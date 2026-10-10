@@ -14,6 +14,7 @@ impl Render for AcpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_elicitation_inputs(window, cx);
         self.apply_pending_composer_restore(window, cx);
+        self.settle_revealed_prompt();
         let composer_focused = self
             .input
             .as_ref()
@@ -460,62 +461,6 @@ impl AcpView {
                 })
                 .into_any_element()
         });
-        // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
-        // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
-        let sticky_prompt = self
-            .entries
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(ix, entry)| {
-                is_user_entry(entry)
-                    && !matches!(entry, AcpEntry::User(text) if is_interrupt_marker(text))
-                    && self.list_state.item_is_above_viewport(*ix) == Some(true)
-            })
-            .map(|(_ix, entry)| {
-                let summary = match entry {
-                    AcpEntry::User(text) => text.split_whitespace().collect::<Vec<_>>().join(" "),
-                    AcpEntry::UserWithImages { text, images } => {
-                        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                        if text.is_empty() {
-                            format!("{} 张图片", images.len())
-                        } else {
-                            format!("{text} · {} 张图片", images.len())
-                        }
-                    }
-                    _ => unreachable!(),
-                };
-                h_flex()
-                    .absolute()
-                    .top(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
-                    .left_0()
-                    .right_0()
-                    .justify_center()
-                    .px_4()
-                    .pt_2()
-                    .child(
-                        h_flex()
-                            .id("acp-sticky-prompt")
-                            .w_full()
-                            .max_w(ui_theme::conversation_max_width())
-                            .h(px(38.))
-                            .px_3()
-                            .items_center()
-                            .rounded(ui_theme::card_radius())
-                            .border_1()
-                            .border_color(t.border)
-                            .bg(ui_theme::glass_floating())
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(gpui::rgb(ui_theme::text()))
-                                    .child(summary),
-                            ),
-                    )
-            });
         let jump_to_latest = self.viewing_history.then(|| {
             h_flex()
                 .absolute()
@@ -558,7 +503,6 @@ impl AcpView {
         });
         let border = t.border;
         let plan_bar = self.render_plan_bar(cx);
-        let background_bar = self.render_background_task_bar(cx);
         let history_error_banner = history_error.map(|error| {
             div()
                 .w_full()
@@ -575,8 +519,9 @@ impl AcpView {
         let clear_capsule = history_error_banner.is_none()
             && banner.is_none()
             && fork_banner.is_none()
-            && plan_bar.is_none()
-            && background_bar.is_none();
+            && plan_bar.is_none();
+        // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
+        // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
         let list = self.render_message_list(animate_ambient, clear_capsule, cx);
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
         let input_row = self.render_composer(composer_focused, cx);
@@ -634,6 +579,10 @@ impl AcpView {
                         this.usage_popover_open = false;
                         cx.notify();
                         cx.stop_propagation();
+                    } else if this.background_tasks_open {
+                        this.background_tasks_open = false;
+                        cx.notify();
+                        cx.stop_propagation();
                     } else if this.completion.take().is_some() {
                         cx.notify();
                         cx.stop_propagation();
@@ -679,7 +628,6 @@ impl AcpView {
                     .children(banner)
                     .children(fork_banner)
                     .children(plan_bar)
-                    .children(background_bar)
             }))
             .child(
                 v_flex()
@@ -693,7 +641,6 @@ impl AcpView {
                             .id("acp-message-scrollbar")
                             .mode(ScrollbarMode::Always)
                     }))
-                    .children(sticky_prompt)
                     .children(jump_to_latest)
                     .children(empty_conversation_state)
                     .children(starting_placeholder)

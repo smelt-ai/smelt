@@ -229,6 +229,7 @@ impl AcpView {
                             })
                             .child(
                                 user_message_bubble(("acp-user-message", i))
+                                    .debug_selector(move || format!("ACP_USER_MESSAGE_{i}"))
                                     .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
                                         ("acp-user-md", i),
                                         cached_entry_markdown(
@@ -1061,8 +1062,9 @@ impl AcpView {
                         _ => 16.,
                     }
                 };
-                // 没有顶栏时，第一条让开标题胶囊；滚上去仍会钻到它底下。
-                let top = if clear_capsule && i == 0 {
+                // 没有顶栏时，第一条和从胶囊跳回的那一问让开标题胶囊；滚上去
+                // 仍会钻到它底下。
+                let top = if clear_capsule && (i == 0 || this.revealed_prompt == Some(i)) {
                     ui_theme::CHROME_ISLAND_CLEARANCE_PX
                 } else {
                     0.

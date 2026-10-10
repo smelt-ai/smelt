@@ -13,7 +13,24 @@ impl AcpView {
             &self.conversation_binding,
             smelt_core::conversation::ConversationBinding::Automation { .. }
         ) {
-            return None;
+            // 自动化 Run 没有输入框；有进程在跑时，后台任务入口单独占底部一行。
+            let chip = self.render_background_task_chip(cx)?;
+            return Some(
+                v_flex()
+                    .relative()
+                    .w_full()
+                    .px_4()
+                    .py_2()
+                    .items_center()
+                    .children(self.render_background_task_popover(cx))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .max_w(ui_theme::conversation_max_width())
+                            .child(chip),
+                    )
+                    .into_any_element(),
+            );
         }
         let t = cx.theme();
         let muted = t.muted_foreground;
@@ -823,6 +840,7 @@ impl AcpView {
                                         })
                                         .on_click(cx.listener(|this, _ev, _window, cx| {
                                             this.usage_popover_open = !this.usage_popover_open;
+                                            this.background_tasks_open = false;
                                             cx.notify();
                                         }));
                                     if !popover_open {
@@ -845,6 +863,7 @@ impl AcpView {
                                     }
                                     row.child(chip)
                                 })
+                                .children(self.render_background_task_chip(cx))
                         )
                         .children(self.restart_error.as_ref().map(|err| {
                             div()
@@ -961,6 +980,7 @@ impl AcpView {
                 .py_3()
                 .items_center()
                 .children(self.render_usage_popover(cx))
+                .children(self.render_background_task_popover(cx))
                 .children(completion_bar)
                 .child(composer)
         });
@@ -1135,6 +1155,187 @@ impl AcpView {
         Some(
             div()
                 .id("acp-usage-popover-layer")
+                .absolute()
+                .bottom(gpui::relative(1.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .pb_2()
+                .occlude()
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    /// 后台任务入口：只在有进程在跑时出现，点开看是哪几个。
+    fn render_background_task_chip(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let running = running_background_tasks(&self.background_tasks).len();
+        if running == 0 {
+            return None;
+        }
+        Some(
+            h_flex()
+                .id("acp-background-tasks")
+                .flex_shrink_0()
+                .h(px(22.))
+                .px_2()
+                .gap_1p5()
+                .items_center()
+                .rounded_full()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(gpui::rgb(ui_theme::text_mid()))
+                .when(self.background_tasks_open, |chip| {
+                    chip.bg(ui_theme::overlay(0x18))
+                })
+                .hover(|chip| chip.bg(ui_theme::overlay(0x22)))
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(gpui::rgb(ui_theme::blue())),
+                )
+                .child(background_task_summary(running))
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.background_tasks_open = !this.background_tasks_open;
+                    this.usage_popover_open = false;
+                    cx.notify();
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// 只列还在跑的进程；结束的记录留在对话正文里。
+    fn render_background_task_popover(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.background_tasks_open {
+            return None;
+        }
+        let running = running_background_tasks(&self.background_tasks);
+        if running.is_empty() {
+            return None;
+        }
+        let muted = cx.theme().muted_foreground;
+        let mono = smelt_core::font_config::font_family();
+        let mut rows = v_flex()
+            .id("acp-background-task-list")
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .gap_1();
+        for (index, task) in running.into_iter().enumerate() {
+            let id = task.id.clone();
+            let mut row = v_flex()
+                .id(("acp-background-task", index))
+                .gap_1()
+                .px_2()
+                .py_1p5()
+                .rounded(ui_theme::row_radius())
+                .cursor_pointer()
+                .hover(|row| row.bg(ui_theme::overlay(0x14)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if !this.expanded_background_tasks.remove(&id) {
+                        this.expanded_background_tasks.insert(id.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::blue()))
+                                .child(task.status.label()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_family(mono.clone())
+                                .text_color(gpui::rgb(ui_theme::text_faint()))
+                                .child(task.id.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(gpui::rgb(ui_theme::text_bright()))
+                                .child(task.title.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .pl(px(4.))
+                        .text_xs()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .child(task.command.clone()),
+                );
+            if self.expanded_background_tasks.contains(&task.id) && !task.output.is_empty() {
+                let mut output = v_flex()
+                    .pl(px(4.))
+                    .font_family(mono.clone())
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::text_mid()));
+                for line in background_task_output_lines(&task.output) {
+                    output = output.child(div().truncate().child(line.to_string()));
+                }
+                row = row.child(output);
+            }
+            rows = rows.child(row);
+        }
+        let panel = v_flex()
+            .id("acp-background-task-popover")
+            .w_full()
+            .max_w(ui_theme::conversation_max_width())
+            .px_4()
+            .pt_3()
+            .pb_3()
+            .gap_2()
+            .rounded(ui_theme::card_radius())
+            .border_1()
+            .border_color(ui_theme::card_stroke())
+            .bg(ui_theme::glass_floating())
+            .shadow_lg()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .child("后台任务"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("acp-background-task-close")
+                            .size(px(24.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(ui_theme::overlay(0x20)))
+                            .child(Icon::new(IconName::Close).size(px(14.)))
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.background_tasks_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(rows);
+        Some(
+            div()
+                .id("acp-background-task-popover-layer")
                 .absolute()
                 .bottom(gpui::relative(1.))
                 .left_0()

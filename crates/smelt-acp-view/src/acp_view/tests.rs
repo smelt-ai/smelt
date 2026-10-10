@@ -2516,7 +2516,7 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
         status: BackgroundTaskStatus::Completed,
         ..running.clone()
     };
-    assert_eq!(background_task_summary(1), "1 个进行中");
+    assert_eq!(background_task_summary(1), "1 个后台任务");
     assert_eq!(
         running_background_tasks(&[running, done.clone()])
             .iter()
@@ -3241,5 +3241,151 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
         (bounds.size.height - cap).abs() < gpui::px(1.),
         "log viewport grew with the full output: {:?} cap {cap:?}",
         bounds.size.height,
+    );
+}
+
+fn draw_settled(cx: &mut gpui::VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+/// 前一条回答超过 4KB，markdown 走后台解析，滚出屏幕后再画会先以空内容出现。
+/// 跳回不能拿它的高度定位，否则提问会被解析完长出来的正文挤走。
+#[gpui::test]
+fn revealing_the_pinned_prompt_parks_it_below_the_title_island(cx: &mut gpui::TestAppContext) {
+    use gpui::{ListOffset, VisualTestContext};
+
+    let long_reply = (0..300)
+        .map(|line| format!("第 {line} 段回答"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(long_reply.len() > 4 * 1024);
+    let entries = vec![
+        AcpEntry::User("第一问".into()),
+        AcpEntry::Assistant {
+            text: long_reply.clone(),
+            thought: false,
+        },
+        AcpEntry::User("  第二问\n  换行  ".into()),
+        AcpEntry::Assistant {
+            text: long_reply,
+            thought: false,
+        },
+    ];
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(move |_window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "pinned prompt".into(),
+                entries,
+                resume_session_id: None,
+                saved_sid: Some("acp-pinned-prompt".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    draw_settled(cx);
+    draw_settled(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.pinned_prompt())
+            .as_deref(),
+        Some("第二问 换行"),
+        "跟着尾部读回答时，这一问已经整条滚出视口"
+    );
+
+    cx.update(|_window, cx| view.update(cx, |view, cx| view.reveal_pinned_prompt(cx)));
+    draw_settled(cx);
+    draw_settled(cx);
+    let viewport = view.read_with(cx, |view, _| view.list_state.viewport_bounds());
+    let bubble = cx
+        .debug_bounds("ACP_USER_MESSAGE_2")
+        .expect("跳回后第二问要画出来");
+    assert_eq!(
+        bubble.top() - viewport.top(),
+        px(ui_theme::CHROME_ISLAND_CLEARANCE_PX),
+        "提问停在标题胶囊下面"
+    );
+    view.read_with(cx, |view, _| {
+        assert!(view.viewing_history, "跳回后要能回到最新");
+        assert_eq!(view.pinned_prompt().as_deref(), Some("第一问"));
+    });
+
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.list_state.scroll_to(ListOffset {
+                item_ix: 3,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        })
+    });
+    draw_settled(cx);
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.revealed_prompt, None, "滚过这一问后留白收起");
+        assert_eq!(view.pinned_prompt().as_deref(), Some("第二问 换行"));
+    });
+}
+
+#[gpui::test]
+fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::TestAppContext) {
+    use smelt_core::acp_session::AcpSessionState;
+
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: None,
+                reason: "background tasks".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-background-popover".into()),
+            },
+        )
+    });
+    let running = BackgroundTaskView {
+        id: "bg-1".into(),
+        title: "dev server".into(),
+        command: "npm run dev".into(),
+        status: BackgroundTaskStatus::Running,
+        exit_code: None,
+        output: String::new(),
+        started_at_ms: 1,
+        finished_at_ms: None,
+    };
+    let mut snapshot = AcpSessionState::default().to_snapshot(false);
+    snapshot.snapshot_revision = 1;
+    snapshot.background_tasks = vec![running.clone()];
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.apply_snapshot(snapshot.clone(), cx);
+            view.background_tasks_open = true;
+        })
+    });
+
+    snapshot.snapshot_revision = 2;
+    snapshot.background_tasks = vec![BackgroundTaskView {
+        status: BackgroundTaskStatus::Completed,
+        finished_at_ms: Some(2),
+        ..running
+    }];
+    cx.update(|_window, cx| view.update(cx, |view, cx| view.apply_snapshot(snapshot, cx)));
+    assert!(
+        !view.read_with(cx, |view, _| view.background_tasks_open),
+        "任务都结束后弹层要收起，下一个任务开始时不能自己弹出来"
     );
 }

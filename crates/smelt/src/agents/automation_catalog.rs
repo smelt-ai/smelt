@@ -97,7 +97,6 @@ impl Workspace {
         let automations = config.automations.clone();
         let agents = config.agents.clone();
         automation_catalog_column()
-            .pb_8()
             .flex()
             .flex_col()
             .gap_6()
@@ -131,7 +130,6 @@ impl Workspace {
         let mut runs = config.automation_runs.clone();
         runs.sort_by_key(|run| std::cmp::Reverse((run.created_at, run.id.clone())));
         automation_catalog_column()
-            .pb_8()
             .flex()
             .flex_col()
             .gap_3()
@@ -451,7 +449,13 @@ impl Workspace {
 }
 
 fn automation_catalog_column() -> Div {
-    div().w_full().max_w(px(CATALOG_MAX_WIDTH)).mx_auto().px_6()
+    div()
+        .w_full()
+        .max_w(px(CATALOG_MAX_WIDTH))
+        .mx_auto()
+        .px_6()
+        .pt_5()
+        .pb_8()
 }
 
 const AUTOMATION_COL_SCHEDULE: f32 = 168.;
