@@ -1262,7 +1262,7 @@ impl AcpView {
                                 .truncate()
                                 .text_sm()
                                 .text_color(gpui::rgb(ui_theme::text_bright()))
-                                .child(task.title.clone()),
+                                .child(background_task_one_line(&task.title)),
                         ),
                 )
                 .child(
@@ -1272,7 +1272,7 @@ impl AcpView {
                         .truncate()
                         .font_family(mono.clone())
                         .text_color(gpui::rgb(ui_theme::text_muted()))
-                        .child(task.command.clone()),
+                        .child(background_task_one_line(&task.command)),
                 );
             if self.expanded_background_tasks.contains(&task.id) && !task.output.is_empty() {
                 let mut output = v_flex()

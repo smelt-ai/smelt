@@ -4259,6 +4259,11 @@ fn background_task_output_lines(output: &str) -> Vec<&str> {
     lines[start..].to_vec()
 }
 
+/// 弹层标题和命令只占一行。GPUI 的 truncate 不吃硬换行，heredoc 会把行高撑开。
+fn background_task_one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// 折叠计划也要告诉用户“现在具体在做什么”，不能只剩一个 2/4。没有显式
 /// InProgress 时回退到下一条 Pending；全完成则显示最后一项。
 fn plan_current_step(plan: &PlanView) -> Option<&str> {

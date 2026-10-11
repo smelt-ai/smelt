@@ -4,32 +4,33 @@ use super::trajectory::runtime_debug_contexts;
 use super::{
     CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot,
     RESTORED_ENTRY_HEIGHT_HINT_PX, append_prompt_text, apply_pending_config_selection,
-    background_task_output_lines, background_task_summary, build_conversation_layout,
-    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
-    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
-    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
-    composer_menu_sections, composer_model_label, composer_model_scroll,
-    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
-    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
-    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
-    current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
-    diff_stats_for_output, escape_html_tags_for_markdown, external_clipboard_image_paths,
-    filter_trajectory_events, format_attached_paths, is_active_permission_selection,
-    is_dispatch_in_flight, is_fresh_conversation_start, is_match_count_line,
-    is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
-    loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd, markdown_user_text_for_cwd,
-    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
-    move_queue_item_to_front, native_queue_item_kind_label, next_snapshot_prompt_gate,
-    overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
-    pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
-    process_group_label, progress_has_details, progress_summary, provider_switch_value,
-    reconcile_pending_config_values, refresh_markdown_cache, resolve_restart_launch,
-    restorable_gui_prompt, running_background_tasks, search_summary_text, selected_provider_group,
-    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
-    should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
-    task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
-    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
-    usage_percent, usage_ring_color, usage_warn_color,
+    background_task_one_line, background_task_output_lines, background_task_summary,
+    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
+    build_tool_image_parts, cached_diff_stats, can_load_older_history, classify_attached_paths,
+    compact_token_count, compact_tool_headline, compact_tool_run_label,
+    composer_config_section_label, composer_menu_sections, composer_model_label,
+    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
+    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
+    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
+    conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
+    diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
+    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
+    is_active_permission_selection, is_dispatch_in_flight, is_fresh_conversation_start,
+    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
+    latest_user_message_index, loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd,
+    markdown_user_text_for_cwd, merge_rejected_prompt, merge_snapshot_entries,
+    model_label_with_provider, move_queue_item_to_front, native_queue_item_kind_label,
+    next_snapshot_prompt_gate, overlay_model_state, overlay_pending_initial_config,
+    overlay_session_configs, pending_config_choice_names, plan_current_step, preformatted_html,
+    process_group_header_label, process_group_label, progress_has_details, progress_summary,
+    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
+    resolve_restart_launch, restorable_gui_prompt, running_background_tasks, search_summary_text,
+    selected_provider_group, session_trajectory_events, should_apply_snapshot_revision,
+    should_cancel_for_immediate_prompt, should_clear_history_session_id_after_snapshot,
+    should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
+    tool_image_cache_matches_output, tool_output_has_content, tool_result_summary,
+    tool_uses_compact_process_row, trajectory_counts, usage_percent, usage_ring_color,
+    usage_warn_color,
 };
 use gpui::{ClipboardEntry, ExternalPaths, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -2478,6 +2479,12 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
         background_task_output_lines(&output),
         ["5", "6", "7", "8", "9", "10", "11", "12"]
     );
+    let command = "git commit -m \"$(cat <<'EOF'\nfeat: 补上目录\n\n侧栏新对话\nEOF\n)\"";
+    assert_eq!(
+        background_task_one_line(command),
+        "git commit -m \"$(cat <<'EOF' feat: 补上目录 侧栏新对话 EOF )\""
+    );
+    assert!(!background_task_one_line("  a\r\n\tb  ").contains(['\n', '\r']));
 }
 
 #[test]
