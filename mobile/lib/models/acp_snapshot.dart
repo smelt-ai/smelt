@@ -23,6 +23,7 @@ class AcpSnapshot {
   final bool completedUnread;
   final bool shouldPersist;
   final String endReason;
+  final bool envelopeOmitted;
 
   AcpSnapshot({
     this.entriesOffset = 0,
@@ -46,6 +47,7 @@ class AcpSnapshot {
     this.completedUnread = false,
     this.shouldPersist = false,
     this.endReason = '',
+    this.envelopeOmitted = false,
   }) : entriesTotal = entriesTotal ?? entriesOffset + entries.length;
 
   int get entriesEnd => entriesOffset + entries.length;
@@ -108,6 +110,7 @@ class AcpSnapshot {
       completedUnread: data['completed_unread'] as bool? ?? false,
       shouldPersist: data['should_persist'] as bool? ?? false,
       endReason: data['end_reason'] as String? ?? '',
+      envelopeOmitted: data['envelope_omitted'] as bool? ?? false,
     );
   }
 
@@ -136,6 +139,7 @@ class AcpSnapshot {
     'completed_unread': completedUnread,
     'should_persist': shouldPersist,
     'end_reason': endReason,
+    if (envelopeOmitted) 'envelope_omitted': true,
   };
 
   AcpSnapshot cacheTail({int limit = 100}) {
@@ -189,9 +193,37 @@ class AcpSnapshot {
       0,
       mergedEntries.length,
     );
-    return metadata._withEntries(
+    final merged = metadata._withEntries(
       mergedStart,
       mergedEntries.take(allowedLength).toList(growable: false),
+    );
+    if (!next.envelopeOmitted) return merged;
+    return _withEnvelope(merged);
+  }
+
+  AcpSnapshot _withEnvelope(AcpSnapshot transcript) {
+    return AcpSnapshot(
+      entriesOffset: transcript.entriesOffset,
+      entriesTotal: transcript.entriesTotal,
+      snapshotRevision: transcript.snapshotRevision,
+      entries: transcript.entries,
+      phase: transcript.phase,
+      pendingPermissions: pendingPermissions,
+      pendingElicitation: pendingElicitation,
+      statusLine: statusLine,
+      acpSessionId: transcript.acpSessionId,
+      historySessionId: transcript.historySessionId,
+      supportsImage: transcript.supportsImage,
+      availableCommands: availableCommands,
+      usage: usage,
+      plan: plan,
+      model: model,
+      configOptions: configOptions,
+      turnStartedAtMs: turnStartedAtMs,
+      lastTurnDurationMs: lastTurnDurationMs,
+      completedUnread: completedUnread,
+      shouldPersist: transcript.shouldPersist,
+      endReason: transcript.endReason,
     );
   }
 

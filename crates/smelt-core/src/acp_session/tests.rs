@@ -531,6 +531,7 @@ fn ready_fresh_replaces_id_and_preserves_legacy_history_with_divider() {
     s.acp_session_id = Some("old-sid".into());
     apply_event(&mut s, ConversationEvent::Status("正在恢复".into()));
     assert_eq!(s.acp_session_id.as_deref(), Some("old-sid"));
+    s.history_abandoned = true;
 
     apply_event(
         &mut s,
@@ -542,6 +543,7 @@ fn ready_fresh_replaces_id_and_preserves_legacy_history_with_divider() {
     );
     assert_eq!(s.acp_session_id.as_deref(), Some("new-sid"));
     assert_eq!(s.history_session_id.as_deref(), Some("new-sid"));
+    assert!(!s.history_abandoned);
     assert!(s.status_line.is_none());
     assert_eq!(s.entries.len(), 2);
     assert!(matches!(&s.entries[0], AcpEntry::User(text) if text == "old"));
@@ -551,6 +553,7 @@ fn ready_fresh_replaces_id_and_preserves_legacy_history_with_divider() {
 #[test]
 fn ready_fresh_blank_session_does_not_create_history_id() {
     let mut s = fresh_state();
+    s.history_abandoned = true;
 
     apply_event(
         &mut s,
@@ -563,6 +566,7 @@ fn ready_fresh_blank_session_does_not_create_history_id() {
 
     assert_eq!(s.acp_session_id.as_deref(), Some("new-sid"));
     assert!(s.history_session_id.is_none());
+    assert!(s.history_abandoned);
 }
 
 #[test]
@@ -577,9 +581,11 @@ fn first_prompt_after_ready_makes_blank_session_resumable() {
         },
     );
 
+    s.history_abandoned = true;
     note_prompt_sent(&mut s, "hello".into(), Vec::new());
 
     assert_eq!(s.history_session_id.as_deref(), Some("new-sid"));
+    assert!(!s.history_abandoned);
 }
 
 #[test]
@@ -1962,8 +1968,79 @@ fn should_persist_excludes_streaming_and_ephemeral_events() {
         },
     );
     assert!(!o.should_persist);
+    assert!(!o.envelope_changed);
+    let o = apply_event(
+        &mut s,
+        ConversationEvent::ToolOutputDelta {
+            id: "tool".into(),
+            delta: "out".into(),
+        },
+    );
+    assert!(!o.should_persist);
+    assert!(!o.envelope_changed);
     let o = apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::EndTurn));
     assert!(o.should_persist);
+    assert!(o.envelope_changed);
+    let o = apply_event(
+        &mut s,
+        ConversationEvent::Usage {
+            used: 1,
+            size: 2,
+            cached_read: None,
+            cost: None,
+            breakdown: None,
+        },
+    );
+    assert!(o.envelope_changed);
+    s.available_commands.push(("plan".into(), "Plan".into()));
+    let omitted = s.to_snapshot_range_selective(false, 0, s.entries_total(), false, false, false);
+    assert!(omitted.envelope_omitted);
+    assert!(omitted.available_commands.is_empty());
+    let full = s.to_snapshot(false);
+    assert!(!full.envelope_omitted);
+    assert_eq!(full.available_commands.len(), 1);
+}
+
+#[test]
+fn live_header_matches_snapshot_without_entry_payload() {
+    let mut state = fresh_state();
+    apply_event(
+        &mut state,
+        ConversationEvent::UserChunk("标题来自这里".into()),
+    );
+    apply_event(
+        &mut state,
+        ConversationEvent::AgentChunk {
+            thought: false,
+            text: "正文".into(),
+            parent_id: None,
+        },
+    );
+    state.tool_debug.insert(
+        "tool".into(),
+        ToolCallDebug {
+            name: Some("bash".into()),
+            raw_input: None,
+        },
+    );
+    let header = SessionLive::header_from_state(&state);
+    let via_snapshot = SessionLive::from_snapshot(&state.to_snapshot(false));
+    assert_eq!(header.phase, via_snapshot.phase);
+    assert_eq!(header.end_reason, via_snapshot.end_reason);
+    assert_eq!(header.end_kind, via_snapshot.end_kind);
+    assert_eq!(header.acp_session_id, via_snapshot.acp_session_id);
+    assert_eq!(header.history_session_id, via_snapshot.history_session_id);
+    assert_eq!(header.session_title, via_snapshot.session_title);
+    assert_eq!(header.status_line, via_snapshot.status_line);
+    assert_eq!(header.history_len, None);
+    assert!(header.open_turn.is_empty());
+    let live = SessionLive::from_state(&state);
+    assert_eq!(live.session_title, header.session_title);
+    assert!(live.history_len.is_some());
+    assert!(
+        live.open_turn.is_empty(),
+        "活状态不复制当前回合，正文只在快照里"
+    );
 }
 
 #[test]
@@ -2713,6 +2790,32 @@ fn consuming_the_first_steering_item_keeps_the_rest_queued() {
 }
 
 #[test]
+fn snapshot_round_trip_keeps_abandoned_history_identity() {
+    let mut state = fresh_state();
+    state.history_abandoned = true;
+    let snapshot = state.to_snapshot(false);
+    assert!(snapshot.history_abandoned);
+    assert!(snapshot.history_session_id.is_none());
+
+    let mut mirror = fresh_state();
+    mirror.history_session_id = Some("old".into());
+    mirror
+        .merge_hosted_snapshot(snapshot)
+        .expect("空快照应能合并");
+    assert!(mirror.history_session_id.is_none());
+    assert!(mirror.history_abandoned);
+
+    let mut bound = fresh_state();
+    bound.history_session_id = Some("pi-next".into());
+    let snapshot = bound.to_snapshot(false);
+    mirror
+        .merge_hosted_snapshot(snapshot)
+        .expect("带新身份的空快照应能合并");
+    assert_eq!(mirror.history_session_id.as_deref(), Some("pi-next"));
+    assert!(!mirror.history_abandoned);
+}
+
+#[test]
 fn restart_clears_old_runtime_id_but_keeps_history_identity() {
     let mut s = fresh_state();
     s.acp_session_id = Some("runtime".into());
@@ -3240,6 +3343,7 @@ fn rewind_truncates_projection_and_adopts_the_new_provider_identity() {
 
     // fork 之后 provider 侧换了新 session 文件，旧 id 必须被覆盖，
     // 否则重连会把被丢弃的旧分支恢复出来。
+    state.history_abandoned = true;
     apply_event(
         &mut state,
         ConversationEvent::ProviderSessionIdChanged(
@@ -3248,6 +3352,7 @@ fn rewind_truncates_projection_and_adopts_the_new_provider_identity() {
     );
     assert_eq!(state.acp_session_id.as_deref(), Some("new-branch"));
     assert_eq!(state.history_session_id.as_deref(), Some("new-branch"));
+    assert!(!state.history_abandoned);
 
     // 游标越界（极端时序下投影还没追上）不能把会话清空。
     let outcome = apply_event(&mut state, ConversationEvent::Rewound { truncate_from: 99 });

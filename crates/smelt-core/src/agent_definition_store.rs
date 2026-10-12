@@ -109,9 +109,13 @@ pub fn load_session_agent_definition_ids() -> BTreeMap<String, String> {
     let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
         return BTreeMap::new();
     };
-    match store.get_workspace_snapshot() {
-        Ok(Some(snapshot)) => session_agent_definition_ids_from_snapshot(&snapshot),
-        Ok(None) | Err(_) => BTreeMap::new(),
+    match store.session_agent_definition_ids() {
+        Ok(Some(ids)) => ids,
+        Ok(None) => match store.get_workspace_snapshot() {
+            Ok(Some(snapshot)) => session_agent_definition_ids_from_snapshot(&snapshot),
+            Ok(None) | Err(_) => BTreeMap::new(),
+        },
+        Err(_) => BTreeMap::new(),
     }
 }
 

@@ -1744,18 +1744,22 @@ fn publish_remote_geometry_release(sess: &Session) {
 
 /// 开/关 fd 的 CLOEXEC 标志。平时所有 fd 都应带 CLOEXEC（不泄漏给 spawn 出的 shell）；
 /// 仅在 exec 交接前对要带过去的 fd 关掉。
-fn set_cloexec(fd: RawFd, on: bool) {
+fn set_cloexec(fd: RawFd, on: bool) -> std::io::Result<()> {
     unsafe {
-        let cur = libc::fcntl(fd, libc::F_GETFD);
-        if cur >= 0 {
-            let new = if on {
-                cur | libc::FD_CLOEXEC
-            } else {
-                cur & !libc::FD_CLOEXEC
-            };
-            libc::fcntl(fd, libc::F_SETFD, new);
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let flags = if on {
+            flags | libc::FD_CLOEXEC
+        } else {
+            flags & !libc::FD_CLOEXEC
+        };
+        if libc::fcntl(fd, libc::F_SETFD, flags) < 0 {
+            return Err(std::io::Error::last_os_error());
         }
     }
+    Ok(())
 }
 
 /// dup 一个 fd 并包成 File。dup 出的新 fd 默认**不带** CLOEXEC，这里立即补上——
@@ -1763,7 +1767,7 @@ fn set_cloexec(fd: RawFd, on: bool) {
 fn dup_file(fd: RawFd) -> anyhow::Result<std::fs::File> {
     let d = unsafe { libc::dup(fd) };
     anyhow::ensure!(d >= 0, "dup({fd}) 失败");
-    set_cloexec(d, true);
+    set_cloexec(d, true)?;
     Ok(unsafe { std::fs::File::from_raw_fd(d) })
 }
 
@@ -2224,7 +2228,7 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
         std::process::exit(2);
     }
     // CLOEXEC 复位：spawn 时放行过，此后沿用"一切 fd 默认 CLOEXEC"纪律。
-    set_cloexec(sock_fd, true);
+    let _ = set_cloexec(sock_fd, true);
     // SAFETY：fd 有效性刚校验过，且该号只属于这次 import（predecessor 传参保证）。
     let sock = unsafe { UnixStream::from_raw_fd(sock_fd) };
 
@@ -2617,6 +2621,7 @@ struct ValidatedHostedAcpHandoff {
     agent_token: String,
     agent_needs_transcript_check: bool,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
+    pending_host_bytes: Vec<u8>,
 }
 
 fn acp_turn_is_active(
@@ -2808,6 +2813,18 @@ fn validate_hosted_acp_handoff_item(
         && item["agent_token"]
             .as_str()
             .is_some_and(|token| !token.is_empty());
+    let pending_host_bytes = match item.get("pending_host_bytes") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(value) => {
+            let Ok(bytes) = serde_json::from_value::<Vec<u8>>(value.clone()) else {
+                return HostedAcpHandoffItemValidation::CleanupRequired(owned);
+            };
+            if bytes.len() > acp_runtime_host::HOST_HANDOFF_RESIDUAL_LIMIT {
+                return HostedAcpHandoffItemValidation::CleanupRequired(owned);
+            }
+            bytes
+        }
+    };
 
     HostedAcpHandoffItemValidation::Restore(Box::new(ValidatedHostedAcpHandoff {
         id: id.to_string(),
@@ -2829,6 +2846,7 @@ fn validate_hosted_acp_handoff_item(
             .get("conversation_binding")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok()),
+        pending_host_bytes,
     }))
 }
 
@@ -3035,6 +3053,7 @@ fn resume_hosted_acp_handoff_item(
         agent_token,
         agent_needs_transcript_check,
         conversation_binding,
+        pending_host_bytes,
     } = validated;
     let snapshot_revision = snapshot.snapshot_revision;
     let pending_agent_preset = snapshot
@@ -3104,6 +3123,7 @@ fn resume_hosted_acp_handoff_item(
         agent_session: Mutex::new(agent_session),
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
+        durable_history_session_id: Mutex::new(None),
     });
     if !created {
         cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
@@ -3117,13 +3137,16 @@ fn resume_hosted_acp_handoff_item(
     }
 
     if !keep_host {
-        let resume_id = slot
-            .value
-            .reduced
-            .lock()
-            .unwrap()
-            .history_session_id
-            .clone();
+        let resume_id = {
+            let known = slot
+                .value
+                .reduced
+                .lock()
+                .unwrap()
+                .history_session_id
+                .clone();
+            resolve_resume_id(&id, None, known, true)
+        };
         let launch = slot
             .value
             .launch_spec
@@ -3146,6 +3169,7 @@ fn resume_hosted_acp_handoff_item(
             None,
             Arc::clone(acp_sessions),
             event_hub,
+            false,
         );
         return;
     }
@@ -3156,7 +3180,12 @@ fn resume_hosted_acp_handoff_item(
         provider_pid,
     } = owned;
     let hosted = match unsafe {
-        acp_runtime_host::HostedConversationHandle::from_handoff(host_pid, host_fd, provider_pid)
+        acp_runtime_host::HostedConversationHandle::from_handoff(
+            host_pid,
+            host_fd,
+            provider_pid,
+            pending_host_bytes,
+        )
     } {
         Ok(hosted) => hosted,
         Err(error) => {
@@ -3250,7 +3279,7 @@ pub(crate) fn resume_from_value(
     if unsafe { libc::fcntl(listen_fd, libc::F_GETFD) } < 0 {
         return None;
     }
-    set_cloexec(listen_fd, true);
+    let _ = set_cloexec(listen_fd, true);
     let listener = unsafe { UnixListener::from_raw_fd(listen_fd) };
 
     #[cfg(target_os = "macos")]
@@ -3372,7 +3401,7 @@ pub(crate) fn resume_from_value(
             }
             continue;
         }
-        set_cloexec(fd, true);
+        let _ = set_cloexec(fd, true);
         let master = unsafe { std::fs::File::from_raw_fd(fd) };
         if set_fd_nonblocking(master.as_raw_fd(), true).is_err() {
             drop(master);
@@ -3673,6 +3702,7 @@ pub(crate) fn resume_from_value(
             agent_session: Mutex::new(agent_session),
             conversation_submit: Mutex::new(()),
             pending_agent_preset: Mutex::new(pending_agent_preset),
+            durable_history_session_id: Mutex::new(None),
         });
         if !created {
             cleanup_rejected_acp_handoff(owned, snapshot_wall);
@@ -3690,8 +3720,8 @@ pub(crate) fn resume_from_value(
             stdin_fd,
             stdout_fd,
         } = owned;
-        set_cloexec(stdin_fd, true);
-        set_cloexec(stdout_fd, true);
+        let _ = set_cloexec(stdin_fd, true);
+        let _ = set_cloexec(stdout_fd, true);
         let drain_id = id.clone();
         let event_rx = {
             let _lifecycle = slot.lifecycle.lock().unwrap();
@@ -3715,7 +3745,10 @@ pub(crate) fn resume_from_value(
             event_rx
         };
         if legacy_rehome_safe {
-            let resume_id = known_acp_resume_id(&slot.value.reduced.lock().unwrap());
+            let resume_id = {
+                let known = known_acp_resume_id(&slot.value.reduced.lock().unwrap());
+                resolve_resume_id(&drain_id, None, known, true)
+            };
             let resume_ids = resume_id.iter().cloned().collect::<Vec<_>>();
             let _lifecycle = slot.lifecycle.lock().unwrap();
             if retire_acp_runtime(&slot.value) {
@@ -3732,6 +3765,7 @@ pub(crate) fn resume_from_value(
                     None,
                     Arc::clone(&acp_sessions),
                     event_hub,
+                    false,
                 );
             } else {
                 let mut reduced = slot.value.reduced.lock().unwrap();

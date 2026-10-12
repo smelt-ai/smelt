@@ -628,6 +628,10 @@ impl RuntimeDebug {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// smeltd → GUI 的完整快照：`acp_watch`/`acp_open` 接上时发一份，之后每次
 /// `apply_event` 有实质变化再发一份。entries 使用尾片增量；大体积 runtime debug
 /// sidecar 只在变更帧、显式全量恢复和初始 attach 时携带，避免完整模型历史随每个
@@ -677,6 +681,10 @@ pub struct ConversationSnapshot {
     pub acp_session_id: Option<String>,
     /// 跨进程恢复时传给 `session/load` 的 canonical history id。
     pub history_session_id: Option<String>,
+    /// 这份历史已经确认读不出来。和 `history_session_id` 同属会话身份：
+    /// 有 id 时以 id 为准；没有 id 且为真，才清空库里的恢复身份。
+    /// 旧快照没有这个字段，按未放弃读。
+    pub history_abandoned: bool,
     pub supports_image: bool,
     pub available_commands: Vec<(String, String)>,
     pub usage: Option<(u64, u64)>,
@@ -753,6 +761,10 @@ pub struct ConversationSnapshot {
     /// 旧交接文件没有这个字段，仍按其中的 `entries` 恢复。
     #[serde(default)]
     pub history_omitted: bool,
+    /// 这帧只带正文尾部和相位。命令、配置、计划、队列、计时等信封没变，
+    /// 接收方必须保留上一份，不能把空列表当成清空。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub envelope_omitted: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -790,6 +802,8 @@ struct ConversationSnapshotDe {
     acp_session_id: Option<String>,
     #[serde(default)]
     history_session_id: Option<String>,
+    #[serde(default)]
+    history_abandoned: bool,
     supports_image: bool,
     available_commands: Vec<(String, String)>,
     usage: Option<(u64, u64)>,
@@ -836,6 +850,8 @@ struct ConversationSnapshotDe {
     history_error: Option<String>,
     #[serde(default)]
     history_omitted: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    envelope_omitted: bool,
 }
 
 impl From<ConversationSnapshotDe> for ConversationSnapshot {
@@ -864,6 +880,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             status_line: de.status_line,
             acp_session_id: de.acp_session_id,
             history_session_id: de.history_session_id,
+            history_abandoned: de.history_abandoned,
             supports_image: de.supports_image,
             available_commands: de.available_commands,
             usage: de.usage,
@@ -891,6 +908,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             should_persist: de.should_persist,
             history_error: de.history_error,
             history_omitted: de.history_omitted,
+            envelope_omitted: de.envelope_omitted,
         }
     }
 }
@@ -920,6 +938,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             status_line: snap.status_line,
             acp_session_id: snap.acp_session_id,
             history_session_id: snap.history_session_id,
+            history_abandoned: snap.history_abandoned,
             supports_image: snap.supports_image,
             available_commands: snap.available_commands,
             usage: snap.usage,
@@ -947,6 +966,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             should_persist: snap.should_persist,
             history_error: snap.history_error,
             history_omitted: snap.history_omitted,
+            envelope_omitted: snap.envelope_omitted,
         }
     }
 }
@@ -1080,6 +1100,9 @@ pub struct AcpSessionState {
     pub acp_session_id: Option<String>,
     /// 已确认的历史会话 id。恢复成功建立新 runtime 连接时也不能覆盖它。
     pub history_session_id: Option<String>,
+    /// 这份历史已经确认读不出来。和 `history_session_id` 同属会话身份。
+    /// 有 id 时以 id 为准；没有 id 且为真，才清空库里的恢复身份。
+    pub history_abandoned: bool,
     pub supports_image: bool,
     /// 「等自己刚发那条 prompt 的回声」，见旧版字段同名注释——语义原样保留。
     pub awaiting_user_echo: bool,
@@ -1153,6 +1176,7 @@ impl Default for AcpSessionState {
             status_line: None,
             acp_session_id: None,
             history_session_id: None,
+            history_abandoned: false,
             supports_image: true,
             awaiting_user_echo: false,
             replaying_history: false,
@@ -1249,6 +1273,7 @@ impl AcpSessionState {
             status_line: snap.status_line,
             acp_session_id: snap.acp_session_id,
             history_session_id: snap.history_session_id,
+            history_abandoned: snap.history_abandoned,
             supports_image: snap.supports_image,
             awaiting_user_echo: false,
             replaying_history: false,
@@ -1322,6 +1347,7 @@ impl AcpSessionState {
             status_line,
             acp_session_id,
             history_session_id,
+            history_abandoned,
             supports_image,
             available_commands,
             usage,
@@ -1349,6 +1375,7 @@ impl AcpSessionState {
             should_persist: _,
             history_error: _,
             history_omitted: _,
+            envelope_omitted,
         } = snap;
 
         let local_end = self.entries_base + self.entries.len();
@@ -1394,60 +1421,63 @@ impl AcpSessionState {
         self.phase = phase;
         self.end_reason = end_reason;
         self.end_kind = end_kind;
-        self.accepted_delivery_ids = accepted_delivery_ids;
-        self.active_delivery_id = active_delivery_id;
-        self.completed_delivery_id = completed_delivery_id;
-        self.permissions = pending_permissions
-            .into_iter()
-            .map(|permission| LivePermission {
-                question: permission.question,
-                tool_call_id: permission.tool_call_id,
-                options: permission.options,
-                details: permission.details,
-                responder: None,
-                raw_request_line: None,
-            })
-            .collect();
-        self.elicitation = pending_elicitation.map(|elicitation| LiveElicitation {
-            message: elicitation.message,
-            raw_fields: elicitation
-                .fields
+        if !envelope_omitted {
+            self.accepted_delivery_ids = accepted_delivery_ids;
+            self.active_delivery_id = active_delivery_id;
+            self.completed_delivery_id = completed_delivery_id;
+            self.permissions = pending_permissions
                 .into_iter()
-                .map(mirror_elicitation_field)
-                .collect(),
-            chosen: elicitation.chosen,
-            text_values: elicitation.text_values,
-            responder: None,
-            recovered_tool_call_id: None,
-            raw_request_line: None,
-        });
-        self.status_line = status_line;
+                .map(|permission| LivePermission {
+                    question: permission.question,
+                    tool_call_id: permission.tool_call_id,
+                    options: permission.options,
+                    details: permission.details,
+                    responder: None,
+                    raw_request_line: None,
+                })
+                .collect();
+            self.elicitation = pending_elicitation.map(|elicitation| LiveElicitation {
+                message: elicitation.message,
+                raw_fields: elicitation
+                    .fields
+                    .into_iter()
+                    .map(mirror_elicitation_field)
+                    .collect(),
+                chosen: elicitation.chosen,
+                text_values: elicitation.text_values,
+                responder: None,
+                recovered_tool_call_id: None,
+                raw_request_line: None,
+            });
+            self.status_line = status_line;
+            self.available_commands = available_commands;
+            self.usage = usage;
+            self.usage_cached_read = usage_cached_read;
+            self.usage_cost = usage_cost;
+            self.usage_breakdown = usage_breakdown;
+            self.plan = plan;
+            self.background_tasks = background_tasks;
+            self.model = model;
+            self.config_options = config_options;
+            self.supports_compaction = supports_compaction;
+            self.supports_native_queue = supports_native_queue;
+            self.supports_rewind = supports_rewind;
+            self.compacting = compacting;
+            self.queued_steering = queued_steering;
+            self.queued_steering_images.clear();
+            self.queued_follow_up = queued_follow_up;
+            self.composer_restore_revision = composer_restore_revision;
+            self.composer_restore_texts = composer_restore_texts;
+            self.composer_restore_images = composer_restore_images;
+            self.turn_started_at_ms = turn_started_at_ms;
+            self.turn_timings = turn_timings;
+        }
         self.acp_session_id = acp_session_id;
-        self.history_session_id = history_session_id;
+        self.history_session_id = history_session_id.filter(|id| !id.trim().is_empty());
+        self.history_abandoned = history_abandoned;
         self.supports_image = supports_image;
         self.awaiting_user_echo = false;
         self.replaying_history = replaying_history;
-        self.available_commands = available_commands;
-        self.usage = usage;
-        self.usage_cached_read = usage_cached_read;
-        self.usage_cost = usage_cost;
-        self.usage_breakdown = usage_breakdown;
-        self.plan = plan;
-        self.background_tasks = background_tasks;
-        self.model = model;
-        self.config_options = config_options;
-        self.supports_compaction = supports_compaction;
-        self.supports_native_queue = supports_native_queue;
-        self.supports_rewind = supports_rewind;
-        self.compacting = compacting;
-        self.queued_steering = queued_steering;
-        self.queued_steering_images.clear();
-        self.queued_follow_up = queued_follow_up;
-        self.composer_restore_revision = composer_restore_revision;
-        self.composer_restore_texts = composer_restore_texts;
-        self.composer_restore_images = composer_restore_images;
-        self.turn_started_at_ms = turn_started_at_ms;
-        self.turn_timings = turn_timings;
         self.completed_unread = completed_unread;
         self.turn_outcome = turn_outcome;
         self.retain_mirror_suffix();
@@ -1499,9 +1529,15 @@ impl AcpSessionState {
     }
 
     /// 协议标题优先；Agent 尚未上报或明确清空时，用首条用户消息兜底。
+    /// 标题已经在协议里时不再扫描正文。
     pub fn resolved_session_title(&self) -> Option<String> {
+        if let Some(title) =
+            crate::session_title::provider_session_title(self.protocol_title.as_deref())
+        {
+            return Some(title.to_string());
+        }
         let fallback = crate::acp_chat::auto_title(self.entries());
-        crate::session_title::session_name(self.protocol_title.as_deref(), fallback.as_deref())
+        crate::session_title::session_name(None, fallback.as_deref())
     }
 
     /// 会话正文：窗口、分页、活帧、回退校验与持久化看到的都是这一份。
@@ -1624,6 +1660,27 @@ impl AcpSessionState {
         entries_offset: usize,
         entries_end: usize,
     ) -> ConversationSnapshot {
+        self.to_snapshot_range_selective(
+            should_persist,
+            entries_offset,
+            entries_end,
+            true,
+            true,
+            true,
+        )
+    }
+
+    /// 与 [`Self::to_snapshot_range`] 相同，但可以不克隆工具参数表、runtime debug
+    /// 和会话信封。流式正文帧只带尾部条目。
+    pub fn to_snapshot_range_selective(
+        &self,
+        should_persist: bool,
+        entries_offset: usize,
+        entries_end: usize,
+        include_tool_debug: bool,
+        include_runtime_debug: bool,
+        include_envelope: bool,
+    ) -> ConversationSnapshot {
         let published = self.entries();
         let base = self.entries_base;
         let entries_total = base + published.len();
@@ -1639,63 +1696,122 @@ impl AcpSessionState {
             entries_offset,
             entries_total,
             snapshot_revision: 0,
-            session_title: self.resolved_session_title(),
+            session_title: include_envelope
+                .then(|| self.resolved_session_title())
+                .flatten(),
             replaying_history: self.replaying_history,
             entries,
-            tool_debug: Some(self.tool_debug.clone()),
-            runtime_debug: Some(self.runtime_debug.clone()),
+            tool_debug: include_tool_debug.then(|| self.tool_debug.clone()),
+            runtime_debug: include_runtime_debug.then(|| self.runtime_debug.clone()),
             phase: self.phase,
             end_reason: self.end_reason.clone(),
             end_kind: self.end_kind,
-            accepted_delivery_ids: self.accepted_delivery_ids.clone(),
-            active_delivery_id: self.active_delivery_id.clone(),
-            completed_delivery_id: self.completed_delivery_id.clone(),
-            pending_permissions: self
-                .permissions
-                .iter()
-                .map(|p| PendingPermission {
-                    question: p.question.clone(),
-                    tool_call_id: p.tool_call_id.clone(),
-                    options: p.options.clone(),
-                    details: p.details.clone(),
+            accepted_delivery_ids: if include_envelope {
+                self.accepted_delivery_ids.clone()
+            } else {
+                Default::default()
+            },
+            active_delivery_id: include_envelope
+                .then(|| self.active_delivery_id.clone())
+                .flatten(),
+            completed_delivery_id: include_envelope
+                .then(|| self.completed_delivery_id.clone())
+                .flatten(),
+            pending_permissions: if include_envelope {
+                self.permissions
+                    .iter()
+                    .map(|p| PendingPermission {
+                        question: p.question.clone(),
+                        tool_call_id: p.tool_call_id.clone(),
+                        options: p.options.clone(),
+                        details: p.details.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            pending_elicitation: if include_envelope {
+                self.elicitation.as_ref().map(|e| PendingElicitation {
+                    message: e.message.clone(),
+                    fields: e.raw_fields.iter().map(elicit_field_view).collect(),
+                    chosen: e.chosen.clone(),
+                    text_values: e.text_values.clone(),
                 })
-                .collect(),
-            pending_elicitation: self.elicitation.as_ref().map(|e| PendingElicitation {
-                message: e.message.clone(),
-                fields: e.raw_fields.iter().map(elicit_field_view).collect(),
-                chosen: e.chosen.clone(),
-                text_values: e.text_values.clone(),
-            }),
-            status_line: self.status_line.clone(),
+            } else {
+                None
+            },
+            status_line: include_envelope.then(|| self.status_line.clone()).flatten(),
             acp_session_id: self.acp_session_id.clone(),
             history_session_id: self.history_session_id.clone(),
+            history_abandoned: self.history_abandoned,
             supports_image: self.supports_image,
-            available_commands: self.available_commands.clone(),
+            available_commands: if include_envelope {
+                self.available_commands.clone()
+            } else {
+                Vec::new()
+            },
             usage: self.usage,
             usage_cached_read: self.usage_cached_read,
             usage_cost: self.usage_cost,
-            usage_breakdown: self.usage_breakdown.clone(),
-            plan: self.plan.clone(),
-            background_tasks: self.background_tasks.clone(),
-            model: self.model.clone(),
-            config_options: self.config_options.clone(),
+            usage_breakdown: include_envelope
+                .then(|| self.usage_breakdown.clone())
+                .flatten(),
+            plan: include_envelope.then(|| self.plan.clone()).flatten(),
+            background_tasks: if include_envelope {
+                self.background_tasks.clone()
+            } else {
+                Vec::new()
+            },
+            model: include_envelope.then(|| self.model.clone()).flatten(),
+            config_options: if include_envelope {
+                self.config_options.clone()
+            } else {
+                Vec::new()
+            },
             conversation_state: None,
             supports_compaction: self.supports_compaction,
             supports_native_queue: self.supports_native_queue,
             supports_rewind: self.supports_rewind,
             compacting: self.compacting,
-            queued_steering: self.queued_steering.clone(),
-            queued_follow_up: self.queued_follow_up.clone(),
-            composer_restore_revision: self.composer_restore_revision,
-            composer_restore_texts: self.composer_restore_texts.clone(),
-            composer_restore_images: self.composer_restore_images.clone(),
-            turn_started_at_ms: self.turn_started_at_ms,
-            turn_timings: self.turn_timings.clone(),
+            queued_steering: if include_envelope {
+                self.queued_steering.clone()
+            } else {
+                Vec::new()
+            },
+            queued_follow_up: if include_envelope {
+                self.queued_follow_up.clone()
+            } else {
+                Vec::new()
+            },
+            composer_restore_revision: if include_envelope {
+                self.composer_restore_revision
+            } else {
+                0
+            },
+            composer_restore_texts: if include_envelope {
+                self.composer_restore_texts.clone()
+            } else {
+                Vec::new()
+            },
+            composer_restore_images: if include_envelope {
+                self.composer_restore_images.clone()
+            } else {
+                Vec::new()
+            },
+            turn_started_at_ms: include_envelope
+                .then_some(self.turn_started_at_ms)
+                .flatten(),
+            turn_timings: if include_envelope {
+                self.turn_timings.clone()
+            } else {
+                Vec::new()
+            },
             completed_unread: self.completed_unread,
             turn_outcome: self.turn_outcome,
             should_persist,
             history_error: None,
             history_omitted: false,
+            envelope_omitted: !include_envelope,
         }
     }
 }
@@ -1713,7 +1829,7 @@ pub struct SessionLive {
     pub status_line: Option<String>,
     /// 已提交历史的长度。`None` 表示这帧仍把历史放在快照 `entries` 里（旧守护）。
     pub history_len: Option<usize>,
-    /// 还没写进会话文件的这一轮：用户刚发出的消息、半句话、进行中的工具。
+    /// 旧帧在快照解析失败时用来保住当前回合。新守护不再填写：正文只在快照 `entries`。
     pub open_turn: Vec<crate::acp_chat::AcpEntry>,
 }
 
@@ -1732,15 +1848,27 @@ impl SessionLive {
         }
     }
 
+    /// 活状态头。`history_len == None`，正文仍由快照 `entries` 携带。
+    /// 不克隆 entries、工具参数表或 runtime debug。
+    pub fn header_from_state(state: &AcpSessionState) -> Self {
+        Self {
+            phase: state.phase,
+            end_reason: state.end_reason.clone(),
+            end_kind: state.end_kind,
+            acp_session_id: state.acp_session_id.clone(),
+            history_session_id: state.history_session_id.clone(),
+            session_title: state.resolved_session_title(),
+            status_line: state.status_line.clone(),
+            history_len: None,
+            open_turn: Vec::new(),
+        }
+    }
+
+    /// 窗口投影。`history_len` 标出已提交历史的终点；当前回合的正文不在这里复制。
     pub fn from_state(state: &AcpSessionState) -> Self {
-        let (history_len, end) = state.open_turn_range();
-        let mut live = Self::from_snapshot(&state.to_snapshot(false));
+        let (history_len, _) = state.open_turn_range();
+        let mut live = Self::header_from_state(state);
         live.history_len = Some(history_len);
-        let published = state.entries();
-        let base = state.entries_base();
-        let local_start = history_len.saturating_sub(base).min(published.len());
-        let local_end = end.saturating_sub(base).min(published.len());
-        live.open_turn = published[local_start..local_end].to_vec();
         live
     }
 
@@ -1778,6 +1906,67 @@ impl SessionLive {
                 .and_then(|entries| serde_json::from_value(entries.clone()).ok())
                 .unwrap_or_default(),
         })
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SessionLiveDe {
+    phase: DaemonPhase,
+    #[serde(default)]
+    end_reason: String,
+    #[serde(default)]
+    end_kind: AcpEndKind,
+    #[serde(default)]
+    acp_session_id: Option<String>,
+    #[serde(default)]
+    history_session_id: Option<String>,
+    #[serde(default)]
+    session_title: Option<String>,
+    #[serde(default)]
+    status_line: Option<String>,
+    #[serde(default)]
+    history_len: Option<usize>,
+    #[serde(default)]
+    open_turn: Vec<crate::acp_chat::AcpEntry>,
+}
+
+impl From<SessionLiveDe> for SessionLive {
+    fn from(value: SessionLiveDe) -> Self {
+        Self {
+            phase: value.phase,
+            end_reason: value.end_reason,
+            end_kind: value.end_kind,
+            acp_session_id: value.acp_session_id,
+            history_session_id: value.history_session_id,
+            session_title: value.session_title,
+            status_line: value.status_line,
+            history_len: value.history_len,
+            open_turn: value.open_turn,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SessionLive {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SessionLiveDe::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// 守护推给窗口的一帧。正文只在 `snapshot`；`live` 是相位和历史边界。
+/// 恢复身份的放弃标志在 `snapshot.history_abandoned` 上，和会话状态同一份。
+#[derive(serde::Serialize)]
+pub struct AcpSnapshotFrame<'a> {
+    pub live: &'a SessionLive,
+    pub snapshot: &'a ConversationSnapshot,
+    pub provider_pid: Option<i32>,
+}
+
+impl AcpSnapshotFrame<'_> {
+    pub fn to_line_bytes(&self) -> Vec<u8> {
+        let mut bytes =
+            serde_json::to_vec(self).expect("ACP snapshot frame contains only serializable data");
+        bytes.push(b'\n');
+        bytes
     }
 }
 
@@ -1996,6 +2185,9 @@ pub fn note_prompt_sent_with_delivery(
     // 排队，则由 Ready 分支在看到本地回显后补上。
     if state.history_session_id.is_none() {
         state.history_session_id = state.acp_session_id.clone();
+        if state.history_session_id.is_some() {
+            state.history_abandoned = false;
+        }
     }
     // 草稿还是空的，说明重放还没交出新正文，新消息接在上一份已发布正文上。
     // 草稿里已经有重放出来的条目时，那份草稿就是新投影，不能退回旧正文。

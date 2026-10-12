@@ -153,6 +153,7 @@ fn acp_item(
             runtime_spec_fingerprint,
             conversation_binding,
             snapshot,
+            pending_host_bytes,
         } => {
             let host_fd = fd_number(&FdRole::AcpHost {
                 session_id: id.clone(),
@@ -172,6 +173,7 @@ fn acp_item(
                 "runtime_spec_fingerprint": runtime_spec_fingerprint,
                 "conversation_binding": to_value("acp.conversation_binding", conversation_binding)?,
                 "snapshot": to_value("acp.snapshot", snapshot)?,
+                "pending_host_bytes": pending_host_bytes,
             }))
         }
         AcpHandoff::Direct {
@@ -463,6 +465,7 @@ mod tests {
                     runtime_spec_fingerprint: None,
                     conversation_binding: None,
                     snapshot: snapshot_fixture(),
+                    pending_host_bytes: Vec::new(),
                 },
                 AcpHandoff::Direct {
                     id: "a2".to_string(),
@@ -491,6 +494,12 @@ mod tests {
         assert_eq!(items[0]["host_pid"], 201);
         assert_eq!(items[0]["provider_pid"], 202);
         assert_eq!(items[0]["host_snapshot_revision"], 7);
+        assert!(
+            items[0]["pending_host_bytes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(items[0]["launch"]["command"], "agent --x");
         assert_eq!(
             items[0]["host_fd"].as_i64().unwrap(),

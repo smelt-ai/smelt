@@ -682,6 +682,15 @@ fn provider_switch_value<'a>(
         .map(|(value, _)| value.as_str())
 }
 
+/// 往空列表补第一页历史。
+///
+/// 新项先带统一高度，滚动条才有长度，并停在最新一条。
+/// 视口本身不靠这个高度：列表是缓存视图的根，必须铺满可用高度。
+fn reveal_first_history_page(list: &ListState, page_len: usize) {
+    list.reset_with_uniform_height(page_len, px(RESTORED_ENTRY_HEIGHT_HINT_PX));
+    list.set_follow_mode(FollowMode::Tail);
+}
+
 fn should_seed_restored_height_hints(
     awaiting_initial_snapshot: bool,
     replaying_history: bool,
@@ -887,13 +896,42 @@ fn is_stale_blank_history_id(
     entries_are_empty && history_session_id.is_some() && history_session_id == acp_session_id
 }
 
+enum ViewHistoryIdentity {
+    Set(String),
+    Clear,
+    Keep,
+}
+
+/// 窗口缓存怎么跟上这一帧。非空的快照 id 直接采用。没有 id 时，放弃标志或
+/// 确认过的空新会话才丢掉缓存；其余帧留着上一次的 id。
+fn view_history_identity(
+    incoming: Option<&str>,
+    abandoned: bool,
+    clear_empty_new_session: bool,
+) -> ViewHistoryIdentity {
+    if let Some(id) = incoming.map(str::trim).filter(|id| !id.is_empty()) {
+        return ViewHistoryIdentity::Set(id.to_string());
+    }
+    if abandoned || clear_empty_new_session {
+        ViewHistoryIdentity::Clear
+    } else {
+        ViewHistoryIdentity::Keep
+    }
+}
+
 fn should_clear_history_session_id_after_snapshot(
     phase: &DaemonPhase,
     entries_are_empty: bool,
+    entries_total: usize,
+    history_omitted: bool,
     snapshot_revision: u64,
     has_runtime_session_id: bool,
 ) -> bool {
-    entries_are_empty
+    // 桌面实时帧不带已提交正文，空的 entries 只说明这一帧没装历史。
+    // 只有守护进程确认这是一份空的新会话，窗口才丢掉旧的恢复身份。
+    !history_omitted
+        && entries_total == 0
+        && entries_are_empty
         && snapshot_revision != 0
         && has_runtime_session_id
         && matches!(phase, DaemonPhase::Idle)
@@ -1252,6 +1290,8 @@ pub struct AcpView {
     /// 与 `entries` 同索引的 Markdown 预处理结果。文件链接解析与用户 HTML 转义只在
     /// entry 变化时执行，静态重绘直接复用 `SharedString`。
     rendered_markdown: Vec<Option<gpui::SharedString>>,
+    /// 对话布局缓存。流式更新只重算当前回合，不扫描已结束的历史。
+    layout_cache: std::cell::RefCell<ConversationLayoutCache>,
     /// Pi 输入栏「技能 N」的发现结果。技能目录和祖先 `.git` 探测一次就要数毫秒
     /// 到几十毫秒，不能跟着消息流每帧重扫。
     loaded_skills: Option<LoadedSkillsSnapshot>,
@@ -1688,6 +1728,7 @@ impl AcpView {
             rendered_diffs,
             rendered_tool_images: std::collections::HashMap::new(),
             rendered_markdown,
+            layout_cache: std::cell::RefCell::default(),
             loaded_skills: None,
             transcript,
             loaded_entries_offset: 0,
@@ -1909,6 +1950,74 @@ impl AcpView {
                 | DaemonPhase::WaitingForUser
         ) || self.has_pending_fresh_start_prompt()
             || is_dispatch_in_flight(self.prompt_dispatch_pending, self.immediate_cancel_pending)
+    }
+
+    /// 消息列表每帧都要布局，但已结束回合的分组不会因为尾部 token 改变。
+    /// 只重算脏下标所在的回合；进行中的耗时只改这一组的 elapsed。
+    fn conversation_layout(&self) -> std::rc::Rc<Vec<EntryPresentation>> {
+        let mut cache = self.layout_cache.borrow_mut();
+        let turn_active = self.has_active_turn();
+        let live = live_elapsed_ms(self.turn_started_at_ms);
+        let len = self.entries.len();
+        let timings_len = self.turn_timings.len();
+        let loaded = self.loaded_entries_offset;
+        let tail = conversation_segment_start(&self.entries, len.saturating_sub(1));
+        let force_full = cache.loaded_offset != loaded
+            || cache.timings_len != timings_len
+            || cache.entries.len() != cache.len
+            || cache.len > len;
+        let dirty = cache.dirty_from.take();
+        let recompute_from = if force_full || dirty == Some(0) || (cache.len == 0 && len > 0) {
+            Some(0)
+        } else {
+            match dirty {
+                Some(usize::MAX) | None => {
+                    if cache.turn_active != turn_active
+                        || cache.len != len
+                        || cache.tail_start != tail
+                    {
+                        Some(tail.min(cache.tail_start))
+                    } else if cache.live_elapsed_ms != live {
+                        let entries = std::rc::Rc::make_mut(&mut cache.entries);
+                        patch_live_elapsed(entries, tail, live);
+                        cache.live_elapsed_ms = live;
+                        cache.tail_start = tail;
+                        cache.turn_active = turn_active;
+                        return cache.entries.clone();
+                    } else {
+                        return cache.entries.clone();
+                    }
+                }
+                Some(ix) => Some(layout_recompute_start(&self.entries, ix)),
+            }
+        };
+        if recompute_from == Some(0) || cache.len == 0 {
+            cache.entries = std::rc::Rc::new(build_conversation_layout_with_timings(
+                &self.entries,
+                turn_active,
+                loaded,
+                &self.turn_timings,
+                live,
+            ));
+        } else if let Some(from) = recompute_from {
+            let entries = std::rc::Rc::make_mut(&mut cache.entries);
+            refresh_conversation_layout_from(
+                entries,
+                &self.entries,
+                from,
+                turn_active,
+                loaded,
+                &self.turn_timings,
+                live,
+            );
+        }
+        cache.len = len;
+        cache.tail_start = tail;
+        cache.turn_active = turn_active;
+        cache.loaded_offset = loaded;
+        cache.timings_len = timings_len;
+        cache.live_elapsed_ms = live;
+        cache.entries.clone()
     }
 
     fn status_evidence(&self) -> AcpStatusEvidence {
@@ -2194,9 +2303,11 @@ impl AcpView {
             return;
         }
 
+        let first_page = self.entries.is_empty();
         let mut page = snapshot.entries;
         page.append(&mut self.entries);
         self.entries = page;
+        self.layout_cache.borrow_mut().dirty_from = Some(0);
         self.loaded_entries_offset = snapshot.entries_offset;
         self.entries_total = self.entries_total.max(snapshot.entries_total);
         // 省略或空白不是清空。
@@ -2240,9 +2351,13 @@ impl AcpView {
             .collect();
         self.revealed_prompt = self.revealed_prompt.map(|entry_ix| entry_ix + page_len);
 
-        // GPUI shifts the logical scroll anchor by `page_len` for a pure prepend, so the
-        // same message stays under the cursor instead of jumping to the newly loaded page.
-        self.list_state.splice(0..0, page_len);
+        // 往已有正文前面接一页时，GPUI 会把滚动锚点后移 page_len，眼前这条消息不动。
+        // 空列表没有可锚的消息，直接铺上统一高度并停在最新一条。
+        if first_page {
+            reveal_first_history_page(&self.list_state, self.entries.len());
+        } else {
+            self.list_state.splice(0..0, page_len);
+        }
         cx.notify();
     }
 
@@ -3351,6 +3466,7 @@ impl AcpView {
             std::mem::take(&mut snap.entries),
             initial_snapshot,
         );
+        self.layout_cache.borrow_mut().dirty_from = Some(changed_from.unwrap_or(usize::MAX));
         let snapshot_entries_changed = changed_from.is_some();
         let entries_offset = changed_from.unwrap_or(self.entries.len());
         let previous_permission = self
@@ -3424,116 +3540,127 @@ impl AcpView {
         self.phase = snap.phase;
         self.end_reason = snap.end_reason;
         self.end_kind = snap.end_kind;
-        // 只有 daemon 已回到可用相位才补满预算。Starting 仍是同一次重连尝试，
-        // 若在这里补满会让启动失败形成无限重试。
+        if !snap.envelope_omitted {
+            self.permissions = snap.pending_permissions;
+            let current_permission = self
+                .permissions
+                .first()
+                .map(|card| (card.tool_call_id.clone(), card.question.clone()));
+            if previous_permission != current_permission {
+                self.permission_submitting = None;
+            }
+            self.elicitation = snap.pending_elicitation;
+            if self.elicitation.is_none() {
+                self.elicitation_inputs.clear();
+                self.elicitation_input_subscriptions.clear();
+            }
+            let previous_status_line = self.status_line.clone();
+            self.status_line = snap.status_line;
+            self.history_error = snap.history_error;
+            if config_update_failure_is_new(
+                previous_status_line.as_deref(),
+                self.status_line.as_deref(),
+            ) {
+                self.pending_config_values.clear();
+            }
+            if let Some(title) =
+                smelt_core::session_title::provider_session_title(snap.session_title.as_deref())
+            {
+                self.session_title = Some(title.to_string());
+            }
+            self.available_commands = snap.available_commands;
+            self.usage = snap.usage;
+            self.usage_cached_read = snap.usage_cached_read;
+            self.usage_cost = snap.usage_cost;
+            self.usage_breakdown = snap.usage_breakdown.clone();
+            self.supports_compaction = snap.supports_compaction;
+            self.supports_native_queue = snap.supports_native_queue;
+            self.supports_rewind = snap.supports_rewind;
+            self.compacting = snap.compacting;
+            self.queued_steering = snap.queued_steering;
+            self.queued_follow_up = snap.queued_follow_up;
+            let restore_revision = snap.composer_restore_revision;
+            let restore = consume_composer_restore(
+                self.last_composer_restore_revision,
+                restore_revision,
+                snap.composer_restore_texts,
+                snap.composer_restore_images,
+            );
+            self.last_composer_restore_revision = restore.last_revision;
+            let has_restore = restore.restore_texts.is_some() || restore.restore_images.is_some();
+            if let Some(texts) = restore.restore_texts {
+                match &mut self.pending_composer_restore {
+                    Some(pending) => pending.extend(texts),
+                    None => self.pending_composer_restore = Some(texts),
+                }
+            }
+            if let Some(images) = restore.restore_images {
+                match &mut self.pending_composer_restore_images {
+                    Some(pending) => pending.extend(images),
+                    None => self.pending_composer_restore_images = Some(images),
+                }
+            }
+            if has_restore {
+                self.pending_composer_restore_revision = Some(
+                    self.pending_composer_restore_revision
+                        .map_or(restore_revision, |pending| pending.max(restore_revision)),
+                );
+            }
+            self.plan = snap.plan;
+            self.background_tasks = snap.background_tasks;
+            if running_background_tasks(&self.background_tasks).is_empty() {
+                self.background_tasks_open = false;
+            }
+            self.model = snap.model;
+            self.config_options = snap.config_options;
+            reconcile_pending_config_values(
+                &mut self.pending_config_values,
+                &self.config_options,
+                self.model.as_ref(),
+            );
+            self.turn_started_at_ms = snap.turn_started_at_ms;
+            self.turn_timings = snap.turn_timings;
+            self.accepted_delivery_ids = snap.accepted_delivery_ids;
+            self.active_delivery_id = snap.active_delivery_id;
+            self.completed_delivery_id = snap.completed_delivery_id;
+        }
         if is_recovered_phase(&self.phase) {
             self.auto_reconnect_left = AUTO_RECONNECT_ATTEMPTS;
-        }
-        self.permissions = snap.pending_permissions;
-        let current_permission = self
-            .permissions
-            .first()
-            .map(|card| (card.tool_call_id.clone(), card.question.clone()));
-        if previous_permission != current_permission {
-            self.permission_submitting = None;
-        }
-        self.elicitation = snap.pending_elicitation;
-        if self.elicitation.is_none() {
-            self.elicitation_inputs.clear();
-            self.elicitation_input_subscriptions.clear();
-        }
-        let previous_status_line = self.status_line.clone();
-        self.status_line = snap.status_line;
-        self.history_error = snap.history_error;
-        if config_update_failure_is_new(
-            previous_status_line.as_deref(),
-            self.status_line.as_deref(),
-        ) {
-            self.pending_config_values.clear();
-        }
-        // 省略或空白不是清空。
-        if let Some(title) =
-            smelt_core::session_title::provider_session_title(snap.session_title.as_deref())
-        {
-            self.session_title = Some(title.to_string());
         }
         let has_runtime_session_id = snap.acp_session_id.is_some();
         let runtime_session_id = snap.acp_session_id.map(SessionId::new);
         self.acp_session_id = runtime_session_id.clone();
-        if let Some(history_session_id) = snap.history_session_id {
-            self.history_session_id = Some(SessionId::new(history_session_id));
-        } else if should_clear_history_session_id_after_snapshot(
-            &snapshot_phase,
-            new_entries_len == 0,
-            snap.snapshot_revision,
-            has_runtime_session_id,
+        match view_history_identity(
+            snap.history_session_id.as_deref(),
+            snap.history_abandoned,
+            should_clear_history_session_id_after_snapshot(
+                &snapshot_phase,
+                new_entries_len == 0,
+                self.entries_total,
+                snap.history_omitted,
+                snap.snapshot_revision,
+                has_runtime_session_id,
+            ),
         ) {
-            // 只有 Ready/Fresh 后的 Idle 空快照才证明新会话已经真正建立；
-            // Starting/Ended 仍可能只是恢复失败或连接超时，必须保留 canonical
-            // history id，让下一次打开还能重试原会话。
-            self.history_session_id = None;
-        } else if self.history_session_id.is_none() && new_entries_len > 0 {
-            // 兼容尚未携带 history_session_id 的旧 daemon 快照，但不要把
-            // 空白会话的运行时 id 当成可恢复历史身份。
-            self.history_session_id = runtime_session_id;
+            ViewHistoryIdentity::Set(history_session_id) => {
+                self.history_session_id = Some(SessionId::new(history_session_id));
+            }
+            ViewHistoryIdentity::Clear => {
+                // 守护进程确认这份历史作废，或确认这是一份空的新会话。
+                // Starting/Ended、以及没把历史放进这一帧的实时快照，都留着。
+                self.history_session_id = None;
+            }
+            ViewHistoryIdentity::Keep
+                if self.history_session_id.is_none() && new_entries_len > 0 =>
+            {
+                // 旧 daemon 快照没带 history_session_id。空白会话的运行时 id
+                // 不能当成可恢复历史。
+                self.history_session_id = runtime_session_id;
+            }
+            ViewHistoryIdentity::Keep => {}
         }
         self.supports_image = snap.supports_image;
-        self.available_commands = snap.available_commands;
-        self.usage = snap.usage;
-        self.usage_cached_read = snap.usage_cached_read;
-        self.usage_cost = snap.usage_cost;
-        self.usage_breakdown = snap.usage_breakdown.clone();
-        self.supports_compaction = snap.supports_compaction;
-        self.supports_native_queue = snap.supports_native_queue;
-        self.supports_rewind = snap.supports_rewind;
-        self.compacting = snap.compacting;
-        self.queued_steering = snap.queued_steering;
-        self.queued_follow_up = snap.queued_follow_up;
-        let restore_revision = snap.composer_restore_revision;
-        let restore = consume_composer_restore(
-            self.last_composer_restore_revision,
-            restore_revision,
-            snap.composer_restore_texts,
-            snap.composer_restore_images,
-        );
-        self.last_composer_restore_revision = restore.last_revision;
-        let has_restore = restore.restore_texts.is_some() || restore.restore_images.is_some();
-        if let Some(texts) = restore.restore_texts {
-            match &mut self.pending_composer_restore {
-                Some(pending) => pending.extend(texts),
-                None => self.pending_composer_restore = Some(texts),
-            }
-        }
-        if let Some(images) = restore.restore_images {
-            match &mut self.pending_composer_restore_images {
-                Some(pending) => pending.extend(images),
-                None => self.pending_composer_restore_images = Some(images),
-            }
-        }
-        if has_restore {
-            self.pending_composer_restore_revision = Some(
-                self.pending_composer_restore_revision
-                    .map_or(restore_revision, |pending| pending.max(restore_revision)),
-            );
-        }
-        self.plan = snap.plan;
-        self.background_tasks = snap.background_tasks;
-        if running_background_tasks(&self.background_tasks).is_empty() {
-            self.background_tasks_open = false;
-        }
-        self.model = snap.model;
-        self.config_options = snap.config_options;
-        reconcile_pending_config_values(
-            &mut self.pending_config_values,
-            &self.config_options,
-            self.model.as_ref(),
-        );
-        self.turn_started_at_ms = snap.turn_started_at_ms;
-        self.turn_timings = snap.turn_timings;
         self.turn_outcome = snap.turn_outcome;
-        self.accepted_delivery_ids = snap.accepted_delivery_ids;
-        self.active_delivery_id = snap.active_delivery_id;
-        self.completed_delivery_id = snap.completed_delivery_id;
         // note_prompt_sent 会先把 Running 快照推给 GUI，再开始真正的 ACP RPC。
         // 只有收到这份确认后才允许下一条排队消息等待 Idle；不能用旧的 Idle 快照
         // 清掉 pending 标记，否则快速连续提交仍会并发打进同一个 session。
@@ -4296,7 +4423,7 @@ fn classify_attached_paths(
     let mut images = Vec::new();
     let mut files = Vec::new();
     for path in paths {
-        if attach_images && external_image_format(path).is_some() {
+        if attach_images && smelt_ui::image::format_for_path(path).is_some() {
             images.push(path.clone());
         } else {
             files.push(path.clone());
@@ -4341,27 +4468,13 @@ fn external_clipboard_image_paths(entries: &[gpui::ClipboardEntry]) -> Vec<std::
             _ => None,
         })
         .flatten()
-        .filter(|path| external_image_format(path).is_some())
+        .filter(|path| smelt_ui::image::format_for_path(path).is_some())
         .cloned()
         .collect()
 }
 
-fn external_image_format(path: &std::path::Path) -> Option<gpui::ImageFormat> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    match extension.as_str() {
-        "png" => Some(gpui::ImageFormat::Png),
-        "jpg" | "jpeg" => Some(gpui::ImageFormat::Jpeg),
-        "webp" => Some(gpui::ImageFormat::Webp),
-        "gif" => Some(gpui::ImageFormat::Gif),
-        "svg" => Some(gpui::ImageFormat::Svg),
-        "bmp" => Some(gpui::ImageFormat::Bmp),
-        "tif" | "tiff" => Some(gpui::ImageFormat::Tiff),
-        _ => None,
-    }
-}
-
 fn load_external_clipboard_image(path: &std::path::Path) -> Option<std::sync::Arc<gpui::Image>> {
-    let format = external_image_format(path)?;
+    let format = smelt_ui::image::format_for_path(path)?;
     let bytes = std::fs::read(path).ok()?;
     if bytes.is_empty() {
         return None;
@@ -4732,7 +4845,57 @@ fn live_elapsed_ms(turn_started_at_ms: Option<u64>) -> Option<u64> {
     turn_started_at_ms.and_then(|started| now_unix_ms().checked_sub(started))
 }
 
-/// 本轮用户消息之后是否已经有思考/工具/正文。没有时在消息流里画「已用 Ns」。
+/// 过程组里最后一条看得见的动作。空思考行跳过；连在一起的同类工具挂到合并行上。
+fn live_elapsed_anchor(
+    entries: &[AcpEntry],
+    group: ProcessGroupInfo,
+    pending_tool_id: Option<&str>,
+) -> usize {
+    let mut index = group.end.saturating_sub(1).max(group.first);
+    while index > group.first {
+        let empty = matches!(
+            entries.get(index),
+            Some(AcpEntry::Assistant { text, .. }) if text.trim().is_empty()
+        );
+        if !empty {
+            break;
+        }
+        index -= 1;
+    }
+    consecutive_compact_tool_run(entries, index, group.first, group.end, pending_tool_id)
+        .map(|run| run.start)
+        .unwrap_or(index)
+}
+
+/// 这一行要不要带上本轮耗时。有动作就挂在动作上；只有思考摘要或还在跑的工具时才挂。
+fn row_live_elapsed(
+    turn_active: bool,
+    index: usize,
+    entries: &[AcpEntry],
+    group: Option<ProcessGroupInfo>,
+    elapsed_ms: Option<u64>,
+    pending_tool_id: Option<&str>,
+) -> Option<u64> {
+    if !turn_active {
+        return None;
+    }
+    let anchor = if let Some(group) = group.filter(|group| group.active) {
+        live_elapsed_anchor(entries, group, pending_tool_id)
+    } else if group.is_none()
+        && index + 1 == entries.len()
+        && matches!(
+            entries.get(index),
+            Some(AcpEntry::Assistant { thought: true, .. } | AcpEntry::ToolCall { .. })
+        )
+    {
+        index
+    } else {
+        return None;
+    };
+    (index == anchor).then_some(elapsed_ms).flatten()
+}
+
+/// 本轮用户消息之后是否已经有思考/工具/正文。没有时才单独画一行「已用 Ns」。
 fn current_turn_has_agent_output(entries: &[AcpEntry]) -> bool {
     entries
         .iter()
@@ -5310,7 +5473,7 @@ fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
         .into_any_element()
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ProcessGroupInfo {
     first: usize,
     end: usize,
@@ -5326,7 +5489,7 @@ struct ProcessGroupInfo {
     elapsed_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct EntryPresentation {
     final_answer: bool,
     process_group: Option<ProcessGroupInfo>,
@@ -5485,7 +5648,56 @@ fn build_conversation_layout_with_timings(
     live_elapsed_ms: Option<u64>,
 ) -> Vec<EntryPresentation> {
     let mut layout = vec![EntryPresentation::default(); entries.len()];
-    let mut start = 0;
+    fill_conversation_layout(
+        &mut layout,
+        entries,
+        0,
+        current_turn_active,
+        entries_offset,
+        turn_timings,
+        live_elapsed_ms,
+    );
+    layout
+}
+
+/// 从 `from` 起重算布局，更早的回合保持不变。`from` 必须落在回合边界上。
+fn refresh_conversation_layout_from(
+    layout: &mut Vec<EntryPresentation>,
+    entries: &[AcpEntry],
+    from: usize,
+    current_turn_active: bool,
+    entries_offset: usize,
+    turn_timings: &[smelt_core::acp_session::TurnTiming],
+    live_elapsed_ms: Option<u64>,
+) {
+    let from = from.min(entries.len());
+    layout.truncate(entries.len());
+    if layout.len() < entries.len() {
+        layout.resize(entries.len(), EntryPresentation::default());
+    }
+    for item in &mut layout[from..] {
+        *item = EntryPresentation::default();
+    }
+    fill_conversation_layout(
+        layout,
+        entries,
+        from,
+        current_turn_active,
+        entries_offset,
+        turn_timings,
+        live_elapsed_ms,
+    );
+}
+
+fn fill_conversation_layout(
+    layout: &mut [EntryPresentation],
+    entries: &[AcpEntry],
+    mut start: usize,
+    current_turn_active: bool,
+    entries_offset: usize,
+    turn_timings: &[smelt_core::acp_session::TurnTiming],
+    live_elapsed_ms: Option<u64>,
+) {
     while start < entries.len() {
         if is_user_entry(&entries[start]) || matches!(entries[start], AcpEntry::Divider(_)) {
             start += 1;
@@ -5592,7 +5804,72 @@ fn build_conversation_layout_with_timings(
         }
         start = end;
     }
-    layout
+}
+
+fn conversation_segment_start(entries: &[AcpEntry], index: usize) -> usize {
+    if entries.is_empty() {
+        return 0;
+    }
+    let mut index = index.min(entries.len() - 1);
+    loop {
+        if is_user_entry(&entries[index]) || matches!(entries[index], AcpEntry::Divider(_)) {
+            return index.saturating_add(1).min(entries.len());
+        }
+        if index == 0 {
+            return 0;
+        }
+        index -= 1;
+    }
+}
+
+/// 新的用户消息会把上一回合标成已结束，所以脏下标落在用户消息上时要连上一回合一起重算。
+fn layout_recompute_start(entries: &[AcpEntry], dirty: usize) -> usize {
+    if entries.is_empty() || dirty == 0 {
+        return 0;
+    }
+    let dirty = dirty.min(entries.len() - 1);
+    if is_user_entry(&entries[dirty]) || matches!(entries[dirty], AcpEntry::Divider(_)) {
+        return conversation_segment_start(entries, dirty - 1);
+    }
+    conversation_segment_start(entries, dirty)
+}
+
+fn patch_live_elapsed(layout: &mut [EntryPresentation], from: usize, live_elapsed_ms: Option<u64>) {
+    let from = from.min(layout.len());
+    for item in &mut layout[from..] {
+        if let Some(group) = item.process_group.as_mut()
+            && group.active
+        {
+            group.elapsed_ms = live_elapsed_ms;
+        }
+    }
+}
+
+struct ConversationLayoutCache {
+    entries: std::rc::Rc<Vec<EntryPresentation>>,
+    len: usize,
+    tail_start: usize,
+    turn_active: bool,
+    loaded_offset: usize,
+    timings_len: usize,
+    live_elapsed_ms: Option<u64>,
+    /// `None` 表示缓存和当前 entries 一致。`Some(usize::MAX)` 只可能改相位或耗时。
+    dirty_from: Option<usize>,
+}
+
+impl Default for ConversationLayoutCache {
+    fn default() -> Self {
+        Self {
+            entries: std::rc::Rc::new(Vec::new()),
+            len: 0,
+            tail_start: 0,
+            turn_active: false,
+            loaded_offset: 0,
+            timings_len: 0,
+            live_elapsed_ms: None,
+            dirty_from: Some(0),
+        }
+    }
 }
 
 fn format_duration(milliseconds: u64) -> String {

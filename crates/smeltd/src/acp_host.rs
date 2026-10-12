@@ -198,6 +198,9 @@ pub(crate) struct AcpSession {
     pub(crate) conversation_submit: Mutex<()>,
     /// 只装饰下一条成功路由的交互输入。Task/Peer delivery 不读取也不消费它。
     pub(crate) pending_agent_preset: Mutex<Option<String>>,
+    /// 已经写进 `acp_detail.history_session_id` 的身份。
+    /// 和内存里的确认值一样就不再写库；行还不在时保持空，下一帧再试。
+    pub(crate) durable_history_session_id: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,12 +322,51 @@ pub(crate) fn normalize_resume_id(resume_id: Option<String>) -> Option<String> {
 }
 
 pub(crate) fn select_resume_id(
+    known: Option<String>,
+    stored: smelt_store::StoredHistoryIdentity,
+    requested: Option<String>,
+) -> Option<String> {
+    // 正在跟 agent 说话的进程记得身份，库和窗口缓存都不能盖过它。
+    if let Some(id) = normalize_resume_id(known) {
+        return Some(id);
+    }
+    match stored {
+        // 这个槽位已经有行。确认过的 id 胜过窗口缓存。
+        smelt_store::StoredHistoryIdentity::Bound(id) => normalize_resume_id(Some(id)),
+        // 行在、列是空：明确还没确认，或已经放弃。窗口里的旧缓存不能填回来。
+        smelt_store::StoredHistoryIdentity::Unbound => None,
+        // 还没有这一行。历史页「继续」带的 id 可以用来开一个新槽位。
+        smelt_store::StoredHistoryIdentity::NoRow => normalize_resume_id(requested),
+    }
+}
+
+fn durable_history_identity(session_id: &str) -> smelt_store::StoredHistoryIdentity {
+    // 没开库，或这一下读失败，都当成还没有行。测试里的显式 resume 仍能用。
+    let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
+        return smelt_store::StoredHistoryIdentity::NoRow;
+    };
+    store
+        .stored_history_identity(session_id)
+        .unwrap_or(smelt_store::StoredHistoryIdentity::NoRow)
+}
+
+/// 给已有会话选恢复身份。`allow_durable` 为假时不读库（分叉是新会话）。
+/// 明确放弃旧历史的 `fallback_to_fresh` 不走这里，它直接把 resume 传成 `None`。
+pub(crate) fn resolve_resume_id(
+    session_id: &str,
     requested: Option<String>,
     known_history: Option<String>,
+    allow_durable: bool,
 ) -> Option<String> {
-    // relaunch 时 GUI 持久化的 canonical id 必须优先；daemon 里的 runtime id
-    // 可能来自一次空恢复，不能反过来覆盖真正的 transcript id。
-    normalize_resume_id(requested).or_else(|| normalize_resume_id(known_history))
+    let requested = normalize_resume_id(requested);
+    let known_history = normalize_resume_id(known_history);
+    if !allow_durable {
+        return known_history.or(requested);
+    }
+    if let Some(id) = known_history {
+        return Some(id);
+    }
+    select_resume_id(None, durable_history_identity(session_id), requested)
 }
 
 pub(crate) fn known_acp_resume_id(
@@ -477,9 +519,86 @@ pub(crate) fn acp_pending_question(
         .or_else(|| reduced.elicitation.as_ref().map(|e| e.message.clone()))
 }
 
+/// 主 daemon 怎样把宿主这一帧落到 `acp_detail.history_session_id`。
+/// 有确认过的 id 就记住，哪怕同一帧还带着放弃标志（新身份胜出）。
+/// 没有 id、也没有放弃，就不能动库：重新开始会先把内存清掉，崩溃后仍要回到旧对话。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DurableHistoryWrite {
+    Remember(String),
+    Clear,
+    Leave,
+}
+
+pub(crate) fn durable_history_write(
+    history_id: Option<String>,
+    abandoned: bool,
+) -> DurableHistoryWrite {
+    match normalize_resume_id(history_id) {
+        Some(id) => DurableHistoryWrite::Remember(id),
+        None if abandoned => DurableHistoryWrite::Clear,
+        None => DurableHistoryWrite::Leave,
+    }
+}
+
+fn persist_confirmed_history_id(sess: &AcpSession) {
+    // 父镜像不写这一列。宿主帧由 snapshot drain 在合并之后写入；
+    // 这里若用合并前拷出来的旧 id 再写一次，会把刚刚放弃的身份填回去。
+    // 会话宿主进程没有打开 SQLite，调用会直接返回。
+    if sess.hosted_handle.lock().unwrap().is_some() {
+        return;
+    }
+    let Some(history_id) = ({
+        let reduced = sess.reduced.lock().unwrap();
+        normalize_resume_id(reduced.history_session_id.clone())
+    }) else {
+        return;
+    };
+    write_durable_history_id(sess, &history_id);
+}
+
+fn write_durable_history_id(sess: &AcpSession, history_id: &str) {
+    if sess.durable_history_session_id.lock().unwrap().as_deref() == Some(history_id) {
+        return;
+    }
+    let session_id = sess.state.lock().unwrap().id.clone();
+    let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
+        return;
+    };
+    match store.remember_history_session_id(&session_id, history_id) {
+        Ok(true) => {
+            *sess.durable_history_session_id.lock().unwrap() = Some(history_id.to_string());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("[acp] 写入对话恢复身份失败 id={session_id}: {error}");
+        }
+    }
+}
+
+fn clear_durable_history_id(sess: &AcpSession) {
+    *sess.durable_history_session_id.lock().unwrap() = None;
+    let session_id = sess.state.lock().unwrap().id.clone();
+    let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
+        return;
+    };
+    if let Err(error) = store.clear_history_session_id(&session_id) {
+        eprintln!("[acp] 放弃对话恢复身份失败 id={session_id}: {error}");
+    }
+}
+
+/// 宿主快照已经合并进父镜像。只有这条路径可以改托管会话的恢复身份。
+fn apply_durable_history_from_host(sess: &AcpSession, history_id: Option<String>, abandoned: bool) {
+    match durable_history_write(history_id, abandoned) {
+        DurableHistoryWrite::Remember(id) => write_durable_history_id(sess, &id),
+        DurableHistoryWrite::Clear => clear_durable_history_id(sess),
+        DurableHistoryWrite::Leave => {}
+    }
+}
+
 /// 把归约状态里的相位/待办问句同步进四色 `SessionState` 并广播。跟旧版 GUI
 /// `AcpView::sync_daemon_state` 是同一件事，只是现在算在 smeltd 侧。
 pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubHandle) {
+    persist_confirmed_history_id(sess);
     let (phase, pending_question, title) = {
         let reduced = sess.reduced.lock().unwrap();
         (
@@ -494,14 +613,26 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         .unwrap_or(0);
     let snapshot = {
         let mut st = sess.state.lock().unwrap();
-        let _ = commit_session_phase(&mut st, PhaseSource::AcpProjection, phase);
-        st.pending_question = pending_question;
-        st.title = title;
-        st.updated_at = now;
-        bump_state_revision(&mut st);
-        st.clone()
+        let phase_changed = commit_session_phase(&mut st, PhaseSource::AcpProjection, phase);
+        let question_changed = st.pending_question != pending_question;
+        let title_changed = st.title != title;
+        if !phase_changed && !question_changed && !title_changed {
+            None
+        } else {
+            if question_changed {
+                st.pending_question = pending_question;
+            }
+            if title_changed {
+                st.title = title;
+            }
+            st.updated_at = now;
+            bump_state_revision(&mut st);
+            Some(st.clone())
+        }
     };
-    broadcast_state(subscribers, &snapshot);
+    if let Some(snapshot) = snapshot {
+        broadcast_state(subscribers, &snapshot);
+    }
     note_automation_watch(sess);
 }
 
@@ -517,25 +648,33 @@ pub(crate) struct AutomationWatch {
 }
 
 fn note_automation_watch(sess: &AcpSession) {
-    let next = {
-        let reduced = sess.reduced.lock().unwrap();
-        AutomationWatch {
-            phase: reduced.phase,
-            active_delivery_id: reduced.active_delivery_id.clone(),
-            completed_delivery_id: reduced.completed_delivery_id.clone(),
-            accepted_delivery_ids: reduced.accepted_delivery_ids.clone(),
-            turn_outcome: reduced.turn_outcome,
-            end_reason: reduced.end_reason.clone(),
-            prompt_in_flight: sess.prompt_in_flight.load(Ordering::SeqCst),
-        }
-    };
+    let reduced = sess.reduced.lock().unwrap();
+    let prompt_in_flight = sess.prompt_in_flight.load(Ordering::SeqCst);
     let mut slot = sess.automation_watch.lock().unwrap();
-    let changed = slot.as_ref() != Some(&next);
-    *slot = Some(next);
-    drop(slot);
-    if changed {
-        crate::automation_runtime::nudge_automation_driver();
+    let unchanged = slot.as_ref().is_some_and(|current| {
+        current.phase == reduced.phase
+            && current.active_delivery_id == reduced.active_delivery_id
+            && current.completed_delivery_id == reduced.completed_delivery_id
+            && current.accepted_delivery_ids == reduced.accepted_delivery_ids
+            && current.turn_outcome == reduced.turn_outcome
+            && current.end_reason == reduced.end_reason
+            && current.prompt_in_flight == prompt_in_flight
+    });
+    if unchanged {
+        return;
     }
+    *slot = Some(AutomationWatch {
+        phase: reduced.phase,
+        active_delivery_id: reduced.active_delivery_id.clone(),
+        completed_delivery_id: reduced.completed_delivery_id.clone(),
+        accepted_delivery_ids: reduced.accepted_delivery_ids.clone(),
+        turn_outcome: reduced.turn_outcome,
+        end_reason: reduced.end_reason.clone(),
+        prompt_in_flight,
+    });
+    drop(slot);
+    drop(reduced);
+    crate::automation_runtime::nudge_automation_driver();
 }
 
 /// 推一份最新快照给控制连接 + 全部旁观者。这里只复制到各 attachment 的输出邮箱；
@@ -550,6 +689,7 @@ struct SnapshotDirty {
     from: usize,
     should_persist: bool,
     include_runtime_debug: bool,
+    include_envelope: bool,
     /// 这一帧要带给窗口的完整调试体。父镜像里只留账本，写完这帧就丢掉。
     runtime_debug: Option<Arc<smelt_core::acp_session::RuntimeDebug>>,
 }
@@ -578,6 +718,13 @@ pub(crate) struct AcpSnapshotLink {
 }
 
 const ACP_SNAPSHOT_FLUSH_DEADLINE: Duration = Duration::from_secs(3);
+/// 流式 token 不值得一帧一帧序列化。写线程把非落盘、非调试的脏标记再并 16ms，
+/// 权限、回合结束和 runtime debug 仍立刻写出。
+const ACP_SNAPSHOT_COALESCE: Duration = Duration::from_millis(16);
+
+fn snapshot_dirty_is_urgent(job: &SnapshotDirty) -> bool {
+    job.should_persist || job.include_runtime_debug || job.include_envelope
+}
 
 impl AcpSnapshotLink {
     fn mark(
@@ -585,6 +732,7 @@ impl AcpSnapshotLink {
         from: usize,
         should_persist: bool,
         include_runtime_debug: bool,
+        include_envelope: bool,
         runtime_debug: Option<Arc<smelt_core::acp_session::RuntimeDebug>>,
     ) {
         let mut mailbox = self.inner.mailbox.lock().unwrap();
@@ -593,6 +741,7 @@ impl AcpSnapshotLink {
                 existing.from = existing.from.min(from);
                 existing.should_persist |= should_persist;
                 existing.include_runtime_debug |= include_runtime_debug;
+                existing.include_envelope |= include_envelope;
                 if runtime_debug.is_some() {
                     existing.runtime_debug = runtime_debug;
                 }
@@ -602,6 +751,7 @@ impl AcpSnapshotLink {
                     from,
                     should_persist,
                     include_runtime_debug,
+                    include_envelope,
                     runtime_debug,
                 });
             }
@@ -672,6 +822,7 @@ pub(crate) struct EncodedAcpSnapshot {
 type SnapshotEncode = Arc<
     dyn Fn(
             usize,
+            bool,
             bool,
             bool,
             u64,
@@ -769,6 +920,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
         Arc::new(
             move |from,
                   should_persist,
+                  include_envelope,
                   include_runtime_debug,
                   tool_debug_generation_sent,
                   runtime_debug| {
@@ -777,6 +929,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
                     &slot.value,
                     from,
                     should_persist,
+                    include_envelope,
                     include_runtime_debug,
                     tool_debug_generation_sent,
                     projection,
@@ -825,18 +978,18 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
         let (lines, job) = {
             let mut mailbox = inner.mailbox.lock().unwrap();
             loop {
-                let lines = std::mem::take(&mut mailbox.lines);
-                let job = mailbox.dirty.take();
-                if !lines.is_empty() || job.is_some() {
-                    break (lines, job);
+                if mailbox.lines.is_empty() && mailbox.dirty.is_none() {
+                    if inner.closed.load(Ordering::SeqCst) || inner.finishing.load(Ordering::SeqCst)
+                    {
+                        inner.flush_done.store(true, Ordering::SeqCst);
+                        inner.cv.notify_all();
+                        let _ = stream.shutdown(Shutdown::Both);
+                        return;
+                    }
+                    mailbox = inner.cv.wait(mailbox).unwrap();
+                    continue;
                 }
-                if inner.closed.load(Ordering::SeqCst) || inner.finishing.load(Ordering::SeqCst) {
-                    inner.flush_done.store(true, Ordering::SeqCst);
-                    inner.cv.notify_all();
-                    let _ = stream.shutdown(Shutdown::Both);
-                    return;
-                }
-                mailbox = inner.cv.wait(mailbox).unwrap();
+                break take_coalesced_snapshot(&inner, mailbox);
             }
         };
         if inner.closed.load(Ordering::SeqCst) && !inner.finishing.load(Ordering::SeqCst) {
@@ -858,6 +1011,7 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
         let Some(encoded) = encode(
             job.from,
             job.should_persist,
+            job.include_envelope,
             job.include_runtime_debug,
             sent_generation,
             job.runtime_debug,
@@ -878,6 +1032,39 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
         }
         inner.snapshots_sent.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// 非紧急脏标记再等一个很短的窗口，让随后到达的 token 并进同一帧。
+/// 等待期间若变成落盘/调试帧，或连接正在关闭，立刻取出。
+fn take_coalesced_snapshot(
+    inner: &SnapshotLinkInner,
+    mut mailbox: std::sync::MutexGuard<'_, SnapshotMailbox>,
+) -> (VecDeque<Vec<u8>>, Option<SnapshotDirty>) {
+    let urgent = mailbox.dirty.as_ref().is_some_and(snapshot_dirty_is_urgent);
+    if !urgent && mailbox.lines.is_empty() && mailbox.dirty.is_some() {
+        let deadline = std::time::Instant::now() + ACP_SNAPSHOT_COALESCE;
+        while std::time::Instant::now() < deadline {
+            if mailbox.dirty.as_ref().is_some_and(snapshot_dirty_is_urgent)
+                || inner.closed.load(Ordering::SeqCst)
+                || inner.finishing.load(Ordering::SeqCst)
+            {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (guard, result) = inner.cv.wait_timeout(mailbox, remaining).unwrap();
+            mailbox = guard;
+            if result.timed_out() {
+                break;
+            }
+        }
+    }
+    let lines = std::mem::take(&mut mailbox.lines);
+    let job = mailbox.dirty.take();
+    drop(mailbox);
+    (lines, job)
 }
 
 fn note_snapshot_writer_stopped(
@@ -912,6 +1099,7 @@ pub(crate) fn encode_acp_snapshot(
     sess: &AcpSession,
     from: usize,
     should_persist: bool,
+    include_envelope: bool,
     include_runtime_debug: bool,
     tool_debug_generation_sent: u64,
     projection: SnapshotProjection,
@@ -926,25 +1114,42 @@ pub(crate) fn encode_acp_snapshot(
         let tool_debug_generation = reduced.tool_debug_generation;
         let included_tool_debug =
             include_debug && tool_debug_generation != tool_debug_generation_sent;
+        let include_runtime_body =
+            include_runtime_debug && include_debug && runtime_debug.is_none();
+        let (history_len, open_end) = reduced.open_turn_range();
         let live = if include_history {
-            smelt_core::acp_session::SessionLive::from_snapshot(&reduced.to_snapshot(false))
+            smelt_core::acp_session::SessionLive::header_from_state(&reduced)
         } else {
             smelt_core::acp_session::SessionLive::from_state(&reduced)
         };
         let mut snapshot = if include_history {
-            reduced.to_snapshot_since(should_persist, from)
+            reduced.to_snapshot_range_selective(
+                should_persist,
+                from,
+                reduced.entries_total(),
+                included_tool_debug,
+                include_runtime_body,
+                include_envelope,
+            )
         } else {
             // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
             // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
-            let history_len = live.history_len.unwrap_or(0);
-            let end = history_len.saturating_add(live.open_turn.len());
-            reduced.to_snapshot_range(should_persist, from.min(history_len), end)
+            reduced.to_snapshot_range_selective(
+                should_persist,
+                from.min(history_len),
+                open_end,
+                included_tool_debug,
+                include_runtime_body,
+                include_envelope,
+            )
         };
-        if !(include_runtime_debug && include_debug) {
-            snapshot.runtime_debug = None;
-        } else if let Some(runtime_debug) = runtime_debug {
+        if let Some(runtime_debug) =
+            runtime_debug.filter(|_| include_runtime_debug && include_debug)
+        {
             // 父镜像上的是账本。这一帧要带的是宿主刚发来的完整请求体。
             snapshot.runtime_debug = Some(runtime_debug.as_ref().clone());
+        } else if !(include_runtime_debug && include_debug) {
+            snapshot.runtime_debug = None;
         }
         if !included_tool_debug {
             snapshot.tool_debug = None;
@@ -952,21 +1157,21 @@ pub(crate) fn encode_acp_snapshot(
         snapshot.snapshot_revision = sess.snapshot_revision.fetch_add(1, Ordering::SeqCst) + 1;
         (snapshot, live, tool_debug_generation, included_tool_debug)
     };
-    set_conversation_snapshot(sess, &mut snap);
+    if include_envelope {
+        set_conversation_snapshot(sess, &mut snap);
+    }
     let provider_pid = sess
         .handle
         .lock()
         .unwrap()
         .as_ref()
         .and_then(|handle| handle.stdio.lock().unwrap().map(|stdio| stdio.pid));
-    let mut payload = serde_json::json!({
-        "live": live,
-        "snapshot": snap,
-        "provider_pid": provider_pid,
-    })
-    .to_string()
-    .into_bytes();
-    payload.push(b'\n');
+    let payload = smelt_core::acp_session::AcpSnapshotFrame {
+        live: &live,
+        snapshot: &snap,
+        provider_pid,
+    }
+    .to_line_bytes();
     EncodedAcpSnapshot {
         bytes: payload,
         tool_debug_generation,
@@ -984,7 +1189,14 @@ pub(crate) fn push_acp_snapshot_since(
     should_persist: bool,
     entries_offset: Option<usize>,
 ) {
-    push_acp_snapshot_since_with_runtime_debug(sess, should_persist, entries_offset, false, None);
+    push_acp_snapshot_since_with_runtime_debug(
+        sess,
+        should_persist,
+        entries_offset,
+        false,
+        true,
+        None,
+    );
 }
 
 fn push_acp_snapshot_since_with_runtime_debug(
@@ -992,6 +1204,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
     should_persist: bool,
     entries_offset: Option<usize>,
     include_runtime_debug: bool,
+    include_envelope: bool,
     runtime_debug: Option<Arc<smelt_core::acp_session::RuntimeDebug>>,
 ) {
     let _output_gate = sess.output_gate.lock().unwrap();
@@ -1005,6 +1218,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
             from,
             should_persist,
             include_runtime_debug,
+            include_envelope,
             runtime_debug.clone(),
         );
     }
@@ -1013,6 +1227,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
             from,
             should_persist,
             include_runtime_debug,
+            include_envelope,
             runtime_debug.clone(),
         );
     }
@@ -1020,7 +1235,7 @@ fn push_acp_snapshot_since_with_runtime_debug(
 
 #[cfg(test)]
 pub(crate) fn push_acp_snapshot_with_runtime_debug_for_test(sess: &AcpSession) {
-    push_acp_snapshot_since_with_runtime_debug(sess, false, None, true, None);
+    push_acp_snapshot_since_with_runtime_debug(sess, false, None, true, true, None);
 }
 
 pub(crate) fn push_acp_snapshot(sess: &AcpSession, should_persist: bool) {
@@ -1278,6 +1493,7 @@ pub(crate) fn start_acp_event_drain(
                 let mut offsets = Vec::with_capacity(batch.len());
                 let mut should_persist = false;
                 let mut runtime_debug_changed = false;
+                let mut envelope_changed = false;
                 let mut turn_ended = false;
                 let mut ready = false;
                 let mut provider_idle = false;
@@ -1398,6 +1614,7 @@ pub(crate) fn start_acp_event_drain(
                     offsets.push(outcome.entries_offset);
                     should_persist |= outcome.should_persist;
                     runtime_debug_changed |= outcome.runtime_debug_changed;
+                    envelope_changed |= outcome.envelope_changed;
                     applied = true;
                 }
                 if prompt_refused && !provider_idle {
@@ -1408,12 +1625,16 @@ pub(crate) fn start_acp_event_drain(
                 if provider_idle {
                     release_provider_hold(sess);
                 }
+                if prompt_refused || provider_idle || turn_ended || ready {
+                    envelope_changed = true;
+                }
                 if applied {
                     push_acp_snapshot_since_with_runtime_debug(
                         sess,
                         should_persist,
                         coalesce_snapshot_offset(offsets.iter().copied()),
                         runtime_debug_changed,
+                        envelope_changed,
                         None,
                     );
                     update_acp_daemon_state(sess, &subscribers);
@@ -1448,6 +1669,8 @@ pub(crate) fn start_acp_event_drain(
         if fallback_to_fresh && let Some(launch) = sess.launch_spec.lock().unwrap().clone() {
             // `acp_relaunch(None)` 会清掉旧的 canonical history id，再走
             // `session/new`；标题、smeltd slot 和 GUI 控制连接都保持不变。
+            // 放弃写进会话状态，和清掉的 id 同一把锁。普通重启不带这个请求，
+            // 库里的旧 id 留到新 id 确认。
             drop(_turn_completion);
             acp_sessions.release_resume_for(&session_id);
             acp_relaunch(
@@ -1459,7 +1682,11 @@ pub(crate) fn start_acp_event_drain(
                 None,
                 Arc::clone(&acp_sessions),
                 &subscribers,
+                true,
             );
+            // 直连进程这里就能清库。生产上的会话宿主不打开 SQLite，
+            // 主 daemon 合并到 `history_abandoned` 再清。
+            clear_durable_history_id(sess);
             return;
         }
         let already_ended = matches!(
@@ -1486,8 +1713,8 @@ pub(crate) fn start_acp_event_drain(
 
 /// 主 daemon 的镜像 drain。权威状态和所有 responder 都在独立 session host；
 /// 这里仅按版本合并快照、维护 provider-session 所有权并向 GUI/状态总线广播。
-/// exec 可能让旧 reader 已从 socket 取走、却尚未来得及归约的字节消失；版本缺口
-/// 或 entry 前缀缺失时必须要求 host 发 offset=0 的全量快照。
+/// 交接前旧读端会停在安全边界，已预取的半行交给继任者当前缀。版本缺口或
+/// entry 前缀缺失时仍要求 host 发 offset=0 的全量快照。
 pub(crate) fn start_hosted_snapshot_drain(
     slot: Arc<AcpSlot<AcpSession>>,
     snapshot_rx: smol::channel::Receiver<acp_runtime_host::HostedSnapshotEnvelope>,
@@ -1552,12 +1779,14 @@ pub(crate) fn start_hosted_snapshot_drain(
                 let runtime_debug_changed = snapshot.runtime_debug.is_some();
                 let should_persist = snapshot.should_persist;
                 let requested_offset = snapshot.entries_offset;
-                let (owner_ids, runtime_debug) = {
+                let (owner_ids, runtime_debug, history_id, history_abandoned) = {
                     let mut reduced = sess.reduced.lock().unwrap();
                     match reduced.merge_hosted_snapshot(snapshot) {
                         Ok(merged) => (
                             live_acp_owner_ids(&reduced),
                             merged.runtime_debug.map(Arc::new),
+                            normalize_resume_id(reduced.history_session_id.clone()),
+                            reduced.history_abandoned,
                         ),
                         Err(error) => {
                             eprintln!("[acp] 会话 {session_id} 宿主快照无法连续合并：{error}");
@@ -1577,6 +1806,7 @@ pub(crate) fn start_hosted_snapshot_drain(
                     }
                 };
                 awaiting_full_snapshot = false;
+                apply_durable_history_from_host(sess, history_id, history_abandoned);
                 if revision != 0 {
                     sess.host_snapshot_revision
                         .store(revision, Ordering::SeqCst);
@@ -1613,6 +1843,7 @@ pub(crate) fn start_hosted_snapshot_drain(
                     should_persist,
                     Some(requested_offset),
                     runtime_debug_changed,
+                    true,
                     runtime_debug,
                 );
                 update_acp_daemon_state(sess, &subscribers);
@@ -1656,6 +1887,7 @@ pub(crate) fn acp_relaunch(
     fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
     acp_sessions: AcpSessions,
     subscribers: &EventHubHandle,
+    abandon_history: bool,
 ) {
     let sess = &slot.value;
     let (generation, restore_policy) = {
@@ -1680,14 +1912,19 @@ pub(crate) fn acp_relaunch(
             );
             smelt_core::acp_session::reset_for_restart(&mut reduced);
             // `resume_id` 只是这次 session/load 的候选身份，不能在 load 成功前
-            // 写进 canonical history。否则 GUI 收到 spawn 后的第一份 Starting
-            // 快照就会把一个可能不存在的 id 持久化成“已确认历史”，下一次启动
-            // 又会无条件进入恢复。真正成功恢复时由 Ready 事件登记 history id；
-            // session/new 的首条 prompt 发出后也由 note_prompt_sent 登记。
-            // 同一 canonical id 的重启保留它，以便瞬断后重试；切换到另一个
-            // candidate 或明确走 session/new 时清掉旧身份，避免 Ready 误沿用旧值。
-            if previous_history_session_id.as_deref() != resume_id.as_deref() {
+            // 写进 canonical history，也不能改库里已经确认的 id。否则 GUI 收到
+            // spawn 后的第一份 Starting 快照会把一个可能不存在的 id 当成已确认
+            // 历史。真正成功时由 Ready 登记；session/new 的首条 prompt 由
+            // note_prompt_sent 登记，再写入 SQLite。同一 id 的重启保留内存里的
+            // 身份和放弃标志。切换候选时只清内存，同时放下放弃标志，崩溃后仍
+            // 回到库里的旧对话。历史文件确认读不出来时，id 和放弃标志在这把锁里
+            // 一起写成「已放弃」。
+            if abandon_history {
                 reduced.history_session_id = None;
+                reduced.history_abandoned = true;
+            } else if previous_history_session_id.as_deref() != resume_id.as_deref() {
+                reduced.history_session_id = None;
+                reduced.history_abandoned = false;
             }
             restore_policy
         };
@@ -1927,6 +2164,7 @@ pub(crate) fn make_acp_session(
         agent_session: Mutex::new(agent_session),
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
+        durable_history_session_id: Mutex::new(None),
     }
 }
 
@@ -2599,7 +2837,7 @@ fn apply_acp_user_action_inner(
     }
     match action {
         AcpUserAction::Refresh => {
-            push_acp_snapshot_since_with_runtime_debug(sess, false, Some(0), true, None);
+            push_acp_snapshot_since_with_runtime_debug(sess, false, Some(0), true, true, None);
             Ok(())
         }
         AcpUserAction::HistoryPage { .. } => Err("history page is internal"),
@@ -3266,12 +3504,11 @@ pub(crate) fn handle_acp_open(
             let Ok(c) = conn.try_clone() else { return };
             let reduced = sess.reduced.lock().unwrap();
             let omit_history = req.omit_history;
+            let (history_len, open_end) = reduced.open_turn_range();
             let live = smelt_core::acp_session::SessionLive::from_state(&reduced);
             let tool_debug_generation = reduced.tool_debug_generation;
             let mut snapshot = if omit_history {
-                let history_len = live.history_len.unwrap_or(0);
-                let end = history_len.saturating_add(live.open_turn.len());
-                reduced.to_snapshot_range(false, history_len, end)
+                reduced.to_snapshot_range(false, history_len, open_end)
             } else {
                 reduced.to_snapshot(false)
             };
@@ -3284,14 +3521,12 @@ pub(crate) fn handle_acp_open(
                 .unwrap()
                 .as_ref()
                 .and_then(|handle| handle.stdio.lock().unwrap().map(|stdio| stdio.pid));
-            let mut initial = serde_json::json!({
-                "live": live,
-                "snapshot": snapshot,
-                "provider_pid": provider_pid,
-            })
-            .to_string()
-            .into_bytes();
-            initial.push(b'\n');
+            let initial = smelt_core::acp_session::AcpSnapshotFrame {
+                live: &live,
+                snapshot: &snapshot,
+                provider_pid,
+            }
+            .to_line_bytes();
             let Ok(attachment) = acp_snapshot_link_for_slot(
                 &slot,
                 c,
@@ -3525,7 +3760,12 @@ pub(crate) fn ensure_acp_session(
             ) || runtime_spec_changed;
             (needs_relaunch, known_acp_resume_id(&reduced))
         };
-        let resume_id = select_resume_id(req.resume_id.clone(), known_history);
+        let resume_id = resolve_resume_id(
+            &req.id,
+            req.resume_id.clone(),
+            known_history,
+            req.fork_id.is_none(),
+        );
         if needs_relaunch {
             // provider session 独占：同一 resume_id 同一时刻只允许一个 ACP 会话
             // 持有。占用者还活着（即使正在重连）就拒绝后来的会话做 session/load，
@@ -3571,6 +3811,7 @@ pub(crate) fn ensure_acp_session(
                 req.fork_cut.clone(),
                 Arc::clone(acp_sessions),
                 subscribers,
+                false,
             );
         }
         drop(lifecycle);
@@ -3870,6 +4111,11 @@ pub(crate) fn handle_acp_snapshot(
 ) {
     let id = v["id"].as_str().unwrap_or_default();
     let Some(slot) = acp_sessions.get(id) else {
+        let _ = writeln!(
+            conn,
+            "{}",
+            serde_json::json!({ "ok": false, "error": "ACP 会话不存在" })
+        );
         return;
     };
     let before = v["before"]
@@ -3903,6 +4149,11 @@ pub(crate) fn handle_acp_snapshot(
         HistoryRead::Ready(Box::new(snapshot))
     });
     let Some(page) = page else {
+        let _ = writeln!(
+            conn,
+            "{}",
+            serde_json::json!({ "ok": false, "error": "ACP 会话不存在" })
+        );
         return;
     };
     let snapshot = match page {
@@ -4164,7 +4415,7 @@ pub(crate) fn restart_acp_session(
     };
     let resume_id = {
         let reduced = sess.reduced.lock().unwrap();
-        known_acp_resume_id(&reduced)
+        resolve_resume_id(id, None, known_acp_resume_id(&reduced), true)
     };
     // 续持自己的 provider session 占用（owner 是自身，正常情况下必然成功）；
     // 被其他会话抢占了才拒绝，避免与占用者并发 load 同一历史。
@@ -4185,6 +4436,7 @@ pub(crate) fn restart_acp_session(
         None,
         Arc::clone(acp_sessions),
         subscribers,
+        false,
     );
     Ok(())
 }
@@ -4231,22 +4483,23 @@ pub(crate) fn collect_acp_handoff_typed(
     let mut acp_fds = Vec::new();
     for (id, slot) in &acp_session_list {
         let sess = &slot.value;
-        let hosted = sess
-            .hosted_handle
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|host| {
-                host.control_fd().map(|fd| {
-                    (
-                        fd,
-                        host.pid(),
-                        host.provider_pid(),
-                        sess.host_snapshot_revision.load(Ordering::SeqCst),
-                    )
-                })
-            });
-        if let Some((host_fd, host_pid, provider_pid, host_snapshot_revision)) = hosted {
+        // 先停读端再取 fd。读线程还在跑时把 fd 交出去，两个进程会从一行中间撕开。
+        let host = sess.hosted_handle.lock().unwrap().clone();
+        if let Some(host) = host {
+            let pending_host_bytes = match host.take_for_handoff() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    crate::dlog(&format!("acp 交接停不下宿主读端 {id}：{error}"));
+                    continue;
+                }
+            };
+            let Some(host_fd) = host.control_fd() else {
+                crate::dlog(&format!("acp 交接拿不到宿主控制连接 {id}"));
+                continue;
+            };
+            let host_pid = host.pid();
+            let provider_pid = host.provider_pid();
+            let host_snapshot_revision = sess.host_snapshot_revision.load(Ordering::SeqCst);
             let launch = recorded_handoff_launch(sess);
             let (agent_mcp, agent_token) = {
                 let state = sess.state.lock().unwrap();
@@ -4268,6 +4521,7 @@ pub(crate) fn collect_acp_handoff_typed(
                 runtime_spec_fingerprint: sess.runtime_spec_fingerprint.lock().unwrap().clone(),
                 conversation_binding: sess.conversation_binding.lock().unwrap().clone(),
                 snapshot,
+                pending_host_bytes,
             });
             acp_fds.push((
                 FdRole::AcpHost {

@@ -343,7 +343,7 @@ fn spawn_successor(
 
     // Rust 建的 socket 自带 CLOEXEC；为 spawn 放行这一只。调用方持有
     // SPAWN_GATE 写锁，此窗口无其它 fork，不会误继承。
-    set_cloexec(handoff_sock.as_raw_fd(), false)?;
+    crate::set_cloexec(handoff_sock.as_raw_fd(), false)?;
     let mut command = std::process::Command::new(exe);
     for (key, value) in successor_env(handoff_sock.as_raw_fd(), fingerprint) {
         command.env(key, value);
@@ -356,26 +356,8 @@ fn spawn_successor(
         .spawn();
     // 无论 spawn 成败，恢复 CLOEXEC（失败时本端稍后随回滚 drop，但显式恢复
     // 更稳；成功时 predecessor 手里这份必须不再可继承）。
-    let _ = set_cloexec(handoff_sock.as_raw_fd(), true);
+    let _ = crate::set_cloexec(handoff_sock.as_raw_fd(), true);
     result
-}
-
-fn set_cloexec(fd: RawFd, cloexec: bool) -> std::io::Result<()> {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let flags = if cloexec {
-            flags | libc::FD_CLOEXEC
-        } else {
-            flags & !libc::FD_CLOEXEC
-        };
-        if libc::fcntl(fd, libc::F_SETFD, flags) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
 
 /// 回滚杀 successor：先让唯一的 `waitpid` 就位，再 TERM，两秒后 KILL。

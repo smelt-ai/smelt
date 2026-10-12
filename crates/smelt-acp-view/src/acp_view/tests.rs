@@ -3,11 +3,11 @@
 use super::trajectory::runtime_debug_contexts;
 use super::{
     CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot,
-    RESTORED_ENTRY_HEIGHT_HINT_PX, append_prompt_text, apply_pending_config_selection,
-    background_task_one_line, background_task_output_lines, background_task_summary,
-    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
-    build_tool_image_parts, cached_diff_stats, can_load_older_history, classify_attached_paths,
-    compact_token_count, compact_tool_headline, compact_tool_run_label,
+    RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity, append_prompt_text,
+    apply_pending_config_selection, background_task_one_line, background_task_output_lines,
+    background_task_summary, build_conversation_layout, build_conversation_layout_with_timings,
+    build_markdown_cache, build_tool_image_parts, cached_diff_stats, can_load_older_history,
+    classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
     composer_config_section_label, composer_menu_sections, composer_model_label,
     composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
     composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
@@ -30,9 +30,9 @@ use super::{
     should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
     tool_image_cache_matches_output, tool_output_has_content, tool_result_summary,
     tool_uses_compact_process_row, trajectory_counts, usage_percent, usage_ring_color,
-    usage_warn_color,
+    usage_warn_color, view_history_identity,
 };
-use gpui::{ClipboardEntry, ExternalPaths, ListAlignment, ListState, px};
+use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
 use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_core::acp_session::{
@@ -605,6 +605,21 @@ fn restored_history_height_hints_cover_unmeasured_entries() {
 }
 
 #[test]
+fn first_history_page_on_an_empty_list_stays_scrollable() {
+    let state = ListState::new(0, ListAlignment::Top, px(800.))
+        .with_uniform_item_height(px(RESTORED_ENTRY_HEIGHT_HINT_PX));
+    state.set_follow_mode(FollowMode::Tail);
+
+    // 桌面第一帧省略已提交历史，列表是空的。补上的第一页若没有高度，
+    // gpui 会把视口收成 0，条目永远测不出来，舞台只剩一块黑。
+    super::reveal_first_history_page(&state, 100);
+
+    assert_eq!(state.item_count(), 100);
+    assert_eq!(state.max_offset_for_scrollbar().y, px(9_600.));
+    assert!(state.is_following_tail());
+}
+
+#[test]
 fn restored_height_hints_only_reset_for_new_history_entries() {
     assert!(should_seed_restored_height_hints(
         true, false, true, true, 20, 20,
@@ -1109,18 +1124,24 @@ fn starting_or_ended_empty_snapshot_keeps_history_identity() {
     assert!(!should_clear_history_session_id_after_snapshot(
         &DaemonPhase::Connecting,
         true,
+        0,
+        false,
         2,
         false,
     ));
     assert!(!should_clear_history_session_id_after_snapshot(
         &DaemonPhase::Dead,
         true,
+        0,
+        false,
         3,
         false,
     ));
     assert!(should_clear_history_session_id_after_snapshot(
         &DaemonPhase::Idle,
         true,
+        0,
+        false,
         4,
         true,
     ));
@@ -1128,7 +1149,44 @@ fn starting_or_ended_empty_snapshot_keeps_history_identity() {
         &DaemonPhase::Idle,
         false,
         4,
+        false,
+        4,
         true,
+    ));
+    assert!(
+        !should_clear_history_session_id_after_snapshot(
+            &DaemonPhase::Idle,
+            true,
+            660,
+            false,
+            4,
+            true,
+        ),
+        "这一帧没装正文，不代表对话是空的"
+    );
+    assert!(
+        !should_clear_history_session_id_after_snapshot(&DaemonPhase::Idle, true, 0, true, 4, true,),
+        "实时帧省略历史时不能丢掉恢复身份"
+    );
+}
+
+#[test]
+fn abandoned_history_clears_the_view_cache_unless_a_new_id_is_bound() {
+    assert!(matches!(
+        view_history_identity(None, true, false),
+        ViewHistoryIdentity::Clear
+    ));
+    assert!(matches!(
+        view_history_identity(Some("  "), true, false),
+        ViewHistoryIdentity::Clear
+    ));
+    assert!(matches!(
+        view_history_identity(Some("pi-next"), true, true),
+        ViewHistoryIdentity::Set(id) if id == "pi-next"
+    ));
+    assert!(matches!(
+        view_history_identity(None, false, false),
+        ViewHistoryIdentity::Keep
     ));
 }
 
@@ -1427,6 +1485,43 @@ fn final_answer_is_the_last_body_in_each_user_turn() {
     assert_eq!(group.end, 3);
     assert!(layout[2].process_group.is_some());
     assert!(layout[3].process_group.is_none());
+}
+
+#[test]
+fn incremental_open_turn_layout_matches_full_rebuild() {
+    let mut entries = vec![
+        AcpEntry::User("先做".into()),
+        AcpEntry::ToolCall {
+            id: "read-1".into(),
+            title: "Read file".into(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+        },
+        AcpEntry::Assistant {
+            text: "好".into(),
+            thought: false,
+        },
+        AcpEntry::User("继续".into()),
+        AcpEntry::Assistant {
+            text: "正在".into(),
+            thought: false,
+        },
+    ];
+    let mut layout = build_conversation_layout(&entries, true);
+    entries.push(AcpEntry::ToolCall {
+        id: "read-2".into(),
+        title: "Read more".into(),
+        kind: ToolKind::Read,
+        status: ToolCallStatus::InProgress,
+        output: Vec::new(),
+        children: Vec::new(),
+    });
+    let from = super::layout_recompute_start(&entries, entries.len() - 1);
+    assert!(from >= 3, "已结束回合不应重算，起点={from}");
+    super::refresh_conversation_layout_from(&mut layout, &entries, from, true, 0, &[], None);
+    assert_eq!(layout, build_conversation_layout(&entries, true));
 }
 
 #[test]
@@ -3196,11 +3291,151 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
     );
 }
 
+/// 紧凑工具行点开的卡片以前只放前 8 行，再标「共 N 行」。卡片挡住后面的列表，
+/// 滚轮落在卡片上时两边都不动。长日志必须在卡片自己的行视口里能滚到后面的行。
+#[gpui::test]
+fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
+    use gpui::{ScrollDelta, TouchPhase, VisualTestContext, point};
+
+    let log = (0..50)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let entries = vec![
+        AcpEntry::User("看一下".into()),
+        AcpEntry::ToolCall {
+            id: "read-1".into(),
+            title: "managed_runtime.rs".into(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            output: vec![ToolOutputPart::Text(log)],
+            children: Vec::new(),
+        },
+    ];
+    let layout = super::build_conversation_layout(&entries, false);
+    let group_ix = layout
+        .iter()
+        .find_map(|entry| entry.process_group.map(|group| group.first))
+        .expect("tool belongs to a process group");
+
+    cx.update(gpui_component::init);
+    let (_view, cx) = cx.add_window_view(move |_window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "popover scroll".into(),
+                entries,
+                resume_session_id: None,
+                saved_sid: Some("acp-pop-scroll".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view.expanded_process_groups.insert(group_ix);
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    draw_settled(cx);
+
+    let row = cx
+        .debug_bounds("ACP_TOOL_COMPACT_1")
+        .expect("completed tool should paint as a compact row");
+    cx.simulate_click(row.center(), Default::default());
+    // 弹层要等触发器量完边界才挂上内容。
+    draw_settled(cx);
+    draw_settled(cx);
+
+    let viewport = cx
+        .debug_bounds("ACP_TOOL_POP_LOG_text_1_0")
+        .expect("popover log viewport should paint");
+    assert!(
+        cx.debug_bounds("ACP_TOOL_POP_LINE_1_0_0").is_some(),
+        "viewport should paint the first line"
+    );
+    assert!(
+        cx.debug_bounds("ACP_TOOL_POP_LINE_1_0_40").is_none(),
+        "line 40 is past the first screen and must not be built yet"
+    );
+
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: ScrollDelta::Lines(point(0., -40.)),
+        modifiers: Default::default(),
+        touch_phase: TouchPhase::Moved,
+    });
+    draw_settled(cx);
+
+    assert!(
+        cx.debug_bounds("ACP_TOOL_POP_LINE_1_0_40").is_some(),
+        "scrolling the popover should reveal later lines"
+    );
+}
+
 fn draw_settled(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
+}
+
+/// 桌面先画一帧空列表（实时帧省略已提交历史），再把第一页补进来。
+/// 消息列表是缓存视图，内容按根节点单独排。根节点只有 `flex_1` 时高度是 0，
+/// 欢迎语因条目非空而消失，舞台就只剩一块黑。
+#[gpui::test]
+fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppContext) {
+    use gpui::VisualTestContext;
+
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "empty open frame".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-empty-then-history".into()),
+            },
+        );
+        view.phase = DaemonPhase::Idle;
+        view.loaded_entries_offset = 1;
+        view.entries_total = 1;
+        view
+    });
+    let cx: &mut VisualTestContext = cx;
+    draw_settled(cx);
+
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.entries = vec![AcpEntry::User("已经写好的那一句".into())];
+            view.loaded_entries_offset = 0;
+            view.rendered_markdown = build_markdown_cache(&view.entries, view.cwd.as_deref());
+            super::reveal_first_history_page(&view.list_state, view.entries.len());
+            cx.notify();
+        });
+    });
+    draw_settled(cx);
+
+    let viewport = view.read_with(cx, |view, _| view.list_state.viewport_bounds().size.height);
+    assert!(
+        viewport > px(100.),
+        "补上历史后列表视口仍是 {viewport:?}，条目没有地方可画"
+    );
+    let bubble = cx
+        .debug_bounds("ACP_USER_MESSAGE_0")
+        .expect("补上的第一页历史要画出来");
+    assert!(
+        bubble.size.height > px(0.),
+        "用户消息画出来了但高度是 0: {bubble:?}"
+    );
 }
 
 /// 前一条回答超过 4KB，markdown 走后台解析，滚出屏幕后再画会先以空内容出现。
@@ -3339,5 +3574,57 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
     assert!(
         !view.read_with(cx, |view, _| view.background_tasks_open),
         "任务都结束后弹层要收起，下一个任务开始时不能自己弹出来"
+    );
+}
+
+#[test]
+fn live_elapsed_hangs_on_the_current_action_row() {
+    let entries = vec![
+        AcpEntry::User("查一下".into()),
+        completed_tool("s1", ToolKind::Search, "icon"),
+        completed_tool("s2", ToolKind::Search, "graph"),
+        AcpEntry::ToolCall {
+            id: "read-1".into(),
+            title: "main.rs".into(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::InProgress,
+            output: Vec::new(),
+            children: Vec::new(),
+        },
+    ];
+    let layout = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
+    let group = layout[1].process_group.expect("进行中的工具要收成过程组");
+    assert_eq!(super::live_elapsed_anchor(&entries, group, None), 3);
+    assert_eq!(
+        super::row_live_elapsed(true, 3, &entries, Some(group), group.elapsed_ms, None),
+        Some(6_000)
+    );
+    assert_eq!(
+        super::row_live_elapsed(true, 1, &entries, Some(group), group.elapsed_ms, None),
+        None
+    );
+
+    let thought = vec![
+        AcpEntry::User("想一下".into()),
+        AcpEntry::Assistant {
+            text: "先看调用方".into(),
+            thought: true,
+        },
+    ];
+    assert_eq!(
+        super::row_live_elapsed(true, 1, &thought, None, Some(20_000), None),
+        Some(20_000)
+    );
+    let answer = vec![
+        AcpEntry::User("写下来".into()),
+        AcpEntry::Assistant {
+            text: "结论是这样".into(),
+            thought: false,
+        },
+    ];
+    assert_eq!(
+        super::row_live_elapsed(true, 1, &answer, None, Some(20_000), None),
+        None,
+        "正文自己在往外长，不再另挂一行耗时"
     );
 }

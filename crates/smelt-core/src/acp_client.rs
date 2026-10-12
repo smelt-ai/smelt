@@ -172,6 +172,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         status_line: None,
         acp_session_id: None,
         history_session_id: None,
+        history_abandoned: false,
         supports_image: true,
         available_commands: Vec::new(),
         usage: None,
@@ -201,6 +202,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         should_persist: true,
         history_error: None,
         history_omitted: false,
+        envelope_omitted: false,
     }
 }
 
@@ -237,8 +239,35 @@ enum SnapshotFrame {
     Unreadable(ConversationSnapshot),
 }
 
+#[derive(serde::Deserialize)]
+struct DecodedAcpSnapshotFrame {
+    #[serde(default)]
+    live: Option<crate::acp_session::SessionLive>,
+    snapshot: Option<crate::acp_session::ConversationSnapshot>,
+}
+
 fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+    let trimmed = line.trim();
+    if let Ok(frame) = serde_json::from_str::<DecodedAcpSnapshotFrame>(trimmed) {
+        if let Some(mut snapshot) = frame.snapshot {
+            // 快照对象缺了恢复身份时，活状态头里的那份仍然有效。
+            // 不能因为这一帧没带字段，就把已经确认的对话 id 丢掉。
+            if snapshot.history_session_id.is_none()
+                && let Some(history_session_id) = frame
+                    .live
+                    .and_then(|live| live.history_session_id)
+                    .filter(|id| !id.trim().is_empty())
+            {
+                snapshot.history_session_id = Some(history_session_id);
+            }
+            return SnapshotFrame::Snapshot(snapshot);
+        }
+        if let Some(live) = frame.live {
+            return SnapshotFrame::Snapshot(snapshot_from_live(live, entries_offset, None));
+        }
+        return SnapshotFrame::Ignore;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
         return SnapshotFrame::Ignore;
     };
     let live = value
@@ -300,6 +329,30 @@ fn acp_snapshot_request(id: &str, before: usize, limit: usize) -> serde_json::Va
     })
 }
 
+/// 把一次 `acp_snapshot` 回包还原成历史页。
+/// 空回包才是「会话不存在」：daemon 找不到槽位时以前不写任何字节。
+/// 有 `error` 字符串就必须原样返回，不能再把它说成会话丢了。
+fn history_snapshot_from_response(response: &str) -> Result<ConversationSnapshot, String> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return Err("ACP 会话不存在".to_string());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|_| "历史快照解析失败".to_string())?;
+    if let Some(snapshot) = value.get("snapshot") {
+        return serde_json::from_value(snapshot.clone())
+            .map_err(|_| "历史快照内容无效".to_string());
+    }
+    if let Some(error) = value
+        .get("error")
+        .and_then(|error| error.as_str())
+        .filter(|error| !error.is_empty())
+    {
+        return Err(error.to_string());
+    }
+    Err("ACP 会话不存在".to_string())
+}
+
 /// Read one bounded page immediately before `before` without disturbing the long-lived
 /// control connection. The caller runs this blocking helper off the GPUI thread.
 pub fn load_acp_history(
@@ -314,15 +367,7 @@ pub fn load_acp_history(
     BufReader::new(stream)
         .read_line(&mut response)
         .map_err(|e| format!("读取历史失败：{e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(response.trim()).map_err(|_| "历史快照解析失败".to_string())?;
-    serde_json::from_value(
-        value
-            .get("snapshot")
-            .cloned()
-            .ok_or_else(|| "ACP 会话不存在".to_string())?,
-    )
-    .map_err(|_| "历史快照内容无效".to_string())
+    history_snapshot_from_response(&response)
 }
 
 /// 连 smeltd 的 `acp_open`，起连接线程，立即返回（不阻塞调用方——旧版
@@ -512,8 +557,8 @@ pub fn restart_acp_session(id: &str) -> Result<(), String> {
 mod tests {
     use super::{
         ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, SnapshotFrame,
-        acp_open_request, acp_snapshot_request, read_snapshot_frame,
-        snapshot_after_stream_disconnect, spawn_acp_session_kill,
+        acp_open_request, acp_snapshot_request, history_snapshot_from_response,
+        read_snapshot_frame, snapshot_after_stream_disconnect, spawn_acp_session_kill,
     };
     use crate::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
     use std::collections::BTreeMap;
@@ -675,6 +720,32 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_omitting_history_id_keeps_the_live_id() {
+        let mut state = crate::acp_session::AcpSessionState::default();
+        state.history_session_id = Some("01a128ad".into());
+        state.acp_session_id = Some("runtime".into());
+        state.phase = crate::daemon_state::DaemonPhase::Idle;
+        let live = crate::acp_session::SessionLive::from_state(&state);
+        let mut snapshot = state.to_snapshot(false);
+        snapshot.history_session_id = None;
+        snapshot.entries_offset = 660;
+        snapshot.entries_total = 660;
+        let mut frame = serde_json::json!({
+            "live": live,
+            "snapshot": snapshot,
+        });
+        frame["snapshot"]
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("history_session_id");
+
+        let SnapshotFrame::Snapshot(snapshot) = read_snapshot_frame(&frame.to_string(), 0) else {
+            panic!("快照对象在，就必须交给窗口");
+        };
+        assert_eq!(snapshot.history_session_id.as_deref(), Some("01a128ad"));
+    }
+
+    #[test]
     fn frame_keeps_entries_written_as_the_turn_closed() {
         // 收尾时写下的报错已经算历史，`live.open_turn` 是空的。快照带着它，
         // 不能拿空的当前一轮把它盖掉。
@@ -758,6 +829,34 @@ mod tests {
             .is_none(),
             "daemon 已发送终态时，EOF 不能再覆盖成通用传输断连"
         );
+    }
+
+    #[test]
+    fn history_error_string_is_not_reported_as_a_missing_session() {
+        let response = serde_json::json!({
+            "ok": false,
+            "error": "读取宿主历史失败：timed out waiting on channel"
+        })
+        .to_string();
+        let error = history_snapshot_from_response(&response).expect_err("宿主超时必须失败");
+        assert_eq!(error, "读取宿主历史失败：timed out waiting on channel");
+    }
+
+    #[test]
+    fn blank_history_response_means_the_session_is_gone() {
+        let error = history_snapshot_from_response("").expect_err("空响应必须失败");
+        assert_eq!(error, "ACP 会话不存在");
+        let error = history_snapshot_from_response("   \n").expect_err("空白响应必须失败");
+        assert_eq!(error, "ACP 会话不存在");
+    }
+
+    #[test]
+    fn history_response_returns_the_snapshot() {
+        let mut snapshot = crate::acp_session::AcpSessionState::default().to_snapshot(false);
+        snapshot.entries_offset = 3;
+        let response = serde_json::json!({ "snapshot": snapshot }).to_string();
+        let parsed = history_snapshot_from_response(&response).expect("合法快照应能读回");
+        assert_eq!(parsed.entries_offset, 3);
     }
 
     #[test]

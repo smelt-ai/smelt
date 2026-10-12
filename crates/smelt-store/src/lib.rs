@@ -224,6 +224,17 @@ impl std::fmt::Debug for Store {
     }
 }
 
+/// `acp_detail.history_session_id` 的三种事实。没有行，和行在但列是空，不能合成同一个 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredHistoryIdentity {
+    /// 还没有 `acp_detail` 行。显式开会话可以带上选中的对话文件。
+    NoRow,
+    /// 行在，列是空。窗口缓存不能把旧 id 填回来。
+    Unbound,
+    /// 守护进程已经确认的对话身份。
+    Bound(String),
+}
+
 impl Store {
     /// 打开已有库。文件不在、或只剩 WAL/SHM sidecar 时失败，绝不建空库。
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -382,8 +393,43 @@ impl Store {
         imp::get_workspace_snapshot(&self.backend)
     }
 
+    /// 会话 id → 智能体定义 id。关系表已存在时返回 `Some`（可以是空表）；
+    /// 只有旧 JSON 工作区时返回 `None`，调用方再走快照回退。
+    pub fn session_agent_definition_ids(
+        &self,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+        imp::session_agent_definition_ids(&self.backend)
+    }
+
     pub fn put_workspace_snapshot(&self, snapshot: &WorkspaceSnapshot) -> Result<(), StoreError> {
         imp::put_workspace_snapshot(&self.backend, snapshot)
+    }
+
+    /// 守护进程确认了一份可恢复的对话身份。行还不存在时返回 `false`，不建行。
+    pub fn remember_history_session_id(
+        &self,
+        session_id: &str,
+        history_id: &str,
+    ) -> Result<bool, StoreError> {
+        imp::remember_history_session_id(&self.backend, session_id, history_id)
+    }
+
+    /// 读这份会话已经确认的对话身份。没有行、或还没确认过，都是 `None`。
+    pub fn history_session_id(&self, session_id: &str) -> Result<Option<String>, StoreError> {
+        imp::history_session_id(&self.backend, session_id)
+    }
+
+    /// 没有行、行在但还没确认、已经确认。恢复时这三件事要分开。
+    pub fn stored_history_identity(
+        &self,
+        session_id: &str,
+    ) -> Result<StoredHistoryIdentity, StoreError> {
+        imp::stored_history_identity(&self.backend, session_id)
+    }
+
+    /// 守护进程明确放弃这份身份（历史文件已经读不出来）。窗口存档不能把它填回来。
+    pub fn clear_history_session_id(&self, session_id: &str) -> Result<bool, StoreError> {
+        imp::clear_history_session_id(&self.backend, session_id)
     }
 
     /// 残留 workspace JSON 文档导入成类型化快照。活路径不要再走 JSON 文档入口。
@@ -1326,6 +1372,13 @@ mod imp {
         crate::documents::read_workspace_snapshot(&connection)
     }
 
+    pub(super) fn session_agent_definition_ids(
+        backend: &Backend,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::documents::read_session_agent_definition_ids(&connection)
+    }
+
     pub(super) fn put_workspace_snapshot(
         backend: &Backend,
         snapshot: &super::WorkspaceSnapshot,
@@ -1336,6 +1389,46 @@ mod imp {
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
+    }
+
+    pub(super) fn remember_history_session_id(
+        backend: &Backend,
+        session_id: &str,
+        history_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated =
+            crate::documents::remember_history_session_id(&transaction, session_id, history_id)?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
+    pub(super) fn history_session_id(
+        backend: &Backend,
+        session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::documents::history_session_id(&connection, session_id)
+    }
+
+    pub(super) fn stored_history_identity(
+        backend: &Backend,
+        session_id: &str,
+    ) -> Result<super::StoredHistoryIdentity, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::documents::stored_history_identity(&connection, session_id)
+    }
+
+    pub(super) fn clear_history_session_id(
+        backend: &Backend,
+        session_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = crate::documents::clear_history_session_id(&transaction, session_id)?;
+        transaction.commit()?;
+        Ok(updated)
     }
 
     pub(super) fn workspace_snapshot_from_json(
@@ -3820,10 +3913,40 @@ mod imp {
     ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
         unsupported()
     }
+    pub(super) fn session_agent_definition_ids(
+        _backend: &Backend,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+        unsupported()
+    }
     pub(super) fn put_workspace_snapshot(
         _backend: &Backend,
         _snapshot: &super::WorkspaceSnapshot,
     ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn remember_history_session_id(
+        _backend: &Backend,
+        _session_id: &str,
+        _history_id: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn history_session_id(
+        _backend: &Backend,
+        _session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn stored_history_identity(
+        _backend: &Backend,
+        _session_id: &str,
+    ) -> Result<super::StoredHistoryIdentity, StoreError> {
+        unsupported()
+    }
+    pub(super) fn clear_history_session_id(
+        _backend: &Backend,
+        _session_id: &str,
+    ) -> Result<bool, StoreError> {
         unsupported()
     }
     pub(super) fn workspace_snapshot_from_json(
@@ -5890,6 +6013,118 @@ mod tests {
                 .unwrap(),
             3,
             "重复快照应原子替换，不能累积旧 session"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn acp_workspace(history_session_id: Option<&str>) -> Vec<u8> {
+        let history = match history_session_id {
+            Some(id) => serde_json::json!(id),
+            None => serde_json::Value::Null,
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "sessions": [{
+                "layout": {"Leaf": {"cwd": "/repo"}},
+                "acp": {
+                    "sid": "acp-1",
+                    "cwd": "/repo",
+                    "agent": "pi",
+                    "launch": {"command": "smelt-pi-agent"},
+                    "history_session_id": history
+                }
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn stored_history_id(store: &Store) -> Option<String> {
+        let raw = store.get("json", "workspace.json").unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        value["sessions"][0]["acp"]["history_session_id"]
+            .as_str()
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn daemon_confirmed_history_id_survives_workspace_rewrite() {
+        let dir = temp_dir("history-owner");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        assert!(
+            !store
+                .remember_history_session_id("acp-1", "pi-confirmed")
+                .unwrap()
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::NoRow
+        );
+        store
+            .put("json", "workspace.json", &acp_workspace(Some("from-gui")))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store),
+            None,
+            "第一次落库后这一列仍是空的，要等守护进程确认"
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::Unbound
+        );
+        assert!(
+            store
+                .remember_history_session_id("acp-1", "pi-confirmed")
+                .unwrap()
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::Bound("pi-confirmed".into())
+        );
+        assert!(!store.remember_history_session_id("acp-1", "  ").unwrap());
+
+        store
+            .put("json", "workspace.json", &acp_workspace(None))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store).as_deref(),
+            Some("pi-confirmed"),
+            "窗口存档没带恢复身份时，不能把守护进程已经确认的 id 写成空"
+        );
+        store
+            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store).as_deref(),
+            Some("pi-confirmed"),
+            "行已经存在后，窗口快照不能换成另一份 id"
+        );
+
+        assert!(
+            store
+                .remember_history_session_id("acp-1", "pi-next")
+                .unwrap()
+        );
+        store
+            .put("json", "workspace.json", &acp_workspace(None))
+            .unwrap();
+        assert_eq!(stored_history_id(&store).as_deref(), Some("pi-next"));
+
+        assert!(store.clear_history_session_id("acp-1").unwrap());
+        store
+            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store),
+            None,
+            "守护进程放弃的身份，窗口旧值不能再写回来"
+        );
+        assert_eq!(store.history_session_id("acp-1").unwrap(), None);
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::Unbound
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-missing").unwrap(),
+            StoredHistoryIdentity::NoRow
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -22,6 +22,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
         Arc::new(
             move |from,
                   should_persist,
+                  include_envelope,
                   include_runtime_debug,
                   tool_debug_generation_sent,
                   runtime_debug| {
@@ -30,6 +31,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
                     &sess,
                     from,
                     should_persist,
+                    include_envelope,
                     include_runtime_debug,
                     tool_debug_generation_sent,
                     SnapshotProjection::FULL,
@@ -2542,6 +2544,32 @@ fn bounded_acp_snapshot_reads_only_the_requested_older_page() {
     assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
 }
 
+#[test]
+fn missing_acp_snapshot_reports_that_the_session_is_gone() {
+    let acp_sessions = new_test_acp_sessions();
+    let (server, mut client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    handle_acp_snapshot(
+        server,
+        &serde_json::json!({
+            "id": "acp-does-not-exist",
+            "before": 10,
+            "limit": 100,
+        }),
+        &acp_sessions,
+    );
+
+    let mut line = String::new();
+    BufReader::new(&mut client)
+        .read_line(&mut line)
+        .expect("会话不存在时必须回一行错误，不能沉默");
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["error"], "ACP 会话不存在");
+    assert!(response.get("snapshot").is_none());
+}
+
 fn reduced_with_debug_sidecars() -> AcpSessionState {
     let mut reduced = AcpSessionState::default();
     reduced.entries_mut().push(AcpEntry::User("hi".into()));
@@ -4027,8 +4055,12 @@ fn blank_resume_id_is_treated_as_a_new_session() {
 
     assert!(req.resume_id.is_none());
     assert_eq!(
-        select_resume_id(Some(" ".into()), Some("known-history".into())).as_deref(),
-        Some("known-history")
+        select_resume_id(
+            Some(" ".into()),
+            smelt_store::StoredHistoryIdentity::NoRow,
+            None
+        ),
+        None
     );
 }
 
@@ -4069,17 +4101,86 @@ fn live_acp_ownership_includes_canonical_and_runtime_aliases() {
 }
 
 #[test]
-fn requested_history_id_wins_when_dead_session_is_relaunched() {
+fn live_memory_then_column_then_unbound_row_selects_resume_id() {
+    use smelt_store::StoredHistoryIdentity::{Bound, NoRow, Unbound};
+
     assert_eq!(
         select_resume_id(
-            Some("saved-history".to_string()),
-            Some("daemon-runtime".to_string())
+            Some("live".into()),
+            Bound("column".into()),
+            Some("gui".into()),
         ),
-        Some("saved-history".to_string())
+        Some("live".into()),
+        "正在跟 agent 说话的进程记得身份"
     );
     assert_eq!(
-        select_resume_id(None, Some("known-history".to_string())),
-        Some("known-history".to_string())
+        select_resume_id(None, Bound("column".into()), Some("gui-stale".into())),
+        Some("column".into()),
+        "进程已经忘了时，库里确认过的 id 胜过窗口缓存"
+    );
+    assert_eq!(
+        select_resume_id(None, Unbound, Some("gui-stale".into())),
+        None,
+        "行在、列是空，窗口缓存不能填回来"
+    );
+    assert_eq!(
+        select_resume_id(None, NoRow, Some("chosen".into())),
+        Some("chosen".into()),
+        "还没有这一行时，历史页继续带上的 id 可以开会话"
+    );
+    assert_eq!(select_resume_id(None, NoRow, None), None);
+    assert_eq!(
+        select_resume_id(
+            Some("  ".into()),
+            Bound("column".into()),
+            Some("gui".into()),
+        ),
+        Some("column".into())
+    );
+    assert_eq!(
+        resolve_resume_id(
+            "acp-fork",
+            Some("requested".into()),
+            Some("known".into()),
+            false
+        )
+        .as_deref(),
+        Some("known"),
+        "分叉不读这个槽位的库"
+    );
+    assert_eq!(
+        resolve_resume_id("acp-fork", Some("requested".into()), None, false).as_deref(),
+        Some("requested")
+    );
+}
+
+#[test]
+fn durable_history_write_keeps_a_confirmed_id_until_it_is_abandoned() {
+    assert_eq!(
+        durable_history_write(Some("pi-1".into()), false),
+        DurableHistoryWrite::Remember("pi-1".into())
+    );
+    assert_eq!(
+        durable_history_write(Some("pi-next".into()), true),
+        DurableHistoryWrite::Remember("pi-next".into()),
+        "新确认的身份胜出，同一帧上的放弃标志不能把它清掉"
+    );
+    assert_eq!(
+        durable_history_write(None, false),
+        DurableHistoryWrite::Leave
+    );
+    assert_eq!(
+        durable_history_write(Some("  ".into()), false),
+        DurableHistoryWrite::Leave,
+        "重新开始先拿掉内存身份，这一帧不能把库里的旧 id 清掉"
+    );
+    assert_eq!(
+        durable_history_write(None, true),
+        DurableHistoryWrite::Clear
+    );
+    assert_eq!(
+        durable_history_write(Some("  ".into()), true),
+        DurableHistoryWrite::Clear
     );
 }
 

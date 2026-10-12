@@ -88,7 +88,59 @@ fn make_acp_session_value(
         agent_session: Mutex::new(None),
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(None),
+        durable_history_session_id: Mutex::new(None),
     }
+}
+
+/// `Ctl.master` 用一根真管道（不是 /dev/null）：这样能从另一头读回真正写
+/// 进去的字节。action 和 input 的集成测试共用这一份。
+fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::fs::File) {
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() 失败");
+    let read_end = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let master = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+
+    let child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id() as i32;
+    drop(child); // 退出状态交给下面 Session 的唯一 TerminalChild owner
+
+    let state = Arc::new(Mutex::new(SessionState {
+        phase,
+        ..Default::default()
+    }));
+    let subscribers = new_event_hub();
+    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
+    let listener = StateListener::with_color_replies(
+        Arc::clone(&state),
+        subscribers,
+        Arc::clone(&color_replies),
+    );
+    let sess = Arc::new(Session {
+        instance: next_session_instance(),
+        geometry_token: uuid::Uuid::new_v4().simple().to_string(),
+        child: TerminalChild::start(pid).unwrap(),
+        ctl: Mutex::new(Ctl {
+            master,
+            jolt: false,
+            cols,
+            rows,
+            cell_w: 0,
+            cell_h: 0,
+            remote_viewports: 0,
+            remote_grace: 0,
+            cwd: None,
+        }),
+        input_gate: Mutex::new(()),
+        out: Mutex::new(Out {
+            clients: Vec::new(),
+            watchers: Vec::new(),
+        }),
+        output_gate: Mutex::new(()),
+        color_replies,
+        term: Mutex::new(new_daemon_term(rows, cols, listener)),
+        state,
+    });
+    (sess, read_end)
 }
 
 /// core 投影的四个只读能力。测试专用，且不碰任何 daemon 私有状态——只是把

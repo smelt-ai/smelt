@@ -56,11 +56,14 @@ struct HostInner {
     history_waiters:
         Arc<Mutex<HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>>>,
     next_history_request: AtomicU64,
+    /// 交接前停掉快照读端，并把已经从内核预取的字节交出去。
+    handoff: Arc<ReaderHandoff>,
 }
 
-/// 主 daemon 持有的 session-host 控制句柄。控制 socket 的这一端是 handoff 时
-/// 唯一需要活过 exec 的 fd；reader 使用 dup 出来的 fd，旧线程随 exec 消失后，
-/// 新 daemon 会从控制 fd 再建 reader 并请求一次全量快照。
+/// 主 daemon 持有的 session-host 控制句柄。控制 socket 的这一端要活过交接。
+/// 快照读端用的是 dup。交接前必须先停掉这个读端，并把已经预取、还没交给
+/// 继任者的字节当行首前缀传过去。停手之后旧读端不再读。两个进程同时读同一条
+/// 流会把一行从中间撕开，继任者会把残行当成协议不兼容并永久拆掉镜像。
 /// 克隆只增加内部引用，分页可以在生命周期锁外等回包。
 #[derive(Clone)]
 pub(crate) struct HostedConversationHandle {
@@ -73,8 +76,8 @@ impl HostedConversationHandle {
         spawn_gate: &Arc<RwLock<()>>,
     ) -> std::io::Result<Self> {
         let (parent, child) = UnixStream::pair()?;
-        set_cloexec(parent.as_raw_fd(), true);
-        set_cloexec(child.as_raw_fd(), true);
+        set_cloexec(parent.as_raw_fd(), true)?;
+        set_cloexec(child.as_raw_fd(), true)?;
 
         let child_fd = unsafe { OwnedFd::from_raw_fd(child.into_raw_fd()) };
         let exe = session_host_executable()?;
@@ -99,7 +102,7 @@ impl HostedConversationHandle {
         let pid = child.id() as i32;
         drop(child);
 
-        let handle = Self::from_stream(pid, parent, None)?;
+        let handle = Self::from_stream(pid, parent, None, Vec::new())?;
         if let Err(error) = handle.send_json(initial_open) {
             let _ = handle.shutdown_and_wait(ACP_SHUTDOWN_GRACE);
             return Err(error);
@@ -109,27 +112,33 @@ impl HostedConversationHandle {
 
     /// 从 daemon handoff 继承的 fd 重建句柄。session host 仍是同一个直接子进程，
     /// 所以新程序映像可以继续按原 pid waitpid。
+    /// `pending_host_bytes` 是前任读端已经取走、继任者必须先读的字节。
     pub(crate) unsafe fn from_handoff(
         pid: i32,
         control_fd: RawFd,
         provider_pid: Option<i32>,
+        pending_host_bytes: Vec<u8>,
     ) -> std::io::Result<Self> {
-        set_cloexec(control_fd, true);
+        set_cloexec(control_fd, true)?;
         // SAFETY: 调用方已校验 fd 有效且从 handoff 中取得唯一所有权。
         let control = unsafe { UnixStream::from_raw_fd(control_fd) };
-        Self::from_stream(pid, control, provider_pid)
+        Self::from_stream(pid, control, provider_pid, pending_host_bytes)
     }
 
     fn from_stream(
         pid: i32,
         control: UnixStream,
         initial_provider_pid: Option<i32>,
+        pending_host_bytes: Vec<u8>,
     ) -> std::io::Result<Self> {
         let reader = control.try_clone()?;
         let provider_pid = Arc::new(AtomicI32::new(initial_provider_pid.unwrap_or(0)));
         let history_waiters = Arc::new(Mutex::new(HashMap::new()));
+        let handoff = ReaderHandoff::new();
         let snapshot_rx = start_snapshot_reader(
             reader,
+            pending_host_bytes,
+            Arc::clone(&handoff),
             Arc::clone(&provider_pid),
             pid,
             Arc::clone(&history_waiters),
@@ -142,6 +151,7 @@ impl HostedConversationHandle {
                 provider_pid,
                 history_waiters,
                 next_history_request: AtomicU64::new(0),
+                handoff,
             }),
         })
     }
@@ -291,6 +301,57 @@ impl HostedConversationHandle {
             .map(AsRawFd::as_raw_fd)
     }
 
+    /// 停掉快照读端并取走它已经预取的字节。调用方必须在把控制 fd 交给继任者之前
+    /// 调用：返回之后这个句柄的读线程不再读 socket。
+    /// 半行超过 [`HOST_HANDOFF_RESIDUAL_LIMIT`] 时失败，调用方不得把 fd 交出去。
+    pub(crate) fn take_for_handoff(&self) -> std::io::Result<Vec<u8>> {
+        self.inner.handoff.stop.store(true, Ordering::SeqCst);
+        let mut slot = self.inner.handoff.residual.lock().unwrap();
+        let deadline = Instant::now() + HANDOFF_READER_STOP_TIMEOUT;
+        loop {
+            if let Some(bytes) = slot.take() {
+                if bytes.len() > HOST_HANDOFF_RESIDUAL_LIMIT {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "交接时读端手里的半行太长",
+                    ));
+                }
+                return Ok(bytes);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    "快照读端没有在交接前停下来",
+                ));
+            }
+            let (guard, wait) = self
+                .inner
+                .handoff
+                .cv
+                .wait_timeout(slot, deadline - now)
+                .unwrap();
+            slot = guard;
+            if wait.timed_out() && slot.is_none() {
+                return Err(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    "快照读端没有在交接前停下来",
+                ));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn clone_control(&self) -> std::io::Result<UnixStream> {
+        self.inner
+            .control
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("ACP session host 已关闭"))?
+            .try_clone()
+    }
+
     pub(crate) fn pid(&self) -> i32 {
         self.inner.pid
     }
@@ -303,7 +364,10 @@ impl HostedConversationHandle {
     #[cfg(test)]
     pub(crate) fn test_stub() -> (Self, UnixStream) {
         let (control, peer) = UnixStream::pair().unwrap();
-        (Self::from_stream(999_999, control, None).unwrap(), peer)
+        (
+            Self::from_stream(999_999, control, None, Vec::new()).unwrap(),
+            peer,
+        )
     }
 
     pub(crate) fn shutdown_and_wait(self, grace: Duration) -> bool {
@@ -353,84 +417,290 @@ impl HostedConversationHandle {
     }
 }
 
+/// 读端空闲时隔这么久看一次有没有被要求停手。数据到达会立刻返回，不额外延迟快照。
+const SNAPSHOT_READ_POLL: Duration = Duration::from_millis(100);
+/// 半行超过这个长度就不塞进交接清单。完整的超长行直接丢掉（继任者会要全量快照）；
+/// 半行则继续读到换行再丢。读不到换行就让交接失败，会话走现有的退役路径。
+/// 256KB 的字节数组展开成 JSON 后仍远小于 128MB 的 manifest 上限。
+pub(crate) const HOST_HANDOFF_RESIDUAL_LIMIT: usize = 256 * 1024;
+const HANDOFF_READER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct ReaderHandoff {
+    stop: AtomicBool,
+    /// `None`：读端还没停。`Some`：已经停，里面是继任者必须先读的字节。
+    residual: Mutex<Option<Vec<u8>>>,
+    cv: Condvar,
+}
+
+impl ReaderHandoff {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            stop: AtomicBool::new(false),
+            residual: Mutex::new(None),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    fn park(&self, bytes: Vec<u8>) {
+        let mut slot = self.residual.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(bytes);
+            self.cv.notify_one();
+        }
+    }
+}
+
+/// 继任者先读前任已经从内核取走的字节，再读 socket。
+/// 这些字节若留在被丢掉的 `BufReader` 里，下一次读取会从一行的中间开始。
+struct PrefixedRead<R> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: R,
+}
+
+impl<R> PrefixedRead<R> {
+    fn new(prefix: Vec<u8>, inner: R) -> Self {
+        Self {
+            prefix,
+            pos: 0,
+            inner,
+        }
+    }
+
+    fn take_unread_prefix(&mut self) -> Vec<u8> {
+        let rest = self.prefix[self.pos..].to_vec();
+        self.pos = self.prefix.len();
+        rest
+    }
+}
+
+impl<R: Read> Read for PrefixedRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos < self.prefix.len() {
+            let n = (self.prefix.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.prefix[self.pos..self.pos + n]);
+            self.pos += n;
+            return Ok(n);
+        }
+        self.inner.read(buf)
+    }
+}
+
+fn is_read_poll(error: &std::io::Error) -> bool {
+    // macOS 上 SO_RCVTIMEO 到期经常报 WouldBlock，而不是 TimedOut。
+    matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(bytes.len());
+    if start >= end {
+        &[]
+    } else {
+        &bytes[start..end]
+    }
+}
+
+/// 已经从流里取出、还没解析的字节。顺序是：读循环攒下的半行、BufReader 预取、
+/// 还没被 BufReader 抽走的行首前缀。不能用 `read_line`：超时切在 UTF-8 字符中间时，
+/// `String` 会把已经读走的字节丢掉。
+fn take_residual(reader: &mut BufReader<PrefixedRead<UnixStream>>, pending: &[u8]) -> Vec<u8> {
+    let mut out = pending.to_vec();
+    let buffered = reader.buffer().to_vec();
+    reader.consume(buffered.len());
+    out.extend_from_slice(&buffered);
+    out.extend(reader.get_mut().take_unread_prefix());
+    out
+}
+
+fn stop_reader(
+    handoff: &ReaderHandoff,
+    reader: &mut BufReader<PrefixedRead<UnixStream>>,
+    pending: &mut Vec<u8>,
+) {
+    let residual = take_residual(reader, pending);
+    let complete = pending.last() == Some(&b'\n');
+    pending.clear();
+    if complete && residual.len() > HOST_HANDOFF_RESIDUAL_LIMIT {
+        // 完整行本身已经对齐。超长的那一行不进清单；行尾之后的预取最多 8KB，
+        // 继任者从下一行接着读，并会另要一份全量快照。
+        let line_len = residual.iter().position(|byte| *byte == b'\n').unwrap_or(0) + 1;
+        crate::dlog(&format!(
+            "acp 交接丢弃过长的完整行（{line_len} 字节），只交接读缓冲里的后续字节"
+        ));
+        let mut rest = residual;
+        rest.drain(..line_len.min(rest.len()));
+        handoff.park(rest);
+        return;
+    }
+    handoff.park(residual);
+}
+
+fn reap_host_tasks(host_pid: i32) {
+    if host_pid > 0 {
+        smelt_core::background_tasks::reap_orphaned_task_groups(host_pid as u32);
+    }
+}
+
+fn dispatch_snapshot_line(
+    line: &[u8],
+    tx: &smol::channel::Sender<HostedSnapshotEnvelope>,
+    provider_pid: &AtomicI32,
+    history_waiters: &Mutex<
+        HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>,
+    >,
+) -> bool {
+    let trimmed = trim_ascii(line);
+    let value: serde_json::Value = match serde_json::from_slice(trimmed) {
+        Ok(value) => value,
+        Err(error) => {
+            crate::dlog(&format!(
+                "acp 宿主快照无法解析，判定协议不兼容并断开镜像：{error}（{} 字节）",
+                line.len()
+            ));
+            return false;
+        }
+    };
+    // 历史页回包没有顶层 `snapshot` 字段。先分流，避免被下面的快照解析当成协议不兼容。
+    if value.get("history_page").is_some() {
+        if let Ok(page) = serde_json::from_value::<HistoryPageLine>(value)
+            && let Some(waiter) = history_waiters
+                .lock()
+                .unwrap()
+                .remove(&page.history_page.request_id)
+        {
+            let _ = waiter.try_send(page.history_page.snapshot);
+        }
+        return true;
+    }
+    let parsed = match serde_json::from_value::<HostedSnapshotLine>(value) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            // 快照解析失败几乎只有一个原因：host 与主 daemon 不同版本，快照 schema
+            // 对不上（比如 host 发了新增的 enum 变体）。这不是瞬时错误，不会自愈；
+            // 旧实现在这里 `continue`，结果是主 daemon（进而 GUI）的镜像永久冻在
+            // 最后一份可解析的快照上，且没有任何日志——会话看起来「只恢复了一半」
+            // 并永远停在「正在建立连接」。宁可断开镜像让上层落成可重连的终态，
+            // 也不能静默冻结。半行被撕开也走这里，所以交接必须在停手时把预取字节交出去。
+            crate::dlog(&format!(
+                "acp 宿主快照无法解析，判定协议不兼容并断开镜像：{error}（{} 字节）",
+                line.len()
+            ));
+            return false;
+        }
+    };
+    let live_provider_pid = parsed.provider_pid.filter(|pid| *pid > 1);
+    // None 也是事实：provider 已被宿主收尸后必须清掉旧 pid，避免该
+    // pid 被系统复用后，后续异常清理误杀无关进程组。
+    provider_pid.store(live_provider_pid.unwrap_or(0), Ordering::SeqCst);
+    tx.try_send(HostedSnapshotEnvelope {
+        snapshot: parsed.snapshot,
+        provider_pid: live_provider_pid,
+    })
+    .is_ok()
+}
+
 fn start_snapshot_reader(
     stream: UnixStream,
+    prefix: Vec<u8>,
+    handoff: Arc<ReaderHandoff>,
     provider_pid: Arc<AtomicI32>,
     host_pid: i32,
     history_waiters: Arc<
         Mutex<HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>>,
     >,
 ) -> std::io::Result<smol::channel::Receiver<HostedSnapshotEnvelope>> {
+    stream.set_read_timeout(Some(SNAPSHOT_READ_POLL))?;
     let (tx, rx) = smol::channel::unbounded();
     thread::Builder::new()
         .name("smelt-acp-host-snapshots".to_string())
         .spawn(move || {
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
+            let mut reader = BufReader::with_capacity(8192, PrefixedRead::new(prefix, stream));
+            let mut pending: Vec<u8> = Vec::new();
             loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => {
-                        // 读端关掉才说明这条连接没了。解析失败不走这里：宿主还活着。
-                        if host_pid > 0 {
-                            smelt_core::background_tasks::reap_orphaned_task_groups(
-                                host_pid as u32,
-                            );
+                // 半行还没超限就可以立刻停。超限的半行继续读到换行，避免把残行交出去。
+                if handoff.stopped() && pending.len() <= HOST_HANDOFF_RESIDUAL_LIMIT {
+                    stop_reader(&handoff, &mut reader, &mut pending);
+                    return;
+                }
+                let mut chunk = Vec::new();
+                match reader.read_until(b'\n', &mut chunk) {
+                    Err(error) if error.kind() == ErrorKind::Interrupted => {
+                        pending.extend_from_slice(&chunk);
+                    }
+                    Err(error) if is_read_poll(&error) => {
+                        pending.extend_from_slice(&chunk);
+                        if handoff.stopped() && pending.len() <= HOST_HANDOFF_RESIDUAL_LIMIT {
+                            stop_reader(&handoff, &mut reader, &mut pending);
+                            return;
                         }
-                        break;
                     }
-                    Ok(_) => {}
-                }
-                let value: serde_json::Value = match serde_json::from_str(line.trim()) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        crate::dlog(&format!(
-                            "acp 宿主快照无法解析，判定协议不兼容并断开镜像：{error}（{} 字节）",
-                            line.len()
-                        ));
-                        break;
+                    Ok(0) => {
+                        // 超时会把半行留在 pending 里。随后的 EOF 这次读不到新字节，
+                        // 但 pending 仍是最后一行，不能直接丢掉。
+                        if handoff.stopped() {
+                            stop_reader(&handoff, &mut reader, &mut pending);
+                            return;
+                        }
+                        if !pending.is_empty()
+                            && !dispatch_snapshot_line(
+                                &pending,
+                                &tx,
+                                &provider_pid,
+                                &history_waiters,
+                            )
+                        {
+                            return;
+                        }
+                        reap_host_tasks(host_pid);
+                        return;
                     }
-                };
-                // 历史页回包没有 `snapshot` 字段。先分流，避免被下面的快照解析当成协议不兼容。
-                if value.get("history_page").is_some() {
-                    if let Ok(page) = serde_json::from_value::<HistoryPageLine>(value)
-                        && let Some(waiter) = history_waiters
-                            .lock()
-                            .unwrap()
-                            .remove(&page.history_page.request_id)
-                    {
-                        let _ = waiter.try_send(page.history_page.snapshot);
+                    Ok(_) => {
+                        pending.extend_from_slice(&chunk);
+                        let at_eof = pending.last() != Some(&b'\n');
+                        if handoff.stopped() {
+                            stop_reader(&handoff, &mut reader, &mut pending);
+                            return;
+                        }
+                        if at_eof {
+                            if !pending.is_empty()
+                                && !dispatch_snapshot_line(
+                                    &pending,
+                                    &tx,
+                                    &provider_pid,
+                                    &history_waiters,
+                                )
+                            {
+                                return;
+                            }
+                            reap_host_tasks(host_pid);
+                            return;
+                        }
+                        if !dispatch_snapshot_line(&pending, &tx, &provider_pid, &history_waiters) {
+                            return;
+                        }
+                        pending.clear();
                     }
-                    continue;
-                }
-                let parsed = match serde_json::from_value::<HostedSnapshotLine>(value) {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        // 快照解析失败几乎只有一个原因：host 与主 daemon 不同版本，快照 schema
-                        // 对不上（比如 host 发了新增的 enum 变体）。这不是瞬时错误，不会自愈；
-                        // 旧实现在这里 `continue`，结果是主 daemon（进而 GUI）的镜像永久冻在
-                        // 最后一份可解析的快照上，且没有任何日志——会话看起来「只恢复了一半」
-                        // 并永远停在「正在建立连接」。宁可断开镜像让上层落成可重连的终态，
-                        // 也不能静默冻结。
-                        crate::dlog(&format!(
-                            "acp 宿主快照无法解析，判定协议不兼容并断开镜像：{error}（{} 字节）",
-                            line.len()
-                        ));
-                        break;
+                    Err(_) => {
+                        // 读端关掉才说明这条连接没了。解析失败不走这里：宿主还活着。
+                        if handoff.stopped() {
+                            stop_reader(&handoff, &mut reader, &mut pending);
+                        } else {
+                            reap_host_tasks(host_pid);
+                        }
+                        return;
                     }
-                };
-                let live_provider_pid = parsed.provider_pid.filter(|pid| *pid > 1);
-                // None 也是事实：provider 已被宿主收尸后必须清掉旧 pid，避免该
-                // pid 被系统复用后，后续异常清理误杀无关进程组。
-                provider_pid.store(live_provider_pid.unwrap_or(0), Ordering::SeqCst);
-                if tx
-                    .try_send(HostedSnapshotEnvelope {
-                        snapshot: parsed.snapshot,
-                        provider_pid: live_provider_pid,
-                    })
-                    .is_err()
-                {
-                    break;
                 }
             }
         })?;
@@ -574,6 +844,8 @@ mod tests {
         let (host_side, daemon_side) = UnixStream::pair().unwrap();
         let rx = start_snapshot_reader(
             daemon_side,
+            Vec::new(),
+            ReaderHandoff::new(),
             Arc::new(AtomicI32::new(0)),
             0,
             Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -680,6 +952,67 @@ mod tests {
         assert!(
             error.contains("读取宿主历史失败"),
             "失败应留在这一次调用里，实际 {error}"
+        );
+    }
+
+    fn hosted_line(title: &str) -> Vec<u8> {
+        let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
+        snapshot.session_title = Some(title.to_string());
+        let mut bytes = serde_json::to_vec(&serde_json::json!({ "snapshot": snapshot })).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    /// 回归：交接时前任 BufReader 已经预取了下一行的前缀。若继任者从 socket 中间接着读，
+    /// 残行会被判定成协议不兼容，镜像永久断开，历史页就一直超时。
+    /// 前任必须停手，并且不再读取停手之后才到达的字节。
+    #[test]
+    fn handoff_prefixes_the_line_the_previous_reader_already_took() {
+        let (handle, mut peer) = HostedConversationHandle::test_stub();
+        peer.write_all(&hosted_line("before")).unwrap();
+        let first = smol::block_on(smol::future::race(
+            async { handle.snapshot_rx().recv().await.ok() },
+            async {
+                smol::Timer::after(Duration::from_secs(2)).await;
+                None
+            },
+        ))
+        .expect("第一行完整快照应先被前任读端解析");
+        assert_eq!(first.snapshot.session_title.as_deref(), Some("before"));
+
+        let line = hosted_line("after");
+        let prefix_len = line.len() / 2;
+        assert!(prefix_len > 0 && line[prefix_len - 1] != b'\n');
+        peer.write_all(&line[..prefix_len]).unwrap();
+
+        let residual = handle.take_for_handoff().expect("读端应在交接前停下来");
+        assert!(
+            line[..prefix_len].starts_with(residual.as_slice()),
+            "交接字节只能是已预取的半行前缀，实际 {} 字节",
+            residual.len()
+        );
+
+        // 停手之后才写后半行。旧读端若还在读，会把这半行吃掉，继任者就拼不回来。
+        peer.write_all(&line[prefix_len..]).unwrap();
+        let stream = handle.clone_control().expect("控制连接应还在");
+        let rx = start_snapshot_reader(
+            stream,
+            residual,
+            ReaderHandoff::new(),
+            Arc::new(AtomicI32::new(0)),
+            0,
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+        )
+        .unwrap();
+        let second = smol::block_on(smol::future::race(async { rx.recv().await.ok() }, async {
+            smol::Timer::after(Duration::from_secs(2)).await;
+            None
+        }))
+        .expect("继任读端应把半行拼回完整快照");
+        assert_eq!(second.snapshot.session_title.as_deref(), Some("after"));
+        assert!(
+            handle.snapshot_rx().try_recv().is_err(),
+            "旧读端停手后不能再收到后半行"
         );
     }
 }

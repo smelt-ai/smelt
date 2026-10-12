@@ -197,7 +197,7 @@ pub fn recv_fds(sock: &UnixStream, expect: usize) -> Result<Vec<OwnedFd>, Transp
             return Err(TransportError::Eof("fd 交接"));
         }
         for fd in batch.drain(..) {
-            set_cloexec(fd.as_raw_fd(), true)?;
+            crate::set_cloexec(fd.as_raw_fd(), true)?;
             out.push(fd);
             if out.len() == expect {
                 break;
@@ -252,24 +252,6 @@ fn recv_fds_one_message(sock_fd: std::os::fd::RawFd) -> std::io::Result<Vec<Owne
         }
     }
     Ok(out)
-}
-
-fn set_cloexec(fd: std::os::fd::RawFd, cloexec: bool) -> std::io::Result<()> {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let flags = if cloexec {
-            flags | libc::FD_CLOEXEC
-        } else {
-            flags & !libc::FD_CLOEXEC
-        };
-        if libc::fcntl(fd, libc::F_SETFD, flags) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
 
 // ---- P→S：GRIDS（best-effort，逐个校验） ----

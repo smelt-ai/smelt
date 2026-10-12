@@ -95,6 +95,9 @@ pub struct ApplyOutcome {
     /// 本次事件替换了大体积 runtime debug sidecar。实时广播只在该位为真时携带
     /// sidecar，避免完整 provider payload 随每个流式 token 重复传输。
     pub runtime_debug_changed: bool,
+    /// 命令、配置、计划、队列、计时等会话信封变了。正文流式帧为 false，
+    /// 调用方省略信封，接收方保留上一份。
+    pub envelope_changed: bool,
     /// 相位刚变成需要人处理 → (标题, 正文, is_approval)，调用方决定要不要弹
     /// 通知（GUI 按各类 Agent 通知开关决定；这个决定权不下放到
     /// smeltd，因为那是纯 GUI 展示偏好，smeltd 不该知道）。
@@ -132,6 +135,7 @@ pub(super) fn resume_running(state: &mut AcpSessionState) {
 /// 分发里，避免为赋值再套一层函数。
 pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyOutcome {
     let mut outcome = ApplyOutcome::default();
+    let envelope_changed = !is_transcript_delta(&ev);
     let mut skip_persist = is_streaming_event(&ev);
     if clears_user_echo(&ev) {
         state.awaiting_user_echo = false;
@@ -314,6 +318,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
     }
 
     outcome.should_persist = !skip_persist;
+    outcome.envelope_changed = envelope_changed;
     outcome
 }
 
@@ -356,11 +361,30 @@ fn consumed_steering_count(old: &[String], new: &[String]) -> usize {
     }
 }
 
+fn is_transcript_delta(ev: &ConversationEvent) -> bool {
+    matches!(
+        ev,
+        ConversationEvent::AgentChunk { .. }
+            | ConversationEvent::ToolOutputDelta { .. }
+            | ConversationEvent::TerminalOutput { .. }
+            | ConversationEvent::ToolCall(_)
+            | ConversationEvent::ToolCallUpdate(_)
+            | ConversationEvent::ToolStarted { .. }
+            | ConversationEvent::ToolFinished { .. }
+            | ConversationEvent::ToolChildren { .. }
+            | ConversationEvent::ToolDebug { .. }
+            | ConversationEvent::UserChunk(_)
+            | ConversationEvent::UserImage(_)
+            | ConversationEvent::BackgroundNotice(_)
+    )
+}
+
 fn is_streaming_event(ev: &ConversationEvent) -> bool {
     matches!(
         ev,
         ConversationEvent::AgentChunk { .. }
             | ConversationEvent::TerminalOutput { .. }
+            | ConversationEvent::ToolOutputDelta { .. }
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
             | ConversationEvent::Model(_)
@@ -484,6 +508,7 @@ fn apply_ready(
         && (!matches!(kind, ReadyKind::Fresh) || !state.entries.is_empty())
     {
         state.history_session_id = Some(session_id.to_string());
+        state.history_abandoned = false;
     }
     state.supports_image = supports_image;
     if !matches!(kind, ReadyKind::ResumedWithReplay) {
@@ -1101,6 +1126,7 @@ fn apply_provider_session_id_changed(state: &mut AcpSessionState, session_id: Se
     }
     state.acp_session_id = Some(session_id.clone());
     state.history_session_id = Some(session_id);
+    state.history_abandoned = false;
 }
 
 /// 把一段 agent 正文/思考文本落进消息流：跟上一条同类 entry 合并，否则新起

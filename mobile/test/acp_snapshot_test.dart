@@ -164,6 +164,33 @@ void main() {
       expect(merged.phase, isA<AcpPhaseIdle>());
     });
 
+    test('keeps the session envelope when a streaming frame omits it', () {
+      final original = AcpSnapshot(
+        entries: const [AcpEntryUser(text: 'first')],
+        phase: const AcpPhaseThinking(),
+        availableCommands: const [
+          ['plan', 'Plan'],
+        ],
+        snapshotRevision: 1,
+      );
+      final update = AcpSnapshot(
+        entriesOffset: 1,
+        entriesTotal: 2,
+        snapshotRevision: 2,
+        entries: const [AcpEntryAssistant(text: 'tail')],
+        phase: const AcpPhaseThinking(),
+        envelopeOmitted: true,
+      );
+
+      final merged = original.merge(update);
+
+      expect(merged.availableCommands, [
+        ['plan', 'Plan'],
+      ]);
+      expect(merged.entries, hasLength(2));
+      expect((merged.entries.last as AcpEntryAssistant).text, 'tail');
+    });
+
     test('drops an untrusted prefix when entries_offset is out of range', () {
       final original = AcpSnapshot(
         entries: const [AcpEntryUser(text: 'local entry')],

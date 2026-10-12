@@ -257,7 +257,8 @@ fn path_inflight() -> &'static Mutex<HashSet<PathBuf>> {
     IN_FLIGHT_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn format_for_path(path: &Path) -> Option<gpui::ImageFormat> {
+/// 路径扩展名到 GPUI 图片格式。会话图片和剪贴板粘贴共用这一张表。
+pub fn format_for_path(path: &Path) -> Option<gpui::ImageFormat> {
     let ext = path
         .extension()
         .and_then(|ext| ext.to_str())

@@ -816,6 +816,7 @@ fn connecting_hosted_handoff_does_not_keep_the_process() {
             agent_token: String::new(),
             agent_needs_transcript_check: false,
             conversation_binding: None,
+            pending_host_bytes: Vec::new(),
         },
         &sessions,
         &no_subs(),
@@ -866,6 +867,7 @@ fn hosted_handoff_accepts_an_active_snapshot_without_sdk_reconstruction() {
     assert_eq!(validated.id, "acp-hosted");
     assert_eq!(validated.launch.command, "provider --acp");
     assert_eq!(validated.host_snapshot_revision, 9);
+    assert!(validated.pending_host_bytes.is_empty());
     assert_eq!(
         validated.owned,
         OwnedHostedAcpHandoff {
@@ -873,6 +875,25 @@ fn hosted_handoff_accepts_an_active_snapshot_without_sdk_reconstruction() {
             host_fd: 40,
             provider_pid: Some(401),
         }
+    );
+}
+
+#[test]
+fn invalid_pending_host_bytes_are_not_imported() {
+    let item = serde_json::json!({
+        "runtime": "hosted",
+        "id": "acp-hosted",
+        "host_fd": 40,
+        "host_pid": 400,
+        "snapshot": sample_snapshot("sid-hosted"),
+        "pending_host_bytes": "not-bytes",
+    });
+    assert!(
+        matches!(
+            validate_hosted_acp_handoff_item(&item, |_| true),
+            HostedAcpHandoffItemValidation::CleanupRequired(_)
+        ),
+        "坏的行首前缀不能接上，否则继任者会从半行中间开始读"
     );
 }
 
