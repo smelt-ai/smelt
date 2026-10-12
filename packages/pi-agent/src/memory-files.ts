@@ -360,69 +360,9 @@ export function renderMemorySnapshot(roots: MemoryRoots, cwd: string, meta: Memo
 	return { text: sections.join("\n\n"), truncated: core.truncated || facts.truncated };
 }
 
-/** 中文按相邻两字切词，英文数字按单词；去掉最常见的虚词组合，减少误召回。 */
-const RECALL_STOP_TOKENS = new Set([
-	"这个", "那个", "一下", "怎么", "什么", "可以", "我们", "你们", "他们", "一个", "没有", "需要",
-	"现在", "然后", "因为", "所以", "如果", "还是", "或者", "帮我", "请你", "一些", "时候", "the",
-	"and", "for", "with", "this", "that", "you", "are", "how", "what",
-]);
-
-export function recallTokens(text: string): Set<string> {
-	const tokens = new Set<string>();
-	const lower = text.toLowerCase();
-	for (const word of lower.match(/[a-z0-9_]{2,}/g) ?? []) tokens.add(word);
-	for (const run of lower.match(/[\u3400-\u9fff]+/g) ?? []) {
-		for (let i = 0; i + 1 < run.length; i++) tokens.add(run.slice(i, i + 2));
-	}
-	for (const stop of RECALL_STOP_TOKENS) tokens.delete(stop);
-	return tokens;
-}
-
-export const RECALL_MAX_MEMORIES = 3;
-export const RECALL_MAX_BYTES = 2_000;
-/** 命中 name / description 记 2 分，只命中正文记 1 分；至少 2 分才召回。 */
-const RECALL_MIN_SCORE = 2;
-const RECALL_BODY_MAX_CHARS = 600;
-
-/**
- * 会话第一轮按用户的问题挑出最相关的几条事实，把正文附在这一轮里，省掉模型再去 read。
- *
- * 只在对话末尾追加，不碰系统提示，不影响缓存。规则类本来就常驻，不参与。
- */
-export function recallRelevantFacts(
-	roots: MemoryRoots,
-	cwd: string,
-	prompt: string,
-	pending?: ReadonlySet<string>,
-): string | undefined {
-	const query = recallTokens(prompt);
-	if (query.size === 0) return undefined;
-	const scored = confirmedLayer(roots.agent, pending)
-		.filter((entry) => !CORE_MEMORY_TYPES.has(entry.type) && appliesTo(entry, cwd))
-		.map((entry) => {
-			const title = recallTokens(`${entry.name.replaceAll("-", " ")} ${entry.description}`);
-			const body = recallTokens(entry.body);
-			let score = 0;
-			for (const token of query) score += title.has(token) ? 2 : body.has(token) ? 1 : 0;
-			return { entry, score };
-		})
-		.filter(({ score }) => score >= RECALL_MIN_SCORE)
-		.sort((a, b) => b.score - a.score || b.entry.mtimeMs - a.entry.mtimeMs)
-		.slice(0, RECALL_MAX_MEMORIES);
-	const blocks: string[] = [];
-	let bytes = 0;
-	for (const { entry } of scored) {
-		const chars = [...entry.body];
-		const body =
-			chars.length > RECALL_BODY_MAX_CHARS
-				? `${chars.slice(0, RECALL_BODY_MAX_CHARS).join("")}…（全文 read ${join(roots.agent, entry.fileName)}）`
-				: entry.body;
-		const block = `### ${entry.name} — ${entry.description}\n${body}`;
-		const size = Buffer.byteLength(block);
-		if (bytes + size > RECALL_MAX_BYTES) break;
-		bytes += size;
-		blocks.push(block);
-	}
-	if (blocks.length === 0) return undefined;
-	return `与这次问题可能相关的记忆（参考，以当前实际情况为准）：\n\n${blocks.join("\n\n")}`;
+/** 召回用的事实：当前项目适用、已确认的 project / reference。规则类本来就常驻，不参与。 */
+export function recallableFacts(roots: MemoryRoots, cwd: string, pending?: ReadonlySet<string>): MemoryEntry[] {
+	return confirmedLayer(roots.agent, pending).filter(
+		(entry) => !CORE_MEMORY_TYPES.has(entry.type) && appliesTo(entry, cwd),
+	);
 }

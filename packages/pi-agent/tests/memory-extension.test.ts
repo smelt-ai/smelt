@@ -31,6 +31,7 @@ import smeltMemoryExtension, {
 } from "../src/memory-extension.ts";
 import { SMELT_BACKGROUND_TASK_EXTENSION_PATH } from "../src/background-task.ts";
 import { SMELT_ELICITATION_EXTENSION_PATH } from "../src/elicitation.ts";
+import { resetEmbeddingCacheForTests } from "../src/memory-embedding.ts";
 import { setMemoryHostTransportForTests } from "../src/memory-host.ts";
 import { FakeMemoryHost } from "./memory-host-fake.ts";
 import { SMELT_SUBAGENT_EXTENSION_PATH } from "../src/subagent/index.ts";
@@ -581,6 +582,145 @@ describe("smelt-memory extension", () => {
 		});
 	});
 
+	test("later turns recall only confident lexical matches, and never the same memory twice", async () => {
+		const { agent } = setupRoots();
+		writeFileSync(
+			join(agent, "meeting-room.md"),
+			"---\nname: meeting-room\ndescription: 周会在 3 楼 301 会议室\ntype: reference\n---\n每周二上午十点。\n",
+		);
+		const { runner } = await createRunner();
+		const turn = (prompt: string) => runner.emitBeforeAgentStart(prompt, undefined, { cwd: process.cwd() });
+		const custom = (result: Awaited<ReturnType<typeof turn>>) =>
+			(result?.messages ?? []).filter((message) => message.customType === SMELT_MEMORY_RECALL_MESSAGE);
+
+		await turn("先聊点别的");
+		expect(custom(await turn("今天天气怎么样"))).toHaveLength(0);
+		const hit = custom(await turn("周会在哪开"));
+		expect(hit).toHaveLength(1);
+		expect(String(hit[0]?.content)).toContain("每周二上午十点");
+		expect(custom(await turn("周会在哪开"))).toHaveLength(0);
+	});
+
+	test("memory_search is registered, needs no approval and returns matching facts", async () => {
+		const { agent } = setupRoots();
+		writeFileSync(
+			join(agent, "meeting-room.md"),
+			"---\nname: meeting-room\ndescription: 周会在 3 楼 301 会议室\ntype: reference\n---\n每周二上午十点。\n",
+		);
+		const { runner } = await createRunner();
+		const tool = runner.getToolDefinition("memory_search");
+		expect(tool).toBeDefined();
+		const result = await tool!.execute("s1", { query: "周会在哪开" }, undefined, undefined, {
+			cwd: process.cwd(),
+		} as never);
+		expect(JSON.stringify(result.content)).toContain("每周二上午十点");
+		const missing = await tool!.execute("s2", { query: "快速排序怎么写" }, undefined, undefined, {
+			cwd: process.cwd(),
+		} as never);
+		expect(JSON.stringify(missing.content)).toContain("没有找到");
+	});
+
+	describe("vector retrieval", () => {
+		const realFetch = globalThis.fetch;
+		afterEach(() => {
+			globalThis.fetch = realFetch;
+			resetEmbeddingCacheForTests();
+		});
+
+		/** 假向量服务：文本里含"发布"或"上线"的映射到同一个方向，其余到另一个方向。 */
+		function fakeEmbeddings(calls: string[][]) {
+			globalThis.fetch = (async (_url: string, init: { body: string }) => {
+				const { input } = JSON.parse(init.body) as { input: string[] };
+				calls.push(input);
+				return new Response(
+					JSON.stringify({
+						data: input.map((text, index) => ({
+							index,
+							embedding: /发布|上线/.test(text) ? [1, 0] : [0, 1],
+						})),
+					}),
+				);
+			}) as typeof fetch;
+		}
+
+		const releaseFlow =
+			"---\nname: release-flow\ndescription: 发布走 fx-deploy 流水线\ntype: project\n---\n先发测试环境，再预发，再生产。\n";
+		const kanban = "---\nname: kanban\ndescription: 需求看板在飞书\ntype: reference\n---\n飞书项目 Smelt 空间。\n";
+
+		test("a paraphrased question is found through vectors when no rerank model is available", async () => {
+			const { agent } = setupRoots();
+			writeFileSync(join(agent, "release-flow.md"), releaseFlow);
+			writeFileSync(join(agent, "kanban.md"), kanban);
+			const calls: string[][] = [];
+			fakeEmbeddings(calls);
+			const host = new FakeMemoryHost();
+			host.embedding = { base_url: "http://embed.test/v1", model: "m" };
+			const { runner } = await createRunner({ host });
+
+			// "上线"和记忆在字面上没有一个二元组相同，只有向量能找到。
+			const first = await runner.emitBeforeAgentStart("这个版本怎么上线？", undefined, { cwd: process.cwd() });
+			expect(String(first?.messages[0]?.content)).toContain("先发测试环境");
+			expect(String(first?.messages[0]?.content)).not.toContain("飞书项目");
+
+			// 记忆没变：第二次只给问题算向量，记忆的向量走缓存。
+			const tool = runner.getToolDefinition("memory_search")!;
+			await tool.execute("s", { query: "上线步骤" }, undefined, undefined, { cwd: process.cwd() } as never);
+			expect(calls.at(-1)).toEqual(["上线步骤"]);
+		});
+
+		test("memories that cannot be embedded are skipped with a single notice", async () => {
+			const { agent } = setupRoots();
+			writeFileSync(join(agent, "release-flow.md"), releaseFlow);
+			writeFileSync(join(agent, "kanban.md"), kanban);
+			// 这个服务拒绝含"看板"的输入（模拟超出模型长度上限的那一条）。
+			globalThis.fetch = (async (_url: string, init: { body: string }) => {
+				const { input } = JSON.parse(init.body) as { input: string[] };
+				if (input.some((text) => text.includes("看板"))) return new Response("too long", { status: 400 });
+				return new Response(
+					JSON.stringify({ data: input.map((text, index) => ({ index, embedding: /发布|上线/.test(text) ? [1, 0] : [0, 1] })) }),
+				);
+			}) as typeof fetch;
+			const host = new FakeMemoryHost();
+			host.embedding = { base_url: "http://embed.test/v1", model: "m" };
+			const { runner, notices } = await createRunner({ host });
+			const tool = runner.getToolDefinition("memory_search")!;
+			const run = (query: string) =>
+				tool.execute("s", { query }, undefined, undefined, {
+					cwd: process.cwd(),
+					ui: { notify: (message: string) => notices.push(message) },
+				} as never);
+
+			expect(JSON.stringify((await run("这个版本怎么上线？")).content)).toContain("先发测试环境");
+			await run("上线步骤");
+			const skipped = notices.filter((notice) => notice.includes("算不出向量"));
+			expect(skipped).toHaveLength(1);
+			expect(skipped[0]).toContain("kanban");
+		});
+
+		test("a failing vector service falls back to keywords and warns once", async () => {
+			const { agent } = setupRoots();
+			writeFileSync(join(agent, "meeting-room.md"), "---\nname: meeting-room\ndescription: 周会在 3 楼 301 会议室\ntype: reference\n---\n每周二。\n");
+			globalThis.fetch = (async () => new Response("down", { status: 503 })) as unknown as typeof fetch;
+			const host = new FakeMemoryHost();
+			host.embedding = { base_url: "http://embed.test/v1", model: "m" };
+			const { runner, notices } = await createRunner({ host });
+			const tool = runner.getToolDefinition("memory_search")!;
+
+			const result = await tool.execute("s1", { query: "周会在哪开" }, undefined, undefined, {
+				cwd: process.cwd(),
+				ui: { notify: (message: string) => notices.push(message) },
+			} as never);
+			await tool.execute("s2", { query: "周会在哪开" }, undefined, undefined, {
+				cwd: process.cwd(),
+				ui: { notify: (message: string) => notices.push(message) },
+			} as never);
+
+			expect(JSON.stringify(result.content)).toContain("每周二");
+			expect(notices.filter((notice) => notice.includes("向量检索不可用"))).toHaveLength(1);
+			expect(notices.find((notice) => notice.includes("向量检索不可用"))).toContain("503");
+		});
+	});
+
 	/**
 	 * 真跑一个 Pi 会话（faux 模型），看模型实际收到的消息：记忆不变时不发任何系统消息；
 	 * 别处改了记忆，只在末尾追加一条只含 smelt_memory 分节的系统消息，开头不动、缓存不失效。
@@ -646,5 +786,146 @@ describe("smelt-memory extension", () => {
 		expect(patch.sections?.[SMELT_MEMORY_PROMPT_SECTION]).toContain("weekly");
 		// 开头那条系统消息原样不动：缓存前缀不失效。
 		expect(systemMessages(2)[0]).toEqual(systemMessages(0)[0]);
+	});
+
+	/** 换了说法、关键词一个都对不上的问题，第一轮靠便宜模型重排找回来（这里用 faux 模型代答）。 */
+	test("the first turn finds a paraphrased memory through the model rerank", async () => {
+		const { base, agent } = setupRoots();
+		writeFileSync(
+			join(agent, "release-flow.md"),
+			"---\nname: release-flow\ndescription: 发布走 fx-deploy 流水线\ntype: project\n---\n先发测试环境，再预发，再生产。\n",
+		);
+		const received: Array<Array<{ role: string; content?: unknown }>> = [];
+		const faux = fauxProvider({ provider: "faux-rerank", models: [{ id: "m" }] });
+		faux.setResponses([
+			// 第一次调用是重排：只有一个候选，选它。
+			() => fauxAssistantMessage("[1]"),
+			(context: { messages: unknown[] }) => {
+				received.push(context.messages as (typeof received)[number]);
+				return fauxAssistantMessage("ok");
+			},
+		]);
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(base, "auth.json"),
+			modelsPath: join(base, "models.json"),
+		});
+		modelRuntime.registerNativeProvider(faux.provider);
+		await modelRuntime.setRuntimeApiKey("faux-rerank", "test");
+		const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: base,
+			agentDir: join(base, "pi"),
+			settingsManager,
+			extensionFactories: [{ name: "smelt-memory", factory: smeltMemoryExtension }],
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+		} as never);
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: base,
+			agentDir: join(base, "pi"),
+			model: faux.getModel(),
+			modelRuntime,
+			resourceLoader,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(base),
+			tools: [],
+		});
+		setMemoryHostTransportForTests(new FakeMemoryHost().transport);
+		// 真实 RPC 模式下宿主会绑定扩展、触发 session_start，第一轮才走完整召回。
+		await session.bindExtensions({ mode: "rpc" });
+		try {
+			await session.prompt("这个版本怎么上线？");
+		} finally {
+			session.dispose();
+		}
+
+		const recalled = JSON.stringify(received[0]);
+		expect(recalled).toContain("先发测试环境，再预发，再生产");
+	});
+
+	/** 用 faux 提供方真跑一轮：记录每次模型调用用的是哪个模型，以及状态栏提示。 */
+	async function runRecallTurn(rerankModel: { provider: string; id: string } | undefined, prompt: string) {
+		const { base, agent } = setupRoots();
+		writeFileSync(
+			join(agent, "meeting-room.md"),
+			"---\nname: meeting-room\ndescription: 周会在 3 楼 301 会议室\ntype: reference\n---\n每周二上午十点。\n",
+		);
+		const asked: Array<{ model: string; reasoning: unknown }> = [];
+		const received: unknown[][] = [];
+		const faux = fauxProvider({ provider: "faux-pick", models: [{ id: "main" }, { id: "picked" }] });
+		faux.setResponses(
+			Array.from(
+				{ length: 4 },
+				() =>
+					(context: { messages: unknown[] }, options: { reasoning?: unknown } | undefined, _state: unknown, model: { id: string }) => {
+						asked.push({ model: model.id, reasoning: options?.reasoning });
+						if (model.id === "picked") return fauxAssistantMessage("[1]");
+						received.push(context.messages);
+						return fauxAssistantMessage("ok");
+					},
+			) as never,
+		);
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(base, "auth.json"),
+			modelsPath: join(base, "models.json"),
+		});
+		modelRuntime.registerNativeProvider(faux.provider);
+		await modelRuntime.setRuntimeApiKey("faux-pick", "test");
+		const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: base,
+			agentDir: join(base, "pi"),
+			settingsManager,
+			extensionFactories: [{ name: "smelt-memory", factory: smeltMemoryExtension }],
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+		} as never);
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: base,
+			agentDir: join(base, "pi"),
+			model: faux.getModel("main"),
+			modelRuntime,
+			resourceLoader,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(base),
+			tools: [],
+		});
+		const host = new FakeMemoryHost();
+		host.rerankModel = rerankModel;
+		setMemoryHostTransportForTests(host.transport);
+		const notices: string[] = [];
+		const ui = new Proxy(
+			{ notify: (message: string) => notices.push(message) },
+			{ get: (target, key) => (key in target ? target[key as "notify"] : () => undefined) },
+		);
+		await session.bindExtensions({ uiContext: ui as never, mode: "rpc" });
+		try {
+			await session.prompt(prompt);
+		} finally {
+			session.dispose();
+		}
+		return { asked, notices, received: JSON.stringify(received) };
+	}
+
+	test("a configured rerank model is used for the rerank, with reasoning left off", async () => {
+		const { asked, received } = await runRecallTurn({ provider: "faux-pick", id: "picked" }, "开会的地方在哪");
+		expect(asked[0]).toEqual({ model: "picked", reasoning: undefined });
+		expect(received).toContain("每周二上午十点");
+	});
+
+	test("a configured rerank model that is not available falls back to retrieval with a notice", async () => {
+		const { asked, notices, received } = await runRecallTurn({ provider: "faux-pick", id: "gone" }, "周会在哪开");
+		expect(asked.map((call) => call.model)).toEqual(["main"]);
+		expect(notices.some((notice) => notice.includes("faux-pick/gone") && notice.includes("不可用"))).toBe(true);
+		// 检索层的关键词结果照样附上。
+		expect(received).toContain("每周二上午十点");
 	});
 });

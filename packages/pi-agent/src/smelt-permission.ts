@@ -3,7 +3,11 @@ import {
 	SMELT_ELICITATION_EXTENSION_PATH,
 	SMELT_ELICITATION_TOOL_NAME,
 } from "./elicitation.ts";
-import { consumeApprovedMemoryWrite } from "./memory-extension.ts";
+import {
+	consumeApprovedMemoryWrite,
+	SMELT_MEMORY_EXTENSION_PATH,
+	SMELT_MEMORY_SEARCH_TOOL_NAME,
+} from "./memory-extension.ts";
 
 /** Rust 端据此识别 Smelt 自己的权限请求，不会误吞用户 Extension 的 confirm。 */
 export const SMELT_PERMISSION_TITLE = "smelt.permission.v1";
@@ -19,6 +23,15 @@ function isActualBuiltin(tool: ToolIdentity): boolean {
 	return (
 		tool.sourceInfo.source === "builtin" &&
 		tool.sourceInfo.path === `builtin:${tool.name}`
+	);
+}
+
+/** 记忆检索只读记忆文件，和内建 read 一样免审批；按身份认，同名的用户扩展工具不算。 */
+function isSmeltMemorySearchTool(tool: ToolIdentity): boolean {
+	return (
+		tool.name === SMELT_MEMORY_SEARCH_TOOL_NAME &&
+		tool.sourceInfo.source === "inline" &&
+		tool.sourceInfo.path === SMELT_MEMORY_EXTENSION_PATH
 	);
 }
 
@@ -43,6 +56,9 @@ export function toolNeedsSmeltApproval(tool: ToolIdentity | undefined, _input?: 
 		return true;
 	}
 	if (READ_ONLY_BUILTIN_TOOLS.has(tool.name) && isActualBuiltin(tool)) {
+		return false;
+	}
+	if (isSmeltMemorySearchTool(tool)) {
 		return false;
 	}
 	return !isSmeltElicitationTool(tool);

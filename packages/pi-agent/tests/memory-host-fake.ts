@@ -12,6 +12,10 @@ export class FakeMemoryHost {
 	failWrites = false;
 	/** 智能体是否开着记忆；关着时 meta 为空、写入被拒。 */
 	enabled = true;
+	/** 用户配置的向量检索服务。 */
+	embedding: { base_url: string; model: string; api_key?: string } | undefined;
+	/** 用户指定的重排模型。 */
+	rerankModel: { provider: string; id: string } | undefined;
 
 	/** 按 daemon `agent.memory.*` 控制方法的契约应答；失败返回 undefined。 */
 	readonly transport: MemoryHostTransport = async (method, params) => {
@@ -27,6 +31,8 @@ export class FakeMemoryHost {
 				[...this.provenance[which]].filter(([, value]) => value.trust === "pending").map(([name]) => name);
 			return {
 				enabled: true,
+				embedding: this.embedding,
+				rerank_model: this.rerankModel,
 				agent: {
 					usage: [...this.usage.agent].map(([name, count]) => ({ file: name, read_count: count, last_read_at_ms: 0 })),
 					pending: pending("agent"),

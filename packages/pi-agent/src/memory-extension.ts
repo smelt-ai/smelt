@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import type { ExtensionAPI, SourceInfo } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { clampThinkingLevel, Type } from "@earendil-works/pi-ai";
+import { defineTool, type ExtensionAPI, type ExtensionContext, type SourceInfo } from "@earendil-works/pi-coding-agent";
 import { currentMemoryRoots, memoryRunIsUnattended } from "./agent-memory.ts";
 import { SMELT_BACKGROUND_TASK_EXTENSION_PATH } from "./background-task.ts";
 import { SMELT_ELICITATION_EXTENSION_PATH } from "./elicitation.ts";
@@ -8,8 +10,9 @@ import {
 	type MemoryLayer,
 	type MemoryRoots,
 	type MemorySnapshot,
+	type MemoryEntry,
 	memorySignature,
-	recallRelevantFacts,
+	recallableFacts,
 	renderMemorySnapshot,
 	resolveMemoryTarget,
 	scanMemoryLayer,
@@ -22,12 +25,37 @@ import {
 	recordMemoryRead,
 	recordMemoryWrite,
 } from "./memory-host.ts";
+import {
+	type AskModel,
+	EVERY_TURN_MIN_COVERAGE,
+	FALLBACK_MIN_COVERAGE,
+	LexicalIndex,
+	findConfiguredModel,
+	pickRecallModel,
+	RECALL_MAX_MEMORIES,
+	RERANK_CANDIDATES,
+	renderRecall,
+	rerankCandidates,
+	RERANK_TIMEOUT_MS,
+	rerankWithModel,
+	rrfFuse,
+} from "./memory-recall.ts";
+import { vectorSearch, type VectorSearchResult } from "./memory-embedding.ts";
 
 export const SMELT_MEMORY_EXTENSION_NAME = "smelt-memory";
 /** Pi 结构化系统提示里的分节名，渲染为 `<smelt_memory>…</smelt_memory>`。 */
 export const SMELT_MEMORY_PROMPT_SECTION = "smelt_memory";
-/** 第一轮按问题召回的记忆，作为隐藏的自定义消息跟在用户消息后面。 */
+/** 按问题召回的记忆，作为隐藏的自定义消息跟在用户消息后面。 */
 export const SMELT_MEMORY_RECALL_MESSAGE = "smelt-memory-recall";
+export const SMELT_MEMORY_SEARCH_TOOL_NAME = "memory_search";
+export const SMELT_MEMORY_EXTENSION_PATH = `<inline:${SMELT_MEMORY_EXTENSION_NAME}>`;
+
+/** 重排不可用时，只靠向量命中的记忆要足够像才注入。不同向量模型的分数尺度不同，取保守值。 */
+const VECTOR_FALLBACK_MIN_SIMILARITY = 0.75;
+
+/** 模型重排连续失败这么多次就先停用一段时间，免得每轮都白等超时（OpenClaw 的熔断做法）。 */
+const RERANK_BREAKER_FAILURES = 2;
+const RERANK_BREAKER_COOLDOWN_MS = 10 * 60_000;
 
 /** 已通过记忆校验的调用；smelt-permission 据此免审批，取一次即作废。 */
 const approvedMemoryWrites = new Set<string>();
@@ -53,14 +81,16 @@ function isActualBuiltin(name: string, sourceInfo: SourceInfo | undefined): bool
 
 /**
  * 不会把外部内容带进上下文的工具：Pi 内建工具（bash 也算，见 docs/agent-memory.md 5.4 的取舍）、
- * Smelt 的选择题（答案来自用户）和后台任务（同 bash）。其余——MCP、用户扩展的工具、
+ * Smelt 的选择题（答案来自用户）、后台任务（同 bash）和记忆检索。其余——MCP、用户扩展的工具、
  * 子智能体——的结果都当作外部内容。
  */
 function isTrustedTool(name: string, sourceInfo: SourceInfo | undefined): boolean {
 	if (isActualBuiltin(name, sourceInfo)) return true;
 	return (
 		sourceInfo?.source === "inline" &&
-		(sourceInfo.path === SMELT_ELICITATION_EXTENSION_PATH || sourceInfo.path === SMELT_BACKGROUND_TASK_EXTENSION_PATH)
+		(sourceInfo.path === SMELT_ELICITATION_EXTENSION_PATH ||
+			sourceInfo.path === SMELT_BACKGROUND_TASK_EXTENSION_PATH ||
+			sourceInfo.path === SMELT_MEMORY_EXTENSION_PATH)
 	);
 }
 
@@ -98,8 +128,10 @@ function validate(layer: MemoryLayer, root: string, fileName: string, content: s
  * 折叠进新的开头；恢复旧会话时，新进程渲染出的分节同样以追加方式更新。
  * 不能用 before_agent_start 返回 systemPrompt：那会整段替换请求开头，一变就整段缓存失效。
  *
- * 召回：会话开始和每次压缩后的第一轮，按用户的问题挑出最相关的几条事实，把正文作为隐藏
- * 消息附在这一轮末尾，省一次 read。只追加，不碰系统提示。
+ * 召回：按用户的问题挑出相关的事实，把正文作为隐藏消息附在这一轮末尾，省一次 read；只追加，
+ * 不碰系统提示。会话开始和每次压缩后的第一轮走完整流程（检索 + 便宜模型重排，重排不可用时
+ * 退回检索）；其它轮只用零成本的关键词检索，门槛更严，同一会话已召回过的不再重复。
+ * 另提供 memory_search 工具，让模型自己需要时主动检索。见 docs/agent-memory.md 5.2。
  *
  * 统计：模型 read 记忆文件时记一次使用，用于事实索引超限时决定留哪些，以及在界面上标出
  * 长期没用过的记忆。统计和来源都在 Smelt 主库，由主 daemon 代办（见 memory-host.ts）。
@@ -126,7 +158,17 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 	/** 最近一次从宿主拿到的元数据；拿不到时沿用它，从没拿到过就不注入任何记忆。 */
 	let lastMeta: MemoryHostMeta | undefined;
 	let warnedTruncation = false;
+	/** 下一轮走完整召回（会话开始、压缩之后）。 */
 	let recallPending = false;
+	/** 本会话已经召回过的事实，不再重复附上；压缩后清空。 */
+	const recalled = new Set<string>();
+	const breaker = { failures: 0, openUntil: 0 };
+	/** 向量服务失败时只提示一次；恢复后重置。 */
+	let warnedEmbedding = false;
+	/** 指定的重排模型不可用时只提示一次。 */
+	let warnedRerankModel = "";
+	/** 已经提示过算不出向量的记忆，不重复提示。 */
+	const warnedUnembeddable = new Set<string>();
 
 	function sourceInfoOf(name: string): SourceInfo | undefined {
 		try {
@@ -184,10 +226,197 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 			: { trust: "trusted", reason: "用户在场时写入" };
 	}
 
+	function askModel(context: ExtensionContext, meta: MemoryHostMeta): AskModel | undefined {
+		if (Date.now() < breaker.openUntil || !context.model || !context.modelRegistry) return undefined;
+		let model: typeof context.model | undefined;
+		try {
+			const available = context.modelRegistry.getAvailable();
+			if (meta.rerankModel) {
+				// 用户指定了：就用它；不可用时这次只用检索结果，提示一次，不偷偷换成别的模型。
+				model = findConfiguredModel(available, meta.rerankModel);
+				const label = `${meta.rerankModel.provider}/${meta.rerankModel.id}`;
+				if (!model && warnedRerankModel !== label) {
+					warnedRerankModel = label;
+					context.ui.notify(`设置里指定的重排模型 ${label} 不可用（没登录或已下线），召回只用检索结果`, "warning");
+				}
+			} else {
+				model = pickRecallModel(available, context.model);
+			}
+		} catch {
+			return undefined;
+		}
+		if (!model) return undefined;
+		const chosen = model;
+		// 重排只要一个编号数组：推理压到模型支持的最低档。关不掉推理的模型给足输出余量，免得思考占满。
+		const lowest = clampThinkingLevel(chosen, "off");
+		const reasoning = lowest === "off" ? undefined : lowest;
+		const maxTokens = reasoning ? 2_048 : 200;
+		// 走会话自己的模型注册表：凭据由它解析，models.json 和扩展注册的提供方也能用。
+		return async (system, user, signal) => {
+			const reply = await context.modelRegistry
+				.streamSimple(
+					chosen,
+					{ systemPrompt: system, messages: [{ role: "user", content: user, timestamp: Date.now() }] },
+					{ signal, maxTokens, reasoning },
+				)
+				.result();
+			if (reply.stopReason === "error" || reply.stopReason === "aborted") return undefined;
+			return reply.content
+				.map((part: { type: string; text?: string }) => (part.type === "text" ? (part.text ?? "") : ""))
+				.join("");
+		};
+	}
+
+	/** 检索 + 重排。重排不可用时返回 undefined，调用方按关键词门槛退回。 */
+	async function rerank(
+		context: ExtensionContext,
+		meta: MemoryHostMeta,
+		query: string,
+		facts: readonly MemoryEntry[],
+		ranked: readonly string[],
+		limit: number,
+	): Promise<MemoryEntry[] | undefined> {
+		const ask = askModel(context, meta);
+		if (!ask) return undefined;
+		const candidates = rerankCandidates(facts, ranked);
+		const picked = await rerankWithModel(
+			query,
+			candidates.map((entry) => ({ id: entry.fileName, name: entry.name, description: entry.description, body: entry.body })),
+			limit,
+			ask,
+			RERANK_TIMEOUT_MS,
+		);
+		if (picked === undefined) {
+			breaker.failures++;
+			if (breaker.failures >= RERANK_BREAKER_FAILURES) {
+				breaker.openUntil = Date.now() + RERANK_BREAKER_COOLDOWN_MS;
+				breaker.failures = 0;
+			}
+			return undefined;
+		}
+		breaker.failures = 0;
+		const byName = new Map(candidates.map((entry) => [entry.fileName, entry]));
+		return picked.map((name) => byName.get(name)).filter((entry): entry is MemoryEntry => Boolean(entry));
+	}
+
+	/**
+	 * 检索层：关键词总是跑；配置了向量服务就再跑一路向量，两路用 RRF 融合。
+	 * 向量服务没配或失败，直接只用关键词（失败时提示一次）。
+	 */
+	async function retrieve(
+		context: ExtensionContext,
+		meta: MemoryHostMeta,
+		facts: readonly MemoryEntry[],
+		query: string,
+	): Promise<{ ranked: string[]; lexical: Map<string, number>; vector: Map<string, number> }> {
+		const lexicalHits = new LexicalIndex(facts).search(query, RERANK_CANDIDATES);
+		const lexical = new Map(lexicalHits.map((hit) => [hit.entry.fileName, hit.coverage]));
+		let vectorHits: VectorSearchResult["hits"] | undefined;
+		if (meta.embedding) {
+			try {
+				const result = await vectorSearch(meta.embedding, query, facts, RERANK_CANDIDATES);
+				vectorHits = result.hits;
+				warnedEmbedding = false;
+				const fresh = result.skipped.filter((entry) => !warnedUnembeddable.has(entry.fileName));
+				if (fresh.length > 0) {
+					for (const entry of fresh) warnedUnembeddable.add(entry.fileName);
+					context.ui.notify(
+						`有 ${fresh.length} 条记忆算不出向量（${fresh.map((entry) => entry.name).join("、")}），向量检索时跳过；关键词检索不受影响`,
+						"warning",
+					);
+				}
+			} catch (error) {
+				if (!warnedEmbedding) {
+					warnedEmbedding = true;
+					const reason = error instanceof Error ? error.message : String(error);
+					context.ui.notify(`向量检索不可用（${reason}），已退回关键词检索`, "warning");
+				}
+			}
+		}
+		const vector = new Map((vectorHits ?? []).map((hit) => [hit.entry.fileName, hit.similarity]));
+		const lexicalRanking = lexicalHits.map((hit) => hit.entry.fileName);
+		const ranked = vectorHits
+			? rrfFuse([lexicalRanking, vectorHits.map((hit) => hit.entry.fileName)])
+			: lexicalRanking;
+		return { ranked, lexical, vector };
+	}
+
+	/** 重排不可用时的退回：关键词覆盖率够，或者向量足够像。 */
+	function confident(
+		retrieved: Awaited<ReturnType<typeof retrieve>>,
+		facts: readonly MemoryEntry[],
+		minCoverage: number,
+		limit: number,
+	): MemoryEntry[] {
+		const byName = new Map(facts.map((entry) => [entry.fileName, entry]));
+		return retrieved.ranked
+			.filter(
+				(name) =>
+					(retrieved.lexical.get(name) ?? 0) >= minCoverage ||
+					(retrieved.vector.get(name) ?? 0) >= VECTOR_FALLBACK_MIN_SIMILARITY,
+			)
+			.slice(0, limit)
+			.map((name) => byName.get(name))
+			.filter((entry): entry is MemoryEntry => Boolean(entry));
+	}
+
+	async function recallFor(
+		context: ExtensionContext,
+		roots: MemoryRoots,
+		meta: MemoryHostMeta,
+		query: string,
+		full: boolean,
+	): Promise<MemoryEntry[]> {
+		const facts = recallableFacts(roots, context.cwd, meta.pending.agent).filter(
+			(entry) => !recalled.has(entry.fileName),
+		);
+		if (facts.length === 0 || !query.trim()) return [];
+		if (!full) {
+			// 其它轮只用零成本的关键词，门槛更严。
+			return new LexicalIndex(facts)
+				.search(query, 2)
+				.filter((hit) => hit.coverage >= EVERY_TURN_MIN_COVERAGE)
+				.map((hit) => hit.entry);
+		}
+		const retrieved = await retrieve(context, meta, facts, query);
+		return (
+			(await rerank(context, meta, query, facts, retrieved.ranked, RECALL_MAX_MEMORIES)) ??
+			confident(retrieved, facts, FALLBACK_MIN_COVERAGE, RECALL_MAX_MEMORIES)
+		);
+	}
+
+	if (currentMemoryRoots()) {
+		pi.registerTool(
+			defineTool({
+				name: SMELT_MEMORY_SEARCH_TOOL_NAME,
+				label: "检索记忆",
+				description:
+					"按问题检索长期记忆里的事实（项目约定、资源位置等），返回相关条目的正文。系统提示里只列了事实索引；需要某条的细节、或怀疑有记忆没列出来时用它。",
+				parameters: Type.Object({ query: Type.String({ description: "要找什么，用自然语言描述" }) }),
+				async execute(_toolCallId, params, _signal, _onUpdate, context) {
+					const roots = currentMemoryRoots();
+					const meta = await currentMeta();
+					if (!roots || !meta?.enabled) {
+						return { content: [{ type: "text" as const, text: "这个智能体的记忆不可用（已关闭或暂时连不上）" }], details: {} };
+					}
+					const facts = recallableFacts(roots, context.cwd, meta.pending.agent);
+					const retrieved = await retrieve(context, meta, facts, params.query);
+					const found =
+						(await rerank(context, meta, params.query, facts, retrieved.ranked, 5)) ??
+						confident(retrieved, facts, FALLBACK_MIN_COVERAGE, 5);
+					const text =
+						renderRecall(found, (entry) => join(roots.agent, entry.fileName)) ?? "没有找到相关的记忆";
+					return { content: [{ type: "text" as const, text }], details: { files: found.map((entry) => entry.fileName) } };
+				},
+			}),
+		);
+	}
+
 	pi.on("session_start", async (_event, context) => {
 		const roots = currentMemoryRoots();
 		if (!roots) return;
 		recallPending = true;
+		recalled.clear();
 		const meta = await currentMeta();
 		if (meta && !meta.enabled) return;
 		warnIfTruncated(snapshotFor(roots, context.cwd, meta), (message, type) => context.ui.notify(message, type));
@@ -207,16 +436,21 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		event.systemPromptOptions.sections ??= {};
 		event.systemPromptOptions.sections[SMELT_MEMORY_PROMPT_SECTION] = snapshot.text;
 		warnIfTruncated(snapshot, (message, type) => context.ui.notify(message, type));
-		if (!recallPending || !meta) return;
+		if (!meta) return;
+		const full = recallPending;
 		recallPending = false;
-		const recalled = recallRelevantFacts(roots, context.cwd, event.prompt, meta.pending.agent);
-		if (!recalled) return;
-		return { message: { customType: SMELT_MEMORY_RECALL_MESSAGE, content: recalled, display: false } };
+		const found = await recallFor(context, roots, meta, event.prompt, full);
+		for (const entry of found) recalled.add(entry.fileName);
+		const text = renderRecall(found, (entry) => join(roots.agent, entry.fileName));
+		if (!text) return;
+		return { message: { customType: SMELT_MEMORY_RECALL_MESSAGE, content: text, display: false } };
 	});
 
-	// 压缩会把之前召回的正文压掉，下一轮重新按问题召回。
+	// 压缩会把之前召回的正文压掉，下一轮重新按问题完整召回。
 	pi.on("session_compact", async () => {
-		if (currentMemoryRoots()) recallPending = true;
+		if (!currentMemoryRoots()) return;
+		recallPending = true;
+		recalled.clear();
 	});
 
 	pi.on("tool_call", async (event, context) => {

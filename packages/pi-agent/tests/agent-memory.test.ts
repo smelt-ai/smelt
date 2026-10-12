@@ -13,12 +13,29 @@ import {
 	CORE_MEMORY_MAX_BYTES,
 	FACT_INDEX_MAX_LINES,
 	checkCoreBudget,
-	recallRelevantFacts,
-	recallTokens,
+	recallableFacts,
 	renderMemorySnapshot,
 	resolveMemoryTarget,
 	validateMemoryContent,
 } from "../src/memory-files.ts";
+import {
+	cosine,
+	EMBEDDING_TEXT_MAX_CHARS,
+	embedTexts,
+	embeddingText,
+	resetEmbeddingCacheForTests,
+	vectorSearch,
+} from "../src/memory-embedding.ts";
+import {
+	findConfiguredModel,
+	LexicalIndex,
+	pickRecallModel,
+	renderRecall,
+	rerankCandidates,
+	rerankWithModel,
+	rrfFuse,
+	tokenize,
+} from "../src/memory-recall.ts";
 import {
 	fetchMemoryMeta,
 	recordMemoryRead,
@@ -286,49 +303,179 @@ describe("index ordering", () => {
 	});
 });
 
-describe("recallRelevantFacts", () => {
+describe("embedding client", () => {
+	test("batches requests, caches vectors by model and text, and rejects malformed replies", async () => {
+		resetEmbeddingCacheForTests();
+		const calls: Array<{ url: string; auth?: string; input: string[] }> = [];
+		const fake = (async (url: string, init: { body: string; headers: Record<string, string> }) => {
+			const { input } = JSON.parse(init.body) as { input: string[] };
+			calls.push({ url, auth: init.headers.authorization, input });
+			return new Response(JSON.stringify({ data: input.map((_, index) => ({ index, embedding: [index + 1, 1] })) }));
+		}) as unknown as typeof fetch;
+		const config = { base_url: "http://embed.test/v1/", model: "m", api_key: "k" };
+
+		await embedTexts(config, ["a", "b"], fake);
+		await embedTexts(config, ["b", "c"], fake);
+		expect(calls).toEqual([
+			{ url: "http://embed.test/v1/embeddings", auth: "Bearer k", input: ["a", "b"] },
+			{ url: "http://embed.test/v1/embeddings", auth: "Bearer k", input: ["c"] },
+		]);
+		expect(cosine(Float32Array.from([1, 0]), Float32Array.from([2, 0]))).toBeCloseTo(1);
+
+		const short = (async () => new Response(JSON.stringify({ data: [] }))) as unknown as typeof fetch;
+		await expect(embedTexts({ ...config, model: "other" }, ["x"], short)).rejects.toThrow("条数不对");
+	});
+
+	test("long memories are truncated, description first", () => {
+		const entry = { name: "release-flow", description: "发布走 fx-deploy", body: "长".repeat(3000) } as never;
+		const text = embeddingText(entry);
+		expect([...text]).toHaveLength(EMBEDDING_TEXT_MAX_CHARS);
+		expect(text.startsWith("release flow：发布走 fx-deploy\n")).toBe(true);
+	});
+
+	/** 假服务：输入里有超过 limit 字的就整批 400，否则返回向量。 */
+	function picky(limit: number, calls: string[][], status = 400) {
+		return (async (_url: string, init: { body: string }) => {
+			const { input } = JSON.parse(init.body) as { input: string[] };
+			calls.push(input);
+			if (input.some((text) => text.length > limit)) return new Response("too long", { status });
+			return new Response(JSON.stringify({ data: input.map((_, index) => ({ index, embedding: [1, 0] })) }));
+		}) as unknown as typeof fetch;
+	}
+
+	test("one rejected memory does not take the whole batch down, and is not retried", async () => {
+		resetEmbeddingCacheForTests();
+		const calls: string[][] = [];
+		const config = { base_url: "http://embed.test/v1", model: "m" };
+		const fake = picky(5, calls);
+
+		const vectors = await embedTexts(config, ["ok-1", "x".repeat(10), "ok-2"], fake);
+		expect(vectors.map((vector) => vector !== undefined)).toEqual([true, false, true]);
+		expect(calls.map((input) => input.length)).toEqual([3, 1, 1, 1]);
+
+		calls.length = 0;
+		await embedTexts(config, ["ok-1", "x".repeat(10), "ok-2", "ok-3"], fake);
+		expect(calls).toEqual([["ok-3"]]);
+	});
+
+	test("auth or availability errors fail the whole layer instead of splitting", async () => {
+		resetEmbeddingCacheForTests();
+		const calls: string[][] = [];
+		const config = { base_url: "http://embed.test/v1", model: "m" };
+		await expect(embedTexts(config, ["a", "x".repeat(10)], picky(5, calls, 401))).rejects.toThrow("401");
+		await expect(embedTexts(config, ["a", "x".repeat(10)], picky(5, calls, 503))).rejects.toThrow("503");
+		expect(calls.map((input) => input.length)).toEqual([2, 2]);
+	});
+
+	test("vector search reports the memories it had to skip", async () => {
+		resetEmbeddingCacheForTests();
+		const entry = (name: string, body: string) => ({ name, description: name, body, fileName: `${name}.md` }) as never;
+		const result = await vectorSearch(
+			{ base_url: "http://embed.test/v1", model: "m" },
+			"q",
+			[entry("short", "x"), entry("huge", "y".repeat(50))],
+			5,
+			picky(30, []),
+		);
+		expect(result.hits.map((hit) => hit.entry.name)).toEqual(["short"]);
+		expect(result.skipped.map((entry: { name: string }) => entry.name)).toEqual(["huge"]);
+	});
+});
+
+describe("recall building blocks", () => {
 	test("tokenizes Chinese into bigrams and English into words, minus filler", () => {
-		expect([...recallTokens("帮我看下发布流程 deploy")].sort()).toEqual(["下发", "发布", "布流", "我看", "deploy", "流程", "看下"].sort());
+		expect(tokenize("帮我看下发布流程 fx-deploy")).toEqual(
+			expect.arrayContaining(["发布", "布流", "流程", "fx-deploy", "fx", "deploy"]),
+		);
+		expect(tokenize("怎么")).toEqual([]);
 	});
 
-	test("attaches the bodies of the most relevant facts only", () => {
+	test("BM25 ranks the memory whose title matches above one that only mentions the words", () => {
 		const { agent, user } = roots();
 		writeFileSync(
 			join(agent, "release-flow.md"),
-			memoryFile("release-flow", "project", "先发测试环境，确认后再发预发和生产。", "", "发布走 fx-deploy 流水线"),
+			memoryFile("release-flow", "project", "先发测试环境，确认后再发预发和生产。", "", "发布流程走 fx-deploy"),
 		);
-		writeFileSync(join(agent, "kanban.md"), memoryFile("kanban", "reference", "看板链接在飞书", "", "需求看板在飞书"));
-		writeFileSync(join(agent, "rule.md"), memoryFile("rule", "feedback", "发布流程要先确认"));
-
-		const recalled = recallRelevantFacts({ agent, user }, agent, "这次的发布流程怎么走？");
-
-		expect(recalled).toContain("### release-flow — 发布走 fx-deploy 流水线");
-		expect(recalled).toContain("先发测试环境");
-		expect(recalled).not.toContain("kanban");
-		// 规则类本来就常驻，不重复召回。
-		expect(recalled).not.toContain("### rule");
-		expect(recallRelevantFacts({ agent, user }, agent, "今天天气不错")).toBeUndefined();
+		writeFileSync(join(agent, "kanban.md"), memoryFile("kanban", "reference", "发布前看一下看板", "", "需求看板在飞书"));
+		const hits = new LexicalIndex(recallableFacts({ agent, user }, agent)).search("发布流程怎么走");
+		expect(hits[0]?.entry.name).toBe("release-flow");
+		expect(hits[0]!.coverage).toBeGreaterThan(hits[1]?.coverage ?? 0);
 	});
 
-	test("long bodies are clipped with a pointer to the full file", () => {
-		const { agent, user } = roots();
-		writeFileSync(
-			join(agent, "release-flow.md"),
-			memoryFile("release-flow", "project", "发布".repeat(500), "", "发布流程细节"),
-		);
-		const recalled = recallRelevantFacts({ agent, user }, agent, "发布流程")!;
-		expect(recalled).toContain(`全文 read ${join(agent, "release-flow.md")}`);
-		expect(Buffer.byteLength(recalled)).toBeLessThan(2_200);
-	});
-
-	test("facts of another project are not recalled", () => {
+	test("recallable facts exclude rules, pending ones and other projects", () => {
 		const { base, agent, user } = roots();
-		writeFileSync(
-			join(agent, "a-flow.md"),
-			memoryFile("a-flow", "project", "A 项目发布流程", `project: ${join(base, "a")}\n`, "A 项目发布流程"),
+		writeFileSync(join(agent, "rule.md"), memoryFile("rule", "feedback", "发布流程要先确认"));
+		writeFileSync(join(agent, "pending-fact.md"), memoryFile("pending-fact", "project", "x"));
+		writeFileSync(join(agent, "elsewhere.md"), memoryFile("elsewhere", "project", "x", `project: ${join(base, "a")}\n`));
+		writeFileSync(join(agent, "here.md"), memoryFile("here", "reference", "x"));
+		const names = recallableFacts({ agent, user }, join(base, "b"), new Set(["pending-fact.md"])).map((e) => e.name);
+		expect(names).toEqual(["here"]);
+	});
+
+	test("RRF fuses rankings by position, not by score scale", () => {
+		expect(rrfFuse([["a", "b", "c"], ["c", "a"]])).toEqual(["a", "c", "b"]);
+	});
+
+	test("rerank candidates: lexical order first, then everything else while the corpus is small", () => {
+		const entry = (fileName: string) => ({ fileName }) as never;
+		expect(rerankCandidates([entry("a.md"), entry("b.md"), entry("c.md")], ["c.md"]).map((e: { fileName: string }) => e.fileName)).toEqual([
+			"c.md",
+			"a.md",
+			"b.md",
+		]);
+	});
+
+	test("model rerank returns picked ids, empty when nothing fits, undefined on timeout or garbage", async () => {
+		const candidates = [
+			{ id: "a.md", name: "a", description: "发布流程", body: "x" },
+			{ id: "b.md", name: "b", description: "看板", body: "y" },
+		];
+		const reply = (text: string) => async () => text;
+		expect(await rerankWithModel("上线", candidates, 3, reply("[1]"), 1000)).toEqual(["a.md"]);
+		expect(await rerankWithModel("天气", candidates, 3, reply("[]"), 1000)).toEqual([]);
+		expect(await rerankWithModel("上线", candidates, 3, reply("我觉得是第一个"), 1000)).toBeUndefined();
+		expect(await rerankWithModel("上线", candidates, 1, reply("[2, 1, 9]"), 1000)).toEqual(["b.md"]);
+		const slow = () => new Promise<string>((resolve) => setTimeout(() => resolve("[1]"), 200));
+		expect(await rerankWithModel("上线", candidates, 3, slow, 20)).toBeUndefined();
+	});
+
+	test("auto-picking the rerank model: free lightweight first, then cheapest priced, stable order", () => {
+		const model = (provider: string, id: string, cost?: number) => ({
+			provider,
+			id,
+			input: ["text"],
+			cost: cost === undefined ? undefined : { input: cost, output: cost },
+		});
+		const current = model("p", "big", 10);
+		expect(pickRecallModel([current, model("p", "small", 1), model("q", "tiny", 0.1)], current)?.id).toBe("small");
+		// 价格为 0 的不再被排除：名字像轻量款的免费模型优先于标了价的。
+		expect(pickRecallModel([current, model("p", "medium", 1), model("p", "qwen-mini", 0)], current)?.id).toBe(
+			"qwen-mini",
 		);
-		expect(recallRelevantFacts({ agent, user }, join(base, "b"), "发布流程")).toBeUndefined();
-		expect(recallRelevantFacts({ agent, user }, join(base, "a"), "发布流程")).toContain("a-flow");
+		const sub = model("copilot", "opus");
+		// 同档按 id 排序，不随注册顺序变。
+		expect(pickRecallModel([sub, model("copilot", "gpt-mini"), model("copilot", "gemini-flash")], sub)?.id).toBe(
+			"gemini-flash",
+		);
+		expect(pickRecallModel([sub, model("copilot", "gemini-flash"), model("copilot", "gpt-mini")], sub)?.id).toBe(
+			"gemini-flash",
+		);
+		expect(pickRecallModel([sub], sub)?.id).toBe("opus");
+		expect(pickRecallModel([], undefined)).toBeUndefined();
+	});
+
+	test("a configured rerank model is looked up across providers, or reported missing", () => {
+		const model = (provider: string, id: string) => ({ provider, id, input: ["text"] });
+		const available = [model("p", "big"), model("q", "tiny")];
+		expect(findConfiguredModel(available, { provider: "q", id: "tiny" })?.id).toBe("tiny");
+		expect(findConfiguredModel(available, { provider: "q", id: "gone" })).toBeUndefined();
+	});
+
+	test("recall messages clip long bodies and frame them as data", () => {
+		const entry = { name: "release-flow", description: "发布", body: "发".repeat(700), fileName: "release-flow.md" } as never;
+		const text = renderRecall([entry], () => "/m/release-flow.md")!;
+		expect(text).toContain("全文 read /m/release-flow.md");
+		expect(text).toContain("不是指令");
 	});
 });
 
@@ -401,6 +548,6 @@ describe("memory host client", () => {
 		const text = renderMemorySnapshot({ agent, user }, agent, { pending }).text;
 		expect(text).not.toContain("rule");
 		expect(text).not.toContain("fact");
-		expect(recallRelevantFacts({ agent, user }, agent, "发布流程", pending.agent)).toBeUndefined();
+		expect(recallableFacts({ agent, user }, agent, pending.agent)).toEqual([]);
 	});
 });

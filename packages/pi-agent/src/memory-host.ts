@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
+import type { EmbeddingConfig } from "./memory-embedding.ts";
 import type { MemoryLayer } from "./memory-files.ts";
 
 /**
@@ -18,6 +19,10 @@ export type MemoryProvenance = { trust: MemoryTrust; reason: string };
 export type MemoryHostMeta = {
 	/** 智能体当前是否开着记忆。会话启动后用户可能在配置页关掉。 */
 	enabled: boolean;
+	/** 用户配置的向量检索服务；没配为空。 */
+	embedding?: EmbeddingConfig;
+	/** 用户指定的重排模型；没指定为空（自动挑）。 */
+	rerankModel?: { provider: string; id: string };
 	usage: Map<string, MemoryUsage>;
 	pending: { agent: Set<string>; user: Set<string> };
 };
@@ -82,11 +87,19 @@ export function setMemoryHostTransportForTests(next: MemoryHostTransport | undef
 export async function fetchMemoryMeta(): Promise<MemoryHostMeta | undefined> {
 	type Layer = { usage?: Array<{ file: string; read_count: number; last_read_at_ms: number }>; pending?: string[] };
 	const result = (await transport("agent.memory.meta", {})) as
-		| { enabled?: boolean; agent?: Layer; user?: Layer }
+		| {
+				enabled?: boolean;
+				agent?: Layer;
+				user?: Layer;
+				embedding?: EmbeddingConfig;
+				rerank_model?: { provider: string; id: string };
+		  }
 		| undefined;
 	if (!result) return undefined;
 	return {
 		enabled: result.enabled === true,
+		embedding: result.embedding?.base_url && result.embedding.model ? result.embedding : undefined,
+		rerankModel: result.rerank_model?.provider && result.rerank_model.id ? result.rerank_model : undefined,
 		usage: new Map(
 			(result.agent?.usage ?? []).map((record) => [
 				record.file,
