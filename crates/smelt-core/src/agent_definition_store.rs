@@ -7,7 +7,7 @@ use crate::agent_definition::AgentDefinition;
 use crate::agent_kind::{
     ConversationAgentKind, ConversationLaunchSpec, SMELT_AGENT_INSTRUCTIONS_ENV,
     SMELT_AGENT_MEMORY_DIR_ENV, SMELT_AGENT_MODEL_ID_ENV, SMELT_AGENT_MODEL_PROVIDER_ENV,
-    SMELT_AGENT_PLUGIN_ARGS_ENV, SMELT_USER_MEMORY_DIR_ENV,
+    SMELT_AGENT_PLUGIN_ARGS_ENV, SMELT_AGENT_UNATTENDED_ENV, SMELT_USER_MEMORY_DIR_ENV,
 };
 use crate::automation::AutomationAction;
 use crate::sqlite_state;
@@ -211,6 +211,8 @@ pub fn prepare_agent_definition_launch(
         &mut launch,
         definition.map(|definition| definition.id.as_str()),
     );
+    // 有人值守是默认；只有自动化运行在拿到启动参数后再标成无人值守。
+    launch.env.remove(SMELT_AGENT_UNATTENDED_ENV);
     // 只要是产品智能体就走勾选式加载。哪怕一个都没勾也要下发参数，因为那时
     // 需要的恰恰是「关掉 Pi 的自动发现」——不下发就等于全量加载。
     if let Some(definition) = definition {
@@ -1211,11 +1213,13 @@ mod tests {
     #[test]
     fn product_agent_launch_carries_both_memory_directories() {
         let definition = definition_with_context(&[], &[]);
+        // 有人值守是默认：只有自动化运行在拿到启动参数后才加上无人值守标记。
+        let stale = ConversationAgentKind::Pi
+            .default_launch()
+            .with_env(SMELT_AGENT_UNATTENDED_ENV, "1");
 
-        let launch = prepare_agent_definition_launch(
-            ConversationAgentKind::Pi.default_launch(),
-            Some(&definition),
-        );
+        let launch = prepare_agent_definition_launch(stale, Some(&definition));
+        assert_eq!(launch.env.get(SMELT_AGENT_UNATTENDED_ENV), None);
 
         let agent_dir = agent_memory_dir("space-agent").unwrap();
         let user_dir = user_memory_dir().unwrap();

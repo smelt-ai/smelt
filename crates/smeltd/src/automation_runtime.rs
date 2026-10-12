@@ -382,6 +382,11 @@ impl Driver {
                     instructions.clone(),
                 );
             }
+            // 自动化没人在场：它写的记忆进"待确认"，用户在记忆卡片里采纳后才生效。
+            execution.launch.env.insert(
+                smelt_core::agent_kind::SMELT_AGENT_UNATTENDED_ENV.to_string(),
+                "1".to_string(),
+            );
             let session_id = match run.session_id.clone() {
                 Some(session_id) => session_id,
                 None => {

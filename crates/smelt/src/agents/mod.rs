@@ -125,15 +125,15 @@ pub(crate) struct AgentMemories {
 
 impl AgentMemories {
     pub(crate) fn scan(agent_id: &str) -> Self {
-        let list = |dir: Option<std::path::PathBuf>| {
-            dir.map(|dir| smelt_core::agent_memory::list_memories(&dir))
+        let list = |layer: MemoryLayer| {
+            layer
+                .dir(agent_id)
+                .map(|dir| smelt_core::agent_memory::list_memories(&dir, &layer.scope(agent_id)))
                 .unwrap_or_default()
         };
         Self {
-            agent: list(smelt_core::agent_definition_store::agent_memory_dir(
-                agent_id,
-            )),
-            user: list(smelt_core::agent_definition_store::user_memory_dir()),
+            agent: list(MemoryLayer::Agent),
+            user: list(MemoryLayer::User),
         }
     }
 }
@@ -145,6 +145,13 @@ pub(crate) enum MemoryLayer {
 }
 
 impl MemoryLayer {
+    pub(crate) fn scope(self, agent_id: &str) -> smelt_core::agent_memory::MemoryScope {
+        match self {
+            Self::Agent => smelt_core::agent_memory::MemoryScope::Agent(agent_id.to_string()),
+            Self::User => smelt_core::agent_memory::MemoryScope::User,
+        }
+    }
+
     pub(crate) fn dir(self, agent_id: &str) -> Option<std::path::PathBuf> {
         match self {
             Self::Agent => smelt_core::agent_definition_store::agent_memory_dir(agent_id),
@@ -2539,7 +2546,7 @@ fn agent_memory_section(
                         .text_xs()
                         .font_medium()
                         .text_color(rgb(crate::ui_theme::text_muted()))
-                        .child(format!("{title} · {} 条", listing.entries.len())),
+                        .child(memory_section_title(title, listing)),
                 )
                 .child(open_folder),
         )
@@ -2560,6 +2567,19 @@ fn agent_memory_section(
         .into_any_element()
 }
 
+fn memory_section_title(title: &str, listing: &smelt_core::agent_memory::MemoryListing) -> String {
+    let pending = listing
+        .entries
+        .iter()
+        .filter(|entry| entry.pending_reason.is_some())
+        .count();
+    if pending == 0 {
+        format!("{title} · {} 条", listing.entries.len())
+    } else {
+        format!("{title} · {} 条，{pending} 条待确认", listing.entries.len())
+    }
+}
+
 fn memory_kind_label(kind: Option<&str>) -> &'static str {
     match kind {
         Some("user") => "关于你",
@@ -2570,8 +2590,11 @@ fn memory_kind_label(kind: Option<&str>) -> &'static str {
     }
 }
 
-/// 行尾的使用情况：长期没用的事实标红，提示用户考虑删掉；用过的显示次数。
+/// 行尾的状态：待确认和长期没用的标红，提示用户处理；用过的显示次数。
 fn memory_usage_label(entry: &smelt_core::agent_memory::MemoryEntry) -> Option<(String, bool)> {
+    if entry.pending_reason.is_some() {
+        return Some(("待确认".to_string(), true));
+    }
     if entry.stale {
         return Some(("长期未用".to_string(), true));
     }
@@ -2589,11 +2612,15 @@ fn agent_memory_row(
     let open_entity = entity.clone();
     let remove_agent = agent_id.to_string();
     let remove_file = entry.file_name.clone();
-    let subtitle = if entry.description.is_empty() {
-        entry.file_name.clone()
-    } else {
-        entry.description.clone()
+    let subtitle = match &entry.pending_reason {
+        // 待确认时把原因放在描述前面，用户采纳前能看到它为什么没生效。
+        Some(reason) => format!("{reason}：{}", entry.description),
+        None if entry.description.is_empty() => entry.file_name.clone(),
+        None => entry.description.clone(),
     };
+    let approve_agent = agent_id.to_string();
+    let approve_file = entry.file_name.clone();
+    let approve_entity = entity.clone();
     div()
         .px_3()
         .py_1p5()
@@ -2654,6 +2681,24 @@ fn agent_memory_row(
                     });
                 }),
         )
+        .when(entry.pending_reason.is_some(), |row| {
+            row.child(
+                compact_chip(format!(
+                    "agent-memory-approve-{layer_key}-{}",
+                    entry.file_name
+                ))
+                .xsmall()
+                .icon(IconName::Check)
+                .tooltip("采纳：之后的对话会用到这条记忆")
+                .on_click(move |_, _, cx| {
+                    let agent_id = approve_agent.clone();
+                    let file_name = approve_file.clone();
+                    approve_entity.update(cx, |workspace, cx| {
+                        workspace.approve_agent_memory(agent_id, layer, file_name, cx)
+                    });
+                }),
+            )
+        })
         .child(
             compact_chip(format!(
                 "agent-memory-remove-{layer_key}-{}",

@@ -174,6 +174,7 @@
 mod acp_host;
 mod acp_registry;
 mod acp_runtime_host;
+mod agent_memory_control;
 mod automation_runtime;
 mod control;
 mod event_hub;

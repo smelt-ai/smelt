@@ -225,13 +225,16 @@ pub const SMELT_AGENT_MODEL_ID_ENV: &str = "SMELT_AGENT_MODEL_ID";
 /// 启动器消费后立刻删除：子智能体和工具子进程都不该读写记忆。见 `docs/agent-memory.md`。
 pub const SMELT_AGENT_MEMORY_DIR_ENV: &str = "SMELT_AGENT_MEMORY_DIR";
 pub const SMELT_USER_MEMORY_DIR_ENV: &str = "SMELT_USER_MEMORY_DIR";
+/// 无人值守的运行（自动化）。这类会话写的记忆一律进"待确认"，用户采纳后才生效。
+pub const SMELT_AGENT_UNATTENDED_ENV: &str = "SMELT_AGENT_UNATTENDED";
 
 /// 产品智能体的启动身份。设置刷新可以替换命令和普通 env，但不能丢掉它们，
 /// 否则重启后的会话就退化成普通 Pi 会话。
-pub const SMELT_AGENT_LAUNCH_IDENTITY_ENVS: [&str; 3] = [
+pub const SMELT_AGENT_LAUNCH_IDENTITY_ENVS: [&str; 4] = [
     SMELT_AGENT_INSTRUCTIONS_ENV,
     SMELT_AGENT_MEMORY_DIR_ENV,
     SMELT_USER_MEMORY_DIR_ENV,
+    SMELT_AGENT_UNATTENDED_ENV,
 ];
 
 /// 一家 ACP agent 的全部静态属性。**新增一种 agent = `CONVERSATION_AGENTS` 加一行 +

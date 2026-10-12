@@ -334,11 +334,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.agent_surface.error = match layer.dir(&agent_id) {
-            Some(dir) => smelt_core::agent_memory::delete_memory(&dir, &file_name)
-                .map_err(|error| format!("删除记忆失败：{error}"))
-                .err(),
+            Some(dir) => {
+                smelt_core::agent_memory::delete_memory(&dir, &layer.scope(&agent_id), &file_name)
+            }
+            .map_err(|error| format!("删除记忆失败：{error}"))
+            .err(),
             None => Some("找不到记忆目录".to_string()),
         };
+        self.refresh_agent_memories(cx);
+    }
+
+    pub(super) fn approve_agent_memory(
+        &mut self,
+        agent_id: String,
+        layer: MemoryLayer,
+        file_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.error =
+            smelt_core::agent_memory::approve_memory(&layer.scope(&agent_id), &file_name)
+                .map_err(|error| format!("采纳记忆失败：{error}"))
+                .err();
         self.refresh_agent_memories(cx);
     }
 
