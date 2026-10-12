@@ -21,6 +21,7 @@ import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-cod
 import {
 	SMELT_AGENT_MEMORY_DIR_ENV,
 	SMELT_USER_MEMORY_DIR_ENV,
+	SMELT_AGENT_UNATTENDED_ENV,
 	consumeAgentMemory,
 	resetMemoryRootsForTests,
 } from "../src/agent-memory.ts";
@@ -28,16 +29,21 @@ import smeltMemoryExtension, {
 	SMELT_MEMORY_PROMPT_SECTION,
 	SMELT_MEMORY_RECALL_MESSAGE,
 } from "../src/memory-extension.ts";
-import { readMemoryUsage } from "../src/memory-usage.ts";
+import { SMELT_BACKGROUND_TASK_EXTENSION_PATH } from "../src/background-task.ts";
+import { SMELT_ELICITATION_EXTENSION_PATH } from "../src/elicitation.ts";
+import { setMemoryHostTransportForTests } from "../src/memory-host.ts";
+import { FakeMemoryHost } from "./memory-host-fake.ts";
+import { SMELT_SUBAGENT_EXTENSION_PATH } from "../src/subagent/index.ts";
 import { SMELT_EXTENSION_FACTORIES } from "../src/runtime-extensions.ts";
 
 const temps: string[] = [];
 afterEach(() => {
 	for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 	resetMemoryRootsForTests();
+	setMemoryHostTransportForTests(undefined);
 });
 
-function setupRoots(options: { consume?: boolean } = {}) {
+function setupRoots(options: { consume?: boolean; unattended?: boolean } = {}) {
 	const base = realpathSync(mkdtempSync(join(tmpdir(), "smelt-memory-ext-")));
 	temps.push(base);
 	const agent = join(base, "agents", "writer", "memory");
@@ -45,7 +51,11 @@ function setupRoots(options: { consume?: boolean } = {}) {
 	mkdirSync(agent, { recursive: true });
 	mkdirSync(user, { recursive: true });
 	if (options.consume !== false) {
-		consumeAgentMemory({ [SMELT_AGENT_MEMORY_DIR_ENV]: agent, [SMELT_USER_MEMORY_DIR_ENV]: user });
+		consumeAgentMemory({
+			[SMELT_AGENT_MEMORY_DIR_ENV]: agent,
+			[SMELT_USER_MEMORY_DIR_ENV]: user,
+			[SMELT_AGENT_UNATTENDED_ENV]: options.unattended ? "1" : undefined,
+		});
 	}
 	return { base, agent, user };
 }
@@ -61,7 +71,8 @@ function inlineFactory(input: InlineExtension): ExtensionFactory {
 	return typeof input === "function" ? input : input.factory;
 }
 
-async function createRunner(options: { spoofWrite?: boolean } = {}) {
+async function createRunner(options: { spoofWrite?: boolean; host?: FakeMemoryHost } = {}) {
+	const host = options.host ?? new FakeMemoryHost();
 	const runtime = createExtensionRuntime();
 	const extensions = await Promise.all(
 		SMELT_EXTENSION_FACTORIES.map((input, index) =>
@@ -75,17 +86,28 @@ async function createRunner(options: { spoofWrite?: boolean } = {}) {
 		),
 	);
 	const runner = new ExtensionRunner(extensions, runtime, process.cwd(), {} as never, {} as never);
-	runtime.getAllTools = () =>
-		["read", "write", "edit", "bash"].map((name) => ({
+	const inlineSource = (path: string): SourceInfo => ({ path, source: "inline", scope: "temporary", origin: "top-level" });
+	const extraTools: Array<[string, SourceInfo]> = [
+		["web_search", { path: "/tmp/web-search.ts", source: "local", scope: "user", origin: "top-level" }],
+		["smelt_ask_user", inlineSource(SMELT_ELICITATION_EXTENSION_PATH)],
+		["background_task", inlineSource(SMELT_BACKGROUND_TASK_EXTENSION_PATH)],
+		["subagent", inlineSource(SMELT_SUBAGENT_EXTENSION_PATH)],
+	];
+	runtime.getAllTools = () => [
+		...["read", "write", "edit", "bash"].map((name): [string, SourceInfo] => [
 			name,
-			description: name,
-			parameters: {} as never,
-			exposure: "direct" as const,
-			sourceInfo:
-				options.spoofWrite && name === "write"
-					? { path: "/tmp/user-write.ts", source: "local", scope: "user", origin: "top-level" }
-					: builtinSource(name),
-		}));
+			options.spoofWrite && name === "write"
+				? { path: "/tmp/user-write.ts", source: "local", scope: "user", origin: "top-level" }
+				: builtinSource(name),
+		]),
+		...extraTools,
+	].map(([name, sourceInfo]) => ({
+		name,
+		description: name,
+		parameters: {} as never,
+		exposure: "direct" as const,
+		sourceInfo,
+	}));
 	const confirms: unknown[] = [];
 	const notices: string[] = [];
 	runner.setUIContext({
@@ -95,8 +117,9 @@ async function createRunner(options: { spoofWrite?: boolean } = {}) {
 		},
 		notify: (message: string) => notices.push(message),
 	} as unknown as ExtensionUIContext);
+	setMemoryHostTransportForTests(host.transport);
 	await runner.emit({ type: "session_start", reason: "startup" });
-	return { runner, confirms, notices };
+	return { runner, confirms, notices, host };
 }
 
 async function memorySectionFor(runner: ExtensionRunner) {
@@ -344,7 +367,7 @@ describe("smelt-memory extension", () => {
 	test("reading a memory file with the built-in read tool counts as a use", async () => {
 		const { agent } = setupRoots();
 		writeFileSync(join(agent, "reply-in-chinese.md"), validMemory);
-		const { runner } = await createRunner();
+		const { runner, host } = await createRunner();
 		const read = (path: string, isError = false) =>
 			runner.emitToolResult({
 				type: "tool_result",
@@ -360,7 +383,167 @@ describe("smelt-memory extension", () => {
 		await read(join(agent, "reply-in-chinese.md"), true);
 		await read(join(agent, "..", "elsewhere.md"));
 
-		expect(readMemoryUsage(agent).get("reply-in-chinese.md")?.readCount).toBe(1);
+		expect(host.usage.agent.get("reply-in-chinese.md")).toBe(1);
+	});
+
+	describe("provenance", () => {
+		const turn = (runner: ExtensionRunner, prompt = "hi") =>
+			runner.emitBeforeAgentStart(prompt, undefined, { cwd: process.cwd() });
+		const toolResult = (runner: ExtensionRunner, toolCallId: string, toolName: string, input: Record<string, unknown> = {}) =>
+			runner.emitToolResult({
+				type: "tool_result",
+				toolCallId,
+				toolName,
+				input,
+				content: [{ type: "text", text: "ok" }],
+				details: undefined,
+				isError: false,
+			});
+		async function writeMemory(runner: ExtensionRunner, agent: string, name: string, id: string) {
+			const path = join(agent, `${name}.md`);
+			const content = validMemory.replace("reply-in-chinese", name);
+			const call = await runner.emitToolCall({ type: "tool_call", toolCallId: id, toolName: "write", input: { path, content } });
+			expect(call?.block).toBeFalsy();
+			writeFileSync(path, content);
+			return toolResult(runner, id, "write", { path, content });
+		}
+
+		test("a clean turn writes trusted memory and reports it when the run ends", async () => {
+			const { agent } = setupRoots();
+			const { runner, notices, host } = await createRunner();
+			await turn(runner);
+			const result = await writeMemory(runner, agent, "clean", "w1");
+			await runner.emit({ type: "agent_end", messages: [] } as never);
+
+			expect(result?.content).toBeUndefined();
+			expect(host.provenance.agent.get("clean.md")?.trust).toBe("trusted");
+			expect(notices.at(-1)).toBe("记忆：记住了 1 条");
+		});
+
+		test("after an external tool result in the same turn, writes are pending and not injected", async () => {
+			const { agent } = setupRoots();
+			const { runner, notices, host } = await createRunner();
+			await turn(runner);
+			// 选择题、bash、后台任务不算外部内容；网页搜索这类扩展工具、子智能体算。
+			await toolResult(runner, "t0", "smelt_ask_user");
+			await toolResult(runner, "t1", "bash");
+			await toolResult(runner, "t2", "background_task");
+			await writeMemory(runner, agent, "before-search", "w0");
+			await toolResult(runner, "t3", "web_search");
+			const result = await writeMemory(runner, agent, "after-search", "w1");
+			await runner.emit({ type: "agent_end", messages: [] } as never);
+
+			expect(host.provenance.agent.get("before-search.md")?.trust).toBe("trusted");
+			expect(host.provenance.agent.get("after-search.md")).toMatchObject({
+				trust: "pending",
+				reason: expect.stringContaining("web_search"),
+			});
+			expect(JSON.stringify(result?.content)).toContain("待确认");
+			expect(notices.at(-1)).toBe("记忆：记住了 1 条；1 条待确认，在智能体的记忆卡片里采纳后生效");
+
+			const section = (await turn(runner))?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION];
+			expect(section).toContain("before-search");
+			expect(section).not.toContain("after-search");
+		});
+
+		test("the next user message clears the mark; subagent results count as external", async () => {
+			const { agent } = setupRoots();
+			const { runner, host } = await createRunner();
+			await turn(runner);
+			await toolResult(runner, "s1", "subagent");
+			await writeMemory(runner, agent, "tainted", "w1");
+			await turn(runner, "记住这个");
+			await writeMemory(runner, agent, "clean", "w2");
+
+			expect(host.provenance.agent.get("tainted.md")?.trust).toBe("pending");
+			expect(host.provenance.agent.get("clean.md")?.trust).toBe("trusted");
+		});
+
+		test("unattended runs only ever write pending memory", async () => {
+			const { agent } = setupRoots({ unattended: true });
+			const { runner, host } = await createRunner();
+			await turn(runner);
+			await writeMemory(runner, agent, "from-automation", "w1");
+			expect(host.provenance.agent.get("from-automation.md")).toMatchObject({
+				trust: "pending",
+				reason: expect.stringContaining("自动化"),
+			});
+		});
+
+		test("editing a pending memory in a clean turn keeps it pending; rewriting it whole does not", async () => {
+			const { agent } = setupRoots();
+			const path = join(agent, "rule.md");
+			const { runner, host } = await createRunner();
+			await turn(runner);
+			await toolResult(runner, "t", "web_search");
+			await writeMemory(runner, agent, "rule", "w1");
+			await turn(runner);
+
+			const editInput = { path, edits: [{ oldText: "回复用中文。", newText: "回复一律用中文。" }] };
+			await runner.emitToolCall({ type: "tool_call", toolCallId: "e1", toolName: "edit", input: editInput });
+			writeFileSync(path, validMemory.replace("reply-in-chinese", "rule").replace("回复用中文。", "回复一律用中文。"));
+			await toolResult(runner, "e1", "edit", editInput);
+			expect(host.provenance.agent.get("rule.md")?.trust).toBe("pending");
+
+			await writeMemory(runner, agent, "rule", "w2");
+			expect(host.provenance.agent.get("rule.md")?.trust).toBe("trusted");
+		});
+
+		test("a pending write whose provenance cannot be recorded is undone", async () => {
+			const { agent } = setupRoots();
+			const { runner, host } = await createRunner();
+			host.failWrites = true;
+			await turn(runner);
+			await toolResult(runner, "t", "web_search");
+			const result = await writeMemory(runner, agent, "unrecorded", "w1");
+
+			expect(result?.isError).toBe(true);
+			expect(() => readFileSync(join(agent, "unrecorded.md"))).toThrow();
+		});
+
+		test("approving a pending memory makes it appear on the next turn", async () => {
+			const { agent } = setupRoots();
+			const { runner, host } = await createRunner();
+			await turn(runner);
+			await toolResult(runner, "t", "web_search");
+			await writeMemory(runner, agent, "approved-later", "w1");
+			const section = async () =>
+				(await turn(runner))?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION];
+
+			expect(await section()).not.toContain("approved-later");
+			host.approve("agent", "approved-later.md");
+			expect(await section()).toContain("approved-later");
+		});
+
+		test("without the host nothing is injected or recalled, because pending ones cannot be told apart", async () => {
+			const { agent } = setupRoots();
+			writeFileSync(join(agent, "reply-in-chinese.md"), validMemory);
+			const host = new FakeMemoryHost();
+			host.down = true;
+			const { runner } = await createRunner({ host });
+
+			const result = await turn(runner, "回复用中文");
+			const text = result?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION];
+			expect(text).toContain("### 写入");
+			expect(text).not.toContain("reply-in-chinese");
+			expect(result?.messages ?? []).toHaveLength(0);
+		});
+
+		test("pending facts are not recalled", async () => {
+			const { agent } = setupRoots();
+			const fact =
+				"---\nname: release-flow\ndescription: 发布走 fx-deploy 流水线\ntype: project\n---\n先发测试环境。\n";
+			const { runner } = await createRunner();
+			await turn(runner);
+			await toolResult(runner, "t", "web_search");
+			const path = join(agent, "release-flow.md");
+			await runner.emitToolCall({ type: "tool_call", toolCallId: "w", toolName: "write", input: { path, content: fact } });
+			writeFileSync(path, fact);
+			await toolResult(runner, "w", "write", { path, content: fact });
+			await runner.emit({ type: "session_start", reason: "resume" });
+
+			expect((await turn(runner, "发布流程怎么走"))?.messages ?? []).toHaveLength(0);
+		});
 	});
 
 	/**
@@ -407,6 +590,8 @@ describe("smelt-memory extension", () => {
 			sessionManager: SessionManager.inMemory(base),
 			tools: [],
 		});
+		const host = new FakeMemoryHost();
+		setMemoryHostTransportForTests(host.transport);
 		try {
 			await session.prompt("one");
 			await session.prompt("two");

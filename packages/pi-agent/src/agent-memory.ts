@@ -4,16 +4,25 @@ import type { MemoryRoots } from "./memory-files.ts";
 /** 与 Rust `agent_kind::SMELT_AGENT_MEMORY_DIR_ENV` / `SMELT_USER_MEMORY_DIR_ENV` 保持一致。 */
 export const SMELT_AGENT_MEMORY_DIR_ENV = "SMELT_AGENT_MEMORY_DIR";
 export const SMELT_USER_MEMORY_DIR_ENV = "SMELT_USER_MEMORY_DIR";
+/** 与 Rust `agent_kind::SMELT_AGENT_UNATTENDED_ENV` 一致：自动化等无人值守的运行。 */
+export const SMELT_AGENT_UNATTENDED_ENV = "SMELT_AGENT_UNATTENDED";
 
 let roots: MemoryRoots | undefined;
+let unattended = false;
 
 /** 本进程的记忆目录；普通 Pi 会话和子智能体没有。 */
 export function currentMemoryRoots(): MemoryRoots | undefined {
 	return roots;
 }
 
+/** 无人值守的运行写的记忆一律待确认。 */
+export function memoryRunIsUnattended(): boolean {
+	return unattended;
+}
+
 export function resetMemoryRootsForTests(): void {
 	roots = undefined;
+	unattended = false;
 }
 
 /** 记忆根本身不能是符号链接；返回规范化后的真实路径，后续写入校验都以它为准。 */
@@ -38,8 +47,10 @@ function canonicalRoot(path: string | undefined): string | undefined {
 export function consumeAgentMemory(environment: Record<string, string | undefined>): boolean {
 	const agentDir = environment[SMELT_AGENT_MEMORY_DIR_ENV]?.trim();
 	const userDir = environment[SMELT_USER_MEMORY_DIR_ENV]?.trim();
+	unattended = environment[SMELT_AGENT_UNATTENDED_ENV] === "1";
 	delete environment[SMELT_AGENT_MEMORY_DIR_ENV];
 	delete environment[SMELT_USER_MEMORY_DIR_ENV];
+	delete environment[SMELT_AGENT_UNATTENDED_ENV];
 	const agent = canonicalRoot(agentDir);
 	const user = canonicalRoot(userDir);
 	if (!agent || !user) return false;

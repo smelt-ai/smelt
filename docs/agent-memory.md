@@ -161,9 +161,7 @@ Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记�
 
 ## 5.3 使用统计与淘汰
 
-模型用内建 `read` 读记忆文件时记一次使用，存进该记忆目录下的 `.usage.sqlite`
-（`memory_usage(file_name, read_count, last_read_at_ms)`）。跟着记忆走，删智能体时随目录一起删；
-以点开头，不会被当成记忆。多个 Pi 进程同时写靠 `busy_timeout` 排队；统计失败不影响读取本身。
+模型用内建 `read` 读记忆文件时记一次使用。统计存主库 `agent_memory_usage`（见 5.5）。
 
 用途：
 
@@ -172,6 +170,56 @@ Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记�
 
 **不自动删除**：记忆是用户的知识，静默删除比多占一行索引更糟。规则类是用户给的约束，
 本来就靠预算强制合并，不按使用情况淘汰。是否删除由用户在记忆卡片上决定。
+
+## 5.4 来源与待确认（防记忆投毒）
+
+参考 OpenClaw（写入路径是安全边界、来源存数据库、不可信的不自动注入）、Hermes（非交互写入
+先暂存审批）、OWASP Agentic T1（限定可信来源、每次更新标来源）。不做内容扫描：靠不住，
+有了来源校验后边际价值很低。
+
+**按轮次标记**。用户每发一条消息开始新的一轮，标记清零。这一轮里出现以下任一情况，之后写的
+记忆记为**待确认**：
+
+- 有工具把外部内容带进了上下文：除 Pi 内建工具、`smelt_ask_user`（答案来自用户）、后台任务
+  （同 bash）之外的工具，包括 MCP、用户扩展的工具（如网页搜索）、子智能体；
+- 无人值守的运行：自动化启动时带 `SMELT_AGENT_UNATTENDED=1`，它写的一律待确认。
+
+`bash` 不算外部内容，否则几乎每个会话都会被标记；代价是 `curl` 取回的网页防不住。残留风险：
+早先轮次读到的外部内容仍在上下文里，可能诱导之后的轮次写记忆——按 OpenClaw 的取舍，用户新发
+的消息才是权威。
+
+**待确认的记忆**：照常写入文件，但不注入、不召回；工具结果里告诉模型"已暂存为待确认，请转告
+用户"。记忆卡片标红显示原因，用户点"采纳"后才生效。edit 一条待确认的记忆仍是待确认；write
+整篇重写按当轮判断。
+
+**失败时偏安全**：来源记不下来（宿主不可达、库锁住），待确认的写入当场撤销；拿不到待确认
+列表时，只注入写入约定，不注入任何记忆、不召回。
+
+**回合提示**：一轮结束时，若写过记忆，状态栏提示"记住了 N 条；M 条待确认"。
+
+## 5.5 元数据存储
+
+记忆正文是 Markdown 文件；使用统计、来源这些结构化状态在 Smelt 主库：
+
+| 表 | 主键 | 字段 |
+|---|---|---|
+| `agent_memory_usage` | `(scope, file_name)` | `read_count`、`last_read_at_ms` |
+| `agent_memory_provenance` | `(scope, file_name)` | `trust`（trusted / pending）、`reason`、`session_id`、`written_at_ms` |
+
+scope 为 `agent:<智能体 id>` 或 `user`。没有来源记录的文件（用户手写）按可信处理。删除智能体时
+同一事务里删掉它的元数据；删除记忆时删掉对应行。schema v13 引入。
+
+Pi 进程不链接 `smelt-store`、不直接打开数据库；托管它的独立会话宿主（`smeltd
+--acp-session-host`）按设计也不初始化 SQLite。所以 Pi 直接调主 daemon 的控制方法：连
+`SMELT_SOCK`，带上 daemon 注入的 `SMELT_SESSION_ID` 和 `SMELT_AGENT_TOKEN`（与跨会话消息同一套
+capability）。daemon 校验令牌、会话未结束后，从该会话的启动规格取两个记忆目录，经
+`smelt-store` 读写。调用方只能操作自己这个会话的两层记忆；普通会话没有记忆层。
+
+| 方法 | 参数（另带 `session_id`、`token`） | 返回 |
+|---|---|---|
+| `agent.memory.meta` | — | 两层的使用统计和待确认文件名 |
+| `agent.memory.record_read` | `layer`、`file` | 记一次使用 |
+| `agent.memory.record_write` | `layer`、`file`、`trust`、`reason` | 记来源（会话 id 取认证过的那个） |
 
 ## 6. 写入与校验
 
@@ -213,13 +261,10 @@ Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记�
 
 手机端只读展示，放到后续。
 
-## 8. 第一阶段不建表
+## 8. 存储
 
-第一阶段没有需要数据库的状态：正文在文件里，修改时间取文件 mtime，写入来源可从会话
-记录追溯。下列内容随第二阶段进 SQLite（`docs/local-storage.md` 同步更新）：
+使用统计和来源已在主库（5.5）。随后台提炼一起再加：
 
-- 记忆写入审计（会话、工具调用、文件、内容哈希）；
-- 会话是否接触外部内容（污染标记），由宿主根据工具调用记录写入，不由模型声明；
 - 后台提炼/合并任务与结果（产出 / 无可记 / 失败）；
 - 删除记录及原因（用户要求 / 隐私 / 错误 / 过时），防止后台提炼把删掉的记忆学回来。
 
@@ -240,11 +285,14 @@ Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记�
 | `smelt-core/src/agent_definition_store.rs` | `prepare_agent_definition_launch` 设置记忆目录；新增 `agent_memory_dir` / `user_memory_dir` |
 | `smelt-acp-view/src/acp_view.rs` | 设置刷新时保留 `SMELT_AGENT_LAUNCH_IDENTITY_ENVS`（说明 + 两个记忆目录） |
 | `smelt-core/src/agent_memory.rs` | 新增：列出、删除记忆，供桌面端卡片使用 |
-| `smelt-core/src/pi_rpc.rs` | 环境变量按路径处理（`~` 展开），无需改 |
 | `packages/pi-agent/src/agent-memory.ts` | 新增：消费并规范化记忆目录 |
 | `packages/pi-agent/src/memory-files.ts` | 新增：路径解析、内容与预算校验、分层渲染记忆段落 |
 | `packages/pi-agent/src/memory-extension.ts` | 新增：分节注入、第一轮召回、使用统计、写入校验、edit 回滚、免审批判定、超限提示 |
-| `packages/pi-agent/src/memory-usage.ts` | 新增：`.usage.sqlite` 读写 |
+| `packages/pi-agent/src/memory-host.ts` | 新增：`agent.memory.*` 控制方法的客户端 |
+| `smelt-store`（schema v13） | 新增 `agent_memory_usage`、`agent_memory_provenance` 及仓储方法 |
+| `smelt-core/src/control_api.rs` | 新增 `agent.memory.*` 三个控制方法 |
+| `smeltd/src/agent_memory_control.rs` | 新增：认证会话并代 Pi 读写记忆元数据 |
+| `smeltd/src/automation_runtime.rs` | 自动化启动带 `SMELT_AGENT_UNATTENDED=1` |
 | `packages/pi-agent/src/runtime-extensions.ts` | 注册 `smelt-memory`，位于 `smelt-permission` 之前 |
 | `packages/pi-agent/src/smelt-permission.ts` | 合法记忆写入免审批 |
 | `smelt/src/agents/` | 配置页"记忆"卡片；删除智能体的提示改为"删除智能体和它的记忆" |

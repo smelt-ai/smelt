@@ -1,7 +1,7 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import type { MemoryUsage } from "./memory-usage.ts";
+import type { MemoryUsage } from "./memory-host.ts";
 
 /**
  * 记忆的唯一真相是一条记忆一个 `<slug>.md`。注入用的索引由宿主按 frontmatter 生成，
@@ -272,8 +272,8 @@ function lastTouched(entry: MemoryEntry, usage: ReadonlyMap<string, MemoryUsage>
 export type MemorySnapshot = { text: string; truncated: boolean };
 
 /**
- * 两层记忆文件的廉价指纹（文件名、大小、修改时间）。指纹不变就复用上一轮渲染结果，
- * 每轮只需 readdir + stat，不必重读所有正文。
+ * 两层记忆文件的廉价指纹（文件名、大小、修改时间）。指纹不变、元数据也没变时复用上一轮
+ * 渲染结果，每轮只需 readdir + stat。
  */
 export function memorySignature(roots: MemoryRoots): string {
 	const parts: string[] = [];
@@ -303,13 +303,22 @@ export function memorySignature(roots: MemoryRoots): string {
  * 规则类（user / feedback）正文常驻；事实类（project / reference）只列一行指针，按当前工作
  * 目录过滤掉别的项目的。段落在会话内不变，保住提示词缓存。
  */
-export function renderMemorySnapshot(
-	roots: MemoryRoots,
-	cwd: string,
-	usage: ReadonlyMap<string, MemoryUsage> = new Map(),
-): MemorySnapshot {
-	const agent = scanMemoryLayer(roots.agent).filter((entry) => appliesTo(entry, cwd));
-	const user = scanMemoryLayer(roots.user);
+export type MemoryMeta = {
+	/** 智能体层的使用统计。 */
+	usage?: ReadonlyMap<string, MemoryUsage>;
+	/** 待确认的文件名：不注入、不召回。 */
+	pending?: { agent: ReadonlySet<string>; user: ReadonlySet<string> };
+};
+
+function confirmedLayer(dir: string, pending: ReadonlySet<string> | undefined): MemoryEntry[] {
+	const entries = scanMemoryLayer(dir);
+	return pending ? entries.filter((entry) => !pending.has(entry.fileName)) : entries;
+}
+
+export function renderMemorySnapshot(roots: MemoryRoots, cwd: string, meta: MemoryMeta = {}): MemorySnapshot {
+	const usage = meta.usage ?? new Map<string, MemoryUsage>();
+	const agent = confirmedLayer(roots.agent, meta.pending?.agent).filter((entry) => appliesTo(entry, cwd));
+	const user = confirmedLayer(roots.user, meta.pending?.user);
 	// scanMemoryLayer 已按修改时间新的在前；全局层排在智能体层之前。
 	const coreSelection = selectWithinBudget(
 		[
@@ -346,7 +355,7 @@ export function renderMemorySnapshot(
 	sections.push(`### 写入
 用户纠正你、要你记住、或给出以后会反复用到的信息时，当场写 \`<名字>.md\`；已有相近条目就改那个文件。只记以后仍成立的规律，不记过程、能直接查到的内容和密钥。
 - 目录：${roots.agent}；关于用户本人或用户纠正过的做法、且适用于所有智能体的放 ${roots.user}（上面标"全局"的也在这里）。
-- frontmatter：name（同文件名）、description（一句话）、type（user / feedback / project / reference）；只适用于某个项目的加 project（绝对路径，当前 ${cwd}）。写错了宿主会退回并说明。
+- frontmatter：name（同文件名）、description（一句话）、type（user / feedback / project / reference）；事实明确只属于某个代码仓库时才加 project（该仓库根目录的绝对路径），拿不准就不加。写错了宿主会退回并说明。
 `);
 	return { text: sections.join("\n\n"), truncated: core.truncated || facts.truncated };
 }
@@ -380,10 +389,15 @@ const RECALL_BODY_MAX_CHARS = 600;
  *
  * 只在对话末尾追加，不碰系统提示，不影响缓存。规则类本来就常驻，不参与。
  */
-export function recallRelevantFacts(roots: MemoryRoots, cwd: string, prompt: string): string | undefined {
+export function recallRelevantFacts(
+	roots: MemoryRoots,
+	cwd: string,
+	prompt: string,
+	pending?: ReadonlySet<string>,
+): string | undefined {
 	const query = recallTokens(prompt);
 	if (query.size === 0) return undefined;
-	const scored = scanMemoryLayer(roots.agent)
+	const scored = confirmedLayer(roots.agent, pending)
 		.filter((entry) => !CORE_MEMORY_TYPES.has(entry.type) && appliesTo(entry, cwd))
 		.map((entry) => {
 			const title = recallTokens(`${entry.name.replaceAll("-", " ")} ${entry.description}`);

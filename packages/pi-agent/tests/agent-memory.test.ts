@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,7 +19,13 @@ import {
 	resolveMemoryTarget,
 	validateMemoryContent,
 } from "../src/memory-files.ts";
-import { MEMORY_USAGE_DB, readMemoryUsage, recordMemoryRead } from "../src/memory-usage.ts";
+import {
+	fetchMemoryMeta,
+	recordMemoryRead,
+	recordMemoryWrite,
+	setMemoryHostTransportForTests,
+} from "../src/memory-host.ts";
+import { FakeMemoryHost } from "./memory-host-fake.ts";
 
 const temps: string[] = [];
 afterEach(() => {
@@ -276,29 +282,7 @@ describe("index ordering", () => {
 		expect(without).not.toContain("- fact-0 —");
 
 		const usage = new Map([["fact-0.md", { readCount: 3, lastReadAtMs: Date.now() + 60_000 }]]);
-		expect(renderMemorySnapshot({ agent, user }, agent, usage).text).toContain("- fact-0 —");
-	});
-});
-
-describe("memory usage", () => {
-	test("reads are counted per file in a hidden SQLite file next to the memories", () => {
-		const { agent } = roots();
-		expect(readMemoryUsage(agent).size).toBe(0);
-		recordMemoryRead(agent, "release-flow.md", 1_000);
-		recordMemoryRead(agent, "release-flow.md", 2_000);
-		recordMemoryRead(agent, "weekly.md", 1_500);
-
-		const usage = readMemoryUsage(agent);
-		expect(usage.get("release-flow.md")).toEqual({ readCount: 2, lastReadAtMs: 2_000 });
-		expect(usage.get("weekly.md")).toEqual({ readCount: 1, lastReadAtMs: 1_500 });
-		expect(MEMORY_USAGE_DB.startsWith(".")).toBe(true);
-	});
-
-	test("a broken usage database never throws", () => {
-		const { agent } = roots();
-		writeFileSync(join(agent, MEMORY_USAGE_DB), "not a database");
-		expect(() => recordMemoryRead(agent, "a.md")).not.toThrow();
-		expect(readMemoryUsage(agent).size).toBe(0);
+		expect(renderMemorySnapshot({ agent, user }, agent, { usage }).text).toContain("- fact-0 —");
 	});
 });
 
@@ -345,5 +329,78 @@ describe("recallRelevantFacts", () => {
 		);
 		expect(recallRelevantFacts({ agent, user }, join(base, "b"), "发布流程")).toBeUndefined();
 		expect(recallRelevantFacts({ agent, user }, join(base, "a"), "发布流程")).toContain("a-flow");
+	});
+});
+
+describe("memory host client", () => {
+	afterEach(() => setMemoryHostTransportForTests(undefined));
+
+	test("records reads and provenance through the daemon and reads back pending files", async () => {
+		const host = new FakeMemoryHost();
+		setMemoryHostTransportForTests(host.transport);
+		await recordMemoryRead("agent", "fact.md");
+		expect(await recordMemoryWrite("user", "me.md", { trust: "pending", reason: "外部" })).toBe(true);
+
+		const meta = await fetchMemoryMeta();
+		expect(meta?.usage.get("fact.md")?.readCount).toBe(1);
+		expect([...(meta?.pending.user ?? [])]).toEqual(["me.md"]);
+	});
+
+	test("an unreachable or failing daemon is reported, never assumed fine", async () => {
+		const host = new FakeMemoryHost();
+		setMemoryHostTransportForTests(host.transport);
+		host.failWrites = true;
+		expect(await recordMemoryWrite("agent", "a.md", { trust: "pending", reason: "外部" })).toBe(false);
+		host.down = true;
+		expect(await fetchMemoryMeta()).toBeUndefined();
+	});
+
+	test("the real transport talks to the daemon control socket with this session's token", async () => {
+		const { createServer } = await import("node:net");
+		const dir = realpathSync(mkdtempSync(join(tmpdir(), "smelt-sock-")));
+		temps.push(dir);
+		const socketPath = join(dir, "smeltd.sock");
+		const requests: Array<Record<string, unknown>> = [];
+		const server = createServer((socket) => {
+			socket.setEncoding("utf8");
+			socket.on("data", (line: string) => {
+				const request = JSON.parse(line.trim()) as Record<string, unknown>;
+				requests.push(request);
+				// 与 Rust 共用的契约样例：daemon 实际回的就是这个形状（见 control_api 的同名测试）。
+				const fixture = JSON.parse(
+					readFileSync(join(import.meta.dir, "fixtures", "agent-memory-meta-response.json"), "utf8"),
+				) as Record<string, unknown>;
+				socket.write(`${JSON.stringify({ ...fixture, request_id: request.request_id })}\n`);
+			});
+		});
+		await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+		const saved = { ...process.env };
+		Object.assign(process.env, { SMELT_SOCK: socketPath, SMELT_SESSION_ID: "acp-1", SMELT_AGENT_TOKEN: "tok" });
+		try {
+			setMemoryHostTransportForTests(undefined);
+			const meta = await fetchMemoryMeta();
+			expect([...(meta?.pending.agent ?? [])]).toEqual(["x.md"]);
+			expect(meta?.usage.get("fact.md")).toEqual({ readCount: 2, lastReadAtMs: 1000 });
+			expect(requests[0]).toMatchObject({
+				op: "control",
+				control_version: 1,
+				method: "agent.memory.meta",
+				params: { session_id: "acp-1", token: "tok" },
+			});
+		} finally {
+			process.env = saved;
+			server.close();
+		}
+	});
+	test("pending memories are neither injected nor recalled", () => {
+		const { agent, user } = roots();
+		writeFileSync(join(user, "rule.md"), memoryFile("rule", "feedback", "全局规则"));
+		writeFileSync(join(agent, "fact.md"), memoryFile("fact", "project", "发布流程", "", "发布流程"));
+		const pending = { agent: new Set(["fact.md"]), user: new Set(["rule.md"]) };
+
+		const text = renderMemorySnapshot({ agent, user }, agent, { pending }).text;
+		expect(text).not.toContain("rule");
+		expect(text).not.toContain("fact");
+		expect(recallRelevantFacts({ agent, user }, agent, "发布流程", pending.agent)).toBeUndefined();
 	});
 });
