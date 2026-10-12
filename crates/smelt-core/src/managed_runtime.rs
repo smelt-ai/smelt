@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
-    io::Read as _,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Command,
@@ -467,20 +466,8 @@ fn managed_pi_agent_dependencies_installed(root: &Path) -> bool {
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file =
-        fs::File::open(path).map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
+    crate::daemon_image::content_fingerprint(path)
+        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))
 }
 
 #[cfg(target_os = "macos")]
