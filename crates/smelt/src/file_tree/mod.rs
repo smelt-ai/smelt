@@ -48,6 +48,8 @@ pub struct OpenFile {
     /// markdown 文件的「预览」开关（仅 .md 生效，见 file_content_parts）；切换打开的
     /// 文件不带过去，open_file_now 每次按文件类型重置（Markdown 默认进预览）。
     pub(super) preview: bool,
+    /// 预览用的正文。编辑器每个按键都会变，这里按停手后再更新，避免每帧重解析 Markdown。
+    pub(super) preview_source: SharedString,
 }
 
 /// 保存一次的结果：分 Saved / 检测到外部改动的 Conflict / 其它 IO 错误。

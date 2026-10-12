@@ -50,26 +50,11 @@ fn maintenance_groups(
         let t = cx.theme();
         (t.foreground, t.muted_foreground, t.border, t.popover)
     };
-    let btn_base = move |id: &'static str, label: String| {
-        div()
-            .id(id)
-            .h(px(26.))
-            .px_3()
-            .flex()
-            .flex_none()
-            .items_center()
-            .rounded_md()
-            .cursor_pointer()
-            .text_xs()
-            .text_color(fg)
-            .bg(popover)
-            .border_1()
-            .border_color(border)
-            .child(label)
+    let btn = move |id: &'static str, label: String| {
+        settings_chip_button(id, label, fg, popover, border).hover(|s| s.bg(border))
     };
-    let btn = move |id: &'static str, label: String| btn_base(id, label).hover(|s| s.bg(border));
     let btn_hover = move |id: &'static str, label: String, hover_bg: Hsla| {
-        btn_base(id, label).hover(move |s| s.bg(hover_bg))
+        settings_chip_button(id, label, fg, popover, border).hover(move |s| s.bg(hover_bg))
     };
 
     // —— 维护：更新、守护进程和残留数据清理 ——

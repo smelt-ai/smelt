@@ -1425,11 +1425,10 @@ impl Session {
             // ACP 协议视图与守护镜像可能先后到达；两边都先给出完整 AgentStatus，
             // 再走同一优先级，避免派发或失败的同步窗口短暂变灰。
             SessionKind::Conversation(view) => {
-                let session_id = view.read(cx).session_id().to_string();
-                let daemon = daemon_state_for_session_id(&session_id, cx)
+                let v = view.read(cx);
+                let daemon = daemon_state_for_session_id(v.session_id(), cx)
                     .and_then(|state| AgentStatus::from_daemon_state(&state))
                     .unwrap_or(AgentStatus::Idle);
-                let v = view.read(cx);
                 AgentStatus::highest([daemon, v.agent_status()])
             }
             // 每个 pane 只读自己的结构化状态；父会话再做来源无关的聚合。
@@ -2415,6 +2414,8 @@ struct Workspace {
     acp_image_preview: Option<Arc<gpui::Image>>,
     /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
     file_gen: u64,
+    /// Markdown 预览刷新世代。连续按键只保留最后一次，停手后再解析。
+    markdown_preview_epoch: u64,
     /// 当前文件有未保存改动时，用户又点了别的文件——先记下目标路径弹确认弹窗，
     /// 等用户选了"不保存"/"保存并切换"才真正打开，见 render_unsaved_file_confirm。
     pending_file_switch: Option<String>,
@@ -2511,7 +2512,7 @@ struct Workspace {
     diff_code_scroll: ScrollHandle,
     /// 变更列表的滚动位置。列表里混着仓库行、提交框和文件行，高度不一，
     /// 用不了等高虚拟列表，所以是常规滚动容器。
-    git_list_scroll: ScrollHandle,
+    git_list_scroll: VirtualListScrollHandle,
     /// 文件树虚拟列表的滚动句柄。行高由文件树自己给定，见 file_tree。
     file_tree_scroll: VirtualListScrollHandle,
     /// Files / Git 右侧树列正在拖拽时的起点：(鼠标 x，树列宽)。树列不能使用
@@ -3018,6 +3019,7 @@ impl Workspace {
             file_tree_pending_reveal: None,
             acp_image_preview: None,
             file_gen: 0,
+            markdown_preview_epoch: 0,
             pending_file_switch: None,
             delete_file_target: None,
             pending_switch_after_save: None,
@@ -3085,7 +3087,7 @@ impl Workspace {
             _palette_sub: None,
             diff_scroll: VirtualListScrollHandle::new(),
             diff_code_scroll: ScrollHandle::new(),
-            git_list_scroll: ScrollHandle::new(),
+            git_list_scroll: VirtualListScrollHandle::new(),
             file_tree_scroll: VirtualListScrollHandle::new(),
             file_tree_drag_start: None,
             file_filter: None,
@@ -3704,17 +3706,21 @@ impl Render for Workspace {
         let animate_sidebar_status =
             self.workspace_window_active && (self.sidebar_open || sidebar_motion.animating);
 
-        // 一帧只读取一次各会话状态，避免侧栏重复遍历 Terminal pane / ACP 证据。
-        let session_statuses: Vec<AgentStatus> = self
-            .sessions
-            .iter()
-            .map(|session| session.status(cx))
-            .collect();
-
-        // 会话列表：单列按项目上下分组（替代旧 gpui-component Sidebar 两级菜单；
-        // 设计稿的「rail + 列表」左右两列实测割裂，见 session_list.rs 文件头）。
-        let list_el =
-            self.render_session_list(cx.entity(), cx, &session_statuses, animate_sidebar_status);
+        // 侧栏收起且没有动画时不建会话树。展开时滚动句柄还在，列表会按原位置回来。
+        let sidebar_mounted = sidebar_motion.mounted;
+        let session_statuses: Vec<AgentStatus> = if sidebar_mounted {
+            self.sessions
+                .iter()
+                .map(|session| session.status(cx))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let list_el = if sidebar_mounted {
+            self.render_session_list(cx.entity(), cx, &session_statuses, animate_sidebar_status)
+        } else {
+            div()
+        };
         // 提升到舞台的那个 tab 不再停靠一份（见 tool_panel_promoted）。
         let tool_panel_motion = self.tool_panel_transition.frame();
         if tool_panel_motion.animating {

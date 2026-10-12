@@ -396,43 +396,64 @@ impl Workspace {
         cx.notify();
     }
 
-    fn dsh_custom_model_editor(
-        model: Option<&NativeDshCustomModel>,
+    /// 自定义模型的四个输入框。Pi 和 DSH 的字段、占位文案一样；两边的保存路径仍各自走。
+    fn custom_model_inputs(
+        id: String,
+        name: String,
+        context_window: String,
+        max_tokens: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> DshCustomModelEditor {
+    ) -> (
+        Entity<gpui_component::input::InputState>,
+        Entity<gpui_component::input::InputState>,
+        Entity<gpui_component::input::InputState>,
+        Entity<gpui_component::input::InputState>,
+    ) {
         use gpui_component::input::InputState;
 
         let id = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("例如 gpt-5-mini")
-                .default_value(model.map(|model| model.id.clone()).unwrap_or_default())
+                .default_value(id)
         });
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("显示名称（可选）")
-                .default_value(model.map(|model| model.name.clone()).unwrap_or_default())
+                .default_value(name)
         });
         let context_window = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("上下文长度（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.context_window)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
+                .default_value(context_window)
         });
         let max_tokens = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("最大输出（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.max_tokens)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
+                .default_value(max_tokens)
         });
+        (id, name, context_window, max_tokens)
+    }
+
+    fn dsh_custom_model_editor(
+        model: Option<&NativeDshCustomModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DshCustomModelEditor {
+        let (id, name, context_window, max_tokens) = Self::custom_model_inputs(
+            model.map(|model| model.id.clone()).unwrap_or_default(),
+            model.map(|model| model.name.clone()).unwrap_or_default(),
+            model
+                .and_then(|model| model.context_window)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            model
+                .and_then(|model| model.max_tokens)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
         DshCustomModelEditor {
             id,
             name,
@@ -1811,38 +1832,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PiCustomModelEditor {
-        use gpui_component::input::InputState;
-
-        let id = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("例如 gpt-5-mini")
-                .default_value(model.map(|model| model.id.clone()).unwrap_or_default())
-        });
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("显示名称（可选）")
-                .default_value(model.map(|model| model.name.clone()).unwrap_or_default())
-        });
-        let context_window = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("上下文长度（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.context_window)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
-        });
-        let max_tokens = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("最大输出（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.max_tokens)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
-        });
+        let (id, name, context_window, max_tokens) = Self::custom_model_inputs(
+            model.map(|model| model.id.clone()).unwrap_or_default(),
+            model.map(|model| model.name.clone()).unwrap_or_default(),
+            model
+                .and_then(|model| model.context_window)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            model
+                .and_then(|model| model.max_tokens)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
         PiCustomModelEditor {
             id,
             name,

@@ -17,7 +17,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{ActiveTheme, h_flex, v_flex};
+use gpui_component::{ActiveTheme, h_flex, v_flex, v_virtual_list};
 
 use crate::git_log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
 use crate::ui_theme;
@@ -526,22 +526,33 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
     } else if diff_lines.is_empty() {
         placeholder_view("正在读取…", muted).into_any_element()
     } else {
+        let gw = crate::git_panel::gutter_width(&diff_lines);
+        let line_count = diff_lines.len();
+        let lines = std::rc::Rc::new(diff_lines);
+        let sizes = std::rc::Rc::new(vec![
+            size(px(1.), px(crate::git_panel::FILE_LINE_H));
+            line_count
+        ]);
         div()
-            .id("commit-diff")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&diff_scroll)
-            .vertical_scrollbar(&diff_scroll)
+            .relative()
             .font_family(crate::terminal_view::font_family())
             .text_sm()
-            .children({
-                let gw = crate::git_panel::gutter_width(&diff_lines);
-                diff_lines
-                    .iter()
-                    .map(move |l| crate::git_panel::render_readonly_diff_line(l, gw))
-                    .collect::<Vec<_>>()
-            })
+            .child(
+                v_virtual_list(ws.clone(), "commit-diff", sizes, move |_, range, _, _| {
+                    let lines = lines.clone();
+                    range
+                        .map(|i| {
+                            crate::git_panel::render_readonly_diff_line(&lines[i], gw)
+                                .into_any_element()
+                        })
+                        .collect()
+                })
+                .size_full()
+                .track_scroll(&diff_scroll),
+            )
+            .vertical_scrollbar(&diff_scroll)
             .into_any_element()
     };
 

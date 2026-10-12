@@ -385,6 +385,39 @@ fn conversation_agent_mark(agent_name: Option<&str>) -> String {
     }
 }
 
+fn is_cjk(ch: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+}
+
+/// 目录和页头上的缩写。中文取前两字，「日志」比单独一个「日」认得出来；
+/// 英文取开头的两个字母，像 Pi。
+fn agent_catalog_monogram(name: &str) -> String {
+    let name = name.trim();
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return "智".to_string();
+    };
+    if is_cjk(first) {
+        return match chars.next() {
+            Some(second) if is_cjk(second) => format!("{first}{second}"),
+            _ => first.to_string(),
+        };
+    }
+    let mut word = String::new();
+    word.push(first);
+    for ch in chars {
+        if word.chars().count() >= 2 || ch.is_whitespace() || is_cjk(ch) {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            word.push(ch);
+        } else {
+            break;
+        }
+    }
+    word
+}
+
 /// 对话行只展示用户命名或对话自己的自动标题。
 fn conversation_row_title(custom_title: Option<&str>, auto_title: Option<&str>) -> String {
     custom_title
@@ -396,9 +429,13 @@ fn conversation_row_title(custom_title: Option<&str>, auto_title: Option<&str>) 
 }
 
 fn compact_instructions(value: &str) -> String {
+    excerpt_text(value, 96)
+}
+
+fn excerpt_text(value: &str, limit: usize) -> String {
     let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = value.chars();
-    let mut compact = chars.by_ref().take(96).collect::<String>();
+    let mut compact = chars.by_ref().take(limit).collect::<String>();
     if chars.next().is_some() {
         compact.push('…');
     }
@@ -1094,31 +1131,24 @@ fn render_notification_field(
         .into_any_element()
 }
 
+/// 权限说明。这里不能切换运行方式，所以不做成和通知一样的设置卡。
 fn render_automation_access_note(is_agent: bool) -> AnyElement {
     div()
         .flex()
         .flex_col()
-        .gap_2()
-        .child(automation_section_label("运行环境"))
+        .gap_1()
         .child(
-            automation_form_shell()
-                .px_3()
-                .py_2p5()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(crate::ui_theme::text_bright()))
-                        .child("无人值守 · 完全访问"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_muted()))
-                        .child(automation_access_note(is_agent)),
-                ),
+            div()
+                .text_xs()
+                .font_medium()
+                .text_color(rgb(crate::ui_theme::text_muted()))
+                .child("无人值守 · 完全访问"),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_muted()))
+                .child(automation_access_note(is_agent)),
         )
         .into_any_element()
 }
@@ -1616,6 +1646,19 @@ fn automation_missing_fields(
     missing
 }
 
+/// 页头上的保存状态。新建还没落盘，只说还差什么；已有的会在补齐后自动保存。
+fn automation_save_hint(missing: &[&str], is_new: bool) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let list = missing.join("、");
+    Some(if is_new {
+        format!("还差：{list}")
+    } else {
+        format!("还差：{list}，补齐后自动保存")
+    })
+}
+
 fn run_source_label(source: smelt_core::automation::AutomationRunSource) -> &'static str {
     source.label()
 }
@@ -1647,6 +1690,16 @@ fn agent_display_name(name: &str) -> String {
 
 fn agent_prompt_summary(prompt: &str) -> Option<String> {
     let compact = compact_instructions(prompt);
+    if compact.is_empty() {
+        None
+    } else {
+        Some(compact)
+    }
+}
+
+/// 卡片正文大约两行。比主页摘要短，窄窗口也不会把省略号裁掉。
+fn agent_card_prompt(prompt: &str) -> Option<String> {
+    let compact = excerpt_text(prompt, 64);
     if compact.is_empty() {
         None
     } else {
@@ -1733,6 +1786,7 @@ fn agent_hub_list_row(
     title: impl Into<SharedString>,
     meta: impl Into<SharedString>,
     attention: bool,
+    divided: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
@@ -1740,7 +1794,11 @@ fn agent_hub_list_row(
         .px_4()
         .py_2p5()
         .cursor_pointer()
-        .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+        // 行压在卡片上。bg_row_hover 比卡片底还暗，划过会陷进去。
+        .hover(|row| row.bg(rgb(crate::ui_theme::bg_hover())))
+        .when(divided, |row| {
+            row.border_t_1().border_color(crate::ui_theme::hairline())
+        })
         .flex()
         .items_center()
         .gap_2()
@@ -2502,7 +2560,7 @@ fn framed_automation_textarea(textarea: Textarea) -> AnyElement {
     div()
         .w_full()
         .px_3()
-        .pt_3()
+        .py_3()
         .min_h(px(120.))
         .child(textarea.appearance(false))
         .into_any_element()

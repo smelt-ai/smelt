@@ -5,34 +5,8 @@ use super::*;
 pub(super) fn dsh_model_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
-    cx: &App,
+    _cx: &App,
 ) -> SettingPage {
-    let (fg, _muted, border, popover) = {
-        let t = cx.theme();
-        (t.foreground, t.muted_foreground, t.border, t.popover)
-    };
-    let btn_base = move |id: &'static str, label: String| {
-        div()
-            .id(id)
-            .h(px(26.))
-            .px_3()
-            .flex()
-            .flex_none()
-            .items_center()
-            .rounded_md()
-            .cursor_pointer()
-            .text_xs()
-            .text_color(fg)
-            .bg(popover)
-            .border_1()
-            .border_color(border)
-            .child(label)
-    };
-    let _btn = move |id: &'static str, label: String| btn_base(id, label).hover(|s| s.bg(border));
-    let _btn_hover = move |id: &'static str, label: String, hover_bg: Hsla| {
-        btn_base(id, label).hover(move |s| s.bg(hover_bg))
-    };
-
     // Native dsh owns providers, credentials and model settings. Keep the
     // removed editor out of compilation while the surrounding settings
     // layout remains stable.

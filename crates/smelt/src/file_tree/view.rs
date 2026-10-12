@@ -963,7 +963,7 @@ pub fn file_content_parts(
                     .child(div().text_sm().text_color(fg).child(
                         crate::markdown_mermaid::markdown_view(
                             "md-preview-body",
-                            of.editor.read(cx).value().to_string(),
+                            of.preview_source.clone(),
                         ),
                     ))
                     .into_any_element()

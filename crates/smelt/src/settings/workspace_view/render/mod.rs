@@ -21,6 +21,31 @@ mod pi_plugin;
 mod plugins;
 mod shortcuts;
 
+/// 设置页里 26px 的小按钮。悬停色由各页自己挂：多数跟边框色走，维护页有的按钮要单独指定。
+fn settings_chip_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    fg: Hsla,
+    popover: Hsla,
+    border: Hsla,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(26.))
+        .px_3()
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(fg)
+        .bg(popover)
+        .border_1()
+        .border_color(border)
+        .child(label.into())
+}
+
 /// 渲染独立设置页面：左侧两级菜单切换内容页，右侧只显示当前选中项。
 pub(super) fn render_settings_content(
     entity: Entity<Workspace>,

@@ -938,15 +938,23 @@ impl Workspace {
                 .get(repo_root.as_ref())
                 .filter(|_| show_commit_box)
             {
+                let commit_text = input.read(cx).value().to_string();
+                let has_text = !commit_text.trim().is_empty();
+                let has_staged = !staged.is_empty();
+                let error = self.commit_errors.get(repo_root.as_ref()).cloned();
+                let (input_h, row_h) =
+                    commit_box_metrics(&commit_text, error.as_deref(), has_text && !has_staged);
                 narrow_rows.push(NarrowGitRow::CommitBox {
                     root: repo_root.clone(),
                     input: input.clone(),
-                    has_text: !input.read(cx).value().trim().is_empty(),
-                    has_staged: !staged.is_empty(),
+                    has_text,
+                    has_staged,
                     pushing: self.pushing,
                     ahead: repo_status.map(|d| d.ahead).unwrap_or(0),
-                    error: self.commit_errors.get(repo_root.as_ref()).cloned(),
+                    error,
                     depth: usize::from(show_repo_headers),
+                    input_h,
+                    row_h,
                 });
             }
             // 多仓时文件比仓库行缩进一级，层级才看得出来；单仓不白白浪费横向空间。
@@ -1027,26 +1035,45 @@ impl Workspace {
                 })
                 .into_any_element()
         } else {
-            // 列表里混着仓库行、内联提交区和文件行，高度不一，用不了等高的
-            // uniform_list。改成常规滚动容器 + 每仓渲染上限：超大仓库不至于把
-            // 整棵布局树拖垮，而上限本身也比"静默卡顿"诚实。
-            let ws_for_rows = ws;
+            // 仓库行、提交框和文件行高度不同，用变高虚拟列表，只构造视口附近的行。
+            let row_w = px(self.tool_panel_w.max(160.));
+            let sizes = Rc::new(
+                narrow_rows
+                    .iter()
+                    .map(|row| size(row_w, px(narrow_git_row_height(row))))
+                    .collect::<Vec<_>>(),
+            );
+            let rows = Rc::new(narrow_rows);
+            let ws_for_rows = ws.clone();
             let collapsed_for_rows = collapsed;
-            v_flex()
-                .id("narrow-git-list")
+            let index_pending = Rc::new(index_pending);
+            div()
+                .id("narrow-git-list-host")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.git_list_scroll)
-                .children(narrow_rows.iter().enumerate().map(|(ix, row)| {
-                    render_narrow_git_row(
-                        row,
-                        ix,
-                        &ws_for_rows,
-                        &collapsed_for_rows,
-                        &index_pending,
-                    )
-                }))
+                .relative()
+                .child(
+                    v_virtual_list(ws, "narrow-git-list", sizes, move |_, range, _, _| {
+                        let rows = rows.clone();
+                        let ws_for_rows = ws_for_rows.clone();
+                        let collapsed_for_rows = collapsed_for_rows.clone();
+                        let index_pending = index_pending.clone();
+                        range
+                            .map(|ix| {
+                                render_narrow_git_row(
+                                    &rows[ix],
+                                    ix,
+                                    &ws_for_rows,
+                                    &collapsed_for_rows,
+                                    &index_pending,
+                                )
+                            })
+                            .collect()
+                    })
+                    .size_full()
+                    .track_scroll(&self.git_list_scroll),
+                )
+                .vertical_scrollbar(&self.git_list_scroll)
                 .into_any_element()
         };
         // 发现被上限截断时必须说清楚。默不作声会让用户以为没列出来的仓库

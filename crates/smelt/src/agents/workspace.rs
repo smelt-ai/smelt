@@ -1095,14 +1095,25 @@ impl Workspace {
     }
 
     pub(super) fn add_automation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let agent_id = self.ready_automation_agent_id(cx).unwrap_or_default();
+        self.add_automation_for_agent(agent_id, window, cx);
+    }
+
+    /// 从某个智能体的详情页新建。绑定的就是这一个，不改用当前选中或列表里的第一个。
+    pub(super) fn add_automation_for_agent(
+        &mut self,
+        agent_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.automation_surface.catalog_tab = AutomationCatalogTab::Tasks;
-        let action = if let Some(agent_id) = self.ready_automation_agent_id(cx) {
+        let action = if agent_id.trim().is_empty() {
+            settings::AutomationAction::shell(String::new(), Vec::new())
+        } else {
             settings::AutomationAction::Agent {
                 agent_definition_id: agent_id,
                 prompt: None,
             }
-        } else {
-            settings::AutomationAction::shell(String::new(), Vec::new())
         };
         let automation = settings::Automation {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1299,7 +1310,7 @@ impl Workspace {
         };
         let name = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("我的自动化")
+                .placeholder("给它起个名字")
                 .default_value(automation.name.clone())
         });
         let prompt = cx.new(|cx| {

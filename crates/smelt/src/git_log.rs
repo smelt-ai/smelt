@@ -219,7 +219,6 @@ pub enum LogScope {
 }
 
 /// 「日志」页的全部状态。
-#[derive(Default)]
 pub struct GitLogState {
     /// 当前载入的提交（已按 git log 给的顺序）。Rc：渲染时每帧要 move 进
     /// uniform_list 的回调，Vec 会整表深拷贝，Rc 只是一次引用计数。
@@ -241,11 +240,30 @@ pub struct GitLogState {
     /// 选中文件在这次提交里的 diff 行（复用 Git 页那套解析与配色）。
     pub detail_diff: Vec<crate::git_panel::DiffLine>,
     /// diff 列表的滚动位置。
-    pub detail_scroll: gpui::ScrollHandle,
+    pub detail_scroll: gpui_component::VirtualListScrollHandle,
     /// 已加载的仓库根，切项目时用来判断要不要重拉。
     pub loaded_root: Option<String>,
     /// 提交列表（uniform_list）的滚动句柄；分支图 canvas 也用它同步滚动。
     pub scroll: gpui::UniformListScrollHandle,
+}
+
+impl Default for GitLogState {
+    fn default() -> Self {
+        Self {
+            commits: Default::default(),
+            graph: Default::default(),
+            loading: false,
+            selected: None,
+            scope: Default::default(),
+            detail_files: Vec::new(),
+            detail_loading: false,
+            detail_selected_file: None,
+            detail_diff: Vec::new(),
+            detail_scroll: gpui_component::VirtualListScrollHandle::new(),
+            loaded_root: None,
+            scroll: Default::default(),
+        }
+    }
 }
 
 /// 一次拉多少条。历史动辄上万条，全量拉既慢又没人翻得到底；先给够用的量，

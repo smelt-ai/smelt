@@ -242,6 +242,9 @@ enum NarrowGitRow {
         /// 上一次提交/推送失败的原因，直接挂在这个仓库的提交框下面。
         error: Option<String>,
         depth: usize,
+        /// 输入框高度。和 `row_h` 一起由调用方算好，虚拟列表的槽位必须和这里一致。
+        input_h: f32,
+        row_h: f32,
     },
     Header {
         key: &'static str,
@@ -267,12 +270,31 @@ enum NarrowGitRow {
 const NARROW_GIT_ROW_H: f32 = 24.0;
 /// 仓库分组带来的一级缩进。窄面板里只能给这么多，再大文件名就没地方了。
 const NARROW_GIT_INDENT: f32 = 10.0;
-/// 单个仓库在变更列表里最多渲染多少行。
-///
-/// 列表混着仓库行、提交框和文件行，高度不一，用不了等高虚拟列表，所以是常规
-/// 布局：行数无上限时超大改动集会让布局树每帧重排。上限之外明确提示还有多少，
-/// 比默默卡住诚实。
-const NARROW_GIT_MAX_ROWS_PER_REPO: usize = 300;
+
+/// 窄变更列表里提交框的高度。输入框行数有上限，错误信息在框内滚动，
+/// 这样虚拟列表的槽位和实际内容对齐。
+fn commit_box_metrics(text: &str, error: Option<&str>, hint: bool) -> (f32, f32) {
+    let lines = text.lines().count().clamp(2, 6) as f32;
+    let input_h = lines * 18.0 + 16.0;
+    let hint_h = if hint { 16.0 } else { 0.0 };
+    let err_lines = error
+        .map(|err| err.lines().count().clamp(1, 4) as f32)
+        .unwrap_or(0.0);
+    let err_h = if err_lines > 0.0 {
+        8.0 + err_lines * 14.0
+    } else {
+        0.0
+    };
+    let row_h = 8.0 + 6.0 + input_h + 28.0 + hint_h + err_h;
+    (input_h, row_h)
+}
+
+fn narrow_git_row_height(row: &NarrowGitRow) -> f32 {
+    match row {
+        NarrowGitRow::CommitBox { row_h, .. } => *row_h,
+        _ => NARROW_GIT_ROW_H,
+    }
+}
 
 /// 仓库分组标题前的身份标记。用字符而不是图标：变更栏行高 24px，
 /// 再塞图标会把本就窄的一行挤成堆砌。
@@ -499,27 +521,14 @@ fn append_narrow_git_group(
         }),
     });
     let tree = build_git_tree(files, collapsed);
-    let total = tree.len();
-    out.extend(
-        tree.into_iter()
-            .take(NARROW_GIT_MAX_ROWS_PER_REPO)
-            .map(|row| NarrowGitRow::Tree {
-                key,
-                root: root.clone(),
-                is_staged_group,
-                depth,
-                gitlink: gitlinks.contains(&row.path),
-                row,
-            }),
-    );
-    if total > NARROW_GIT_MAX_ROWS_PER_REPO {
-        out.push(NarrowGitRow::Header {
-            key,
-            title: format!("… 还有 {} 项未显示", total - NARROW_GIT_MAX_ROWS_PER_REPO),
-            depth: depth + 1,
-            batch: None,
-        });
-    }
+    out.extend(tree.into_iter().map(|row| NarrowGitRow::Tree {
+        key,
+        root: root.clone(),
+        is_staged_group,
+        depth,
+        gitlink: gitlinks.contains(&row.path),
+        row,
+    }));
 }
 
 /// 渲染一行。`list_index` 是它在整个列表里的下标，只用作 GPUI element id——
@@ -670,6 +679,8 @@ fn render_narrow_git_row(
             ahead,
             error,
             depth,
+            input_h,
+            row_h: _,
         } => {
             let (has_text, has_staged, pushing, ahead) = (*has_text, *has_staged, *pushing, *ahead);
             let can_commit = has_text && has_staged && !pushing;
@@ -689,7 +700,7 @@ fn render_narrow_git_row(
                 .pl(px(12. + *depth as f32 * NARROW_GIT_INDENT))
                 .pr_2()
                 .py_1()
-                .child(gpui_component::input::Textarea::new(input))
+                .child(gpui_component::input::Textarea::new(input).h(px(*input_h)))
                 .child(
                     h_flex()
                         .gap_1p5()
@@ -801,6 +812,8 @@ fn render_narrow_git_row(
                 .children(error.clone().map(|err| {
                     div()
                         .w_full()
+                        .max_h(px(64.))
+                        .overflow_hidden()
                         .px_1p5()
                         .py_1()
                         .rounded(ui_theme::row_radius())
@@ -1171,7 +1184,7 @@ pub(crate) enum SplitRow {
 }
 
 /// 文件查看的固定行高（供 diff 视图 uniform_list 虚拟滚动，需每行等高）。
-const FILE_LINE_H: f32 = 20.0;
+pub(crate) const FILE_LINE_H: f32 = 20.0;
 
 /// 评论器插入到 diff 行之间时占用的固定高度。sticky 的位置和折叠锚点都必须
 /// 使用同一个值，否则打开评论后标题会出现一帧错位。

@@ -1,6 +1,7 @@
 use super::{
-    bound_agent_definition_id, conversation_agent_mark, conversation_icon_color,
-    conversation_row_title, new_conversation_row_label, recent_conversation_order,
+    agent_catalog_monogram, bound_agent_definition_id, conversation_agent_mark,
+    conversation_icon_color, conversation_row_title, new_conversation_row_label,
+    recent_conversation_order,
 };
 use crate::AgentStatus;
 use gpui::rgb;
@@ -34,6 +35,15 @@ fn conversation_mark_uses_the_first_character_or_pi() {
     assert_eq!(conversation_agent_mark(Some("  研究助理")), "研");
     assert_eq!(conversation_agent_mark(None), "Pi");
     assert_eq!(conversation_agent_mark(Some("  ")), "Pi");
+}
+
+#[test]
+fn catalog_monogram_keeps_two_characters_when_they_identify_the_agent() {
+    assert_eq!(agent_catalog_monogram("编码助手"), "编码");
+    assert_eq!(agent_catalog_monogram("日志与磁盘清理智能体"), "日志");
+    assert_eq!(agent_catalog_monogram("Pi 智能体 3"), "Pi");
+    assert_eq!(agent_catalog_monogram("A"), "A");
+    assert_eq!(agent_catalog_monogram("   "), "智");
 }
 
 #[test]
@@ -83,7 +93,8 @@ fn selected_idle_conversation_icon_does_not_look_like_running() {
 mod schedule_editor_tests {
     use super::super::{
         IntervalUnit, ScheduleKind, automation_missing_fields, automation_prompt_hint,
-        clock_input_is_editable, interval_title, schedule_from_values, webhook_curl_example,
+        automation_save_hint, clock_input_is_editable, interval_title, schedule_from_values,
+        webhook_curl_example,
     };
     use crate::settings;
     use smelt_core::automation::{SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK};
@@ -183,6 +194,19 @@ mod schedule_editor_tests {
                 false
             ),
             vec!["命令"]
+        );
+    }
+
+    #[test]
+    fn save_hint_names_what_is_missing_and_how_saving_works() {
+        assert_eq!(automation_save_hint(&[], true), None);
+        assert_eq!(
+            automation_save_hint(&["名称", "触发器"], true).as_deref(),
+            Some("还差：名称、触发器")
+        );
+        assert_eq!(
+            automation_save_hint(&["指令"], false).as_deref(),
+            Some("还差：指令，补齐后自动保存")
         );
     }
 
@@ -342,7 +366,7 @@ mod schedule_editor_tests {
 #[cfg(test)]
 mod agent_definition_ui_tests {
     use super::super::{
-        AutomationRowStatus, agent_conversation_start_error, agent_display_name,
+        AutomationRowStatus, agent_card_prompt, agent_conversation_start_error, agent_display_name,
         agent_instructions_footer, agent_prompt_summary, agent_usage_summary,
         automation_row_status, automation_row_status_label, format_last_run_cell,
         format_next_run_cell, format_relative_since, format_relative_until,
@@ -424,6 +448,21 @@ mod agent_definition_ui_tests {
             agent_prompt_summary("先验证行情时间，再给出结论。"),
             Some("先验证行情时间，再给出结论。".into())
         );
+    }
+
+    #[test]
+    fn card_prompt_stays_within_two_lines_and_skips_blank() {
+        assert_eq!(agent_card_prompt("   \n  "), None);
+        assert_eq!(
+            agent_card_prompt("先验证行情时间，再给出结论。"),
+            Some("先验证行情时间，再给出结论。".into())
+        );
+        let long = "你是一个专业的本地系统与磁盘清理智能体。职责：检查并安全清理本地超过 7 天的历史日志、AI 助手会话轨迹与临时缓存，然后再做别的。";
+        let card = agent_card_prompt(long).unwrap();
+        let summary = agent_prompt_summary(long).unwrap();
+        assert!(card.ends_with('…'));
+        assert!(card.chars().count() < summary.chars().count());
+        assert!(card.chars().count() <= 65);
     }
 
     #[test]

@@ -24,7 +24,41 @@ impl Workspace {
         if let Some(of) = self.open_file.as_mut() {
             of.preview = preview;
         }
+        if preview {
+            self.refresh_markdown_preview_source(cx);
+        }
         cx.notify();
+    }
+
+    fn refresh_markdown_preview_source(&mut self, cx: &App) {
+        let Some(open) = self.open_file.as_mut() else {
+            return;
+        };
+        if !open.preview {
+            return;
+        }
+        let next = open.editor.read(cx).value().to_string();
+        if open.preview_source.as_ref() != next {
+            open.preview_source = next.into();
+        }
+    }
+
+    fn schedule_markdown_preview_refresh(&mut self, cx: &mut Context<Self>) {
+        self.markdown_preview_epoch = self.markdown_preview_epoch.wrapping_add(1);
+        let epoch = self.markdown_preview_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(80))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.markdown_preview_epoch != epoch {
+                    return;
+                }
+                this.refresh_markdown_preview_source(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 文件树：展开/收起一个文件夹。
@@ -395,12 +429,13 @@ impl Workspace {
             readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
             conflict_pending: false,
             preview: is_markdown,
+            preview_source: SharedString::default(),
         });
-        // InputState 自己会刷新编辑器，但预览和文件头属于 Workspace，必须订阅变更
-        // 才能在编辑时同步更新 Markdown 预览与未保存标记，而不依赖切换 tab 触发 render。
-        self._file_editor_sub = Some(cx.subscribe(&editor, |_, _, event: &InputEvent, cx| {
+        // 编辑器自己会刷新。预览和未保存标记属于 Workspace：按键先记下世代，
+        // 停手后再把正文交给 Markdown，避免每个字符都重解析。
+        self._file_editor_sub = Some(cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                cx.notify();
+                this.schedule_markdown_preview_refresh(cx);
             }
         }));
         cx.notify();
@@ -435,7 +470,8 @@ impl Workspace {
                                 state.set_cursor_position(Position::new(line0, 0), window, cx);
                             }
                         });
-                        of.saved_content = Rc::new(content);
+                        of.saved_content = Rc::new(content.clone());
+                        of.preview_source = content.into();
                         of.readable = true;
                     }
                     Err(_) => {
