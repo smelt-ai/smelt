@@ -108,10 +108,6 @@
 //! 回滚 tripwire：successor 若已迁移 store sqlite schema，老进程不可再服务，
 //! 此时 exit 交由拉起逻辑重开新版（结局=旧版最坏情况，显式可观测）。
 //!
-//! legacy exec-self 文件交接（一代兼容）：旧二进制仍会 exec 新二进制并传
-//! SMELTD_HANDOFF 文件路径；新二进制保留文件读端。TODO(下版)：删文件读端、
-//! `handoff_path` 清理逻辑与 `.next` 启动自提升。
-//!
 //! ## 内嵌远程网关（`remote_start`/`remote_stop`/`remote_status`）
 //!
 //! 路由/handler 全在 `smelt_remote_gateway` crate（跟独立进程版 `gateway.rs` 共用一份，
@@ -441,18 +437,8 @@ fn bind_single_instance(
     UnixListener::bind(path).map(Some)
 }
 
-fn bind_fresh_daemon(
-    path: &std::path::Path,
-    stale_handoff: &std::path::Path,
-    check_existing: bool,
-) -> std::io::Result<Option<UnixListener>> {
-    let listener = bind_single_instance(path, check_existing)?;
-    if listener.is_some() {
-        // 只有确认自己取得 listener 后才能清理。若已有 daemon 正在 upgrade，
-        // 它刚写下的 handoff 是活数据，竞争启动者必须原样保留并直接退出。
-        let _ = std::fs::remove_file(stale_handoff);
-    }
-    Ok(listener)
+fn bind_fresh_daemon(path: &std::path::Path) -> std::io::Result<Option<UnixListener>> {
+    bind_single_instance(path, true)
 }
 
 fn secure_daemon_socket(path: &std::path::Path) -> std::io::Result<()> {
@@ -2066,10 +2052,7 @@ fn main() {
     }
     // 钉住启动时刻：晚一步取到的就是「首次有人问 version」的时间，不是启动时间。
     started_at();
-    // 无缝升级交接：上一代进程 exec 本二进制前写好交接文件并把路径放在环境变量里。
-    // 立即摘掉环境变量：它只对"本次 exec 交接"有意义，不能传染给之后 spawn 的 shell。
-    let handoff = std::env::var("SMELTD_HANDOFF").ok();
-    // 交接 v2 import 模式：socketpair 端 fd 号（与 legacy 文件路径互斥，v2 优先）。
+    // 交接 v2 import 模式：socketpair 端 fd 号。旧的 SMELTD_HANDOFF 文件路径不再读取。
     let import_sock = std::env::var("SMELTD_HANDOFF_SOCK")
         .ok()
         .and_then(|fd| fd.parse::<RawFd>().ok());
@@ -2081,7 +2064,6 @@ fn main() {
         std::env::remove_var("SMELTD_HANDOFF_SOCK");
         std::env::remove_var("SMELTD_PLUGIN_DAEMON_FINGERPRINT");
     }
-    let came_from_handoff = handoff.is_some();
     // 进程指纹启动时钉死：env（handoff successor / GUI 拉起传入）优先，否则对
     // current_exe 文件哈希一次。此后进程生命期内不再重哈希磁盘——StageDiskOnly
     // 后磁盘是新的、进程还是老的，重哈希会拿错插件集（与 -67034 同一类耦合）。
@@ -2091,22 +2073,9 @@ fn main() {
         return;
     }
 
-    // `exec` 保留直接子进程与已经退出但尚未 wait 的状态，却销毁上一映像的所有
-    // reaper 线程。必须在恢复终端/ACP/插件 Host、启动任何新 child owner 之前做一次
-    // 有界 WNOHANG sweep；运行期绝不再用 waitpid(-1)，后续全部交给精确 PID owner。
-    if came_from_handoff {
-        let reaped = reap_inherited_exited_children_at_exec_boundary();
-        if reaped > 0 {
-            dlog(&format!(
-                "upgrade: 启动边界已回收 {reaped} 个上一映像遗留的退出子进程"
-            ));
-        }
-    }
-
     let path = sock_path();
     // EventHub 的实时连接列表不参与无缝升级交接；每个进程从空列表开始，
     // durable log/cursor 则复用 smelt.sqlite3。
-    // 建在 resume_handoff 之前：交接恢复的会话也要把状态投影到同一个 EventHub。
     let event_hub = match event_hub::DaemonEventHub::open_default() {
         Ok(event_hub) => event_hub,
         Err(error) => {
@@ -2119,70 +2088,36 @@ fn main() {
     // 即可。读取异常时 fail-closed，绝不把损坏文档当成空目录发布给 GUI。
     let remote_sessions = new_remote_sessions();
     let workspace_menu = new_workspace_menu();
-    let (listener, sessions, acp_sessions) = match handoff.and_then(|p| {
-        resume_handoff_with_remote(
-            &p,
-            &event_hub,
-            Some(Arc::clone(&remote_sessions)),
-            /* legacy_rehome */ true,
-        )
-    }) {
-        Some(x) => {
-            let acp_n = x.2.snapshot().len();
-            dlog(&format!(
-                "upgrade: 交接完成，恢复 {} 个终端会话 + {acp_n} 个 ACP 会话",
-                x.1.len()
-            ));
-            // 交接的会话是活的：空身份目录，由后续广播持续更新落盘。
-            *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) =
-                Some(SessionDirectory::new());
-            x
-        }
-        None => {
-            if came_from_handoff {
-                dlog("upgrade: 交接文件恢复失败，走全新启动（会话丢失但守护存活）");
-            }
-            // 单实例检查只在「不是从交接来的」这条路径上做：能连上说明已有活守护，
-            // 直接退出。若 came_from_handoff 为真，说明本进程就是刚从上一代 exec
-            // 过来的替身——这种情况下绝不能做这个检查：上一代把监听 fd 的 CLOEXEC
-            // 清掉了，我们已经继承着它，此时 connect 这个 path 会连上我们自己继承
-            // 的那份监听 fd（进 backlog 即成功），于是把「自己」误判成「已有别的
-            // 守护」而直接 return 退出——刚交接过来的进程当场自杀，所有会话陪葬。
-            // 交接失败时唯一正确的动作是：忽略那份不可追溯的旧监听 fd（它会作为
-            // 一个泄漏的 fd 留在本进程里，无害但也无法优雅关闭——resume_handoff
-            // 失败通常发生在 JSON 都解析不出来的极端情况，代价可接受），把 socket
-            // 文件净空重 bind，保证守护本身不能倒。
-            let listener = match bind_fresh_daemon(&path, &handoff_path(), !came_from_handoff) {
-                Ok(Some(l)) => l,
-                Ok(None) => return,
-                Err(e) => {
-                    // 曾经是静默 return：守护无声消失、sock 残留，外面完全查不到
-                    // 死因（排障时被坑过——必须留痕）。
-                    dlog(&format!("bind {} 失败，守护退出：{e}", path.display()));
-                    return;
-                }
-            };
-            // socket 仅本用户可读写。权限收紧失败时不能留下一个仍接受连接的 daemon。
-            if let Err(error) = secure_daemon_socket(&path) {
-                dlog(&format!(
-                    "设置 {} 权限失败，守护退出：{error}",
-                    path.display()
-                ));
-                drop(listener);
-                let _ = std::fs::remove_file(&path);
-                std::process::exit(1);
-            }
-            // 崩溃恢复：非 handoff 启动时，落盘有内容就说明上次非正常退出
-            // （正常 shutdown 会清空）。灌进身份目录，runtime=false，保留最后相位。
-            let directory = SessionDirectory::restore_from_disk();
-            let recovered = directory.snapshot().len();
-            if recovered > 0 {
-                dlog(&format!("崩溃恢复：{recovered} 个会话恢复为已断连状态"));
-            }
-            *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(directory);
-            (listener, new_sessions(), new_acp_sessions())
+    let listener = match bind_fresh_daemon(&path) {
+        Ok(Some(l)) => l,
+        Ok(None) => return,
+        Err(e) => {
+            // 曾经是静默 return：守护无声消失、sock 残留，外面完全查不到
+            // 死因（排障时被坑过——必须留痕）。
+            dlog(&format!("bind {} 失败，守护退出：{e}", path.display()));
+            return;
         }
     };
+    // socket 仅本用户可读写。权限收紧失败时不能留下一个仍接受连接的 daemon。
+    if let Err(error) = secure_daemon_socket(&path) {
+        dlog(&format!(
+            "设置 {} 权限失败，守护退出：{error}",
+            path.display()
+        ));
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        std::process::exit(1);
+    }
+    // 崩溃恢复：落盘有内容就说明上次非正常退出（正常 shutdown 会清空）。
+    // 灌进身份目录，runtime=false，保留最后相位。
+    let directory = SessionDirectory::restore_from_disk();
+    let recovered = directory.snapshot().len();
+    if recovered > 0 {
+        dlog(&format!("崩溃恢复：{recovered} 个会话恢复为已断连状态"));
+    }
+    *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(directory);
+    let sessions = new_sessions();
+    let acp_sessions = new_acp_sessions();
 
     let automations = new_automation_store();
 
@@ -2201,7 +2136,7 @@ fn main() {
         Arc::clone(&acp_sessions),
         Arc::clone(&remote_sessions),
         Arc::clone(&event_hub),
-        came_from_handoff,
+        false,
     );
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
 
@@ -2576,11 +2511,6 @@ fn run_serve_loop(
     accept_loop();
 }
 
-/// 交接文件路径（跟 socket 同目录）。
-fn handoff_path() -> std::path::PathBuf {
-    sock_path().with_file_name("handoff.json")
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct OwnedAcpHandoff {
     pid: i32,
@@ -2596,7 +2526,6 @@ struct ValidatedAcpHandoff {
     acp_session_id: String,
     cwd: Option<String>,
     launch: smelt_core::agent_kind::ConversationLaunchSpec,
-    agent_needs_transcript_check: bool,
     pending_raw_line: Option<String>,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
 }
@@ -2619,7 +2548,6 @@ struct ValidatedHostedAcpHandoff {
     runtime_spec_fingerprint: Option<String>,
     agent_mcp: bool,
     agent_token: String,
-    agent_needs_transcript_check: bool,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
     pending_host_bytes: Vec<u8>,
 }
@@ -2753,9 +2681,6 @@ fn validate_acp_handoff_item(
         acp_session_id,
         cwd: item["cwd"].as_str().map(String::from),
         launch: launch_spec_from_handoff_item(item),
-        agent_needs_transcript_check: item["agent_needs_transcript_check"]
-            .as_bool()
-            .unwrap_or(false),
         pending_raw_line: item["pending_raw_line"].as_str().map(String::from),
         conversation_binding: item
             .get("conversation_binding")
@@ -2839,9 +2764,6 @@ fn validate_hosted_acp_handoff_item(
             .map(String::from),
         agent_mcp,
         agent_token,
-        agent_needs_transcript_check: item["agent_needs_transcript_check"]
-            .as_bool()
-            .unwrap_or(false),
         conversation_binding: item
             .get("conversation_binding")
             .cloned()
@@ -2914,32 +2836,6 @@ fn wait_for_exact_child(pid: i32) -> TerminalChildExit {
             TerminalChildExit::WaitFailed(error)
         }
     }
-}
-
-/// `exec` 交接会保留 daemon PID 与父子关系，却会丢掉上一映像中的回收线程。
-/// 这里只允许在新映像尚未恢复任何 child owner 的独占启动边界调用：此刻旧线程已随
-/// `exec` 消失，新 waiter 尚未建立，因此不会抢 ACP、插件 Host 或终端的退出状态。
-/// 存活子进程由 WNOHANG 原样保留，稍后交回各自的精确 PID owner。
-fn reap_inherited_exited_children_at_exec_boundary() -> usize {
-    let mut reaped = 0;
-    loop {
-        let waited = waitpid_retry(-1, libc::WNOHANG);
-        if waited > 0 {
-            reaped += 1;
-            continue;
-        }
-        if waited == 0 {
-            break;
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::ECHILD) => break,
-            error => {
-                dlog(&format!("upgrade: 启动边界清理遗留子进程失败：{error:?}"));
-                break;
-            }
-        }
-    }
-    reaped
 }
 
 /// 交接清理动刀前的身份门：pid 启动早于快照时刻才是原进程。复用只能发生在
@@ -3051,7 +2947,6 @@ fn resume_hosted_acp_handoff_item(
         runtime_spec_fingerprint,
         agent_mcp,
         agent_token,
-        agent_needs_transcript_check,
         conversation_binding,
         pending_host_bytes,
     } = validated;
@@ -3108,7 +3003,6 @@ fn resume_hosted_acp_handoff_item(
         handle: Mutex::new(None),
         unreaped_pid: Mutex::new(None),
         cwd,
-        agent_needs_transcript_check,
         state,
         output_gate: Mutex::new(()),
         out: Mutex::new(AcpOut {
@@ -3243,16 +3137,18 @@ fn legacy_rehome_is_safe(
 /// `legacy_rehome`：是否执行上面那步迁移。它会杀掉旧连接并重新 spawn 宿主，
 /// 属于有副作用的动作，所以由调用方显式选择，而不是靠 `cfg!(test)` 猜构建
 /// 类型——那样测试里这条分支按构造永远不可达，等于没有覆盖。
+///
+/// 生产启动不再读交接文件。这个入口只给单测喂 JSON，恢复核心和 v2 socket 共用。
+#[cfg(test)]
 fn resume_handoff_with_remote(
     path: &str,
     event_hub: &EventHubHandle,
     remote_sessions: Option<RemoteSessions>,
     legacy_rehome: bool,
 ) -> Option<(UnixListener, Sessions, AcpSessions)> {
-    // legacy 文件入口（一代兼容）：读文件 → Value → 恢复核心。
-    // 交接 v2 走 socket + typed manifest，经 bridge 调同一恢复核心。
+    // 单测把交接 JSON 写成临时文件再喂给恢复核心。生产启动不走这里。
     let data = std::fs::read_to_string(path).ok()?;
-    let _ = std::fs::remove_file(path); // 读到手就删，避免残留被下次启动误认
+    let _ = std::fs::remove_file(path);
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
     resume_from_value(
         &v,
@@ -3613,7 +3509,6 @@ pub(crate) fn resume_from_value(
             acp_session_id,
             cwd,
             launch,
-            agent_needs_transcript_check,
             pending_raw_line,
             conversation_binding,
         } = validated;
@@ -3680,7 +3575,6 @@ pub(crate) fn resume_from_value(
             handle: Mutex::new(None),
             unreaped_pid: Mutex::new(None),
             cwd,
-            agent_needs_transcript_check,
             state,
             output_gate: Mutex::new(()),
             out: Mutex::new(AcpOut {
@@ -3989,7 +3883,8 @@ fn handle_upgrade(
     }
 }
 
-/// 开 PTY + 起 shell（环境设置与 GUI 内嵌版完全一致，见 terminal_view.rs 的注释）。
+/// 开 PTY + 起 shell。交互环境在下面的 `apply_interactive_pty_env`：PTY 只活在守护里，
+/// GUI 的 `terminal.rs` 只消费字节流。
 /// `launch`：项目「+」悬浮菜单的 Claude Code / Codex 快捷入口——把要跑的命令直接编进
 /// 启动命令行（`-ilc '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
 /// 这样从根上没有"shell 是否已经在读 stdin"的时序问题，命令跑完会 exec 回一个

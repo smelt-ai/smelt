@@ -701,7 +701,6 @@ mod tests {
             super::super::make_acp_session(
                 id,
                 None,
-                false,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
                 None,
                 None,

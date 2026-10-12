@@ -67,7 +67,6 @@ fn make_acp_session_value(
         handle: Mutex::new(None),
         unreaped_pid: Mutex::new(None),
         cwd: None,
-        agent_needs_transcript_check: true,
         state: Arc::new(Mutex::new(SessionState {
             id: id.to_string(),
             instance,

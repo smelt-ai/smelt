@@ -262,7 +262,7 @@ fn legacy_entries_are_readable_but_not_written_back() {
             { "Assistant": { "text": "old answer", "thought": false } }
         ]
     }))
-    .expect("旧 entries 字段不能让整个 ACP 会话存档解析失败");
+    .expect("不认识的 entries 字段不能让整个 ACP 会话存档解析失败");
 
     let migrated = serde_json::to_value(&legacy).unwrap();
     assert!(

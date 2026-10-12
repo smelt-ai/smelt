@@ -414,46 +414,24 @@ impl ListDelegate for CmdDelegate {
 
 /// 舞台覆盖页：盖在当前会话舞台上，不是一级导航（一级导航是 `WorkspaceRoute`）。
 ///
-/// 存档 JSON 键仍是 `stage_override`；`ToolPanel` 的 wire 值仍是 `inspector`，
-/// 避免旧版本读不了新存档。实际内容由 `tool_panel_tab` 决定，其余变体只为旧档兼容。
+/// 存档 JSON 键仍是 `stage_override`；`ToolPanel` 的 wire 值仍是 `inspector`。
+/// 实际内容由 `tool_panel_tab` 决定。旧的 `files`/`git`/`skills`/`history` 不再识别，
+/// 读到即视为没有覆盖页。
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StageCover {
     /// Tool Panel 全屏；持久化沿用旧 wire 名 `inspector`。
     #[serde(rename = "inspector", alias = "tool_panel")]
     ToolPanel,
-    // 旧版本把 Tool Panel 的具体内容写进覆盖页。读档时迁成 ToolPanel。
-    /// 「文件树 + 内容」双栏全宽（旧档）。
-    Files,
-    /// 「变更列表 + diff」双栏全宽（旧档）。
-    Git,
-    /// 「技能」旧档；技能已迁成插件 tab。
-    Skills,
-    History,
     /// 未知覆盖页。读到即视为没有覆盖页。
     #[serde(other)]
     Unknown,
 }
 
 impl StageCover {
-    /// 旧版具体舞台页对应的 Tool Panel tab；新的 `ToolPanel` 展示态不携带内容。
-    pub(crate) fn legacy_tool_panel_tab(self) -> Option<tool_panel::ToolPanelTab> {
-        match self {
-            Self::Files => Some(tool_panel::ToolPanelTab::Files),
-            Self::Git => Some(tool_panel::ToolPanelTab::Git),
-            // 技能已经不是内置 tab；沿用 tab 反序列化那条同样的迁移路径。
-            Self::Skills => Some(tool_panel::ToolPanelTab::migrated_skills()),
-            Self::History => Some(tool_panel::ToolPanelTab::History),
-            Self::ToolPanel | Self::Unknown => None,
-        }
-    }
-
-    /// 是否是 Tool Panel 的舞台全屏（含旧存档中的具体内容变体）。
+    /// 是否是 Tool Panel 的舞台全屏。
     pub(crate) fn is_tool_panel_cover(self) -> bool {
-        matches!(
-            self,
-            Self::ToolPanel | Self::Files | Self::Git | Self::Skills | Self::History
-        )
+        matches!(self, Self::ToolPanel)
     }
 }
 
@@ -688,14 +666,12 @@ impl Default for SessionRouteArchive {
 
 impl SessionUiState {
     fn archive(&self) -> SessionRouteArchive {
-        let legacy_tool_panel_tab = self.stage_cover.and_then(StageCover::legacy_tool_panel_tab);
         SessionRouteArchive {
-            // 只持久化 Tool Panel 全屏；旧的具体内容变体一律收成 ToolPanel。
             stage_cover: self
                 .stage_cover
                 .filter(|view| view.is_tool_panel_cover())
                 .map(|_| StageCover::ToolPanel),
-            tool_panel_tab: legacy_tool_panel_tab.unwrap_or(self.tool_panel_tab),
+            tool_panel_tab: self.tool_panel_tab,
             tool_panel_open: self.tool_panel_open,
             tool_panel_w: self.tool_panel_w,
             expanded: self.expanded.clone(),
@@ -721,16 +697,12 @@ impl SessionUiState {
         Self {
             restored_from_archive: true,
             pending_restore_file: archive.open_file_path,
-            // 旧版把具体 Tool Panel 内容写进覆盖页；恢复时保留当前内容并
-            // 统一迁到 ToolPanel。旧档 `tasks` 读成 Unknown，不占用 session 舞台。
+            // 不认识的覆盖页（含已删除的 files/git/skills/history）不占用舞台。
             stage_cover: match archive.stage_cover {
+                Some(StageCover::ToolPanel) => Some(StageCover::ToolPanel),
                 Some(StageCover::Unknown) | None => None,
-                Some(_) => Some(StageCover::ToolPanel),
             },
-            tool_panel_tab: archive
-                .stage_cover
-                .and_then(StageCover::legacy_tool_panel_tab)
-                .unwrap_or(archive.tool_panel_tab),
+            tool_panel_tab: archive.tool_panel_tab,
             tool_panel_open: archive.tool_panel_open,
             tool_panel_w: archive.tool_panel_w.max(MIN_TOOL_PANEL_WIDTH),
             expanded: archive.expanded,
@@ -1737,20 +1709,12 @@ struct AcpSavedWire {
     agent: Option<String>,
     #[serde(default)]
     agent_definition_id: Option<String>,
-    /// 旧版曾把完整消息历史写进 workspace.json。只消费字段保证迁移可读，值不再
-    /// 进入 `AcpSaved`，更不会在下一次保存时写回。
-    #[serde(default, rename = "entries")]
-    _legacy_entries: Option<serde::de::IgnoredAny>,
     #[serde(default, alias = "resume_session_id")]
     history_session_id: Option<agent_client_protocol::schema::v1::SessionId>,
     #[serde(default)]
     sid: Option<String>,
     #[serde(default)]
     refresh_launch_from_settings: Option<bool>,
-    /// 旧存档记过「这场对话是分出来的」。分叉只是创建动作，结果就是普通对话，
-    /// 这个字段不再进入 `AcpSaved`，下一次保存也不会写回。
-    #[serde(default, rename = "fork_origin")]
-    _legacy_fork_origin: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
     #[serde(default)]

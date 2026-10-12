@@ -182,8 +182,8 @@ enum CachedQuotaStatus {
 pub(crate) struct QuotaCache {
     /// 上次写入时间（Unix 毫秒），用于判断缓存是否还新鲜。
     pub saved_at_ms: u64,
-    /// 格式版本仅用于迁移旧命名字段；provider 覆盖范围由 `provider_ids` 决定，
-    /// 新增 provider 不再需要手工递增版本号。
+    /// 格式版本只用于判断旧快照有没有覆盖当时的 provider。覆盖范围由
+    /// `provider_ids` 决定，新增 provider 不再需要手工递增版本号。
     #[serde(default)]
     pub schema_version: u32,
     /// 本次缓存生成时注册过的全部 provider，包括没有凭据、未拿到额度的项。
@@ -193,19 +193,6 @@ pub(crate) struct QuotaCache {
     /// 真正拿到额度的项。键使用 agent 的稳定存档 id。
     #[serde(default)]
     providers: BTreeMap<String, CachedQuotaStatus>,
-    /// 以下字段只读旧格式，新缓存不再写出。
-    #[serde(default, skip_serializing)]
-    pub copilot: Option<CachedCopilotQuotaStatus>,
-    #[serde(default, skip_serializing)]
-    pub codex: Option<CachedWindowQuotaStatus>,
-    #[serde(default, skip_serializing)]
-    pub claude: Option<CachedWindowQuotaStatus>,
-    /// 旧缓存文件没有这个字段；缺省时按没查过 Grok 处理，不能让整份缓存作废。
-    #[serde(default, skip_serializing)]
-    pub grok: Option<CachedWindowQuotaStatus>,
-    /// 旧缓存没有这个字段；缺省按没查过 Cursor 处理。
-    #[serde(default, skip_serializing)]
-    pub cursor: Option<CachedWindowQuotaStatus>,
 }
 
 /// 当前格式开始使用动态 provider map。以后新增 provider 不需要改这个版本。
@@ -244,36 +231,13 @@ impl QuotaCache {
     }
 
     fn statuses(&self) -> Vec<(ConversationAgentKind, QuotaStatus)> {
-        let mut statuses = [
-            self.codex
-                .clone()
-                .map(QuotaStatus::from_window_cache)
-                .map(|status| (ConversationAgentKind::Codex, status)),
-            self.claude
-                .clone()
-                .map(QuotaStatus::from_window_cache)
-                .map(|status| (ConversationAgentKind::Claude, status)),
-            self.copilot
-                .clone()
-                .map(QuotaStatus::from_copilot_cache)
-                .map(|status| (ConversationAgentKind::Copilot, status)),
-            self.grok
-                .clone()
-                .map(QuotaStatus::from_window_cache)
-                .map(|status| (ConversationAgentKind::Grok, status)),
-            self.cursor
-                .clone()
-                .map(QuotaStatus::from_window_cache)
-                .map(|status| (ConversationAgentKind::Cursor, status)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-        statuses.extend(self.providers.iter().filter_map(|(id, status)| {
-            ConversationAgentKind::from_id(id)
-                .map(|provider| (provider, QuotaStatus::from_cache(status.clone())))
-        }));
-        statuses
+        self.providers
+            .iter()
+            .filter_map(|(id, status)| {
+                ConversationAgentKind::from_id(id)
+                    .map(|provider| (provider, QuotaStatus::from_cache(status.clone())))
+            })
+            .collect()
     }
 }
 
@@ -367,11 +331,6 @@ impl ProviderQuotaState {
             provider_ids,
             // 只缓存真正拿到 quota 的项；失败态（quota 为 None）不落盘。
             providers,
-            copilot: None,
-            codex: None,
-            claude: None,
-            grok: None,
-            cursor: None,
         }
     }
 }
@@ -405,11 +364,6 @@ fn cache_from_snapshot(snapshot: smelt_store::QuotaCacheSnapshot) -> Option<Quot
         schema_version: snapshot.schema_version,
         provider_ids: snapshot.provider_ids.into_iter().collect(),
         providers: serde_json::from_slice(&snapshot.providers_json).ok()?,
-        copilot: None,
-        codex: None,
-        claude: None,
-        grok: None,
-        cursor: None,
     })
 }
 
@@ -555,29 +509,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_named_cache_restores_into_the_provider_index() {
+    fn retired_named_cache_fields_are_ignored() {
         let cache: QuotaCache = serde_json::from_str(
             r#"{
               "saved_at_ms": 1,
               "schema_version": 2,
-              "copilot": null,
-              "codex": null,
               "claude": {
                 "quota": {"windows": [{"label":"5h","used_percent":9.0,"resets_at_ms":null,"reset_after_seconds":null}]},
                 "checked_at_ms": 7
-              },
-              "grok": null,
-              "cursor": null
+              }
             }"#,
         )
         .unwrap();
-        let mut state = ProviderQuotaState::default();
-
-        state.restore(&cache);
-
-        let status = state.status(ConversationAgentKind::Claude).unwrap();
-        assert_eq!(status.checked_at_ms, 7);
-        assert!(matches!(status.quota, Some(ProviderQuotaData::Windows(_))));
+        assert!(cache.statuses().is_empty());
+        assert!(!cache.can_skip_startup_fetch());
     }
 
     #[test]
@@ -664,15 +609,8 @@ mod tests {
               }
             }"#,
         )
-        .expect("missing grok field must not reject old cache");
-        assert!(cache.grok.is_none());
-        assert!(
-            cache
-                .claude
-                .as_ref()
-                .and_then(|status| status.quota.as_ref())
-                .is_some()
-        );
+        .expect("缺字段不能让整份缓存作废");
+        assert!(cache.statuses().is_empty());
         assert_eq!(cache.schema_version, 0);
         assert!(
             !cache.can_skip_startup_fetch(),

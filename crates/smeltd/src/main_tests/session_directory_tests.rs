@@ -249,7 +249,6 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
             make_acp_session(
                 "acp-1",
                 None,
-                false,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
                 None,
                 None,

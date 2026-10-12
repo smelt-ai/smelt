@@ -314,8 +314,8 @@ fn update_replaces_the_whole_package_and_uninstall_removes_the_record() {
 }
 
 #[test]
-fn leftover_runtime_field_does_not_block_install() {
-    let root = root("ignored-runtime");
+fn leftover_runtime_field_rejects_install() {
+    let root = root("rejected-runtime");
     let smelt_root = root.join("home");
     let source = package(&root, "1.0.0", "v1\n");
     let manifest_path = source.join("plugin.json");
@@ -328,15 +328,8 @@ fn leftover_runtime_field_does_not_block_install() {
     )
     .unwrap();
 
-    install(&smelt_root, &source);
-    assert_eq!(
-        list_user_plugins(&smelt_root)
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-            .len(),
-        1
-    );
+    let error = plan_user_plugin_install(&smelt_root, &source).unwrap_err();
+    assert!(error.to_string().contains("runtime"));
 
     fs::remove_dir_all(root).unwrap();
 }

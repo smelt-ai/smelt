@@ -663,7 +663,7 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
     cx.set_global(c);
 }
 
-// ===================== Agent UI / Claude hooks（B 路线） =====================
+// ===================== Agent 身份与宿主状态 =====================
 //
 // ConversationAgentKind / AcpProfile 搬进 smelt-core（本身不需要 GPUI），AgentHostState
 // （需要 `gpui::Global`）搬进 smelt-ui——都是 acp_view.rs 独立成 smelt-acp-view

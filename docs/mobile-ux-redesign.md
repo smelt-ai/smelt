@@ -215,7 +215,7 @@ yellow / red），哈希是写死的 FNV-1a，只保证手机内部稳定。色�
   （连同 `THIRD_PARTY_NOTICES.md`，LobeHub Icons / MIT）。桌面换图标时这里要跟着换，
   pubspec 里写了提醒。
 - **匹配用「包含」而不是「相等」。** 服务端那边是 `c.contains(k.id())`
-  （`agent_kind.rs` 的 `from_command_loose`），自定义 agent 的 id 常常是
+  （`agent_kind` 的 `from_command_loose`），自定义 agent 的 id 常常是
   `claude-quant` 这种带后缀的形态。精确匹配会让它们全掉进兜底图标。
 - **认不出的 ACP 会话退到机器人图标，不退到终端图标。** 后者会把一个 ACP 会话画成
   终端——那不是「信息少了」，是「信息错了」。

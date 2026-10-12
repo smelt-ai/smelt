@@ -1,5 +1,8 @@
 # Smelt 架构改进路线图（Implementation Roadmap）
 
+> 历史快照，不是当前实施说明。13 周计划和里面的代码片段不要按字面执行。
+> 现状见 [`workspace.md`](workspace.md)，产品待做见 [`product-roadmap.md`](product-roadmap.md)。
+
 ## 概览
 
 基于架构审查的 P0/P1/P2 优先级，制定 13 周的改进方案。

@@ -758,7 +758,6 @@ pub(crate) fn run_session_host() {
         let session = make_acp_session(
             &req.id,
             req.cwd.clone(),
-            req.agent_needs_transcript_check,
             req.conversation_binding.clone(),
             req.agent_session.clone(),
             req.pending_agent_preset.clone(),

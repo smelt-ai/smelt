@@ -89,9 +89,6 @@ pub struct ConversationLaunch {
     /// `occurrence` 与 `ConversationCommand::Rewind` 同语义：在 agent 的可分叉
     /// 列表里按文本配对，`occurrence` 是同文本消息中的第几条（从 0 数起）。
     pub fork_cut: Option<AcpForkCut>,
-    /// 旧 smeltd handoff 格式兼容字段。历史是否存在现在一律由 agent 的
-    /// `session/load` 判断，Smelt 不再检查任何 agent 的私有 transcript 路径。
-    pub resume_needs_transcript_check: bool,
 }
 
 /// 「分叉副本的切点」：见 `ConversationLaunch::fork_cut`。
@@ -1224,7 +1221,6 @@ pub fn spawn_acp(
                 resume_session_id,
                 fork_session_id,
                 fork_cut,
-                resume_needs_transcript_check,
             } = launch;
             let launch = ConversationLaunch {
                 launch: ConversationLaunchSpec {
@@ -1240,7 +1236,6 @@ pub fn spawn_acp(
                 resume_session_id,
                 fork_session_id,
                 fork_cut,
-                resume_needs_transcript_check,
             };
             let result = smol::block_on(run_connection(
                 &launch,
@@ -7107,7 +7102,6 @@ mod session_load_replay_tests {
                 resume_session_id: Some(SessionId::new("session-from-disk")),
                 fork_session_id: None,
                 fork_cut: None,
-                resume_needs_transcript_check: false,
             },
             None,
         );
@@ -7220,7 +7214,6 @@ mod dsh_live_tests {
                 resume_session_id: None,
                 fork_session_id: None,
                 fork_cut: None,
-                resume_needs_transcript_check: false,
             },
             None,
         );
@@ -7310,7 +7303,6 @@ mod dsh_live_tests {
                 resume_session_id: None,
                 fork_session_id: None,
                 fork_cut: None,
-                resume_needs_transcript_check: false,
             },
             None,
         );

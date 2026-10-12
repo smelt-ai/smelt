@@ -166,8 +166,6 @@ pub(crate) struct AcpSession {
     /// 把 sid 从表里摘掉——否则新 open 会在旧进程还活着时 session/load。
     pub(crate) unreaped_pid: Mutex<Option<i32>>,
     pub(crate) cwd: Option<String>,
-    /// 旧 handoff 格式兼容字段；当前恢复路径不再读取 agent 私有 transcript。
-    pub(crate) agent_needs_transcript_check: bool,
     /// 四色状态，跟终端会话共用同一个类型/同一套广播机制。
     pub(crate) state: Arc<Mutex<SessionState>>,
     /// Serializes snapshot creation, initial attachment, and incremental fanout.
@@ -250,7 +248,6 @@ pub(crate) struct AcpOpenRequest {
     pub(crate) cwd: Option<String>,
     pub(crate) launch: smelt_core::agent_kind::ConversationLaunchSpec,
     pub(crate) ephemeral_env: BTreeMap<String, String>,
-    pub(crate) agent_needs_transcript_check: bool,
     pub(crate) resume_id: Option<String>,
     /// Pi `--fork` 源 session。新开会话，不得拿它去抢源会话的 resume 锁。
     pub(crate) fork_id: Option<String>,
@@ -295,7 +292,6 @@ pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenReq
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default(),
-        agent_needs_transcript_check: v["agent"].as_str().unwrap_or("claude") == "claude",
         resume_id: normalize_resume_id(v["resume_id"].as_str().map(String::from)),
         fork_id: normalize_resume_id(v["fork_id"].as_str().map(String::from)),
         fork_cut: v
@@ -1933,7 +1929,6 @@ pub(crate) fn acp_relaunch(
     // 无头恢复不会经过 GUI 的 AgentHostState 迁移；daemon 自己也要把 Smelt
     // 发布过的旧默认值升到当前适配器，否则历史会话 relaunch 仍会拉旧包。
     upgrade_released_adapter_launch(&mut launch);
-    let needs_check = sess.agent_needs_transcript_check;
     let ephemeral_env = sess.ephemeral_env.lock().unwrap().clone();
     // 记住这次真正用过的完整启动规格，`acp_restart` 卡死重启时不必依赖 GUI
     // 重新把 launch 传一遍（GUI 那条 acp_open 连接可能压根没断，不会重新握手）。
@@ -1968,7 +1963,6 @@ pub(crate) fn acp_relaunch(
             "cwd": sess.cwd,
             "launch": launch,
             "ephemeral_env": ephemeral_env,
-            "agent": if needs_check { "claude" } else { "other" },
             "resume_id": resume_id,
             "fork_id": fork_id,
             "fork_cut": &fork_cut,
@@ -2027,7 +2021,6 @@ pub(crate) fn acp_relaunch(
         },
         fork_session_id: fork_id.map(agent_client_protocol::schema::v1::SessionId::new),
         fork_cut,
-        resume_needs_transcript_check: needs_check,
     };
     let handle =
         smelt_core::acp_conn::spawn_agent_runtime(app_launch, Some(acp_sessions.spawn_gate()));
@@ -2103,7 +2096,6 @@ pub(crate) fn retire_acp_runtime(sess: &AcpSession) -> bool {
 pub(crate) fn make_acp_session(
     id: &str,
     cwd: Option<String>,
-    agent_needs_transcript_check: bool,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
     agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
     pending_agent_preset: Option<String>,
@@ -2126,7 +2118,6 @@ pub(crate) fn make_acp_session(
         handle: Mutex::new(None),
         unreaped_pid: Mutex::new(None),
         cwd: cwd.clone(),
-        agent_needs_transcript_check,
         state: Arc::new(Mutex::new(SessionState {
             id: id.to_string(),
             instance,
@@ -3700,7 +3691,6 @@ pub(crate) fn ensure_acp_session(
             make_acp_session(
                 &req.id,
                 req.cwd.clone(),
-                req.agent_needs_transcript_check,
                 req.conversation_binding.clone(),
                 req.agent_session.clone(),
                 req.pending_agent_preset.clone(),
@@ -4517,7 +4507,6 @@ pub(crate) fn collect_acp_handoff_typed(
                 launch,
                 agent_mcp,
                 agent_token,
-                agent_needs_transcript_check: sess.agent_needs_transcript_check,
                 runtime_spec_fingerprint: sess.runtime_spec_fingerprint.lock().unwrap().clone(),
                 conversation_binding: sess.conversation_binding.lock().unwrap().clone(),
                 snapshot,
@@ -4558,7 +4547,6 @@ pub(crate) fn collect_acp_handoff_typed(
             launch,
             agent_mcp,
             agent_token,
-            agent_needs_transcript_check: sess.agent_needs_transcript_check,
             runtime_spec_fingerprint: sess.runtime_spec_fingerprint.lock().unwrap().clone(),
             conversation_binding: sess.conversation_binding.lock().unwrap().clone(),
             snapshot,
@@ -4708,7 +4696,7 @@ mod snapshot_link_tests {
     fn burst_while_writer_is_blocked_coalesces_and_stays_connected() {
         let slot = Arc::new(AcpSlot {
             lifecycle: Mutex::new(()),
-            value: make_acp_session("acp-burst", None, false, None, None, None),
+            value: make_acp_session("acp-burst", None, None, None, None),
         });
         let (mut server, mut client) = UnixStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();

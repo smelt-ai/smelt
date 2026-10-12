@@ -814,7 +814,6 @@ fn connecting_hosted_handoff_does_not_keep_the_process() {
             runtime_spec_fingerprint: None,
             agent_mcp: false,
             agent_token: String::new(),
-            agent_needs_transcript_check: false,
             conversation_binding: None,
             pending_host_bytes: Vec::new(),
         },
@@ -1061,6 +1060,7 @@ fn acp_session_with_valid_fds_and_session_id_is_recovered() {
             "pid": pid,
             "cwd": "/tmp/proj",
             "cmd": "claude --dangerously-skip-permissions",
+            // 旧交接多出来的字段。恢复不再读它，留在夹具里确认旧文件仍能起来。
             "agent_needs_transcript_check": true,
             "snapshot": sample_snapshot("sid-1"),
             "pending_raw_line": null,
@@ -1072,7 +1072,6 @@ fn acp_session_with_valid_fds_and_session_id_is_recovered() {
     let slot = acp.get("acp-1").expect("acp-1 应被恢复");
     let sess = &slot.value;
     assert_eq!(sess.cwd.as_deref(), Some("/tmp/proj"));
-    assert!(sess.agent_needs_transcript_check);
     assert!(
         sess.handle.lock().unwrap().is_some(),
         "应该已经起了 resume 连接"

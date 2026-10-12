@@ -1650,16 +1650,6 @@ fn validate_display_text(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct IgnoredManifestField;
-
-impl<'de> Deserialize<'de> for IgnoredManifestField {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        serde::de::IgnoredAny::deserialize(deserializer)?;
-        Ok(Self)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
@@ -1668,9 +1658,6 @@ pub struct PluginManifest {
     pub version: String,
     pub api_version: u16,
     pub entrypoint: String,
-    /// 已废弃。历史上用来区分 bun/wasm。解码时丢掉，不参与行为，也不写回。
-    #[serde(default, skip_serializing)]
-    runtime: IgnoredManifestField,
     #[serde(default)]
     pub subscriptions: Vec<SubscriptionDeclaration>,
     #[serde(default)]
@@ -2329,8 +2316,8 @@ mod tests {
     }
 
     #[test]
-    fn manifest_ignores_runtime_field() {
-        let manifest: PluginManifest = serde_json::from_value(json!({
+    fn manifest_rejects_runtime_field() {
+        let error = serde_json::from_value::<PluginManifest>(json!({
             "id": "com.example",
             "name": "Example",
             "version": "1.0.0",
@@ -2338,27 +2325,8 @@ mod tests {
             "runtime": "wasm",
             "entrypoint": "bin/example.ts"
         }))
-        .unwrap();
-        manifest.validate().unwrap();
-        assert!(
-            !serde_json::to_value(&manifest)
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .contains_key("runtime")
-        );
-
-        let error = serde_json::from_value::<PluginManifest>(json!({
-            "id": "com.example",
-            "name": "Example",
-            "version": "1.0.0",
-            "api_version": 1,
-            "runtime": "wasm",
-            "entrypoint": "module/example.wasm"
-        }))
-        .and_then(|manifest| manifest.validate().map_err(serde::de::Error::custom))
         .unwrap_err();
-        assert!(error.to_string().contains("bin"));
+        assert!(error.to_string().contains("runtime"));
     }
 
     #[test]

@@ -424,7 +424,6 @@ impl Driver {
             cwd: Some(cwd.clone()),
             launch: launch.clone(),
             ephemeral_env: Default::default(),
-            agent_needs_transcript_check: false,
             resume_id: None,
             fork_id: None,
             fork_cut: None,
@@ -1283,7 +1282,6 @@ mod lifecycle_tests {
             make_acp_session(
                 "session-1",
                 Some("/tmp".into()),
-                false,
                 Some(ConversationBinding::Direct),
                 None,
                 None,
@@ -1564,7 +1562,6 @@ mod lifecycle_tests {
         let session = make_acp_session(
             "session-1",
             Some("/tmp".into()),
-            false,
             Some(ConversationBinding::Automation { run_id: run.id }),
             None,
             None,
@@ -1648,7 +1645,6 @@ mod lifecycle_tests {
             make_acp_session(
                 "session-1",
                 Some("/tmp".into()),
-                false,
                 Some(ConversationBinding::Direct),
                 None,
                 None,

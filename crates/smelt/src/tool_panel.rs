@@ -285,13 +285,11 @@ impl Workspace {
             .is_some_and(StageCover::is_tool_panel_cover)
     }
 
-    /// 当前中央 Tool Panel 舞台正在展示的 tab。新状态由 Tool Panel 自己的 tab 保存；
-    /// 运行时若暂时读到旧具体 StageCover 变体，则从变体本身推导。
+    /// 当前中央 Tool Panel 舞台正在展示的 tab。
     pub(crate) fn active_stage_tool_panel_tab(&self) -> Option<ToolPanelTab> {
         match self.stage_cover {
             Some(StageCover::ToolPanel) => Some(self.tool_panel_tab),
             Some(StageCover::Unknown) | None => None,
-            Some(view) => view.legacy_tool_panel_tab(),
         }
     }
 
@@ -324,29 +322,15 @@ impl Workspace {
 
     /// Tool Panel tab 点击：停靠态同 tab 可收合面板；全屏态只切换内容，不改变
     /// 全屏展示状态。全屏的进入/退出由容器按钮（或 Esc）负责。
-    pub(crate) fn toggle_tool_panel_tab(
-        &mut self,
-        tab: ToolPanelTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn toggle_tool_panel_tab(&mut self, tab: ToolPanelTab, cx: &mut Context<Self>) {
         if self.tool_panel_promoted() {
             // 全屏态切换内容仍用当前 Tool Panel tab；点击当前 tab
             // 也保持全屏，避免内容导航反向改变容器展示状态。
-            let active_tab = self
-                .active_stage_tool_panel_tab()
-                .unwrap_or(self.tool_panel_tab);
-            if active_tab != tab {
+            if self.tool_panel_tab != tab {
                 if tab == ToolPanelTab::Git {
                     self.reset_git_diff_view();
                 }
                 self.tool_panel_tab = tab;
-            } else if self.tool_panel_tab != tab {
-                // 旧具体 StageCover 变体运行时兼容：统一当前内容字段。
-                self.tool_panel_tab = tab;
-            }
-            if self.stage_cover != Some(StageCover::ToolPanel) {
-                self.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
             }
             self.save_state(cx);
             cx.notify();
@@ -421,9 +405,9 @@ impl Workspace {
         .underline()
         .with_size(gpui_component::Size::XSmall)
         .flex_1()
-        .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
+        .on_click(cx.listener(move |ws, ix: &usize, _window, cx| {
             if let Some(tab) = click_tabs.get(*ix).copied() {
-                ws.toggle_tool_panel_tab(tab, window, cx);
+                ws.toggle_tool_panel_tab(tab, cx);
             }
         }));
         if let Some(ix) = selected_index {
@@ -711,10 +695,6 @@ mod tests {
     #[test]
     fn tool_panel_fullscreen_is_panel_level() {
         assert!(StageCover::ToolPanel.is_tool_panel_cover());
-        assert!(StageCover::Files.is_tool_panel_cover());
-        assert!(StageCover::Git.is_tool_panel_cover());
-        assert!(StageCover::Skills.is_tool_panel_cover());
-        assert!(StageCover::History.is_tool_panel_cover());
         assert!(!StageCover::Unknown.is_tool_panel_cover());
     }
 

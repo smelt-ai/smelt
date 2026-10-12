@@ -4053,7 +4053,6 @@ mod tests {
             resume_session_id: None,
             fork_session_id: None,
             fork_cut: None,
-            resume_needs_transcript_check: false,
         }
     }
 

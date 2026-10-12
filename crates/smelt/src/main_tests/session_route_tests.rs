@@ -273,39 +273,19 @@ fn legacy_bottom_drawer_fields_are_ignored_on_restore() {
 }
 
 #[test]
-fn legacy_history_stage_migrates_to_the_tool_panel_wire_state() {
-    let archive: SessionRouteArchive = serde_json::from_value(serde_json::json!({
-        "version": 1,
-        "stage_override": "history",
-        "tool_panel_open": false,
-        "tool_panel_tab": "files"
-    }))
-    .unwrap();
-    let restored = SessionUiState::restore(archive);
-
-    assert!(matches!(restored.stage_cover, Some(StageCover::ToolPanel)));
-    assert_eq!(restored.tool_panel_tab, tool_panel::ToolPanelTab::History);
-    assert!(!restored.tool_panel_open);
-}
-
-#[test]
-fn legacy_tool_panel_stage_migrates_to_generic_stage_with_its_tab() {
-    for (wire, tab) in [
-        ("files", tool_panel::ToolPanelTab::Files),
-        ("git", tool_panel::ToolPanelTab::Git),
-        // 技能已迁成插件 tab：注册表里没有该插件（测试进程不加载插件包）就降级成 Files。
-        ("skills", tool_panel::ToolPanelTab::Files),
-        ("history", tool_panel::ToolPanelTab::History),
-    ] {
+fn retired_stage_covers_are_dropped() {
+    for wire in ["files", "git", "skills", "history", "tasks"] {
         let archive: SessionRouteArchive = serde_json::from_value(serde_json::json!({
             "version": 1,
             "stage_override": wire,
+            "tool_panel_open": false,
             "tool_panel_tab": "files"
         }))
         .unwrap();
         let restored = SessionUiState::restore(archive);
-        assert_eq!(restored.stage_cover, Some(StageCover::ToolPanel));
-        assert_eq!(restored.tool_panel_tab, tab);
+        assert_eq!(restored.stage_cover, None, "{wire} 不再是覆盖页");
+        assert_eq!(restored.tool_panel_tab, tool_panel::ToolPanelTab::Files);
+        assert!(!restored.tool_panel_open);
     }
 }
 

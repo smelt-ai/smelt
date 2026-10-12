@@ -1,5 +1,8 @@
 # Smelt 架构审查文档索引
 
+> 历史快照，不是当前实施说明。文中的周计划、文件路径和「从这里开始」都已过时。
+> 现状见 [`docs/workspace.md`](docs/workspace.md)，产品待做见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
+
 ## 📚 快速导航
 
 ### 🎯 想快速了解？

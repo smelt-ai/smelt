@@ -324,8 +324,8 @@ Antigravity 只接入 PTY/TUI，不进入 ACP。smelt 的快捷终端出厂启�
 - 对话模式的写入、执行和 Extension Tool 默认通过 Pi Extension UI 走 Smelt 权限弹窗；只有任务显式声明
   FullAccess 时才切成 `bypassPermissions`。终端扩展不从输出文本猜测审批状态。
 
-> 注：代码注册表另有 Cursor / OpenCode / Kiro / Pi / DSH（`agent_kind.rs` 的
-> `ConversationAgentKind`）；Antigravity 单独走 `TerminalAgentKind`。
+> 注：代码注册表在 `agent_kind/` 的 `ConversationAgentKind`（含 Cursor / OpenCode / Kiro / DSH；
+> Pi 见上一节）。Antigravity 单独走 `TerminalAgentKind`。
 
 ---
 
