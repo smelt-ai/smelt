@@ -23,6 +23,8 @@ mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod documents;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod memory;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
 mod snapshots;
 
@@ -30,15 +32,24 @@ pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AppearanceSnapshot,
     AutoModelSnapshot, HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
-    PublishedSessionRecord, PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot,
-    QuotaCacheSnapshot, RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
+    MemoryMetaSnapshot, MemoryTrust, MemoryUsageRecord, PublishedSessionRecord,
+    PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot,
+    RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
     RemoteTerminalSessionRecord, TerminalThemeSnapshot, UpdateSettingsSnapshot,
     UpdateStateSnapshot, WorkspaceAcpRecord, WorkspaceLayoutNode, WorkspaceProjectRecord,
     WorkspaceSessionRecord, WorkspaceSnapshot, WorktreeInheritSnapshot,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
-pub const STORE_SCHEMA_VERSION: u32 = 12;
+
+/// 智能体记忆元数据的 scope：某个智能体自己的那一层。
+pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
+    format!("agent:{agent_definition_id}")
+}
+
+/// 智能体记忆元数据的 scope：跨智能体的用户全局层。
+pub const USER_MEMORY_SCOPE: &str = "user";
+pub const STORE_SCHEMA_VERSION: u32 = 13;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -476,6 +487,51 @@ impl Store {
 
     pub fn delete_agent_definition(&self, id: &str) -> Result<bool, StoreError> {
         imp::delete_agent_definition(&self.backend, id)
+    }
+
+    /// 智能体记忆：模型读了一次某条记忆。`scope` 见 [`memory_scope_for_agent`]。
+    pub fn record_memory_read(
+        &self,
+        scope: &str,
+        file_name: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::record_memory_read(&self.backend, scope, file_name, now_ms)
+    }
+
+    /// 智能体记忆：一次成功写入的来源。
+    pub fn record_memory_write(
+        &self,
+        scope: &str,
+        file_name: &str,
+        trust: MemoryTrust,
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::record_memory_write(
+            &self.backend,
+            scope,
+            file_name,
+            trust,
+            reason,
+            session_id,
+            now_ms,
+        )
+    }
+
+    /// 用户采纳一条待确认的记忆。返回是否真有一条待确认被改成可信。
+    pub fn approve_memory(&self, scope: &str, file_name: &str) -> Result<bool, StoreError> {
+        imp::approve_memory(&self.backend, scope, file_name)
+    }
+
+    /// 删掉一条记忆的元数据（文件已删，或同名重建时不该继承）。
+    pub fn forget_memory(&self, scope: &str, file_name: &str) -> Result<(), StoreError> {
+        imp::forget_memory(&self.backend, scope, file_name)
+    }
+
+    pub fn memory_meta(&self, scope: &str) -> Result<MemoryMetaSnapshot, StoreError> {
+        imp::memory_meta(&self.backend, scope)
     }
 
     pub fn get_remote_session_snapshot(
@@ -1518,9 +1574,86 @@ mod imp {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed = crate::catalog::delete_agent_definition(&transaction, id)?;
+        if changed {
+            // 记忆跟着智能体走：定义删了，它的记忆元数据一起删。
+            crate::memory::forget_scope(&transaction, &super::memory_scope_for_agent(id))?;
+        }
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(changed)
+    }
+
+    fn write_memory<T>(
+        backend: &Backend,
+        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = write(&transaction)?;
+        transaction.commit()?;
+        secure_sidecar_permissions(&backend.path);
+        Ok(result)
+    }
+
+    pub(super) fn record_memory_read(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::record_read(transaction, scope, file_name, now_ms)
+        })
+    }
+
+    pub(super) fn record_memory_write(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+        trust: super::MemoryTrust,
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::record_write(
+                transaction,
+                scope,
+                file_name,
+                trust,
+                reason,
+                session_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(super) fn approve_memory(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<bool, StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::approve(transaction, scope, file_name)
+        })
+    }
+
+    pub(super) fn forget_memory(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::forget(transaction, scope, file_name)
+        })
+    }
+
+    pub(super) fn memory_meta(
+        backend: &Backend,
+        scope: &str,
+    ) -> Result<super::MemoryMetaSnapshot, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::memory::read_meta(&connection, scope)
     }
 
     pub(super) fn get_remote_session_snapshot(
@@ -3035,6 +3168,18 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 12 {
+            if !schema_matches_v12(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v13_memory_tables(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 11 {
             if !schema_matches_v11(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -3149,14 +3294,24 @@ mod imp {
     fn apply_v12_agent_model_columns(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
-        if table_columns(transaction, "agent_definition")?
+        if !table_columns(transaction, "agent_definition")?
             .iter()
             .any(|column| column == "model_provider")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V11_TO_V12)?;
+        }
+        apply_v13_memory_tables(transaction)
+    }
+
+    fn apply_v13_memory_tables(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if table_names(transaction)?
+            .iter()
+            .any(|table| table == "agent_memory_usage")
         {
             return Ok(());
         }
         transaction
-            .execute_batch(crate::schema::MIGRATE_V11_TO_V12)
+            .execute_batch(crate::schema::MIGRATE_V12_TO_V13)
             .map_err(StoreError::from)
     }
 
@@ -3175,12 +3330,22 @@ mod imp {
         )
     }
 
+    fn schema_matches_v12(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V12)?,
+        )
+    }
+
     fn schema_matches_v11(connection: &Connection) -> Result<bool, StoreError> {
         Ok(
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
                 && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V11)?,
         )
     }
@@ -3190,7 +3355,7 @@ mod imp {
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
                 && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V10)?,
         )
     }
@@ -3485,6 +3650,13 @@ mod imp {
         ) || object.name == "automation_run_automation_created_idx"
     }
 
+    fn is_v13_memory_schema_object(object: &SchemaObject) -> bool {
+        matches!(
+            object.table_name.as_str(),
+            "agent_memory_provenance" | "agent_memory_usage"
+        )
+    }
+
     fn is_v10_catalog_schema_object(object: &SchemaObject) -> bool {
         matches!(
             object.table_name.as_str(),
@@ -3509,6 +3681,7 @@ mod imp {
         V9,
         V10,
         V11,
+        V12,
         Current,
     }
 
@@ -3541,6 +3714,7 @@ mod imp {
         static V9_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V10_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V11_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V12_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3568,6 +3742,7 @@ mod imp {
                     .filter(|object| {
                         !is_v9_automation_schema_object(object)
                             && !is_v10_catalog_schema_object(object)
+                            && !is_v13_memory_schema_object(object)
                     })
                     .collect()
             }),
@@ -3579,6 +3754,7 @@ mod imp {
                             object.name != "acp_detail"
                                 && !is_v9_automation_schema_object(object)
                                 && !is_v10_catalog_schema_object(object)
+                                && !is_v13_memory_schema_object(object)
                         })
                         .collect()
                 })
@@ -3598,6 +3774,7 @@ mod imp {
                                 )
                                 && object.name != "automation_run_automation_created_idx"
                                 && !is_v10_catalog_schema_object(object)
+                                && !is_v13_memory_schema_object(object)
                         })
                         .collect()
                 })
@@ -3605,10 +3782,17 @@ mod imp {
             SchemaGeneration::V9 => cached_schema_objects(&V9_OBJECTS, |objects| {
                 objects
                     .into_iter()
-                    .filter(|object| !is_v10_catalog_schema_object(object))
+                    .filter(|object| {
+                        !is_v10_catalog_schema_object(object)
+                            && !is_v13_memory_schema_object(object)
+                    })
                     .collect()
             }),
-            SchemaGeneration::V10 => cached_schema_objects(&V10_OBJECTS, |mut objects| {
+            SchemaGeneration::V10 => cached_schema_objects(&V10_OBJECTS, |objects| {
+                let mut objects: Vec<_> = objects
+                    .into_iter()
+                    .filter(|object| !is_v13_memory_schema_object(object))
+                    .collect();
                 strip_agent_definition_model_columns(&mut objects);
                 for object in &mut objects {
                     if matches!(
@@ -3620,9 +3804,19 @@ mod imp {
                 }
                 objects
             }),
-            SchemaGeneration::V11 => cached_schema_objects(&V11_OBJECTS, |mut objects| {
+            SchemaGeneration::V11 => cached_schema_objects(&V11_OBJECTS, |objects| {
+                let mut objects: Vec<_> = objects
+                    .into_iter()
+                    .filter(|object| !is_v13_memory_schema_object(object))
+                    .collect();
                 strip_agent_definition_model_columns(&mut objects);
                 objects
+            }),
+            SchemaGeneration::V12 => cached_schema_objects(&V12_OBJECTS, |objects| {
+                objects
+                    .into_iter()
+                    .filter(|object| !is_v13_memory_schema_object(object))
+                    .collect()
             }),
             SchemaGeneration::Current => cached_schema_objects(&CURRENT_OBJECTS, |objects| objects),
         }
@@ -3993,6 +4187,45 @@ mod imp {
         _backend: &Backend,
         _id: &str,
     ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn record_memory_read(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn record_memory_write(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+        _trust: super::MemoryTrust,
+        _reason: &str,
+        _session_id: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn approve_memory(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn forget_memory(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn memory_meta(
+        _backend: &Backend,
+        _scope: &str,
+    ) -> Result<super::MemoryMetaSnapshot, StoreError> {
         unsupported()
     }
     pub(super) fn get_remote_session_snapshot(
@@ -4438,6 +4671,115 @@ mod tests {
 
     fn v10_schema() -> String {
         format!("{}\n{}", v9_schema(), crate::schema::MIGRATE_V9_TO_V10)
+    }
+
+    #[test]
+    fn memory_metadata_round_trip_and_follows_the_agent() {
+        let dir = temp_dir("memory-meta");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let agent = memory_scope_for_agent("agent-1");
+        store
+            .insert_agent_definition(&AgentDefinitionRecord {
+                id: "agent-1".into(),
+                name: "写作".into(),
+                description: String::new(),
+                engine_kind_id: "pi".into(),
+                prompt: String::new(),
+                plugins_json: b"[]".to_vec(),
+                context_folders_json: b"[]".to_vec(),
+                context_links_json: b"[]".to_vec(),
+                model_provider: String::new(),
+                model_id: String::new(),
+            })
+            .unwrap();
+
+        store.record_memory_read(&agent, "fact.md", 1_000).unwrap();
+        store.record_memory_read(&agent, "fact.md", 2_000).unwrap();
+        store
+            .record_memory_write(
+                &agent,
+                "rule.md",
+                MemoryTrust::Pending,
+                "外部内容",
+                "s1",
+                3_000,
+            )
+            .unwrap();
+        store
+            .record_memory_write(
+                USER_MEMORY_SCOPE,
+                "me.md",
+                MemoryTrust::Pending,
+                "外部内容",
+                "s1",
+                3_000,
+            )
+            .unwrap();
+        let meta = store.memory_meta(&agent).unwrap();
+        assert_eq!(
+            meta.usage,
+            [MemoryUsageRecord {
+                file_name: "fact.md".into(),
+                read_count: 2,
+                last_read_at_ms: 2_000
+            }]
+        );
+        assert_eq!(
+            meta.pending,
+            [("rule.md".to_string(), "外部内容".to_string())]
+        );
+
+        assert!(store.approve_memory(&agent, "rule.md").unwrap());
+        assert!(
+            !store.approve_memory(&agent, "rule.md").unwrap(),
+            "已经可信的不算再采纳一次"
+        );
+        assert!(store.memory_meta(&agent).unwrap().pending.is_empty());
+
+        store.forget_memory(&agent, "fact.md").unwrap();
+        assert!(store.memory_meta(&agent).unwrap().usage.is_empty());
+
+        store.record_memory_read(&agent, "fact.md", 4_000).unwrap();
+        assert!(store.delete_agent_definition("agent-1").unwrap());
+        assert_eq!(
+            store.memory_meta(&agent).unwrap(),
+            MemoryMetaSnapshot::default()
+        );
+        assert_eq!(
+            store.memory_meta(USER_MEMORY_SCOPE).unwrap().pending.len(),
+            1,
+            "全局层不属于任何一个智能体"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_v12_by_adding_memory_tables() {
+        let dir = temp_dir("migrate-v12-memory");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch("DROP TABLE agent_memory_usage; DROP TABLE agent_memory_provenance;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project(root, position, collapsed) VALUES ('/repo', 0, 0)",
+                [],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 12).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let workspace = store.get_workspace_snapshot().unwrap().unwrap();
+        assert_eq!(workspace.projects[0].root, "/repo");
+        store.record_memory_read("user", "a.md", 1).unwrap();
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

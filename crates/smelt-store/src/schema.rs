@@ -5,7 +5,42 @@
 //!
 //! 迁移必须先读出旧数据，再替换结构；认不出的库一律拒绝打开。
 
-pub const TABLES: [&str; 29] = [
+pub const TABLES: [&str; 31] = [
+    "acp_detail",
+    "agent_acp_command",
+    "agent_acp_config_memory",
+    "agent_acp_env",
+    "agent_definition",
+    "agent_memory_provenance",
+    "agent_memory_usage",
+    "agent_profile",
+    "agent_ui_pref",
+    "automation",
+    "automation_meta",
+    "automation_run",
+    "automation_run_transcript",
+    "automation_state",
+    "command_dedupe",
+    "event_dead_letter",
+    "event_delivery_retry",
+    "event_log",
+    "event_outbox",
+    "history_title",
+    "kv",
+    "launch_entry",
+    "layout_node",
+    "peer_message_command",
+    "project",
+    "published_session",
+    "remote_acp_session",
+    "remote_terminal_session",
+    "session",
+    "session_group",
+    "subscription_cursor",
+];
+
+/// v12 的表清单。v13 加了智能体记忆的元数据表（使用统计、来源）。
+pub const V12_TABLES: [&str; 29] = [
     "acp_detail",
     "agent_acp_command",
     "agent_acp_config_memory",
@@ -360,6 +395,22 @@ CREATE TABLE agent_definition (
   model_id TEXT NOT NULL DEFAULT '',
   position INTEGER NOT NULL CHECK (position >= 0)
 );
+CREATE TABLE agent_memory_provenance (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  trust TEXT NOT NULL CHECK (trust IN ('trusted', 'pending')),
+  reason TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  written_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
+CREATE TABLE agent_memory_usage (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  read_count INTEGER NOT NULL CHECK (read_count >= 0),
+  last_read_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
 CREATE TABLE agent_profile (
   id TEXT PRIMARY KEY,
   kind_id TEXT NOT NULL,
@@ -776,4 +827,25 @@ SELECT
   context_folders_json, context_links_json, '', '', position
 FROM agent_definition_v11;
 DROP TABLE agent_definition_v11;
+";
+
+/// v12 → v13：智能体记忆的元数据（使用统计、来源）。记忆正文仍是 Markdown 文件，
+/// 这两张表只存结构化状态，scope 为 `agent:<智能体 id>` 或 `user`。
+pub const MIGRATE_V12_TO_V13: &str = "
+CREATE TABLE agent_memory_provenance (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  trust TEXT NOT NULL CHECK (trust IN ('trusted', 'pending')),
+  reason TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  written_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
+CREATE TABLE agent_memory_usage (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  read_count INTEGER NOT NULL CHECK (read_count >= 0),
+  last_read_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
 ";

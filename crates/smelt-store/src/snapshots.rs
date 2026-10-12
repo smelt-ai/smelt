@@ -293,3 +293,35 @@ pub struct PublishedWorkspaceMenuSnapshot {
     pub projects_json: Vec<u8>,
     pub sessions_json: Vec<u8>,
 }
+
+/// 记忆的来源可信度。`pending`：读过外部内容的那一轮或无人值守的运行写的，不注入、不召回，
+/// 用户采纳后变成 `trusted`。没有记录的记忆文件（用户手写、旧数据）按 `trusted` 处理。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryTrust {
+    Trusted,
+    Pending,
+}
+
+impl MemoryTrust {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryUsageRecord {
+    pub file_name: String,
+    pub read_count: u64,
+    pub last_read_at_ms: i64,
+}
+
+/// 一层记忆（一个 scope）的元数据。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryMetaSnapshot {
+    pub usage: Vec<MemoryUsageRecord>,
+    /// 待确认的文件名和原因。
+    pub pending: Vec<(String, String)>,
+}
