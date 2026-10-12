@@ -14,6 +14,7 @@ import { SMELT_EXTENSION_FACTORIES } from "../src/runtime-extensions.ts";
 import smeltBackgroundTaskExtension, {
 	SMELT_BACKGROUND_TASK_EXTENSION_NAME,
 } from "../src/background-task.ts";
+import smeltCodemodeExtension from "../src/codemode.ts";
 import smeltContextUsageExtension from "../src/context-usage.ts";
 import {
 	SMELT_ELICITATION_TOOL_NAME,
@@ -66,6 +67,7 @@ describe("Smelt Pi extension ordering", () => {
 			{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
 			{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 			{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
+			{ name: "smelt-codemode", factory: smeltCodemodeExtension, hidden: true },
 			{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },
 		]);
 	});

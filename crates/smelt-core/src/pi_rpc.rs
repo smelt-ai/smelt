@@ -33,6 +33,8 @@ const SMELT_PERMISSION_TITLE: &str = "smelt.permission.v1";
 const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
+const SMELT_CODEMODE_COMMAND: &str = "smelt-codemode";
+const SMELT_CODEMODE_WIDGET: &str = "smelt-codemode";
 
 #[derive(Clone, Debug)]
 struct PiModel {
@@ -46,6 +48,8 @@ struct PiModel {
 enum PendingConfig {
     Model(String),
     Thinking(String),
+    /// 请求的 `off` / `on`。回执只表示命令被处理，勾选以扩展回报的活动工具为准。
+    Codemode(String),
 }
 
 #[derive(Default)]
@@ -57,6 +61,8 @@ struct PiState {
     thinking_level: String,
     thinking_levels: Vec<String>,
     permission_mode: String,
+    /// 脚本工具是否已在活动工具集里。启动默认关，只信扩展回报。
+    codemode_enabled: bool,
     available_commands: Vec<(String, String)>,
     active_turn: bool,
     /// Pi 已经收下当前这条 prompt。没收下之前，`agent_settled` 属于上一轮，
@@ -859,9 +865,9 @@ where
         native_queue: true,
         rewind: true,
     });
-    let _ = event_tx.try_send(ConversationEvent::AvailableCommands(
-        state.available_commands.clone(),
-    ));
+    let _ = event_tx.try_send(ConversationEvent::AvailableCommands(publishable_commands(
+        &state.available_commands,
+    )));
     if let Some(title) = state.session_name.clone() {
         let _ = event_tx.try_send(ConversationEvent::SessionTitle(Some(title)));
     }
@@ -1147,7 +1153,7 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
     } else {
         "逐次审批"
     };
-    let _ = event_tx.try_send(ConversationEvent::ConfigOptions(vec![
+    let mut configs = vec![
         SessionConfigState {
             config_id: "mode".to_string(),
             name: "权限模式".to_string(),
@@ -1173,7 +1179,41 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
                 .collect(),
             boolean: None,
         },
-    ]));
+    ];
+    if codemode_command_available(state) {
+        configs.push(codemode_config(state));
+    }
+    let _ = event_tx.try_send(ConversationEvent::ConfigOptions(configs));
+}
+
+fn codemode_command_available(state: &PiState) -> bool {
+    state
+        .available_commands
+        .iter()
+        .any(|(name, _)| name == SMELT_CODEMODE_COMMAND)
+}
+
+fn codemode_config(state: &PiState) -> SessionConfigState {
+    SessionConfigState {
+        config_id: "codemode".to_string(),
+        name: "脚本工具".to_string(),
+        description: Some("模型写脚本调用其它工具，下一轮生效".to_string()),
+        current_name: if state.codemode_enabled { "开" } else { "关" }.to_string(),
+        options: vec![
+            ("off".to_string(), "关".to_string()),
+            ("on".to_string(), "开".to_string()),
+        ],
+        boolean: None,
+    }
+}
+
+/// 内部开关命令不进 slash 菜单。缺了它，会话配置行也不发布。
+fn publishable_commands(commands: &[(String, String)]) -> Vec<(String, String)> {
+    commands
+        .iter()
+        .filter(|(name, _)| name != SMELT_CODEMODE_COMMAND)
+        .cloned()
+        .collect()
 }
 
 fn thinking_name(level: &str) -> &str {
@@ -1667,6 +1707,30 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
             )
             .await?;
         }
+        "codemode" if matches!(value.as_str(), "off" | "on") => {
+            if !codemode_command_available(state) {
+                finish_in_flight(in_flight_rpc);
+                let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
+                    "当前 Pi 没有脚本工具",
+                )));
+                return Ok(());
+            }
+            // Pi 没有 set_active_tools。这条 prompt 只走扩展命令，回执是 handled，
+            // 不开模型回合，也不能记成用户消息。
+            let id = state.request_id("config-codemode");
+            state
+                .pending_configs
+                .insert(id.clone(), PendingConfig::Codemode(value.clone()));
+            write_rpc(
+                writer,
+                &serde_json::json!({
+                    "id": id,
+                    "type": "prompt",
+                    "message": format!("/{SMELT_CODEMODE_COMMAND} {value}"),
+                }),
+            )
+            .await?;
+        }
         "model" => {
             let Some((provider, model_id)) = value.split_once('/') else {
                 finish_in_flight(in_flight_rpc);
@@ -1932,6 +1996,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                     apply_requested_pi_model(state, &value, response.get("data"));
                 }
                 PendingConfig::Thinking(level) => state.thinking_level = level,
+                PendingConfig::Codemode(requested) => {
+                    let enabled = requested == "on";
+                    let handled = response
+                        .get("data")
+                        .and_then(|data| data.get("disposition"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("handled");
+                    if !handled || state.codemode_enabled != enabled {
+                        let _ = event_tx.try_send(ConversationEvent::Status(
+                            config_update_failure_status("脚本工具没有在下一轮生效"),
+                        ));
+                    }
+                }
             },
             Err(error) => {
                 let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
@@ -2489,7 +2566,9 @@ fn handle_event(
             }
         }
         Some("extension_ui_request") => {
-            handle_extension_ui(&event, event_tx, outbound_tx, state, launch)
+            if !apply_codemode_widget(&event, state, event_tx) {
+                handle_extension_ui(&event, event_tx, outbound_tx, state, launch)
+            }
         }
         Some("extension_error") => {
             let message = event
@@ -3692,6 +3771,35 @@ fn publish_extension_widget(
     }
 }
 
+/// 扩展用 widget 回报真实活动工具。菜单勾选只跟这个走。
+fn apply_codemode_widget(
+    request: &serde_json::Value,
+    state: &mut PiState,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+) -> bool {
+    if request.get("method").and_then(serde_json::Value::as_str) != Some("setWidget") {
+        return false;
+    }
+    if request.get("widgetKey").and_then(serde_json::Value::as_str) != Some(SMELT_CODEMODE_WIDGET) {
+        return false;
+    }
+    let Some(enabled) = request
+        .get("widgetLines")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|lines| lines.first())
+        .and_then(serde_json::Value::as_str)
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|payload| payload.get("enabled").and_then(serde_json::Value::as_bool))
+    else {
+        return true;
+    };
+    if state.codemode_enabled != enabled {
+        state.codemode_enabled = enabled;
+        publish_configuration(state, event_tx);
+    }
+    true
+}
+
 fn handle_extension_ui(
     request: &serde_json::Value,
     event_tx: &smol::channel::Sender<ConversationEvent>,
@@ -4268,6 +4376,211 @@ mod tests {
                 option.config_id == "thought_level" && option.current_name == "高"
             })
         );
+        assert!(options.iter().all(|option| option.config_id != "codemode"));
+    }
+
+    fn with_codemode_command(state: &mut PiState) {
+        state
+            .available_commands
+            .push((SMELT_CODEMODE_COMMAND.to_string(), "toggle".to_string()));
+    }
+
+    fn codemode_option(options: &[SessionConfigState]) -> &SessionConfigState {
+        options
+            .iter()
+            .find(|option| option.config_id == "codemode")
+            .expect("脚本工具应单独成行")
+    }
+
+    #[test]
+    fn codemode_row_is_omitted_until_the_command_exists() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.thinking_levels = vec!["medium".to_string()];
+        publish_configuration(&state, &event_tx);
+        let ConversationEvent::ConfigOptions(options) = event_rx.try_recv().unwrap() else {
+            panic!("应发布会话配置");
+        };
+        assert!(options.iter().all(|option| option.config_id != "codemode"));
+
+        with_codemode_command(&mut state);
+        publish_configuration(&state, &event_tx);
+        let ConversationEvent::ConfigOptions(options) = event_rx.try_recv().unwrap() else {
+            panic!("命令出现后应重新发布");
+        };
+        let codemode = codemode_option(&options);
+        assert_eq!(codemode.name, "脚本工具");
+        assert_eq!(codemode.current_name, "关");
+        assert_eq!(
+            codemode.options,
+            vec![
+                ("off".to_string(), "关".to_string()),
+                ("on".to_string(), "开".to_string())
+            ]
+        );
+        assert_eq!(
+            publishable_commands(&state.available_commands),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    #[test]
+    fn codemode_widget_updates_the_checkmark_without_guessing() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.thinking_levels = vec!["medium".to_string()];
+        with_codemode_command(&mut state);
+
+        handle_event(
+            serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "widget-1",
+                "method": "setWidget",
+                "widgetKey": SMELT_CODEMODE_WIDGET,
+                "widgetLines": ["{\"enabled\":true}"]
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+
+        assert!(state.codemode_enabled);
+        let ConversationEvent::ConfigOptions(options) = event_rx.try_recv().unwrap() else {
+            panic!("回报开之后应刷新勾选");
+        };
+        assert_eq!(codemode_option(&options).current_name, "开");
+    }
+
+    #[test]
+    fn codemode_toggle_sends_a_handled_command_not_a_user_turn() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        with_codemode_command(&mut state);
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "codemode".to_string(),
+                value: ConfigValue::Select("on".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        let request = rpc_lines(writer).pop().unwrap();
+        assert_eq!(request["type"], "prompt");
+        assert_eq!(request["message"], "/smelt-codemode on");
+        assert!(!state.active_turn);
+        assert!(state.prompt_request_id.is_none());
+        assert!(!state.codemode_enabled);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn missing_codemode_command_does_not_start_a_prompt() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "codemode".to_string(),
+                value: ConfigValue::Select("on".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(rpc_lines(writer).is_empty());
+        assert!(!state.active_turn);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        let ConversationEvent::Status(status) = event_rx.try_recv().unwrap() else {
+            panic!("缺命令时应给出不支持状态");
+        };
+        assert!(status.starts_with("更新会话配置失败"));
+        assert!(status.contains("没有脚本工具"));
+    }
+
+    #[test]
+    fn codemode_response_without_widget_confirmation_is_a_failure() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.pending_configs.insert(
+            "smelt-config-codemode-1".into(),
+            PendingConfig::Codemode("on".into()),
+        );
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": "smelt-config-codemode-1",
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(!state.codemode_enabled);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        let ConversationEvent::Status(status) = event_rx.try_recv().unwrap() else {
+            panic!("没有扩展回报时不能把勾选改成开");
+        };
+        assert!(status.contains("没有在下一轮生效"));
+    }
+
+    #[test]
+    fn confirmed_codemode_response_keeps_the_checkmark() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.codemode_enabled = true;
+        state.thinking_levels = vec!["medium".to_string()];
+        with_codemode_command(&mut state);
+        state.pending_configs.insert(
+            "smelt-config-codemode-2".into(),
+            PendingConfig::Codemode("on".into()),
+        );
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": "smelt-config-codemode-2",
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(state.codemode_enabled);
+        assert!(event_rx.try_recv().is_ok_and(|event| {
+            matches!(event, ConversationEvent::ConfigOptions(options)
+                if codemode_option(&options).current_name == "开")
+        }));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

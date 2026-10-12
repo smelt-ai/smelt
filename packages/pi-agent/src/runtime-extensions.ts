@@ -3,6 +3,7 @@ import {
 	SMELT_BACKGROUND_TASK_EXTENSION_NAME,
 	smeltBackgroundTaskExtension,
 } from "./background-task.ts";
+import smeltCodemodeExtension from "./codemode.ts";
 import smeltContextUsageExtension from "./context-usage.ts";
 import {
 	SMELT_ELICITATION_EXTENSION_NAME,
@@ -18,5 +19,6 @@ export const SMELT_EXTENSION_FACTORIES = [
 	{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
 	{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 	{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
+	{ name: "smelt-codemode", factory: smeltCodemodeExtension, hidden: true },
 	{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },
 ] satisfies InlineExtension[];

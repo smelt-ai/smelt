@@ -16,7 +16,7 @@ Extension / Tool / Skill 交付。
 - `~/.pi/agent/extensions/`、项目 `.pi/extensions/` 以及 Pi 的 Skill 目录由
   `DefaultResourceLoader` 原生发现；Smelt 内置的 `subagent` 作为 Pi Extension 加载，
   不依赖用户全局安装。
-- Pi 1.1 起内置 MCP、codemode 和 tool search。Smelt 自己的业务能力仍以 Extension、Tool 和 Skill 交付，不只放进 MCP 配置。
+- Pi 1.1 起内置 MCP、codemode 和 tool search。对话菜单里的「脚本工具」打开 codemode，下一轮生效。Smelt 自己的业务能力仍以 Extension、Tool 和 Skill 交付，不只放进 MCP 配置。
 
 ## 运行与安全
 
