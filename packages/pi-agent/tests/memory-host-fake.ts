@@ -10,16 +10,23 @@ export class FakeMemoryHost {
 	down = false;
 	/** 模拟写来源失败（库锁住、磁盘满）。 */
 	failWrites = false;
+	/** 智能体是否开着记忆；关着时 meta 为空、写入被拒。 */
+	enabled = true;
 
 	/** 按 daemon `agent.memory.*` 控制方法的契约应答；失败返回 undefined。 */
 	readonly transport: MemoryHostTransport = async (method, params) => {
 		if (this.down) return undefined;
 		const layer = params.layer as "agent" | "user";
 		const file = params.file as string;
+		if (method !== "agent.memory.meta" && !this.enabled) return undefined;
 		if (method === "agent.memory.meta") {
+			if (!this.enabled) {
+				return { enabled: false, agent: { usage: [], pending: [] }, user: { usage: [], pending: [] } };
+			}
 			const pending = (which: "agent" | "user") =>
 				[...this.provenance[which]].filter(([, value]) => value.trust === "pending").map(([name]) => name);
 			return {
+				enabled: true,
 				agent: {
 					usage: [...this.usage.agent].map(([name, count]) => ({ file: name, read_count: count, last_read_at_ms: 0 })),
 					pending: pending("agent"),

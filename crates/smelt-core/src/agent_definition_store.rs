@@ -72,6 +72,7 @@ fn agent_from_record(record: smelt_store::AgentDefinitionRecord) -> AgentDefinit
         context_links: serde_json::from_slice(&record.context_links_json).unwrap_or_default(),
         model_provider: record.model_provider,
         model_id: record.model_id,
+        memory_enabled: record.memory_enabled,
     }
 }
 
@@ -207,6 +208,8 @@ pub fn prepare_agent_definition_launch(
                 .insert(SMELT_AGENT_INSTRUCTIONS_ENV.to_string(), instructions);
         }
     }
+    // 记忆目录总是下发，开关不在这里判断：用户可能在会话中途开关记忆，Pi 每轮向 daemon
+    // 取元数据时拿到当前开关，关着就不注入、不写入。启动时就不下发的话，中途打开无从生效。
     attach_agent_memory_dirs(
         &mut launch,
         definition.map(|definition| definition.id.as_str()),
@@ -512,6 +515,8 @@ pub struct AgentDefinitionCreate {
     pub model_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +537,8 @@ pub struct AgentDefinitionPatch {
     pub model_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_enabled: Option<bool>,
 }
 
 pub fn list_agent_definitions_on(
@@ -590,6 +597,7 @@ pub fn create_agent_definition_on(
         context_links: normalize_list(input.context_links),
         model_provider: input.model_provider.unwrap_or_default().trim().to_string(),
         model_id: input.model_id.unwrap_or_default().trim().to_string(),
+        memory_enabled: input.memory_enabled.unwrap_or(true),
     };
     store
         .insert_agent_definition(&record_from_definition(&definition))
@@ -627,6 +635,9 @@ pub fn update_agent_definition_on(
         }
         if let Some(model_id) = patch.model_id {
             definition.model_id = model_id.trim().to_string();
+        }
+        if let Some(memory_enabled) = patch.memory_enabled {
+            definition.memory_enabled = memory_enabled;
         }
         Ok(())
     })
@@ -669,6 +680,7 @@ fn take_edited_fields(
         context_links: _,
         model_provider: _,
         model_id: _,
+        memory_enabled: _,
     } = after;
     macro_rules! take {
         ($($field:ident),* $(,)?) => {
@@ -687,6 +699,7 @@ fn take_edited_fields(
         context_links,
         model_provider,
         model_id,
+        memory_enabled,
     );
 }
 
@@ -838,6 +851,7 @@ fn record_from_definition(agent: &AgentDefinition) -> smelt_store::AgentDefiniti
             .unwrap_or_else(|_| b"[]".to_vec()),
         model_provider: agent.model_provider.clone(),
         model_id: agent.model_id.clone(),
+        memory_enabled: agent.memory_enabled,
     }
 }
 
@@ -1160,6 +1174,7 @@ mod tests {
                 context_links_json: b"[]".to_vec(),
                 model_provider: String::new(),
                 model_id: String::new(),
+                memory_enabled: true,
             }],
             profiles: Vec::new(),
         };
@@ -1238,6 +1253,26 @@ mod tests {
         assert!(agent_dir.is_dir());
         assert!(user_dir.is_dir());
         assert!(agent_dir.starts_with(agent_space_root("space-agent").unwrap()));
+    }
+
+    /// 开关不在启动时判断：关着记忆启动的会话也要拿到目录，用户中途打开时下一轮才能生效。
+    #[test]
+    fn an_agent_with_memory_turned_off_still_launches_with_its_memory_directories() {
+        let mut definition = definition_with_context(&[], &[]);
+        definition.memory_enabled = false;
+
+        let launch = prepare_agent_definition_launch(
+            ConversationAgentKind::Pi.default_launch(),
+            Some(&definition),
+        );
+
+        assert_eq!(
+            launch
+                .env
+                .get(SMELT_AGENT_MEMORY_DIR_ENV)
+                .map(PathBuf::from),
+            agent_memory_dir("space-agent")
+        );
     }
 
     /// 普通 Pi 会话没有记忆。设置里万一配了同名 env，也不能让它冒充产品智能体。

@@ -806,6 +806,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 开关智能体的长期记忆。关掉后新对话不注入、不写入；正在进行的对话下一轮生效。
+    /// 已有记忆文件保留，重新打开后照常使用。
+    pub(super) fn set_agent_memory_enabled(
+        &mut self,
+        id: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        settings::apply_agent_host(
+            move |config| {
+                if let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == id) {
+                    agent.memory_enabled = enabled;
+                }
+            },
+            cx,
+        );
+        self.agent_surface.error = None;
+        cx.notify();
+    }
+
     pub(super) fn set_agent_model(
         &mut self,
         id: String,

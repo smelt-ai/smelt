@@ -261,6 +261,8 @@ pub enum MemoryRequestError {
     NoSuchLayer,
     /// 不是记忆文件名。
     InvalidFile,
+    /// 智能体的记忆已经关掉。
+    Disabled,
     Store(String),
 }
 
@@ -269,6 +271,7 @@ impl std::fmt::Display for MemoryRequestError {
         match self {
             Self::NoSuchLayer => formatter.write_str("这次会话没有这一层记忆"),
             Self::InvalidFile => formatter.write_str("不是记忆文件"),
+            Self::Disabled => formatter.write_str("这个智能体的记忆已关闭"),
             Self::Store(error) => formatter.write_str(error),
         }
     }
@@ -285,12 +288,27 @@ pub fn launch_scope(
     }
 }
 
-/// 两层的使用统计和待确认列表。没有的那一层为空。
+/// 这次启动的智能体现在是否还开着记忆。会话启动后用户可能在配置页关掉；智能体被删了、
+/// 或者这不是产品智能体的会话，都按关处理。
+pub fn launch_memory_enabled(store: &smelt_store::Store, agent_dir: Option<&Path>) -> bool {
+    match launch_scope(agent_dir, false) {
+        Ok(MemoryScope::Agent(id)) => {
+            crate::agent_definition_store::get_agent_definition_on(store, &id)
+                .is_ok_and(|definition| definition.memory_enabled)
+        }
+        _ => false,
+    }
+}
+
+/// 两层的使用统计和待确认列表，以及记忆是否还开着。关着时两层都为空。
 pub fn launch_memory_meta(
     store: &smelt_store::Store,
     agent_dir: Option<&Path>,
     user_dir: Option<&Path>,
 ) -> Result<crate::control_api::AgentMemoryMetaResult, MemoryRequestError> {
+    if !launch_memory_enabled(store, agent_dir) {
+        return Ok(crate::control_api::AgentMemoryMetaResult::default());
+    }
     let layer = |scope: Result<MemoryScope, MemoryRequestError>| {
         let Ok(scope) = scope else {
             return Ok(crate::control_api::AgentMemoryLayerMeta::default());
@@ -312,6 +330,7 @@ pub fn launch_memory_meta(
         })
     };
     Ok(crate::control_api::AgentMemoryMetaResult {
+        enabled: true,
         agent: layer(launch_scope(agent_dir, false))?,
         user: layer(launch_scope(user_dir, true))?,
     })
@@ -556,6 +575,15 @@ mod tests {
         let agent_dir = crate::agent_definition_store::agent_memory_dir("writer").unwrap();
         let user_dir = crate::agent_definition_store::user_memory_dir().unwrap();
 
+        crate::agent_definition_store::create_agent_definition_on(
+            &store,
+            crate::agent_definition_store::AgentDefinitionCreate {
+                id: Some("writer".into()),
+                name: "写作".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let agent_scope = launch_scope(Some(&agent_dir), false).unwrap();
         let user_scope = launch_scope(Some(&user_dir), true).unwrap();
         record_launch_read(&store, &agent_scope, "fact.md", 5).unwrap();
@@ -570,6 +598,7 @@ mod tests {
         )
         .unwrap();
         let meta = launch_memory_meta(&store, Some(&agent_dir), Some(&user_dir)).unwrap();
+        assert!(meta.enabled);
         assert_eq!(meta.agent.usage[0].file, "fact.md");
         assert_eq!(meta.agent.usage[0].read_count, 1);
         assert_eq!(meta.user.pending, ["me.md"]);
@@ -593,6 +622,22 @@ mod tests {
         );
         assert_eq!(
             launch_memory_meta(&store, None, None).unwrap(),
+            crate::control_api::AgentMemoryMetaResult::default()
+        );
+
+        // 会话启动后用户关掉记忆：之后拿到的是"已关闭"，不再给任何元数据。
+        crate::agent_definition_store::update_agent_definition_on(
+            &store,
+            "writer",
+            crate::agent_definition_store::AgentDefinitionPatch {
+                memory_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!launch_memory_enabled(&store, Some(&agent_dir)));
+        assert_eq!(
+            launch_memory_meta(&store, Some(&agent_dir), Some(&user_dir)).unwrap(),
             crate::control_api::AgentMemoryMetaResult::default()
         );
     }

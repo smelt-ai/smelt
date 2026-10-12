@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_kind::ConversationAgentKind;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDefinition {
     pub id: String,
     pub name: String,
@@ -34,6 +34,33 @@ pub struct AgentDefinition {
     /// 对应的模型 ID。必须和 `model_provider` 成对出现，否则视为未设置。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model_id: String,
+    /// 关掉后这个智能体不注入、不写入记忆，已有记忆文件保留。默认开。
+    #[serde(default = "memory_enabled_by_default")]
+    pub memory_enabled: bool,
+}
+
+fn memory_enabled_by_default() -> bool {
+    true
+}
+
+/// 手写而不是 derive：记忆默认开，derive 出来的 `false` 会让 `..Default::default()`
+/// 构造的新智能体悄悄关掉记忆。
+impl Default for AgentDefinition {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            description: String::new(),
+            engine_kind_id: String::new(),
+            prompt: String::new(),
+            plugins: Vec::new(),
+            context_folders: Vec::new(),
+            context_links: Vec::new(),
+            model_provider: String::new(),
+            model_id: String::new(),
+            memory_enabled: memory_enabled_by_default(),
+        }
+    }
 }
 
 impl AgentDefinition {
@@ -85,6 +112,20 @@ pub fn agent_engine_kinds() -> Vec<ConversationAgentKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_is_on_unless_explicitly_turned_off() {
+        assert!(AgentDefinition::default().memory_enabled);
+        let old: AgentDefinition =
+            serde_json::from_str(r#"{"id":"a","name":"A","engine_kind":"pi","prompt":""}"#)
+                .unwrap();
+        assert!(old.memory_enabled, "旧存档没有这个字段，按开处理");
+        let off: AgentDefinition = serde_json::from_str(
+            r#"{"id":"a","name":"A","engine_kind":"pi","prompt":"","memory_enabled":false}"#,
+        )
+        .unwrap();
+        assert!(!off.memory_enabled);
+    }
 
     fn definition(engine: &str) -> AgentDefinition {
         AgentDefinition {

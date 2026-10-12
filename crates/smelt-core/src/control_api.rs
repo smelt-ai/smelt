@@ -389,6 +389,8 @@ pub struct AgentMemoryLayerMeta {
 /// 会话没有某一层记忆（普通会话）时，那一层为空。
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentMemoryMetaResult {
+    /// 智能体当前是否开着记忆。会话启动后用户可能关掉，关掉后不注入、不写入。
+    pub enabled: bool,
     pub agent: AgentMemoryLayerMeta,
     pub user: AgentMemoryLayerMeta,
 }
@@ -778,6 +780,7 @@ mod tests {
         let response = ControlResponse::ok(
             "req-1",
             AgentMemoryMetaResult {
+                enabled: true,
                 agent: AgentMemoryLayerMeta {
                     usage: vec![AgentMemoryUsageEntry {
                         file: "fact.md".into(),

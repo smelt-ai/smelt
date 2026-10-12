@@ -16,6 +16,8 @@ export type MemoryTrust = "trusted" | "pending";
 export type MemoryProvenance = { trust: MemoryTrust; reason: string };
 
 export type MemoryHostMeta = {
+	/** 智能体当前是否开着记忆。会话启动后用户可能在配置页关掉。 */
+	enabled: boolean;
 	usage: Map<string, MemoryUsage>;
 	pending: { agent: Set<string>; user: Set<string> };
 };
@@ -79,9 +81,12 @@ export function setMemoryHostTransportForTests(next: MemoryHostTransport | undef
 /** 两层的使用统计和待确认列表；daemon 不可达时返回 undefined，调用方必须按"不知道"处理。 */
 export async function fetchMemoryMeta(): Promise<MemoryHostMeta | undefined> {
 	type Layer = { usage?: Array<{ file: string; read_count: number; last_read_at_ms: number }>; pending?: string[] };
-	const result = (await transport("agent.memory.meta", {})) as { agent?: Layer; user?: Layer } | undefined;
+	const result = (await transport("agent.memory.meta", {})) as
+		| { enabled?: boolean; agent?: Layer; user?: Layer }
+		| undefined;
 	if (!result) return undefined;
 	return {
+		enabled: result.enabled === true,
 		usage: new Map(
 			(result.agent?.usage ?? []).map((record) => [
 				record.file,

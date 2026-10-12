@@ -154,8 +154,9 @@ fn insert_agent_definition_at(
     transaction.execute(
         "INSERT INTO agent_definition(
                id, name, description, engine_kind_id, prompt, plugins_json,
-               context_folders_json, context_links_json, model_provider, model_id, position
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+               context_folders_json, context_links_json, model_provider, model_id,
+               memory_enabled, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             agent.id,
             agent.name,
@@ -167,6 +168,7 @@ fn insert_agent_definition_at(
             &agent.context_links_json,
             agent.model_provider,
             agent.model_id,
+            agent.memory_enabled,
             position,
         ],
     )?;
@@ -199,8 +201,9 @@ pub(crate) fn update_agent_definition(
                  context_folders_json = ?6,
                  context_links_json = ?7,
                  model_provider = ?8,
-                 model_id = ?9
-           WHERE id = ?10",
+                 model_id = ?9,
+                 memory_enabled = ?10
+           WHERE id = ?11",
         params![
             agent.name,
             agent.description,
@@ -211,6 +214,7 @@ pub(crate) fn update_agent_definition(
             &agent.context_links_json,
             agent.model_provider,
             agent.model_id,
+            agent.memory_enabled,
             agent.id,
         ],
     )?;
@@ -333,6 +337,10 @@ pub(crate) fn agent_ui_from_document(value: &Value) -> Result<AgentUiSnapshot, S
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            memory_enabled: agent
+                .get("memory_enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
         });
     }
     let mut profiles = Vec::new();
@@ -929,7 +937,7 @@ fn query_config_memory(
 
 const AGENT_DEFINITION_COLUMNS: &str =
     "id, name, description, engine_kind_id, prompt, plugins_json,
-     context_folders_json, context_links_json, model_provider, model_id";
+     context_folders_json, context_links_json, model_provider, model_id, memory_enabled";
 
 fn agent_definition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentDefinitionRecord> {
     Ok(AgentDefinitionRecord {
@@ -943,6 +951,7 @@ fn agent_definition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentD
         context_links_json: row.get(7)?,
         model_provider: row.get(8)?,
         model_id: row.get(9)?,
+        memory_enabled: row.get(10)?,
     })
 }
 

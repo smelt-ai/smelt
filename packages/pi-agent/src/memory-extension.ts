@@ -189,6 +189,7 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		if (!roots) return;
 		recallPending = true;
 		const meta = await currentMeta();
+		if (meta && !meta.enabled) return;
 		warnIfTruncated(snapshotFor(roots, context.cwd, meta), (message, type) => context.ui.notify(message, type));
 	});
 
@@ -200,6 +201,8 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		turnWrites.trusted = 0;
 		turnWrites.pending = 0;
 		const meta = await currentMeta();
+		// 用户在配置页关掉了记忆：不给分节。Pi 会在对话末尾追加一条移除它的系统消息。
+		if (meta && !meta.enabled) return;
 		const snapshot = snapshotFor(roots, context.cwd, meta);
 		event.systemPromptOptions.sections ??= {};
 		event.systemPromptOptions.sections[SMELT_MEMORY_PROMPT_SECTION] = snapshot.text;
@@ -226,6 +229,10 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		const target = resolveMemoryTarget(input.path, context.cwd, roots);
 		if (target.kind === "outside") return;
 		if (target.kind === "invalid") return { block: true, reason: target.reason };
+		const meta = await currentMeta();
+		if (meta && !meta.enabled) {
+			return { block: true, reason: "这个智能体的记忆已在配置页关闭，不能写记忆" };
+		}
 		if (inFlight.has(target.absolutePath)) {
 			return {
 				block: true,

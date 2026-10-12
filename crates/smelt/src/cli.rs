@@ -66,8 +66,8 @@ smelt {version}
   smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 
 智能体：
-  smelt agent create --name <名称> [--prompt <工作方式>] [--plugin <id>]...
-  smelt agent update <id> [--name <名称>] [--prompt <工作方式>]
+  smelt agent create --name <名称> [--prompt <工作方式>] [--plugin <id>]... [--memory on|off]
+  smelt agent update <id> [--name <名称>] [--prompt <工作方式>] [--memory on|off]
 
 自动化（写操作需要 smeltd）：
   smelt automation create --name <名称> --agent <智能体id> --every-hours 1 [--prompt <单次输入>]
@@ -594,6 +594,7 @@ fn parse_create(args: &[String]) -> Result<AgentDefinitionCreate, String> {
         plugins: flags.plugins,
         context_folders: flags.folders,
         context_links: flags.links,
+        memory_enabled: flags.memory_enabled,
         ..Default::default()
     })
 }
@@ -610,6 +611,7 @@ fn parse_patch(args: &[String]) -> Result<AgentDefinitionPatch, String> {
         plugins: flags.plugins_set.then_some(flags.plugins),
         context_folders: flags.folders_set.then_some(flags.folders),
         context_links: flags.links_set.then_some(flags.links),
+        memory_enabled: flags.memory_enabled,
         ..Default::default()
     };
     if patch == AgentDefinitionPatch::default() {
@@ -630,6 +632,7 @@ struct Flags {
     plugins_set: bool,
     folders_set: bool,
     links_set: bool,
+    memory_enabled: Option<bool>,
 }
 
 fn conversation_title_flag(args: &[String]) -> Result<String, String> {
@@ -668,6 +671,13 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--name" => flags.name = Some(value(index, arg)?),
             "--prompt" => flags.prompt = Some(value(index, arg)?),
             "--engine" => flags.engine_kind_id = Some(value(index, arg)?),
+            "--memory" => {
+                flags.memory_enabled = Some(match value(index, arg)?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("--memory 只能是 on 或 off，收到 {other}")),
+                });
+            }
             "--plugin" => {
                 flags.plugins_set = true;
                 flags.plugins.push(value(index, arg)?);
@@ -711,6 +721,31 @@ fn fail(message: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_flag_turns_agent_memory_on_or_off() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_patch(&args(&["--memory", "off"]))
+                .unwrap()
+                .memory_enabled,
+            Some(false)
+        );
+        assert_eq!(
+            parse_create(&args(&["--name", "写作", "--memory", "on"]))
+                .unwrap()
+                .memory_enabled,
+            Some(true)
+        );
+        assert_eq!(
+            parse_create(&args(&["--name", "写作"]))
+                .unwrap()
+                .memory_enabled,
+            None,
+            "不写就用默认（开）"
+        );
+        assert!(parse_patch(&args(&["--memory", "maybe"])).is_err());
+    }
 
     #[test]
     fn help_and_version_are_cli_commands() {

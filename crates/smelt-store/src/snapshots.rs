@@ -167,6 +167,8 @@ pub struct AgentDefinitionRecord {
     pub context_links_json: Vec<u8>,
     pub model_provider: String,
     pub model_id: String,
+    /// 关闭时不注入、不写入记忆；已有记忆文件保留。
+    pub memory_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

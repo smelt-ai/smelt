@@ -529,6 +529,41 @@ describe("smelt-memory extension", () => {
 			expect(result?.messages ?? []).toHaveLength(0);
 		});
 
+		test("turning memory off mid-session removes the section and refuses writes", async () => {
+			const { agent } = setupRoots();
+			writeFileSync(join(agent, "reply-in-chinese.md"), validMemory);
+			const { runner, host } = await createRunner();
+			expect((await turn(runner))?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION]).toContain(
+				"reply-in-chinese",
+			);
+
+			host.enabled = false;
+			const off = await turn(runner, "回复用中文");
+			expect(off?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION]).toBeUndefined();
+			expect(off?.messages ?? []).toHaveLength(0);
+			const write = await runner.emitToolCall({
+				type: "tool_call",
+				toolCallId: "w-off",
+				toolName: "write",
+				input: { path: join(agent, "new-one.md"), content: validMemory.replace("reply-in-chinese", "new-one") },
+			});
+			expect(write).toMatchObject({ block: true, reason: expect.stringContaining("已在配置页关闭") });
+		});
+
+		test("a session that started with memory off picks it up once memory is turned on", async () => {
+			const { agent } = setupRoots();
+			writeFileSync(join(agent, "reply-in-chinese.md"), validMemory);
+			const host = new FakeMemoryHost();
+			host.enabled = false;
+			const { runner } = await createRunner({ host });
+			expect((await turn(runner))?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION]).toBeUndefined();
+
+			host.enabled = true;
+			expect((await turn(runner))?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION]).toContain(
+				"reply-in-chinese",
+			);
+		});
+
 		test("pending facts are not recalled", async () => {
 			const { agent } = setupRoots();
 			const fact =

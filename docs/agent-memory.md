@@ -78,6 +78,20 @@ project: /Users/me/work/smelt   # 可选
 
 ## 4. 作用域与注入范围
 
+### 4.1 记忆开关
+
+每个智能体有一个记忆开关（`agent_definition.memory_enabled`，schema v14，默认开）。可在
+配置页的记忆卡片上切换，或用 `smelt agent update <id> --memory on|off`。
+
+- 开关在每轮生效，不在启动时判断：产品智能体的会话总会拿到记忆目录，扩展每轮向 daemon
+  取元数据时拿到当前开关。关着就不给记忆分节（会话中途关闭时 Pi 追加一条移除分节的系统
+  消息）、不召回、拒绝写记忆，daemon 也拒绝记录读写；中途打开则下一轮分节回来。
+- 已有记忆文件和元数据保留，重新打开后照常使用。
+- 恢复旧标签页时按智能体 id 补记忆目录，开关同样每轮判断。
+
+只做开 / 关两档：原设想的"只记录"与待确认机制（5.4）作用重复。
+
+
 | 会话类型 | 注入智能体层 | 注入全局层 | 可写记忆 |
 |---|---|---|---|
 | 产品智能体对话 | 是 | 是 | 是 |
@@ -293,6 +307,8 @@ capability）。daemon 校验令牌、会话未结束后，从该会话的启动
 | `smelt-core/src/control_api.rs` | 新增 `agent.memory.*` 三个控制方法 |
 | `smeltd/src/agent_memory_control.rs` | 新增：认证会话并代 Pi 读写记忆元数据 |
 | `smeltd/src/automation_runtime.rs` | 自动化启动带 `SMELT_AGENT_UNATTENDED=1` |
+| `smelt-store`（schema v14） | `agent_definition.memory_enabled` |
+| `smelt/src/cli.rs` | `smelt agent create/update --memory on\|off` |
 | `packages/pi-agent/src/runtime-extensions.ts` | 注册 `smelt-memory`，位于 `smelt-permission` 之前 |
 | `packages/pi-agent/src/smelt-permission.ts` | 合法记忆写入免审批 |
 | `smelt/src/agents/` | 配置页"记忆"卡片；删除智能体的提示改为"删除智能体和它的记忆" |

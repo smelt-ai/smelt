@@ -610,6 +610,7 @@ fn snapshot_from_config(config: &AgentHostState) -> smelt_store::AgentUiSnapshot
                     .unwrap_or_else(|_| b"[]".to_vec()),
                 model_provider: agent.model_provider.clone(),
                 model_id: agent.model_id.clone(),
+                memory_enabled: agent.memory_enabled,
             })
             .collect(),
         profiles: config
@@ -687,6 +688,7 @@ fn config_from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostStat
                     .unwrap_or_default(),
                 model_provider: agent.model_provider,
                 model_id: agent.model_id,
+                memory_enabled: agent.memory_enabled,
             })
             .collect(),
         automations: Vec::new(),

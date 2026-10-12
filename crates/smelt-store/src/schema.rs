@@ -393,6 +393,7 @@ CREATE TABLE agent_definition (
   context_links_json BLOB NOT NULL,
   model_provider TEXT NOT NULL DEFAULT '',
   model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
   position INTEGER NOT NULL CHECK (position >= 0)
 );
 CREATE TABLE agent_memory_provenance (
@@ -848,4 +849,32 @@ CREATE TABLE agent_memory_usage (
   last_read_at_ms INTEGER NOT NULL,
   PRIMARY KEY (scope, file_name)
 ) WITHOUT ROWID;
+";
+
+/// v13 → v14：智能体可以关闭记忆。关闭时不注入、不写入，已有记忆文件保留。
+pub const MIGRATE_V13_TO_V14: &str = "
+ALTER TABLE agent_definition RENAME TO agent_definition_v13;
+CREATE TABLE agent_definition (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  engine_kind_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  plugins_json BLOB NOT NULL,
+  context_folders_json BLOB NOT NULL,
+  context_links_json BLOB NOT NULL,
+  model_provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+INSERT INTO agent_definition(
+  id, name, description, engine_kind_id, prompt, plugins_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+)
+SELECT
+  id, name, description, engine_kind_id, prompt, plugins_json,
+  context_folders_json, context_links_json, model_provider, model_id, 1, position
+FROM agent_definition_v13;
+DROP TABLE agent_definition_v13;
 ";

@@ -49,7 +49,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 13;
+pub const STORE_SCHEMA_VERSION: u32 = 14;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -3168,6 +3168,18 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 13 {
+            if !schema_matches_v13(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v14_agent_memory_switch(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 12 {
             if !schema_matches_v12(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -3304,14 +3316,26 @@ mod imp {
     }
 
     fn apply_v13_memory_tables(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
-        if table_names(transaction)?
+        if !table_names(transaction)?
             .iter()
             .any(|table| table == "agent_memory_usage")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V12_TO_V13)?;
+        }
+        apply_v14_agent_memory_switch(transaction)
+    }
+
+    fn apply_v14_agent_memory_switch(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_columns(transaction, "agent_definition")?
+            .iter()
+            .any(|column| column == "memory_enabled")
         {
             return Ok(());
         }
         transaction
-            .execute_batch(crate::schema::MIGRATE_V12_TO_V13)
+            .execute_batch(crate::schema::MIGRATE_V13_TO_V14)
             .map_err(StoreError::from)
     }
 
@@ -3327,6 +3351,16 @@ mod imp {
                 && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
                 && schema_objects(connection)?
                     == expected_schema_objects(SchemaGeneration::Current)?,
+        )
+    }
+
+    fn schema_matches_v13(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V13)?,
         )
     }
 
@@ -3682,6 +3716,7 @@ mod imp {
         V10,
         V11,
         V12,
+        V13,
         Current,
     }
 
@@ -3715,6 +3750,7 @@ mod imp {
         static V10_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V11_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V12_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V13_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3793,6 +3829,7 @@ mod imp {
                     .into_iter()
                     .filter(|object| !is_v13_memory_schema_object(object))
                     .collect();
+                strip_agent_definition_memory_column(&mut objects);
                 strip_agent_definition_model_columns(&mut objects);
                 for object in &mut objects {
                     if matches!(
@@ -3809,14 +3846,21 @@ mod imp {
                     .into_iter()
                     .filter(|object| !is_v13_memory_schema_object(object))
                     .collect();
+                strip_agent_definition_memory_column(&mut objects);
                 strip_agent_definition_model_columns(&mut objects);
                 objects
             }),
             SchemaGeneration::V12 => cached_schema_objects(&V12_OBJECTS, |objects| {
-                objects
+                let mut objects: Vec<_> = objects
                     .into_iter()
                     .filter(|object| !is_v13_memory_schema_object(object))
-                    .collect()
+                    .collect();
+                strip_agent_definition_memory_column(&mut objects);
+                objects
+            }),
+            SchemaGeneration::V13 => cached_schema_objects(&V13_OBJECTS, |mut objects| {
+                strip_agent_definition_memory_column(&mut objects);
+                objects
             }),
             SchemaGeneration::Current => cached_schema_objects(&CURRENT_OBJECTS, |objects| objects),
         }
@@ -3854,6 +3898,15 @@ mod imp {
             .filter(|character| !character.is_whitespace())
             .flat_map(char::to_lowercase)
             .collect()
+    }
+
+    fn strip_agent_definition_memory_column(objects: &mut [SchemaObject]) {
+        const NEEDLE: &str = "memory_enabledintegernotnulldefault1check(memory_enabledin(0,1)),";
+        for object in objects {
+            if object.name == "agent_definition" {
+                object.sql = object.sql.replace(NEEDLE, "");
+            }
+        }
     }
 
     fn strip_agent_definition_model_columns(objects: &mut [SchemaObject]) {
@@ -4690,6 +4743,7 @@ mod tests {
                 context_links_json: b"[]".to_vec(),
                 model_provider: String::new(),
                 model_id: String::new(),
+                memory_enabled: true,
             })
             .unwrap();
 
@@ -4754,6 +4808,58 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v13_by_adding_the_agent_memory_switch_defaulting_on() {
+        let dir = temp_dir("migrate-v13-memory-switch");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE agent_definition RENAME TO agent_definition_v14;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );
+                 DROP TABLE agent_definition_v14;
+                 INSERT INTO agent_definition VALUES
+                   ('writer', '写作', '', 'pi', '先列提纲', X'5B5D', X'5B5D', X'5B5D', 'p', 'm', 0);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 13).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].prompt, "先列提纲");
+        assert_eq!(agents[0].model_id, "m");
+        assert!(agents[0].memory_enabled, "已有智能体默认开着记忆");
+
+        store
+            .modify_agent_definition::<StoreError>("writer", |agent| {
+                agent.memory_enabled = false;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert!(!agents[0].memory_enabled);
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn migrates_v12_by_adding_memory_tables() {
         let dir = temp_dir("migrate-v12-memory");
         let path = dir.join(DATABASE_FILE_NAME);
@@ -4762,7 +4868,23 @@ mod tests {
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
         connection
-            .execute_batch("DROP TABLE agent_memory_usage; DROP TABLE agent_memory_provenance;")
+            .execute_batch(
+                "DROP TABLE agent_memory_usage; DROP TABLE agent_memory_provenance;
+                 DROP TABLE agent_definition;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );",
+            )
             .unwrap();
         connection
             .execute(
@@ -6627,6 +6749,7 @@ mod tests {
                 context_links_json: b"[]".to_vec(),
                 model_provider: String::new(),
                 model_id: String::new(),
+                memory_enabled: true,
             }],
             profiles: vec![AgentProfileRecord {
                 id: "profile-1".into(),
@@ -6652,6 +6775,7 @@ mod tests {
             context_links_json: b"[]".to_vec(),
             model_provider: String::new(),
             model_id: String::new(),
+            memory_enabled: true,
         };
         store.insert_agent_definition(&extra).unwrap();
         store.put_agent_ui_prefs(&agent_ui).unwrap();

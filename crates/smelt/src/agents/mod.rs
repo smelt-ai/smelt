@@ -2423,6 +2423,23 @@ fn render_agent_memory_card(
     editor: &AgentEditor,
     entity: Entity<Workspace>,
 ) -> AnyElement {
+    let memory_enabled = agent.memory_enabled;
+    let toggle_agent = agent.id.clone();
+    let toggle_entity = entity.clone();
+    let memory_switch = Switch::new("agent-memory-enabled")
+        .checked(memory_enabled)
+        .tooltip(if memory_enabled {
+            "关闭后不再注入和写入记忆，已有记忆保留"
+        } else {
+            "打开后在对话和自动化里使用记忆"
+        })
+        .on_click(move |checked, _, cx| {
+            let agent_id = toggle_agent.clone();
+            let enabled = *checked;
+            toggle_entity.update(cx, |workspace, cx| {
+                workspace.set_agent_memory_enabled(agent_id, enabled, cx)
+            });
+        });
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-memory-refresh")
         .icon(IconName::Redo)
@@ -2460,12 +2477,22 @@ fn render_agent_memory_card(
                             div()
                                 .text_xs()
                                 .text_color(rgb(crate::ui_theme::text_muted()))
-                                .child(
-                                    "智能体在对话和自动化里记下的长期信息。改动对新开的对话生效。",
-                                ),
+                                .child(if memory_enabled {
+                                    "智能体在对话和自动化里记下的长期信息。改动从下一轮对话起生效。"
+                                } else {
+                                    "记忆已关闭：不注入、不写入。下面的记忆保留着，重新打开后照常使用。"
+                                }),
                         ),
                 )
-                .child(div().flex_shrink_0().child(refresh_button)),
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(refresh_button)
+                        .child(memory_switch),
+                ),
         )
         .child(agent_memory_section(
             &agent.id,

@@ -203,6 +203,8 @@ impl Workspace {
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
                         let mut launch = saved.launch;
+                        // 记忆目录由智能体 id 决定，升级前保存的会话也能补上。开关由 Pi 每轮
+                        // 向 daemon 取，这里不判断。
                         smelt_core::agent_definition_store::attach_agent_memory_dirs(
                             &mut launch,
                             agent_definition_id.as_deref(),

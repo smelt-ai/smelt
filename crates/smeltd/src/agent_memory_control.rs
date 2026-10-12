@@ -67,9 +67,19 @@ fn request_error(error: MemoryRequestError) -> ControlError {
     let code = match error {
         MemoryRequestError::NoSuchLayer => ControlErrorCode::FailedPrecondition,
         MemoryRequestError::InvalidFile => ControlErrorCode::InvalidParams,
+        MemoryRequestError::Disabled => ControlErrorCode::FailedPrecondition,
         MemoryRequestError::Store(_) => ControlErrorCode::OperationFailed,
     };
     ControlError::new(code, error.to_string())
+}
+
+/// 会话启动后用户可能关掉了记忆：关着就不再记任何东西。
+fn ensure_enabled(store: &smelt_store::Store, launch: &MemoryLaunch) -> Result<(), ControlError> {
+    if agent_memory::launch_memory_enabled(store, launch.agent_dir.as_deref()) {
+        Ok(())
+    } else {
+        Err(request_error(MemoryRequestError::Disabled))
+    }
 }
 
 fn scope(launch: &MemoryLaunch, layer: AgentMemoryLayer) -> Result<MemoryScope, ControlError> {
@@ -103,8 +113,9 @@ pub(crate) fn record_read(
 ) -> Result<(), ControlError> {
     let launch = authenticate(acp_sessions, &params.session_id, &params.token)?;
     let scope = scope(&launch, params.layer)?;
-    agent_memory::record_launch_read(&store()?, &scope, &params.file, now_ms())
-        .map_err(request_error)
+    let store = store()?;
+    ensure_enabled(&store, &launch)?;
+    agent_memory::record_launch_read(&store, &scope, &params.file, now_ms()).map_err(request_error)
 }
 
 pub(crate) fn record_write(
@@ -113,8 +124,10 @@ pub(crate) fn record_write(
 ) -> Result<(), ControlError> {
     let launch = authenticate(acp_sessions, &params.session_id, &params.token)?;
     let scope = scope(&launch, params.layer)?;
+    let store = store()?;
+    ensure_enabled(&store, &launch)?;
     agent_memory::record_launch_write(
-        &store()?,
+        &store,
         &scope,
         &params.file,
         params.trust,
