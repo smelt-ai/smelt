@@ -329,8 +329,25 @@ pub fn launch_memory_meta(
             pending: meta.pending.into_iter().map(|(file, _)| file).collect(),
         })
     };
+    let embedding = crate::memory_settings::load_on(store)
+        .ok()
+        .filter(crate::memory_settings::EmbeddingSettings::is_configured)
+        .map(|settings| crate::control_api::AgentMemoryEmbedding {
+            base_url: settings.base_url,
+            model: settings.model,
+            api_key: settings.api_key,
+        });
+    let rerank_model = crate::memory_settings::load_rerank_model_on(store)
+        .ok()
+        .flatten()
+        .map(|model| crate::control_api::AgentMemoryRerankModel {
+            provider: model.provider,
+            id: model.id,
+        });
     Ok(crate::control_api::AgentMemoryMetaResult {
         enabled: true,
+        embedding,
+        rerank_model,
         agent: layer(launch_scope(agent_dir, false))?,
         user: layer(launch_scope(user_dir, true))?,
     })
@@ -599,6 +616,24 @@ mod tests {
         .unwrap();
         let meta = launch_memory_meta(&store, Some(&agent_dir), Some(&user_dir)).unwrap();
         assert!(meta.enabled);
+        assert_eq!(meta.embedding, None, "没配向量检索就不下发");
+        crate::memory_settings::apply_on(
+            &store,
+            crate::memory_settings::EMBEDDING_BASE_URL,
+            &serde_json::Value::from("http://localhost:11434/v1"),
+        )
+        .unwrap();
+        crate::memory_settings::apply_on(
+            &store,
+            crate::memory_settings::EMBEDDING_MODEL,
+            &serde_json::Value::from("bge-m3"),
+        )
+        .unwrap();
+        let embedding = launch_memory_meta(&store, Some(&agent_dir), Some(&user_dir))
+            .unwrap()
+            .embedding
+            .unwrap();
+        assert_eq!(embedding.model, "bge-m3");
         assert_eq!(meta.agent.usage[0].file, "fact.md");
         assert_eq!(meta.agent.usage[0].read_count, 1);
         assert_eq!(meta.user.pending, ["me.md"]);

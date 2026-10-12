@@ -16,6 +16,7 @@ mod collaboration;
 mod dsh_model;
 mod maintenance;
 mod pi_auth;
+mod pi_memory;
 mod pi_model;
 mod pi_plugin;
 mod plugins;
@@ -240,6 +241,7 @@ fn section_page(
         SettingsSection::DshModel => dsh_model::dsh_model_page(entity, snapshot, cx),
         SettingsSection::PiModel => pi_model::pi_model_page(entity, snapshot, cx),
         SettingsSection::PiPlugins => pi_plugin::pi_plugin_page(entity, snapshot, cx),
+        SettingsSection::PiMemory => pi_memory::pi_memory_page(cx),
         SettingsSection::AgentRuntime => agent::runtime_page(entity, snapshot, cx),
         SettingsSection::AgentLaunch => agent::launch_page(entity, snapshot, cx),
         SettingsSection::AgentWorkspace => agent::workspace_page(entity, snapshot, cx),

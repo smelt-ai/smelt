@@ -25,6 +25,7 @@ use gpui_component::*;
 use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
 mod agent_hooks;
+mod memory;
 mod nav;
 mod pi_auth;
 pub(crate) mod plugins;

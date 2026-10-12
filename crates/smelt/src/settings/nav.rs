@@ -17,6 +17,7 @@ pub enum SettingsSection {
     DshModel,
     PiModel,
     PiPlugins,
+    PiMemory,
     AgentRuntime,
     AgentLaunch,
     AgentWorkspace,
@@ -50,6 +51,7 @@ impl SettingsSection {
             Self::DshModel => "dsh-model".into(),
             Self::PiModel => "pi-model".into(),
             Self::PiPlugins => "pi-plugins".into(),
+            Self::PiMemory => "pi-memory".into(),
             Self::AgentRuntime => "agent-runtime".into(),
             Self::AgentLaunch => "agent-launch".into(),
             Self::AgentWorkspace => "agent-workspace".into(),
@@ -112,7 +114,7 @@ pub enum SettingsScope {
     /// 通用设置窗口。
     #[default]
     All,
-    /// 智能体设置窗口：只有 Pi 模型与智能体插件。
+    /// 智能体设置窗口：只有 Pi 模型、智能体插件与记忆。
     AgentSetup,
 }
 
@@ -153,7 +155,7 @@ pub fn nav_contains(nav: &[SettingsNavCategory], section: &SettingsSection) -> b
         .any(|child| &child.section == section)
 }
 
-/// 智能体设置窗口的侧栏：只放「配好就能开跑」的两页。
+/// 智能体设置窗口的侧栏：只放「配好就能开跑」的几页。
 pub fn agent_setup_nav() -> Vec<SettingsNavCategory> {
     vec![SettingsNavCategory {
         id: SettingsCategoryId::Agent,
@@ -198,6 +200,23 @@ pub fn agent_setup_nav() -> Vec<SettingsNavCategory> {
                     "extension",
                     "能力",
                     "工具",
+                    "Pi",
+                    "pi",
+                    "智能体",
+                ],
+            ),
+            leaf(
+                "记忆",
+                IconName::BookOpen,
+                SettingsSection::PiMemory,
+                &[
+                    "记忆",
+                    "memory",
+                    "向量",
+                    "embedding",
+                    "检索",
+                    "召回",
+                    "Ollama",
                     "Pi",
                     "pi",
                     "智能体",
@@ -866,7 +885,7 @@ mod tests {
     #[test]
     fn agent_scope_owns_the_pi_pages_and_the_main_window_does_not_show_them_twice() {
         let agent_titles = child_titles(&agent_setup_nav(), SettingsCategoryId::Agent);
-        assert_eq!(agent_titles, ["模型", "插件"]);
+        assert_eq!(agent_titles, ["模型", "插件", "记忆"]);
 
         // 两页只在智能体窗口出现：留在通用设置里就成了两处入口、两处维护。
         let main_sections = settings_nav(&[])
@@ -876,9 +895,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!main_sections.contains(&SettingsSection::PiModel));
         assert!(!main_sections.contains(&SettingsSection::PiPlugins));
+        assert!(!main_sections.contains(&SettingsSection::PiMemory));
 
         assert!(SettingsScope::AgentSetup.contains(&SettingsSection::PiModel));
         assert!(SettingsScope::AgentSetup.contains(&SettingsSection::PiPlugins));
+        assert!(SettingsScope::AgentSetup.contains(&SettingsSection::PiMemory));
         assert!(!SettingsScope::AgentSetup.contains(&SettingsSection::AppearanceTheme));
         assert!(SettingsScope::All.contains(&SettingsSection::AppearanceTheme));
         assert!(!SettingsScope::All.contains(&SettingsSection::PiModel));
@@ -902,6 +923,30 @@ mod tests {
         assert_eq!(visible_destinations.len(), 15);
         assert!(visible_destinations.contains(&SettingsSection::DshModel));
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
+    }
+
+    #[test]
+    fn element_keys_are_unique_across_both_windows() {
+        let keys = settings_nav(&[])
+            .into_iter()
+            .chain(agent_setup_nav())
+            .flat_map(|category| category.children)
+            .map(|child| child.section.element_key())
+            .collect::<Vec<_>>();
+        let unique = keys.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), keys.len(), "{keys:?}");
+    }
+
+    #[test]
+    fn agent_scope_search_finds_memory_by_its_synonyms() {
+        let nav = agent_setup_nav();
+        for query in ["记忆", "embedding", "向量", "Ollama", "召回"] {
+            assert_eq!(
+                matching_sections(&nav, query),
+                [SettingsSection::PiMemory],
+                "query: {query}"
+            );
+        }
     }
 
     #[test]

@@ -42,6 +42,8 @@ smelt settings set appearance.theme_mode=dark
 smelt settings set appearance.theme_mode=light appearance.ui_font_px=16 appearance.font_px=13
 ```
 
+记忆的向量检索（可选）：`memory.embedding_base_url`（OpenAI 兼容的 /embeddings 地址，Ollama 填 `http://localhost:11434/v1`）、`memory.embedding_model`、`memory.embedding_api_key`（本地服务可不填）。填空字符串清除。没配或服务不可用时召回退回关键词 + 模型重排。召回重排模型：`memory.rerank_model_provider` + `memory.rerank_model_id`（Pi 里已登录的模型），都空表示自动挑。
+
 允许的设置：`appearance.theme_mode`（dark|light）、`appearance.ui_font_px`（14–26）、`appearance.ui_font_family`、`appearance.font_px`（9–22）、`appearance.font_family`、`appearance.opacity`（0.3–1.0）。改完后用户打开设置页会套上；正在看的窗口可能要再点一次设置。
 
 先 list 再 update。不要和 `smelt_list_agents`（跨会话发消息）搞混。

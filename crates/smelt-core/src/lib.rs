@@ -44,6 +44,7 @@ pub mod isolated_workspace;
 pub mod login_env;
 #[cfg(unix)]
 pub mod managed_runtime;
+pub mod memory_settings;
 pub mod new_session;
 pub mod osc;
 pub mod pi_auth;

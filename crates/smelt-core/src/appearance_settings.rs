@@ -55,9 +55,12 @@ pub struct SettingsResult {
 }
 
 pub fn get_settings_on(store: &smelt_store::Store) -> Result<SettingsResult, SettingsError> {
-    Ok(SettingsResult {
-        settings: snapshot_to_map(get_snapshot_on(store)?),
-    })
+    let mut settings = snapshot_to_map(get_snapshot_on(store)?);
+    settings.extend(crate::memory_settings::to_map(
+        &crate::memory_settings::load_on(store)?,
+        crate::memory_settings::load_rerank_model_on(store)?.as_ref(),
+    ));
+    Ok(SettingsResult { settings })
 }
 
 /// 所有写入都经 `Store::modify_appearance_snapshot` 在一个写事务里读-改-写：
@@ -69,15 +72,23 @@ pub fn update_settings_on(
     if patch.settings.is_empty() {
         return Err(SettingsError::Invalid("没有要更新的设置".into()));
     }
-    let snapshot = store.modify_appearance_snapshot(default_snapshot, |snapshot| {
-        for (key, value) in &patch.settings {
-            apply_key(snapshot, key, value)?;
-        }
-        Ok::<(), SettingsError>(())
-    })?;
-    Ok(SettingsResult {
-        settings: snapshot_to_map(snapshot),
-    })
+    // 记忆的向量检索配置不属于外观快照，单独存；其余照旧在一个写事务里读-改-写。
+    let (memory, appearance): (Vec<_>, Vec<_>) = patch
+        .settings
+        .iter()
+        .partition(|(key, _)| crate::memory_settings::is_memory_key(key));
+    for (key, value) in memory {
+        crate::memory_settings::apply_on(store, key, value).map_err(SettingsError::Invalid)?;
+    }
+    if !appearance.is_empty() {
+        store.modify_appearance_snapshot(default_snapshot, |snapshot| {
+            for (key, value) in &appearance {
+                apply_key(snapshot, key, value)?;
+            }
+            Ok::<(), SettingsError>(())
+        })?;
+    }
+    get_settings_on(store)
 }
 
 /// 完整外观快照（含不在可脚本目录里的底色、玻璃等字段），供 GUI 设置页使用。

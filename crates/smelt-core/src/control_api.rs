@@ -393,6 +393,27 @@ pub struct AgentMemoryMetaResult {
     pub enabled: bool,
     pub agent: AgentMemoryLayerMeta,
     pub user: AgentMemoryLayerMeta,
+    /// 用户配置的向量检索服务；没配为空，Pi 退回关键词 + 模型重排。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<AgentMemoryEmbedding>,
+    /// 用户指定的重排模型；没指定为空，Pi 自动挑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_model: Option<AgentMemoryRerankModel>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryRerankModel {
+    pub provider: String,
+    pub id: String,
+}
+
+/// OpenAI 兼容的 `/embeddings` 服务。只发给通过认证的会话。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryEmbedding {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -781,6 +802,8 @@ mod tests {
             "req-1",
             AgentMemoryMetaResult {
                 enabled: true,
+                embedding: None,
+                rerank_model: None,
                 agent: AgentMemoryLayerMeta {
                     usage: vec![AgentMemoryUsageEntry {
                         file: "fact.md".into(),
