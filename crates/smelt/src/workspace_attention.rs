@@ -2,6 +2,17 @@
 
 use super::*;
 
+fn session_attention_ids(session: &Session, cx: &App) -> Vec<String> {
+    match &session.kind {
+        SessionKind::Term { .. } => session
+            .term_leaves()
+            .iter()
+            .map(|pane| pane.read(cx).session_id().to_string())
+            .collect(),
+        SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
+    }
+}
+
 impl Workspace {
     /// 跳到某条通知：切到该会话 + 聚焦该 pane。
     pub(crate) fn goto_notification(
@@ -142,24 +153,54 @@ impl Workspace {
             status_item::set_counts(attention_count, running_count);
         }
 
+        let badge: std::collections::HashMap<String, bool> = cx
+            .try_global::<AttentionGlobal>()
+            .map(|store| {
+                store
+                    .0
+                    .lock()
+                    .unwrap()
+                    .badge_sessions()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut menu_order: Vec<usize> = (0..self.sessions.len()).collect();
         menu_order.sort_by_key(|&ix| statuses[ix].rank());
         let menu_snapshot: Vec<status_item::SessionEntry> = menu_order
             .into_iter()
-            .map(|ix| {
+            .filter_map(|ix| {
                 let status = statuses[ix];
-                let status_text = match status {
-                    AgentStatus::NeedsYou => "需要你",
-                    AgentStatus::Running => "运行中",
-                    AgentStatus::Idle => "空闲",
+                let mut listed = matches!(status, AgentStatus::NeedsYou | AgentStatus::Running);
+                let mut requires_action = status == AgentStatus::NeedsYou;
+                for id in session_attention_ids(&self.sessions[ix], cx) {
+                    if let Some(action) = badge.get(&id) {
+                        listed = true;
+                        requires_action |= *action;
+                    }
+                }
+                if !listed {
+                    return None;
+                }
+                let status_text = if requires_action {
+                    "需要你"
+                } else if status == AgentStatus::Running {
+                    "运行中"
+                } else {
+                    "未读"
                 };
-                status_item::SessionEntry {
+                let color_status = if requires_action {
+                    AgentStatus::NeedsYou
+                } else {
+                    statuses[ix]
+                };
+                Some(status_item::SessionEntry {
                     session_ix: ix,
                     title: self.sessions[ix].title(cx),
                     status_text,
-                    color: ui_theme::agent_status_rgb8(status),
+                    color: ui_theme::agent_status_rgb8(color_status),
                     agent: self.sessions[ix].agent_icon_id(cx),
-                }
+                })
             })
             .collect();
         if self.status_menu_snapshot.as_ref() != Some(&menu_snapshot) {
