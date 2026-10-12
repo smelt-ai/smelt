@@ -1093,16 +1093,7 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 					executeHandoff(ctx, instructions);
 				},
 			});
-
-			// 官方 RPC 没有 reload。注册成扩展命令后，session.prompt("/reload")
-			// 会在调模型前执行 ctx.reload()。不要在 input 里再拦一次：命令已处理时 input 不会再跑。
-			pi.registerCommand("reload", {
-				description:
-					"Reload keybindings, extensions, skills, prompts, themes, and context files",
-				handler: async (_args, ctx) => {
-					await ctx.reload();
-				},
-			});
+			// 不注册 /reload。官方 RPC 没有 reload，用 prompt 模拟会占住 stdin 读循环。
 		}
 
 		pi.on("input", async (event, ctx) => {

@@ -2082,8 +2082,8 @@ fn remember_outgoing_prompt(
 
 /// Pi 的会话命令在进入 Prompt / Steer / FollowUp 之前处理。
 ///
-/// 其它 agent 的同名文本仍是普通输入。空闲时的 `/reload` 和 `/shake` 继续走
-/// 原 prompt 路径：它们是扩展命令，回执靠那条本地回合上的 ProviderIdle 释放闸门。
+/// 其它 agent 的同名文本仍是普通输入。`/reload` 由驱动拒绝，不写给 Pi。
+/// `/shake` 仍走 prompt，由扩展命令执行。
 fn dispatch_pi_session_command(
     sess: &AcpSession,
     text: &str,

@@ -81,12 +81,7 @@ struct PiState {
     steer_request_ids: HashSet<String>,
     follow_up_request_ids: HashSet<String>,
     compact_request_ids: HashSet<String>,
-    /// 精确 `/reload` 走的 prompt id。回执在 prompt 分支处理，不再发 RPC `reload`。
-    reload_request_ids: HashSet<String>,
-    /// 扩展命令 `reload` 抛错。Pi 仍回 `disposition: handled`，成功文案不能盖掉它。
-    reload_command_error: Option<String>,
-    /// `/reload` 成功后补发的 `get_commands`。技能和提示词可能刚变过。
-    commands_refresh_id: Option<String>,
+
     /// `clear_queue` 回执后是否要把 in_flight 还回去（ClearQueue 动作才要）。
     pending_clear: Option<(String, bool)>,
     composer_restore_seq: u64,
@@ -1290,8 +1285,8 @@ pub fn parse_session_slash(text: &str) -> Option<PiSessionSlash> {
     None
 }
 
-/// 已识别的会话命令不再交给模型。空闲时的 `/reload` 和 `/shake` 仍是普通 prompt，
-/// 由扩展命令执行。`/reload` 的回执靠这条 prompt 加 `get_state` 结束本地回合。
+/// 已识别的会话命令不再交给模型。`/reload` 官方 RPC 没有对应方法，不能用 prompt
+/// 模拟：那会占住 stdin 读循环，并可能停在「已用 0s」。直接拒绝。
 async fn consume_session_slash<W: AsyncWrite + Unpin>(
     text: &str,
     writer: &mut W,
@@ -1305,14 +1300,14 @@ async fn consume_session_slash<W: AsyncWrite + Unpin>(
     };
     match slash {
         PiSessionSlash::Reload => {
-            if turn_is_active {
-                finish_in_flight(in_flight_rpc);
-                let _ = event_tx.try_send(ConversationEvent::Status(
-                    "回合进行中，结束后再 /reload".to_string(),
-                ));
-                return Ok(true);
+            finish_in_flight(in_flight_rpc);
+            let _ = event_tx.try_send(ConversationEvent::Status(
+                "当前协议不支持 /reload，不会发给模型".to_string(),
+            ));
+            if !turn_is_active {
+                mark_provider_idle(state, event_tx);
             }
-            Ok(false)
+            Ok(true)
         }
         PiSessionSlash::Shake if turn_is_active => {
             finish_in_flight(in_flight_rpc);
@@ -1433,9 +1428,6 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             state.last_error = None;
             let id = state.request_id("prompt");
             state.prompt_request_id = Some(id.clone());
-            if parse_reload_slash(&text) {
-                state.reload_request_ids.insert(id.clone());
-            }
             let images = encode_pi_images(images);
             let mut request = serde_json::json!({
                 "id": id,
@@ -1724,18 +1716,7 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         .to_string();
     if state.prompt_request_id.as_deref() == Some(&id) {
         state.prompt_request_id = None;
-        let reload = state.reload_request_ids.remove(&id);
         if let Err(error) = ensure_response_success(&response) {
-            if reload {
-                state.reload_command_error = None;
-                let _ =
-                    event_tx.try_send(ConversationEvent::Status(format!("重新加载失败：{error}")));
-                // 失败详情在 Status。本地回合要结束，发送闸门才开得了。不能记成 TurnFailed。
-                finish_turn(state, event_tx, None);
-                mark_provider_idle(state, event_tx);
-                finish_in_flight(in_flight_rpc);
-                return Ok(());
-            }
             // 先问 Pi 还在不在跑。忙着就不是这一条的失败，空了才是真的预检错误。
             state.pending_refusal_error = Some(error);
             let check_id = state.request_id("refusal-state");
@@ -1755,38 +1736,11 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                 resolve_prompt_refusal(state, event_tx, error, None);
             }
         } else {
-            let handled = response
-                .get("data")
-                .and_then(|data| data.get("disposition"))
-                .and_then(serde_json::Value::as_str)
-                == Some("handled");
-            let reload_error = if reload {
-                state.reload_command_error.take()
-            } else {
-                None
-            };
-            let reload_done = reload && handled && reload_error.is_none();
-            if reload && handled {
-                let status = match reload_error {
-                    Some(error) => format!("重新加载失败：{error}"),
-                    None => "已重新加载技能、扩展、提示词和上下文".to_string(),
-                };
-                let _ = event_tx.try_send(ConversationEvent::Status(status));
-            }
             if state.active_turn {
                 state.prompt_accepted = true;
                 state.compaction_idle_pending = false;
             }
             let _ = event_tx.try_send(ConversationEvent::PromptAccepted);
-            if reload_done {
-                let refresh_id = state.request_id("commands");
-                state.commands_refresh_id = Some(refresh_id.clone());
-                write_rpc(
-                    writer,
-                    &serde_json::json!({"id": refresh_id, "type": "get_commands"}),
-                )
-                .await?;
-            }
             if state.active_turn {
                 // Extension command/input handler 可以不启动模型回合。询问权威状态，避免
                 // 只等 agent_settled 导致这种 prompt 永远卡在 Running。
@@ -1903,16 +1857,6 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             )));
         }
         finish_in_flight(in_flight_rpc);
-        return Ok(());
-    }
-    if state.commands_refresh_id.as_deref() == Some(&id) {
-        state.commands_refresh_id = None;
-        if let Ok(data) = response_data(&response) {
-            state.available_commands = parse_pi_commands(data);
-            let _ = event_tx.try_send(ConversationEvent::AvailableCommands(
-                state.available_commands.clone(),
-            ));
-        }
         return Ok(());
     }
     if state
@@ -2552,15 +2496,6 @@ fn handle_event(
                 .get("error")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("Pi Extension 执行失败");
-            // `ctx.reload()` 抛错时 Pi 仍把 prompt 标成 handled。先记下，等回执改成失败文案。
-            let command_reload = event
-                .get("extensionPath")
-                .and_then(serde_json::Value::as_str)
-                == Some("command:reload");
-            if command_reload && !state.reload_request_ids.is_empty() {
-                state.reload_command_error = Some(message.to_string());
-                return;
-            }
             let _ = event_tx.try_send(ConversationEvent::Status(format!(
                 "Pi Extension：{message}"
             )));
@@ -6553,9 +6488,12 @@ mod tests {
     }
 
     #[test]
-    fn slash_reload_prompts_the_extension_command() {
+    fn slash_reload_is_rejected_without_a_prompt() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         let mut state = PiState::new();
+        state
+            .available_commands
+            .push(("reload".into(), "Reload skills".into()));
         let in_flight = AtomicUsize::new(1);
         let mut writer = futures::io::Cursor::new(Vec::new());
 
@@ -6564,209 +6502,6 @@ mod tests {
                 text: "/reload".to_string(),
                 images: Vec::new(),
             },
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-
-        let request = rpc_lines(writer).remove(0);
-        assert_eq!(request["type"], "prompt");
-        assert_eq!(request["message"], "/reload");
-        assert_eq!(state.reload_request_ids.len(), 1);
-        assert!(state.active_turn);
-        assert!(event_rx.try_recv().is_err());
-
-        let id = request["id"].as_str().unwrap().to_string();
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": id,
-                "type": "response",
-                "command": "prompt",
-                "success": true,
-                "data": {"disposition": "handled"}
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("已重新加载")
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::PromptAccepted)
-        ));
-        let follow_ups = rpc_lines(writer);
-        assert_eq!(follow_ups[0]["type"], "get_commands");
-        assert_eq!(follow_ups[1]["type"], "get_state");
-        // prompt 回执不归还 in_flight，和普通 prompt 一样。闸门靠后面的 ProviderIdle。
-        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
-        assert!(state.active_turn);
-
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": follow_ups[1]["id"].as_str().unwrap(),
-                "type": "response",
-                "command": "get_state",
-                "success": true,
-                "data": {"isStreaming": false, "isCompacting": false}
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::ProviderIdle)
-        ));
-        assert!(!state.active_turn);
-
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": follow_ups[0]["id"].as_str().unwrap(),
-                "type": "response",
-                "command": "get_commands",
-                "success": true,
-                "data": {
-                    "commands": [
-                        {"name": "reload", "description": "Reload skills"},
-                        {"name": "skill:new", "description": "刚加载的技能"}
-                    ]
-                }
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        assert_eq!(
-            state.available_commands,
-            vec![
-                ("reload".to_string(), "Reload skills".to_string()),
-                ("skill:new".to_string(), "刚加载的技能".to_string()),
-            ]
-        );
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::AvailableCommands(commands))
-                if commands.iter().any(|(name, _)| name == "skill:new")
-        ));
-        assert!(event_rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn slash_reload_without_a_handler_stays_a_model_turn() {
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let mut state = PiState::new();
-        let in_flight = AtomicUsize::new(1);
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_command(
-            ConversationCommand::Prompt {
-                text: "/reload".to_string(),
-                images: Vec::new(),
-            },
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        let id = rpc_lines(writer).remove(0)["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": id,
-                "type": "response",
-                "command": "prompt",
-                "success": true,
-                "data": {"disposition": "started"}
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::PromptAccepted)
-        ));
-        assert!(event_rx.try_recv().is_err());
-        let follow_ups = rpc_lines(writer);
-        assert_eq!(follow_ups.len(), 1);
-        assert_eq!(follow_ups[0]["type"], "get_state");
-
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": follow_ups[0]["id"].as_str().unwrap(),
-                "type": "response",
-                "command": "get_state",
-                "success": true,
-                "data": {"isStreaming": true, "isCompacting": false}
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        assert!(state.active_turn);
-        assert!(event_rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn failed_slash_reload_also_ends_the_local_turn() {
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let mut state = PiState::new();
-        let in_flight = AtomicUsize::new(1);
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_command(
-            ConversationCommand::Prompt {
-                text: "/reload".to_string(),
-                images: Vec::new(),
-            },
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        let id = rpc_lines(writer).remove(0)["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": id,
-                "type": "response",
-                "command": "prompt",
-                "success": false,
-                "error": "reload failed"
-            }),
             &mut writer,
             &event_tx,
             &mut state,
@@ -6775,107 +6510,11 @@ mod tests {
         .unwrap();
 
         assert!(rpc_lines(writer).is_empty());
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("重新加载失败")
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::ProviderIdle)
-        ));
-        assert!(event_rx.try_recv().is_err());
         assert!(!state.active_turn);
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn thrown_reload_command_is_a_failed_reload_not_a_success() {
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let (outbound_tx, _) = smol::channel::unbounded();
-        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
-        let mut state = PiState::new();
-        let in_flight = AtomicUsize::new(1);
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_command(
-            ConversationCommand::Prompt {
-                text: "/reload".to_string(),
-                images: Vec::new(),
-            },
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        let id = rpc_lines(writer).remove(0)["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        handle_event(
-            serde_json::json!({
-                "type": "extension_error",
-                "extensionPath": "command:reload",
-                "event": "command",
-                "error": "disk full"
-            }),
-            &event_tx,
-            &outbound_tx,
-            &mut state,
-            &launch,
-        );
-        assert!(event_rx.try_recv().is_err());
-
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": id,
-                "type": "response",
-                "command": "prompt",
-                "success": true,
-                "data": {"disposition": "handled"}
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("重新加载失败") && text.contains("disk full")
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::PromptAccepted)
-        ));
-        let follow_ups = rpc_lines(writer);
-        assert_eq!(follow_ups.len(), 1);
-        assert_eq!(follow_ups[0]["type"], "get_state");
-
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": follow_ups[0]["id"].as_str().unwrap(),
-                "type": "response",
-                "command": "get_state",
-                "success": true,
-                "data": {"isStreaming": false, "isCompacting": false}
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
+            Ok(ConversationEvent::Status(text)) if text.contains("不支持 /reload")
         ));
         assert!(matches!(
             event_rx.try_recv(),
@@ -6914,7 +6553,7 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("结束后再")
+            Ok(ConversationEvent::Status(text)) if text.contains("不支持 /reload")
         ));
     }
 
