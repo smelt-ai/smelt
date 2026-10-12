@@ -9274,6 +9274,7 @@ dependencies = [
  "similar",
  "smelt-paths",
  "smelt-plugin-api",
+ "smelt-process-wait",
  "smelt-store",
  "smol",
  "tempfile",
@@ -9351,7 +9352,15 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smelt-plugin-api",
+ "smelt-process-wait",
  "uuid",
+]
+
+[[package]]
+name = "smelt-process-wait"
+version = "0.9.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
