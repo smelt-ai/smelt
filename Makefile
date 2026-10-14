@@ -71,13 +71,19 @@ build: ## 编译 release 二进制（GUI + 守护 + helpers）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝构建"; exit 1; \
 	}
+	@sdk="$$(./scripts/macos-sdk-26.sh)"; \
+	export SDKROOT="$$sdk"; \
 	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-sync-plugins --bin smelt-installer
 
 run: ## 本地直接跑 GUI（开发用）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝构建"; exit 1; \
 	}
+	@sdk="$$(./scripts/macos-sdk-26.sh)"; \
+	export SDKROOT="$$sdk"; \
 	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
+	@sdk="$$(./scripts/macos-sdk-26.sh)"; \
+	export SDKROOT="$$sdk"; \
 	cargo run --bin $(BIN)
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
@@ -93,6 +99,7 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
 	@# 旧包再装一遍，守护永远跑不到新代码，插件映射竞态也修不进去。Shared Bun
 	@# package 没有 cargo binary，因此同时检查整个 bundled package 的源内容。
+	@# codesign -dv 不打印证书名，Authority= 从 -dvv 才出现。少这一级时已签好的包也会被当成签名不对。
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝安装"; exit 1; \
 	}
@@ -110,7 +117,7 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 	sig_ok=0; \
 	identity="$${SMELT_CODESIGN_IDENTITY:-Smelt Local Signing}"; \
 	if [ -d dist/Smelt.app ]; then \
-		sig="$$(codesign -dv dist/Smelt.app 2>&1 || true)"; \
+		sig="$$(codesign -dvv dist/Smelt.app 2>&1 || true)"; \
 		case "$$sig" in \
 			*Signature=adhoc*|*linker-signed*) ;; \
 			*) printf '%s\n' "$$sig" | grep -F -q "Authority=$$identity" && sig_ok=1 ;; \
