@@ -1745,19 +1745,25 @@ impl Workspace {
         // 从舞台头栏迁到这里（底部操作条上方）。只显示「检测到额度」的 provider，
         // 全部挤在一行：每项 = provider 图标 + 最差窗口的已用百分比（颜色也由它
         // 决定）；悬浮单项看完整窗口明细与重置时间；点击整条刷新。
+        // Pi 不在这里：它底下几家 provider 是独立账户，额度跟在对话模型菜单的
+        // provider 名字后面（括号），那里才说得清数字属于谁。
         let quota_this = this.clone();
-        let quota_state = &self.provider_quota_state;
-        // (provider 身份, 行内百分比文本, 行内颜色, tooltip 完整文案)
-        let quota_rows = crate::provider_quota::quota_provider_kinds()
-            .filter_map(|provider| {
-                let row = provider_quota_row(provider, quota_state.status(provider)?)?;
-                Some((provider, row.text, row.color, row.hint))
+        // (provider 身份, 行内百分比文本, 行内颜色, tooltip 完整文案, 是否用户手动刷新中)
+        // 状态在这里一次性读完，子元素的构造闭包里不再碰全局。
+        let quota_rows = crate::provider_quota::ProviderStatus::sidebar_targets(cx)
+            .into_iter()
+            .filter_map(|target| {
+                let status = crate::provider_quota::ProviderStatus::quota_status(target, cx)?;
+                let row = provider_quota_row(target, &status)?;
+                let manual_refreshing =
+                    crate::provider_quota::ProviderStatus::is_manually_refreshing(target, cx);
+                Some((target, row.text, row.color, row.hint, manual_refreshing))
             })
             .collect::<Vec<_>>();
 
         let quota_footer = if quota_rows.is_empty() {
             // 完全没有额度数据：只保留「查询中」过渡行；否则整条不占位。
-            if !quota_state.refreshing.is_empty() {
+            if crate::provider_quota::ProviderStatus::is_refreshing(cx) {
                 Some(
                     div()
                         .id("sidebar-quota")
@@ -1787,46 +1793,47 @@ impl Workspace {
                     .py(px(4.))
                     .border_t_1()
                     .border_color(rgb(ui_theme::border_dim()))
-                    .children(quota_rows.into_iter().map(|(provider, text, color, hint)| {
-                        // 只对用户手动点击刷新的那家转绿；启动首查和定时刷新保持
-                        // 静默，继续显示已有额度自己的风险颜色。
-                        // 点击只刷新当前这一家（点谁查谁）。
-                        let is_manual_refreshing =
-                            quota_state.manual_refreshing.contains(&provider);
-                        let tip = if is_manual_refreshing {
-                            format!("{hint} 正在刷新…")
-                        } else {
-                            format!("{hint} 点击刷新。")
-                        };
-                        let on_click_this = quota_this.clone();
-                        div()
-                            .id(provider.id())
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_1()
-                            .rounded(px(4.))
-                            .text_xs()
-                            .font_family(crate::terminal_view::font_family())
-                            .text_color(rgb(if is_manual_refreshing {
-                                ui_theme::green()
+                    .children(quota_rows.into_iter().map(
+                        |(target, text, color, hint, is_manual_refreshing)| {
+                            // 只对用户手动点击刷新的那家转绿；启动首查和定时刷新保持
+                            // 静默，继续显示已有额度自己的风险颜色。
+                            // 点击只刷新当前这一家（点谁查谁）。
+                            let tip = if is_manual_refreshing {
+                                format!("{hint} 正在刷新…")
                             } else {
-                                color
-                            }))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                            .child(acp_provider_icon(provider).size(px(12.)))
-                            .child(text)
-                            .tooltip(move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                            })
-                            .on_click(move |_ev, _window, cx| {
-                                on_click_this.update(cx, |workspace, cx| {
-                                    workspace.request_provider_quota_refresh(provider);
-                                    cx.notify();
-                                });
-                            })
-                    })),
+                                format!("{hint} 点击刷新。")
+                            };
+                            let on_click_this = quota_this.clone();
+                            div()
+                                .id(SharedString::from(target.id()))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_1()
+                                .rounded(px(4.))
+                                .text_xs()
+                                .font_family(crate::terminal_view::font_family())
+                                .text_color(rgb(if is_manual_refreshing {
+                                    ui_theme::green()
+                                } else {
+                                    color
+                                }))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
+                                .child(acp_provider_icon(target.agent).size(px(12.)))
+                                .child(text)
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                })
+                                .on_click(move |_ev, _window, cx| {
+                                    on_click_this.update(cx, |workspace, cx| {
+                                        workspace.request_provider_quota_refresh(target);
+                                        cx.notify();
+                                    });
+                                })
+                        },
+                    )),
             )
         };
 

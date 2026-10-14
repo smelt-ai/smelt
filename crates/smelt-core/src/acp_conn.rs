@@ -159,6 +159,13 @@ pub enum ConversationCommand {
         config_id: String,
         value: ConfigValue,
     },
+    /// 重新拉取模型目录。
+    ///
+    /// 模型目录是会话启动时问 agent 要的一份快照（Pi 走 `get_available_models`）。
+    /// 用户在应用里登录了新 provider、改了模型配置之后，这份快照就过期了，但会话
+    /// 不会自己知道——所以由 UI 侧订阅账户状态变化后发这条命令。不支持的驱动静默
+    /// 忽略：它们的模型列表本来就不随本机配置变化。
+    RefreshModels,
     /// 改会话名。用户在侧栏重命名后同步给 agent，让 agent 侧的会话档也叫这个名字。
     /// 不是所有 agent 都支持，不支持的静默忽略——重命名对本地侧栏始终生效。
     SetSessionTitle(String),
@@ -3257,6 +3264,9 @@ async fn drive_session<S: SessionDrive>(
             }
             // 通用 ACP 没有改会话名的方法；本地标题已经改好，这里无声跳过。
             Next::Cmd(Some(ConversationCommand::SetSessionTitle(_))) => {}
+            // 通用 ACP 的模型列表由 agent 在 `session/update` 里自己推，没有「重拉」
+            // 这个动作；这条命令是给 Pi 那条路径的。
+            Next::Cmd(Some(ConversationCommand::RefreshModels)) => {}
             Next::Cmd(Some(ConversationCommand::SetConfigOption { config_id, value })) => {
                 if turn_active {
                     queue_config_option(

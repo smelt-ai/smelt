@@ -167,76 +167,56 @@ pub(super) struct ProviderQuotaRow {
 
 /// 把两种 provider 额度模型归一成侧栏的一行。注册表负责“查哪家”，这里仅负责
 /// “怎么显示”，Workspace 渲染无需按 Agent 身份重复展开状态。
+///
+/// 行内数字和模型菜单里的括号走同一个口径（`ProviderQuotaData::short_text`），
+/// 两处不会对同一个账户给出不同的百分比。
 pub(super) fn provider_quota_row(
-    provider: ConversationAgentKind,
+    target: crate::provider_quota::QuotaTarget,
     status: &crate::provider_quota::QuotaStatus,
 ) -> Option<ProviderQuotaRow> {
-    let label = provider.short_label();
-    match status.quota.as_ref()? {
-        crate::provider_quota::ProviderQuotaData::Windows(quota) => {
-            let worst_used = quota
-                .windows
-                .iter()
-                .map(|window| window.used_percent)
-                .fold(0.0_f64, f64::max);
-            let hint = quota
-                .windows
-                .iter()
-                .map(|window| {
-                    format!(
-                        "{label} {} 窗口已用 {}%，{}。",
-                        window.label,
-                        window.used_percent.round() as u32,
-                        quota_reset_text(window)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            Some(ProviderQuotaRow {
-                text: format!("{}%", worst_used.round() as u32),
-                color: quota_color(worst_used),
-                hint,
-            })
-        }
-        crate::provider_quota::ProviderQuotaData::Copilot(quota) => {
-            let (text, hint, used_percent) = if let Some(limit) = quota.limit {
-                let used = quota.used.unwrap_or((limit - quota.remaining).max(0.0));
-                let used_percent = (used / limit.max(1.0) * 100.0).clamp(0.0, 100.0);
-                let used_pct = used_percent.round() as u32;
-                (
-                    format!("{used_pct}%"),
-                    format!(
-                        "{label} 本周期已用 {} / {} {}（{used_pct}%）。",
-                        smelt_core::copilot_quota::format_amount(used),
-                        smelt_core::copilot_quota::format_amount(limit),
-                        quota.unit.label()
-                    ),
-                    used_percent,
+    let label = target.label();
+    let quota = status.quota.as_ref()?;
+    let text = quota.short_text();
+    let color = quota_color(quota.used_percent());
+    let hint = match quota {
+        crate::provider_quota::ProviderQuotaData::Windows(quota) => quota
+            .windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "{label} {} 窗口已用 {}%，{}。",
+                    window.label,
+                    window.used_percent.round() as u32,
+                    quota_reset_text(window)
                 )
-            } else {
-                (
-                    smelt_core::copilot_quota::format_amount(quota.remaining),
-                    format!(
-                        "{label} 本周期剩余 {} {}。",
-                        smelt_core::copilot_quota::format_amount(quota.remaining),
-                        quota.unit.label()
-                    ),
-                    0.0,
-                )
-            };
-            Some(ProviderQuotaRow {
-                text,
-                color: quota_color(used_percent),
-                hint,
             })
-        }
-    }
+            .collect::<Vec<_>>()
+            .join(" "),
+        crate::provider_quota::ProviderQuotaData::Copilot(copilot) => match copilot.limit {
+            Some(limit) => {
+                let used = copilot.used.unwrap_or((limit - copilot.remaining).max(0.0));
+                format!(
+                    "{label} 本周期已用 {} / {} {}（{}%）。",
+                    smelt_core::copilot_quota::format_amount(used),
+                    smelt_core::copilot_quota::format_amount(limit),
+                    copilot.unit.label(),
+                    quota.used_percent().round() as u32
+                )
+            }
+            None => format!(
+                "{label} 本周期剩余 {} {}。",
+                smelt_core::copilot_quota::format_amount(copilot.remaining),
+                copilot.unit.label()
+            ),
+        },
+    };
+    Some(ProviderQuotaRow { text, color, hint })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{effective_pane_updated_at, provider_quota_row, session_updated_at_text};
-    use crate::provider_quota::{ProviderQuotaData, QuotaStatus};
+    use crate::provider_quota::{ProviderQuotaData, QuotaStatus, QuotaTarget};
     use crate::settings::ConversationAgentKind;
     use crate::ui_theme;
     use chrono::{Local, TimeZone};
@@ -266,7 +246,8 @@ mod tests {
             error: None,
         };
 
-        let row = provider_quota_row(ConversationAgentKind::Claude, &status).unwrap();
+        let row =
+            provider_quota_row(QuotaTarget::agent(ConversationAgentKind::Claude), &status).unwrap();
 
         assert_eq!(row.text, "91%");
         assert_eq!(row.color, ui_theme::red());
@@ -286,7 +267,8 @@ mod tests {
             error: None,
         };
 
-        let row = provider_quota_row(ConversationAgentKind::Copilot, &status).unwrap();
+        let row = provider_quota_row(QuotaTarget::agent(ConversationAgentKind::Copilot), &status)
+            .unwrap();
 
         assert_eq!(row.text, "25%");
         assert_eq!(row.color, ui_theme::text_muted());

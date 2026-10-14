@@ -2712,10 +2712,9 @@ struct Workspace {
     /// 各类后台操作（建/删 worktree、生成 commit message 等）失败时的提示，render
     /// 顶部取走并弹成通知；后台任务里没有 Window，弹不了通知，所以先暂存到这。
     background_error: Option<String>,
-    /// 应用级 provider 额度快照。它不属于任何 ACP 会话，终端和 ACP 头栏都只读这份
-    /// 状态；刷新由 provider_quota 模块自己的后台循环负责。
-    provider_quota_state: provider_quota::ProviderQuotaState,
-    provider_quota_refresh_tx: Option<smol::channel::Sender<settings::ConversationAgentKind>>,
+    /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
+    /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
+    provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
 
     /// 守护进程是否落后于磁盘上的 smeltd 二进制（重装/重编译后常见，需手动重启守护
     /// 才生效新代码）；None 表示还没查过，驱动设置页「更新」分区的重启提示。
@@ -2756,6 +2755,8 @@ struct Workspace {
     _remote_sessions_sub: Option<Subscription>,
     /// 自动化目录读 AgentHostState；不观察的话，投影写进 global 后当前页不会重绘。
     _agent_host_sub: Option<Subscription>,
+    /// provider 账户状态（额度）变化时重绘侧栏额度行。
+    _provider_status_sub: Option<Subscription>,
     /// 正在后台 reattach 中、尚未插入侧栏的移动端终端会话 id。不去重会对同一 id
     /// 并发 open 两次，smeltd 第二次会顶掉前一个连接。
     remote_terminal_reattach_pending: HashSet<String>,
@@ -3148,7 +3149,6 @@ impl Workspace {
             git_op: None,
             background_error: workspace_load_error
                 .map(|error| format!("工作区存档无法打开，已停止写入以免覆盖原会话。{error}")),
-            provider_quota_state: provider_quota::ProviderQuotaState::default(),
             provider_quota_refresh_tx: None,
 
             daemon_outdated: None,
@@ -3167,6 +3167,7 @@ impl Workspace {
             cancelled_restore_paths: Vec::new(),
             _remote_sessions_sub: None,
             _agent_host_sub: None,
+            _provider_status_sub: None,
             remote_terminal_reattach_pending: HashSet::new(),
             remote_projected_terminal_ids: HashSet::new(),
             session_list_revision: 0,
@@ -3222,6 +3223,12 @@ impl Workspace {
         );
         ws._agent_host_sub =
             Some(cx.observe_global_in::<settings::AgentHostState>(window, |_, _, cx| cx.notify()));
+        ws._provider_status_sub = Some(
+            cx.observe_global_in::<smelt_ui::provider_status_global::ProviderStatus>(
+                window,
+                |_, _, cx| cx.notify(),
+            ),
+        );
         ws
     }
 
@@ -4749,6 +4756,9 @@ fn main() {
         cx.set_global(daemon_states);
         cx.set_global(RemoteSessionCatalogGlobal::default());
         cx.set_global(HistoryTitles::default());
+        // provider 账户状态（额度 + Pi 模型目录版本）：刷新循环写，侧栏和对话
+        // 模型菜单读。必须在建 Workspace 之前装好，否则启动首查无处可写。
+        cx.set_global(smelt_ui::provider_status_global::ProviderStatus::default());
         let attention = AttentionGlobal::default();
         cx.set_global(attention);
         let current_ws_for_attention = current_ws.clone();

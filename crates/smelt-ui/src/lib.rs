@@ -10,4 +10,5 @@ pub mod history_titles_global;
 pub mod image;
 pub mod markdown_mermaid;
 pub mod motion;
+pub mod provider_status_global;
 pub mod ui_theme;

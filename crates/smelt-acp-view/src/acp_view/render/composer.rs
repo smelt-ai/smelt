@@ -187,6 +187,8 @@ impl AcpView {
             .is_empty();
             let model_control = if has_menu {
                 let this = cx.entity();
+                // Provider 菜单项要按 agent 决定是否补额度括号，闭包里拿不到 self。
+                let agent = self.agent;
                 let current_provider_id = current_provider.as_ref().map(|p| p.id.clone());
                 let current_model_name = model_state
                     .as_ref()
@@ -230,7 +232,7 @@ impl AcpView {
                                     for provider in &provider_groups {
                                         let is_current = current_provider_id.as_deref()
                                             == Some(provider.id.as_str());
-                                        let name = provider.name.clone();
+                                        let name = provider_menu_label(agent, provider, cx);
                                         // 只有一个 provider 时没得切，如实列出当前项即可。
                                         let switch_to = if provider_groups.len() > 1 {
                                             provider_switch_value(provider, &current_model_name)

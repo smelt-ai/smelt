@@ -78,7 +78,15 @@ const COPILOT_QUOTA_ENDPOINT: &str = "https://api.github.com/copilot_internal/us
 /// 只使用 Copilot CLI/IDE 的 `apps.json` 凭据，不读取通用 GitHub 环境变量，
 /// 避免运行 Smelt 的宿主环境把无 Copilot 权限的 token 混进来。
 pub async fn fetch_copilot_quota() -> anyhow::Result<Option<CopilotQuota>> {
-    let token = local_copilot_token()?;
+    fetch_copilot_quota_with_token(&local_copilot_token()?).await
+}
+
+/// 用调用方给定的 GitHub OAuth 令牌查额度，供 Pi 这类把凭据存在别处的宿主复用。
+///
+/// 令牌必须是 GitHub 的 OAuth 令牌（`gho_` / `ghu_`），**不是**
+/// `copilot_internal/v2/token` 换来的短期 Copilot 令牌（`tid=…`）。后者是模型
+/// 推理用的，打这个额度接口固定 401。
+pub async fn fetch_copilot_quota_with_token(token: &str) -> anyhow::Result<Option<CopilotQuota>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;

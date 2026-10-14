@@ -36,7 +36,7 @@ const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
 const SMELT_CODEMODE_COMMAND: &str = "smelt-codemode";
 const SMELT_CODEMODE_WIDGET: &str = "smelt-codemode";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct PiModel {
     provider: String,
     id: String,
@@ -80,6 +80,9 @@ struct PiState {
     pending_refusal_error: Option<String>,
     /// 用户停止后补问的 `get_state`。界面先停，这条回来才知道能不能再发。
     cancel_state_request_id: Option<String>,
+    /// 用户在应用里登录/改配置后补拉的 `get_available_models`。会话启动时那一次走
+    /// `rpc_call` 同步等，不走这里。
+    models_request_id: Option<String>,
     /// 压缩已经结束。拒绝用的快照可能仍写着 `isCompacting`，不能再把它当成还在忙。
     compaction_idle_pending: bool,
     /// 已发出、等 Pi 回执的 steer 请求。只用来把 `in_flight_rpc` 记账还回去；
@@ -697,33 +700,7 @@ where
         serde_json::json!({"type": "get_available_models"}),
     )
     .await?;
-    state.models = response_data(&response)?["models"]
-        .as_array()
-        .map(|models| models.iter().filter_map(parse_model).collect())
-        .unwrap_or_default();
-
-    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
-        for cp in settings.custom_providers {
-            for m in cp.models {
-                if !state
-                    .models
-                    .iter()
-                    .any(|existing| existing.provider == cp.id && existing.id == m.id)
-                {
-                    state.models.push(PiModel {
-                        provider: cp.id.clone(),
-                        id: m.id.clone(),
-                        name: if m.name.is_empty() {
-                            m.id.clone()
-                        } else {
-                            m.name
-                        },
-                        context_window: m.context_window,
-                    });
-                }
-            }
-        }
-    }
+    state.models = parse_available_models(response_data(&response)?);
 
     let force_agent_model = agent_model_from_launch(launch);
     if force_agent_model.is_some()
@@ -1025,6 +1002,41 @@ fn apply_state_response(state: &mut PiState, data: &serde_json::Value) -> Result
         state.thinking_level = level.to_string();
     }
     Ok(())
+}
+
+/// 把 `get_available_models` 的响应拼成完整模型目录。
+///
+/// Pi 只报它自己知道的 provider；`models.json` 里的自定义 provider 是我们这边的
+/// 配置，Pi 不认，所以要在这里并进去。会话初始化和运行中刷新目录走同一条路径，
+/// 否则刷新回来的列表会悄悄少掉自定义 provider。
+fn parse_available_models(data: &serde_json::Value) -> Vec<PiModel> {
+    let mut models: Vec<PiModel> = data["models"]
+        .as_array()
+        .map(|models| models.iter().filter_map(parse_model).collect())
+        .unwrap_or_default();
+
+    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
+        for cp in settings.custom_providers {
+            for m in cp.models {
+                if !models
+                    .iter()
+                    .any(|existing| existing.provider == cp.id && existing.id == m.id)
+                {
+                    models.push(PiModel {
+                        provider: cp.id.clone(),
+                        id: m.id.clone(),
+                        name: if m.name.is_empty() {
+                            m.id.clone()
+                        } else {
+                            m.name
+                        },
+                        context_window: m.context_window,
+                    });
+                }
+            }
+        }
+    }
+    models
 }
 
 fn parse_model(value: &serde_json::Value) -> Option<PiModel> {
@@ -1607,6 +1619,21 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         ConversationCommand::SetConfigOption { config_id, value } => {
             handle_config_command(config_id, value, writer, event_tx, state, in_flight_rpc).await?;
         }
+        ConversationCommand::RefreshModels => {
+            // 发出去就不管了：响应回来时按 request id 认领（见 `models_request_id`）。
+            // 这里不能同步等——命令循环在这条路上没有 reader，等下去会把整条会话卡死。
+            let id = state.request_id("refresh-models");
+            state.models_request_id = Some(id.clone());
+            if write_rpc(
+                writer,
+                &serde_json::json!({"id": id, "type": "get_available_models"}),
+            )
+            .await
+            .is_err()
+            {
+                state.models_request_id = None;
+            }
+        }
         ConversationCommand::SetSessionTitle(title) => {
             let title = title.trim().to_string();
             // Pi 的 set_session_name 拒绝空名字；清空标题只在本地生效。
@@ -1873,6 +1900,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                 } else {
                     resolve_prompt_refusal(state, event_tx, error, None);
                 }
+            }
+        }
+        return Ok(());
+    }
+    if state.models_request_id.as_deref() == Some(&id) {
+        state.models_request_id = None;
+        // 拉失败就维持旧目录：模型列表突然变空比列表过期严重得多。
+        if let Ok(()) = ensure_response_success(&response) {
+            let data = response.get("data").cloned().unwrap_or_default();
+            let models = parse_available_models(&data);
+            if !models.is_empty() && models != state.models {
+                state.models = models;
+                publish_configuration(state, event_tx);
             }
         }
         return Ok(());

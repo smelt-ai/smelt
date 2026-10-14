@@ -46,6 +46,7 @@ use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
     ambient_animation, ambient_application_active, ambient_motion_enabled, ambient_spinner,
 };
+use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
 
 /// 消息流数据模型（AcpEntry/ToolOutputPart/ToolKind/ToolCallStatus）与 diff/
@@ -680,6 +681,26 @@ fn provider_switch_value<'a>(
         .find(|(_, name)| name == current_model_name)
         .or_else(|| provider.options.first())
         .map(|(value, _)| value.as_str())
+}
+
+/// Provider 菜单项的显示名。查得到账户额度就在名字后面补一个括号，如
+/// `github-copilot (25%)`；查不到就是原名，不画空括号。
+///
+/// 只对 Pi 生效：额度查的是 Pi 自己 `auth.json` 里的凭据，别家 agent 的同名
+/// provider（比如 Claude 的 `anthropic`）用的是另一套账户，套上这个数字就是
+/// 张冠李戴。
+fn provider_menu_label(
+    agent: ConversationAgentKind,
+    provider: &ModelProviderGroup,
+    cx: &App,
+) -> String {
+    if agent != ConversationAgentKind::Pi {
+        return provider.name.clone();
+    }
+    match ProviderStatus::pi_quota_badge(&provider.id, cx) {
+        Some(badge) => format!("{} ({badge})", provider.name),
+        None => provider.name.clone(),
+    }
 }
 
 /// 往空列表补第一页历史。
@@ -1460,6 +1481,11 @@ pub struct AcpView {
     pending_agent_preset: Option<String>,
     focus_handle: FocusHandle,
     _input_sub: Option<gpui::Subscription>,
+    /// 订阅 provider 账户状态（额度 + Pi 模型目录版本）。
+    _provider_status_sub: Option<gpui::Subscription>,
+    /// 上次已经跟进过的 Pi 模型目录版本。订阅回调会因为额度刷新等原因被
+    /// 叫很多次，记下版本号才能只在真的改了凭据/配置时发一次重拉。
+    pi_catalog_revision: u64,
 }
 
 pub(crate) fn resolve_restart_launch(
@@ -1799,10 +1825,35 @@ impl AcpView {
             pending_agent_preset: None,
             focus_handle: cx.focus_handle(),
             _input_sub: None,
+            _provider_status_sub: None,
+            pi_catalog_revision: 0,
         };
         // 技能发现读磁盘，只在视图建好时做一次。绘制路径只允许读缓存。
         this.ensure_loaded_skills();
+        this.pi_catalog_revision = ProviderStatus::pi_catalog_revision(cx);
+        // provider 账户状态变化：额度只需重绘（菜单每次打开重建，读的就是新值），
+        // 但模型目录是会话启动时问 agent 要的快照，必须显式重拉。
+        this._provider_status_sub = Some(cx.observe_global::<ProviderStatus>(|this, cx| {
+            let revision = ProviderStatus::pi_catalog_revision(cx);
+            if this.pi_catalog_revision != revision {
+                this.pi_catalog_revision = revision;
+                this.refresh_model_catalog();
+            }
+            cx.notify();
+        }));
         this
+    }
+
+    /// 本机凭据/模型配置变了，让 agent 重拉一次模型目录。
+    ///
+    /// 模型列表只有 agent 自己知道（Pi 走 `get_available_models`），而那是会话启动时
+    /// 拉的一次性快照。没有这条，新登录的 provider 要等用户重开会话才出现。
+    /// 不支持的驱动会静默忽略这个动作。
+    fn refresh_model_catalog(&mut self) {
+        let Some(handle) = &self.handle else {
+            return;
+        };
+        let _ = handle.action_tx.try_send(AcpUserAction::RefreshModels);
     }
 
     /// 「重新开始」：带着上次的 session id（如果有）尝试真续接——smeltd 那边

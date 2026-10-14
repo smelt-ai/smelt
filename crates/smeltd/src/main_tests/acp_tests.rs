@@ -2173,7 +2173,45 @@ fn one_shot_action_rejects_invalid_prompt_shape() {
     BufReader::new(client).read_line(&mut response).unwrap();
     let response: serde_json::Value = serde_json::from_str(&response).unwrap();
     assert_eq!(response["ok"], false);
-    assert_eq!(response["error"], "invalid ACP action");
+    let error = response["error"].as_str().unwrap();
+    // 负载形状不对是真的坏消息，不能甲锅给版本差异——`Prompt` 本版是认识的。
+    assert!(error.starts_with("invalid ACP action"), "实际 {error}");
+    assert!(
+        error.contains("Prompt"),
+        "错误要指出是哪个动作，实际 {error}"
+    );
+    assert!(
+        !error.contains("older than the client"),
+        "字段写错不是版本落后，实际 {error}"
+    );
+}
+
+/// 新客户端配旧守护进程：不认识的动作只让这一次失败，并且要能看出是版本差异。
+#[test]
+fn one_shot_action_from_a_newer_client_reports_a_version_gap() {
+    let acp_sessions = new_test_acp_sessions();
+    acp_sessions.reserve_with("acp-action", || {
+        make_acp_session_value("acp-action", AcpSessionState::default())
+    });
+    let (server, client) = UnixStream::pair().unwrap();
+
+    handle_acp_action(
+        server,
+        &serde_json::json!({
+            "id": "acp-action",
+            "action": "SomeFutureAction",
+        }),
+        &acp_sessions,
+        &new_event_hub(),
+    );
+
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["ok"], false);
+    let error = response["error"].as_str().unwrap();
+    assert!(error.contains("SomeFutureAction"), "实际 {error}");
+    assert!(error.contains("older than the client"), "实际 {error}");
 }
 
 #[test]

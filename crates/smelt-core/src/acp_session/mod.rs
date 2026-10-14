@@ -2487,6 +2487,9 @@ pub enum AcpUserAction {
     SetSessionTitle {
         title: String,
     },
+    /// 本机 provider 凭据或模型配置变了，请 agent 重拉一次模型目录。
+    /// 旧客户端不会发；不支持的驱动静默忽略。
+    RefreshModels,
     /// 等当前回合完全结束后再送。不支持原生队列的驱动按普通 Prompt 排队。
     FollowUp {
         text: String,
@@ -2535,6 +2538,63 @@ pub enum AcpUserAction {
         before: usize,
         limit: usize,
     },
+}
+
+/// 一个本端解析不了的用户动作。
+///
+/// 区分两种情况是有意义的：对端比本端新（发来了这一版还不认识的动作）通常只需要
+/// 升级守护进程，而畸形 JSON 是真的坏消息。两者都只让这一次动作失败，不拆连接。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownUserAction {
+    /// 动作名。能认出名字说明消息形状是对的，只是本端不认识这个动作。
+    pub name: Option<String>,
+    /// 本端比对端旧（收到了未知的动作名），而不是消息本身坏掉。
+    pub newer_peer: bool,
+    pub detail: String,
+}
+
+impl UnknownUserAction {
+    /// 回给对端、也写进日志的一句话。
+    pub fn message(&self) -> String {
+        match (&self.name, self.newer_peer) {
+            (Some(name), true) => {
+                format!("unsupported ACP action `{name}`: this build is older than the client")
+            }
+            (Some(name), false) => format!("invalid ACP action `{name}`: {}", self.detail),
+            (None, _) => format!("invalid ACP action: {}", self.detail),
+        }
+    }
+}
+
+/// 解析一个用户动作，把「本端不认识」和「根本不是个动作」分开。
+///
+/// `AcpUserAction` 是 externally tagged enum，serde 的 `#[serde(other)]` 只支持
+/// internally / adjacently tagged 形状，对它用不了；而换标记方式会改变 wire 格式，
+/// 把所有旧端一起打死。所以兜底只能放在解析这一处。
+pub fn parse_user_action(
+    value: serde_json::Value,
+) -> Result<AcpUserAction, Box<UnknownUserAction>> {
+    let error = match serde_json::from_value::<AcpUserAction>(value.clone()) {
+        Ok(action) => return Ok(action),
+        Err(error) => error,
+    };
+    let detail = error.to_string();
+    Err(Box::new(UnknownUserAction {
+        name: user_action_name(&value),
+        // serde 对未知变体固定报 `unknown variant \`X\`, expected one of ...`。
+        // 认错了只影响这句提示文案，不影响「这次动作失败」这个行为本身。
+        newer_peer: detail.starts_with("unknown variant"),
+        detail,
+    }))
+}
+
+/// 从 wire 形状里取动作名：unit variant 是裸字符串，带数据的是单键对象。
+fn user_action_name(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(name) => Some(name.clone()),
+        serde_json::Value::Object(map) if map.len() == 1 => map.keys().next().cloned(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -2992,6 +2992,16 @@ fn apply_acp_user_action_inner(
                 .try_send(ConversationCommand::SetSessionTitle(title))
                 .map_err(|_| "ACP command channel is busy or closed")
         }
+        AcpUserAction::RefreshModels => {
+            let handle = sess.handle.lock().unwrap();
+            let Some(h) = handle.as_ref() else {
+                return Err("ACP session is not running");
+            };
+            // 不计 in_flight_rpc：这是背景刷新，不应让输入栏显示成「正在处理」。
+            h.cmd_tx
+                .try_send(ConversationCommand::RefreshModels)
+                .map_err(|_| "ACP command channel is busy or closed")
+        }
         AcpUserAction::PermissionSelect {
             tool_call_id,
             option_id,
@@ -3371,11 +3381,20 @@ pub(crate) fn handle_acp_action(
             return;
         }
     };
-    let action: smelt_core::acp_session::AcpUserAction = match serde_json::from_value(action_value)
-    {
-        Ok(a) => a,
-        Err(_) => {
-            let _ = writeln!(conn, r#"{{"ok":false,"error":"invalid ACP action"}}"#);
+    let action = match smelt_core::acp_session::parse_user_action(action_value) {
+        Ok(action) => action,
+        Err(unknown) => {
+            // 只让这一次动作失败，连接照旧。对端比本端新时把话说清楚，否则
+            // 只能看到一句【无效动作】，分不出是守护进程该升级还是消息真坏了。
+            let message = unknown.message();
+            if unknown.newer_peer {
+                eprintln!("[acp] 会话 {id} 收到本版不认识的动作：{message}");
+            }
+            let _ = writeln!(
+                conn,
+                "{}",
+                serde_json::json!({ "ok": false, "error": message })
+            );
             return;
         }
     };

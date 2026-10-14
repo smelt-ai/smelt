@@ -23,14 +23,14 @@ use super::{
     next_snapshot_prompt_gate, overlay_model_state, overlay_pending_initial_config,
     overlay_session_configs, pending_config_choice_names, plan_current_step, preformatted_html,
     process_group_header_label, process_group_label, progress_has_details, progress_summary,
-    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
-    resolve_restart_launch, restorable_gui_prompt, running_background_tasks, search_summary_text,
-    selected_provider_group, session_trajectory_events, should_apply_snapshot_revision,
-    should_cancel_for_immediate_prompt, should_clear_history_session_id_after_snapshot,
-    should_seed_restored_height_hints, task_body_from_selection, tool_card_default_expanded,
-    tool_image_cache_matches_output, tool_output_has_content, tool_result_summary,
-    tool_uses_compact_process_row, trajectory_counts, usage_percent, usage_ring_color,
-    usage_warn_color, view_history_identity,
+    provider_menu_label, provider_switch_value, reconcile_pending_config_values,
+    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt,
+    running_background_tasks, search_summary_text, selected_provider_group,
+    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
+    task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
+    tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
+    usage_percent, usage_ring_color, usage_warn_color, view_history_identity,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -43,6 +43,7 @@ use smelt_core::acp_session::{
 };
 use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::daemon_state::DaemonPhase;
+use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
 
 #[test]
@@ -579,6 +580,94 @@ fn provider_switch_keeps_the_model_name_when_available() {
         provider_switch_value(&provider, "Missing"),
         Some("backup/flash")
     );
+}
+
+fn provider_group(id: &str) -> ModelProviderGroup {
+    ModelProviderGroup {
+        id: id.to_string(),
+        name: id.to_string(),
+        options: vec![(format!("{id}/model"), "Model".to_string())],
+    }
+}
+
+fn published_quota(used_percent: f64) -> smelt_core::provider_quota::ProviderQuotaData {
+    smelt_core::provider_quota::ProviderQuotaData::Windows(
+        smelt_core::provider_quota::ProviderQuota {
+            windows: vec![smelt_core::provider_quota::ProviderQuotaWindow {
+                label: "5h".to_string(),
+                used_percent,
+                resets_at_ms: None,
+                reset_after_seconds: None,
+            }],
+        },
+    )
+}
+
+/// 把一份额度放进全局单例，模拟刷新循环刚查完一轮。
+fn publish_pi_quota(provider_id: &'static str, used_percent: f64, cx: &mut gpui::App) {
+    cx.set_global(ProviderStatus::default());
+    ProviderStatus::apply_quota(
+        vec![(
+            QuotaTarget::pi(provider_id),
+            QuotaStatus {
+                quota: Some(published_quota(used_percent)),
+                checked_at_ms: 1,
+                error: None,
+            },
+        )],
+        cx,
+    );
+}
+
+#[gpui::test]
+fn pi_provider_menu_shows_the_quota_in_parentheses(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        publish_pi_quota("anthropic", 25.0, cx);
+
+        assert_eq!(
+            provider_menu_label(ConversationAgentKind::Pi, &provider_group("anthropic"), cx),
+            "anthropic (25%)"
+        );
+    });
+}
+
+/// 查不到额度就是原名，不能留一个空括号。API key 型的 provider
+/// （modelsight / volces 这类）永远走这条路。
+#[gpui::test]
+fn providers_without_a_known_quota_keep_their_plain_name(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        publish_pi_quota("anthropic", 25.0, cx);
+
+        assert_eq!(
+            provider_menu_label(ConversationAgentKind::Pi, &provider_group("modelsight"), cx),
+            "modelsight"
+        );
+    });
+}
+
+/// 额度查的是 Pi 自己 `auth.json` 里的账户；别家 agent 里的同名 provider 是另一
+/// 套凭据，不能把这个数字套上去。
+#[gpui::test]
+fn non_pi_agents_never_show_pi_quota(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        publish_pi_quota("xai", 80.0, cx);
+
+        assert_eq!(
+            provider_menu_label(ConversationAgentKind::Claude, &provider_group("xai"), cx),
+            "xai"
+        );
+    });
+}
+
+/// 没装全局单例时不能 panic，只是不画括号。
+#[gpui::test]
+fn missing_global_degrades_to_the_plain_name(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        assert_eq!(
+            provider_menu_label(ConversationAgentKind::Pi, &provider_group("anthropic"), cx),
+            "anthropic"
+        );
+    });
 }
 use smelt_ui::agent_host_state::AgentHostState;
 use std::collections::VecDeque;

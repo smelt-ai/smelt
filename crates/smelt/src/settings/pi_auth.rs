@@ -213,7 +213,7 @@ impl Workspace {
                 view.device_code = None;
                 view.outcome = Some(Ok(()));
                 let provider_id = view.provider_id.clone();
-                self.reload_pi_model_settings();
+                self.reload_pi_model_settings(cx);
                 self.refresh_pi_auth_providers(cx);
                 self.load_pi_models_for(provider_id, cx);
             }
@@ -351,7 +351,7 @@ impl Workspace {
         };
         match smelt_core::pi_model_settings::save_pi_default_model(&config, None) {
             Ok(()) => {
-                self.reload_pi_model_settings();
+                self.reload_pi_model_settings(cx);
                 self.pi_auth_model_picker = None;
                 crate::status_item::notify_success(format!(
                     "已设为默认模型：{} / {}",
@@ -380,7 +380,7 @@ impl Workspace {
                 if let Err(error) = outcome {
                     this.pi_auth_error = Some(error);
                 } else {
-                    this.reload_pi_model_settings();
+                    this.reload_pi_model_settings(cx);
                     // 凭据没了，它报过的模型也就不能选了。
                     if this
                         .pi_auth_model_picker

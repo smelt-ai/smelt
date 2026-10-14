@@ -52,6 +52,7 @@ pub mod pi_auto_models;
 pub mod pi_model_discovery;
 pub mod pi_model_settings;
 pub mod pi_plugin_catalog;
+pub mod pi_quota;
 pub mod pi_rpc;
 pub mod plugin_enablement;
 pub mod process_wait;

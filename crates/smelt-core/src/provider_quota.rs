@@ -11,6 +11,50 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+use crate::copilot_quota::CopilotQuota;
+
+/// 一家 provider 的额度数据。两种模型互不相容——窗口型按时间窗给百分比，
+/// Copilot 按本周期剩余额度计数——所以不强行合并成一个结构，由展示层归一。
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProviderQuotaData {
+    Windows(ProviderQuota),
+    Copilot(CopilotQuota),
+}
+
+impl ProviderQuotaData {
+    /// 侧栏额度行和模型菜单括号共用的短文本：通常是已用百分比。
+    ///
+    /// 两处必须是同一个口径，否则同一个账户在两个地方显示出不同的数字。
+    pub fn short_text(&self) -> String {
+        match self {
+            Self::Windows(_) => format!("{}%", self.used_percent().round() as u32),
+            Self::Copilot(quota) => match quota.limit {
+                Some(_) => format!("{}%", self.used_percent().round() as u32),
+                // 只知道剩余量、不知道配额时，百分比无从谈起，如实报剩余量。
+                None => crate::copilot_quota::format_amount(quota.remaining),
+            },
+        }
+    }
+
+    /// 已用比例，用于风险配色。无法换算成比例时按 0 处理（不渲染成高风险）。
+    pub fn used_percent(&self) -> f64 {
+        match self {
+            Self::Windows(quota) => quota
+                .windows
+                .iter()
+                .map(|window| window.used_percent)
+                .fold(0.0_f64, f64::max),
+            Self::Copilot(quota) => {
+                let Some(limit) = quota.limit else {
+                    return 0.0;
+                };
+                let used = quota.used.unwrap_or((limit - quota.remaining).max(0.0));
+                (used / limit.max(1.0) * 100.0).clamp(0.0, 100.0)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderQuotaWindow {
     /// 短显示名，例如 `5h`、`7d`。
@@ -90,6 +134,14 @@ const CURSOR_USAGE_ENDPOINT: &str =
 /// 使用 Codex CLI 的 ChatGPT OAuth 凭据查询账户限额。
 pub async fn fetch_codex_quota() -> anyhow::Result<Option<ProviderQuota>> {
     let (token, account_id) = local_codex_credentials()?;
+    fetch_codex_quota_with_token(&token, &account_id).await
+}
+
+/// 用调用方给定的 ChatGPT OAuth 令牌查限额，供 Pi 这类把凭据存在别处的宿主复用。
+pub async fn fetch_codex_quota_with_token(
+    token: &str,
+    account_id: &str,
+) -> anyhow::Result<Option<ProviderQuota>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
@@ -119,6 +171,11 @@ pub async fn fetch_claude_quota() -> anyhow::Result<Option<ProviderQuota>> {
     let Some(token) = local_claude_access_token() else {
         return Ok(None);
     };
+    fetch_claude_quota_with_token(&token).await
+}
+
+/// 用调用方给定的 Claude OAuth 令牌查限额，供 Pi 这类把凭据存在别处的宿主复用。
+pub async fn fetch_claude_quota_with_token(token: &str) -> anyhow::Result<Option<ProviderQuota>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
@@ -153,6 +210,11 @@ pub async fn fetch_grok_quota() -> anyhow::Result<Option<ProviderQuota>> {
     let Some(token) = local_grok_access_token() else {
         return Ok(None);
     };
+    fetch_grok_quota_with_token(&token).await
+}
+
+/// 用调用方给定的 grok.com 会话令牌查额度，供 Pi 这类把凭据存在别处的宿主复用。
+pub async fn fetch_grok_quota_with_token(token: &str) -> anyhow::Result<Option<ProviderQuota>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;

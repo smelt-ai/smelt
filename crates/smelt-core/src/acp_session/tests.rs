@@ -3379,3 +3379,68 @@ fn session_controls_rewind_flag_reaches_the_snapshot() {
     let wire = crate::acp_session::ConversationSnapshotDe::from(snap);
     assert!(wire.supports_rewind);
 }
+
+/// 认识的动作照常解析，wire 形状不能因为加了兜底而改变。
+#[test]
+fn known_actions_still_parse() {
+    let action = crate::acp_session::parse_user_action(serde_json::json!("RefreshModels"))
+        .expect("本版认识 RefreshModels");
+    assert!(matches!(
+        action,
+        crate::acp_session::AcpUserAction::RefreshModels
+    ));
+
+    let action = crate::acp_session::parse_user_action(serde_json::json!({
+        "SetSessionTitle": { "title": "x" }
+    }))
+    .expect("带数据的变体也要照常解析");
+    assert!(matches!(
+        action,
+        crate::acp_session::AcpUserAction::SetSessionTitle { .. }
+    ));
+}
+
+/// 旧 daemon 收到新客户端的动作：要能认出是版本落后，而不是报一句看不懂的
+/// 「无效动作」。这正是 `RefreshModels` 这类新增变体的处境。
+#[test]
+fn an_action_from_a_newer_peer_is_reported_as_a_version_gap() {
+    let unknown = crate::acp_session::parse_user_action(serde_json::json!("SomeFutureAction"))
+        .expect_err("本版不该认识未来的动作");
+
+    assert!(unknown.newer_peer);
+    assert_eq!(unknown.name.as_deref(), Some("SomeFutureAction"));
+    assert!(unknown.message().contains("older than the client"));
+}
+
+#[test]
+fn a_newer_peer_action_with_payload_is_also_detected() {
+    let unknown = crate::acp_session::parse_user_action(serde_json::json!({
+        "SomeFutureAction": { "whatever": 1 }
+    }))
+    .expect_err("本版不该认识未来的动作");
+
+    assert!(unknown.newer_peer);
+    assert_eq!(unknown.name.as_deref(), Some("SomeFutureAction"));
+}
+
+/// 认识的动作但负载不对，是真的坏消息，不能甩锅给版本差异。
+#[test]
+fn a_malformed_payload_is_not_blamed_on_the_peer_version() {
+    let unknown = crate::acp_session::parse_user_action(serde_json::json!({
+        "SetSessionTitle": { "title": 42 }
+    }))
+    .expect_err("标题不是字符串，解析必须失败");
+
+    assert!(!unknown.newer_peer);
+    assert_eq!(unknown.name.as_deref(), Some("SetSessionTitle"));
+    assert!(!unknown.message().contains("older than the client"));
+}
+
+#[test]
+fn garbage_has_no_action_name() {
+    let unknown = crate::acp_session::parse_user_action(serde_json::json!([1, 2, 3]))
+        .expect_err("数组不是动作");
+
+    assert_eq!(unknown.name, None);
+    assert!(!unknown.newer_peer);
+}

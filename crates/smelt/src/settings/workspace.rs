@@ -1683,9 +1683,13 @@ impl Workspace {
             .get_or_init(smelt_core::pi_model_settings::load_pi_model_settings)
     }
 
-    /// 丢掉缓存，下次读取重新读盘。
-    pub(super) fn reload_pi_model_settings(&mut self) {
+    /// 丢掉缓存，下次读取重新读盘，并告知活着的会话「Pi 的凭据/模型配置变了」。
+    ///
+    /// 登录、登出、改 `models.json` 都汇到这里，所以通知也放这里——散在各个调用点
+    /// 早晚漏一个，漏掉的那个就是「登录了但菜单里没出现」的 bug。
+    pub(super) fn reload_pi_model_settings(&mut self, cx: &mut App) {
         self.pi_model_settings.take();
+        smelt_ui::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
     }
 
     /// 用刚写盘的内容顶掉缓存，省掉一次立刻重读。
@@ -1822,7 +1826,7 @@ impl Workspace {
 
         self.pi_model_editor = None;
         self.pi_model_editor_error = None;
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         crate::status_item::notify_success("Pi 模型配置已保存");
         cx.notify();
     }
@@ -2317,7 +2321,7 @@ impl Workspace {
 
         self.pi_custom_provider_editor = None;
         self.pi_model_editor_error = None;
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         crate::status_item::notify_success(if auto {
             format!("自定义 Provider {id} 已保存，模型目录将在每次启动时刷新")
         } else {
@@ -2338,7 +2342,7 @@ impl Workspace {
             return;
         }
         smelt_core::pi_auto_models::update(|store| store.set_auto(&provider_id, false));
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         crate::status_item::notify_success(format!("已移除自定义 Provider {provider_id}"));
         cx.notify();
     }
@@ -2397,7 +2401,7 @@ impl Workspace {
     }
 
     pub(super) fn refresh_pi_settings(&mut self, cx: &mut Context<Self>) {
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         cx.notify();
     }
 
