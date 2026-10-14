@@ -2644,7 +2644,9 @@ fn acp_snapshot_without_debug_omits_the_debug_sidecars() {
     };
 
     let full = read(serde_json::json!({"id": "acp-no-debug"}));
-    assert!(full["snapshot"].get("runtime_debug").is_some());
+    // 父镜像里的 runtime debug 只是去掉请求体的账本，历史页带上它会把窗口里
+    // 完整的调试体盖掉；完整调试体只随宿主推送帧走。工具参数表照旧默认带。
+    assert!(full["snapshot"].get("runtime_debug").is_none());
     assert!(full["snapshot"].get("tool_debug").is_some());
 
     let lean = read(serde_json::json!({"id": "acp-no-debug", "include_debug": false}));

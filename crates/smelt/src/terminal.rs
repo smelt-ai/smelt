@@ -3964,6 +3964,19 @@ impl Terminal {
 mod damage_gate_tests {
     use super::*;
 
+    /// 这组测试连真实守护进程：测试进程在沙箱 home 里，只能用构建目录里的 smeltd
+    /// （`target/<profile>/smeltd`）。单独 `cargo test -p smelt` 不会构建它，缺了就说清楚
+    /// 怎么补，别让人去查 `~/.smelt/bin`。
+    fn spawn_test_terminal(dir: &std::path::Path, id: &str) -> Terminal {
+        if bundled_daemon_path().is_none() {
+            panic!(
+                "缺少构建目录里的 smeltd：这组测试要连真实守护进程，请先 `cargo build -p smeltd`\
+                 （`make test` 会一并构建）"
+            );
+        }
+        Terminal::spawn(24, 80, dir.to_str(), id, None).expect("spawn 失败")
+    }
+
     /// 一次性测试会话的自动清理：Drop 无论函数正常返回还是中途 panic（assert
     /// 失败）都会执行，不像原来手写在函数末尾的 `kill_remote(&id)`——那种写法
     /// 一旦前面某个 assert 炸了就会被 unwind 跳过，永远执行不到。
@@ -3992,7 +4005,7 @@ mod damage_gate_tests {
         let _ = std::fs::create_dir_all(&dir);
         let id = format!("dead-test-{}", uuid_like());
         // 不持 guard：会话由下面的 kill_remote 主动清理。
-        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let term = spawn_test_terminal(&dir, &id);
         assert!(!term.is_dead(), "刚连上不该是断的");
 
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
@@ -4053,7 +4066,7 @@ mod damage_gate_tests {
         let id = format!("damage-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let mut term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let mut term = spawn_test_terminal(&dir, &id);
 
         // 等 shell 起来后进入 cat：前台进程阻塞读，不再周期性画 prompt。
         thread::sleep(Duration::from_millis(500));
@@ -4123,7 +4136,7 @@ mod damage_gate_tests {
         let id = format!("kitty-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let term = spawn_test_terminal(&dir, &id);
         thread::sleep(Duration::from_millis(800)); // 等 shell 起来
 
         assert!(!term.kitty_keyboard_mode(), "shell 刚起来时不该开着");
@@ -4159,7 +4172,7 @@ mod damage_gate_tests {
         let id = format!("cursor-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let term = spawn_test_terminal(&dir, &id);
         thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀，避免并发 advance 干扰
 
         let frame = term.snapshot();
@@ -4216,7 +4229,7 @@ mod damage_gate_tests {
         let id = format!("selscroll-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let mut term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let mut term = spawn_test_terminal(&dir, &id);
         thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀
 
         // 注入 40 行，把内容顶进 scrollback（24 行屏高）。

@@ -102,6 +102,9 @@ fn visual_only_layer_repaints_on_hover_transitions(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn horizontal_hover_layer_keeps_the_underlying_drag_working(cx: &mut TestAppContext) {
+    // 上游 gpui-kit 的 h/v_resizable 给 handle 挂了主题化外观，渲染时读 Theme 全局；
+    // 与生产入口一致先 init 组件库。
+    cx.update(gpui_component::init);
     let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
     let (_, cx) = cx.add_window_view({
         let state = state.clone();
@@ -144,6 +147,7 @@ fn horizontal_hover_layer_keeps_the_underlying_drag_working(cx: &mut TestAppCont
 
 #[gpui::test]
 fn vertical_split_uses_the_same_facade_without_changing_layout(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
     let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
     let (_, cx) = cx.add_window_view({
         move |_, _| SplitHarness {

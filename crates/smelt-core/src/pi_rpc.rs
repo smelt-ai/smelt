@@ -7038,7 +7038,7 @@ mod tests {
                     images: Vec::new(),
                 },
                 None,
-                Some("结束后再"),
+                Some("不支持 /reload"),
             ),
             (
                 ConversationCommand::Steer {
