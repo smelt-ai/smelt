@@ -1060,13 +1060,19 @@ impl Workspace {
                         let index_pending = index_pending.clone();
                         range
                             .map(|ix| {
-                                render_narrow_git_row(
-                                    &rows[ix],
-                                    ix,
-                                    &ws_for_rows,
-                                    &collapsed_for_rows,
-                                    &index_pending,
-                                )
+                                // 虚拟列表用 layout_as_root 排每一行，只给可用宽度、不强制
+                                // 行宽：行根没有显式宽度就按内容收缩，提交框会被挤成一个字宽。
+                                // 在这里统一撑满列宽，各类行不用各自记得加 w_full。
+                                v_flex()
+                                    .w_full()
+                                    .child(render_narrow_git_row(
+                                        &rows[ix],
+                                        ix,
+                                        &ws_for_rows,
+                                        &collapsed_for_rows,
+                                        &index_pending,
+                                    ))
+                                    .into_any_element()
                             })
                             .collect()
                     })
