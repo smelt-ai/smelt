@@ -145,19 +145,24 @@ setup_rust() {
     [[ "$CHECK_ONLY" == 1 ]] && die "Rust 不满足要求（--check 模式不安装）"
 
     if [[ -x "$rustup_bin" ]]; then
-      info "升级 Rust 工具链"
-      "$rustup_bin" update stable || die "rustup update 失败"
-      "$rustup_bin" default stable >/dev/null
+      info "升级 Rust 到 $REQUIRED_RUST"
+      "$rustup_bin" toolchain install "$REQUIRED_RUST" --profile minimal || die "Rust 工具链安装失败"
+      "$rustup_bin" default "$REQUIRED_RUST" || die "切换默认工具链失败"
     else
       info "安装 rustup 到 $CARGO_HOME_DIR"
-      local update_root="${RUSTUP_UPDATE_ROOT:-https://static.rust-lang.org/rustup}"
-      curl -fsSL --retry 3 "$update_root/dist/$(uname -m)-apple-darwin/rustup-init" \
-        -o "$TOOLCHAIN_ROOT/rustup-init" \
-        || die "下载 rustup-init 失败。内网机器请设置 RUSTUP_UPDATE_ROOT 指向镜像。"
-      chmod +x "$TOOLCHAIN_ROOT/rustup-init"
-      "$TOOLCHAIN_ROOT/rustup-init" -y --no-modify-path --default-toolchain stable \
-        || die "安装 rustup 失败"
-      rm -f "$TOOLCHAIN_ROOT/rustup-init"
+      mkdir -p "$TOOLCHAIN_ROOT"
+      # 和 ci/mac/env-setup.sh 一样走架构无关的安装脚本。按 uname -m 自己拼
+      # dist/<arch>-apple-darwin/rustup-init 是错的：Apple Silicon 上 uname -m
+      # 返回 arm64，而 rustup 的分发路径用的是 Rust 三元组里的 aarch64，拼出来
+      # 的 URL 一定 404。
+      local init="$TOOLCHAIN_ROOT/rustup-init.sh"
+      curl -fsSL --retry 3 "${RUSTUP_UPDATE_ROOT:-https://sh.rustup.rs}" -o "$init" \
+        || die "下载 rustup 失败。内网机器请设置 RUSTUP_UPDATE_ROOT 指向镜像。"
+      # --no-modify-path 是关键：默认行为会往 ~/.profile、~/.bashrc 里塞 PATH，
+      # 那是对构建机的永久污染。PATH 由本脚本写进 ci/.env/android.sh。
+      sh "$init" -y --no-modify-path --default-toolchain "$REQUIRED_RUST" --profile minimal \
+        || die "rustup 安装失败"
+      rm -f "$init"
     fi
     ok "Rust $(tool_version "$rustc_bin" --version)"
   fi
