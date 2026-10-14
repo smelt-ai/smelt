@@ -12,7 +12,10 @@ export type MemoryType = (typeof MEMORY_TYPES)[number];
 /** 行为规则：每轮都该遵守，正文常驻进系统提示。 */
 export const CORE_MEMORY_TYPES: ReadonlySet<string> = new Set(["user", "feedback"]);
 
-/** 每层常驻规则正文的总预算（UTF-8 字节，约 1K token 的中文）。超了要合并，不截断。 */
+/**
+ * 每层（智能体自己、全局）常驻规则正文的预算（UTF-8 字节，约 1K token 的中文），写入和注入都
+ * 按层各算。超了要合并，不截断。两层合计最多约 6KB。
+ */
 export const CORE_MEMORY_MAX_BYTES = 3_000;
 /** 事实类索引：每层最多注入的条数与字节，超出按最近修改优先保留。 */
 export const FACT_INDEX_MAX_LINES = 60;
@@ -320,14 +323,16 @@ export function renderMemorySnapshot(roots: MemoryRoots, cwd: string, meta: Memo
 	const agent = confirmedLayer(roots.agent, meta.pending?.agent).filter((entry) => appliesTo(entry, cwd));
 	const user = confirmedLayer(roots.user, meta.pending?.user);
 	// scanMemoryLayer 已按修改时间新的在前；全局层排在智能体层之前。
-	const coreSelection = selectWithinBudget(
-		[
-			...user.filter((entry) => CORE_MEMORY_TYPES.has(entry.type)).map((entry) => ({ ...entry, global: true })),
-			...agent.filter((entry) => CORE_MEMORY_TYPES.has(entry.type)).map((entry) => ({ ...entry, global: false })),
-		],
-		(entry) => coreBytes(entry.body),
-		CORE_MEMORY_MAX_BYTES,
-	);
+	// 规则按层各算预算，和写入时的 checkCoreBudget 一致：两层都写满也全部放得下，不会在注入时
+	// 截掉智能体自己那层。只有手改超了才会截断（同层里新改的优先），并提示。
+	const coreLayer = (entries: MemoryEntry[], global: boolean) =>
+		selectWithinBudget(
+			entries.filter((entry) => CORE_MEMORY_TYPES.has(entry.type)).map((entry) => ({ ...entry, global })),
+			(entry) => coreBytes(entry.body),
+			CORE_MEMORY_MAX_BYTES,
+		);
+	const userCore = coreLayer(user, true);
+	const agentCore = coreLayer(agent, false);
 	const factSelection = selectWithinBudget(
 		agent
 			.filter((entry) => !CORE_MEMORY_TYPES.has(entry.type))
@@ -337,11 +342,8 @@ export function renderMemorySnapshot(roots: MemoryRoots, cwd: string, meta: Memo
 		FACT_INDEX_MAX_LINES,
 	);
 	const core = {
-		lines: [
-			...coreSelection.selected.filter((entry) => entry.global),
-			...coreSelection.selected.filter((entry) => !entry.global),
-		].map(coreLine),
-		truncated: coreSelection.truncated,
+		lines: [...userCore.selected, ...agentCore.selected].map(coreLine),
+		truncated: userCore.truncated || agentCore.truncated,
 	};
 	const facts = { lines: factSelection.selected.map(factLine), truncated: factSelection.truncated };
 

@@ -146,6 +146,21 @@ describe("renderMemorySnapshot", () => {
 		expect(elsewhere).toContain("需求看板在飞书");
 	});
 
+	test("each layer has its own rule budget, so two full layers are both injected in full", () => {
+		const { agent, user } = roots();
+		const nearlyFull = "规".repeat(Math.floor(CORE_MEMORY_MAX_BYTES / 3) - 10);
+		writeFileSync(join(user, "global-rule.md"), memoryFile("global-rule", "feedback", nearlyFull));
+		writeFileSync(join(agent, "agent-rule.md"), memoryFile("agent-rule", "feedback", nearlyFull));
+		expect(checkCoreBudget(user, "global-rule.md", memoryFile("global-rule", "feedback", nearlyFull))).toBeUndefined();
+		expect(checkCoreBudget(agent, "agent-rule.md", memoryFile("agent-rule", "feedback", nearlyFull))).toBeUndefined();
+
+		const snapshot = renderMemorySnapshot({ agent, user }, agent);
+
+		expect(snapshot.truncated).toBe(false);
+		expect(snapshot.text).toContain("- global-rule（全局）：");
+		expect(snapshot.text).toContain("- agent-rule：");
+	});
+
 	test("hand-edited overflow is truncated newest first and reported", () => {
 		const { agent, user } = roots();
 		const body = "规".repeat(Math.ceil(CORE_MEMORY_MAX_BYTES / 3 / 2) + 10);
