@@ -71,19 +71,13 @@ build: ## 编译 release 二进制（GUI + 守护 + helpers）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝构建"; exit 1; \
 	}
-	@sdk="$$(./scripts/macos-sdk-26.sh)"; \
-	export SDKROOT="$$sdk"; \
 	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-sync-plugins --bin smelt-installer
 
 run: ## 本地直接跑 GUI（开发用）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝构建"; exit 1; \
 	}
-	@sdk="$$(./scripts/macos-sdk-26.sh)"; \
-	export SDKROOT="$$sdk"; \
 	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
-	@sdk="$$(./scripts/macos-sdk-26.sh)"; \
-	export SDKROOT="$$sdk"; \
 	cargo run --bin $(BIN)
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
