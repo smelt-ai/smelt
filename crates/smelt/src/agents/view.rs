@@ -117,44 +117,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 侧栏「能力库」：以后放智能体的插件、技能、MCP 这类配置。
-    /// 三个字，和「智能体」「自动化」对齐。现在先打开已有的模型和插件窗口。不是路由。
-    pub(super) fn render_customize_row(&self, entity: Entity<Workspace>) -> AnyElement {
-        div()
-            .id("customize-route")
-            .h(px(32.))
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .rounded(crate::ui_theme::row_radius())
-            .cursor_pointer()
-            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-            .child(
-                Icon::new(IconName::LayoutDashboard)
-                    .size(px(16.))
-                    .text_color(rgb(crate::ui_theme::text_muted())),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
-                    .font_medium()
-                    .text_color(rgb(crate::ui_theme::text_mid()))
-                    .child("能力库"),
-            )
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |workspace, cx| {
-                    workspace.open_scoped_settings_section(
-                        settings::SettingsScope::AgentSetup,
-                        settings::SettingsSection::PiModel,
-                        cx,
-                    );
-                });
-            })
-            .into_any_element()
-    }
-
     /// 侧栏最顶「新对话」：跟某个智能体开一场，不是裸引擎。
     ///
     /// 有默认时单击直接开，右侧箭头只换默认。没有默认时弹出可对话的智能体。
@@ -1460,6 +1422,58 @@ impl Workspace {
             .bg(rgb(crate::ui_theme::bg_stage()))
             .child(header)
             .child(body)
+            .into_any_element()
+    }
+
+    /// 能力库：页头和智能体、自动化同一条，左边页名接三个页签。正文是独立的设置内容视图，
+    /// 自己节流刷新快照，终端输出这类高频通知不会让它每帧重读 Pi 配置。
+    pub(crate) fn render_capabilities_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        let current = self.nav.capabilities_tab();
+        let tabs = segmented_track(cx).children(CapabilitiesTab::ALL.into_iter().map(|tab| {
+            let selected = tab == current;
+            let entity = entity.clone();
+            compact_chip(tab.element_id())
+                .label(tab.label())
+                .selected(selected)
+                .toggled(selected)
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.select_capabilities_tab(tab, cx)
+                    });
+                })
+        }));
+        let header = product_page_chrome(self.chrome_left_guard(window))
+            .gap_3()
+            .child(
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .text_color(rgb(crate::ui_theme::text_bright()))
+                    .child("能力库"),
+            )
+            .child(tabs);
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(crate::ui_theme::bg_stage()))
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .children(self.capabilities_view.clone()),
+            )
             .into_any_element()
     }
 }

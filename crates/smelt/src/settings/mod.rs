@@ -34,8 +34,8 @@ mod workspace;
 mod workspace_view;
 
 pub(crate) use nav::{
-    SettingsCategoryId, SettingsNavCategory, SettingsScope, SettingsSection, filter_settings_nav,
-    nav_contains,
+    SettingsCategoryId, SettingsNavCategory, SettingsSection, filter_settings_nav, nav_contains,
+    settings_nav,
 };
 pub(super) use plugins::*;
 pub(super) use remote::*;
@@ -1572,16 +1572,27 @@ struct SettingsRenderSnapshot {
     daemon_info: Option<terminal::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
+    /// 能力库当前页签。和 `settings_section` 分开记：设置窗口和能力库可以同时开着，
+    /// 各看各的页。
+    capabilities_tab: crate::CapabilitiesTab,
     show_daemon_restart_confirm: bool,
     session_manager_open: bool,
 }
 
-/// 设置窗口的内容子视图。将它与外层的键盘/性能 HUD 分开，HUD 的逐帧采样不会重建
-/// 全部 Settings 元素，也不会重新布局二维码和设置侧栏。
+/// 设置内容画在哪。两处共用同一套快照和节流刷新，只是外壳不同。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsSurface {
+    /// 独立设置窗口：左侧两级导航，右侧当前页。
+    Window,
+    /// 主窗口「能力库」页的正文。页头和页签由 Workspace 画，这里只画当前页签的内容。
+    Capabilities,
+}
+
+/// 设置内容子视图。独立设置窗口里，它和外层的键盘/性能 HUD 分开，HUD 的逐帧采样不会
+/// 重建全部 Settings 元素；主窗口里，它把设置快照和终端等高频通知隔开。
 pub struct SettingsContentView {
     workspace: Entity<Workspace>,
-    /// 本窗口显示哪一档内容。同一个 Workspace 可以同时被多扇作用域不同的窗口观察。
-    scope: SettingsScope,
+    surface: SettingsSurface,
     snapshot: SettingsRenderSnapshot,
     _observe_workspace: Subscription,
     _observe_settings_globals: Vec<Subscription>,
@@ -1591,6 +1602,49 @@ pub struct SettingsContentView {
 }
 
 impl SettingsContentView {
+    /// `snapshot` 由调用方在创建前同步取好；构造期间不能再回头 update Workspace。
+    fn new(
+        workspace: Entity<Workspace>,
+        surface: SettingsSurface,
+        snapshot: SettingsRenderSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            _observe_workspace: cx.observe_in(
+                &workspace,
+                window,
+                |this: &mut SettingsContentView, _, window, cx| {
+                    this.request_refresh(window, cx);
+                },
+            ),
+            workspace,
+            surface,
+            snapshot,
+            _observe_settings_globals: vec![
+                Self::observe_settings_global::<Appearance>(window, cx),
+                Self::observe_settings_global::<LaunchConfig>(window, cx),
+                Self::observe_settings_global::<AgentHostState>(window, cx),
+                Self::observe_settings_global::<AcpRuntimeState>(window, cx),
+                Self::observe_settings_global::<UpdateSettings>(window, cx),
+                Self::observe_settings_global::<CleanupState>(window, cx),
+                Self::observe_settings_global::<CopyFlash>(window, cx),
+                Self::observe_settings_global::<RemoteConfig>(window, cx),
+                Self::observe_settings_global::<RemoteRuntimeState>(window, cx),
+                Self::observe_settings_global::<IrohRuntimeState>(window, cx),
+                Self::observe_settings_global::<IrohConnectionsState>(window, cx),
+                Self::observe_settings_global::<crate::worktree_inherit::WorktreeInheritSettings>(
+                    window, cx,
+                ),
+                Self::observe_settings_global::<PluginEnablementState>(window, cx),
+            ],
+            // 初始快照已经同步取好；避免刚打开就被第一条后台流式通知立即打穿缓存。
+            last_refresh: Some(Instant::now()),
+            refresh_pending: false,
+            refresh_generation: 0,
+        }
+    }
+
     fn observe_settings_global<G: Global + 'static>(
         window: &Window,
         cx: &mut Context<Self>,
@@ -1611,9 +1665,17 @@ impl SettingsContentView {
     }
 
     fn request_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 子菜单切换必须立刻生效，不能被设置页 250ms 刷新节流挡住。
-        let current_section = self.workspace.read(cx).settings_section.clone();
-        if current_section != self.snapshot.settings_section {
+        // 子菜单和页签切换必须立刻生效，不能被设置页 250ms 刷新节流挡住。
+        let (current_section, current_tab) = {
+            let workspace = self.workspace.read(cx);
+            (
+                workspace.settings_section.clone(),
+                workspace.nav.capabilities_tab(),
+            )
+        };
+        if current_section != self.snapshot.settings_section
+            || current_tab != self.snapshot.capabilities_tab
+        {
             self.refresh_snapshot(window, cx);
             return;
         }
@@ -1655,10 +1717,21 @@ impl SettingsContentView {
 
 impl Render for SettingsContentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 设置内容 +（可选）守护管理弹层：弹层必须画在本窗，不能只改 Workspace 上的
-        // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
         let snapshot = self.snapshot.clone();
         let workspace = self.workspace.clone();
+        if self.surface == SettingsSurface::Capabilities {
+            // 能力库只有模型、插件、记忆三页，没有维护页那些弹层；弹层若也画在这里，
+            // 设置窗口开着时会在主窗口再弹一份。
+            return div()
+                .size_full()
+                .child(Workspace::render_capabilities_content(
+                    workspace, &snapshot, cx,
+                ))
+                .into_any_element();
+        }
+
+        // 设置内容 +（可选）守护管理弹层：弹层必须画在本窗，不能只改 Workspace 上的
+        // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
         let show_daemon_restart_confirm = snapshot.show_daemon_restart_confirm;
         let session_manager_open = snapshot.session_manager_open;
 
@@ -1667,7 +1740,6 @@ impl Render for SettingsContentView {
             .size_full()
             .child(Workspace::render_settings_content(
                 workspace.clone(),
-                self.scope,
                 &snapshot,
                 cx,
             ))
@@ -1681,6 +1753,7 @@ impl Render for SettingsContentView {
                 session_manager_open
                     .then(|| workspace.update(cx, |ws, cx| ws.render_session_manager(cx))),
             )
+            .into_any_element()
     }
 }
 
@@ -1826,10 +1899,9 @@ impl Render for SettingsWindow {
     }
 }
 
-/// 各作用域设置窗口的单例句柄：已经开着就聚焦复用，避免重复开出好几扇一样的窗口。
-#[derive(Default)]
-pub struct SettingsWindowHandles(pub std::collections::HashMap<SettingsScope, WindowHandle<Root>>);
-impl Global for SettingsWindowHandles {}
+/// 设置窗口的单例句柄：已经开着就聚焦复用，避免重复开出好几扇一样的窗口。
+pub struct SettingsWindowHandle(pub WindowHandle<Root>);
+impl Global for SettingsWindowHandle {}
 
 // ===================== Workspace 方法 =====================
 

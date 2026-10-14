@@ -86,6 +86,7 @@ impl Workspace {
             daemon_info: self.daemon_info.clone(),
             settings_section: self.settings_section.clone(),
             settings_page_nonce: self.settings_page_nonce,
+            capabilities_tab: self.nav.capabilities_tab(),
             show_daemon_restart_confirm: self.show_daemon_restart_confirm,
             session_manager_open: self.session_manager_open,
         }
@@ -93,37 +94,52 @@ impl Workspace {
 
     pub(super) fn render_settings_content(
         entity: Entity<Workspace>,
-        scope: SettingsScope,
         snapshot: &SettingsRenderSnapshot,
         cx: &App,
     ) -> Div {
-        render::render_settings_content(entity, scope, snapshot, cx)
+        render::render_settings_content(entity, snapshot, cx)
     }
 
-    /// 跳到指定设置子页并打开对应作用域的窗口。已打开时靠 nonce 强制切到目标子页。
+    pub(super) fn render_capabilities_content(
+        entity: Entity<Workspace>,
+        snapshot: &SettingsRenderSnapshot,
+        cx: &App,
+    ) -> Div {
+        render::render_capabilities_content(entity, snapshot, cx)
+    }
+
+    /// 跳到指定设置子页并打开设置窗口。已打开时靠 nonce 强制切到目标子页。
     pub(crate) fn open_settings_section(
         &mut self,
         section: SettingsSection,
         cx: &mut Context<Self>,
     ) {
-        let scope = if SettingsScope::AgentSetup.contains(&section) {
-            SettingsScope::AgentSetup
-        } else {
-            SettingsScope::All
-        };
-        self.open_scoped_settings_section(scope, section, cx);
-    }
-
-    /// 指定作用域打开设置窗口并定位到子页。
-    pub(crate) fn open_scoped_settings_section(
-        &mut self,
-        scope: SettingsScope,
-        section: SettingsSection,
-        cx: &mut Context<Self>,
-    ) {
         self.settings_section = section;
         self.settings_page_nonce += 1;
-        self.open_settings_window_scoped(scope, cx);
+        self.open_settings_window(cx);
+    }
+
+    /// 能力库正文只在这条路由可见时存在。离开就丢掉：它观察 Workspace，每次通知都可能
+    /// 重读 Pi 的配置文件，看不见时没必要付这份代价。回来时重建，快照自然是最新的。
+    pub(crate) fn sync_capabilities_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab() != &crate::WorkspaceRoute::Capabilities {
+            self.capabilities_view = None;
+            return;
+        }
+        if self.capabilities_view.is_some() {
+            return;
+        }
+        let snapshot = self.settings_render_snapshot(cx);
+        let workspace = cx.entity();
+        self.capabilities_view = Some(cx.new(|cx| {
+            SettingsContentView::new(
+                workspace,
+                SettingsSurface::Capabilities,
+                snapshot,
+                window,
+                cx,
+            )
+        }));
     }
 
     /// 打开独立设置窗口：已经开着就聚焦提到前台，不重复开第二扇。窗口只持有设置
@@ -136,16 +152,12 @@ impl Workspace {
     /// 的重入保护直接 panic 崩溃（"cannot update ... while it is already being
     /// updated"）——这就是「点齿轮整个 app 崩溃」的真正原因。
     pub fn open_settings_window(&self, cx: &mut Context<Self>) {
-        self.open_settings_window_scoped(SettingsScope::All, cx);
-    }
-
-    pub fn open_settings_window_scoped(&self, scope: SettingsScope, cx: &mut Context<Self>) {
         super::reload_appearance_from_store(cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {
             if let Some(handle) = cx
-                .try_global::<SettingsWindowHandles>()
-                .and_then(|handles| handles.0.get(&scope).copied())
+                .try_global::<SettingsWindowHandle>()
+                .map(|handle| handle.0)
                 && handle
                     .update(cx, |_, window, _| window.activate_window())
                     .is_ok()
@@ -157,7 +169,7 @@ impl Workspace {
             let window_bg = cx.global::<Appearance>().window_bg();
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some(scope.window_title().into()),
+                    title: Some("设置".into()),
                     ..Default::default()
                 }),
                 window_bounds: Some(bounds),
@@ -189,59 +201,14 @@ impl Workspace {
                         }
                         workspace.settings_render_snapshot(cx)
                     });
-                    let content = cx.new(|cx| SettingsContentView {
-                        workspace: workspace.clone(),
-                        scope,
-                        snapshot,
-                        _observe_workspace: cx.observe_in(
-                            &workspace,
+                    let content = cx.new(|cx| {
+                        SettingsContentView::new(
+                            workspace.clone(),
+                            SettingsSurface::Window,
+                            snapshot,
                             window,
-                            |this: &mut SettingsContentView, _, window, cx| {
-                                this.request_refresh(window, cx);
-                            },
-                        ),
-                        _observe_settings_globals: vec![
-                            SettingsContentView::observe_settings_global::<Appearance>(window, cx),
-                            SettingsContentView::observe_settings_global::<LaunchConfig>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<AgentHostState>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<AcpRuntimeState>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<UpdateSettings>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<CleanupState>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<CopyFlash>(window, cx),
-                            SettingsContentView::observe_settings_global::<RemoteConfig>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<RemoteRuntimeState>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<IrohRuntimeState>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<IrohConnectionsState>(
-                                window, cx,
-                            ),
-                            SettingsContentView::observe_settings_global::<
-                                crate::worktree_inherit::WorktreeInheritSettings,
-                            >(window, cx),
-                            SettingsContentView::observe_settings_global::<PluginEnablementState>(
-                                window, cx,
-                            ),
-                        ],
-                        // 初始快照已经在上面同步完成；避免设置窗刚打开就被第一条后台
-                        // 流式通知立即打穿缓存。
-                        last_refresh: Some(Instant::now()),
-                        refresh_pending: false,
-                        refresh_generation: 0,
+                            cx,
+                        )
                     });
                     let view = cx.new(|cx| SettingsWindow {
                         content,
@@ -265,12 +232,7 @@ impl Workspace {
                     cx.new(|cx| Root::new(view, window, cx))
                 })
                 .expect("打开设置窗口失败");
-            let mut handles = cx
-                .try_global::<SettingsWindowHandles>()
-                .map(|handles| handles.0.clone())
-                .unwrap_or_default();
-            handles.insert(scope, handle);
-            cx.set_global(SettingsWindowHandles(handles));
+            cx.set_global(SettingsWindowHandle(handle));
         });
     }
 }

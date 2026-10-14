@@ -58,7 +58,7 @@ pub(crate) fn stage_has_page_header(
     }
     match route {
         WorkspaceRoute::Agents => !agent_conversation_open,
-        WorkspaceRoute::Automations => true,
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => true,
         WorkspaceRoute::Session | WorkspaceRoute::Plugin { .. } => false,
     }
 }
@@ -107,7 +107,7 @@ pub(crate) fn chrome_title_for_stage(
     match route {
         WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
         WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
-        WorkspaceRoute::Automations => ChromeTitle::Hidden,
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => ChromeTitle::Hidden,
         WorkspaceRoute::Plugin { .. } => match plugin_title {
             Some(title) if !title.trim().is_empty() => ChromeTitle::Visible {
                 title,
@@ -788,6 +788,11 @@ mod tests {
         assert!(stage_content_drag_band(true, false, px(0.), true).is_none());
         assert!(stage_has_page_header(
             &WorkspaceRoute::Automations,
+            false,
+            false
+        ));
+        assert!(stage_has_page_header(
+            &WorkspaceRoute::Capabilities,
             false,
             false
         ));

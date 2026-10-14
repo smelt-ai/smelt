@@ -21,6 +21,7 @@ impl Workspace {
     pub(crate) fn prepare_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_session_ui(window, cx);
         self.note_window_activation(window, cx);
+        self.sync_capabilities_view(window, cx);
 
         // 拖拽生命周期属于帧准备，不属于元素树投影。统一在这里清理瞬态状态并
         // 设置系统光标后，侧栏渲染入口可以保持 `&Workspace -> Div` 的只读契约。

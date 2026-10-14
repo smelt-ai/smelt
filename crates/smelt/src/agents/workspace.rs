@@ -59,7 +59,7 @@ impl Workspace {
     ) {
         debug_assert!(matches!(
             route,
-            WorkspaceRoute::Agents | WorkspaceRoute::Automations
+            WorkspaceRoute::Agents | WorkspaceRoute::Automations | WorkspaceRoute::Capabilities
         ));
         if route == WorkspaceRoute::Agents {
             settings::reload_agent_definitions(cx);
@@ -69,6 +69,24 @@ impl Workspace {
 
     pub(crate) fn open_agents_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_agent_product_route(WorkspaceRoute::Agents, window, cx);
+    }
+
+    /// 直接打开能力库的某个页签，比如智能体编辑器里「插件 · 管理」。
+    pub(super) fn open_capabilities(
+        &mut self,
+        tab: CapabilitiesTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nav.set_capabilities_tab(tab);
+        self.open_agent_product_route(WorkspaceRoute::Capabilities, window, cx);
+    }
+
+    pub(super) fn select_capabilities_tab(&mut self, tab: CapabilitiesTab, cx: &mut Context<Self>) {
+        if self.nav.capabilities_tab() != tab {
+            self.nav.set_capabilities_tab(tab);
+            cx.notify();
+        }
     }
 
     pub(super) fn create_agent(

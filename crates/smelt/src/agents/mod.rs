@@ -22,7 +22,7 @@ use gpui_component::{
 };
 
 use crate::workspace_sessions::NewAcpSessionRequest;
-use crate::{AgentStatus, Workspace, WorkspaceRoute, acp_view, settings};
+use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
 use smelt_core::pi_plugin_catalog::{PiPlugin, discover_plugins};
 
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
@@ -2160,14 +2160,10 @@ fn render_agent_plugin_card(
     let manage_entity = entity.clone();
     let manage_button = compact_chip("agent-plugins-manage")
         .label("管理")
-        .tooltip("去设置里导入或删除插件")
-        .on_click(move |_, _, cx| {
+        .tooltip("去能力库导入或删除插件")
+        .on_click(move |_, window, cx| {
             manage_entity.update(cx, |workspace, cx| {
-                workspace.open_scoped_settings_section(
-                    settings::SettingsScope::AgentSetup,
-                    settings::SettingsSection::PiPlugins,
-                    cx,
-                );
+                workspace.open_capabilities(CapabilitiesTab::Plugins, window, cx);
             });
         });
 

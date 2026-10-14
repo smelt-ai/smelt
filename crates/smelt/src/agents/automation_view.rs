@@ -91,7 +91,14 @@ impl Workspace {
                 WorkspaceRoute::Automations,
                 entity.clone(),
             ))
-            .child(self.render_customize_row(entity.clone()))
+            .child(self.render_agent_product_navigation_row(
+                "capabilities-route",
+                "能力库",
+                IconName::LayoutDashboard,
+                false,
+                WorkspaceRoute::Capabilities,
+                entity.clone(),
+            ))
             .child(self.render_product_conversation_nav(entity, statuses, animate_running, cx))
     }
 

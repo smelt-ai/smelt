@@ -58,7 +58,7 @@ mod workspace_view;
 mod worktree_inherit;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
-pub(crate) use workspace_nav::{WorkspaceNav, WorkspaceRoute};
+pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::{
     WorkspaceLoad, WorkspaceSnapshotWriteQueue, load_ws_state, normalize_saved_sessions,
     pending_restore_session_ids, unproject_acp_when_remote_catalog_drops,
@@ -2664,6 +2664,8 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
+    /// 能力库正文。只在能力库路由可见时存在，见 `sync_capabilities_view`。
+    capabilities_view: Option<Entity<settings::SettingsContentView>>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
     ///
     /// `all_font_names()` 在 mac 上枚举的是全部字体 face 的 descriptor（本机 902 个），
@@ -3131,6 +3133,7 @@ impl Workspace {
             update_install_generation: 0,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
+            capabilities_view: None,
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
             status_running_count: None,
@@ -3705,6 +3708,7 @@ impl Render for Workspace {
             WorkspaceRoute::Plugin { .. } => self.render_workspace_surface(window, cx),
             WorkspaceRoute::Agents => self.render_agents_page(window, cx),
             WorkspaceRoute::Automations => self.render_automations_page(window, cx),
+            WorkspaceRoute::Capabilities => self.render_capabilities_page(window, cx),
             WorkspaceRoute::Session => {
                 if self.tool_panel_promoted() {
                     self.render_tool_panel_stage(left_guard, window, cx)
