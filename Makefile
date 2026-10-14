@@ -89,7 +89,7 @@ dist: ## 用已有 release 产物打包 app + dmg
 dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
 
-install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
+install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
 	@# 旧包再装一遍，守护永远跑不到新代码，插件映射竞态也修不进去。Shared Bun
 	@# package 没有 cargo binary，因此同时检查整个 bundled package 的源内容。
@@ -107,6 +107,15 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 	else \
 		plugin_sources_changed=missing; \
 	fi; \
+	sig_ok=0; \
+	identity="$${SMELT_CODESIGN_IDENTITY:-Smelt Local Signing}"; \
+	if [ -d dist/Smelt.app ]; then \
+		sig="$$(codesign -dv dist/Smelt.app 2>&1 || true)"; \
+		case "$$sig" in \
+			*Signature=adhoc*|*linker-signed*) ;; \
+			*) printf '%s\n' "$$sig" | grep -F -q "Authority=$$identity" && sig_ok=1 ;; \
+		esac; \
+	fi; \
 	if [ ! -d dist/Smelt.app ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(DAEMON) ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(BIN) ] \
@@ -118,9 +127,10 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
 		|| [ target/release/smelt-agent-mcp -nt dist/Smelt.app/Contents/MacOS/smelt-agent-mcp ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
-		|| [ -n "$$plugin_sources_changed" ]; then \
-		echo "· dist 落后于 release 或 bundled plugin package，重新打包"; \
-		./scripts/package-mac.sh; \
+		|| [ -n "$$plugin_sources_changed" ] \
+		|| [ "$$sig_ok" -ne 1 ]; then \
+		echo "· dist 落后于 release、签名不对，或 bundled plugin package，重新打包"; \
+		./scripts/package-mac.sh --no-dmg; \
 	fi
 	@# 存量 make install 仍走旧的显式安装入口；在线更新已改由进程外 installer
 	@# 在 GUI 完全退出后提交。这里保留 daemon handoff 语义，后续再收敛到同一 core。

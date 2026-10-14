@@ -1170,6 +1170,12 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+fn reap_managed_daemon_images(dir: &std::path::Path) {
+    if let Err(error) = smelt_core::daemon_image::reap_unused_images(dir) {
+        eprintln!("[workspace] 回收旧守护映像失败：{error}");
+    }
+}
+
 /// 守护没在跑时发布一份不可变映像，并把启动名拨过去。
 /// 启动名这个目录项仍被进程映射时，只挂 `smeltd.pending`，不拨链接。
 fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
@@ -1185,6 +1191,7 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
                 "[workspace] {} 仍被进程映射，不改启动名，已挂上 smeltd.pending",
                 managed.display()
             );
+            reap_managed_daemon_images(&dir);
             return Ok(managed);
         }
         smelt_core::daemon_image::retarget_launch_after_commit(&image)?;
@@ -1194,6 +1201,7 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
             image.display()
         );
     }
+    reap_managed_daemon_images(&dir);
     if managed.is_file() {
         Ok(managed)
     } else {
@@ -1219,6 +1227,7 @@ fn stage_daemon_update_in(
     std::fs::create_dir_all(dir)?;
     let image = smelt_core::daemon_image::publish_image(dir, src)?;
     smelt_core::daemon_image::retarget_pending_symlink(dir, &image)?;
+    reap_managed_daemon_images(dir);
     eprintln!(
         "[workspace] 已暂存守护更新 {} → {}",
         src.display(),
@@ -1258,11 +1267,13 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
         Ok(image) => image,
         Err(e) => {
             eprintln!("[workspace] 发布守护映像失败：{e}");
+            reap_managed_daemon_images(&dir);
             return UpgradeOutcome::Failed;
         }
     };
     if let Err(e) = smelt_core::daemon_image::retarget_pending_symlink(&dir, &image) {
         eprintln!("[workspace] 挂上 smeltd.pending 失败：{e}");
+        reap_managed_daemon_images(&dir);
         return UpgradeOutcome::Failed;
     }
 
@@ -1275,12 +1286,17 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
                     managed.display()
                 );
             }
+            reap_managed_daemon_images(&dir);
             eprintln!("[workspace] 守护已迁入 managed：{}", managed.display());
             UpgradeOutcome::Upgraded
         }
-        UpgradeOutcome::Busy => UpgradeOutcome::Busy,
+        UpgradeOutcome::Busy => {
+            reap_managed_daemon_images(&dir);
+            UpgradeOutcome::Busy
+        }
         other => {
             // 失败时启动名不动。候选留在 pending，下次再 exec 同一份映像。
+            reap_managed_daemon_images(&dir);
             eprintln!(
                 "[workspace] handoff 到 managed 失败（{other:?}），候选：{}",
                 image.display()
@@ -2072,6 +2088,7 @@ where
                     }
                 }
             }
+            reap_managed_daemon_images(&dir);
             eprintln!(
                 "✅ 已安装 {}（守护交接与插件映射与在线更新相同）",
                 target.display()

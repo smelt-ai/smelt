@@ -3,6 +3,8 @@
 //! macOS 没有 fexecve。正在映射的那个文件不能改名、不能截断，启动名也不能在
 //! 进程活着的时候被重新解析成另一份映像。会话宿主必须 exec 启动时钉住的普通文件。
 //! 升级只是再写一份新映像，提交成功后再把链接拨过去；回滚不动链接。
+//! 没有被启动名或 `smeltd.pending` 指向、并且 `lsof` 证明没有进程映射的旧映像可以删。
+//! 证明不了就留下。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -224,6 +226,166 @@ fn image_name_in_dir(dir: &Path, image: &Path) -> io::Result<std::ffi::OsString>
     Ok(name)
 }
 
+/// `lsof` 的约定与在线更新一致：退出码 0 表示至少有一个打开项；
+/// 退出码 1 且标准输出、标准错误都为空才是没人用。其余都不能证明安全。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MappedState {
+    InUse,
+    Unused,
+    Unknown,
+}
+
+pub fn classify_lsof_probe(
+    success: bool,
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> MappedState {
+    if success {
+        return MappedState::InUse;
+    }
+    if code == Some(1) && stdout.is_empty() && stderr.is_empty() {
+        return MappedState::Unused;
+    }
+    MappedState::Unknown
+}
+
+/// 删掉没有被 `smeltd` / `smeltd.pending` 指向、并且探测证明没有进程映射的旧映像。
+/// 删除某一份失败时仍继续尝试其余映像，最后返回第一个删除错误。
+pub fn reap_unused_images(dir: &Path) -> io::Result<()> {
+    reap_unused_images_with(dir, probe_image_mapped)
+}
+
+fn reap_unused_images_with(
+    dir: &Path,
+    mut probe: impl FnMut(&Path) -> MappedState,
+) -> io::Result<()> {
+    let keep = referenced_image_ids(dir)?;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut first_delete_error = None;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_immutable_image_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if file_id(&meta).is_none() {
+            continue;
+        }
+        if keep.iter().any(|id| file_id(&meta) == Some(*id)) {
+            continue;
+        }
+        if probe(&path) != MappedState::Unused {
+            continue;
+        }
+        if let Err(error) = fs::remove_file(&path) {
+            if error.kind() != io::ErrorKind::NotFound && first_delete_error.is_none() {
+                first_delete_error = Some(error);
+            }
+        }
+    }
+    match first_delete_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn probe_image_mapped(path: &Path) -> MappedState {
+    let output = match std::process::Command::new("/usr/sbin/lsof")
+        .arg("-Fn")
+        .arg("--")
+        .arg(path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return MappedState::Unknown,
+    };
+    classify_lsof_probe(
+        output.status.success(),
+        output.status.code(),
+        &output.stdout,
+        &output.stderr,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+fn file_id(meta: &fs::Metadata) -> Option<FileId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !meta.file_type().is_file() {
+            return None;
+        }
+        return Some(FileId {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+fn referenced_image_ids(dir: &Path) -> io::Result<Vec<FileId>> {
+    let mut ids = Vec::new();
+    for name in [LAUNCH_NAME, PENDING_NAME] {
+        if let Some(id) = resolved_image_id(dir, name)? {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+fn resolved_image_id(dir: &Path, name: &str) -> io::Result<Option<FileId>> {
+    let link = dir.join(name);
+    let meta = match fs::symlink_metadata(&link) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let resolved = match fs::canonicalize(&link) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let resolved_meta = fs::symlink_metadata(&resolved)?;
+    let Some(id) = file_id(&resolved_meta) else {
+        return Ok(None);
+    };
+    let Some(parent) = resolved.parent() else {
+        return Ok(None);
+    };
+    let dir = fs::canonicalize(dir)?;
+    let parent = fs::canonicalize(parent)?;
+    if parent != dir {
+        return Ok(None);
+    }
+    Ok(Some(id))
+}
+
 fn remove_pending_symlink(dir: &Path) -> io::Result<()> {
     let path = dir.join(PENDING_NAME);
     match fs::symlink_metadata(&path) {
@@ -347,5 +509,69 @@ mod tests {
         assert!(error.to_string().contains("同一目录"), "实际错误：{error}");
         fs::remove_dir_all(dir).unwrap();
         fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
+    fn lsof_success_means_mapped_and_only_empty_exit_one_means_unused() {
+        assert_eq!(
+            classify_lsof_probe(true, Some(0), b"p1\n", b""),
+            MappedState::InUse
+        );
+        assert_eq!(
+            classify_lsof_probe(false, Some(1), b"", b""),
+            MappedState::Unused
+        );
+        assert_eq!(
+            classify_lsof_probe(false, Some(1), b"", b"warn"),
+            MappedState::Unknown
+        );
+        assert_eq!(
+            classify_lsof_probe(false, Some(2), b"", b""),
+            MappedState::Unknown
+        );
+        assert_eq!(
+            classify_lsof_probe(false, None, b"", b""),
+            MappedState::Unknown
+        );
+    }
+
+    #[test]
+    fn reap_keeps_launch_pending_and_anything_not_proven_unused() {
+        let dir = scratch("reap");
+        let launch_src = dir.join("launch-src");
+        let pending_src = dir.join("pending-src");
+        let mapped_src = dir.join("mapped-src");
+        let unknown_src = dir.join("unknown-src");
+        let stale_src = dir.join("stale-src");
+        fs::write(&launch_src, b"launch").unwrap();
+        fs::write(&pending_src, b"pending").unwrap();
+        fs::write(&mapped_src, b"mapped").unwrap();
+        fs::write(&unknown_src, b"unknown").unwrap();
+        fs::write(&stale_src, b"stale").unwrap();
+        let launch = publish_image(&dir, &launch_src).unwrap();
+        let pending = publish_image(&dir, &pending_src).unwrap();
+        let mapped = publish_image(&dir, &mapped_src).unwrap();
+        let unknown = publish_image(&dir, &unknown_src).unwrap();
+        let stale = publish_image(&dir, &stale_src).unwrap();
+        retarget_launch_symlink(&dir, &launch).unwrap();
+        retarget_pending_symlink(&dir, &pending).unwrap();
+
+        reap_unused_images_with(&dir, |path| {
+            if path == mapped {
+                MappedState::InUse
+            } else if path == unknown {
+                MappedState::Unknown
+            } else {
+                MappedState::Unused
+            }
+        })
+        .unwrap();
+
+        assert!(launch.is_file(), "启动名指向的映像必须留下");
+        assert!(pending.is_file(), "pending 指向的映像必须留下");
+        assert!(mapped.is_file(), "仍被映射的映像必须留下");
+        assert!(unknown.is_file(), "无法证明空闲的映像必须留下");
+        assert!(!stale.exists(), "既没人指向也没人映射的旧映像要删掉");
+        fs::remove_dir_all(dir).unwrap();
     }
 }
