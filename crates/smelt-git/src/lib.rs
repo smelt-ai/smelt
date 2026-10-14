@@ -305,25 +305,38 @@ pub fn parse_branch_status_line(b: &str) -> (String, Option<String>, u32, u32) {
     (head.trim().to_string(), Some(upstream), ahead, behind)
 }
 
+/// 解析 `git status --porcelain=v1 -b -z` 的输出。
+///
+/// 必须用 `-z`：不加时 git 会把中文、空格、引号等路径转义成 `"\344\270\255.txt"`
+/// 这种 C 字符串，重命名还会写成 `old -> new`，按原样当路径就成了乱码。`-z` 下
+/// 条目以 NUL 分隔、路径原样输出；重命名/复制写成 `XY 新路径\0旧路径\0`。
 pub fn parse_git_status(text: &str) -> GitStatusData {
     let mut status = GitStatusData {
         ok: true,
         ..Default::default()
     };
-    for line in text.lines() {
-        if let Some(branch) = line.strip_prefix("## ") {
+    let mut entries = text.split('\0');
+    while let Some(entry) = entries.next() {
+        if let Some(branch) = entry.strip_prefix("## ") {
             let (name, upstream, ahead, behind) = parse_branch_status_line(branch);
             status.branch = name;
             status.upstream = upstream;
             status.ahead = ahead;
             status.behind = behind;
-        } else if line.len() >= 3 {
-            // 未跟踪目录 / 嵌套 git 仓库（常被当成 submodule）porcelain 会写成
-            // `?? path/`。文件树按 `/` 切最后一段，尾斜杠会得到空文件名直接丢掉。
-            let path = line[3..].trim_end_matches('/').to_string();
-            if !path.is_empty() {
-                status.files.push((line[..2].to_string(), path));
-            }
+            continue;
+        }
+        let (Some(xy), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        if xy.contains(['R', 'C']) {
+            // 紧跟的那一段是旧路径，列表只显示新路径。
+            entries.next();
+        }
+        // 未跟踪目录 / 嵌套 git 仓库（常被当成 submodule）porcelain 会写成
+        // `?? path/`。文件树按 `/` 切最后一段，尾斜杠会得到空文件名直接丢掉。
+        let path = path.trim_end_matches('/');
+        if !path.is_empty() {
+            status.files.push((xy.to_string(), path.to_string()));
         }
     }
     status
@@ -378,7 +391,13 @@ pub fn load_git_status_with(subprocess: &dyn Subprocess, root: &str) -> GitStatu
         // 以前强制 `none` 是「靠父仓 status 发现子仓」那套模型的遗留：不强制就一个
         // 子仓都找不到。现在仓库由 discovery 独立发现，强制只剩副作用——用户明明
         // 配了 `ignore = all`，父仓还是塞进来一条 gitlink，跟子仓自己的分组重复。
-        &["status", "--porcelain=v1", "--untracked-files=all", "-b"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "-b",
+            "-z",
+        ],
     ) else {
         return GitStatusData::default();
     };
@@ -1042,7 +1061,15 @@ husky - pre-commit hook exited with code 127 (error)"
             .to_vec();
         let sp = MockSubprocess::new().when(
             "git",
-            &["-C", "/repo", "commit", "-m", "msg"],
+            &[
+                "-C",
+                "/repo",
+                "-c",
+                "core.quotePath=false",
+                "commit",
+                "-m",
+                "msg",
+            ],
             Output {
                 code: Some(1),
                 stdout: Vec::new(),
@@ -1059,7 +1086,15 @@ husky - pre-commit hook exited with code 127 (error)"
     fn failed_commit_does_not_attempt_push() {
         let sp = MockSubprocess::new().when(
             "git",
-            &["-C", "/repo", "commit", "-m", "msg"],
+            &[
+                "-C",
+                "/repo",
+                "-c",
+                "core.quotePath=false",
+                "commit",
+                "-m",
+                "msg",
+            ],
             Output {
                 code: Some(1),
                 stdout: Vec::new(),
@@ -1073,7 +1108,7 @@ husky - pre-commit hook exited with code 127 (error)"
     #[test]
     fn status_parser_reads_branch_and_files() {
         let status = parse_git_status(
-            "## main...origin/main [ahead 2, behind 1]\n M src/lib.rs\n?? notes.md\n",
+            "## main...origin/main [ahead 2, behind 1]\0 M src/lib.rs\0?? notes.md\0",
         );
         assert_eq!(status.branch, "main");
         assert_eq!(status.upstream.as_deref(), Some("origin/main"));
@@ -1081,10 +1116,25 @@ husky - pre-commit hook exited with code 127 (error)"
         assert_eq!(status.files.len(), 2);
     }
 
+    /// 输出取自真实 `git status --porcelain=v1 -b -z`：中文、空格、引号原样保留，
+    /// 重命名只留新路径，不能把旧路径当成另一条改动。
+    #[test]
+    fn status_parser_keeps_non_ascii_and_renamed_paths_verbatim() {
+        let status = parse_git_status("## main\0 M 中文 名.txt\0R  新.txt\0old.txt\0?? q\"x.txt\0");
+        assert_eq!(
+            status.files,
+            vec![
+                (" M".into(), "中文 名.txt".into()),
+                ("R ".into(), "新.txt".into()),
+                ("??".into(), "q\"x.txt".into()),
+            ]
+        );
+    }
+
     #[test]
     fn status_parser_keeps_submodule_and_nested_repo_paths() {
         let status =
-            parse_git_status("## main\n M vendor/lib\n m vendor/dirty\n?? skills/fx-deploy/\n");
+            parse_git_status("## main\0 M vendor/lib\0 m vendor/dirty\0?? skills/fx-deploy/\0");
         assert_eq!(
             status.files,
             vec![
@@ -1144,17 +1194,20 @@ husky - pre-commit hook exited with code 127 (error)"
         let status_args = [
             "-C",
             "/repo",
+            "-c",
+            "core.quotePath=false",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "-b",
+            "-z",
         ];
         let subprocess = MockSubprocess::new().when(
             "git",
             &status_args,
             Output {
                 code: Some(0),
-                stdout: b"## main\n M src/lib.rs\n".to_vec(),
+                stdout: b"## main\0 M src/lib.rs\0".to_vec(),
                 stderr: Vec::new(),
             },
         );
