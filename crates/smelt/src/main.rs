@@ -5085,11 +5085,6 @@ fn main() {
                 let handled_by_existing_window = existing_ws.is_some_and(|ws| {
                     ws.update_in(cx, |ws, window, cx| {
                             match &event {
-                                status_item::StatusItemEvent::JumpToSession(ix) => {
-                                    if *ix < ws.sessions.len() {
-                                        ws.goto_notification(*ix, None, window, cx);
-                                    }
-                                }
                                 status_item::StatusItemEvent::JumpToDaemonSession(id) => {
                                     ws.request_notification_session_jump(
                                         id.clone(),
@@ -5150,7 +5145,6 @@ fn main() {
                                 });
                             }
                             status_item::StatusItemEvent::ActivateMain
-                            | status_item::StatusItemEvent::JumpToSession(_)
                             | status_item::StatusItemEvent::SystemNotificationStateChanged => {}
                         }
                         *current_ws_status.borrow_mut() = Some(ws);

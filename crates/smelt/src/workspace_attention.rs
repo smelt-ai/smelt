@@ -13,6 +13,20 @@ fn session_attention_ids(session: &Session, cx: &App) -> Vec<String> {
     }
 }
 
+/// 菜单项点下去要露出来的那个守护会话 id。终端会话可能分屏：优先挂着提醒的
+/// pane，其次当前活动 pane，再其次第一个；对话只有一个 id。
+fn menu_jump_target(
+    ids: &[String],
+    badge: &std::collections::HashMap<String, bool>,
+    active_id: Option<&str>,
+) -> Option<String> {
+    ids.iter()
+        .find(|id| badge.contains_key(*id))
+        .or_else(|| ids.iter().find(|id| Some(id.as_str()) == active_id))
+        .or_else(|| ids.first())
+        .cloned()
+}
+
 impl Workspace {
     /// 跳到某条通知：切到该会话 + 聚焦该 pane。
     pub(crate) fn goto_notification(
@@ -173,8 +187,9 @@ impl Workspace {
                 let status = statuses[ix];
                 let mut listed = matches!(status, AgentStatus::NeedsYou | AgentStatus::Running);
                 let mut requires_action = status == AgentStatus::NeedsYou;
-                for id in session_attention_ids(&self.sessions[ix], cx) {
-                    if let Some(action) = badge.get(&id) {
+                let ids = session_attention_ids(&self.sessions[ix], cx);
+                for id in &ids {
+                    if let Some(action) = badge.get(id) {
                         listed = true;
                         requires_action |= *action;
                     }
@@ -182,6 +197,10 @@ impl Workspace {
                 if !listed {
                     return None;
                 }
+                let active_id = self.sessions[ix]
+                    .active_term()
+                    .map(|pane| pane.read(cx).session_id().to_string());
+                let session_id = menu_jump_target(&ids, &badge, active_id.as_deref())?;
                 let status_text = if requires_action {
                     "需要你"
                 } else if status == AgentStatus::Running {
@@ -195,7 +214,7 @@ impl Workspace {
                     statuses[ix]
                 };
                 Some(status_item::SessionEntry {
-                    session_ix: ix,
+                    session_id,
                     title: self.sessions[ix].title(cx),
                     status_text,
                     color: ui_theme::agent_status_rgb8(color_status),
@@ -207,5 +226,38 @@ impl Workspace {
             status_item::update_menu(&menu_snapshot);
             self.status_menu_snapshot = Some(menu_snapshot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::menu_jump_target;
+    use std::collections::HashMap;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn menu_jumps_to_the_pane_that_raised_attention() {
+        let badge = HashMap::from([("right".to_string(), true)]);
+        assert_eq!(
+            menu_jump_target(&ids(&["left", "right"]), &badge, Some("left")).as_deref(),
+            Some("right")
+        );
+    }
+
+    #[test]
+    fn menu_falls_back_to_the_active_pane_then_the_first() {
+        let badge = HashMap::new();
+        assert_eq!(
+            menu_jump_target(&ids(&["left", "right"]), &badge, Some("right")).as_deref(),
+            Some("right")
+        );
+        assert_eq!(
+            menu_jump_target(&ids(&["left", "right"]), &badge, None).as_deref(),
+            Some("left")
+        );
+        assert_eq!(menu_jump_target(&[], &badge, None), None);
     }
 }
