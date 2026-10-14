@@ -126,6 +126,13 @@ impl Workspace {
             self.capabilities_view = None;
             return;
         }
+        // 模型页签一打开就读内置 Provider 的登录状态，不用再点「查看」。失败后停在
+        // Failed，由用户点重试，不会每帧重来。
+        if self.nav.capabilities_tab() == crate::CapabilitiesTab::Models
+            && self.pi_auth_providers.is_none()
+        {
+            self.refresh_pi_auth_providers(cx);
+        }
         if self.capabilities_view.is_some() {
             return;
         }

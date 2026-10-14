@@ -67,7 +67,12 @@ pub(super) fn render_capabilities_content(
 ) -> Div {
     let tab = snapshot.capabilities_tab;
     let page = match tab {
-        crate::CapabilitiesTab::Models => pi_model::pi_model_page(entity, snapshot, cx),
+        // 模型页自己排版：居中限宽、表单就地展开，不走 Settings 的「标签左、值右」两栏。
+        crate::CapabilitiesTab::Models => {
+            return div()
+                .size_full()
+                .child(pi_model::pi_model_page(entity, snapshot, cx));
+        }
         crate::CapabilitiesTab::Plugins => pi_plugin::pi_plugin_page(entity, snapshot, cx),
         crate::CapabilitiesTab::Memory => pi_memory::pi_memory_page(cx),
     };

@@ -1758,11 +1758,41 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn set_pi_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
+    /// 直接改默认模型的推理强度并写盘。只在用户选过默认模型时可用（界面会禁用），
+    /// 否则写进去的 provider/model 会是 Pi 的兜底值，等于替用户做了选择。
+    pub fn set_pi_default_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
+        let summary = match smelt_core::pi_model_settings::pi_settings_summary() {
+            Ok(summary) => summary,
+            Err(error) => {
+                crate::status_item::notify_error(&error);
+                return;
+            }
+        };
+        let Some((provider, model)) = summary.default_model.and_then(|model| {
+            Some((
+                model.provider.filter(|v| !v.trim().is_empty())?,
+                model.model.filter(|v| !v.trim().is_empty())?,
+            ))
+        }) else {
+            crate::status_item::notify_error("先选一个默认模型，再调推理强度");
+            return;
+        };
+        let config = smelt_core::pi_model_settings::PiDefaultModelConfig {
+            provider,
+            model,
+            base_url: String::new(),
+            thinking_level: level.clone(),
+        };
+        if let Err(error) = smelt_core::pi_model_settings::save_pi_default_model(&config, None) {
+            crate::status_item::notify_error(&error);
+            return;
+        }
+        // 手动填写表单开着时也同步，免得稍后保存表单把这次改动盖回去。
         if let Some(editor) = &mut self.pi_model_editor {
             editor.thinking_level = level;
-            cx.notify();
         }
+        self.reload_pi_model_settings(cx);
+        cx.notify();
     }
 
     pub fn save_pi_model_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
