@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install clean fmt fmt-check lint lint-sh lint-paths test sdk-check pi-agent-check check-all
+.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test sdk-check pi-agent-check check-all
 
 build run install: SHELL := /bin/bash
 
@@ -137,6 +137,11 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 	@# 在 GUI 完全退出后提交。这里保留 daemon handoff 语义，后续再收敛到同一 core。
 	@./target/release/$(BIN) --install-app dist/Smelt.app /Applications/Smelt.app
 	@echo "✅ 安装完成"
+
+dev: ## 编译 release 并原子安装到 /Applications（= make build 后 make install）
+	@# 不写成 `dev: build install` 依赖：make -j 会把两者并行，install 可能装上旧产物。
+	@$(MAKE) --no-print-directory build
+	@$(MAKE) --no-print-directory install
 
 clean: ## 清理 make build / make install 的构建产物（target/ 与 dist/，不卸载已安装的 App）
 	@set -eu; \
