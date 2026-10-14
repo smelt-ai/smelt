@@ -6,7 +6,6 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::*;
 use gpui_component::input::InputEvent;
 
 use crate::Workspace;

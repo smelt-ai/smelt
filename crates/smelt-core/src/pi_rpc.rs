@@ -2023,7 +2023,7 @@ async fn handle_response<W: AsyncWrite + Unpin>(
 }
 
 fn finish_in_flight(counter: &AtomicUsize) {
-    let _ = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+    let _ = counter.try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
         value.checked_sub(1)
     });
 }

@@ -3391,7 +3391,7 @@ impl Drop for RpcCompletionGuard {
 }
 
 fn finish_rpc(in_flight_rpc: &AtomicUsize) {
-    let _ = in_flight_rpc.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    let _ = in_flight_rpc.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
 /// 当前 turn 还在运行时只保留同一 config id 的最后一次选择。被覆盖的请求

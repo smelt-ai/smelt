@@ -4,7 +4,6 @@
 
 use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
-use gpui::*;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
