@@ -1312,8 +1312,11 @@ fn custom_provider_form(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use smelt_core::pi_auth::PiAuthStatus;
+    // 不用 `super::*`：那条 glob 链会带进 `gpui::*` 里的 `test` 属性宏，把这里的
+    // `#[test]` 换成 gpui 的版本，展开时撞上递归上限。
+    use super::{ProviderEntry, merge_providers};
+    use smelt_core::pi_auth::{PiAuthProvider, PiAuthStatus};
+    use smelt_core::pi_model_settings::PiCustomProvider;
 
     fn builtin(id: &str, oauth: bool, status: PiAuthStatus) -> PiAuthProvider {
         PiAuthProvider {
