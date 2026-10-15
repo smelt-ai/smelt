@@ -2573,6 +2573,7 @@ fn bounded_acp_snapshot_reads_only_the_requested_older_page() {
             "limit": 2,
         }),
         &acp_sessions,
+        &new_event_hub(),
     );
 
     let mut line = String::new();
@@ -2598,6 +2599,7 @@ fn missing_acp_snapshot_reports_that_the_session_is_gone() {
             "limit": 100,
         }),
         &acp_sessions,
+        &new_event_hub(),
     );
 
     let mut line = String::new();
@@ -2638,7 +2640,7 @@ fn acp_snapshot_without_debug_omits_the_debug_sidecars() {
     });
     let read = |request: serde_json::Value| {
         let (server, client) = UnixStream::pair().unwrap();
-        handle_acp_snapshot(server, &request, &acp_sessions);
+        handle_acp_snapshot(server, &request, &acp_sessions, &new_event_hub());
         let mut line = String::new();
         BufReader::new(client).read_line(&mut line).unwrap();
         serde_json::from_str::<serde_json::Value>(&line).unwrap()

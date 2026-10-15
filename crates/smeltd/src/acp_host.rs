@@ -199,6 +199,8 @@ pub(crate) struct AcpSession {
     /// 已经写进 `acp_detail.history_session_id` 的身份。
     /// 和内存里的确认值一样就不再写库；行还不在时保持空，下一帧再试。
     pub(crate) durable_history_session_id: Mutex<Option<String>>,
+    /// 闲置挂起的账本，见 `acp_idle`。
+    pub(crate) idle: crate::acp_idle::AcpIdleState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1802,6 +1804,11 @@ pub(crate) fn start_hosted_snapshot_drain(
                     }
                 };
                 awaiting_full_snapshot = false;
+                // 宿主在干活就算活动；安静下来之后才开始计闲置。
+                if crate::acp_idle::reduced_suspend_blocker(&sess.reduced.lock().unwrap()).is_some()
+                {
+                    sess.idle.touch();
+                }
                 apply_durable_history_from_host(sess, history_id, history_abandoned);
                 if revision != 0 {
                     sess.host_snapshot_revision
@@ -1886,6 +1893,7 @@ pub(crate) fn acp_relaunch(
     abandon_history: bool,
 ) {
     let sess = &slot.value;
+    sess.idle.mark_running();
     let (generation, restore_policy) = {
         let _turn_completion = sess.turn_completion.lock().unwrap();
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
@@ -2156,6 +2164,7 @@ pub(crate) fn make_acp_session(
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
         durable_history_session_id: Mutex::new(None),
+        idle: Default::default(),
     }
 }
 
@@ -3344,6 +3353,8 @@ pub(crate) fn handle_acp_submit_input(
         let slot = acp_sessions.get(id).ok_or_else(|| {
             smelt_core::conversation::ConversationSubmitError::rejected("ACP session not found")
         })?;
+        crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+            .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
         acp_sessions
             .with_current(id, &slot, |session| {
                 apply_submit_config_values(session, &config_values, subscribers)?;
@@ -3458,6 +3469,18 @@ pub(crate) fn handle_acp_action(
         return;
     }
 
+    if crate::acp_idle::acp_action_needs_runtime(&action)
+        && let Err(error) =
+            crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+    {
+        let _ = writeln!(
+            conn,
+            "{}",
+            serde_json::json!({ "ok": false, "error": error })
+        );
+        return;
+    }
+
     let result = acp_sessions
         .with_current(id, &slot, |session| {
             apply_acp_user_action(session, action, subscribers)
@@ -3563,6 +3586,7 @@ pub(crate) fn handle_acp_open(
         break attached_fd;
     };
     let sess = &slot.value;
+    sess.idle.touch();
     // ACP 控制连接活着：headless 自升级让路。对话可以连着看很久却不再走
     // desktop 鉴权 / 终端 open，不能靠过期时间戳判断「没人看」。
     let _viewer = crate::protocol::ViewerLease::acquire();
@@ -3592,7 +3616,8 @@ pub(crate) fn handle_acp_open(
         } = action
         {
             // 父进程的控制连接上不回答：正文在宿主。宿主进程没有 hosted_handle，就地切一页。
-            if sess.hosted_handle.lock().unwrap().is_some() {
+            // 挂起的会话也在父进程里，镜像只剩当前回合，同样不答。
+            if sess.hosted_handle.lock().unwrap().is_some() || sess.idle.is_suspended() {
                 continue;
             }
             let bytes = history_page_bytes(sess, request_id, before, limit);
@@ -3600,6 +3625,13 @@ pub(crate) fn handle_acp_open(
             if let Some(client) = sess.out.lock().unwrap().client.as_ref() {
                 client.enqueue_line(bytes);
             }
+            continue;
+        }
+        if crate::acp_idle::acp_action_needs_runtime(&action)
+            && let Err(error) =
+                crate::acp_idle::wake_suspended_acp_session(&id, &slot, &acp_sessions, &subscribers)
+        {
+            eprintln!("[acp] 会话 {id} 唤醒失败，丢弃这次动作：{error}");
             continue;
         }
         if acp_sessions
@@ -4117,6 +4149,7 @@ pub(crate) fn handle_acp_snapshot(
     mut conn: UnixStream,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
     let Some(slot) = acp_sessions.get(id) else {
@@ -4137,6 +4170,25 @@ pub(crate) fn handle_acp_snapshot(
         .unwrap_or(100)
         .clamp(1, 500);
     let include_debug = request_includes_debug(v);
+    // 挂起的会话镜像只剩当前回合。往上翻到镜像之前，就得先拉起宿主问它要。
+    let needs_host = acp_sessions
+        .with_current(id, &slot, |session| {
+            let reduced = session.reduced.lock().unwrap();
+            let end = before.min(reduced.entries_total());
+            end.saturating_sub(limit) < reduced.entries_base() && session.idle.is_suspended()
+        })
+        .unwrap_or(false);
+    if needs_host
+        && let Err(error) =
+            crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+    {
+        let _ = writeln!(
+            conn,
+            "{}",
+            serde_json::json!({ "ok": false, "error": error })
+        );
+        return;
+    }
     let page = acp_sessions.with_current(id, &slot, |session| {
         let _output_gate = session.output_gate.lock().unwrap();
         let reduced = session.reduced.lock().unwrap();
@@ -4419,6 +4471,18 @@ pub(crate) fn restart_acp_session(
             .send_action(&smelt_core::acp_session::AcpUserAction::RestartRuntime)
             .map_err(|_| "ACP session host is unavailable");
     }
+    relaunch_recorded_acp_runtime(id, &slot, acp_sessions, subscribers)
+}
+
+/// 按槽位里记录的启动规格重新拉起 runtime，带上自己的历史身份。调用方必须持有
+/// 生命周期锁并确认槽位仍是当前的。重启和闲置唤醒共用。
+pub(crate) fn relaunch_recorded_acp_runtime(
+    id: &str,
+    slot: &Arc<AcpSlot<AcpSession>>,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) -> Result<(), &'static str> {
+    let sess = &slot.value;
     let Some(launch) = sess.launch_spec.lock().unwrap().clone() else {
         return Err("no launch spec recorded for this session yet");
     };
@@ -4437,7 +4501,7 @@ pub(crate) fn restart_acp_session(
     }
     acp_sessions.retain_resumes_for(id, &resume_ids);
     acp_relaunch(
-        &slot,
+        slot,
         id,
         launch,
         resume_id,

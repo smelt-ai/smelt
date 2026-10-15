@@ -12,6 +12,7 @@ fn resume_handoff(
     resume_handoff_with_remote(path, event_hub, None, false)
 }
 
+mod acp_idle_tests;
 mod acp_tests;
 mod action_integration_tests;
 mod action_tests;
@@ -88,6 +89,7 @@ fn make_acp_session_value(
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(None),
         durable_history_session_id: Mutex::new(None),
+        idle: Default::default(),
     }
 }
 

@@ -172,6 +172,7 @@
 //! 时机、不管权限。
 
 mod acp_host;
+mod acp_idle;
 mod acp_registry;
 mod acp_runtime_host;
 mod agent_memory_control;
@@ -2448,6 +2449,9 @@ fn run_serve_loop(
     // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
     spawn_headless_self_upgrade(daemon_fingerprint.clone());
 
+    // 闲置会话挂起（见 acp_idle）。冷启动和升级交接都走到这里；会话宿主进程不走。
+    acp_idle::spawn_acp_idle_reaper(Arc::clone(&acp_sessions), Arc::clone(&remote_sessions));
+
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
     let accept_loop = move || {
@@ -3019,6 +3023,7 @@ fn resume_hosted_acp_handoff_item(
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
         durable_history_session_id: Mutex::new(None),
+        idle: Default::default(),
     });
     if !created {
         cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
@@ -3598,6 +3603,7 @@ pub(crate) fn resume_from_value(
             conversation_submit: Mutex::new(()),
             pending_agent_preset: Mutex::new(pending_agent_preset),
             durable_history_session_id: Mutex::new(None),
+            idle: Default::default(),
         });
         if !created {
             cleanup_rejected_acp_handoff(owned, snapshot_wall);

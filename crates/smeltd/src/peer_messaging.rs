@@ -271,7 +271,8 @@ fn acp_accepts_peer_input(session: &AcpSession) -> bool {
 
 fn acp_endpoint(id: &str, session: &AcpSession) -> AgentEndpoint {
     let state = session.state.lock().unwrap().clone();
-    let running = acp_runtime_alive(session);
+    // 闲置挂起的会话投递时会被拉起，照样是可用目标。
+    let running = crate::acp_idle::acp_runtime_available(session);
     let accepts_peer_input = acp_accepts_peer_input(session);
     AgentEndpoint {
         session_id: id.to_string(),
@@ -398,7 +399,7 @@ fn resolve_target(
                 accepts_peer_input
                     && state.agent_mcp
                     && state.phase != Phase::Dead
-                    && acp_runtime_alive(session)
+                    && crate::acp_idle::acp_runtime_available(session)
             })
             .ok_or_else(|| {
                 PeerMessagingError::NotFound("target disappeared while resolving it".to_string())
@@ -628,6 +629,12 @@ pub(crate) fn send_message(
             message_id: result.message_id,
             target_session_id: result.target_session_id,
         });
+    }
+    // 闲置挂起的目标先拉起来。不能放进下面的闭包：那里握着来源会话的生命周期锁，
+    // 等目标恢复历史的这段时间会把来源会话的其它操作全堵住。
+    if let ResolvedTarget::Acp(id, slot) = &target {
+        crate::acp_idle::wake_suspended_acp_session(id, slot, acp_sessions, event_hub)
+            .map_err(PeerMessagingError::TemporarilyUnavailable)?;
     }
     source.authorize_delivery(sessions, acp_sessions, || {
         deliver(
