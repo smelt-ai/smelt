@@ -36,6 +36,8 @@ pub struct MemoryEntry {
     /// 待确认的原因：读过外部内容的那一轮或无人值守的运行写的。待确认的记忆不注入、不召回，
     /// 用户采纳（[`approve_memory`]）后才生效。
     pub pending_reason: Option<String>,
+    /// 去掉 frontmatter 的正文，卡片展开时看；frontmatter 坏了就是整个文件。
+    pub body: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -168,6 +170,11 @@ fn list_memories_with(
                 continue;
             };
             let (frontmatter, body) = split_frontmatter(&content).unwrap_or(("", ""));
+            let shown_body = if frontmatter.is_empty() {
+                content.trim()
+            } else {
+                body.trim()
+            };
             let field = |key| frontmatter_field(frontmatter, key).filter(|value| !value.is_empty());
             let kind = field("type").map(str::to_string);
             let modified = entry.metadata().and_then(|meta| meta.modified()).ok();
@@ -202,6 +209,7 @@ fn list_memories_with(
                 last_used,
                 stale,
                 pending_reason,
+                body: shown_body.to_string(),
             });
         }
     }
@@ -430,6 +438,14 @@ mod tests {
         assert_eq!(listing.entries[0].kind, None);
         assert_eq!(listing.entries[1].description, "回复用中文");
         assert_eq!(listing.entries[1].kind.as_deref(), Some("feedback"));
+        assert_eq!(
+            listing.entries[1].body, "正文",
+            "展开看的是去掉 frontmatter 的正文"
+        );
+        assert_eq!(
+            listing.entries[0].body, "手改坏了",
+            "格式坏了就给整个文件，用户才看得出哪里坏"
+        );
         assert!(!listing.core_over_budget);
     }
 

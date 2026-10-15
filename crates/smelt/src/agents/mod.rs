@@ -33,6 +33,8 @@ pub(crate) struct AgentsSurface {
     pub(crate) error: Option<String>,
     /// 正在等二次确认删除的智能体。
     pub(crate) pending_delete: Option<AgentDeleteTarget>,
+    /// 正在等二次确认删除的记忆。
+    pub(crate) pending_memory_delete: Option<MemoryDeleteTarget>,
     /// 从侧栏「新对话」进来、还没有可对话的智能体。下一次新建走草稿，不是普通创建。
     pub(crate) arm_conversation_on_create: bool,
     /// 这次「新对话」新建的草稿。点「开始对话」才设默认；返回则删掉。
@@ -46,6 +48,7 @@ impl AgentsSurface {
             editor: None,
             error: None,
             pending_delete: None,
+            pending_memory_delete: None,
             arm_conversation_on_create: false,
             conversation_draft_id: None,
         }
@@ -56,6 +59,13 @@ pub(crate) struct AgentDeleteTarget {
     id: String,
     name: String,
     conversations: usize,
+}
+
+pub(crate) struct MemoryDeleteTarget {
+    agent_id: String,
+    layer: MemoryLayer,
+    file_name: String,
+    name: String,
 }
 
 pub(crate) struct AutomationDeleteTarget {
@@ -113,8 +123,14 @@ pub(crate) struct AgentEditor {
     plugins: Vec<PiPlugin>,
     /// `~/.pi/agent/mcp.json` 里的服务器，同样只在打开编辑器和点刷新时读。
     mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
-    /// 同理，记忆目录也只在打开编辑器、点刷新或删除后扫描。
+    /// 同理，记忆不在渲染里扫：打开编辑器、记忆目录有变化、有对话停下来、
+    /// 点刷新或删除后才重扫。
     memories: AgentMemories,
+    /// 卡片里展开看全文的那条记忆。只是看，改仍走系统编辑器。
+    expanded_memory: Option<(MemoryLayer, String)>,
+    /// 监听两层记忆目录，智能体或外部编辑器改了文件，卡片自己刷新。跟着编辑器走：
+    /// 关掉或换一个智能体时 drop，监听随之停止。
+    _memory_watcher: Option<notify::RecommendedWatcher>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -160,6 +176,16 @@ impl MemoryLayer {
             Self::User => smelt_core::agent_definition_store::user_memory_dir(),
         }
     }
+}
+
+/// 会话是否停在两步之间。记忆的读写元数据在工具结果里落库，模型还在想或工具还在跑
+/// 时重扫可能赶在写文件之后、记元数据之前。
+pub(crate) fn session_phase_settled(phase: smelt_core::daemon_state::DaemonPhase) -> bool {
+    use smelt_core::daemon_state::DaemonPhase;
+    !matches!(
+        phase,
+        DaemonPhase::Connecting | DaemonPhase::Thinking | DaemonPhase::ExecutingTool
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2442,6 +2468,7 @@ fn render_agent_memory_card(
             "这个智能体",
             "还没有记忆。用户纠正它或让它记住什么时，它会自己写下来。",
             &editor.memories.agent,
+            editor.expanded_memory.as_ref(),
             entity.clone(),
         ))
         .child(agent_memory_section(
@@ -2450,6 +2477,7 @@ fn render_agent_memory_card(
             "全局（所有智能体共享）",
             "还没有全局记忆。这里只放你本人的情况和你纠正过的做法。",
             &editor.memories.user,
+            editor.expanded_memory.as_ref(),
             entity,
         ))
         .into_any_element()
@@ -2461,6 +2489,7 @@ fn agent_memory_section(
     title: &'static str,
     empty_hint: &'static str,
     listing: &smelt_core::agent_memory::MemoryListing,
+    expanded: Option<&(MemoryLayer, String)>,
     entity: Entity<Workspace>,
 ) -> AnyElement {
     let layer_key = match layer {
@@ -2483,7 +2512,12 @@ fn agent_memory_section(
     let rows: Vec<AnyElement> = listing
         .entries
         .iter()
-        .map(|entry| agent_memory_row(agent_id, layer, layer_key, entry, entity.clone()))
+        .map(|entry| {
+            let open = expanded.is_some_and(|(expanded_layer, file_name)| {
+                *expanded_layer == layer && *file_name == entry.file_name
+            });
+            agent_memory_row(agent_id, layer, layer_key, entry, open, entity.clone())
+        })
         .collect();
     let body = if rows.is_empty() {
         div()
@@ -2575,12 +2609,16 @@ fn agent_memory_row(
     layer: MemoryLayer,
     layer_key: &str,
     entry: &smelt_core::agent_memory::MemoryEntry,
+    expanded: bool,
     entity: Entity<Workspace>,
 ) -> AnyElement {
     let open_path = entry.path.clone();
+    let toggle_file = entry.file_name.clone();
+    let toggle_entity = entity.clone();
     let open_entity = entity.clone();
     let remove_agent = agent_id.to_string();
     let remove_file = entry.file_name.clone();
+    let remove_name = entry.name.clone();
     let subtitle = match &entry.pending_reason {
         // 待确认时把原因放在描述前面，用户采纳前能看到它为什么没生效。
         Some(reason) => format!("{reason}：{}", entry.description),
@@ -2590,7 +2628,8 @@ fn agent_memory_row(
     let approve_agent = agent_id.to_string();
     let approve_file = entry.file_name.clone();
     let approve_entity = entity.clone();
-    div()
+    let body_id = format!("agent-memory-body-{layer_key}-{}", entry.file_name);
+    let header = div()
         .px_3()
         .py_1p5()
         .flex()
@@ -2606,16 +2645,44 @@ fn agent_memory_row(
         )
         .child(
             div()
+                .id(SharedString::from(format!(
+                    "agent-memory-expand-{layer_key}-{}",
+                    entry.file_name
+                )))
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .flex_col()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    let file_name = toggle_file.clone();
+                    toggle_entity.update(cx, |workspace, cx| {
+                        workspace.toggle_agent_memory_expanded(layer, file_name, cx)
+                    });
+                })
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(crate::ui_theme::text_bright()))
-                        .truncate()
-                        .child(entry.name.clone()),
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(px(12.))
+                            .flex_shrink_0()
+                            .text_color(rgb(crate::ui_theme::text_faint())),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .truncate()
+                                .child(entry.name.clone()),
+                        ),
                 )
                 .child(
                     div()
@@ -2677,13 +2744,60 @@ fn agent_memory_row(
             .icon(IconName::Close)
             .tooltip("删除这条记忆")
             .on_click(move |_, _, cx| {
-                let agent_id = remove_agent.clone();
-                let file_name = remove_file.clone();
+                let target = MemoryDeleteTarget {
+                    agent_id: remove_agent.clone(),
+                    layer,
+                    file_name: remove_file.clone(),
+                    name: remove_name.clone(),
+                };
                 entity.update(cx, |workspace, cx| {
-                    workspace.delete_agent_memory(agent_id, layer, file_name, cx)
+                    workspace.request_delete_agent_memory(target, cx)
                 });
             }),
-        )
+        );
+    div()
+        .flex()
+        .flex_col()
+        .child(header)
+        .when(expanded, |row| {
+            row.child(agent_memory_body(body_id, &entry.body))
+        })
+        .into_any_element()
+}
+
+/// 展开的记忆正文：按原样分行显示，不渲染 Markdown，用户看到的就是模型读到的。
+fn agent_memory_body(id: String, body: &str) -> AnyElement {
+    let lines: Vec<AnyElement> = if body.is_empty() {
+        vec![
+            div()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child("（正文为空）")
+                .into_any_element(),
+        ]
+    } else {
+        body.lines()
+            .map(|line| {
+                // 空行也要占一行高度，不然段落会挤在一起。
+                div()
+                    .min_h(px(16.))
+                    .child(line.to_string())
+                    .into_any_element()
+            })
+            .collect()
+    };
+    div()
+        .id(SharedString::from(id))
+        .mx_3()
+        .mb_2()
+        .px_3()
+        .py_2()
+        .max_h(px(240.))
+        .overflow_y_scroll()
+        .rounded(px(6.))
+        .bg(rgb(crate::ui_theme::bg_column()))
+        .text_xs()
+        .text_color(rgb(crate::ui_theme::text_muted()))
+        .children(lines)
         .into_any_element()
 }
 

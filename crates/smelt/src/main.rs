@@ -4802,6 +4802,7 @@ fn main() {
                     for state in &states {
                         ws.handle_daemon_state_event(state, cx);
                     }
+                    ws.refresh_agent_memories_after_turns(&states, cx);
                     ws.sync_notification_surfaces(cx);
                     if ws.session_manager_open {
                         ws.refresh_session_manager(cx);

@@ -81,6 +81,7 @@ impl Workspace {
             || self.delete_file_target.is_some()
             || self.delete_history_target.is_some()
             || self.agent_surface.pending_delete.is_some()
+            || self.agent_surface.pending_memory_delete.is_some()
             || self.automation_surface.pending_delete.is_some()
             || self.pending_file_switch.is_some()
             || self.acp_image_preview.is_some()
@@ -123,6 +124,7 @@ impl Workspace {
             || self.delete_file_target.is_some()
             || self.delete_history_target.is_some()
             || self.agent_surface.pending_delete.is_some()
+            || self.agent_surface.pending_memory_delete.is_some()
             || self.automation_surface.pending_delete.is_some()
             || self.pending_file_switch.is_some()
         {
@@ -134,6 +136,7 @@ impl Workspace {
             self.delete_file_target = None;
             self.delete_history_target = None;
             self.agent_surface.pending_delete = None;
+            self.agent_surface.pending_memory_delete = None;
             self.automation_surface.pending_delete = None;
             self.pending_file_switch = None;
             cx.notify();
@@ -307,6 +310,12 @@ impl Workspace {
                     .pending_delete
                     .is_some()
                     .then(|| self.render_delete_agent_confirm(cx)),
+            )
+            .children(
+                self.agent_surface
+                    .pending_memory_delete
+                    .is_some()
+                    .then(|| self.render_delete_agent_memory_confirm(cx)),
             )
             .children(
                 self.automation_surface

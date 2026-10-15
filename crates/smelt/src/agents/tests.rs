@@ -1,7 +1,7 @@
 use super::{
     agent_catalog_monogram, bound_agent_definition_id, conversation_agent_mark,
     conversation_icon_color, conversation_row_title, new_conversation_row_label,
-    recent_conversation_order,
+    recent_conversation_order, session_phase_settled,
 };
 use crate::AgentStatus;
 use gpui::rgb;
@@ -17,6 +17,29 @@ fn conversation_belongs_to_the_bound_agent_not_the_cwd() {
         None,
         "自动化 Run 不是对话"
     );
+}
+
+/// 记忆卡片在会话停下时重扫：模型还在想、工具还在跑时，元数据可能还没落库。
+#[test]
+fn memory_card_rescans_only_when_the_session_is_between_steps() {
+    use smelt_core::daemon_state::DaemonPhase;
+    for phase in [
+        DaemonPhase::Connecting,
+        DaemonPhase::Thinking,
+        DaemonPhase::ExecutingTool,
+    ] {
+        assert!(!session_phase_settled(phase), "{phase:?} 还在一步当中");
+    }
+    for phase in [
+        DaemonPhase::AwaitingApproval,
+        DaemonPhase::WaitingForUser,
+        DaemonPhase::Succeeded,
+        DaemonPhase::Failed,
+        DaemonPhase::Idle,
+        DaemonPhase::Dead,
+    ] {
+        assert!(session_phase_settled(phase), "{phase:?} 已停在两步之间");
+    }
 }
 
 #[test]

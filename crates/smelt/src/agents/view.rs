@@ -53,6 +53,54 @@ impl Workspace {
         Self::modal_shell(420., true, content, cx)
     }
 
+    pub(crate) fn render_delete_agent_memory_confirm(&self, cx: &mut Context<Self>) -> Div {
+        let Some(target) = self.agent_surface.pending_memory_delete.as_ref() else {
+            return div();
+        };
+        let (fg, muted) = {
+            let theme = cx.theme();
+            (theme.foreground, theme.muted_foreground)
+        };
+        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let scope = match target.layer {
+            MemoryLayer::Agent => "这个智能体之后不会再用到它。",
+            MemoryLayer::User => "这是全局记忆，所有智能体之后都不会再用到它。",
+        };
+        let content = div()
+            .flex()
+            .flex_col()
+            .child(Self::modal_title(fg, "确定删除这条记忆吗？"))
+            .child(div().text_sm().text_color(muted).child(format!(
+                "将删除记忆「{}」和它的使用记录。{scope}此操作不可撤销。",
+                target.name
+            )))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_button(
+                        "cancel-delete-agent-memory",
+                        "取消",
+                        neutral_bg,
+                        neutral_hover,
+                        fg,
+                        |this, _, _, cx| this.cancel_delete_agent_memory(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_button(
+                        "confirm-delete-agent-memory",
+                        "确定删除",
+                        tint,
+                        hover,
+                        accent_text,
+                        |this, _, _, cx| this.confirm_delete_agent_memory(cx),
+                        cx,
+                    )),
+            );
+        Self::modal_shell(420., true, content, cx)
+    }
+
     pub(super) fn render_agent_product_navigation_row(
         &self,
         id: &'static str,

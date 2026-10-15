@@ -329,6 +329,91 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 一次只展开一条；再点同一条收起。
+    pub(super) fn toggle_agent_memory_expanded(
+        &mut self,
+        layer: MemoryLayer,
+        file_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            let target = (layer, file_name);
+            editor.expanded_memory = if editor.expanded_memory.as_ref() == Some(&target) {
+                None
+            } else {
+                Some(target)
+            };
+        }
+        cx.notify();
+    }
+
+    /// 使用次数和待确认状态存在主库，是智能体在一轮里写完文件之后才记的，目录监听
+    /// 看不到。有对话停下来时这些已经落库，编辑器开着就重扫一次。
+    pub(crate) fn refresh_agent_memories_after_turns(
+        &mut self,
+        states: &[smelt_core::daemon_state::DaemonSessionState],
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_surface.editor.is_some()
+            && states
+                .iter()
+                .any(|state| session_phase_settled(state.effective_phase()))
+        {
+            self.refresh_agent_memories(cx);
+        }
+    }
+
+    /// 监听两层记忆目录。回调在 notify 的线程上，只发唤醒信号；一次写入会连着来好几个
+    /// 事件，稍等一下合并成一次重扫。返回的 watcher 一 drop，发送端跟着释放，任务就结束。
+    fn watch_agent_memories(
+        &mut self,
+        agent_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<notify::RecommendedWatcher> {
+        use notify::Watcher as _;
+
+        let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok() {
+                let _ = wake_tx.try_send(());
+            }
+        })
+        .ok()?;
+        let mut watching = false;
+        for layer in [MemoryLayer::Agent, MemoryLayer::User] {
+            // 目录不存在就监听不了；先建好，智能体第一次写记忆时卡片也能刷新。
+            let Some(dir) = layer.dir(agent_id) else {
+                continue;
+            };
+            if std::fs::create_dir_all(&dir).is_ok()
+                && watcher
+                    .watch(&dir, notify::RecursiveMode::NonRecursive)
+                    .is_ok()
+            {
+                watching = true;
+            }
+        }
+        if !watching {
+            return None;
+        }
+        cx.spawn(async move |this, cx| {
+            while wake_rx.recv().await.is_ok() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                while wake_rx.try_recv().is_ok() {}
+                if this
+                    .update(cx, |this, cx| this.refresh_agent_memories(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Some(watcher)
+    }
+
     pub(super) fn open_agent_memory_file(
         &mut self,
         path: std::path::PathBuf,
@@ -354,13 +439,31 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn delete_agent_memory(
+    /// 点删除只是弹确认；记忆删了就没了，全局记忆还会从所有智能体里消失。
+    pub(super) fn request_delete_agent_memory(
         &mut self,
-        agent_id: String,
-        layer: MemoryLayer,
-        file_name: String,
+        target: MemoryDeleteTarget,
         cx: &mut Context<Self>,
     ) {
+        self.agent_surface.pending_memory_delete = Some(target);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_delete_agent_memory(&mut self, cx: &mut Context<Self>) {
+        self.agent_surface.pending_memory_delete = None;
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_delete_agent_memory(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.agent_surface.pending_memory_delete.take() else {
+            return;
+        };
+        let MemoryDeleteTarget {
+            agent_id,
+            layer,
+            file_name,
+            ..
+        } = target;
         self.agent_surface.error = match layer.dir(&agent_id) {
             Some(dir) => {
                 smelt_core::agent_memory::delete_memory(&dir, &layer.scope(&agent_id), &file_name)
@@ -509,6 +612,7 @@ impl Workspace {
         );
 
         let memories = AgentMemories::scan(&id);
+        let memory_watcher = self.watch_agent_memories(&id, cx);
         self.agent_surface.editor = Some(AgentEditor {
             id,
             name,
@@ -518,6 +622,8 @@ impl Workspace {
             plugins: discover_plugins(),
             mcp_servers: load_mcp_servers_for_editor(),
             memories,
+            expanded_memory: None,
+            _memory_watcher: memory_watcher,
             _subscriptions: subscriptions,
         });
         window.focus(&self.focus_handle, cx);
