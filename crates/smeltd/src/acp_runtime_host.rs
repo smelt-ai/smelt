@@ -60,6 +60,13 @@ struct HostInner {
     handoff: Arc<ReaderHandoff>,
 }
 
+impl Drop for HostInner {
+    /// 交接停手的读线程在等回滚，句柄没了就叫它退出。
+    fn drop(&mut self) {
+        self.handoff.close();
+    }
+}
+
 /// 主 daemon 持有的 session-host 控制句柄。控制 socket 的这一端要活过交接。
 /// 快照读端用的是 dup。交接前必须先停掉这个读端，并把已经预取、还没交给
 /// 继任者的字节当行首前缀传过去。停手之后旧读端不再读。两个进程同时读同一条
@@ -306,10 +313,10 @@ impl HostedConversationHandle {
     /// 半行超过 [`HOST_HANDOFF_RESIDUAL_LIMIT`] 时失败，调用方不得把 fd 交出去。
     pub(crate) fn take_for_handoff(&self) -> std::io::Result<Vec<u8>> {
         self.inner.handoff.stop.store(true, Ordering::SeqCst);
-        let mut slot = self.inner.handoff.residual.lock().unwrap();
+        let mut park = self.inner.handoff.park.lock().unwrap();
         let deadline = Instant::now() + HANDOFF_READER_STOP_TIMEOUT;
         loop {
-            if let Some(bytes) = slot.take() {
+            if let Some(bytes) = park.handed.take() {
                 if bytes.len() > HOST_HANDOFF_RESIDUAL_LIMIT {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
@@ -329,16 +336,22 @@ impl HostedConversationHandle {
                 .inner
                 .handoff
                 .cv
-                .wait_timeout(slot, deadline - now)
+                .wait_timeout(park, deadline - now)
                 .unwrap();
-            slot = guard;
-            if wait.timed_out() && slot.is_none() {
+            park = guard;
+            if wait.timed_out() && park.handed.is_none() {
                 return Err(std::io::Error::new(
                     ErrorKind::TimedOut,
                     "快照读端没有在交接前停下来",
                 ));
             }
         }
+    }
+
+    /// 交接回滚后让停手的读端接着读：先读停手时取走的字节，再读 socket。
+    /// 控制连接全程没动过，宿主和镜像都不用重开。
+    pub(crate) fn resume_after_handoff_rollback(&self) {
+        self.inner.handoff.resume();
     }
 
     #[cfg(test)]
@@ -374,6 +387,7 @@ impl HostedConversationHandle {
         if let Some(control) = self.inner.control.lock().unwrap().take() {
             let _ = control.shutdown(Shutdown::Both);
         }
+        self.inner.handoff.close();
 
         // host 收到 EOF 后会先让其 ACP connection 正常收尾。它内部的 provider
         // shutdown 最坏还包含一次 kill+reap 宽限，因此这里至少给两倍再加 250ms。
@@ -425,18 +439,32 @@ const SNAPSHOT_READ_POLL: Duration = Duration::from_millis(100);
 pub(crate) const HOST_HANDOFF_RESIDUAL_LIMIT: usize = 256 * 1024;
 const HANDOFF_READER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 交接时读端的停手与恢复。
+///
+/// 读线程停手后不退出，原地等：交接提交后进程退出，它跟着结束；回滚了就从停手处
+/// 接着读；句柄关掉才退出。它一退出镜像通道就关了，会话的 drain 会当成宿主断线，
+/// 在交接把控制 fd 发出去之前就拆掉宿主、关掉这个 fd。
 struct ReaderHandoff {
     stop: AtomicBool,
-    /// `None`：读端还没停。`Some`：已经停，里面是继任者必须先读的字节。
-    residual: Mutex<Option<Vec<u8>>>,
+    park: Mutex<ParkedReader>,
     cv: Condvar,
+}
+
+#[derive(Default)]
+struct ParkedReader {
+    parked: bool,
+    /// 停手时读端已经从内核取走的字节，交接取走交给继任者。
+    handed: Option<Vec<u8>>,
+    /// 同一份字节留一份：回滚后读端先读它们，再接着读 socket。
+    resume_prefix: Option<Vec<u8>>,
+    closed: bool,
 }
 
 impl ReaderHandoff {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             stop: AtomicBool::new(false),
-            residual: Mutex::new(None),
+            park: Mutex::new(ParkedReader::default()),
             cv: Condvar::new(),
         })
     }
@@ -446,11 +474,42 @@ impl ReaderHandoff {
     }
 
     fn park(&self, bytes: Vec<u8>) {
-        let mut slot = self.residual.lock().unwrap();
-        if slot.is_none() {
-            *slot = Some(bytes);
-            self.cv.notify_one();
+        let mut park = self.park.lock().unwrap();
+        if !park.parked {
+            park.parked = true;
+            park.handed = Some(bytes.clone());
+            park.resume_prefix = Some(bytes);
+            self.cv.notify_all();
         }
+    }
+
+    /// 停手的读线程在这里等。回滚了返回要先读的字节；句柄关掉返回 `None`。
+    fn wait_for_resume(&self) -> Option<Vec<u8>> {
+        let mut park = self.park.lock().unwrap();
+        loop {
+            if park.closed {
+                return None;
+            }
+            if !self.stopped() {
+                park.parked = false;
+                park.handed = None;
+                return Some(park.resume_prefix.take().unwrap_or_default());
+            }
+            park = self.cv.wait(park).unwrap();
+        }
+    }
+
+    /// 交接回滚：读端没停下就接着跑，停下了就醒来接着读。
+    fn resume(&self) {
+        let _park = self.park.lock().unwrap();
+        self.stop.store(false, Ordering::SeqCst);
+        self.cv.notify_all();
+    }
+
+    fn close(&self) {
+        let mut park = self.park.lock().unwrap();
+        park.closed = true;
+        self.cv.notify_all();
     }
 }
 
@@ -469,6 +528,10 @@ impl<R> PrefixedRead<R> {
             pos: 0,
             inner,
         }
+    }
+
+    fn into_inner(self) -> R {
+        self.inner
     }
 
     fn take_unread_prefix(&mut self) -> Vec<u8> {
@@ -545,6 +608,22 @@ fn stop_reader(
         return;
     }
     handoff.park(residual);
+}
+
+/// 交接停手：交出已取走的字节，原地等。回滚了就用同一条 socket 重建读端，先读
+/// 那些字节；句柄关掉返回 `None`，读线程退出。
+fn pause_reader(
+    handoff: &ReaderHandoff,
+    mut reader: BufReader<PrefixedRead<UnixStream>>,
+    pending: &mut Vec<u8>,
+) -> Option<BufReader<PrefixedRead<UnixStream>>> {
+    stop_reader(handoff, &mut reader, pending);
+    let prefix = handoff.wait_for_resume()?;
+    let stream = reader.into_inner().into_inner();
+    Some(BufReader::with_capacity(
+        8192,
+        PrefixedRead::new(prefix, stream),
+    ))
 }
 
 fn reap_host_tasks(host_pid: i32) {
@@ -631,8 +710,13 @@ fn start_snapshot_reader(
             loop {
                 // 半行还没超限就可以立刻停。超限的半行继续读到换行，避免把残行交出去。
                 if handoff.stopped() && pending.len() <= HOST_HANDOFF_RESIDUAL_LIMIT {
-                    stop_reader(&handoff, &mut reader, &mut pending);
-                    return;
+                    match pause_reader(&handoff, reader, &mut pending) {
+                        Some(resumed) => {
+                            reader = resumed;
+                            continue;
+                        }
+                        None => return,
+                    }
                 }
                 let mut chunk = Vec::new();
                 match reader.read_until(b'\n', &mut chunk) {
@@ -642,16 +726,26 @@ fn start_snapshot_reader(
                     Err(error) if is_read_poll(&error) => {
                         pending.extend_from_slice(&chunk);
                         if handoff.stopped() && pending.len() <= HOST_HANDOFF_RESIDUAL_LIMIT {
-                            stop_reader(&handoff, &mut reader, &mut pending);
-                            return;
+                            match pause_reader(&handoff, reader, &mut pending) {
+                                Some(resumed) => {
+                                    reader = resumed;
+                                    continue;
+                                }
+                                None => return,
+                            }
                         }
                     }
                     Ok(0) => {
                         // 超时会把半行留在 pending 里。随后的 EOF 这次读不到新字节，
                         // 但 pending 仍是最后一行，不能直接丢掉。
                         if handoff.stopped() {
-                            stop_reader(&handoff, &mut reader, &mut pending);
-                            return;
+                            match pause_reader(&handoff, reader, &mut pending) {
+                                Some(resumed) => {
+                                    reader = resumed;
+                                    continue;
+                                }
+                                None => return,
+                            }
                         }
                         if !pending.is_empty()
                             && !dispatch_snapshot_line(
@@ -670,8 +764,13 @@ fn start_snapshot_reader(
                         pending.extend_from_slice(&chunk);
                         let at_eof = pending.last() != Some(&b'\n');
                         if handoff.stopped() {
-                            stop_reader(&handoff, &mut reader, &mut pending);
-                            return;
+                            match pause_reader(&handoff, reader, &mut pending) {
+                                Some(resumed) => {
+                                    reader = resumed;
+                                    continue;
+                                }
+                                None => return,
+                            }
                         }
                         if at_eof {
                             if !pending.is_empty()
@@ -695,10 +794,16 @@ fn start_snapshot_reader(
                     Err(_) => {
                         // 读端关掉才说明这条连接没了。解析失败不走这里：宿主还活着。
                         if handoff.stopped() {
-                            stop_reader(&handoff, &mut reader, &mut pending);
-                        } else {
-                            reap_host_tasks(host_pid);
+                            // 回滚后读端接着读，同一个错误会再来一次，按断线收尾。
+                            match pause_reader(&handoff, reader, &mut pending) {
+                                Some(resumed) => {
+                                    reader = resumed;
+                                    continue;
+                                }
+                                None => return,
+                            }
                         }
+                        reap_host_tasks(host_pid);
                         return;
                     }
                 }
@@ -1013,5 +1118,34 @@ mod tests {
             handle.snapshot_rx().try_recv().is_err(),
             "旧读端停手后不能再收到后半行"
         );
+    }
+
+    /// 回归：交接先停读端再发 fd。停手的读线程一退出，镜像通道就关了，会话的
+    /// drain 把它当成宿主断线，抢在发 fd 之前关掉控制连接。交接报 EBADF 回滚，
+    /// 会话被拆掉重开；守护每分钟重试一次交接，界面就每分钟重连一次。
+    /// 停手期间通道必须保持打开；回滚后原读端从停手处接着读。
+    #[test]
+    fn rolled_back_handoff_resumes_the_paused_reader_without_closing_the_mirror() {
+        let (handle, mut peer) = HostedConversationHandle::test_stub();
+        let rx = handle.snapshot_rx();
+        let line = hosted_line("after");
+        let prefix_len = line.len() / 2;
+        peer.write_all(&line[..prefix_len]).unwrap();
+
+        let _residual = handle.take_for_handoff().expect("读端应在交接前停下来");
+        std::thread::sleep(SNAPSHOT_READ_POLL * 3);
+        assert!(
+            !rx.is_closed(),
+            "交接期间读端只是停手，镜像通道不能关，否则会话会把宿主当成断线拆掉"
+        );
+
+        handle.resume_after_handoff_rollback();
+        peer.write_all(&line[prefix_len..]).unwrap();
+        let resumed = smol::block_on(smol::future::race(async { rx.recv().await.ok() }, async {
+            smol::Timer::after(Duration::from_secs(2)).await;
+            None
+        }))
+        .expect("回滚后原读端接着读，把半行拼回完整快照");
+        assert_eq!(resumed.snapshot.session_title.as_deref(), Some("after"));
     }
 }

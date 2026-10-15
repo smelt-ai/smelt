@@ -3874,6 +3874,7 @@ fn handle_upgrade(
             std::process::exit(0);
         }
         handoff_v2::predecessor::TransactionOutcome::RolledBack { reason } => {
+            acp_host::resume_acp_after_handoff_rollback(acp_sessions);
             if handoff_v2::predecessor::store_migrated_since(pre_schema) {
                 let _ = writeln!(
                     c,

@@ -723,3 +723,77 @@ fn import_loopback_restores_hosted_acp_mid_turn() {
     drop(listener);
     let _ = std::fs::remove_file(&sock_path);
 }
+
+/// 回归：交接停下宿主读端后，前任的镜像 drain 不能把它当成宿主断线。
+/// 以前读线程一停就退出、通道关闭，drain 抢在 fd 发出去之前拆掉宿主、关掉控制
+/// 连接，交接报 EBADF 回滚，会话被重开。守护每分钟重试一次，界面就每分钟重连一次。
+/// 现在：停手期间控制 fd 一直有效、宿主句柄还在；回滚后同一个 drain 接着合并快照。
+#[test]
+fn rolled_back_handoff_keeps_the_hosted_acp_session_attached() {
+    use smelt_core::acp_session::AcpSessionState;
+
+    let acp_sessions = new_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-rollback", || {
+        make_acp_session_value("acp-rollback", AcpSessionState::default())
+    });
+    let (hosted, mut peer) = acp_runtime_host::HostedConversationHandle::test_stub();
+    let snapshot_rx = hosted.snapshot_rx();
+    *slot.value.hosted_handle.lock().unwrap() = Some(hosted);
+    let generation = slot.value.connection_generation.load(Ordering::SeqCst);
+    start_hosted_snapshot_drain(
+        std::sync::Arc::clone(&slot),
+        snapshot_rx,
+        new_event_hub(),
+        "acp-rollback".to_string(),
+        acp_sessions.clone(),
+        generation,
+    );
+
+    let sessions = new_sessions();
+    let sock_path = test_sock_path("acp-rollback");
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).unwrap();
+    predecessor::with_snapshot(&sessions, &acp_sessions, listener.as_raw_fd(), |snapshot| {
+        // 给 drain 足够的时间对读端停手作出反应。
+        std::thread::sleep(Duration::from_millis(500));
+        for fd in &snapshot.staged.fds {
+            assert!(
+                unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0,
+                "交接期间要发的 fd {fd} 被关掉了"
+            );
+        }
+        let (ours, _theirs) = transport::socketpair().unwrap();
+        transport::send_fds(&ours, &snapshot.staged.fds).expect("fd 全部有效，发得出去");
+    });
+    acp_host::resume_acp_after_handoff_rollback(&acp_sessions);
+
+    assert_eq!(
+        slot.value.connection_generation.load(Ordering::SeqCst),
+        generation,
+        "回滚不能换连接"
+    );
+    assert!(
+        slot.value.hosted_handle.lock().unwrap().is_some(),
+        "回滚后宿主句柄还在"
+    );
+    let mut snapshot_value =
+        serde_json::to_value(AcpSessionState::default().to_snapshot(false)).unwrap();
+    snapshot_value["snapshot_revision"] = serde_json::json!(7u64);
+    let line = format!(
+        "{}\n",
+        serde_json::json!({"snapshot": snapshot_value, "provider_pid": null})
+    );
+    peer.write_all(line.as_bytes()).unwrap();
+    peer.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while slot.value.host_snapshot_revision.load(Ordering::SeqCst) != 7 {
+        assert!(
+            Instant::now() < deadline,
+            "回滚后同一个 drain 应接着合并宿主快照"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(listener);
+    let _ = std::fs::remove_file(&sock_path);
+}

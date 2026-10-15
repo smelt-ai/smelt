@@ -4544,6 +4544,16 @@ fn conversation_snapshot_for_handoff(
 
 /// 交接 v2 typed 收集：与旧版同锁、同过滤、同 retire 语义，只换 typed 输出。
 /// 旧 JSON 版已删：v2 写端不再产文件，legacy 文件读端只认旧二进制写的文件。
+/// 交接回滚：[`collect_acp_handoff_typed`] 停下的宿主读端从停手处接着读。
+/// 控制连接全程没动，宿主和镜像都不用重开，界面也就不会重连。
+pub(crate) fn resume_acp_after_handoff_rollback(acp_sessions: &AcpSessions) {
+    for (_, slot) in &acp_sessions.snapshot() {
+        if let Some(host) = slot.value.hosted_handle.lock().unwrap().as_ref() {
+            host.resume_after_handoff_rollback();
+        }
+    }
+}
+
 pub(crate) fn collect_acp_handoff_typed(
     acp_sessions: &AcpSessions,
 ) -> (
