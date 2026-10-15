@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { McpServerEntry } from "@earendil-works/pi-coding-agent";
 import {
@@ -9,11 +12,31 @@ import {
 	StreamableHttpTransport,
 } from "@earendil-works/pi-mcp";
 import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-works/pi-mcp/testing";
-import { type GatewayEndpoint, GatewayTransport, gatewayEnvironment, sharedTransportFactory, stdioServerSpec } from "../src/mcp-gateway-client.ts";
-import { McpGateway, parseStdioServerSpec, type StdioServerSpec, upstreamKey } from "../src/mcp-gateway.ts";
+import {
+	currentStdioServerSpec,
+	type GatewayEndpoint,
+	GatewayTransport,
+	gatewayEnvironment,
+	sharedTransportFactory,
+	stdioServerSpec,
+} from "../src/mcp-gateway-client.ts";
+import {
+	McpGateway,
+	type McpGatewayOptions,
+	parseStdioServerSpec,
+	readStdioServerSpecs,
+	type StdioServerSpec,
+	stdioServerSpecs,
+	upstreamKey,
+} from "../src/mcp-gateway.ts";
 import { createPiDefaultTransport } from "../src/pi-mcp-runtime.ts";
 
-const SPEC: StdioServerSpec = { name: "rea", command: "bun", args: ["x", "rea-agents", "mcp"] };
+const SOURCE = "/home/me/.pi/agent/mcp.json";
+const SPEC: StdioServerSpec = { source: SOURCE, name: "rea", command: "bun", args: ["x", "rea-agents", "mcp"] };
+/** The same server after the user edited its entry. */
+const EDITED: StdioServerSpec = { ...SPEC, env: { GHIDRA_INSTALL_DIR: "/opt/ghidra" } };
+/** Tests hand the transport its spec as is instead of reading `mcp.json`. */
+const asGiven = (spec: StdioServerSpec) => spec;
 
 /** A scripted MCP server behind an in-memory transport; every transport is one "process". */
 function fakeServer() {
@@ -87,6 +110,11 @@ function fakeServer() {
 		stats,
 		factory,
 		notify: (method: string) => current?.send({ jsonrpc: "2.0", method }),
+		/** Answer the `slow` calls still waiting. */
+		finishSlow: () => {
+			for (const finish of waiting.values()) finish();
+			waiting.clear();
+		},
 	};
 }
 
@@ -275,19 +303,207 @@ describe("shared MCP gateway", () => {
 	});
 });
 
+/**
+ * A gateway whose `mcp.json` is a map the test edits; `edit` saves it and fires the watcher, like
+ * the file watcher of the gateway process does.
+ */
+function configuredSetup(options: Partial<McpGatewayOptions> = {}) {
+	const fake = fakeServer();
+	const files = new Map<string, Map<string, StdioServerSpec> | Error>([[SOURCE, new Map([["rea", SPEC]])]]);
+	const watchers = new Map<string, () => void>();
+	const gateway = new McpGateway({
+		token: "secret",
+		createTransport: fake.factory,
+		upstreamIdleMs: 60_000,
+		sessionIdleMs: 120_000,
+		watchConfig: (path, onChange) => {
+			watchers.set(path, onChange);
+			return () => watchers.delete(path);
+		},
+		readConfig: (path) => {
+			const file = files.get(path) ?? new Map();
+			if (file instanceof Error) throw file;
+			return file;
+		},
+		...options,
+	});
+	const base = serve(gateway);
+	const endpoint: GatewayEndpoint = { base, token: "secret", pid: process.pid };
+	/** Connect the way Pi does: the transport reads the server's entry from the file when it starts. */
+	const connect = async (spec: StdioServerSpec = SPEC) => {
+		const client = new McpClient({ name: "test", version: "1", requestTimeoutMs: 5_000 });
+		clients.push(client);
+		const resolve = (given: StdioServerSpec) => {
+			const file = files.get(given.source);
+			const current = file instanceof Map ? file.get(given.name) : undefined;
+			if (!current) throw new Error(`${given.name} is not in ${given.source}`);
+			return current;
+		};
+		await client.connect(new GatewayTransport(spec, async () => endpoint, resolve));
+		return client;
+	};
+	const edit = (source: string, file: Map<string, StdioServerSpec> | Error) => {
+		files.set(source, file);
+		watchers.get(source)?.();
+	};
+	const rea = () => gateway.status().servers.filter((server) => server.name === "rea");
+	return { fake, gateway, watchers, connect, edit, rea };
+}
+
+describe("only the latest configuration runs", () => {
+	test("editing the entry retires the old process; the old conversation reconnects to the new one", async () => {
+		const { fake, connect, edit, rea } = configuredSetup();
+		const old = await connect();
+		await old.callTool("echo", {});
+		expect(fake.stats.spawned).toBe(1);
+
+		edit(SOURCE, new Map([["rea", EDITED]]));
+		await until(() => fake.stats.closed === 1);
+		expect(rea()).toEqual([]);
+
+		// The old conversation's next request is a 404: Pi retries it on a new connection, which reads
+		// the file again and starts the edited server.
+		await expect(old.callTool("echo", {})).rejects.toBeInstanceOf(McpSessionExpiredError);
+		const retried = await connect();
+		await retried.callTool("echo", {});
+		expect(fake.stats.spawned).toBe(2);
+		expect(rea()).toEqual([
+			{ source: SOURCE, name: "rea", key: upstreamKey(EDITED), running: true, sessions: 1 },
+		]);
+	});
+
+	test("a conversation registering the new entry retires the old one, even without a file event", async () => {
+		const { fake, gateway, connect, rea } = configuredSetup({ watchConfig: undefined });
+		const old = await connect();
+		await old.callTool("echo", {});
+
+		gateway.register(EDITED);
+		await until(() => fake.stats.closed === 1);
+		expect(rea().map((server) => server.key)).toEqual([upstreamKey(EDITED)]);
+		await expect(old.callTool("echo", {})).rejects.toBeInstanceOf(McpSessionExpiredError);
+	});
+
+	test("a call running on the old process finishes before the process stops", async () => {
+		const { fake, connect, edit } = configuredSetup();
+		const old = await connect();
+		const slow = old.callTool("slow", {});
+		await until(() => fake.stats.calls === 1);
+
+		edit(SOURCE, new Map([["rea", EDITED]]));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(fake.stats.closed).toBe(0);
+		expect(fake.stats.cancelled).toEqual([]);
+
+		await fake.finishSlow();
+		await expect(slow).resolves.toMatchObject({ content: [] });
+		await until(() => fake.stats.closed === 1);
+	});
+
+	test("removing or disabling the entry retires the server, and reconnecting says why", async () => {
+		const { fake, connect, edit, rea } = configuredSetup();
+		const old = await connect();
+		await old.callTool("echo", {});
+
+		edit(SOURCE, new Map());
+		await until(() => fake.stats.closed === 1);
+		expect(rea()).toEqual([]);
+		await expect(connect()).rejects.toThrow("rea is not in");
+	});
+
+	test("edits that leave the process the same keep it running", async () => {
+		const { fake, connect, edit, rea } = configuredSetup();
+		const client = await connect();
+		await client.callTool("echo", {});
+		edit(SOURCE, new Map([["rea", { ...SPEC }]]));
+		await client.callTool("echo", {});
+		expect(fake.stats.spawned).toBe(1);
+		expect(fake.stats.closed).toBe(0);
+		expect(rea()).toHaveLength(1);
+	});
+
+	test("a file that cannot be read keeps the servers running", async () => {
+		const { fake, connect, edit, rea } = configuredSetup();
+		const client = await connect();
+		await client.callTool("echo", {});
+		edit(SOURCE, new SyntaxError("Unexpected end of JSON input"));
+		await client.callTool("echo", {});
+		expect(fake.stats.closed).toBe(0);
+		expect(rea()).toHaveLength(1);
+	});
+
+	test("the same server name in another mcp.json is a different server", async () => {
+		const other = "/work/override/mcp.json";
+		const otherSpec: StdioServerSpec = { ...SPEC, source: other, args: ["other"] };
+		const { fake, connect, edit, rea, watchers } = configuredSetup();
+		edit(other, new Map([["rea", otherSpec]]));
+		const first = await connect();
+		const second = await connect(otherSpec);
+		await first.callTool("echo", {});
+		await second.callTool("echo", {});
+		expect(fake.stats.spawned).toBe(2);
+		expect(rea()).toHaveLength(2);
+		expect([...watchers.keys()].sort()).toEqual([other, SOURCE].sort());
+
+		edit(other, new Map([["rea", { ...otherSpec, args: ["edited"] }]]));
+		await until(() => fake.stats.closed === 1);
+		expect(rea().map((server) => server.source)).toEqual([SOURCE]);
+		// No server comes from that file any more until a conversation reconnects to it.
+		expect([...watchers.keys()]).toEqual([SOURCE]);
+		await first.callTool("echo", {});
+	});
+});
+
 describe("server specs", () => {
 	test("share a key only when the process would be the same", () => {
 		expect(upstreamKey(SPEC)).toBe(upstreamKey({ ...SPEC, args: [...(SPEC.args ?? [])] }));
 		expect(upstreamKey({ ...SPEC, env: { A: "1", B: "2" } })).toBe(upstreamKey({ ...SPEC, env: { B: "2", A: "1" } }));
 		expect(upstreamKey(SPEC)).not.toBe(upstreamKey({ ...SPEC, args: ["other"] }));
 		expect(upstreamKey(SPEC)).not.toBe(upstreamKey({ ...SPEC, cwd: "/tmp" }));
+		expect(upstreamKey(SPEC)).not.toBe(upstreamKey({ ...SPEC, source: "/work/.pi/agent/mcp.json" }));
 	});
 
 	test("are validated", () => {
 		expect(parseStdioServerSpec(SPEC)).toEqual(SPEC);
-		expect(typeof parseStdioServerSpec({ name: "x", command: "y", args: [1] })).toBe("string");
-		expect(typeof parseStdioServerSpec({ name: "x", command: "y", env: { A: 1 } })).toBe("string");
+		expect(typeof parseStdioServerSpec({ ...SPEC, source: undefined })).toBe("string");
+		expect(typeof parseStdioServerSpec({ ...SPEC, source: "relative/mcp.json" })).toBe("string");
+		expect(typeof parseStdioServerSpec({ source: SOURCE, name: "x", command: "y", args: [1] })).toBe("string");
+		expect(typeof parseStdioServerSpec({ source: SOURCE, name: "x", command: "y", env: { A: 1 } })).toBe("string");
 		expect(typeof parseStdioServerSpec(null)).toBe("string");
+	});
+
+	test("are read from mcp.json: enabled stdio entries only", () => {
+		const specs = stdioServerSpecs(
+			{
+				mcpServers: {
+					rea: { command: "bun", args: ["x"], env: { A: "1" }, description: "d", exposure: "codemode" },
+					figma: { url: "https://mcp.figma.com/mcp" },
+					off: { command: "bun", enabled: false },
+					broken: { command: "bun", args: "x" },
+				},
+			},
+			SOURCE,
+		);
+		expect([...specs.entries()]).toEqual([
+			["rea", { source: SOURCE, name: "rea", command: "bun", args: ["x"], env: { A: "1" } }],
+		]);
+		expect(stdioServerSpecs(null, SOURCE).size).toBe(0);
+	});
+
+	test("a connecting transport takes the entry as the file has it now", () => {
+		const dir = mkdtempSync(join(tmpdir(), "smelt-mcp-"));
+		try {
+			const path = join(dir, "mcp.json");
+			expect(readStdioServerSpecs(path).size).toBe(0);
+			const stale: StdioServerSpec = { source: path, name: "rea", command: "bun" };
+			writeFileSync(path, JSON.stringify({ mcpServers: { rea: { command: "bun", args: ["new"] } } }));
+			expect(currentStdioServerSpec(stale)).toEqual({ ...stale, args: ["new"] });
+			writeFileSync(path, JSON.stringify({ mcpServers: { rea: { command: "bun", enabled: false } } }));
+			expect(() => currentStdioServerSpec(stale)).toThrow("no longer enabled");
+			writeFileSync(path, "{");
+			expect(() => readStdioServerSpecs(path)).toThrow();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("come from stdio entries only; HTTP servers keep Pi's transport", () => {
@@ -297,8 +513,14 @@ describe("server specs", () => {
 			source: "test",
 		};
 		const http: McpServerEntry = { name: "figma", config: { url: "https://mcp.figma.com/mcp" }, source: "test" };
-		expect(stdioServerSpec(stdio)).toEqual({ name: "rea", command: "bun", args: ["x"], env: { A: "1" } });
-		expect(stdioServerSpec(http)).toBeUndefined();
+		expect(stdioServerSpec(stdio, SOURCE)).toEqual({
+			source: SOURCE,
+			name: "rea",
+			command: "bun",
+			args: ["x"],
+			env: { A: "1" },
+		});
+		expect(stdioServerSpec(http, SOURCE)).toBeUndefined();
 
 		const routed: string[] = [];
 		const marker = createInMemoryTransportPair().client;
@@ -307,14 +529,15 @@ describe("server specs", () => {
 				routed.push(`direct:${entry.name}`);
 				return marker;
 			},
+			SOURCE,
 			(spec) => {
-				routed.push(`gateway:${spec.name}`);
+				routed.push(`gateway:${spec.name}@${spec.source}`);
 				return marker;
 			},
 		);
 		factory(stdio, "/work", undefined);
 		factory(http, "/work", undefined);
-		expect(routed).toEqual(["gateway:rea", "direct:figma"]);
+		expect(routed).toEqual([`gateway:rea@${SOURCE}`, "direct:figma"]);
 	});
 
 	test("Pi's default transport factory is reachable", () => {
@@ -341,10 +564,12 @@ describe("gateway transport", () => {
 		const endpoint: GatewayEndpoint = { base, token: "secret", pid: process.pid };
 		const client = new McpClient({ name: "test", version: "1", requestTimeoutMs: 5_000 });
 		clients.push(client);
-		await client.connect(new GatewayTransport(SPEC, async () => endpoint));
+		await client.connect(new GatewayTransport(SPEC, async () => endpoint, asGiven));
 		const result = await client.callTool("echo", { ok: 1 });
 		expect(result.content).toEqual([{ type: "text", text: '{"ok":1}' }]);
-		expect(gateway.status().servers).toEqual([{ name: "rea", key: upstreamKey(SPEC), running: true, sessions: 1 }]);
+		expect(gateway.status().servers).toEqual([
+			{ source: SOURCE, name: "rea", key: upstreamKey(SPEC), running: true, sessions: 1 },
+		]);
 	});
 
 	test("reports a vanished gateway as an expired session, so Pi retries on a new connection", async () => {
@@ -357,7 +582,7 @@ describe("gateway transport", () => {
 		});
 		const server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, fetch: (r) => gateway.handle(r) });
 		const endpoint: GatewayEndpoint = { base: `http://127.0.0.1:${server.port}`, token: "secret", pid: process.pid };
-		const transport = new GatewayTransport(SPEC, async () => endpoint);
+		const transport = new GatewayTransport(SPEC, async () => endpoint, asGiven);
 		const client = new McpClient({ name: "test", version: "1", requestTimeoutMs: 5_000 });
 		clients.push(client);
 		await client.connect(transport);

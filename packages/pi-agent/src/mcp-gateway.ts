@@ -1,4 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import {
 	type InitializeResult,
 	isJsonRpcNotification,
@@ -29,6 +31,10 @@ import {
  *   (`tools/list`, `resources/list`, …) does not wake a server that was stopped for being idle.
  * - A server with no request in flight for `upstreamIdleMs` is stopped. The next request starts it
  *   again.
+ * - Only the latest configuration of a server runs. A server is the entry `name` of the `mcp.json`
+ *   at `source`; the gateway watches that file, and when the entry changes or goes away, the old
+ *   process is retired: its sessions are forgotten (their next request gets 404, and Pi reconnects
+ *   with the file as it is now), requests already running finish, then the process is stopped.
  *
  * The server sees one client: the gateway. It does not get the client capabilities (roots,
  * sampling, elicitation) of any one conversation, since a reply could not be routed back to the
@@ -36,12 +42,14 @@ import {
  */
 
 /** Bumped when the HTTP surface between Pi and the gateway changes. Part of the state file name. */
-export const GATEWAY_PROTOCOL = 1;
+export const GATEWAY_PROTOCOL = 2;
 
 export const GATEWAY_CLIENT_INFO = { name: "smelt-mcp-gateway", version: String(GATEWAY_PROTOCOL) };
 
 /** The fields of a stdio server entry that decide which process runs. */
 export interface StdioServerSpec {
+	/** Absolute path of the `mcp.json` the entry is read from; with `name`, it identifies the server. */
+	source: string;
 	name: string;
 	command: string;
 	args?: string[];
@@ -50,6 +58,9 @@ export interface StdioServerSpec {
 }
 
 export type UpstreamTransportFactory = (spec: StdioServerSpec) => McpTransport;
+
+/** Call `onChange` when the file at `path` may have changed; returns a function that stops watching. */
+export type ConfigWatcher = (path: string, onChange: () => void) => () => void;
 
 export interface McpGatewayOptions {
 	/** Bearer token every request must carry. */
@@ -61,6 +72,10 @@ export interface McpGatewayOptions {
 	sessionIdleMs: number;
 	/** Timeout of the gateway's own `initialize` with a server. */
 	initializeTimeoutMs?: number;
+	/** Watch a server's `mcp.json`, to retire the server when its entry changes. Not watched without it. */
+	watchConfig?: ConfigWatcher;
+	/** Read the stdio servers of an `mcp.json`; defaults to `readStdioServerSpecs`. */
+	readConfig?: (path: string) => Map<string, StdioServerSpec>;
 	now?: () => number;
 	log?: (line: string) => void;
 }
@@ -85,17 +100,28 @@ const SSE_KEEPALIVE_MS = 15_000;
 const STDERR_TAIL_CHARS = 2_000;
 const REQUEST_CANCELLED = -32800;
 
-/** Stable id of a server spec: the same command, arguments, environment, and directory share a process. */
+/**
+ * Stable id of a server spec: the same entry of the same `mcp.json` with the same command, arguments,
+ * environment, and directory shares a process.
+ */
 export function upstreamKey(spec: StdioServerSpec): string {
 	const env = Object.entries(spec.env ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-	const canonical = JSON.stringify([spec.name, spec.command, spec.args ?? [], env, spec.cwd ?? null]);
+	const canonical = JSON.stringify([
+		spec.source,
+		spec.name,
+		spec.command,
+		spec.args ?? [],
+		env,
+		spec.cwd ?? null,
+	]);
 	return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
 
 /** A stdio server spec from untrusted JSON, or an error message. */
 export function parseStdioServerSpec(value: unknown): StdioServerSpec | string {
 	if (!isRecord(value)) return "server spec must be an object";
-	const { name, command, args, env, cwd } = value;
+	const { source, name, command, args, env, cwd } = value;
+	if (typeof source !== "string" || !isAbsolute(source)) return "source must be an absolute path";
 	if (typeof name !== "string" || name.length === 0) return "name must be a non-empty string";
 	if (typeof command !== "string" || command.length === 0) return "command must be a non-empty string";
 	if (args !== undefined && !(Array.isArray(args) && args.every((arg) => typeof arg === "string"))) {
@@ -106,12 +132,48 @@ export function parseStdioServerSpec(value: unknown): StdioServerSpec | string {
 	}
 	if (cwd !== undefined && typeof cwd !== "string") return "cwd must be a string";
 	return {
+		source,
 		name,
 		command,
 		...(args === undefined ? {} : { args: [...(args as string[])] }),
 		...(env === undefined ? {} : { env: { ...(env as Record<string, string>) } }),
 		...(cwd === undefined ? {} : { cwd }),
 	};
+}
+
+/**
+ * The enabled stdio servers of the `mcp.json` at `path`, by name. A missing file has none; a file
+ * that cannot be read or parsed throws, so a half-written file is not taken for an empty one.
+ * Entries are taken as Pi takes them: HTTP entries (`url`) and invalid ones are left out.
+ */
+export function readStdioServerSpecs(path: string): Map<string, StdioServerSpec> {
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (error) {
+		if ((error as { code?: unknown }).code === "ENOENT") return new Map();
+		throw error;
+	}
+	return stdioServerSpecs(JSON.parse(text), path);
+}
+
+/** The enabled stdio servers of a parsed `mcp.json` read from `source`. */
+export function stdioServerSpecs(document: unknown, source: string): Map<string, StdioServerSpec> {
+	const specs = new Map<string, StdioServerSpec>();
+	if (!isRecord(document) || !isRecord(document.mcpServers)) return specs;
+	for (const [name, entry] of Object.entries(document.mcpServers)) {
+		if (!isRecord(entry) || entry.enabled === false || "url" in entry) continue;
+		const spec = parseStdioServerSpec({
+			source,
+			name,
+			command: entry.command,
+			args: entry.args,
+			env: entry.env,
+			cwd: entry.cwd,
+		});
+		if (typeof spec !== "string") specs.set(name, spec);
+	}
+	return specs;
 }
 
 class Session {
@@ -142,6 +204,11 @@ class Session {
 	close(): void {
 		for (const controller of this.pending.values()) controller.abort("session closed");
 		this.pending.clear();
+		this.closeStreams();
+	}
+
+	/** End the server-to-client streams; requests still running keep going and answer on their POST. */
+	closeStreams(): void {
 		for (const stream of this.streams) {
 			try {
 				stream.close();
@@ -163,6 +230,8 @@ class Upstream {
 	private listGeneration = 0;
 	inflight = 0;
 	lastUsed: number;
+	/** Replaced by a newer configuration: takes no new sessions and stops once its requests finish. */
+	retired = false;
 
 	constructor(
 		readonly spec: StdioServerSpec,
@@ -172,12 +241,18 @@ class Upstream {
 		this.lastUsed = gateway.now();
 	}
 
+	/** Name and short key in log lines, so two configurations of one server can be told apart. */
+	get label(): string {
+		return `${this.spec.name} ${this.key.slice(0, 8)}`;
+	}
+
 	get running(): boolean {
 		return this.client !== undefined || this.starting !== undefined;
 	}
 
 	getClient(): Promise<McpClient> {
 		if (this.client?.connectionState === "connected") return Promise.resolve(this.client);
+		if (this.retired) return Promise.reject(new Error(`MCP server "${this.spec.name}" was reconfigured; retry`));
 		this.starting ??= this.start().finally(() => {
 			this.starting = undefined;
 		});
@@ -189,7 +264,7 @@ class Upstream {
 			...GATEWAY_CLIENT_INFO,
 			requestTimeoutMs: this.gateway.options.initializeTimeoutMs ?? 60_000,
 		});
-		const name = this.spec.name;
+		const label = this.label;
 		for (const notification of BROADCAST_NOTIFICATIONS) {
 			client.onNotification(notification, (params) => {
 				this.dropLists(notification);
@@ -201,12 +276,12 @@ class Upstream {
 			});
 		}
 		client.onNotification("notifications/message", (params) => {
-			this.gateway.log(`[${name}] ${JSON.stringify(params)}`);
+			this.gateway.log(`[${label}] ${JSON.stringify(params)}`);
 		});
-		client.onError((error) => this.gateway.log(`[${name}] ${error.message}`));
+		client.onError((error) => this.gateway.log(`[${label}] ${error.message}`));
 		client.onClose(() => {
 			if (this.client === client) this.client = undefined;
-			this.gateway.log(`[${name}] stopped`);
+			this.gateway.log(`[${label}] stopped`);
 		});
 		let transport: McpTransport | undefined;
 		try {
@@ -217,7 +292,12 @@ class Upstream {
 			throw new Error(`${errorMessage(error)}${stderr ? `\n${stderr}` : ""}`);
 		}
 		this.client = client;
-		this.gateway.log(`[${name}] started`);
+		this.gateway.log(`[${label}] started`);
+		if (this.retired) {
+			// Reconfigured while starting: the requests waiting for it fail and Pi retries on the new one.
+			await this.stop();
+			throw new Error(`MCP server "${this.spec.name}" was reconfigured; retry`);
+		}
 		return client;
 	}
 
@@ -272,6 +352,7 @@ class Upstream {
 			session.pending.delete(requestKey);
 			this.inflight--;
 			this.lastUsed = this.gateway.now();
+			if (this.retired && this.inflight === 0) void this.stop();
 		}
 	}
 
@@ -290,6 +371,8 @@ class Upstream {
 export class McpGateway {
 	private readonly upstreams = new Map<string, Upstream>();
 	private readonly sessions = new Map<string, Session>();
+	/** Stop functions of the watched `mcp.json` files, by path. */
+	private readonly watchers = new Map<string, () => void>();
 
 	constructor(readonly options: McpGatewayOptions) {}
 
@@ -301,17 +384,92 @@ export class McpGateway {
 		this.options.log?.(line);
 	}
 
-	/** Register a server spec and return the key of its endpoint, `/mcp/<key>`. */
+	/**
+	 * Register a server spec and return the key of its endpoint, `/mcp/<key>`. Clients read the spec
+	 * from `mcp.json` when they connect, so a new spec for a server is its latest configuration and
+	 * replaces the old one.
+	 */
 	register(spec: StdioServerSpec): string {
 		const key = upstreamKey(spec);
-		if (!this.upstreams.has(key)) this.upstreams.set(key, new Upstream(spec, this));
+		if (this.upstreams.has(key)) return key;
+		for (const other of [...this.upstreams.values()]) {
+			if (other.spec.source === spec.source && other.spec.name === spec.name) this.retire(other, "reconfigured");
+		}
+		this.upstreams.set(key, new Upstream(spec, this));
+		this.watch(spec.source);
 		return key;
 	}
 
+	/**
+	 * Compare the servers read from `source` with the file: retire the ones whose entry changed or is
+	 * gone. A file that cannot be read keeps everything, so a half-written file does not stop servers.
+	 */
+	reconcile(source: string): void {
+		let specs: Map<string, StdioServerSpec>;
+		try {
+			specs = (this.options.readConfig ?? readStdioServerSpecs)(source);
+		} catch (error) {
+			this.log(`reading ${source} failed, keeping its servers: ${errorMessage(error)}`);
+			return;
+		}
+		for (const upstream of [...this.upstreams.values()]) {
+			if (upstream.spec.source !== source) continue;
+			const current = specs.get(upstream.spec.name);
+			if (!current) this.retire(upstream, "removed or disabled in mcp.json");
+			else if (upstreamKey(current) !== upstream.key) this.retire(upstream, "reconfigured");
+		}
+		this.unwatchUnused();
+	}
+
+	/**
+	 * Take an old configuration out of service. Its sessions are forgotten, so their next request gets
+	 * 404 and the client reconnects with the latest configuration; requests already running finish
+	 * first, then the process stops.
+	 */
+	private retire(upstream: Upstream, reason: string): void {
+		if (upstream.retired) return;
+		upstream.retired = true;
+		this.upstreams.delete(upstream.key);
+		for (const session of upstream.sessions) {
+			this.sessions.delete(session.id);
+			session.closeStreams();
+		}
+		upstream.sessions.clear();
+		this.log(`[${upstream.label}] ${reason}, retiring`);
+		if (upstream.inflight === 0) void upstream.stop();
+	}
+
+	private watch(source: string): void {
+		const watchConfig = this.options.watchConfig;
+		if (!watchConfig || this.watchers.has(source)) return;
+		try {
+			this.watchers.set(
+				source,
+				watchConfig(source, () => this.reconcile(source)),
+			);
+		} catch (error) {
+			this.log(`watching ${source} failed: ${errorMessage(error)}`);
+		}
+	}
+
+	/** Stop watching files that no registered server comes from. */
+	private unwatchUnused(): void {
+		const used = new Set([...this.upstreams.values()].map((upstream) => upstream.spec.source));
+		for (const [source, stop] of [...this.watchers]) {
+			if (used.has(source)) continue;
+			stop();
+			this.watchers.delete(source);
+		}
+	}
+
 	/** Servers and sessions, for `/health` and tests. */
-	status(): { servers: Array<{ name: string; key: string; running: boolean; sessions: number }>; sessions: number } {
+	status(): {
+		servers: Array<{ source: string; name: string; key: string; running: boolean; sessions: number }>;
+		sessions: number;
+	} {
 		return {
 			servers: [...this.upstreams.values()].map((upstream) => ({
+				source: upstream.spec.source,
 				name: upstream.spec.name,
 				key: upstream.key,
 				running: upstream.running,
@@ -337,12 +495,13 @@ export class McpGateway {
 		for (const upstream of [...this.upstreams.values()]) {
 			if (upstream.inflight > 0 || now - upstream.lastUsed < this.options.upstreamIdleMs) continue;
 			if (upstream.running) {
-				this.log(`[${upstream.spec.name}] idle for ${Math.round((now - upstream.lastUsed) / 1000)}s, stopping`);
+				this.log(`[${upstream.label}] idle for ${Math.round((now - upstream.lastUsed) / 1000)}s, stopping`);
 				stops.push(upstream.stop());
 			} else if (upstream.sessions.size === 0) {
 				this.upstreams.delete(upstream.key);
 			}
 		}
+		this.unwatchUnused();
 		await Promise.all(stops);
 	}
 
@@ -350,6 +509,7 @@ export class McpGateway {
 		for (const session of [...this.sessions.values()]) this.dropSession(session);
 		await Promise.all([...this.upstreams.values()].map((upstream) => upstream.stop()));
 		this.upstreams.clear();
+		this.unwatchUnused();
 	}
 
 	async handle(request: Request): Promise<Response> {
@@ -448,6 +608,8 @@ export class McpGateway {
 			return Response.json({ jsonrpc: "2.0", id: message.id, error: errorObject(error) });
 		}
 		const session = new Session(randomUUID(), upstream, this.now());
+		// Retired while it started: no session on it; the client gets the latest configuration on retry.
+		if (upstream.retired) return text(404, "MCP server was reconfigured");
 		this.sessions.set(session.id, session);
 		upstream.sessions.add(session);
 		return Response.json({ jsonrpc: "2.0", id: message.id, result: init }, { headers: { "mcp-session-id": session.id } });

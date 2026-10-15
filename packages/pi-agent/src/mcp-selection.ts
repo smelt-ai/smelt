@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import {
 	createMcpExtension,
 	type ExtensionAPI,
@@ -67,19 +67,22 @@ export function selectMcpServers(
  * is not read: an agent picks from the global list.
  *
  * Stdio servers connect through the shared gateway (`mcp-gateway.ts`), so all conversations use one
- * process per server instead of one each; HTTP servers connect directly, as Pi does.
+ * process per server instead of one each; HTTP servers connect directly, as Pi does. The gateway
+ * keeps only the latest configuration of each server running: editing `mcp.json` retires the old
+ * process, and conversations reconnect to the new one.
  */
 export function smeltMcpExtension(selection: ReadonlySet<string>) {
+	const configPath = resolve(getAgentDir(), "mcp.json");
 	const connectRegistered = createMcpExtension({
 		loadConfig: () => ({ servers: [], errors: [] }),
-		createTransport: sharedTransportFactory(createPiDefaultTransport),
+		createTransport: sharedTransportFactory(createPiDefaultTransport, configPath),
 	});
 	return (pi: ExtensionAPI) => {
 		connectRegistered(pi);
 		const problems: string[] = [];
 		let document: unknown;
 		try {
-			document = JSON.parse(readFileSync(join(getAgentDir(), "mcp.json"), "utf8"));
+			document = JSON.parse(readFileSync(configPath, "utf8"));
 		} catch (error) {
 			problems.push(`读取 mcp.json 失败：${errorMessage(error)}`);
 		}

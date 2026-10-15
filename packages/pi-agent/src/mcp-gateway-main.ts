@@ -7,13 +7,15 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { watch } from "node:fs";
 import { homedir } from "node:os";
+import { basename, dirname } from "node:path";
 import {
 	gatewayDir,
 	removeGatewayStateIfOwned,
 	writeGatewayState,
 } from "./mcp-gateway-client.ts";
-import { GATEWAY_PROTOCOL, McpGateway } from "./mcp-gateway.ts";
+import { type ConfigWatcher, GATEWAY_PROTOCOL, McpGateway } from "./mcp-gateway.ts";
 import { createPiDefaultTransport } from "./pi-mcp-runtime.ts";
 
 const MINUTE = 60_000;
@@ -30,6 +32,8 @@ const SESSION_IDLE_MS = duration("SMELT_MCP_GATEWAY_SESSION_IDLE_MS", 30 * MINUT
 /** Exit after this long with nothing to serve. */
 const GATEWAY_IDLE_MS = duration("SMELT_MCP_GATEWAY_IDLE_MS", 5 * MINUTE);
 const SWEEP_INTERVAL_MS = Math.min(30_000, UPSTREAM_IDLE_MS, GATEWAY_IDLE_MS);
+/** Editors and atomic writes touch the file several times per save; act once it settles. */
+const CONFIG_SETTLE_MS = 200;
 
 process.title = "smelt-mcp-gateway";
 process.emitWarning = (() => {}) as typeof process.emitWarning;
@@ -40,6 +44,25 @@ delete process.env.SMELT_MCP_GATEWAY_DIR;
 function log(line: string): void {
 	process.stderr.write(`${new Date().toISOString()} ${line}\n`);
 }
+
+/**
+ * Watch the directory rather than the file: saving by rename (atomic writes, most editors) replaces
+ * the file, and a watch on the old file would see nothing after the first save.
+ */
+const watchConfig: ConfigWatcher = (path, onChange) => {
+	const name = basename(path);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const watcher = watch(dirname(path), (_event, file) => {
+		if (file !== null && file !== name) return;
+		clearTimeout(timer);
+		timer = setTimeout(onChange, CONFIG_SETTLE_MS);
+	});
+	watcher.on("error", (error) => log(`watching ${path} failed: ${error.message}`));
+	return () => {
+		clearTimeout(timer);
+		watcher.close();
+	};
+};
 
 const token = randomBytes(32).toString("hex");
 const gateway = new McpGateway({
@@ -62,6 +85,7 @@ const gateway = new McpGateway({
 		),
 	upstreamIdleMs: UPSTREAM_IDLE_MS,
 	sessionIdleMs: SESSION_IDLE_MS,
+	watchConfig,
 	log,
 });
 

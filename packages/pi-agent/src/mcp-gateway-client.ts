@@ -22,7 +22,7 @@ import {
 	StreamableHttpTransport,
 } from "@earendil-works/pi-mcp";
 import lockfile from "proper-lockfile";
-import { GATEWAY_PROTOCOL, type StdioServerSpec } from "./mcp-gateway.ts";
+import { GATEWAY_PROTOCOL, readStdioServerSpecs, type StdioServerSpec } from "./mcp-gateway.ts";
 
 /**
  * Pi side of the shared MCP gateway: find it, start it when it is not running, and connect stdio
@@ -229,6 +229,17 @@ async function registerServer(endpoint: GatewayEndpoint, spec: StdioServerSpec):
 }
 
 /**
+ * The current spec of a server, read from its `mcp.json` again. Pi keeps the entry it read when the
+ * conversation started; reading the file on every connect is what makes a conversation that
+ * reconnects (for example after the gateway retired the old configuration) use the latest one.
+ */
+export function currentStdioServerSpec(spec: StdioServerSpec): StdioServerSpec {
+	const current = readStdioServerSpecs(spec.source).get(spec.name);
+	if (!current) throw new Error(`MCP server "${spec.name}" is no longer enabled in ${spec.source}`);
+	return current;
+}
+
+/**
  * A stdio server reached through the gateway. To Pi it looks like any transport; it finds (or
  * starts) the gateway in `start()`, so a gateway that went away is replaced on reconnect.
  *
@@ -247,12 +258,14 @@ export class GatewayTransport implements McpTransport {
 	private closeEmitted = false;
 
 	constructor(
-		readonly spec: StdioServerSpec,
+		public spec: StdioServerSpec,
 		private readonly locate: () => Promise<GatewayEndpoint> = ensureGateway,
+		private readonly resolve: (spec: StdioServerSpec) => StdioServerSpec = currentStdioServerSpec,
 	) {}
 
 	async start(): Promise<void> {
 		if (this.closed) throw new McpConnectionClosedError();
+		this.spec = this.resolve(this.spec);
 		let endpoint = await this.locate();
 		let key: string;
 		try {
@@ -329,11 +342,15 @@ export class GatewayTransport implements McpTransport {
 	}
 }
 
-/** The transport-relevant part of a stdio entry. Other fields only matter to the client. */
-export function stdioServerSpec(entry: McpServerEntry): StdioServerSpec | undefined {
+/**
+ * The transport-relevant part of a stdio entry read from the `mcp.json` at `source`. Other fields
+ * only matter to the client.
+ */
+export function stdioServerSpec(entry: McpServerEntry, source: string): StdioServerSpec | undefined {
 	const config = entry.config;
 	if ("url" in config) return undefined;
 	return {
+		source,
 		name: entry.name,
 		command: config.command,
 		...(config.args === undefined ? {} : { args: [...config.args] }),
@@ -342,13 +359,14 @@ export function stdioServerSpec(entry: McpServerEntry): StdioServerSpec | undefi
 	};
 }
 
-/** Stdio servers through the shared gateway; HTTP servers as Pi connects them. */
+/** Stdio servers of the `mcp.json` at `source` through the shared gateway; HTTP servers as Pi connects them. */
 export function sharedTransportFactory(
 	fallback: McpTransportFactory,
+	source: string,
 	connect: (spec: StdioServerSpec) => McpTransport = (spec) => new GatewayTransport(spec),
 ): McpTransportFactory {
 	return (entry, cwd, authProvider) => {
-		const spec = stdioServerSpec(entry);
+		const spec = stdioServerSpec(entry, source);
 		return spec ? connect(spec) : fallback(entry, cwd, authProvider);
 	};
 }
