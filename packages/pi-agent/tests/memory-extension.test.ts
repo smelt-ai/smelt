@@ -647,7 +647,7 @@ describe("smelt-memory extension", () => {
 			"---\nname: release-flow\ndescription: 发布走 fx-deploy 流水线\ntype: project\n---\n先发测试环境，再预发，再生产。\n";
 		const kanban = "---\nname: kanban\ndescription: 需求看板在飞书\ntype: reference\n---\n飞书项目 Smelt 空间。\n";
 
-		test("a paraphrased question is found through vectors when no rerank model is available", async () => {
+		test("vectors serve the search tool, not the automatic recall", async () => {
 			const { agent } = setupRoots();
 			writeFileSync(join(agent, "release-flow.md"), releaseFlow);
 			writeFileSync(join(agent, "kanban.md"), kanban);
@@ -657,14 +657,22 @@ describe("smelt-memory extension", () => {
 			host.embedding = { base_url: "http://embed.test/v1", model: "m" };
 			const { runner } = await createRunner({ host });
 
-			// "上线"和记忆在字面上没有一个二元组相同，只有向量能找到。
+			// 自动召回挂在 before_agent_start 上，它慢一秒用户那条消息就晚一秒。
+			// 所以它只跑本地关键词：不请求向量服务，字面对不上就找不到。
 			const first = await runner.emitBeforeAgentStart("这个版本怎么上线？", undefined, { cwd: process.cwd() });
-			expect(String(first?.messages[0]?.content)).toContain("先发测试环境");
-			expect(String(first?.messages[0]?.content)).not.toContain("飞书项目");
+			expect(String(first?.messages[0]?.content ?? "")).not.toContain("先发测试环境");
+			expect(calls).toEqual([]);
+
+			// 换了说法的问题交给工具：这条路模型自己决定何时走，延迟也看得见。
+			const tool = runner.getToolDefinition("memory_search")!;
+			const found = await tool.execute("s", { query: "这个版本怎么上线？" }, undefined, undefined, {
+				cwd: process.cwd(),
+			} as never);
+			expect(JSON.stringify(found.content)).toContain("先发测试环境");
+			expect(JSON.stringify(found.content)).not.toContain("飞书项目");
 
 			// 记忆没变：第二次只给问题算向量，记忆的向量走缓存。
-			const tool = runner.getToolDefinition("memory_search")!;
-			await tool.execute("s", { query: "上线步骤" }, undefined, undefined, { cwd: process.cwd() } as never);
+			await tool.execute("s2", { query: "上线步骤" }, undefined, undefined, { cwd: process.cwd() } as never);
 			expect(calls.at(-1)).toEqual(["上线步骤"]);
 		});
 
@@ -788,8 +796,8 @@ describe("smelt-memory extension", () => {
 		expect(systemMessages(2)[0]).toEqual(systemMessages(0)[0]);
 	});
 
-	/** 换了说法、关键词一个都对不上的问题，第一轮靠便宜模型重排找回来（这里用 faux 模型代答）。 */
-	test("the first turn finds a paraphrased memory through the model rerank", async () => {
+	/** 首轮是用户等得最心急的一轮：召回不能在这里多花一次模型调用。 */
+	test("the first turn never spends a model call on recall", async () => {
 		const { base, agent } = setupRoots();
 		writeFileSync(
 			join(agent, "release-flow.md"),
@@ -798,8 +806,6 @@ describe("smelt-memory extension", () => {
 		const received: Array<Array<{ role: string; content?: unknown }>> = [];
 		const faux = fauxProvider({ provider: "faux-rerank", models: [{ id: "m" }] });
 		faux.setResponses([
-			// 第一次调用是重排：只有一个候选，选它。
-			() => fauxAssistantMessage("[1]"),
 			(context: { messages: unknown[] }) => {
 				received.push(context.messages as (typeof received)[number]);
 				return fauxAssistantMessage("ok");
@@ -835,7 +841,7 @@ describe("smelt-memory extension", () => {
 			tools: [],
 		});
 		setMemoryHostTransportForTests(new FakeMemoryHost().transport);
-		// 真实 RPC 模式下宿主会绑定扩展、触发 session_start，第一轮才走完整召回。
+		// 真实 RPC 模式下宿主会绑定扩展、触发 session_start，第一轮门槛最松。
 		await session.bindExtensions({ mode: "rpc" });
 		try {
 			await session.prompt("这个版本怎么上线？");
@@ -843,8 +849,10 @@ describe("smelt-memory extension", () => {
 			session.dispose();
 		}
 
-		const recalled = JSON.stringify(received[0]);
-		expect(recalled).toContain("先发测试环境，再预发，再生产");
+		// 只有主回合这一次调用。字面对不上的记忆此时召不回来，这是故意的：
+		// 模型看得见系统提示里的事实索引，需要正文自己调 memory_search。
+		expect(received).toHaveLength(1);
+		expect(JSON.stringify(received[0])).not.toContain("先发测试环境，再预发");
 	});
 
 	/** 用 faux 提供方真跑一轮：记录每次模型调用用的是哪个模型，以及状态栏提示。 */
@@ -915,17 +923,18 @@ describe("smelt-memory extension", () => {
 		return { asked, notices, received: JSON.stringify(received) };
 	}
 
-	test("a configured rerank model is used for the rerank, with reasoning left off", async () => {
-		const { asked, received } = await runRecallTurn({ provider: "faux-pick", id: "picked" }, "开会的地方在哪");
-		expect(asked[0]).toEqual({ model: "picked", reasoning: undefined });
+	test("a configured rerank model is never used by the automatic recall", async () => {
+		const { asked, received } = await runRecallTurn({ provider: "faux-pick", id: "picked" }, "周会在哪开");
+		// 重排现在只属于 memory_search：自动召回再也不替用户做这个决定。
+		expect(asked.map((call) => call.model)).toEqual(["main"]);
+		// 关键词命中的正文照样附上，这一段是免费的。
 		expect(received).toContain("每周二上午十点");
 	});
 
-	test("a configured rerank model that is not available falls back to retrieval with a notice", async () => {
+	test("an unavailable rerank model no longer costs the first turn a notice", async () => {
 		const { asked, notices, received } = await runRecallTurn({ provider: "faux-pick", id: "gone" }, "周会在哪开");
 		expect(asked.map((call) => call.model)).toEqual(["main"]);
-		expect(notices.some((notice) => notice.includes("faux-pick/gone") && notice.includes("不可用"))).toBe(true);
-		// 检索层的关键词结果照样附上。
+		expect(notices.some((notice) => notice.includes("faux-pick/gone"))).toBe(false);
 		expect(received).toContain("每周二上午十点");
 	});
 });

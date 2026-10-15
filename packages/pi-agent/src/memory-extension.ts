@@ -129,8 +129,12 @@ function validate(layer: MemoryLayer, root: string, fileName: string, content: s
  * 不能用 before_agent_start 返回 systemPrompt：那会整段替换请求开头，一变就整段缓存失效。
  *
  * 召回：按用户的问题挑出相关的事实，把正文作为隐藏消息附在这一轮末尾，省一次 read；只追加，
- * 不碰系统提示。会话开始和每次压缩后的第一轮走完整流程（检索 + 便宜模型重排，重排不可用时
- * 退回检索）；其它轮只用零成本的关键词检索，门槛更严，同一会话已召回过的不再重复。
+ * 不碰系统提示。自动召回一律只用零成本的关键词检索：会话开始和每次压缩后的第一轮
+ * 放宽门槛、多给一条，其它轮门槛更严，同一会话已召回过的不再重复。
+ *
+ * 这里**不能**调模型重排。自动召回挂在 `before_agent_start` 上，它一慢，用户那条
+ * 消息就要等它才落地（气泡、首个 token 全都被推后）。真要准确度，模型自己调
+ * `memory_search`——那条路走的是检索 + 重排，延迟发生在用户看得见的工具调用里。
  * 另提供 memory_search 工具，让模型自己需要时主动检索。见 docs/agent-memory.md 5.2。
  *
  * 统计：模型 read 记忆文件时记一次使用，用于事实索引超限时决定留哪些，以及在界面上标出
@@ -365,24 +369,19 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		roots: MemoryRoots,
 		meta: MemoryHostMeta,
 		query: string,
-		full: boolean,
+		generous: boolean,
 	): Promise<MemoryEntry[]> {
 		const facts = recallableFacts(roots, context.cwd, meta.pending.agent).filter(
 			(entry) => !recalled.has(entry.fileName),
 		);
 		if (facts.length === 0 || !query.trim()) return [];
-		if (!full) {
-			// 其它轮只用零成本的关键词，门槛更严。
-			return new LexicalIndex(facts)
-				.search(query, 2)
-				.filter((hit) => hit.coverage >= EVERY_TURN_MIN_COVERAGE)
-				.map((hit) => hit.entry);
-		}
-		const retrieved = await retrieve(context, meta, facts, query);
-		return (
-			(await rerank(context, meta, query, facts, retrieved.ranked, RECALL_MAX_MEMORIES)) ??
-			confident(retrieved, facts, FALLBACK_MIN_COVERAGE, RECALL_MAX_MEMORIES)
-		);
+		const [limit, minCoverage] = generous
+			? [RECALL_MAX_MEMORIES, FALLBACK_MIN_COVERAGE]
+			: [2, EVERY_TURN_MIN_COVERAGE];
+		return new LexicalIndex(facts)
+			.search(query, limit)
+			.filter((hit) => hit.coverage >= minCoverage)
+			.map((hit) => hit.entry);
 	}
 
 	if (currentMemoryRoots()) {
@@ -437,16 +436,16 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		event.systemPromptOptions.sections[SMELT_MEMORY_PROMPT_SECTION] = snapshot.text;
 		warnIfTruncated(snapshot, (message, type) => context.ui.notify(message, type));
 		if (!meta) return;
-		const full = recallPending;
+		const generous = recallPending;
 		recallPending = false;
-		const found = await recallFor(context, roots, meta, event.prompt, full);
+		const found = await recallFor(context, roots, meta, event.prompt, generous);
 		for (const entry of found) recalled.add(entry.fileName);
 		const text = renderRecall(found, (entry) => join(roots.agent, entry.fileName));
 		if (!text) return;
 		return { message: { customType: SMELT_MEMORY_RECALL_MESSAGE, content: text, display: false } };
 	});
 
-	// 压缩会把之前召回的正文压掉，下一轮重新按问题完整召回。
+	// 压缩会把之前召回的正文压掉，下一轮按问题重新召回（门槛放宽）。
 	pi.on("session_compact", async () => {
 		if (!currentMemoryRoots()) return;
 		recallPending = true;
