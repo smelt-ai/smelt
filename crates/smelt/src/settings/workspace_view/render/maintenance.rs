@@ -205,7 +205,7 @@ fn maintenance_groups(
                     updater::UpdateChannel::Dev => "update-channel-dev",
                     updater::UpdateChannel::Prod => "update-channel-prod",
                 })
-                .h(px(28.))
+                .h(crate::ui_theme::height::sm())
                 .px_3()
                 .flex()
                 .flex_none()

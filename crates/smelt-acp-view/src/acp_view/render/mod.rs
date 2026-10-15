@@ -14,6 +14,7 @@ mod conversation;
 
 impl Render for AcpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("AcpView");
         self.ensure_elicitation_inputs(window, cx);
         self.apply_pending_composer_restore(window, cx);
         self.settle_revealed_prompt();
@@ -35,8 +36,20 @@ impl Render for AcpView {
             .input
             .as_ref()
             .is_some_and(|input| input.focus_handle(cx).is_focused(window));
+        self.settle_composer_motion(cx.reduce_motion());
+        // 每个会话一条曲线。同一个窗口里换会话时不能接着上一条的焦点相位。
+        let focus_id: gpui::ElementId = ("acp-composer-focus", cx.entity_id()).into();
+        let composer_focus = unit_transition(
+            focus_id,
+            if composer_focused { 1.0 } else { 0.0 },
+            window,
+            cx,
+        );
+        if !cx.reduce_motion() && !self.pending_image_enter.is_empty() {
+            window.request_animation_frame();
+        }
         self.view(
-            composer_focused,
+            composer_focus,
             ambient_motion_enabled(
                 ambient_application_active(cx),
                 window.is_window_active(),
@@ -52,7 +65,7 @@ impl AcpView {
     /// 实际状态变更仍由父模块的方法集中处理。
     fn view(
         &self,
-        composer_focused: bool,
+        composer_focus: f32,
         animate_ambient: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -161,7 +174,7 @@ impl AcpView {
                             .child(
                                 div()
                                     .id("acp-restart")
-                                    .h(px(28.))
+                                    .h(ui_theme::height::sm())
                                     .px_3()
                                     .rounded_full()
                                     .bg(ui_theme::overlay(0x18))
@@ -240,6 +253,7 @@ impl AcpView {
                                 .rounded_full()
                                 .bg(ui_theme::overlay(0x14))
                                 .text_xs()
+                                .font_features(ui_theme::tabular_figures())
                                 .text_color(muted)
                                 .child(elapsed.clone()),
                         )
@@ -312,7 +326,7 @@ impl AcpView {
                         .child(
                             div()
                                 .id("acp-restart")
-                                .h(px(36.))
+                                .h(ui_theme::height::lg())
                                 .px_5()
                                 .rounded_full()
                                 .bg(gpui::rgb(ui_theme::action_fill()))
@@ -450,7 +464,7 @@ impl AcpView {
                 .child(
                     h_flex()
                         .id("acp-jump-to-latest")
-                        .h(px(36.))
+                        .h(ui_theme::height::lg())
                         .px_4()
                         .gap_2()
                         .items_center()
@@ -505,7 +519,7 @@ impl AcpView {
                 .min_h(gpui::px(0.)),
         );
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
-        let input_row = self.render_composer(composer_focused, cx);
+        let input_row = self.render_composer(composer_focus, cx);
         v_flex()
             .size_full()
             .relative()
@@ -677,11 +691,21 @@ impl AcpView {
 
 impl Render for ConversationTranscript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("Transcript");
         let animate_ambient = ambient_motion_enabled(
             ambient_application_active(cx),
             window.is_window_active(),
             true,
         );
+        let reduce_motion = cx.reduce_motion();
+        self.host.update(cx, |view, _cx| {
+            view.settle_transcript_motion(reduce_motion);
+        });
+        // 入场时钟在上面这次 settle 里才启动。先结算再要帧，新气泡的第一帧才会排下一帧。
+        // 帧要打在这条列表上：此刻的 current view 是 transcript，打在 AcpView 上不会让列表重画。
+        if !reduce_motion && self.host.read(cx).decorative_transcript_motion() {
+            window.request_animation_frame();
+        }
         self.host.update(cx, |view, cx| {
             let clear_capsule = view.message_list_clears_capsule();
             view.render_message_list(animate_ambient, clear_capsule, cx)

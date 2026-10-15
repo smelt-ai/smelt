@@ -234,7 +234,7 @@ fn agent_groups(
                             col.child(
                                 div()
                                     .id("add-launch")
-                                    .h(px(36.))
+                                    .h(crate::ui_theme::height::lg())
                                     .w(field_w)
                                     .px_3()
                                     .flex()
@@ -753,7 +753,7 @@ fn agent_groups(
                                 col.child(
                                     div()
                                         .id("add-profile")
-                                        .h(px(36.))
+                                        .h(crate::ui_theme::height::lg())
                                         .w(field_w)
                                         .px_3()
                                         .flex()

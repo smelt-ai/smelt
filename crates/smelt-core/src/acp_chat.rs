@@ -37,17 +37,31 @@ pub enum AcpEntry {
     },
     /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
     Divider(String),
-    /// 后台任务结束。这是状态，不是用户说的话，不能回退，也不能当会话标题。
+    /// 后台任务或后台子智能体结束。这是状态，不是用户说的话，不能回退，也不能当会话标题。
     TaskNote(TaskNote),
 }
 
 /// Pi 会话里这条自定义消息的类型。重放时认它，避免把结果画成用户或助手的话。
 pub const SMELT_BACKGROUND_TASK_CUSTOM_TYPE: &str = "smelt.background_task";
+/// 后台子智能体交回结果。和后台任务一样是状态，不是用户消息。
+pub const SMELT_SUBAGENT_RESULT_CUSTOM_TYPE: &str = "smelt.subagent_result";
+
+/// 状态行说的是哪一种后台工作。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskNoteKind {
+    #[default]
+    BackgroundTask,
+    Subagent,
+}
 
 /// 一条后台任务的结束说明。人看到的是状态行；模型另走自定义消息。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskNote {
+    /// 旧快照没有这个字段，都是后台任务。
+    #[serde(default)]
+    pub kind: TaskNoteKind,
     pub id: String,
     pub title: String,
     pub status: String,
@@ -72,11 +86,15 @@ impl TaskNote {
             .exit_code
             .map(|code| format!("，退出码 {code}"))
             .unwrap_or_default();
+        let what = match self.kind {
+            TaskNoteKind::BackgroundTask => "后台任务",
+            TaskNoteKind::Subagent => "子智能体",
+        };
         if self.title.is_empty() {
-            format!("后台任务 {} 已结束，状态 {status}{code}", self.id)
+            format!("{what} {} 已结束，状态 {status}{code}", self.id)
         } else {
             format!(
-                "后台任务 {}（{}）已结束，状态 {status}{code}",
+                "{what} {}（{}）已结束，状态 {status}{code}",
                 self.id, self.title
             )
         }
@@ -85,19 +103,21 @@ impl TaskNote {
 
 /// 从 Pi 的自定义消息还原状态行。类型不对或没有任务 id 时返回 None。
 pub fn task_note_from_pi_custom(message: &serde_json::Value) -> Option<TaskNote> {
-    if message
+    let kind = match message
         .get("customType")
-        .and_then(serde_json::Value::as_str)
-        != Some(SMELT_BACKGROUND_TASK_CUSTOM_TYPE)
+        .and_then(serde_json::Value::as_str)?
     {
-        return None;
-    }
+        SMELT_BACKGROUND_TASK_CUSTOM_TYPE => TaskNoteKind::BackgroundTask,
+        SMELT_SUBAGENT_RESULT_CUSTOM_TYPE => TaskNoteKind::Subagent,
+        _ => return None,
+    };
     let details = message.get("details")?;
     let id = details
         .get("id")
         .and_then(serde_json::Value::as_str)
         .filter(|id| !id.is_empty())?;
     Some(TaskNote {
+        kind,
         id: id.to_string(),
         title: details
             .get("title")
@@ -720,6 +740,29 @@ pub fn completion_summary_text(output: &[ToolOutputPart]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 子智能体的结果走自定义消息，重放时要还原成状态行，不能变成用户气泡。
+    #[test]
+    fn subagent_result_custom_message_becomes_a_task_note() {
+        let message = serde_json::json!({
+            "role": "custom",
+            "customType": SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
+            "details": {"id": "sub-1", "title": "迁移", "status": "failed", "outputTail": "出错了"},
+        });
+        let note = task_note_from_pi_custom(&message).unwrap();
+        assert_eq!(note.kind, TaskNoteKind::Subagent);
+        assert_eq!(note.summary(), "子智能体 sub-1（迁移）已结束，状态 失败");
+        assert_eq!(note.output_tail, "出错了");
+
+        let old_snapshot: TaskNote = serde_json::from_value(serde_json::json!({
+            "id": "bg-1", "title": "", "status": "completed"
+        }))
+        .unwrap();
+        assert_eq!(old_snapshot.kind, TaskNoteKind::BackgroundTask);
+
+        let other = serde_json::json!({"customType": "note", "details": {"id": "x"}});
+        assert!(task_note_from_pi_custom(&other).is_none());
+    }
 
     #[test]
     fn strips_whole_output_code_fence_only() {

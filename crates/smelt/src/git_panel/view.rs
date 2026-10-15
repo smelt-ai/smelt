@@ -774,7 +774,7 @@ impl Workspace {
         // 改动 / 历史是长期可见的同级视图，不属于操作菜单；与标题合并到同一行，
         // 避免旧的第二条 tab 栏挤压本就有限的 Git 内容高度。
         let header = div()
-            .h(px(36.))
+            .h(ui_theme::height::lg())
             .flex_shrink_0()
             .flex()
             .items_center()

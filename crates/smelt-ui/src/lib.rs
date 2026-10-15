@@ -6,6 +6,7 @@ pub mod acp_completion;
 pub mod agent_host_state;
 pub mod automation;
 pub mod daemon_states_global;
+pub mod frame_stats;
 pub mod history_titles_global;
 pub mod image;
 pub mod markdown_mermaid;

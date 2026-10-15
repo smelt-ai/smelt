@@ -935,14 +935,21 @@ impl Workspace {
             let c = cwd.clone();
             let od = override_dir.clone();
             let pid = profile_id.clone();
-            let sessions = cx
+            let (sessions, bindings) = cx
                 .background_executor()
-                .spawn(async move { list_sessions_for(agent, pid.as_deref(), od.as_deref(), &c) })
+                .spawn(async move {
+                    let sessions = list_sessions_for(agent, pid.as_deref(), od.as_deref(), &c);
+                    let bindings =
+                        smelt_core::session_metadata::agent_definition_ids(agent, pid.as_deref());
+                    (sessions, bindings)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_list_inflight.remove(&key);
                 this.session_list
                     .insert(key.clone(), (Instant::now(), Rc::new(sessions)));
+                this.history_agent_bindings
+                    .insert(key.clone(), Rc::new(bindings));
                 if this.session_list_invalidated.remove(&key) {
                     this.session_list.remove(&key);
                     this.ensure_session_list(agent, profile_id.clone(), cwd.clone(), cx);

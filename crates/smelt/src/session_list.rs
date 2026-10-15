@@ -21,7 +21,7 @@ use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
-use smelt_ui::motion::ambient_animation;
+use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
 
 use crate::git_panel::main_repo_root_from_common_dir;
@@ -63,6 +63,11 @@ const PROJECT_GUIDE_LEFT: f32 = 18.;
 const SESSION_AGENT_ICON_BOX_SIZE: f32 = 18.;
 const SESSION_AGENT_ICON_SIZE: f32 = 17.;
 pub(crate) const SESSION_GLOW_PERIOD: Duration = Duration::from_secs(2);
+
+/// 项目组的重排过渡跟着根路径走。行上其它 id 用的是组下标，重排后会指向别的组，不能复用。
+fn project_flip_id(root: &str) -> ElementId {
+    ElementId::Name(format!("sidebar-flip-project:{root}").into())
+}
 
 fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
     if collapsed_or_empty {
@@ -409,6 +414,8 @@ impl Workspace {
                 });
             });
 
+        // 拖拽排序生效后，项目组和会话行都从旧位置滑到新位置。
+        let reorder_generation = self.sidebar_reorder_generation;
         let mut hidden_empty = 0usize;
         let mut visible_ix = 0usize;
         for (pix, group) in groups.iter().enumerate() {
@@ -990,14 +997,14 @@ impl Workspace {
 
             if collapsed {
                 if grouping != SidebarGrouping::None {
-                    rows = rows.child(group_rows);
+                    rows = rows.child(flip_slot(project_flip_id(cwd), reorder_generation, group_rows));
                 }
                 continue;
             }
 
             if ixs.is_empty() {
                 // 空项目不占一行说明。Grok 的空分组就是没有条目，新建走标题上的 +。
-                rows = rows.child(group_rows);
+                rows = rows.child(flip_slot(project_flip_id(cwd), reorder_generation, group_rows));
                 continue;
             }
 
@@ -1440,7 +1447,11 @@ impl Workspace {
                 // 分屏会话：不显示会话名父行；把同一 tab 的多个 pane 用内层括线
                 // 圈在一起平铺，pane 行本身只管「切到该 pane」。
                 if self.sessions[ix].pane_count() <= 1 {
-                    group_body = group_body.child(row);
+                    group_body = group_body.child(flip_slot(
+                        ("sidebar-flip-session", ui_id),
+                        reorder_generation,
+                        row,
+                    ));
                 } else {
                     let leaves = self.sessions[ix].term_leaves();
                     let active_pane_id = self.sessions[ix].anchor_id();
@@ -1701,10 +1712,18 @@ impl Workspace {
                                 .rounded(px(7.)),
                         );
 
-                    group_body = group_body.child(pane_group);
+                    group_body = group_body.child(flip_slot(
+                        ("sidebar-flip-session", ui_id),
+                        reorder_generation,
+                        pane_group,
+                    ));
                 }
             }
-            rows = rows.child(group_rows.child(group_body));
+            rows = rows.child(flip_slot(
+                project_flip_id(cwd),
+                reorder_generation,
+                group_rows.child(group_body),
+            ));
         }
 
         if hidden_empty > 0 {
@@ -1850,7 +1869,7 @@ impl Workspace {
                     .id("sidebar-settings")
                     .relative()
                     .flex_1()
-                    .h(px(32.))
+                    .h(ui_theme::height::md())
                     .min_w_0()
                     .px_2()
                     .flex()
@@ -1869,7 +1888,7 @@ impl Workspace {
                     .child(
                         Button::new("sidebar-settings-btn")
                             .custom(ButtonCustomVariant::new(cx))
-                            .h(px(32.))
+                            .h(ui_theme::height::md())
                             .w_full()
                             .px_0()
                             .cursor_pointer()
@@ -2139,7 +2158,7 @@ impl Workspace {
                     let rename_key = key.clone();
                     div()
                         .id(SharedString::from(format!("workspace-surface-{key}")))
-                        .h(px(32.))
+                        .h(ui_theme::height::md())
                         .px_2()
                         .flex()
                         .items_center()

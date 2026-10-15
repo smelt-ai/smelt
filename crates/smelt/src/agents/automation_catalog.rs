@@ -126,8 +126,9 @@ impl Workspace {
         cx: &App,
     ) -> Div {
         let config = cx.global::<settings::AgentHostState>();
-        let mut runs = config.automation_runs.clone();
-        runs.sort_by_key(|run| std::cmp::Reverse((run.created_at, run.id.clone())));
+        // 借引用排序：整份克隆会把每条运行的输出在每帧重绘里复制一遍。
+        let mut runs = config.automation_runs.iter().collect::<Vec<_>>();
+        runs.sort_by(|a, b| (b.created_at, &b.id).cmp(&(a.created_at, &a.id)));
         automation_catalog_column()
             .flex()
             .flex_col()
@@ -354,7 +355,7 @@ impl Workspace {
 
     fn render_catalog_run_row(
         &self,
-        run: smelt_core::automation::AutomationRun,
+        run: &smelt_core::automation::AutomationRun,
         entity: Entity<Workspace>,
         _cx: &App,
     ) -> AnyElement {
@@ -372,7 +373,7 @@ impl Workspace {
             .filter(|_| run.status == smelt_core::automation::AutomationRunStatus::Failed)
             .map(compact_instructions);
         let open_entity = entity;
-        let run_id = run.id;
+        let run_id = run.id.clone();
         div()
             .id(format!("automation-catalog-run-{run_id}"))
             .w_full()
@@ -383,6 +384,7 @@ impl Workspace {
             .gap_3()
             .cursor_pointer()
             .hover(|row| row.bg(rgb(crate::ui_theme::bg_hover())))
+            .child(automation_run_detail::run_status_dot(run.status))
             .child(
                 automation_run_lines(
                     name,
@@ -513,7 +515,7 @@ fn catalog_tab_pill(
 ) -> AnyElement {
     div()
         .id(id)
-        .h(px(28.))
+        .h(crate::ui_theme::height::sm())
         .px_3()
         .rounded_full()
         .flex()

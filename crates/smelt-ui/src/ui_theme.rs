@@ -18,8 +18,9 @@
 //! 切完必须 `cx.refresh_windows()` 才会重绘。
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
-use gpui::{Anchor, Pixels, Rgba, px, rgb, rgba, transparent_black};
+use gpui::{Anchor, FontFeatures, Pixels, Rgba, px, rgb, rgba, transparent_black};
 
 use smelt_core::agent_status::AgentStatus;
 
@@ -507,6 +508,52 @@ pub fn composer_radius() -> Pixels {
 /// 用户消息气泡圆角。比内容卡片大，比输入条胶囊小。
 pub fn bubble_radius() -> Pixels {
     px(20.)
+}
+
+/// 控件和行的高度阶梯。同一档的东西并排放时顶边、底边才对得齐；新控件先挑一档，
+/// 别再写裸 `px`。数值就是现有界面在用的六档，换成这组名字不改任何观感。
+///
+/// 圆角和内边距不跟着绑死：同一档里主操作和次操作的内边距本来就有意不同。
+pub mod height {
+    use gpui::{Pixels, px};
+
+    /// 行内状态行（「正在想 · 12s」）、小状态胶囊。
+    pub fn xxs() -> Pixels {
+        px(22.)
+    }
+
+    /// 快捷键键帽、输入框里的小胶囊。
+    pub fn xs() -> Pixels {
+        px(24.)
+    }
+
+    /// 紧凑按钮、短输入框、小表头。
+    pub fn sm() -> Pixels {
+        px(28.)
+    }
+
+    /// 列表行：侧栏、智能体对话列表、用量明细。
+    pub fn md() -> Pixels {
+        px(32.)
+    }
+
+    /// 常规按钮、主操作胶囊、面板标题条和页签条。
+    pub fn lg() -> Pixels {
+        px(36.)
+    }
+
+    /// 页面级大按钮、表单行、检查器标题栏。
+    pub fn xl() -> Pixels {
+        px(44.)
+    }
+}
+
+/// 等宽数字（OpenType `tnum`）。逐秒跳动的计时、计数挂上它：系统字体默认是比例数字，
+/// `1` 比 `0` 窄，读数一变整行宽度就跟着变，右边的内容会抖。只管数字字形，别的字不受影响。
+pub fn tabular_figures() -> FontFeatures {
+    static TNUM: LazyLock<FontFeatures> =
+        LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    TNUM.clone()
 }
 
 /// 标题胶囊离开窗口顶边的距离。

@@ -56,6 +56,10 @@ struct ModelNotice {
 
 struct LiveTask {
     id: String,
+    /// 谁启动的。空串是会话本身（主 Pi 进程）；后台子智能体是 `"<父归属>/<子智能体>"`。
+    /// 查询、停止、等待、完成通知都只在同一归属里进行：子智能体的命令不进父会话，
+    /// 父会话也看不到、碰不到子智能体的任务。
+    owner: String,
     title: String,
     command: String,
     status: BackgroundTaskStatus,
@@ -76,6 +80,11 @@ struct LiveTask {
     /// 正在写给这条监听。写失败就放开，让当前连接再写一次。
     delivering_to: Option<u64>,
     deadline: Option<Instant>,
+    /// 挂接任务（后台子智能体）的看管线程唤醒端。进程不归宿主管，要停时叫醒那条线程，
+    /// 由它转告 Pi。宿主自己起的命令是 `None`。
+    attach_poke: Option<std::os::unix::net::UnixStream>,
+    /// 发起它的那次工具调用。界面据此把派发卡片画成还在后台跑。
+    tool_call_id: Option<String>,
 }
 
 struct State {
@@ -103,8 +112,9 @@ struct Inner {
     cv: Condvar,
     events: smol::channel::Sender<ConversationEvent>,
     outbound: smol::channel::Sender<serde_json::Value>,
-    /// 当前这一条监听。新连接换掉旧的，旧线程看到自己不再是当前就退出。
-    listen: Mutex<CurrentListen>,
+    /// 每个归属当前的那一条监听。同一归属的新连接换掉旧的，旧线程看到自己不再是当前就退出；
+    /// 不同归属互不影响。
+    listen: Mutex<std::collections::HashMap<String, CurrentListen>>,
     pokes: Mutex<Pokes>,
     next_listener: AtomicU64,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -160,10 +170,7 @@ impl BackgroundSupervisor {
             cv: Condvar::new(),
             events,
             outbound,
-            listen: Mutex::new(CurrentListen {
-                id: None,
-                poke: None,
-            }),
+            listen: Mutex::new(std::collections::HashMap::new()),
             pokes: Mutex::new(Pokes {
                 accept: None,
                 waits: Vec::new(),
@@ -206,7 +213,7 @@ impl Drop for BackgroundSupervisor {
         if let Ok(state) = self.inner.mu.lock() {
             for task in &state.tasks {
                 if is_running(task.status) {
-                    signal_group(task.pgid, libc::SIGKILL);
+                    interrupt_task(task, libc::SIGKILL);
                 }
             }
         }
@@ -273,10 +280,13 @@ fn handle_client(inner: Arc<Inner>, stream: std::os::unix::net::UnixStream, sess
         return;
     }
     let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
+    // 挂接连接在请求行之后还会接着发进展，读请求行时多读进缓冲的那部分不能丢。
+    let pending = reader.buffer().to_vec();
     let mut stream = reader.into_inner();
     let _ = stream.set_read_timeout(None);
     match request.get("op").and_then(serde_json::Value::as_str) {
-        Some("listen") => serve_listen(inner, stream),
+        Some("listen") => serve_listen(inner, stream, request_owner(&request)),
+        Some("attach") => serve_attach(inner, stream, &request, pending),
         Some("wait") if wait_timeout(&request).is_some() => {
             serve_wait_until(inner, stream, &request);
         }
@@ -290,28 +300,29 @@ fn handle_client(inner: Arc<Inner>, stream: std::os::unix::net::UnixStream, sess
 
 /// 扩展保持这条连接。结果在任务记录里：这条连接把还没写成功的读出来，写进套接字才算送到。
 /// 对端关掉、任务结束、自己被换掉，都由这一次等待返回，不再隔一段时间醒来看。
-fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream) {
+fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream, owner: String) {
+    let owner = owner.as_str();
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let Ok((mut wake, poke_tx)) = wake_pair() else {
         return;
     };
-    let id = register_listener(&inner, poke_tx);
+    let id = register_listener(&inner, owner, poke_tx);
     if write_line(&mut stream, &serde_json::json!({"ok": true}).to_string()).is_err() {
-        end_listener(&inner, id);
+        end_listener(&inner, owner, id);
         return;
     }
-    if write_ready(&inner, id, &mut stream).is_err() {
-        end_listener(&inner, id);
+    if write_ready(&inner, owner, id, &mut stream).is_err() {
+        end_listener(&inner, owner, id);
         return;
     }
     let mut buf = [0u8; 64];
     loop {
         if inner.stop.load(Ordering::SeqCst) {
-            clear_if_current(&inner, id);
+            clear_if_current(&inner, owner, id);
             return;
         }
-        if !is_current(&inner, id) {
+        if !is_current(&inner, owner, id) {
             abandon_listener(&inner, id);
             return;
         }
@@ -324,7 +335,7 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream) {
         ) {
             Ok(ready) => ready,
             Err(_) => {
-                end_listener(&inner, id);
+                end_listener(&inner, owner, id);
                 return;
             }
         };
@@ -332,10 +343,10 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream) {
             drain_wake(&mut wake);
         }
         if inner.stop.load(Ordering::SeqCst) {
-            clear_if_current(&inner, id);
+            clear_if_current(&inner, owner, id);
             return;
         }
-        if !is_current(&inner, id) {
+        if !is_current(&inner, owner, id) {
             abandon_listener(&inner, id);
             return;
         }
@@ -352,20 +363,243 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream) {
                 Ok(_) => false,
             };
             if peer_gone {
-                end_listener(&inner, id);
+                end_listener(&inner, owner, id);
                 return;
             }
         }
-        if write_ready(&inner, id, &mut stream).is_err() {
-            end_listener(&inner, id);
+        if write_ready(&inner, owner, id, &mut stream).is_err() {
+            end_listener(&inner, owner, id);
             return;
         }
     }
 }
 
-fn register_listener(inner: &Inner, poke_tx: std::os::unix::net::UnixStream) -> u64 {
+/// 进展文字最多留这么多。界面只看尾部，模型用 `output` 也只翻这么长。
+const ATTACH_PROGRESS_CAP: usize = 8 * 1024;
+
+/// 挂接一个不归宿主管的后台任务：后台子智能体。进程是 Pi 起的、靠 stdio 跟 Pi 说话，
+/// 宿主代管不了，只登记。这条连接就是任务的命：
+/// - Pi 发 `progress` 更新进展，发 `finish` 报结果，然后断开；
+/// - 没报结果就断开（Pi 被杀、崩了），记成已停止，不会留下一个永远在跑的假任务；
+/// - 宿主要停它（模型调 `stop`、上级结束、会话关闭）时写一行 `{"op":"stop"}` 转告 Pi，
+///   再等它报结果或断开。
+///
+/// 结果由 Pi 自己作为子智能体消息交回会话，这里不再给界面和模型各发一遍完成通知。
+fn serve_attach(
+    inner: Arc<Inner>,
+    mut stream: std::os::unix::net::UnixStream,
+    request: &serde_json::Value,
+    mut pending: Vec<u8>,
+) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let text_field = |key: &str| {
+        request
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let title = text_field("title").unwrap_or_else(|| "后台子智能体".to_string());
+    let command = text_field("command").unwrap_or_else(|| title.clone());
+    let tool_call_id = text_field("toolCallId");
+    let owner = request_owner(request);
+    let Ok((mut wake, poke_tx)) = wake_pair() else {
+        let _ = write_line(
+            &mut stream,
+            &serde_json::json!({"ok": false, "error": "无法登记后台任务"}).to_string(),
+        );
+        return;
+    };
+    let registered = {
+        let mut state = inner.mu.lock().unwrap();
+        if state
+            .tasks
+            .iter()
+            .filter(|task| is_running(task.status))
+            .count()
+            >= MAX_TASKS
+        {
+            Err(format!(
+                "已经有 {MAX_TASKS} 个后台任务，先停止或等其中一个结束"
+            ))
+        } else {
+            state.tasks.retain(|task| {
+                is_running(task.status) || !task.ui_published || !task.model_delivered
+            });
+            create_task_log(&inner.root).map(|(id, log_path)| {
+                state.tasks.push(LiveTask {
+                    id: id.clone(),
+                    owner,
+                    title,
+                    command,
+                    status: BackgroundTaskStatus::Running,
+                    exit_code: None,
+                    started_at_ms: now_ms(),
+                    finished_at_ms: None,
+                    log_path,
+                    pgid: None,
+                    cancel: None,
+                    watched_by: None,
+                    // 结果由 Pi 交回，宿主不再发状态行，也不再通知模型。
+                    ui_published: true,
+                    model_delivered: true,
+                    delivering_to: None,
+                    deadline: None,
+                    attach_poke: Some(poke_tx),
+                    tool_call_id,
+                });
+                publish_locked(&state, &inner.events);
+                id
+            })
+        }
+    };
+    let id = match registered {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = write_line(
+                &mut stream,
+                &serde_json::json!({"ok": false, "error": error}).to_string(),
+            );
+            return;
+        }
+    };
+    if write_line(
+        &mut stream,
+        &serde_json::json!({"ok": true, "id": id}).to_string(),
+    )
+    .is_err()
+    {
+        settle_attached(&inner, &id, BackgroundTaskStatus::Stopped);
+        return;
+    }
+
+    let mut told_stop = false;
+    let mut buf = [0u8; 4096];
+    let reported = 'serve: loop {
+        while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            let Ok(message) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                continue;
+            };
+            match message.get("op").and_then(serde_json::Value::as_str) {
+                Some("progress") => record_attach_progress(
+                    &inner,
+                    &id,
+                    message
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(""),
+                ),
+                Some("finish") => {
+                    break 'serve Some(attach_status(
+                        message.get("status").and_then(serde_json::Value::as_str),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if inner.stop.load(Ordering::SeqCst) {
+            break None;
+        }
+        if !told_stop && attach_stop_requested(&inner, &id) {
+            if write_line(&mut stream, r#"{"op":"stop"}"#).is_err() {
+                break None;
+            }
+            told_stop = true;
+        }
+        let ready = match poll_wait(
+            &[
+                (stream.as_raw_fd(), libc::POLLIN),
+                (wake.as_raw_fd(), libc::POLLIN),
+            ],
+            None,
+        ) {
+            Ok(ready) => ready,
+            Err(_) => break None,
+        };
+        if ready.get(1) == Some(&true) {
+            drain_wake(&mut wake);
+        }
+        if ready.first() == Some(&true) {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break None,
+                Ok(read) => pending.extend_from_slice(&buf[..read]),
+            }
+        }
+    };
+    settle_attached(
+        &inner,
+        &id,
+        reported.unwrap_or(BackgroundTaskStatus::Stopped),
+    );
+}
+
+/// Pi 报的结果。认不出来的按失败算，不能当成完成。
+fn attach_status(status: Option<&str>) -> BackgroundTaskStatus {
+    match status {
+        Some("completed") => BackgroundTaskStatus::Completed,
+        Some("stopped") => BackgroundTaskStatus::Stopped,
+        _ => BackgroundTaskStatus::Failed,
+    }
+}
+
+fn attach_stop_requested(inner: &Inner, id: &str) -> bool {
+    let state = inner.mu.lock().unwrap();
+    state
+        .tasks
+        .iter()
+        .any(|task| task.id == id && is_running(task.status) && task.cancel.is_some())
+}
+
+/// 进展整段覆盖写进任务日志：界面展开看到的、模型用 `output` 翻到的都是最新这一段。
+fn record_attach_progress(inner: &Inner, id: &str, text: &str) {
+    let log_path = {
+        let state = inner.mu.lock().unwrap();
+        let Some(task) = state.tasks.iter().find(|task| task.id == id) else {
+            return;
+        };
+        task.log_path.clone()
+    };
+    let mut start = text.len().saturating_sub(ATTACH_PROGRESS_CAP);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let _ = fs::write(&log_path, &text[start..]);
+    note_output(inner);
+}
+
+/// 挂接任务结束。宿主先要求过停止的，以停止为准：Pi 被叫停后报的多半是「失败（aborted）」。
+fn settle_attached(inner: &Inner, id: &str, reported: BackgroundTaskStatus) {
+    {
+        let mut state = inner.mu.lock().unwrap();
+        let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) else {
+            return;
+        };
+        if !is_running(task.status) {
+            return;
+        }
+        task.status = task.cancel.unwrap_or(reported);
+        task.finished_at_ms = Some(now_ms());
+        task.attach_poke = None;
+        if !inner.stop.load(Ordering::SeqCst) {
+            publish_locked(&state, &inner.events);
+        }
+        inner.cv.notify_all();
+    }
+    if !inner.stop.load(Ordering::SeqCst) {
+        poke(inner);
+    }
+}
+
+fn register_listener(inner: &Inner, owner: &str, poke_tx: std::os::unix::net::UnixStream) -> u64 {
     let id = inner.next_listener.fetch_add(1, Ordering::Relaxed);
-    let mut slot = inner.listen.lock().unwrap();
+    let mut listens = inner.listen.lock().unwrap();
+    let slot = listens.entry(owner.to_string()).or_insert(CurrentListen {
+        id: None,
+        poke: None,
+    });
     slot.id = Some(id);
     if let Some(old) = slot.poke.replace(poke_tx) {
         poke_stream(&old);
@@ -373,25 +607,29 @@ fn register_listener(inner: &Inner, poke_tx: std::os::unix::net::UnixStream) -> 
     id
 }
 
-fn is_current(inner: &Inner, id: u64) -> bool {
-    inner.listen.lock().unwrap().id == Some(id)
+fn is_current(inner: &Inner, owner: &str, id: u64) -> bool {
+    current_listener(inner, owner) == Some(id)
 }
 
-fn current_listener(inner: &Inner) -> Option<u64> {
-    inner.listen.lock().unwrap().id
+fn current_listener(inner: &Inner, owner: &str) -> Option<u64> {
+    inner
+        .listen
+        .lock()
+        .unwrap()
+        .get(owner)
+        .and_then(|slot| slot.id)
 }
 
-fn clear_if_current(inner: &Inner, id: u64) {
-    let mut slot = inner.listen.lock().unwrap();
-    if slot.id == Some(id) {
-        slot.id = None;
-        slot.poke = None;
+fn clear_if_current(inner: &Inner, owner: &str, id: u64) {
+    let mut listens = inner.listen.lock().unwrap();
+    if listens.get(owner).is_some_and(|slot| slot.id == Some(id)) {
+        listens.remove(owner);
     }
 }
 
 /// 这条连接结束。它名下还被工具看着的任务放开，界面补一行；模型等下一条连接来写。
-fn end_listener(inner: &Inner, id: u64) {
-    clear_if_current(inner, id);
+fn end_listener(inner: &Inner, owner: &str, id: u64) {
+    clear_if_current(inner, owner, id);
     if inner.stop.load(Ordering::SeqCst) {
         return;
     }
@@ -438,13 +676,16 @@ fn dispatch(inner: &Arc<Inner>, request: &serde_json::Value, session_cwd: &str) 
         .get("op")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
+    let owner = request_owner(request);
+    let owner = owner.as_str();
     let body = match op {
-        "start" => start_task(inner, request, session_cwd),
-        "output" => output_task(inner, request),
-        "stop" => stop_task(inner, request),
-        "wait" => wait_tasks(inner, request),
-        "unwatch" => unwatch_task(inner, request),
-        "list" => Ok(reply(list_text(inner), serde_json::json!({}))),
+        "start" => start_task(inner, request, owner, session_cwd),
+        "output" => output_task(inner, request, owner),
+        "stop" => stop_task(inner, request, owner),
+        "wait" => wait_tasks(inner, request, owner),
+        "unwatch" => unwatch_task(inner, request, owner),
+        "list" => Ok(reply(list_text(inner, owner), serde_json::json!({}))),
+        "end_owner" => end_owner(inner, request, owner),
         _ => Err("未知的后台任务操作".to_string()),
     };
     match body {
@@ -464,6 +705,7 @@ fn dispatch(inner: &Arc<Inner>, request: &serde_json::Value, session_cwd: &str) 
 fn start_task(
     inner: &Arc<Inner>,
     request: &serde_json::Value,
+    owner: &str,
     session_cwd: &str,
 ) -> Result<Reply, String> {
     let command = request
@@ -496,7 +738,7 @@ fn start_task(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     // 先记下当前监听，再拿任务锁，避免和写结果的线程互相等待。
-    let watched_by = watch.then(|| current_listener(inner).unwrap_or(UNBOUND_WATCH));
+    let watched_by = watch.then(|| current_listener(inner, owner).unwrap_or(UNBOUND_WATCH));
     let mut state = inner.mu.lock().unwrap();
     if state
         .tasks
@@ -543,6 +785,7 @@ fn start_task(
     record_task_group(&inner.root, pgid);
     state.tasks.push(LiveTask {
         id: id.clone(),
+        owner: owner.to_string(),
         title: title.clone(),
         command,
         status: BackgroundTaskStatus::Running,
@@ -557,6 +800,8 @@ fn start_task(
         model_delivered: false,
         delivering_to: None,
         deadline: timeout.map(|seconds| Instant::now() + Duration::from_secs(seconds)),
+        attach_poke: None,
+        tool_call_id: None,
     });
     publish_locked(&state, &inner.events);
     drop(state);
@@ -602,7 +847,7 @@ fn create_task_log(root: &Path) -> Result<(String, PathBuf), String> {
     Err("无法分配不重复的任务 id".to_string())
 }
 
-fn output_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, String> {
+fn output_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<Reply, String> {
     let id = required_id(request)?;
     let offset = request
         .get("offset")
@@ -617,7 +862,7 @@ fn output_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, Stri
     let task = state
         .tasks
         .iter()
-        .find(|task| task.id == id)
+        .find(|task| task.id == id && task.owner == owner)
         .ok_or_else(|| format!("没有后台任务 {id}"))?;
     let page = read_log_page(&task.log_path, offset, limit)?;
     let ended = !is_running(task.status) && page.end;
@@ -650,13 +895,13 @@ fn output_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, Stri
     ))
 }
 
-fn stop_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, String> {
+fn stop_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<Reply, String> {
     let id = required_id(request)?;
     let mut state = inner.mu.lock().unwrap();
     let task = state
         .tasks
         .iter_mut()
-        .find(|task| task.id == id)
+        .find(|task| task.id == id && task.owner == owner)
         .ok_or_else(|| format!("没有后台任务 {id}"))?;
     if !is_running(task.status) {
         let status = task.status;
@@ -666,7 +911,7 @@ fn stop_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, String
         ));
     }
     task.cancel = Some(BackgroundTaskStatus::Stopped);
-    signal_group(task.pgid, libc::SIGTERM);
+    interrupt_task(task, libc::SIGTERM);
     Ok(reply(
         format!("{id} 正在停止"),
         serde_json::json!({"id": id, "status": "stopped"}),
@@ -675,30 +920,32 @@ fn stop_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, String
 
 /// 不带 `timeoutMs` 时只回报当前状态，不把这次调用挂住。
 /// 进程退出由看管线程标记；带了期限的等待在 `serve_wait_until`。
-fn wait_tasks(inner: &Inner, request: &serde_json::Value) -> Result<Reply, String> {
+fn wait_tasks(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<Reply, String> {
     let ids = request_ids(request)?;
     let state = inner.mu.lock().unwrap();
-    let (_done, reply) = wait_reply(&state, &ids)?;
+    let (_done, reply) = wait_reply(&state, owner, &ids)?;
     drop(state);
     Ok(reply)
 }
 
-fn wait_reply(state: &State, ids: &[String]) -> Result<(bool, Reply), String> {
-    for id in ids {
-        if !state.tasks.iter().any(|task| task.id == *id) {
-            return Err(format!("没有后台任务 {id}"));
-        }
-    }
-    let done = ids.iter().all(|id| {
+fn wait_reply(state: &State, owner: &str, ids: &[String]) -> Result<(bool, Reply), String> {
+    let find = |id: &String| {
         state
             .tasks
             .iter()
-            .find(|task| task.id == *id)
-            .is_some_and(|task| !is_running(task.status))
-    });
+            .find(|task| task.id == *id && task.owner == owner)
+    };
+    for id in ids {
+        if find(id).is_none() {
+            return Err(format!("没有后台任务 {id}"));
+        }
+    }
+    let done = ids
+        .iter()
+        .all(|id| find(id).is_some_and(|task| !is_running(task.status)));
     let mut lines = Vec::new();
     for id in ids {
-        let Some(task) = state.tasks.iter().find(|task| task.id == *id) else {
+        let Some(task) = find(id) else {
             continue;
         };
         let code = task
@@ -709,7 +956,7 @@ fn wait_reply(state: &State, ids: &[String]) -> Result<(bool, Reply), String> {
     }
     let tasks = serde_json::Value::Array(
         ids.iter()
-            .filter_map(|id| state.tasks.iter().find(|task| task.id == *id))
+            .filter_map(find)
             .map(|task| {
                 serde_json::json!({
                     "id": task.id,
@@ -725,7 +972,7 @@ fn wait_reply(state: &State, ids: &[String]) -> Result<(bool, Reply), String> {
     ))
 }
 
-fn unwatch_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, String> {
+fn unwatch_task(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<Reply, String> {
     let id = required_id(request)?;
     let consumed = request
         .get("consumed")
@@ -736,7 +983,7 @@ fn unwatch_task(inner: &Inner, request: &serde_json::Value) -> Result<Reply, Str
         let task = state
             .tasks
             .iter_mut()
-            .find(|task| task.id == id)
+            .find(|task| task.id == id && task.owner == owner)
             .ok_or_else(|| format!("没有后台任务 {id}"))?;
         task.watched_by = None;
         if consumed {
@@ -769,14 +1016,18 @@ fn status_name(status: BackgroundTaskStatus) -> &'static str {
     }
 }
 
-fn list_text(inner: &Inner) -> String {
+fn list_text(inner: &Inner, owner: &str) -> String {
     let state = inner.mu.lock().unwrap();
-    if state.tasks.is_empty() {
-        return "没有后台任务".to_string();
-    }
-    state
+    let tasks: Vec<_> = state
         .tasks
         .iter()
+        .filter(|task| task.owner == owner)
+        .collect();
+    if tasks.is_empty() {
+        return "没有后台任务".to_string();
+    }
+    tasks
+        .into_iter()
         .map(|task| format!("{} {} {}", task.id, task.status.label(), task.title))
         .collect::<Vec<_>>()
         .join("\n")
@@ -1127,6 +1378,8 @@ fn serve_wait_until(
         return;
     };
     let deadline = Instant::now() + timeout;
+    let owner = request_owner(request);
+    let owner = owner.as_str();
     let ids = match request_ids(request) {
         Ok(ids) => ids,
         Err(error) => {
@@ -1148,7 +1401,7 @@ fn serve_wait_until(
         }
         let snapshot = {
             let state = inner.mu.lock().unwrap();
-            wait_reply(&state, &ids)
+            wait_reply(&state, owner, &ids)
         };
         match snapshot {
             Err(error) => break Some(Err(error)),
@@ -1159,7 +1412,7 @@ fn serve_wait_until(
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             let state = inner.mu.lock().unwrap();
-            break Some(wait_reply(&state, &ids).map(|(_done, body)| body));
+            break Some(wait_reply(&state, owner, &ids).map(|(_done, body)| body));
         }
         let ready = match poll_wait(
             &[
@@ -1216,6 +1469,10 @@ fn take_ui(task: &mut LiveTask) -> Option<UiNotice> {
         return None;
     }
     task.ui_published = true;
+    // 子智能体的任务是它自己的中间过程，会话界面不画；它的结果由子智能体交回。
+    if !task.owner.is_empty() {
+        return None;
+    }
     let output = log_tail_limited(&task.log_path, MODEL_TAIL);
     Some(UiNotice {
         id: task.id.clone(),
@@ -1253,21 +1510,23 @@ fn publish_ui(inner: &Inner, notice: &UiNotice) {
 /// 把还没写进套接字的结束结果写给这条监听。写成功才记成模型已收到。
 fn write_ready(
     inner: &Inner,
+    owner: &str,
     listener_id: u64,
     stream: &mut std::os::unix::net::UnixStream,
 ) -> std::io::Result<()> {
     loop {
-        if !is_current(inner, listener_id) {
+        if !is_current(inner, owner, listener_id) {
             return Ok(());
         }
         let notice = {
             let mut state = inner.mu.lock().unwrap();
-            claim_model(&mut state, listener_id)
+            claim_model(&mut state, owner, listener_id)
         };
         let Some(notice) = notice else {
             return Ok(());
         };
-        if !is_current(inner, listener_id) || !still_claimed(inner, &notice.id, listener_id) {
+        if !is_current(inner, owner, listener_id) || !still_claimed(inner, &notice.id, listener_id)
+        {
             unclaim(inner, &notice.id, listener_id);
             return Ok(());
         }
@@ -1285,9 +1544,13 @@ fn write_ready(
     }
 }
 
-fn claim_model(state: &mut State, listener_id: u64) -> Option<ModelNotice> {
+fn claim_model(state: &mut State, owner: &str, listener_id: u64) -> Option<ModelNotice> {
     for task in &mut state.tasks {
-        if task.watched_by.is_some() || is_running(task.status) || task.model_delivered {
+        if task.owner != owner
+            || task.watched_by.is_some()
+            || is_running(task.status)
+            || task.model_delivered
+        {
             continue;
         }
         if task
@@ -1361,6 +1624,7 @@ fn publish_locked(state: &State, events: &smol::channel::Sender<ConversationEven
     let views = state
         .tasks
         .iter()
+        .filter(|task| task.owner.is_empty())
         .map(|task| BackgroundTaskView {
             id: task.id.clone(),
             title: task.title.clone(),
@@ -1370,6 +1634,7 @@ fn publish_locked(state: &State, events: &smol::channel::Sender<ConversationEven
             output: log_tail(&task.log_path),
             started_at_ms: task.started_at_ms,
             finished_at_ms: task.finished_at_ms,
+            tool_call_id: task.tool_call_id.clone(),
         })
         .collect();
     let _ = events.try_send(ConversationEvent::BackgroundTasks(views));
@@ -1391,8 +1656,10 @@ fn poke_stream(stream: &std::os::unix::net::UnixStream) {
 }
 
 fn poke(inner: &Inner) {
-    if let Some(stream) = inner.listen.lock().unwrap().poke.as_ref() {
-        poke_stream(stream);
+    for slot in inner.listen.lock().unwrap().values() {
+        if let Some(stream) = slot.poke.as_ref() {
+            poke_stream(stream);
+        }
     }
     let pokes = inner.pokes.lock().unwrap();
     if let Some(stream) = pokes.accept.as_ref() {
@@ -1562,6 +1829,15 @@ fn group_record_matches(path: &Path, pgid: i32) -> bool {
     elapsed.as_secs() == secs && elapsed.subsec_nanos() == nanos
 }
 
+/// 叫一个任务停下。宿主自己起的命令给整个进程组发信号；挂接任务叫醒它的看管线程，
+/// 由那条线程转告 Pi。
+fn interrupt_task(task: &LiveTask, signal: i32) {
+    signal_group(task.pgid, signal);
+    if let Some(poke) = task.attach_poke.as_ref() {
+        poke_stream(poke);
+    }
+}
+
 fn signal_group(pgid: Option<i32>, signal: i32) {
     let Some(pgid) = pgid.filter(|pgid| *pgid > 0) else {
         return;
@@ -1646,6 +1922,69 @@ fn display_tail(text: &str) -> String {
 
 fn log_len(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+/// 请求方的归属。没带就是会话本身。
+fn request_owner(request: &serde_json::Value) -> String {
+    request
+        .get("owner")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `target` 是不是 `owner` 自己或它的后代（子智能体的子智能体）。
+fn owns(owner: &str, target: &str) -> bool {
+    owner.is_empty() || target == owner || target.starts_with(&format!("{owner}/"))
+}
+
+/// 某个子智能体结束了：停掉它和它后代名下还在跑的任务，结果谁也不再送，监听一并撤掉。
+/// 只能由它的上级（或会话本身）发起，不能结束兄弟或上级的任务。
+fn end_owner(inner: &Inner, request: &serde_json::Value, owner: &str) -> Result<Reply, String> {
+    let target = request
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| "缺少 target".to_string())?
+        .to_string();
+    if target == owner || !owns(owner, &target) {
+        return Err(format!("不能结束 {target} 的后台任务"));
+    }
+    let mut stopped = 0;
+    {
+        let mut state = inner.mu.lock().unwrap();
+        for task in &mut state.tasks {
+            if !owns(&target, &task.owner) {
+                continue;
+            }
+            task.watched_by = None;
+            task.ui_published = true;
+            task.model_delivered = true;
+            task.delivering_to = None;
+            if is_running(task.status) && task.cancel.is_none() {
+                task.cancel = Some(BackgroundTaskStatus::Stopped);
+                interrupt_task(task, libc::SIGTERM);
+                stopped += 1;
+            }
+        }
+        inner.cv.notify_all();
+    }
+    {
+        let mut listens = inner.listen.lock().unwrap();
+        listens.retain(|listen_owner, slot| {
+            let ended = owns(&target, listen_owner);
+            if ended && let Some(stream) = slot.poke.as_ref() {
+                poke_stream(stream);
+            }
+            !ended
+        });
+    }
+    Ok(reply(
+        format!("{target} 已结束，停止了 {stopped} 个后台任务"),
+        serde_json::json!({"target": target, "stopped": stopped}),
+    ))
 }
 
 fn is_running(status: BackgroundTaskStatus) -> bool {
@@ -1759,6 +2098,11 @@ mod tests {
 
     impl Listen {
         fn connect(path: &Path) -> Self {
+            Self::connect_as(path, "")
+        }
+
+        /// 以某个归属连上监听。空串是会话本身。
+        fn connect_as(path: &Path, owner: &str) -> Self {
             let stream = UnixStream::connect(path).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1769,7 +2113,9 @@ mod tests {
             let mut reader = std::io::BufReader::new(stream);
             reader
                 .get_mut()
-                .write_all(b"{\"op\":\"listen\"}\n")
+                .write_all(
+                    format!("{}\n", serde_json::json!({"op": "listen", "owner": owner})).as_bytes(),
+                )
                 .unwrap();
             let mut line = String::new();
             std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
@@ -1836,9 +2182,16 @@ mod tests {
     }
 
     fn until_settled(path: &Path, id: &str) -> serde_json::Value {
+        until_settled_as(path, "", id)
+    }
+
+    fn until_settled_as(path: &Path, owner: &str, id: &str) -> serde_json::Value {
         let started = Instant::now();
         loop {
-            let snapshot = call(path, serde_json::json!({"op": "wait", "id": id}));
+            let snapshot = call(
+                path,
+                serde_json::json!({"op": "wait", "id": id, "owner": owner}),
+            );
             let status = snapshot["tasks"][0]["status"].as_str().unwrap_or("");
             if status != "running" || started.elapsed() > Duration::from_secs(5) {
                 return snapshot;
@@ -1856,6 +2209,110 @@ mod tests {
         let mut line = String::new();
         std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut line).unwrap();
         serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// 子智能体是另一个 Pi 进程，连的是同一个会话宿主。它的监听不能把会话的监听挤掉，
+    /// 它的任务结果只送给它自己，会话界面和会话模型都看不到。
+    #[test]
+    fn subagent_tasks_stay_with_the_subagent() {
+        let (supervisor, _events, outbound) = supervisor_with_outbound();
+        let path = supervisor.socket_path().to_path_buf();
+        let mut session = Listen::connect(&path);
+        let mut child = Listen::connect_as(&path, "/sub-a");
+
+        let started = call(
+            &path,
+            serde_json::json!({"op": "start", "command": "printf child", "title": "子任务", "owner": "/sub-a"}),
+        );
+        let child_task = started["id"].as_str().unwrap().to_string();
+        until_settled_as(&path, "/sub-a", &child_task);
+        let notice = child.next();
+        assert_eq!(notice["id"], child_task.as_str());
+        assert_eq!(notice["output"], "child");
+
+        let mine = call(
+            &path,
+            serde_json::json!({"op": "start", "command": "printf session", "title": "会话任务"}),
+        );
+        let session_task = mine["id"].as_str().unwrap().to_string();
+        until_settled(&path, &session_task);
+        let notice = session.next();
+        assert_eq!(
+            notice["id"],
+            session_task.as_str(),
+            "子智能体连上监听后，会话自己的结果仍要送到会话"
+        );
+        assert!(session.try_next(Duration::from_millis(200)).is_none());
+
+        let ui: Vec<_> =
+            std::iter::from_fn(|| recv_outbound(&outbound, Duration::from_millis(200))).collect();
+        assert!(
+            ui.iter().all(|line| line["id"] != child_task.as_str()),
+            "子智能体的任务不画在会话界面上: {ui:?}"
+        );
+
+        let listed = call(&path, serde_json::json!({"op": "list"}));
+        assert!(!listed["text"].as_str().unwrap().contains(&child_task));
+        let peek = call(
+            &path,
+            serde_json::json!({"op": "output", "id": child_task, "offset": 0}),
+        );
+        assert_eq!(peek["ok"], false, "会话碰不到子智能体的任务");
+    }
+
+    /// 子智能体结束时由上级收尾：它和它后代的任务一起停掉，不再送任何结果；
+    /// 不能越级结束兄弟或会话自己。
+    #[test]
+    fn ending_a_subagent_stops_its_tasks_and_only_its_tasks() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let start = |owner: &str| {
+            call(
+                &path,
+                serde_json::json!({"op": "start", "command": "sleep 30", "title": "等待", "owner": owner}),
+            )["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let child = start("/sub-a");
+        let grandchild = start("/sub-a/sub-b");
+        let sibling = start("/sub-c");
+
+        let refused = call(
+            &path,
+            serde_json::json!({"op": "end_owner", "owner": "/sub-c", "target": "/sub-a"}),
+        );
+        assert_eq!(refused["ok"], false);
+        let refused = call(
+            &path,
+            serde_json::json!({"op": "end_owner", "owner": "", "target": ""}),
+        );
+        assert_eq!(refused["ok"], false);
+
+        let ended = call(
+            &path,
+            serde_json::json!({"op": "end_owner", "owner": "", "target": "/sub-a"}),
+        );
+        assert_eq!(ended["ok"], true, "{ended}");
+        assert_eq!(ended["stopped"], 2);
+        assert_eq!(
+            until_settled_as(&path, "/sub-a", &child)["tasks"][0]["status"],
+            "stopped"
+        );
+        assert_eq!(
+            until_settled_as(&path, "/sub-a/sub-b", &grandchild)["tasks"][0]["status"],
+            "stopped"
+        );
+        let still = call(
+            &path,
+            serde_json::json!({"op": "wait", "id": sibling, "owner": "/sub-c"}),
+        );
+        assert_eq!(still["tasks"][0]["status"], "running");
+        call(
+            &path,
+            serde_json::json!({"op": "stop", "id": sibling, "owner": "/sub-c"}),
+        );
     }
 
     #[test]
@@ -2374,5 +2831,130 @@ mod tests {
             got.push(completion["id"].as_str().unwrap().to_string());
         }
         assert_eq!(got, ids, "没写成功的结果不能因为条数被丢掉");
+    }
+
+    /// 以挂接方式登记一个后台子智能体，返回连接和宿主分的任务 id。
+    fn attach(path: &Path, tool_call_id: &str) -> (std::io::BufReader<UnixStream>, String) {
+        let stream = UnixStream::connect(path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        reader
+            .get_mut()
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "op": "attach",
+                        "title": "8 个并行任务",
+                        "command": "审计单测 · 审计集成测试",
+                        "toolCallId": tool_call_id,
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
+        let ack: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(ack["ok"], true, "{ack}");
+        let id = ack["id"].as_str().unwrap().to_string();
+        (reader, id)
+    }
+
+    fn send_line(reader: &mut std::io::BufReader<UnixStream>, value: serde_json::Value) {
+        reader
+            .get_mut()
+            .write_all(format!("{value}\n").as_bytes())
+            .unwrap();
+    }
+
+    /// 后台子智能体的进程不归宿主管，但要和后台命令一样出现在会话的任务列表里：
+    /// 带着派它出去的那次工具调用，进展能翻到，报完结果就结束，宿主不再另发完成通知。
+    #[test]
+    fn an_attached_subagent_is_listed_until_it_reports_and_stays_silent() {
+        let (supervisor, events, outbound) = supervisor_with_outbound();
+        let path = supervisor.socket_path().to_path_buf();
+        let mut session = Listen::connect(&path);
+        let (mut conn, id) = attach(&path, "call-7");
+
+        let published =
+            std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+                ConversationEvent::BackgroundTasks(tasks) => {
+                    tasks.into_iter().find(|task| task.id == id)
+                }
+                _ => None,
+            });
+        let published = published.expect("挂接后要推给界面");
+        assert_eq!(published.status, BackgroundTaskStatus::Running);
+        assert_eq!(published.tool_call_id.as_deref(), Some("call-7"));
+        let listed = call(&path, serde_json::json!({"op": "list"}));
+        assert!(listed["text"].as_str().unwrap().contains(&id), "{listed}");
+
+        send_line(
+            &mut conn,
+            serde_json::json!({"op": "progress", "text": "2/8 完成"}),
+        );
+        let started = Instant::now();
+        let progress = loop {
+            let peek = call(
+                &path,
+                serde_json::json!({"op": "output", "id": id, "offset": 0}),
+            );
+            let text = peek["output"].as_str().unwrap_or("").to_string();
+            if text.contains("2/8") || started.elapsed() > Duration::from_secs(5) {
+                break text;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(progress, "2/8 完成");
+
+        send_line(
+            &mut conn,
+            serde_json::json!({"op": "finish", "status": "completed"}),
+        );
+        assert_eq!(until_settled(&path, &id)["tasks"][0]["status"], "completed");
+        assert!(
+            session.try_next(Duration::from_millis(200)).is_none(),
+            "结果由子智能体自己交回，宿主不能再通知模型一遍"
+        );
+        let ui: Vec<_> =
+            std::iter::from_fn(|| recv_outbound(&outbound, Duration::from_millis(200))).collect();
+        assert!(
+            ui.iter().all(|line| line["id"] != id.as_str()),
+            "也不能再画一条状态行: {ui:?}"
+        );
+    }
+
+    /// Pi 被杀或崩掉时连接断开，任务必须跟着结束，不能留一个永远在跑的假任务。
+    #[test]
+    fn a_dropped_attachment_ends_the_task() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let (conn, id) = attach(&path, "call-8");
+        drop(conn);
+        assert_eq!(until_settled(&path, &id)["tasks"][0]["status"], "stopped");
+    }
+
+    /// 模型或上级要停它时，宿主转告 Pi；Pi 被叫停后报的失败按停止记。
+    #[test]
+    fn stopping_an_attached_task_asks_the_caller_to_stop() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let (mut conn, id) = attach(&path, "call-9");
+
+        let stopped = call(&path, serde_json::json!({"op": "stop", "id": id}));
+        assert_eq!(stopped["ok"], true, "{stopped}");
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut conn, &mut line).unwrap();
+        let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(request["op"], "stop");
+
+        send_line(
+            &mut conn,
+            serde_json::json!({"op": "finish", "status": "failed"}),
+        );
+        assert_eq!(until_settled(&path, &id)["tasks"][0]["status"], "stopped");
     }
 }

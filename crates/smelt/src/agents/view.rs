@@ -114,7 +114,7 @@ impl Workspace {
             && (route != WorkspaceRoute::Agents || self.nav.agents().conversation_sid().is_none());
         div()
             .id(id)
-            .h(px(32.))
+            .h(crate::ui_theme::height::md())
             .px_2()
             .flex()
             .items_center()
@@ -220,7 +220,7 @@ impl Workspace {
         let click_entity = entity.clone();
         div()
             .id("workbench-chat")
-            .h(px(32.))
+            .h(crate::ui_theme::height::md())
             .px_2()
             .flex()
             .items_center()
@@ -276,14 +276,14 @@ impl Workspace {
     ) -> AnyElement {
         div()
             .id("workbench-chat")
-            .h(px(32.))
+            .h(crate::ui_theme::height::md())
             .rounded(crate::ui_theme::row_radius())
             .cursor_pointer()
             .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
             .child(
                 Button::new("workbench-chat-pick")
                     .custom(ButtonCustomVariant::new(cx))
-                    .h(px(32.))
+                    .h(crate::ui_theme::height::md())
                     .w_full()
                     .px_2()
                     .cursor_pointer()
@@ -364,7 +364,7 @@ impl Workspace {
                 div()
                     .id(format!("product-conversation-{sid}"))
                     .group("product-conv-row")
-                    .h(px(32.))
+                    .h(crate::ui_theme::height::md())
                     .px_2()
                     .flex()
                     .items_center()
@@ -485,7 +485,7 @@ impl Workspace {
                     section.child(
                         div()
                             .px_2()
-                            .h(px(28.))
+                            .h(crate::ui_theme::height::sm())
                             .flex()
                             .items_center()
                             .text_xs()

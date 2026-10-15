@@ -10,8 +10,16 @@ import type {
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 } from "@earendil-works/pi-coding-agent";
+import {
+  SMELT_BACKGROUND_TASK_OWNER_ENV,
+  SMELT_BACKGROUND_TASK_STOP_TOOL_NAME,
+  attachBackgroundTask,
+  backgroundTaskOwner,
+  endBackgroundTaskOwner,
+} from "../background-task.ts";
 import { getConsumedPluginArgs } from "../plugin-args.ts";
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentCatalog } from "./agents.ts";
+import { subagentResultMessage } from "./result.ts";
 import { bridgeSubagentUiRequest } from "./ui-bridge.ts";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -94,6 +102,29 @@ function failed(result: AgentResult): boolean {
 function cap(text: string): string {
   if (text.length <= OUTPUT_CAP) return text;
   return `${text.slice(0, OUTPUT_CAP)}\n\n[truncated ${text.length - OUTPUT_CAP} chars]`;
+}
+
+/**
+ * 子智能体在会话宿主里的归属：父归属下的一个新分支。子进程照样用宿主跑命令（长命令也能
+ * 转后台），但它的任务和完成通知都归它自己，不进父会话。
+ */
+export function childTaskOwner(parentOwner: string, runId: string): string {
+  return `${parentOwner}/${runId}`;
+}
+
+/** 后台任务列表里那一行写的「在做什么」：并行时列出各任务的名字，单个时就是任务本身。 */
+export function backgroundSubagentCommand(params: {
+  task?: string;
+  tasks?: ReadonlyArray<{ task: string; label?: string; agent?: string }>;
+}): string {
+  if (params.tasks?.length) {
+    return params.tasks.map((task) => task.label || task.agent || task.task).join(" · ");
+  }
+  return params.task ?? "子智能体";
+}
+
+export function subagentEnvironment(environment: NodeJS.ProcessEnv, owner: string): NodeJS.ProcessEnv {
+  return { ...environment, [SMELT_BACKGROUND_TASK_OWNER_ENV]: owner };
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -223,6 +254,7 @@ async function runAgent(options: {
 
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
   const emit = () => options.onUpdate?.({ ...current, messages: [...current.messages] });
+  const taskOwner = childTaskOwner(backgroundTaskOwner(), `sub-${crypto.randomUUID().slice(0, 8)}`);
 
   try {
     if (agent.systemPrompt) {
@@ -235,6 +267,7 @@ async function runAgent(options: {
       const invocation = getPiInvocation(args);
       const proc = spawn(invocation.command, invocation.args, {
         cwd: options.cwd,
+        env: subagentEnvironment(process.env, taskOwner),
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -427,6 +460,8 @@ async function runAgent(options: {
     if (!current.output) current.output = current.errorMessage || current.stderr.trim();
     return current;
   } finally {
+    // 子进程不管怎么结束（完成、出错、被取消、被杀），它在宿主里留下的任务都要收掉。
+    await endBackgroundTaskOwner(taskOwner).catch(() => undefined);
     await fs.promises.rm(tmpDir, { recursive: true, force: true });
   }
 }
@@ -501,7 +536,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
       ),
     }),
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = params.agentScope ?? "user";
       const discovery = discoverAgents(ctx.cwd, agentScope);
       const catalog = formatAgentCatalog(discovery.agents);
@@ -526,6 +561,14 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
         return fail(
           "single",
           `Provide exactly one of task, tasks, or chain. Named presets are optional.\nAvailable presets: ${catalog}`,
+        );
+      }
+
+      // 转后台之前就拒绝。以前先回「已在后台启动」、过一阵才报超限，模型白等一轮才知道要分批。
+      if (params.tasks && params.tasks.length > MAX_PARALLEL_TASKS) {
+        return fail(
+          "parallel",
+          `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}; split them into batches of at most ${MAX_PARALLEL_TASKS}.`,
         );
       }
 
@@ -558,7 +601,8 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
           onUpdate: onResult,
         });
 
-      const finish = async () => {
+      // 进度交给谁：前台就是这次工具调用；转后台后工具已经返回，改交给宿主里的那条后台任务。
+      const finish = async (report: typeof onUpdate = onUpdate) => {
       if (params.chain?.length) {
         const results: AgentResult[] = [];
         let previous = "";
@@ -568,7 +612,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
             { ...step, task: step.task.replaceAll("{previous}", previous) },
             i + 1,
             (partial) => {
-              onUpdate?.({
+              report?.({
                 content: [{ type: "text", text: partial.output || `(running ${partial.agent}...)` }],
                 details: details("chain", [...results, partial]),
               });
@@ -591,9 +635,6 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
       }
 
       if (params.tasks?.length) {
-        if (params.tasks.length > MAX_PARALLEL_TASKS) {
-          return fail("parallel", `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`);
-        }
         const results: AgentResult[] = params.tasks.map((task) => ({
           agent: task.label || task.agent || "ad-hoc",
           agentSource: task.agent ? "unknown" : "inline",
@@ -607,7 +648,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
         const emit = () => {
           const running = results.filter((result) => result.exitCode === -1).length;
           const done = results.length - running;
-          onUpdate?.({
+          report?.({
             content: [{ type: "text", text: `Parallel: ${done}/${results.length} done, ${running} running...` }],
             details: details("parallel", [...results]),
           });
@@ -649,7 +690,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
         },
         undefined,
         (partial) => {
-          onUpdate?.({
+          report?.({
             content: [{ type: "text", text: partial.output || `(running ${partial.agent}...)` }],
             details: details("single", [partial]),
           });
@@ -668,21 +709,41 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
         const controller = new AbortController();
         backgroundRuns.add(controller);
         activeSignal = controller.signal;
-        const id = `sub-${++subagentSeq}`;
-        void finish()
+        const title = hasTasks ? `${params.tasks!.length} 个并行任务` : (params.label ?? "");
+        // 登记进宿主的后台任务：界面看得到它还在跑，模型能 list / stop 它，Pi 没了它也跟着结束。
+        // 宿主分的任务 id 就是这个子智能体的 id：启动回复、结果消息、background_task 工具都认这一个。
+        const hostTask = await attachBackgroundTask(
+          { title: title || "后台子智能体", command: backgroundSubagentCommand(params), toolCallId },
+          () => controller.abort(),
+        );
+        // 不在 Smelt 里（没有宿主）时退回本进程内的编号，照常能跑、能交回结果。
+        const id = hostTask?.id ?? `sub-${++subagentSeq}`;
+        const report: typeof onUpdate = hostTask
+          ? (partial) => hostTask.progress(partial.content.map((part) => ("text" in part ? part.text : "")).join("\n"))
+          : undefined;
+        void finish(report)
           .then((result) => {
             const text = result.content.map((part) => ("text" in part ? part.text : "")).join("\n");
+            const resultFailed = "isError" in result && result.isError === true;
+            hostTask?.finish(controller.signal.aborted ? "stopped" : resultFailed ? "failed" : "completed");
             try {
-              pi.sendUserMessage(`子智能体 ${id} 已结束。\n${cap(text)}`, { deliverAs: "followUp" });
+              // 自定义消息而不是用户消息：界面画成状态行，模型也知道这是结果不是新要求。
+              void pi.sendMessage(
+                subagentResultMessage({ id, title, failed: resultFailed, text: cap(text) }),
+                { triggerTurn: true, deliverAs: "followUp" },
+              );
             } catch {
               // 会话还不能收消息时，子进程的结果留在它自己的记录里。
             }
           })
           .finally(() => {
+            // 上面没走到（`finish` 抛错）时也要收掉，不然列表里留一个在跑的任务直到连接断开。
+            hostTask?.finish("failed");
             backgroundRuns.delete(controller);
           });
+        const stopHint = hostTask ? `要提前停掉，用 ${SMELT_BACKGROUND_TASK_STOP_TOOL_NAME} 停 ${id}。` : "";
         return {
-          content: [{ type: "text" as const, text: `已在后台启动子智能体 ${id}。这一轮可以继续，结束后会把结果发回。` }],
+          content: [{ type: "text" as const, text: `已在后台启动子智能体 ${id}。这一轮可以继续，结束后会把结果发回。${stopHint}` }],
           details: details(hasTasks ? "parallel" : "single", []),
         };
       }

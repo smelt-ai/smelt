@@ -6,7 +6,7 @@ use smelt_core::daemon_state::DaemonPhase;
 impl AcpView {
     pub(super) fn render_composer(
         &self,
-        focused: bool,
+        composer_focus: f32,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         if matches!(
@@ -364,7 +364,7 @@ impl AcpView {
                     .into_any_element()
             } else {
                 div()
-                    .h(px(24.))
+                    .h(ui_theme::height::xs())
                     .px_2()
                     .rounded_full()
                     .flex()
@@ -416,11 +416,11 @@ impl AcpView {
                     )
                     .into_any_element()
             });
-            let composer_border = if focused {
-                ui_theme::tint(ui_theme::accent(), 0x66)
-            } else {
-                ui_theme::overlay(0x22)
-            };
+            let composer_border = mix_rgba(
+                ui_theme::overlay(0x22),
+                ui_theme::tint(ui_theme::accent(), 0x66),
+                composer_focus,
+            );
             let composer = v_flex()
                 .w_full()
                 .max_w(ui_theme::conversation_max_width())
@@ -428,7 +428,10 @@ impl AcpView {
                 .border_1()
                 .border_color(composer_border)
                 .bg(ui_theme::glass_input())
-                .shadow_sm()
+                .shadow(composer_shadows(
+                    composer_focus,
+                    gpui::rgb(ui_theme::accent()),
+                ))
                 .child(
                     div()
                         .id("acp-composer-input")
@@ -700,9 +703,9 @@ impl AcpView {
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
                     for (ix, im) in self.pending_images.iter().enumerate() {
-                        if smelt_ui::image::cached(im).is_none()
-                            && im.format != gpui::ImageFormat::Svg
-                        {
+                        let awaiting_decode = smelt_ui::image::cached(im).is_none()
+                            && im.format != gpui::ImageFormat::Svg;
+                        if awaiting_decode {
                             let fetch_image = im.clone();
                             cx.spawn(async move |this, cx| {
                                 smelt_ui::image::fetch_async(
@@ -714,6 +717,33 @@ impl AcpView {
                             })
                             .detach();
                         }
+                        // 地址而不是下标：删掉前面一张时，后面的缩略图不会重播挤入。
+                        let image_key = std::sync::Arc::as_ptr(im) as usize;
+                        let enter = self.pending_image_enter.get(&image_key).map(|started| {
+                            let t = (started.elapsed().as_secs_f32() / (ENTER_MS as f32 / 1000.0))
+                                .clamp(0.0, 1.0);
+                            ease_snap(t)
+                        });
+                        let thumb = if awaiting_decode {
+                            let image = im.clone();
+                            ambient_animation(
+                                ("acp-pending-img-pulse", image_key),
+                                std::time::Duration::from_millis(700),
+                                true,
+                                move |delta| {
+                                    let opacity = 1.0 - 0.4 * (delta * std::f32::consts::PI).sin();
+                                    div().opacity(opacity).child(smelt_ui::image::thumb_element(
+                                        &image,
+                                        px(56.),
+                                        px(96.),
+                                        8.0,
+                                    ))
+                                },
+                            )
+                            .into_any_element()
+                        } else {
+                            smelt_ui::image::thumb_element(im, px(56.), px(96.), 8.0)
+                        };
                         let preview_image = im.clone();
                         strip = strip.child(
                             div()
@@ -725,16 +755,14 @@ impl AcpView {
                                 .border_color(t.border)
                                 .rounded_md()
                                 .overflow_hidden()
+                                .when_some(enter, |card, factor| {
+                                    card.max_w(px(96. * factor.max(0.15))).opacity(factor)
+                                })
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                                     let _ = this;
                                     cx.emit(AcpViewEvent::PreviewImage(preview_image.clone()));
                                 }))
-                                .child(smelt_ui::image::thumb_element(
-                                    im,
-                                    px(56.),
-                                    px(96.),
-                                    8.0,
-                                ))
+                                .child(thumb)
                                 .child(
                                     // 右上角小 ×：点掉这张。
                                     div()
@@ -923,6 +951,7 @@ impl AcpView {
                                     .justify_center()
                                     .cursor_pointer()
                                     .hover(|d| d.opacity(0.85))
+                                    .active(|d| d.opacity(PRESS_OPACITY))
                                     .tooltip(move |window, cx| {
                                         gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                                     })
@@ -957,6 +986,8 @@ impl AcpView {
                                             .text_color(gpui::rgb(ui_theme::action_on()))
                                             .cursor_pointer()
                                             .hover(|d| d.opacity(0.88))
+                                            // Div 没有 scale，按下用透明度代替缩到 0.96。
+                                            .active(|d| d.opacity(PRESS_OPACITY))
                                     })
                                     .when(!can_send, |d| {
                                         d.bg(ui_theme::overlay(0x18))
@@ -1077,7 +1108,7 @@ impl AcpView {
                 h_flex()
                     .id(("acp-usage-row", i))
                     .w_full()
-                    .h(px(32.))
+                    .h(ui_theme::height::md())
                     .px_2()
                     .gap_2()
                     .items_center()
@@ -1133,7 +1164,7 @@ impl AcpView {
                 h_flex().w_full().justify_end().child(
                     div()
                         .id("acp-usage-compact")
-                        .h(px(28.))
+                        .h(ui_theme::height::sm())
                         .px_3()
                         .rounded(ui_theme::row_radius())
                         .flex()
@@ -1178,7 +1209,7 @@ impl AcpView {
             h_flex()
                 .id("acp-background-tasks")
                 .flex_shrink_0()
-                .h(px(22.))
+                .h(ui_theme::height::xxs())
                 .px_2()
                 .gap_1p5()
                 .items_center()

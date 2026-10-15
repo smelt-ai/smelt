@@ -11,6 +11,7 @@ import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-cod
 import smeltSubagentExtension, {
 	SMELT_SUBAGENT_EXTENSION_PATH,
 	SMELT_SUBAGENT_TOOL_NAME,
+	backgroundSubagentCommand,
 	subagentShouldBackground,
 } from "../src/subagent/index.ts";
 
@@ -77,6 +78,30 @@ describe("Smelt Pi subagent extension", () => {
 		expect(tools).toHaveLength(1);
 		expect(tools[0]?.sourceInfo.path).toBe("<user:0>");
 		expect(tools[0]?.definition.description).toBe("user-owned subagent implementation");
+	});
+
+	test("describes a background subagent by what it is doing", () => {
+		expect(
+			backgroundSubagentCommand({ tasks: [{ task: "看 a.rs", label: "审计 a" }, { task: "看 b.rs", agent: "reviewer" }] }),
+		).toBe("审计 a · reviewer");
+		expect(backgroundSubagentCommand({ task: "迁移数据库" })).toBe("迁移数据库");
+	});
+
+	test("rejects too many parallel tasks before going to the background", async () => {
+		const runner = await loadSubagentExtensions();
+		const tool = runner.getAllRegisteredTools().find((candidate) => candidate.definition.name === "subagent");
+		const tasks = Array.from({ length: 11 }, (_, index) => ({ task: `audit ${index}` }));
+		const result = (await tool!.definition.execute(
+			"call-1",
+			{ tasks } as never,
+			undefined,
+			undefined,
+			{ cwd: process.cwd(), hasUI: false } as never,
+		)) as { content: Array<{ text: string }>; isError?: boolean };
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0]?.text).toContain("Too many parallel tasks (11)");
+		expect(result.content[0]?.text).not.toContain("已在后台启动");
 	});
 
 	test("runs single and parallel subagents in the background unless asked to wait", () => {

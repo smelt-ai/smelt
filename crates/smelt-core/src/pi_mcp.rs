@@ -96,6 +96,24 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         exposure: None,
         timeout_secs: Some(120),
     },
+    // Agent360 Browser MCP（github.com/Agent360dk/browser-mcp）驱动用户已登录的 Chrome，
+    // 另需装它的 Chrome 扩展。和 REA 一样用自带 Bun 的 `bun x --bun`、钉死版本；入口
+    // 不带子命令就是启动 MCP 服务器。服务器名沿用上游自己注册的 `browser-mcp`，用户按上游
+    // 文档加过的话会撞名被拒，不会出现两份。40 个工具、四十多 KB schema，直接声明太占
+    // 上下文；但截图、点击是一步一步交互的，codemode 脚本不合适，所以用 `deferred`：
+    // 按需检索后直接调用。
+    PiMcpPreset {
+        id: "browser-mcp",
+        name: "Agent360 浏览器",
+        summary: "操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先在 Chrome 应用商店安装 Agent360 Browser MCP 扩展。用 Smelt 自带的 Bun 运行。",
+        description: "Browser automation in the user's own signed-in Chrome: navigate, click, fill forms, read pages and take screenshots, and ask the user for 2FA codes or CAPTCHAs",
+        transport: PiMcpPresetTransport::Stdio {
+            command: crate::managed_runtime::MANAGED_BUN_LAUNCHER_HOME_PATH,
+            args: &["x", "--bun", "@agent360/browser-mcp@1.30.2"],
+        },
+        exposure: Some("deferred"),
+        timeout_secs: None,
+    },
 ];
 
 impl PiMcpPreset {
@@ -434,6 +452,29 @@ mod tests {
                     "mcp".into(),
                 ],
             }
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn adding_agent360_browser_writes_a_pinned_deferred_stdio_entry() {
+        let dir = temp_dir();
+        add_pi_mcp_preset_at(&dir, "browser-mcp").unwrap();
+
+        let browser = &read(&dir)["mcpServers"]["browser-mcp"];
+        assert_eq!(browser["command"], "~/.smelt/runtime/bin/bun");
+        assert_eq!(
+            browser["args"],
+            serde_json::json!(["x", "--bun", "@agent360/browser-mcp@1.30.2"]),
+            "钉死版本，不带子命令才会启动服务器；--bun 防止转交给系统 node"
+        );
+        assert_eq!(browser["exposure"], "deferred");
+        assert!(browser.get("url").is_none());
+        assert!(
+            !find_preset("browser-mcp")
+                .unwrap()
+                .transport
+                .needs_sign_in()
         );
         std::fs::remove_dir_all(dir).ok();
     }

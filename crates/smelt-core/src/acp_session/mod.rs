@@ -276,6 +276,10 @@ pub struct BackgroundTaskView {
     pub started_at_ms: u64,
     #[serde(default)]
     pub finished_at_ms: Option<u64>,
+    /// 挂接任务（后台子智能体）是哪次工具调用派出去的。界面据此把那张派发卡片
+    /// 画成还在后台跑；宿主自己起的命令没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

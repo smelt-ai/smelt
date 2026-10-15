@@ -24,6 +24,7 @@ fn background_task_updates_replace_the_list_without_persisting_or_clearing_echo(
         output: "running".into(),
         started_at_ms: 10,
         finished_at_ms: None,
+        tool_call_id: None,
     }];
     let outcome = apply_event(
         &mut state,
@@ -1762,6 +1763,7 @@ fn background_notice_is_a_status_line_and_not_a_user_turn() {
     state.phase = DaemonPhase::Idle;
     state.awaiting_user_echo = true;
     let note = crate::acp_chat::TaskNote {
+        kind: crate::acp_chat::TaskNoteKind::BackgroundTask,
         id: "bg-1".into(),
         title: "编译".into(),
         status: "failed".into(),

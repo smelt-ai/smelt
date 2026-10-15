@@ -1723,6 +1723,7 @@ impl SettingsContentView {
 
 impl Render for SettingsContentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("SettingsContent");
         let snapshot = self.snapshot.clone();
         let workspace = self.workspace.clone();
         if self.surface == SettingsSurface::Capabilities {

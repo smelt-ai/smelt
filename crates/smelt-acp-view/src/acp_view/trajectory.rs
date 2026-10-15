@@ -438,7 +438,7 @@ fn render_trajectory_toolbar(
         format!("{visible_events} / {total_events} events")
     };
     h_flex()
-        .h(px(44.))
+        .h(ui_theme::height::xl())
         .flex_shrink_0()
         .w_full()
         .px_4()
@@ -496,7 +496,7 @@ fn stat_text(label: &'static str, value: String) -> gpui::Div {
 
 fn render_ledger_header(muted: gpui::Hsla) -> gpui::Div {
     h_flex()
-        .h(px(28.))
+        .h(ui_theme::height::sm())
         .flex_shrink_0()
         .w_full()
         .px_3()
@@ -831,7 +831,7 @@ fn render_inspector(
         )
         .child(
             h_flex()
-                .h(px(36.))
+                .h(ui_theme::height::lg())
                 .flex_shrink_0()
                 .px_4()
                 .gap_5()
@@ -899,7 +899,7 @@ fn inspector_tab_label(
         } else {
             "trajectory-tab-source"
         })
-        .h(px(36.))
+        .h(ui_theme::height::lg())
         .flex()
         .items_center()
         .cursor_pointer()

@@ -26,7 +26,7 @@ cargo run --bin smelt
 
 | 层 | 选型 | 说明 |
 |----|------|------|
-| GUI 框架 | **GPUI**（`gpui-pre` 0.3.8，zed@279fe07）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
+| GUI 框架 | **GPUI**（`gpui-pre` 0.3.9）+ `longbridge/gpui-kit` | GPU 加速、Metal 渲染 |
 | 组件库 | **gpui-component**（`longbridge/gpui-kit`，不再用 zzfn fork） | Dock/补全/主题等，与 GPUI 同一套修订 |
 | 终端后端 | **portable-pty** `0.9`（在 `smeltd`） | 起 `$SHELL` 子进程并拿到 PTY |
 | 终端状态机 | **alacritty_terminal** `0.26` | ANSI 解析 + 网格模型 + 滚动缓冲 |

@@ -292,7 +292,7 @@ impl Workspace {
     ) -> Stateful<Div> {
         div()
             .id(id)
-            .h(px(32.))
+            .h(ui_theme::height::md())
             .px_4()
             .flex()
             .items_center()
@@ -724,8 +724,11 @@ impl Workspace {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect();
-            let mut history_agent_ids =
-                smelt_core::session_metadata::agent_definition_ids(agent, profile_id.as_deref());
+            let mut history_agent_ids = list_key
+                .as_ref()
+                .and_then(|key| self.history_agent_bindings.get(key))
+                .map(|bindings| bindings.as_ref().clone())
+                .unwrap_or_default();
             history_agent_ids.retain(|_, id| known.contains(id.as_str()));
             (
                 source_tabs,

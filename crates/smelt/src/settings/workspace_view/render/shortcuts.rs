@@ -20,7 +20,7 @@ pub(super) fn shortcuts_page(
                 let keycap = move |key: &'static str| {
                     div()
                         .min_w(px(34.))
-                        .h(px(24.))
+                        .h(crate::ui_theme::height::xs())
                         .px_2()
                         .flex()
                         .items_center()

@@ -756,6 +756,7 @@ impl Workspace {
         }
         self.sess_drop_hint = None;
         self.sidebar_drag = None;
+        self.sidebar_reorder_generation += 1;
         self.stop_sidebar_drag_scroll();
         self.save_state(cx);
         cx.notify();
@@ -783,6 +784,7 @@ impl Workspace {
         }
         self.proj_drop_hint = None;
         self.sidebar_drag = None;
+        self.sidebar_reorder_generation += 1;
         self.stop_sidebar_drag_scroll();
         self.save_state(cx);
         cx.notify();

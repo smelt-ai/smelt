@@ -44,7 +44,9 @@ use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_core::daemon_state::DaemonPhase;
 use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
-    ambient_animation, ambient_application_active, ambient_motion_enabled, ambient_spinner,
+    BASE_MS, COPY_ACK_MS, ENTER_MS, PRESS_OPACITY, ambient_animation, ambient_application_active,
+    ambient_motion_enabled, ambient_spinner, composer_shadows, copy_ack_opacity, ease_overshoot,
+    ease_snap, enter_offset_px, mix_rgba, quiet_dots, unit_transition,
 };
 use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
@@ -75,6 +77,68 @@ fn latest_user_message_index(entries: &[AcpEntry]) -> Option<usize> {
         AcpEntry::UserWithImages { text, .. } => !is_interrupt_marker(text),
         _ => false,
     })
+}
+
+/// 新用户消息的本地下标至少要到武装时的条数。更早的气泡是历史，不入场。
+/// 一次结算里新冒出来的条目，哪些要淡入。
+///
+/// 用户消息有自己的气泡入场。一次冒出好几条，多半是切回会话、补历史或快照重放，
+/// 不是眼看着生成的，整批直接出现，不然会一起闪一下。
+fn entries_to_fade_in(entries: &[AcpEntry], new: std::ops::Range<usize>) -> Vec<usize> {
+    const MAX_BATCH: usize = 3;
+    if new.len() > MAX_BATCH {
+        return Vec::new();
+    }
+    new.filter(|&ix| {
+        !matches!(
+            entries.get(ix),
+            None | Some(AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+        )
+    })
+    .collect()
+}
+
+fn user_bubble_enter_ready(latest_user_index: Option<usize>, len_at_arm: usize) -> bool {
+    latest_user_index.is_some_and(|latest| latest >= len_at_arm)
+}
+
+fn working_status_label(elapsed: &str) -> String {
+    format!("正在想 · {elapsed}")
+}
+
+fn settled_thought_label(elapsed_ms: u64) -> String {
+    format!("想了 {}", format_duration(elapsed_ms))
+}
+
+/// 过程组外的思考，用这一问从发出到结束的耗时。进行中或不是思考则没有。
+fn settled_thought_elapsed(
+    entries: &[AcpEntry],
+    entry_ix: usize,
+    entries_offset: usize,
+    timings: &[smelt_core::acp_session::TurnTiming],
+) -> Option<u64> {
+    if !matches!(
+        entries.get(entry_ix),
+        Some(AcpEntry::Assistant { thought: true, .. })
+    ) {
+        return None;
+    }
+    let user_index = (0..entry_ix)
+        .rev()
+        .find(|ix| is_user_entry(&entries[*ix]))?;
+    let global_index = entries_offset.saturating_add(user_index);
+    timings
+        .iter()
+        .find(|timing| timing.user_index == global_index)
+        .and_then(smelt_core::acp_session::TurnTiming::completed_elapsed_ms)
+}
+
+fn shift_copy_site(site: CopySite, page_len: usize) -> CopySite {
+    match site {
+        CopySite::Answer(ix) => CopySite::Answer(ix + page_len),
+        CopySite::Completion(ix) => CopySite::Completion(ix + page_len),
+        other => other,
+    }
 }
 
 fn model_label_with_provider(value: &str, name: &str) -> String {
@@ -1229,6 +1293,28 @@ struct ConversationTranscript {
     _observe: Subscription,
 }
 
+/// 刚发出去的那条用户气泡。`len_at_arm` 是武装时的本地条数，新消息的下标要落到它之后。
+struct UserBubbleEnter {
+    nonce: u64,
+    len_at_arm: usize,
+    /// 快照里真出现这条消息之后才计时。没出现之前不要预约帧。
+    started: Option<std::time::Instant>,
+}
+
+/// 思考详情的一次展开或收起。到点就删，行回到静态的开或关。
+struct ThoughtReveal {
+    open: bool,
+    started: std::time::Instant,
+}
+
+/// 复制对勾的位置。回答和完成摘要跟着历史分页挪下标；工具日志用稳定的 tool id。
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum CopySite {
+    Answer(usize),
+    Completion(usize),
+    ToolLog { tool_id: String, part_ix: usize },
+}
+
 pub struct AcpView {
     sid: String,
     cwd: Option<String>,
@@ -1395,11 +1481,26 @@ pub struct AcpView {
     /// 用户展开了输出的后台任务 id。
     expanded_background_tasks: std::collections::HashSet<String>,
     /// 用户手动展开的过程/分析摘要（key = entries 索引）。过程组外的思考、
-    /// 以及过程组里对用户说的中间正文共用这份状态；只属于当前视图。
+    /// 过程组里对用户说的中间正文，以及后台任务 / 子智能体状态行的输出共用这份状态；
+    /// 只属于当前视图。
     expanded_thoughts: std::collections::HashSet<usize>,
     /// 手动展开的回合执行过程（key = 该组第一条 entry 的索引）。默认整组收起。
     /// 展开后工具、思考和对用户说的中间正文都留在时间线上。
     expanded_process_groups: std::collections::HashSet<usize>,
+    /// 只武装刚发送的那一条。历史加载和虚拟列表回收不会重播。
+    user_enter: Option<UserBubbleEnter>,
+    user_enter_nonce: u64,
+    /// 复制成功后的对勾。淡出期间不改按钮占位。
+    copy_acks: std::collections::HashMap<CopySite, std::time::Instant>,
+    /// 待发缩略图挤入。key 是 `Arc<Image>` 的地址，同一张图退回输入栏不再播一次。
+    pending_image_enter: std::collections::HashMap<usize, std::time::Instant>,
+    pending_image_seen: std::collections::HashSet<usize>,
+    /// 思考详情高度过渡。key 跟 `expanded_thoughts` 一样是 entries 下标。
+    thought_reveals: std::collections::HashMap<usize, ThoughtReveal>,
+    /// 回合进行中新出现的条目（工具、回复、思考）淡入。key 是 entries 下标。
+    entry_enters: std::collections::HashMap<usize, std::time::Instant>,
+    /// 上次结算时 entries 的长度。只有超出这条线的才算新条目。
+    entries_settled_len: usize,
     /// 同类紧凑工具合并行是否撑开（key = 该段第一条 entry 的索引）。
     /// 分组本身仍内联展开；单条工具的输出走 popover，不占时间线高度。
     expanded_tool_runs: std::collections::HashSet<usize>,
@@ -1795,6 +1896,14 @@ impl AcpView {
             expanded_background_tasks: std::collections::HashSet::new(),
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
+            user_enter: None,
+            user_enter_nonce: 0,
+            copy_acks: std::collections::HashMap::new(),
+            pending_image_enter: std::collections::HashMap::new(),
+            pending_image_seen: std::collections::HashSet::new(),
+            thought_reveals: std::collections::HashMap::new(),
+            entry_enters: std::collections::HashMap::new(),
+            entries_settled_len: 0,
             expanded_tool_runs: std::collections::HashSet::new(),
             model: None,
             config_options: Vec::new(),
@@ -2397,6 +2506,25 @@ impl AcpView {
             .map(|entry_ix| entry_ix + page_len)
             .collect();
         self.revealed_prompt = self.revealed_prompt.map(|entry_ix| entry_ix + page_len);
+        if let Some(enter) = self.user_enter.as_mut() {
+            enter.len_at_arm = enter.len_at_arm.saturating_add(page_len);
+        }
+        self.thought_reveals = self
+            .thought_reveals
+            .drain()
+            .map(|(entry_ix, reveal)| (entry_ix + page_len, reveal))
+            .collect();
+        self.entry_enters = self
+            .entry_enters
+            .drain()
+            .map(|(entry_ix, started)| (entry_ix + page_len, started))
+            .collect();
+        self.entries_settled_len = self.entries_settled_len.saturating_add(page_len);
+        self.copy_acks = self
+            .copy_acks
+            .drain()
+            .map(|(site, started)| (shift_copy_site(site, page_len), started))
+            .collect();
 
         // 往已有正文前面接一页时，GPUI 会把滚动锚点后移 page_len，眼前这条消息不动。
         // 空列表没有可锚的消息，直接铺上统一高度并停在最新一条。
@@ -2822,6 +2950,8 @@ impl AcpView {
         {
             return;
         }
+        // 快照到达之前就武装。等消息已经在列表里再记长度，新气泡会被算成历史。
+        let enter_nonce = self.arm_user_bubble_enter();
         let images = std::mem::take(&mut self.pending_images);
         let input = conversation_input_for_submit(
             text.clone(),
@@ -2850,8 +2980,13 @@ impl AcpView {
                     )
                 })
                 .await;
+            let failed = result.is_err();
             let _ = this.update_in(cx, |view, window, cx| {
-                view.finish_conversation_input(result, window, cx)
+                view.finish_conversation_input(result, window, cx);
+                // 更新的一次发送已经换了 nonce，失败不能把它清掉。
+                if failed {
+                    view.disarm_user_bubble_enter(enter_nonce);
+                }
             });
         })
         .detach();
@@ -3031,17 +3166,22 @@ impl AcpView {
         cx: &mut Context<Self>,
     ) -> bool {
         let (text, encoded) = self.encode_prompt_for_agent(text, images);
-        let Some(h) = &self.handle else {
+        if self.handle.is_none() {
             return false;
-        };
-        if h.action_tx
-            .try_send(AcpUserAction::Prompt {
-                text,
-                images: encoded,
-                delivery_id: None,
-            })
-            .is_err()
-        {
+        }
+        let nonce = self.arm_user_bubble_enter();
+        let sent = self.handle.as_ref().is_some_and(|handle| {
+            handle
+                .action_tx
+                .try_send(AcpUserAction::Prompt {
+                    text,
+                    images: encoded,
+                    delivery_id: None,
+                })
+                .is_ok()
+        });
+        if !sent {
+            self.disarm_user_bubble_enter(nonce);
             return false;
         }
         self.prompt_dispatch_pending = true;
@@ -3330,18 +3470,23 @@ impl AcpView {
         for (config_id, value_id) in self.pending_config_values.clone() {
             let _ = self.set_config_option(config_id, value_id);
         }
-        let Some(h) = &self.handle else {
+        if self.handle.is_none() {
             self.pending_images = images;
             return;
-        };
-        if h.action_tx
-            .try_send(AcpUserAction::FollowUp {
-                text,
-                images: encoded,
-                delivery_id: None,
-            })
-            .is_err()
-        {
+        }
+        let nonce = self.arm_user_bubble_enter();
+        let sent = self.handle.as_ref().is_some_and(|handle| {
+            handle
+                .action_tx
+                .try_send(AcpUserAction::FollowUp {
+                    text,
+                    images: encoded,
+                    delivery_id: None,
+                })
+                .is_ok()
+        });
+        if !sent {
+            self.disarm_user_bubble_enter(nonce);
             self.pending_images = images;
             self.paste_hint = Some("后续消息未能排队".to_string());
             cx.notify();
@@ -3823,6 +3968,188 @@ impl AcpView {
         self.expanded_thoughts.retain(|ix| *ix < self.entries.len());
         self.expanded_process_groups
             .retain(|ix| *ix < self.entries.len());
+        self.thought_reveals
+            .retain(|ix, _| *ix < self.entries.len());
+        let entry_len = self.entries.len();
+        self.entry_enters.retain(|ix, _| *ix < entry_len);
+        self.entries_settled_len = self.entries_settled_len.min(entry_len);
+        self.copy_acks.retain(|site, _| match site {
+            CopySite::Answer(ix) | CopySite::Completion(ix) => *ix < entry_len,
+            CopySite::ToolLog { .. } => true,
+        });
+    }
+
+    fn arm_user_bubble_enter(&mut self) -> u64 {
+        self.user_enter_nonce = self.user_enter_nonce.wrapping_add(1);
+        let nonce = self.user_enter_nonce;
+        self.user_enter = Some(UserBubbleEnter {
+            nonce,
+            len_at_arm: self.entries.len(),
+            started: None,
+        });
+        nonce
+    }
+
+    /// 只撤销还没开始的那一次。已经在播的入场，或更新的一次发送，留着。
+    fn disarm_user_bubble_enter(&mut self, nonce: u64) {
+        let disarm = self
+            .user_enter
+            .as_ref()
+            .is_some_and(|enter| enter.nonce == nonce && enter.started.is_none());
+        if disarm {
+            self.user_enter = None;
+        }
+    }
+
+    /// 待发图片的挤入。同一张 `Arc` 失败退回时还在 `pending_image_seen` 里，不重播。
+    fn settle_composer_motion(&mut self, reduce_motion: bool) {
+        let now = std::time::Instant::now();
+        let live: Vec<usize> = self
+            .pending_images
+            .iter()
+            .map(|image| std::sync::Arc::as_ptr(image) as usize)
+            .collect();
+        if reduce_motion {
+            self.pending_image_enter.clear();
+            self.pending_image_seen.extend(live);
+            return;
+        }
+        let live_set: std::collections::HashSet<usize> = live.iter().copied().collect();
+        self.pending_image_enter
+            .retain(|key, _| live_set.contains(key));
+        for key in live {
+            if self.pending_image_seen.contains(&key) || self.pending_image_enter.contains_key(&key)
+            {
+                continue;
+            }
+            self.pending_image_enter.insert(key, now);
+        }
+        let enter_done = std::time::Duration::from_millis(ENTER_MS);
+        let finished: Vec<usize> = self
+            .pending_image_enter
+            .iter()
+            .filter(|(_, started)| started.elapsed() >= enter_done)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in finished {
+            self.pending_image_enter.remove(&key);
+            self.pending_image_seen.insert(key);
+        }
+    }
+
+    fn settle_transcript_motion(&mut self, reduce_motion: bool) {
+        let entries_len = self.entries.len();
+        let new_entries = self.entries_settled_len.min(entries_len)..entries_len;
+        self.entries_settled_len = entries_len;
+        if reduce_motion {
+            self.user_enter = None;
+            self.copy_acks.clear();
+            self.thought_reveals.clear();
+            self.entry_enters.clear();
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.has_active_turn() {
+            for ix in entries_to_fade_in(&self.entries, new_entries) {
+                self.entry_enters.insert(ix, now);
+            }
+        }
+        let entry_enter_done = std::time::Duration::from_millis(ENTER_MS);
+        self.entry_enters
+            .retain(|_, started| started.elapsed() < entry_enter_done);
+        if let Some(enter) = self.user_enter.as_mut()
+            && enter.started.is_none()
+            && user_bubble_enter_ready(latest_user_message_index(&self.entries), enter.len_at_arm)
+        {
+            enter.started = Some(now);
+        }
+        let enter_done = self.user_enter.as_ref().is_some_and(|enter| {
+            enter.started.is_some_and(|started| {
+                started.elapsed() >= std::time::Duration::from_millis(ENTER_MS)
+            })
+        });
+        if enter_done {
+            self.user_enter = None;
+        }
+        let ack_done = std::time::Duration::from_millis(COPY_ACK_MS);
+        self.copy_acks
+            .retain(|_, started| started.elapsed() < ack_done);
+        let reveal_done = std::time::Duration::from_millis(BASE_MS);
+        self.thought_reveals
+            .retain(|_, reveal| reveal.started.elapsed() < reveal_done);
+    }
+
+    /// 气泡、复制对勾、思考展开还在动。入场要等消息落地、`started` 写上之后才算。
+    fn decorative_transcript_motion(&self) -> bool {
+        let user_enter_running = self
+            .user_enter
+            .as_ref()
+            .is_some_and(|enter| enter.started.is_some());
+        user_enter_running
+            || !self.copy_acks.is_empty()
+            || !self.thought_reveals.is_empty()
+            || !self.entry_enters.is_empty()
+    }
+
+    fn user_enter_nonce_for(&self, index: usize) -> Option<u64> {
+        let enter = self.user_enter.as_ref()?;
+        if enter.started.is_none() || latest_user_message_index(&self.entries) != Some(index) {
+            return None;
+        }
+        user_bubble_enter_ready(Some(index), enter.len_at_arm).then_some(enter.nonce)
+    }
+
+    /// 新条目淡入的进度，0 到 1。不在淡入中返回 None。
+    fn entry_enter_progress(&self, entry_ix: usize) -> Option<f32> {
+        let started = self.entry_enters.get(&entry_ix)?;
+        let t = started.elapsed().as_secs_f32() / (ENTER_MS as f32 / 1000.0);
+        Some(ease_snap(t.min(1.0)))
+    }
+
+    fn thought_reveal_progress(&self, entry_ix: usize) -> Option<f32> {
+        let reveal = self.thought_reveals.get(&entry_ix)?;
+        let t = (reveal.started.elapsed().as_secs_f32() / (BASE_MS as f32 / 1000.0)).min(1.0);
+        let eased = ease_snap(t);
+        Some(if reveal.open { eased } else { 1.0 - eased })
+    }
+
+    fn render_copy_button(
+        &self,
+        site: CopySite,
+        value: impl Into<String>,
+        tooltip: &'static str,
+        cx: &Context<Self>,
+    ) -> Button {
+        let value = value.into();
+        let copied = self.copy_acks.contains_key(&site);
+        let opacity = self
+            .copy_acks
+            .get(&site)
+            .map(|started| copy_ack_opacity(started.elapsed()));
+        let id: gpui::ElementId = match &site {
+            CopySite::Answer(index) => ("acp-copy-answer", *index).into(),
+            CopySite::Completion(index) => ("acp-copy-completion", *index).into(),
+            CopySite::ToolLog { tool_id, part_ix } => {
+                format!("acp-tool-log-copy-{tool_id}-{part_ix}").into()
+            }
+        };
+        let site_for_click = site;
+        Button::new(id)
+            .icon(if copied {
+                IconName::Check
+            } else {
+                IconName::Copy
+            })
+            .ghost()
+            .xsmall()
+            .when_some(opacity, |button, opacity| button.opacity(opacity))
+            .tooltip(tooltip)
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                this.copy_acks
+                    .insert(site_for_click.clone(), std::time::Instant::now());
+                cx.notify();
+            }))
     }
 
     fn ensure_diff_cache_for_entry(&mut self, entry_ix: usize) {
@@ -4422,6 +4749,14 @@ fn running_background_tasks(tasks: &[BackgroundTaskView]) -> Vec<&BackgroundTask
         .collect()
 }
 
+/// 某次工具调用派出去的后台工作（挂接在宿主里的后台子智能体）是否还在跑。
+fn background_task_running_for(tasks: &[BackgroundTaskView], tool_call_id: &str) -> bool {
+    tasks.iter().any(|task| {
+        task.status == BackgroundTaskStatus::Running
+            && task.tool_call_id.as_deref() == Some(tool_call_id)
+    })
+}
+
 fn background_task_summary(running: usize) -> String {
     format!("{running} 个后台任务")
 }
@@ -4942,7 +5277,7 @@ fn row_live_elapsed(
     (index == anchor).then_some(elapsed_ms).flatten()
 }
 
-/// 本轮用户消息之后是否已经有思考/工具/正文。没有时才单独画一行「已用 Ns」。
+/// 本轮用户消息之后是否已经有思考/工具/正文。没有时才单独画一行「正在想」。
 fn current_turn_has_agent_output(entries: &[AcpEntry]) -> bool {
     entries
         .iter()
@@ -5043,7 +5378,7 @@ fn compact_tool_run_label(kind: ToolKind, count: usize) -> String {
 }
 
 /// 时间线上单条工具的动词句，对齐 Grok「Opened page / Searched web for」。
-fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
+pub fn compact_tool_headline(kind: ToolKind, title: &str) -> String {
     let title = title.trim();
     if title.is_empty() {
         return tool_kind_label(&kind).to_string();
@@ -5556,7 +5891,7 @@ fn process_group_label(group: ProcessGroupInfo) -> String {
         } else if let Some(kind) = group.active_tool_kind {
             tool_running_label(kind).to_string()
         } else {
-            "正在分析".to_string()
+            "正在想".to_string()
         };
     }
     "执行过程".to_string()
@@ -6322,7 +6657,7 @@ fn tool_kind_icon(kind: &ToolKind) -> IconName {
 }
 
 /// 时间线用更接近 Grok 的图标：打开页面是地球，搜索是放大镜。
-fn process_timeline_icon(kind: &ToolKind) -> IconName {
+pub fn process_timeline_icon(kind: &ToolKind) -> IconName {
     match kind {
         ToolKind::Fetch => IconName::Globe,
         ToolKind::Search => IconName::Search,

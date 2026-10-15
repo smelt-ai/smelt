@@ -518,7 +518,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn close_agent_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_agent_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editing_conversation_draft() {
             self.cancel_conversation_draft(cx);
             return;

@@ -1186,6 +1186,7 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("TerminalView");
         if let Some(message) = self.write_error.take() {
             crate::status_item::notify_error(message);
         }

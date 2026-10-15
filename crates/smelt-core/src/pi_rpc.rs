@@ -1415,6 +1415,7 @@ fn background_notice_from_outbound(message: &serde_json::Value) -> Option<Conver
         .filter(|id| !id.is_empty())?;
     Some(ConversationEvent::BackgroundNotice(
         crate::acp_chat::TaskNote {
+            kind: crate::acp_chat::TaskNoteKind::BackgroundTask,
             id: id.to_string(),
             title: message
                 .get("title")
@@ -2461,6 +2462,17 @@ fn handle_event(
             }
         }
         Some("message_end") => {
+            // 后台子智能体的结果是自定义消息（`display: false`），实时到达时只有这里能看到。
+            // 只认子智能体：后台任务的状态行由守护进程自己发（`smelt_background_notify`），
+            // 这里再发一次会重复。
+            if let Some(message) = event.get("message")
+                && message.get("role").and_then(serde_json::Value::as_str) == Some("custom")
+                && let Some(note) = crate::acp_chat::task_note_from_pi_custom(message)
+                && note.kind == crate::acp_chat::TaskNoteKind::Subagent
+            {
+                let _ = event_tx.try_send(ConversationEvent::BackgroundNotice(note));
+                return;
+            }
             if let Some(message) = event.get("message")
                 && message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
             {
@@ -4231,33 +4243,104 @@ mod tests {
         );
     }
 
-    /// `fork` 之后只剩调用线程。先挡住 `SIGCHLD` 再拉起子进程，回收线程会继承
-    /// 这份掩码，没有别的线程能接住信号。`Child::status()` 会停在这里。
+    /// 被拉起来跑探针的那个测试进程认这个变量；平时跑 `cargo test` 时探针直接返回。
+    #[cfg(unix)]
+    const REAP_PROBE_ENV: &str = "SMELT_TEST_REAP_PROBE";
+
+    /// 场景：没有任何线程能接住 `SIGCHLD`（守护进程 fork 后只剩调用线程时就是这样），
+    /// `Child::status()` 会一直停着。`PiProcessGuard` 必须照样把子进程收掉。
+    ///
+    /// 不能在测试进程里直接 `fork`：libtest 是多线程的，fork 出来的子进程只剩一个线程，
+    /// 别的测试线程那一刻若拿着 malloc 之类的锁，子进程一分配内存、一 spawn 就永远卡住——
+    /// 这是它在并行跑时偶发超时的原因。改成重新 exec 一个干净的测试进程，只跑下面的探针。
+    /// exec 前在子进程里挡住 `SIGCHLD`：信号掩码跨 exec 保留，新进程从第一个线程起就挡着，
+    /// 之后建的线程（包括 async-process 的回收线程）都继承，比原来只挡一个线程更严格。
     #[cfg(unix)]
     #[test]
     fn pi_process_guard_reaps_while_sigchld_is_blocked() {
-        let probe = unsafe { libc::fork() };
-        assert!(probe >= 0, "fork 失败");
-        if probe == 0 {
-            let code = reap_child_with_sigchld_blocked();
-            unsafe { libc::_exit(code) };
+        use std::os::unix::process::CommandExt as _;
+
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "pi_rpc::tests::reap_probe_with_sigchld_blocked",
+                "--ignored",
+                "--test-threads=1",
+                "--quiet",
+            ])
+            .env(REAP_PROBE_ENV, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // SAFETY: 只调用异步信号安全的 sigemptyset / sigaddset / sigprocmask。
+        unsafe {
+            command.pre_exec(|| {
+                let mut blocked = std::mem::zeroed();
+                if libc::sigemptyset(&mut blocked) != 0
+                    || libc::sigaddset(&mut blocked, libc::SIGCHLD) != 0
+                    || libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut status = 0;
-            let waited = unsafe { libc::waitpid(probe, &mut status, 0) };
-            let _ = sender.send((waited, status));
-        });
-        let finished = receiver.recv_timeout(std::time::Duration::from_secs(3));
-        let Ok((waited, status)) = finished else {
-            unsafe { libc::kill(probe, libc::SIGKILL) };
-            panic!("SIGCHLD 被挡住时收尸没有返回");
+        let mut probe = command.spawn().expect("拉起探针进程失败");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = probe.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                panic!("SIGCHLD 被挡住时收尸没有返回");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         };
-        assert_eq!(waited, probe);
-        assert!(
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-            "子进程退出状态 {status}"
+        let read_all = |pipe: Option<&mut dyn std::io::Read>| {
+            let mut text = String::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.read_to_string(&mut text);
+            }
+            text
+        };
+        let stdout = read_all(
+            probe
+                .stdout
+                .as_mut()
+                .map(|pipe| pipe as &mut dyn std::io::Read),
         );
+        let stderr = read_all(
+            probe
+                .stderr
+                .as_mut()
+                .map(|pipe| pipe as &mut dyn std::io::Read),
+        );
+        assert!(status.success(), "探针失败：{status}\n{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed"),
+            "探针必须真的跑过（改名后 --exact 匹配不到也会返回成功）：{stdout}"
+        );
+    }
+
+    /// 只在 `pi_process_guard_reaps_while_sigchld_is_blocked` 拉起的独立进程里有意义。
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "由 pi_process_guard_reaps_while_sigchld_is_blocked 在独立进程里启动"]
+    fn reap_probe_with_sigchld_blocked() {
+        if std::env::var_os(REAP_PROBE_ENV).is_none() {
+            return;
+        }
+        // 先确认场景成立：掩码确实跨 exec 带进来了，本线程（继承自主线程）挡着 SIGCHLD。
+        let inherited = unsafe {
+            let mut current = std::mem::zeroed();
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut current) == 0
+                && libc::sigismember(&current, libc::SIGCHLD) == 1
+        };
+        assert!(inherited, "探针进程没有继承到挡住 SIGCHLD 的掩码");
+        assert_eq!(reap_child_with_sigchld_blocked(), 0);
     }
 
     #[cfg(unix)]
@@ -5091,6 +5174,55 @@ mod tests {
         assert_eq!(tool_kind("bash"), ToolKind::Execute);
         assert_eq!(tool_kind("subagent"), ToolKind::Collaborate);
         assert_eq!(tool_kind("stock_quote"), ToolKind::Other);
+    }
+
+    /// 后台子智能体的结果实时到达时画成状态行，不能变成用户消息；后台任务的同类
+    /// 自定义消息不在这里发，避免和守护进程自己发的状态行重复。
+    #[test]
+    fn live_subagent_result_becomes_a_task_note_once() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+
+        let custom = |custom_type: &str, id: &str| {
+            serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "custom",
+                    "customType": custom_type,
+                    "display": false,
+                    "content": [{"type": "text", "text": "<subagent-notification>…"}],
+                    "details": {"id": id, "title": "迁移", "status": "completed", "outputTail": "改好了"}
+                }
+            })
+        };
+        handle_event(
+            custom(crate::acp_chat::SMELT_SUBAGENT_RESULT_CUSTOM_TYPE, "sub-1"),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        handle_event(
+            custom(crate::acp_chat::SMELT_BACKGROUND_TASK_CUSTOM_TYPE, "bg-1"),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+
+        let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        let notes: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::BackgroundNotice(note) => Some(note),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1, "子智能体发一条，后台任务这里不发");
+        assert_eq!(notes[0].id, "sub-1");
+        assert_eq!(notes[0].kind, crate::acp_chat::TaskNoteKind::Subagent);
     }
 
     #[test]

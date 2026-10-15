@@ -1,6 +1,7 @@
 //! ACP 消息流虚拟列表。
 
 use super::*;
+use gpui_base::motion::MotionReveal;
 
 const USER_MESSAGE_ACTION_GROUP: &str = "acp-user-message-actions";
 
@@ -20,6 +21,43 @@ fn user_message_bubble(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::D
         .bg(ui_theme::overlay(0x14))
         .hover(|bubble| bubble.bg(ui_theme::overlay(0x1c)))
         .text_sm()
+}
+
+/// 只包刚发送的那一条。nonce 进元素 id，虚拟列表把行卸掉再装上时，过了时钟就不再播。
+/// Div 没有 scale，用透明度和 6px 下落代替从 0.92 缩放进来。
+fn user_bubble_with_enter<E>(nonce: Option<u64>, index: usize, bubble: E) -> gpui::AnyElement
+where
+    E: gpui::Styled + gpui::IntoElement + 'static,
+{
+    let Some(nonce) = nonce else {
+        return bubble.into_any_element();
+    };
+    bubble
+        .with_animation(
+            format!("acp-user-enter-{nonce}-{index}"),
+            Animation::new(std::time::Duration::from_millis(ENTER_MS)).with_easing(ease_overshoot),
+            |bubble, delta| {
+                bubble
+                    .opacity(delta.clamp(0.0, 1.0))
+                    .relative()
+                    .top(px(enter_offset_px(delta)))
+            },
+        )
+        .into_any_element()
+}
+
+/// 回合中新出现的条目：淡入，同时从下方 4px 升到原位。只改绘制位置，不改行高，
+/// 虚拟列表不用为它重新测量。
+fn entry_with_enter(progress: Option<f32>, el: gpui::AnyElement) -> gpui::AnyElement {
+    let Some(progress) = progress else {
+        return el;
+    };
+    div()
+        .relative()
+        .top(px(4. * (1. - progress)))
+        .opacity(progress)
+        .child(el)
+        .into_any_element()
 }
 
 struct SubagentCard<'a> {
@@ -48,6 +86,12 @@ impl AcpView {
     ) -> gpui::AnyElement {
         let current_turn_active = self.has_active_turn();
         let conversation_layout = self.conversation_layout();
+        // 虚拟列表把行高缓存到重新测量。高度还在变的思考详情和入场气泡，
+        // 不在布局前标脏的话，动画只改样式、行高不动。
+        let reveal_indices: Vec<usize> = self.thought_reveals.keys().copied().collect();
+        for ix in reveal_indices {
+            self.list_state.remeasure_items(ix..ix.saturating_add(1));
+        }
         // These values are stable for the whole render pass. Computing them once keeps the
         // virtual-list item builder from rescanning the full conversation for every row.
         let active_permission_tool_id = self
@@ -55,6 +99,14 @@ impl AcpView {
             .first()
             .map(|card| card.tool_call_id.clone());
         let latest_user_message_index = super::super::latest_user_message_index(&self.entries);
+        if self
+            .user_enter
+            .as_ref()
+            .is_some_and(|enter| enter.started.is_some())
+            && let Some(ix) = latest_user_message_index
+        {
+            self.list_state.remeasure_items(ix..ix.saturating_add(1));
+        }
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             let conversation_layout = conversation_layout.clone();
@@ -237,7 +289,9 @@ impl AcpView {
                                         )),
                                 )
                             })
-                            .child(
+                            .child(user_bubble_with_enter(
+                                this.user_enter_nonce_for(i),
+                                i,
                                 user_message_bubble(("acp-user-message", i))
                                     .debug_selector(move || format!("ACP_USER_MESSAGE_{i}"))
                                     .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
@@ -258,7 +312,7 @@ impl AcpView {
                                             cx,
                                         )
                                     }),
-                            )
+                            ))
                             .into_any_element()
                     }
                     AcpEntry::UserWithImages { text, images } => {
@@ -334,7 +388,9 @@ impl AcpView {
                                     )
                                 },
                             )
-                            .child(
+                            .child(user_bubble_with_enter(
+                                this.user_enter_nonce_for(i),
+                                i,
                                 user_message_bubble(("acp-user-images-message", i))
                                     .child(content.child(image_strip))
                                     .context_menu(move |menu, window, cx| {
@@ -346,7 +402,7 @@ impl AcpView {
                                             cx,
                                         )
                                     }),
-                            )
+                            ))
                             .into_any_element()
                     }
                     // 过程组里的思考和中间正文都走进展行：一行摘要，长文可展开。
@@ -356,12 +412,29 @@ impl AcpView {
                         div().h(px(0.)).w_full().overflow_hidden().into_any_element()
                     }
                     AcpEntry::Assistant { text, .. } if process_group.is_some() => this
-                        .render_progress_entry(i, entry, text, true, muted, row_elapsed, cx),
+                        .render_progress_entry(
+                            i,
+                            entry,
+                            text,
+                            true,
+                            muted,
+                            row_elapsed,
+                            animate_ambient,
+                            cx,
+                        ),
                     AcpEntry::Assistant {
                         text,
                         thought: true,
-                    } => this
-                        .render_progress_entry(i, entry, text, false, muted, row_elapsed, cx),
+                    } => this.render_progress_entry(
+                        i,
+                        entry,
+                        text,
+                        false,
+                        muted,
+                        row_elapsed,
+                        animate_ambient,
+                        cx,
+                    ),
                     AcpEntry::Assistant {
                         text,
                         thought: false,
@@ -388,11 +461,12 @@ impl AcpView {
                                     h_flex()
                                         .pt_1()
                                         .gap_1()
-                                        .child(
-                                            Clipboard::new(("acp-copy-answer", i))
-                                                .value(text.clone())
-                                                .tooltip("复制回答"),
-                                        )
+                                        .child(this.render_copy_button(
+                                            CopySite::Answer(i),
+                                            text.clone(),
+                                            "复制回答",
+                                            cx,
+                                        ))
                                         .when(
                                             smelt_core::session_handoff::live_fork_is_available(
                                                 this.agent,
@@ -510,11 +584,12 @@ impl AcpView {
                                 h_flex()
                                     .pt_1()
                                     .gap_1()
-                                    .child(
-                                        Clipboard::new(("acp-copy-completion", i))
-                                            .value(body)
-                                            .tooltip("复制完成摘要"),
-                                    ),
+                                    .child(this.render_copy_button(
+                                        CopySite::Completion(i),
+                                        body.clone(),
+                                        "复制完成摘要",
+                                        cx,
+                                    )),
                             );
                         }
                         answer.into_any_element()
@@ -941,20 +1016,61 @@ impl AcpView {
                         }
                     }
                     AcpEntry::TaskNote(note) => {
-                        let mut block = v_flex().w_full().gap_1().py_1().child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(note.summary()),
-                        );
-                        if !note.output_tail.trim().is_empty() {
+                        // 后台任务和后台子智能体的结果：默认只占一行。输出可能很长，模型已经
+                        // 拿到完整内容，人要看时再点开，展开后限高滚动。展开状态和思考详情
+                        // 共用 `expanded_thoughts`（key 都是 entries 下标，互不冲突）。
+                        let has_output = !note.output_tail.trim().is_empty();
+                        let expanded = has_output && this.expanded_thoughts.contains(&i);
+                        let summary = h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1p5()
+                            .items_center()
+                            .py_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(div().min_w_0().truncate().child(note.summary()));
+                        let summary = if has_output {
+                            let hover = t.foreground;
+                            summary
+                                .id(("acp-task-note-row", i))
+                                .cursor_pointer()
+                                .hover(move |row| row.text_color(hover))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(if expanded { "▾" } else { "▸" }),
+                                )
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    if !this.expanded_thoughts.remove(&i) {
+                                        this.expanded_thoughts.insert(i);
+                                    }
+                                    this.list_state.remeasure_items(i..i.saturating_add(1));
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        } else {
+                            summary.into_any_element()
+                        };
+                        let mut block = v_flex().w_full().child(summary);
+                        if expanded {
                             block = block.child(
-                                div().w_full().child(
-                                    selectable_plain_text(("acp-task-note", i), &note.output_tail)
+                                div()
+                                    .id(("acp-task-note-output", i))
+                                    .w_full()
+                                    .max_h(px(320.))
+                                    .overflow_y_scroll()
+                                    .pl_3()
+                                    .pb_2()
+                                    .child(
+                                        selectable_plain_text(
+                                            ("acp-task-note", i),
+                                            &note.output_tail,
+                                        )
                                         .text_xs()
                                         .text_color(muted)
                                         .font_family(smelt_core::font_config::font_family()),
-                                ),
+                                    ),
                             );
                         }
                         block.into_any_element()
@@ -1037,6 +1153,7 @@ impl AcpView {
                         .child(this.render_working_status(
                             live_elapsed_ms(this.turn_started_at_ms),
                             i,
+                            animate_ambient,
                         ))
                         .into_any_element();
                 }
@@ -1078,7 +1195,7 @@ impl AcpView {
                         div()
                             .w_full()
                             .max_w(ui_theme::conversation_max_width())
-                            .child(el),
+                            .child(entry_with_enter(this.entry_enter_progress(i), el)),
                     )
                     .into_any_element()
             })
@@ -1092,19 +1209,31 @@ impl AcpView {
     }
 
     /// 模型还没出字时的一行耗时。有动作之后，时间改挂在那一行后面。
-    fn render_working_status(&self, elapsed_ms: Option<u64>, entry_ix: usize) -> gpui::AnyElement {
+    fn render_working_status(
+        &self,
+        elapsed_ms: Option<u64>,
+        entry_ix: usize,
+        animate_ambient: bool,
+    ) -> gpui::AnyElement {
         let elapsed = elapsed_ms
             .map(format_duration)
             .unwrap_or_else(|| "0s".to_string());
-        div()
+        let mark: gpui::Hsla = gpui::rgb(ui_theme::text_muted()).into();
+        h_flex()
             .id(("acp-working", entry_ix))
             .debug_selector(move || format!("ACP_WORKING_{entry_ix}"))
-            .h(px(22.))
-            .flex()
+            .h(ui_theme::height::xxs())
+            .gap_1p5()
             .items_center()
             .text_xs()
+            .font_features(ui_theme::tabular_figures())
             .text_color(gpui::rgb(ui_theme::text_muted()))
-            .child(format!("已用 {elapsed}"))
+            .child(quiet_dots(
+                ("acp-working-dots", entry_ix),
+                mark,
+                animate_ambient,
+            ))
+            .child(working_status_label(&elapsed))
             .into_any_element()
     }
 
@@ -1121,19 +1250,31 @@ impl AcpView {
         let group_label = process_group_header_label(&self.entries, group);
         let group_accent_u32 = ui_theme::text_muted();
         let group_accent = gpui::rgb(group_accent_u32);
+        // 有工具在跑仍用 spinner。只有思考、没有进行中的工具或子 agent 时换成安静的点。
+        let thinking = group.active
+            && group.active_tool_kind.is_none()
+            && group.agents == 0
+            && group.active_agents == 0;
         h_flex()
             .id(("acp-process-group", group.first))
             .debug_selector(move || format!("ACP_PROCESS_GROUP_{}", group.first))
             .w_full()
-            .h(px(28.))
+            .h(ui_theme::height::sm())
             .flex_shrink_0()
             .gap_1p5()
             .items_center()
             .cursor_pointer()
             .hover(|row| row.opacity(0.78))
-            .when(group.active, |row| {
+            .when(group.active && !thinking, |row| {
                 row.child(ambient_spinner(
                     ("acp-process-group-spinner", group.first),
+                    group_accent.into(),
+                    animate_ambient,
+                ))
+            })
+            .when(thinking, |row| {
+                row.child(quiet_dots(
+                    ("acp-process-think", group.first),
                     group_accent.into(),
                     animate_ambient,
                 ))
@@ -1303,14 +1444,21 @@ impl AcpView {
         let faint = gpui::rgb(ui_theme::text_faint());
         let red = gpui::rgb(ui_theme::red());
         let ink = if failed { red.into() } else { muted };
+        // 转后台的派发调用一启动就返回，调用本身是「完成」。子智能体还在不在跑，以宿主里
+        // 挂着这次调用的后台任务为准：Pi 没了任务也跟着结束，不会一直转。
+        let background_running = background_task_running_for(&self.background_tasks, id);
         let running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
-            || smelt_core::acp_chat::has_unfinished_tool_call(children);
+            || smelt_core::acp_chat::has_unfinished_tool_call(children)
+            || background_running;
         let roster = smelt_core::acp_chat::is_subagent_roster(children);
         let mut headline = smelt_core::acp_chat::subagent_card_title(title, children);
         if headline.is_empty() {
             headline = "子代理".to_string();
         }
-        let progress = smelt_core::acp_chat::subagent_progress_text(status, children);
+        let mut progress = smelt_core::acp_chat::subagent_progress_text(status, children);
+        if background_running && progress.is_empty() {
+            progress = "后台运行中".to_string();
+        }
         let progress_failed = failed || progress.contains("失败");
         let show_fail_label = failed && !progress.contains("失败");
         let show_header_spinner = running && !(card_expanded && roster);
@@ -1604,11 +1752,25 @@ impl AcpView {
         in_process: bool,
         muted: gpui::Hsla,
         live_elapsed: Option<u64>,
+        animate_ambient: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_thoughts.contains(&entry_ix);
-        let preview = progress_summary(text);
+        let mut preview = progress_summary(text);
+        if !in_process && preview.is_empty() && live_elapsed.is_some() {
+            preview = "正在想".to_string();
+        }
         let has_details = progress_has_details(text);
+        let settled = if !in_process && live_elapsed.is_none() {
+            settled_thought_elapsed(
+                &self.entries,
+                entry_ix,
+                self.loaded_entries_offset,
+                &self.turn_timings,
+            )
+        } else {
+            None
+        };
         let mut row = h_flex()
             .id((
                 if in_process {
@@ -1630,7 +1792,9 @@ impl AcpView {
             })
             .child(if in_process {
                 let thought = matches!(entry, AcpEntry::Assistant { thought: true, .. });
-                if has_details && thought {
+                if thought && live_elapsed.is_some() {
+                    quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
+                } else if has_details && thought {
                     expandable_lead_icon(IconName::Asterisk, expanded, muted)
                 } else if thought {
                     Icon::new(IconName::Asterisk)
@@ -1657,6 +1821,8 @@ impl AcpView {
                         .border_color(muted)
                         .into_any_element()
                 }
+            } else if live_elapsed.is_some() {
+                quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
             } else {
                 div()
                     .flex_shrink_0()
@@ -1677,6 +1843,15 @@ impl AcpView {
             )
             .when_some(live_elapsed, |row, elapsed_ms| {
                 row.child(elapsed_suffix(elapsed_ms, muted))
+            })
+            .when_some(settled, |row, elapsed_ms| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(settled_thought_label(elapsed_ms)),
+                )
             });
         if has_details {
             row = row
@@ -1692,47 +1867,63 @@ impl AcpView {
                         )
                 })
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
-                    if !this.expanded_thoughts.remove(&entry_ix) {
+                    let open = if this.expanded_thoughts.remove(&entry_ix) {
+                        false
+                    } else {
                         this.expanded_thoughts.insert(entry_ix);
-                    }
+                        true
+                    };
+                    this.thought_reveals.insert(
+                        entry_ix,
+                        ThoughtReveal {
+                            open,
+                            started: std::time::Instant::now(),
+                        },
+                    );
                     this.list_state
                         .remeasure_items(entry_ix..entry_ix.saturating_add(1));
                     cx.notify();
                 }));
         }
-        v_flex()
-            .w_full()
-            .min_w_0()
-            .child(row)
-            .when(expanded && has_details, |col| {
-                col.child(
-                    div()
-                        .min_w_0()
-                        .pl(px(if in_process { 24. } else { 8. }))
-                        .pr_2()
-                        .pt_2()
-                        .pb_2()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                            (
-                                if in_process {
-                                    "acp-progress-md"
-                                } else {
-                                    "acp-analysis-md"
-                                },
-                                entry_ix,
-                            ),
-                            cached_entry_markdown(
-                                &self.rendered_markdown,
-                                entry_ix,
-                                entry,
-                                self.cwd.as_deref(),
-                            ),
-                        )),
-                )
-            })
-            .into_any_element()
+        let reveal = self.thought_reveal_progress(entry_ix);
+        let mut col = v_flex().w_full().min_w_0().child(row);
+        if has_details && (reveal.is_some() || expanded) {
+            let details = div()
+                .min_w_0()
+                .pl(px(if in_process { 24. } else { 8. }))
+                .pr_2()
+                .pt_2()
+                .pb_2()
+                .text_xs()
+                .text_color(muted)
+                .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
+                    (
+                        if in_process {
+                            "acp-progress-md"
+                        } else {
+                            "acp-analysis-md"
+                        },
+                        entry_ix,
+                    ),
+                    cached_entry_markdown(
+                        &self.rendered_markdown,
+                        entry_ix,
+                        entry,
+                        self.cwd.as_deref(),
+                    ),
+                ))
+                .into_any_element();
+            col = if let Some(progress) = reveal {
+                col.child(MotionReveal::new(
+                    ("acp-thought-reveal", entry_ix),
+                    progress,
+                    details,
+                ))
+            } else {
+                col.child(details)
+            };
+        }
+        col.into_any_element()
     }
 
     /// 控制台和文件内容。短的整段可选；长的默认前几行，展开后是固定高度的行视口。
@@ -1815,11 +2006,15 @@ impl AcpView {
                                     }),
                                 ),
                         )
-                        .child(
-                            Clipboard::new(format!("acp-tool-log-copy-{tool_id}-{part_ix}"))
-                                .value(copy_text)
-                                .tooltip("复制全部"),
-                        ),
+                        .child(self.render_copy_button(
+                            CopySite::ToolLog {
+                                tool_id: tool_id.to_string(),
+                                part_ix,
+                            },
+                            copy_text,
+                            "复制全部",
+                            cx,
+                        )),
                 )
             })
             .into_any_element()
@@ -2188,6 +2383,7 @@ fn elapsed_suffix(elapsed_ms: u64, color: gpui::Hsla) -> gpui::Div {
     div()
         .flex_shrink_0()
         .text_xs()
+        .font_features(ui_theme::tabular_figures())
         .text_color(color)
         .child(format!("· {}", format_duration(elapsed_ms)))
 }

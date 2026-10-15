@@ -14,9 +14,9 @@ workspace = true
 smelt-core = { path = "../smelt-core" }
 smelt-plugin-api = { path = "../smelt-plugin-api" }
 smelt-ui = { path = "../smelt-ui" }
-gpui = { package = "gpui-pre", version = "=0.3.8" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "ed27c6293b585acc40c10be7138534243bee5841" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "ed27c6293b585acc40c10be7138534243bee5841", features = ["tree-sitter-languages"] }
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "1e7ffaa6d1c0c230cb84099584e6c057531d5a5d" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "1e7ffaa6d1c0c230cb84099584e6c057531d5a5d", features = ["tree-sitter-languages"] }
 # 仅用于 SessionId 这一个类型（acp_session_id 字段/存档边界），协议本身的连接
 # 驱动已经不在这层了。
 agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }
@@ -29,4 +29,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }

@@ -115,7 +115,9 @@ fn grok_hooks_path() -> Option<std::path::PathBuf> {
     })
 }
 
-const SMELT_HOOK_EVENTS: &[&str] = &[
+/// Claude Code 认的回合事件。不要把 `StopCancelled` 放进来：那是 Grok 的中断事件，
+/// 写进 `~/.claude/settings.json` 会在每次启动被跳过并弹出 Settings Warning。
+const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "PreToolUse",
     "PostToolUse",
@@ -127,10 +129,12 @@ const SMELT_HOOK_EVENTS: &[&str] = &[
     "SubagentStop",
     "Stop",
     "StopFailure",
-    "StopCancelled",
     "TeammateIdle",
     "SessionEnd",
 ];
+
+/// Grok 在用户中断、拒绝权限或触达轮次上限时发 `StopCancelled`，不发 `Stop`。
+const GROK_ONLY_HOOK_EVENTS: &[&str] = &["StopCancelled"];
 
 const CODEX_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
@@ -835,8 +839,9 @@ pub fn uninstall_codex_hooks() -> Result<(), String> {
 
 /// Claude hooks 是否已完整装上 smelt-notify。
 pub fn claude_hooks_installed() -> bool {
-    hook_file_installed(claude_settings_path(), SMELT_HOOK_EVENTS)
-        && hook_file_installed(grok_hooks_path(), SMELT_HOOK_EVENTS)
+    hook_file_installed(claude_settings_path(), CLAUDE_HOOK_EVENTS)
+        && hook_file_installed(grok_hooks_path(), CLAUDE_HOOK_EVENTS)
+        && hook_file_installed(grok_hooks_path(), GROK_ONLY_HOOK_EVENTS)
 }
 
 /// 把 smelt-notify 写入 Claude settings 和 Grok 自己的 hooks 目录（幂等）。
@@ -844,17 +849,24 @@ pub fn claude_hooks_installed() -> bool {
 /// Grok TUI 读 `~/.grok/hooks/` 与 config 层，不只读 `~/.claude/settings.json`。
 /// 只写 Claude 时，Grok 会话能靠 OSC 改标题，但 Stop/idle 进不了 smeltd，
 /// 侧栏会停在最后一次 PostToolUse 的运行蓝。
+///
+/// `StopCancelled` 只写给 Grok，并从已有的 Claude settings 里清掉。旧版本把它
+/// 和 Claude 事件写在同一张表里，Claude Code 会因此每次启动弹出 Settings Warning。
 pub fn install_claude_hooks() -> Result<(), String> {
     let claude = claude_settings_path().ok_or_else(|| "无 home 目录".to_string())?;
     let grok = grok_hooks_path().ok_or_else(|| "无 home 目录".to_string())?;
-    install_hook_file(claude, SMELT_HOOK_EVENTS, "claude", false)?;
-    install_hook_file(grok, SMELT_HOOK_EVENTS, "grok", false)
+    install_hook_file(claude.clone(), CLAUDE_HOOK_EVENTS, "claude", false)?;
+    uninstall_hook_file(Some(claude), GROK_ONLY_HOOK_EVENTS)?;
+    install_hook_file(grok.clone(), CLAUDE_HOOK_EVENTS, "grok", false)?;
+    install_hook_file(grok, GROK_ONLY_HOOK_EVENTS, "grok", false)
 }
 
 /// 从 Claude settings 和 Grok hooks 目录移除 smelt-notify（其它 hook 保留）。
 pub fn uninstall_claude_hooks() -> Result<(), String> {
-    uninstall_hook_file(claude_settings_path(), SMELT_HOOK_EVENTS)?;
-    uninstall_hook_file(grok_hooks_path(), SMELT_HOOK_EVENTS)
+    uninstall_hook_file(claude_settings_path(), CLAUDE_HOOK_EVENTS)?;
+    uninstall_hook_file(claude_settings_path(), GROK_ONLY_HOOK_EVENTS)?;
+    uninstall_hook_file(grok_hooks_path(), CLAUDE_HOOK_EVENTS)?;
+    uninstall_hook_file(grok_hooks_path(), GROK_ONLY_HOOK_EVENTS)
 }
 
 fn read_json_or_empty(path: &std::path::Path, provider: &str) -> Result<serde_json::Value, String> {
@@ -1555,9 +1567,13 @@ mod provider_extension_tests {
                 "Kiro v3",
             ]
         );
-        assert!(SMELT_HOOK_EVENTS.contains(&"Stop"));
-        assert!(SMELT_HOOK_EVENTS.contains(&"StopCancelled"));
-        assert!(SMELT_HOOK_EVENTS.contains(&"TeammateIdle"));
+        assert!(CLAUDE_HOOK_EVENTS.contains(&"Stop"));
+        assert!(
+            !CLAUDE_HOOK_EVENTS.contains(&"StopCancelled"),
+            "StopCancelled 只属于 Grok，写进 Claude settings 会触发 Settings Warning"
+        );
+        assert_eq!(GROK_ONLY_HOOK_EVENTS, &["StopCancelled"]);
+        assert!(CLAUDE_HOOK_EVENTS.contains(&"TeammateIdle"));
         assert!(CODEX_HOOK_EVENTS.contains(&"Stop"));
         assert!(CODEX_HOOK_EVENTS.contains(&"SessionStop"));
         assert!(CURSOR_HOOK_EVENTS.contains(&"stop"));

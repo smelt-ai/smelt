@@ -1221,6 +1221,7 @@ fn background_notice_during_a_turn_does_not_queue_a_prompt() {
 
 fn task_note() -> smelt_core::acp_chat::TaskNote {
     smelt_core::acp_chat::TaskNote {
+        kind: smelt_core::acp_chat::TaskNoteKind::BackgroundTask,
         id: "bg-1".into(),
         title: "编译".into(),
         status: "failed".into(),

@@ -94,6 +94,10 @@ pub(crate) struct AutomationsSurface {
     pub(crate) selected_run_id: Option<String>,
     /// 正在等二次确认删除的自动化。
     pub(crate) pending_delete: Option<AutomationDeleteTarget>,
+    /// 选中运行的落库内容。后台读好再放进来，render 里不读库。
+    pub(crate) run_detail: Option<automation_run_detail::AutomationRunDetail>,
+    /// 正在后台读取的那份运行版本，防止逐帧重复排读取。
+    pub(crate) run_detail_loading: Option<automation_run_detail::RunDetailKey>,
 }
 
 impl Default for AutomationsSurface {
@@ -107,6 +111,8 @@ impl Default for AutomationsSurface {
             template_filter: None,
             selected_run_id: None,
             pending_delete: None,
+            run_detail: None,
+            run_detail_loading: None,
         }
     }
 }
@@ -1082,7 +1088,7 @@ fn render_trigger_entries(
 fn render_add_trigger_button(entity: Entity<Workspace>) -> AnyElement {
     div()
         .w_full()
-        .h(px(44.))
+        .h(crate::ui_theme::height::xl())
         .rounded_full()
         .border_1()
         .border_dashed()
@@ -2110,7 +2116,7 @@ fn render_agent_model_control(
 
 fn render_engine_chip(label: String, kind: Option<settings::ConversationAgentKind>) -> AnyElement {
     div()
-        .h(px(22.))
+        .h(crate::ui_theme::height::xxs())
         .px_2()
         .rounded_full()
         .bg(rgb(crate::ui_theme::bg_hover()))
@@ -2173,7 +2179,7 @@ fn product_page_header(
         .gap_3()
         .child(
             div()
-                .h(px(28.))
+                .h(crate::ui_theme::height::sm())
                 .flex()
                 .items_center()
                 .gap_2()
@@ -2192,26 +2198,6 @@ fn product_page_header(
                 ),
         )
         .child(action)
-        .into_any_element()
-}
-
-fn automation_run_detail_section(
-    title: &'static str,
-    body: impl IntoElement,
-    cx: &App,
-) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .font_medium()
-                .text_color(cx.theme().muted_foreground)
-                .child(title),
-        )
-        .child(body)
         .into_any_element()
 }
 
@@ -2964,10 +2950,12 @@ fn agent_memory_row(
                         ),
                 )
                 .child(
+                    // 待确认时前面挂着原因，一行放不下就把描述挤没了；给两行再省略。
                     div()
                         .text_xs()
                         .text_color(rgb(crate::ui_theme::text_faint()))
-                        .truncate()
+                        .text_ellipsis()
+                        .line_clamp(2)
                         .child(subtitle),
                 ),
         )
@@ -3387,7 +3375,7 @@ fn editor_field_frame() -> Div {
         .flex()
         .items_center()
         .flex_none()
-        .h(px(28.))
+        .h(crate::ui_theme::height::sm())
         .overflow_hidden()
         .border_1()
         .border_color(rgb(crate::ui_theme::border_loud()))
@@ -3480,7 +3468,7 @@ fn automation_run_lines(title: String, detail: String, error: Option<String>) ->
 
 fn automation_form_row() -> Div {
     automation_form_shell()
-        .h(px(44.))
+        .h(crate::ui_theme::height::xl())
         .px_3()
         .flex()
         .items_center()
@@ -3509,6 +3497,7 @@ fn segmented_track(_cx: &App) -> Div {
 }
 
 mod automation_catalog;
+mod automation_run_detail;
 mod automation_templates;
 mod automation_view;
 mod view;

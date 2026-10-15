@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use smelt_store::Store;
 
-use crate::acp_chat::{AcpEntry, AcpImage, ToolCallStatus, ToolOutputPart};
+use crate::acp_chat::{AcpEntry, AcpImage, ToolOutputPart};
 
 pub fn save_run_transcript_on(
     store: &Store,
@@ -33,19 +33,11 @@ pub fn retain_run_transcripts_on(store: &Store, keep: &HashSet<String>) -> Resul
         .map_err(Into::into)
 }
 
-pub fn load_run_transcript_markdown(run_id: &str) -> Option<String> {
+/// GUI 详情页用：读出结构化条目，由界面逐条渲染。不拼成 Markdown——工具输出里的
+/// `---`、`#` 会被当成标题和分割线，排版全乱。
+pub fn load_run_transcript(run_id: &str) -> Option<Vec<AcpEntry>> {
     let store = crate::sqlite_state::default_sqlite_store().ok()?;
-    let entries = load_run_transcript_on(&store, run_id)?;
-    let markdown = render_run_transcript(&entries);
-    (!markdown.trim().is_empty()).then_some(markdown)
-}
-
-pub fn render_run_transcript(entries: &[AcpEntry]) -> String {
-    let mut out = String::new();
-    for entry in entries {
-        render_entry(entry, &mut out, 0);
-    }
-    out
+    load_run_transcript_on(&store, run_id)
 }
 
 fn archive_entries(entries: &[AcpEntry]) -> Vec<AcpEntry> {
@@ -95,150 +87,10 @@ fn archive_tool_output(part: &ToolOutputPart) -> ToolOutputPart {
     }
 }
 
-fn render_entry(entry: &AcpEntry, out: &mut String, depth: usize) {
-    let heading = if depth == 0 { "###" } else { "####" };
-    match entry {
-        AcpEntry::User(text) => {
-            push_block(out, heading, "用户", text);
-        }
-        AcpEntry::UserWithImages { text, images } => {
-            let mut body = text.clone();
-            if !images.is_empty() {
-                if !body.trim().is_empty() {
-                    body.push_str("\n\n");
-                }
-                body.push_str(&format!("（{} 张图片，未写入存档）", images.len()));
-            }
-            push_block(out, heading, "用户", &body);
-        }
-        AcpEntry::Assistant { text, thought } => {
-            let title = if *thought { "思考" } else { "助手" };
-            push_block(out, heading, title, text);
-        }
-        AcpEntry::ToolCall {
-            title,
-            status,
-            output,
-            children,
-            ..
-        } => {
-            let status = tool_status_label(*status);
-            push_block(
-                out,
-                heading,
-                &format!("工具 · {title} · {status}"),
-                &render_tool_output(output),
-            );
-            for child in children {
-                render_entry(child, out, depth.saturating_add(1));
-            }
-        }
-        AcpEntry::Divider(label) => {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str("---\n");
-            if !label.trim().is_empty() {
-                out.push_str(label.trim());
-                out.push_str("\n\n");
-            }
-        }
-        AcpEntry::TaskNote(note) => {
-            let mut body = note.summary();
-            if !note.output_tail.trim().is_empty() {
-                body.push_str("\n\n");
-                body.push_str(note.output_tail.trim_end());
-            }
-            push_block(out, heading, "后台任务", &body);
-        }
-    }
-}
-
-fn push_block(out: &mut String, heading: &str, title: &str, body: &str) {
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out.push_str(heading);
-    out.push(' ');
-    out.push_str(title);
-    out.push_str("\n\n");
-    let body = body.trim();
-    if body.is_empty() {
-        out.push_str("（无内容）\n");
-    } else {
-        out.push_str(body);
-        out.push('\n');
-    }
-}
-
-fn render_tool_output(parts: &[ToolOutputPart]) -> String {
-    if parts.is_empty() {
-        return String::new();
-    }
-    let mut body = String::new();
-    for part in parts {
-        if !body.is_empty() {
-            body.push_str("\n\n");
-        }
-        match part {
-            ToolOutputPart::Text(text) => body.push_str(text.trim()),
-            // transcript 是纯文本载体，图片只留类型标记。
-            ToolOutputPart::Image(image) => {
-                body.push_str(&format!("[图片 {}]", image.mime));
-            }
-            ToolOutputPart::Diff {
-                path,
-                old_text,
-                new_text,
-            } => {
-                body.push_str("```diff\n");
-                body.push_str(&format!("# {path}\n"));
-                if let Some(old_text) = old_text {
-                    for line in old_text.lines() {
-                        body.push('-');
-                        body.push_str(line);
-                        body.push('\n');
-                    }
-                }
-                for line in new_text.lines() {
-                    body.push('+');
-                    body.push_str(line);
-                    body.push('\n');
-                }
-                body.push_str("```");
-            }
-            ToolOutputPart::Terminal {
-                output,
-                exit_code,
-                truncated,
-                ..
-            } => {
-                if let Some(exit_code) = exit_code {
-                    body.push_str(&format!("exit {exit_code}\n"));
-                }
-                body.push_str(output.trim());
-                if *truncated {
-                    body.push_str("\n…（输出已截断）");
-                }
-            }
-        }
-    }
-    body
-}
-
-fn tool_status_label(status: ToolCallStatus) -> &'static str {
-    match status {
-        ToolCallStatus::Pending => "等待",
-        ToolCallStatus::InProgress => "进行中",
-        ToolCallStatus::Completed => "完成",
-        ToolCallStatus::Failed => "失败",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acp_chat::{ToolKind, ToolOutputPart};
+    use crate::acp_chat::ToolCallStatus;
     use std::fs;
     use std::path::PathBuf;
 
@@ -332,10 +184,8 @@ mod tests {
             panic!("应保留带图用户消息");
         };
         assert!(images[0].data_b64.is_empty());
-        let markdown = render_run_transcript(&loaded);
-        assert!(markdown.contains("看盘"));
-        assert!(markdown.contains("结论"));
-        assert!(markdown.contains("1 张图片"));
+        assert!(matches!(&loaded[0], AcpEntry::User(text) if text == "看盘"));
+        assert!(matches!(&loaded[2], AcpEntry::Assistant { text, .. } if text == "结论"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -366,7 +216,6 @@ mod tests {
             &output[1],
             ToolOutputPart::Image(image) if image.mime == "image/png" && image.data_b64.is_empty()
         ));
-        assert!(render_run_transcript(&loaded).contains("[图片 image/png]"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -418,19 +267,5 @@ mod tests {
         .unwrap();
         assert!(load_run_transcript_on(&store, "run-1").is_none());
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn tool_calls_render_into_the_markdown_audit() {
-        let markdown = render_run_transcript(&[AcpEntry::ToolCall {
-            id: "t1".into(),
-            title: "bash".into(),
-            kind: ToolKind::Execute,
-            status: ToolCallStatus::Completed,
-            output: vec![ToolOutputPart::Text("ok".into())],
-            children: Vec::new(),
-        }]);
-        assert!(markdown.contains("工具 · bash · 完成"));
-        assert!(markdown.contains("ok"));
     }
 }

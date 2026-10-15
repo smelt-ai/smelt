@@ -2455,6 +2455,8 @@ struct Workspace {
     proj_drop_hint: Option<(String, bool)>,
     /// 当前正在拖的侧栏项。用来压暗原位、以及只在「我们自己的拖」时改抓握光标。
     sidebar_drag: Option<SidebarDrag>,
+    /// 侧栏拖拽排序生效一次就加一。各行据此在下一帧从旧位置滑到新位置，见 `flip_slot`。
+    sidebar_reorder_generation: u64,
     /// 侧栏会话列表的滚动位置；拖到顶底边缘时靠它自动滚。
     sidebar_scroll: ScrollHandle,
     sidebar_auto_scroll: gpui_component::scroll::AutoScroll,
@@ -2616,6 +2618,9 @@ struct Workspace {
     session_list_inflight: HashSet<String>,
     /// 扫描期间发生删除等变更的 key；旧扫描完成后会自动再扫一次，避免旧快照回写。
     session_list_invalidated: HashSet<String>,
+    /// 历史会话绑定的智能体（同上 key → `resume_id` → 智能体 id）。跟列表在同一次后台
+    /// 扫描里读出：它要逐条查 SQLite，放进 render 会随每帧重绘重复读库。
+    history_agent_bindings: HashMap<String, Rc<HashMap<String, String>>>,
     /// 历史会话标题搜索框；只过滤已加载列表，不触发 transcript 重扫。
     history_filter: Option<Entity<gpui_component::input::InputState>>,
     _history_filter_sub: Option<Subscription>,
@@ -3052,6 +3057,7 @@ impl Workspace {
             sess_drop_hint: None,
             proj_drop_hint: None,
             sidebar_drag: None,
+            sidebar_reorder_generation: 0,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_auto_scroll: gpui_component::scroll::AutoScroll::default(),
             ide_catalog: ide::IdeCatalog::default(),
@@ -3084,6 +3090,7 @@ impl Workspace {
             session_list: HashMap::new(),
             session_list_inflight: HashSet::new(),
             session_list_invalidated: HashSet::new(),
+            history_agent_bindings: HashMap::new(),
             history_filter: None,
             _history_filter_sub: None,
             pending_history_title_persist: HashSet::new(),
@@ -3662,6 +3669,9 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 工作台每帧都会重跑这里：debug 构建下，期间读写 SQLite 会被报出来。
+        let _render_scope = smelt_core::sqlite_state::render_guard::RenderScope::enter();
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("Workspace");
         // 数据准备与页面绘制分开：缓存/控件/窗口材质在 prepare_frame，下面只组页面。
         self.prepare_frame(window, cx);
 
@@ -3811,7 +3821,7 @@ impl Render for Workspace {
                             .child(
                                 div()
                                     .id("empty-open")
-                                    .h(px(36.))
+                                    .h(ui_theme::height::lg())
                                     .px_5()
                                     .rounded_full()
                                     .bg(rgb(ui_theme::action_fill()))

@@ -2,7 +2,7 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot,
+    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, ProcessGroupInfo,
     RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity, append_prompt_text,
     apply_pending_config_selection, background_task_one_line, background_task_output_lines,
     background_task_summary, build_conversation_layout, build_conversation_layout_with_timings,
@@ -26,11 +26,14 @@ use super::{
     provider_menu_label, provider_switch_value, reconcile_pending_config_values,
     refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt,
     running_background_tasks, search_summary_text, selected_provider_group,
-    session_trajectory_events, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    session_trajectory_events, settled_thought_elapsed, settled_thought_label,
+    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
     task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
     tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
-    usage_percent, usage_ring_color, usage_warn_color, view_history_identity,
+    usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
+    entries_to_fade_in, background_task_running_for,
+    view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
 use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
@@ -1743,6 +1746,102 @@ fn completed_process_group_appends_elapsed_like_grok() {
 }
 
 #[test]
+fn active_process_group_without_a_running_tool_says_thinking() {
+    let thinking = ProcessGroupInfo {
+        active: true,
+        ..ProcessGroupInfo::default()
+    };
+    assert_eq!(process_group_label(thinking), "正在想");
+
+    let searching = ProcessGroupInfo {
+        active: true,
+        active_tool_kind: Some(ToolKind::Search),
+        ..ProcessGroupInfo::default()
+    };
+    assert_eq!(process_group_label(searching), "正在搜索");
+}
+
+#[test]
+fn working_status_names_the_wait() {
+    assert_eq!(working_status_label("6s"), "正在想 · 6s");
+}
+
+#[test]
+fn settled_thought_uses_the_completed_turn() {
+    let entries = vec![
+        AcpEntry::User("想一下".into()),
+        AcpEntry::Assistant {
+            text: "先看调用方".into(),
+            thought: true,
+        },
+    ];
+    let done = [TurnTiming {
+        user_index: 10,
+        started_at_ms: 1_000,
+        ended_at_ms: Some(4_000),
+    }];
+    assert_eq!(settled_thought_elapsed(&entries, 1, 10, &done), Some(3_000));
+    assert_eq!(settled_thought_elapsed(&entries, 1, 0, &done), None);
+    assert_eq!(settled_thought_label(3_000), "想了 3s");
+
+    let answer = vec![
+        AcpEntry::User("想一下".into()),
+        AcpEntry::Assistant {
+            text: "结论".into(),
+            thought: false,
+        },
+    ];
+    assert_eq!(settled_thought_elapsed(&answer, 1, 10, &done), None);
+
+    let live = [TurnTiming {
+        user_index: 10,
+        started_at_ms: 1_000,
+        ended_at_ms: None,
+    }];
+    assert_eq!(settled_thought_elapsed(&entries, 1, 10, &live), None);
+}
+
+#[test]
+fn only_a_few_freshly_generated_non_user_entries_fade_in() {
+    let entries = vec![
+        AcpEntry::User("改一下".into()),
+        AcpEntry::Assistant {
+            text: "好".into(),
+            thought: true,
+        },
+        AcpEntry::Assistant {
+            text: "改好了".into(),
+            thought: false,
+        },
+    ];
+    assert_eq!(
+        entries_to_fade_in(&entries, 0..3),
+        vec![1, 2],
+        "用户消息有自己的气泡入场，不再叠一层淡入"
+    );
+    assert!(entries_to_fade_in(&entries, 3..3).is_empty());
+
+    let replayed: Vec<AcpEntry> = (0..4)
+        .map(|n| AcpEntry::Assistant {
+            text: format!("第 {n} 段"),
+            thought: false,
+        })
+        .collect();
+    assert!(
+        entries_to_fade_in(&replayed, 0..4).is_empty(),
+        "一次冒出一大批是切回会话或补历史，不是眼看着生成的，不该一起闪"
+    );
+}
+
+#[test]
+fn user_bubble_enter_waits_until_the_new_message_exists() {
+    assert!(user_bubble_enter_ready(Some(0), 0));
+    assert!(!user_bubble_enter_ready(Some(5), 8));
+    assert!(!user_bubble_enter_ready(None, 0));
+    assert!(user_bubble_enter_ready(Some(8), 8));
+}
+
+#[test]
 fn active_turn_wraps_tools_in_a_live_process_group() {
     let entries = vec![
         AcpEntry::User("定位实现".into()),
@@ -1783,6 +1882,7 @@ fn task_note_stays_outside_the_process_group() {
             children: Vec::new(),
         },
         AcpEntry::TaskNote(TaskNote {
+            kind: Default::default(),
             id: "bg-1".into(),
             title: "编译".into(),
             status: "failed".into(),
@@ -2671,12 +2771,31 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
         output: String::new(),
         started_at_ms: 1,
         finished_at_ms: None,
+        tool_call_id: None,
     };
     let done = BackgroundTaskView {
         status: BackgroundTaskStatus::Completed,
         ..running.clone()
     };
     assert_eq!(background_task_summary(1), "1 个后台任务");
+    let subagent = BackgroundTaskView {
+        id: "bg-2".into(),
+        tool_call_id: Some("call-1".into()),
+        ..running.clone()
+    };
+    assert!(background_task_running_for(&[running.clone(), subagent.clone()], "call-1"));
+    assert!(
+        !background_task_running_for(&[running.clone()], "call-1"),
+        "宿主自己起的命令不挂在任何工具调用上"
+    );
+    let finished = BackgroundTaskView {
+        status: BackgroundTaskStatus::Stopped,
+        ..subagent
+    };
+    assert!(
+        !background_task_running_for(&[finished], "call-1"),
+        "子智能体结束（含 Pi 被杀、连接断开）后卡片不能再转"
+    );
     assert_eq!(
         running_background_tasks(&[running, done.clone()])
             .iter()
@@ -3672,6 +3791,7 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
         output: String::new(),
         started_at_ms: 1,
         finished_at_ms: None,
+        tool_call_id: None,
     };
     let mut snapshot = AcpSessionState::default().to_snapshot(false);
     snapshot.snapshot_revision = 1;
