@@ -782,21 +782,23 @@ fn render_narrow_git_row(
                                 } else {
                                     ui_theme::text_faint()
                                 }))
+                                // 点击跟可用态同一个条件：以前只置灰不拦点击，↑0 照样能点，
+                                // 点了就是一次毫无意义的 push（失败时还会贴出一条报错）。
                                 .when(ahead > 0 && !pushing, |d| {
                                     d.cursor_pointer()
                                         .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
+                                        .on_click(move |_ev, _window, cx| {
+                                            let root = root_push.clone();
+                                            ws_push.update(cx, |ws, cx| {
+                                                if ws.pushing {
+                                                    return;
+                                                }
+                                                ws.set_active_git_repo(root, cx);
+                                                ws.push_only(cx);
+                                            });
+                                        })
                                 })
-                                .child(format!("↑{ahead}"))
-                                .on_click(move |_ev, _window, cx| {
-                                    let root = root_push.clone();
-                                    ws_push.update(cx, |ws, cx| {
-                                        if ws.pushing {
-                                            return;
-                                        }
-                                        ws.set_active_git_repo(root, cx);
-                                        ws.push_only(cx);
-                                    });
-                                }),
+                                .child(format!("↑{ahead}")),
                         ),
                 )
                 .when(has_text && !has_staged, |col| {
