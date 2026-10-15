@@ -49,7 +49,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 15;
+pub const STORE_SCHEMA_VERSION: u32 = 16;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -3168,6 +3168,18 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 15 {
+            if !schema_matches_v15(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v16_agent_mcp_servers_default(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 14 {
             if !schema_matches_v14(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -3352,15 +3364,30 @@ mod imp {
     fn apply_v15_agent_mcp_servers(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
-        if table_columns(transaction, "agent_definition")?
+        if !table_columns(transaction, "agent_definition")?
             .iter()
             .any(|column| column == "mcp_servers_json")
         {
-            return Ok(());
+            transaction.execute_batch(crate::schema::MIGRATE_V14_TO_V15)?;
         }
-        transaction
-            .execute_batch(crate::schema::MIGRATE_V14_TO_V15)
-            .map_err(StoreError::from)
+        apply_v16_agent_mcp_servers_default(transaction)
+    }
+
+    /// v15 建的列默认值是文本 `'[]'`，与 BLOB 列类型不一致；v16 改成 `X'5B5D'`。
+    /// 看列的默认值决定要不要重建，已经是 BLOB 默认值就跳过。
+    fn apply_v16_agent_mcp_servers_default(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        let default: Option<String> = transaction.query_row(
+            "SELECT dflt_value FROM pragma_table_info('agent_definition')
+             WHERE name = 'mcp_servers_json'",
+            [],
+            |row| row.get(0),
+        )?;
+        if default.as_deref() == Some("'[]'") {
+            transaction.execute_batch(crate::schema::MIGRATE_V15_TO_V16)?;
+        }
+        Ok(())
     }
 
     fn unrecognized_schema_error(version: u32) -> StoreError {
@@ -3375,6 +3402,16 @@ mod imp {
                 && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
                 && schema_objects(connection)?
                     == expected_schema_objects(SchemaGeneration::Current)?,
+        )
+    }
+
+    fn schema_matches_v15(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V15)?,
         )
     }
 
@@ -3752,6 +3789,7 @@ mod imp {
         V12,
         V13,
         V14,
+        V15,
         Current,
     }
 
@@ -3787,6 +3825,7 @@ mod imp {
         static V12_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V13_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V14_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V15_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3906,6 +3945,16 @@ mod imp {
                 strip_agent_definition_mcp_column(&mut objects);
                 objects
             }),
+            SchemaGeneration::V15 => cached_schema_objects(&V15_OBJECTS, |mut objects| {
+                for object in &mut objects {
+                    if object.name == "agent_definition" {
+                        object.sql = object
+                            .sql
+                            .replace(MCP_COLUMN_NORMALIZED, MCP_COLUMN_V15_NORMALIZED);
+                    }
+                }
+                objects
+            }),
             SchemaGeneration::Current => cached_schema_objects(&CURRENT_OBJECTS, |objects| objects),
         }
     }
@@ -3944,11 +3993,14 @@ mod imp {
             .collect()
     }
 
+    /// `mcp_servers_json` 列定义去空白、转小写后的样子：当前（v16 起）和 v15。
+    const MCP_COLUMN_NORMALIZED: &str = "mcp_servers_jsonblobnotnulldefaultx'5b5d',";
+    const MCP_COLUMN_V15_NORMALIZED: &str = "mcp_servers_jsonblobnotnulldefault'[]',";
+
     fn strip_agent_definition_mcp_column(objects: &mut [SchemaObject]) {
-        const NEEDLE: &str = "mcp_servers_jsonblobnotnulldefault'[]',";
         for object in objects {
             if object.name == "agent_definition" {
-                object.sql = object.sql.replace(NEEDLE, "");
+                object.sql = object.sql.replace(MCP_COLUMN_NORMALIZED, "");
             }
         }
     }
@@ -4967,6 +5019,64 @@ mod tests {
         assert_eq!(agents[0].mcp_servers_json, br#"["github"]"#.to_vec());
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v15 发出去的库：`mcp_servers_json` 默认值是文本 `'[]'`。升到 v16 后默认值改成 BLOB，
+    /// 已勾选的 MCP 服务器和其余字段原样保留。
+    #[test]
+    fn migrates_v15_by_switching_mcp_servers_default_to_blob() {
+        let dir = temp_dir("migrate-v15-mcp-default");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE agent_definition;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   mcp_servers_json BLOB NOT NULL DEFAULT '[]',
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );
+                 INSERT INTO agent_definition VALUES
+                   ('writer', '写作', '', 'pi', '先列提纲', X'5B5D', CAST('[\"figma\"]' AS BLOB),
+                    X'5B5D', X'5B5D', 'p', 'm', 0, 0);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 15).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].prompt, "先列提纲");
+        assert!(!agents[0].memory_enabled);
+        assert_eq!(agents[0].mcp_servers_json, br#"["figma"]"#.to_vec());
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let default: String = connection
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('agent_definition')
+                 WHERE name = 'mcp_servers_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default, "X'5B5D'");
+        drop(connection);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

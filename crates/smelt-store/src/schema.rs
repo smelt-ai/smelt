@@ -4,6 +4,11 @@
 //! 3. 在存储初始化器中补对应版本的事务迁移。
 //!
 //! 迁移必须先读出旧数据，再替换结构；认不出的库一律拒绝打开。
+//!
+//! 只是给表加一列、且该表没有表级约束时，用 `ALTER TABLE … ADD COLUMN`，并把新列写在
+//! `CREATE_SCHEMA` 里这张表的最后：SQLite 只改表定义、不搬数据，改完的建表语句去掉空白后
+//! 也和 `CREATE_SCHEMA` 一致。改约束、改默认值、删列、调列序这些 ALTER 做不到的，才整表重建。
+//! 默认值要和列类型一致：BLOB 列用 `X'…'`，不要写文本字面量。
 
 pub const TABLES: [&str; 31] = [
     "acp_detail",
@@ -389,7 +394,7 @@ CREATE TABLE agent_definition (
   engine_kind_id TEXT NOT NULL,
   prompt TEXT NOT NULL,
   plugins_json BLOB NOT NULL,
-  mcp_servers_json BLOB NOT NULL DEFAULT '[]',
+  mcp_servers_json BLOB NOT NULL DEFAULT X'5B5D',
   context_folders_json BLOB NOT NULL,
   context_links_json BLOB NOT NULL,
   model_provider TEXT NOT NULL DEFAULT '',
@@ -909,4 +914,34 @@ SELECT
   context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
 FROM agent_definition_v14;
 DROP TABLE agent_definition_v14;
+";
+
+/// v15 → v16：`agent_definition.mcp_servers_json` 的默认值从文本 `'[]'` 改成 BLOB `X'5B5D'`，
+/// 与列类型一致。SQLite 改不了已有列的默认值，只能重建表；列顺序和其余定义不变。
+pub const MIGRATE_V15_TO_V16: &str = "
+ALTER TABLE agent_definition RENAME TO agent_definition_v15;
+CREATE TABLE agent_definition (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  engine_kind_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  plugins_json BLOB NOT NULL,
+  mcp_servers_json BLOB NOT NULL DEFAULT X'5B5D',
+  context_folders_json BLOB NOT NULL,
+  context_links_json BLOB NOT NULL,
+  model_provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+INSERT INTO agent_definition(
+  id, name, description, engine_kind_id, prompt, plugins_json, mcp_servers_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+)
+SELECT
+  id, name, description, engine_kind_id, prompt, plugins_json, mcp_servers_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+FROM agent_definition_v15;
+DROP TABLE agent_definition_v15;
 ";
