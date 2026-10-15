@@ -122,14 +122,34 @@ mod tests {
         assert!(frame.animating);
     }
 
+    /// 关到一半又打开：面板保持挂载，从当前位置带着速度掉头，最后停在全开。
+    /// 用注入的时钟——同一时刻连按两次时进度和速度都还没动，弹簧本来就该立刻停稳，
+    /// 那测不出「掉头」。
     #[test]
     fn transition_can_reverse_mid_flight() {
+        let start = Instant::now();
         let mut transition = PanelTransition::new(true);
-        transition.set_open(false);
-        transition.set_open(true);
-        let frame = transition.frame();
-        assert!(frame.mounted);
-        assert!(frame.animating);
+        transition.set_open_at(false, start);
+        let midway = start + Duration::from_millis(60);
+        let closing = transition.frame_at(midway);
+        assert!(closing.animating);
+        assert!(
+            closing.progress > 0.0 && closing.progress < 1.0,
+            "要真的关到一半"
+        );
+
+        transition.set_open_at(true, midway);
+        let reversing = transition.frame_at(midway + Duration::from_millis(1));
+        assert!(reversing.mounted);
+        assert!(reversing.animating);
+        assert!(
+            reversing.progress < 1.0,
+            "从关到一半的位置出发，不能跳回全开"
+        );
+
+        let settled = transition.frame_at(midway + Duration::from_secs(5));
+        assert!(!settled.animating);
+        assert_eq!(settled.progress, 1.0);
     }
 
     #[test]

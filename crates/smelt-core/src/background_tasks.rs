@@ -1881,12 +1881,7 @@ fn read_log_page(path: &Path, offset: u64, limit: u64) -> Result<LogPage, String
         .read(&mut buf)
         .map_err(|error| format!("无法读取任务日志：{error}"))?;
     buf.truncate(read);
-    while buf
-        .last()
-        .is_some_and(|byte| (*byte & 0b1100_0000) == 0b1000_0000)
-    {
-        buf.pop();
-    }
+    buf.truncate(complete_utf8_prefix(&buf));
     let next_offset = offset + buf.len() as u64;
     let text = String::from_utf8_lossy(&buf).into_owned();
     Ok(LogPage {
@@ -1894,6 +1889,29 @@ fn read_log_page(path: &Path, offset: u64, limit: u64) -> Result<LogPage, String
         next_offset,
         end: next_offset >= len,
     })
+}
+
+/// 去掉末尾没写完（或被页边界切开）的那个多字节字符，留到下一页再读。
+///
+/// 只看最后一个字符：找到它的首字节，按首字节算出应有的长度，不够就从首字节处截断。
+/// 完整的字符原样保留——不能见到续字节就往回删，那样每页结尾的中文都会被削成「�」。
+fn complete_utf8_prefix(bytes: &[u8]) -> usize {
+    let len = bytes.len();
+    let Some(lead) = (len.saturating_sub(4)..len)
+        .rev()
+        .find(|&ix| bytes[ix] & 0b1100_0000 != 0b1000_0000)
+    else {
+        return len;
+    };
+    let expected = match bytes[lead] {
+        byte if byte & 0b1000_0000 == 0 => 1,
+        byte if byte & 0b1110_0000 == 0b1100_0000 => 2,
+        byte if byte & 0b1111_0000 == 0b1110_0000 => 3,
+        byte if byte & 0b1111_1000 == 0b1111_0000 => 4,
+        // 非法首字节：不是「没写完」，原样交给后面的有损解码。
+        _ => return len,
+    };
+    if len - lead < expected { lead } else { len }
 }
 
 fn log_tail(path: &Path) -> String {
@@ -2870,6 +2888,22 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn log_pages_keep_complete_multibyte_characters_and_defer_partial_ones() {
+        let text = "完成🙂";
+        let bytes = text.as_bytes();
+        // 结尾是完整字符：原样保留，不能削掉（以前「完成」会读成「完�」）。
+        assert_eq!(complete_utf8_prefix(bytes), bytes.len());
+        // 每个切点：保留的部分必须是合法 UTF-8，且只少掉最后那个没写完的字符。
+        for cut in 0..=bytes.len() {
+            let keep = complete_utf8_prefix(&bytes[..cut]);
+            let kept = std::str::from_utf8(&bytes[..keep]).expect("保留部分必须是合法 UTF-8");
+            assert!(text.starts_with(kept));
+            assert!(cut - keep < 4, "最多推迟一个字符");
+        }
+        assert_eq!(complete_utf8_prefix(b"ab\xFF"), 3, "非法字节不是没写完");
+    }
+
     /// 后台子智能体的进程不归宿主管，但要和后台命令一样出现在会话的任务列表里：
     /// 带着派它出去的那次工具调用，进展能翻到，报完结果就结束，宿主不再另发完成通知。
     #[test]
@@ -2903,7 +2937,8 @@ mod tests {
                 serde_json::json!({"op": "output", "id": id, "offset": 0}),
             );
             let text = peek["output"].as_str().unwrap_or("").to_string();
-            if text.contains("2/8") || started.elapsed() > Duration::from_secs(5) {
+            // 等到整句出现：只看前缀，可能读到写了一半的那一刻。
+            if text == "2/8 完成" || started.elapsed() > Duration::from_secs(5) {
                 break text;
             }
             thread::sleep(Duration::from_millis(20));

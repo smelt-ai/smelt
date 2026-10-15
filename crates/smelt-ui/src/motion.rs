@@ -533,9 +533,7 @@ impl Element for FlipSlot {
         let (offset, running) = window.with_element_state(id, |state: Option<FlipState>, _| {
             let mut state = state.unwrap_or_default();
             let layout_top = bounds.top();
-            let rearranged = state
-                .seen_generation
-                .is_some_and(|seen| seen != generation);
+            let rearranged = state.seen_generation.is_some_and(|seen| seen != generation);
             if rearranged
                 && animate
                 && let Some(painted_top) = state.painted_top
@@ -551,9 +549,7 @@ impl Element for FlipSlot {
                 }
             }
             state.seen_generation = Some(generation);
-            let (offset, velocity) = state
-                .motion
-                .map_or((0.0, 0.0), |motion| motion.sample(now));
+            let (offset, velocity) = state.motion.map_or((0.0, 0.0), |motion| motion.sample(now));
             let running = state.motion.is_some()
                 && !CriticalSpring::SNAP.is_settled(offset, velocity, FLIP_REST_PX);
             let offset = if running { offset } else { 0.0 };
@@ -649,7 +645,7 @@ fn sample_cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, ParentElement as _, Render, TestAppContext, div, px, size};
+    use gpui::{Context, Render, TestAppContext, div, px, size};
     use std::{cell::Cell, rc::Rc, time::Duration};
 
     struct AmbientTransitionTestView {
@@ -703,8 +699,12 @@ mod tests {
         let spring = CriticalSpring::SNAP;
         let (x0, v0, t, dt) = (-0.6, 4.0, 0.05, 1e-3);
         let (_, v) = spring.sample(x0, v0, t);
-        let numeric = (spring.sample(x0, v0, t + dt).0 - spring.sample(x0, v0, t - dt).0) / (2.0 * dt);
-        assert!((v - numeric).abs() < 0.05, "解析速度 {v}，数值导数 {numeric}");
+        let numeric =
+            (spring.sample(x0, v0, t + dt).0 - spring.sample(x0, v0, t - dt).0) / (2.0 * dt);
+        assert!(
+            (v - numeric).abs() < 0.05,
+            "解析速度 {v}，数值导数 {numeric}"
+        );
     }
 
     #[test]
@@ -832,7 +832,7 @@ mod tests {
     fn ease_overshoot_leaves_the_unit_interval_and_returns() {
         assert_eq!(ease_overshoot(0.0), 0.0);
         assert_eq!(ease_overshoot(1.0), 1.0);
-        let mut peak = 0.0;
+        let mut peak: f32 = 0.0;
         let mut t = 0.0;
         while t <= 1.0 {
             peak = peak.max(ease_overshoot(t));

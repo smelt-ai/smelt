@@ -957,7 +957,12 @@ fn format_elapsed(seconds: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // 不用 `super::*`：那条 glob 链会带进 `gpui::*` 里的 `test` 属性宏，把这里的
+    // `#[test]` 换成 gpui 的版本，展开时撞上递归上限。
+    use super::{
+        AcpEntry, AutomationRunDetail, AutomationRunStatus, HashSet, RunDetailKey,
+        TOOL_OUTPUT_MAX_LINES, fenced_block, format_elapsed,
+    };
 
     #[test]
     fn fence_outgrows_backticks_inside_output() {

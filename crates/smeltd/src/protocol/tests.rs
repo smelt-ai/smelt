@@ -886,8 +886,9 @@ fn read_probe_line(reader: &mut impl std::io::BufRead, prefix: &str) -> String {
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
             panic!("探针没有输出 {prefix}（已退出或被看门狗杀掉）");
         }
-        if let Some(value) = line.trim_end().strip_prefix(prefix) {
-            return value.to_string();
+        // libtest 先打出「test xxx ... 」不换行，探针的第一行会接在它后面，不能按行首匹配。
+        if let Some(at) = line.find(prefix) {
+            return line[at + prefix.len()..].trim_end().to_string();
         }
     }
 }
