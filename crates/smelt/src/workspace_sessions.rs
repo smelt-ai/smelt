@@ -202,7 +202,20 @@ impl Workspace {
                         }
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
-                        let mut launch = saved.launch;
+                        // 旧版重启会丢掉产品智能体的插件和 MCP 勾选，存下来的快照就成了裸 Pi。
+                        // 这样的快照按当前定义补全，完好的原样沿用。
+                        let definition = agent_definition_id.as_deref().and_then(|id| {
+                            cx.global::<settings::AgentHostState>()
+                                .agents
+                                .iter()
+                                .find(|definition| definition.id == id)
+                                .cloned()
+                        });
+                        let mut launch =
+                            smelt_core::agent_definition_store::repair_agent_definition_launch(
+                                saved.launch,
+                                definition.as_ref(),
+                            );
                         // 记忆目录由智能体 id 决定，升级前保存的会话也能补上。开关由 Pi 每轮
                         // 向 daemon 取，这里不判断。
                         smelt_core::agent_definition_store::attach_agent_memory_dirs(

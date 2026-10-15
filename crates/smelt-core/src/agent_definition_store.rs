@@ -318,6 +318,22 @@ pub fn ensure_agent_space(agent_definition_id: &str) -> Option<PathBuf> {
 
 /// 按智能体身份写入两个记忆目录的启动变量；不是产品智能体就清掉。
 ///
+/// 产品智能体会话的启动快照一定带插件参数（哪怕一个都没勾也会下发，见
+/// [`prepare_agent_definition_launch`]）。旧版重启只保留了指令和记忆目录，把插件和 MCP
+/// 勾选丢了，存下来的快照从此就是裸 Pi。这样的快照按智能体当前定义重新组装；
+/// 完好的快照原样沿用创建时的内容。
+pub fn repair_agent_definition_launch(
+    launch: ConversationLaunchSpec,
+    definition: Option<&AgentDefinition>,
+) -> ConversationLaunchSpec {
+    match definition {
+        Some(definition) if !launch.env.contains_key(SMELT_AGENT_PLUGIN_ARGS_ENV) => {
+            prepare_agent_definition_launch(launch, Some(definition))
+        }
+        _ => launch,
+    }
+}
+
 /// 记忆目录完全由智能体 id 决定，所以恢复升级前保存的会话时也能补上，不必像说明、插件那样
 /// 沿用创建时的快照。只有产品智能体有记忆：普通会话上万一带着同名 env（设置里手配的、
 /// 旧快照留下的），也不能让它冒充某个智能体去读写记忆。
@@ -1134,6 +1150,35 @@ mod tests {
         // 自动发现仍然要关掉，否则勾选式加载就成了摆设。
         assert!(args.contains(&"--no-skills".to_string()));
         std::fs::remove_dir_all(&folder).ok();
+    }
+
+    /// 被旧版重启丢了插件参数的快照按当前定义补全；完好的快照不动。
+    #[test]
+    fn launch_that_lost_its_selection_is_rebuilt_from_the_definition() {
+        let mut definition = definition_with_context(&[], &[]);
+        definition.mcp_servers = vec!["rea".into()];
+        let mut damaged = ConversationAgentKind::Pi.default_launch();
+        damaged
+            .env
+            .insert(SMELT_AGENT_INSTRUCTIONS_ENV.to_string(), "old".into());
+
+        let repaired = repair_agent_definition_launch(damaged.clone(), Some(&definition));
+        assert!(repaired.env.contains_key(SMELT_AGENT_PLUGIN_ARGS_ENV));
+        let selected: Vec<String> =
+            serde_json::from_str(repaired.env.get(SMELT_AGENT_MCP_SERVERS_ENV).unwrap()).unwrap();
+        assert_eq!(selected, ["rea"]);
+
+        let intact = prepare_agent_definition_launch(damaged.clone(), Some(&definition));
+        definition.mcp_servers = vec!["figma".into()];
+        assert_eq!(
+            repair_agent_definition_launch(intact.clone(), Some(&definition)),
+            intact,
+            "完好的快照沿用创建时的勾选"
+        );
+        assert_eq!(
+            repair_agent_definition_launch(damaged.clone(), None),
+            damaged
+        );
     }
 
     /// 智能体只连勾选的 MCP 服务器；没勾就完全不碰 MCP，也不残留上一次的名单。

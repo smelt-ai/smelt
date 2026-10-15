@@ -237,12 +237,15 @@ pub const SMELT_USER_MEMORY_DIR_ENV: &str = "SMELT_USER_MEMORY_DIR";
 pub const SMELT_AGENT_UNATTENDED_ENV: &str = "SMELT_AGENT_UNATTENDED";
 
 /// 产品智能体的启动身份。设置刷新可以替换命令和普通 env，但不能丢掉它们，
-/// 否则重启后的会话就退化成普通 Pi 会话。
-pub const SMELT_AGENT_LAUNCH_IDENTITY_ENVS: [&str; 4] = [
+/// 否则重启后的会话就退化成普通 Pi 会话：插件和 MCP 的勾选一丢，Pi 会回到全量
+/// 自动发现，每场对话各连一遍 `mcp.json` 里的全部服务器。
+pub const SMELT_AGENT_LAUNCH_IDENTITY_ENVS: [&str; 6] = [
     SMELT_AGENT_INSTRUCTIONS_ENV,
     SMELT_AGENT_MEMORY_DIR_ENV,
     SMELT_USER_MEMORY_DIR_ENV,
     SMELT_AGENT_UNATTENDED_ENV,
+    SMELT_AGENT_PLUGIN_ARGS_ENV,
+    SMELT_AGENT_MCP_SERVERS_ENV,
 ];
 
 /// 一家 ACP agent 的全部静态属性。**新增一种 agent = `CONVERSATION_AGENTS` 加一行 +
