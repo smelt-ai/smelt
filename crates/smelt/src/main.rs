@@ -3726,13 +3726,26 @@ impl Render for Workspace {
                         div().flex_1().min_w_0().min_h_0().flex().flex_col().child(
                             div().flex_1().min_w_0().min_h_0().flex().child(
                                 match &self.sessions[self.active_session].kind {
-                                    SessionKind::Term { .. } => self.render_pane(
-                                        self.sessions[self.active_session]
-                                            .term_layout()
-                                            .expect("Term 会话必有 layout"),
-                                        "pane",
-                                        cx,
-                                    ),
+                                    // 标题胶囊占一条顶带，终端从它下面开始，不再让第一行
+                                    // 和胶囊叠在一起。顶带铺终端同一个底色，跟下面连成一片；
+                                    // 分屏时所有 pane 一起下移。
+                                    SessionKind::Term { .. } => div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .flex()
+                                        .bg(rgb(terminal::default_bg()))
+                                        .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
+                                        .child(
+                                            self.render_pane(
+                                                self.sessions[self.active_session]
+                                                    .term_layout()
+                                                    .expect("Term 会话必有 layout"),
+                                                "pane",
+                                                cx,
+                                            ),
+                                        )
+                                        .into_any_element(),
                                     // ACP 会话与终端共用背景图；AcpView 根面板本身保持透明，
                                     // 所以图片会自然透过消息间隙，不需要把外观配置耦合进子 crate。
                                     // 容器先垫主题面板底色，半透明图片合成在底色上（同终端 bg_layer
