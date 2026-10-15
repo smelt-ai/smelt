@@ -776,6 +776,83 @@ fn reveal_first_history_page(list: &ListState, page_len: usize) {
     list.set_follow_mode(FollowMode::Tail);
 }
 
+/// 消息列表里一段正文的位置：(哪种正文, 全局消息下标, 同一条消息里的第几段)。
+/// 用全局下标，往前补历史页后还认得出是哪条。
+type RetainedTextKey = (&'static str, usize, usize);
+
+/// 视图持有的一段正文解析状态。`text` 是上次交给它的那份，同一份字符串就不再比内容。
+struct RetainedText {
+    state: gpui::Entity<gpui_component::text::TextViewState>,
+    text: gpui::SharedString,
+    _remeasure: Subscription,
+}
+
+/// 快照从 `changed_from` 起改了消息：两边都在的行请列表重新量高，多出来的追加，
+/// 少了的删掉。
+///
+/// 不能整段 `splice`：被换掉的行会变成没有高度的新行，下一帧量完之前总高度都缺
+/// 这一截。这期间到来的滚轮事件按缩水的总高夹住滚动位置，视口一下跳到很上面。
+/// 重新量高留着上一帧的高度当估计，滚动锚点也原样保留在这一行里。
+fn sync_changed_rows(list: &ListState, changed_from: usize, old_len: usize, new_len: usize) {
+    let kept_end = old_len.min(new_len);
+    if changed_from < kept_end {
+        list.remeasure_items(changed_from..kept_end);
+    }
+    if new_len > old_len {
+        list.splice(old_len..old_len, new_len - old_len);
+    } else if old_len > new_len {
+        list.splice(new_len..old_len, 0);
+    }
+}
+
+/// 行高跟着变的那部分外观：是不是最终回答，在过程组里的位置，过程组是否还在进行。
+/// 位置按相对本行记，往前补历史页、下标整体后移时不算变化。耗时、工具计数这类只改
+/// 一行字的字段不算。
+fn row_shape(row: &EntryPresentation, ix: usize) -> (bool, Option<(usize, usize, bool)>) {
+    (
+        row.final_answer,
+        row.process_group.map(|group| {
+            (
+                ix.saturating_sub(group.first),
+                group.end.saturating_sub(ix),
+                group.active,
+            )
+        }),
+    )
+}
+
+/// 两次布局之间外观变了的行，按 `new` 的下标合并成连续区间。
+///
+/// 过程组收起、成为最终回答，改的是别的消息带出来的外观，快照只报自己改过的那条。
+/// 这些行多半已经滚出视口，列表还记着旧高度；不告诉列表，往回滚时就按旧高度换算，
+/// 内容一顿一顿往回跳。`old` 的第一行是全局第 `old_start` 条，`new` 的是第 `new_start`
+/// 条；只比 `new` 里 `from` 之后、两边都有的行，新出现的行本来就还没量过。
+fn rows_with_changed_shape(
+    old: &[EntryPresentation],
+    old_start: usize,
+    new: &[EntryPresentation],
+    new_start: usize,
+    from: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for (ix, row) in new.iter().enumerate().skip(from) {
+        let Some(old_ix) = (new_start + ix).checked_sub(old_start) else {
+            continue;
+        };
+        let Some(old_row) = old.get(old_ix) else {
+            continue;
+        };
+        if row_shape(old_row, old_ix) == row_shape(row, ix) {
+            continue;
+        }
+        match ranges.last_mut() {
+            Some(range) if range.end == ix => range.end = ix + 1,
+            _ => ranges.push(ix..ix + 1),
+        }
+    }
+    ranges
+}
+
 fn should_seed_restored_height_hints(
     awaiting_initial_snapshot: bool,
     replaying_history: bool,
@@ -1397,6 +1474,8 @@ pub struct AcpView {
     /// 与 `entries` 同索引的 Markdown 预处理结果。文件链接解析与用户 HTML 转义只在
     /// entry 变化时执行，静态重绘直接复用 `SharedString`。
     rendered_markdown: Vec<Option<gpui::SharedString>>,
+    /// 消息列表里正文的解析状态，见 [`Self::retained_markdown`]。
+    retained_text: std::cell::RefCell<std::collections::HashMap<RetainedTextKey, RetainedText>>,
     /// 对话布局缓存。流式更新只重算当前回合，不扫描已结束的历史。
     layout_cache: std::cell::RefCell<ConversationLayoutCache>,
     /// Pi 输入栏「技能 N」的发现结果。技能目录和祖先 `.git` 探测一次就要数毫秒
@@ -1851,6 +1930,7 @@ impl AcpView {
             rendered_diffs,
             rendered_tool_images: std::collections::HashMap::new(),
             rendered_markdown,
+            retained_text: std::cell::RefCell::default(),
             layout_cache: std::cell::RefCell::default(),
             loaded_skills: None,
             transcript,
@@ -2147,25 +2227,48 @@ impl AcpView {
                 Some(ix) => Some(layout_recompute_start(&self.entries, ix)),
             }
         };
-        if recompute_from == Some(0) || cache.len == 0 {
-            cache.entries = std::rc::Rc::new(build_conversation_layout_with_timings(
-                &self.entries,
-                turn_active,
+        // 列表量过上一版布局的行。重算后外观变了的行要让它重新量，见 `rows_with_changed_shape`。
+        let measured = cache.len > 0;
+        let previous_offset = cache.loaded_offset;
+        let (previous, previous_start, compare_from) =
+            if recompute_from == Some(0) || cache.len == 0 {
+                let previous = std::mem::replace(
+                    &mut cache.entries,
+                    std::rc::Rc::new(build_conversation_layout_with_timings(
+                        &self.entries,
+                        turn_active,
+                        loaded,
+                        &self.turn_timings,
+                        live,
+                    )),
+                );
+                (previous, previous_offset, 0)
+            } else {
+                let from = recompute_from.unwrap_or(0);
+                // 只留要重算的那截。留整份 `Rc` 会让下面的 `make_mut` 复制整张表。
+                let kept = from.min(cache.entries.len());
+                let previous = std::rc::Rc::new(cache.entries[kept..].to_vec());
+                refresh_conversation_layout_from(
+                    std::rc::Rc::make_mut(&mut cache.entries),
+                    &self.entries,
+                    from,
+                    turn_active,
+                    loaded,
+                    &self.turn_timings,
+                    live,
+                );
+                (previous, previous_offset + kept, from)
+            };
+        if measured {
+            for rows in rows_with_changed_shape(
+                &previous,
+                previous_start,
+                &cache.entries,
                 loaded,
-                &self.turn_timings,
-                live,
-            ));
-        } else if let Some(from) = recompute_from {
-            let entries = std::rc::Rc::make_mut(&mut cache.entries);
-            refresh_conversation_layout_from(
-                entries,
-                &self.entries,
-                from,
-                turn_active,
-                loaded,
-                &self.turn_timings,
-                live,
-            );
+                compare_from,
+            ) {
+                self.list_state.remeasure_items(rows);
+            }
         }
         cache.len = len;
         cache.tail_start = tail;
@@ -3672,6 +3775,11 @@ impl AcpView {
                 self.cwd.as_deref(),
                 &mut self.rendered_markdown,
             );
+            let loaded =
+                self.loaded_entries_offset..self.loaded_entries_offset + self.entries.len();
+            self.retained_text
+                .get_mut()
+                .retain(|(_, entry, _), _| loaded.contains(entry));
             self.rendered_images
                 .retain(|(entry_ix, _), _| *entry_ix < entries_offset);
             self.rendered_images.extend(decode_entry_images(
@@ -3702,19 +3810,12 @@ impl AcpView {
             self.list_state
                 .reset_with_uniform_height(new_entries_len, px(RESTORED_ENTRY_HEIGHT_HINT_PX));
         } else if let Some(entries_offset) = changed_from {
-            // splice 会把落在被替换 item 内部的滚动锚点重置到该 item 顶部。
-            // 流式正文持续替换最后一项时，用户若正在这项里向上浏览，就会每个
-            // chunk 被拉回一次，形成明显抖动。离开尾随态后保留逻辑锚点；正文
-            // 只在锚点下方增长，原 offset 仍然代表同一块可见内容。
-            let scroll_anchor = (!self.list_state.is_following_tail())
-                .then(|| self.list_state.logical_scroll_top());
-            self.list_state.splice(
-                entries_offset..old_entries_len,
-                new_entries_len.saturating_sub(entries_offset),
+            sync_changed_rows(
+                &self.list_state,
+                entries_offset,
+                old_entries_len,
+                new_entries_len,
             );
-            if let Some(anchor) = scroll_anchor {
-                self.list_state.scroll_to(anchor);
-            }
         }
         if self.revealed_prompt.is_some_and(|ix| {
             seed_restored_height_hints || changed_from.is_some_and(|from| from <= ix)

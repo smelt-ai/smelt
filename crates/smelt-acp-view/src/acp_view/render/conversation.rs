@@ -78,6 +78,56 @@ struct SubagentCard<'a> {
 }
 
 impl AcpView {
+    /// 消息列表里的 Markdown 正文。解析状态由视图按位置留着，不挂在元素上。
+    ///
+    /// 挂在元素上的状态，行一滚出虚拟列表的渲染范围就跟着丢。超过 4KB 的正文在后台
+    /// 解析，滚回来先以空内容量出一个很矮的高度，往回滚时会把整条回答跳过去，
+    /// 解析完又一下撑开。解析结果落地（含图片加载完重排）时请列表重新量这一行，
+    /// 还在视口外的行就能在滚到之前量对。
+    fn retained_markdown(
+        &self,
+        site: &'static str,
+        entry_ix: usize,
+        part: usize,
+        text: gpui::SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_component::text::TextView {
+        let global = self.loaded_entries_offset + entry_ix;
+        let mut retained = self.retained_text.borrow_mut();
+        let state = match retained.get_mut(&(site, global, part)) {
+            Some(slot) => {
+                if slot.text.as_ptr() != text.as_ptr() || slot.text.len() != text.len() {
+                    slot.state.update(cx, |state, cx| state.set_text(&text, cx));
+                    slot.text = text;
+                }
+                slot.state.clone()
+            }
+            None => {
+                let state = cx.new(|cx| gpui_component::text::TextViewState::markdown(&text, cx));
+                let remeasure = cx.observe(&state, move |this, _, cx| {
+                    let Some(ix) = global
+                        .checked_sub(this.loaded_entries_offset)
+                        .filter(|ix| *ix < this.entries.len())
+                    else {
+                        return;
+                    };
+                    this.list_state.remeasure_items(ix..ix + 1);
+                    cx.notify();
+                });
+                retained.insert(
+                    (site, global, part),
+                    super::super::RetainedText {
+                        state: state.clone(),
+                        text,
+                        _remeasure: remeasure,
+                    },
+                );
+                state
+            }
+        };
+        smelt_ui::markdown_mermaid::markdown_view_for_state(&state)
+    }
+
     pub(super) fn render_message_list(
         &self,
         animate_ambient: bool,
@@ -111,7 +161,7 @@ impl AcpView {
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             let conversation_layout = conversation_layout.clone();
             view.update(app, |this, cx| {
-                let t = cx.theme();
+                let t = cx.theme().colors;
                 let muted = t.muted_foreground;
                 let presentation = conversation_layout.get(i).copied().unwrap_or_default();
                 let final_answer = presentation.final_answer;
@@ -294,14 +344,17 @@ impl AcpView {
                                 i,
                                 user_message_bubble(("acp-user-message", i))
                                     .debug_selector(move || format!("ACP_USER_MESSAGE_{i}"))
-                                    .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                        ("acp-user-md", i),
+                                    .child(this.retained_markdown(
+                                        "acp-user-md",
+                                        i,
+                                        0,
                                         cached_entry_markdown(
                                             &this.rendered_markdown,
                                             i,
                                             entry,
                                             this.cwd.as_deref(),
                                         ),
+                                        cx,
                                     ))
                                     .context_menu(move |menu, window, cx| {
                                         selected_text_context_menu(
@@ -324,14 +377,17 @@ impl AcpView {
                         let mut content = v_flex().gap_2();
                         if !text.trim().is_empty() {
                             content = content.child(
-                                smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                    ("acp-user-images-md", i),
+                                this.retained_markdown(
+                                    "acp-user-images-md",
+                                    i,
+                                    0,
                                     cached_entry_markdown(
                                         &this.rendered_markdown,
                                         i,
                                         entry,
                                         this.cwd.as_deref(),
                                     ),
+                                    cx,
                                 ),
                             );
                         }
@@ -447,14 +503,17 @@ impl AcpView {
                             .min_w_0()
                             .text_sm()
                             .text_color(t.foreground)
-                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                ("acp-md", i),
+                            .child(this.retained_markdown(
+                                "acp-md",
+                                i,
+                                0,
                                 cached_entry_markdown(
                                     &this.rendered_markdown,
                                     i,
                                     entry,
                                     this.cwd.as_deref(),
                                 ),
+                                cx,
                             ))
                             .when(final_answer, |col| {
                                 col.child(
@@ -566,9 +625,12 @@ impl AcpView {
                                             .child(status_label),
                                     ),
                             )
-                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                ("acp-completion-md", i),
+                            .child(this.retained_markdown(
+                                "acp-completion-md",
+                                i,
+                                0,
                                 body_markdown,
+                                cx,
                             ))
                             .context_menu(move |menu, window, cx| {
                                 selected_text_context_menu(
@@ -902,9 +964,12 @@ impl AcpView {
                                                 lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
                                             };
                                             let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
-                                            let body_el = smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                                ("acp-tool-output-md", i * 100 + part_ix),
-                                                shown,
+                                            let body_el = this.retained_markdown(
+                                                "acp-tool-output-md",
+                                                i,
+                                                part_ix,
+                                                shown.into(),
+                                                cx,
                                             )
                                             .text_xs()
                                             .text_color(muted)
@@ -1753,7 +1818,7 @@ impl AcpView {
         muted: gpui::Hsla,
         live_elapsed: Option<u64>,
         animate_ambient: bool,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_thoughts.contains(&entry_ix);
         let mut preview = progress_summary(text);
@@ -1896,21 +1961,21 @@ impl AcpView {
                 .pb_2()
                 .text_xs()
                 .text_color(muted)
-                .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                    (
-                        if in_process {
-                            "acp-progress-md"
-                        } else {
-                            "acp-analysis-md"
-                        },
-                        entry_ix,
-                    ),
+                .child(self.retained_markdown(
+                    if in_process {
+                        "acp-progress-md"
+                    } else {
+                        "acp-analysis-md"
+                    },
+                    entry_ix,
+                    0,
                     cached_entry_markdown(
                         &self.rendered_markdown,
                         entry_ix,
                         entry,
                         self.cwd.as_deref(),
                     ),
+                    cx,
                 ))
                 .into_any_element();
             col = if let Some(progress) = reveal {

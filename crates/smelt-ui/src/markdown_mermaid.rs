@@ -34,7 +34,8 @@ use gpui::{
 };
 use gpui_component::ActiveTheme;
 use gpui_component::text::{
-    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewStyle, markdown_ast,
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewState, TextViewStyle,
+    markdown_ast,
 };
 use sha2::{Digest, Sha256};
 
@@ -342,9 +343,20 @@ fn markdown_view_with_selection(
     text: impl Into<SharedString>,
     selectable: bool,
 ) -> TextView {
-    TextView::markdown(id, text)
-        .selectable(selectable)
-        .style(markdown_text_view_style())
+    with_markdown_hooks(TextView::markdown(id, text).selectable(selectable))
+}
+
+/// 和 [`markdown_view_clickable`] 一样的 Markdown，只是解析状态由调用方持有。
+///
+/// `TextView::markdown` 把解析结果挂在元素上，元素有一帧没画就丢掉。虚拟列表里的行
+/// 滚出渲染范围再回来，超过 4KB 的正文要先以空内容等后台重新解析，行高跟着跳。
+/// 这类地方自己留住 `TextViewState`，用这个入口画。
+pub fn markdown_view_for_state(state: &gpui::Entity<TextViewState>) -> TextView {
+    with_markdown_hooks(TextView::new(state).selectable(true))
+}
+
+fn with_markdown_hooks(view: TextView) -> TextView {
+    view.style(markdown_text_view_style())
         .code_block_actions(code_block_corner)
         .markdown_extensions(shared_markdown_extensions().clone())
 }

@@ -25,7 +25,7 @@ use super::{
     overlay_session_configs, pending_config_choice_names, plan_current_step, preformatted_html,
     process_group_header_label, process_group_label, progress_has_details, progress_summary,
     provider_menu_label, provider_switch_value, reconcile_pending_config_values,
-    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt,
+    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt, rows_with_changed_shape,
     running_background_tasks, search_summary_text, selected_provider_group,
     session_trajectory_events, settled_thought_elapsed, settled_thought_label,
     should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
@@ -3897,5 +3897,352 @@ fn live_elapsed_hangs_on_the_current_action_row() {
         super::row_live_elapsed(true, 1, &answer, None, Some(20_000), None),
         None,
         "正文自己在往外长，不再另挂一行耗时"
+    );
+}
+
+fn numbered_paragraphs(label: &str, count: usize) -> String {
+    (0..count)
+        .map(|n| format!("{label} 第 {n} 段"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 打开一个已有消息的会话视图。不等首帧快照，后续快照按增量尾片合并。
+fn open_conversation<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    sid: &'static str,
+    entries: Vec<AcpEntry>,
+    phase: DaemonPhase,
+) -> (
+    gpui::Entity<super::AcpView>,
+    &'a mut gpui::VisualTestContext,
+) {
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(move |_window, cx| {
+        let mut view = super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "scroll".into(),
+                entries,
+                resume_session_id: None,
+                saved_sid: Some(sid.into()),
+            },
+        );
+        view.phase = phase;
+        view.awaiting_initial_history_snapshot = false;
+        view
+    });
+    (view, cx)
+}
+
+fn tail_snapshot(
+    revision: u64,
+    entries_offset: usize,
+    entries: Vec<AcpEntry>,
+    phase: DaemonPhase,
+) -> smelt_core::acp_session::ConversationSnapshot {
+    let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
+    snapshot.snapshot_revision = revision;
+    snapshot.entries_total = entries_offset + entries.len();
+    snapshot.entries_offset = entries_offset;
+    snapshot.entries = entries;
+    snapshot.phase = phase;
+    snapshot
+}
+
+fn wheel(position: gpui::Point<gpui::Pixels>, up: gpui::Pixels) -> gpui::ScrollWheelEvent {
+    gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), up)),
+        modifiers: Default::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    }
+}
+
+/// 流式正文每来一段就改一次最后一条。快照落地到下一帧画出来之间，滚轮事件照常
+/// 进来，按上一帧的位置换算。改动的行这时不能变成没有高度的新行：总高度少了
+/// 这一截，滚动位置会被夹到很靠上的地方，视口一下跳走。
+#[gpui::test]
+fn wheel_between_a_streaming_snapshot_and_the_next_frame_moves_by_its_delta(
+    cx: &mut gpui::TestAppContext,
+) {
+    let answer = |paragraphs| AcpEntry::Assistant {
+        text: numbered_paragraphs("回答", paragraphs),
+        thought: false,
+    };
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-streaming-wheel",
+        vec![AcpEntry::User("问".into()), answer(80)],
+        DaemonPhase::Thinking,
+    );
+    draw_settled(cx);
+    draw_settled(cx);
+    let viewport = view.read_with(cx, |view, _| view.list_state.viewport_bounds());
+    assert!(
+        viewport.size.height > px(100.),
+        "列表要有视口: {viewport:?}"
+    );
+
+    cx.simulate_event(wheel(viewport.center(), px(200.)));
+    draw_settled(cx);
+    let before = view.read_with(cx, |view, _| {
+        assert!(
+            !view.list_state.is_following_tail(),
+            "往上滚过就不再跟随最新"
+        );
+        view.list_state.logical_scroll_top()
+    });
+    assert_eq!(before.item_ix, 1, "还停在回答里");
+    assert!(before.offset_in_item > px(30.), "回答比视口高: {before:?}");
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.apply_snapshot(
+                tail_snapshot(1, 1, vec![answer(81)], DaemonPhase::Thinking),
+                cx,
+            )
+        });
+        window.dispatch_event(
+            gpui::PlatformInput::ScrollWheel(wheel(viewport.center(), px(30.))),
+            cx,
+        );
+    });
+    draw_settled(cx);
+
+    let after = view.read_with(cx, |view, _| view.list_state.logical_scroll_top());
+    assert_eq!(after.item_ix, before.item_ix, "滚轮只走了 30px: {after:?}");
+    assert_eq!(
+        after.offset_in_item,
+        before.offset_in_item - px(30.),
+        "滚轮只走了 30px"
+    );
+}
+
+/// 上一回合结束后，它的工具行收成一行「执行过程」，其余行高度变成 0。这些行早就
+/// 滚出了视口，列表里还记着展开时的高度；往回滚时按旧高度换算，内容一顿一顿地
+/// 往回跳，滚不上去。
+#[gpui::test]
+fn scrolling_back_over_a_collapsed_turn_moves_by_the_wheel_delta(cx: &mut gpui::TestAppContext) {
+    let kinds = [
+        ToolKind::Read,
+        ToolKind::Edit,
+        ToolKind::Execute,
+        ToolKind::Search,
+    ];
+    let mut first_turn = vec![AcpEntry::User("第一问".into())];
+    first_turn.extend((0..16).map(|n| {
+        completed_tool(
+            &format!("tool-{n}"),
+            kinds[n % kinds.len()],
+            &format!("步骤 {n}"),
+        )
+    }));
+    let first_turn_len = first_turn.len();
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-collapsed-turn-wheel",
+        first_turn,
+        DaemonPhase::Thinking,
+    );
+    draw_settled(cx);
+    draw_settled(cx);
+    assert!(
+        cx.debug_bounds("ACP_TOOL_COMPACT_2").is_some(),
+        "回合进行中，工具逐行展开"
+    );
+
+    let second_prompt = first_turn_len + 1;
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.apply_snapshot(
+                tail_snapshot(
+                    1,
+                    first_turn_len,
+                    vec![
+                        AcpEntry::Assistant {
+                            text: "第一问的回答".into(),
+                            thought: false,
+                        },
+                        AcpEntry::User("第二问".into()),
+                        AcpEntry::Assistant {
+                            text: numbered_paragraphs("答二", 120),
+                            thought: false,
+                        },
+                    ],
+                    DaemonPhase::Thinking,
+                ),
+                cx,
+            )
+        })
+    });
+    draw_settled(cx);
+    draw_settled(cx);
+    assert!(
+        cx.debug_bounds("ACP_TOOL_COMPACT_2").is_none(),
+        "第一回合结束后工具收起，而且已经滚出视口"
+    );
+
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.list_state.scroll_to(gpui::ListOffset {
+                item_ix: second_prompt + 1,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        })
+    });
+    draw_settled(cx);
+
+    let viewport = view.read_with(cx, |view, _| view.list_state.viewport_bounds());
+    assert_eq!(second_prompt, 18);
+    let selector = "ACP_USER_MESSAGE_18";
+    let step = px(40.);
+    let mut compared = 0;
+    for _ in 0..12 {
+        let before = cx.debug_bounds(selector);
+        cx.simulate_event(wheel(viewport.center(), step));
+        draw_settled(cx);
+        let after = cx.debug_bounds(selector);
+        let top = view.read_with(cx, |view, _| view.list_state.logical_scroll_top());
+        if top.item_ix == 0 && top.offset_in_item == px(0.) {
+            // 到顶了，剩下的距离不够一整步。
+            break;
+        }
+        if let (Some(before), Some(after)) = (before, after)
+            && before.top() < viewport.bottom()
+            && after.top() < viewport.bottom()
+        {
+            let moved = after.top() - before.top();
+            assert!(
+                (moved - step).abs() < px(1.),
+                "第 {compared} 次比对：滚轮往上 {step:?}，第二问却移动了 {moved:?}"
+            );
+            compared += 1;
+        }
+    }
+    assert!(
+        compared >= 5,
+        "第二问要在视口里停留多次比对，实际 {compared} 次"
+    );
+    assert!(
+        cx.debug_bounds("ACP_PROCESS_GROUP_1").is_some(),
+        "滚到第一回合，看得到收起后的执行过程"
+    );
+}
+
+#[test]
+fn closing_a_turn_remeasures_the_rows_its_process_group_folds() {
+    let mut entries = vec![AcpEntry::User("第一问".into())];
+    entries.extend((0..4).map(|n| {
+        let kind = if n % 2 == 0 {
+            ToolKind::Read
+        } else {
+            ToolKind::Edit
+        };
+        completed_tool(&format!("tool-{n}"), kind, &format!("步骤 {n}"))
+    }));
+    entries.push(AcpEntry::Assistant {
+        text: "回答".into(),
+        thought: false,
+    });
+    let running = build_conversation_layout(&entries, true);
+    let closed = build_conversation_layout(&entries, false);
+    assert_eq!(
+        rows_with_changed_shape(&running, 0, &closed, 0, 0),
+        vec![1..6],
+        "工具行收起、回答成为最终回答，都要重新量"
+    );
+    assert!(
+        rows_with_changed_shape(&closed, 0, &closed, 0, 0).is_empty(),
+        "外观没变的行不打扰列表"
+    );
+}
+
+#[test]
+fn prepending_history_does_not_remeasure_unchanged_rows() {
+    let turn = |label: &str| {
+        vec![
+            AcpEntry::User(label.into()),
+            completed_tool(&format!("{label}-read"), ToolKind::Read, "a.rs"),
+            completed_tool(&format!("{label}-edit"), ToolKind::Edit, "a.rs"),
+            AcpEntry::Assistant {
+                text: "回答".into(),
+                thought: false,
+            },
+        ]
+    };
+    let later = turn("后一问");
+    let mut all = turn("前一问");
+    all.extend(later.clone());
+    let before = build_conversation_layout(&later, false);
+    let after = build_conversation_layout(&all, false);
+    assert!(
+        rows_with_changed_shape(&before, 4, &after, 0, 0).is_empty(),
+        "往前补一页，已有的行只是整体后移"
+    );
+}
+
+/// 超过 4KB 的回答在后台解析。解析结果挂在元素上，行一滚出列表的渲染范围就跟着
+/// 丢掉，滚回来先以空内容出现、解析完才撑开。往回滚经过长回答时，内容会被它
+/// 一下顶开，往回跳。
+#[gpui::test]
+fn scrolling_back_over_a_long_answer_moves_by_the_wheel_delta(cx: &mut gpui::TestAppContext) {
+    let long_answer = |label: &str| AcpEntry::Assistant {
+        text: numbered_paragraphs(label, 400),
+        thought: false,
+    };
+    let entries = vec![
+        AcpEntry::User("第一问".into()),
+        long_answer("答一"),
+        AcpEntry::User("第二问".into()),
+        long_answer("答二"),
+    ];
+    assert!(numbered_paragraphs("答一", 400).len() > 4 * 1024);
+    let (view, cx) = open_conversation(cx, "acp-long-answer-wheel", entries, DaemonPhase::Idle);
+    draw_settled(cx);
+    draw_settled(cx);
+
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 3,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        })
+    });
+    draw_settled(cx);
+    draw_settled(cx);
+
+    let viewport = view.read_with(cx, |view, _| view.list_state.viewport_bounds());
+    let selector = "ACP_USER_MESSAGE_2";
+    let step = px(40.);
+    let mut compared = 0;
+    for _ in 0..10 {
+        let before = cx.debug_bounds(selector);
+        cx.simulate_event(wheel(viewport.center(), step));
+        draw_settled(cx);
+        let after = cx.debug_bounds(selector);
+        if let (Some(before), Some(after)) = (before, after)
+            && before.top() < viewport.bottom()
+            && after.top() < viewport.bottom()
+        {
+            let moved = after.top() - before.top();
+            assert!(
+                (moved - step).abs() < px(1.),
+                "第 {compared} 次比对：滚轮往上 {step:?}，第二问却移动了 {moved:?}"
+            );
+            compared += 1;
+        }
+    }
+    assert!(
+        compared >= 5,
+        "第二问要在视口里停留多次比对，实际 {compared} 次"
     );
 }
