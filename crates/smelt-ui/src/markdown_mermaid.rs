@@ -298,9 +298,43 @@ fn markdown_text_view_style() -> TextViewStyle {
         background_color: Some(rgb(crate::ui_theme::bg_selected()).into()),
         ..Default::default()
     };
-    let mut style = TextViewStyle::default().inline_code(inline_code);
+    // 右上角挂了语言名和复制按钮（见 `code_block_corner`），首行要让开它，跟
+    // gpui-component 自带语言标签时的留白一致。
+    let code_block = gpui::StyleRefinement::default().pt(px(28.));
+    let mut style = TextViewStyle::default()
+        .inline_code(inline_code)
+        .code_block(code_block);
     style.is_dark = !crate::ui_theme::is_light();
     style
+}
+
+/// 围栏代码块右上角：语言名 + 复制按钮。
+///
+/// 一旦接了 `code_block_actions`，gpui-component 就不再画它自带的语言标签，所以
+/// 语言名在这里一并画。按钮 id 用固定的 `"copy"` 即可：框架按代码块给 actions
+/// 套了一层带位置的 id，不同代码块之间不会撞。
+fn code_block_corner(
+    code_block: &gpui_base::text::CodeBlock,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let lang = code_block.lang().filter(|lang| !lang.is_empty());
+    gpui_component::h_flex()
+        .gap_1()
+        .items_center()
+        .children(lang.map(|lang| {
+            div()
+                .px_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(lang)
+        }))
+        .child(
+            gpui_component::clipboard::Clipboard::new("copy")
+                .value(code_block.code())
+                .tooltip("复制代码"),
+        )
+        .into_any_element()
 }
 
 fn markdown_view_with_selection(
@@ -311,6 +345,7 @@ fn markdown_view_with_selection(
     TextView::markdown(id, text)
         .selectable(selectable)
         .style(markdown_text_view_style())
+        .code_block_actions(code_block_corner)
         .markdown_extensions(shared_markdown_extensions().clone())
 }
 
