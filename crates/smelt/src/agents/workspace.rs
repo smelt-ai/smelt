@@ -329,6 +329,20 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn select_agent_editor_tab(&mut self, tab: AgentEditorTab, cx: &mut Context<Self>) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            editor.tab = tab;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_agent_memory_filter(&mut self, filter: MemoryFilter, cx: &mut Context<Self>) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            editor.memory_filter = filter;
+        }
+        cx.notify();
+    }
+
     /// 一次只展开一条；再点同一条收起。
     pub(super) fn toggle_agent_memory_expanded(
         &mut self,
@@ -611,6 +625,14 @@ impl Workspace {
             }),
         );
 
+        let memory_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称、描述或正文"));
+        subscriptions.push(cx.subscribe(&memory_query, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
+
         let memories = AgentMemories::scan(&id);
         let memory_watcher = self.watch_agent_memories(&id, cx);
         self.agent_surface.editor = Some(AgentEditor {
@@ -622,6 +644,9 @@ impl Workspace {
             plugins: discover_plugins(),
             mcp_servers: load_mcp_servers_for_editor(),
             memories,
+            tab: AgentEditorTab::default(),
+            memory_query,
+            memory_filter: MemoryFilter::default(),
             expanded_memory: None,
             _memory_watcher: memory_watcher,
             _subscriptions: subscriptions,

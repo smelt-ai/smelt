@@ -126,7 +126,12 @@ pub(crate) struct AgentEditor {
     /// 同理，记忆不在渲染里扫：打开编辑器、记忆目录有变化、有对话停下来、
     /// 点刷新或删除后才重扫。
     memories: AgentMemories,
-    /// 卡片里展开看全文的那条记忆。只是看，改仍走系统编辑器。
+    /// 当前页签。每次打开编辑器回到配置。
+    tab: AgentEditorTab,
+    /// 记忆页签的搜索框和筛选。
+    memory_query: Entity<InputState>,
+    memory_filter: MemoryFilter,
+    /// 记忆页签里展开看全文的那条记忆。只是看，改仍走系统编辑器。
     expanded_memory: Option<(MemoryLayer, String)>,
     /// 监听两层记忆目录，智能体或外部编辑器改了文件，卡片自己刷新。跟着编辑器走：
     /// 关掉或换一个智能体时 drop，监听随之停止。
@@ -186,6 +191,107 @@ pub(crate) fn session_phase_settled(phase: smelt_core::daemon_state::DaemonPhase
         phase,
         DaemonPhase::Connecting | DaemonPhase::Thinking | DaemonPhase::ExecutingTool
     )
+}
+
+/// 编辑页的两个页签。配置是设一次就不怎么动的东西；记忆是会一直长的数据，单独一页，
+/// 不把插件和 MCP 挤到后面去。
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(crate) enum AgentEditorTab {
+    #[default]
+    Config,
+    Memory,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(crate) enum MemoryFilter {
+    #[default]
+    All,
+    Pending,
+    Rules,
+    Facts,
+}
+
+impl MemoryFilter {
+    const ALL: [Self; 4] = [Self::All, Self::Pending, Self::Rules, Self::Facts];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Pending => "待确认",
+            Self::Rules => "规则",
+            Self::Facts => "事实",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::All => "所有记忆",
+            Self::Pending => "没生效、等你采纳的记忆",
+            Self::Rules => "你本人的情况和你纠正过的做法，每轮都带上",
+            Self::Facts => "项目、资源一类的信息，用到时才召回",
+        }
+    }
+
+    fn element_id(self) -> &'static str {
+        match self {
+            Self::All => "agent-memory-filter-all",
+            Self::Pending => "agent-memory-filter-pending",
+            Self::Rules => "agent-memory-filter-rules",
+            Self::Facts => "agent-memory-filter-facts",
+        }
+    }
+
+    fn matches(self, entry: &smelt_core::agent_memory::MemoryEntry) -> bool {
+        let rule = smelt_core::agent_memory::is_rule_memory_kind(entry.kind.as_deref());
+        match self {
+            Self::All => true,
+            Self::Pending => entry.pending_reason.is_some(),
+            Self::Rules => rule,
+            Self::Facts => !rule,
+        }
+    }
+}
+
+/// 记忆页签里一层要显示的记忆。搜索不分大小写，名字、描述、文件名、正文任一命中即可。
+/// 待确认要用户处理，排最前；其余按最近用过排，没用过的垫底，同档按名字。
+pub(crate) fn visible_memories<'a>(
+    entries: &'a [smelt_core::agent_memory::MemoryEntry],
+    query: &str,
+    filter: MemoryFilter,
+) -> Vec<&'a smelt_core::agent_memory::MemoryEntry> {
+    let query = query.trim().to_lowercase();
+    let mut visible: Vec<_> = entries
+        .iter()
+        .filter(|entry| filter.matches(entry))
+        .filter(|entry| {
+            query.is_empty()
+                || [
+                    &entry.name,
+                    &entry.description,
+                    &entry.file_name,
+                    &entry.body,
+                ]
+                .iter()
+                .any(|field| field.to_lowercase().contains(&query))
+        })
+        .collect();
+    visible.sort_by(|a, b| {
+        b.pending_reason
+            .is_some()
+            .cmp(&a.pending_reason.is_some())
+            .then_with(|| b.last_used.cmp(&a.last_used))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    visible
+}
+
+/// 配置页摘要行的条数。只报数，不列条目，记忆再多也是一行。
+pub(crate) fn memory_summary_text(agent: usize, user: usize) -> String {
+    if agent + user == 0 {
+        "还没有记忆".to_string()
+    } else {
+        format!("这个智能体 {agent} 条 · 全局 {user} 条")
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2384,17 +2490,14 @@ fn render_agent_context_card(
         .into_any_element()
 }
 
-/// 智能体的记忆：它在对话和自动化里自己记下的长期信息。正文是 Markdown 文件，
-/// 这里只列出、打开和删除；写入规则见 `docs/agent-memory.md`。
-fn render_agent_memory_card(
+fn agent_memory_switch(
+    id: &'static str,
     agent: &settings::AgentDefinition,
-    editor: &AgentEditor,
     entity: Entity<Workspace>,
-) -> AnyElement {
+) -> Switch {
     let memory_enabled = agent.memory_enabled;
-    let toggle_agent = agent.id.clone();
-    let toggle_entity = entity.clone();
-    let memory_switch = Switch::new("agent-memory-enabled")
+    let agent_id = agent.id.clone();
+    Switch::new(id)
         .checked(memory_enabled)
         .tooltip(if memory_enabled {
             "关闭后不再注入和写入记忆，已有记忆保留"
@@ -2402,12 +2505,116 @@ fn render_agent_memory_card(
             "打开后在对话和自动化里使用记忆"
         })
         .on_click(move |checked, _, cx| {
-            let agent_id = toggle_agent.clone();
+            let agent_id = agent_id.clone();
             let enabled = *checked;
-            toggle_entity.update(cx, |workspace, cx| {
+            entity.update(cx, |workspace, cx| {
                 workspace.set_agent_memory_enabled(agent_id, enabled, cx)
             });
+        })
+}
+
+fn memory_pending_count(memories: &AgentMemories) -> usize {
+    memories
+        .agent
+        .entries
+        .iter()
+        .chain(&memories.user.entries)
+        .filter(|entry| entry.pending_reason.is_some())
+        .count()
+}
+
+/// 编辑页页签名。待确认要用户处理，挂在页签上，在配置页也看得到。
+pub(super) fn agent_editor_tab_label(tab: AgentEditorTab, editor: &AgentEditor) -> String {
+    match tab {
+        AgentEditorTab::Config => "配置".to_string(),
+        AgentEditorTab::Memory => match memory_pending_count(&editor.memories) {
+            0 => "记忆".to_string(),
+            pending => format!("记忆 · {pending} 待确认"),
+        },
+    }
+}
+
+/// 配置页上的记忆只占一行：开关、条数、待确认、进记忆页签的入口。条目一律不在这里列，
+/// 记忆再多也不会把插件和 MCP 挤到后面。
+fn render_agent_memory_summary(
+    agent: &settings::AgentDefinition,
+    editor: &AgentEditor,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    let pending = memory_pending_count(&editor.memories);
+    let manage_entity = entity.clone();
+    let manage = compact_chip("agent-memory-manage")
+        .label("管理")
+        .icon(IconName::ChevronRight)
+        .tooltip("查看、搜索和删除记忆")
+        .on_click(move |_, _, cx| {
+            manage_entity.update(cx, |workspace, cx| {
+                workspace.select_agent_editor_tab(AgentEditorTab::Memory, cx)
+            });
         });
+    agent_surface_card()
+        .px_5()
+        .py_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .font_medium()
+                .text_color(rgb(crate::ui_theme::text_bright()))
+                .child("记忆"),
+        )
+        .child(agent_memory_switch(
+            "agent-memory-enabled-summary",
+            agent,
+            entity,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(if agent.memory_enabled {
+                            memory_summary_text(
+                                editor.memories.agent.entries.len(),
+                                editor.memories.user.entries.len(),
+                            )
+                        } else {
+                            "已关闭：不注入、不写入，已有记忆保留".to_string()
+                        }),
+                )
+                .when(pending > 0, |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(crate::ui_theme::red()))
+                            .child(format!("{pending} 条待确认")),
+                    )
+                }),
+        )
+        .child(manage)
+        .into_any_element()
+}
+
+/// 记忆页签：智能体在对话和自动化里自己记下的长期信息。正文是 Markdown 文件，
+/// 这里搜索、筛选、展开看正文、打开和删除；写入规则见 `docs/agent-memory.md`。
+fn render_agent_memory_card(
+    agent: &settings::AgentDefinition,
+    editor: &AgentEditor,
+    entity: Entity<Workspace>,
+    cx: &App,
+) -> AnyElement {
+    let memory_enabled = agent.memory_enabled;
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-memory-refresh")
         .icon(IconName::Redo)
@@ -2415,7 +2622,23 @@ fn render_agent_memory_card(
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_memories(cx));
         });
-
+    let query = editor.memory_query.read(cx).value().to_string();
+    let filter = editor.memory_filter;
+    let narrowed = !query.trim().is_empty() || filter != MemoryFilter::All;
+    let filters = segmented_track(cx).children(MemoryFilter::ALL.into_iter().map(|option| {
+        let selected = option == filter;
+        let entity = entity.clone();
+        compact_chip(option.element_id())
+            .label(option.label())
+            .tooltip(option.tooltip())
+            .selected(selected)
+            .toggled(selected)
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |workspace, cx| {
+                    workspace.set_agent_memory_filter(option, cx)
+                });
+            })
+    }));
     agent_surface_card()
         .flex()
         .flex_col()
@@ -2459,39 +2682,82 @@ fn render_agent_memory_card(
                         .items_center()
                         .gap_2()
                         .child(refresh_button)
-                        .child(memory_switch),
+                        .child(agent_memory_switch("agent-memory-enabled", agent, entity.clone())),
                 ),
+        )
+        .child(
+            div()
+                .px_5()
+                .pb_2()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(200.))
+                        .child(Input::new(&editor.memory_query).small().cleanable(true)),
+                )
+                .child(filters),
         )
         .child(agent_memory_section(
             &agent.id,
-            MemoryLayer::Agent,
-            "这个智能体",
-            "还没有记忆。用户纠正它或让它记住什么时，它会自己写下来。",
-            &editor.memories.agent,
+            AgentMemorySection {
+                layer: MemoryLayer::Agent,
+                title: "这个智能体",
+                empty_hint: "还没有记忆。用户纠正它或让它记住什么时，它会自己写下来。",
+                listing: &editor.memories.agent,
+                query: &query,
+                filter,
+                narrowed,
+            },
             editor.expanded_memory.as_ref(),
             entity.clone(),
         ))
         .child(agent_memory_section(
             &agent.id,
-            MemoryLayer::User,
-            "全局（所有智能体共享）",
-            "还没有全局记忆。这里只放你本人的情况和你纠正过的做法。",
-            &editor.memories.user,
+            AgentMemorySection {
+                layer: MemoryLayer::User,
+                title: "全局（所有智能体共享）",
+                empty_hint: "还没有全局记忆。这里只放你本人的情况和你纠正过的做法。",
+                listing: &editor.memories.user,
+                query: &query,
+                filter,
+                narrowed,
+            },
             editor.expanded_memory.as_ref(),
             entity,
         ))
         .into_any_element()
 }
 
-fn agent_memory_section(
-    agent_id: &str,
+struct AgentMemorySection<'a> {
     layer: MemoryLayer,
     title: &'static str,
     empty_hint: &'static str,
-    listing: &smelt_core::agent_memory::MemoryListing,
+    listing: &'a smelt_core::agent_memory::MemoryListing,
+    query: &'a str,
+    filter: MemoryFilter,
+    /// 有搜索词或筛选时，空列表要说「没有匹配」，不能说「还没有记忆」。
+    narrowed: bool,
+}
+
+fn agent_memory_section(
+    agent_id: &str,
+    section: AgentMemorySection<'_>,
     expanded: Option<&(MemoryLayer, String)>,
     entity: Entity<Workspace>,
 ) -> AnyElement {
+    let AgentMemorySection {
+        layer,
+        title,
+        empty_hint,
+        listing,
+        query,
+        filter,
+        narrowed,
+    } = section;
     let layer_key = match layer {
         MemoryLayer::Agent => "agent",
         MemoryLayer::User => "user",
@@ -2509,9 +2775,8 @@ fn agent_memory_section(
             });
         });
 
-    let rows: Vec<AnyElement> = listing
-        .entries
-        .iter()
+    let rows: Vec<AnyElement> = visible_memories(&listing.entries, query, filter)
+        .into_iter()
         .map(|entry| {
             let open = expanded.is_some_and(|(expanded_layer, file_name)| {
                 *expanded_layer == layer && *file_name == entry.file_name
@@ -2519,13 +2784,18 @@ fn agent_memory_section(
             agent_memory_row(agent_id, layer, layer_key, entry, open, entity.clone())
         })
         .collect();
+    let shown = rows.len();
     let body = if rows.is_empty() {
         div()
             .px_3()
             .py_1p5()
             .text_xs()
             .text_color(rgb(crate::ui_theme::text_faint()))
-            .child(empty_hint)
+            .child(if narrowed && !listing.entries.is_empty() {
+                "没有匹配的记忆"
+            } else {
+                empty_hint
+            })
             .into_any_element()
     } else {
         div().flex().flex_col().children(rows).into_any_element()
@@ -2549,7 +2819,7 @@ fn agent_memory_section(
                         .text_xs()
                         .font_medium()
                         .text_color(rgb(crate::ui_theme::text_muted()))
-                        .child(memory_section_title(title, listing)),
+                        .child(memory_section_title(title, listing, narrowed.then_some(shown))),
                 )
                 .child(open_folder),
         )
@@ -2570,16 +2840,25 @@ fn agent_memory_section(
         .into_any_element()
 }
 
-fn memory_section_title(title: &str, listing: &smelt_core::agent_memory::MemoryListing) -> String {
+fn memory_section_title(
+    title: &str,
+    listing: &smelt_core::agent_memory::MemoryListing,
+    shown: Option<usize>,
+) -> String {
+    let total = listing.entries.len();
+    let count = match shown {
+        Some(shown) => format!("{shown} / {total} 条"),
+        None => format!("{total} 条"),
+    };
     let pending = listing
         .entries
         .iter()
         .filter(|entry| entry.pending_reason.is_some())
         .count();
     if pending == 0 {
-        format!("{title} · {} 条", listing.entries.len())
+        format!("{title} · {count}")
     } else {
-        format!("{title} · {} 条，{pending} 条待确认", listing.entries.len())
+        format!("{title} · {count}，{pending} 条待确认")
     }
 }
 

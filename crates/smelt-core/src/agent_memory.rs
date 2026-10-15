@@ -19,6 +19,12 @@ pub const MEMORY_STALE_AFTER: Duration = Duration::from_secs(60 * 24 * 60 * 60);
 pub const CORE_MEMORY_MAX_BYTES: usize = 3_000;
 const CORE_MEMORY_TYPES: [&str; 2] = ["user", "feedback"];
 
+/// 规则类记忆（用户本人的情况、用户纠正过的做法）：常驻注入、占规则预算、不按使用情况淘汰。
+/// 其余类型是按需召回的事实。
+pub fn is_rule_memory_kind(kind: Option<&str>) -> bool {
+    kind.is_some_and(|kind| CORE_MEMORY_TYPES.contains(&kind))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryEntry {
     pub file_name: String,
@@ -190,11 +196,7 @@ fn list_memories_with(
                     now.duration_since(last)
                         .is_ok_and(|age| age > MEMORY_STALE_AFTER)
                 });
-            if pending_reason.is_none()
-                && kind
-                    .as_deref()
-                    .is_some_and(|kind| CORE_MEMORY_TYPES.contains(&kind))
-            {
+            if pending_reason.is_none() && is_rule_memory_kind(kind.as_deref()) {
                 core_bytes += body.trim().len();
             }
             entries.push(MemoryEntry {

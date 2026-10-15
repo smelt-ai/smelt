@@ -1,10 +1,12 @@
 use super::{
-    agent_catalog_monogram, bound_agent_definition_id, conversation_agent_mark,
-    conversation_icon_color, conversation_row_title, new_conversation_row_label,
-    recent_conversation_order, session_phase_settled,
+    MemoryFilter, agent_catalog_monogram, bound_agent_definition_id, conversation_agent_mark,
+    conversation_icon_color, conversation_row_title, memory_summary_text,
+    new_conversation_row_label, recent_conversation_order, session_phase_settled, visible_memories,
 };
 use crate::AgentStatus;
 use gpui::rgb;
+use smelt_core::agent_memory::MemoryEntry;
+use std::time::{Duration, SystemTime};
 
 #[test]
 fn conversation_belongs_to_the_bound_agent_not_the_cwd() {
@@ -17,6 +19,84 @@ fn conversation_belongs_to_the_bound_agent_not_the_cwd() {
         None,
         "自动化 Run 不是对话"
     );
+}
+
+fn memory(name: &str, kind: Option<&str>) -> MemoryEntry {
+    MemoryEntry {
+        file_name: format!("{name}.md"),
+        name: name.to_string(),
+        description: String::new(),
+        kind: kind.map(str::to_string),
+        path: std::path::PathBuf::from(format!("/m/{name}.md")),
+        read_count: 0,
+        last_used: None,
+        stale: false,
+        pending_reason: None,
+        body: String::new(),
+    }
+}
+
+/// 待确认要用户处理，排最前；其余按最近用过排，没用过的垫底，同档按名字。
+#[test]
+fn memory_list_puts_pending_first_then_recently_used() {
+    let at = |secs| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+    let mut old = memory("old", Some("project"));
+    old.last_used = at(100);
+    let mut recent = memory("recent", Some("project"));
+    recent.last_used = at(200);
+    let never_b = memory("b-never", Some("project"));
+    let never_a = memory("a-never", Some("project"));
+    let mut pending = memory("pending", Some("project"));
+    pending.pending_reason = Some("读过外部内容".to_string());
+    let entries = vec![old, never_b, recent, pending, never_a];
+
+    let names: Vec<&str> = visible_memories(&entries, "", MemoryFilter::All)
+        .into_iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(names, ["pending", "recent", "old", "a-never", "b-never"]);
+}
+
+/// 搜索不分大小写，名字、描述、文件名、正文任一命中都算；筛选和搜索同时生效。
+#[test]
+fn memory_search_and_filter_narrow_the_list_together() {
+    let mut rule = memory("Reply-Language", Some("feedback"));
+    rule.body = "回复用中文".to_string();
+    let mut fact = memory("deploy", Some("reference"));
+    fact.description = "流水线地址".to_string();
+    let untyped = memory("scratch", None);
+    let mut pending = memory("proxy", Some("user"));
+    pending.pending_reason = Some("自动化写的".to_string());
+    let entries = vec![rule, fact, untyped, pending];
+    let names = |query: &str, filter| -> Vec<String> {
+        visible_memories(&entries, query, filter)
+            .into_iter()
+            .map(|entry| entry.name.clone())
+            .collect()
+    };
+
+    assert_eq!(names("reply", MemoryFilter::All), ["Reply-Language"]);
+    assert_eq!(names("中文", MemoryFilter::All), ["Reply-Language"]);
+    assert_eq!(names("流水线", MemoryFilter::All), ["deploy"]);
+    assert_eq!(names("scratch.md", MemoryFilter::All), ["scratch"]);
+    assert_eq!(names("  ", MemoryFilter::All).len(), 4, "空白搜索等于不搜");
+
+    assert_eq!(names("", MemoryFilter::Pending), ["proxy"]);
+    assert_eq!(names("", MemoryFilter::Rules), ["proxy", "Reply-Language"]);
+    assert_eq!(
+        names("", MemoryFilter::Facts),
+        ["deploy", "scratch"],
+        "没写类型的按事实算"
+    );
+    assert!(names("中文", MemoryFilter::Facts).is_empty());
+}
+
+/// 配置页那一行摘要：条数固定一行，待确认单独提醒，没有就不提。
+#[test]
+fn memory_summary_is_one_line_of_counts() {
+    assert_eq!(memory_summary_text(0, 0), "还没有记忆");
+    assert_eq!(memory_summary_text(8, 4), "这个智能体 8 条 · 全局 4 条");
+    assert_eq!(memory_summary_text(0, 3), "这个智能体 0 条 · 全局 3 条");
 }
 
 /// 记忆卡片在会话停下时重扫：模型还在想、工具还在跑时，元数据可能还没落库。

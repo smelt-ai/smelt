@@ -559,9 +559,30 @@ impl Workspace {
         name: &str,
         entity: Entity<Workspace>,
         left_guard: Pixels,
+        cx: &App,
     ) -> AnyElement {
         let draft = self.editing_conversation_draft();
         let back_entity = entity.clone();
+        let tabs = self.agent_surface.editor.as_ref().map(|editor| {
+            segmented_track(cx).children([AgentEditorTab::Config, AgentEditorTab::Memory].map(
+                |tab| {
+                    let selected = tab == editor.tab;
+                    let entity = entity.clone();
+                    compact_chip(match tab {
+                        AgentEditorTab::Config => "agent-editor-tab-config",
+                        AgentEditorTab::Memory => "agent-editor-tab-memory",
+                    })
+                    .label(agent_editor_tab_label(tab, editor))
+                    .selected(selected)
+                    .toggled(selected)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |workspace, cx| {
+                            workspace.select_agent_editor_tab(tab, cx)
+                        });
+                    })
+                },
+            ))
+        });
         let start_entity = entity;
         product_page_chrome(left_guard)
             .gap_2()
@@ -601,6 +622,7 @@ impl Workspace {
                             }),
                     ),
             )
+            .children(tabs)
             .when(draft, |row| {
                 row.child(
                     Button::new("agent-draft-start-conversation")
@@ -839,6 +861,26 @@ impl Workspace {
                 .persistence_error
                 .clone()
         });
+        if editor.tab == AgentEditorTab::Memory {
+            // 单独的滚动区：两个页签各记各的滚动位置。
+            return div()
+                .id("agent-memory-scroll")
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .bg(rgb(crate::ui_theme::bg_stage()))
+                .overflow_y_scroll()
+                .child(
+                    agent_definition_column()
+                        .py_5()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .children(error.map(render_agent_error))
+                        .child(render_agent_memory_card(&agent, editor, entity, cx)),
+                )
+                .into_any_element();
+        }
         let engine_kind = agent.engine_kind();
         let engine_label = engine_kind
             .map(|kind| kind.short_label().to_string())
@@ -1016,7 +1058,7 @@ impl Workspace {
                             ),
                     )
                     .child(render_agent_context_card(&agent, editor, entity.clone()))
-                    .child(render_agent_memory_card(&agent, editor, entity.clone()))
+                    .child(render_agent_memory_summary(&agent, editor, entity.clone()))
                     .child(render_agent_plugin_card(&agent, editor, entity.clone(), cx))
                     .child(render_agent_mcp_card(&agent, editor, entity, cx)),
             )
@@ -1088,7 +1130,7 @@ impl Workspace {
             let selected = agents.iter().find(|agent| agent.id == editor_id).cloned();
             match (selected, self.agent_surface.editor.as_ref()) {
                 (Some(agent), Some(editor)) => (
-                    self.render_agent_editor_header(&agent.name, entity.clone(), left_guard),
+                    self.render_agent_editor_header(&agent.name, entity.clone(), left_guard, cx),
                     self.render_agent_config_panel(agent, editor, entity, cx),
                 ),
                 _ => (
