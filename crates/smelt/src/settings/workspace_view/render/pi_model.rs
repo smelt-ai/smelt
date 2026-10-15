@@ -12,6 +12,9 @@ use smelt_core::pi_model_settings::{PiCustomProvider, PiModelSettings};
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
 const PAGE_MAX_WIDTH: f32 = 760.;
 const THINKING_LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
+/// 列表行标题和侧栏行同号（`SIDEBAR_FONT_SIZE`），不加粗；按钮一律 xsmall。
+/// 这页原来套的是设置窗口的 14px 粗体加 small 按钮，夹在侧栏和右栏中间显得又大又重。
+pub(super) const ROW_TITLE_PX: f32 = crate::session_list::SIDEBAR_FONT_SIZE;
 
 #[derive(Clone, Copy)]
 pub(super) struct Palette {
@@ -24,13 +27,13 @@ pub(super) struct Palette {
 }
 
 impl Palette {
-    fn new(cx: &App) -> Self {
+    pub(super) fn new(cx: &App) -> Self {
         let theme = cx.theme();
         Self {
             fg: theme.foreground,
             muted: theme.muted_foreground,
             border: theme.border,
-            danger: theme.danger_foreground,
+            danger: theme.danger,
             success: theme.success,
             warning: theme.warning,
         }
@@ -62,7 +65,7 @@ pub(super) fn pi_model_page(
         .into_any_element()
 }
 
-fn section(
+pub(super) fn section(
     title: &'static str,
     action: Option<AnyElement>,
     body: impl IntoElement,
@@ -78,10 +81,11 @@ fn section(
                 .items_center()
                 .justify_between()
                 .child(
+                    // 分组标题跟侧栏「最近对话」「项目」一个级别：小号、灰、不加粗。
                     div()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(palette.fg)
+                        .text_xs()
+                        .font_medium()
+                        .text_color(palette.muted)
                         .child(title),
                 )
                 .children(action),
@@ -89,7 +93,7 @@ fn section(
         .child(body)
 }
 
-fn card(palette: Palette) -> Div {
+pub(super) fn card(palette: Palette) -> Div {
     v_flex()
         .w_full()
         .rounded_lg()
@@ -183,13 +187,14 @@ fn default_model_section(
                 .gap_3()
                 .child(
                     v_flex()
+                        .flex_1()
                         .min_w_0()
                         .gap_1()
                         .child(
                             div()
                                 .truncate()
-                                .text_base()
-                                .font_semibold()
+                                .text_sm()
+                                .font_medium()
                                 .text_color(palette.fg)
                                 .child(title),
                         )
@@ -249,7 +254,7 @@ fn change_model_button(
 ) -> impl IntoElement {
     let entity = entity.clone();
     Button::new("pi-change-default-model")
-        .small()
+        .xsmall()
         .label("更换模型")
         .disabled(editing)
         .dropdown_menu(move |mut menu, window, cx| {
@@ -453,7 +458,7 @@ fn provider_section(
     let add_entity = entity.clone();
     let add = Button::new("pi-add-custom-provider")
         .ghost()
-        .small()
+        .xsmall()
         .icon(IconName::Plus)
         .label("自定义 Provider")
         .tooltip("OpenAI / Anthropic 兼容网关、自托管服务或其他模型端点")
@@ -675,6 +680,7 @@ fn custom_provider_row(
         .gap_3()
         .child(
             v_flex()
+                .flex_1()
                 .min_w_0()
                 .gap_0p5()
                 .child(
@@ -684,8 +690,7 @@ fn custom_provider_row(
                         .child(
                             div()
                                 .truncate()
-                                .text_sm()
-                                .font_medium()
+                                .text_size(px(ROW_TITLE_PX))
                                 .text_color(palette.fg)
                                 .child(name),
                         )
@@ -712,7 +717,7 @@ fn custom_provider_row(
                 .child(
                     Button::new(format!("pi-edit-custom-provider-{}", provider.id))
                         .ghost()
-                        .small()
+                        .xsmall()
                         .label("编辑")
                         .disabled(editor_open)
                         .on_click(move |_, window, cx| {
@@ -725,7 +730,7 @@ fn custom_provider_row(
                 .child(
                     Button::new(format!("pi-delete-custom-provider-{delete_id}"))
                         .ghost()
-                        .small()
+                        .xsmall()
                         .icon(crate::trash_icon())
                         .tooltip("删除此 Provider")
                         .disabled(editor_open)

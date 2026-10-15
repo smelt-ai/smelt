@@ -52,7 +52,7 @@ pub(super) fn builtin_provider_row(
         Some(
             Button::new(format!("pi-auth-models-{}", provider.id))
                 .ghost()
-                .small()
+                .xsmall()
                 .label("选模型")
                 .tooltip("列出这个 Provider 现在能用的模型，挑一个设为默认")
                 .on_click(move |_, _, cx| {
@@ -65,7 +65,7 @@ pub(super) fn builtin_provider_row(
     } else if provider.supports_oauth {
         Some(
             Button::new(format!("pi-auth-oauth-{}", provider.id))
-                .small()
+                .xsmall()
                 .label("登录")
                 .tooltip("在浏览器里完成授权；只有一个正确答案的步骤会自动跳过")
                 .disabled(login_busy)
@@ -74,7 +74,7 @@ pub(super) fn builtin_provider_row(
     } else if provider.supports_api_key {
         Some(
             Button::new(format!("pi-auth-key-{}", provider.id))
-                .small()
+                .xsmall()
                 .label("填 API key")
                 .disabled(login_busy)
                 .on_click(login(PiLoginMethod::ApiKey, true)),
@@ -114,7 +114,7 @@ pub(super) fn builtin_provider_row(
         let logout = logout.map(std::rc::Rc::new);
         Button::new(format!("pi-auth-more-{}", provider.id))
             .ghost()
-            .small()
+            .xsmall()
             .icon(IconName::Ellipsis)
             .dropdown_menu(move |mut menu, _, _| {
                 if let Some(handler) = reauth.clone() {
@@ -156,6 +156,7 @@ pub(super) fn builtin_provider_row(
         .gap_3()
         .child(
             v_flex()
+                .flex_1()
                 .min_w_0()
                 .gap_0p5()
                 .child(
@@ -165,8 +166,7 @@ pub(super) fn builtin_provider_row(
                         .child(
                             div()
                                 .truncate()
-                                .text_sm()
-                                .font_medium()
+                                .text_size(px(super::pi_model::ROW_TITLE_PX))
                                 .text_color(palette.fg)
                                 .child(provider.name.clone()),
                         )
