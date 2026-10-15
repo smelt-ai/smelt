@@ -6,6 +6,8 @@ import {
 	getAgentDir,
 	type McpServerConfig,
 } from "@earendil-works/pi-coding-agent";
+import { sharedTransportFactory } from "./mcp-gateway-client.ts";
+import { createPiDefaultTransport } from "./pi-mcp-runtime.ts";
 
 /**
  * MCP servers a product agent checked, as a JSON string array of `mcp.json` server names.
@@ -63,9 +65,15 @@ export function selectMcpServers(
  * the global `mcp.json` are registered with `pi.registerMcpServer`, which validates them and lets
  * them share the global sign-in (credentials belong to a server name and URL). Project `.pi/mcp.json`
  * is not read: an agent picks from the global list.
+ *
+ * Stdio servers connect through the shared gateway (`mcp-gateway.ts`), so all conversations use one
+ * process per server instead of one each; HTTP servers connect directly, as Pi does.
  */
 export function smeltMcpExtension(selection: ReadonlySet<string>) {
-	const connectRegistered = createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }) });
+	const connectRegistered = createMcpExtension({
+		loadConfig: () => ({ servers: [], errors: [] }),
+		createTransport: sharedTransportFactory(createPiDefaultTransport),
+	});
 	return (pi: ExtensionAPI) => {
 		connectRegistered(pi);
 		const problems: string[] = [];
