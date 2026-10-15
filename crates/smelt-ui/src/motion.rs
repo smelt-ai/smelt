@@ -211,14 +211,12 @@ impl Element for AmbientAnimationElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let id = id.expect("状态动画元素必须有稳定 id");
         let spec = self.spec.clone();
-        let view = window.with_element_state(id, |view: Option<Entity<AmbientAnimationView>>, _| {
-            let view = view.unwrap_or_else(|| {
-                cx.new(|_| AmbientAnimationView {
-                    spec: spec.clone(),
-                })
+        let view =
+            window.with_element_state(id, |view: Option<Entity<AmbientAnimationView>>, _| {
+                let view =
+                    view.unwrap_or_else(|| cx.new(|_| AmbientAnimationView { spec: spec.clone() }));
+                (view.clone(), view)
             });
-            (view.clone(), view)
-        });
         // 只写不通知：动画视图跟着外层这次重建一起重画，外层不会因此被标成已变化。
         view.update(cx, |view, _| view.spec = spec);
         let mut element = view.into_any_element();

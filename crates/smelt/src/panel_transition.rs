@@ -135,13 +135,19 @@ mod tests {
         let midway = start + Duration::from_millis(60);
         let closing = transition.frame_at(midway, false);
         assert!(closing.animating);
-        assert!(closing.progress > 0.0 && closing.progress < 1.0, "要真的关到一半");
+        assert!(
+            closing.progress > 0.0 && closing.progress < 1.0,
+            "要真的关到一半"
+        );
 
         transition.set_open_at(true, midway);
         let reversing = transition.frame_at(midway + Duration::from_millis(1), false);
         assert!(reversing.mounted);
         assert!(reversing.animating);
-        assert!(reversing.progress < 1.0, "从关到一半的位置出发，不能跳回全开");
+        assert!(
+            reversing.progress < 1.0,
+            "从关到一半的位置出发，不能跳回全开"
+        );
 
         let settled = transition.frame_at(midway + Duration::from_secs(5), false);
         assert!(!settled.animating);
@@ -182,7 +188,10 @@ mod tests {
         transition.set_open_at(true, start);
         let frame = transition.frame_at(start, true);
         assert_eq!(frame.progress, 1.0);
-        assert!(!transition.is_opening(), "打开当帧就挂真实内容，不再先给骨架");
+        assert!(
+            !transition.is_opening(),
+            "打开当帧就挂真实内容，不再先给骨架"
+        );
     }
 
     #[test]

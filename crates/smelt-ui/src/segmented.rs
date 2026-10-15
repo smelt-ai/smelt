@@ -6,12 +6,12 @@
 //! 选中块用临界阻尼弹簧追着选中项走：连点时带着当前速度换方向，不会每次从头起步。
 //! 位置按轨道内的相对坐标记，轨道跟着滚动、拖窗口整体移动时选中块不会自己动。
 
+use gpui::prelude::*;
 use gpui::{
     AlignItems, AnyElement, App, BorderStyle, Bounds, Corners, Display, Edges, Element, ElementId,
-    FlexDirection, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels,
-    Style, Window, fill, point, px, quad, size,
+    FlexDirection, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Style,
+    Window, fill, point, px, quad, size,
 };
-use gpui::prelude::*;
 use gpui_component::ActiveTheme as _;
 use std::time::Instant;
 
@@ -88,9 +88,7 @@ impl Glide {
     }
 
     fn sample(&self, now: Instant) -> (f32, f32) {
-        let t = now
-            .saturating_duration_since(self.started_at)
-            .as_secs_f32();
+        let t = now.saturating_duration_since(self.started_at).as_secs_f32();
         let (offset, velocity) = CriticalSpring::SNAP.sample(self.displacement, self.velocity, t);
         (self.target + offset, velocity)
     }
@@ -174,7 +172,10 @@ impl Element for SegmentedTrack {
                 style.size.height = px(26.).into();
             }
         }
-        (window.request_layout(style, children.iter().copied(), cx), children)
+        (
+            window.request_layout(style, children.iter().copied(), cx),
+            children,
+        )
     }
 
     fn prepaint(
@@ -197,43 +198,44 @@ impl Element for SegmentedTrack {
         let animate = !cx.reduce_motion();
         let id = id.expect("分段轨道必须有稳定 id");
         // 元素状态存 `Option<ThumbState>`：没有选中项时清空，下次选中从那里直接出现。
-        let (thumb, running) = window.with_element_state(id, |state: Option<Option<ThumbState>>, _| {
-            let state = state.flatten();
-            let Some(item) = selected else {
-                // 没有选中项就不画；下次选中时从那里直接出现，不从上一次的位置飞过来。
-                return ((None, false), None);
-            };
-            let left = f32::from(item.left() - bounds.left());
-            let width = f32::from(item.size.width);
-            let state = match state {
-                Some(mut state) if animate => {
-                    state.left.retarget(left, now);
-                    state.width.retarget(width, now);
-                    state
-                }
-                _ => ThumbState {
-                    left: Glide::at(left, now),
-                    width: Glide::at(width, now),
-                },
-            };
-            let running = !state.left.settled(now) || !state.width.settled(now);
-            let (left, width) = if running {
-                (state.left.sample(now).0, state.width.sample(now).0.max(0.))
-            } else {
-                (state.left.target, state.width.target)
-            };
-            let thumb = match self.variant {
-                SegmentedVariant::Pill => Bounds::new(
-                    point(bounds.left() + px(left), item.top()),
-                    size(px(width), item.size.height),
-                ),
-                SegmentedVariant::Underline => Bounds::new(
-                    point(bounds.left() + px(left), bounds.bottom() - px(UNDERLINE_PX)),
-                    size(px(width), px(UNDERLINE_PX)),
-                ),
-            };
-            ((Some(thumb), running), Some(state))
-        });
+        let (thumb, running) =
+            window.with_element_state(id, |state: Option<Option<ThumbState>>, _| {
+                let state = state.flatten();
+                let Some(item) = selected else {
+                    // 没有选中项就不画；下次选中时从那里直接出现，不从上一次的位置飞过来。
+                    return ((None, false), None);
+                };
+                let left = f32::from(item.left() - bounds.left());
+                let width = f32::from(item.size.width);
+                let state = match state {
+                    Some(mut state) if animate => {
+                        state.left.retarget(left, now);
+                        state.width.retarget(width, now);
+                        state
+                    }
+                    _ => ThumbState {
+                        left: Glide::at(left, now),
+                        width: Glide::at(width, now),
+                    },
+                };
+                let running = !state.left.settled(now) || !state.width.settled(now);
+                let (left, width) = if running {
+                    (state.left.sample(now).0, state.width.sample(now).0.max(0.))
+                } else {
+                    (state.left.target, state.width.target)
+                };
+                let thumb = match self.variant {
+                    SegmentedVariant::Pill => Bounds::new(
+                        point(bounds.left() + px(left), item.top()),
+                        size(px(width), item.size.height),
+                    ),
+                    SegmentedVariant::Underline => Bounds::new(
+                        point(bounds.left() + px(left), bounds.bottom() - px(UNDERLINE_PX)),
+                        size(px(width), px(UNDERLINE_PX)),
+                    ),
+                };
+                ((Some(thumb), running), Some(state))
+            });
         if running {
             window.request_animation_frame();
         }
@@ -325,7 +327,11 @@ pub fn underline_segment(
         .gap_1()
         .cursor_pointer()
         .text_xs()
-        .text_color(if selected { active } else { theme.tab_foreground })
+        .text_color(if selected {
+            active
+        } else {
+            theme.tab_foreground
+        })
         .hover(move |segment| segment.text_color(active))
         .child(label.into())
 }
@@ -358,7 +364,10 @@ mod tests {
 
         left.retarget(40., turn);
         let (after_position, after_velocity) = left.sample(turn);
-        assert!((after_position - position).abs() < 0.01, "换目标那一刻不能跳");
+        assert!(
+            (after_position - position).abs() < 0.01,
+            "换目标那一刻不能跳"
+        );
         assert!(
             (after_velocity - velocity).abs() < 0.01,
             "换目标那一刻速度不能突变：{velocity} → {after_velocity}"

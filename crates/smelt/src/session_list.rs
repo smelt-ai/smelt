@@ -1004,16 +1004,20 @@ impl Workspace {
 
             if collapsed {
                 if grouping != SidebarGrouping::None {
-                    rows = rows.child(flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
-                    .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))));
+                    rows = rows.child(
+                        flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
+                            .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                    );
                 }
                 continue;
             }
 
             if ixs.is_empty() {
                 // 空项目不占一行说明。Grok 的空分组就是没有条目，新建走标题上的 +。
-                rows = rows.child(flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
-                    .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))));
+                rows = rows.child(
+                    flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
+                        .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                );
                 continue;
             }
 
@@ -1456,8 +1460,10 @@ impl Workspace {
                 // 分屏会话：不显示会话名父行；把同一 tab 的多个 pane 用内层括线
                 // 圈在一起平铺，pane 行本身只管「切到该 pane」。
                 if self.sessions[ix].pane_count() <= 1 {
-                    group_body = group_body.child(flip_slot(("sidebar-flip-session", ui_id), reorder_generation, row)
-                    .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))));
+                    group_body = group_body.child(
+                        flip_slot(("sidebar-flip-session", ui_id), reorder_generation, row)
+                            .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))),
+                    );
                 } else {
                     let leaves = self.sessions[ix].term_leaves();
                     let active_pane_id = self.sessions[ix].anchor_id();
@@ -1718,12 +1724,24 @@ impl Workspace {
                                 .rounded(px(7.)),
                         );
 
-                    group_body = group_body.child(flip_slot(("sidebar-flip-session", ui_id), reorder_generation, pane_group)
-                    .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))));
+                    group_body = group_body.child(
+                        flip_slot(
+                            ("sidebar-flip-session", ui_id),
+                            reorder_generation,
+                            pane_group,
+                        )
+                        .from_top(drop_origin(crate::SidebarDrag::Session(ui_id))),
+                    );
                 }
             }
-            rows = rows.child(flip_slot(project_flip_id(cwd), reorder_generation, group_rows.child(group_body))
-                    .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))));
+            rows = rows.child(
+                flip_slot(
+                    project_flip_id(cwd),
+                    reorder_generation,
+                    group_rows.child(group_body),
+                )
+                .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+            );
         }
 
         if hidden_empty > 0 {

@@ -11,8 +11,7 @@ use gpui::*;
 
 use crate::settings::Appearance;
 use crate::{
-    SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp,
-    tool_panel,
+    SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp, tool_panel,
 };
 
 impl Workspace {

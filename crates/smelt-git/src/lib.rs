@@ -682,7 +682,12 @@ fn has_upstream(subprocess: &dyn Subprocess, root: &str) -> bool {
     run_git_with(
         subprocess,
         root,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     )
     .is_ok_and(|out| out.success())
 }
@@ -1307,7 +1312,12 @@ husky - pre-commit hook exited with code 127 (error)"
         let bare = tmp.join(format!("{remote}.git"));
         run_git(
             bare.to_str().unwrap(),
-            &["rev-parse", "--verify", "-q", &format!("refs/heads/{branch}")],
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ],
         )
         .unwrap()
         .success()
@@ -1324,11 +1334,7 @@ husky - pre-commit hook exited with code 127 (error)"
         run_git(&root, &["push", "-q", "-u", "nio", "feature"]).unwrap();
         // 让上游远端变得不可达：模拟网络 / 权限一类与「缺上游」无关的失败。
         let gone = tmp.path().join("gone.git");
-        run_git(
-            &root,
-            &["remote", "set-url", "nio", gone.to_str().unwrap()],
-        )
-        .unwrap();
+        run_git(&root, &["remote", "set-url", "nio", gone.to_str().unwrap()]).unwrap();
         std::fs::write(Path::new(&root).join("a.txt"), "two\n").unwrap();
         run_git(&root, &["commit", "-qam", "next"]).unwrap();
 
@@ -1362,7 +1368,10 @@ husky - pre-commit hook exited with code 127 (error)"
         let root = repo_with_remotes(tmp.path(), &["gh", "nio"]);
 
         let err = push_current(&root, "feature").expect_err("多远端不能瞎猜");
-        assert!(err.contains("gh") && err.contains("nio"), "应列出可选远端：{err}");
+        assert!(
+            err.contains("gh") && err.contains("nio"),
+            "应列出可选远端：{err}"
+        );
         assert!(!remote_has_branch(tmp.path(), "gh", "feature"));
         assert!(!remote_has_branch(tmp.path(), "nio", "feature"));
     }
