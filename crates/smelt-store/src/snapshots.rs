@@ -163,6 +163,8 @@ pub struct AgentDefinitionRecord {
     pub engine_kind_id: String,
     pub prompt: String,
     pub plugins_json: Vec<u8>,
+    /// 勾选要连接的 MCP 服务器名（JSON 字符串数组）；空数组表示不连任何 MCP 服务器。
+    pub mcp_servers_json: Vec<u8>,
     pub context_folders_json: Vec<u8>,
     pub context_links_json: Vec<u8>,
     pub model_provider: String,

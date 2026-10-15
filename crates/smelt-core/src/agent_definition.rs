@@ -19,6 +19,11 @@ pub struct AgentDefinition {
     /// 的回退，否则用户勾掉最后一个反而会拿回全量。
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// 这个智能体要连接的 MCP 服务器名（`~/.pi/agent/mcp.json` 里 `mcpServers` 的键）。
+    /// 空表示不连任何 MCP 服务器；和插件一样不做「空则全量」的回退，否则用户
+    /// 勾掉最后一个反而会连上全部服务器。
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
     /// 绑定到这个智能体的本地目录。会话的工作目录是智能体自己的 space，业务
     /// 素材靠这里挂进来：Pi 只接受单个 cwd，没有 `--add-dir`，所以只能把绝对
     /// 路径写进 system prompt，让它用 read/bash 去访问。
@@ -54,6 +59,7 @@ impl Default for AgentDefinition {
             engine_kind_id: String::new(),
             prompt: String::new(),
             plugins: Vec::new(),
+            mcp_servers: Vec::new(),
             context_folders: Vec::new(),
             context_links: Vec::new(),
             model_provider: String::new(),

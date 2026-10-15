@@ -121,21 +121,6 @@ impl Workspace {
         self.open_agent_definition(selected, window, cx);
     }
 
-    pub(super) fn open_agent_hub(
-        &mut self,
-        id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.agent_surface.selected_id = Some(id.clone());
-        self.nav.agents_mut().open_hub(id);
-        self.agent_surface.editor = None;
-        self.agent_surface.error = None;
-        window.focus(&self.focus_handle, cx);
-        self.save_state(cx);
-        cx.notify();
-    }
-
     pub(super) fn open_agent_definition(
         &mut self,
         id: String,
@@ -175,6 +160,30 @@ impl Workspace {
                     agent.plugins.remove(pos);
                 } else {
                     agent.plugins.push(plugin_id.clone());
+                }
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// 勾选 / 取消勾选一台 MCP 服务器。新开的对话只连勾选的服务器，没勾就不连。
+    pub(super) fn toggle_agent_mcp_server(
+        &mut self,
+        agent_id: String,
+        server: String,
+        cx: &mut Context<Self>,
+    ) {
+        settings::apply_agent_host(
+            move |config| {
+                let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id)
+                else {
+                    return;
+                };
+                if let Some(pos) = agent.mcp_servers.iter().position(|name| *name == server) {
+                    agent.mcp_servers.remove(pos);
+                } else {
+                    agent.mcp_servers.push(server.clone());
                 }
             },
             cx,
@@ -307,6 +316,7 @@ impl Workspace {
     pub(super) fn refresh_agent_plugins(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.agent_surface.editor.as_mut() {
             editor.plugins = discover_plugins();
+            editor.mcp_servers = load_mcp_servers_for_editor();
         }
         cx.notify();
     }
@@ -394,10 +404,6 @@ impl Workspace {
     pub(super) fn close_agent_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing_conversation_draft() {
             self.cancel_conversation_draft(cx);
-            return;
-        }
-        if let Some(id) = self.nav.agents().editor_id().map(str::to_string) {
-            self.open_agent_hub(id, window, cx);
             return;
         }
         self.close_agent_definition(cx);
@@ -510,6 +516,7 @@ impl Workspace {
             instructions,
             context_link,
             plugins: discover_plugins(),
+            mcp_servers: load_mcp_servers_for_editor(),
             memories,
             _subscriptions: subscriptions,
         });
@@ -1204,7 +1211,7 @@ impl Workspace {
         self.add_automation_for_agent(agent_id, window, cx);
     }
 
-    /// 从某个智能体的详情页新建。绑定的就是这一个，不改用当前选中或列表里的第一个。
+    /// 为指定智能体新建自动化。绑定的就是这一个，不改用当前选中或列表里的第一个。
     pub(super) fn add_automation_for_agent(
         &mut self,
         agent_id: String,

@@ -17,6 +17,14 @@ use std::{
 };
 
 pub(crate) const BUN_VERSION: &str = "1.4.0";
+
+#[cfg(any(target_os = "macos", test))]
+/// 当前受管 Bun 的固定入口，相对 runtime 根目录。generation 目录名带哈希、随版本变，
+/// 写进外部配置（如 `mcp.json` 的 `command`）的路径必须是这一条。
+const BUN_LAUNCHER: &str = "bin/bun";
+
+/// [`BUN_LAUNCHER`] 的 `~/` 写法。Pi 会展开 `mcp.json` 里 `command` 开头的 `~/`。
+pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun";
 pub(crate) const PI_BRIDGE_PROTOCOL: &str = "smelt-pi-rpc-v1";
 include!(concat!(env!("OUT_DIR"), "/pi_agent_runtime_files.rs"));
 
@@ -218,6 +226,8 @@ fn sync_managed_bun_locked(
     }
     let lease = store.acquire_shared_locked(GenerationKind::Bun, &manifest.generation_id)?;
     store.write_current_locked(GenerationKind::Bun, &manifest.generation_id)?;
+    // 先把固定入口切到新 generation，再回收旧的：顺序反过来，入口会短暂悬空。
+    publish_bun_launcher(store.runtime_root(), &root.join("bun"))?;
     let mut keep = HashSet::new();
     keep.insert(manifest.generation_id.clone());
     store.gc_kind_locked(GenerationKind::Bun, &keep);
@@ -226,6 +236,30 @@ fn sync_managed_bun_locked(
         generation_id: manifest.generation_id,
         lease,
     })
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// 把 `<runtime>/bin/bun` 原子地指向 `bun`：先建临时符号链接再 rename 覆盖，
+/// 正在通过旧链接启动的进程不会撞上「文件不存在」。
+fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
+    let launcher = runtime_root.join(BUN_LAUNCHER);
+    if fs::read_link(&launcher).is_ok_and(|target| target == bun) {
+        return Ok(());
+    }
+    let dir = launcher.parent().unwrap_or(runtime_root);
+    fs::create_dir_all(dir).map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+    let temporary = dir.join(format!(
+        ".bun-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = std::os::unix::fs::symlink(bun, &temporary)
+        .and_then(|()| fs::rename(&temporary, &launcher))
+        .map_err(|error| format!("更新 Bun 固定入口 {} 失败：{error}", launcher.display()));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -513,6 +547,27 @@ pub(crate) fn pi_runtime_files() -> &'static [(&'static str, &'static str)] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bun_launcher_follows_the_latest_generation() {
+        let runtime =
+            std::env::temp_dir().join(format!("smelt-bun-launcher-{}", uuid::Uuid::new_v4()));
+        let first = runtime.join("store/bun/bun-a/bun");
+        let second = runtime.join("store/bun/bun-b/bun");
+
+        publish_bun_launcher(&runtime, &first).unwrap();
+        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), first);
+        publish_bun_launcher(&runtime, &first).unwrap();
+        publish_bun_launcher(&runtime, &second).unwrap();
+        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), second);
+        assert!(
+            MANAGED_BUN_LAUNCHER_HOME_PATH.ends_with(BUN_LAUNCHER),
+            "写进外部配置的路径必须就是这个入口"
+        );
+        let leftovers = fs::read_dir(runtime.join("bin")).unwrap().count();
+        assert_eq!(leftovers, 1, "临时链接不能留下");
+        fs::remove_dir_all(runtime).ok();
+    }
 
     fn collect_runtime_files(dir: &Path, package: &Path, output: &mut Vec<String>) {
         for entry in fs::read_dir(dir).expect("读取 runtime 源码目录") {

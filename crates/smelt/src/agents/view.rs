@@ -506,84 +506,6 @@ impl Workspace {
         )
     }
 
-    pub(super) fn render_agent_hub_header(
-        &self,
-        agent: &settings::AgentDefinition,
-        entity: Entity<Workspace>,
-        cx: &App,
-        left_guard: Pixels,
-    ) -> AnyElement {
-        let back_entity = entity.clone();
-        let automation_count = cx
-            .global::<settings::AgentHostState>()
-            .automations_for(&agent.id)
-            .len();
-        let settings_entity = entity.clone();
-        let settings_id = agent.id.clone();
-        let delete_entity = entity;
-        let delete_id = agent.id.clone();
-        let delete_tooltip = if automation_count == 0 {
-            "删除智能体；已有对话会保留".to_string()
-        } else {
-            format!("请先删除关联的 {automation_count} 条自动化")
-        };
-        product_page_chrome(left_guard)
-            .gap_2()
-            .child(product_back_button(
-                "agent-hub-back",
-                "返回",
-                move |_, _, cx| {
-                    back_entity.update(cx, |workspace, cx| workspace.close_agent_definition(cx));
-                },
-            ))
-            .child(agent_monogram(&agent.name, 28., false))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_lg()
-                    .font_semibold()
-                    .text_color(rgb(crate::ui_theme::text_bright()))
-                    .truncate()
-                    .child(agent_display_name(&agent.name)),
-            )
-            .child(
-                Button::new("agent-hub-edit-settings")
-                    .ghost()
-                    .small()
-                    .label("设置")
-                    .on_click(move |_, window, cx| {
-                        let id = settings_id.clone();
-                        settings_entity.update(cx, |workspace, cx| {
-                            workspace.open_agent_definition(id, window, cx);
-                        });
-                    }),
-            )
-            .child(
-                Button::new("agent-hub-menu")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Ellipsis)
-                    .tooltip(delete_tooltip)
-                    .dropdown_menu(move |menu, _, _| {
-                        let entity = delete_entity.clone();
-                        let id = delete_id.clone();
-                        menu.item(
-                            PopupMenuItem::new("删除智能体")
-                                .icon(crate::trash_icon())
-                                .disabled(automation_count != 0)
-                                .on_click(move |_, _, cx| {
-                                    let id = id.clone();
-                                    entity.update(cx, |workspace, cx| {
-                                        workspace.start_delete_agent(id, cx)
-                                    });
-                                }),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
     pub(super) fn render_agent_editor_header(
         &self,
         name: &str,
@@ -688,9 +610,7 @@ impl Workspace {
     ) -> AnyElement {
         let id = agent.id.clone();
         let open_id = id.clone();
-        let talk_id = id.clone();
-        let open_entity = entity.clone();
-        let talk_entity = entity;
+        let open_entity = entity;
         let name = agent_display_name(&agent.name);
         let engine_kind = agent.engine_kind();
         let engine_label = engine_kind
@@ -703,9 +623,7 @@ impl Workspace {
             .automations_for(&agent.id)
             .len();
         let menu_talk_entity = open_entity.clone();
-        let menu_talk_id = talk_id.clone();
-        let menu_settings_entity = open_entity.clone();
-        let menu_settings_id = open_id.clone();
+        let menu_talk_id = id.clone();
         let menu_delete_entity = open_entity.clone();
         let menu_delete_id = id.clone();
         agent_surface_card()
@@ -760,47 +678,22 @@ impl Workspace {
                         )
                     }),
             )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        Button::new(format!("agent-row-talk-{id}"))
-                            .ghost()
-                            .small()
-                            .label("新对话")
-                            .tooltip("新开一段对话")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                let id = talk_id.clone();
-                                talk_entity.update(cx, |workspace, cx| {
-                                    workspace.start_agent_conversation(id, window, cx)
-                                });
-                            }),
-                    ),
-            )
+            // 行上不放「新对话」：点行进智能体详情，那里有新对话入口；右键菜单也有。
             .on_click(move |_, window, cx| {
                 let id = open_id.clone();
-                open_entity.update(cx, |workspace, cx| workspace.open_agent_hub(id, window, cx));
+                open_entity.update(cx, |workspace, cx| {
+                    workspace.open_agent_definition(id, window, cx)
+                });
             })
             .context_menu(move |menu, _, _| {
                 let talk_entity = menu_talk_entity.clone();
                 let talk_id = menu_talk_id.clone();
-                let settings_entity = menu_settings_entity.clone();
-                let settings_id = menu_settings_id.clone();
                 let delete_entity = menu_delete_entity.clone();
                 let delete_id = menu_delete_id.clone();
                 menu.item(PopupMenuItem::new("新对话").on_click(move |_, window, cx| {
                     let id = talk_id.clone();
                     talk_entity.update(cx, |workspace, cx| {
                         workspace.start_agent_conversation(id, window, cx)
-                    });
-                }))
-                .item(PopupMenuItem::new("设置").on_click(move |_, window, cx| {
-                    let id = settings_id.clone();
-                    settings_entity.update(cx, |workspace, cx| {
-                        workspace.open_agent_definition(id, window, cx);
                     });
                 }))
                 .separator()
@@ -1076,7 +969,8 @@ impl Workspace {
                     )
                     .child(render_agent_context_card(&agent, editor, entity.clone()))
                     .child(render_agent_memory_card(&agent, editor, entity.clone()))
-                    .child(render_agent_plugin_card(&agent, editor, entity, cx)),
+                    .child(render_agent_plugin_card(&agent, editor, entity.clone(), cx))
+                    .child(render_agent_mcp_card(&agent, editor, entity, cx)),
             )
             .into_any_element()
     }
@@ -1113,250 +1007,13 @@ impl Workspace {
         self.render_product_conversation_view(view, cx)
     }
 
-    pub(super) fn render_agent_hub(
-        &self,
-        agent: &settings::AgentDefinition,
-        entity: Entity<Workspace>,
-        cx: &App,
-    ) -> AnyElement {
-        let config = cx.global::<settings::AgentHostState>();
-        let now = Local::now().timestamp();
-        let conversation_ixes: Vec<usize> = {
-            let owned: Vec<usize> = self
-                .sessions
-                .iter()
-                .enumerate()
-                .filter(|(_, session)| self.session_belongs_to_agent(session, &agent.id))
-                .map(|(ix, _)| ix)
-                .collect();
-            let updated: Vec<u64> = owned
-                .iter()
-                .map(|&ix| self.sessions[ix].effective_updated_at(cx))
-                .collect();
-            recent_conversation_order(&updated)
-                .into_iter()
-                .map(|order| owned[order])
-                .collect()
-        };
-        let automations = config.automations_for(&agent.id);
-        let prompt = agent_prompt_summary(&agent.prompt);
-        let mut conversation_rows = Vec::new();
-        for ix in conversation_ixes {
-            let Some(session) = self.sessions.get(ix) else {
-                continue;
-            };
-            let Some(view) = session.active_acp() else {
-                continue;
-            };
-            let title = conversation_row_title(
-                session.custom_title.as_deref(),
-                view.read(cx).auto_title().as_deref(),
-            );
-            let project = (!session.is_agent_conversation(cx))
-                .then(|| session.cwd(cx))
-                .flatten()
-                .and_then(|cwd| {
-                    std::path::Path::new(&cwd)
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                });
-            let time = format_relative_since(session.effective_updated_at(cx) as i64, now);
-            let meta = match project {
-                Some(project) => format!("{project} · {time}"),
-                None => time,
-            };
-            let open_entity = entity.clone();
-            let divided = !conversation_rows.is_empty();
-            conversation_rows.push(agent_hub_list_row(
-                format!("agent-hub-conversation-{ix}"),
-                title,
-                meta,
-                false,
-                divided,
-                move |_, window, cx| {
-                    open_entity.update(cx, |workspace, cx| {
-                        workspace.activate(ix, window, cx);
-                    });
-                },
-            ));
-        }
-        let mut automation_rows = Vec::new();
-        for automation in &automations {
-            let last = format_last_run_cell(
-                config
-                    .latest_automation_run(&automation.id)
-                    .map(|run| (run.status, run.finished_at.unwrap_or(run.created_at))),
-                now,
-            );
-            let failed = config
-                .latest_automation_run(&automation.id)
-                .is_some_and(|run| {
-                    run.status == smelt_core::automation::AutomationRunStatus::Failed
-                });
-            let open_id = automation.id.clone();
-            let open_entity = entity.clone();
-            let divided = !automation_rows.is_empty();
-            automation_rows.push(agent_hub_list_row(
-                format!("agent-hub-automation-{}", automation.id),
-                if automation.name.trim().is_empty() {
-                    "未命名自动化".to_string()
-                } else {
-                    automation.name.clone()
-                },
-                format!("{} · {last}", automation.trigger.summary()),
-                failed,
-                divided,
-                move |_, window, cx| {
-                    let id = open_id.clone();
-                    open_entity.update(cx, |workspace, cx| {
-                        workspace.open_automation_editor(id, window, cx);
-                    });
-                },
-            ));
-        }
-        let create_entity = entity.clone();
-        let create_agent_id = agent.id.clone();
-        let talk_entity = entity.clone();
-        let talk_id = agent.id.clone();
-        let empty_talk_entity = talk_entity.clone();
-        let empty_talk_id = talk_id.clone();
-        let empty_create_entity = create_entity.clone();
-        let empty_create_id = create_agent_id.clone();
-        let settings_entity = entity.clone();
-        let settings_id = agent.id.clone();
-        let prompt_written = prompt.is_some();
-        let error = self
-            .agent_surface
-            .error
-            .clone()
-            .or_else(|| config.persistence_error.clone());
-        div()
-            .id("agent-hub-scroll")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_y_scroll()
-            .child(
-                agent_definition_column()
-                    .py_5()
-                    .flex()
-                    .flex_col()
-                    .gap_5()
-                    .children(error.map(render_agent_error))
-                    .child(
-                        div()
-                            .id("agent-hub-prompt")
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .cursor_pointer()
-                            .rounded(crate::ui_theme::row_radius())
-                            .py_1()
-                            .hover(|block| block.bg(rgb(crate::ui_theme::bg_row_hover())))
-                            .tooltip(|window, cx| {
-                                gpui_component::tooltip::Tooltip::new("编辑工作方式")
-                                    .build(window, cx)
-                            })
-                            .on_click(move |_, window, cx| {
-                                let id = settings_id.clone();
-                                settings_entity.update(cx, |workspace, cx| {
-                                    workspace.open_agent_definition(id, window, cx);
-                                });
-                            })
-                            .child(agent_hub_label("工作方式"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .line_height(px(22.))
-                                    .text_color(rgb(if prompt_written {
-                                        crate::ui_theme::text_muted()
-                                    } else {
-                                        crate::ui_theme::text_faint()
-                                    }))
-                                    .hover(|line| {
-                                        line.text_color(rgb(if prompt_written {
-                                            crate::ui_theme::text()
-                                        } else {
-                                            crate::ui_theme::text_mid()
-                                        }))
-                                    })
-                                    .child(prompt.unwrap_or_else(|| "写下工作方式".to_string())),
-                            ),
-                    )
-                    .child(agent_hub_section(
-                        "对话",
-                        Some(agent_hub_section_action(
-                            "agent-hub-new-conversation",
-                            "新对话",
-                            "新开一段对话",
-                            true,
-                            move |_, window, cx| {
-                                let id = talk_id.clone();
-                                talk_entity.update(cx, |workspace, cx| {
-                                    workspace.start_agent_conversation(id, window, cx)
-                                });
-                            },
-                        )),
-                        agent_hub_rows(
-                            conversation_rows,
-                            agent_hub_empty_action(
-                                "agent-hub-empty-conversation",
-                                "还没有对话",
-                                "新开一段对话",
-                                move |_, window, cx| {
-                                    let id = empty_talk_id.clone();
-                                    empty_talk_entity.update(cx, |workspace, cx| {
-                                        workspace.start_agent_conversation(id, window, cx)
-                                    });
-                                },
-                            ),
-                        ),
-                    ))
-                    .child(agent_hub_section(
-                        "自动化",
-                        Some(agent_hub_section_action(
-                            "agent-hub-new-automation",
-                            "新建",
-                            "用这个智能体新建自动化",
-                            false,
-                            move |_, window, cx| {
-                                let id = create_agent_id.clone();
-                                create_entity.update(cx, |workspace, cx| {
-                                    workspace.add_automation_for_agent(id, window, cx);
-                                });
-                            },
-                        )),
-                        agent_hub_rows(
-                            automation_rows,
-                            agent_hub_empty_action(
-                                "agent-hub-empty-automation",
-                                "还没有自动化",
-                                "用这个智能体新建自动化",
-                                move |_, window, cx| {
-                                    let id = empty_create_id.clone();
-                                    empty_create_entity.update(cx, |workspace, cx| {
-                                        workspace.add_automation_for_agent(id, window, cx);
-                                    });
-                                },
-                            ),
-                        ),
-                    )),
-            )
-            .into_any_element()
-    }
-
     pub(crate) fn render_agents_page(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let agents = cx.global::<settings::AgentHostState>().agents.clone();
-        let open_id = self
-            .nav
-            .agents()
-            .hub_id()
-            .or_else(|| self.nav.agents().editor_id())
-            .map(str::to_string);
+        let open_id = self.nav.agents().editor_id().map(str::to_string);
         if open_id
             .as_deref()
             .is_some_and(|id| agents.iter().all(|agent| agent.id != id))
@@ -1372,7 +1029,6 @@ impl Workspace {
         }
 
         let editor_id = self.nav.agents().editor_id().map(str::to_string);
-        let hub_id = self.nav.agents().hub_id().map(str::to_string);
         if editor_id.is_some() {
             self.ensure_agent_editor(window, cx);
         } else {
@@ -1388,17 +1044,6 @@ impl Workspace {
                     self.render_agent_config_panel(agent, editor, entity, cx),
                 ),
                 _ => (
-                    self.render_agents_header(agents.len(), entity.clone(), cx, left_guard),
-                    self.render_agent_catalog(&agents, entity, cx),
-                ),
-            }
-        } else if let Some(hub_id) = hub_id {
-            match agents.iter().find(|agent| agent.id == hub_id).cloned() {
-                Some(agent) => (
-                    self.render_agent_hub_header(&agent, entity.clone(), cx, left_guard),
-                    self.render_agent_hub(&agent, entity, cx),
-                ),
-                None => (
                     self.render_agents_header(agents.len(), entity.clone(), cx, left_guard),
                     self.render_agent_catalog(&agents, entity, cx),
                 ),
@@ -1478,92 +1123,6 @@ impl Workspace {
     }
 }
 
-fn agent_hub_label(label: &'static str) -> AnyElement {
-    div()
-        .text_xs()
-        .font_medium()
-        .text_color(rgb(crate::ui_theme::text_faint()))
-        .child(label)
-        .into_any_element()
-}
-
-fn agent_hub_empty_action(
-    id: impl Into<ElementId>,
-    text: &'static str,
-    tooltip: &'static str,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    div()
-        .id(id.into())
-        .cursor_pointer()
-        .text_sm()
-        .text_color(rgb(crate::ui_theme::text_faint()))
-        .hover(|line| line.text_color(rgb(crate::ui_theme::text_mid())))
-        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx))
-        .on_click(on_click)
-        .child(text)
-        .into_any_element()
-}
-
-fn agent_hub_rows(rows: Vec<AnyElement>, empty: AnyElement) -> AnyElement {
-    if rows.is_empty() {
-        empty
-    } else {
-        agent_surface_card()
-            .flex()
-            .flex_col()
-            .children(rows)
-            .into_any_element()
-    }
-}
-
-fn agent_hub_section_action(
-    id: &'static str,
-    label: &'static str,
-    tooltip: &'static str,
-    primary: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let button = Button::new(id)
-        .small()
-        .icon(IconName::Plus)
-        .label(label)
-        .tooltip(tooltip)
-        .on_click(on_click);
-    div()
-        .flex_shrink_0()
-        .child(if primary {
-            button.primary()
-        } else {
-            button.ghost()
-        })
-        .into_any_element()
-}
-
-fn agent_hub_section(
-    label: &'static str,
-    action: Option<AnyElement>,
-    body: impl IntoElement,
-) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .min_h(px(28.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(agent_hub_label(label))
-                .when_some(action, |row, action| row.child(action)),
-        )
-        .child(body)
-        .into_any_element()
-}
-
-/// `on_card` 时用舞台色嵌进卡片；页头本身就在舞台上，改用卡片色抬起来。
 fn agent_monogram(name: &str, size: f32, on_card: bool) -> Div {
     let monogram = agent_catalog_monogram(name);
     let compact = monogram.chars().count() > 1;

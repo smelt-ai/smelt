@@ -28,6 +28,7 @@ mod agent_hooks;
 mod memory;
 mod nav;
 mod pi_auth;
+mod pi_mcp;
 pub(crate) mod plugins;
 mod remote;
 mod workspace;
@@ -1557,6 +1558,11 @@ struct SettingsRenderSnapshot {
     /// 注销、刷新这类一次性操作的最近一次错误。
     pi_auth_error: Option<String>,
     pi_auth_show_all: bool,
+    /// `~/.pi/agent/mcp.json` 里的服务器。文件很小，每次刷新快照时重读，外部改动也能跟上。
+    pi_mcp_servers: Result<Vec<smelt_core::pi_mcp::PiMcpServer>, String>,
+    pi_mcp_login: Option<String>,
+    pi_mcp_pending_remove: Option<String>,
+    pi_mcp_error: Option<String>,
     pi_model_editor_error: Option<String>,
     pi_model_settings: Result<smelt_core::pi_model_settings::PiModelSettings, String>,
     pi_settings: Result<smelt_core::pi_model_settings::PiSettingsSummary, String>,

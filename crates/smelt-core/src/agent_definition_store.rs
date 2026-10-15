@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_definition::AgentDefinition;
 use crate::agent_kind::{
-    ConversationAgentKind, ConversationLaunchSpec, SMELT_AGENT_INSTRUCTIONS_ENV,
-    SMELT_AGENT_MEMORY_DIR_ENV, SMELT_AGENT_MODEL_ID_ENV, SMELT_AGENT_MODEL_PROVIDER_ENV,
-    SMELT_AGENT_PLUGIN_ARGS_ENV, SMELT_AGENT_UNATTENDED_ENV, SMELT_USER_MEMORY_DIR_ENV,
+    ConversationAgentKind, ConversationLaunchSpec, PI_MCP_COMPANION_EXTENSIONS,
+    SMELT_AGENT_INSTRUCTIONS_ENV, SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_MEMORY_DIR_ENV,
+    SMELT_AGENT_MODEL_ID_ENV, SMELT_AGENT_MODEL_PROVIDER_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV,
+    SMELT_AGENT_UNATTENDED_ENV, SMELT_USER_MEMORY_DIR_ENV,
 };
 use crate::automation::AutomationAction;
 use crate::sqlite_state;
@@ -68,6 +69,7 @@ fn agent_from_record(record: smelt_store::AgentDefinitionRecord) -> AgentDefinit
         engine_kind_id: record.engine_kind_id,
         prompt: record.prompt,
         plugins: serde_json::from_slice(&record.plugins_json).unwrap_or_default(),
+        mcp_servers: serde_json::from_slice(&record.mcp_servers_json).unwrap_or_default(),
         context_folders: serde_json::from_slice(&record.context_folders_json).unwrap_or_default(),
         context_links: serde_json::from_slice(&record.context_links_json).unwrap_or_default(),
         model_provider: record.model_provider,
@@ -216,6 +218,8 @@ pub fn prepare_agent_definition_launch(
     );
     // 有人值守是默认；只有自动化运行在拿到启动参数后再标成无人值守。
     launch.env.remove(SMELT_AGENT_UNATTENDED_ENV);
+    // MCP 只给勾了服务器的产品智能体下发；其余情况（裸 Pi、没勾）都不能留着旧值。
+    launch.env.remove(SMELT_AGENT_MCP_SERVERS_ENV);
     // 只要是产品智能体就走勾选式加载。哪怕一个都没勾也要下发参数，因为那时
     // 需要的恰恰是「关掉 Pi 的自动发现」——不下发就等于全量加载。
     if let Some(definition) = definition {
@@ -228,6 +232,24 @@ pub fn prepare_agent_definition_launch(
         args.extend(crate::pi_plugin_catalog::workspace_skill_args(
             &agent_workspace_skill_roots(definition),
         ));
+        // 只连勾选的 MCP 服务器：名单交给启动器里的 MCP 扩展过滤 `mcp.json`。没勾就
+        // 什么都不加——不注册 MCP、不起任何服务器进程。勾了的要把 codemode / tool-search
+        // 加回来，否则默认暴露方式下的 MCP 工具模型够不着。
+        if !definition.mcp_servers.is_empty()
+            && let Ok(encoded) = serde_json::to_string(&definition.mcp_servers)
+        {
+            launch
+                .env
+                .insert(SMELT_AGENT_MCP_SERVERS_ENV.to_string(), encoded);
+            for extension in PI_MCP_COMPANION_EXTENSIONS {
+                args.push(
+                    crate::pi_plugin_catalog::PiPluginKind::Extension
+                        .load_flag()
+                        .to_string(),
+                );
+                args.push(extension.to_string());
+            }
+        }
         if let Ok(encoded) = serde_json::to_string(&args) {
             launch
                 .env
@@ -508,6 +530,8 @@ pub struct AgentDefinitionCreate {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_folders: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_links: Vec<String>,
@@ -529,6 +553,8 @@ pub struct AgentDefinitionPatch {
     pub engine_kind_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_folders: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -593,6 +619,7 @@ pub fn create_agent_definition_on(
         engine_kind_id,
         prompt: input.prompt,
         plugins: normalize_list(input.plugins),
+        mcp_servers: normalize_list(input.mcp_servers),
         context_folders: normalize_list(input.context_folders),
         context_links: normalize_list(input.context_links),
         model_provider: input.model_provider.unwrap_or_default().trim().to_string(),
@@ -623,6 +650,9 @@ pub fn update_agent_definition_on(
         }
         if let Some(plugins) = patch.plugins {
             definition.plugins = normalize_list(plugins);
+        }
+        if let Some(mcp_servers) = patch.mcp_servers {
+            definition.mcp_servers = normalize_list(mcp_servers);
         }
         if let Some(folders) = patch.context_folders {
             definition.context_folders = normalize_list(folders);
@@ -676,6 +706,7 @@ fn take_edited_fields(
         engine_kind_id: _,
         prompt: _,
         plugins: _,
+        mcp_servers: _,
         context_folders: _,
         context_links: _,
         model_provider: _,
@@ -695,6 +726,7 @@ fn take_edited_fields(
         engine_kind_id,
         prompt,
         plugins,
+        mcp_servers,
         context_folders,
         context_links,
         model_provider,
@@ -845,6 +877,7 @@ fn record_from_definition(agent: &AgentDefinition) -> smelt_store::AgentDefiniti
         engine_kind_id: agent.engine_kind_id.clone(),
         prompt: agent.prompt.clone(),
         plugins_json: serde_json::to_vec(&agent.plugins).unwrap_or_else(|_| b"[]".to_vec()),
+        mcp_servers_json: serde_json::to_vec(&agent.mcp_servers).unwrap_or_else(|_| b"[]".to_vec()),
         context_folders_json: serde_json::to_vec(&agent.context_folders)
             .unwrap_or_else(|_| b"[]".to_vec()),
         context_links_json: serde_json::to_vec(&agent.context_links)
@@ -1103,6 +1136,45 @@ mod tests {
         std::fs::remove_dir_all(&folder).ok();
     }
 
+    /// 智能体只连勾选的 MCP 服务器；没勾就完全不碰 MCP，也不残留上一次的名单。
+    #[test]
+    fn mcp_selection_reaches_the_launcher_only_when_checked() {
+        let mut definition = definition_with_context(&[], &[]);
+        let mut stale = ConversationAgentKind::Pi.default_launch();
+        stale
+            .env
+            .insert(SMELT_AGENT_MCP_SERVERS_ENV.to_string(), "[\"old\"]".into());
+
+        let launch = prepare_agent_definition_launch(stale.clone(), Some(&definition));
+        assert!(!launch.env.contains_key(SMELT_AGENT_MCP_SERVERS_ENV));
+        let args: Vec<String> =
+            serde_json::from_str(launch.env.get(SMELT_AGENT_PLUGIN_ARGS_ENV).unwrap()).unwrap();
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("builtin:")),
+            "没勾 MCP 就不该加载内置扩展: {args:?}"
+        );
+
+        definition.mcp_servers = vec!["figma".into(), "rea".into()];
+        let launch = prepare_agent_definition_launch(stale.clone(), Some(&definition));
+        let selected: Vec<String> =
+            serde_json::from_str(launch.env.get(SMELT_AGENT_MCP_SERVERS_ENV).unwrap()).unwrap();
+        assert_eq!(selected, ["figma", "rea"]);
+        let args: Vec<String> =
+            serde_json::from_str(launch.env.get(SMELT_AGENT_PLUGIN_ARGS_ENV).unwrap()).unwrap();
+        for extension in PI_MCP_COMPANION_EXTENSIONS {
+            assert!(
+                args.contains(&extension.to_string()),
+                "缺 {extension}: {args:?}"
+            );
+        }
+
+        let plain = prepare_agent_definition_launch(stale, None);
+        assert!(
+            !plain.env.contains_key(SMELT_AGENT_MCP_SERVERS_ENV),
+            "裸 Pi 走内置 MCP 读全量 mcp.json，不能带着智能体的名单"
+        );
+    }
+
     /// space 根目录必须由 id 唯一决定：同一个智能体的每段对话都要落回同一处，
     /// 否则 agent 攒下的文件下次就找不到了。
     #[test]
@@ -1170,6 +1242,7 @@ mod tests {
                 engine_kind_id: "pi".into(),
                 prompt: "Write".into(),
                 plugins_json: b"[]".to_vec(),
+                mcp_servers_json: b"[]".to_vec(),
                 context_folders_json: b"[]".to_vec(),
                 context_links_json: b"[]".to_vec(),
                 model_provider: String::new(),

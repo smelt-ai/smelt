@@ -2522,6 +2522,12 @@ struct Workspace {
     pi_auth_error: Option<String>,
     /// 凭据面板是否展开到全部内置 provider（默认只列可订阅登录的和已配好的）。
     pi_auth_show_all: bool,
+    /// 正在登录的 MCP 服务器名。登录跑在后台子进程里，期间禁用同一行的按钮。
+    pi_mcp_login: Option<String>,
+    /// 等用户确认移除的 MCP 服务器名。移除会删掉用户手写的配置，所以要两步。
+    pi_mcp_pending_remove: Option<String>,
+    /// MCP 配置操作（添加、启停、移除、登录）的最近一次错误。
+    pi_mcp_error: Option<String>,
     /// 原生 Pi 模型设置缓存。渲染只读缓存，避免每帧读磁盘；刷新时清空重读。
     ///
     /// 懒加载而不是「打开设置页时主动拉一次」：设置页有好几个入口（齿轮、智能体
@@ -3107,6 +3113,9 @@ impl Workspace {
             pi_auth_model_picker: None,
             pi_auth_error: None,
             pi_auth_show_all: false,
+            pi_mcp_login: None,
+            pi_mcp_pending_remove: None,
+            pi_mcp_error: None,
             pi_model_settings: std::cell::OnceCell::new(),
             pi_model_editor_error: None,
             pi_plugins: std::cell::OnceCell::new(),

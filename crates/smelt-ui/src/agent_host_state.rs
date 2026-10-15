@@ -604,6 +604,8 @@ fn snapshot_from_config(config: &AgentHostState) -> smelt_store::AgentUiSnapshot
                 engine_kind_id: agent.engine_kind_id.clone(),
                 prompt: agent.prompt.clone(),
                 plugins_json: serde_json::to_vec(&agent.plugins).unwrap_or_else(|_| b"[]".to_vec()),
+                mcp_servers_json: serde_json::to_vec(&agent.mcp_servers)
+                    .unwrap_or_else(|_| b"[]".to_vec()),
                 context_folders_json: serde_json::to_vec(&agent.context_folders)
                     .unwrap_or_else(|_| b"[]".to_vec()),
                 context_links_json: serde_json::to_vec(&agent.context_links)
@@ -682,6 +684,7 @@ fn config_from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostStat
                 engine_kind_id: agent.engine_kind_id,
                 prompt: agent.prompt,
                 plugins: serde_json::from_slice(&agent.plugins_json).unwrap_or_default(),
+                mcp_servers: serde_json::from_slice(&agent.mcp_servers_json).unwrap_or_default(),
                 context_folders: serde_json::from_slice(&agent.context_folders_json)
                     .unwrap_or_default(),
                 context_links: serde_json::from_slice(&agent.context_links_json)

@@ -1,7 +1,7 @@
 //! 工作台当前显示哪一个一级入口。
 //!
 //! 左侧「智能体 / 自动化 / 能力库」是分组标题，不是 iOS/长桥那种保活 Tab：点标题总是进
-//! 该面的根页。能力库的模型、插件、记忆是面内平级页签，不是钻取。对话和运行现场
+//! 该面的根页。能力库的模型、插件、MCP、记忆是面内平级页签，不是钻取。对话和运行现场
 //! 是侧栏里的子行，只切当前面、不清根页。插件工作台与这些系统入口并列，不再把
 //! `route` 写成 Session 再盖一层 surface。
 
@@ -50,14 +50,11 @@ impl WorkspaceRoute {
     }
 }
 
-/// 智能体面内页。定义列表是根；主页、设置和对话是钻取，不落盘。
+/// 智能体面内页。定义列表是根；详情（设置）和对话是钻取，不落盘。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AgentsView {
     #[default]
     Catalog,
-    Hub {
-        agent_id: String,
-    },
     Editor {
         agent_id: String,
     },
@@ -70,26 +67,15 @@ impl AgentsView {
     pub(crate) fn conversation_sid(&self) -> Option<&str> {
         match self {
             Self::Conversation { sid } => Some(sid.as_str()),
-            Self::Catalog | Self::Hub { .. } | Self::Editor { .. } => None,
-        }
-    }
-
-    pub(crate) fn hub_id(&self) -> Option<&str> {
-        match self {
-            Self::Hub { agent_id } => Some(agent_id.as_str()),
-            Self::Catalog | Self::Editor { .. } | Self::Conversation { .. } => None,
+            Self::Catalog | Self::Editor { .. } => None,
         }
     }
 
     pub(crate) fn editor_id(&self) -> Option<&str> {
         match self {
             Self::Editor { agent_id } => Some(agent_id.as_str()),
-            Self::Catalog | Self::Hub { .. } | Self::Conversation { .. } => None,
+            Self::Catalog | Self::Conversation { .. } => None,
         }
-    }
-
-    pub(crate) fn open_hub(&mut self, agent_id: String) {
-        *self = Self::Hub { agent_id };
     }
 
     pub(crate) fn open_editor(&mut self, agent_id: String) {
@@ -105,22 +91,24 @@ impl AgentsView {
     }
 }
 
-/// 能力库面内页签。三页平级，切换不算钻取：侧栏回根页时保持当前页签，不落盘。
+/// 能力库面内页签。各页平级，切换不算钻取：侧栏回根页时保持当前页签，不落盘。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum CapabilitiesTab {
     #[default]
     Models,
     Plugins,
+    Mcp,
     Memory,
 }
 
 impl CapabilitiesTab {
-    pub(crate) const ALL: [Self; 3] = [Self::Models, Self::Plugins, Self::Memory];
+    pub(crate) const ALL: [Self; 4] = [Self::Models, Self::Plugins, Self::Mcp, Self::Memory];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Models => "模型",
             Self::Plugins => "插件",
+            Self::Mcp => "MCP",
             Self::Memory => "记忆",
         }
     }
@@ -129,6 +117,7 @@ impl CapabilitiesTab {
         match self {
             Self::Models => "capabilities-tab-models",
             Self::Plugins => "capabilities-tab-plugins",
+            Self::Mcp => "capabilities-tab-mcp",
             Self::Memory => "capabilities-tab-memory",
         }
     }
@@ -358,27 +347,20 @@ mod tests {
     }
 
     #[test]
-    fn agents_catalog_hub_editor_and_conversation_are_exclusive() {
+    fn agents_catalog_editor_and_conversation_are_exclusive() {
         let mut view = AgentsView::Catalog;
-        view.open_hub("agent-1".into());
-        assert_eq!(view.hub_id(), Some("agent-1"));
-        assert!(view.editor_id().is_none());
-        assert!(view.conversation_sid().is_none());
-
         view.open_editor("agent-1".into());
         assert_eq!(view.editor_id(), Some("agent-1"));
-        assert!(view.hub_id().is_none());
+        assert!(view.conversation_sid().is_none());
 
         view.open_conversation("sid-1".into());
         assert_eq!(view.conversation_sid(), Some("sid-1"));
         assert!(view.editor_id().is_none());
-        assert!(view.hub_id().is_none());
 
         view.pop_to_root();
         assert_eq!(view, AgentsView::Catalog);
         assert!(view.conversation_sid().is_none());
         assert!(view.editor_id().is_none());
-        assert!(view.hub_id().is_none());
     }
 
     #[test]

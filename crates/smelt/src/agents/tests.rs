@@ -367,10 +367,10 @@ mod schedule_editor_tests {
 mod agent_definition_ui_tests {
     use super::super::{
         AutomationRowStatus, agent_card_prompt, agent_conversation_start_error, agent_display_name,
-        agent_instructions_footer, agent_prompt_summary, agent_usage_summary,
-        automation_row_status, automation_row_status_label, format_last_run_cell,
-        format_next_run_cell, format_relative_since, format_relative_until,
-        identity_name_idle_text, identity_name_should_finish_edit,
+        agent_instructions_footer, agent_usage_summary, automation_row_status,
+        automation_row_status_label, format_last_run_cell, format_next_run_cell,
+        format_relative_since, format_relative_until, identity_name_idle_text,
+        identity_name_should_finish_edit,
     };
     use crate::settings::{AgentDefinition, ConversationAgentKind};
     use gpui_component::input::InputEvent;
@@ -442,15 +442,6 @@ mod agent_definition_ui_tests {
     }
 
     #[test]
-    fn prompt_summary_skips_blank_instructions() {
-        assert_eq!(agent_prompt_summary("   "), None);
-        assert_eq!(
-            agent_prompt_summary("先验证行情时间，再给出结论。"),
-            Some("先验证行情时间，再给出结论。".into())
-        );
-    }
-
-    #[test]
     fn card_prompt_stays_within_two_lines_and_skips_blank() {
         assert_eq!(agent_card_prompt("   \n  "), None);
         assert_eq!(
@@ -459,9 +450,7 @@ mod agent_definition_ui_tests {
         );
         let long = "你是一个专业的本地系统与磁盘清理智能体。职责：检查并安全清理本地超过 7 天的历史日志、AI 助手会话轨迹与临时缓存，然后再做别的。";
         let card = agent_card_prompt(long).unwrap();
-        let summary = agent_prompt_summary(long).unwrap();
         assert!(card.ends_with('…'));
-        assert!(card.chars().count() < summary.chars().count());
         assert!(card.chars().count() <= 65);
     }
 

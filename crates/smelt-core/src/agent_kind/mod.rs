@@ -216,6 +216,14 @@ pub const SMELT_AGENT_INSTRUCTIONS_ENV: &str = "SMELT_AGENT_INSTRUCTIONS";
 /// 不会继承。
 pub const SMELT_AGENT_PLUGIN_ARGS_ENV: &str = "SMELT_AGENT_PLUGIN_ARGS";
 
+/// 产品智能体勾选的 MCP 服务器名（JSON 字符串数组，对应 `~/.pi/agent/mcp.json` 的键）。
+/// 启动器据此注册只连这几台的 MCP 扩展，消费后立刻删除。没勾任何服务器时不下发。
+pub const SMELT_AGENT_MCP_SERVERS_ENV: &str = "SMELT_AGENT_MCP_SERVERS";
+
+/// 勾了 MCP 服务器的智能体要额外加载的 Pi 内置扩展：`--no-extensions` 会把它们一起关掉，
+/// 而 MCP 工具默认（`codemode` / `deferred` 暴露）要靠它们才能被模型找到和调用。
+pub const PI_MCP_COMPANION_EXTENSIONS: [&str; 2] = ["builtin:codemode", "builtin:tool-search"];
+
 /// 产品智能体绑的默认模型。启动器消费后立刻删除，工具子进程不会继承。
 /// 成对出现才生效；只填一半等于没选。
 pub const SMELT_AGENT_MODEL_PROVIDER_ENV: &str = "SMELT_AGENT_MODEL_PROVIDER";

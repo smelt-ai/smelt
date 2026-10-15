@@ -2387,6 +2387,7 @@ impl Workspace {
             PiConfigFileKind::Settings => smelt_core::pi_model_settings::pi_settings_path(),
             PiConfigFileKind::Models => smelt_core::pi_model_settings::pi_models_path(),
             PiConfigFileKind::Credentials => smelt_core::pi_model_settings::pi_auth_path(),
+            PiConfigFileKind::Mcp => smelt_core::pi_mcp::pi_mcp_path(),
         };
         if !path.exists() {
             use std::io::Write as _;
@@ -2522,6 +2523,7 @@ pub enum PiConfigFileKind {
     Settings,
     Models,
     Credentials,
+    Mcp,
 }
 
 impl Workspace {

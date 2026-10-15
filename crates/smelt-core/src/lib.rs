@@ -49,6 +49,7 @@ pub mod new_session;
 pub mod osc;
 pub mod pi_auth;
 pub mod pi_auto_models;
+pub mod pi_mcp;
 pub mod pi_model_discovery;
 pub mod pi_model_settings;
 pub mod pi_plugin_catalog;

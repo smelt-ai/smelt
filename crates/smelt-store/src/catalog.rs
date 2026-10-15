@@ -154,9 +154,9 @@ fn insert_agent_definition_at(
     transaction.execute(
         "INSERT INTO agent_definition(
                id, name, description, engine_kind_id, prompt, plugins_json,
-               context_folders_json, context_links_json, model_provider, model_id,
-               memory_enabled, position
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+               mcp_servers_json, context_folders_json, context_links_json,
+               model_provider, model_id, memory_enabled, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             agent.id,
             agent.name,
@@ -164,6 +164,7 @@ fn insert_agent_definition_at(
             agent.engine_kind_id,
             agent.prompt,
             &agent.plugins_json,
+            &agent.mcp_servers_json,
             &agent.context_folders_json,
             &agent.context_links_json,
             agent.model_provider,
@@ -198,18 +199,20 @@ pub(crate) fn update_agent_definition(
                  engine_kind_id = ?3,
                  prompt = ?4,
                  plugins_json = ?5,
-                 context_folders_json = ?6,
-                 context_links_json = ?7,
-                 model_provider = ?8,
-                 model_id = ?9,
-                 memory_enabled = ?10
-           WHERE id = ?11",
+                 mcp_servers_json = ?6,
+                 context_folders_json = ?7,
+                 context_links_json = ?8,
+                 model_provider = ?9,
+                 model_id = ?10,
+                 memory_enabled = ?11
+           WHERE id = ?12",
         params![
             agent.name,
             agent.description,
             agent.engine_kind_id,
             agent.prompt,
             &agent.plugins_json,
+            &agent.mcp_servers_json,
             &agent.context_folders_json,
             &agent.context_links_json,
             agent.model_provider,
@@ -325,6 +328,7 @@ pub(crate) fn agent_ui_from_document(value: &Value) -> Result<AgentUiSnapshot, S
                 .unwrap_or_default()
                 .to_string(),
             plugins_json: json_bytes(agent.get("plugins"), json!([])),
+            mcp_servers_json: json_bytes(agent.get("mcp_servers"), json!([])),
             context_folders_json: json_bytes(agent.get("context_folders"), json!([])),
             context_links_json: json_bytes(agent.get("context_links"), json!([])),
             model_provider: agent
@@ -465,6 +469,8 @@ pub(crate) fn json_from_agent_ui(snapshot: &AgentUiSnapshot) -> Result<Value, St
                     "engine_kind": agent.engine_kind_id,
                     "prompt": agent.prompt,
                     "plugins": serde_json::from_slice::<Value>(&agent.plugins_json)
+                        .unwrap_or_else(|_| json!([])),
+                    "mcp_servers": serde_json::from_slice::<Value>(&agent.mcp_servers_json)
                         .unwrap_or_else(|_| json!([])),
                     "context_folders": serde_json::from_slice::<Value>(&agent.context_folders_json)
                         .unwrap_or_else(|_| json!([])),
@@ -936,7 +942,7 @@ fn query_config_memory(
 }
 
 const AGENT_DEFINITION_COLUMNS: &str =
-    "id, name, description, engine_kind_id, prompt, plugins_json,
+    "id, name, description, engine_kind_id, prompt, plugins_json, mcp_servers_json,
      context_folders_json, context_links_json, model_provider, model_id, memory_enabled";
 
 fn agent_definition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentDefinitionRecord> {
@@ -947,11 +953,12 @@ fn agent_definition_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentD
         engine_kind_id: row.get(3)?,
         prompt: row.get(4)?,
         plugins_json: row.get(5)?,
-        context_folders_json: row.get(6)?,
-        context_links_json: row.get(7)?,
-        model_provider: row.get(8)?,
-        model_id: row.get(9)?,
-        memory_enabled: row.get(10)?,
+        mcp_servers_json: row.get(6)?,
+        context_folders_json: row.get(7)?,
+        context_links_json: row.get(8)?,
+        model_provider: row.get(9)?,
+        model_id: row.get(10)?,
+        memory_enabled: row.get(11)?,
     })
 }
 

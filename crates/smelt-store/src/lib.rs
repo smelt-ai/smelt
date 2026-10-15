@@ -49,7 +49,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 14;
+pub const STORE_SCHEMA_VERSION: u32 = 15;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -3168,6 +3168,18 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 14 {
+            if !schema_matches_v14(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v15_agent_mcp_servers(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 13 {
             if !schema_matches_v13(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -3328,14 +3340,26 @@ mod imp {
     fn apply_v14_agent_memory_switch(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
-        if table_columns(transaction, "agent_definition")?
+        if !table_columns(transaction, "agent_definition")?
             .iter()
             .any(|column| column == "memory_enabled")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V13_TO_V14)?;
+        }
+        apply_v15_agent_mcp_servers(transaction)
+    }
+
+    fn apply_v15_agent_mcp_servers(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_columns(transaction, "agent_definition")?
+            .iter()
+            .any(|column| column == "mcp_servers_json")
         {
             return Ok(());
         }
         transaction
-            .execute_batch(crate::schema::MIGRATE_V13_TO_V14)
+            .execute_batch(crate::schema::MIGRATE_V14_TO_V15)
             .map_err(StoreError::from)
     }
 
@@ -3351,6 +3375,16 @@ mod imp {
                 && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
                 && schema_objects(connection)?
                     == expected_schema_objects(SchemaGeneration::Current)?,
+        )
+    }
+
+    fn schema_matches_v14(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V14)?,
         )
     }
 
@@ -3717,6 +3751,7 @@ mod imp {
         V11,
         V12,
         V13,
+        V14,
         Current,
     }
 
@@ -3751,6 +3786,7 @@ mod imp {
         static V11_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V12_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V13_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V14_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3829,6 +3865,7 @@ mod imp {
                     .into_iter()
                     .filter(|object| !is_v13_memory_schema_object(object))
                     .collect();
+                strip_agent_definition_mcp_column(&mut objects);
                 strip_agent_definition_memory_column(&mut objects);
                 strip_agent_definition_model_columns(&mut objects);
                 for object in &mut objects {
@@ -3846,6 +3883,7 @@ mod imp {
                     .into_iter()
                     .filter(|object| !is_v13_memory_schema_object(object))
                     .collect();
+                strip_agent_definition_mcp_column(&mut objects);
                 strip_agent_definition_memory_column(&mut objects);
                 strip_agent_definition_model_columns(&mut objects);
                 objects
@@ -3855,11 +3893,17 @@ mod imp {
                     .into_iter()
                     .filter(|object| !is_v13_memory_schema_object(object))
                     .collect();
+                strip_agent_definition_mcp_column(&mut objects);
                 strip_agent_definition_memory_column(&mut objects);
                 objects
             }),
             SchemaGeneration::V13 => cached_schema_objects(&V13_OBJECTS, |mut objects| {
+                strip_agent_definition_mcp_column(&mut objects);
                 strip_agent_definition_memory_column(&mut objects);
+                objects
+            }),
+            SchemaGeneration::V14 => cached_schema_objects(&V14_OBJECTS, |mut objects| {
+                strip_agent_definition_mcp_column(&mut objects);
                 objects
             }),
             SchemaGeneration::Current => cached_schema_objects(&CURRENT_OBJECTS, |objects| objects),
@@ -3898,6 +3942,15 @@ mod imp {
             .filter(|character| !character.is_whitespace())
             .flat_map(char::to_lowercase)
             .collect()
+    }
+
+    fn strip_agent_definition_mcp_column(objects: &mut [SchemaObject]) {
+        const NEEDLE: &str = "mcp_servers_jsonblobnotnulldefault'[]',";
+        for object in objects {
+            if object.name == "agent_definition" {
+                object.sql = object.sql.replace(NEEDLE, "");
+            }
+        }
     }
 
     fn strip_agent_definition_memory_column(objects: &mut [SchemaObject]) {
@@ -4739,6 +4792,7 @@ mod tests {
                 engine_kind_id: "pi".into(),
                 prompt: String::new(),
                 plugins_json: b"[]".to_vec(),
+                mcp_servers_json: b"[]".to_vec(),
                 context_folders_json: b"[]".to_vec(),
                 context_links_json: b"[]".to_vec(),
                 model_provider: String::new(),
@@ -4854,6 +4908,63 @@ mod tests {
             .unwrap();
         let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
         assert!(!agents[0].memory_enabled);
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_v14_by_adding_agent_mcp_servers_defaulting_empty() {
+        let dir = temp_dir("migrate-v14-mcp-servers");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE agent_definition RENAME TO agent_definition_v15;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );
+                 DROP TABLE agent_definition_v15;
+                 INSERT INTO agent_definition VALUES
+                   ('writer', '写作', '', 'pi', '先列提纲', X'5B5D', X'5B5D', X'5B5D', 'p', 'm', 0, 0);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 14).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].prompt, "先列提纲");
+        assert!(!agents[0].memory_enabled, "迁移保留原有的记忆开关");
+        assert_eq!(
+            agents[0].mcp_servers_json,
+            b"[]".to_vec(),
+            "已有智能体默认不连任何 MCP 服务器"
+        );
+
+        store
+            .modify_agent_definition::<StoreError>("writer", |agent| {
+                agent.mcp_servers_json = br#"["github"]"#.to_vec();
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].mcp_servers_json, br#"["github"]"#.to_vec());
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
         std::fs::remove_dir_all(dir).unwrap();
@@ -6745,6 +6856,7 @@ mod tests {
                 engine_kind_id: "pi".into(),
                 prompt: "先核对成交".into(),
                 plugins_json: b"[]".to_vec(),
+                mcp_servers_json: b"[]".to_vec(),
                 context_folders_json: b"[]".to_vec(),
                 context_links_json: b"[]".to_vec(),
                 model_provider: String::new(),
@@ -6771,6 +6883,7 @@ mod tests {
             engine_kind_id: "pi".into(),
             prompt: "先列提纲".into(),
             plugins_json: b"[]".to_vec(),
+            mcp_servers_json: b"[]".to_vec(),
             context_folders_json: b"[]".to_vec(),
             context_links_json: b"[]".to_vec(),
             model_provider: String::new(),

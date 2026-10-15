@@ -389,6 +389,7 @@ CREATE TABLE agent_definition (
   engine_kind_id TEXT NOT NULL,
   prompt TEXT NOT NULL,
   plugins_json BLOB NOT NULL,
+  mcp_servers_json BLOB NOT NULL DEFAULT '[]',
   context_folders_json BLOB NOT NULL,
   context_links_json BLOB NOT NULL,
   model_provider TEXT NOT NULL DEFAULT '',
@@ -877,4 +878,35 @@ SELECT
   context_folders_json, context_links_json, model_provider, model_id, 1, position
 FROM agent_definition_v13;
 DROP TABLE agent_definition_v13;
+";
+
+/// v14 → v15：智能体勾选要连接的 MCP 服务器名（`mcp.json` 里 `mcpServers` 的键）。
+/// 已有智能体迁移后为空，即不连任何 MCP 服务器。回填值显式转成 BLOB：
+/// 文本 '[]' 读成 `Vec<u8>` 时 rusqlite 会报类型不符。
+pub const MIGRATE_V14_TO_V15: &str = "
+ALTER TABLE agent_definition RENAME TO agent_definition_v14;
+CREATE TABLE agent_definition (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  engine_kind_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  plugins_json BLOB NOT NULL,
+  mcp_servers_json BLOB NOT NULL DEFAULT '[]',
+  context_folders_json BLOB NOT NULL,
+  context_links_json BLOB NOT NULL,
+  model_provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+INSERT INTO agent_definition(
+  id, name, description, engine_kind_id, prompt, plugins_json, mcp_servers_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+)
+SELECT
+  id, name, description, engine_kind_id, prompt, plugins_json, CAST('[]' AS BLOB),
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+FROM agent_definition_v14;
+DROP TABLE agent_definition_v14;
 ";

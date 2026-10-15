@@ -111,6 +111,8 @@ pub(crate) struct AgentEditor {
     context_link: Entity<InputState>,
     /// 打开编辑器时扫一次磁盘的插件目录；不在渲染里扫，避免每次输入都读文件。
     plugins: Vec<PiPlugin>,
+    /// `~/.pi/agent/mcp.json` 里的服务器，同样只在打开编辑器和点刷新时读。
+    mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
     /// 同理，记忆目录也只在打开编辑器、点刷新或删除后扫描。
     memories: AgentMemories,
     _subscriptions: Vec<Subscription>,
@@ -1734,16 +1736,7 @@ fn agent_display_name(name: &str) -> String {
     }
 }
 
-fn agent_prompt_summary(prompt: &str) -> Option<String> {
-    let compact = compact_instructions(prompt);
-    if compact.is_empty() {
-        None
-    } else {
-        Some(compact)
-    }
-}
-
-/// 卡片正文大约两行。比主页摘要短，窄窗口也不会把省略号裁掉。
+/// 卡片正文大约两行，窄窗口也不会把省略号裁掉。
 fn agent_card_prompt(prompt: &str) -> Option<String> {
     let compact = excerpt_text(prompt, 64);
     if compact.is_empty() {
@@ -1825,55 +1818,6 @@ fn automation_nav_needs_attention(config: &settings::AgentHostState) -> bool {
                     run.status == smelt_core::automation::AutomationRunStatus::Failed
                 })
     })
-}
-
-fn agent_hub_list_row(
-    id: impl Into<ElementId>,
-    title: impl Into<SharedString>,
-    meta: impl Into<SharedString>,
-    attention: bool,
-    divided: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    div()
-        .id(id.into())
-        .px_4()
-        .py_2p5()
-        .cursor_pointer()
-        // 行压在卡片上。bg_row_hover 比卡片底还暗，划过会陷进去。
-        .hover(|row| row.bg(rgb(crate::ui_theme::bg_hover())))
-        .when(divided, |row| {
-            row.border_t_1().border_color(crate::ui_theme::hairline())
-        })
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_sm()
-                .text_color(rgb(crate::ui_theme::text_bright()))
-                .truncate()
-                .child(title.into()),
-        )
-        .when(attention, |row| {
-            row.child(
-                div()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(rgb(crate::ui_theme::red())),
-            )
-        })
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(rgb(crate::ui_theme::text_faint()))
-                .child(meta.into()),
-        )
-        .on_click(on_click)
-        .into_any_element()
 }
 
 fn agent_usage_summary(conversations: usize, automations: usize) -> String {
@@ -2173,6 +2117,7 @@ fn render_agent_plugin_card(
         .iter()
         .map(|plugin| {
             agent_plugin_row(
+                AgentPick::Plugin,
                 &agent.id,
                 &plugin.id,
                 &plugin.name,
@@ -2195,6 +2140,7 @@ fn render_agent_plugin_card(
             None => ("未知", id.clone()),
         };
         rows.push(agent_plugin_row(
+            AgentPick::Plugin,
             &agent.id,
             id,
             &name,
@@ -2797,7 +2743,162 @@ fn agent_context_row(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 编辑器打开、刷新时读一次 `mcp.json`。读不出来就当没有：错误在能力库「MCP」页签里看。
+fn load_mcp_servers_for_editor() -> Vec<smelt_core::pi_mcp::PiMcpServer> {
+    smelt_core::pi_mcp::load_pi_mcp_servers().unwrap_or_default()
+}
+
+/// 智能体的 MCP 勾选。服务器在能力库里配置，这里只决定这个智能体连哪几台。
+fn render_agent_mcp_card(
+    agent: &settings::AgentDefinition,
+    editor: &AgentEditor,
+    entity: Entity<Workspace>,
+    cx: &App,
+) -> AnyElement {
+    let selected = agent.mcp_servers.clone();
+    let selected_count = selected.len();
+
+    let refresh_entity = entity.clone();
+    let refresh_button = compact_chip("agent-mcp-refresh")
+        .icon(IconName::Redo)
+        .tooltip("重新读取 mcp.json")
+        .on_click(move |_, _, cx| {
+            refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));
+        });
+    let manage_entity = entity.clone();
+    let manage_button = compact_chip("agent-mcp-manage")
+        .label("管理")
+        .tooltip("去能力库添加、登录或停用 MCP 服务器")
+        .on_click(move |_, window, cx| {
+            manage_entity.update(cx, |workspace, cx| {
+                workspace.open_capabilities(CapabilitiesTab::Mcp, window, cx);
+            });
+        });
+
+    let mut rows: Vec<AnyElement> = editor
+        .mcp_servers
+        .iter()
+        .map(|server| {
+            let (kind_label, detail) = match &server.transport {
+                smelt_core::pi_mcp::PiMcpTransport::Http { url } => ("远程", url.clone()),
+                smelt_core::pi_mcp::PiMcpTransport::Stdio { command, args } => {
+                    ("本地", format!("{command} {}", args.join(" ")))
+                }
+                smelt_core::pi_mcp::PiMcpTransport::Unknown => ("未知", String::new()),
+            };
+            // 能力库里停用的服务器勾了也不会连：Pi 读到 `enabled: false` 就跳过。
+            let broken = (!server.enabled).then(|| "已在能力库停用，勾选也不会连接".to_string());
+            agent_plugin_row(
+                AgentPick::McpServer,
+                &agent.id,
+                &server.name,
+                &server.name,
+                kind_label,
+                server.description.as_deref().unwrap_or(""),
+                &detail,
+                broken,
+                selected.contains(&server.name),
+                entity.clone(),
+                cx,
+            )
+        })
+        .collect();
+    // 已勾选但 mcp.json 里已经删掉的也要露出来，否则用户没法取消它。
+    for name in &selected {
+        if editor.mcp_servers.iter().any(|server| server.name == *name) {
+            continue;
+        }
+        rows.push(agent_plugin_row(
+            AgentPick::McpServer,
+            &agent.id,
+            name,
+            name,
+            "未知",
+            "",
+            "",
+            Some("mcp.json 里已经没有这台服务器".to_string()),
+            true,
+            entity.clone(),
+            cx,
+        ));
+    }
+
+    let body = if rows.is_empty() {
+        div()
+            .px_5()
+            .py_4()
+            .text_xs()
+            .text_color(rgb(crate::ui_theme::text_faint()))
+            .child("还没有配置 MCP 服务器。点「管理」去能力库添加。")
+            .into_any_element()
+    } else {
+        div()
+            .px_2()
+            .pb_2()
+            .flex()
+            .flex_col()
+            .children(rows)
+            .into_any_element()
+    };
+
+    agent_surface_card()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_5()
+                .pt_4()
+                .pb_2()
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .child("MCP"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(crate::ui_theme::text_muted()))
+                                .child(format!(
+                                    "已勾选 {selected_count} 个。对话只连勾选的服务器，没勾的不启动。改动对新开的对话生效。"
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(refresh_button)
+                        .child(manage_button),
+                ),
+        )
+        .child(body)
+        .into_any_element()
+}
+
+/// 编辑器里可勾选的两类能力：插件（技能 / 扩展）和 MCP 服务器。行的样子一样，
+/// 只是写回定义的字段不同。
+#[derive(Clone, Copy)]
+enum AgentPick {
+    Plugin,
+    McpServer,
+}
+
 fn agent_plugin_row(
+    pick: AgentPick,
     agent_id: &str,
     plugin_id: &str,
     name: &str,
@@ -2830,16 +2931,22 @@ fn agent_plugin_row(
         .items_center()
         .gap_3()
         .child(
-            Switch::new(format!("agent-plugin-{plugin_id}"))
-                .checked(checked)
-                .disabled(!usable && !checked)
-                .on_click(move |_, _, cx| {
-                    let agent_id = toggle_agent.clone();
-                    let plugin_id = toggle_plugin.clone();
-                    entity.update(cx, |workspace, cx| {
-                        workspace.toggle_agent_plugin(agent_id, plugin_id, cx)
-                    });
-                }),
+            Switch::new(match pick {
+                AgentPick::Plugin => format!("agent-plugin-{plugin_id}"),
+                AgentPick::McpServer => format!("agent-mcp-{plugin_id}"),
+            })
+            .checked(checked)
+            .disabled(!usable && !checked)
+            .on_click(move |_, _, cx| {
+                let agent_id = toggle_agent.clone();
+                let plugin_id = toggle_plugin.clone();
+                entity.update(cx, |workspace, cx| match pick {
+                    AgentPick::Plugin => workspace.toggle_agent_plugin(agent_id, plugin_id, cx),
+                    AgentPick::McpServer => {
+                        workspace.toggle_agent_mcp_server(agent_id, plugin_id, cx)
+                    }
+                });
+            }),
         )
         .child(
             div()
