@@ -111,6 +111,13 @@ struct PiState {
     /// fork 成功后补发 `get_state` 的请求 id：Pi 切到了新 session 文件，
     /// 本地 session id 必须跟着换，否则后续断线重连会恢复到被丢弃的旧分支。
     rewind_state_request_id: Option<String>,
+    /// 最近一条 `prompt` 写出的时刻，以及本会话已发出的条数。Pi 的 response 才算
+    /// 「收下」，而它前面压着整个 `before_agent_start`（扩展在那里做慢活就直接计
+    /// 在这段时延里），所以这是首轮卡顿唯一的可观测点。
+    prompt_sent_at: Option<std::time::Instant>,
+    prompts_sent: u64,
+    /// Smelt 侧会话 id，只用于日志可读（Pi 自己的 id 在 `session_id`）。
+    sid: String,
     next_request_id: u64,
 }
 
@@ -362,6 +369,7 @@ async fn run_connection(
         let mut writer = child_stdin;
         let mut lines = futures::io::BufReader::new(child_stdout).lines();
         let mut state = PiState::new();
+        state.sid = launch.sid.clone();
         let initialize = initialize_session(
             &mut lines,
             &mut writer,
@@ -1491,6 +1499,8 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 request["images"] = serde_json::Value::Array(images);
             }
             write_rpc(writer, &request).await?;
+            state.prompts_sent += 1;
+            state.prompt_sent_at = Some(std::time::Instant::now());
         }
         ConversationCommand::Steer { text, images } => {
             // steer 只对正在跑的回合有意义。界面和 Pi 都空了就降级成普通 prompt，
@@ -1808,6 +1818,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         .to_string();
     if state.prompt_request_id.as_deref() == Some(&id) {
         state.prompt_request_id = None;
+        // Pi 回这条 response 之前，这一轮还没真正开跑。首条通常最慢（扩展、MCP、
+        // skills 都在第一轮 run 里初始化），没有这行日志就只能靠体感。
+        if let Some(sent_at) = state.prompt_sent_at.take() {
+            crate::app_log::info(
+                "pi-rpc",
+                &format!(
+                    "会话 {} 第 {} 条 prompt 被 Pi 收下用时 {:?}（气泡在提交时已落地）",
+                    state.sid,
+                    state.prompts_sent,
+                    sent_at.elapsed()
+                ),
+            );
+        }
         if let Err(error) = ensure_response_success(&response) {
             // 先问 Pi 还在不在跑。忙着就不是这一条的失败，空了才是真的预检错误。
             state.pending_refusal_error = Some(error);

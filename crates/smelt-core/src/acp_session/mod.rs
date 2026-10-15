@@ -2228,6 +2228,48 @@ pub fn note_prompt_sent_with_delivery(
     });
 }
 
+/// 撤回 [`note_prompt_sent_with_delivery`] 刚写下的那条用户消息。
+///
+/// 只用在这条 prompt 最终没能进模型、正文要还给输入框的场景（Pi 预检失败 /
+/// 用户取消）——正文回了输入框，消息流里就不能再留着它，否则同一句话会在
+/// 两处同时存在。
+///
+/// 只撤可逆的那部分：`history_session_id` 的升级和悬空工具收尾都是单调的，
+/// 回滚它们只会把别的东西弄坏。最后一条不是刚写下的用户消息时一律不动
+/// 状态返回 `None`：那说明已经有新正文长进来，此时删条目只会错位。
+pub fn undo_prompt_sent(
+    state: &mut AcpSessionState,
+) -> Option<(String, Vec<crate::acp_chat::AcpImage>)> {
+    let last_index = state.entries.len().checked_sub(1)?;
+    if !matches!(
+        state.entries.last(),
+        Some(AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+    ) {
+        return None;
+    }
+    // 这一轮必须是「刚开头」：计时条目指向最后这条用户消息且还没收尾。
+    match state.turn_timings.last() {
+        Some(timing) if timing.user_index == last_index && timing.ended_at_ms.is_none() => {}
+        _ => return None,
+    }
+    let taken = match state.entries.pop()? {
+        AcpEntry::User(text) => (text, Vec::new()),
+        AcpEntry::UserWithImages { text, images } => (text, images),
+        // 上面已经匹配过类型，这里不可能走到。
+        other => {
+            state.entries.push(other);
+            return None;
+        }
+    };
+    state.turn_timings.pop();
+    state.turn_seq = state.turn_seq.saturating_sub(1);
+    state.awaiting_user_echo = false;
+    state.turn_started_at_ms = None;
+    state.active_delivery_id = None;
+    state.phase = DaemonPhase::Idle;
+    Some(taken)
+}
+
 const PROVIDER_STILL_RUNNING_STATUS: &str = "已排队，这一轮结束后再发";
 
 /// Pi 还在跑，这条消息要等它结束。界面若已经空闲，把转圈拉回来，好接住后续输出。

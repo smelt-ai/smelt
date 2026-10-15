@@ -224,6 +224,8 @@ pub(crate) struct QueuedAcpPrompt {
     pub(crate) images: Vec<smelt_core::acp_conn::PromptImage>,
     pub(crate) delivery_id: Option<String>,
     pub(crate) origin: AcpPromptOrigin,
+    /// 正文已经在消息流里了。Pi 拒收后重发的是同一条气泡，不能再写一遍。
+    pub(crate) echoed: bool,
 }
 
 pub(crate) type AcpSessions = Arc<AcpRegistry<AcpSession>>;
@@ -1513,10 +1515,9 @@ pub(crate) fn start_acp_event_drain(
                         break;
                     }
                     if matches!(&ev, smelt_core::acp_conn::ConversationEvent::PromptAccepted) {
+                        // 气泡在提交时就写过了，这里不再新增条目，只是状态变了（provider
+                        // 排队提示要收），所以只标 applied，不推 entries 偏移。
                         if accept_unaccepted_prompt(sess) {
-                            let len = sess.reduced.lock().unwrap().entries().len();
-                            offsets.push(Some(len.saturating_sub(1)));
-                            should_persist = true;
                             applied = true;
                         }
                         continue;
@@ -2198,22 +2199,30 @@ fn take_unaccepted_prompt(sess: &AcpSession) -> Option<QueuedAcpPrompt> {
 }
 
 pub(crate) fn requeue_unaccepted_prompt(sess: &AcpSession) {
-    let Some(prompt) = take_unaccepted_prompt(sess) else {
+    let Some(mut prompt) = take_unaccepted_prompt(sess) else {
         return;
     };
+    // 「Pi 还在跑」不是用户没说过这句话，只是还没送进去：气泡留在原地，
+    // provider 空下来重发同一条，不能再写第二个气泡。
+    prompt.echoed = true;
     sess.prompt_in_flight.store(true, Ordering::SeqCst);
     sess.pending_prompts.lock().unwrap().push_front(prompt);
+}
+
+/// 还草稿：正文回输入框的同时把消息流里的气泡撤掉，不能两处都留。
+fn restore_prompt_to_composer(sess: &AcpSession, prompt: QueuedAcpPrompt) {
+    let mut state = sess.reduced.lock().unwrap();
+    if prompt.echoed {
+        smelt_core::acp_session::undo_prompt_sent(&mut state);
+    }
+    smelt_core::acp_session::queue_composer_restore(&mut state, vec![prompt.text], prompt.images);
 }
 
 pub(crate) fn restore_unaccepted_to_composer(sess: &AcpSession) {
     let Some(prompt) = take_unaccepted_prompt(sess) else {
         return;
     };
-    smelt_core::acp_session::queue_composer_restore(
-        &mut sess.reduced.lock().unwrap(),
-        vec![prompt.text],
-        prompt.images,
-    );
+    restore_prompt_to_composer(sess, prompt);
 }
 
 pub(crate) fn park_unaccepted_after_cancel(sess: &AcpSession) {
@@ -2221,40 +2230,34 @@ pub(crate) fn park_unaccepted_after_cancel(sess: &AcpSession) {
         return;
     };
     match prompt.origin {
-        AcpPromptOrigin::User => smelt_core::acp_session::queue_composer_restore(
-            &mut sess.reduced.lock().unwrap(),
-            vec![prompt.text],
-            prompt.images,
-        ),
+        AcpPromptOrigin::User => restore_prompt_to_composer(sess, prompt),
     }
 }
 
+/// Pi 收下了这一条。气泡在提交时就已经写过，这里只收掉「未确认」标记
+/// 并放掉 provider 排队状态。
 pub(crate) fn accept_unaccepted_prompt(sess: &AcpSession) -> bool {
-    let Some(prompt) = take_unaccepted_prompt(sess) else {
+    if take_unaccepted_prompt(sess).is_none() {
         return false;
-    };
+    }
     sess.provider_hold.store(false, Ordering::SeqCst);
     let mut state = sess.reduced.lock().unwrap();
     smelt_core::acp_session::clear_provider_queue_status(&mut state);
-    smelt_core::acp_session::note_prompt_sent_with_delivery(
-        &mut state,
-        prompt.text,
-        prompt.images,
-        prompt.delivery_id,
-    );
     true
 }
 
 /// 在调用方取得 daemon 回合槽位后发送 prompt。
 ///
-/// 其它 agent 立刻回显。Pi 先记在 `unaccepted_prompt`，等 `PromptAccepted` 再回显；
-/// 会话命令（`/reload`）没有模型回合，不回显。
+/// 气泡一律在这里就落地，不等 agent 确认：用户确实提交了这条，这是 daemon 自己
+/// 掌握的事实。Pi 额外记一笔 `unaccepted_prompt`，只用来决定被拒收时是重发还是
+/// 还草稿；`echoed` 的重发不再写第二遍。会话命令（`/reload`）没有模型回合，不回显。
 pub(crate) fn send_acp_prompt_reserved(
     sess: &AcpSession,
     text: String,
     images: Vec<smelt_core::acp_conn::PromptImage>,
     delivery_id: Option<String>,
     origin: AcpPromptOrigin,
+    echoed: bool,
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
     let handle = sess
@@ -2275,7 +2278,7 @@ pub(crate) fn send_acp_prompt_reserved(
         .try_send(smelt_core::acp_conn::ConversationCommand::Prompt { text, images })
         .is_ok()
     {
-        if remember_outgoing_prompt(sess, shown_text, shown_images, delivery_id, origin) {
+        if remember_outgoing_prompt(sess, shown_text, shown_images, delivery_id, origin, echoed) {
             push_acp_snapshot(sess, false);
             update_acp_daemon_state(sess, subscribers);
         }
@@ -2288,13 +2291,14 @@ pub(crate) fn send_acp_prompt_reserved(
     }
 }
 
-/// 投影已经写入用户气泡时返回 true。Pi 的普通消息要等收下，会话命令不写气泡。
+/// 投影已经写入用户气泡时返回 true。会话命令不写气泡，重发也不重写。
 fn remember_outgoing_prompt(
     sess: &AcpSession,
     text: String,
     images: Vec<smelt_core::acp_conn::PromptImage>,
     delivery_id: Option<String>,
     origin: AcpPromptOrigin,
+    echoed: bool,
 ) -> bool {
     let pi = session_uses_pi_admission(sess);
     if pi && smelt_core::pi_rpc::parse_session_slash(&text).is_some() {
@@ -2302,11 +2306,15 @@ fn remember_outgoing_prompt(
     }
     if pi {
         *sess.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
-            text,
-            images,
-            delivery_id,
+            text: text.clone(),
+            images: images.clone(),
+            delivery_id: delivery_id.clone(),
             origin,
+            echoed: true,
         });
+    }
+    if echoed {
+        // 重发：气泡上一次就写过了，这一轮只是把它真正送进 provider。
         return false;
     }
     smelt_core::acp_session::note_prompt_sent_with_delivery(
@@ -2638,6 +2646,7 @@ pub(crate) fn try_flush_immediate_delivery(sess: &AcpSession, subscribers: &Even
         delivery.images.clone(),
         None,
         AcpPromptOrigin::User,
+        false,
         subscribers,
     )
     .is_err()
@@ -2774,6 +2783,7 @@ pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &E
         prompt.images.clone(),
         prompt.delivery_id.clone(),
         prompt.origin,
+        prompt.echoed,
         subscribers,
     )
     .is_err()
@@ -2918,6 +2928,7 @@ fn apply_acp_user_action_inner(
                         images,
                         delivery_id,
                         origin: AcpPromptOrigin::User,
+                        echoed: false,
                     });
                 push_acp_snapshot_since(sess, false, None);
                 return Ok(());
@@ -2928,6 +2939,7 @@ fn apply_acp_user_action_inner(
                 images,
                 delivery_id.clone(),
                 AcpPromptOrigin::User,
+                false,
                 subscribers,
             );
             if result.is_err()
@@ -3329,6 +3341,7 @@ pub(crate) fn handle_acp_submit_input(
     subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
+    let submit_started = std::time::Instant::now();
     let config_values = submit_config_values(v);
     let input = v
         .get("input")
@@ -3372,6 +3385,12 @@ pub(crate) fn handle_acp_submit_input(
             })?
     });
     let response = conversation_submit_response(result);
+    // 用户按下回车到这里是 Smelt 自己的开销；气泡落地还要等 Pi 的 admission
+    // （见 pi_rpc 里「被 Pi 收下用时」那行）。两条日志的时间差就是分界点。
+    crate::dlog(&format!(
+        "acp submit id={id} 派发用时 {:?}",
+        submit_started.elapsed()
+    ));
     let _ = writeln!(conn, "{response}");
 }
 

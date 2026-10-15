@@ -1141,6 +1141,25 @@ fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
     ));
 }
 
+/// 消息流里正文为 `text` 的用户气泡有几个。乐观回显最容易错的地方就是重发
+/// 时写出第二条，所以这里数数量而不是只看最后一条。
+fn user_bubbles(session: &AcpSession, text: &str) -> usize {
+    session
+        .reduced
+        .lock()
+        .unwrap()
+        .entries()
+        .iter()
+        .filter(|entry| match entry {
+            AcpEntry::User(entry_text) => entry_text == text,
+            AcpEntry::UserWithImages {
+                text: entry_text, ..
+            } => entry_text == text,
+            _ => false,
+        })
+        .count()
+}
+
 fn attach_prompt_handle(
     session: &AcpSession,
 ) -> smol::channel::Receiver<smelt_core::acp_conn::ConversationCommand> {
@@ -1251,6 +1270,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
             images: Vec::new(),
             delivery_id: None,
             origin: AcpPromptOrigin::User,
+            echoed: false,
         });
     let subscribers = new_event_hub();
 
@@ -1269,8 +1289,12 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     assert!(cmd_rx.try_recv().is_err());
     assert!(slot.value.prompt_in_flight.load(Ordering::SeqCst));
     let state = slot.value.reduced.lock().unwrap();
-    assert!(state.entries().is_empty());
-    assert!(state.turn_started_at_ms.is_none());
+    // 排队中的消息不在消息流里（GUI 显示在队列区），真正派发时才落气泡。
+    assert!(matches!(
+        state.entries().last(),
+        Some(AcpEntry::User(text)) if text == "下一句"
+    ));
+    assert!(state.turn_started_at_ms.is_some());
     drop(state);
     let unaccepted = slot.value.unaccepted_prompt.lock().unwrap();
     assert_eq!(
@@ -1299,6 +1323,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
         Vec::new(),
         None,
         AcpPromptOrigin::User,
+        false,
         &subscribers,
     )
     .unwrap();
@@ -1306,7 +1331,7 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
         cmd_rx.try_recv(),
         Ok(smelt_core::acp_conn::ConversationCommand::Prompt { .. })
     ));
-    assert!(slot.value.reduced.lock().unwrap().entries().is_empty());
+    assert_eq!(user_bubbles(&slot.value, "再问一句"), 1);
     assert!(slot.value.unaccepted_prompt.lock().unwrap().is_some());
 
     requeue_unaccepted_prompt(&slot.value);
@@ -1317,12 +1342,13 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
     {
         let state = slot.value.reduced.lock().unwrap();
         assert!(matches!(state.phase, DaemonPhase::Thinking));
-        assert!(state.entries().is_empty());
         assert_eq!(
             state.status_line.as_deref(),
             Some("已排队，这一轮结束后再发")
         );
     }
+    // 「Pi 还在跑」不是用户没说过：气泡留在原地，不撤也不重写。
+    assert_eq!(user_bubbles(&slot.value, "再问一句"), 1);
     settle_acp_turn_locked(&slot.value, false, false, false, &subscribers);
     assert!(cmd_rx.try_recv().is_err());
 
@@ -1339,6 +1365,8 @@ fn pi_prompt_is_requeued_when_pi_refuses_it_and_is_not_a_failed_turn() {
         }
         _ => panic!("idle provider must send the refused prompt once"),
     }
+    // 重发的是同一条，消息流里永远只能有一个气泡。
+    assert_eq!(user_bubbles(&slot.value, "再问一句"), 1);
     assert!(
         !slot.value.reduced.lock().unwrap().entries().iter().any(
             |entry| matches!(entry, AcpEntry::Assistant { text, .. } if text.contains("回合失败"))
@@ -1363,6 +1391,7 @@ fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
         images: Vec::new(),
         delivery_id: None,
         origin: AcpPromptOrigin::User,
+        echoed: false,
     });
     slot.value.prompt_in_flight.store(true, Ordering::SeqCst);
     let subscribers = new_event_hub();
@@ -1387,7 +1416,7 @@ fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
 }
 
 #[test]
-fn pi_prompt_is_echoed_only_after_it_is_accepted() {
+fn pi_prompt_is_echoed_without_waiting_for_pi_to_accept() {
     let acp_sessions = new_test_acp_sessions();
     let mut reduced = AcpSessionState::default();
     reduced.phase = DaemonPhase::Idle;
@@ -1396,20 +1425,48 @@ fn pi_prompt_is_echoed_only_after_it_is_accepted() {
         *session.launch_spec.lock().unwrap() = Some(pi_launch());
         session
     });
-    *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
-        text: "卡住了吗".to_string(),
-        images: Vec::new(),
-        delivery_id: None,
-        origin: AcpPromptOrigin::User,
-    });
-    slot.value.reduced.lock().unwrap().status_line = Some("已排队，这一轮结束后再发".to_string());
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    let subscribers = new_event_hub();
 
+    send_acp_prompt_reserved(
+        &slot.value,
+        "卡住了吗".into(),
+        Vec::new(),
+        None,
+        AcpPromptOrigin::User,
+        false,
+        &subscribers,
+    )
+    .unwrap();
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(smelt_core::acp_conn::ConversationCommand::Prompt { .. })
+    ));
+    {
+        // Pi 的 admission 可能要数秒（扩展在 before_agent_start 里做慢活）。
+        // 用户确实提交过这条，气泡不能等到那时候才出现。
+        let state = slot.value.reduced.lock().unwrap();
+        assert!(matches!(
+            state.entries().last(),
+            Some(AcpEntry::User(text)) if text == "卡住了吗"
+        ));
+        assert!(matches!(state.phase, DaemonPhase::Thinking));
+        assert!(state.turn_started_at_ms.is_some());
+    }
+    assert!(slot.value.unaccepted_prompt.lock().unwrap().is_some());
+
+    slot.value.reduced.lock().unwrap().status_line = Some("已排队，这一轮结束后再发".to_string());
     assert!(accept_unaccepted_prompt(&slot.value));
     let state = slot.value.reduced.lock().unwrap();
-    assert!(matches!(
-        state.entries().last(),
-        Some(AcpEntry::User(text)) if text == "卡住了吗"
-    ));
+    // 收下只是确认：不能再写第二个气泡。
+    assert_eq!(
+        state
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, AcpEntry::User(text) if text == "卡住了吗"))
+            .count(),
+        1
+    );
     assert!(matches!(state.phase, DaemonPhase::Thinking));
     assert!(state.status_line.is_none());
     assert!(state.turn_started_at_ms.is_some());
@@ -1428,7 +1485,13 @@ fn real_prompt_failure_returns_the_text_instead_of_retrying() {
         images: Vec::new(),
         delivery_id: None,
         origin: AcpPromptOrigin::User,
+        echoed: true,
     });
+    smelt_core::acp_session::note_prompt_sent(
+        &mut slot.value.reduced.lock().unwrap(),
+        "再试一次".to_string(),
+        Vec::new(),
+    );
 
     restore_unaccepted_to_composer(&slot.value);
     assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
@@ -1436,6 +1499,16 @@ fn real_prompt_failure_returns_the_text_instead_of_retrying() {
     assert_eq!(
         slot.value.reduced.lock().unwrap().composer_restore_texts,
         ["再试一次".to_string()]
+    );
+    // 正文回了输入框，消息流里就不能再留着它。
+    assert_eq!(user_bubbles(&slot.value, "再试一次"), 0);
+    assert!(
+        slot.value
+            .reduced
+            .lock()
+            .unwrap()
+            .turn_started_at_ms
+            .is_none()
     );
 }
 
@@ -1454,19 +1527,27 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
         images: vec![image.clone()],
         delivery_id: None,
         origin: AcpPromptOrigin::User,
+        echoed: true,
     });
+    smelt_core::acp_session::note_prompt_sent(
+        &mut slot.value.reduced.lock().unwrap(),
+        "看这张".to_string(),
+        vec![image.clone()],
+    );
     park_unaccepted_after_cancel(&slot.value);
     {
         let state = slot.value.reduced.lock().unwrap();
         assert_eq!(state.composer_restore_texts, ["看这张".to_string()]);
         assert_eq!(state.composer_restore_images, vec![image.clone()]);
     }
+    assert_eq!(user_bubbles(&slot.value, "看这张"), 0);
 
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
         text: "   ".to_string(),
         images: vec![image.clone()],
         delivery_id: None,
         origin: AcpPromptOrigin::User,
+        echoed: false,
     });
     park_unaccepted_after_cancel(&slot.value);
     let state = slot.value.reduced.lock().unwrap();
@@ -1492,8 +1573,15 @@ fn real_prompt_failure_restores_the_images_with_the_text() {
         images: vec![image.clone()],
         delivery_id: None,
         origin: AcpPromptOrigin::User,
+        echoed: true,
     });
+    smelt_core::acp_session::note_prompt_sent(
+        &mut slot.value.reduced.lock().unwrap(),
+        "再试一次".to_string(),
+        vec![image.clone()],
+    );
     restore_unaccepted_to_composer(&slot.value);
+    assert_eq!(user_bubbles(&slot.value, "再试一次"), 0);
     let state = slot.value.reduced.lock().unwrap();
     assert_eq!(state.composer_restore_texts, ["再试一次".to_string()]);
     assert_eq!(state.composer_restore_images, vec![image]);
@@ -1511,12 +1599,19 @@ fn cancel_before_accept_restores_user_text() {
         images: Vec::new(),
         delivery_id: None,
         origin: AcpPromptOrigin::User,
+        echoed: true,
     });
+    smelt_core::acp_session::note_prompt_sent(
+        &mut slot.value.reduced.lock().unwrap(),
+        "用户刚发的".to_string(),
+        Vec::new(),
+    );
     park_unaccepted_after_cancel(&slot.value);
     assert_eq!(
         slot.value.reduced.lock().unwrap().composer_restore_texts,
         ["用户刚发的".to_string()]
     );
+    assert_eq!(user_bubbles(&slot.value, "用户刚发的"), 0);
     assert!(slot.value.pending_prompts.lock().unwrap().is_empty());
 }
 
@@ -1536,6 +1631,7 @@ fn pi_queue_hold_clears_when_the_provider_becomes_idle() {
         images: Vec::new(),
         delivery_id: None,
         origin: AcpPromptOrigin::User,
+        echoed: false,
     });
     let subscribers = new_event_hub();
 
@@ -2023,6 +2119,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
             images: Vec::new(),
             delivery_id: None,
             origin: AcpPromptOrigin::User,
+            echoed: false,
         });
     let subscribers = new_event_hub();
     let (late_started_tx, late_started_rx) = std::sync::mpsc::channel();
@@ -2139,6 +2236,7 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
             images: Vec::new(),
             delivery_id: None,
             origin: AcpPromptOrigin::User,
+            echoed: false,
         });
     let subscribers = new_event_hub();
 

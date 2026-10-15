@@ -3446,3 +3446,69 @@ fn garbage_has_no_action_name() {
     assert_eq!(unknown.name, None);
     assert!(!unknown.newer_peer);
 }
+
+/// 撤回要把 `note_prompt_sent` 留下的回合痕迹一起收走：条目、计时、等回声窗口。
+/// 只收掉条目会让 `turn_timings` 指向不存在的下标，按下标取正文的地方全部错位。
+#[test]
+fn undo_prompt_sent_rolls_back_the_turn_it_opened() {
+    let mut state = AcpSessionState::default();
+    state.phase = DaemonPhase::Idle;
+    let image = crate::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aGk=".into(),
+    };
+    crate::acp_session::note_prompt_sent_with_delivery(
+        &mut state,
+        "发出去了".to_string(),
+        vec![image.clone()],
+        Some("delivery-1".to_string()),
+    );
+    assert_eq!(state.entries().len(), 1);
+
+    let (text, images) =
+        crate::acp_session::undo_prompt_sent(&mut state).expect("刚写下的那条必须可撤回");
+
+    assert_eq!(text, "发出去了");
+    assert_eq!(images, vec![image]);
+    assert!(state.entries().is_empty());
+    assert!(state.turn_timings.is_empty());
+    assert_eq!(state.turn_seq, 0);
+    assert!(!state.awaiting_user_echo);
+    assert!(state.turn_started_at_ms.is_none());
+    assert!(state.active_delivery_id.is_none());
+    assert!(matches!(state.phase, DaemonPhase::Idle));
+}
+
+/// 正文已经长进来了就不能再撤：那条用户消息不再是最后一条，删它会错位。
+#[test]
+fn undo_prompt_sent_refuses_once_the_answer_started() {
+    let mut state = AcpSessionState::default();
+    crate::acp_session::note_prompt_sent(&mut state, "发出去了".to_string(), Vec::new());
+    crate::acp_session::apply_event(
+        &mut state,
+        crate::acp_conn::ConversationEvent::AgentChunk {
+            text: "开始回答".to_string(),
+            thought: false,
+            parent_id: None,
+        },
+    );
+
+    assert!(crate::acp_session::undo_prompt_sent(&mut state).is_none());
+    assert_eq!(state.entries().len(), 2);
+}
+
+/// 上一轮已经收尾的用户消息是历史，不是「还没送出去的那条」，一律不动。
+#[test]
+fn undo_prompt_sent_refuses_a_finished_turn() {
+    let mut state = AcpSessionState::default();
+    crate::acp_session::note_prompt_sent(&mut state, "上一轮".to_string(), Vec::new());
+    crate::acp_session::apply_event(
+        &mut state,
+        crate::acp_conn::ConversationEvent::TurnEnded(
+            agent_client_protocol::schema::v1::StopReason::EndTurn,
+        ),
+    );
+
+    assert!(crate::acp_session::undo_prompt_sent(&mut state).is_none());
+    assert_eq!(state.entries().len(), 1);
+}
