@@ -5,13 +5,13 @@
 //! `impl Workspace` 事件方法，不塞进绘制。
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::*;
 
 use crate::settings::Appearance;
 use crate::{
-    SessionKind, Workspace, liquid_glass, mem_usage, settings, should_auto_resume_active_acp,
+    SessionKind, Workspace, liquid_glass, settings, should_auto_resume_active_acp,
     tool_panel,
 };
 
@@ -187,36 +187,6 @@ impl Workspace {
         if self.applied_ui_font_px != Some(ui_font_px) {
             window.set_rem_size(px(ui_font_px as f32));
             self.applied_ui_font_px = Some(ui_font_px);
-        }
-
-        // 调试 HUD：开启时用 request_animation_frame 驱动连续渲染，测真实帧率
-        // （连续重绘会重跑整窗布局/绘制，diff 面板卡不卡直接反映到帧耗时上）。
-        if self.debug_hud {
-            let now = Instant::now();
-            if let Some(prev) = self.last_frame {
-                let dt = now.duration_since(prev).as_secs_f32();
-                if dt > 0.0 {
-                    let inst = 1.0 / dt;
-                    self.fps_ema = if self.fps_ema <= 0.0 {
-                        inst
-                    } else {
-                        self.fps_ema * 0.9 + inst * 0.1
-                    };
-                }
-            }
-            self.last_frame = Some(now);
-            let mem_due = self
-                .debug_mem_sampled_at
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
-            if mem_due {
-                self.debug_mem_rss = mem_usage::current_rss_bytes();
-                self.debug_mem_sampled_at = Some(now);
-            }
-            window.request_animation_frame();
-        } else {
-            self.last_frame = None;
-            self.debug_mem_rss = None;
-            self.debug_mem_sampled_at = None;
         }
 
         // 冷恢复后若活动项是智能体对话，把工作台带回那段对话（子页不落盘，恢复出来

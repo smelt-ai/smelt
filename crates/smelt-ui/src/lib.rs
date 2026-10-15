@@ -12,4 +12,5 @@ pub mod image;
 pub mod markdown_mermaid;
 pub mod motion;
 pub mod provider_status_global;
+pub mod segmented;
 pub mod ui_theme;

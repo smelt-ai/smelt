@@ -65,15 +65,17 @@ impl PanelTransition {
         self.started_at.is_some() && self.target > 0.5
     }
 
-    pub(crate) fn frame(&mut self) -> Frame {
-        self.frame_at(Instant::now())
+    /// 系统开了「减弱动态效果」时直接落到终点，和侧栏归位、条目淡入一致。
+    pub(crate) fn frame(&mut self, reduce_motion: bool) -> Frame {
+        self.frame_at(Instant::now(), reduce_motion)
     }
 
-    fn frame_at(&mut self, now: Instant) -> Frame {
+    fn frame_at(&mut self, now: Instant, reduce_motion: bool) -> Frame {
         let (progress, velocity) = self.state_at(now);
         self.progress = progress;
         if self.started_at.is_some()
-            && CriticalSpring::SNAP.is_settled(progress - self.target, velocity, PROGRESS_REST)
+            && (reduce_motion
+                || CriticalSpring::SNAP.is_settled(progress - self.target, velocity, PROGRESS_REST))
         {
             self.progress = self.target;
             self.from = self.target;
@@ -108,7 +110,7 @@ mod tests {
     #[test]
     fn closed_panel_starts_unmounted() {
         let mut transition = PanelTransition::new(false);
-        let frame = transition.frame();
+        let frame = transition.frame(false);
         assert!(!frame.mounted);
         assert_eq!(frame.progress, 0.0);
     }
@@ -117,7 +119,7 @@ mod tests {
     fn closing_panel_stays_mounted_until_animation_finishes() {
         let mut transition = PanelTransition::new(true);
         transition.set_open(false);
-        let frame = transition.frame();
+        let frame = transition.frame(false);
         assert!(frame.mounted);
         assert!(frame.animating);
     }
@@ -131,23 +133,17 @@ mod tests {
         let mut transition = PanelTransition::new(true);
         transition.set_open_at(false, start);
         let midway = start + Duration::from_millis(60);
-        let closing = transition.frame_at(midway);
+        let closing = transition.frame_at(midway, false);
         assert!(closing.animating);
-        assert!(
-            closing.progress > 0.0 && closing.progress < 1.0,
-            "要真的关到一半"
-        );
+        assert!(closing.progress > 0.0 && closing.progress < 1.0, "要真的关到一半");
 
         transition.set_open_at(true, midway);
-        let reversing = transition.frame_at(midway + Duration::from_millis(1));
+        let reversing = transition.frame_at(midway + Duration::from_millis(1), false);
         assert!(reversing.mounted);
         assert!(reversing.animating);
-        assert!(
-            reversing.progress < 1.0,
-            "从关到一半的位置出发，不能跳回全开"
-        );
+        assert!(reversing.progress < 1.0, "从关到一半的位置出发，不能跳回全开");
 
-        let settled = transition.frame_at(midway + Duration::from_secs(5));
+        let settled = transition.frame_at(midway + Duration::from_secs(5), false);
         assert!(!settled.animating);
         assert_eq!(settled.progress, 1.0);
     }
@@ -158,7 +154,7 @@ mod tests {
         let mut transition = PanelTransition::new(false);
         transition.set_open_at(true, start);
         assert!(transition.is_opening());
-        let frame = transition.frame_at(start + Duration::from_millis(400));
+        let frame = transition.frame_at(start + Duration::from_millis(400), false);
         assert_eq!(frame.progress, 1.0);
         assert!(!frame.animating);
         assert!(!transition.is_opening());
@@ -169,9 +165,24 @@ mod tests {
         let start = Instant::now();
         let mut transition = PanelTransition::new(true);
         transition.set_open_at(false, start);
-        let frame = transition.frame_at(start + Duration::from_millis(400));
+        let frame = transition.frame_at(start + Duration::from_millis(400), false);
         assert!(!frame.mounted);
         assert!(!frame.animating);
+    }
+
+    #[test]
+    fn reduced_motion_jumps_straight_to_the_end() {
+        let start = Instant::now();
+        let mut transition = PanelTransition::new(true);
+        transition.set_open_at(false, start);
+        let frame = transition.frame_at(start, true);
+        assert!(!frame.mounted, "关闭要当帧卸载，不播滑出");
+        assert!(!frame.animating);
+
+        transition.set_open_at(true, start);
+        let frame = transition.frame_at(start, true);
+        assert_eq!(frame.progress, 1.0);
+        assert!(!transition.is_opening(), "打开当帧就挂真实内容，不再先给骨架");
     }
 
     #[test]
@@ -194,7 +205,7 @@ mod tests {
             progress_soon_after > progress_at_reverse,
             "惯性让面板先继续展开一点，再减速收回"
         );
-        let frame = transition.frame_at(reversed_at + Duration::from_millis(500));
+        let frame = transition.frame_at(reversed_at + Duration::from_millis(500), false);
         assert!(!frame.mounted && !frame.animating);
     }
 }

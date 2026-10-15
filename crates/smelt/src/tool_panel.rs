@@ -4,8 +4,8 @@
 //!
 //! 从 main.rs 拆出的 `impl Workspace` 方法，字段仍在 main.rs。
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
 use crate::{StageCover, Workspace, resizable_split, ui_theme};
@@ -371,19 +371,39 @@ impl Workspace {
                 .into_iter()
                 .map(ToolPanelTab::Plugin),
         );
-        let click_tabs = tabs.clone();
         // 停靠 rail 收起期间不保留高亮；全屏 rail 始终高亮当前 Tool Panel tab。
         let selected_index = (stage_rail || self.tool_panel_open)
             .then(|| tabs.iter().position(|t| *t == active_tab))
             .flatten();
 
-        let tab = |t: ToolPanelTab, badge: usize| {
-            let mut b = Tab::new()
-                .label(t.label())
-                // 页签拦住自己的点击。这一行其余空白走下面的拖窗口。
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-            if badge > 0 {
-                b = b.suffix(
+        // 下划线跟着选中页签滑过去，不是在两个页签之间瞬移。
+        let mut track = smelt_ui::segmented::segmented_track(
+            if stage_rail {
+                "stage-tool-panel-rail"
+            } else {
+                "tool-panel-rail"
+            },
+            smelt_ui::segmented::SegmentedVariant::Underline,
+            selected_index,
+        );
+        for (ix, entry) in tabs.iter().copied().enumerate() {
+            // 角标由面板自己声明，不在这里特判某个 tab。
+            let badge = builtin_panel(entry)
+                .and_then(|panel| panel.badge)
+                .map_or(0, |badge| badge(self, cx));
+            let tab = smelt_ui::segmented::underline_segment(
+                ("tool-panel-tab", ix),
+                entry.label(),
+                selected_index == Some(ix),
+                cx,
+            )
+            // 页签拦住自己的点击。这一行其余空白走下面的拖窗口。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |ws, _, _window, cx| {
+                ws.toggle_tool_panel_tab(entry, cx);
+            }))
+            .when(badge > 0, |tab| {
+                tab.child(
                     div()
                         .px(px(5.))
                         .rounded_full()
@@ -392,34 +412,25 @@ impl Workspace {
                         .font_semibold()
                         .text_color(rgb(ui_theme::action_on()))
                         .child(badge.to_string()),
-                );
-            }
-            b
-        };
-
-        let mut tab_bar = TabBar::new(if stage_rail {
-            "stage-tool-panel-rail"
-        } else {
-            "tool-panel-rail"
-        })
-        .underline()
-        .with_size(gpui_component::Size::XSmall)
-        .flex_1()
-        .on_click(cx.listener(move |ws, ix: &usize, _window, cx| {
-            if let Some(tab) = click_tabs.get(*ix).copied() {
-                ws.toggle_tool_panel_tab(tab, cx);
-            }
-        }));
-        if let Some(ix) = selected_index {
-            tab_bar = tab_bar.selected_index(ix);
+                )
+            });
+            track = track.child(tab);
         }
-        for entry in &tabs {
-            // 角标由面板自己声明，不在这里特判某个 tab。
-            let badge = builtin_panel(*entry)
-                .and_then(|panel| panel.badge)
-                .map_or(0, |badge| badge(self, cx));
-            tab_bar = tab_bar.child(tab(*entry, badge));
-        }
+        // 页签多到放不下时横向滚动，底下那条分隔线和原来的页签栏一致。
+        let tab_bar = div()
+            .id(if stage_rail {
+                "stage-tool-panel-tabs"
+            } else {
+                "tool-panel-tabs"
+            })
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(track);
 
         crate::workspace_frame::with_window_drag(
             div()

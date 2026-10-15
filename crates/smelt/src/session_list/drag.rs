@@ -70,14 +70,24 @@ fn lifted_preview() -> Div {
         .border_color(ui_theme::card_stroke())
 }
 
+/// 浮层左上角相对指针的偏移。
+const DRAG_PREVIEW_OFFSET_X: f32 = 16.;
+const DRAG_PREVIEW_OFFSET_Y: f32 = 12.;
+
 /// 浮层钉在指针右下方：热点和列表里的插入缝不被预览盖住，drop 命中也不被挡。
+/// GPUI 把拖拽视图画在「指针 − 按下点」处，这里再加回按下点，浮层就总在指针右下角。
 fn offset_drag_preview(grab: Point<Pixels>, preview: Div) -> Div {
     div().relative().size(px(1.)).child(
         preview
             .absolute()
-            .left(grab.x + px(16.))
-            .top(grab.y + px(12.)),
+            .left(grab.x + px(DRAG_PREVIEW_OFFSET_X))
+            .top(grab.y + px(DRAG_PREVIEW_OFFSET_Y)),
     )
+}
+
+/// 松手这一刻拖拽浮层的上沿（窗口坐标）。被拖的那一项从这里落到新位置。
+fn drop_preview_top(window: &Window) -> Pixels {
+    window.mouse_position().y + px(DRAG_PREVIEW_OFFSET_Y)
 }
 
 fn session_drag_preview(drag: &SessionDrag) -> Div {
@@ -341,10 +351,11 @@ pub(super) fn attach_session_drop_layers<E: ParentElement + FluentBuilder>(
                     .right_0()
                     .h_1_2()
                     .on_drag_move(update_sess_drop_hint(workspace.clone(), ui_id, true))
-                    .on_drop(move |drag: &SessionDrag, _window, cx| {
+                    .on_drop(move |drag: &SessionDrag, window, cx| {
                         let dragged = drag.id;
+                        let drop_top = drop_preview_top(window);
                         e_before.update(cx, |ws, cx| {
-                            ws.move_session_near(dragged, ui_id, true, cx);
+                            ws.move_session_near(dragged, ui_id, true, Some(drop_top), cx);
                         });
                     }),
             )
@@ -357,10 +368,11 @@ pub(super) fn attach_session_drop_layers<E: ParentElement + FluentBuilder>(
                     .right_0()
                     .h_1_2()
                     .on_drag_move(update_sess_drop_hint(workspace, ui_id, false))
-                    .on_drop(move |drag: &SessionDrag, _window, cx| {
+                    .on_drop(move |drag: &SessionDrag, window, cx| {
                         let dragged = drag.id;
+                        let drop_top = drop_preview_top(window);
                         e_after.update(cx, |ws, cx| {
-                            ws.move_session_near(dragged, ui_id, false, cx);
+                            ws.move_session_near(dragged, ui_id, false, Some(drop_top), cx);
                         });
                     }),
             ),
@@ -394,11 +406,12 @@ pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
                     .right_0()
                     .h_1_2()
                     .on_drag_move(update_proj_drop_hint(workspace.clone(), root.clone(), true))
-                    .on_drop(move |drag: &ProjectDrag, _window, cx| {
+                    .on_drop(move |drag: &ProjectDrag, window, cx| {
                         let from = drag.root.to_string();
                         let to = before_root.to_string();
+                        let drop_top = drop_preview_top(window);
                         e_before.update(cx, |ws, cx| {
-                            ws.move_project_near(&from, &to, true, cx);
+                            ws.move_project_near(&from, &to, true, Some(drop_top), cx);
                         });
                     }),
             )
@@ -411,11 +424,12 @@ pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
                     .right_0()
                     .h_1_2()
                     .on_drag_move(update_proj_drop_hint(workspace, root, false))
-                    .on_drop(move |drag: &ProjectDrag, _window, cx| {
+                    .on_drop(move |drag: &ProjectDrag, window, cx| {
                         let from = drag.root.to_string();
                         let to = after_root.to_string();
+                        let drop_top = drop_preview_top(window);
                         e_after.update(cx, |ws, cx| {
-                            ws.move_project_near(&from, &to, false, cx);
+                            ws.move_project_near(&from, &to, false, Some(drop_top), cx);
                         });
                     }),
             ),

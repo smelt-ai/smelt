@@ -47,6 +47,8 @@ gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "1e7ffa
 # 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
 # 上游已把包名从 gpui-component-assets 改成 gpui-kit-assets。
 gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "1e7ffaa6d1c0c230cb84099584e6c057531d5a5d" }
+# 调试 HUD（Cmd+Shift+F）：帧耗时取自 GPUI 自己的帧追踪，不靠连续重绘去量。
+gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "1e7ffaa6d1c0c230cb84099584e6c057531d5a5d" }
 # 内嵌终端网格仍由 alacritty_terminal 驱动；PTY 子进程已迁到 smeltd。
 libc = "0.2"
 alacritty_terminal = { version = "0.26", default-features = false }

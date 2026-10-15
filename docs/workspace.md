@@ -152,7 +152,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 | `Cmd+Shift+D` | 横切分屏（下方堆叠） |
 | `Cmd+W` | 关闭当前 pane（会话只剩一个 pane 时关掉整个会话） |
 | `Cmd+S` | 保存文件（舞台上是文件内容 / 文件树双栏时生效） |
-| `Cmd+Shift+F` | 切换调试 HUD（右上角帧率 + 帧耗时） |
+| `Cmd+Shift+F` | 切换调试 HUD（gpui-fps：帧耗时、慢帧、掉帧、GPU/CPU/内存） |
 | `Cmd+Q` | 退出（`cx.bind_keys`，也在应用菜单） |
 | `Cmd+,` | 打开设置窗口 |
 

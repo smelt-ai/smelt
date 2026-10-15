@@ -624,16 +624,16 @@ impl Workspace {
                 .automation_runs
                 .iter()
                 .any(|run| run.automation_id == automation_id);
-            let selected_run_gone =
-                self.automation_surface
-                    .selected_run_id
-                    .as_ref()
-                    .is_some_and(|run_id| {
-                        !config
-                            .automation_runs
-                            .iter()
-                            .any(|run| run.id == *run_id && run.automation_id == automation_id)
-                    });
+            let selected_run_gone = self
+                .automation_surface
+                .selected_run_id
+                .as_ref()
+                .is_some_and(|run_id| {
+                    !config
+                        .automation_runs
+                        .iter()
+                        .any(|run| run.id == *run_id && run.automation_id == automation_id)
+                });
             let new_draft = self
                 .automation_surface
                 .editor

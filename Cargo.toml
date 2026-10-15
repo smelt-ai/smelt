@@ -45,6 +45,14 @@ thiserror = "2"
 # and patch only that FFI declaration until GPUI migrates to block2/objc2.
 [patch.crates-io]
 block = { path = "vendor/block-0.1.6" }
+# GPUI 用 gpui-fast（保留模式：没变的视图、布局和文字测量直接沿用上一帧）。
+# 这些 compat 包以 gpui-pre 的包名和版本顶替全图的 GPUI，gpui-kit 不用改，版本必须
+# 和 gpui-kit 钉的 gpui-pre 一致。render 读的状态要在 Entity/全局里，别处的状态变了
+# 要 `cx.notify()`；怀疑显示过期时用 `GPUI_VIEW_RETENTION=0` 退回逐帧全量重绘对比。
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "eeccb27f7b7b437e0d99277af2b696e6c71fb6ef" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "eeccb27f7b7b437e0d99277af2b696e6c71fb6ef" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "eeccb27f7b7b437e0d99277af2b696e6c71fb6ef" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "eeccb27f7b7b437e0d99277af2b696e6c71fb6ef" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

@@ -5,15 +5,16 @@ use super::{
     CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, ProcessGroupInfo,
     RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity, append_prompt_text,
     apply_pending_config_selection, background_task_one_line, background_task_output_lines,
-    background_task_summary, build_conversation_layout, build_conversation_layout_with_timings,
-    build_markdown_cache, build_tool_image_parts, cached_diff_stats, can_load_older_history,
-    classify_attached_paths, compact_token_count, compact_tool_headline, compact_tool_run_label,
-    composer_config_section_label, composer_menu_sections, composer_model_label,
-    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
-    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
-    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
-    conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
-    diff_cache_matches_output, diff_stats_for_output, escape_html_tags_for_markdown,
+    background_task_running_for, background_task_summary, build_conversation_layout,
+    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
+    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
+    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
+    composer_menu_sections, composer_model_label, composer_model_scroll,
+    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
+    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
+    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
+    current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
+    diff_stats_for_output, entries_to_fade_in, escape_html_tags_for_markdown,
     external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
     is_active_permission_selection, is_dispatch_in_flight, is_fresh_conversation_start,
     is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
@@ -32,7 +33,6 @@ use super::{
     task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
     tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
     usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
-    entries_to_fade_in, background_task_running_for,
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
@@ -2812,7 +2812,10 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
         tool_call_id: Some("call-1".into()),
         ..running.clone()
     };
-    assert!(background_task_running_for(&[running.clone(), subagent.clone()], "call-1"));
+    assert!(background_task_running_for(
+        &[running.clone(), subagent.clone()],
+        "call-1"
+    ));
     assert!(
         !background_task_running_for(&[running.clone()], "call-1"),
         "宿主自己起的命令不挂在任何工具调用上"

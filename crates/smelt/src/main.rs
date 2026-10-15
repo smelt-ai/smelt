@@ -28,7 +28,6 @@ mod git_log_view;
 mod git_panel;
 mod ide;
 mod liquid_glass;
-mod mem_usage;
 mod overlay;
 mod plugin_ui;
 mod tool_panel;
@@ -2457,6 +2456,8 @@ struct Workspace {
     sidebar_drag: Option<SidebarDrag>,
     /// 侧栏拖拽排序生效一次就加一。各行据此在下一帧从旧位置滑到新位置，见 `flip_slot`。
     sidebar_reorder_generation: u64,
+    /// 最近一次拖拽排序里被拖的那一项，和松手时拖拽浮层的高度。它从这里落到新位置。
+    sidebar_drop_origin: Option<(SidebarDrag, Pixels)>,
     /// 侧栏会话列表的滚动位置；拖到顶底边缘时靠它自动滚。
     sidebar_scroll: ScrollHandle,
     sidebar_auto_scroll: gpui_component::scroll::AutoScroll,
@@ -2648,16 +2649,8 @@ struct Workspace {
     history_profile: Option<String>,
     /// 上一次渲染历史时使用的项目根。项目切换后在下一次历史渲染前失效旧详情。
     history_project_root: Option<String>,
-    /// 调试 HUD 开关（Cmd+Shift+F 切换）：开启时右上角显示帧率 + 帧耗时 + RSS。
+    /// 调试 HUD 开关（Cmd+Shift+F 切换），见 `overlay::debug_hud`。
     debug_hud: bool,
-    /// 上一帧渲染时刻（算帧间隔用）。
-    last_frame: Option<Instant>,
-    /// 平滑后的帧率（EMA）。
-    fps_ema: f32,
-    /// 调试 HUD 上次采样的 RSS（字节）；约每秒刷新一次，避免每帧调系统 API。
-    debug_mem_rss: Option<u64>,
-    /// 调试 HUD 上次内存采样时刻。
-    debug_mem_sampled_at: Option<Instant>,
     /// 退出确认拦截弹窗开关
     show_quit_confirm: bool,
     /// 用户已确认退出；防止异步更新收尾期间重复提交退出动作。
@@ -3058,6 +3051,7 @@ impl Workspace {
             proj_drop_hint: None,
             sidebar_drag: None,
             sidebar_reorder_generation: 0,
+            sidebar_drop_origin: None,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_auto_scroll: gpui_component::scroll::AutoScroll::default(),
             ide_catalog: ide::IdeCatalog::default(),
@@ -3139,10 +3133,6 @@ impl Workspace {
             applied_glass_style: None,
             applied_ui_font_px: None,
             debug_hud: false,
-            last_frame: None,
-            debug_mem_rss: None,
-            debug_mem_sampled_at: None,
-            fps_ema: 0.0,
             show_quit_confirm: false,
             quit_requested: false,
             update_status: updater::UpdateStatus::default(),
@@ -3692,7 +3682,8 @@ impl Render for Workspace {
         let stage_surface: Hsla = rgb(ui_theme::bg_stage()).into();
         let shell_padding = ui_theme::shell_padding();
 
-        let sidebar_motion = self.sidebar_transition.frame();
+        let reduce_motion = cx.reduce_motion();
+        let sidebar_motion = self.sidebar_transition.frame(reduce_motion);
         if sidebar_motion.animating {
             window.request_animation_frame();
         }
@@ -3715,7 +3706,7 @@ impl Render for Workspace {
             div()
         };
         // 提升到舞台的那个 tab 不再停靠一份（见 tool_panel_promoted）。
-        let tool_panel_motion = self.tool_panel_transition.frame();
+        let tool_panel_motion = self.tool_panel_transition.frame(reduce_motion);
         if tool_panel_motion.animating {
             window.request_animation_frame();
         }
@@ -4221,13 +4212,9 @@ impl Render for Workspace {
                     // Cmd+S：保存 Files 里打开的文件。Files 既可以展开到舞台，也可以
                     // 停靠在 Tool Panel；两种显示方式都必须支持保存。
                     "s" if this.files_view_visible() => this.save_open_file(cx),
-                    // Cmd+Shift+F 切换调试 HUD（右上角帧率 + 内存）
+                    // Cmd+Shift+F 切换调试 HUD（帧耗时、GPU/CPU/内存）
                     "f" if ks.modifiers.shift => {
                         this.debug_hud = !this.debug_hud;
-                        this.fps_ema = 0.0;
-                        this.last_frame = None;
-                        this.debug_mem_rss = None;
-                        this.debug_mem_sampled_at = None;
                         cx.notify();
                     }
                     // Cmd+Q 退出交给应用菜单的 Quit action（全局绑定，见 main）

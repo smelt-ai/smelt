@@ -760,6 +760,16 @@ mod tests {
         .unwrap();
         assert_eq!(old_snapshot.kind, TaskNoteKind::BackgroundTask);
 
+        let stopped = serde_json::json!({
+            "customType": SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
+            "details": {"id": "bg-1", "title": "", "status": "stopped"},
+        });
+        assert_eq!(
+            task_note_from_pi_custom(&stopped).unwrap().summary(),
+            "子智能体 bg-1 已结束，状态 已停止",
+            "被叫停的子智能体和宿主一样记停止，不写成失败"
+        );
+
         let other = serde_json::json!({"customType": "note", "details": {"id": "x"}});
         assert!(task_note_from_pi_custom(&other).is_none());
     }

@@ -7,9 +7,10 @@
 //! 不跟显示器刷新率。面板开合等交互过渡仍由调用方使用默认动画帧率。
 
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, Element, ElementId, EntityId, Global, GlobalElementId,
-    Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled as _,
-    Transformation, Window, WindowId, hsla, percentage, point, px,
+    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Element, ElementId, Entity,
+    EntityId, Global, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
+    ParentElement, Pixels, Render, Rgba, Styled as _, Transformation, Window, WindowId, hsla,
+    percentage, point, px,
 };
 use gpui_component::{Icon, IconName, Sizable as _, h_flex};
 // 时间一律从 `cx.background_executor().now()` 取（测试里可换假时钟）。它返回的
@@ -17,6 +18,7 @@ use gpui_component::{Icon, IconName, Sizable as _, h_flex};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -150,13 +152,34 @@ pub struct AmbientAnimationLayoutState {
     running: bool,
 }
 
-/// 动画起点保存在 GPUI 的元素状态中；元素从树上消失时状态随之释放。
-pub struct AmbientAnimationElement {
+/// 一段装饰动画的参数。外层每次重建都会带来新的 `renderer`，原样交给动画视图。
+#[derive(Clone)]
+struct AmbientAnimationSpec {
     id: ElementId,
     duration: Duration,
     animate: bool,
     repeat: bool,
-    renderer: Box<dyn Fn(f32) -> AnyElement>,
+    renderer: Rc<dyn Fn(f32) -> AnyElement>,
+}
+
+/// 装饰动画单独占一个小视图。动画帧只通知这个视图：保留模式渲染下，它外面的大
+/// 视图（比如整个工作台）直接沿用上一帧，不会跟着 6 FPS 时钟整个重建。
+///
+/// 视图实体存在外层的元素状态里，元素从树上消失时随之释放。
+pub struct AmbientAnimationElement {
+    spec: AmbientAnimationSpec,
+}
+
+struct AmbientAnimationView {
+    spec: AmbientAnimationSpec,
+}
+
+impl Render for AmbientAnimationView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        AmbientAnimationFrame {
+            spec: self.spec.clone(),
+        }
+    }
 }
 
 impl IntoElement for AmbientAnimationElement {
@@ -168,11 +191,11 @@ impl IntoElement for AmbientAnimationElement {
 }
 
 impl Element for AmbientAnimationElement {
-    type RequestLayoutState = AmbientAnimationLayoutState;
+    type RequestLayoutState = AnyElement;
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
-        Some(self.id.clone())
+        Some(self.spec.id.clone())
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -187,9 +210,84 @@ impl Element for AmbientAnimationElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let id = id.expect("状态动画元素必须有稳定 id");
-        let duration = self.duration;
-        let animate = self.animate;
-        let repeat = self.repeat;
+        let spec = self.spec.clone();
+        let view = window.with_element_state(id, |view: Option<Entity<AmbientAnimationView>>, _| {
+            let view = view.unwrap_or_else(|| {
+                cx.new(|_| AmbientAnimationView {
+                    spec: spec.clone(),
+                })
+            });
+            (view.clone(), view)
+        });
+        // 只写不通知：动画视图跟着外层这次重建一起重画，外层不会因此被标成已变化。
+        view.update(cx, |view, _| view.spec = spec);
+        let mut element = view.into_any_element();
+        let layout_id = element.request_layout(window, cx);
+        (layout_id, element)
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        element.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.paint(window, cx);
+    }
+}
+
+/// 动画视图里真正按时间取相位、预约下一帧的元素。起点存在元素状态里。
+struct AmbientAnimationFrame {
+    spec: AmbientAnimationSpec,
+}
+
+impl IntoElement for AmbientAnimationFrame {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for AmbientAnimationFrame {
+    type RequestLayoutState = AmbientAnimationLayoutState;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.spec.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let id = id.expect("状态动画元素必须有稳定 id");
+        let duration = self.spec.duration;
+        let animate = self.spec.animate;
+        let repeat = self.spec.repeat;
         let now = cx.background_executor().now();
         let (phase, running) =
             window.with_element_state(id, |state: Option<AmbientAnimationState>, _window| {
@@ -211,7 +309,7 @@ impl Element for AmbientAnimationElement {
                 };
                 (transition, state)
             });
-        let mut element = (self.renderer)(phase);
+        let mut element = (self.spec.renderer)(phase);
         let layout_id = element.request_layout(window, cx);
         (layout_id, AmbientAnimationLayoutState { element, running })
     }
@@ -254,11 +352,13 @@ pub fn ambient_animation<E: IntoElement + 'static>(
     renderer: impl Fn(f32) -> E + 'static,
 ) -> AmbientAnimationElement {
     AmbientAnimationElement {
-        id: id.into(),
-        duration,
-        animate,
-        repeat: false,
-        renderer: Box::new(move |phase| renderer(phase).into_any_element()),
+        spec: AmbientAnimationSpec {
+            id: id.into(),
+            duration,
+            animate,
+            repeat: false,
+            renderer: Rc::new(move |phase| renderer(phase).into_any_element()),
+        },
     }
 }
 
@@ -273,7 +373,7 @@ pub fn ambient_spinner(id: impl Into<ElementId>, color: Hsla, animate: bool) -> 
             .text_color(color)
             .transform(Transformation::rotate(percentage(delta)))
     });
-    animation.repeat = true;
+    animation.spec.repeat = true;
     animation.into_any_element()
 }
 
@@ -368,7 +468,7 @@ pub fn quiet_dots(id: impl Into<ElementId>, color: Hsla, animate: bool) -> AnyEl
             }))
         },
     );
-    animation.repeat = true;
+    animation.spec.repeat = true;
     animation.into_any_element()
 }
 
@@ -476,6 +576,7 @@ const FLIP_REST_PX: f32 = 0.5;
 pub struct FlipSlot {
     id: ElementId,
     generation: u64,
+    origin_top: Option<Pixels>,
     child: AnyElement,
 }
 
@@ -483,7 +584,18 @@ pub fn flip_slot(id: impl Into<ElementId>, generation: u64, child: impl IntoElem
     FlipSlot {
         id: id.into(),
         generation,
+        origin_top: None,
         child: child.into_any_element(),
+    }
+}
+
+impl FlipSlot {
+    /// 这一次重排从哪个高度出发（窗口坐标）。拖拽松手时传拖拽浮层所在的高度，
+    /// 那一项就从手放下的地方落到新位置，而不是先跳回原位再滑过去。
+    /// 只在重排那一帧生效；`None` 时用上一帧画的位置。
+    pub fn from_top(mut self, top: Option<Pixels>) -> Self {
+        self.origin_top = top;
+        self
     }
 }
 
@@ -529,6 +641,7 @@ impl Element for FlipSlot {
         let id = id.expect("FlipSlot 必须有稳定 id");
         let now = cx.background_executor().now();
         let generation = self.generation;
+        let origin_top = self.origin_top;
         let animate = !cx.reduce_motion();
         let (offset, running) = window.with_element_state(id, |state: Option<FlipState>, _| {
             let mut state = state.unwrap_or_default();
@@ -536,9 +649,9 @@ impl Element for FlipSlot {
             let rearranged = state.seen_generation.is_some_and(|seen| seen != generation);
             if rearranged
                 && animate
-                && let Some(painted_top) = state.painted_top
+                && let Some(from_top) = origin_top.or(state.painted_top)
             {
-                let displacement = f32::from(painted_top - layout_top);
+                let displacement = f32::from(from_top - layout_top);
                 if displacement.abs() >= FLIP_REST_PX {
                     let velocity = state.motion.map_or(0.0, |motion| motion.sample(now).1);
                     state.motion = Some(FlipMotion {
@@ -792,7 +905,11 @@ mod tests {
             animation_renders.get() > 1,
             "动画子树应在共享时钟到点后更新"
         );
-        assert!(parent_renders.get() > 1);
+        assert_eq!(
+            parent_renders.get(),
+            1,
+            "动画帧只通知动画自己的视图，父视图沿用上一帧"
+        );
 
         cx.executor().advance_clock(Duration::from_secs(2));
         cx.run_until_parked();

@@ -328,38 +328,22 @@ impl Workspace {
                     .clone()
                     .map(|target| self.render_unsaved_file_confirm(target, cx)),
             )
-            .children(self.debug_hud.then(|| {
-                let fps = self.fps_ema;
-                let ms = if fps > 0.0 { 1000.0 / fps } else { 0.0 };
-                let mem = self
-                    .debug_mem_rss
-                    .map(mem_usage::format_rss)
-                    .unwrap_or_else(|| "—".into());
-                let color = if fps >= 55.0 {
-                    rgb(ui_theme::green())
-                } else if fps >= 30.0 {
-                    rgb(ui_theme::yellow())
-                } else {
-                    rgb(ui_theme::red())
-                };
-                div()
-                    .absolute()
-                    .top(px(40.))
-                    .right(px(12.))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(ui_theme::tint(ui_theme::bg_card(), 0xcc))
-                    .border_1()
-                    .border_color(ui_theme::overlay(0x22))
-                    .font_family(terminal_view::font_family())
-                    .text_xs()
-                    .text_color(color)
-                    .child(format!("{fps:.0} FPS · {ms:.1} ms · RSS {mem}"))
-            }))
+            .children(self.debug_hud.then(|| debug_hud(window, cx)))
             .children(image_preview_overlay)
             .into_any_element()
     }
+}
+
+/// 调试 HUD（Cmd+Shift+F）：gpui-fps 的帧耗时、慢帧、掉帧和 GPU/CPU/内存。
+/// 让出顶部标题栏，免得盖住窗口按钮。主窗口和设置窗口共用，每个窗口各一份监视器。
+pub(crate) fn debug_hud(window: &mut Window, cx: &mut App) -> Div {
+    div()
+        .absolute()
+        .top(px(40.))
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .child(gpui_fps::fps_monitor(window, cx))
 }
 
 /// Whether GPUI content currently needs plugin WebViews removed from the native

@@ -122,8 +122,9 @@ impl Workspace {
                     let archived = need_archive
                         .then(|| smelt_core::automation_store::load_run(&run_id))
                         .flatten();
-                    let transcript = smelt_core::automation_transcript::load_run_transcript(&run_id)
-                        .unwrap_or_default();
+                    let transcript =
+                        smelt_core::automation_transcript::load_run_transcript(&run_id)
+                            .unwrap_or_default();
                     (archived, transcript)
                 })
                 .await;
@@ -142,11 +143,7 @@ impl Workspace {
                     .map(|detail| detail.expanded)
                     .unwrap_or_default();
                 surface.run_detail = Some(AutomationRunDetail::new(
-                    key,
-                    &run,
-                    archived,
-                    transcript,
-                    expanded,
+                    key, &run, archived, transcript, expanded,
                 ));
                 cx.notify();
             });
@@ -199,15 +196,7 @@ impl Workspace {
                     Some(process_meta),
                     detail,
                     &entity,
-                    || {
-                        render_transcript(
-                            &detail.transcript,
-                            "t/",
-                            final_reply,
-                            detail,
-                            &entity,
-                        )
-                    },
+                    || render_transcript(&detail.transcript, "t/", final_reply, detail, &entity),
                 ))
             })
             .child(run_detail_disclosure(
@@ -310,7 +299,11 @@ fn run_summary_line(run: &AutomationRun) -> AnyElement {
                 .text_color(rgb(crate::ui_theme::text_mid()))
                 .child(agent),
         )
-        .child(div().text_color(rgb(crate::ui_theme::text_faint())).child("·"))
+        .child(
+            div()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child("·"),
+        )
         .child(div().child(parts.join(" · ")))
         .into_any_element()
 }
@@ -508,9 +501,7 @@ fn render_transcript(
             AcpEntry::UserWithImages { text, images } => {
                 transcript_user(&key, detail.run_id(), text, images.len())
             }
-            AcpEntry::Assistant {
-                thought: false, ..
-            } if final_reply == Some(ix) => div()
+            AcpEntry::Assistant { thought: false, .. } if final_reply == Some(ix) => div()
                 .py_1()
                 .text_xs()
                 .text_color(rgb(crate::ui_theme::text_faint()))
@@ -835,7 +826,10 @@ fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
         .w_full()
         .min_w_0()
         .text_xs()
-        .child(crate::markdown_mermaid::markdown_view(id, blocks.join("\n\n")))
+        .child(crate::markdown_mermaid::markdown_view(
+            id,
+            blocks.join("\n\n"),
+        ))
         .into_any_element()
 }
 
@@ -1012,8 +1006,14 @@ mod tests {
     #[test]
     fn final_reply_is_folded_only_when_it_matches_the_result() {
         let entries = vec![reply("中间说明"), reply("结论\n")];
-        assert_eq!(detail(Some("结论"), entries.clone()).final_reply_index(), Some(1));
-        assert_eq!(detail(Some("别的"), entries.clone()).final_reply_index(), None);
+        assert_eq!(
+            detail(Some("结论"), entries.clone()).final_reply_index(),
+            Some(1)
+        );
+        assert_eq!(
+            detail(Some("别的"), entries.clone()).final_reply_index(),
+            None
+        );
         assert_eq!(detail(None, entries).final_reply_index(), None);
     }
 

@@ -232,10 +232,6 @@ impl Workspace {
                         applied_glass_style: None,
                         applied_ui_font_px: Some(ui_font_px),
                         debug_hud: false,
-                        last_frame: None,
-                        fps_ema: 0.0,
-                        debug_mem_rss: None,
-                        debug_mem_sampled_at: None,
                     });
                     // 设置侧栏有自己的底色，右侧设置页则依赖 Root 的主题背景。
                     // 不能将 Root 强制设为透明，否则浅色模式下右侧会透出原生毛玻璃

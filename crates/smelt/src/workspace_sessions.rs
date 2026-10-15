@@ -727,6 +727,7 @@ impl Workspace {
         dragged: u64,
         target: u64,
         before: bool,
+        drop_top: Option<Pixels>,
         cx: &mut Context<Self>,
     ) {
         if dragged == target {
@@ -770,6 +771,7 @@ impl Workspace {
         self.sess_drop_hint = None;
         self.sidebar_drag = None;
         self.sidebar_reorder_generation += 1;
+        self.sidebar_drop_origin = drop_top.map(|top| (crate::SidebarDrag::Session(dragged), top));
         self.stop_sidebar_drag_scroll();
         self.save_state(cx);
         cx.notify();
@@ -783,6 +785,7 @@ impl Workspace {
         from_root: &str,
         to_root: &str,
         before: bool,
+        drop_top: Option<Pixels>,
         cx: &mut Context<Self>,
     ) {
         if !crate::sidebar_order::apply_pinned_project_drop(
@@ -798,6 +801,8 @@ impl Workspace {
         self.proj_drop_hint = None;
         self.sidebar_drag = None;
         self.sidebar_reorder_generation += 1;
+        self.sidebar_drop_origin =
+            drop_top.map(|top| (crate::SidebarDrag::Project(from_root.to_string()), top));
         self.stop_sidebar_drag_scroll();
         self.save_state(cx);
         cx.notify();

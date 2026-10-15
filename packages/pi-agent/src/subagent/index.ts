@@ -725,11 +725,13 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
           .then((result) => {
             const text = result.content.map((part) => ("text" in part ? part.text : "")).join("\n");
             const resultFailed = "isError" in result && result.isError === true;
-            hostTask?.finish(controller.signal.aborted ? "stopped" : resultFailed ? "failed" : "completed");
+            // 宿主和结果消息报同一个状态：被叫停的子进程会以 aborted 失败收场，那是停止不是失败。
+            const status = controller.signal.aborted ? "stopped" : resultFailed ? "failed" : "completed";
+            hostTask?.finish(status);
             try {
               // 自定义消息而不是用户消息：界面画成状态行，模型也知道这是结果不是新要求。
               void pi.sendMessage(
-                subagentResultMessage({ id, title, failed: resultFailed, text: cap(text) }),
+                subagentResultMessage({ id, title, status, text: cap(text) }),
                 { triggerTurn: true, deliverAs: "followUp" },
               );
             } catch {

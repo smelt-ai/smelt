@@ -4,11 +4,20 @@ export const SMELT_SUBAGENT_RESULT_CUSTOM_TYPE = "smelt.subagent_result";
 /** 状态行展开后最多显示这么多字符；模型拿到的是完整结果。 */
 const OUTPUT_TAIL_CHARS = 4000;
 
+/** 和宿主里那条后台任务记的状态一致：被叫停就是停止，不算失败。 */
+export type SubagentResultStatus = "completed" | "failed" | "stopped";
+
 export type SubagentResultNotice = {
 	id: string;
 	title: string;
-	failed: boolean;
+	status: SubagentResultStatus;
 	text: string;
+};
+
+const STATUS_LABEL: Record<SubagentResultStatus, string> = {
+	completed: "完成",
+	failed: "失败",
+	stopped: "已停止",
 };
 
 /**
@@ -18,7 +27,7 @@ export type SubagentResultNotice = {
 export function subagentResultText(notice: SubagentResultNotice): string {
 	// 和界面状态行同一个写法：有标题时括号紧跟「已结束」，没有时空一格。
 	const who = notice.title ? `${notice.id}（${notice.title}）` : `${notice.id} `;
-	const status = notice.failed ? "失败" : "完成";
+	const status = STATUS_LABEL[notice.status];
 	return [
 		"<subagent-notification>",
 		`这是后台子智能体交回的结果，不是用户的新请求。子智能体 ${who}已结束，状态 ${status}。`,
@@ -42,7 +51,7 @@ export function subagentResultMessage(notice: SubagentResultNotice) {
 		details: {
 			id: notice.id,
 			title: notice.title,
-			status: notice.failed ? "failed" : "completed",
+			status: notice.status,
 			exitCode: null,
 			outputTail: text.length > OUTPUT_TAIL_CHARS ? `…${text.slice(-OUTPUT_TAIL_CHARS)}` : text,
 		},

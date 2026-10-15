@@ -1774,84 +1774,14 @@ pub struct SettingsWindow {
     applied_window_opacity: Option<f32>,
     applied_glass_style: Option<liquid_glass::GlassStyle>,
     applied_ui_font_px: Option<u32>,
-    /// 设置窗口独立采样，不能复用主工作区的 FPS：两个窗口的布局负载不同。
+    /// 调试 HUD 开关。监视器按窗口各一份：两个窗口的布局负载不同。
     debug_hud: bool,
-    last_frame: Option<Instant>,
-    fps_ema: f32,
-    debug_mem_rss: Option<u64>,
-    debug_mem_sampled_at: Option<Instant>,
 }
 
 impl SettingsWindow {
     fn toggle_debug_hud(&mut self, cx: &mut Context<Self>) {
         self.debug_hud = !self.debug_hud;
-        self.fps_ema = 0.0;
-        self.last_frame = None;
-        self.debug_mem_rss = None;
-        self.debug_mem_sampled_at = None;
         cx.notify();
-    }
-
-    fn update_debug_hud(&mut self, window: &mut Window) {
-        if !self.debug_hud {
-            self.last_frame = None;
-            self.debug_mem_rss = None;
-            self.debug_mem_sampled_at = None;
-            return;
-        }
-
-        let now = Instant::now();
-        if let Some(previous) = self.last_frame {
-            let delta = now.saturating_duration_since(previous).as_secs_f32();
-            if delta > 0.0 {
-                let instantaneous_fps = 1.0 / delta;
-                self.fps_ema = if self.fps_ema <= 0.0 {
-                    instantaneous_fps
-                } else {
-                    self.fps_ema * 0.9 + instantaneous_fps * 0.1
-                };
-            }
-        }
-        self.last_frame = Some(now);
-
-        if self.debug_mem_sampled_at.is_none_or(|sampled_at| {
-            now.saturating_duration_since(sampled_at) >= Duration::from_secs(1)
-        }) {
-            self.debug_mem_rss = crate::mem_usage::current_rss_bytes();
-            self.debug_mem_sampled_at = Some(now);
-        }
-        window.request_animation_frame();
-    }
-
-    fn render_debug_hud(&self) -> Div {
-        let fps = self.fps_ema;
-        let frame_ms = if fps > 0.0 { 1000.0 / fps } else { 0.0 };
-        let memory = self
-            .debug_mem_rss
-            .map(crate::mem_usage::format_rss)
-            .unwrap_or_else(|| "-".into());
-        let color = if fps >= 55.0 {
-            rgb(crate::ui_theme::green())
-        } else if fps >= 30.0 {
-            rgb(crate::ui_theme::yellow())
-        } else {
-            rgb(crate::ui_theme::red())
-        };
-
-        div()
-            .absolute()
-            .top(px(40.))
-            .right(px(12.))
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(crate::ui_theme::tint(crate::ui_theme::bg_card(), 0xcc))
-            .border_1()
-            .border_color(crate::ui_theme::overlay(0x22))
-            .font_family(terminal_view::font_family())
-            .text_xs()
-            .text_color(color)
-            .child(format!("{fps:.0} FPS · {frame_ms:.1} ms · RSS {memory}"))
     }
 }
 
@@ -1861,8 +1791,9 @@ impl Render for SettingsWindow {
             self.did_focus = true;
             window.focus(&self.focus_handle, cx);
         }
-        self.update_debug_hud(window);
-        let debug_hud = self.debug_hud.then(|| self.render_debug_hud());
+        let debug_hud = self
+            .debug_hud
+            .then(|| crate::overlay::debug_hud(window, cx));
 
         let ui_font_px = cx.global::<Appearance>().ui_font_px;
         if self.applied_ui_font_px != Some(ui_font_px) {

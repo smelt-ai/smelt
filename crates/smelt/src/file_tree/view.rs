@@ -251,7 +251,7 @@ impl FileTreeRow {
 /// text_sm 是 0.875rem，默认行高是黄金比例。再留 2px，避免字形被行盒裁切。
 /// 图标固定 14px，所以行高至少要能装下它。
 pub(super) fn file_tree_row_height(rem_px: f32) -> f32 {
-    let line = rem_px * 0.875 * 1.618034;
+    let line = rem_px * 0.875 * std::f32::consts::GOLDEN_RATIO;
     line.max(16.0) + 2.0
 }
 

@@ -1169,13 +1169,15 @@ impl Workspace {
     ) -> AnyElement {
         let entity = cx.entity();
         let current = self.nav.capabilities_tab();
-        let tabs = segmented_track(cx).children(CapabilitiesTab::ALL.into_iter().map(|tab| {
-            let selected = tab == current;
+        // 选中块从上一个页签滑到这一个，而不是两格之间瞬间换底色。
+        let tabs = smelt_ui::segmented::segmented_track(
+            "capabilities-tabs",
+            smelt_ui::segmented::SegmentedVariant::Pill,
+            CapabilitiesTab::ALL.iter().position(|tab| *tab == current),
+        )
+        .children(CapabilitiesTab::ALL.into_iter().map(|tab| {
             let entity = entity.clone();
-            compact_chip(tab.element_id())
-                .label(tab.label())
-                .selected(selected)
-                .toggled(selected)
+            smelt_ui::segmented::pill_segment(tab.element_id(), tab.label(), tab == current)
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |workspace, cx| {
                         workspace.select_capabilities_tab(tab, cx)
