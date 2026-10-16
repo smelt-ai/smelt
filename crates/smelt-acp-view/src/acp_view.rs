@@ -42,6 +42,7 @@ use smelt_core::acp_session::{
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_core::daemon_state::DaemonPhase;
+use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
     BASE_MS, COPY_ACK_MS, ENTER_MS, PRESS_OPACITY, ambient_animation, ambient_application_active,
@@ -1698,6 +1699,23 @@ pub(crate) fn resolve_restart_launch(
     launch
 }
 
+/// 哪些字段要有文本框。形状没变就不用重建。
+fn elicitation_input_shape(card: &PendingElicitation) -> Vec<(usize, bool)> {
+    card.fields
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, field)| match &field.kind {
+            ElicitFieldKindView::Text { secret } => Some((ix, *secret)),
+            ElicitFieldKindView::Select(_) | ElicitFieldKindView::MultiSelect(_)
+                if field.allow_custom_input =>
+            {
+                Some((ix, false))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 impl AcpView {
     /// 建视图并立即向 smeltd 发起 `acp_open`（非阻塞，握手结果以快照回来）。
     pub fn start(
@@ -2356,10 +2374,27 @@ impl AcpView {
             },
         ));
         self.input = Some(input);
+        // 草稿或提问卡可能比输入框先到。这里补一次，绘制不再写状态。
+        self.ensure_elicitation_inputs(window, cx);
+        self.apply_pending_composer_restore(window, cx);
     }
 
-    /// GPUI 输入实体只能在拥有 `Window`/`Context` 的渲染边界创建。把这一步封装
-    /// 在 AcpView 内部，避免调用方必须记住额外的准备顺序；后续元素树投影保持只读。
+    /// 快照回调没有 `Window`。排到当前这轮更新结束，再到本视图所在的窗口上建提问输入框、写回草稿。
+    fn schedule_surface_inputs(&self, cx: &mut Context<Self>) {
+        let view = cx.weak_entity();
+        let entity_id = cx.entity_id();
+        cx.defer(move |cx| {
+            cx.with_window(entity_id, |window, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.ensure_elicitation_inputs(window, cx);
+                    this.apply_pending_composer_restore(window, cx);
+                    cx.notify();
+                });
+            });
+        });
+    }
+
+    /// 提问卡上的文本框要有 `Window` 才能建。由 `schedule_surface_inputs` 或 `init_input` 调用。
     fn ensure_elicitation_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(card) = &self.elicitation {
             // 自由文本字段，以及题目卡上「自己写答案」的输入行，共用同一套
@@ -3837,6 +3872,7 @@ impl AcpView {
         self.phase = snap.phase;
         self.end_reason = snap.end_reason;
         self.end_kind = snap.end_kind;
+        let mut prepare_surface_inputs = false;
         if !snap.envelope_omitted {
             self.permissions = snap.pending_permissions;
             let current_permission = self
@@ -3846,10 +3882,14 @@ impl AcpView {
             if previous_permission != current_permission {
                 self.permission_submitting = None;
             }
+            let previous_input_shape = self.elicitation.as_ref().map(elicitation_input_shape);
             self.elicitation = snap.pending_elicitation;
             if self.elicitation.is_none() {
                 self.elicitation_inputs.clear();
                 self.elicitation_input_subscriptions.clear();
+            } else if self.elicitation.as_ref().map(elicitation_input_shape) != previous_input_shape
+            {
+                prepare_surface_inputs = true;
             }
             let previous_status_line = self.status_line.clone();
             self.status_line = snap.status_line;
@@ -3902,6 +3942,7 @@ impl AcpView {
                     self.pending_composer_restore_revision
                         .map_or(restore_revision, |pending| pending.max(restore_revision)),
                 );
+                prepare_surface_inputs = true;
             }
             self.plan = snap.plan;
             self.background_tasks = snap.background_tasks;
@@ -4055,6 +4096,9 @@ impl AcpView {
         }
         if self.has_active_turn() {
             self.ensure_running_tick(cx);
+        }
+        if prepare_surface_inputs {
+            self.schedule_surface_inputs(cx);
         }
         cx.notify();
     }
@@ -4248,7 +4292,7 @@ impl AcpView {
             .ghost()
             .xsmall()
             .when_some(opacity, |button, opacity| button.opacity(opacity))
-            .tooltip(tooltip)
+            .icon_action(tooltip)
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
                 this.copy_acks

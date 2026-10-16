@@ -9,6 +9,7 @@
 //! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::prelude::FluentBuilder;
+use gpui::StatefulInteractiveElement;
 use gpui::*;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
@@ -536,6 +537,13 @@ impl Workspace {
     pub(crate) fn render_window_trailing_toggles(&self, cx: &mut Context<Self>) -> Div {
         let promoted = self.tool_panel_promoted();
         let panel_visible = self.tool_panel_open || promoted;
+        let fullscreen_toggle = cx.entity().downgrade();
+        let panel_toggle = cx.entity().downgrade();
+        let fullscreen_label = if promoted {
+            "收回右侧面板"
+        } else {
+            "全屏显示右侧面板"
+        };
         h_flex()
             .flex_none()
             .items_center()
@@ -543,6 +551,8 @@ impl Workspace {
             .children((promoted || self.tool_panel_open).then(|| {
                 div()
                     .id("tool-panel-fullscreen-toggle")
+                    .role(Role::Button)
+                    .aria_label(fullscreen_label)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -561,12 +571,7 @@ impl Workspace {
                         .size_4(),
                     )
                     .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(if promoted {
-                            "收回右侧面板"
-                        } else {
-                            "全屏显示右侧面板"
-                        })
-                        .build(window, cx)
+                        gpui_component::tooltip::Tooltip::new(fullscreen_label).build(window, cx)
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -582,10 +587,24 @@ impl Workspace {
                             cx.notify();
                         }),
                     )
+                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                        let _ = fullscreen_toggle.update(cx, |this, cx| {
+                            if promoted {
+                                this.set_stage_cover(None, window, cx);
+                                this.set_tool_panel_open(true, cx);
+                            } else {
+                                this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
+                            }
+                            this.save_state(cx);
+                            cx.notify();
+                        });
+                    })
             }))
             .child(
                 div()
                     .id("tool-panel-toggle")
+                    .role(Role::Button)
+                    .aria_label("切换右侧面板")
                     .flex()
                     .items_center()
                     .justify_center()
@@ -614,7 +633,11 @@ impl Workspace {
                             cx.stop_propagation();
                             this.toggle_tool_panel(window, cx);
                         }),
-                    ),
+                    )
+                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                        let _ = panel_toggle
+                            .update(cx, |this, cx| this.toggle_tool_panel(window, cx));
+                    }),
             )
     }
 }

@@ -24,6 +24,7 @@ use gpui_component::{
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
 use smelt_core::pi_plugin_catalog::{PiPlugin, discover_plugins};
+use smelt_ui::IconAction as _;
 
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
 pub(crate) struct AgentsSurface {
@@ -1225,7 +1226,7 @@ fn render_trigger_entry(
                 .child(
                     compact_chip("automation-remove-trigger")
                         .icon(crate::trash_icon())
-                        .tooltip("删除触发器")
+                        .icon_action("删除触发器")
                         .on_click(move |_, _, cx| {
                             remove_entity.update(cx, |workspace, cx| {
                                 workspace.remove_trigger_entry(index, cx);
@@ -1707,7 +1708,7 @@ fn render_schedule_rule(
         let remove_entity = entity.clone();
         compact_chip("automation-remove-schedule")
             .icon(crate::trash_icon())
-            .tooltip("删除时间设置")
+            .icon_action("删除时间设置")
             .on_click(move |_, _, cx| {
                 remove_entity.update(cx, |workspace, cx| {
                     workspace.remove_trigger_entry(index, cx);
@@ -2165,7 +2166,7 @@ fn product_back_button(
     Button::new(id)
         .ghost()
         .icon(IconName::ChevronLeft)
-        .tooltip(tooltip)
+        .icon_action(tooltip)
         .on_click(on_click)
 }
 
@@ -2238,7 +2239,7 @@ fn render_agent_plugin_card(
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-plugins-refresh")
         .icon(IconName::Redo)
-        .tooltip("重新扫描插件目录")
+        .icon_action("重新扫描插件目录")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));
         });
@@ -2508,6 +2509,7 @@ fn agent_memory_switch(
     let agent_id = agent.id.clone();
     Switch::new(id)
         .checked(memory_enabled)
+        .accessibility_label("记忆")
         .tooltip(if memory_enabled {
             "关闭后不再注入和写入记忆，已有记忆保留"
         } else {
@@ -2627,7 +2629,7 @@ fn render_agent_memory_card(
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-memory-refresh")
         .icon(IconName::Redo)
-        .tooltip("重新读取记忆")
+        .icon_action("重新读取记忆")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_memories(cx));
         });
@@ -2776,7 +2778,7 @@ fn agent_memory_section(
     let open_folder = compact_chip(format!("agent-memory-folder-{layer_key}"))
         .xsmall()
         .icon(IconName::FolderOpen)
-        .tooltip("打开记忆文件夹")
+        .icon_action("打开记忆文件夹")
         .on_click(move |_, _, cx| {
             let agent_id = folder_agent.clone();
             folder_entity.update(cx, |workspace, cx| {
@@ -2999,7 +3001,7 @@ fn agent_memory_row(
             compact_chip(format!("agent-memory-open-{layer_key}-{}", entry.file_name))
                 .xsmall()
                 .icon(IconName::ExternalLink)
-                .tooltip("用文本编辑器打开")
+                .icon_action("用文本编辑器打开")
                 .on_click(move |_, _, cx| {
                     let path = open_path.clone();
                     open_entity.update(cx, |workspace, cx| {
@@ -3015,6 +3017,7 @@ fn agent_memory_row(
                 ))
                 .xsmall()
                 .icon(IconName::Check)
+                .accessibility_label("采纳")
                 .tooltip("采纳：之后的对话会用到这条记忆")
                 .on_click(move |_, _, cx| {
                     let agent_id = approve_agent.clone();
@@ -3032,7 +3035,7 @@ fn agent_memory_row(
             ))
             .xsmall()
             .icon(IconName::Close)
-            .tooltip("删除这条记忆")
+            .icon_action("删除这条记忆")
             .on_click(move |_, _, cx| {
                 let target = MemoryDeleteTarget {
                     agent_id: remove_agent.clone(),
@@ -3126,7 +3129,7 @@ fn agent_context_row(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
                 .xsmall()
                 .icon(crate::trash_icon())
-                .tooltip(if is_folder {
+                .icon_action(if is_folder {
                     "解除这个目录的绑定"
                 } else {
                     "移除这个链接"
@@ -3165,7 +3168,7 @@ fn render_agent_mcp_card(
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-mcp-refresh")
         .icon(IconName::Redo)
-        .tooltip("重新读取 mcp.json")
+        .icon_action("重新读取 mcp.json")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));
         });
@@ -3341,6 +3344,7 @@ fn agent_plugin_row(
             })
             .checked(checked)
             .disabled(!usable && !checked)
+            .accessibility_label(name.to_string())
             .on_click(move |_, _, cx| {
                 let agent_id = toggle_agent.clone();
                 let plugin_id = toggle_plugin.clone();

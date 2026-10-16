@@ -344,6 +344,7 @@ impl Workspace {
             .font_medium()
             .text_color(text_color)
             .hover(move |style| style.bg(hover_bg))
+            .accessibility_label(label)
             .child(label)
             .on_click(move |event, window, cx| {
                 let Some(host) = host.upgrade() else {

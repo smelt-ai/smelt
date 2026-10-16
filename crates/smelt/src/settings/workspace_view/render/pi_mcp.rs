@@ -5,6 +5,7 @@ use super::pi_model::{Palette, card, pill, section};
 use super::*;
 use crate::settings::workspace::PiConfigFileKind;
 use smelt_core::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
+use smelt_ui::IconAction as _;
 
 const PAGE_MAX_WIDTH: f32 = 760.;
 
@@ -233,7 +234,7 @@ fn server_row(
             .ghost()
             .xsmall()
             .icon(crate::trash_icon())
-            .tooltip("从 mcp.json 移除")
+            .icon_action("从 mcp.json 移除")
             .disabled(logging_in || removing)
             .on_click(move |_, _, cx| {
                 let name = name.clone();

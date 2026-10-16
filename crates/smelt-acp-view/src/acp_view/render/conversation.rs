@@ -339,7 +339,7 @@ impl AcpView {
                                         .icon(Icon::new(IconName::Undo2))
                                         .ghost()
                                         .xsmall()
-                                        .tooltip("编辑并重发最后一条消息")
+                                        .icon_action("编辑并重发最后一条消息")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
                                                 this.rewind_to_message(i, cx);
@@ -423,7 +423,7 @@ impl AcpView {
                                         .icon(Icon::new(IconName::Undo2))
                                         .ghost()
                                         .xsmall()
-                                        .tooltip("编辑并重发最后一条消息（图片需重新添加）")
+                                        .icon_action("编辑并重发最后一条消息（图片需重新添加）")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
                                                 this.rewind_to_message(i, cx);
@@ -528,7 +528,7 @@ impl AcpView {
                                                         )
                                                         .ghost()
                                                         .xsmall()
-                                                        .tooltip("分叉对话")
+                                                        .icon_action("分叉对话")
                                                         .on_click(cx.listener(
                                                             move |this, _ev, _window, cx| {
                                                                 this.fork_from_answer(i, cx);
@@ -693,6 +693,7 @@ impl AcpView {
                             div().w_full().into_any_element()
                         } else if compact_in_process {
                             let can_expand = has_expandable_content;
+                            let headline = compact_tool_headline(*kind, title);
                             let diff_stats = cached_diff_stats(
                                 this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
                             )
@@ -736,7 +737,7 @@ impl AcpView {
                                                 s.text_color(gpui::rgb(ui_theme::text_bright()))
                                             })
                                         })
-                                        .child(compact_tool_headline(*kind, title)),
+                                        .child(headline.clone()),
                                 );
                             if failed {
                                 row = row.child(
@@ -771,6 +772,7 @@ impl AcpView {
                                         .w_full()
                                         .justify_start()
                                         .group(PEEK_ROW_GROUP)
+                                        .accessibility_label(headline)
                                         .child(row),
                                 )
                                 .into_any_element()
@@ -1387,8 +1389,11 @@ impl AcpView {
                 _ => None,
             })
             .unwrap_or_else(|| gpui::SharedString::from(start.to_string()));
+        let run_label = compact_tool_run_label(run.kind, count);
         let header = h_flex()
             .id(owner_id("acp-tool-run", &run_owner))
+            .role(gpui::Role::Button)
+            .aria_label(run_label.clone())
             .debug_selector(move || format!("ACP_TOOL_RUN_{start}"))
             .group(EXPAND_ICON_GROUP)
             .w_full()
@@ -1408,7 +1413,7 @@ impl AcpView {
                     .truncate()
                     .text_xs()
                     .text_color(muted)
-                    .child(compact_tool_run_label(run.kind, count)),
+                    .child(run_label),
             )
             .when_some(live_elapsed, |header, elapsed_ms| {
                 header.child(elapsed_suffix(elapsed_ms, muted))
@@ -1443,6 +1448,7 @@ impl AcpView {
                 else {
                     continue;
                 };
+                let headline = compact_tool_headline(run.kind, &title);
                 let row = h_flex()
                     .id(owner_id("acp-tool-run-item", &tool_owner))
                     .debug_selector(move || format!("ACP_TOOL_RUN_ITEM_{ix}"))
@@ -1475,7 +1481,7 @@ impl AcpView {
                                     s.text_color(gpui::rgb(ui_theme::text_bright()))
                                 })
                             })
-                            .child(compact_tool_headline(run.kind, &title)),
+                            .child(headline.clone()),
                     );
                 col = col.child(if can_expand {
                     self.tool_output_popover(
@@ -1486,6 +1492,7 @@ impl AcpView {
                             .w_full()
                             .justify_start()
                             .group(PEEK_ROW_GROUP)
+                            .accessibility_label(headline)
                             .child(row),
                     )
                     .into_any_element()
@@ -1924,7 +1931,7 @@ impl AcpView {
                     .truncate()
                     .text_xs()
                     .text_color(muted)
-                    .child(preview),
+                    .child(preview.clone()),
             )
             .when_some(live_elapsed, |row, elapsed_ms| {
                 row.child(elapsed_suffix(elapsed_ms, muted))
@@ -1940,6 +1947,8 @@ impl AcpView {
             });
         if has_details {
             row = row
+                .role(gpui::Role::Button)
+                .aria_label(preview)
                 .cursor_pointer()
                 .when(!in_process, |row| {
                     row.hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
@@ -2063,6 +2072,13 @@ impl AcpView {
             .child(body_el)
             .when(mode != ToolLogMode::Inline, |block| {
                 let key = tool_id.to_string();
+                let toggle_label = if expanded {
+                    "收起".to_string()
+                } else {
+                    format!("展开全部 {total} 行")
+                };
+                let toggle_view = cx.entity().downgrade();
+                let toggle_key = key.clone();
                 block.child(
                     h_flex()
                         .gap_3()
@@ -2070,15 +2086,13 @@ impl AcpView {
                         .child(
                             div()
                                 .id(owner_part("acp-tool-toggle", &owner, part_ix))
+                                .role(gpui::Role::Button)
+                                .aria_label(toggle_label.clone())
                                 .text_xs()
                                 .text_color(gpui::rgb(ui_theme::text_faint()))
                                 .cursor_pointer()
                                 .hover(|row| row.opacity(0.8))
-                                .child(if expanded {
-                                    "收起".to_string()
-                                } else {
-                                    format!("展开全部 {total} 行")
-                                })
+                                .child(toggle_label)
                                 .on_mouse_down(
                                     gpui::MouseButton::Left,
                                     cx.listener(move |this, _ev, _window, cx| {
@@ -2090,7 +2104,18 @@ impl AcpView {
                                         cx.stop_propagation();
                                         cx.notify();
                                     }),
-                                ),
+                                )
+                                .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                                    let _ = toggle_view.update(cx, |this, cx| {
+                                        if !this.expanded_tools.remove(&toggle_key) {
+                                            this.expanded_tools.insert(toggle_key.clone());
+                                        }
+                                        this.list_state.remeasure_items(
+                                            entry_ix..entry_ix.saturating_add(1),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
                         )
                         .child(self.render_copy_button(
                             CopySite::ToolLog {
@@ -2335,7 +2360,7 @@ fn popover_plain_log(
                 .child(
                     Clipboard::new(owner_part(copy_name, tool_id, part_ix))
                         .value(copy)
-                        .tooltip("复制全部"),
+                        .icon_action("复制全部"),
                 ),
         )
         .into_any_element()

@@ -235,6 +235,7 @@ impl Workspace {
                             .ghost()
                             .small()
                             .icon(IconName::Close)
+                            .accessibility_label("关闭")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.close_worktree_list(cx);
                             })),
@@ -262,6 +263,7 @@ impl Workspace {
                                     .ghost()
                                     .small()
                                     .icon(IconName::Redo)
+                                    .accessibility_label("刷新")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.refresh_worktree_list(cx);
                                     })),
@@ -322,6 +324,7 @@ impl Workspace {
                             .ghost()
                             .small()
                             .icon(IconName::Close)
+                            .accessibility_label("关闭")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.cancel_new_worktree(cx);
                             })),

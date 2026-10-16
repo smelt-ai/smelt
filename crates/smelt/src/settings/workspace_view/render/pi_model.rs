@@ -8,6 +8,7 @@ use super::*;
 use crate::settings::workspace::PiConfigFileKind;
 use smelt_core::pi_auth::PiAuthProvider;
 use smelt_core::pi_model_settings::{PiCustomProvider, PiModelSettings};
+use smelt_ui::IconAction as _;
 
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
 const PAGE_MAX_WIDTH: f32 = 760.;
@@ -731,7 +732,7 @@ fn custom_provider_row(
                         .ghost()
                         .xsmall()
                         .icon(crate::trash_icon())
-                        .tooltip("删除此 Provider")
+                        .icon_action("删除此 Provider")
                         .disabled(editor_open)
                         .on_click(move |_, window, cx| {
                             let delete_id = delete_id.clone();
@@ -801,7 +802,7 @@ fn config_files_footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
                 .ghost()
                 .xsmall()
                 .icon(IconName::Redo)
-                .tooltip("重新读取 ~/.pi/agent/ 下的配置")
+                .icon_action("重新读取 ~/.pi/agent/ 下的配置")
                 .on_click(move |_, _, cx| {
                     refresh_entity.update(cx, |workspace, cx| {
                         workspace.refresh_pi_settings(cx);
@@ -1016,7 +1017,7 @@ fn custom_provider_form(
                                 .ghost()
                                 .small()
                                 .icon(crate::trash_icon())
-                                .tooltip("移除此模型")
+                                .icon_action("移除此模型")
                                 .on_click(move |_, _, cx| {
                                     remove_entity.update(cx, |workspace, cx| {
                                         workspace.remove_pi_custom_model(index, cx);

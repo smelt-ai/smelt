@@ -207,6 +207,7 @@ impl Workspace {
                     .ghost()
                     .small()
                     .icon(IconName::Ellipsis)
+                    .accessibility_label("更多操作")
                     .dropdown_menu(move |mut menu, _, _| {
                         let run_entity = test_entity.clone();
                         menu = menu.item(

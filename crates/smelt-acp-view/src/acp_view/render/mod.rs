@@ -15,8 +15,6 @@ mod conversation;
 impl Render for AcpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timing = smelt_ui::frame_stats::RenderTiming::start("AcpView");
-        self.ensure_elicitation_inputs(window, cx);
-        self.apply_pending_composer_restore(window, cx);
         self.settle_revealed_prompt();
         // 技能目录一次就要数毫秒到几十毫秒。过期必须在启动规格变化时刷新，
         // 不能留到绘制里扫盘。
@@ -463,6 +461,8 @@ impl AcpView {
                 .child(
                     h_flex()
                         .id("acp-jump-to-latest")
+                        .role(gpui::Role::Button)
+                        .aria_label("回到最新")
                         .h(ui_theme::height::lg())
                         .px_4()
                         .gap_2()

@@ -39,6 +39,8 @@ use gpui_component::text::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::IconAction as _;
+
 /// rusty-mermaid（crates.io `=0.2.0`）默认字体栈——见其
 /// `rusty_mermaid_core::font_fallback::SVG_FONT_FAMILY` 常量。整份字体栈都是西文
 /// 字体（Intel One Mono / SF Mono / .../ monospace），不含任何 CJK 字体，且
@@ -333,7 +335,7 @@ fn code_block_corner(
         .child(
             gpui_component::clipboard::Clipboard::new("copy")
                 .value(code_block.code())
-                .tooltip("复制代码"),
+                .icon_action("复制代码"),
         )
         .into_any_element()
 }

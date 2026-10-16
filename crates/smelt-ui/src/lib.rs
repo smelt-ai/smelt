@@ -8,6 +8,7 @@ pub mod automation;
 pub mod daemon_states_global;
 pub mod frame_stats;
 pub mod history_titles_global;
+pub mod icon_action;
 pub mod image;
 pub mod markdown_mermaid;
 pub mod motion;
@@ -16,3 +17,5 @@ pub mod segmented;
 pub mod theme_catalog;
 pub mod theme_files;
 pub mod ui_theme;
+
+pub use icon_action::IconAction;

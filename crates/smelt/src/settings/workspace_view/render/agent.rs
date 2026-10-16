@@ -1,6 +1,7 @@
 //! 设置页：模型与 Agent（运行环境 / 新建与启动 / 对话工作区 / 通知 / Hooks）。
 
 use super::*;
+use smelt_ui::IconAction as _;
 
 pub(super) fn runtime_page(
     entity: Entity<Workspace>,
@@ -280,7 +281,7 @@ fn agent_groups(
                             .loading_icon(IconName::LoaderCircle)
                             .loading(runtime.refreshing)
                             .disabled(runtime.refreshing || runtime.installing.is_some())
-                            .tooltip("刷新运行环境检测")
+                            .icon_action("刷新运行环境检测")
                             .on_click(move |_, _, cx| {
                                 refresh_entity.update(cx, |workspace, cx| {
                                     workspace.refresh_acp_runtime(cx);

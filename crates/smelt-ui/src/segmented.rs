@@ -290,8 +290,12 @@ pub fn pill_segment(
     label: impl Into<gpui::SharedString>,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
+    let label = label.into();
     gpui::div()
         .id(id)
+        .role(gpui::Role::Tab)
+        .aria_label(label.clone())
+        .aria_selected(selected)
         .h(ui_theme::height::xs())
         .px_2p5()
         .flex()
@@ -306,7 +310,7 @@ pub fn pill_segment(
         .when(!selected, |segment| {
             segment.hover(|segment| segment.bg(ui_theme::overlay(0x14)))
         })
-        .child(label.into())
+        .child(label)
 }
 
 /// 下划线页签里的一格。字号、字色和 gpui-component 的 XSmall 下划线页签一致。
@@ -318,8 +322,12 @@ pub fn underline_segment(
 ) -> gpui::Stateful<gpui::Div> {
     let theme = cx.theme();
     let active = theme.tab_active_foreground;
+    let label = label.into();
     gpui::div()
         .id(id)
+        .role(gpui::Role::Tab)
+        .aria_label(label.clone())
+        .aria_selected(selected)
         .h(px(20.))
         .flex()
         .items_center()
@@ -331,7 +339,7 @@ pub fn underline_segment(
             theme.tab_foreground
         })
         .hover(move |segment| segment.text_color(active))
-        .child(label.into())
+        .child(label)
 }
 
 #[cfg(test)]

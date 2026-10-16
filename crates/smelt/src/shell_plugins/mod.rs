@@ -13,9 +13,9 @@
 //! 2. App 自带的 `Contents/Resources/shell-plugins/`，只读加载。
 //! 3. debug 构建直接读仓库里的 `shell-plugins/`，改完脚本重启即可。
 //!
-//! 原型阶段刻意不处理的已知限制：gpui-shell 的 dialog / sheet / toast / tooltip 都按
-//! 「窗口根是 `ShellRoot`」去找浮层宿主，而 smelt 的窗口根是 gpui-component 的
-//! `Root`，所以脚本里这些 API 用不了，弹层由脚本自己在面板里画。
+//! 脚本可以从 `"gpui-component"` 导入带皮肤的控件。这些控件的 dialog、sheet、
+//! notification 走组件库的 `Root`，和这扇窗口的根一致。`gpui-shell` 自己的
+//! `window.open_dialog` 仍只认 `ShellRoot`，这条用不了。
 
 mod fs;
 
@@ -136,13 +136,18 @@ fn runtime(cx: &mut App) -> anyhow::Result<Rc<ShellRuntime>> {
     if let Some(runtime) = REGISTRY.with(|registry| registry.borrow().runtime.clone()) {
         return Ok(runtime);
     }
-    // 不调 `gpui_shell::init`：它只是 `gpui_base::init` 加样式表预热，前者
-    // gpui-component 启动时已经做过（重复做会重复绑键），后者首次用到时自会建好。
+    // 不调 `gpui_shell::init`，也不调 `init_with_components`。后者会再跑一遍目录里
+    // 登记的 `gpui_component::init`，而启动时已经调用过；`gpui_base::init` 重复做会
+    // 重复绑键。样式表首次用到时自会建好。
     //
     // 编辑器文件（gpui-kit.d.ts 等）只在开发构建里写：发布版从 .app 里只读加载，
     // 写进已签名的包会破坏签名。
     gpui_shell::set_editor_files(cfg!(debug_assertions));
-    let runtime = ShellRuntime::new(cx)?;
+    // 只要组件目录，不用 `gpui_component_shell` 的开窗口函数。那个函数给 shell
+    // 自己当应用入口用，会把窗口内容换成 `ShellRoot`。
+    let components =
+        gpui_component_shell::components().context("构建 gpui-component 脚本组件目录")?;
+    let runtime = ShellRuntime::new_with_components(cx, components)?;
     REGISTRY.with(|registry| registry.borrow_mut().runtime = Some(runtime.clone()));
     Ok(runtime)
 }

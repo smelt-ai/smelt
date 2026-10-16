@@ -116,6 +116,7 @@ pub(super) fn builtin_provider_row(
             .ghost()
             .xsmall()
             .icon(IconName::Ellipsis)
+            .accessibility_label("更多操作")
             .dropdown_menu(move |mut menu, _, _| {
                 if let Some(handler) = reauth.clone() {
                     menu = menu.item(

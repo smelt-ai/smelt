@@ -4,7 +4,10 @@
 //! popover, or drag preview must be visible, the host temporarily hides
 //! those WebViews instead of creating another GPUI window above them.
 
-use gpui::{AnyElement, App, Context, IntoElement, ParentElement, Styled, Window, canvas, div};
+use gpui::{
+    AnyElement, App, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    Window, canvas, div,
+};
 use gpui_component::WindowExt;
 
 use super::*;
@@ -530,6 +533,8 @@ impl Workspace {
                 .child(
                     div()
                         .id("workspace-image-preview-close")
+                        .role(gpui::Role::Button)
+                        .aria_label("关闭预览")
                         .absolute()
                         .top(px(48.))
                         .right(px(48.))

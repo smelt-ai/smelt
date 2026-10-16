@@ -21,6 +21,7 @@ use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
+use smelt_ui::IconAction as _;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
 
@@ -333,7 +334,7 @@ impl Workspace {
                     .ghost()
                     .size(px(24.))
                     .icon(IconName::Settings2)
-                    .tooltip("筛选与分组")
+                    .icon_action("筛选与分组")
                     .dropdown_menu(move |menu, _window, _cx| {
                         let menu = menu.item(PopupMenuItem::label("分组依据"));
                         let add_group =
@@ -1589,6 +1590,7 @@ impl Workspace {
                                                 .ghost()
                                                 .xsmall()
                                                 .icon(IconName::Close)
+                                                .accessibility_label("关闭分栏")
                                                 .on_click(move |_ev, window, cx| {
                                                     cx.stop_propagation();
                                                     let pane = close_pane.clone();
@@ -1877,6 +1879,7 @@ impl Workspace {
                             .w_full()
                             .px_0()
                             .cursor_pointer()
+                            .accessibility_label("设置")
                             .child(
                                 div()
                                     .w_full()
@@ -2084,7 +2087,7 @@ impl Workspace {
                                                                 "smelt-icons/folder-plus.svg",
                                                             ),
                                                         )
-                                                        .tooltip("打开项目")
+                                                        .icon_action("打开项目")
                                                         .on_click(move |_ev, _window, cx| {
                                                             e_open.update(cx, |ws, cx| {
                                                                 ws.open_project(cx)

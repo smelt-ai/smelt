@@ -3819,6 +3819,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-component-shell"
+version = "0.7.1"
+source = "git+https://github.com/zzfn/gpui-kit?rev=073a87951971a9f7be8587942861b8692525d8de#073a87951971a9f7be8587942861b8692525d8de"
+dependencies = [
+ "gpui-component",
+ "gpui-shell",
+]
+
+[[package]]
 name = "gpui-fast"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10153,6 +10162,7 @@ dependencies = [
  "futures-util",
  "gpui-base",
  "gpui-component",
+ "gpui-component-shell",
  "gpui-fps",
  "gpui-kit-assets",
  "gpui-pre",

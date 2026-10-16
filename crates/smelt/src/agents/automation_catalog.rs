@@ -602,6 +602,7 @@ fn render_automation_row_menu(
         .ghost()
         .small()
         .icon(IconName::Ellipsis)
+        .accessibility_label("更多操作")
         .dropdown_menu(move |mut menu, _, _| {
             if let Some(active_run_id) = cancel_run_id.clone() {
                 let entity = cancel_entity.clone();

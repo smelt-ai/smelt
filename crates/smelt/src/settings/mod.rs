@@ -1625,6 +1625,11 @@ pub struct SettingsContentView {
     snapshot: SettingsRenderSnapshot,
     _observe_workspace: Subscription,
     _observe_settings_globals: Vec<Subscription>,
+    /// 运行状态不在设置快照里，绘制时直接读 Global。观察者只 notify 本视图，
+    /// 不走 250ms 的整页快照刷新。
+    _observe_plugin_statuses: Subscription,
+    /// 插件页可见时的状态轮询。离开页面或关掉设置窗口就 drop，查询随之取消。
+    plugin_status_task: Option<Task<()>>,
     last_refresh: Option<Instant>,
     refresh_pending: bool,
     refresh_generation: u64,
@@ -1639,7 +1644,7 @@ impl SettingsContentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let mut this = Self {
             _observe_workspace: cx.observe_in(
                 &workspace,
                 window,
@@ -1667,11 +1672,54 @@ impl SettingsContentView {
                 ),
                 Self::observe_settings_global::<PluginEnablementState>(window, cx),
             ],
+            _observe_plugin_statuses: cx.observe_global_in::<PluginRuntimeStatuses>(
+                window,
+                |this, _, cx| {
+                    if this.shows_plugin_runtime_status() {
+                        cx.notify();
+                    }
+                },
+            ),
+            plugin_status_task: None,
             // 初始快照已经同步取好；避免刚打开就被第一条后台流式通知立即打穿缓存。
             last_refresh: Some(Instant::now()),
             refresh_pending: false,
             refresh_generation: 0,
+        };
+        this.sync_plugin_status_watch(cx);
+        this
+    }
+
+    fn shows_plugin_runtime_status(&self) -> bool {
+        plugins::shows_plugin_runtime_status(self.surface, &self.snapshot.settings_section)
+    }
+
+    /// 进入插件页时开始轮询，离开时丢掉 `Task`。绘制只读 Global，不再从 render 里发起查询。
+    fn sync_plugin_status_watch(&mut self, cx: &mut Context<Self>) {
+        if !self.shows_plugin_runtime_status() {
+            self.plugin_status_task = None;
+            return;
         }
+        if self.plugin_status_task.is_some() {
+            return;
+        }
+        self.plugin_status_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let outcome = cx
+                    .background_spawn(async move { terminal::plugin_statuses() })
+                    .await;
+                let show = this
+                    .update(cx, |this, _cx| this.shows_plugin_runtime_status())
+                    .unwrap_or(false);
+                if !show {
+                    return;
+                }
+                cx.update(|cx| plugins::publish_plugin_runtime_statuses(outcome, cx));
+                cx.background_executor()
+                    .timer(plugins::PLUGIN_STATUS_POLL_INTERVAL)
+                    .await;
+            }
+        }));
     }
 
     fn observe_settings_global<G: Global + 'static>(
@@ -1690,6 +1738,7 @@ impl SettingsContentView {
         self.last_refresh = Some(Instant::now());
         self.refresh_pending = false;
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        self.sync_plugin_status_watch(cx);
         cx.notify();
     }
 

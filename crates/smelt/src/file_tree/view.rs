@@ -4,6 +4,7 @@
 
 use gpui::ElementId;
 use gpui::InteractiveElement;
+use gpui::StatefulInteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
@@ -901,19 +902,18 @@ pub fn file_content_parts(
                         ),
                 )
                 .when(is_md, |el| {
+                    let markdown_label = if preview { "查看原始码" } else { "查看预览" };
                     el.child(
                         div()
                             .id("markdown-view-toggle")
+                            .role(gpui::Role::Button)
+                            .aria_label(markdown_label)
                             .flex_shrink_0()
                             .text_xs()
                             .text_color(fg)
                             .cursor_pointer()
                             .hover(|el| el.opacity(0.75))
-                            .child(if preview {
-                                "查看原始码"
-                            } else {
-                                "查看预览"
-                            })
+                            .child(markdown_label)
                             .on_click(cx.listener(move |ws, _ev, _window, cx| {
                                 ws.set_file_preview(!preview, cx)
                             })),
@@ -922,6 +922,12 @@ pub fn file_content_parts(
                 .child(
                     div()
                         .id("file-tree-toggle")
+                        .role(gpui::Role::Button)
+                        .aria_label(if file_tree_open {
+                            "收起文件树"
+                        } else {
+                            "展开文件树"
+                        })
                         .flex()
                         .items_center()
                         .justify_center()

@@ -79,6 +79,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
+use gpui::StatefulInteractiveElement;
 use gpui::*;
 use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{
@@ -2572,6 +2573,7 @@ struct Workspace {
     pending_history_title_persist: HashSet<u64>,
     /// 上一次把用户命名覆盖层读进 `HistoryTitles` 缓存的时刻。侧栏每帧都要用它，
     /// 但改名本身会写穿缓存，所以这里只是低频兜底（覆盖移动端/历史页的远端改名）。
+    /// 缓存变了由 `_history_titles_sub` 重绘，这里不直接 notify。
     history_titles_at: Option<Instant>,
     /// 是否已有一次后台重读在路上，防止逐帧重复 spawn。
     history_titles_inflight: bool,
@@ -2703,6 +2705,9 @@ struct Workspace {
     _agent_host_sub: Option<Subscription>,
     /// provider 账户状态（额度）变化时重绘侧栏额度行。
     _provider_status_sub: Option<Subscription>,
+    /// 侧栏 pane 标题在 render 里读 `HistoryTitles`。读 Global 不会自动订阅，
+    /// 后台覆盖层刷新、另一扇窗口和手机上的改名都靠这里把工作台标脏。
+    _history_titles_sub: Option<Subscription>,
     /// 外观全局变化。不能放进 `settings_subs`：设置滑块重建时会清掉那个 vec。
     _appearance_sub: Option<Subscription>,
     /// 正在后台 reattach 中、尚未插入侧栏的移动端终端会话 id。不去重会对同一 id
@@ -3139,6 +3144,7 @@ impl Workspace {
             _remote_sessions_sub: None,
             _agent_host_sub: None,
             _provider_status_sub: None,
+            _history_titles_sub: None,
             _appearance_sub: None,
             remote_terminal_reattach_pending: HashSet::new(),
             remote_projected_terminal_ids: HashSet::new(),
@@ -3209,6 +3215,8 @@ impl Workspace {
                 |_, _, cx| cx.notify(),
             ),
         );
+        ws._history_titles_sub =
+            Some(cx.observe_global_in::<HistoryTitles>(window, |_, _, cx| cx.notify()));
         ws._appearance_sub = Some(cx.observe_global_in::<Appearance>(
             window,
             |this, _window, cx| this.schedule_visible_refresh(cx),
@@ -4021,6 +4029,8 @@ impl Render for Workspace {
             // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
             // window 的 focus 兜底钉在这层，保证下面的全局 on_key_down 收得到事件。
             .track_focus(&self.focus_handle)
+            // cmd-up/down 的 context。挂在 handler 这一层才浅于 Input。
+            .key_context("Workspace")
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 if this.quit_requested {
                     return;
@@ -4227,7 +4237,8 @@ impl Render for Workspace {
                     ),
             )
             // 浮层只留左侧栏开关。窗口开关在右侧共用顶栏，跟 tab 同一条 flex。
-            .child(
+            .child({
+                let sidebar_toggle = cx.entity().downgrade();
                 div()
                     .absolute()
                     // 跟主体内的共用顶栏使用同一个纵向原点；外壳内边距若以后
@@ -4241,6 +4252,8 @@ impl Render for Workspace {
                     .child(
                         div()
                             .id("sidebar-toggle")
+                            .role(Role::Button)
+                            .aria_label("切换左侧栏")
                             // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
                             // 隐藏红绿灯，这 92px 就全空了，按钮回到窗口左侧
                             // 18px 的统一视觉基准。纵向不再手算 top：由共用顶栏的
@@ -4277,11 +4290,16 @@ impl Render for Workspace {
                                     cx.stop_propagation();
                                     this.toggle_sidebar(window, cx);
                                 }),
-                            ),
+                            )
+                            .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                                let _ = sidebar_toggle.update(cx, |this, cx| {
+                                    this.toggle_sidebar(window, cx);
+                                });
+                            }),
                     )
                     // 中间点穿。窗口开关在右侧共用顶栏里，不在这条浮层。
-                    .child(div().flex_1().min_w_0()),
-            )
+                    .child(div().flex_1().min_w_0())
+            })
             // 确认框、命令面板和图片预览都留在当前 Workspace 的 GPUI 树内。
             .child(self.render_overlay_layers(window, cx))
             .child(context_menu_event_bridge)
@@ -4676,12 +4694,11 @@ fn main() {
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("alt-cmd-b", ToggleToolPanel, None),
-            // 会话上/下切换（跨项目按侧栏视觉顺序，到头循环）。用 cmd+方向键：
-            // 比 cmd-shift-[ 好按。输入框聚焦时 Input 自己的 cmd-up/down（文首/
-            // 文末）更具体，会盖过这两条；终端聚焦时才会切会话。
-            // 原有的 cmd-[ / cmd-] 保持原样，不覆盖、不接管。
-            KeyBinding::new("cmd-up", PrevSession, None),
-            KeyBinding::new("cmd-down", NextSession, None),
+            // 会话上/下切换（跨项目按侧栏视觉顺序，到头循环）。
+            // None 和最内层 context 同深度，后注册会盖过 Input 的 cmd-up/down。
+            // 绑在 Workspace 上更浅：输入框里是文首/文末，其余工作区切会话。
+            KeyBinding::new("cmd-up", PrevSession, Some("Workspace")),
+            KeyBinding::new("cmd-down", NextSession, Some("Workspace")),
             // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
             // Ctrl+W 删词。绑在 Input context，所有输入框（ACP composer 等）生效。
             KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),

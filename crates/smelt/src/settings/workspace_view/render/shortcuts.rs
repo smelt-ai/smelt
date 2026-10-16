@@ -66,6 +66,7 @@ pub(super) fn shortcuts_page(
                                 vec![bound_key(
                                     window,
                                     &crate::OpenSettings,
+                                    None,
                                     "⌘,",
                                     border,
                                     popover,
@@ -77,7 +78,15 @@ pub(super) fn shortcuts_page(
                             fixed("新建任务", &["⇧⌘N"]),
                             row(
                                 "退出 Smelt",
-                                vec![bound_key(window, &crate::Quit, "⌘Q", border, popover, fg)],
+                                vec![bound_key(
+                                    window,
+                                    &crate::Quit,
+                                    None,
+                                    "⌘Q",
+                                    border,
+                                    popover,
+                                    fg,
+                                )],
                             ),
                         ],
                     ))
@@ -89,6 +98,7 @@ pub(super) fn shortcuts_page(
                                 vec![bound_key(
                                     window,
                                     &crate::ToggleSidebar,
+                                    None,
                                     "⌘B",
                                     border,
                                     popover,
@@ -100,6 +110,7 @@ pub(super) fn shortcuts_page(
                                 vec![bound_key(
                                     window,
                                     &crate::ToggleToolPanel,
+                                    None,
                                     "⌥⌘B",
                                     border,
                                     popover,
@@ -112,6 +123,7 @@ pub(super) fn shortcuts_page(
                                     bound_key(
                                         window,
                                         &crate::PrevSession,
+                                        Some("Workspace"),
                                         "⌘↑",
                                         border,
                                         popover,
@@ -120,6 +132,7 @@ pub(super) fn shortcuts_page(
                                     bound_key(
                                         window,
                                         &crate::NextSession,
+                                        Some("Workspace"),
                                         "⌘↓",
                                         border,
                                         popover,
@@ -169,16 +182,18 @@ fn keycap(key: &'static str, border: Hsla, popover: Hsla, fg: Hsla) -> gpui::Any
         .into_any_element()
 }
 
-/// 读当前键位。没有绑定时退回原来的字，避免键帽是空的。
+/// 读当前键位。`context` 用 Key Context 声明，不用 predicate。
+/// 没有绑定时退回原来的字，避免键帽是空的。
 fn bound_key(
     window: &Window,
     action: &dyn gpui::Action,
+    context: Option<&str>,
     fallback: &'static str,
     border: Hsla,
     popover: Hsla,
     fg: Hsla,
 ) -> gpui::AnyElement {
-    match gpui_component::kbd::Kbd::binding_for_action(action, None, window) {
+    match gpui_component::kbd::Kbd::binding_for_action(action, context, window) {
         Some(kbd) => kbd
             .min_w(px(34.))
             .h(crate::ui_theme::height::xs())

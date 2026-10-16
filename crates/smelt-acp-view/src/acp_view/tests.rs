@@ -3183,7 +3183,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
 }
 
 #[gpui::test]
-fn acp_view_render_prepares_text_elicitation_inputs(cx: &mut gpui::TestAppContext) {
+fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext) {
     use gpui::VisualTestContext;
 
     cx.update(gpui_component::init);
@@ -3217,15 +3217,13 @@ fn acp_view_render_prepares_text_elicitation_inputs(cx: &mut gpui::TestAppContex
         view
     });
     let cx: &mut VisualTestContext = cx;
+    view.update(cx, |view, cx| view.schedule_surface_inputs(cx));
     cx.run_until_parked();
-    cx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
 
     assert_eq!(
         view.read_with(cx, |view, _| view.elicitation_inputs.len()),
         1,
-        "AcpView::render must establish the input entities required by its own element tree",
+        "提问输入框在绘制前就建好",
     );
 }
 
@@ -3234,7 +3232,7 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
     use gpui::VisualTestContext;
 
     cx.update(gpui_component::init);
-    let (_view, cx) = cx.add_window_view(|_window, cx| {
+    let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
@@ -3274,6 +3272,7 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
         view
     });
     let cx: &mut VisualTestContext = cx;
+    view.update(cx, |view, cx| view.schedule_surface_inputs(cx));
     cx.run_until_parked();
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -3311,7 +3310,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
     use gpui::VisualTestContext;
 
     cx.update(gpui_component::init);
-    let (_view, cx) = cx.add_window_view(|_window, cx| {
+    let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
@@ -3343,6 +3342,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
         view
     });
     let cx: &mut VisualTestContext = cx;
+    view.update(cx, |view, cx| view.schedule_surface_inputs(cx));
     cx.run_until_parked();
     cx.update(|window, cx| {
         let _ = window.draw(cx);

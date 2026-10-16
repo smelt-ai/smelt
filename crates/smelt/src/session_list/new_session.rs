@@ -15,6 +15,7 @@ use gpui::{
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use smelt_ui::IconAction as _;
 use gpui_component::popover::{Popover, PopoverState};
 use gpui_component::{Icon, IconName, IndexPath, Sizable as _, StyledExt as _};
 
@@ -457,7 +458,7 @@ impl Render for NewSessionPickerState {
                     .xsmall()
                     .flex_shrink_0()
                     .icon(pin_icon)
-                    .tooltip(pin_tip)
+                    .icon_action(pin_tip)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -470,6 +471,8 @@ impl Render for NewSessionPickerState {
                 content = content.child(
                     div()
                         .id((ElementId::from("new-session-picker-item"), item_key.clone()))
+                        .role(gpui::Role::Button)
+                        .aria_label(row_label.clone())
                         .h(px(PICKER_ROW_HEIGHT))
                         .mx_1()
                         .px_2()
@@ -559,7 +562,7 @@ pub(super) fn new_session_picker(
             .small()
             .size(px(super::PROJECT_NEW_BUTTON_SIZE))
             .icon(IconName::Plus)
-            .tooltip("新建会话"),
+            .icon_action("新建会话"),
     }
 }
 

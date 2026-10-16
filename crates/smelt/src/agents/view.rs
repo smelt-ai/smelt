@@ -2,6 +2,7 @@
 //!
 //! 只组 UI。写配置、开对话、改 Workspace 字段的方法在 `workspace.rs`。
 use super::*;
+use gpui::StatefulInteractiveElement;
 
 impl Workspace {
     pub(crate) fn render_delete_agent_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -232,6 +233,8 @@ impl Workspace {
         let click_entity = entity.clone();
         div()
             .id("workbench-chat")
+            .role(gpui::Role::Button)
+            .aria_label(label.clone())
             .h(crate::ui_theme::height::md())
             .px_2()
             .flex()
@@ -252,7 +255,7 @@ impl Workspace {
                                 .ghost()
                                 .size(px(22.))
                                 .icon(IconName::ChevronDown)
-                                .tooltip("更换默认智能体")
+                                .icon_action("更换默认智能体")
                                 // 这一行在侧栏顶上。Bottom* 会往上翻进红绿灯，
                                 // 菜单要向下展开，并贴着箭头右缘，避免冲出侧栏。
                                 .dropdown_menu_with_anchor(
@@ -299,6 +302,7 @@ impl Workspace {
                     .w_full()
                     .px_2()
                     .cursor_pointer()
+                    .accessibility_label(label.clone())
                     .child(new_conversation_row_body(label, None).w_full())
                     // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
                     .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
@@ -941,6 +945,7 @@ impl Workspace {
             .ghost()
             .small()
             .icon(IconName::Ellipsis)
+            .accessibility_label("更多操作")
             .tooltip(delete_tooltip)
             .dropdown_menu(move |menu, _, _| {
                 let entity = delete_entity.clone();

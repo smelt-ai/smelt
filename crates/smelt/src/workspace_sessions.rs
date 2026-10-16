@@ -2554,7 +2554,8 @@ impl Workspace {
     ///
     /// 改名走写穿，本地改完立即可见；这里只负责兜住不经过本窗口的写入（历史页、
     /// 移动端、另一扇窗口），因此 5 秒一次足够，且必须在后台线程读存储——侧栏
-    /// 渲染路径上不允许出现同步存储访问。
+    /// 渲染路径上不允许出现同步存储访问。内容变了由 `HistoryTitles` 的观察者重绘
+    /// 工作台，这里不再单独 notify。
     pub(crate) fn refresh_history_titles(&mut self, cx: &mut Context<Self>) {
         let fresh = self
             .history_titles_at

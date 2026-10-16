@@ -550,9 +550,16 @@ impl AcpView {
                                         )
                                     })
                                     .when(immediate_action_available, |row| {
+                                        let immediate_label = if immediate_cancels_turn {
+                                            "立即发送（停止当前回答）"
+                                        } else {
+                                            "立即发送"
+                                        };
                                         row.child(
                                             div()
                                                 .id("acp-native-queue-immediate")
+                                                .role(gpui::Role::Button)
+                                                .aria_label(immediate_label)
                                                 .text_xs()
                                                 .text_color(gpui::rgb(if immediate_cancels_turn {
                                                     ui_theme::yellow()
@@ -571,11 +578,7 @@ impl AcpView {
                                                     )
                                                     .build(window, cx)
                                                 })
-                                                .child(if immediate_cancels_turn {
-                                                    "立即发送（停止当前回答）"
-                                                } else {
-                                                    "立即发送"
-                                                })
+                                                .child(immediate_label)
                                                 .on_click(cx.listener(
                                                     move |this, _ev, _window, cx| {
                                                         this.send_native_queue_item_immediately(
@@ -591,6 +594,8 @@ impl AcpView {
                             strip = strip.child(
                                 div()
                                     .id("acp-native-queue-clear")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("撤回排队")
                                     .text_xs()
                                     .text_color(gpui::rgb(ui_theme::text_muted()))
                                     .cursor_pointer()
@@ -663,9 +668,16 @@ impl AcpView {
                                     )
                                 })
                                 .when(immediate_action_available, |row| {
+                                    let immediate_label = if immediate_cancels_turn {
+                                        "立即发送（停止当前回答）"
+                                    } else {
+                                        "立即发送"
+                                    };
                                     row.child(
                                         div()
                                             .id("acp-queued-prompt-immediate")
+                                            .role(gpui::Role::Button)
+                                            .aria_label(immediate_label)
                                             .text_xs()
                                             .text_color(gpui::rgb(if immediate_cancels_turn {
                                                 ui_theme::yellow()
@@ -684,11 +696,7 @@ impl AcpView {
                                                 )
                                                 .build(window, cx)
                                             })
-                                            .child(if immediate_cancels_turn {
-                                                "立即发送（停止当前回答）"
-                                            } else {
-                                                "立即发送"
-                                            })
+                                            .child(immediate_label)
                                             .on_click(cx.listener(
                                                 move |this, _ev, _window, cx| {
                                                     this.send_queued_prompt_immediately(ix, cx);
@@ -702,6 +710,8 @@ impl AcpView {
                                         row.child(
                                             div()
                                                 .id("acp-queued-prompt-send")
+                                                .role(gpui::Role::Button)
+                                                .aria_label("下一条发送")
                                                 .text_xs()
                                                 .text_color(gpui::rgb(ui_theme::accent()))
                                                 .cursor_pointer()
@@ -724,6 +734,8 @@ impl AcpView {
                                 .child(
                                     div()
                                         .id("acp-queued-prompt-remove")
+                                        .role(gpui::Role::Button)
+                                        .aria_label("撤回")
                                         .text_xs()
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .cursor_pointer()
@@ -776,9 +788,12 @@ impl AcpView {
                             smelt_ui::image::thumb_element(im, px(56.), px(96.), 8.0)
                         };
                         let preview_image = im.clone();
+                        let remove_image = cx.entity().downgrade();
                         strip = strip.child(
                             div()
                                 .id(("acp-pending-img", image_key))
+                                .role(gpui::Role::Button)
+                                .aria_label("预览图片")
                                 .relative()
                                 .cursor_pointer()
                                 .hover(|d| d.opacity(0.88))
@@ -797,6 +812,9 @@ impl AcpView {
                                 .child(
                                     // 右上角小 ×：点掉这张。
                                     div()
+                                        .id(("acp-pending-img-remove", image_key))
+                                        .role(gpui::Role::Button)
+                                        .aria_label("移除图片")
                                         .absolute()
                                         .top(px(-4.))
                                         .right(px(-4.))
@@ -820,6 +838,17 @@ impl AcpView {
                                                 cx.stop_propagation();
                                                 cx.notify();
                                             }),
+                                        )
+                                        .on_a11y_action(
+                                            gpui::AccessibleAction::Click,
+                                            move |_, _, cx| {
+                                                let _ = remove_image.update(cx, |this, cx| {
+                                                    if ix < this.pending_images.len() {
+                                                        this.pending_images.remove(ix);
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            },
                                         ),
                                 ),
                         );
@@ -851,6 +880,8 @@ impl AcpView {
                                 .child(
                                     div()
                                         .id("acp-trajectory")
+                                        .role(gpui::Role::Button)
+                                        .aria_label("会话追踪")
                                         .flex_shrink_0()
                                         .size(px(18.))
                                         .flex()
@@ -880,6 +911,12 @@ impl AcpView {
                                     let cached_read = self.usage_cached_read;
                                     let mut chip = div()
                                         .id("acp-usage")
+                                        .role(gpui::Role::Button)
+                                        .aria_label(if compacting {
+                                            "压缩中"
+                                        } else {
+                                            "上下文用量"
+                                        })
                                         .debug_selector(|| "ACP_USAGE_RING".into())
                                         .flex_shrink_0()
                                         .size(px(18.))
@@ -934,6 +971,8 @@ impl AcpView {
                         .child(
                             div()
                                 .id("acp-attach")
+                                .role(gpui::Role::Button)
+                                .aria_label("添加文件")
                                 .flex_shrink_0()
                                 .size(px(32.))
                                 .rounded_full()
@@ -973,6 +1012,8 @@ impl AcpView {
                             row.child(
                                 div()
                                     .id("acp-stop")
+                                    .role(gpui::Role::Button)
+                                    .aria_label(label)
                                     .flex_shrink_0()
                                     .size(px(32.))
                                     .rounded_full()
@@ -1004,6 +1045,8 @@ impl AcpView {
                                 // 圆钮 + 上箭头。有内容才是主操作色，空着是灰底。
                                 div()
                                     .id("acp-send")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("发送")
                                     .flex_shrink_0()
                                     .size(px(32.))
                                     .rounded_full()
@@ -1092,6 +1135,8 @@ impl AcpView {
                     .child(
                         div()
                             .id("acp-usage-close")
+                            .role(gpui::Role::Button)
+                            .aria_label("关闭")
                             .size(px(24.))
                             .rounded_md()
                             .flex()
@@ -1195,6 +1240,8 @@ impl AcpView {
                 h_flex().w_full().justify_end().child(
                     div()
                         .id("acp-usage-compact")
+                        .role(gpui::Role::Button)
+                        .aria_label("压缩上下文")
                         .h(ui_theme::height::sm())
                         .px_3()
                         .rounded(ui_theme::row_radius())
@@ -1236,9 +1283,12 @@ impl AcpView {
         if running == 0 {
             return None;
         }
+        let summary = background_task_summary(running);
         Some(
             h_flex()
                 .id("acp-background-tasks")
+                .role(gpui::Role::Button)
+                .aria_label(summary.clone())
                 .flex_shrink_0()
                 .h(ui_theme::height::xxs())
                 .px_2()
@@ -1258,7 +1308,7 @@ impl AcpView {
                         .rounded_full()
                         .bg(gpui::rgb(ui_theme::blue())),
                 )
-                .child(background_task_summary(running))
+                .child(summary)
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.background_tasks_open = !this.background_tasks_open;
                     this.usage_popover_open = false;
@@ -1286,8 +1336,11 @@ impl AcpView {
             .gap_1();
         for task in running {
             let id = task.id.clone();
+            let title_line = background_task_one_line(&task.title);
             let mut row = v_flex()
                 .id((gpui::ElementId::from("acp-background-task"), id.clone()))
+                .role(gpui::Role::Button)
+                .aria_label(title_line.clone())
                 .gap_1()
                 .px_2()
                 .py_1p5()
@@ -1326,7 +1379,7 @@ impl AcpView {
                                 .truncate()
                                 .text_sm()
                                 .text_color(gpui::rgb(ui_theme::text_bright()))
-                                .child(background_task_one_line(&task.title)),
+                                .child(title_line),
                         ),
                 )
                 .child(
@@ -1379,6 +1432,8 @@ impl AcpView {
                     .child(
                         div()
                             .id("acp-background-task-close")
+                            .role(gpui::Role::Button)
+                            .aria_label("关闭")
                             .size(px(24.))
                             .rounded_md()
                             .flex()

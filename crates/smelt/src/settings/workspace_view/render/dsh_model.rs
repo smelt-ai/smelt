@@ -1,6 +1,7 @@
 //! 设置页：模型 / DeepSeek Harness。
 
 use super::*;
+use smelt_ui::IconAction as _;
 
 pub(super) fn dsh_model_page(
     entity: Entity<Workspace>,
@@ -651,7 +652,7 @@ pub(super) fn dsh_model_page(
                                                     .ghost()
                                                     .small()
                                                     .icon(crate::trash_icon())
-                                                    .tooltip("移除此模型")
+                                                    .icon_action("移除此模型")
                                                     .on_click(move |_, _, cx| {
                                                         remove_entity.update(
                                                             cx,

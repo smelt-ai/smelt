@@ -59,6 +59,7 @@ gpui-component = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971
 gpui-fps = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
 gpui-kit-assets = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
 gpui-shell = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+gpui-component-shell = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }
