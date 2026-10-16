@@ -166,7 +166,7 @@ pub(super) fn builtin_provider_row(
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(super::pi_model::ROW_TITLE_PX))
+                                .text_sm()
                                 .text_color(palette.fg)
                                 .child(provider.name.clone()),
                         )

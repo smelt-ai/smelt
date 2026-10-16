@@ -64,6 +64,7 @@ smelt {version}
   smelt automation list|get|create|update|enable|disable|run|delete
   smelt settings get
   smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
+  smelt settings set appearance.theme=\"Ayu Dark\"
   smelt settings set memory.embedding_base_url=http://localhost:11434/v1 memory.embedding_model=bge-m3
 
 智能体：

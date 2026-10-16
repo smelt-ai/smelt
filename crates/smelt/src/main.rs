@@ -38,6 +38,7 @@ mod resizable_split;
 mod session_history;
 mod session_list;
 mod settings;
+mod shell_plugins;
 mod sidebar_order;
 mod stage;
 mod status_item;
@@ -83,7 +84,6 @@ use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{
     DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart,
 };
-use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::resizable::{ResizablePanelEvent, ResizableState, resizable_panel};
 use gpui_component::slider::SliderState;
 use gpui_component::*;
@@ -187,6 +187,13 @@ struct DaemonStatesSubscription {
 
 impl Global for DaemonStatesSubscription {}
 
+/// 主窗口关闭时关掉设置窗口。订阅必须由 app 持有，否则初始化闭包返回就取消了。
+struct MainWindowClosedSubscription {
+    _subscription: Subscription,
+}
+
+impl Global for MainWindowClosedSubscription {}
+
 /// smeltd 远程会话目录在 GUI 内的只读投影。唯一的 daemon `event_subscribe` 循环写入它；
 /// 各个 Workspace 只观察并渲染，不能重新读写历史 JSON 文件或自行建第二条订阅连接。
 #[derive(Clone, Default)]
@@ -281,24 +288,6 @@ enum Cmd {
     SwitchTab(usize),
 }
 
-/// 命令面板的单个列表项：标签 + 选中态。
-#[derive(IntoElement)]
-struct CmdItem {
-    base: ListItem,
-    label: SharedString,
-    selected: bool,
-}
-
-impl CmdItem {
-    fn new(id: impl Into<ElementId>, label: SharedString, selected: bool) -> Self {
-        Self {
-            base: ListItem::new(id).selected(selected),
-            label,
-            selected,
-        }
-    }
-}
-
 /// 按本地日历把 unix 秒归入「今天 / 昨天 / 本周 / 更早」。
 fn last_updated_bucket(timestamp: u64, now: chrono::DateTime<Local>) -> usize {
     let Some(updated) = Local
@@ -320,95 +309,6 @@ fn unix_now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
-}
-
-impl Selectable for CmdItem {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
-    }
-}
-
-impl RenderOnce for CmdItem {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let fg = if self.selected {
-            cx.theme().accent_foreground
-        } else {
-            cx.theme().foreground
-        };
-        self.base
-            .px_3()
-            .py_1()
-            .child(div().text_color(fg).child(self.label))
-    }
-}
-
-/// 命令面板列表的数据源：全部命令 + 当前查询过滤结果。
-/// 搜索输入、上下选择、回车确认、Esc 取消都由 `ListState` 负责。
-struct CmdDelegate {
-    all: Vec<(SharedString, Cmd)>,
-    matched: Vec<(SharedString, Cmd)>,
-    selected_index: Option<IndexPath>,
-}
-
-impl CmdDelegate {
-    fn new(all: Vec<(SharedString, Cmd)>) -> Self {
-        Self {
-            matched: all.clone(),
-            all,
-            selected_index: Some(IndexPath::default()),
-        }
-    }
-}
-
-impl ListDelegate for CmdDelegate {
-    type Item = CmdItem;
-
-    fn items_count(&self, _section: usize, _: &App) -> usize {
-        self.matched.len()
-    }
-
-    fn perform_search(
-        &mut self,
-        query: &str,
-        _: &mut Window,
-        _: &mut Context<ListState<Self>>,
-    ) -> Task<()> {
-        let q = query.to_lowercase();
-        self.matched = self
-            .all
-            .iter()
-            .filter(|(label, _)| q.is_empty() || label.to_lowercase().contains(&q))
-            .cloned()
-            .collect();
-        Task::ready(())
-    }
-
-    fn set_selected_index(
-        &mut self,
-        ix: Option<IndexPath>,
-        _: &mut Window,
-        cx: &mut Context<ListState<Self>>,
-    ) {
-        self.selected_index = ix;
-        cx.notify();
-    }
-
-    fn render_item(
-        &mut self,
-        ix: IndexPath,
-        _: &mut Window,
-        _: &mut Context<ListState<Self>>,
-    ) -> Option<Self::Item> {
-        let selected = Some(ix) == self.selected_index;
-        self.matched
-            .get(ix.row)
-            .map(|(label, _)| CmdItem::new(ix, label.clone(), selected))
-    }
 }
 
 /// 舞台覆盖页：盖在当前会话舞台上，不是一级导航（一级导航是 `WorkspaceRoute`）。
@@ -439,10 +339,68 @@ impl StageCover {
 /// `refresh_windows()` 把独立的 TerminalView 画布也一起标脏。
 static STATE_REFRESH_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
+/// 当前主工作台。窗口在不在只看 `window`：设置窗口强持有同一份 `Workspace`，
+/// 主窗口关掉之后 `workspace` 仍能 `upgrade`。
+#[derive(Clone)]
+struct MainWindow {
+    window: WindowHandle<Root>,
+    workspace: WeakEntity<Workspace>,
+}
+
+fn current_workspace(current: &Rc<RefCell<Option<MainWindow>>>) -> Option<WeakEntity<Workspace>> {
+    current.borrow().as_ref().map(|main| main.workspace.clone())
+}
+
+/// 窗口还在窗口表里。`is_active` 返回 `None` 表示已关，或这扇窗口正在被借用。
+/// 不要在它自己的 update 里调用。
+fn window_handle_is_open<V: 'static + Render>(window: &WindowHandle<V>, cx: &mut App) -> bool {
+    window.is_active(cx).is_some()
+}
+
+fn close_settings_window(cx: &mut App) {
+    let Some(handle) = cx
+        .try_global::<settings::SettingsWindowHandle>()
+        .map(|handle| handle.0)
+    else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, _| window.remove_window());
+}
+
+fn close_settings_if_main_window_closed(
+    main_id: Option<WindowId>,
+    closed_id: WindowId,
+    cx: &mut App,
+) {
+    if main_id == Some(closed_id) {
+        close_settings_window(cx);
+    }
+}
+
+/// 主窗口还在就原样返回。已经关掉时，先关掉仍绑着旧 Workspace 的设置窗口，再开一扇。
+/// 设置窗口若留着，新窗口会从磁盘装出第二份 Workspace，设置页仍改着旧的那份。
+/// 不要在主窗口自己的 update 里调用：窗口被借用时 `is_active` 也是 `None`。
+fn ensure_main_window(current: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) -> MainWindow {
+    let existing = current.borrow().clone();
+    if let Some(main) = existing
+        && window_handle_is_open(&main.window, cx)
+    {
+        return main;
+    }
+    close_settings_window(cx);
+    let window_bg = cx
+        .try_global::<Appearance>()
+        .map(|appearance| appearance.window_bg())
+        .unwrap_or(WindowBackgroundAppearance::Opaque);
+    let main = open_workspace_window(cx, window_bg);
+    *current.borrow_mut() = Some(main.clone());
+    main
+}
+
 fn apply_automation_projection(
     snapshot: smelt_core::automation::AutomationFile,
     origin: automation_notifications::AutomationProjectionOrigin,
-    current_ws: &Rc<RefCell<Option<WeakEntity<Workspace>>>>,
+    current_ws: &Rc<RefCell<Option<MainWindow>>>,
     cx: &mut gpui::App,
 ) {
     let mut config = cx.global::<settings::AgentHostState>().clone();
@@ -497,15 +455,12 @@ fn apply_automation_projection(
 
     // 自动化投影不是 ACP 相位那种高频流，不能走 300ms 合并刷新：
     // 保存回包已经 notify 过一次，若这里再延迟 notify，编辑器会隔一拍再闪。
-    if let Some(workspace) = current_ws.borrow().clone() {
+    if let Some(workspace) = current_workspace(current_ws) {
         let _ = workspace.update(cx, |_, cx| cx.notify());
     }
 }
 
-fn schedule_state_refresh(
-    current_ws: &Rc<RefCell<Option<WeakEntity<Workspace>>>>,
-    cx: &mut gpui::App,
-) {
+fn schedule_state_refresh(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: &mut gpui::App) {
     if STATE_REFRESH_SCHEDULED.swap(true, Ordering::Relaxed) {
         return; // 已有一笔刷新在途，这次更新并入它
     }
@@ -516,7 +471,7 @@ fn schedule_state_refresh(
             .await;
         STATE_REFRESH_SCHEDULED.store(false, Ordering::Relaxed);
         cx.update(|cx| {
-            if let Some(workspace) = current_ws.borrow().clone() {
+            if let Some(workspace) = current_workspace(&current_ws) {
                 let _ = workspace.update(cx, |_, cx| cx.notify());
             }
         });
@@ -553,23 +508,19 @@ struct SessionUiState {
     diff_gen: u64,
     /// 右侧 Git 文件树点击后，等待聚合 diff 加载完成再定位的文件。
     pending_diff_file: Option<String>,
-    /// Diff 审查拖选的起点；用于计算连续选区范围。
-    diff_selection_anchor: Option<usize>,
-    /// 拖选当前指针所在的可评论行；松开后 `+` 显示在这里，而不是起点。
-    diff_selection_cursor: Option<usize>,
-    /// 指针从行号栏按下到松开的短暂状态；不能由 anchor 推断，因为松开后锚点仍要显示。
-    diff_selection_dragging: bool,
-    diff_selected: HashSet<usize>,
-    /// 选区和评论器是两步操作：只在点击 `+` 后插入并聚焦评论卡。
+    /// 点「+」之后才展开评论。拖选期间不往 Diff 里加注释，列表高度不变。
     diff_comment_open: bool,
     git_collapsed_diff_files: HashSet<String>,
-    /// 该折叠集合的变更序号，diff_derived 的缓存 key 之一（折叠/展开文件头时 +1）。
-    git_collapsed_diff_files_gen: u64,
-    active_hunk: Option<usize>,
     diff_split: bool,
-    /// diff 视图派生数据缓存（gutter 宽 / 内容宽 / 展开行）：diff 内容与折叠状态
-    /// 不变时每帧复用，避免大 diff 下每帧 O(n) 重算（掉帧主因之一）。
-    diff_derived: Option<git_panel::DiffDerivedCache>,
+    /// 变更栏正文。补丁原文没变时不调用 `set_files`，滚动和折叠才留得住。
+    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
+    /// 当前装进 `diff_view` 的补丁原文。
+    diff_view_patch: String,
+    /// 评论卡锚在这个源码范围的末行。
+    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
+    _diff_view_sub: Option<Subscription>,
+    /// `DiffFile::parse` 失败时的说明。git 报错、只有子模块这类非 diff 文本走这里。
+    diff_parse_error: Option<String>,
     git_tree_collapsed: HashSet<String>,
     diff_scope: git_panel::DiffScope,
 }
@@ -596,16 +547,14 @@ impl Default for SessionUiState {
             git_diff: None,
             diff_gen: 0,
             pending_diff_file: None,
-            diff_selection_anchor: None,
-            diff_selection_cursor: None,
-            diff_selection_dragging: false,
-            diff_selected: HashSet::new(),
             diff_comment_open: false,
             git_collapsed_diff_files: HashSet::new(),
-            git_collapsed_diff_files_gen: 0,
-            active_hunk: None,
             diff_split: false,
-            diff_derived: None,
+            diff_view: None,
+            diff_view_patch: String::new(),
+            diff_comment_range: None,
+            _diff_view_sub: None,
+            diff_parse_error: None,
             git_tree_collapsed: HashSet::new(),
             diff_scope: git_panel::DiffScope::All,
         }
@@ -719,16 +668,14 @@ impl SessionUiState {
             git_diff: None,
             diff_gen: 0,
             pending_diff_file: None,
-            diff_selection_anchor: None,
-            diff_selection_cursor: None,
-            diff_selection_dragging: false,
-            diff_selected: HashSet::new(),
             diff_comment_open: false,
             git_collapsed_diff_files: HashSet::new(),
-            git_collapsed_diff_files_gen: 0,
-            active_hunk: None,
             diff_split: archive.diff_split,
-            diff_derived: None,
+            diff_view: None,
+            diff_view_patch: String::new(),
+            diff_comment_range: None,
+            _diff_view_sub: None,
+            diff_parse_error: None,
             git_tree_collapsed: archive.git_tree_collapsed,
             diff_scope: archive.diff_scope,
         }
@@ -768,16 +715,14 @@ struct ProjectUiState {
     git_diff: Option<GitDiff>,
     diff_gen: u64,
     pending_diff_file: Option<String>,
-    diff_selection_anchor: Option<usize>,
-    diff_selection_cursor: Option<usize>,
-    diff_selection_dragging: bool,
-    diff_selected: HashSet<usize>,
     diff_comment_open: bool,
     git_collapsed_diff_files: HashSet<String>,
-    git_collapsed_diff_files_gen: u64,
-    active_hunk: Option<usize>,
     diff_split: bool,
-    diff_derived: Option<git_panel::DiffDerivedCache>,
+    diff_view: Option<Entity<gpui_component::diff::DiffState>>,
+    diff_view_patch: String,
+    diff_comment_range: Option<gpui_component::diff::DiffLineRange>,
+    _diff_view_sub: Option<Subscription>,
+    diff_parse_error: Option<String>,
     git_tree_collapsed: HashSet<String>,
     diff_scope: git_panel::DiffScope,
 }
@@ -809,16 +754,14 @@ impl SessionUiState {
             git_diff: self.git_diff.take(),
             diff_gen: std::mem::take(&mut self.diff_gen),
             pending_diff_file: self.pending_diff_file.take(),
-            diff_selection_anchor: self.diff_selection_anchor.take(),
-            diff_selection_cursor: self.diff_selection_cursor.take(),
-            diff_selection_dragging: std::mem::take(&mut self.diff_selection_dragging),
-            diff_selected: std::mem::take(&mut self.diff_selected),
             diff_comment_open: std::mem::take(&mut self.diff_comment_open),
             git_collapsed_diff_files: std::mem::take(&mut self.git_collapsed_diff_files),
-            git_collapsed_diff_files_gen: std::mem::take(&mut self.git_collapsed_diff_files_gen),
-            active_hunk: self.active_hunk.take(),
             diff_split: std::mem::replace(&mut self.diff_split, defaults.diff_split),
-            diff_derived: self.diff_derived.take(),
+            diff_view: self.diff_view.take(),
+            diff_view_patch: std::mem::take(&mut self.diff_view_patch),
+            diff_comment_range: self.diff_comment_range.take(),
+            _diff_view_sub: self._diff_view_sub.take(),
+            diff_parse_error: self.diff_parse_error.take(),
             git_tree_collapsed: std::mem::take(&mut self.git_tree_collapsed),
             diff_scope: std::mem::replace(&mut self.diff_scope, defaults.diff_scope),
         }
@@ -845,16 +788,14 @@ impl SessionUiState {
         self.git_diff = ui.git_diff;
         self.diff_gen = ui.diff_gen;
         self.pending_diff_file = ui.pending_diff_file;
-        self.diff_selection_anchor = ui.diff_selection_anchor;
-        self.diff_selection_cursor = ui.diff_selection_cursor;
-        self.diff_selection_dragging = ui.diff_selection_dragging;
-        self.diff_selected = ui.diff_selected;
         self.diff_comment_open = ui.diff_comment_open;
         self.git_collapsed_diff_files = ui.git_collapsed_diff_files;
-        self.git_collapsed_diff_files_gen = ui.git_collapsed_diff_files_gen;
-        self.active_hunk = ui.active_hunk;
         self.diff_split = ui.diff_split;
-        self.diff_derived = ui.diff_derived;
+        self.diff_view = ui.diff_view;
+        self.diff_view_patch = ui.diff_view_patch;
+        self.diff_comment_range = ui.diff_comment_range;
+        self._diff_view_sub = ui._diff_view_sub;
+        self.diff_parse_error = ui.diff_parse_error;
         self.git_tree_collapsed = ui.git_tree_collapsed;
         self.diff_scope = ui.diff_scope;
     }
@@ -1024,11 +965,8 @@ fn apply_daemon_attention_baseline(state: &terminal::DaemonSessionState, cx: &mu
 /// 新关注事件入队后的应用级协调出口。这里一次性完成角标、菜单和通知投递；
 /// `Workspace::render` 不参与消费队列，因此原生全屏窗口在其它 Space 暂停绘制时，
 /// hook/OSC/ACP 事件仍会立即变成系统通知。
-fn dispatch_pending_attention(
-    current_ws: &Rc<RefCell<Option<WeakEntity<Workspace>>>>,
-    cx: &mut App,
-) {
-    let workspace = current_ws.borrow().clone();
+fn dispatch_pending_attention(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
+    let workspace = current_workspace(current_ws);
     let app_active = status_item::is_app_active();
     let Some(store) = cx
         .try_global::<AttentionGlobal>()
@@ -1059,14 +997,10 @@ fn dispatch_pending_attention(
     // 只有主工作区窗口本身也拿到焦点，逻辑上的当前 pane 才算用户真的正在看。
     // 未查看的事件一律走系统通知；后台分流仍只依赖 app_active，避免原生全屏窗口
     // 留着 key-window 状态时被误判成正在看。
+    let main_window = current_ws.borrow().as_ref().map(|main| main.window);
     let workspace_window_active = app_active
-        && workspace
-            .as_ref()
-            .and_then(|workspace| {
-                workspace
-                    .update_in(cx, |_, window, _| window.is_window_active())
-                    .ok()
-            })
+        && main_window
+            .and_then(|window| window.is_active(cx))
             .unwrap_or(false);
     let contexts = workspace
         .as_ref()
@@ -2366,13 +2300,15 @@ struct Workspace {
     dir_cache: file_tree::DirCache,
     /// 正在后台读取的目录（防重复并发 spawn）。
     dir_inflight: HashSet<String>,
+    /// 目录列表失效代数。删除发生在读取期间时，旧回包不得再把缓存标成新鲜。
+    dir_generation: HashMap<String, u64>,
     /// 文件树键盘选中的条目绝对路径（↑↓ 导航用）。
     /// 打开文件后要 reveal 的路径：祖先目录缓存齐了再 scroll_to_item。
     file_tree_pending_reveal: Option<String>,
     /// 当前在文件树里打开查看的文件（含预高亮的行数据）。
     /// ACP 消息图片的窗口级预览。放在 Workspace 而非 AcpView，遮罩才能覆盖 Session
     /// Panel、Tool Panel 和输入区，且不受会话面板裁剪。解码/降采样走
-    /// `smelt_ui::image` 的内容寻址缓存：渲染时查 `cached()` 取当前这张图的结果，
+    /// `smelt_ui::image` 按图片 id 缓存：渲染时查 `cached()` 取当前这张图的结果，
     /// 不用再单独持有解码后的 RenderImage 字段。
     acp_image_preview: Option<Arc<gpui::Image>>,
     /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
@@ -2395,8 +2331,7 @@ struct Workspace {
     /// 「日志」页（git 提交历史 + 分支图）的全部状态。
     git_log: git_log::GitLogState,
     /// Git 页当前在看哪个子页（改动 / 日志）。
-    /// 正在推送（按钮显示「推送中…」并禁用，避免连点推两次）。
-    pushing: bool,
+
     /// 正在确认删除的分支：(仓库根, 分支名, 是否远端分支)。
     delete_branch_target: Option<(String, String, bool)>,
     /// 日志页三栏（分支树 / 提交列表 / 详情）的拖拽状态。窗口窄时靠它腾地方。
@@ -2412,6 +2347,8 @@ struct Workspace {
     /// 交互式 diff：选中待评论的行号集合（对应 GitDiff.lines 下标），换文件/重开 diff 时清空。
     /// 交互式 diff 的评论输入框（懒创建，随 Git 视图渲染出待发送的 diff 时创建）。
     diff_comment_input: Option<Entity<gpui_component::input::TextareaState>>,
+    /// 变更栏 diff 正文。和右侧文件列表分开缓存：列表滚动不再重排整份 diff。
+    diff_body: Option<Entity<git_panel::GitDiffBody>>,
     /// Git 视图的 commit message 输入框，按**仓库根**分开。
     ///
     /// 多仓工作区里提交信息天然属于某一个仓库：共用一个框会把写给子仓的
@@ -2467,16 +2404,8 @@ struct Workspace {
     /// 首次扫描尚未完成时打开的 IDE 菜单。弱引用不会把已经关闭的弹层留在内存里；
     /// 完成后统一原地替换其加载项。
     ide_popup_waiters: Vec<stage::IdePopupWaiter>,
-    /// 命令面板（Cmd+K）；None 表示未打开。搜索/导航/确认由 ListState 负责。
-    palette: Option<Entity<ListState<CmdDelegate>>>,
-    /// 命令面板的事件订阅（确认/取消）；随面板关闭一并释放。
-    _palette_sub: Option<Subscription>,
-    /// 各滚动区的常驻滚动句柄——供 gpui-component Scrollbar 读取位置并绘制。
-    /// 必须常驻（每帧新建会丢失滚动位置）。
-    diff_scroll: VirtualListScrollHandle,
-    /// Diff 代码正文专用的横向滚动位置。纵向虚拟列表不能复用它：行号栏和
-    /// 行内评论器是审查轨道，必须始终钉在视口左侧。
-    diff_code_scroll: ScrollHandle,
+    /// 命令面板（Cmd+K）；None 表示未打开。查询和选中在 CommandState 里。
+    palette: Option<Entity<gpui_component::command::CommandState>>,
     /// 变更列表的滚动位置。列表里混着仓库行、提交框和文件行，高度不一，
     /// 用不了等高虚拟列表，所以是常规滚动容器。
     git_list_scroll: VirtualListScrollHandle,
@@ -2495,6 +2424,11 @@ struct Workspace {
     search_results: Option<SearchState>,
     /// 搜索任务自增序号：后台遍历完成时用它丢弃过期结果（期间又改了查询）。
     search_gen: u64,
+    /// 进行中的文件搜索。换查询或清空输入时替换它，取消还没 poll 到的那一轮。
+    search_task: Option<Task<()>>,
+    /// 正在跑的搜索在每个文件边界读这个标志。drop `search_task` 停不掉已经进入
+    /// 同步遍历的那一次。
+    search_cancel: Option<Arc<AtomicBool>>,
     _stage_tool_panel_resize_sub: Subscription,
     /// 启动项列表编辑器（设置页「会话与 Agent」分组懒创建）。
     launch_inputs: Option<settings::LaunchInputs>,
@@ -2593,12 +2527,14 @@ struct Workspace {
     /// root → 连续读取失败次数。失败数据不能冒充“工作区干净”；前三次按短退避
     /// 自动重试，持续失败则等文件事件或后续界面交互再尝试。
     git_status_failures: HashMap<String, u8>,
-    /// 单文件 git add/reset 的即时 UI 状态。操作完成后继续保留到一次操作后发起的
-    /// 权威 status 回包，避免复选框先回弹再延迟移动分组。
+    /// 单文件 git add/reset 的即时 UI 状态。进程是否在跑看 `git_writes`，
+    /// 这里只在进程返回后保留到权威 status 回包，避免复选框先回弹再延迟移动分组。
     git_index_pending: HashMap<(String, String), git_panel::PendingGitIndexOp>,
     /// 分支列表缓存（root → (取得时刻, 数据)），Git 页头部分支切换下拉用；同
     /// git_status 一套只在 Git 页打开时后台刷新。
     branches: HashMap<String, (Instant, BranchList)>,
+    /// 分支列表失效代数。删除分支发生在 `for-each-ref` 期间时，旧回包不得再写回。
+    branches_generation: HashMap<String, u64>,
     /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
     branches_inflight: HashSet<String>,
     /// 每个 root 常驻的文件监听器（root → watcher）。watcher 必须存活才会继续收事件，
@@ -2711,10 +2647,11 @@ struct Workspace {
     discard_file_target: Option<(String, String, bool)>,
     /// 「丢弃全部改动」确认弹窗的目标仓库根（Some = 弹窗开着）。见 git_panel 模块。
     discard_all_target: Option<String>,
-    /// git 远端同步 / stash 操作进行中：Some(操作名) = 正在跑，None = 空闲。
-    /// 既做并发闸门（防连点抢 index.lock），也给 SOURCE CONTROL 头显示「拉取中…」
-    /// 这类进行中反馈——否则点了按钮几秒内毫无动静。见 git_panel 模块 run_git_op。
-    git_op: Option<&'static str>,
+    /// 每个仓库正在跑的 git 写入。键是这次命令的仓库根。
+    ///
+    /// `index.lock` 属于这一个仓库，所以另一个仓库可以同时写。同一个根上的
+    /// 提交、推送、获取、暂存、建工作树都进这一张表，由 `spawn_git` 占用和释放。
+    git_writes: HashMap<String, git_panel::GitWrite>,
     /// 各类后台操作（建/删 worktree、生成 commit message 等）失败时的提示，render
     /// 顶部取走并弹成通知；后台任务里没有 Window，弹不了通知，所以先暂存到这。
     background_error: Option<String>,
@@ -2784,6 +2721,19 @@ struct Workspace {
     /// 文件树的专属键盘焦点。文件树的方向键导航只在这个焦点生效，不能让终端、
     /// ACP 输入框或其它控件冒泡出来的按键误操作右侧面板。
     file_tree_focus_handle: FocusHandle,
+    /// 确认弹窗共用的焦点陷阱。`Dialog::new` 每次都会新造一个句柄，不能用那个。
+    modal_focus: FocusHandle,
+    /// 主窗口弹窗已经记下打开前的焦点。嵌套弹窗不再覆盖。
+    main_modal_guard: bool,
+    main_modal_restore: Option<WeakFocusHandle>,
+    /// 这一帧的打开动作会自己把焦点放进输入框，sync 不要再抢回对话框。
+    main_modal_hold: bool,
+    /// 当前最上层确认框的层级。变了才把焦点交给新的那一层。
+    main_modal_rank: Option<u8>,
+    /// 设置窗口的弹窗单独记一份。主窗口的 prepare 不能把焦点抢到另一扇窗。
+    settings_modal_guard: bool,
+    settings_modal_restore: Option<WeakFocusHandle>,
+    settings_modal_rank: Option<u8>,
     /// 冷启动的会话恢复流程是否已经跑完（没有待恢复会话时启动即为 true）。
     /// save_state 的抹盘安全阀靠它区分「还没恢复上来的空」和「用户真把会话全关了」。
     sessions_restored: bool,
@@ -2878,6 +2828,8 @@ impl Workspace {
         // 插件 tab 注册表必须先于存档读取建好：存档里的 tab 以插件 key 记录，
         // 注册表为空时会全部降级成 Files，用户上次停在插件面板就再也回不去。
         plugin_ui::refresh_once(cx);
+        // gpui-shell 插件 tab 同理，也要先于存档读取挂好。
+        shell_plugins::mount_all(window, cx);
         // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
         // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
         let (saved, workspace_state_load_failed, workspace_load_error) = match load_ws_state() {
@@ -2987,6 +2939,7 @@ impl Workspace {
             context_menu_generation: 0,
             dir_cache: HashMap::new(),
             dir_inflight: HashSet::new(),
+            dir_generation: HashMap::new(),
             file_tree_pending_reveal: None,
             acp_image_preview: None,
             file_gen: 0,
@@ -2995,7 +2948,6 @@ impl Workspace {
             delete_file_target: None,
             pending_switch_after_save: None,
             git_log: git_log::GitLogState::default(),
-            pushing: false,
             delete_branch_target: None,
             git_log_resize,
             stage_tool_panel_resize,
@@ -3004,6 +2956,7 @@ impl Workspace {
             sidebar_w,
             sidebar_drag_start: None,
             diff_comment_input: None,
+            diff_body: None,
             commit_msg_inputs: HashMap::new(),
             commit_errors: HashMap::new(),
             // 没有待恢复会话 → 一开始就算「恢复完毕」，否则等 schedule_session_restore 置位。
@@ -3057,9 +3010,6 @@ impl Workspace {
             ide_catalog: ide::IdeCatalog::default(),
             ide_popup_waiters: Vec::new(),
             palette: None,
-            _palette_sub: None,
-            diff_scroll: VirtualListScrollHandle::new(),
-            diff_code_scroll: ScrollHandle::new(),
             git_list_scroll: VirtualListScrollHandle::new(),
             file_tree_scroll: VirtualListScrollHandle::new(),
             file_tree_drag_start: None,
@@ -3067,6 +3017,8 @@ impl Workspace {
             _file_filter_sub: None,
             search_results: None,
             search_gen: 0,
+            search_task: None,
+            search_cancel: None,
             _stage_tool_panel_resize_sub,
             git_status: HashMap::new(),
             git_repos: HashMap::new(),
@@ -3078,6 +3030,7 @@ impl Workspace {
             git_status_failures: HashMap::new(),
             git_index_pending: HashMap::new(),
             branches: HashMap::new(),
+            branches_generation: HashMap::new(),
             branches_inflight: HashSet::new(),
             git_watchers: HashMap::new(),
             git_autofetch_at: HashMap::new(),
@@ -3155,7 +3108,7 @@ impl Workspace {
             discard_hunk_target: None,
             discard_file_target: None,
             discard_all_target: None,
-            git_op: None,
+            git_writes: HashMap::new(),
             background_error: workspace_load_error
                 .map(|error| format!("工作区存档无法打开，已停止写入以免覆盖原会话。{error}")),
             provider_quota_refresh_tx: None,
@@ -3183,6 +3136,14 @@ impl Workspace {
             active_session_revision: 0,
             focus_handle: cx.focus_handle(),
             file_tree_focus_handle: cx.focus_handle(),
+            modal_focus: cx.focus_handle(),
+            main_modal_guard: false,
+            main_modal_restore: None,
+            main_modal_hold: false,
+            main_modal_rank: None,
+            settings_modal_guard: false,
+            settings_modal_restore: None,
+            settings_modal_rank: None,
         };
         // 只预取一个已知的系统 Finder 图标，不枚举第三方应用；真实 IDE 列表由
         // stage.rs 在有项目舞台显示后的空闲期再低优先级预热。
@@ -4039,10 +4000,11 @@ impl Render for Workspace {
             // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
             // window 的 focus 兜底钉在这层，保证下面的全局 on_key_down 收得到事件。
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &Quit, _window, cx| {
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 if this.quit_requested {
                     return;
                 }
+                this.begin_main_modal_focus(window, cx);
                 this.show_quit_confirm = true;
                 cx.notify();
             }))
@@ -4284,7 +4246,8 @@ impl Render for Workspace {
                                 .size_4(),
                             )
                             .tooltip(|window, cx| {
-                                gpui_component::tooltip::Tooltip::new("切换左侧栏  ⌘B")
+                                gpui_component::tooltip::Tooltip::new("切换左侧栏")
+                                    .action(&ToggleSidebar, None)
                                     .build(window, cx)
                             })
                             .on_mouse_down(
@@ -4459,13 +4422,11 @@ fn smelt_file_url_to_target(url: &str) -> Option<(String, Option<usize>)> {
     Some((path, line))
 }
 
-/// 开一扇主工作台窗口（Workspace + Root 包装），返回其 weak 引用。
+/// 开一扇主工作台窗口（Workspace + Root 包装）。
 /// 首启和「点 Dock 图标重开」共用这一份：`Workspace::new` 本来就会从存档 + smeltd
 /// 重新拼出会话布局，跟正常重启应用效果一致。
-fn open_workspace_window(
-    cx: &mut App,
-    window_bg: WindowBackgroundAppearance,
-) -> WeakEntity<Workspace> {
+/// 返回值同时留下窗口句柄：主窗口还在不在看它，不看 Workspace 还能不能升级。
+fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) -> MainWindow {
     let window_options = WindowOptions {
         // 透明标题栏：红绿灯浮在内容上，拖拽 / 双击最大化由自绘顶栏接管。
         // 纵向位置复用 gpui-component 与 34px TitleBar 配套的契约，再统一叠加
@@ -4476,19 +4437,23 @@ fn open_workspace_window(
         ..Default::default()
     };
     let mut workspace = None;
-    cx.open_window(window_options, |window, cx| {
-        // 界面文字（侧边栏/标签页/状态栏等）用的都是 text_xs/text_sm 这类相对 rem
-        // 单位。根据外观设置里的 ui_font_px（默认 16px）统一设置，全局跟着等比例缩放。
-        // 终端内容本身的字号另由 terminal_view.rs 的 FONT_PX 控制，不受这个影响。
-        let ui_font_px = cx.global::<Appearance>().ui_font_px;
-        window.set_rem_size(px(ui_font_px as f32));
-        let view = cx.new(|cx| Workspace::new(window, cx));
-        workspace = Some(view.clone());
-        // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。
-        cx.new(|cx| Root::new(view, window, cx).bg(gpui::transparent_black()))
-    })
-    .expect("打开窗口失败");
-    workspace.expect("回调里一定会设置 workspace").downgrade()
+    let window_handle = cx
+        .open_window(window_options, |window, cx| {
+            // 界面文字（侧边栏/标签页/状态栏等）用的都是 text_xs/text_sm 这类相对 rem
+            // 单位。根据外观设置里的 ui_font_px（默认 16px）统一设置，全局跟着等比例缩放。
+            // 终端内容本身的字号另由 terminal_view.rs 的 FONT_PX 控制，不受这个影响。
+            let ui_font_px = cx.global::<Appearance>().ui_font_px;
+            window.set_rem_size(px(ui_font_px as f32));
+            let view = cx.new(|cx| Workspace::new(window, cx));
+            workspace = Some(view.downgrade());
+            // 顶层视图必须包一层 Root（组件库的主题/遮罩系统要求）。
+            cx.new(|cx| Root::new(view, window, cx).bg(gpui::transparent_black()))
+        })
+        .expect("打开窗口失败");
+    MainWindow {
+        window: window_handle,
+        workspace: workspace.expect("回调里一定会设置 workspace"),
+    }
 }
 
 /// gpui-component 自带的图标集里没有「当前分支」这类专属 git 图标（只有品牌向的
@@ -4648,28 +4613,17 @@ fn main() {
     // （没有 GPUI 的 cx），一样经 channel 转发到下面 run() 里 drain。
     let (status_tx, status_rx) = smol::channel::unbounded::<status_item::StatusItemEvent>();
 
-    // 当前存活的主窗口（weak，随窗口关闭自然失效）。首启时在 run() 里写入；
-    // URL 投递循环和「点 Dock 图标重开」都读它判断当前有没有主窗口。
+    // 当前主窗口。窗口在不在看 WindowHandle，不看 Workspace 弱句柄：设置窗口强持有
+    // 那份实体，主窗口关掉后 upgrade 仍然成功。
     // on_reopen 得在 run() 之前挂在 Application builder 上（跟 on_open_urls 一样），
     // 但它触发时 run() 早已跑起来，Rc 到时候已经被 run() 里的首启逻辑填过了。
-    let current_ws: Rc<RefCell<Option<WeakEntity<Workspace>>>> = Rc::new(RefCell::new(None));
+    let current_ws: Rc<RefCell<Option<MainWindow>>> = Rc::new(RefCell::new(None));
     {
         let current_ws = current_ws.clone();
         // 点 Dock 图标 / 双击程序图标重开：GPUI 只在系统判定「没有可见窗口」时才会调这个
-        // 回调。这里做好兜底：主窗口还活着就什么都不做，只有真的没了才重新开一扇。
+        // 回调。主窗口的句柄还在就什么都不做，只有窗口真的没了才重新开一扇。
         app.on_reopen(move |cx| {
-            let alive = current_ws
-                .borrow()
-                .as_ref()
-                .is_some_and(|w| w.upgrade().is_some());
-            if !alive {
-                let window_bg = cx
-                    .try_global::<Appearance>()
-                    .map(|a| a.window_bg())
-                    .unwrap_or(WindowBackgroundAppearance::Opaque);
-                let ws = open_workspace_window(cx, window_bg);
-                *current_ws.borrow_mut() = Some(ws);
-            }
+            ensure_main_window(&current_ws, cx);
         });
     }
 
@@ -4752,10 +4706,10 @@ fn main() {
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         cx.set_global(appearance.clone());
-        // 代码字体必须在 apply_theme_mode 之前落地：Theme.mono_font_family 从这里读。
+        // 代码字体必须在装主题之前落地：Theme.mono_font_family 从这里读。
         terminal_view::set_font_px(appearance.font_px);
         terminal_view::set_font_family(&appearance.font_family);
-        settings::apply_theme_mode(appearance.theme_mode, cx);
+        settings::apply_named_theme(&appearance.theme_name, cx);
         // 用户自选终端底色要在首帧前生效，并连同主题一起发布给守护（移动端配色）。
         settings::apply_bg_color(&appearance);
         cx.set_global(load_launch_config());
@@ -4794,7 +4748,7 @@ fn main() {
         let current_ws_for_daemon_states = current_ws.clone();
         let daemon_states_subscription = cx.observe_global::<DaemonStates>(move |cx| {
             let states = DaemonStates::drain_pending(cx);
-            if let Some(ws) = current_ws_for_daemon_states.borrow().clone() {
+            if let Some(ws) = current_workspace(&current_ws_for_daemon_states) {
                 let _ = ws.update(cx, |ws, cx| {
                     for state in &states {
                         ws.handle_daemon_state_event(state, cx);
@@ -4899,8 +4853,9 @@ fn main() {
         cx.spawn(async move |cx| {
             while let Ok(event) = daemon_state_rx.recv().await {
                 // 唤醒要拿窗口去重启对话视图，走 update_in；它不是状态投影，后面不用再看。
+                // 主窗口已经关掉就放弃这次唤醒，不另开一扇。
                 if let terminal::DaemonStateEvent::ConversationWakeRequested { session_id } = &event {
-                    let workspace = current_ws_for_menu_republish.borrow().clone();
+                    let workspace = current_workspace(&current_ws_for_menu_republish);
                     if let Some(ws) = workspace {
                         let _ = ws.update_in(cx, |ws, window, cx| {
                             ws.wake_conversation_for_remote(session_id.clone(), window, cx);
@@ -4924,7 +4879,7 @@ fn main() {
                             // subscribe 的首帧意味着刚连上一个 daemon epoch。把桌面端
                             // 自己持有的最新菜单重新放进同一保存队列，覆盖 daemon 重启时
                             // 从旧 dedicated 文件恢复的副本；source revision 会过滤迟到重发。
-                            if let Some(ws) = current_ws_for_menu_republish.borrow().clone() {
+                            if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
                                 let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
                             }
                             if let Some(automations) = automations {
@@ -5031,6 +4986,20 @@ fn main() {
         // 首启主窗口，记入 current_ws（reopen 回调 / URL 投递循环都靠它判断当前主窗口）。
         *current_ws.borrow_mut() = Some(open_workspace_window(cx, window_bg));
 
+        // 主窗口关掉后，设置窗口不能继续强持有那份 Workspace。回调发生时窗口已经不在，
+        // 只能比 window id。订阅必须由 app global 持有，否则初始化闭包返回就取消了。
+        let current_ws_closed = current_ws.clone();
+        let main_window_closed = cx.on_window_closed(move |cx, closed_id| {
+            let main_id = current_ws_closed
+                .borrow()
+                .as_ref()
+                .map(|main| main.window.window_id());
+            close_settings_if_main_window_closed(main_id, closed_id, cx);
+        });
+        cx.set_global(MainWindowClosedSubscription {
+            _subscription: main_window_closed,
+        });
+
         // 退出前尽量提交最后一次 workspace 文档。订阅必须由 app global 持有，否则
         // app.run 的初始化闭包返回时会被 Subscription::drop 自动取消。
         let current_ws_quit = current_ws.clone();
@@ -5038,7 +5007,7 @@ fn main() {
             let flush_done = current_ws_quit
                 .borrow()
                 .as_ref()
-                .and_then(|w| w.upgrade())
+                .and_then(|main| main.workspace.upgrade())
                 .map(|ws| ws.update(cx, |ws, cx| ws.flush_ws_state_on_quit(cx)));
             async move {
                 if let Some(done) = flush_done {
@@ -5050,8 +5019,8 @@ fn main() {
             _subscription: quit_subscription,
         });
 
-        // 消费 Dock / Finder 投递的目录：每个开一个会话（文件取父目录）。常驻到应用退出，
-        // 不因主窗口一度被关掉而停——重开窗口后应继续能接文件投递。
+        // 消费 Dock / Finder 投递的目录：每个开一个项目（文件取父目录）。循环常驻到应用退出。
+        // 主窗口没了就先关掉设置窗口再重开，避免把路径写进用户看不见的那份 Workspace。
         let current_ws_status = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv().await {
@@ -5064,24 +5033,27 @@ fn main() {
                 if paths.is_empty() && internal_files.is_empty() {
                     continue;
                 }
-                let ws = current_ws.borrow().clone();
-                if let Some(ws) = ws {
+                let workspace = cx.update(|cx| {
+                    let main = ensure_main_window(&current_ws, cx);
                     if !paths.is_empty() {
-                        let _ = ws.update(cx, |ws, cx| ws.open_paths(&paths, cx));
+                        let _ = main
+                            .workspace
+                            .update(cx, |ws, cx| ws.open_paths(&paths, cx));
                     }
-                    for (path, line) in internal_files {
-                        let _ = ws.update_in(cx, |ws, window, cx| {
-                            ws.view_file_at(path, line, window, cx)
-                        });
-                    }
+                    main.workspace
+                });
+                for (path, line) in internal_files {
+                    let _ = workspace.update_in(cx, |ws, window, cx| {
+                        ws.view_file_at(path, line, window, cx)
+                    });
                 }
             }
         })
         .detach();
 
-        // 菜单栏图标/下拉菜单事件：主窗口还活着就前置 app（跳会话时顺带切过去）。
-        // 没了就跟 on_reopen 一样重开；稳定的 daemon/run id 在恢复后仍可继续导航，
-        // 只有菜单临时下标在新窗口里已经失去意义。
+        // 菜单栏图标/下拉菜单事件：主窗口还在就前置它并跳过去。窗口句柄失效时先关掉
+        // 设置窗口再重开，避免设置页留在旧 Workspace 上。稳定的 daemon/run id 在恢复后
+        // 仍可继续导航，只有菜单临时下标在新窗口里已经失去意义。
         cx.spawn(async move |cx| {
             while let Ok(event) = status_rx.recv().await {
                 if matches!(
@@ -5096,81 +5068,38 @@ fn main() {
                             notification_status.authorization, notification_status.pending_count
                         );
                     }
-                    if let Some(ws) = current_ws_status.borrow().clone() {
+                    if let Some(ws) = current_workspace(&current_ws_status) {
                         let _ = ws.update(cx, |_, cx| cx.notify());
                     }
                     continue;
                 }
-                let existing_ws = current_ws_status.borrow().clone();
-                let handled_by_existing_window = existing_ws.is_some_and(|ws| {
-                    ws.update_in(cx, |ws, window, cx| {
-                            match &event {
-                                status_item::StatusItemEvent::JumpToDaemonSession(id) => {
-                                    ws.request_notification_session_jump(
-                                        id.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                                status_item::StatusItemEvent::JumpToAutomationRun {
-                                    automation_id,
-                                    run_id,
-                                } => {
-                                    ws.navigate_to_automation_run(
-                                        automation_id.clone(),
-                                        run_id.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                                status_item::StatusItemEvent::ActivateMain
-                                | status_item::StatusItemEvent::SystemNotificationStateChanged => {}
-                            }
-                            // activateIgnoringOtherApps 负责前置应用；这里再显式激活主窗口，
-                            // 让 macOS 切回它所在的原生全屏 Space，而不是只激活菜单栏。
-                            window.activate_window();
-                        })
-                        .is_ok()
-                });
-                if handled_by_existing_window {
-                    status_item::activate_app();
-                } else {
-                    cx.update(|cx| {
-                        let window_bg = cx
-                            .try_global::<Appearance>()
-                            .map(|a| a.window_bg())
-                            .unwrap_or(WindowBackgroundAppearance::Opaque);
-                        let ws = open_workspace_window(cx, window_bg);
-                        match &event {
-                            status_item::StatusItemEvent::JumpToDaemonSession(id) => {
-                                let _ = ws.update_in(cx, |ws, window, cx| {
-                                    ws.request_notification_session_jump(
-                                        id.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                            status_item::StatusItemEvent::JumpToAutomationRun {
-                                automation_id,
-                                run_id,
-                            } => {
-                                let _ = ws.update_in(cx, |ws, window, cx| {
-                                    ws.navigate_to_automation_run(
-                                        automation_id.clone(),
-                                        run_id.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                            status_item::StatusItemEvent::ActivateMain
-                            | status_item::StatusItemEvent::SystemNotificationStateChanged => {}
+                // 窗口句柄失效时先关掉设置窗口再重开，避免菜单栏跳出第二份 Workspace。
+                let workspace =
+                    cx.update(|cx| ensure_main_window(&current_ws_status, cx).workspace);
+                let _ = workspace.update_in(cx, |ws, window, cx| {
+                    match &event {
+                        status_item::StatusItemEvent::JumpToDaemonSession(id) => {
+                            ws.request_notification_session_jump(id.clone(), window, cx);
                         }
-                        *current_ws_status.borrow_mut() = Some(ws);
-                    });
-                    status_item::activate_app();
-                }
+                        status_item::StatusItemEvent::JumpToAutomationRun {
+                            automation_id,
+                            run_id,
+                        } => {
+                            ws.navigate_to_automation_run(
+                                automation_id.clone(),
+                                run_id.clone(),
+                                window,
+                                cx,
+                            );
+                        }
+                        status_item::StatusItemEvent::ActivateMain
+                        | status_item::StatusItemEvent::SystemNotificationStateChanged => {}
+                    }
+                    // activateIgnoringOtherApps 负责前置应用；这里再显式激活主窗口，
+                    // 让 macOS 切回它所在的原生全屏 Space，而不是只激活菜单栏。
+                    window.activate_window();
+                });
+                status_item::activate_app();
             }
         })
         .detach();

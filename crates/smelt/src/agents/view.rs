@@ -4,9 +4,9 @@
 use super::*;
 
 impl Workspace {
-    pub(crate) fn render_delete_agent_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_delete_agent_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(target) = self.agent_surface.pending_delete.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         let (fg, muted) = {
             let theme = cx.theme();
@@ -50,12 +50,12 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(420., true, content, cx)
+        self.modal_shell(420., true, content, crate::overlay::ModalLayer::DeleteAgent, cx)
     }
 
-    pub(crate) fn render_delete_agent_memory_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_delete_agent_memory_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(target) = self.agent_surface.pending_memory_delete.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         let (fg, muted) = {
             let theme = cx.theme();
@@ -98,7 +98,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(420., true, content, cx)
+        self.modal_shell(
+            420.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DeleteAgentMemory,
+            cx,
+        )
     }
 
     pub(super) fn render_agent_product_navigation_row(
@@ -136,7 +142,7 @@ impl Workspace {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
+                    .text_sm()
                     .font_medium()
                     .text_color(rgb(if selected {
                         crate::ui_theme::text_bright()
@@ -387,7 +393,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(10.))
+                            .text_xs()
                             .font_medium()
                             .text_color(conversation_icon_color(status, None))
                             .child(mark),
@@ -396,7 +402,7 @@ impl Workspace {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
+                            .text_sm()
                             .text_color(rgb(if selected {
                                 crate::ui_theme::text_bright()
                             } else {
@@ -409,7 +415,7 @@ impl Workspace {
                         crate::session_list::row::session_row_status_label(status).map(|label| {
                             div()
                                 .flex_shrink_0()
-                                .text_size(px(11.))
+                                .text_xs()
                                 .text_color(crate::ui_theme::session_dot_color(status))
                                 .child(label)
                         }),
@@ -475,7 +481,7 @@ impl Workspace {
                 div()
                     .px_2()
                     .pb_1()
-                    .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
+                    .text_sm()
                     .font_medium()
                     .text_color(rgb(crate::ui_theme::text_faint()))
                     .child("最近对话"),
@@ -1245,7 +1251,7 @@ fn new_conversation_mark(mark: String) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(10.))
+        .text_xs()
         .font_medium()
         .text_color(rgb(crate::ui_theme::text_muted()))
         .child(mark)
@@ -1271,7 +1277,7 @@ fn new_conversation_row_body(label: String, mark: Option<String>) -> Div {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(crate::session_list::SIDEBAR_FONT_SIZE))
+                .text_sm()
                 .font_medium()
                 .text_color(rgb(crate::ui_theme::text_mid()))
                 .child(label),

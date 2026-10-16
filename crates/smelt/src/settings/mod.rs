@@ -62,6 +62,10 @@ fn default_theme_mode() -> ThemeMode {
     ThemeMode::Dark
 }
 
+fn default_theme_name() -> String {
+    smelt_core::theme_index::DEFAULT_DARK.to_string()
+}
+
 /// 界面字号（基准 rem，px）默认值与取值范围。
 pub const DEFAULT_UI_FONT_PX: u32 = 16;
 pub const MIN_UI_FONT_PX: u32 = 14;
@@ -106,9 +110,12 @@ pub struct Appearance {
     /// 液态玻璃材质档位（macOS 26+；旧系统忽略）。老配置文件缺省 = 标准。
     #[serde(default)]
     pub glass_style: liquid_glass::GlassStyle,
-    /// 明暗主题模式。
+    /// 明暗。跟着 `theme_name` 走，CLI 的 `appearance.theme_mode` 会把主题拨到同一族的另一侧。
     #[serde(default = "default_theme_mode")]
     pub theme_mode: ThemeMode,
+    /// 主题名，对应注册表里的 `name`，例如 `Default Dark`、`Ayu Light`。
+    #[serde(default = "default_theme_name")]
+    pub theme_name: String,
     /// 界面字号（基准 rem，px）。控制侧边栏、Agent 会话、设置页等全局 UI 元素的排版缩放。
     #[serde(default = "default_ui_font_px")]
     pub ui_font_px: u32,
@@ -137,6 +144,7 @@ impl Default for Appearance {
             blur: true,
             glass_style: liquid_glass::GlassStyle::Regular,
             theme_mode: ThemeMode::Dark,
+            theme_name: default_theme_name(),
             ui_font_px: default_ui_font_px(),
             ui_font_family: String::new(),
             font_px: default_font_px(),
@@ -285,26 +293,27 @@ fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_px(appearance.font_px);
     terminal_view::set_font_family(&appearance.font_family);
     cx.set_global(appearance.clone());
-    apply_theme_mode(appearance.theme_mode, cx);
+    apply_named_theme(&appearance.theme_name, cx);
     apply_bg_color(&appearance);
     cx.refresh_windows();
 }
 
-/// 把主题模式落到所有吃颜色的层：gpui-component 部件、自绘 UI 语义色板、终端调色板。
-/// **唯一入口**——三处必须同时切，漏一处就是「面板变浅了但终端还是黑的」这种半吊子。
-/// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`
-/// （启动时还没有窗口，切换时才需要）。
-pub fn apply_theme_mode(mode: ThemeMode, cx: &mut App) {
-    Theme::change(mode, None, cx);
-    crate::ui_theme::set_light(!mode.is_dark());
-    terminal::set_dark_mode(mode.is_dark());
-    // Theme::change 装的是组件库自带色板，跟 ui_theme 是两套值——同屏里
-    // `t.border` 和 `ui_theme::border_mid()` 挨着出现就会差一档。这里按语义位
-    // 把组件库主题覆写成 ui_theme 的值，色真源收敛成一个。
-    // 覆写必须在 Theme::change 之后：它会整套 apply_config 覆盖回默认。
-    crate::ui_theme::apply_to_component_theme(cx);
-    // Theme::change 会把 font_size / mono_font_family 重置回组件库默认；
-    // 必须写回 Appearance，否则界面字号闪回 16px，markdown 代码块也会掉回 Menlo。
+/// 按主题名装上配色。组件库走 `apply_config`，自绘色板从这份主题投影，终端跟着明暗切。
+/// 字号和字体在装完之后写回 Appearance，主题文件里的字号不覆盖用户设置。
+/// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`。
+pub fn apply_named_theme(name: &str, cx: &mut App) {
+    let applied = smelt_ui::theme_catalog::apply(name, cx);
+    let dark = if applied && cx.has_global::<Theme>() {
+        cx.global::<Theme>().is_dark()
+    } else {
+        cx.try_global::<Appearance>()
+            .map(|appearance| appearance.theme_mode.is_dark())
+            .unwrap_or(true)
+    };
+    if !applied {
+        crate::ui_theme::set_light(!dark);
+    }
+    terminal::set_dark_mode(dark);
     sync_theme_fonts(cx);
     publish_terminal_theme();
 }
@@ -330,12 +339,16 @@ fn sync_theme_fonts(cx: &mut App) {
         .try_global::<Appearance>()
         .map(|a| (a.ui_font_px, resolved_ui_font_family(a)))
         .unwrap_or((DEFAULT_UI_FONT_PX, SYSTEM_UI_FONT.into()));
-    if cx.has_global::<Theme>() {
-        let theme = cx.global_mut::<Theme>();
+    if !cx.has_global::<Theme>() {
+        return;
+    }
+    // Root 每帧用 Theme.font_size 设 rem。update 结尾的 sync_base 用当前主题
+    // 重写分栏手柄和滚动条，这里不再另涂一层。
+    Theme::update(cx, |theme| {
         theme.font_size = px(ui_font_px as f32);
         theme.font_family = ui_family;
         theme.mono_font_family = terminal_view::font_family().into();
-    }
+    });
 }
 
 /// 把「当前生效的终端配色」落盘给守护/网关，转发给移动端。
@@ -345,7 +358,7 @@ fn sync_theme_fonts(cx: &mut App) {
 /// TUI 以为的底色跟实际底色对不上，就是对比度问题。所以颜色真源只有 PC 这一份，
 /// 而且一部手机可以连多台设备，配色必须**按设备**下发而不是客户端内置。
 ///
-/// 主题模式、用户自选底色变化时都要调（见 `apply_theme_mode` / `apply_appearance`）。
+/// 主题、用户自选底色变化时都要调（见 `apply_named_theme` / `apply_appearance`）。
 pub fn publish_terminal_theme() {
     smelt_core::terminal_theme::publish(&current_terminal_theme());
 }
@@ -414,6 +427,11 @@ fn snapshot_from_appearance(appearance: &Appearance) -> smelt_store::AppearanceS
             .ok()
             .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_else(|| "dark".into()),
+        theme_name: if appearance.theme_name.trim().is_empty() {
+            default_theme_name()
+        } else {
+            appearance.theme_name.clone()
+        },
         ui_font_px: appearance.ui_font_px,
         ui_font_family: appearance.ui_font_family.clone(),
         font_px: appearance.font_px,
@@ -432,8 +450,13 @@ fn appearance_from_snapshot(snapshot: smelt_store::AppearanceSnapshot) -> Appear
             "clear" => liquid_glass::GlassStyle::Clear,
             _ => liquid_glass::GlassStyle::Regular,
         },
-        theme_mode: serde_json::from_value(serde_json::Value::String(snapshot.theme_mode))
+        theme_mode: serde_json::from_value(serde_json::Value::String(snapshot.theme_mode.clone()))
             .unwrap_or_else(|_| default_theme_mode()),
+        theme_name: if snapshot.theme_name.trim().is_empty() {
+            default_theme_name()
+        } else {
+            snapshot.theme_name
+        },
         ui_font_px: snapshot.ui_font_px,
         ui_font_family: snapshot.ui_font_family,
         font_px: snapshot.font_px,
@@ -1722,7 +1745,7 @@ impl SettingsContentView {
 }
 
 impl Render for SettingsContentView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timing = smelt_ui::frame_stats::RenderTiming::start("SettingsContent");
         let snapshot = self.snapshot.clone();
         let workspace = self.workspace.clone();
@@ -1739,6 +1762,8 @@ impl Render for SettingsContentView {
 
         // 设置内容 +（可选）守护管理弹层：弹层必须画在本窗，不能只改 Workspace 上的
         // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
+        // 焦点也在这扇窗里记，不能放到主窗口的 prepare。
+        workspace.update(cx, |ws, cx| ws.sync_settings_modal_focus(window, cx));
         let show_daemon_restart_confirm = snapshot.show_daemon_restart_confirm;
         let session_manager_open = snapshot.session_manager_open;
 

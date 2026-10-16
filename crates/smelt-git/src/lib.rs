@@ -95,6 +95,8 @@ pub struct GitDiff {
     pub patchable: bool,
     pub scope: DiffScope,
     pub has_staged: bool,
+    /// 原始补丁。`None` 还在读取；`Some("")` 是已经读完的空差异。
+    pub patch: Option<String>,
 }
 
 pub struct ParsedDiff {

@@ -703,19 +703,9 @@ impl AcpView {
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
                     for (ix, im) in self.pending_images.iter().enumerate() {
-                        let awaiting_decode = smelt_ui::image::cached(im).is_none()
-                            && im.format != gpui::ImageFormat::Svg;
+                        let awaiting_decode = smelt_ui::image::preview_pending(im);
                         if awaiting_decode {
-                            let fetch_image = im.clone();
-                            cx.spawn(async move |this, cx| {
-                                smelt_ui::image::fetch_async(
-                                    fetch_image,
-                                    cx.background_executor(),
-                                )
-                                .await;
-                                let _ = this.update(cx, |_, cx| cx.notify());
-                            })
-                            .detach();
+                            smelt_ui::image::ensure_preview(im, cx);
                         }
                         // 地址而不是下标：删掉前面一张时，后面的缩略图不会重播挤入。
                         let image_key = std::sync::Arc::as_ptr(im) as usize;

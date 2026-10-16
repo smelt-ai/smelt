@@ -73,6 +73,7 @@ pub mod subprocess;
 pub mod term_config;
 pub mod term_text;
 pub mod terminal_theme;
+pub mod theme_index;
 pub mod tty_color;
 pub mod updater;
 pub mod workspace_menu;

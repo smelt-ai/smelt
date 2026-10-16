@@ -1,4 +1,4 @@
-//! 图片显示统一抽象：解码 + 降采样 + 内容寻址缓存 + contain 绘制。
+//! 图片显示统一抽象：解码 + 降采样 + 按图片 id 缓存 + contain 绘制。
 //!
 //! 背景：ACP 图片显示反复出 bug——大图撑破屏幕、长截图只露顶部一截、超高图撞
 //! sprite atlas 上限（16384px）画不出来。先后四次修复（「盒子 min_w/min_h 归
@@ -7,8 +7,11 @@
 //! → 受控尺寸的 RenderImage → contain 绘制」收敛成唯一路径，调用点只描述「显
 //! 示哪张图、盒子多大」：
 //!
-//! - 解码/降采样在后台线程执行，结果按内容 hash 缓存（同一张图多处显示只解一次）
+//! - 解码/降采样在后台线程执行，结果按 `gpui::Image::id` 缓存（建图时算一次，
+//!   同一张图多处显示只解一次；绘制路径不再对字节做哈希）
 //! - 大图降到 `MAX_PREVIEW_DIM` 以内，避免撞 sprite atlas 上限
+//! - 超出条数时先记下被淘汰的 `RenderImage`，回到前台再 `drop_image`。atlas
+//!   按 `RenderImage` 的递增 id 留纹理，只丢掉 CPU 侧的 `Arc` 不会释放显存
 //! - 绘制用 canvas 手动 contain，不依赖 taffy 的 aspect_ratio 推导（那是历次
 //!   「撑破屏幕 / 只露顶部」的根因）
 //!
@@ -22,22 +25,28 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use gpui::*;
-use sha2::{Digest, Sha256};
 
 /// 降采样后的最大边长。gpui sprite atlas 上限 16384px，这里留足余量；
 /// 长截图几万像素高时仍能完整画出来。
 pub const MAX_PREVIEW_DIM: u32 = 2048;
 
-/// 缓存条数上限：图片消息流可能很长，内容寻址缓存要防内存无限增长。
+/// 缓存条数上限：图片消息流可能很长，按图片 id 的缓存要防内存无限增长。
 /// 超出后按 FIFO 淘汰最旧条目。
 const CACHE_CAPACITY: usize = 64;
 
-/// 正在后台解码的图片内容 hash：同一张图并发显示时只解一次。
-static IN_FLIGHT: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+/// 一次解码的结局。失败也留下，避免坏图在每一帧被重新拿去解码。
+enum StoredPreview {
+    Ready(Arc<RenderImage>),
+    Failed,
+}
 
 struct ImageCacheInner {
-    entries: HashMap<u64, Arc<RenderImage>>,
+    entries: HashMap<u64, StoredPreview>,
     order: VecDeque<u64>,
+    /// 正在后台解码的图片 id。和缓存放在同一把锁里，绘制路径先查再决定要不要启动。
+    inflight: HashSet<u64>,
+    /// 已从缓存摘下、还占着 sprite atlas 的预览。只在前台排空。
+    pending_drops: Vec<Arc<RenderImage>>,
 }
 
 fn image_cache() -> &'static Mutex<ImageCacheInner> {
@@ -46,13 +55,17 @@ fn image_cache() -> &'static Mutex<ImageCacheInner> {
         Mutex::new(ImageCacheInner {
             entries: HashMap::new(),
             order: VecDeque::new(),
+            inflight: HashSet::new(),
+            pending_drops: Vec::new(),
         })
     })
 }
 
-fn content_hash(bytes: &[u8]) -> u64 {
-    let digest = Sha256::digest(bytes);
-    u64::from_be_bytes(digest[..8].try_into().expect("sha256 摘要至少 8 字节"))
+fn cached_render(id: u64) -> Option<Arc<RenderImage>> {
+    match image_cache().lock().unwrap().entries.get(&id) {
+        Some(StoredPreview::Ready(render)) => Some(Arc::clone(render)),
+        _ => None,
+    }
 }
 
 /// gpui::ImageFormat → image crate 的 ImageFormat。SVG 走 gpui 的 svg_renderer，
@@ -71,74 +84,112 @@ fn to_image_format(f: gpui::ImageFormat) -> Option<image::ImageFormat> {
     })
 }
 
-/// 同步命中：图片内容 hash 已在缓存时直接返回降采样结果。解码未完成或失败
-/// （格式不支持、数据损坏）返回 None。栅格缩略图这时只能占位，不能把原图交给
-/// `img()`；见 [`thumb_paint`]。
+/// 同步命中：这张图已经降采样过就返回预览。还在解码、解不开、或根本没开始时
+/// 返回 None。栅格缩略图这时只能占位，不能把原图交给 `img()`；见 [`thumb_paint`]。
 pub fn cached(image: &gpui::Image) -> Option<Arc<RenderImage>> {
-    let hash = content_hash(&image.bytes);
-    image_cache().lock().unwrap().entries.get(&hash).cloned()
+    cached_render(image.id)
 }
 
-/// 后台解码 + 入缓存。已缓存或已在途时立即返回；否则在后台 executor 解码，
-/// 完成后返回。调用点模式（解码完成需要重绘）：
-///
-/// ```ignore
-/// if smelt_ui::image::cached(&image).is_none() {
-///     let image = image.clone();
-///     let this = cx.entity();
-///     cx.spawn(async move |this, cx| {
-///         smelt_ui::image::fetch_async(image, cx.background_executor()).await;
-///         this.update(cx, |_, cx| cx.notify());
-///     })
-///     .detach();
-/// }
-/// ```
-///
-/// 内容寻址缓存让调用点无需自管竞态：渲染时查 `cached()` 拿「当前这张图」的
-/// 结果，迟到的旧图解码不会覆盖新图的显示。
-pub async fn fetch_async(image: Arc<gpui::Image>, executor: &BackgroundExecutor) {
-    if cached(&image).is_some() {
-        return;
+/// 栅格图还没有结局（既没有预览，也没有记下失败）。SVG 不算，它不走这条解码。
+/// 绘制路径用它决定要不要转占位动画；真正启动解码用 [`ensure_preview`]。
+pub fn preview_pending(image: &gpui::Image) -> bool {
+    if image.format == gpui::ImageFormat::Svg {
+        return false;
     }
-    let hash = content_hash(&image.bytes);
-    {
-        let mut in_flight = IN_FLIGHT.get_or_init(Default::default).lock().unwrap();
-        if !in_flight.insert(hash) {
-            return; // 已在途，等它的结果进缓存
-        }
-    }
-    let image_clone = image.clone();
-    let render = executor
-        .spawn(async move { decode_preview(&image_clone) })
-        .await;
-    IN_FLIGHT
-        .get_or_init(Default::default)
+    !image_cache()
         .lock()
         .unwrap()
-        .remove(&hash);
-    if let Some(render) = render {
-        put(hash, render);
+        .entries
+        .contains_key(&image.id)
+}
+
+/// 还没人解码这张图时占住在途标记。已有预览、已经失败、或已有任务在飞时返回 false。
+/// 必须在 `spawn` 之前调用：画一帧查一次，不能等任务里再发现「已经在跑」然后通知重绘。
+fn begin_preview(image: &gpui::Image) -> bool {
+    if image.format == gpui::ImageFormat::Svg {
+        return false;
+    }
+    let mut cache = image_cache().lock().unwrap();
+    if cache.entries.contains_key(&image.id) {
+        return false;
+    }
+    cache.inflight.insert(image.id)
+}
+
+fn finish_preview(id: u64, render: Option<Arc<RenderImage>>) {
+    let mut cache = image_cache().lock().unwrap();
+    store_preview(
+        &mut cache,
+        id,
+        match render {
+            Some(render) => StoredPreview::Ready(render),
+            None => StoredPreview::Failed,
+        },
+    );
+}
+
+/// 写入一条预览并按 FIFO 淘汰。淘汰下来的已解码图片留在 `pending_drops`，
+/// 调用方稍后在前台交给 `drop_image`。失败记录没有上传 atlas，直接丢掉。
+fn store_preview(cache: &mut ImageCacheInner, id: u64, stored: StoredPreview) {
+    cache.inflight.remove(&id);
+    if cache.entries.contains_key(&id) {
+        return;
+    }
+    cache.entries.insert(id, stored);
+    cache.order.push_back(id);
+    while cache.order.len() > CACHE_CAPACITY {
+        let Some(oldest) = cache.order.pop_front() else {
+            break;
+        };
+        if let Some(StoredPreview::Ready(render)) = cache.entries.remove(&oldest) {
+            cache.pending_drops.push(render);
+        }
     }
 }
 
-fn put(hash: u64, render: Arc<RenderImage>) {
+fn take_pending_drops() -> Vec<Arc<RenderImage>> {
     let mut cache = image_cache().lock().unwrap();
-    if cache.entries.contains_key(&hash) {
+    std::mem::take(&mut cache.pending_drops)
+}
+
+/// 释放上一轮淘汰仍占着 sprite atlas 的纹理。必须在前台调用：`drop_image`
+/// 要拿到窗口。后台解码只能先把 `RenderImage` 留在 `pending_drops`。
+fn release_dropped_previews(cx: &mut App) {
+    for image in take_pending_drops() {
+        cx.drop_image(image, None);
+    }
+}
+
+fn put(id: u64, render: Arc<RenderImage>) {
+    finish_preview(id, Some(render));
+}
+
+/// 栅格图还没有预览时，在后台解码一次，完成后刷新窗口。
+///
+/// 绘制路径可以每帧调用：已在途、已完成、已失败或是 SVG 时直接返回，不再启动任务。
+/// 解码结果按图片 id 放进进程内缓存，所有显示这张图的视图下一帧一起看到。
+pub fn ensure_preview(image: &Arc<gpui::Image>, cx: &App) {
+    if !begin_preview(image) {
         return;
     }
-    cache.entries.insert(hash, render);
-    cache.order.push_back(hash);
-    while cache.order.len() > CACHE_CAPACITY {
-        if let Some(oldest) = cache.order.pop_front() {
-            cache.entries.remove(&oldest);
-        }
-    }
+    let image = Arc::clone(image);
+    cx.spawn(async move |cx| {
+        let id = image.id;
+        let decoded = cx
+            .background_executor()
+            .spawn(async move { decode_preview(&image) })
+            .await;
+        finish_preview(id, decoded);
+        cx.update(release_dropped_previews);
+        cx.refresh();
+    })
+    .detach();
 }
 
 /// 解码 + 降采样成 RenderImage（BGRA）供 canvas 直接绘制。
 ///
 /// 顺带把 RGBA 字节换成 gpui 纹理要的 BGRA。失败（格式不支持 / 数据损坏）返回
-/// None，调用点留空即可，不阻塞 UI。解码结果同时喂给 `cached()` 的内容寻址
+/// None，调用点留空即可，不阻塞 UI。解码结果按图片 id 放进 `cached()` 的
 /// 缓存，同一张图多处显示只解一次。
 pub fn decode_preview(image: &gpui::Image) -> Option<Arc<RenderImage>> {
     let format = to_image_format(image.format)?;
@@ -311,7 +362,7 @@ fn file_paint(path: &Path) -> FilePaint {
             PathOutcome::Ready(hash) => hash,
         }
     };
-    match image_cache().lock().unwrap().entries.get(&hash).cloned() {
+    match cached_render(hash) {
         Some(render) => FilePaint::Preview(render),
         None => FilePaint::Placeholder,
     }
@@ -338,9 +389,8 @@ fn load_file_preview(path: &Path) -> FilePaint {
     let image = gpui::Image::from_bytes(format, bytes);
     match decode_preview(&image) {
         Some(render) => {
-            let hash = content_hash(&image.bytes);
-            put(hash, Arc::clone(&render));
-            remember_path(path, Some(stamp), PathOutcome::Ready(hash));
+            put(image.id, Arc::clone(&render));
+            remember_path(path, Some(stamp), PathOutcome::Ready(image.id));
             FilePaint::Preview(render)
         }
         None => {
@@ -395,6 +445,7 @@ pub fn ensure_file_preview(path: &Path, cx: &App) {
     let path = path.to_path_buf();
     cx.spawn(async move |cx| {
         let paint = fetch_file_preview(path, cx.background_executor()).await;
+        cx.update(release_dropped_previews);
         if matches!(paint, FilePaint::Preview(_)) {
             cx.refresh();
         }
@@ -561,10 +612,12 @@ mod tests {
     // `test` 属性宏带进测试模块，遮蔽标准 `#[test]`（gpui 宏会把函数体当测试
     // 上下文深度解析，rustc 直接 SIGBUS）。见 acp_view.rs 测试模块的同一惯例。
     use super::{
-        FilePaint, MAX_PREVIEW_DIM, ThumbPaint, begin_file_fetch, contain_width_at_height,
-        content_hash, cover_placement, decode_preview, file_paint, load_file_preview, put,
+        CACHE_CAPACITY, FilePaint, ImageCacheInner, MAX_PREVIEW_DIM, StoredPreview, ThumbPaint,
+        begin_file_fetch, begin_preview, contain_width_at_height, cover_placement, decode_preview,
+        file_paint, finish_preview, load_file_preview, preview_pending, put, store_preview,
         thumb_paint,
     };
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::Arc;
 
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
@@ -618,7 +671,7 @@ mod tests {
     fn cached_raster_thumb_is_the_downsampled_preview() {
         let image = make_image(png_bytes(64, 6000));
         let render = decode_preview(&image).expect("png 应可解码");
-        put(content_hash(&image.bytes), render);
+        put(image.id, render);
         let ThumbPaint::Preview(render) = thumb_paint(&image) else {
             panic!("入缓存后应画降采样预览");
         };
@@ -708,14 +761,76 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_is_byte_addressed() {
+    fn image_id_is_byte_addressed() {
         assert_eq!(
-            content_hash(&png_bytes(8, 8)),
-            content_hash(&png_bytes(8, 8))
+            make_image(png_bytes(8, 8)).id,
+            make_image(png_bytes(8, 8)).id
         );
         assert_ne!(
-            content_hash(&png_bytes(8, 8)),
-            content_hash(&png_bytes(9, 8))
+            make_image(png_bytes(8, 8)).id,
+            make_image(png_bytes(9, 8)).id
         );
+    }
+
+    #[test]
+    fn evicting_a_preview_keeps_the_render_image_for_atlas_release() {
+        let mut cache = ImageCacheInner {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            inflight: HashSet::new(),
+            pending_drops: Vec::new(),
+        };
+        let mut first_key = None;
+        let mut first_render_id = None;
+        for index in 0..(CACHE_CAPACITY + 1) {
+            let image = make_image(png_bytes(2 + index as u32, 2));
+            let render = decode_preview(&image).expect("小图应可解码");
+            if index == 0 {
+                first_key = Some(image.id);
+                first_render_id = Some(render.id);
+            }
+            store_preview(&mut cache, image.id, StoredPreview::Ready(render));
+        }
+        assert!(
+            !cache.entries.contains_key(&first_key.expect("first")),
+            "超出上限后最旧的预览必须离开 CPU 缓存"
+        );
+        assert_eq!(cache.entries.len(), CACHE_CAPACITY);
+        assert!(
+            cache
+                .pending_drops
+                .iter()
+                .any(|render| render.id == first_render_id.expect("render id")),
+            "被淘汰的预览还要交给 drop_image，不能只丢掉 Arc"
+        );
+    }
+
+    #[test]
+    fn evicting_a_failed_preview_does_not_request_atlas_release() {
+        let mut cache = ImageCacheInner {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            inflight: HashSet::new(),
+            pending_drops: Vec::new(),
+        };
+        store_preview(&mut cache, u64::MAX, StoredPreview::Failed);
+        for index in 0..CACHE_CAPACITY {
+            let image = make_image(png_bytes(80 + index as u32, 3));
+            let render = decode_preview(&image).expect("小图应可解码");
+            store_preview(&mut cache, image.id, StoredPreview::Ready(render));
+        }
+        assert!(cache.pending_drops.is_empty(), "失败记录没有上传 atlas");
+        assert!(!cache.entries.contains_key(&u64::MAX));
+    }
+
+    #[test]
+    fn preview_starts_once_and_a_failure_is_not_retried() {
+        let image = make_image(png_bytes(17, 19));
+        assert!(preview_pending(&image));
+        assert!(begin_preview(&image));
+        assert!(!begin_preview(&image), "在途的解码不能再启动一次");
+        finish_preview(image.id, None);
+        assert!(!preview_pending(&image), "失败要留下，绘制路径不能每帧再试");
+        assert!(!begin_preview(&image));
     }
 }

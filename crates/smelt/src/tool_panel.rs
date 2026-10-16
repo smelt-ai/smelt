@@ -8,7 +8,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::*;
 
-use crate::{StageCover, Workspace, resizable_split, ui_theme};
+use crate::{StageCover, Workspace, ui_theme};
 
 pub(crate) const MIN_FILE_TREE_WIDTH: f32 = 190.0;
 /// 文件树是导航区而不是主内容区；限制最大值既能修正早期“按比例保存”留下的异常
@@ -32,6 +32,8 @@ pub(crate) enum ToolPanelTab {
     Git,
     History,
     Plugin(crate::plugin_ui::PluginTabSlot),
+    /// gpui-shell 插件（可行性原型，见 `shell_plugins`），与 `Plugin` 互不相干。
+    Shell(crate::shell_plugins::ShellTabSlot),
 }
 
 impl serde::Serialize for ToolPanelTab {
@@ -47,6 +49,15 @@ impl serde::Serialize for ToolPanelTab {
                     use serde::ser::SerializeMap;
                     let mut map = serializer.serialize_map(Some(1))?;
                     map.serialize_entry("plugin", &key)?;
+                    map.end()
+                }
+                None => serializer.serialize_str(DEFAULT_PANEL_KEY),
+            },
+            Self::Shell(slot) => match crate::shell_plugins::key_for(*slot) {
+                Some(key) => {
+                    use serde::ser::SerializeMap;
+                    let mut map = serializer.serialize_map(Some(1))?;
+                    map.serialize_entry("shell", &key)?;
                     map.end()
                 }
                 None => serializer.serialize_str(DEFAULT_PANEL_KEY),
@@ -71,6 +82,7 @@ impl<'de> serde::Deserialize<'de> for ToolPanelTab {
         enum Wire {
             Builtin(String),
             Plugin { plugin: String },
+            Shell { shell: String },
         }
         Ok(
             match <Wire as serde::Deserialize>::deserialize(deserializer)? {
@@ -78,6 +90,9 @@ impl<'de> serde::Deserialize<'de> for ToolPanelTab {
                 // 插件被卸载或停用后，存档里指向它的 tab 自动降级——
                 // 这是"可拔插"在持久化层该有的样子，不是错误。
                 Wire::Plugin { plugin } => Self::plugin_or_files(&plugin),
+                Wire::Shell { shell } => {
+                    crate::shell_plugins::slot_for_key(&shell).map_or(Self::Files, Self::Shell)
+                }
             },
         )
     }
@@ -109,6 +124,7 @@ impl ToolPanelTab {
         match self {
             // 插件面板的标题来自 manifest，只有运行时才知道。
             Self::Plugin(slot) => crate::plugin_ui::title(slot),
+            Self::Shell(slot) => crate::shell_plugins::title(slot),
             builtin => builtin_panel(builtin).map_or_else(String::new, |p| p.title.to_string()),
         }
     }
@@ -209,9 +225,7 @@ impl Workspace {
                     .w(px(1.))
                     .h_full()
                     .bg(rgb(ui_theme::border_dim()))
-                    .group_hover(id, |line| {
-                        line.bg(resizable_split::resize_handle_hover_color())
-                    }),
+                    .group_hover(id, |line| line.bg(rgb(ui_theme::text_faint()))),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -371,6 +385,11 @@ impl Workspace {
                 .into_iter()
                 .map(ToolPanelTab::Plugin),
         );
+        tabs.extend(
+            crate::shell_plugins::slots()
+                .into_iter()
+                .map(ToolPanelTab::Shell),
+        );
         // 停靠 rail 收起期间不保留高亮；全屏 rail 始终高亮当前 Tool Panel tab。
         let selected_index = (stage_rail || self.tool_panel_open)
             .then(|| tabs.iter().position(|t| *t == active_tab))
@@ -509,6 +528,11 @@ impl Workspace {
     ) -> AnyElement {
         match tab {
             ToolPanelTab::Plugin(slot) => self.render_plugin_tab(slot, window, cx),
+            ToolPanelTab::Shell(slot) => {
+                // 插件经 smelt-workspace.context() 读当前项目；这里只写内存。
+                crate::shell_plugins::set_project_root(self.active_project_root(cx));
+                crate::shell_plugins::render(slot, cx)
+            }
             builtin => match builtin_panel(builtin) {
                 Some(panel) => (panel.render)(self, window, cx),
                 // 注册表里没有就不渲染：这是声明与实现脱节，不应该 panic 拖垮整个窗口。

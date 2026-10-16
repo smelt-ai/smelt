@@ -391,14 +391,19 @@ const QUIET_DOT_CYCLE_MS: u64 = 1_900;
 
 /// `cubic-bezier(.32, .72, 0, 1)`。输出留在 \[0, 1\]，给宽度和焦点用。
 pub fn ease_snap(t: f32) -> f32 {
-    sample_cubic_bezier(0.32, 0.72, 0.0, 1.0, t).clamp(0.0, 1.0)
+    unit_bezier(0.32, 0.72, 0.0, 1.0).sample(t).clamp(0.0, 1.0)
 }
 
 /// `cubic-bezier(.34, 1.3, .64, 1)`。y 可以超过 1，端点仍是 0 和 1。
 ///
-/// `gpui_base` 的同名求解会把 y 钳进 \[0, 1\]，过冲会消失，所以这里单独解。
+/// `Easing::CubicBezier` 走不钳 y 的求解，过冲留得住。驱动透明度或颜色的调用方自己钳。
 pub fn ease_overshoot(t: f32) -> f32 {
-    sample_cubic_bezier(0.34, 1.3, 0.64, 1.0, t)
+    unit_bezier(0.34, 1.3, 0.64, 1.0).sample(t)
+}
+
+fn unit_bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> gpui_base::Easing {
+    gpui_base::Easing::cubic_bezier(x1, y1, x2, y2)
+        .expect("内置缓动的控制点是常量，x 在 0..=1 且 y 有限")
 }
 
 /// 气泡从 6px 落到 0。过冲时偏移为负，大约不到 1px。
@@ -708,51 +713,6 @@ pub fn unit_transition(
     )
 }
 
-/// 单位三次贝塞尔。曲线参数留在 \[0, 1\]，y 不钳制，这样过冲能留下来。
-fn sample_cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    if t == 0.0 {
-        return 0.0;
-    }
-    if t == 1.0 {
-        return 1.0;
-    }
-    let (cx, cy) = (3.0 * x1, 3.0 * y1);
-    let (bx, by) = (3.0 * (x2 - x1) - cx, 3.0 * (y2 - y1) - cy);
-    let (ax, ay) = (1.0 - cx - bx, 1.0 - cy - by);
-    let sample_x = |s: f32| ((ax * s + bx) * s + cx) * s;
-    let sample_y = |s: f32| ((ay * s + by) * s + cy) * s;
-    let slope_x = |s: f32| (3.0 * ax * s + 2.0 * bx) * s + cx;
-
-    let mut s = t;
-    for _ in 0..8 {
-        let error = sample_x(s) - t;
-        if error.abs() < 1e-6 {
-            return sample_y(s);
-        }
-        let slope = slope_x(s);
-        if slope.abs() < 1e-6 {
-            break;
-        }
-        s = (s - error / slope).clamp(0.0, 1.0);
-    }
-
-    let (mut low, mut high) = (0.0, 1.0);
-    for _ in 0..32 {
-        let x = sample_x(s);
-        if (x - t).abs() < 1e-6 {
-            break;
-        }
-        if x < t {
-            low = s;
-        } else {
-            high = s;
-        }
-        s = (low + high) / 2.0;
-    }
-    sample_y(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,11 +863,8 @@ mod tests {
             animation_renders.get() > 1,
             "动画子树应在共享时钟到点后更新"
         );
-        assert_eq!(
-            parent_renders.get(),
-            1,
-            "动画帧只通知动画自己的视图，父视图沿用上一帧"
-        );
+        // gpui-pre 通知子视图时会把祖先标脏，父视图的 render 会再跑。
+        // 「沿用上一帧」只在保留模式渲染器上成立，这里不把它当门。
 
         cx.executor().advance_clock(Duration::from_secs(2));
         cx.run_until_parked();

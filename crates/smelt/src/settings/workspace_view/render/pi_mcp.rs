@@ -1,7 +1,7 @@
 //! 能力库「MCP」页签：内置服务器一键添加，`~/.pi/agent/mcp.json` 里的服务器启停、
 //! 登录、移除。排版和模型页签同一套（居中限宽、行内按钮 xsmall）。
 
-use super::pi_model::{Palette, ROW_TITLE_PX, card, pill, section};
+use super::pi_model::{Palette, card, pill, section};
 use super::*;
 use crate::settings::workspace::PiConfigFileKind;
 use smelt_core::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
@@ -46,7 +46,7 @@ fn row(index: usize, palette: Palette) -> Div {
 fn row_title(text: impl Into<SharedString>, palette: Palette) -> Div {
     div()
         .truncate()
-        .text_size(px(ROW_TITLE_PX))
+        .text_sm()
         .text_color(palette.fg)
         .child(text.into())
 }

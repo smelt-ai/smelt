@@ -604,7 +604,9 @@ impl Workspace {
                         .size_4(),
                     )
                     .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("切换右侧面板  ⌥⌘B").build(window, cx)
+                        gpui_component::tooltip::Tooltip::new("切换右侧面板")
+                            .action(&crate::ToggleToolPanel, None)
+                            .build(window, cx)
                     })
                     .on_mouse_down(
                         MouseButton::Left,

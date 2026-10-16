@@ -297,7 +297,6 @@ pub fn pill_segment(
         .flex()
         .items_center()
         .rounded(px(PILL_TRACK_RADIUS - PILL_TRACK_PADDING))
-        .cursor_pointer()
         .text_sm()
         .text_color(gpui::rgb(if selected {
             ui_theme::text_bright()
@@ -325,7 +324,6 @@ pub fn underline_segment(
         .flex()
         .items_center()
         .gap_1()
-        .cursor_pointer()
         .text_xs()
         .text_color(if selected {
             active

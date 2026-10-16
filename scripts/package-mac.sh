@@ -243,6 +243,24 @@ for dir in "${plugin_dirs[@]}"; do
   echo "  … 打包插件：${plugin_id}"
 done
 
+# gpui-shell 插件（可行性原型，见 crates/smelt/src/shell_plugins）：与上面的 bun
+# 插件体系无关，整目录随 App 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell
+# 加载时写编辑器文件的行为，不会写进已签名的 .app）。
+SHELL_PLUGINS="$RES/shell-plugins"
+for dir in "$ROOT"/shell-plugins/*/; do
+  [[ -f "${dir}gpui-shell.json" ]] || continue
+  target="$SHELL_PLUGINS/$(basename "$dir")"
+  mkdir -p "$target"
+  for file in "$dir"*; do
+    case "$(basename "$file")" in
+      # gpui-shell 生成给编辑器用的文件，不是插件内容。
+      gpui-kit.d.ts|jsconfig.json) continue ;;
+    esac
+    cp -R "$file" "$target/"
+  done
+  echo "  … 打包 gpui-shell 插件：$(basename "$dir")"
+done
+
 # 可选：把当前包对应的内部发布地址写进 App。若发布系统是在打包后才生成
 # release URL，也可以不设这个变量；updater 会在成功自更新后把 URL 写入用户状态。
 if [[ -n "$UPDATE_URL" ]]; then

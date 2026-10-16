@@ -4246,3 +4246,31 @@ fn scrolling_back_over_a_long_answer_moves_by_the_wheel_delta(cx: &mut gpui::Tes
         "第二问要在视口里停留多次比对，实际 {compared} 次"
     );
 }
+
+#[gpui::test]
+fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext;
+
+    let view = cx.new(|cx| {
+        super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                agent: ConversationAgentKind::Codex,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: None,
+                reason: "test placeholder".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-release-test".into()),
+            },
+        )
+    });
+    let weak = view.downgrade();
+    drop(view);
+    assert!(
+        weak.upgrade().is_none(),
+        "关掉会话后消息流不能再把 AcpView 留住"
+    );
+}

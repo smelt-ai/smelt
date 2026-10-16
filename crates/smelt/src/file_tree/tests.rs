@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use super::view::{BreadcrumbSeg, FileTreeRow, breadcrumb_segments, collect_file_tree_rows};
 use super::{DirCache, SearchHit, build_search_tree, search_project};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::git_panel::GitStatusData;
 
 #[test]
@@ -219,7 +220,11 @@ fn search_project_respects_gitignore_and_matches_content() {
     std::fs::write(venv_dir.join("lib.py"), "smelt_search venv file\n").unwrap();
     std::fs::write(temp.join("ignored.txt"), "smelt_search ignored text\n").unwrap();
 
-    let (hits, truncated) = search_project(temp.to_str().unwrap(), "smelt_search");
+    let (hits, truncated) = search_project(
+        temp.to_str().unwrap(),
+        "smelt_search",
+        &AtomicBool::new(false),
+    );
     assert!(!truncated);
 
     let hit_paths: Vec<_> = hits.iter().map(|h| h.rel.as_str()).collect();
@@ -245,4 +250,13 @@ fn search_project_respects_gitignore_and_matches_content() {
     );
 
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn search_project_returns_without_walking_when_cancelled() {
+    let cancel = AtomicBool::new(true);
+    let (hits, truncated) = search_project("/no/such/smelt-search-root", "smelt_search", &cancel);
+    assert!(hits.is_empty());
+    assert!(!truncated);
+    assert!(cancel.load(Ordering::Relaxed));
 }

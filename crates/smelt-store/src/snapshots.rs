@@ -37,6 +37,8 @@ pub struct AppearanceSnapshot {
     pub blur: bool,
     pub glass_style: String,
     pub theme_mode: String,
+    /// 主题注册名，例如 `Default Dark`、`Ayu Light`。旧库没有这一项、或仍是已删除的 Sand 时，按 `theme_mode` 落到 Default。
+    pub theme_name: String,
     pub ui_font_px: u32,
     pub ui_font_family: String,
     pub font_px: u32,

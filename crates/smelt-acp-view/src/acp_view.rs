@@ -13,9 +13,9 @@ use gpui::{
     Anchor, Animation, AnimationExt, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
     FocusHandle, Focusable, FollowMode, InteractiveElement, IntoElement, ListAlignment,
     ListHorizontalSizingBehavior, ListOffset, ListState, ParentElement, PathBuilder, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowHandle, WindowOptions, canvas, div, list as virtual_list, point, px, size,
-    uniform_list,
+    ScrollHandle, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, list as virtual_list, point,
+    px, size, uniform_list,
 };
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
@@ -1366,7 +1366,9 @@ impl EventEmitter<AcpViewEvent> for AcpView {}
 /// 消息流的独立绘制边界。和输入框是兄弟，不是父子，所以打字标脏输入框时
 /// 不会把这段列表标脏。
 struct ConversationTranscript {
-    host: Entity<AcpView>,
+    /// `AcpView` 强持有本视图。反向必须是弱句柄，否则关掉的会话互相留着，
+    /// 消息和图片缓存释放不掉。绘制时父视图还在，弱引用升得起来。
+    host: WeakEntity<AcpView>,
     _observe: Subscription,
 }
 
@@ -1887,7 +1889,7 @@ impl AcpView {
             // 不会进这里，消息列表因此可以跳过重排。
             let observe = cx.observe(&host, |_, _, cx| cx.notify());
             ConversationTranscript {
-                host,
+                host: host.downgrade(),
                 _observe: observe,
             }
         });

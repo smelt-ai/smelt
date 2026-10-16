@@ -3,7 +3,29 @@
 use super::*;
 use gpui_base::motion::MotionReveal;
 
-const USER_MESSAGE_ACTION_GROUP: &str = "acp-user-message-actions";
+fn user_message_context_menu(
+    menu: PopupMenu,
+    view: Entity<AcpView>,
+    cwd: Option<String>,
+    fork_index: Option<usize>,
+    fork_label: &'static str,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let menu = if let Some(index) = fork_index {
+        let fork_view = view.clone();
+        menu.item(
+            PopupMenuItem::new(fork_label)
+                .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
+                .on_click(move |_event, _window, cx| {
+                    fork_view.update(cx, |this, cx| this.fork_from_user_message(index, cx));
+                }),
+        )
+    } else {
+        menu
+    };
+    selected_text_context_menu(menu, view, cwd, window, cx)
+}
 
 /// 用户消息气泡。
 ///
@@ -298,39 +320,17 @@ impl AcpView {
                         let can_edit = this.supports_rewind && !this.has_active_turn();
                         let show_edit = latest_user_message_index == Some(i) && can_edit;
                         let show_fork_edit = latest_user_message_index != Some(i) && can_edit;
+                        let fork_index = show_fork_edit.then_some(i);
                         h_flex()
-                            .group(USER_MESSAGE_ACTION_GROUP)
                             .w_full()
                             .justify_end()
                             .gap_2()
-                            .when(show_fork_edit, |row| {
-                                row.child(
-                                    Button::new(("acp-fork-edit-message", i))
-                                        .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
-                                        .ghost()
-                                        .xsmall()
-                                        .opacity(0.)
-                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                            style.opacity(1.)
-                                        })
-                                        .tooltip("保留原对话，从这条之前分叉并编辑重发")
-                                        .on_click(cx.listener(
-                                            move |this, _ev, _window, cx| {
-                                                this.fork_from_user_message(i, cx);
-                                            },
-                                        )),
-                                )
-                            })
                             .when(show_edit, |row| {
                                 row.child(
                                     Button::new(("acp-edit-message", i))
                                         .icon(Icon::new(IconName::Undo2))
                                         .ghost()
                                         .xsmall()
-                                        .opacity(0.)
-                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                            style.opacity(1.)
-                                        })
                                         .tooltip("编辑并重发最后一条消息")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
@@ -357,10 +357,12 @@ impl AcpView {
                                         cx,
                                     ))
                                     .context_menu(move |menu, window, cx| {
-                                        selected_text_context_menu(
+                                        user_message_context_menu(
                                             menu,
                                             task_view.clone(),
                                             task_cwd.clone(),
+                                            fork_index,
+                                            "从这里分叉并编辑",
                                             window,
                                             cx,
                                         )
@@ -402,58 +404,37 @@ impl AcpView {
                                 ));
                             }
                         }
+                        let fork_index = show_fork_edit.then_some(i);
                         h_flex()
                             .w_full()
                             .justify_end()
                             .gap_2()
-                            .group(USER_MESSAGE_ACTION_GROUP)
-                            .when(show_fork_edit, |row| {
+                            .when(show_edit, |row| {
                                 row.child(
-                                    Button::new(("acp-fork-edit-message", i))
-                                        .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
+                                    Button::new(("acp-edit-message", i))
+                                        .icon(Icon::new(IconName::Undo2))
                                         .ghost()
                                         .xsmall()
-                                        .opacity(0.)
-                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                            style.opacity(1.)
-                                        })
-                                        .tooltip("保留原对话，从这条之前分叉并编辑重发（图片需重新添加）")
+                                        .tooltip("编辑并重发最后一条消息（图片需重新添加）")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
-                                                this.fork_from_user_message(i, cx);
+                                                this.rewind_to_message(i, cx);
                                             },
                                         )),
                                 )
                             })
-                            .when(show_edit, |row| {
-                                    row.child(
-                                        Button::new(("acp-edit-message", i))
-                                            .icon(Icon::new(IconName::Undo2))
-                                            .ghost()
-                                            .xsmall()
-                                            .opacity(0.)
-                                            .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                                style.opacity(1.)
-                                            })
-                                            .tooltip("编辑并重发最后一条消息（图片需重新添加）")
-                                            .on_click(cx.listener(
-                                                move |this, _ev, _window, cx| {
-                                                    this.rewind_to_message(i, cx);
-                                                },
-                                            )),
-                                    )
-                                },
-                            )
                             .child(user_bubble_with_enter(
                                 this.user_enter_nonce_for(i),
                                 i,
                                 user_message_bubble(("acp-user-images-message", i))
                                     .child(content.child(image_strip))
                                     .context_menu(move |menu, window, cx| {
-                                        selected_text_context_menu(
+                                        user_message_context_menu(
                                             menu,
                                             task_view.clone(),
                                             task_cwd.clone(),
+                                            fork_index,
+                                            "从这里分叉并编辑（图片需重新添加）",
                                             window,
                                             cx,
                                         )
@@ -2212,7 +2193,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                     .and_then(Option::as_ref)
                 {
                     // hover 预览没有 `Context<AcpView>`，只出缩略图，不接点击大图；
-                    // 解码交给展开卡片路径触发（缓存是内容寻址的，全局共享）。
+                    // 解码交给展开卡片路径触发（缓存按图片 id 全局共享）。
                     Some(image) => col.child(image_thumb_element(image)),
                     None => col,
                 }
@@ -2577,25 +2558,12 @@ fn hover_swap_lead(
         .into_any_element()
 }
 
-/// 缩略图元素：降采样 + 内容寻址缓存 + canvas contain 绘制。历史上大图/长截图
+/// 缩略图元素：降采样 + 按图片 id 缓存 + canvas contain 绘制。历史上大图/长截图
 /// 在调用点反复出 bug（撑破屏幕、只露顶部、撞 sprite atlas 上限），已发消息、
 /// 工具输出图片统一收敛到这一条路径，不再各写一份。
 fn image_thumb_element(image: &std::sync::Arc<gpui::Image>) -> gpui::AnyElement {
     // 栅格图只画降采样预览。未完成时是占位，不把原图交给 `img()`。
     smelt_ui::image::thumb_element(image, px(160.), px(280.), 8.0)
-}
-
-/// 后台解码到 `smelt_ui::image` 缓存；解码完成后通知重绘切到 contain 路径。
-fn ensure_image_decoded(image: &std::sync::Arc<gpui::Image>, cx: &Context<AcpView>) {
-    if smelt_ui::image::cached(image).is_some() || image.format == gpui::ImageFormat::Svg {
-        return;
-    }
-    let fetch_image = image.clone();
-    cx.spawn(async move |this, cx| {
-        smelt_ui::image::fetch_async(fetch_image, cx.background_executor()).await;
-        let _ = this.update(cx, |_, cx| cx.notify());
-    })
-    .detach();
 }
 
 /// 可点开大图的缩略图卡片（已发消息里的图、工具返回的图共用）。
@@ -2605,7 +2573,8 @@ fn render_clickable_image_thumb(
     border: gpui::Hsla,
     cx: &Context<AcpView>,
 ) -> gpui::AnyElement {
-    ensure_image_decoded(&image, cx);
+    // 每帧调用是安全的：已在途、已完成或已失败时不会再启动任务。
+    smelt_ui::image::ensure_preview(&image, cx);
     let thumb = image_thumb_element(&image);
     let preview_image = image;
     div()

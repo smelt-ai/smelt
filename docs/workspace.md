@@ -187,9 +187,9 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 >
 > 舞台有两种覆盖模式：**详情**（从停靠面板点文件/变更 → 舞台只出内容或 diff，
 > 面板原样停靠）与**双栏全宽**（面板头 ⤢ → 树/列表 + 详情占满舞台，此时面板让位）；
-> 总览/历史仍是整页覆盖。Esc 或返回条收回。主题支持深色/浅色，
-> 设置 → 外观 → 主题模式切换（色板见 `ui_theme.rs`，切换入口
-> `settings::apply_theme_mode`）。
+> 总览/历史仍是整页覆盖。Esc 或返回条收回。主题按名字切换（默认是库自带的
+> Default Dark / Default Light，同目录里还有 Ayu、Catppuccin 等），设置 → 外观 → 主题。
+> 色板见 `ui_theme.rs`，切换入口 `settings::apply_named_theme`。
 
 ### 终端内（`TerminalView` 聚焦时，见 `terminal_view.rs`）
 

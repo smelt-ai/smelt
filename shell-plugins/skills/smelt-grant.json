@@ -1,0 +1,51 @@
+{
+  "fs": {
+    "read": [
+      "~/.claude",
+      "~/.codex",
+      "~/.copilot",
+      "~/.cursor",
+      "~/.gemini",
+      "~/.grok",
+      "~/.kiro",
+      "~/.config/opencode",
+      "~/.config/amp",
+      "~/.qwen",
+      "~/.cline",
+      "~/.roo",
+      "~/.codeium",
+      "~/.trae",
+      "~/.smelt/skills",
+      "${project}/.smelt/skills"
+    ],
+    "write": [
+      "~/.agents/skills",
+      "~/.smelt/trash/skills",
+      "~/.claude/skills",
+      "~/.copilot/skills",
+      "~/.cursor/skills",
+      "~/.gemini/skills",
+      "~/.gemini/config/skills",
+      "~/.kiro/skills",
+      "~/.config/opencode/skills",
+      "~/.config/amp/skills",
+      "~/.qwen/skills",
+      "~/.cline/skills",
+      "~/.roo/skills",
+      "~/.codeium/windsurf/skills",
+      "~/.trae/skills",
+      "${project}/.agents/skills",
+      "${project}/.claude/skills",
+      "${project}/.github/skills",
+      "${project}/.cursor/skills",
+      "${project}/.gemini/skills",
+      "${project}/.kiro/skills",
+      "${project}/.opencode/skills",
+      "${project}/.qwen/skills",
+      "${project}/.cline/skills",
+      "${project}/.roo/skills",
+      "${project}/.windsurf/skills",
+      "${project}/.trae/skills"
+    ]
+  }
+}

@@ -258,7 +258,7 @@ fn run_status_color(status: AutomationRunStatus) -> u32 {
         AutomationRunStatus::Starting
         | AutomationRunStatus::Queued
         | AutomationRunStatus::Dispatching
-        | AutomationRunStatus::Running => crate::ui_theme::accent(),
+        | AutomationRunStatus::Running => crate::ui_theme::blue(),
     }
 }
 

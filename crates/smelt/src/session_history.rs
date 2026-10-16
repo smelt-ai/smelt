@@ -1072,9 +1072,9 @@ impl Workspace {
     }
 
     /// 历史会话右键「删除」的二次确认弹窗。
-    pub(crate) fn render_delete_history_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_delete_history_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(target) = self.delete_history_target.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         let (fg, muted) = {
             let t = cx.theme();
@@ -1111,7 +1111,7 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(420., true, content, cx)
+        self.modal_shell(420., true, content, crate::overlay::ModalLayer::DeleteHistory, cx)
     }
 
     /// 历史会话页的「迁移到 →」：读源 agent 落盘的 transcript，压成交接 prompt，

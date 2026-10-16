@@ -1,6 +1,6 @@
 //! macOS 26 顶部导航的系统玻璃桥。
 //!
-//! 这是窗口铬，不是内容区视觉语言（内容区跟 Grok Bot 实色 sand）。
+//! 这是窗口铬，不是内容区视觉语言（内容区用当前主题的不透明实色）。
 //! GPUI 目前只公开传统 `WindowBackgroundAppearance::Blurred`，其 macOS 实现是
 //! `NSVisualEffectView`。这里在 GPUI 的 Metal view 下插入原生
 //! `NSGlassEffectView`，只给稳定的顶部导航区域使用系统玻璃。

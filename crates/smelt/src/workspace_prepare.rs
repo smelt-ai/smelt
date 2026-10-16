@@ -147,8 +147,9 @@ impl Workspace {
             // 也确保各根缓存新鲜（ensure_git_status 内部已有 TTL）。
             let roots = self.workspace_roots(cx);
             if query.is_empty() {
-                // 无查询：正常树形浏览，清空上一次搜索结果。
+                // 无查询：正常树形浏览，清空上一次搜索结果，并停掉还在走的遍历。
                 self.search_results = None;
+                self.cancel_file_search();
                 for root in &roots {
                     self.ensure_git_status(root.clone(), cx);
                     self.ensure_dir_listing(root.clone(), cx);

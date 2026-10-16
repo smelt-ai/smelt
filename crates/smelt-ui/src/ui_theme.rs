@@ -1,30 +1,23 @@
-//! 语义色板（深色 / 浅色两套）——全局 UI 颜色的唯一出处。
+//! 语义色板。自绘界面的颜色只从**当前装上的主题**来。
 //!
-//! 视觉语言整体跟本机 **Grok Bot**（`/Applications/Grok Bot.app`）的 `sand`：
-//! 色值、实色表面、近白/近黑主按钮、胶囊 composer。窗口底和舞台底 `#070707` /
-//! 会话列表 `#111111` / 卡片 `#181818`，交互强调是它的链接蓝 `#1084fe`；
-//! 主操作（发送钮）走近白/近黑实心，不走强调蓝。浅色对应 `sand` light
-//! （舞台底 `#fcfcfc`）。
+//! gpui-kit 的 `Theme::update` / `apply_config` 管组件库。侧栏、会话行、气泡、
+//! Git 大多没有 `&App`，不能在绘制时读 `cx.theme()`，所以装主题时把语义位
+//! 抄进这里，绘制时读 `ui_theme::bg_stage()`。这里没有第二套色值。
 //!
-//! 上一版色值来自 Discord，材质一度走过 Telegram 毛玻璃。换成 Grok Bot
-//! 是整体换语言，不是调参：**深色表面层级的方向反过来了**（见 DARK 的注释），
-//! 内容区用实底，不要再给卡片叠半透明。
+//! 默认主题是库自带的 Default Dark / Default Light。换 Ayu、Catppuccin
+//! 或其它已注册主题时，下面这一条映射整份重填。主题文件不带产品色块。
 //!
-//! 布局各层（项目栏 / 会话栏 / 舞台 / 工具栏 / 底栏 / 状态栏 / diff）
-//! 统一从这里取色，别再在各处写裸 `rgb(0x...)`——写死的深色在浅色模式下会花。
-//!
-//! 用法：全是**函数**不是常量（`ui_theme::bg_rail()`），因为色值要跟着
-//! `set_light()` 在运行时切换。切换点见 settings 模块的「外观」设置开关和 main() 初始化，
-//! 切完必须 `cx.refresh_windows()` 才会重绘。
+//! 内容区用实底，不要再给卡片叠半透明。调用点不写裸 `rgb(0x...)`。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
-use gpui::{Anchor, FontFeatures, Pixels, Rgba, px, rgb, rgba, transparent_black};
+use gpui::{FontFeatures, Hsla, Pixels, Rgba, px, rgb, rgba};
 
 use smelt_core::agent_status::AgentStatus;
 
 /// 一套完整语义色板。字段即语义位，深浅两套必须一一对应填满。
+#[derive(Clone, Copy)]
 pub struct Palette {
     // ---- 底色（表面层级） ----
     /// 项目 rail / Tool Panel 图标条（深色下最深，浅色下最灰）。
@@ -35,15 +28,13 @@ pub struct Palette {
     pub bg_column: u32,
     /// 标题栏底。
     pub bg_bar: u32,
-    /// 卡片 / 胶囊底。
+    /// 卡片 / 胶囊底。读主题的 `popover`，和菜单同一层。
     pub bg_card: u32,
-    /// hover / 输入胶囊底。
+    /// 控件 hover。`list_hover` 压在卡片上。
     pub bg_hover: u32,
-    /// **列表行**专用 hover 底：必须明显弱于 `bg_selected`，否则「鼠标划过的行」
-    /// 和「当前选中的行」同时是两块灰，一眼分不出哪个才是当前。
-    /// 不能直接复用 `bg_hover`——那个还给按钮 / 输入胶囊用，压淡了控件就没手感。
+    /// 列表行 hover。`list_hover` 压在侧栏上，不跟控件 hover 共用一个底。
     pub bg_row_hover: u32,
-    /// 选中行底（会话行选中、文件行选中）。
+    /// 选中行底。侧栏选中色和列表选中色里，离栏底更远的那一个。
     pub bg_selected: u32,
     /// 状态栏 / 终端底条。
     pub bg_status: u32,
@@ -64,21 +55,21 @@ pub struct Palette {
     pub text_bright: u32,
     /// 正文。
     pub text: u32,
-    /// 次级正文 / 按钮文字。
+    /// 次级正文。正文和 `muted_foreground` 的中间。
     pub text_mid: u32,
-    /// 弱化说明 / mono 副标题。
+    /// 弱化说明。主题的 `muted_foreground`。
     pub text_muted: u32,
-    /// 最弱（占位、时间戳、快捷键提示）。
+    /// 最弱（占位、时间戳、快捷键提示）。从弱字再往窗口底走一截。
     pub text_faint: u32,
 
     // ---- 语义色 ----
-    /// 交互强调（选中描边 / 焦点 / 链接）。Grok Bot 的 `fill/accent`，不是主按钮填色。
+    /// 强调色。`link` 能从正文里认出来就用它，否则用列表选中边，再否则用蓝。
     pub accent: u32,
     /// 绿：运行正常 / 通过 / diff 新增侧。
     pub green: u32,
     /// 黄：警告 / 额度将满，不是 agent 状态。
     pub yellow: u32,
-    /// 蓝：链接 / 读类工具 / queued。
+    /// 蓝：运行中、读类工具。来自主题的 `base.blue`，不是强调色。
     pub blue: u32,
     /// 紫：agent 会话标识 / 模型胶囊。
     pub purple: u32,
@@ -110,288 +101,341 @@ pub struct Palette {
     pub diff_empty_bg: u32,
     /// 并排视图中缝分隔线。
     pub diff_gutter: u32,
+
+    /// 主操作填充，读主题的 `primary`。
+    pub action_fill: u32,
+    /// 压在 `action_fill` 上的字和图标。
+    pub action_on: u32,
 }
-
-/// 深色（Grok Bot `sand-dark`）。
-///
-/// **表面层级跟 Discord 那版相反，别顺手改回去**：Grok Bot 是窗口底和舞台同色近黑，
-/// 会话列表和卡片往上抬。上一版 Discord 靠「舞台最亮、边缘压暗」把注意力推向中间；
-/// 两种都自洽，混用就既不像 Grok 也不像 Discord。
-pub const DARK: Palette = Palette {
-    bg_rail: 0x070707,
-    bg_stage: 0x070707,
-    bg_column: 0x111111,
-    bg_bar: 0x111111,
-    bg_card: 0x181818,
-    bg_hover: 0x262626,
-    // 只比 bg_column(#111) 抬一档：划过是「浮起一点」，选中才明显亮起来。
-    bg_row_hover: 0x151515,
-    bg_selected: 0x262626,
-    bg_status: 0x070707,
-
-    border_dim: 0x151515,
-    border: 0x181818,
-    border_mid: 0x262626,
-    border_loud: 0x3d3d3d,
-    // Grok Bot `border/focus` 深色：#1c8bfe。
-    border_focus: 0x1c8bfe,
-    // 选中描边走强调蓝，不用「灰上加灰」。
-    text_bright: 0xfcfcfc,
-    text: 0xf3f3f3,
-    text_mid: 0xb7b7b7,
-    text_muted: 0x959595,
-    text_faint: 0x777777,
-
-    // 强调蓝是 Grok Bot 的 `fill/accent`（sand blue/9）。主按钮不走它，
-    // 见 `action_fill`：深色近白、浅色近黑。
-    accent: 0x1084fe,
-    // 完成绿要偏黄、少蓝。sand success `#00c972` 的 B=114，是薄荷绿，
-    // 小图标上看着跟运行青是同一个色。
-    green: 0x22c55e,
-    yellow: 0xff9800,
-    // 运行必须是「蓝通道压过绿」的蓝。`#459ffe` 的 G=159，15px 空心图标会收成青，
-    // 和完成绿撞车。`#3b82f6` 仍跟强调蓝 `#1084fe` 同族，但绿通道更低。
-    blue: 0x3b82f6,
-    purple: 0x9159fe,
-    red: 0xff263c,
-    diff_add_text: 0x78e2b4,
-    on_accent: 0xfcfcfc,
-
-    diff_add_fg: 0x78e2b4,
-    diff_add_bg: 0x001c10,
-    diff_add_bar: 0x00c972,
-    diff_add_hl: 0x004024,
-    diff_del_fg: 0xff8c98,
-    diff_del_bg: 0x240508,
-    diff_del_bar: 0xff263c,
-    diff_del_hl: 0x520c13,
-    diff_ctx_fg: 0xb7b7b7,
-    diff_hunk_fg: 0x459ffe,
-    diff_meta_fg: 0x5a5a5a,
-    diff_empty_bg: 0x070707,
-    diff_gutter: 0x181818,
-};
-
-/// 浅色（Grok Bot `sand` light）。
-///
-/// 两条别顺手改平：
-/// - 浅色舞台底是近白 `#fcfcfc`（最亮），会话列表和卡片略压暗才能浮起来。
-/// - 强调蓝深浅两套用同一个值 `#1084fe`：它是品牌交互色，跟着模式变色就不是
-///   那个牌子了；其余语义色（绿/黄/红/青/紫）照例压深一档，否则近白底上对比不足。
-pub const LIGHT: Palette = Palette {
-    bg_rail: 0xeeeeee,
-    bg_stage: 0xfcfcfc,
-    bg_column: 0xf7f7f7,
-    bg_bar: 0xf7f7f7,
-    bg_card: 0xf3f3f3,
-    bg_hover: 0xe8e8e8,
-    // 浅色下同理：划过只比 bg_column 压深一点，选中才明显。
-    bg_row_hover: 0xeeeeee,
-    bg_selected: 0xe8e8e8,
-    bg_status: 0xeeeeee,
-
-    border_dim: 0xe8e8e8,
-    border: 0xe8e8e8,
-    border_mid: 0xd5d5d5,
-    border_loud: 0xb7b7b7,
-    border_focus: 0x0c64c1,
-
-    text_bright: 0x141414,
-    text: 0x141414,
-    text_mid: 0x3d3d3d,
-    text_muted: 0x5a5a5a,
-    text_faint: 0x777777,
-
-    accent: 0x1084fe,
-    green: 0x16a34a,
-    yellow: 0xc27400,
-    blue: 0x2563eb,
-    purple: 0x6e44c1,
-    red: 0xc21d2e,
-    diff_add_text: 0x00673a,
-    on_accent: 0xfcfcfc,
-
-    diff_add_fg: 0x00673a,
-    diff_add_bg: 0xe8faf2,
-    diff_add_bar: 0x00c972,
-    diff_add_hl: 0xb0eed3,
-    diff_del_fg: 0xc21d2e,
-    diff_del_bg: 0xffebed,
-    diff_del_bar: 0xff263c,
-    diff_del_hl: 0xffbcc3,
-    diff_ctx_fg: 0x3d3d3d,
-    diff_hunk_fg: 0x0c64c1,
-    diff_meta_fg: 0x959595,
-    diff_empty_bg: 0xf7f7f7,
-    diff_gutter: 0xe8e8e8,
-};
 
 /// 当前是不是浅色。进程级全局态：色板要在任意渲染函数里同步读到，
 /// 走 GPUI 的 Global 就得把 `&App` 一路传进每个取色点，代价不成比例
 /// （跟 terminal.rs 的 `DARK_MODE` 是同一路数）。
 static LIGHT_MODE: AtomicBool = AtomicBool::new(false);
 
-/// 切换色板。调用方切完必须 `cx.refresh_windows()`，否则已绘制的界面不会更新。
+static ACTIVE: RwLock<Option<Palette>> = RwLock::new(None);
+
+/// 主题还没装上时的明暗。测试和 `apply` 失败时走这里。
+/// 正式切换走 `adopt_active_theme`，整份换成当前主题。
 pub fn set_light(light: bool) {
-    LIGHT_MODE.store(light, Ordering::Relaxed);
+    install_palette(builtin_fallback(light), light);
 }
 
 pub fn is_light() -> bool {
     LIGHT_MODE.load(Ordering::Relaxed)
 }
 
-/// 把当前色板按语义位灌进 gpui-component 的主题，让组件（Input / Button /
-/// Menu / 设置页 / 表格…）跟自绘部分同色。
-///
-/// 背景：全库有一百多处直接读 `cx.theme().border` 这类组件库色位，和自绘部分读
-/// 的 `ui_theme::*` 是两套独立色值，同屏挨着就差一档。与其改掉那一百多处调用，
-/// 不如在这里把组件库主题按语义对齐——色真源仍然只有本文件一个。
-///
-/// 只覆写「表面 / 边 / 文字 / 主按钮」这些会跟自绘部分并排出现的位；组件内部
-/// 的细分态（各种 button_success_hover 之类）交给组件库自己推导，别越俎代庖。
-pub fn apply_to_component_theme(cx: &mut gpui::App) {
-    use gpui_component::{ActiveTheme as _, Theme};
+/// 主题装上之后，按语义位重填产品色板。
+pub fn adopt_active_theme(cx: &gpui::App) {
+    use gpui_component::Theme;
 
     if !cx.has_global::<Theme>() {
         return;
     }
-    let p = palette();
-    let is_dark = cx.theme().mode.is_dark();
-    let c = &mut cx.global_mut::<Theme>().colors;
+    let theme = Theme::global(cx);
+    install_palette(palette_from_theme(theme), !theme.is_dark());
+}
 
-    c.background = rgb(p.bg_stage).into();
-    c.foreground = rgb(p.text).into();
-    // Markdown 表格/分割线、ACP 卡片描边都读 `theme.border`。写成透明后这些
-    // 声明全部失效，表格会糊成两列飘字。跟 `border_mid()` 对齐。
-    c.border = rgb(p.border_mid).into();
-    c.muted = rgb(p.bg_card).into();
-    c.muted_foreground = rgb(p.text_muted).into();
-    c.popover = rgb(p.bg_card).into();
-    c.popover_foreground = rgb(p.text).into();
-    c.input = rgb(p.border_loud).into();
-    c.ring = rgb(p.accent).into();
-    c.selection = rgba((p.accent << 8) | 0x55).into();
-    c.drop_target = rgba((p.accent << 8) | 0x33).into();
+fn install_palette(palette: Palette, light: bool) {
+    LIGHT_MODE.store(light, Ordering::Relaxed);
+    *ACTIVE.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(palette);
+}
 
-    // 主按钮走 Grok Bot：深色近白底 + 深字，浅色近黑底 + 浅字。强调蓝只留给
-    // 选中/链接，不再当实心 CTA，否则和对话里的白圆钮打架。
-    c.primary = rgb(p.text_bright).into();
-    c.primary_hover = rgb(shade(p.text_bright, if is_dark { 0.9 } else { 1.18 })).into();
-    c.primary_active = rgb(shade(p.text_bright, if is_dark { 0.82 } else { 0.7 })).into();
-    c.primary_foreground = rgb(p.bg_stage).into();
-    // Slider：tokens 派生时 slider_bar/slider_thumb 没配置会 fallback 到
-    // primary——拖动 active 时整条轨道铺成主色，全屏下非常刺眼。
-    // 收敛成中性选中表面色 + 亮手柄，跟拖拽调整布局那条 drag_border 一个思路：
-    // 拖拽反馈用主题色，不用组件默认的亮强调色。
-    c.slider_bar = rgb(p.bg_selected).into();
-    c.slider_thumb = rgb(p.text_bright).into();
-    c.secondary = rgb(p.bg_card).into();
-    c.secondary_hover = rgb(p.bg_hover).into();
-    c.secondary_active = rgb(p.bg_selected).into();
-    c.secondary_foreground = rgb(p.text).into();
-    // 行内 code 的底色改在 markdown_view 里用 bg_selected 实色设，不再借 accent。
-    // accent 仍给菜单/列表 hover：半透明选中表面，避免整块发灰。
-    c.accent = rgba((p.bg_selected << 8) | 0xaa).into();
-    c.accent_foreground = rgb(p.text_bright).into();
-    c.danger = rgb(p.red).into();
-    c.danger_foreground = rgb(p.on_accent).into();
-    // Markdown 链接读 `theme.link*`，不覆写的话深色默认是近白，和正文分不开。
-    c.link = rgb(p.blue).into();
-    c.link_hover = rgb(shade(p.blue, if is_dark { 1.14 } else { 0.88 })).into();
-    c.link_active = rgb(shade(p.blue, if is_dark { 0.88 } else { 0.78 })).into();
-    c.warning = rgb(p.yellow).into();
-    c.warning_foreground = rgb(p.yellow).into();
-    c.info = rgb(p.blue).into();
-    c.info_foreground = rgb(p.blue).into();
-    // Tab（tool_panel.rs 的 Files / Git / History 与插件 tab 用的 gpui_component::tab::TabBar）：
-    // 库自带的 tab_foreground/tab_active_foreground 是内置深色主题的固定值，
-    // 不跟着上面这些 palette 覆写走，跟其余全用 ui_theme 色板的界面挨在一起
-    // 会有点"格格不入"（灰阶、字重都对不上）。这里收敛成跟舞台头标题同一套
-    // text_muted/text_bright。
-    c.tab_foreground = rgb(p.text_muted).into();
-    c.tab_active_foreground = rgb(p.text_bright).into();
-    c.tab_bar = c.background;
-    c.tab = transparent_black();
-    c.tab_active = transparent_black();
+struct ThemeRoles {
+    background: Hsla,
+    foreground: Hsla,
+    muted_foreground: Hsla,
+    sidebar: Hsla,
+    popover: Hsla,
+    list_hover: Hsla,
+    list_active: Hsla,
+    sidebar_accent: Hsla,
+    list_active_border: Hsla,
+    title_bar: Hsla,
+    status_bar: Hsla,
+    sidebar_border: Hsla,
+    border: Hsla,
+    input: Hsla,
+    ring: Hsla,
+    link: Hsla,
+    success: Hsla,
+    danger: Hsla,
+    warning: Hsla,
+    blue: Hsla,
+    magenta: Hsla,
+    primary: Hsla,
+    primary_foreground: Hsla,
+}
 
-    // 列表 / 侧栏：会话列表与文件树都在这一层，必须跟自绘的行底同色。
-    c.list = rgb(p.bg_column).into();
-    c.list_hover = rgb(p.bg_hover).into();
-    c.list_active = rgb(p.bg_selected).into();
-    c.list_active_border = rgb(p.accent).into();
-    c.list_even = rgb(p.bg_column).into();
-    c.list_head = rgb(p.bg_bar).into();
-    c.sidebar = rgb(p.bg_column).into();
-    // 设置页侧栏的 active 行读的是 sidebar_accent（不是 list_active）。
-    // 如果只覆写 sidebar，默认深色主题的 #262626 会和 bg_column 几乎融在一起，
-    // 看起来就像当前页没有选中。
-    c.sidebar_accent = rgb(p.bg_selected).into();
-    c.sidebar_accent_foreground = rgb(p.text_bright).into();
-    c.sidebar_border = rgb(p.border_dim).into();
-    c.sidebar_foreground = rgb(p.text).into();
-    // 滚动条：组件库缺省 thumb 会落到 accent（Grok 强调蓝 `#1084fe`），
-    // 侧栏/历史这种长列表里整条亮蓝非常扎眼。轨道保持透明，thumb 用中性描边灰。
-    c.scrollbar = transparent_black();
-    c.scrollbar_thumb = rgb(p.border_loud).into();
-    c.scrollbar_thumb_hover = rgb(p.text_faint).into();
+fn palette_from_theme(theme: &gpui_component::Theme) -> Palette {
+    palette_from_roles(&ThemeRoles {
+        background: theme.background,
+        foreground: theme.foreground,
+        muted_foreground: theme.muted_foreground,
+        sidebar: theme.sidebar,
+        popover: theme.popover,
+        list_hover: theme.list_hover,
+        list_active: theme.list_active,
+        sidebar_accent: theme.sidebar_accent,
+        list_active_border: theme.list_active_border,
+        title_bar: theme.title_bar,
+        status_bar: theme.status_bar,
+        sidebar_border: theme.sidebar_border,
+        border: theme.border,
+        input: theme.input,
+        ring: theme.ring,
+        link: theme.link,
+        success: theme.success,
+        danger: theme.danger,
+        warning: theme.warning,
+        blue: theme.blue,
+        magenta: theme.magenta,
+        primary: theme.primary,
+        primary_foreground: theme.primary_foreground,
+    })
+}
 
-    // colors 改完必须同步重算 tokens：组件内部有些位读的是 `tokens.*` 而不是
-    // `colors.*`（如 checkbox 勾选态的方块填充用 tokens.primary）。不同步的话
-    // 填充还是组件库默认的浅色，和被我们改成白的对勾（primary_foreground）撞成
-    // 「白底 + 白对勾」——勾选了却看不见勾，就是这个回归。
-    let theme = cx.global_mut::<Theme>();
-    theme.tokens = (&theme.colors).into();
-    // 应用内通知固定在右下角，避开左侧高频操作的会话列表；主题切换会重置通知配置，
-    // 所以必须在每次 Theme::change 之后和色板一起重新覆盖。
-    theme.notification.placement = Anchor::BottomRight;
-    let radius = theme.radius;
+/// 正文和弱字之间的一档。库只有 `muted_foreground` 一种弱字。
+const TEXT_MID_MIX: f32 = 0.45;
+/// 最弱字再往窗口底走的比例。对比仍够 3:1 才走满。
+const TEXT_FAINT_MIX: f32 = 0.40;
+/// 弱字自己已经偏暗时只走一小步，避免时间戳掉进底色。
+const TEXT_FAINT_SHORT_MIX: f32 = 0.15;
+const TEXT_FAINT_MIN_CONTRAST: f32 = 3.0;
+/// 和正文或窗口底的平方距离不超过这个值，就还是同一种墨。
+/// 纯灰大约 23 级。Default Light 的 link 落到 `#171717`，
+/// 正文是 `#0a0a0a`，只差 13 级，不能当强调色。
+const EMPHASIS_MIN_DISTANCE2: u32 = 40 * 40;
 
-    // 分栏拖拽条读的是 gpui-base 的 `resizable.handle`，不是 `Theme.colors.border`。
-    // Theme::change 会把手柄设成当时的 `theme.border`；我们随后覆写 colors.border
-    // 却不同步这一位的话，手柄就停在组件库默认——Default 是透明，1px 缝里露出
-    // 壳底 `#070707`，看起来像一条黑槽。发丝画在手柄上，不要靠缝透底。
-    // 滚动条同理：Theme::change 已经把旧 thumb 色烤进 gpui-base，只改 colors
-    // 不够，必须把中性灰重新投影上去。
-    if cx.has_global::<gpui_base::Theme>() {
-        let hairline: gpui::Hsla = overlay(0x22).into();
-        let active: gpui::Hsla = rgb(p.border_focus).into();
-        let track: gpui::Hsla = transparent_black();
-        let thumb: gpui::Hsla = rgb(p.border_loud).into();
-        let thumb_hover: gpui::Hsla = rgb(p.text_faint).into();
-        let border: gpui::Hsla = rgb(p.border_mid).into();
-        let base = cx.global_mut::<gpui_base::Theme>();
-        base.resizable.handle = Some(hairline);
-        base.resizable.active_handle = Some(active);
-        let mode = base.scrollbar.mode();
-        let motion = base.scrollbar.motion();
-        base.scrollbar = gpui_base::ScrollbarTheme::new()
-            .with_mode(mode)
-            .with_motion(motion)
-            .with_styles(
-                gpui_base::ScrollbarStyles::default()
-                    .track(|style| style.bg(track))
-                    .track_hover(|style| style.bg(track))
-                    .track_active(|style| style.bg(track).border_color(border))
-                    .thumb(|style| style.bg(thumb).radius(radius))
-                    .thumb_hover(|style| style.bg(thumb_hover).radius(radius))
-                    .thumb_active(|style| style.bg(thumb_hover).radius(radius)),
-            );
+/// 产品档读当前主题的语义位。库没有的几档才用这份主题自己的颜色推一次：
+/// 字的中间档和最弱档、hover 压在各自的底上、选中行取离栏底更远的那个、
+/// 强调色在 link 和正文糊在一起时改走列表选中边。diff 底色用 success / danger
+/// 和背景混一次。不另写一套色，也不按主题名分支。
+fn palette_from_roles(theme: &ThemeRoles) -> Palette {
+    let bg = solid(theme.background, theme.background);
+    let fg = solid(theme.foreground, theme.background);
+    let muted_fg = solid(theme.muted_foreground, theme.background);
+    let column = solid(theme.sidebar, theme.background);
+    let card = solid(theme.popover, theme.background);
+    let row_hover = solid(theme.list_hover, theme.sidebar);
+    let control_hover = solid(theme.list_hover, theme.popover);
+    let border = solid(theme.border, theme.background);
+    let link = solid(theme.link, theme.background);
+    let active_border = solid(theme.list_active_border, theme.background);
+    let green = solid(theme.success, theme.background);
+    let red = solid(theme.danger, theme.background);
+    let yellow = solid(theme.warning, theme.background);
+    let blue = solid(theme.blue, theme.background);
+    let accent = emphasis(link, fg, bg, active_border, blue);
+    Palette {
+        bg_rail: bg,
+        bg_stage: bg,
+        bg_column: column,
+        bg_bar: solid(theme.title_bar, theme.background),
+        bg_card: card,
+        bg_hover: control_hover,
+        bg_row_hover: row_hover,
+        bg_selected: selected_fill(theme.sidebar_accent, theme.list_active, theme.sidebar),
+        bg_status: solid(theme.status_bar, theme.background),
+        border_dim: solid(theme.sidebar_border, theme.background),
+        border,
+        border_mid: border,
+        border_loud: solid(theme.input, theme.background),
+        border_focus: solid(theme.ring, theme.background),
+        text_bright: fg,
+        text: fg,
+        text_mid: mix(fg, muted_fg, TEXT_MID_MIX),
+        text_muted: muted_fg,
+        text_faint: faint_text(muted_fg, bg),
+        accent,
+        green,
+        yellow,
+        blue,
+        purple: solid(theme.magenta, theme.background),
+        red,
+        diff_add_text: green,
+        on_accent: solid(theme.primary_foreground, theme.primary),
+        diff_add_fg: green,
+        diff_add_bg: mix(bg, green, 0.18),
+        diff_add_bar: green,
+        diff_add_hl: mix(bg, green, 0.35),
+        diff_del_fg: red,
+        diff_del_bg: mix(bg, red, 0.18),
+        diff_del_bar: red,
+        diff_del_hl: mix(bg, red, 0.35),
+        diff_ctx_fg: muted_fg,
+        diff_hunk_fg: accent,
+        diff_meta_fg: muted_fg,
+        diff_empty_bg: bg,
+        diff_gutter: card,
+        action_fill: solid(theme.primary, theme.background),
+        action_on: solid(theme.primary_foreground, theme.primary),
     }
 }
 
-/// 把一个 RGB 按比例调亮（factor > 1）或压暗（< 1），逐通道饱和截断。
-/// 只给上面的 hover / active 态推导用——手写十几个近似色不值当。
-fn shade(color: u32, factor: f32) -> u32 {
-    let ch = |shift: u32| {
-        let v = ((color >> shift) & 0xff) as f32 * factor;
-        (v.clamp(0.0, 255.0) as u32) << shift
-    };
-    ch(16) | ch(8) | ch(0)
+/// 侧栏行的选中底。主题给侧栏准备的选中色离栏底更远，就用它。
+/// 否则用列表选中色。Ayu 没写侧栏，回落的 accent 几乎贴着栏底，
+/// 真正的选中是 `list.active`。
+fn selected_fill(sidebar_accent: Hsla, list_active: Hsla, column: Hsla) -> u32 {
+    let column_rgb = solid(column, column);
+    let accent_fill = solid(sidebar_accent, column);
+    let active_fill = solid(list_active, column);
+    if distance2(accent_fill, column_rgb) >= distance2(active_fill, column_rgb) {
+        accent_fill
+    } else {
+        active_fill
+    }
 }
 
-/// 当前色板。
-pub fn palette() -> &'static Palette {
-    if is_light() { &LIGHT } else { &DARK }
+fn emphasis(link: u32, foreground: u32, background: u32, active_border: u32, blue: u32) -> u32 {
+    if reads_as_emphasis(link, foreground, background) {
+        link
+    } else if reads_as_emphasis(active_border, foreground, background) {
+        active_border
+    } else {
+        blue
+    }
+}
+
+fn reads_as_emphasis(color: u32, foreground: u32, background: u32) -> bool {
+    distance2(color, foreground) > EMPHASIS_MIN_DISTANCE2
+        && distance2(color, background) > EMPHASIS_MIN_DISTANCE2
+}
+
+fn faint_text(muted: u32, background: u32) -> u32 {
+    let full = mix(muted, background, TEXT_FAINT_MIX);
+    if contrast_ratio(muted, background) >= TEXT_FAINT_MIN_CONTRAST
+        && contrast_ratio(full, background) >= TEXT_FAINT_MIN_CONTRAST
+    {
+        full
+    } else {
+        mix(muted, background, TEXT_FAINT_SHORT_MIX)
+    }
+}
+
+/// 主题还没装上时的底。只对齐库 Default 的窗口底：深色 `neutral-950`，浅色白。
+/// 强调色用一档能看见的蓝，不跟正文糊在一起。状态色彼此不同，
+/// 好让首帧的状态点分得开。正式颜色由 `adopt_active_theme` 换上。
+fn builtin_fallback(light: bool) -> Palette {
+    let bg = if light { 0xffffff } else { 0x0a0a0a };
+    let fg = if light { 0x0a0a0a } else { 0xfafafa };
+    let muted = if light { 0x737373 } else { 0xa3a3a3 };
+    let border = if light { 0xe5e5e5 } else { 0x262626 };
+    let green = 0x16a34a;
+    let red = 0xdc2626;
+    let yellow = 0xca8a04;
+    let blue = 0x2563eb;
+    let purple = 0x9333ea;
+    Palette {
+        bg_rail: bg,
+        bg_stage: bg,
+        bg_column: bg,
+        bg_bar: bg,
+        bg_card: bg,
+        bg_hover: bg,
+        bg_row_hover: bg,
+        bg_selected: bg,
+        bg_status: bg,
+        border_dim: border,
+        border,
+        border_mid: border,
+        border_loud: border,
+        border_focus: border,
+        text_bright: fg,
+        text: fg,
+        text_mid: mix(fg, muted, TEXT_MID_MIX),
+        text_muted: muted,
+        text_faint: faint_text(muted, bg),
+        accent: blue,
+        green,
+        yellow,
+        blue,
+        purple,
+        red,
+        diff_add_text: green,
+        on_accent: bg,
+        diff_add_fg: green,
+        diff_add_bg: mix(bg, green, 0.18),
+        diff_add_bar: green,
+        diff_add_hl: mix(bg, green, 0.35),
+        diff_del_fg: red,
+        diff_del_bg: mix(bg, red, 0.18),
+        diff_del_bar: red,
+        diff_del_hl: mix(bg, red, 0.35),
+        diff_ctx_fg: muted,
+        diff_hunk_fg: blue,
+        diff_meta_fg: muted,
+        diff_empty_bg: bg,
+        diff_gutter: bg,
+        action_fill: fg,
+        action_on: bg,
+    }
+}
+
+fn solid(color: Hsla, behind: Hsla) -> u32 {
+    let over = color.to_rgb();
+    if over.a >= 0.98 {
+        pack(over)
+    } else {
+        pack(behind.to_rgb().blend(over))
+    }
+}
+
+fn pack(color: Rgba) -> u32 {
+    let q = |channel: f32| ((channel.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xff;
+    (q(color.r) << 16) | (q(color.g) << 8) | q(color.b)
+}
+
+fn mix(from: u32, to: u32, t: f32) -> u32 {
+    let channel = |shift: u32| {
+        let start = ((from >> shift) & 0xff) as f32;
+        let end = ((to >> shift) & 0xff) as f32;
+        let value = start + (end - start) * t;
+        (value.clamp(0.0, 255.0).round() as u32) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
+fn distance2(a: u32, b: u32) -> u32 {
+    let channel = |shift: u32| {
+        let delta = ((a >> shift) & 0xff).abs_diff((b >> shift) & 0xff);
+        delta * delta
+    };
+    channel(16) + channel(8) + channel(0)
+}
+
+fn channel_lin(channel: u32) -> f32 {
+    let c = (channel as f32) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn relative_luminance(color: u32) -> f32 {
+    0.2126 * channel_lin((color >> 16) & 0xff)
+        + 0.7152 * channel_lin((color >> 8) & 0xff)
+        + 0.0722 * channel_lin(color & 0xff)
+}
+
+fn contrast_ratio(a: u32, b: u32) -> f32 {
+    let l1 = relative_luminance(a);
+    let l2 = relative_luminance(b);
+    let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// 当前色板。渲染里同步读，不碰数据库。还没装主题时是库 Default 的底色。
+pub fn palette() -> Palette {
+    let guard = ACTIVE.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(palette) = *guard {
+        return palette;
+    }
+    drop(guard);
+    let palette = builtin_fallback(is_light());
+    *ACTIVE.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(palette);
+    palette
 }
 
 /// 给每个语义位生成一个取当前色板的读取函数——调用点写 `ui_theme::bg_rail()`。
@@ -450,7 +494,7 @@ slots!(
 );
 
 /// 给纯色叠低透明度，用于角标底、激活态背景等衍生色。
-/// `alpha` 0–255；`tint(accent(), 0x22)` 给强调蓝叠一层淡底。
+/// `alpha` 0–255；`tint(accent(), 0x22)` 给强调色叠一层淡底。
 pub fn tint(color: u32, alpha: u8) -> Rgba {
     rgba((color << 8) | alpha as u32)
 }
@@ -461,7 +505,8 @@ pub fn glass_floating() -> Rgba {
     rgb(bg_card())
 }
 
-/// 内容卡片材质：工具调用、附件、任务卡。实色 `bg_card`，比舞台抬一档。
+/// 内容卡片材质：工具调用、附件、任务卡。
+/// 实色 `bg_card`，跟主题的 popover 同一层。
 pub fn glass_card() -> Rgba {
     rgb(bg_card())
 }
@@ -568,14 +613,14 @@ pub const CHROME_ISLAND_BAND_PX: f32 = CHROME_ISLAND_TOP_PX + CHROME_ISLAND_HEIG
 /// 侧栏和工具页签走交通灯那条 `TOP_BAR_HEIGHT`，不用它。
 pub const CHROME_ISLAND_CLEARANCE_PX: f32 = CHROME_ISLAND_BAND_PX + 8.;
 
-/// 主操作填充：深色近白、浅色近黑。Grok 发送钮同一套，不用品牌紫。
+/// 主操作填充，读当前主题的 `primary`。
 pub fn action_fill() -> u32 {
-    text_bright()
+    palette().action_fill
 }
 
 /// 主操作上的字/图标，压在 `action_fill` 上。
 pub fn action_on() -> u32 {
-    bg_stage()
+    palette().action_on
 }
 
 /// 弱分隔：半透明 overlay，不是实色 `border_dim`。
@@ -584,7 +629,7 @@ pub fn hairline() -> Rgba {
     overlay(0x14)
 }
 
-/// 卡片轮廓：半透明 overlay，Grok Bot 的 `sand-border-default` 同思路，不走硬灰边。
+/// 卡片轮廓：半透明 overlay，不走硬灰边。
 pub fn card_stroke() -> Rgba {
     overlay(0x22)
 }
@@ -613,10 +658,14 @@ pub fn agent_status_color(status: AgentStatus) -> Rgba {
 }
 
 fn agent_status_u32(status: AgentStatus) -> u32 {
+    role_for_status(&palette(), status)
+}
+
+fn role_for_status(palette: &Palette, status: AgentStatus) -> u32 {
     match status {
-        AgentStatus::NeedsYou => red(),
-        AgentStatus::Running => blue(),
-        AgentStatus::Idle => text_faint(),
+        AgentStatus::NeedsYou => palette.red,
+        AgentStatus::Running => palette.blue,
+        AgentStatus::Idle => palette.text_faint,
     }
 }
 
@@ -701,30 +750,189 @@ mod tests {
             "正中内容的净空必须由胶囊顶带和缝加出来"
         );
         assert_eq!(conversation_max_width(), px(768.));
-        assert_eq!(action_fill(), text_bright());
-        assert_eq!(action_on(), bg_stage());
-        assert_ne!(
-            action_fill(),
-            accent(),
-            "主操作不能走强调蓝，否则和 Grok Bot 发送钮两套语言"
-        );
-        assert_eq!(DARK.accent, 0x1084fe, "强调色必须是 Grok Bot fill/accent");
-        assert_ne!(
-            DARK.border_loud, DARK.accent,
-            "滚动条 thumb 用 border_loud，不能跟强调蓝撞成一条亮蓝"
-        );
-        assert_eq!(LIGHT.accent, 0x1084fe);
-        assert_ne!(DARK.accent, 0x5865f2, "Discord blurple 必须从色板里清掉");
-        const {
-            // 深色：舞台最暗，会话列表/卡片往上抬。
-            assert!(DARK.bg_stage <= DARK.bg_column);
-            assert!(DARK.bg_column <= DARK.bg_card);
-            assert!(DARK.bg_card < DARK.bg_selected);
-            // 浅色：舞台最亮，会话列表/卡片略压暗。
-            assert!(LIGHT.bg_stage > LIGHT.bg_column);
-            assert!(LIGHT.bg_column >= LIGHT.bg_card);
-            assert!(LIGHT.bg_card > LIGHT.bg_selected);
+    }
+
+    fn opaque(hex: u32) -> Hsla {
+        rgb(hex).into()
+    }
+
+    fn sample_roles() -> ThemeRoles {
+        ThemeRoles {
+            background: opaque(0x111111),
+            foreground: opaque(0xfafafa),
+            muted_foreground: opaque(0xa3a3a3),
+            sidebar: opaque(0x222222),
+            popover: opaque(0x181818),
+            list_hover: rgba(0xffffff40).into(),
+            list_active: rgba(0x1e40af33).into(),
+            sidebar_accent: opaque(0x3a3a3a),
+            list_active_border: opaque(0x1d4ed8),
+            title_bar: opaque(0x171717),
+            status_bar: opaque(0x0a0a0a),
+            sidebar_border: opaque(0x262626),
+            border: opaque(0x2a2a2a),
+            input: opaque(0x3a3a3a),
+            ring: opaque(0x737373),
+            link: opaque(0x2563eb),
+            success: opaque(0x16a34a),
+            danger: opaque(0xdc2626),
+            warning: opaque(0xca8a04),
+            blue: opaque(0x3b82f6),
+            magenta: opaque(0x9333ea),
+            primary: opaque(0xfafafa),
+            primary_foreground: opaque(0x171717),
         }
+    }
+
+    #[test]
+    fn product_slots_read_theme_roles() {
+        let roles = sample_roles();
+        let palette = palette_from_roles(&roles);
+        assert_eq!(palette.bg_stage, 0x111111);
+        assert_eq!(palette.bg_rail, palette.bg_stage);
+        assert_eq!(palette.bg_column, 0x222222);
+        assert_eq!(palette.bg_card, 0x181818);
+        assert_ne!(palette.bg_card, palette.border);
+        assert_eq!(palette.bg_bar, 0x171717);
+        assert_eq!(palette.bg_status, 0x0a0a0a);
+        assert_eq!(palette.bg_row_hover, solid(roles.list_hover, roles.sidebar));
+        assert_eq!(palette.bg_hover, solid(roles.list_hover, roles.popover));
+        assert_ne!(palette.bg_hover, palette.bg_row_hover);
+        assert_eq!(palette.bg_selected, 0x3a3a3a);
+        assert_ne!(
+            palette.bg_selected,
+            solid(roles.list_active, roles.sidebar)
+        );
+        assert_eq!(palette.border_dim, 0x262626);
+        assert_eq!(palette.border, 0x2a2a2a);
+        assert_eq!(palette.border_mid, palette.border);
+        assert_eq!(palette.border_loud, 0x3a3a3a);
+        assert_eq!(palette.border_focus, 0x737373);
+        assert_eq!(palette.text, 0xfafafa);
+        assert_eq!(palette.text_bright, palette.text);
+        assert_eq!(palette.text_muted, 0xa3a3a3);
+        assert_eq!(palette.text_mid, mix(palette.text, palette.text_muted, TEXT_MID_MIX));
+        assert_ne!(palette.text_mid, palette.text);
+        assert_ne!(palette.text_mid, palette.text_muted);
+        assert_eq!(palette.text_faint, faint_text(palette.text_muted, palette.bg_stage));
+        assert_ne!(palette.text_faint, palette.text_muted);
+        assert!(
+            contrast_ratio(palette.text_faint, palette.bg_stage) >= TEXT_FAINT_MIN_CONTRAST
+        );
+        assert_eq!(palette.accent, 0x2563eb);
+        assert_eq!(palette.green, 0x16a34a);
+        assert_eq!(palette.red, 0xdc2626);
+        assert_eq!(palette.yellow, 0xca8a04);
+        assert_eq!(palette.blue, 0x3b82f6);
+        assert_eq!(palette.purple, 0x9333ea);
+        assert_eq!(palette.action_fill, 0xfafafa);
+        assert_eq!(
+            palette.action_on,
+            solid(roles.primary_foreground, roles.primary)
+        );
+        assert_eq!(palette.diff_add_fg, palette.green);
+        assert_eq!(palette.diff_add_bar, palette.green);
+        assert_eq!(
+            palette.diff_add_bg,
+            mix(palette.bg_stage, palette.green, 0.18)
+        );
+        assert_eq!(
+            palette.diff_add_hl,
+            mix(palette.bg_stage, palette.green, 0.35)
+        );
+        assert_eq!(palette.diff_del_fg, palette.red);
+        assert_eq!(
+            palette.diff_del_bg,
+            mix(palette.bg_stage, palette.red, 0.18)
+        );
+        assert_eq!(palette.diff_hunk_fg, palette.accent);
+        assert_eq!(palette.diff_ctx_fg, palette.text_muted);
+        assert_eq!(palette.diff_empty_bg, palette.bg_stage);
+        assert_eq!(palette.diff_gutter, palette.bg_card);
+    }
+
+    #[test]
+    fn selected_row_keeps_list_active_when_sidebar_accent_is_flat() {
+        let mut roles = sample_roles();
+        roles.sidebar_accent = opaque(0x282828);
+        roles.list_active = rgba(0x36a3d980).into();
+        let palette = palette_from_roles(&roles);
+        assert_eq!(palette.bg_selected, solid(roles.list_active, roles.sidebar));
+        assert_ne!(
+            palette.bg_selected,
+            solid(roles.sidebar_accent, roles.sidebar)
+        );
+    }
+
+    #[test]
+    fn link_that_matches_body_ink_uses_the_active_border() {
+        let mut roles = sample_roles();
+        roles.link = roles.foreground;
+        let palette = palette_from_roles(&roles);
+        assert_eq!(palette.accent, 0x1d4ed8);
+        assert_ne!(palette.accent, palette.text);
+        assert_eq!(palette.diff_hunk_fg, palette.accent);
+
+        roles.foreground = opaque(0x0a0a0a);
+        roles.background = opaque(0xffffff);
+        roles.link = opaque(0x171717);
+        roles.list_active_border = opaque(0x60a5fa);
+        let palette = palette_from_roles(&roles);
+        assert_eq!(palette.accent, 0x60a5fa);
+    }
+
+    #[test]
+    fn emphasis_uses_blue_when_link_and_border_are_body_ink() {
+        let mut roles = sample_roles();
+        roles.link = roles.foreground;
+        roles.list_active_border = roles.foreground;
+        let palette = palette_from_roles(&roles);
+        assert_eq!(palette.accent, palette.blue);
+    }
+
+    #[test]
+    fn faint_text_takes_a_short_step_when_muted_is_already_dim() {
+        let muted = 0x52514f;
+        let background = 0x0d1016;
+        assert!(contrast_ratio(muted, background) < TEXT_FAINT_MIN_CONTRAST);
+        assert_eq!(
+            faint_text(muted, background),
+            mix(muted, background, TEXT_FAINT_SHORT_MIX)
+        );
+        assert_ne!(faint_text(muted, background), muted);
+    }
+
+    #[test]
+    fn contrast_ratio_matches_black_on_white() {
+        let ratio = contrast_ratio(0xffffff, 0x000000);
+        assert!((ratio - 21.0).abs() < 0.05, "{ratio}");
+    }
+
+    #[test]
+    fn fallback_matches_builtin_default_background() {
+        let dark = builtin_fallback(false);
+        let light = builtin_fallback(true);
+        assert_eq!(dark.bg_stage, 0x0a0a0a);
+        assert_eq!(dark.bg_rail, dark.bg_stage);
+        assert_eq!(dark.bg_column, dark.bg_stage);
+        assert_eq!(light.bg_stage, 0xffffff);
+        assert_eq!(dark.action_fill, dark.text);
+        assert_eq!(dark.action_on, dark.bg_stage);
+        assert_eq!(dark.accent, dark.blue);
+        assert_ne!(dark.accent, dark.text);
+        assert_ne!(light.accent, light.text);
+        assert!(relative_luminance(dark.text) > relative_luminance(dark.text_mid));
+        assert!(relative_luminance(dark.text_mid) > relative_luminance(dark.text_muted));
+        assert!(relative_luminance(dark.text_muted) > relative_luminance(dark.text_faint));
+        assert!(relative_luminance(dark.text_faint) > relative_luminance(dark.bg_stage));
+        assert!(relative_luminance(light.text) < relative_luminance(light.text_mid));
+        assert!(relative_luminance(light.text_mid) < relative_luminance(light.text_muted));
+        assert!(relative_luminance(light.text_muted) < relative_luminance(light.text_faint));
+        assert!(relative_luminance(light.text_faint) < relative_luminance(light.bg_stage));
+        assert!(contrast_ratio(dark.text_faint, dark.bg_stage) >= TEXT_FAINT_MIN_CONTRAST);
+        assert!(contrast_ratio(light.text_faint, light.bg_stage) >= TEXT_FAINT_MIN_CONTRAST);
+        assert_ne!(dark.red, dark.blue);
+        assert_ne!(dark.blue, dark.text_faint);
     }
 
     #[test]
@@ -748,64 +956,35 @@ mod tests {
         assert_eq!(glass_input().a, 1.0, "composer 必须是实底");
     }
 
-    fn channel(c: u32, shift: u32) -> i32 {
-        ((c >> shift) & 0xff) as i32
-    }
-
-    /// 15px 空心图标在深色底上，RGB 欧氏距离会骗人：天蓝 `#459ffe`（G=159）
-    /// 和薄荷绿 `#00c972`（B=114）数值差得开，看起来仍是两颗青绿。
-    /// 运行必须蓝通道压过绿，完成必须绿通道压过蓝。
-    fn assert_running_is_blue_and_done_is_green(
-        blue: u32,
-        green: u32,
-        min_blue_lead: i32,
-        min_green_lead: i32,
-        label: &str,
-    ) {
-        let run_b = channel(blue, 0);
-        let run_g = channel(blue, 8);
-        let done_g = channel(green, 8);
-        let done_b = channel(green, 0);
-        assert!(
-            run_b - run_g > min_blue_lead,
-            "{label} 运行态不够蓝：B-G={} blue={blue:#08x}（15px 图标会收成青）",
-            run_b - run_g
-        );
-        assert!(
-            done_g - done_b > min_green_lead,
-            "{label} 完成态不够绿：G-B={} green={green:#08x}（薄荷绿会跟青撞）",
-            done_g - done_b
-        );
-    }
-
     #[test]
     fn agent_status_uses_three_colors() {
-        assert_eq!(agent_status_u32(AgentStatus::NeedsYou), DARK.red);
-        assert_eq!(agent_status_u32(AgentStatus::Running), DARK.blue);
-        assert_eq!(agent_status_u32(AgentStatus::Idle), DARK.text_faint);
-        assert_ne!(DARK.red, DARK.blue);
-        assert_ne!(DARK.blue, DARK.text_faint);
-    }
-
-    #[test]
-    fn running_is_visibly_blue() {
-        // 运行中仍用蓝，避免再和别的状态挤在青绿里。
-        assert_running_is_blue_and_done_is_green(DARK.blue, DARK.green, 110, 100, "深色");
-        assert_running_is_blue_and_done_is_green(LIGHT.blue, LIGHT.green, 110, 85, "浅色");
+        let palette = builtin_fallback(false);
+        assert_eq!(
+            role_for_status(&palette, AgentStatus::NeedsYou),
+            palette.red
+        );
+        assert_eq!(role_for_status(&palette, AgentStatus::Running), palette.blue);
+        assert_eq!(
+            role_for_status(&palette, AgentStatus::Idle),
+            palette.text_faint
+        );
+        assert_ne!(palette.red, palette.blue);
+        assert_ne!(palette.blue, palette.text_faint);
     }
 
     #[test]
     fn running_glow_preserves_hue_and_limits_the_light_theme_peak() {
-        let dark_base: gpui::Hsla = rgb(DARK.blue).into();
+        let blue = 0x3b82f6;
+        let dark_base: gpui::Hsla = rgb(blue).into();
         let dark_start: gpui::Hsla =
-            running_glow_color_for(DARK.blue, 0.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+            running_glow_color_for(blue, 0.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
         let dark_peak: gpui::Hsla =
-            running_glow_color_for(DARK.blue, 0.5, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+            running_glow_color_for(blue, 0.5, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
         let dark_end: gpui::Hsla =
-            running_glow_color_for(DARK.blue, 1.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
-        let light_base: gpui::Hsla = rgb(LIGHT.blue).into();
+            running_glow_color_for(blue, 1.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+        let light_base: gpui::Hsla = rgb(blue).into();
         let light_peak: gpui::Hsla =
-            running_glow_color_for(LIGHT.blue, 0.5, RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN).into();
+            running_glow_color_for(blue, 0.5, RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN).into();
 
         let dark_hue_shift = (dark_peak.h - dark_base.h).abs();
         let light_hue_shift = (light_peak.h - light_base.h).abs();

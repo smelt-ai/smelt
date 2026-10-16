@@ -9,6 +9,59 @@ use gpui_component::WindowExt;
 
 use super::*;
 
+/// 确认框的叠放顺序。同一扇窗里只有最上层做成 Dialog，底下的只留卡片，
+/// 这样不会共用一个 `dialog-host` 和焦点句柄。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalLayer {
+    WorktreeList,
+    NewWorktree,
+    DeleteWorktree,
+    Rename,
+    Quit,
+    CloseProject,
+    DiscardHunk,
+    DiscardFile,
+    DiscardAll,
+    DeleteBranch,
+    DeleteFile,
+    DeleteHistory,
+    DeleteAgentMemory,
+    DeleteAgent,
+    DeleteAutomation,
+    UnsavedFile,
+    SessionManager,
+    DaemonRestart,
+}
+
+impl ModalLayer {
+    pub(crate) fn rank(self) -> u8 {
+        match self {
+            Self::WorktreeList => 1,
+            Self::NewWorktree => 2,
+            Self::DeleteWorktree => 3,
+            Self::Rename => 4,
+            Self::Quit => 5,
+            Self::CloseProject => 6,
+            Self::DiscardHunk => 7,
+            Self::DiscardFile => 8,
+            Self::DiscardAll => 9,
+            Self::DeleteBranch => 10,
+            Self::DeleteFile => 11,
+            Self::DeleteHistory => 12,
+            Self::DeleteAgentMemory => 13,
+            Self::DeleteAgent => 14,
+            Self::DeleteAutomation => 15,
+            Self::UnsavedFile => 16,
+            Self::SessionManager => 1,
+            Self::DaemonRestart => 2,
+        }
+    }
+
+    fn is_settings(self) -> bool {
+        matches!(self, Self::SessionManager | Self::DaemonRestart)
+    }
+}
+
 impl Workspace {
     /// Mark a library ContextMenu as active. ContextMenu stores its open bit in
     /// element-local state, so it cannot be observed through GlobalState.
@@ -64,6 +117,205 @@ impl Workspace {
             workspace.plugin_surface_sync_scheduled = false;
             workspace.sync_plugin_panels(window, cx);
         });
+    }
+
+    /// 当前最上层主窗口确认框。数字大的盖住数字小的。
+    /// Worktree 列表是底，新建在其上，删除再在其上。
+    pub(crate) fn main_modal_rank(&self) -> Option<u8> {
+        let mut rank = None;
+        let raise = |rank: &mut Option<u8>, open: bool, value: u8| {
+            if open {
+                *rank = Some(rank.unwrap_or(0).max(value));
+            }
+        };
+        raise(&mut rank, self.worktree_list.is_some(), ModalLayer::WorktreeList.rank());
+        raise(&mut rank, self.new_worktree.is_some(), ModalLayer::NewWorktree.rank());
+        raise(
+            &mut rank,
+            self.delete_worktree_target.is_some(),
+            ModalLayer::DeleteWorktree.rank(),
+        );
+        raise(&mut rank, self.rename_target.is_some(), ModalLayer::Rename.rank());
+        raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
+        raise(
+            &mut rank,
+            self.close_project_target.is_some(),
+            ModalLayer::CloseProject.rank(),
+        );
+        raise(
+            &mut rank,
+            self.discard_hunk_target.is_some(),
+            ModalLayer::DiscardHunk.rank(),
+        );
+        raise(
+            &mut rank,
+            self.discard_file_target.is_some(),
+            ModalLayer::DiscardFile.rank(),
+        );
+        raise(
+            &mut rank,
+            self.discard_all_target.is_some(),
+            ModalLayer::DiscardAll.rank(),
+        );
+        raise(
+            &mut rank,
+            self.delete_branch_target.is_some(),
+            ModalLayer::DeleteBranch.rank(),
+        );
+        raise(
+            &mut rank,
+            self.delete_file_target.is_some(),
+            ModalLayer::DeleteFile.rank(),
+        );
+        raise(
+            &mut rank,
+            self.delete_history_target.is_some(),
+            ModalLayer::DeleteHistory.rank(),
+        );
+        raise(
+            &mut rank,
+            self.agent_surface.pending_memory_delete.is_some(),
+            ModalLayer::DeleteAgentMemory.rank(),
+        );
+        raise(
+            &mut rank,
+            self.agent_surface.pending_delete.is_some(),
+            ModalLayer::DeleteAgent.rank(),
+        );
+        raise(
+            &mut rank,
+            self.automation_surface.pending_delete.is_some(),
+            ModalLayer::DeleteAutomation.rank(),
+        );
+        raise(
+            &mut rank,
+            self.pending_file_switch.is_some(),
+            ModalLayer::UnsavedFile.rank(),
+        );
+        rank
+    }
+
+    pub(crate) fn settings_modal_rank(&self) -> Option<u8> {
+        let mut rank = None;
+        if self.session_manager_open {
+            rank = Some(ModalLayer::SessionManager.rank());
+        }
+        if self.show_daemon_restart_confirm {
+            rank = Some(rank.unwrap_or(0).max(ModalLayer::DaemonRestart.rank()));
+        }
+        rank
+    }
+
+    pub(crate) fn modal_is_top(&self, layer: ModalLayer) -> bool {
+        let current = if layer.is_settings() {
+            self.settings_modal_rank()
+        } else {
+            self.main_modal_rank()
+        };
+        current == Some(layer.rank())
+    }
+
+    /// 在改名框、新建 worktree 的输入框拿到焦点之前调用。
+    /// 渲染时再记焦点会把那个输入框当成「打开前的焦点」，关弹窗时又抢回来。
+    /// `hold` 让紧接着的 sync 不要因为层级变化把焦点从输入框抢回对话框。
+    pub(crate) fn begin_main_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
+        self.arm_modal_focus(false, window, cx);
+        self.main_modal_hold = true;
+    }
+
+    pub(crate) fn sync_main_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
+        self.sync_modal_rank(false, self.main_modal_rank(), window, cx);
+    }
+
+    pub(crate) fn sync_settings_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
+        self.sync_modal_rank(true, self.settings_modal_rank(), window, cx);
+    }
+
+    fn sync_modal_rank(
+        &mut self,
+        settings: bool,
+        rank: Option<u8>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (guard, hold, current) = if settings {
+            (
+                self.settings_modal_guard,
+                false,
+                self.settings_modal_rank,
+            )
+        } else {
+            (
+                self.main_modal_guard,
+                self.main_modal_hold,
+                self.main_modal_rank,
+            )
+        };
+        if let Some(rank) = rank {
+            if !guard {
+                self.arm_modal_focus(settings, window, cx);
+            } else if !hold && current != Some(rank) {
+                self.modal_focus.focus(window, cx);
+            }
+            if settings {
+                self.settings_modal_rank = Some(rank);
+            } else {
+                self.main_modal_rank = Some(rank);
+                self.main_modal_hold = false;
+            }
+        } else {
+            if settings {
+                self.settings_modal_rank = None;
+            } else {
+                self.main_modal_rank = None;
+                self.main_modal_hold = false;
+            }
+            self.release_modal_focus(settings, window, cx);
+        }
+    }
+
+    fn arm_modal_focus(&mut self, settings: bool, window: &mut Window, cx: &mut App) {
+        let armed = if settings {
+            self.settings_modal_guard
+        } else {
+            self.main_modal_guard
+        };
+        if armed {
+            return;
+        }
+        let previous = window.focused(cx).map(|handle| handle.downgrade());
+        if settings {
+            self.settings_modal_restore = previous;
+            self.settings_modal_guard = true;
+        } else {
+            self.main_modal_restore = previous;
+            self.main_modal_guard = true;
+        }
+        self.modal_focus.focus(window, cx);
+    }
+
+    fn release_modal_focus(&mut self, settings: bool, window: &mut Window, cx: &mut App) {
+        let armed = if settings {
+            self.settings_modal_guard
+        } else {
+            self.main_modal_guard
+        };
+        if !armed {
+            return;
+        }
+        if settings {
+            self.settings_modal_guard = false;
+        } else {
+            self.main_modal_guard = false;
+        }
+        let previous = if settings {
+            self.settings_modal_restore.take()
+        } else {
+            self.main_modal_restore.take()
+        };
+        if let Some(handle) = previous.and_then(|handle| handle.upgrade()) {
+            handle.focus(window, cx);
+        }
     }
 
     fn has_workspace_overlay(&self) -> bool {
@@ -152,7 +404,27 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.sync_main_modal_focus(window, cx);
         let palette_overlay = self.palette.as_ref().map(|state| {
+            let [commands, sessions] = self.palette_groups(cx);
+            let command_cmds: Vec<Cmd> = commands.iter().map(|(_, cmd)| cmd.clone()).collect();
+            let session_cmds: Vec<Cmd> = sessions.iter().map(|(_, cmd)| cmd.clone()).collect();
+            let host = cx.entity().downgrade();
+            let confirm_host = host.clone();
+            let command_group = gpui_component::command::CommandGroup::new()
+                .label("命令")
+                .items(
+                    commands
+                        .into_iter()
+                        .map(|(label, _)| gpui_component::command::CommandItem::new().label(label)),
+                );
+            let session_group = gpui_component::command::CommandGroup::new()
+                .label("切换会话")
+                .items(
+                    sessions
+                        .into_iter()
+                        .map(|(label, _)| gpui_component::command::CommandItem::new().label(label)),
+                );
             div()
                 .absolute()
                 .inset_0()
@@ -170,12 +442,43 @@ impl Workspace {
                         .h(px(360.))
                         .flex()
                         .flex_col()
+                        .overflow_hidden()
                         .bg(ui_theme::glass_floating())
                         .border_1()
                         .border_color(ui_theme::overlay(0x22))
                         .rounded(ui_theme::composer_radius())
                         .shadow_lg()
-                        .child(List::new(state).search_placeholder("想做什么？")),
+                        .child(
+                            gpui_component::command::Command::new(state)
+                                .group(command_group)
+                                .group(session_group)
+                                .placeholder("想做什么？")
+                                .bordered(false)
+                                .max_h(px(360.))
+                                .size_full()
+                                .on_confirm(move |index, window, cx| {
+                                    // 回调被推迟到这次更新结束后。用打开这一帧的快照，
+                                    // 避免中途重建把下标对到另一条命令上。
+                                    let cmd = match index.section {
+                                        0 => command_cmds.get(index.row).cloned(),
+                                        1 => session_cmds.get(index.row).cloned(),
+                                        _ => None,
+                                    };
+                                    let Some(cmd) = cmd else {
+                                        return;
+                                    };
+                                    let Some(host) = confirm_host.upgrade() else {
+                                        return;
+                                    };
+                                    host.update(cx, |this, cx| this.exec_cmd(cmd, window, cx));
+                                })
+                                .on_cancel(move |window, cx| {
+                                    let Some(host) = host.upgrade() else {
+                                        return;
+                                    };
+                                    host.update(cx, |this, cx| this.close_palette(window, cx));
+                                }),
+                        ),
                 )
         });
 
@@ -228,15 +531,15 @@ impl Workspace {
                         .size(px(34.))
                         .rounded_full()
                         .border_1()
-                        .border_color(rgba(0xffffff33))
-                        .bg(rgba(0x181818ee))
-                        .text_color(rgb(0xffffff))
+                        .border_color(ui_theme::card_stroke())
+                        .bg(rgb(ui_theme::bg_card()))
+                        .text_color(rgb(ui_theme::text()))
                         .text_lg()
                         .flex()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .hover(|d| d.bg(rgba(0x303030ff)))
+                        .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
                         .child("×")
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.acp_image_preview = None;

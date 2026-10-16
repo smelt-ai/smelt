@@ -15,9 +15,9 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::diff::Diff;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::{ActiveTheme, h_flex, v_flex, v_virtual_list};
+use gpui_component::{ActiveTheme, h_flex, v_flex};
 
 use crate::git_log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
 use crate::ui_theme;
@@ -158,7 +158,7 @@ fn commit_row(
     let ws_click = ws.clone();
     let root_click = root.clone();
     h_flex()
-        .id(("log-row", i))
+        .id((ElementId::from("log-row"), hash.clone()))
         .h(px(ROW_H))
         .w_full()
         .min_w_0()
@@ -460,6 +460,52 @@ pub fn commit_detail_pane(
         )
 }
 
+/// 日志页的单文件 diff。提交列表滚动通知的是 Workspace。
+/// 渲染只读自己持有的 `DiffState`，不能再去读 Workspace。
+pub struct GitLogDiffBody {
+    view: Option<Entity<gpui_component::diff::DiffState>>,
+}
+
+impl GitLogDiffBody {
+    pub fn new(view: Option<Entity<gpui_component::diff::DiffState>>) -> Self {
+        Self { view }
+    }
+
+    pub fn set_view(
+        &mut self,
+        view: Option<Entity<gpui_component::diff::DiffState>>,
+        cx: &mut Context<Self>,
+    ) {
+        let same = match (&self.view, &view) {
+            (Some(current), Some(next)) => current.entity_id() == next.entity_id(),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        self.view = view;
+        cx.notify();
+    }
+}
+
+impl Render for GitLogDiffBody {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(view) = self.view.clone() else {
+            return div().size_full().into_any_element();
+        };
+        // 订上 DiffState 的刷新。不读 Workspace，提交列表滚动不会把这份正文再排一遍。
+        let _ = view.read(cx);
+        // 缓存视图按给定边界做根布局。
+        div()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .child(Diff::new(&view).size_full())
+            .into_any_element()
+    }
+}
+
 /// 提交详情里的文件列表：点一个文件在下方看它的 diff。
 fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<Workspace>) -> Div {
     let (muted, fg, accent) = {
@@ -472,8 +518,10 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
     let ws = cx.entity();
     let files = state.detail_files.clone();
     let sel_file = state.detail_selected_file.clone();
-    let diff_lines = state.detail_diff.clone();
-    let diff_scroll = state.detail_scroll.clone();
+    let patch_ready = state.detail_patch.is_some();
+    let detail_error = state.detail_error.clone();
+    let detail_body = state.detail_body.clone();
+    let has_diff_view = state.detail_view.is_some();
 
     let file_list =
         v_flex()
@@ -485,7 +533,7 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
                 let ws_click = ws.clone();
                 let (p, r) = (path.clone(), root.clone());
                 h_flex()
-                    .id(("commit-file", i))
+                    .id((ElementId::from("commit-file"), path.clone()))
                     .gap_2()
                     .px_2()
                     .py(px(1.0))
@@ -520,40 +568,33 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
                     )
             }));
 
-    // 选中文件的 diff：复用 Git 页的行渲染，配色与行内高亮保持一致。
+    // 不在这里 read DiffState。提交列表和这份正文不在同一次重绘里。
     let diff = if sel_file.is_none() {
         placeholder_view("选择一个文件查看这次提交的更改", muted).into_any_element()
-    } else if diff_lines.is_empty() {
+    } else if !patch_ready {
         placeholder_view("正在读取…", muted).into_any_element()
-    } else {
-        let gw = crate::git_panel::gutter_width(&diff_lines);
-        let line_count = diff_lines.len();
-        let lines = std::rc::Rc::new(diff_lines);
-        let sizes = std::rc::Rc::new(vec![
-            size(px(1.), px(crate::git_panel::FILE_LINE_H));
-            line_count
-        ]);
+    } else if let Some(err) = detail_error {
         div()
             .flex_1()
             .min_h_0()
-            .relative()
-            .font_family(crate::terminal_view::font_family())
+            .overflow_hidden()
+            .p_4()
             .text_sm()
-            .child(
-                v_virtual_list(ws.clone(), "commit-diff", sizes, move |_, range, _, _| {
-                    let lines = lines.clone();
-                    range
-                        .map(|i| {
-                            crate::git_panel::render_readonly_diff_line(&lines[i], gw)
-                                .into_any_element()
-                        })
-                        .collect()
-                })
-                .size_full()
-                .track_scroll(&diff_scroll),
-            )
-            .vertical_scrollbar(&diff_scroll)
+            .whitespace_normal()
+            .text_color(muted)
+            .child(err)
             .into_any_element()
+    } else if !has_diff_view {
+        placeholder_view("（无差异）", muted).into_any_element()
+    } else if let Some(body) = detail_body {
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(body.cached(StyleRefinement::default().size_full()))
+            .into_any_element()
+    } else {
+        placeholder_view("（无差异）", muted).into_any_element()
     };
 
     v_flex().flex_1().min_h_0().child(file_list).child(diff)
@@ -626,14 +667,19 @@ pub fn branch_tree(
                     .text_color(muted)
                     .child(title),
             )
-            .children(names.into_iter().enumerate().map(move |(i, name)| {
+            .children(names.into_iter().map(move |name| {
                 let on = scope == LogScope::Branch(name.clone());
                 let is_head = head.as_deref() == Some(name.as_str());
                 let (ws2, r2, n2) = (ws.clone(), root.clone(), name.clone());
                 // 右键菜单要用的副本（上面那组会被 on_click 闭包吃掉）。
                 let (ws2b, r2b, head2) = (ws.clone(), root.clone(), head.clone());
+                let row_kind = if is_remote {
+                    "git-branch-remote"
+                } else {
+                    "git-branch-local"
+                };
                 h_flex()
-                    .id((title, i))
+                    .id((ElementId::from(row_kind), name.clone()))
                     .gap_1()
                     .pl_3()
                     .pr_2()
@@ -664,7 +710,7 @@ pub fn branch_tree(
                     // tooltip 才看得全。
                     .child(
                         div()
-                            .id(("branch-name", i))
+                            .id("branch-name")
                             .min_w_0()
                             .truncate()
                             .text_color(fg)

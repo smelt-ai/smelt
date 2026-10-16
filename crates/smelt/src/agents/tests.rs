@@ -176,7 +176,7 @@ fn conversation_row_title_uses_title_source_not_agent_name_equality() {
 
 #[test]
 fn selected_idle_conversation_icon_does_not_look_like_running() {
-    // 选中由行底色表达。图标如果因为选中而走 accent 蓝，就会和运行中撞色。
+    // 选中由行底色表达。图标如果因为选中而走强调色，就会和运行中撞色。
     let idle = conversation_icon_color(AgentStatus::Idle, None);
     let running = conversation_icon_color(AgentStatus::Running, None);
     assert_eq!(
@@ -188,7 +188,7 @@ fn selected_idle_conversation_icon_does_not_look_like_running() {
     assert_ne!(
         idle,
         rgb(crate::ui_theme::accent()),
-        "空闲不能走 accent 蓝，否则选中行看起来像运行中"
+        "空闲不能走强调色，否则选中行看起来像带了状态色"
     );
 }
 

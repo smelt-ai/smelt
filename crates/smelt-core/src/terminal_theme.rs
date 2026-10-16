@@ -46,7 +46,7 @@ impl Default for TerminalThemeSnapshot {
         Self {
             version: TERMINAL_THEME_VERSION,
             dark: true,
-            background: 0x070707,
+            background: 0x0a0a0a,
             foreground: 0xd8d8d8,
             cursor: 0xd8d8d8,
             selection: 0x0c3d7a,
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn wire_uses_hex_strings_and_full_palette() {
         let wire = TerminalThemeSnapshot::default().to_wire();
-        assert_eq!(wire["background"], "#070707");
+        assert_eq!(wire["background"], "#0a0a0a");
         assert_eq!(wire["foreground"], "#d8d8d8");
         assert_eq!(wire["palette"].as_array().unwrap().len(), 16);
         assert_eq!(wire["palette"][0], "#15161e");

@@ -237,10 +237,18 @@ pub struct GitLogState {
     pub detail_loading: bool,
     /// 详情里选中的文件。
     pub detail_selected_file: Option<String>,
-    /// 选中文件在这次提交里的 diff 行（复用 Git 页那套解析与配色）。
-    pub detail_diff: Vec<crate::git_panel::DiffLine>,
-    /// diff 列表的滚动位置。
-    pub detail_scroll: gpui_component::VirtualListScrollHandle,
+    /// 选中文件的补丁原文。`None` 还在读；`Some` 是已经读完的文本。
+    pub detail_patch: Option<String>,
+    /// `DiffFile::parse` 失败时的说明。合并提交的 `@@@` 走这里。
+    pub detail_error: Option<String>,
+    /// 已经装进组件的补丁。原文和 `detail_view_key` 都没变时不调用 `set_files`。
+    pub detail_view_patch: String,
+    /// `hash\0path`，用来区分「同一份补丁文本但是另一个文件」。
+    pub detail_view_key: String,
+    /// 日志 diff 正文。和变更栏的 `DiffState` 分开。
+    pub detail_view: Option<gpui::Entity<gpui_component::diff::DiffState>>,
+    /// 正文的缓存视图。渲染提交列表时不读 `detail_view`。
+    pub detail_body: Option<gpui::Entity<crate::git_log_view::GitLogDiffBody>>,
     /// 已加载的仓库根，切项目时用来判断要不要重拉。
     pub loaded_root: Option<String>,
     /// 提交列表（uniform_list）的滚动句柄；分支图 canvas 也用它同步滚动。
@@ -258,8 +266,12 @@ impl Default for GitLogState {
             detail_files: Vec::new(),
             detail_loading: false,
             detail_selected_file: None,
-            detail_diff: Vec::new(),
-            detail_scroll: gpui_component::VirtualListScrollHandle::new(),
+            detail_patch: None,
+            detail_error: None,
+            detail_view_patch: String::new(),
+            detail_view_key: String::new(),
+            detail_view: None,
+            detail_body: None,
             loaded_root: None,
             scroll: Default::default(),
         }
@@ -311,7 +323,7 @@ pub fn parse_name_status(text: &str) -> Vec<(String, String)> {
 
 use crate::Workspace;
 use crate::git_panel::run_git;
-use gpui::Context;
+use gpui::{AppContext, Context};
 
 impl Workspace {
     /// 进「日志」页时确保数据在（换了仓库也重拉）。`prepare_frame` 调用，必须便宜：
@@ -351,7 +363,7 @@ impl Workspace {
                 // 列表换了，旧的选中项多半已经不在里面。
                 this.git_log.selected = None;
                 this.git_log.detail_files.clear();
-                this.git_log.detail_selected_file = None;
+                this.clear_commit_file_diff();
                 cx.notify();
             });
         })
@@ -372,7 +384,7 @@ impl Workspace {
         self.git_log.selected = Some(hash.clone());
         self.git_log.detail_loading = true;
         self.git_log.detail_files.clear();
-        self.git_log.detail_selected_file = None;
+        self.clear_commit_file_diff();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (r, h) = (root.clone(), hash.clone());
@@ -414,31 +426,116 @@ impl Workspace {
             return;
         };
         self.git_log.detail_selected_file = Some(path.clone());
-        self.git_log.detail_diff.clear();
+        self.git_log.detail_patch = None;
+        self.git_log.detail_error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (r, h, p) = (root.clone(), hash.clone(), path.clone());
-            let lines = cx
+            let loaded = cx
                 .background_executor()
                 .spawn(async move {
                     // 单个文件在这次提交里的改动。--format= 去掉提交头，只留 diff 本体。
-                    let out =
-                        run_git(&r, &["show", "--format=", "--no-color", &h, "--", &p]).ok()?;
-                    Some(crate::git_panel::parse_diff(&String::from_utf8_lossy(&out.stdout)).lines)
+                    let text = match run_git(&r, &["show", "--format=", "--no-color", &h, "--", &p])
+                    {
+                        Ok(out) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+                            // `git show` 失败时正文在 stderr，stdout 是空的。空成功才是无差异。
+                            if stdout.trim().is_empty() && !out.success() {
+                                let err = String::from_utf8_lossy(&out.stderr);
+                                let err = err.trim();
+                                if err.is_empty() {
+                                    stdout
+                                } else {
+                                    format!("无法执行 git show：{err}")
+                                }
+                            } else {
+                                stdout
+                            }
+                        }
+                        Err(err) => format!("无法执行 git show：{err}"),
+                    };
+                    let files = gpui_component::diff::DiffFile::parse(&text).map_err(|err| {
+                        crate::git_panel::diff_parse_failure(&text, &err.to_string())
+                    });
+                    (text, files)
                 })
-                .await
-                .unwrap_or_default();
+                .await;
             let _ = this.update(cx, |this, cx| {
                 // 期间可能又点了别的文件/提交，别把旧结果盖上去。
                 if this.git_log.selected.as_deref() == Some(hash.as_str())
                     && this.git_log.detail_selected_file.as_deref() == Some(path.as_str())
                 {
-                    this.git_log.detail_diff = lines;
+                    let (text, files) = loaded;
+                    this.install_commit_diff(&hash, &path, text, files, cx);
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+
+    fn clear_commit_file_diff(&mut self) {
+        self.git_log.detail_selected_file = None;
+        self.git_log.detail_patch = None;
+        self.git_log.detail_error = None;
+    }
+
+    /// 把这次提交的单文件补丁装进 Diff。同一文件、同一原文不调用 `set_files`，滚动留得住。
+    fn install_commit_diff(
+        &mut self,
+        hash: &str,
+        path: &str,
+        patch: String,
+        files: Result<Vec<gpui_component::diff::DiffFile>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = format!("{hash}\0{path}");
+        self.git_log.detail_patch = Some(patch.clone());
+        let files = match files {
+            Ok(files) => files,
+            Err(err) => {
+                self.git_log.detail_error = Some(err);
+                self.git_log.detail_view = None;
+                self.git_log.detail_view_patch.clear();
+                self.git_log.detail_view_key.clear();
+                self.sync_log_diff_body(cx);
+                return;
+            }
+        };
+        self.git_log.detail_error = None;
+        if files.is_empty() {
+            self.git_log.detail_view = None;
+            self.git_log.detail_view_patch = patch;
+            self.git_log.detail_view_key = key;
+            self.sync_log_diff_body(cx);
+            return;
+        }
+        let same = self.git_log.detail_view_key == key
+            && self.git_log.detail_view_patch == patch
+            && self.git_log.detail_view.is_some();
+        if !same {
+            self.git_log.detail_view_patch = patch;
+            self.git_log.detail_view_key = key;
+            if let Some(view) = self.git_log.detail_view.clone() {
+                view.update(cx, |state, cx| state.set_files(files, cx));
+            } else {
+                self.git_log.detail_view =
+                    Some(cx.new(|cx| gpui_component::diff::DiffState::new(files, cx)));
+            }
+        }
+        self.sync_log_diff_body(cx);
+    }
+
+    fn sync_log_diff_body(&mut self, cx: &mut Context<Self>) {
+        let view = self.git_log.detail_view.clone();
+        if let Some(body) = self.git_log.detail_body.clone() {
+            body.update(cx, |body, cx| body.set_view(view, cx));
+            return;
+        }
+        if view.is_none() {
+            return;
+        }
+        self.git_log.detail_body = Some(cx.new(|_| crate::git_log_view::GitLogDiffBody::new(view)));
     }
 }
 

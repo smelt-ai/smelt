@@ -518,7 +518,7 @@ fn clear_default_conversation_agent() {
 
 /// 对话行图标色。只跟状态走：选中已经由行底色表达。
 ///
-/// 空闲选中如果再走 accent 蓝，就会和运行中撞色——选中那条永远看不出在不在跑。
+/// 空闲选中如果再走强调色，就会和运行中撞色——选中那条永远看不出在不在跑。
 fn conversation_icon_color(status: AgentStatus, phase: Option<f32>) -> gpui::Rgba {
     Workspace::session_icon_color(status, phase)
 }

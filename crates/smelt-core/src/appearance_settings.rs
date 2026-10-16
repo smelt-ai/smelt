@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use crate::sqlite_state;
 
 pub const THEME_MODE: &str = "appearance.theme_mode";
+pub const THEME_NAME: &str = "appearance.theme";
 pub const UI_FONT_PX: &str = "appearance.ui_font_px";
 pub const UI_FONT_FAMILY: &str = "appearance.ui_font_family";
 pub const FONT_PX: &str = "appearance.font_px";
@@ -127,6 +128,7 @@ fn take_edited_fields(
         blur: _,
         glass_style: _,
         theme_mode: _,
+        theme_name: _,
         ui_font_px: _,
         ui_font_family: _,
         font_px: _,
@@ -147,6 +149,7 @@ fn take_edited_fields(
         blur,
         glass_style,
         theme_mode,
+        theme_name,
         ui_font_px,
         ui_font_family,
         font_px,
@@ -187,6 +190,7 @@ pub fn default_snapshot() -> smelt_store::AppearanceSnapshot {
         blur: true,
         glass_style: "regular".into(),
         theme_mode: "dark".into(),
+        theme_name: crate::theme_index::DEFAULT_DARK.into(),
         ui_font_px: 16,
         ui_font_family: String::new(),
         font_px: 13,
@@ -197,6 +201,7 @@ pub fn default_snapshot() -> smelt_store::AppearanceSnapshot {
 fn snapshot_to_map(snapshot: smelt_store::AppearanceSnapshot) -> BTreeMap<String, Value> {
     let mut settings = BTreeMap::new();
     settings.insert(THEME_MODE.into(), json!(snapshot.theme_mode));
+    settings.insert(THEME_NAME.into(), json!(snapshot.theme_name));
     settings.insert(UI_FONT_PX.into(), json!(snapshot.ui_font_px));
     settings.insert(UI_FONT_FAMILY.into(), json!(snapshot.ui_font_family));
     settings.insert(FONT_PX.into(), json!(snapshot.font_px));
@@ -220,6 +225,19 @@ fn apply_key(
                     SettingsError::Invalid("appearance.theme_mode 只能是 dark 或 light".into())
                 })?;
             snapshot.theme_mode = mode.to_string();
+            snapshot.theme_name = crate::theme_index::sibling(&snapshot.theme_name, mode);
+        }
+        THEME_NAME => {
+            let name = value
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && name.len() <= 80)
+                .ok_or_else(|| SettingsError::Invalid("appearance.theme 必须是主题名".into()))?;
+            let entry = crate::theme_index::find(name).ok_or_else(|| {
+                SettingsError::Invalid(format!("未知主题: {name}"))
+            })?;
+            snapshot.theme_name = entry.name.clone();
+            snapshot.theme_mode = entry.mode.clone();
         }
         UI_FONT_PX => {
             snapshot.ui_font_px = u32_in(value, UI_FONT_PX, MIN_UI_FONT_PX, MAX_UI_FONT_PX)?;
@@ -333,10 +351,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated.settings[THEME_MODE], "light");
+        assert_eq!(updated.settings[THEME_NAME], "Default Light");
         assert_eq!(updated.settings[UI_FONT_PX], 18);
         assert_eq!(
             get_settings_on(&store).unwrap().settings[THEME_MODE],
             "light"
+        );
+    }
+
+    #[test]
+    fn theme_name_selects_a_catalog_entry_and_sets_mode() {
+        let (_dir, store) = open_store();
+        let updated = update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([(THEME_NAME.into(), json!("Ayu Light"))]),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.settings[THEME_NAME], "Ayu Light");
+        assert_eq!(updated.settings[THEME_MODE], "light");
+
+        let error = update_settings_on(
+            &store,
+            SettingsPatch {
+                settings: BTreeMap::from([(THEME_NAME.into(), json!("Not A Theme"))]),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SettingsError::Invalid(_)));
+        assert_eq!(
+            get_settings_on(&store).unwrap().settings[THEME_NAME],
+            "Ayu Light"
         );
     }
 }

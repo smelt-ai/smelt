@@ -5066,11 +5066,12 @@ mod event_proxy_answers_tests {
     }
 
     /// 兼容旧守护：`OSC 11 ?`（查询当前背景色）仍要由客户端兜底，回应里应带上当前主题的
-    /// 默认背景色（深色下 `bg_stage` = `0x070707`，跟随卡片配色）而不是空/无回应。
+    /// 默认背景色（深色下 `bg_stage` = `0x0a0a0a`，库 Default 的窗口底）而不是空/无回应。
     #[test]
     fn background_color_query_gets_answered() {
         let _guard = lock_theme_globals();
         set_dark_mode(true); // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
+        crate::ui_theme::set_light(false);
         set_bg_override(None);
         let (proxy, mut probe) = make_proxy();
         let size = TermSize { rows: 24, cols: 80 };
@@ -5082,8 +5083,8 @@ mod event_proxy_answers_tests {
         let (ty, resp) = read_frame(&mut probe);
         assert_eq!(ty, 0);
         assert!(
-            resp.contains("rgb:0707/0707/0707"),
-            "应含默认背景色（bg_stage 深色 0x070707）的 rgb 十六进制，实际: {resp:?}"
+            resp.contains("rgb:0a0a/0a0a/0a0a"),
+            "应含默认背景色（bg_stage 深色 0x0a0a0a）的 rgb 十六进制，实际: {resp:?}"
         );
     }
 

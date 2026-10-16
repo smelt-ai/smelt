@@ -32,15 +32,6 @@ use crate::{
     pane_status, pane_title, ui_theme,
 };
 
-/// 会话行 hover group 名：行 `.group()` + 右端操作条 `.group_hover()` 配对，
-/// 鼠标移到行才显形关闭按钮；关闭操作不占会话正文宽度。
-const SESS_ROW_GROUP: &str = "sess-row-hover";
-
-/// 分屏 pane 行自己的 hover group 名：每行右端的「关掉这个 pane」按钮靠它显形。
-/// 必须跟 SESS_ROW_GROUP 分开——共用一个名字的话 hover 组内任意位置，所有 pane 行的
-/// × 会一起亮，用户分不清点下去关的是哪一个（正是「关一个 pane 结果两个都没了」的来源）。
-const PANE_ROW_GROUP: &str = "sess-pane-row-hover";
-
 /// 项目标题行的 hover group 名：整行 `.group()` + 左端文件夹 `.group_hover()`。
 /// 整行点击展开/折叠；文件夹只表达项目身份和开合状态，hover 整行时同步提亮。
 const PROJ_HEADER_GROUP: &str = "proj-header-hover";
@@ -48,13 +39,11 @@ const PROJ_HEADER_GROUP: &str = "proj-header-hover";
 /// 「项目」分组标题行：筛选和打开项目只在 hover 这行时出现，跟 Grok 一样。
 const PROJ_SECTION_GROUP: &str = "proj-section-hover";
 
-/// 侧栏正文统一 13px：分区标题、导航、项目名、会话名、对话名同一字号。
-/// 层级靠字重和颜色，不靠放大字——分区标题 medium + faint，辅助信息 11/10px faint。
-pub(crate) const SIDEBAR_FONT_SIZE: f32 = 13.;
-
+/// 侧栏正文走 `text_sm`，辅助信息走 `text_xs`，跟着界面字号缩放。
+/// 层级靠字重和颜色，不靠放大字。
+///
 /// 项目标题与会话列表之间的固定层级尺寸。集中声明是为了避免项目头、会话缩进和
 /// 新建按钮各自改尺寸后失去对齐关系。
-const PROJECT_HEADER_FONT_SIZE: f32 = SIDEBAR_FONT_SIZE;
 const PROJECT_NEW_BUTTON_SIZE: f32 = 28.;
 const PROJECT_ACTION_SLOT_HEIGHT: f32 = 20.;
 const PROJECT_DISCLOSURE_ICON_SIZE: f32 = 15.;
@@ -64,9 +53,13 @@ const SESSION_AGENT_ICON_BOX_SIZE: f32 = 18.;
 const SESSION_AGENT_ICON_SIZE: f32 = 17.;
 pub(crate) const SESSION_GLOW_PERIOD: Duration = Duration::from_secs(2);
 
-/// 项目组的重排过渡跟着根路径走。行上其它 id 用的是组下标，重排后会指向别的组，不能复用。
+/// 项目组的重排过渡跟着根路径走。行 id 也用根路径，重排后不会把 hover 留在旧槽位。
 fn project_flip_id(root: &str) -> ElementId {
     ElementId::Name(format!("sidebar-flip-project:{root}").into())
+}
+
+fn project_element_id(name: &'static str, root: &str) -> ElementId {
+    (ElementId::from(name), root.to_string()).into()
 }
 
 fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
@@ -141,7 +134,7 @@ pub(crate) fn entity_decoration_chip(
                 .border_1()
                 .border_color(color.opacity(0.45))
                 .bg(color.opacity(0.08))
-                .text_size(px(9.))
+                .text_xs()
                 .child(badge.clone())
         }))
         .when_some(tooltip, |chip, tooltip| {
@@ -534,7 +527,7 @@ impl Workspace {
                 && !is_drag_source_project
                 && self.proj_drop_hint.as_ref() == Some(&(cwd.clone(), false));
             let mut group_rows = div()
-                .id(("proj-group-rows", pix))
+                .id(project_element_id("proj-group-rows", cwd))
                 .flex()
                 .flex_col()
                 .when(is_drag_source_project, |d| d.opacity(0.4))
@@ -545,7 +538,7 @@ impl Workspace {
             if grouping != SidebarGrouping::None {
                 group_rows = group_rows.child(
                     div()
-                        .id(("proj-group", pix))
+                        .id(project_element_id("proj-group", cwd))
                         // relative：右端的 + 浮层靠 absolute 定位到这行内。
                         .relative()
                         .flex()
@@ -554,7 +547,6 @@ impl Workspace {
                         .px_3()
                         .py(px(4.))
                         .rounded(ui_theme::row_radius())
-                        .cursor_pointer()
                         .group(PROJ_HEADER_GROUP)
                         .map(|d| {
                             if project_header_selected {
@@ -565,7 +557,7 @@ impl Workspace {
                         })
                         .child(
                             div()
-                                .id(("proj-disclosure", pix))
+                                .id(project_element_id("proj-disclosure", cwd))
                                 .w(px(14.))
                                 .flex_shrink_0()
                                 .flex()
@@ -590,11 +582,11 @@ impl Workspace {
                                 .gap_1p5()
                                 .overflow_hidden()
                                 .child(
-                                    // 项目名与会话同为 13px，再用 semibold 区分结构层级；
+                                    // 项目名与会话同为 text_sm，再用 semibold 区分结构层级；
                                     // 空项目继续降到 faint，避免和活跃项目争夺注意力。
                                     div()
                                         .flex_shrink_0()
-                                        .text_size(px(PROJECT_HEADER_FONT_SIZE))
+                                        .text_sm()
                                         .font_semibold()
                                         .text_color(rgb(if is_active_group {
                                             ui_theme::text_bright()
@@ -611,7 +603,7 @@ impl Workspace {
                                 .when(is_pinned, |row| {
                                     row.child(
                                         div()
-                                            .id(("proj-pin", pix))
+                                            .id(project_element_id("proj-pin", cwd))
                                             .flex_shrink_0()
                                             .text_color(rgb(ui_theme::text_faint()))
                                             .child(Icon::new(IconName::Star).size(px(11.))),
@@ -620,7 +612,7 @@ impl Workspace {
                                 .when(agg != AgentStatus::Idle, |row| {
                                     row.child(
                                         div()
-                                            .id(("proj-status-dot", pix))
+                                            .id(project_element_id("proj-status-dot", cwd))
                                             .flex_shrink_0()
                                             .size(px(6.))
                                             .rounded_full()
@@ -630,7 +622,7 @@ impl Workspace {
                                 .children(plugin_agent.as_ref().map(|agent| {
                                     let agent_name = agent.name.clone();
                                     div()
-                                        .id(("proj-plugin-agent-logo", pix))
+                                        .id(project_element_id("proj-plugin-agent-logo", cwd))
                                         .flex_shrink_0()
                                         .size(px(15.))
                                         .flex()
@@ -648,7 +640,13 @@ impl Workspace {
                                 .children(project_decorations.iter().take(2).enumerate().map(
                                     |(decoration_ix, decoration)| {
                                         entity_decoration_chip(
-                                            ("proj-entity-decoration", pix * 4 + decoration_ix),
+                                            (
+                                                project_element_id(
+                                                    "proj-entity-decoration",
+                                                    cwd,
+                                                ),
+                                                decoration_ix.to_string(),
+                                            ),
                                             decoration,
                                             plugin_agent.is_none(),
                                             cx,
@@ -659,7 +657,7 @@ impl Workspace {
                                     div()
                                         .min_w_0()
                                         .truncate()
-                                        .text_size(px(11.))
+                                        .text_xs()
                                         .font_family(crate::terminal_view::font_family())
                                         .text_color(rgb(ui_theme::text_faint()))
                                         .child(b.clone())
@@ -682,7 +680,7 @@ impl Workspace {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .text_size(px(11.))
+                                        .text_xs()
                                         .text_color(rgb(ui_theme::text_faint()))
                                         .when(empty_group, |d| d.opacity(0.55))
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
@@ -712,7 +710,6 @@ impl Workspace {
                                                 cx.stop_propagation()
                                             })
                                             .child(new_session_picker(
-                                                pix,
                                                 e_menu.clone(),
                                                 menu_cwd.clone(),
                                                 cx,
@@ -1133,7 +1130,7 @@ impl Workspace {
                 // 永久持有动画 timer。明确状态仍可从行内标签或图标 tooltip 获得。
                 let session_icon = if let Some(mark) = agent_mark {
                     div()
-                        .id(("sess-provider-icon", ix))
+                        .id(("sess-provider-icon", ui_id))
                         .flex_shrink_0()
                         .size(px(SESSION_AGENT_ICON_BOX_SIZE))
                         .flex()
@@ -1147,7 +1144,7 @@ impl Workspace {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(10.))
+                                .text_xs()
                                 .font_medium()
                                 .child(mark),
                         )
@@ -1159,13 +1156,13 @@ impl Workspace {
                 } else if animate_running && status == AgentStatus::Running {
                     let plugin_agent = plugin_agent.clone();
                     ambient_animation(
-                        ("sess-provider-glow", ix),
+                        ("sess-provider-glow", ui_id),
                         SESSION_GLOW_PERIOD,
                         true,
                         move |phase| {
                             let tooltip_label = identity_label.clone();
                             div()
-                                .id(("sess-provider-icon", ix))
+                                .id(("sess-provider-icon", ui_id))
                                 .flex_shrink_0()
                                 .size(px(SESSION_AGENT_ICON_BOX_SIZE))
                                 .flex()
@@ -1192,7 +1189,7 @@ impl Workspace {
                     .into_any_element()
                 } else {
                     div()
-                        .id(("sess-provider-icon", ix))
+                        .id(("sess-provider-icon", ui_id))
                         .flex_shrink_0()
                         .size(px(SESSION_AGENT_ICON_BOX_SIZE))
                         .flex()
@@ -1219,8 +1216,7 @@ impl Workspace {
 
                 let row_tooltip = title.clone();
                 let row = div()
-                    .id(("sess-row", ix))
-                    .group(SESS_ROW_GROUP)
+                    .id(("sess-row", ui_id))
                     .relative()
                     .flex()
                     .items_center()
@@ -1228,7 +1224,6 @@ impl Workspace {
                     .px_2()
                     .py(px(6.))
                     .rounded(ui_theme::row_radius())
-                    .cursor_pointer()
                     .when(is_drag_source_session, |d| d.opacity(0.4))
                     .tooltip(move |window, cx| {
                         gpui_component::tooltip::Tooltip::new(row_tooltip.clone()).build(window, cx)
@@ -1257,7 +1252,7 @@ impl Workspace {
                                 div()
                                     .min_w_0()
                                     .line_height(px(16.))
-                                    .text_size(px(13.))
+                                    .text_sm()
                                     .text_color(rgb(if is_active {
                                         ui_theme::text_bright()
                                     } else {
@@ -1270,7 +1265,7 @@ impl Workspace {
                                 div()
                                     .min_w_0()
                                     .line_height(px(14.))
-                                    .text_size(px(10.))
+                                    .text_xs()
                                     .text_color(rgb(ui_theme::text_faint()))
                                     .truncate()
                                     .child(updated_text),
@@ -1279,7 +1274,10 @@ impl Workspace {
                     .children(session_decorations.iter().take(2).enumerate().map(
                         |(decoration_ix, decoration)| {
                             entity_decoration_chip(
-                                ("sess-entity-decoration", ix * 4 + decoration_ix),
+                                (
+                                    ElementId::from(("sess-entity-decoration", ui_id)),
+                                    decoration_ix.to_string(),
+                                ),
                                 decoration,
                                 plugin_agent.is_none(),
                                 cx,
@@ -1290,7 +1288,7 @@ impl Workspace {
                     .children(subtitle.as_ref().map(|s| {
                         div()
                             .flex_shrink_0()
-                            .text_size(px(11.))
+                            .text_xs()
                             .font_family(crate::terminal_view::font_family())
                             .text_color(rgb(ui_theme::text_faint()))
                             .child(s.clone())
@@ -1299,14 +1297,11 @@ impl Workspace {
                     .children(project_context.map(|(project, branch)| {
                         div()
                             .flex_shrink_0()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .px_1p5()
-                            .py(px(1.))
-                            .rounded_full()
-                            .bg(ui_theme::overlay(0x14))
-                            .text_size(px(10.))
+                            .text_xs()
                             .text_color(rgb(ui_theme::text_muted()))
                             .child(project)
                             .children(branch.map(|name| {
@@ -1320,45 +1315,33 @@ impl Workspace {
                     .children(status_label.map(|label| {
                         div()
                             .flex_shrink_0()
-                            .text_size(px(11.))
+                            .text_xs()
                             .text_color(ui_theme::session_dot_color(status))
                             .child(label)
                     }))
                     .child(
-                        // 标题占据中间可用宽度，关闭按钮作为唯一右侧操作贴行尾显示。
+                        // 关闭是这一行唯一的主操作，一直放在行尾。不用 ghost Button：
+                        // 它的 hover 底是 secondary(bg_card).lighten(0.1)，压在选中行的
+                        // bg_selected 上比底色还暗，且图标色 hover 前后不变。这里自己画，
+                        // hover 只把图标转红、不加底。
                         div()
+                            .id(("close-session", ui_id))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .opacity(0.0)
-                            .group_hover(SESS_ROW_GROUP, |s| s.opacity(1.0))
-                            .child(
-                                // 关闭键不用 ghost Button：它的 hover 底是
-                                // secondary(bg_card).lighten(0.1)，压在选中行的
-                                // bg_selected 上比底色还暗——鼠标压上去等于没反应，
-                                // 且 ghost 的图标色 hover 前后不变。这里自己画，hover **只把
-                                // 图标转红、不加底**：平时可见的只有 14px 图标，一加 20px 的
-                                // hover 底就像整个键突然撑大一圈（布局没变，但眼睛就是这么读的）。
-                                // 灰→红本身已经是够强的反馈，也把「这是关掉」说清楚了。
-                                div()
-                                    .id(("close-session", ix))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(20.))
-                                    .rounded(px(4.))
-                                    .cursor_pointer()
-                                    .text_color(rgb(ui_theme::text_muted()))
-                                    .hover(|d| d.text_color(rgb(ui_theme::red())))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .child(Icon::new(IconName::Close).size(px(14.)))
-                                    .on_click(move |_ev, _w, cx| {
-                                        cx.stop_propagation();
-                                        e_close.update(cx, |ws, cx| ws.close_session(ix, cx));
-                                    }),
-                            ),
+                            .justify_center()
+                            .size(px(20.))
+                            .rounded(px(4.))
+                            .text_color(rgb(ui_theme::text_muted()))
+                            .hover(|d| d.text_color(rgb(ui_theme::red())))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .child(Icon::new(IconName::Close).size(px(14.)))
+                            .on_click(move |_ev, _w, cx| {
+                                cx.stop_propagation();
+                                e_close.update(cx, |ws, cx| ws.close_session(ix, cx));
+                            }),
                     )
                     .when(can_drag, |row| {
                         with_session_drag(
@@ -1506,16 +1489,16 @@ impl Workspace {
                         let menu_pane = view.clone();
                         let close_pane = view.clone();
                         let copy_session_id = view.read(cx).session_id().to_string();
-                        let pane_icon_id = ix * 100 + lix;
+                        let pane_entity_id = view.entity_id();
                         let pane_icon = if animate_running && p_status == AgentStatus::Running {
                             ambient_animation(
-                                ("pane-provider-glow", pane_icon_id),
+                                ("pane-provider-glow", pane_entity_id),
                                 SESSION_GLOW_PERIOD,
                                 true,
                                 move |phase| {
                                     let tooltip_label = pane_tooltip.clone();
                                     div()
-                                        .id(("pane-provider-icon", pane_icon_id))
+                                        .id(("pane-provider-icon", pane_entity_id))
                                         .flex_shrink_0()
                                         .size(px(SESSION_AGENT_ICON_BOX_SIZE))
                                         .flex()
@@ -1537,7 +1520,7 @@ impl Workspace {
                             .into_any_element()
                         } else {
                             div()
-                                .id(("pane-provider-icon", pane_icon_id))
+                                .id(("pane-provider-icon", pane_entity_id))
                                 .flex_shrink_0()
                                 .size(px(SESSION_AGENT_ICON_BOX_SIZE))
                                 .flex()
@@ -1555,8 +1538,7 @@ impl Workspace {
                         };
                         pane_rows = pane_rows.child(
                             div()
-                                .id(("sess-pane-row", ix * 100 + lix))
-                                .group(PANE_ROW_GROUP)
+                                .id(("sess-pane-row", pane_entity_id))
                                 .relative()
                                 .flex()
                                 .items_center()
@@ -1564,7 +1546,6 @@ impl Workspace {
                                 .px_2()
                                 .py(px(6.))
                                 .rounded(ui_theme::row_radius())
-                                .cursor_pointer()
                                 .when(is_drag_source_session, |d| d.opacity(0.4))
                                 .map(|d| {
                                     if is_current_view {
@@ -1585,7 +1566,7 @@ impl Workspace {
                                             div()
                                                 .min_w_0()
                                                 .line_height(px(16.))
-                                                .text_size(px(13.))
+                                                .text_sm()
                                                 // 当前 pane 提亮，其余用中灰——和会话行选中态同口径。
                                                 .text_color(rgb(if is_current_view {
                                                     ui_theme::text_bright()
@@ -1599,24 +1580,21 @@ impl Workspace {
                                             div()
                                                 .min_w_0()
                                                 .line_height(px(14.))
-                                                .text_size(px(10.))
+                                                .text_xs()
                                                 .text_color(rgb(ui_theme::text_faint()))
                                                 .truncate()
                                                 .child(pane_updated_text),
                                         ),
                                 )
                                 // 每个 pane 自己的关闭键：只关这一个 pane，剩下的照常活着。
-                                // 常态透明，hover 本行才显形（本行 group，不是整组）。
                                 .child(
                                     div()
                                         .flex_shrink_0()
-                                        .opacity(0.0)
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
                                         })
-                                        .group_hover(PANE_ROW_GROUP, |s| s.opacity(1.0))
                                         .child(
-                                            Button::new(("close-pane", ix * 100 + lix))
+                                            Button::new(("close-pane", pane_entity_id))
                                                 .ghost()
                                                 .xsmall()
                                                 .icon(IconName::Close)
@@ -1701,8 +1679,7 @@ impl Workspace {
 
                     // 组容器只负责把同一会话的多个 pane 视觉归在一起。
                     let pane_group = div()
-                        .id(("sess-pane-group", ix))
-                        .group(SESS_ROW_GROUP)
+                        .id(("sess-pane-group", ui_id))
                         .relative()
                         .child(pane_rows)
                         // 成组的唯一标记：贴左缘一条圆角竖线，把这几个 pane 圈在一起，
@@ -1764,7 +1741,7 @@ impl Workspace {
                             cx.notify();
                         });
                     })
-                    .text_size(px(11.))
+                    .text_xs()
                     .text_color(rgb(ui_theme::text_faint()))
                     .child(format!("已隐藏 {hidden_empty} 个无会话项目")),
             );
@@ -1896,7 +1873,7 @@ impl Workspace {
                     .gap_2()
                     .rounded_full()
                     .cursor_pointer()
-                    .text_size(px(SIDEBAR_FONT_SIZE))
+                    .text_sm()
                     .font_medium()
                     .text_color(rgb(ui_theme::text_mid()))
                     .hover(|d| {
@@ -1917,7 +1894,7 @@ impl Workspace {
                                     .items_center()
                                     .justify_center()
                                     .gap_2()
-                                    .text_size(px(SIDEBAR_FONT_SIZE))
+                                    .text_sm()
                                     .font_medium()
                                     .text_color(rgb(ui_theme::text_mid()))
                                     .child(
@@ -2090,7 +2067,7 @@ impl Workspace {
                                     div()
                                         .px_1()
                                         .flex_shrink_0()
-                                        .text_size(px(SIDEBAR_FONT_SIZE))
+                                        .text_sm()
                                         .font_medium()
                                         .text_color(rgb(ui_theme::text_faint()))
                                         .child("项目"),
@@ -2161,7 +2138,7 @@ impl Workspace {
                     div()
                         .px_2()
                         .pb_1()
-                        .text_size(px(SIDEBAR_FONT_SIZE))
+                        .text_sm()
                         .font_medium()
                         .text_color(rgb(ui_theme::text_faint()))
                         .child("插件"),
@@ -2200,7 +2177,7 @@ impl Workspace {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(10.))
+                                .text_xs()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(
                                     title
@@ -2215,7 +2192,7 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(SIDEBAR_FONT_SIZE))
+                                .text_sm()
                                 .text_color(rgb(if selected {
                                     ui_theme::text_bright()
                                 } else {
@@ -2248,7 +2225,7 @@ impl Workspace {
 mod tests {
     use super::{
         PROJECT_ACTION_SLOT_HEIGHT, PROJECT_DISCLOSURE_ICON_SIZE, PROJECT_GUIDE_LEFT,
-        PROJECT_HEADER_FONT_SIZE, PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT,
+        PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT,
         SESSION_AGENT_ICON_BOX_SIZE, SESSION_AGENT_ICON_SIZE, project_disclosure_icon,
         project_header_is_selected, session_row_is_selected, session_row_status_label,
         shared_project_action_payload, status_text,
@@ -2258,7 +2235,6 @@ mod tests {
 
     const _: () = {
         assert!(PROJECT_NEW_BUTTON_SIZE >= 28.);
-        assert!(PROJECT_HEADER_FONT_SIZE == 13.);
         assert!(PROJECT_NEW_BUTTON_SIZE > PROJECT_ACTION_SLOT_HEIGHT);
         assert!(PROJECT_SESSION_INDENT == 22.);
         assert!(PROJECT_GUIDE_LEFT < PROJECT_SESSION_INDENT);

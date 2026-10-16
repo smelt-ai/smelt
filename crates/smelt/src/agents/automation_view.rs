@@ -5,9 +5,9 @@
 use super::*;
 
 impl Workspace {
-    pub(crate) fn render_delete_automation_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_delete_automation_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(target) = self.automation_surface.pending_delete.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         let (fg, muted) = {
             let theme = cx.theme();
@@ -51,7 +51,7 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(420., true, content, cx)
+        self.modal_shell(420., true, content, crate::overlay::ModalLayer::DeleteAutomation, cx)
     }
 
     pub(crate) fn render_automation_navigation(

@@ -5,6 +5,26 @@
 
 use super::*;
 
+fn apply_collapsed_files(
+    state: &mut gpui_component::diff::DiffState,
+    collapsed: &HashSet<String>,
+    cx: &mut Context<gpui_component::diff::DiffState>,
+) {
+    let paths: Vec<String> = state
+        .files()
+        .iter()
+        .map(|file| file.path().to_string())
+        .collect();
+    for path in paths {
+        state.set_file_collapsed(&path, collapsed.contains(&path), cx);
+    }
+}
+
+fn parse_diff_files(text: &str) -> Result<Vec<gpui_component::diff::DiffFile>, String> {
+    gpui_component::diff::DiffFile::parse(text)
+        .map_err(|err| diff_parse_failure(text, &err.to_string()))
+}
+
 // ===================== Workspace 方法 =====================
 
 impl Workspace {
@@ -54,13 +74,14 @@ impl Workspace {
             }),
         );
 
+        // 先记下打开前的焦点，再把焦点交给路径框。
+        self.begin_main_modal_focus(window, cx);
         path_input.update(cx, |input, cx| input.focus(window, cx));
         self.new_worktree = Some(NewWorktreeState {
             main_root,
             base_branch,
             branch_input,
             path_input,
-            busy: false,
             error: None,
             _subs: subs,
         });
@@ -76,33 +97,43 @@ impl Workspace {
     /// 确认新建：后台跑 `git worktree add`，成功后在新建目录打开一个终端会话
     /// （建 worktree 就是要进去干活），并刷新「关联 Worktree」列表（若开着）。
     pub fn confirm_new_worktree(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.new_worktree.as_mut() else {
+        let Some(main_root) = self
+            .new_worktree
+            .as_ref()
+            .map(|state| state.main_root.clone())
+        else {
             return;
         };
-        if state.busy {
+        if self.git_writes.contains_key(&main_root) {
+            if self.git_writes.get(&main_root) != Some(&GitWrite::CreateWorktree) {
+                if let Some(state) = self.new_worktree.as_mut() {
+                    state.error = Some("有 Git 操作正在进行，请稍后再建工作树".into());
+                }
+                cx.notify();
+            }
             return;
         }
-        let main_root = state.main_root.clone();
-        let branch = state.branch_input.read(cx).value().to_string();
-        let path = state.path_input.read(cx).value().to_string();
-        let path = path.trim().to_string();
-        if path.is_empty() {
-            state.error = Some("请填写 worktree 检出目录".to_string());
-            cx.notify();
-            return;
-        }
-        state.busy = true;
-        state.error = None;
-        cx.notify();
+        let (branch, path) = {
+            let Some(state) = self.new_worktree.as_mut() else {
+                return;
+            };
+            let branch = state.branch_input.read(cx).value().to_string();
+            let path = state.path_input.read(cx).value().trim().to_string();
+            if path.is_empty() {
+                state.error = Some("请填写 worktree 检出目录".to_string());
+                cx.notify();
+                return;
+            }
+            state.error = None;
+            (branch, path)
+        };
         let branch_opt = (!branch.trim().is_empty()).then(|| branch.trim().to_string());
-        cx.spawn(async move |this, cx| {
-            let b = branch_opt.clone();
-            let p = path.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { create_worktree(&main_root, b.as_deref(), &p) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        let git_root = main_root.clone();
+        self.spawn_git(
+            &main_root,
+            GitWrite::CreateWorktree,
+            move || create_worktree(&git_root, branch_opt.as_deref(), &path),
+            |this, result, cx| {
                 let Some(state) = this.new_worktree.as_mut() else {
                     return;
                 };
@@ -116,15 +147,11 @@ impl Workspace {
                         // 建完直接在新目录开一个终端会话。
                         this.add_session(Some(created), cx);
                     }
-                    Err(err) => {
-                        state.busy = false;
-                        state.error = Some(err);
-                    }
+                    Err(err) => state.error = Some(err),
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+            cx,
+        );
     }
 
     /// 项目行右键「关联 Worktree」：打开弹窗并后台列出这个仓库的全部 worktree。
@@ -274,38 +301,41 @@ impl Workspace {
     /// （探测出有未提交改动就带 --force——用户已经在弹窗里看到红色警告并主动点了
     /// 确定）。失败写 background_error，交给 render 顶部弹通知。
     pub fn confirm_delete_worktree(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self
+            .delete_worktree_target
+            .as_ref()
+            .map(|target| target.main_root.clone())
+        else {
+            return;
+        };
+        if self.git_writes.contains_key(&repo) {
+            return;
+        }
         let Some(target) = self.delete_worktree_target.take() else {
             return;
         };
-        cx.notify();
         self.close_sessions_under(&target.path, cx);
         let force = target.dirty.unwrap_or(false);
-        cx.spawn(async move |this, cx| {
-            let path = target.path.clone();
-            let main_root = target.main_root.clone();
-            let git_path = path.clone();
-            let git_result = cx
-                .background_executor()
-                .spawn(async move { remove_worktree(&main_root, &git_path, force) })
-                .await;
-            match git_result {
-                Err(err) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.background_error = Some(err);
-                        cx.notify();
-                    });
-                }
+        let path = target.path.clone();
+        let git_root = repo.clone();
+        let started = self.spawn_git(
+            &repo,
+            GitWrite::DeleteWorktree,
+            move || remove_worktree(&git_root, &path, force),
+            |this, result, cx| match result {
+                Err(err) => this.background_error = Some(err),
                 Ok(()) => {
                     // 「关联 Worktree」弹窗还开着就刷新，让刚删掉的条目从列表消失。
-                    let _ = this.update(cx, |this, cx| {
-                        if this.worktree_list.is_some() {
-                            this.refresh_worktree_list(cx);
-                        }
-                    });
+                    if this.worktree_list.is_some() {
+                        this.refresh_worktree_list(cx);
+                    }
                 }
-            }
-        })
-        .detach();
+            },
+            cx,
+        );
+        if !started {
+            self.delete_worktree_target = Some(target);
+        }
     }
 
     /// 取消删除 worktree：不落地任何改动。
@@ -337,79 +367,81 @@ impl Workspace {
     /// 已跟踪走 `git restore --staged --worktree`（暂存区和工作区一起还原，省得
     /// 用户为「已 add 过」的文件再点一次）；未跟踪的 git 管不着，直接删盘。
     pub fn confirm_discard_file(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .discard_file_target
+            .as_ref()
+            .map(|(root, _, _)| root.clone())
+        else {
+            return;
+        };
+        if self.git_writes.contains_key(&root) {
+            return;
+        }
         let Some((root, path, untracked)) = self.discard_file_target.take() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            let (r, p) = (root.clone(), path.clone());
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    if untracked {
-                        let full = Path::new(&r).join(&p);
-                        return LocalFs
-                            .remove_file(&full)
-                            .map_err(|e| format!("删除 {p} 失败：{e}"));
-                    }
-                    // 行自带仓库根，直接在它自己的仓库里丢弃。
-                    let out = run_git(&r, &["restore", "--staged", "--worktree", "--", &p])
-                        .map_err(|e| e.to_string())?;
-                    if out.success() {
-                        Ok(())
-                    } else {
-                        Err(git_err(&out, "git restore 失败"))
-                    }
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.invalidate_git_status(&root);
-                        // 丢弃的正是当前打开的那个文件时，diff 已经没意义了，关掉。
-                        if this.git_diff.as_ref().is_some_and(|d| d.path == path) {
-                            this.git_diff = None;
-                            this.active_hunk = None;
-                        }
-                    }
-                    Err(err) => this.background_error = Some(err),
+        let git_root = root.clone();
+        let git_path = path.clone();
+        let done_root = root.clone();
+        let done_path = path.clone();
+        let started = self.spawn_git(
+            &root,
+            GitWrite::DiscardFile,
+            move || {
+                if untracked {
+                    let full = Path::new(&git_root).join(&git_path);
+                    return LocalFs
+                        .remove_file(&full)
+                        .map_err(|e| format!("删除 {git_path} 失败：{e}"));
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                // 行自带仓库根，直接在它自己的仓库里丢弃。
+                let out = run_git(
+                    &git_root,
+                    &["restore", "--staged", "--worktree", "--", &git_path],
+                )
+                .map_err(|e| e.to_string())?;
+                if out.success() {
+                    Ok(())
+                } else {
+                    Err(git_err(&out, "git restore 失败"))
+                }
+            },
+            move |this, result, _cx| match result {
+                Ok(()) => {
+                    this.invalidate_git_status(&done_root);
+                    // 丢弃的正是当前打开的那个文件时，diff 已经没意义了，关掉。
+                    if this.git_diff.as_ref().is_some_and(|d| d.path == done_path) {
+                        this.reset_git_diff_view();
+                    }
+                }
+                Err(err) => this.background_error = Some(err),
+            },
+            cx,
+        );
+        if !started {
+            self.discard_file_target = Some((root, path, untracked));
+        }
     }
 
-    /// F7 / Shift+F7：跳到下一个 / 上一个改动块并滚到视野里。
-    ///
-    /// 首次按跳第一块；到头就停在两端，不回绕——回绕会让人以为还有更多改动。
+    /// F7 / Shift+F7：跳到下一处 / 上一处变更。组件到头会绕回另一端。
     pub fn jump_hunk(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(d) = self.git_diff.as_ref() else {
-            return;
-        };
-        let n = d.hunks.len();
-        if n == 0 {
+        if self
+            .git_diff
+            .as_ref()
+            .is_none_or(|diff| diff.patch.is_none())
+        {
             return;
         }
-        let next = match self.active_hunk {
-            None => 0,
-            Some(i) if forward => (i + 1).min(n - 1),
-            Some(i) => i.saturating_sub(1),
+        let Some(view) = self.diff_view.clone() else {
+            return;
         };
-        let line = d.hunks[next].range.start;
-        // 并排视图里 uniform_list 的 item 是 SplitRow，下标和 lines 的下标不是一回事，
-        // 直接拿行号去滚会滚到别的位置——先翻译成 row 下标。
-        let item = if self.diff_split {
-            build_split_rows(&d.lines)
-                .iter()
-                .position(|r| matches!(r, SplitRow::Full(i) if *i == line))
-                .unwrap_or(line)
-        } else {
-            line
-        };
-        self.active_hunk = Some(next);
-        self.diff_scroll
-            .scroll_to_item(item, gpui::ScrollStrategy::Top);
-        cx.notify();
+        view.update(cx, |state, cx| {
+            if forward {
+                state.next_change(cx);
+            } else {
+                state.previous_change(cx);
+            }
+        });
     }
 
     /// 点「丢弃块」：先弹确认，不直接动文件。
@@ -418,12 +450,27 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 确认丢弃：关弹窗并真正执行 reverse apply。
+    /// 确认丢弃：这个仓库还没有写入时才收起弹窗，并执行 reverse apply。
+    ///
+    /// 已经有写入就保持弹窗。diff 不能 apply、或占用没成功，把目标放回去。
     pub fn confirm_discard_hunk(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .discard_hunk_target
+            .as_ref()
+            .map(|(root, _)| root.clone())
+        else {
+            return;
+        };
+        if self.git_writes.contains_key(&root) {
+            return;
+        }
         let Some((root, idx)) = self.discard_hunk_target.take() else {
             return;
         };
-        self.discard_hunk(root, idx, cx);
+        if !self.discard_hunk(root.clone(), idx, cx) {
+            self.discard_hunk_target = Some((root, idx));
+            cx.notify();
+        }
     }
 
     /// 取消丢弃：什么都不发生。
@@ -793,6 +840,7 @@ impl Workspace {
         if fresh || self.branches_inflight.contains(&root) {
             return;
         }
+        let request_generation = self.branches_generation.get(&root).copied().unwrap_or(0);
         self.branches_inflight.insert(root.clone());
         cx.spawn(async move |this, cx| {
             let r = root.clone();
@@ -802,11 +850,24 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.branches_inflight.remove(&root);
-                this.branches.insert(root, (Instant::now(), list));
+                let current_generation = this.branches_generation.get(&root).copied().unwrap_or(0);
+                // 删除分支发生在列举期间时，这一包还含着已删的分支。不写回，下一帧再拉。
+                if current_generation == request_generation {
+                    this.branches.insert(root, (Instant::now(), list));
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// 分支集合变了。在途的 `for-each-ref` 不得再把旧列表标成新鲜。
+    fn bump_branches_generation(&mut self, root: &str) {
+        let generation = self
+            .branches_generation
+            .entry(root.to_string())
+            .or_default();
+        *generation = generation.wrapping_add(1);
     }
 
     /// Git 页组页面前的数据准备：失效跨仓库 diff、默认打开全部改动、懒建输入框。
@@ -873,7 +934,17 @@ impl Workspace {
                 });
                 self.diff_comment_input = Some(state);
             }
-            self.reveal_pending_diff_file();
+            if self.diff_view.is_some() {
+                self.ensure_diff_body(cx);
+            }
+            // 定位发生在点击或补丁装上时。这里再补一帧，且放到 render 之外，
+            // 避免准备阶段读 DiffState，把整窗订上它的刷新。
+            if self.pending_diff_file.is_some() {
+                let view = cx.entity();
+                cx.defer(move |cx| {
+                    view.update(cx, |this, cx| this.reveal_pending_diff_file(cx));
+                });
+            }
         } else if self.git_tab == GitTab::Log {
             self.ensure_git_log(root, cx);
         }
@@ -883,24 +954,20 @@ impl Workspace {
     /// 内建 DWIM 自动建好跟踪分支——跟 create_worktree 判断分支存不存在同一个逻辑）。
     /// 成功后清掉 status/分支缓存强制下一帧重新拉（文件、ahead/behind 全变了）。
     pub fn checkout_branch(&mut self, root: String, branch: String, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let r = root.clone();
-            let b = branch.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { checkout_git_branch(&r, &b) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    // 切分支后文件列表、ahead/behind 都变了，标脏逼下一帧重新拉取；
-                    // 分支列表本身（有哪些分支）不受切换影响，不用跟着失效。
-                    Ok(()) => this.invalidate_git_status(&root),
-                    Err(err) => this.background_error = Some(err),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        let key = root.clone();
+        let status_root = root.clone();
+        self.spawn_git(
+            &key,
+            GitWrite::Checkout,
+            move || checkout_git_branch(&root, &branch),
+            move |this, result, _cx| match result {
+                // 切分支后文件列表、ahead/behind 都变了，标脏逼下一帧重新拉取；
+                // 分支列表本身（有哪些分支）不受切换影响，不用跟着失效。
+                Ok(()) => this.invalidate_git_status(&status_root),
+                Err(err) => this.background_error = Some(err),
+            },
+            cx,
+        );
     }
 
     /// 右键「删除分支」：先弹确认。`remote` 为真时删的是远端分支（更危险，别人也
@@ -928,29 +995,46 @@ impl Workspace {
     /// 而是把 git 的原话报出来让人自己决定——分支删了没有 reflog 之外的退路。
     /// 远端分支走 `push origin --delete`。
     pub fn confirm_delete_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .delete_branch_target
+            .as_ref()
+            .map(|(root, _, _)| root.clone())
+        else {
+            return;
+        };
+        if self.git_writes.contains_key(&root) {
+            return;
+        }
         let Some((root, branch, remote)) = self.delete_branch_target.take() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            let (r, b) = (root.clone(), branch.clone());
-            let result = cx
-                .background_executor()
-                .spawn(async move { delete_git_branch(&r, &b, remote) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.invalidate_git_status(&root);
-                        // 分支没了，列表和日志都得重拉。
-                        this.branches.remove(&root);
-                        this.reload_git_log(root.clone(), cx);
-                    }
-                    Err(err) => this.background_error = Some(err),
+        let op = if remote {
+            GitWrite::DeleteRemoteBranch
+        } else {
+            GitWrite::DeleteBranch
+        };
+        let git_root = root.clone();
+        let git_branch = branch.clone();
+        let done_root = root.clone();
+        let started = self.spawn_git(
+            &root,
+            op,
+            move || delete_git_branch(&git_root, &git_branch, remote),
+            move |this, result, cx| match result {
+                Ok(()) => {
+                    this.invalidate_git_status(&done_root);
+                    // 分支没了，列表和日志都得重拉。先推进代次，在途的旧列表不能写回来。
+                    this.bump_branches_generation(&done_root);
+                    this.branches.remove(&done_root);
+                    this.reload_git_log(done_root, cx);
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                Err(err) => this.background_error = Some(err),
+            },
+            cx,
+        );
+        if !started {
+            self.delete_branch_target = Some((root, branch, remote));
+        }
     }
 
     /// 把某个分支合并进当前分支（`git merge <branch>`）。
@@ -958,24 +1042,21 @@ impl Workspace {
     /// 冲突时 git 会以非 0 退出并把冲突文件写进工作区——此时**不自动 abort**，
     /// 保留现场让人去解，只把提示报出来（自动回滚会让人措手不及）。
     pub fn merge_branch(&mut self, root: String, branch: String, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let (r, b) = (root.clone(), branch.clone());
-            let result = cx
-                .background_executor()
-                .spawn(async move { merge_git_branch(&r, &b) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.invalidate_git_status(&root);
-                        this.reload_git_log(root.clone(), cx);
-                    }
-                    Err(err) => this.background_error = Some(err),
+        let key = root.clone();
+        let done_root = root.clone();
+        self.spawn_git(
+            &key,
+            GitWrite::Merge,
+            move || merge_git_branch(&root, &branch),
+            move |this, result, cx| match result {
+                Ok(()) => {
+                    this.invalidate_git_status(&done_root);
+                    this.reload_git_log(done_root, cx);
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                Err(err) => this.background_error = Some(err),
+            },
+            cx,
+        );
     }
 
     /// Git 页文件列表勾选框：把某个改动文件加入暂存区（`git add --`，untracked/修改/
@@ -1003,46 +1084,48 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
-        let op_name = if stage { "暂存" } else { "取消暂存" };
-        cx.spawn(async move |this, cx| {
-            let r = root.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let args: Vec<&str> = if stage {
-                        std::iter::once("add")
-                            .chain(std::iter::once("--"))
-                            .collect()
-                    } else {
-                        ["reset", "--"].into_iter().collect()
-                    };
-                    let mut full: Vec<&str> = args;
-                    full.extend(paths.iter().map(String::as_str));
-                    run_git(&r, &full)
-                        .map_err(|error| error.to_string())
-                        .and_then(|out| {
-                            if out.success() {
-                                Ok(())
-                            } else {
-                                Err(git_err(&out, "git 操作失败"))
-                            }
-                        })
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        let op = if stage {
+            GitWrite::Stage
+        } else {
+            GitWrite::Unstage
+        };
+        let failure = if stage { "暂存" } else { "取消暂存" };
+        let key = root.clone();
+        let done_root = root.clone();
+        self.spawn_git(
+            &key,
+            op,
+            move || {
+                let args: Vec<&str> = if stage {
+                    std::iter::once("add").chain(std::iter::once("--")).collect()
+                } else {
+                    ["reset", "--"].into_iter().collect()
+                };
+                let mut full: Vec<&str> = args;
+                full.extend(paths.iter().map(String::as_str));
+                run_git(&root, &full)
+                    .map_err(|error| error.to_string())
+                    .and_then(|out| {
+                        if out.success() {
+                            Ok(())
+                        } else {
+                            Err(git_err(&out, "git 操作失败"))
+                        }
+                    })
+            },
+            move |this, result, cx| {
                 if let Err(err) = result {
-                    this.background_error = Some(format!("{op_name}失败：{err}"));
+                    this.background_error = Some(format!("{failure}失败：{err}"));
                 }
                 // 批量操作会一口气改掉一片文件的暂存状态，之前留下的单文件乐观状态
                 // 全部作废；留着它们只会让复选标记跟真实 status 对不上。
                 this.git_index_pending
-                    .retain(|(pending_root, _), _| pending_root != &root);
-                this.invalidate_git_status(&root);
-                this.ensure_git_status(root.clone(), cx);
-                cx.notify();
-            });
-        })
-        .detach();
+                    .retain(|(pending_root, _), _| pending_root != &done_root);
+                this.invalidate_git_status(&done_root);
+                this.ensure_git_status(done_root, cx);
+            },
+            cx,
+        );
     }
 
     /// stage_file/unstage_file 共用的后台执行 + 缓存失效逻辑：`git <args.. > -- <path>`。
@@ -1053,42 +1136,38 @@ impl Workspace {
         op: fn(&str, &str) -> Result<(), String>,
         cx: &mut Context<Self>,
     ) {
+        // 勾选框的乐观标记在占用成功之后才写。占用失败时格子保持原样，用户可再点。
+        let key = root.clone();
         let pending_key = (root.clone(), path.clone());
-        if git_index_op_in_flight(self.git_index_pending.get(&pending_key)) {
-            return;
-        }
-        self.git_index_pending
-            .insert(pending_key.clone(), PendingGitIndexOp { completed: false });
-        // 立刻把这一行标成"操作进行中"，不等 git 进程和 status 回包。
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let r = root.clone();
-            let p = path.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { op(&r, &p) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.mark_git_status_dirty(&root);
-                        if let Some(pending) = this.git_index_pending.get_mut(&pending_key) {
-                            pending.completed = true;
-                        }
-                        // 不依赖下一次 render 或 watcher；操作完成后立即发起权威刷新。
-                        // 若已有旧请求在途，generation 会让它回包后自动补拉。
-                        this.ensure_git_status(root.clone(), cx);
+        let git_path = path.clone();
+        let done_key = pending_key.clone();
+        let done_root = root.clone();
+        let started = self.spawn_git(
+            &key,
+            GitWrite::IndexFile,
+            move || op(&root, &git_path),
+            move |this, result, cx| match result {
+                Ok(()) => {
+                    this.mark_git_status_dirty(&done_root);
+                    if let Some(pending) = this.git_index_pending.get_mut(&done_key) {
+                        pending.completed = true;
                     }
-                    Err(err) => {
-                        this.git_index_pending.remove(&pending_key);
-                        this.background_error = Some(err);
-                    }
+                    // 不依赖下一次 render 或 watcher；操作完成后立即发起权威刷新。
+                    // 若已有旧请求在途，generation 会让它回包后自动补拉。
+                    this.ensure_git_status(done_root, cx);
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                Err(err) => {
+                    this.git_index_pending.remove(&done_key);
+                    this.background_error = Some(err);
+                }
+            },
+            cx,
+        );
+        if started {
+            self.git_index_pending
+                .insert(pending_key, PendingGitIndexOp { completed: false });
+            cx.notify();
+        }
     }
 
     /// 切换 diff 视图（全部 / 已暂存 / 未暂存），并按新视图重拉当前文件的 diff。
@@ -1125,19 +1204,23 @@ impl Workspace {
         // 必须指向同一个仓库，否则看着 A 的 diff 却提交到了 B。
         self.set_active_git_repo(root.clone(), cx);
         self.pending_diff_file = Some(path.clone());
-        let aggregate_ready = self
+        let header_ready = self
             .git_diff
             .as_ref()
             .is_some_and(|diff| aggregate_diff_ready_for_file(diff, &root, self.diff_scope, &path));
+        // 标题行按空白切开，带空格或重命名的路径会对不上。组件里已经有这个文件
+        // 就直接滚，不要整份重拉。重拉会先闪「正在读取…」，滚动位置也没了。
+        let in_view = self.loaded_aggregate_has_file(&root, &path, cx);
         let aggregate_loading = self.git_diff.as_ref().is_some_and(|diff| {
             diff.root == root
                 && diff.aggregate
                 && diff.scope == self.diff_scope
-                && diff.lines.is_empty()
+                && diff.patch.is_none()
         });
-        if !aggregate_ready && !aggregate_loading {
+        if !header_ready && !in_view && !aggregate_loading {
             self.open_all_diffs_at(root, cx);
         }
+        self.reveal_pending_diff_file(cx);
         cx.notify();
     }
 
@@ -1147,12 +1230,111 @@ impl Workspace {
         self.diff_gen = self.diff_gen.wrapping_add(1);
         self.git_diff = None;
         self.pending_diff_file = None;
-        self.diff_selected.clear();
-        self.diff_selection_anchor = None;
-        self.diff_selection_cursor = None;
-        self.diff_selection_dragging = false;
+        self.drop_diff_view();
+    }
+
+    fn drop_diff_view(&mut self) {
+        self.diff_view = None;
+        self._diff_view_sub = None;
+        self.diff_view_patch.clear();
+        self.diff_parse_error = None;
+        self.diff_comment_range = None;
         self.diff_comment_open = false;
-        self.active_hunk = None;
+    }
+
+    /// 开始读一份新补丁。旧正文先藏起来，但原文没变时不拆掉 Diff，滚动才留得住。
+    fn begin_diff_load(&mut self, cx: &mut Context<Self>) {
+        self.diff_comment_open = false;
+        self.diff_comment_range = None;
+        if let Some(view) = self.diff_view.clone() {
+            view.update(cx, |state, cx| state.set_selected_lines(None, cx));
+        }
+        self.publish_diff_body(cx);
+    }
+
+    pub(crate) fn current_diff_mode(&self) -> gpui_component::diff::DiffMode {
+        if self.diff_split {
+            gpui_component::diff::DiffMode::Split
+        } else {
+            gpui_component::diff::DiffMode::Unified
+        }
+    }
+
+    fn subscribe_diff_view(
+        &mut self,
+        view: &Entity<gpui_component::diff::DiffState>,
+        cx: &mut Context<Self>,
+    ) {
+        // 折叠事件只改集合。DiffState 自己会通知正文视图；这里再 notify Workspace
+        // 会把右侧文件列表整列重排。
+        self._diff_view_sub = Some(cx.subscribe(view, |this, _, event, _cx| {
+            match event {
+                gpui_component::diff::DiffEvent::FileCollapsed(path) => {
+                    this.git_collapsed_diff_files.insert(path.to_string());
+                }
+                gpui_component::diff::DiffEvent::FileExpanded(path) => {
+                    this.git_collapsed_diff_files.remove(path.as_ref());
+                }
+                _ => {}
+            }
+        }));
+    }
+
+    fn ensure_diff_body(&mut self, cx: &mut Context<Self>) {
+        if self.diff_body.is_some() {
+            return;
+        }
+        let host = cx.entity().downgrade();
+        self.diff_body = Some(cx.new(|_| GitDiffBody::new(host)));
+    }
+
+    /// 把补丁装进 Diff。原文相同就只同步统一/并排，不调用 `set_files`。
+    fn install_diff_view(
+        &mut self,
+        patch: &str,
+        files: Result<Vec<gpui_component::diff::DiffFile>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff_view_patch == patch {
+            if let Some(view) = self.diff_view.clone() {
+                let mode = self.current_diff_mode();
+                view.update(cx, |state, cx| state.set_mode(mode, cx));
+                self.ensure_diff_body(cx);
+                self.publish_diff_body(cx);
+            }
+            self.reveal_pending_diff_file(cx);
+            return;
+        }
+        self.diff_comment_open = false;
+        self.diff_comment_range = None;
+        self.diff_view_patch = patch.to_string();
+        let files = match files {
+            Ok(files) => files,
+            Err(err) => {
+                self.diff_view = None;
+                self._diff_view_sub = None;
+                self.diff_parse_error = Some(err);
+                return;
+            }
+        };
+        self.diff_parse_error = None;
+        let mode = self.current_diff_mode();
+        let collapsed = self.git_collapsed_diff_files.clone();
+        if let Some(view) = self.diff_view.clone() {
+            view.update(cx, |state, cx| {
+                state.set_files(files, cx);
+                state.set_mode(mode, cx);
+                apply_collapsed_files(state, &collapsed, cx);
+            });
+        } else {
+            let view = cx.new(|cx| gpui_component::diff::DiffState::new(files, cx).with_mode(mode));
+            view.update(cx, |state, cx| apply_collapsed_files(state, &collapsed, cx));
+            self.subscribe_diff_view(&view, cx);
+            self.diff_view = Some(view);
+        }
+        self.ensure_diff_body(cx);
+        self.publish_diff_body(cx);
+        self.reveal_pending_diff_file(cx);
     }
 
     /// 把第 `idx` 个 hunk 单独加入暂存区（`git apply --cached`）。
@@ -1160,7 +1342,7 @@ impl Workspace {
     /// 只暂存一块、其余留在工作区，是 agent 写的代码「对一半」时最需要的动作：挑出
     /// 对的先存下来，剩下的继续让它改。
     pub fn stage_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) {
-        self.apply_hunk(root, idx, &["apply", "--cached", "-"], cx);
+        self.apply_hunk(root, idx, &["apply", "--cached", "-"], GitWrite::StageHunk, cx);
     }
 
     /// 把第 `idx` 个 hunk 撤出暂存区（`git apply --cached --reverse`）。
@@ -1168,14 +1350,22 @@ impl Workspace {
     /// 只在「已暂存」视图下给：那时 diff 就是索引相对 HEAD 的差异，reverse 回去
     /// 正好把这一块退回工作区，文件内容不受影响。
     pub fn unstage_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) {
-        self.apply_hunk(root, idx, &["apply", "--cached", "--reverse", "-"], cx);
+        self.apply_hunk(
+            root,
+            idx,
+            &["apply", "--cached", "--reverse", "-"],
+            GitWrite::UnstageHunk,
+            cx,
+        );
     }
 
     /// 丢弃第 `idx` 个 hunk（`git apply --reverse`，作用于工作区文件）。
     ///
     /// **会真的改用户的文件且不进 reflog**，调用方必须先让用户确认过。
-    pub fn discard_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) {
-        self.apply_hunk(root, idx, &["apply", "--reverse", "-"], cx);
+    ///
+    /// 返回 false 表示没有占住这个仓库：确认弹窗要留着。
+    fn discard_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) -> bool {
+        self.apply_hunk(root, idx, &["apply", "--reverse", "-"], GitWrite::DiscardHunk, cx)
     }
 
     /// stage_hunk / discard_hunk 共用：拼 patch → 后台 `git apply` → 刷新状态并重开 diff。
@@ -1187,52 +1377,54 @@ impl Workspace {
         root: String,
         idx: usize,
         args: &'static [&'static str],
+        op: GitWrite,
         cx: &mut Context<Self>,
-    ) {
-        let Some(d) = self.git_diff.as_ref() else {
-            return;
-        };
-        if !d.patchable {
-            self.background_error =
-                Some("这个 diff 不支持按块操作（子模块 / 未跟踪文件），请用整文件的勾选框".into());
-            cx.notify();
-            return;
-        }
-        let Some(hunk) = d.hunks.get(idx) else { return };
-        let patch = hunk_patch(&d.header, hunk);
-        let path = d.path.clone();
-        cx.spawn(async move |this, cx| {
-            let r = root.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let Err(raw) = apply_git_patch(&r, args, &patch) else {
-                        return Ok(());
-                    };
-                    // apply 失败最常见的原因是这个文件已经部分暂存过：当前 diff 是
-                    // `git diff HEAD`（暂存+未暂存合起来），其中已进索引的那部分再
-                    // apply --cached 就会 "already exists"/"does not apply"。把原因
-                    // 说清楚，别只甩 git 的英文原文。
-                    Err(format!(
-                        "按块操作失败：{raw}\n\
-                         （这个文件若已部分暂存，当前视图混着暂存与未暂存的改动，\
-                         按块操作会对不上号；先用勾选框整文件取消暂存再试）"
-                    ))
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.invalidate_git_status(&root);
-                        // 行号已变，重新解析一份，避免下一次点击打在错的位置上。
-                        this.open_diff(root.clone(), path, false, cx);
-                    }
-                    Err(err) => this.background_error = Some(err),
-                }
+    ) -> bool {
+        let (patch, path) = {
+            let Some(d) = self.git_diff.as_ref() else {
+                return false;
+            };
+            if !d.patchable {
+                self.background_error = Some(
+                    "这个 diff 不支持按块操作（子模块 / 未跟踪文件），请用整文件的勾选框".into(),
+                );
                 cx.notify();
-            });
-        })
-        .detach();
+                return false;
+            }
+            let Some(hunk) = d.hunks.get(idx) else {
+                return false;
+            };
+            (hunk_patch(&d.header, hunk), d.path.clone())
+        };
+        let key = root.clone();
+        let done_root = root.clone();
+        self.spawn_git(
+            &key,
+            op,
+            move || {
+                let Err(raw) = apply_git_patch(&root, args, &patch) else {
+                    return Ok(());
+                };
+                // apply 失败最常见的原因是这个文件已经部分暂存过：当前 diff 是
+                // `git diff HEAD`（暂存+未暂存合起来），其中已进索引的那部分再
+                // apply --cached 就会 "already exists"/"does not apply"。把原因
+                // 说清楚，别只甩 git 的英文原文。
+                Err(format!(
+                    "按块操作失败：{raw}\n\
+                     （这个文件若已部分暂存，当前视图混着暂存与未暂存的改动，\
+                     按块操作会对不上号；先用勾选框整文件取消暂存再试）"
+                ))
+            },
+            move |this, result, cx| match result {
+                Ok(()) => {
+                    this.invalidate_git_status(&done_root);
+                    // 行号已变，重新解析一份，避免下一次点击打在错的位置上。
+                    this.open_diff(done_root, path, false, cx);
+                }
+                Err(err) => this.background_error = Some(err),
+            },
+            cx,
+        )
     }
 
     /// 跑 git + 着色放后台，用 file_gen 丢弃过期结果。
@@ -1260,13 +1452,9 @@ impl Workspace {
             patchable: false,
             scope,
             has_staged: false,
+            patch: None,
         });
-        self.diff_selected.clear(); // 换文件/重开 diff：旧的行选区不再对应新内容
-        self.diff_selection_anchor = None;
-        self.diff_selection_cursor = None;
-        self.diff_selection_dragging = false;
-        self.diff_comment_open = false;
-        self.active_hunk = None; // 块下标同理，换了文件就不指向原来那块了
+        self.begin_diff_load(cx);
         // diff 内嵌显示在改动页里（停靠或展开态用同一份 UI，见 git_narrow_panel），
         // 不再提升到单独的舞台页——跟 Files 点文件不提升到舞台是同一个道理。
         self.git_tab = crate::GitTab::Changes;
@@ -1299,15 +1487,19 @@ impl Workspace {
                     let is_gitlink = text.lines().any(|l| l.starts_with("Submodule "));
                     let worktree_file = full_file_path(&r, &p, false)
                         .filter(|full_path| is_regular_worktree_file(Path::new(full_path)));
+                    let files = parse_diff_files(&text);
+                    let parsed = parse_diff(&text);
                     (
-                        parse_diff(&text),
+                        text,
+                        parsed,
+                        files,
                         !untracked && !is_gitlink,
                         has_staged,
                         worktree_file,
                     )
                 })
                 .await;
-            let (parsed, patchable, has_staged, worktree_file) = parsed;
+            let (text, parsed, files, patchable, has_staged, worktree_file) = parsed;
             let _ = this.update(cx, |this, cx| {
                 if this.diff_gen == r#gen {
                     // 没解析出文件头就拼不出合法 patch（比如 diff 为空、或 git 报错
@@ -1324,10 +1516,9 @@ impl Workspace {
                         patchable,
                         scope,
                         has_staged,
+                        patch: Some(text.clone()),
                     });
-                    // 异步结果替换了 diff 内容；同一 diff_gen 下缓存键不变，
-                    // 必须主动失效，否则会继续复用加载前的空行列表。
-                    this.diff_derived = None;
+                    this.install_diff_view(&text, files, cx);
                     cx.notify();
                 }
             });
@@ -1344,12 +1535,6 @@ impl Workspace {
 
     fn open_all_diffs_at(&mut self, root: String, cx: &mut Context<Self>) {
         let scope = self.diff_scope;
-        // 普通打开“全部改动”从顶部开始；文件树导航触发的重载则必须保留 pending，
-        // 否则这里排队的 deferred scroll-to-0 可能在异步结果回来后覆盖目标定位。
-        if self.pending_diff_file.is_none() {
-            self.diff_scroll
-                .scroll_to_item(0, gpui::ScrollStrategy::Top);
-        }
         let status_files = self
             .git_status
             .get(&root)
@@ -1377,13 +1562,9 @@ impl Workspace {
             patchable: false,
             scope,
             has_staged: false,
+            patch: None,
         });
-        self.diff_selected.clear();
-        self.diff_selection_anchor = None;
-        self.diff_selection_cursor = None;
-        self.diff_selection_dragging = false;
-        self.diff_comment_open = false;
-        self.active_hunk = None;
+        self.begin_diff_load(cx);
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1411,9 +1592,12 @@ impl Workspace {
                         }
                         text.push_str(&chunk);
                     }
-                    parse_diff_with_file_headers(&text)
+                    let parsed = parse_diff_with_file_headers(&text);
+                    let files = parse_diff_files(&text);
+                    (text, parsed, files)
                 })
                 .await;
+            let (text, parsed, files) = result;
             let _ = this.update(cx, |this, cx| {
                 if this.diff_gen == r#gen {
                     this.git_diff = Some(GitDiff {
@@ -1421,16 +1605,15 @@ impl Workspace {
                         path: "全部更改".into(),
                         aggregate: true,
                         worktree_file: None,
-                        lines: Rc::new(result.lines),
+                        lines: Rc::new(parsed.lines),
                         header: String::new(),
                         hunks: Rc::new(Vec::new()),
                         patchable: false,
                         scope,
                         has_staged: false,
+                        patch: Some(text.clone()),
                     });
-                    // 聚合 diff 的异步结果与占位对象共用同一代数，不能只依赖
-                    // diff_gen 判断缓存是否过期。
-                    this.diff_derived = None;
+                    this.install_diff_view(&text, files, cx);
                     cx.notify();
                 }
             });
@@ -1438,102 +1621,59 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn reveal_pending_diff_file(&mut self) {
+    pub(super) fn reveal_pending_diff_file(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.pending_diff_file.clone() else {
             return;
         };
-        let comment_after_line = self
-            .diff_comment_open
-            .then(|| self.diff_selected.iter().max().copied())
-            .flatten();
-        let (loaded, scroll_top) = self
+        if self.diff_parse_error.is_some() {
+            self.pending_diff_file = None;
+            return;
+        }
+        let Some(root) = self.git_diff.as_ref().map(|diff| diff.root.clone()) else {
+            return;
+        };
+        let ready = self
             .git_diff
             .as_ref()
-            .and_then(|diff| {
-                diff.aggregate.then(|| {
-                    (
-                        !diff.lines.is_empty(),
-                        aggregate_file_scroll_top(
-                            &diff.lines,
-                            &path,
-                            &self.git_collapsed_diff_files,
-                            self.diff_split,
-                            comment_after_line,
-                        ),
-                    )
-                })
-            })
-            .unwrap_or((false, None));
-        if !loaded {
+            .is_some_and(|diff| aggregate_diff_ready_for_file(diff, &root, self.diff_scope, &path))
+            || self.loaded_aggregate_has_file(&root, &path, cx);
+        if !ready {
             return;
         }
+        let Some(view) = self.diff_view.clone() else {
+            return;
+        };
+        let target = view.update(cx, |state, cx| {
+            let target = diff_scroll_target(state.files(), &path)
+                .unwrap_or(path.as_str())
+                .to_string();
+            // 点文件是为了看到正文。`scroll_to_file` 停在标题上，不会把折叠展开。
+            state.set_file_collapsed(&target, false, cx);
+            state.scroll_to_file(&target, cx);
+            target
+        });
+        self.git_collapsed_diff_files.remove(&target);
+        self.git_collapsed_diff_files.remove(&path);
         self.pending_diff_file = None;
-        if let Some(scroll_top) = scroll_top {
-            let current_offset = self.diff_scroll.offset();
-            self.diff_scroll
-                .set_offset(point(current_offset.x, px(-scroll_top)));
-        }
     }
 
-    /// 开始一次代码审查式拖选。每次新的按下都替换旧选区，语义稳定且不会留下
-    /// 分散的“勾选行”；多段评论可以逐段发送。
-    pub(super) fn begin_diff_selection(&mut self, i: usize, cx: &mut Context<Self>) {
-        self.diff_selection_anchor = Some(i);
-        self.diff_selection_cursor = Some(i);
-        self.diff_selection_dragging = true;
-        self.diff_selected.clear();
-        self.diff_selected.insert(i);
-        self.diff_comment_open = false;
-        cx.notify();
-    }
-
-    /// 指针拖过新行时，把选区重建为从锚点到当前行的连续范围。只收集可评论的
-    /// 代码行，避免把 @@ hunk 标题或文件元信息混进反馈正文。
-    pub(super) fn extend_diff_selection(&mut self, i: usize, cx: &mut Context<Self>) {
-        if !self.diff_selection_dragging {
-            return;
-        }
-        let Some(anchor) = self.diff_selection_anchor else {
-            return;
-        };
+    /// 当前这份已经读完的聚合 diff 里，组件是否认这个状态路径。
+    ///
+    /// 读取中的视图还是上一份补丁，不能算数，否则会把待定位清掉，新补丁装上后不再滚。
+    fn loaded_aggregate_has_file(&self, root: &str, path: &str, cx: &App) -> bool {
         let Some(diff) = self.git_diff.as_ref() else {
-            return;
+            return false;
         };
-        let (start, end) = if anchor <= i {
-            (anchor, i)
-        } else {
-            (i, anchor)
-        };
-        let selected = (start..=end)
-            .filter(|&ix| diff.lines.get(ix).is_some_and(is_commentable_diff_line))
-            .collect();
-        let cursor_is_commentable = diff.lines.get(i).is_some_and(is_commentable_diff_line);
-        self.diff_selected = selected;
-        if cursor_is_commentable {
-            self.diff_selection_cursor = Some(i);
+        if diff.root != root
+            || !diff.aggregate
+            || diff.scope != self.diff_scope
+            || diff.patch.is_none()
+        {
+            return false;
         }
-        cx.notify();
-    }
-
-    /// 松开鼠标只完成范围；评论器由锚点 `+` 单独触发，拖拽期间列表不会变高。
-    pub(super) fn finish_diff_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.diff_selection_dragging {
-            return;
-        }
-        self.diff_selection_dragging = false;
-        cx.notify();
-    }
-
-    /// 点击选区起点的 `+` 后才展开评论卡并聚焦输入框。
-    pub(super) fn open_diff_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.diff_selected.is_empty() {
-            return;
-        }
-        self.diff_comment_open = true;
-        if let Some(state) = self.diff_comment_input.clone() {
-            state.update(cx, |state, cx| state.focus(window, cx));
-        }
-        cx.notify();
+        self.diff_view.as_ref().is_some_and(|view| {
+            diff_scroll_target(view.read(cx).files(), path).is_some()
+        })
     }
 
     pub(super) fn clear_diff_comment_selection(
@@ -1541,72 +1681,109 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.diff_selection_anchor = None;
-        self.diff_selection_cursor = None;
-        self.diff_selection_dragging = false;
-        self.diff_selected.clear();
+        self.diff_comment_range = None;
         self.diff_comment_open = false;
+        if let Some(view) = self.diff_view.clone() {
+            view.update(cx, |state, cx| state.set_selected_lines(None, cx));
+        }
         if let Some(state) = self.diff_comment_input.clone() {
             state.update(cx, |state, cx| state.set_value("", window, cx));
         }
-        cx.notify();
+        self.publish_diff_body(cx);
     }
 
-    /// 把选中的 diff 行 + 评论输入框内容拼成一段文本，写进当前激活终端的 PTY
+    /// 把选中的源码和评论拼成一段文本，写进当前激活终端的 PTY
     /// （不带回车，留给用户自己看一眼再发送）。
     pub(super) fn send_diff_comments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.diff_selected.is_empty() {
+        let Some(range) = self.diff_comment_range.clone() else {
             return;
-        }
-        let Some(diff) = &self.git_diff else { return };
+        };
+        let selected = self
+            .diff_view
+            .as_ref()
+            .map(|view| view.read(cx).selected_text(cx))
+            .unwrap_or_default();
         let comment = self
             .diff_comment_input
             .as_ref()
-            .map(|s| s.read(cx).value().trim().to_string())
+            .map(|state| state.read(cx).value().trim().to_string())
             .unwrap_or_default();
-
-        let mut selected: Vec<usize> = self.diff_selected.iter().copied().collect();
-        selected.sort_unstable();
-        let mut msg = format!("对 {} 的这几行有反馈：\n", diff.path);
-        for i in selected {
-            if let Some(l) = diff.lines.get(i) {
-                let ln = l
-                    .new_ln
-                    .or(l.old_ln)
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "?".into());
-                let marker = match l.kind {
-                    DiffKind::Add => "+",
-                    DiffKind::Del => "-",
-                    _ => " ",
-                };
-                msg.push_str(&format!("  L{ln} {marker} {}\n", l.text));
-            }
-        }
-        if !comment.is_empty() {
-            msg.push_str(&format!("\n{comment}\n"));
-        }
-
-        let target = self.cur().and_then(|s| s.active_term().cloned());
+        // 选区带的是文件路径。聚合 diff 的 `git_diff.path` 是「全部更改」。
+        let path = range.path().to_string();
+        let msg = diff_feedback_text(&path, range.start(), range.end(), &selected, &comment);
+        let target = self.cur().and_then(|session| session.active_term().cloned());
         if let Some(view) = target {
             view.update(cx, |tv, cx| tv.send_text(&msg, cx));
         }
-        self.diff_selected.clear();
-        self.diff_selection_anchor = None;
-        self.diff_selection_cursor = None;
-        self.diff_selection_dragging = false;
-        self.diff_comment_open = false;
-        if let Some(state) = self.diff_comment_input.clone() {
-            state.update(cx, |s, cx| s.set_value("", window, cx));
-        }
-        cx.notify();
+        self.clear_diff_comment_selection(window, cx);
     }
 
-    /// Git 页「提交」/「提交并推送」共用入口：直接执行（不再走"发到终端"那套）——
-    /// 要提交的内容已经在暂存区里明明白白摆着（部分暂存那套勾选框），跟 stage/
-    /// checkout 一样属于本地可控操作，不需要再让人去终端里确认一遍回车；真正没法
-    /// 回头的风险点在 push 影响远程共享状态，但 WebStorm 等主流 git 客户端也是
-    /// 「提交并推送」一键做的，这里跟随这个惯例。
+    /// 在 `root` 上跑一条 git 写入，回来在 UI 线程收尾。
+    ///
+    /// 占用和释放都在这里。调用点只提供命令和成功/失败后要改的状态，
+    /// 不会忘记放开这个仓库，也不会用字符串对上一次的操作名。
+    fn spawn_git<T, Make, Done>(
+        &mut self,
+        root: &str,
+        op: GitWrite,
+        make: Make,
+        done: Done,
+        cx: &mut Context<Self>,
+    ) -> bool
+    where
+        T: Send + 'static,
+        Make: FnOnce() -> T + Send + 'static,
+        Done: FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        if !reserve_git_write(&mut self.git_writes, root, op) {
+            return false;
+        }
+        cx.notify();
+        let root_key = root.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { make() }).await;
+            let _ = this.update(cx, |this, cx| {
+                release_git_write(&mut this.git_writes, &root_key, op);
+                done(this, result, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    /// 同 [`Self::spawn_git`]，收尾时还拿得到点按钮的那个窗口（清提交框要用）。
+    fn spawn_git_in<T, Make, Done>(
+        &mut self,
+        root: &str,
+        op: GitWrite,
+        window: &mut Window,
+        make: Make,
+        done: Done,
+        cx: &mut Context<Self>,
+    ) -> bool
+    where
+        T: Send + 'static,
+        Make: FnOnce() -> T + Send + 'static,
+        Done: FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
+    {
+        if !reserve_git_write(&mut self.git_writes, root, op) {
+            return false;
+        }
+        cx.notify();
+        let root_key = root.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { make() }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                release_git_write(&mut this.git_writes, &root_key, op);
+                done(this, result, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
     /// 只推送，不提交。本地攒了几个 commit 想推上去时用——以前只有「提交并推送」，
     /// 而它要求先写 commit message，于是「没有新改动、只想把已有提交推上去」这条
     /// 最常见的路径反而没有入口。
@@ -1619,93 +1796,79 @@ impl Workspace {
             .get(&root)
             .map(|(_, d)| d.branch.clone())
             .unwrap_or_default();
-        self.pushing = true;
-        // 上一次的失败原因已经不再描述当前这次尝试。
-        self.commit_errors.remove(&root);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let (r, b) = (root.clone(), branch.clone());
-            let result = cx
-                .background_executor()
-                .spawn(async move { push_current(&r, &b) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.pushing = false;
-                match result {
-                    Ok(()) => this.invalidate_git_status(&root),
-                    Err(err) => {
-                        this.commit_errors.insert(root.clone(), err);
-                    }
+        let key = root.clone();
+        let done_root = root.clone();
+        if self.spawn_git(
+            &key,
+            GitWrite::Push,
+            move || push_current(&root, &branch),
+            move |this, result, _cx| match result {
+                Ok(()) => this.invalidate_git_status(&done_root),
+                Err(err) => {
+                    this.commit_errors.insert(done_root, err);
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+            cx,
+        ) {
+            // 上一次的失败原因已经不再描述当前这次尝试。
+            self.commit_errors.remove(&key);
+        }
     }
 
-    /// 后台跑一条 git 操作，回来刷新状态 / 报错。fetch·pull·stash 共用这个骨架
-    /// （照 push_only）。`name` 是进行中显示的操作名（「拉取」等）；`op` 在后台
-    /// 线程里执行，返回 `Result<(),String>`；`reload_log` = 操作会改历史（pull）
-    /// 时顺带重拉 log；`silent` = 失败不弹顶部错误通知（自动 fetch 用，避免离线/
-    /// 无凭据时反复刷屏）。
+    /// 后台跑一条 git 操作，回来刷新状态 / 报错。fetch·pull·stash 共用这个骨架。
+    /// `reload_log` = 操作会改历史（pull）时顺带重拉 log；`silent` = 失败不弹顶部
+    /// 错误通知（自动 fetch 用，避免离线/无凭据时反复刷屏）。
     fn run_git_op<F>(
         &mut self,
-        name: &'static str,
+        op: GitWrite,
         reload_log: bool,
         silent: bool,
-        op: F,
+        work: F,
         cx: &mut Context<Self>,
     ) where
         F: FnOnce(&str) -> Result<(), String> + Send + 'static,
     {
-        // 一次只跑一个：避免连点 fetch/pull 起一堆并发 git 抢 index.lock。
-        if self.git_op.is_some() {
-            return;
-        }
         let Some(root) = self.git_write_target(cx) else {
             return;
         };
-        self.git_op = Some(name);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let r = root.clone();
-            let result = cx.background_executor().spawn(async move { op(&r) }).await;
-            let _ = this.update(cx, |this, cx| {
-                this.git_op = None;
-                match result {
-                    Ok(()) => {
-                        this.invalidate_git_status(&root);
-                        if reload_log {
-                            this.reload_git_log(root.clone(), cx);
-                        }
-                    }
-                    // silent（自动 fetch）：失败不弹顶部错误通知，避免离线 / 无凭据时
-                    // 每次进 Git 页刷屏；只有手动操作失败才提示。
-                    Err(err) => {
-                        if !silent {
-                            this.background_error = Some(err);
-                        }
+        let key = root.clone();
+        let done_root = root.clone();
+        self.spawn_git(
+            &key,
+            op,
+            move || work(&root),
+            move |this, result, cx| match result {
+                Ok(()) => {
+                    this.invalidate_git_status(&done_root);
+                    if reload_log {
+                        this.reload_git_log(done_root, cx);
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                // silent（自动 fetch）：失败不弹顶部错误通知，避免离线 / 无凭据时
+                // 每次进 Git 页刷屏；只有手动操作失败才提示。
+                Err(err) => {
+                    if !silent {
+                        this.background_error = Some(err);
+                    }
+                }
+            },
+            cx,
+        );
     }
 
     /// `git fetch --all --prune`：更新远端追踪，刷新 ahead/behind。手动触发，失败弹错误。
     pub fn git_fetch(&mut self, cx: &mut Context<Self>) {
-        self.run_git_op("获取", false, false, fetch_remote, cx);
+        self.run_git_op(GitWrite::Fetch, false, false, fetch_remote, cx);
     }
 
     /// 同 git_fetch，但失败静默：进 Git 页自动 fetch 用，离线 / 无凭据时不刷屏报错。
     pub fn git_fetch_silent(&mut self, cx: &mut Context<Self>) {
-        self.run_git_op("获取", false, true, fetch_remote, cx);
+        self.run_git_op(GitWrite::Fetch, false, true, fetch_remote, cx);
     }
 
     /// `git pull --rebase`：拉取并 rebase 本地提交（历史变了 → 重拉 log）。
     pub fn git_pull(&mut self, cx: &mut Context<Self>) {
-        self.run_git_op("拉取", true, false, pull_rebase, cx);
+        self.run_git_op(GitWrite::Pull, true, false, pull_rebase, cx);
     }
 
     /// `git stash push -u`：储藏全部更改（含未跟踪）。
@@ -1713,12 +1876,12 @@ impl Workspace {
     /// 名字是「储藏」不是「暂存」：暂存已经归 staging area 了，两个概念共用一个
     /// 词，用户看到「暂存中…」根本分不清东西进了索引还是 stash 栈。
     pub fn git_stash_push(&mut self, cx: &mut Context<Self>) {
-        self.run_git_op("储藏", false, false, stash_push, cx);
+        self.run_git_op(GitWrite::Stash, false, false, stash_push, cx);
     }
 
     /// `git stash pop`：弹出最近一条 stash。
     pub fn git_stash_pop(&mut self, cx: &mut Context<Self>) {
-        self.run_git_op("恢复储藏", false, false, stash_pop, cx);
+        self.run_git_op(GitWrite::StashPop, false, false, stash_pop, cx);
     }
 
     /// 点「丢弃全部更改」：先弹确认，不直接动文件（照 start_discard_file）。
@@ -1735,35 +1898,49 @@ impl Workspace {
 
     /// 确认丢弃工作区全部改动（restore + clean）。
     pub fn confirm_discard_all(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.discard_all_target.take() else {
+        let Some(root) = self.discard_all_target.clone() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            let r = root.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { discard_all(&r) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        this.invalidate_git_status(&root);
-                        // 丢弃后当前打开的 diff 大概率没了，关掉免得看空。
-                        this.git_diff = None;
-                        this.active_hunk = None;
-                    }
-                    Err(err) => this.background_error = Some(err),
+        if self.git_writes.contains_key(&root) {
+            return;
+        }
+        self.discard_all_target = None;
+        let key = root.clone();
+        let git_root = root.clone();
+        let done_root = root.clone();
+        let started = self.spawn_git(
+            &key,
+            GitWrite::DiscardChanges,
+            move || discard_all(&git_root),
+            move |this, result, _cx| match result {
+                Ok(()) => {
+                    this.invalidate_git_status(&done_root);
+                    // 丢弃后当前打开的 diff 大概率没了，关掉免得看空。
+                    this.reset_git_diff_view();
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                Err(err) => this.background_error = Some(err),
+            },
+            cx,
+        );
+        if !started {
+            self.discard_all_target = Some(root);
+        }
     }
 
+    /// Git 页「提交」/「提交并推送」共用入口：直接执行（不再走"发到终端"那套）——
+    /// 要提交的内容已经在暂存区里明明白白摆着（部分暂存那套勾选框），跟 stage/
+    /// checkout 一样属于本地可控操作，不需要再让人去终端里确认一遍回车；真正没法
+    /// 回头的风险点在 push 影响远程共享状态，但 WebStorm 等主流 git 客户端也是
+    /// 「提交并推送」一键做的，这里跟随这个惯例。
+    ///
+    /// 校验没过不会占这个仓库的写入格。
     pub(super) fn commit(&mut self, push: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.git_write_target(cx) else {
             return;
         };
+        if self.git_writes.contains_key(&root) {
+            return;
+        }
         let Some(message) = self
             .commit_msg_inputs
             .get(&root)
@@ -1779,36 +1956,39 @@ impl Workspace {
             .get(&root)
             .map(|(_, d)| d.branch.clone())
             .unwrap_or_default();
-        // 新的一次提交开始，旧错误先清——否则用户分不清面板上那条是这次的还是上次的。
-        self.commit_errors.remove(&root);
-        cx.notify();
-        cx.spawn_in(window, async move |this, cx| {
-            let r = root.clone();
-            let msg = message.clone();
-            let b = branch.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { commit_and_maybe_push(&r, &msg, push, &b) })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(()) => {
-                        this.invalidate_git_status(&root);
-                        if let Some(input) = this.commit_msg_inputs.get(&root).cloned() {
-                            input.update(cx, |s, cx| s.set_value("", window, cx));
-                        }
-                    }
-                    Err(err) => {
-                        this.commit_errors.insert(root.clone(), err);
+        let op = if push {
+            GitWrite::CommitAndPush
+        } else {
+            GitWrite::Commit
+        };
+        let key = root.clone();
+        let done_root = root.clone();
+        if self.spawn_git_in(
+            &key,
+            op,
+            window,
+            move || commit_and_maybe_push(&root, &message, push, &branch),
+            move |this, result, window, cx| match result {
+                Ok(()) => {
+                    this.invalidate_git_status(&done_root);
+                    if let Some(input) = this.commit_msg_inputs.get(&done_root).cloned() {
+                        input.update(cx, |s, cx| s.set_value("", window, cx));
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                Err(err) => {
+                    this.commit_errors.insert(done_root, err);
+                }
+            },
+            cx,
+        ) {
+            // 新的一次提交开始，旧错误先清——否则用户分不清面板上那条是这次的还是上次的。
+            self.commit_errors.remove(&key);
+        }
     }
 
     /// 全部改动：一份 diff 里所有文件一起展开或收起。
+    ///
+    /// `set_file_collapsed` 不发折叠事件，折叠集合要在这里自己写。
     pub fn toggle_all_aggregate_diff_files(&mut self, cx: &mut Context<Self>) {
         let Some(diff) = self.git_diff.as_ref() else {
             return;
@@ -1816,94 +1996,34 @@ impl Workspace {
         if !diff.aggregate {
             return;
         }
-        let paths = aggregate_file_header_paths(&diff.lines);
-        toggle_aggregate_collapse_all(&paths, &mut self.git_collapsed_diff_files);
-        self.git_collapsed_diff_files_gen = self.git_collapsed_diff_files_gen.wrapping_add(1);
-        cx.notify();
-    }
-}
-
-impl Workspace {
-    /// diff 视图的派生数据（gutter 宽 / 内容宽 / 展开行）：diff 身份（diff_gen +
-    /// root + path）、并排/统一、折叠状态任一变化才重算，否则每帧复用缓存——
-    /// 大 diff 下每帧 O(n) 重算这些度量是「变更」页持续低帧率的主因。
-    /// 返回 None 表示当前没有已打开的 diff。
-    pub(crate) fn diff_derived_for_render(&mut self) -> Option<DiffDerivedCache> {
-        // 命中路径只做 O(1) 的身份/版本比较（root/path 是很短的路径字符串）。
-        let (root, path, split, diff_gen_v, collapsed_gen) = {
-            let d = self.git_diff.as_ref()?;
-            (
-                d.root.clone(),
-                d.path.clone(),
-                self.diff_split,
-                self.diff_gen,
-                self.git_collapsed_diff_files_gen,
-            )
+        let Some(view) = self.diff_view.clone() else {
+            return;
         };
-        if let Some(c) = &self.diff_derived
-            && c.diff_gen == diff_gen_v
-            && c.root == root
-            && c.path == path
-            && c.split == split
-            && c.collapsed_gen == collapsed_gen
-        {
-            return Some(c.clone());
+        let paths: Vec<String> = view
+            .read(cx)
+            .files()
+            .iter()
+            .map(|file| file.path().to_string())
+            .collect();
+        if paths.is_empty() {
+            return;
         }
-        // 未命中才克隆 lines / 折叠集合重算。
-        let (aggregate, lines, collapsed) = {
-            let d = self.git_diff.as_ref().expect("git_diff 存在才进重算分支");
-            (
-                d.aggregate,
-                d.lines.clone(),
-                self.git_collapsed_diff_files.clone(),
-            )
-        };
-        let gutter_w = gutter_width(&lines);
-        let content_w = diff_content_width(&lines, gutter_w);
-        let (rows, split_rows, sticky_headers) = if split {
-            let split_rows = Rc::new(build_split_rows(&lines));
-            let sticky_headers = Rc::new(if aggregate {
-                aggregate_sticky_headers(&[], &split_rows, &lines, true)
-            } else {
-                Vec::new()
-            });
-            (Rc::new(Vec::new()), split_rows, sticky_headers)
+        let collapse = !paths
+            .iter()
+            .all(|path| self.git_collapsed_diff_files.contains(path));
+        view.update(cx, |state, cx| {
+            for path in &paths {
+                state.set_file_collapsed(path, collapse, cx);
+            }
+        });
+        if collapse {
+            for path in paths {
+                self.git_collapsed_diff_files.insert(path);
+            }
         } else {
-            let rows: Rc<Vec<DiffReviewRow>> = Rc::new(if aggregate {
-                aggregate_diff_rows(&lines, &collapsed)
-                    .into_iter()
-                    .map(|row| match row {
-                        AggregateDiffRow::Header { path, adds, dels } => {
-                            DiffReviewRow::Header { path, adds, dels }
-                        }
-                        AggregateDiffRow::Line(index) => DiffReviewRow::Line(index),
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                (0..lines.len())
-                    .map(DiffReviewRow::Line)
-                    .collect::<Vec<_>>()
-            });
-            let sticky_headers = Rc::new(if aggregate {
-                aggregate_sticky_headers(&rows, &[], &lines, false)
-            } else {
-                Vec::new()
-            });
-            (rows, Rc::new(Vec::new()), sticky_headers)
-        };
-        let cache = DiffDerivedCache {
-            diff_gen: diff_gen_v,
-            root,
-            path,
-            split,
-            collapsed_gen,
-            gutter_w,
-            content_w,
-            rows,
-            split_rows,
-            sticky_headers,
-        };
-        self.diff_derived = Some(cache.clone());
-        Some(cache)
+            for path in &paths {
+                self.git_collapsed_diff_files.remove(path);
+            }
+        }
     }
 }

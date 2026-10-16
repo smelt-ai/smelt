@@ -2,6 +2,7 @@
 //!
 //! 只组 UI。写缓存、打开文件、删盘的方法留在 `workspace.rs`。
 
+use gpui::ElementId;
 use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -29,12 +30,17 @@ struct SearchTreeContext<'a> {
 fn search_tree_rows(
     dir: &SearchTreeDir,
     depth: usize,
-    row_id: &mut usize,
+    prefix: &str,
     context: &SearchTreeContext<'_>,
 ) -> Vec<AnyElement> {
     let mut rows = Vec::new();
 
     for (name, child) in &dir.dirs {
+        let mut rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         let mut label = name.clone();
         let mut visible_child = child;
         while visible_child.files.is_empty() && visible_child.dirs.len() == 1 {
@@ -45,14 +51,14 @@ fn search_tree_rows(
                 .expect("single child directory must exist");
             label.push_str(" / ");
             label.push_str(next_name);
+            rel.push('/');
+            rel.push_str(next_name);
             visible_child = next_child;
         }
 
-        let id = *row_id;
-        *row_id += 1;
         rows.push(
             div()
-                .id(("search-dir", id))
+                .id((ElementId::from("search-dir"), rel.clone()))
                 .flex()
                 .items_center()
                 .gap_1()
@@ -74,7 +80,7 @@ fn search_tree_rows(
                 .child(div().min_w_0().truncate().child(label))
                 .into_any_element(),
         );
-        rows.extend(search_tree_rows(visible_child, depth + 1, row_id, context));
+        rows.extend(search_tree_rows(visible_child, depth + 1, &rel, context));
     }
 
     for &ix in &dir.files {
@@ -86,13 +92,12 @@ fn search_tree_rows(
             .unwrap_or(hit.rel.as_str())
             .to_string();
         let path = hit.path.clone();
+        let rel = hit.rel.clone();
         let line = hit.line.as_ref().map(|(line, _)| *line);
-        let id = *row_id;
-        *row_id += 1;
         let open_view = context.view.clone();
         rows.push(
             div()
-                .id(("search-file", id))
+                .id((ElementId::from("search-file"), rel))
                 .flex()
                 .items_center()
                 .gap_1()
@@ -143,7 +148,6 @@ pub fn search_results_view(
     };
 
     let tree = build_search_tree(&state.hits);
-    let mut row_id = 0;
     let context = SearchTreeContext {
         hits: &state.hits,
         view: cx.entity(),
@@ -151,7 +155,7 @@ pub fn search_results_view(
         fg,
         hover,
     };
-    let rows = search_tree_rows(&tree, 0, &mut row_id, &context);
+    let rows = search_tree_rows(&tree, 0, "", &context);
 
     div()
         .id("search-results")
@@ -227,6 +231,7 @@ pub(super) enum FileTreeRow {
     },
     Loading {
         depth: usize,
+        root: String,
     },
     Entry {
         depth: usize,
@@ -318,6 +323,7 @@ pub(super) fn collect_file_tree_rows(
         if !dir_cache.contains_key(root) {
             rows.push(FileTreeRow::Loading {
                 depth: usize::from(multi),
+                root: root.clone(),
             });
             continue;
         }
@@ -426,7 +432,6 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
         range
             .map(|i| {
                 render_file_tree_row(FileTreeRowPaint {
-                    index: i,
                     row: &rows[i],
                     view: view.clone(),
                     focus: list_focus.clone(),
@@ -474,7 +479,6 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
 }
 
 struct FileTreeRowPaint<'a> {
-    index: usize,
     row: &'a FileTreeRow,
     view: Entity<Workspace>,
     focus: FocusHandle,
@@ -492,7 +496,6 @@ struct FileTreeRowPaint<'a> {
 
 fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
     let FileTreeRowPaint {
-        index,
         row,
         view,
         focus,
@@ -508,8 +511,8 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
         accent,
     } = paint;
     match row {
-        FileTreeRow::Loading { depth } => div()
-            .id(("root-loading", index))
+        FileTreeRow::Loading { depth, root } => div()
+            .id((ElementId::from("root-loading"), root.clone()))
             .w(row_w)
             .h(row_h)
             .flex()
@@ -530,7 +533,7 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
             let root = path.clone();
             let focus_down = focus.clone();
             div()
-                .id(("root", index))
+                .id((ElementId::from("root"), path.clone()))
                 .w(row_w)
                 .h(row_h)
                 .flex()
@@ -603,7 +606,7 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
             let is_open = !*is_dir && open_path == Some(path.as_str());
             let is_selected = selected_path == Some(path.as_str());
             let show_name_tip = name_likely_truncated(name, *depth, panel_w);
-            let name_tip: SharedString = name.clone().into();
+            let name_label: SharedString = name.clone().into();
             let click_view = view.clone();
             let click_path = path.clone();
             let menu_view = view.clone();
@@ -611,7 +614,7 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
             let is_dir = *is_dir;
             let focus_down = focus;
             div()
-                .id(("file", index))
+                .id((ElementId::from("file"), path.clone()))
                 .w(row_w)
                 .h(row_h)
                 .flex()
@@ -681,14 +684,14 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
                 .child(type_icon)
                 .child(
                     div()
-                        .id(("file-name", index))
+                        .id("file-name")
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .child(name.clone())
+                        .child(name_label.clone())
                         .when(show_name_tip, |el| {
                             el.tooltip(move |window, cx| {
-                                Tooltip::new(name_tip.clone()).build(window, cx)
+                                Tooltip::new(name_label.clone()).build(window, cx)
                             })
                         }),
                 )
@@ -826,7 +829,7 @@ pub fn file_content_parts(
                     let is_dir = !is_last;
                     let this = this.clone();
                     let seg_el = div()
-                        .id(("file-breadcrumb-seg", i))
+                        .id((ElementId::from("file-breadcrumb-seg"), path.clone()))
                         .flex_shrink_0()
                         .px(px(8.))
                         .py(px(5.))
@@ -1009,11 +1012,11 @@ pub fn file_content_parts(
 
 impl Workspace {
     /// 「删除文件」二次确认弹窗。
-    pub fn render_delete_file_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub fn render_delete_file_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let Some(target) = self.delete_file_target.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         let fg = cx.theme().foreground;
 
@@ -1058,6 +1061,6 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(360., true, content, cx)
+        self.modal_shell(360., true, content, crate::overlay::ModalLayer::DeleteFile, cx)
     }
 }

@@ -12,9 +12,8 @@ use smelt_core::pi_model_settings::{PiCustomProvider, PiModelSettings};
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
 const PAGE_MAX_WIDTH: f32 = 760.;
 const THINKING_LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
-/// 列表行标题和侧栏行同号（`SIDEBAR_FONT_SIZE`），不加粗；按钮一律 xsmall。
+/// 列表行标题和侧栏行同走 `text_sm`，不加粗；按钮一律 xsmall。
 /// 这页原来套的是设置窗口的 14px 粗体加 small 按钮，夹在侧栏和右栏中间显得又大又重。
-pub(super) const ROW_TITLE_PX: f32 = crate::session_list::SIDEBAR_FONT_SIZE;
 
 #[derive(Clone, Copy)]
 pub(super) struct Palette {
@@ -690,7 +689,7 @@ fn custom_provider_row(
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(ROW_TITLE_PX))
+                                .text_sm()
                                 .text_color(palette.fg)
                                 .child(name),
                         )

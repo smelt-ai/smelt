@@ -176,13 +176,12 @@ impl AcpView {
                                     .id("acp-restart")
                                     .h(ui_theme::height::sm())
                                     .px_3()
-                                    .rounded_full()
+                                    .rounded(ui_theme::row_radius())
                                     .bg(ui_theme::overlay(0x18))
                                     .flex()
                                     .items_center()
                                     .text_xs()
                                     .font_medium()
-                                    .cursor_pointer()
                                     .hover(|d| d.bg(ui_theme::overlay(0x28)))
                                     .child("重新开始")
                                     .on_click(cx.listener(|this, _ev, window, cx| {
@@ -698,15 +697,19 @@ impl Render for ConversationTranscript {
             true,
         );
         let reduce_motion = cx.reduce_motion();
-        self.host.update(cx, |view, _cx| {
-            view.settle_transcript_motion(reduce_motion);
-        });
-        // 入场时钟在上面这次 settle 里才启动。先结算再要帧，新气泡的第一帧才会排下一帧。
+        let Some(host) = self.host.upgrade() else {
+            return div().into_any_element();
+        };
+        // 入场时钟在这次 settle 里才启动。先结算再要帧，新气泡的第一帧才会排下一帧。
         // 帧要打在这条列表上：此刻的 current view 是 transcript，打在 AcpView 上不会让列表重画。
-        if !reduce_motion && self.host.read(cx).decorative_transcript_motion() {
+        let decorative = host.update(cx, |view, _cx| {
+            view.settle_transcript_motion(reduce_motion);
+            view.decorative_transcript_motion()
+        });
+        if !reduce_motion && decorative {
             window.request_animation_frame();
         }
-        self.host.update(cx, |view, cx| {
+        host.update(cx, |view, cx| {
             let clear_capsule = view.message_list_clears_capsule();
             view.render_message_list(animate_ambient, clear_capsule, cx)
         })

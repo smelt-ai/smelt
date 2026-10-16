@@ -6918,6 +6918,53 @@ mod tests {
         assert_eq!(snapshot.ui_font_px, 16);
         assert_eq!(snapshot.font_px, 13);
         assert_eq!(snapshot.theme_mode, "light");
+        assert_eq!(snapshot.theme_name, "Default Light");
+
+        store
+            .put(
+                "json",
+                "appearance.json",
+                br#"{"theme_mode":"dark","theme_name":"Sand Dark"}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_appearance_snapshot()
+                .unwrap()
+                .unwrap()
+                .theme_name,
+            "Default Dark"
+        );
+        store
+            .put(
+                "json",
+                "appearance.json",
+                br#"{"theme_mode":"light","theme_name":"Sand Dark"}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_appearance_snapshot()
+                .unwrap()
+                .unwrap()
+                .theme_name,
+            "Default Light"
+        );
+        store
+            .put(
+                "json",
+                "appearance.json",
+                br#"{"theme_mode":"light","theme_name":"Ayu Light"}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_appearance_snapshot()
+                .unwrap()
+                .unwrap()
+                .theme_name,
+            "Ayu Light"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

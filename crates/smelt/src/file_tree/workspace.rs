@@ -4,6 +4,8 @@
 
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_component::input::InputEvent;
@@ -368,6 +370,7 @@ impl Workspace {
         });
         if dirty {
             // 脏切换暂不带行号（确认后再 open 整文件即可）
+            self.begin_main_modal_focus(window, cx);
             self.pending_file_switch = Some(path);
             cx.notify();
             return;
@@ -565,6 +568,9 @@ impl Workspace {
     /// 文件树搜索：按 query 匹配文件名 + 文件内容，后台遍历项目、命中写回 search_results。
     /// 与 view_file 同款「background_executor + 自增 gen 丢弃过期结果」模式，绝不阻塞 render。
     /// query 未变（已有对应结果或正在跑同一 query）就跳过，避免每帧重扫。
+    ///
+    /// 换查询时替换 `search_task`，并在遍历的每个文件边界看 `search_cancel`。
+    /// 只递增代次会让旧扫描继续占着 worker。
     pub fn ensure_search(&mut self, root: String, query: String, cx: &mut Context<Self>) {
         // 已有本 query 的结果、或正有一次针对本 query 的遍历在跑，就不重复触发。
         if self
@@ -574,8 +580,13 @@ impl Workspace {
         {
             return;
         }
+        self.cancel_file_search();
         self.search_gen = self.search_gen.wrapping_add(1);
-        let r#gen = self.search_gen;
+        let generation = self.search_gen;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_walk = Arc::clone(&cancel);
+        let cancel_for_apply = Arc::clone(&cancel);
+        self.search_cancel = Some(cancel);
         // 先占位：done=false 让列表顶部显示「搜索中…」，遍历完成后替换。
         self.search_results = Some(SearchState {
             query: query.clone(),
@@ -585,26 +596,38 @@ impl Workspace {
         });
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
-            let (r, q) = (root.clone(), query.clone());
-            let (hits, truncated) = cx
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            let (r, q) = (root, query.clone());
+            let walked = cx
                 .background_executor()
-                .spawn(async move { search_project(&r, &q) })
+                .spawn(async move { search_project(&r, &q, &cancel_for_walk) })
                 .await;
+            if cancel_for_apply.load(Ordering::Acquire) {
+                return;
+            }
+            let (hits, truncated) = walked;
             let _ = this.update(cx, |this, cx| {
                 // 只有仍是最新一次搜索才写入，丢弃期间被新查询取代的过期结果。
-                if this.search_gen == r#gen {
-                    this.search_results = Some(SearchState {
-                        query,
-                        done: true,
-                        hits,
-                        truncated,
-                    });
-                    cx.notify();
+                if this.search_gen != generation {
+                    return;
                 }
+                this.search_results = Some(SearchState {
+                    query,
+                    done: true,
+                    hits,
+                    truncated,
+                });
+                cx.notify();
             });
-        })
-        .detach();
+        }));
+    }
+
+    /// 停掉正在跑的文件搜索。清空输入和换查询都走这里。
+    pub(crate) fn cancel_file_search(&mut self) {
+        if let Some(cancel) = self.search_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.search_task.take();
     }
 
     /// 确保某目录的直接子项列表缓存新鲜（>2s 或缺失就后台刷新）。
@@ -618,6 +641,7 @@ impl Workspace {
         if fresh || self.dir_inflight.contains(&dir) {
             return;
         }
+        let request_generation = self.dir_generation.get(&dir).copied().unwrap_or(0);
         self.dir_inflight.insert(dir.clone());
         cx.spawn(async move |this, cx| {
             let d = dir.clone();
@@ -634,12 +658,22 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.dir_inflight.remove(&dir);
-                this.dir_cache
-                    .insert(dir, (Instant::now(), Rc::new(entries)));
+                let current_generation = this.dir_generation.get(&dir).copied().unwrap_or(0);
+                // 删除发生在列目录期间时，这一包是旧快照。不写回，下一帧会按新代次再读。
+                if current_generation == request_generation {
+                    this.dir_cache
+                        .insert(dir, (Instant::now(), Rc::new(entries)));
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// 目录列表失效。在途的那一次读完后不得再把旧条目标成新鲜。
+    fn bump_dir_generation(&mut self, dir: &str) {
+        let generation = self.dir_generation.entry(dir.to_string()).or_default();
+        *generation = generation.wrapping_add(1);
     }
 
     /// 文件树右键「复制文件路径」：把绝对路径写入系统剪贴板。
@@ -707,15 +741,27 @@ impl Workspace {
             self.pending_file_switch = None;
         }
 
+        let mut stale_dirs: Vec<String> = Vec::new();
         if is_dir {
             self.expanded.retain(|p| !under(&path, p));
-            self.dir_cache.retain(|p, _| !under(&path, p));
+            stale_dirs.extend(
+                self.dir_cache
+                    .keys()
+                    .filter(|candidate| under(&path, candidate))
+                    .cloned(),
+            );
+            stale_dirs.push(path.clone());
         } else {
             self.expanded.remove(&path);
         }
-
         if let Some(parent) = Path::new(&path).parent().and_then(|p| p.to_str()) {
-            self.dir_cache.remove(parent);
+            stale_dirs.push(parent.to_string());
+        }
+        stale_dirs.sort();
+        stale_dirs.dedup();
+        for dir in stale_dirs {
+            self.bump_dir_generation(&dir);
+            self.dir_cache.remove(&dir);
         }
         cx.notify();
     }

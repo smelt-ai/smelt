@@ -681,7 +681,25 @@ pub(crate) fn write_appearance_snapshot(
     write_scoped_object(transaction, APPEARANCE_SCOPE, &appearance_object(snapshot))
 }
 
+/// 已删掉的 Sand 主题，以及缺名字的旧记录，按当时的明暗落到库自带的 Default。
+fn migrated_theme_name(raw: &str, theme_mode: &str) -> String {
+    if raw.is_empty() || raw == "Sand Dark" || raw == "Sand Light" {
+        if theme_mode == "light" {
+            "Default Light".to_string()
+        } else {
+            "Default Dark".to_string()
+        }
+    } else {
+        raw.to_string()
+    }
+}
+
 fn appearance_from_object(object: &Map<String, Value>) -> AppearanceSnapshot {
+    let theme_mode = object
+        .get("theme_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("dark")
+        .to_string();
     AppearanceSnapshot {
         bg_color: object.get("bg_color").and_then(Value::as_u64).unwrap_or(0) as u32,
         bg_image: object
@@ -699,11 +717,11 @@ fn appearance_from_object(object: &Map<String, Value>) -> AppearanceSnapshot {
             .and_then(Value::as_str)
             .unwrap_or("regular")
             .to_string(),
-        theme_mode: object
-            .get("theme_mode")
-            .and_then(Value::as_str)
-            .unwrap_or("dark")
-            .to_string(),
+        theme_mode: theme_mode.clone(),
+        theme_name: migrated_theme_name(
+            object.get("theme_name").and_then(Value::as_str).unwrap_or(""),
+            &theme_mode,
+        ),
         ui_font_px: object
             .get("ui_font_px")
             .and_then(Value::as_u64)
@@ -731,6 +749,7 @@ fn appearance_object(snapshot: &AppearanceSnapshot) -> Map<String, Value> {
     object.insert("blur".into(), json!(snapshot.blur));
     object.insert("glass_style".into(), json!(snapshot.glass_style));
     object.insert("theme_mode".into(), json!(snapshot.theme_mode));
+    object.insert("theme_name".into(), json!(snapshot.theme_name));
     object.insert("ui_font_px".into(), json!(snapshot.ui_font_px));
     object.insert("ui_font_family".into(), json!(snapshot.ui_font_family));
     object.insert("font_px".into(), json!(snapshot.font_px));

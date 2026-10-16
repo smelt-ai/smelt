@@ -14,20 +14,36 @@ pub(super) fn theme_page(
         .description("界面主题、字号和字体；终端字体在「终端」里单独设置。")
         .group(SettingGroup::new().items(vec![
                 SettingItem::new(
-                    "主题模式",
-                    SettingField::switch(
-                        |cx: &App| cx.global::<Appearance>().theme_mode.is_dark(),
-                        |v: bool, cx: &mut App| {
-                            let mode = if v { ThemeMode::Dark } else { ThemeMode::Light };
-                            apply_appearance(|a| a.theme_mode = mode, cx);
-                            apply_theme_mode(mode, cx);
-                            // 色板是进程级全局态（见 ui_theme），改完不重绘就还是旧色。
+                    "主题",
+                    SettingField::scrollable_dropdown(
+                        smelt_ui::theme_catalog::options(),
+                        |cx: &App| cx.global::<Appearance>().theme_name.clone().into(),
+                        |name: SharedString, cx: &mut App| {
+                            let name = name.to_string();
+                            let Some(entry) = smelt_core::theme_index::find(&name) else {
+                                return;
+                            };
+                            let mode = if entry.mode == "light" {
+                                ThemeMode::Light
+                            } else {
+                                ThemeMode::Dark
+                            };
+                            apply_appearance(
+                                move |appearance| {
+                                    appearance.theme_name = name;
+                                    appearance.theme_mode = mode;
+                                },
+                                cx,
+                            );
+                            let selected = cx.global::<Appearance>().theme_name.clone();
+                            apply_named_theme(&selected, cx);
                             cx.refresh_windows();
                         },
                     )
-                    .default_value(true),
+                    .max_w(px(220.))
+                    .overflow_hidden(),
                 )
-                .description("开启为深色主题，关闭为浅色主题"),
+                .description("Default 是库自带的默认外观。换主题后，组件和自绘界面一起变"),
                 SettingItem::new(
                     "界面字号",
                     SettingField::render(move |_, _, cx: &mut App| {

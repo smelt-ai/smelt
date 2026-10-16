@@ -868,15 +868,8 @@ impl Workspace {
                 }
                 acp_view::AcpViewEvent::PreviewImage(image) => {
                     this.acp_image_preview = Some(image.clone());
-                    // 后台解码 + 内容寻址缓存（见 smelt_ui::image）：同一张图只解
-                    // 一次，迟到的旧图结果不会覆盖新图（渲染时按当前图查缓存）。
-                    let image_for_decode = image.clone();
-                    cx.spawn(async move |this, cx| {
-                        smelt_ui::image::fetch_async(image_for_decode, cx.background_executor())
-                            .await;
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    })
-                    .detach();
+                    // 解码进按图片 id 索引的缓存。完成时刷新窗口，渲染按当前这张图查缓存。
+                    smelt_ui::image::ensure_preview(image, cx);
                     cx.notify();
                 }
                 acp_view::AcpViewEvent::NewSession(request) => {
@@ -2397,6 +2390,8 @@ impl Workspace {
             RenameTarget::WorkspaceSurface(key) => self.workspace_surface_display_title(key),
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
+        self.begin_main_modal_focus(window, cx);
         input.update(cx, |s, cx| s.focus(window, cx));
         self._rename_sub = Some(cx.subscribe_in(
             &input,

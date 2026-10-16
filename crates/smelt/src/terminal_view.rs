@@ -1377,13 +1377,9 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
                 let m = &ks.modifiers;
-                // 搜索条打开时：Esc 关闭；其它键留给输入框（不要灌进 PTY）。
-                if this.search_open {
-                    if ks.key == "escape" {
-                        this.close_search(window, cx);
-                    }
-                    // 搜索框属于终端；不能再让按键冒泡给工作区的文件树 / Git 快捷键。
-                    cx.stop_propagation();
+                // 只处理终端本身获焦时的按键；从子元素（搜索框）冒泡上来的按键由它自己处理，
+                // 不能灌进 PTY。搜索条开着与否不影响终端输入。
+                if !this.focus_handle.is_focused(window) {
                     return;
                 }
                 // IME 合成中：这些键归输入法（backspace 删拼音、enter/space/数字选词），
@@ -1394,7 +1390,8 @@ impl Render for TerminalView {
                     return;
                 }
                 // Cmd+F 打开搜索（action 也会绑，这里兜底）。
-                if m.platform && ks.key == "f" {
+                // 只认纯 Cmd+F：Cmd+Shift+F 是工作区的调试 HUD 开关，不能被这里截走。
+                if m.platform && !m.shift && !m.alt && !m.control && ks.key == "f" {
                     this.open_search(window, cx);
                     cx.stop_propagation();
                     return;
@@ -1792,6 +1789,14 @@ impl Render for TerminalView {
                     .border_1()
                     .border_color(rgb(crate::ui_theme::border_mid()))
                     .shadow_md()
+                    // 搜索框的按键在这里就地处理：Esc 关闭；其它键归输入框，
+                    // 不再冒泡给终端（会进 PTY）或工作区快捷键。
+                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                        if ev.keystroke.key == "escape" {
+                            this.close_search(window, cx);
+                        }
+                        cx.stop_propagation();
+                    }))
                     .child(
                         div()
                             .flex_1()

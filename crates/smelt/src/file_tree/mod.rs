@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use gpui::*;
@@ -92,7 +93,13 @@ const SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
 /// 使用 `ignore` crate 遵循 `.gitignore`、`.git/info/exclude`、全局 gitignore 与隐藏文件规则，
 /// 兜底跳过 .git/node_modules/target/.DS_Store，并采用流式行读取避免大文件占用过多内存。
 /// 返回 (命中列表, 是否因触顶截断)；文件名命中排在内容命中前。绝不在此之外做 UI 调用。
-fn search_project(root: &str, query: &str) -> (Vec<SearchHit>, bool) {
+///
+/// `cancel` 在每个文件边界检查。遍历本身是一次同步调用，丢掉外层 Task
+/// 停不掉已经在跑的这一轮，所以取消必须发生在这里。
+fn search_project(root: &str, query: &str, cancel: &AtomicBool) -> (Vec<SearchHit>, bool) {
+    if cancel.load(Ordering::Acquire) {
+        return (Vec::new(), false);
+    }
     let needle = query.to_lowercase();
     let mut name_hits: Vec<SearchHit> = Vec::new();
     let mut content_hits: Vec<SearchHit> = Vec::new();
@@ -120,6 +127,9 @@ fn search_project(root: &str, query: &str) -> (Vec<SearchHit>, bool) {
         .build();
 
     for entry in walker.flatten() {
+        if cancel.load(Ordering::Acquire) {
+            return (Vec::new(), false);
+        }
         let Some(ft) = entry.file_type() else {
             continue;
         };

@@ -9,7 +9,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, App, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    Anchor, App, Context, ElementId, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement,
     MouseButton, ParentElement as _, Render, RenderOnce, StatefulInteractiveElement as _,
     Styled as _, WeakEntity, Window, div, px,
 };
@@ -542,16 +543,17 @@ pub(super) struct NewSessionPicker {
 
 /// 构造与会话数完全同槽的「+」触发器；命中区比旧版 xsmall 更大，但可见性仍只由
 /// 项目行 hover 切换，避免每个项目常驻一个高对比操作。
+/// 按钮 id 跟项目路径走。下标会在拖动排序后指到别的项目。
 pub(super) fn new_session_picker(
-    project_index: usize,
     workspace: Entity<Workspace>,
     cwd: String,
     cx: &App,
 ) -> NewSessionPicker {
+    let trigger_id = ElementId::from((ElementId::from("proj-new"), cwd.clone()));
     NewSessionPicker {
         workspace,
         cwd: (!cwd.is_empty()).then_some(cwd),
-        trigger: Button::new(("proj-new", project_index))
+        trigger: Button::new(trigger_id)
             .custom(ButtonCustomVariant::new(cx))
             .opacity(0.0)
             .group_hover(super::PROJ_HEADER_GROUP, |style| style.opacity(1.0))
