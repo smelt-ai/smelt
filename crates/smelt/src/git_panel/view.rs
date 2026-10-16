@@ -1189,8 +1189,6 @@ impl Workspace {
                                         .min_h_0()
                                         .flex()
                                         .flex_col()
-                                        .border_l_1()
-                                        .border_color(ui_theme::hairline())
                                         .child(list_and_commit),
                                 ),
                         ),
@@ -1222,7 +1220,6 @@ impl Workspace {
             .get(&root)
             .map(|(_, d)| d.branch_name().to_string())
             .filter(|b| !b.is_empty());
-        let border = rgb(crate::ui_theme::border_dim());
         // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死宽度的话中间的提交
         // 列表会被挤得没法看。
         div()
@@ -1241,8 +1238,6 @@ impl Workspace {
                                 div()
                                     .size_full()
                                     .min_h_0()
-                                    .border_r_1()
-                                    .border_color(border)
                                     .child(crate::git_log_view::branch_tree(
                                         Some(root.clone()),
                                         branches,
@@ -1262,8 +1257,6 @@ impl Workspace {
                                 .flex()
                                 .min_w_0()
                                 .min_h_0()
-                                .border_r_1()
-                                .border_color(border)
                                 .child(crate::git_log_view::git_log_view(
                                     Some(root.clone()),
                                     &self.git_log,

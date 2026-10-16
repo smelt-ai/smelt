@@ -42,8 +42,8 @@ impl Render for SplitHarness {
 
 #[gpui::test]
 fn horizontal_split_drag_still_resizes_the_panels(cx: &mut TestAppContext) {
-    // 上游 gpui-kit 的 h/v_resizable 给 handle 挂了主题化外观，渲染时读 Theme 全局；
-    // 与生产入口一致先 init 组件库。
+    // 发丝颜色走 ui_theme。组件库仍先 init：和主窗口同一套全局，
+    // 手柄的内置回退线也会读 Theme。
     cx.update(gpui_component::init);
     let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
     let (_, cx) = cx.add_window_view({

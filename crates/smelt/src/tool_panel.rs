@@ -661,8 +661,6 @@ impl Workspace {
                                 .min_h_0()
                                 .flex()
                                 .flex_col()
-                                .border_l_1()
-                                .border_color(rgb(ui_theme::border_dim()))
                                 .child(tree),
                         ),
                 )
