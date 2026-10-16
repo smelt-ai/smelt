@@ -120,6 +120,21 @@ impl ToolPanelTab {
         Self::plugin_or_files(MIGRATED_SKILLS_TAB_KEY)
     }
 
+    /// 页签元素身份。插件增删会平移槽位下标，key 不会。
+    fn element_key(self) -> String {
+        match self {
+            Self::Plugin(slot) => {
+                crate::plugin_ui::key_for(slot).unwrap_or_else(|| format!("plugin:{}", slot.0))
+            }
+            Self::Shell(slot) => {
+                crate::shell_plugins::key_for(slot).unwrap_or_else(|| format!("shell:{}", slot.0))
+            }
+            builtin => builtin_panel(builtin)
+                .map(|panel| panel.key.to_string())
+                .unwrap_or_else(|| DEFAULT_PANEL_KEY.to_string()),
+        }
+    }
+
     fn label(self) -> String {
         match self {
             // 插件面板的标题来自 manifest，只有运行时才知道。
@@ -290,6 +305,7 @@ impl Workspace {
     pub(crate) fn toggle_file_tree(&mut self, cx: &mut Context<Self>) {
         self.file_tree_open = !self.file_tree_open;
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -312,20 +328,24 @@ impl Workspace {
     }
 
     /// 唯一改 `tool_panel_open` 的入口：持久状态与可复用过渡状态同步更新。
-    pub(crate) fn set_tool_panel_open(&mut self, open: bool) {
+    pub(crate) fn set_tool_panel_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        let changed = self.tool_panel_open != open;
         self.tool_panel_transition.set_open(open);
         self.tool_panel_open = open;
+        if changed {
+            self.schedule_visible_refresh(cx);
+        }
     }
 
     /// 切换 Tool Panel 显隐（或全屏退出），与右上角按钮逻辑对齐。
     pub(crate) fn toggle_tool_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tool_panel_promoted() {
             self.set_stage_cover(None, window, cx);
-            self.set_tool_panel_open(false);
+            self.set_tool_panel_open(false, cx);
             self.focus_active_stage(window, cx);
         } else {
             let next_open = !self.tool_panel_open;
-            self.set_tool_panel_open(next_open);
+            self.set_tool_panel_open(next_open, cx);
             if !next_open {
                 self.focus_active_stage(window, cx);
             }
@@ -347,11 +367,12 @@ impl Workspace {
                 self.tool_panel_tab = tab;
             }
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
             cx.notify();
             return;
         }
         if self.tool_panel_tab == tab && self.tool_panel_open {
-            self.set_tool_panel_open(false);
+            self.set_tool_panel_open(false, cx);
         } else {
             if tab == ToolPanelTab::Git
                 && should_reset_git_diff_on_dock_selection(
@@ -364,9 +385,10 @@ impl Workspace {
                 self.reset_git_diff_view();
             }
             self.tool_panel_tab = tab;
-            self.set_tool_panel_open(true);
+            self.set_tool_panel_open(true, cx);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -410,8 +432,9 @@ impl Workspace {
             let badge = builtin_panel(entry)
                 .and_then(|panel| panel.badge)
                 .map_or(0, |badge| badge(self, cx));
+            let tab_key = entry.element_key();
             let tab = smelt_ui::segmented::underline_segment(
-                ("tool-panel-tab", ix),
+                (ElementId::from("tool-panel-tab"), tab_key),
                 entry.label(),
                 selected_index == Some(ix),
                 cx,
@@ -552,7 +575,7 @@ impl Workspace {
     ) -> AnyElement {
         // 「EXPLORER」标题行去掉：上面已经有 FILES tab 高亮，这行纯属多余的重复标签。
         // 有查询串 → 显示搜索结果；否则显示文件树（跟旧全屏页行为一致，
-        // file_filter/search_results 已在 prepare_frame 懒创建 + 刷新）。
+        // file_filter/search_results 在打开文件页时懒创建 + 刷新）。
         let has_query = self
             .file_filter
             .as_ref()
@@ -573,7 +596,7 @@ impl Workspace {
                 Some(state) => {
                     crate::file_tree::search_results_view(state, &self.file_tree_scroll, cx)
                 }
-                // ensure_search 已在 prepare_frame 置位，通常到不了这里。
+                // ensure_search 已在打开文件页或改查询时置位，通常到不了这里。
                 None => div().flex_1().into_any_element(),
             }
         } else {
@@ -593,7 +616,7 @@ impl Workspace {
                 cx,
             )
         };
-        // 顶部搜索框（file_filter 已在 prepare_frame 懒创建）。
+        // 顶部搜索框（file_filter 在打开文件页时懒创建）。
         let search_box = self.file_filter.as_ref().map(|state| {
             div()
                 .px_2()

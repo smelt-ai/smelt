@@ -988,8 +988,10 @@ fn custom_provider_form(
     let mut model_rows = v_flex().w_full().gap_2();
     for (index, model) in editor.models.iter().enumerate() {
         let remove_entity = manage_entity.clone();
+        let row_key = model.id.entity_id();
         model_rows = model_rows.child(
             v_flex()
+                .id(("pi-custom-model", row_key))
                 .w_full()
                 .gap_2()
                 .p_3()
@@ -1010,7 +1012,7 @@ fn custom_provider_form(
                         )
                         .child(div().flex_1())
                         .child(
-                            Button::new(format!("pi-remove-custom-model-{index}"))
+                            Button::new("pi-remove-custom-model")
                                 .ghost()
                                 .small()
                                 .icon(crate::trash_icon())

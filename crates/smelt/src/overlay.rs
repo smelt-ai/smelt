@@ -128,14 +128,26 @@ impl Workspace {
                 *rank = Some(rank.unwrap_or(0).max(value));
             }
         };
-        raise(&mut rank, self.worktree_list.is_some(), ModalLayer::WorktreeList.rank());
-        raise(&mut rank, self.new_worktree.is_some(), ModalLayer::NewWorktree.rank());
+        raise(
+            &mut rank,
+            self.worktree_list.is_some(),
+            ModalLayer::WorktreeList.rank(),
+        );
+        raise(
+            &mut rank,
+            self.new_worktree.is_some(),
+            ModalLayer::NewWorktree.rank(),
+        );
         raise(
             &mut rank,
             self.delete_worktree_target.is_some(),
             ModalLayer::DeleteWorktree.rank(),
         );
-        raise(&mut rank, self.rename_target.is_some(), ModalLayer::Rename.rank());
+        raise(
+            &mut rank,
+            self.rename_target.is_some(),
+            ModalLayer::Rename.rank(),
+        );
         raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
         raise(
             &mut rank,
@@ -239,11 +251,7 @@ impl Workspace {
         cx: &mut App,
     ) {
         let (guard, hold, current) = if settings {
-            (
-                self.settings_modal_guard,
-                false,
-                self.settings_modal_rank,
-            )
+            (self.settings_modal_guard, false, self.settings_modal_rank)
         } else {
             (
                 self.main_modal_guard,
@@ -405,82 +413,79 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.sync_main_modal_focus(window, cx);
-        let palette_overlay = self.palette.as_ref().map(|state| {
-            let [commands, sessions] = self.palette_groups(cx);
-            let command_cmds: Vec<Cmd> = commands.iter().map(|(_, cmd)| cmd.clone()).collect();
-            let session_cmds: Vec<Cmd> = sessions.iter().map(|(_, cmd)| cmd.clone()).collect();
-            let host = cx.entity().downgrade();
-            let confirm_host = host.clone();
-            let command_group = gpui_component::command::CommandGroup::new()
-                .label("命令")
-                .items(
-                    commands
-                        .into_iter()
-                        .map(|(label, _)| gpui_component::command::CommandItem::new().label(label)),
-                );
-            let session_group = gpui_component::command::CommandGroup::new()
-                .label("切换会话")
-                .items(
-                    sessions
-                        .into_iter()
-                        .map(|(label, _)| gpui_component::command::CommandItem::new().label(label)),
-                );
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .justify_center()
-                .pt(px(80.))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
-                )
-                .child(
-                    div()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .w(px(520.))
-                        .h(px(360.))
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .bg(ui_theme::glass_floating())
-                        .border_1()
-                        .border_color(ui_theme::overlay(0x22))
-                        .rounded(ui_theme::composer_radius())
-                        .shadow_lg()
-                        .child(
-                            gpui_component::command::Command::new(state)
-                                .group(command_group)
-                                .group(session_group)
-                                .placeholder("想做什么？")
-                                .bordered(false)
-                                .max_h(px(360.))
-                                .size_full()
-                                .on_confirm(move |index, window, cx| {
-                                    // 回调被推迟到这次更新结束后。用打开这一帧的快照，
-                                    // 避免中途重建把下标对到另一条命令上。
-                                    let cmd = match index.section {
-                                        0 => command_cmds.get(index.row).cloned(),
-                                        1 => session_cmds.get(index.row).cloned(),
-                                        _ => None,
-                                    };
-                                    let Some(cmd) = cmd else {
-                                        return;
-                                    };
-                                    let Some(host) = confirm_host.upgrade() else {
-                                        return;
-                                    };
-                                    host.update(cx, |this, cx| this.exec_cmd(cmd, window, cx));
-                                })
-                                .on_cancel(move |window, cx| {
-                                    let Some(host) = host.upgrade() else {
-                                        return;
-                                    };
-                                    host.update(cx, |this, cx| this.close_palette(window, cx));
-                                }),
-                        ),
-                )
-        });
+        let palette_overlay =
+            self.palette.as_ref().map(|state| {
+                let [commands, sessions] = self.palette_groups(cx);
+                let command_cmds: Vec<Cmd> = commands.iter().map(|(_, cmd)| cmd.clone()).collect();
+                let session_cmds: Vec<Cmd> = sessions.iter().map(|(_, cmd)| cmd.clone()).collect();
+                let host = cx.entity().downgrade();
+                let confirm_host = host.clone();
+                let command_group = gpui_component::command::CommandGroup::new()
+                    .label("命令")
+                    .items(commands.into_iter().map(|(label, _)| {
+                        gpui_component::command::CommandItem::new().label(label)
+                    }));
+                let session_group = gpui_component::command::CommandGroup::new()
+                    .label("切换会话")
+                    .items(sessions.into_iter().map(|(label, _)| {
+                        gpui_component::command::CommandItem::new().label(label)
+                    }));
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .justify_center()
+                    .pt(px(80.))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                    )
+                    .child(
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .w(px(520.))
+                            .h(px(360.))
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .bg(ui_theme::glass_floating())
+                            .border_1()
+                            .border_color(ui_theme::overlay(0x22))
+                            .rounded(ui_theme::composer_radius())
+                            .shadow_lg()
+                            .child(
+                                gpui_component::command::Command::new(state)
+                                    .group(command_group)
+                                    .group(session_group)
+                                    .placeholder("想做什么？")
+                                    .bordered(false)
+                                    .max_h(px(360.))
+                                    .size_full()
+                                    .on_confirm(move |index, window, cx| {
+                                        // 回调被推迟到这次更新结束后。用打开这一帧的快照，
+                                        // 避免中途重建把下标对到另一条命令上。
+                                        let cmd = match index.section {
+                                            0 => command_cmds.get(index.row).cloned(),
+                                            1 => session_cmds.get(index.row).cloned(),
+                                            _ => None,
+                                        };
+                                        let Some(cmd) = cmd else {
+                                            return;
+                                        };
+                                        let Some(host) = confirm_host.upgrade() else {
+                                            return;
+                                        };
+                                        host.update(cx, |this, cx| this.exec_cmd(cmd, window, cx));
+                                    })
+                                    .on_cancel(move |window, cx| {
+                                        let Some(host) = host.upgrade() else {
+                                            return;
+                                        };
+                                        host.update(cx, |this, cx| this.close_palette(window, cx));
+                                    }),
+                            ),
+                    )
+            });
 
         let preview_viewport = window.viewport_size();
         let preview_box_w = preview_viewport.width * 0.86;

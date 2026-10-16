@@ -50,7 +50,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(420., true, content, crate::overlay::ModalLayer::DeleteAgent, cx)
+        self.modal_shell(
+            420.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DeleteAgent,
+            cx,
+        )
     }
 
     pub(crate) fn render_delete_agent_memory_confirm(&self, cx: &mut Context<Self>) -> AnyElement {

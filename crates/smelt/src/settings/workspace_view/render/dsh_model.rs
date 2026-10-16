@@ -623,8 +623,10 @@ pub(super) fn dsh_model_page(
                             let mut model_rows = v_flex().w_full().gap_2();
                             for (index, model) in editor.models.iter().enumerate() {
                                 let remove_entity = manage_entity.clone();
+                                let row_key = model.id.entity_id();
                                 model_rows = model_rows.child(
                                     v_flex()
+                                        .id(("dsh-custom-model", row_key))
                                         .w_full()
                                         .gap_2()
                                         .p_3()
@@ -645,9 +647,7 @@ pub(super) fn dsh_model_page(
                                                 )
                                                 .child(div().flex_1())
                                                 .child(
-                                                    Button::new(format!(
-                                                        "dsh-remove-custom-model-{index}"
-                                                    ))
+                                                    Button::new("dsh-remove-custom-model")
                                                     .ghost()
                                                     .small()
                                                     .icon(crate::trash_icon())

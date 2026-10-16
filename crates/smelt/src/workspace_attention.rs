@@ -139,7 +139,7 @@ impl Workspace {
     }
 
     /// 将会话状态和统一 AttentionStore 投影到 Dock、菜单栏数字和下拉菜单。调用方是应用级
-    /// attention observer、daemon 订阅和 render 兜底；快照去重保证重复调用便宜。
+    /// attention observer、daemon 订阅和可见数据刷新兜底；快照去重保证重复调用便宜。
     pub(crate) fn sync_notification_surfaces(&mut self, cx: &App) {
         let attention_count = cx
             .try_global::<AttentionGlobal>()

@@ -311,18 +311,16 @@ fn aggregate_diff_keeps_a_heading_for_each_file() {
 /// 块按钮挂在第一行有新文件行号的位置；纯删除才退回旧文件行号。
 #[test]
 fn hunk_anchor_prefers_the_modified_side() {
-    let changed = parse_diff(
-        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-old\n+new\n ctx\n",
-    );
+    let changed =
+        parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-old\n+new\n ctx\n");
     assert_eq!(
         hunk_line_anchor(&changed.lines, &changed.hunks[0]),
         Some((true, 1)),
         "新增行的新文件行号应优先于后面的上下文"
     );
 
-    let context_first = parse_diff(
-        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -10,3 +10,3 @@\n ctx\n-old\n+new\n",
-    );
+    let context_first =
+        parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -10,3 +10,3 @@\n ctx\n-old\n+new\n");
     assert_eq!(
         hunk_line_anchor(&context_first.lines, &context_first.hunks[0]),
         Some((true, 10)),
@@ -366,7 +364,10 @@ rename to new name.rs
 +b
 ";
     let files = gpui_component::diff::DiffFile::parse(patch).expect("rename diff");
-    assert_eq!(diff_scroll_target(&files, "new name.rs"), Some("new name.rs"));
+    assert_eq!(
+        diff_scroll_target(&files, "new name.rs"),
+        Some("new name.rs")
+    );
     assert_eq!(
         diff_scroll_target(&files, "old name.rs"),
         Some("new name.rs"),

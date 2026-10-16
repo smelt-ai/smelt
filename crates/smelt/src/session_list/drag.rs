@@ -330,7 +330,6 @@ pub(super) fn with_project_drag(
 
 pub(super) fn attach_session_drop_layers<E: ParentElement + FluentBuilder>(
     row: E,
-    key: usize,
     ui_id: u64,
     hint_before: bool,
     hint_after: bool,
@@ -344,7 +343,7 @@ pub(super) fn attach_session_drop_layers<E: ParentElement + FluentBuilder>(
             .inset_0()
             .child(
                 div()
-                    .id(("sess-drop-before", key))
+                    .id("sess-drop-before")
                     .absolute()
                     .top_0()
                     .left_0()
@@ -361,7 +360,7 @@ pub(super) fn attach_session_drop_layers<E: ParentElement + FluentBuilder>(
             )
             .child(
                 div()
-                    .id(("sess-drop-after", key))
+                    .id("sess-drop-after")
                     .absolute()
                     .bottom_0()
                     .left_0()
@@ -383,7 +382,6 @@ pub(super) fn attach_session_drop_layers<E: ParentElement + FluentBuilder>(
 
 pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
     row: E,
-    pix: usize,
     root: SharedString,
     hint_before: bool,
     hint_after: bool,
@@ -399,7 +397,7 @@ pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
             .inset_0()
             .child(
                 div()
-                    .id(("proj-drop-before", pix))
+                    .id("proj-drop-before")
                     .absolute()
                     .top_0()
                     .left_0()
@@ -417,7 +415,7 @@ pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
             )
             .child(
                 div()
-                    .id(("proj-drop-after", pix))
+                    .id("proj-drop-after")
                     .absolute()
                     .bottom_0()
                     .left_0()

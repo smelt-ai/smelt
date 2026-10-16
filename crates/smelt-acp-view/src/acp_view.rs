@@ -2244,6 +2244,7 @@ impl AcpView {
                         live,
                     )),
                 );
+                cache.owner_ids.refresh(&self.entries, 0);
                 (previous, previous_offset, 0)
             } else {
                 let from = recompute_from.unwrap_or(0);
@@ -2259,6 +2260,7 @@ impl AcpView {
                     &self.turn_timings,
                     live,
                 );
+                cache.owner_ids.refresh(&self.entries, from);
                 (previous, previous_offset + kept, from)
             };
         if measured {
@@ -6330,8 +6332,86 @@ fn patch_live_elapsed(layout: &mut [EntryPresentation], from: usize, live_elapse
     }
 }
 
+/// 工具 id、任务 id 在条目写入后不变。元素键每帧重建，文本留在这里。
+struct OwnerIdCache {
+    by_entry: Vec<Box<[gpui::SharedString]>>,
+    lookup: std::collections::HashSet<gpui::SharedString>,
+}
+
+impl Default for OwnerIdCache {
+    fn default() -> Self {
+        Self {
+            by_entry: Vec::new(),
+            lookup: std::collections::HashSet::new(),
+        }
+    }
+}
+
+impl OwnerIdCache {
+    fn refresh(&mut self, entries: &[AcpEntry], from: usize) {
+        let from = from.min(entries.len()).min(self.by_entry.len());
+        let previous_tail = self.by_entry.split_off(from);
+        for (offset, entry) in entries[from..].iter().enumerate() {
+            self.by_entry.push(
+                owner_ids_for_entry(entry, previous_tail.get(offset).map(Box::as_ref))
+                    .into_boxed_slice(),
+            );
+        }
+        self.lookup.clear();
+        for ids in &self.by_entry {
+            for id in ids.iter() {
+                self.lookup.insert(id.clone());
+            }
+        }
+    }
+}
+
+fn owner_ids_for_entry(
+    entry: &AcpEntry,
+    previous: Option<&[gpui::SharedString]>,
+) -> Vec<gpui::SharedString> {
+    let mut ids = Vec::new();
+    push_owner_ids(entry, previous.unwrap_or(&[]), &mut ids);
+    ids
+}
+
+fn push_owner_ids(
+    entry: &AcpEntry,
+    previous: &[gpui::SharedString],
+    ids: &mut Vec<gpui::SharedString>,
+) {
+    match entry {
+        AcpEntry::ToolCall { id, children, .. } => {
+            ids.push(reuse_owner(previous, id));
+            for child in children {
+                push_owner_ids(child, previous, ids);
+            }
+        }
+        AcpEntry::TaskNote(note) => ids.push(reuse_owner(previous, &note.id)),
+        _ => {}
+    }
+}
+
+fn reuse_owner(previous: &[gpui::SharedString], id: &str) -> gpui::SharedString {
+    previous
+        .iter()
+        .find(|existing| existing.as_str() == id)
+        .cloned()
+        .unwrap_or_else(|| gpui::SharedString::from(id))
+}
+
+/// 只借布局缓存，好和已经借出的 `entries` 同时用。命中时克隆句柄。
+fn lookup_owner(cache: &OwnerIdCache, owner: &str) -> gpui::SharedString {
+    cache
+        .lookup
+        .get(owner)
+        .cloned()
+        .unwrap_or_else(|| gpui::SharedString::from(owner))
+}
+
 struct ConversationLayoutCache {
     entries: std::rc::Rc<Vec<EntryPresentation>>,
+    owner_ids: OwnerIdCache,
     len: usize,
     tail_start: usize,
     turn_active: bool,
@@ -6346,6 +6426,7 @@ impl Default for ConversationLayoutCache {
     fn default() -> Self {
         Self {
             entries: std::rc::Rc::new(Vec::new()),
+            owner_ids: OwnerIdCache::default(),
             len: 0,
             tail_start: 0,
             turn_active: false,
@@ -6769,17 +6850,18 @@ pub fn process_timeline_icon(kind: &ToolKind) -> IconName {
 }
 
 /// 渲染一份 diff：逐行红（删）/绿（增）/灰（不变），等宽字体，滚动限高——大改动
-/// 不能把整个消息流撑爆，超出部分滚动查看。`key` 保证同一条消息里多个 diff
-/// 块各自有唯一 element id。行数据来自 `smelt_core::acp_chat::diff_lines`——
-/// 跟头部「+N -M」摘要（`diff_line_stats`）共用同一次计算结果，数字不会对不上。
+/// 不能把整个消息流撑爆，超出部分滚动查看。`id` 是这块 diff 的身份，每一行再挂
+/// 行号，同一条消息里的多块 diff 不会抢同一个元素。行数据来自
+/// `smelt_core::acp_chat::diff_lines`——跟头部「+N -M」摘要（`diff_line_stats`）
+/// 共用同一次计算结果，数字不会对不上。
 fn render_diff_lines(
     lines: &[DiffLine],
-    key: (usize, usize),
+    id: gpui::ElementId,
     border_color: gpui::Hsla,
     muted_color: gpui::Hsla,
 ) -> gpui::AnyElement {
     let mut rows = v_flex()
-        .id(("acp-diff", key.0 * 10_000 + key.1))
+        .id(id.clone())
         .max_h(px(320.))
         .overflow_y_scroll()
         .rounded_md()
@@ -6808,15 +6890,12 @@ fn render_diff_lines(
         let text = format!("{prefix}{}", line.text);
         rows = rows.child(
             row.child(
-                selectable_plain_text(
-                    format!("acp-diff-line-{}-{}-{line_ix}", key.0, key.1),
-                    &text,
-                )
-                .flex_1()
-                .min_w_0()
-                .text_xs()
-                .font_family(smelt_core::font_config::font_family())
-                .text_color(fg),
+                selectable_plain_text((id.clone(), line_ix.to_string()), &text)
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .font_family(smelt_core::font_config::font_family())
+                    .text_color(fg),
             ),
         );
     }

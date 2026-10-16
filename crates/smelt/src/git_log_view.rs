@@ -144,7 +144,6 @@ pub fn graph_canvas(
 /// 里的大闭包，500 条提交一次全构造，是这页 FPS 掉到个位数的主因。
 #[allow(clippy::too_many_arguments)]
 fn commit_row(
-    i: usize,
     commit: &CommitNode,
     gw: f32,
     is_sel: bool,
@@ -267,7 +266,6 @@ pub fn git_log_view(
             .map(|i| {
                 let c = &commits[i];
                 commit_row(
-                    i,
                     c,
                     gw,
                     selected.as_deref() == Some(c.hash.as_str()),
@@ -523,50 +521,49 @@ fn commit_diff_list(root: Option<String>, state: &GitLogState, cx: &mut Context<
     let detail_body = state.detail_body.clone();
     let has_diff_view = state.detail_view.is_some();
 
-    let file_list =
-        v_flex()
-            .flex_none()
-            .max_h(px(160.))
-            .p_1()
-            .children(files.into_iter().enumerate().map(|(i, (st, path))| {
-                let is_sel = sel_file.as_deref() == Some(path.as_str());
-                let ws_click = ws.clone();
-                let (p, r) = (path.clone(), root.clone());
-                h_flex()
-                    .id((ElementId::from("commit-file"), path.clone()))
-                    .gap_2()
-                    .px_2()
-                    .py(px(1.0))
-                    .text_sm()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(accent))
-                    .when(is_sel, |d| d.bg(accent))
-                    .on_click(move |_ev, _w, cx| {
-                        let (p, r) = (p.clone(), r.clone());
-                        ws_click.update(cx, |this, cx| {
-                            if let Some(r) = r {
-                                this.select_commit_file(r, p, cx);
-                            }
-                        });
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(14.))
-                            .text_xs()
-                            .text_color(muted)
-                            .child(st),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(fg)
-                            .child(path),
-                    )
-            }));
+    let file_list = v_flex()
+        .flex_none()
+        .max_h(px(160.))
+        .p_1()
+        .children(files.into_iter().map(|(st, path)| {
+            let is_sel = sel_file.as_deref() == Some(path.as_str());
+            let ws_click = ws.clone();
+            let (p, r) = (path.clone(), root.clone());
+            h_flex()
+                .id((ElementId::from("commit-file"), path.clone()))
+                .gap_2()
+                .px_2()
+                .py(px(1.0))
+                .text_sm()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|d| d.bg(accent))
+                .when(is_sel, |d| d.bg(accent))
+                .on_click(move |_ev, _w, cx| {
+                    let (p, r) = (p.clone(), r.clone());
+                    ws_click.update(cx, |this, cx| {
+                        if let Some(r) = r {
+                            this.select_commit_file(r, p, cx);
+                        }
+                    });
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(14.))
+                        .text_xs()
+                        .text_color(muted)
+                        .child(st),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(fg)
+                        .child(path),
+                )
+        }));
 
     // 不在这里 read DiffState。提交列表和这份正文不在同一次重绘里。
     let diff = if sel_file.is_none() {

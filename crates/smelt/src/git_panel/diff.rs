@@ -10,9 +10,7 @@
 use std::rc::Rc;
 
 use super::*;
-use gpui_component::diff::{
-    Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide,
-};
+use gpui_component::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
 
 /// 块操作挂在哪一行。优先新文件侧的行号，纯删除才退回旧文件侧。
 ///
@@ -77,8 +75,12 @@ pub(crate) fn diff_scroll_target<'a>(
     files.iter().find_map(|file| {
         let show = file.path().as_ref();
         let hit = show == requested
-            || file.modified_path().is_some_and(|path| path.as_ref() == requested)
-            || file.original_path().is_some_and(|path| path.as_ref() == requested);
+            || file
+                .modified_path()
+                .is_some_and(|path| path.as_ref() == requested)
+            || file
+                .original_path()
+                .is_some_and(|path| path.as_ref() == requested);
         hit.then_some(show)
     })
 }
@@ -108,10 +110,7 @@ pub(crate) struct GitDiffBody {
 
 impl GitDiffBody {
     pub(crate) fn new(host: WeakEntity<Workspace>) -> Self {
-        Self {
-            host,
-            chrome: None,
-        }
+        Self { host, chrome: None }
     }
 
     fn set_chrome(&mut self, chrome: DiffChrome, cx: &mut Context<Self>) {
@@ -182,9 +181,11 @@ impl Workspace {
         let Some(body) = self.diff_body.clone() else {
             return placeholder_view("（无差异）", muted);
         };
-        div().flex_1().min_w_0().min_h_0().child(
-            body.cached(StyleRefinement::default().size_full()),
-        )
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(body.cached(StyleRefinement::default().size_full()))
     }
 
     pub(crate) fn publish_diff_body(&mut self, cx: &mut Context<Self>) {
@@ -307,7 +308,8 @@ impl GitDiffBody {
                     let path = full_path.clone();
                     host.update(cx, |this, cx| {
                         this.tool_panel_tab = crate::tool_panel::ToolPanelTab::Files;
-                        this.set_tool_panel_open(true);
+                        this.set_tool_panel_open(true, cx);
+                        this.schedule_visible_refresh(cx);
                         this.view_file(path, window, cx);
                         this.save_state(cx);
                     });
@@ -359,7 +361,11 @@ impl GitDiffBody {
                     host.update(cx, |this, cx| this.toggle_diff_split(cx));
                 }
             })
-            .child(if chrome.split { "并排 ⇄" } else { "统一 ☰" });
+            .child(if chrome.split {
+                "并排 ⇄"
+            } else {
+                "统一 ☰"
+            });
         let stage_path = (!chrome.aggregate).then(|| chrome.path.clone());
         let root = chrome.root.clone();
         let annotation_root = root.clone();
@@ -419,13 +425,7 @@ impl GitDiffBody {
                             let root = root.clone();
                             let host = host.clone();
                             move |file, _window, _cx| {
-                                diff_header_suffix(
-                                    file,
-                                    ops,
-                                    stage_path.clone(),
-                                    &root,
-                                    &host,
-                                )
+                                diff_header_suffix(file, ops, stage_path.clone(), &root, &host)
                             }
                         })
                         .render_annotation({
@@ -449,7 +449,9 @@ impl GitDiffBody {
                                     return;
                                 };
                                 let range = range.clone();
-                                host.update(cx, |this, cx| this.open_diff_comment(range, window, cx));
+                                host.update(cx, |this, cx| {
+                                    this.open_diff_comment(range, window, cx)
+                                });
                             }
                         }),
                 ),
@@ -487,9 +489,7 @@ fn diff_annotations(
     comment: Option<&DiffLineRange>,
 ) -> Vec<DiffAnnotation> {
     let mut items = Vec::new();
-    if show_hunks
-        && let Some(path) = file_path
-    {
+    if show_hunks && let Some(path) = file_path {
         for (idx, hunk) in hunks.iter().enumerate() {
             let Some((modified, line)) = hunk_line_anchor(lines, hunk) else {
                 continue;
@@ -570,7 +570,8 @@ fn diff_header_suffix(
                     let path = full.clone();
                     host.update(cx, |this, cx| {
                         this.tool_panel_tab = crate::tool_panel::ToolPanelTab::Files;
-                        this.set_tool_panel_open(true);
+                        this.set_tool_panel_open(true, cx);
+                        this.schedule_visible_refresh(cx);
                         this.view_file(path, window, cx);
                         this.save_state(cx);
                     });
@@ -626,38 +627,34 @@ fn hunk_ops_row(
         HunkOps::StageDiscard => {
             let (stage_host, stage_root) = (host.clone(), root.clone());
             let (discard_host, discard_root) = (host, root);
-            row.child(
-                button("hunk-stage", "暂存块", theme.accent).on_click(move |_ev, _window, cx| {
+            row.child(button("hunk-stage", "暂存块", theme.accent).on_click(
+                move |_ev, _window, cx| {
                     let Some(host) = stage_host.upgrade() else {
                         return;
                     };
                     let root = stage_root.clone();
                     host.update(cx, |this, cx| this.stage_hunk(root, idx, cx));
-                }),
-            )
-            .child(
-                button("hunk-discard", "丢弃块", theme.danger).on_click(
-                    move |_ev, _window, cx| {
-                        let Some(host) = discard_host.upgrade() else {
-                            return;
-                        };
-                        let root = discard_root.clone();
-                        host.update(cx, |this, cx| this.start_discard_hunk(root, idx, cx));
-                    },
-                ),
-            )
-        }
-        HunkOps::Unstage => {
-            row.child(button("hunk-unstage", "取消暂存块", theme.accent).on_click(
+                },
+            ))
+            .child(button("hunk-discard", "丢弃块", theme.danger).on_click(
                 move |_ev, _window, cx| {
-                    let Some(host) = host.upgrade() else {
+                    let Some(host) = discard_host.upgrade() else {
                         return;
                     };
-                    let root = root.clone();
-                    host.update(cx, |this, cx| this.unstage_hunk(root, idx, cx));
+                    let root = discard_root.clone();
+                    host.update(cx, |this, cx| this.start_discard_hunk(root, idx, cx));
                 },
             ))
         }
+        HunkOps::Unstage => row.child(button("hunk-unstage", "取消暂存块", theme.accent).on_click(
+            move |_ev, _window, cx| {
+                let Some(host) = host.upgrade() else {
+                    return;
+                };
+                let root = root.clone();
+                host.update(cx, |this, cx| this.unstage_hunk(root, idx, cx));
+            },
+        )),
     }
 }
 
@@ -703,7 +700,11 @@ fn diff_comment_composer(
                         .child(range_label),
                 ),
         )
-        .children(input.map(|state| div().w_full().child(gpui_component::input::Textarea::new(&state))))
+        .children(input.map(|state| {
+            div()
+                .w_full()
+                .child(gpui_component::input::Textarea::new(&state))
+        }))
         .child(
             h_flex()
                 .justify_end()
@@ -721,17 +722,14 @@ fn diff_comment_composer(
                             });
                         }),
                 )
-                .child(
-                    Button::new("diff-send")
-                        .small()
-                        .label("发送评论")
-                        .on_click(move |_ev, window, cx| {
-                            let Some(host) = host.upgrade() else {
-                                return;
-                            };
-                            host.update(cx, |this, cx| this.send_diff_comments(window, cx));
-                        }),
-                ),
+                .child(Button::new("diff-send").small().label("发送评论").on_click(
+                    move |_ev, window, cx| {
+                        let Some(host) = host.upgrade() else {
+                            return;
+                        };
+                        host.update(cx, |this, cx| this.send_diff_comments(window, cx));
+                    },
+                )),
         )
         .border_color(border)
 }

@@ -53,7 +53,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(380., true, content, crate::overlay::ModalLayer::CloseProject, cx)
+        self.modal_shell(
+            380.,
+            true,
+            content,
+            crate::overlay::ModalLayer::CloseProject,
+            cx,
+        )
     }
 
     /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
@@ -84,14 +90,15 @@ impl Workspace {
                     .gap_1()
                     .max_h(px(360.))
                     .overflow_y_scroll();
-                for (row_index, s) in list.iter().enumerate() {
+                for s in list {
                     let is_detached = !tracked.contains(&s.id);
                     let is_acp = s.id.starts_with("acp-");
-                    let label = s
+                    let label: SharedString = s
                         .cwd
                         .clone()
                         .or_else(|| s.title.clone())
-                        .unwrap_or_else(|| s.id.clone());
+                        .unwrap_or_else(|| s.id.clone())
+                        .into();
                     let id_for_kill = s.id.clone();
                     rows = rows.child(
                         h_flex()
@@ -118,14 +125,17 @@ impl Workspace {
                                     )
                                     .child(
                                         div()
-                                            .id(("session-manager-label", row_index))
+                                            .id((
+                                                ElementId::from("session-manager-label"),
+                                                id_for_kill.clone(),
+                                            ))
                                             .flex_1()
                                             .min_w_0()
                                             .text_sm()
                                             .text_color(fg)
                                             .truncate()
                                             .tooltip({
-                                                let tip: SharedString = label.clone().into();
+                                                let tip = label.clone();
                                                 move |window, cx| {
                                                     gpui_component::tooltip::Tooltip::new(
                                                         tip.clone(),
@@ -133,7 +143,7 @@ impl Workspace {
                                                     .build(window, cx)
                                                 }
                                             })
-                                            .child(label),
+                                            .child(label.clone()),
                                     )
                                     .children(is_detached.then(|| {
                                         div()
@@ -215,7 +225,13 @@ impl Workspace {
                         ))
                     }),
             );
-        self.modal_shell(420., true, content, crate::overlay::ModalLayer::SessionManager, cx)
+        self.modal_shell(
+            420.,
+            true,
+            content,
+            crate::overlay::ModalLayer::SessionManager,
+            cx,
+        )
     }
 
     /// 弹窗标题：半粗、跟正文同色阶，不要 `font_bold` + `text_lg` 喊出来。
@@ -519,7 +535,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(320., true, content, crate::overlay::ModalLayer::DaemonRestart, cx)
+        self.modal_shell(
+            320.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DaemonRestart,
+            cx,
+        )
     }
 
     /// 当前文件有未保存改动、又点了别的文件时弹的确认弹窗：取消 / 不保存直接切换 /
@@ -604,7 +626,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(360., true, content, crate::overlay::ModalLayer::UnsavedFile, cx)
+        self.modal_shell(
+            360.,
+            true,
+            content,
+            crate::overlay::ModalLayer::UnsavedFile,
+            cx,
+        )
     }
 
     /// 递归渲染分屏布局树：Leaf 渲染一个终端（活动 pane 描边 + 点击聚焦），
@@ -713,9 +741,19 @@ impl Workspace {
         let list_key = cwd
             .as_ref()
             .map(|c| crate::session_history::session_list_key(agent, profile_id.as_deref(), c));
-        let sessions = list_key
-            .as_ref()
-            .and_then(|k| self.session_list.get(k).map(|(_, d)| d.clone()));
+        let (sessions, row_text, row_keys) =
+            match list_key.as_ref().and_then(|key| self.session_list.get(key)) {
+                Some((_, list)) => (
+                    Some(list.sessions.clone()),
+                    list.row_text.clone(),
+                    list.row_keys.clone(),
+                ),
+                None => (
+                    None,
+                    std::rc::Rc::new(Vec::new()),
+                    std::rc::Rc::new(Vec::new()),
+                ),
+            };
         let list_state = match (cwd.as_ref(), sessions) {
             (None, _) => HistoryListState::NoProject,
             (Some(_), None) => HistoryListState::Loading,
@@ -768,6 +806,8 @@ impl Workspace {
                 launch_override,
                 profile_label,
                 history_agent_ids,
+                row_text,
+                row_keys,
             },
             cx,
         )

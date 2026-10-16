@@ -3,6 +3,14 @@
 use super::*;
 use gpui_base::motion::MotionReveal;
 
+fn owner_id(name: &'static str, owner: &gpui::SharedString) -> gpui::ElementId {
+    gpui::ElementId::from((gpui::ElementId::from(name), owner.clone()))
+}
+
+fn owner_part(name: &'static str, owner: &gpui::SharedString, part: usize) -> gpui::ElementId {
+    gpui::ElementId::from((gpui::ElementId::named_usize(name, part), owner.clone()))
+}
+
 fn user_message_context_menu(
     menu: PopupMenu,
     view: Entity<AcpView>,
@@ -398,7 +406,7 @@ impl AcpView {
                             if let Some(image) = this.rendered_images.get(&(i, image_ix)).cloned() {
                                 image_strip = image_strip.child(render_clickable_image_thumb(
                                     image,
-                                    ("acp-sent-image", i * 1024 + image_ix),
+                                    ("acp-sent-image", image_ix),
                                     t.border,
                                     cx,
                                 ));
@@ -645,6 +653,7 @@ impl AcpView {
                         output,
                         children,
                     } => {
+                        let owner = super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, id);
                         let failed = matches!(status, ToolCallStatus::Failed);
                         let status_label: &str = match status {
                             ToolCallStatus::Pending => "待执行",
@@ -695,7 +704,7 @@ impl AcpView {
                                 muted
                             };
                             let mut row = h_flex()
-                                .id(("acp-tool-compact", i))
+                                .id(owner_id("acp-tool-compact", &owner))
                                 .debug_selector(move || format!("ACP_TOOL_COMPACT_{i}"))
                                 .w_full()
                                 .min_h(px(22.))
@@ -757,7 +766,7 @@ impl AcpView {
                                 this.tool_output_popover(
                                     i,
                                     muted,
-                                    Button::new(("acp-tool-compact-trigger", i))
+                                    Button::new(owner_id("acp-tool-compact-trigger", &owner))
                                         .text()
                                         .w_full()
                                         .justify_start()
@@ -805,7 +814,7 @@ impl AcpView {
                             ) {
                                 if animate_ambient {
                                     ambient_spinner(
-                                        ("acp-tool-status-spin", i),
+                                        "acp-tool-status-spin",
                                         muted,
                                         animate_ambient,
                                     )
@@ -845,7 +854,7 @@ impl AcpView {
 
                         let mut card = v_flex().w_full();
                         let mut header = h_flex()
-                            .id(("acp-tool-card-toggle", i))
+                            .id(owner_id("acp-tool-card-toggle", &owner))
                             .w_full()
                             .min_h(px(22.))
                             .gap_2()
@@ -910,7 +919,7 @@ impl AcpView {
                                                 .gap_1()
                                                 .child(
                                                     selectable_plain_text(
-                                                        ("acp-diff-path", i * 100 + part_ix),
+                                                        owner_part("acp-diff-path", &owner, part_ix),
                                                         path,
                                                     )
                                                         .text_xs()
@@ -919,7 +928,7 @@ impl AcpView {
                                                 .children(cached.map(|diff| {
                                                     render_diff_lines(
                                                         &diff.lines,
-                                                        (i, part_ix),
+                                                        owner_part("acp-diff", &owner, part_ix),
                                                         t.border,
                                                         t.muted_foreground,
                                                     )
@@ -966,9 +975,10 @@ impl AcpView {
                                                         let key = key.clone();
                                                         d.child(
                                                             div()
-                                                                .id((
+                                                                .id(owner_part(
                                                                     "acp-tool-toggle",
-                                                                    i * 100 + part_ix,
+                                                                    &owner,
+                                                                    part_ix,
                                                                 ))
                                                                 .text_xs()
                                                                 .text_color(faint)
@@ -1027,7 +1037,7 @@ impl AcpView {
                                                 div().pl_5().pt_1().pb_1().child(
                                                     render_clickable_image_thumb(
                                                         image,
-                                                        ("acp-tool-image", i * 100 + part_ix),
+                                                        owner_part("acp-tool-image", &owner, part_ix),
                                                         t.border,
                                                         cx,
                                                     ),
@@ -1062,6 +1072,8 @@ impl AcpView {
                         }
                     }
                     AcpEntry::TaskNote(note) => {
+                        let note_owner =
+                            super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, &note.id);
                         // 后台任务和后台子智能体的结果：默认只占一行。输出可能很长，模型已经
                         // 拿到完整内容，人要看时再点开，展开后限高滚动。展开状态和思考详情
                         // 共用 `expanded_thoughts`（key 都是 entries 下标，互不冲突）。
@@ -1079,7 +1091,7 @@ impl AcpView {
                         let summary = if has_output {
                             let hover = t.foreground;
                             summary
-                                .id(("acp-task-note-row", i))
+                                .id(owner_id("acp-task-note-row", &note_owner))
                                 .cursor_pointer()
                                 .hover(move |row| row.text_color(hover))
                                 .child(
@@ -1102,7 +1114,7 @@ impl AcpView {
                         if expanded {
                             block = block.child(
                                 div()
-                                    .id(("acp-task-note-output", i))
+                                    .id(owner_id("acp-task-note-output", &note_owner))
                                     .w_full()
                                     .max_h(px(320.))
                                     .overflow_y_scroll()
@@ -1110,7 +1122,7 @@ impl AcpView {
                                     .pb_2()
                                     .child(
                                         selectable_plain_text(
-                                            ("acp-task-note", i),
+                                            owner_id("acp-task-note", &note_owner),
                                             &note.output_tail,
                                         )
                                         .text_xs()
@@ -1363,16 +1375,20 @@ impl AcpView {
         let open = self.tool_run_is_open(start);
         let count = run.indices.len();
         let faint = gpui::rgb(ui_theme::text_faint());
-        let items: Vec<(usize, String)> = run
+        let owner_cache = &self.layout_cache;
+        let run_owner = run
             .indices
             .iter()
-            .filter_map(|&ix| match self.entries.get(ix) {
-                Some(AcpEntry::ToolCall { title, .. }) => Some((ix, title.clone())),
+            .find_map(|&ix| match self.entries.get(ix) {
+                Some(AcpEntry::ToolCall { id, .. }) => Some(super::super::lookup_owner(
+                    &owner_cache.borrow().owner_ids,
+                    id,
+                )),
                 _ => None,
             })
-            .collect();
+            .unwrap_or_else(|| gpui::SharedString::from(start.to_string()));
         let header = h_flex()
-            .id(("acp-tool-run", start))
+            .id(owner_id("acp-tool-run", &run_owner))
             .debug_selector(move || format!("ACP_TOOL_RUN_{start}"))
             .group(EXPAND_ICON_GROUP)
             .w_full()
@@ -1401,19 +1417,34 @@ impl AcpView {
                 this.toggle_tool_run(start, cx);
             }));
         let mut col = v_flex()
-            .id(("acp-tool-run-box", start))
+            .id(owner_id("acp-tool-run-box", &run_owner))
             .w_full()
             .child(header);
         if open {
-            for (ix, title) in items {
-                let can_expand = match self.entries.get(ix) {
-                    Some(AcpEntry::ToolCall {
-                        output, children, ..
-                    }) => tool_output_has_content(output) || !children.is_empty(),
-                    _ => false,
+            for &ix in &run.indices {
+                let Some((tool_owner, can_expand, title)) =
+                    self.entries.get(ix).and_then(|entry| {
+                        let AcpEntry::ToolCall {
+                            id,
+                            title,
+                            output,
+                            children,
+                            ..
+                        } = entry
+                        else {
+                            return None;
+                        };
+                        Some((
+                            super::super::lookup_owner(&owner_cache.borrow().owner_ids, id),
+                            tool_output_has_content(output) || !children.is_empty(),
+                            title.clone(),
+                        ))
+                    })
+                else {
+                    continue;
                 };
                 let row = h_flex()
-                    .id(("acp-tool-run-item", ix))
+                    .id(owner_id("acp-tool-run-item", &tool_owner))
                     .debug_selector(move || format!("ACP_TOOL_RUN_ITEM_{ix}"))
                     .w_full()
                     .min_h(px(20.))
@@ -1450,7 +1481,7 @@ impl AcpView {
                     self.tool_output_popover(
                         ix,
                         muted,
-                        Button::new(("acp-tool-run-item-trigger", ix))
+                        Button::new(owner_id("acp-tool-run-item-trigger", &tool_owner))
                             .text()
                             .w_full()
                             .justify_start()
@@ -1509,9 +1540,10 @@ impl AcpView {
         let show_fail_label = failed && !progress.contains("失败");
         let show_header_spinner = running && !(card_expanded && roster);
         let show_check = !running && !progress_failed && progress.is_empty();
+        let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
         let id_for_toggle = id.to_string();
         let mut header = h_flex()
-            .id(("acp-subagent-toggle", i))
+            .id(owner_id("acp-subagent-toggle", &owner))
             .w_full()
             .min_h(px(24.))
             .gap_2()
@@ -1552,7 +1584,11 @@ impl AcpView {
         }
         let status_el: gpui::AnyElement = if show_header_spinner {
             if animate_ambient {
-                ambient_spinner(("acp-subagent-spin", i), muted, animate_ambient)
+                ambient_spinner(
+                    owner_id("acp-subagent-spin", &owner),
+                    muted,
+                    animate_ambient,
+                )
             } else {
                 Icon::new(IconName::Loader)
                     .size(px(13.))
@@ -1580,7 +1616,7 @@ impl AcpView {
                 header.child(elapsed_suffix(elapsed_ms, muted))
             });
         let mut card = v_flex()
-            .id(("acp-subagent-card", i))
+            .id(owner_id("acp-subagent-card", &owner))
             .w_full()
             .rounded(ui_theme::card_radius())
             .border_1()
@@ -1631,7 +1667,7 @@ impl AcpView {
         let faint = gpui::rgb(ui_theme::text_faint());
         let red = gpui::rgb(ui_theme::red());
         let mut col = v_flex().w_full().gap_1();
-        for (child_ix, child) in children.iter().enumerate() {
+        for child in children {
             col = col.child(match child {
                 AcpEntry::Assistant { text, thought } => {
                     let line = text.lines().next().unwrap_or_default();
@@ -1669,8 +1705,10 @@ impl AcpView {
                     let has_nested = !nested.is_empty() || tool_output_has_content(output);
                     let expanded = self.tool_card_is_expanded(id, has_nested, false);
                     let spinning = matches!(status, ToolCallStatus::InProgress) || nested_running;
+                    let owner =
+                        super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
                     let glyph = subagent_child_status_glyph(
-                        ("acp-subagent-child-spin", parent_ix * 4096 + child_ix),
+                        owner_id("acp-subagent-child-spin", &owner),
                         spinning,
                         failed,
                         matches!(status, ToolCallStatus::Completed) && !spinning,
@@ -1679,7 +1717,7 @@ impl AcpView {
                         faint.into(),
                     );
                     let mut row = h_flex()
-                        .id(("acp-subagent-child", parent_ix * 4096 + child_ix))
+                        .id(owner_id("acp-subagent-child", &owner))
                         .w_full()
                         .min_h(px(22.))
                         .gap_2()
@@ -1745,7 +1783,7 @@ impl AcpView {
     }
 
     fn tool_output_popover(&self, entry_ix: usize, muted: gpui::Hsla, trigger: Button) -> Popover {
-        let (kind, output, children, diffs, images) = match self.entries.get(entry_ix) {
+        let (tool_id, kind, output, children, diffs, images) = match self.entries.get(entry_ix) {
             Some(AcpEntry::ToolCall {
                 id,
                 kind,
@@ -1753,6 +1791,7 @@ impl AcpView {
                 children,
                 ..
             }) => (
+                super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id),
                 *kind,
                 output.clone(),
                 children.clone(),
@@ -1768,14 +1807,14 @@ impl AcpView {
             }
         };
         let border: gpui::Hsla = ui_theme::card_stroke().into();
-        Popover::new(("acp-tool-output-pop", entry_ix))
+        Popover::new(owner_id("acp-tool-output-pop", &tool_id))
             .anchor(Anchor::BottomLeft)
             .appearance(false)
             .p_0()
             .trigger(trigger)
             .content(move |_, _, _| {
                 render_tool_output_popover_body(ToolOutputPopoverBody {
-                    entry_ix,
+                    tool_id: tool_id.clone(),
                     kind,
                     output: &output,
                     diffs: diffs.as_deref(),
@@ -1982,20 +2021,21 @@ impl AcpView {
             tool_id,
             muted,
         } = log;
+        let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, tool_id);
         let preview = tool_log_preview(body);
         let expanded = self.expanded_tools.contains(tool_id);
         let mode = tool_log_mode(preview.total, expanded);
         let font = smelt_core::font_config::font_family();
         let body_el = match mode {
             ToolLogMode::Inline => {
-                selectable_plain_text(format!("acp-tool-log-text-{tool_id}-{part_ix}"), body)
+                selectable_plain_text(owner_part("acp-tool-log-text", &owner, part_ix), body)
                     .text_xs()
                     .text_color(muted)
                     .font_family(font)
                     .into_any_element()
             }
             ToolLogMode::Preview => selectable_plain_text(
-                format!("acp-tool-log-text-{tool_id}-{part_ix}"),
+                owner_part("acp-tool-log-text", &owner, part_ix),
                 &preview.shown,
             )
             .text_xs()
@@ -2003,8 +2043,8 @@ impl AcpView {
             .font_family(font)
             .into_any_element(),
             ToolLogMode::Viewport => tool_log_viewport(ToolLogViewport {
-                list_id: format!("acp-tool-log-{tool_id}-{part_ix}").into(),
-                box_id: format!("acp-tool-log-box-{tool_id}-{part_ix}").into(),
+                list_id: owner_part("acp-tool-log", &owner, part_ix),
+                box_id: owner_part("acp-tool-log-box", &owner, part_ix),
                 debug_marker: format!("ACP_TOOL_LOG_{tool_id}_{part_ix}"),
                 line_marker_prefix: None,
                 body,
@@ -2029,7 +2069,7 @@ impl AcpView {
                         .items_center()
                         .child(
                             div()
-                                .id(("acp-tool-toggle", entry_ix * 100 + part_ix))
+                                .id(owner_part("acp-tool-toggle", &owner, part_ix))
                                 .text_xs()
                                 .text_color(gpui::rgb(ui_theme::text_faint()))
                                 .cursor_pointer()
@@ -2137,7 +2177,7 @@ fn tool_log_viewport(viewport: ToolLogViewport<'_>) -> gpui::AnyElement {
 
 /// 点开后的工具输出。长日志不铺全文，走固定高度的行视口，在卡片里滚动。
 struct ToolOutputPopoverBody<'a> {
-    entry_ix: usize,
+    tool_id: gpui::SharedString,
     kind: ToolKind,
     output: &'a [ToolOutputPart],
     diffs: Option<&'a [Option<super::super::CachedDiff>]>,
@@ -2149,7 +2189,7 @@ struct ToolOutputPopoverBody<'a> {
 
 fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::AnyElement {
     let ToolOutputPopoverBody {
-        entry_ix,
+        tool_id,
         kind,
         output,
         diffs,
@@ -2172,20 +2212,25 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                         .gap_1()
                         .child(
                             selectable_plain_text(
-                                ("acp-tool-pop-diff-path", entry_ix * 100 + part_ix),
+                                owner_part("acp-tool-pop-diff-path", &tool_id, part_ix),
                                 path,
                             )
                             .text_xs()
                             .text_color(muted),
                         )
                         .children(cached.map(|diff| {
-                            render_diff_lines(&diff.lines, (entry_ix, part_ix), border, muted)
+                            render_diff_lines(
+                                &diff.lines,
+                                owner_part("acp-diff", &tool_id, part_ix),
+                                border,
+                                muted,
+                            )
                         })),
                 )
             }
             ToolOutputPart::Text(text) if !text.trim().is_empty() => {
                 let body = strip_code_fence(text);
-                col.child(popover_tool_text(entry_ix, part_ix, kind, body, muted))
+                col.child(popover_tool_text(&tool_id, part_ix, kind, body, muted))
             }
             ToolOutputPart::Image(_) => {
                 match images
@@ -2200,7 +2245,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
             }
             ToolOutputPart::Text(_) => col,
             ToolOutputPart::Terminal { output, .. } if !output.trim().is_empty() => col.child(
-                popover_plain_log(entry_ix, part_ix, "terminal", output, muted),
+                popover_plain_log(&tool_id, part_ix, "terminal", output, muted),
             ),
             ToolOutputPart::Terminal { .. } => col,
         };
@@ -2209,7 +2254,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
         col = col.child(render_nested_transcript(children, muted));
     }
     div()
-        .id(("acp-tool-output-pop-body", entry_ix))
+        .id(owner_id("acp-tool-output-pop-body", &tool_id))
         .min_w(px(280.))
         .max_w(px(520.))
         .max_h(px(360.))
@@ -2223,30 +2268,42 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
 }
 
 fn popover_tool_text(
-    entry_ix: usize,
+    tool_id: &gpui::SharedString,
     part_ix: usize,
     kind: ToolKind,
     body: &str,
     muted: gpui::Hsla,
 ) -> gpui::AnyElement {
     if matches!(kind, ToolKind::Other) {
-        popover_markdown_log(entry_ix, part_ix, body, muted)
+        popover_markdown_log(tool_id, part_ix, body, muted)
     } else {
-        popover_plain_log(entry_ix, part_ix, "text", body, muted)
+        popover_plain_log(tool_id, part_ix, "text", body, muted)
     }
 }
 
 /// 短输出整段可选。超过预览行数后改走行视口，滚轮能走到最后一行。
 fn popover_plain_log(
-    entry_ix: usize,
+    tool_id: &gpui::SharedString,
     part_ix: usize,
-    slot: &str,
+    slot: &'static str,
     body: &str,
     muted: gpui::Hsla,
 ) -> gpui::AnyElement {
     let preview = tool_log_preview(body);
+    let text_name = match slot {
+        "terminal" => "acp-tool-pop-terminal",
+        _ => "acp-tool-pop-text",
+    };
+    let box_name = match slot {
+        "terminal" => "acp-tool-pop-terminal-box",
+        _ => "acp-tool-pop-text-box",
+    };
+    let copy_name = match slot {
+        "terminal" => "acp-tool-pop-terminal-copy",
+        _ => "acp-tool-pop-text-copy",
+    };
     if !preview.truncated() {
-        return selectable_plain_text(format!("acp-tool-pop-{slot}-{entry_ix}-{part_ix}"), body)
+        return selectable_plain_text(owner_part(text_name, tool_id, part_ix), body)
             .text_xs()
             .text_color(muted)
             .font_family(smelt_core::font_config::font_family())
@@ -2258,10 +2315,10 @@ fn popover_plain_log(
         .w_full()
         .gap_1()
         .child(tool_log_viewport(ToolLogViewport {
-            list_id: format!("acp-tool-pop-{slot}-{entry_ix}-{part_ix}").into(),
-            box_id: format!("acp-tool-pop-{slot}-box-{entry_ix}-{part_ix}").into(),
-            debug_marker: format!("ACP_TOOL_POP_LOG_{slot}_{entry_ix}_{part_ix}"),
-            line_marker_prefix: Some(format!("ACP_TOOL_POP_LINE_{entry_ix}_{part_ix}_")),
+            list_id: owner_part(text_name, tool_id, part_ix),
+            box_id: owner_part(box_name, tool_id, part_ix),
+            debug_marker: format!("ACP_TOOL_POP_LOG_{slot}_{tool_id}_{part_ix}"),
+            line_marker_prefix: Some(format!("ACP_TOOL_POP_LINE_{tool_id}_{part_ix}_")),
             body,
             muted,
         }))
@@ -2276,7 +2333,7 @@ fn popover_plain_log(
                         .child(format!("共 {total} 行")),
                 )
                 .child(
-                    Clipboard::new(format!("acp-tool-pop-copy-{slot}-{entry_ix}-{part_ix}"))
+                    Clipboard::new(owner_part(copy_name, tool_id, part_ix))
                         .value(copy)
                         .tooltip("复制全部"),
                 ),
@@ -2285,14 +2342,14 @@ fn popover_plain_log(
 }
 
 fn popover_markdown_log(
-    entry_ix: usize,
+    tool_id: &gpui::SharedString,
     part_ix: usize,
     body: &str,
     muted: gpui::Hsla,
 ) -> gpui::AnyElement {
     let preview = tool_log_preview(body);
     let view = smelt_ui::markdown_mermaid::markdown_view_clickable(
-        ("acp-tool-pop-md", entry_ix * 100 + part_ix),
+        owner_part("acp-tool-pop-md", tool_id, part_ix),
         body.to_string(),
     )
     .text_xs()
@@ -2301,7 +2358,7 @@ fn popover_markdown_log(
         return view.into_any_element();
     }
     div()
-        .id(("acp-tool-pop-md-scroll", entry_ix * 100 + part_ix))
+        .id(owner_part("acp-tool-pop-md-scroll", tool_id, part_ix))
         .w_full()
         .max_h(px(tool_log_viewport_height(preview.total)))
         .overflow_y_scroll()

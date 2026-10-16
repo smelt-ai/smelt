@@ -55,7 +55,7 @@ pub(crate) const SESSION_GLOW_PERIOD: Duration = Duration::from_secs(2);
 
 /// 项目组的重排过渡跟着根路径走。行 id 也用根路径，重排后不会把 hover 留在旧槽位。
 fn project_flip_id(root: &str) -> ElementId {
-    ElementId::Name(format!("sidebar-flip-project:{root}").into())
+    project_element_id("sidebar-flip-project", root)
 }
 
 fn project_element_id(name: &'static str, root: &str) -> ElementId {
@@ -418,7 +418,7 @@ impl Workspace {
         };
         let mut hidden_empty = 0usize;
         let mut visible_ix = 0usize;
-        for (pix, group) in groups.iter().enumerate() {
+        for group in groups.iter() {
             let is_project_group = grouping == SidebarGrouping::Project;
             // ---- 项目分组标题行 ----
             // 分组身份一律用 root 路径（末段同名的两个目录是两个项目，见 ProjectGroup）；
@@ -637,22 +637,17 @@ impl Workspace {
                                             .build(window, cx)
                                         })
                                 }))
-                                .children(project_decorations.iter().take(2).enumerate().map(
-                                    |(decoration_ix, decoration)| {
-                                        entity_decoration_chip(
-                                            (
-                                                project_element_id(
-                                                    "proj-entity-decoration",
-                                                    cwd,
-                                                ),
-                                                decoration_ix.to_string(),
-                                            ),
-                                            decoration,
-                                            plugin_agent.is_none(),
-                                            cx,
-                                        )
-                                    },
-                                ))
+                                .children(project_decorations.iter().take(2).map(|decoration| {
+                                    entity_decoration_chip(
+                                        (
+                                            ElementId::from("proj-entity-decoration"),
+                                            decoration.key.clone(),
+                                        ),
+                                        decoration,
+                                        plugin_agent.is_none(),
+                                        cx,
+                                    )
+                                }))
                                 .children(branch_label.as_ref().map(|b| {
                                     div()
                                         .min_w_0()
@@ -989,7 +984,6 @@ impl Workspace {
                         .when(can_drag && dragging, |header| {
                             attach_project_drop_layers(
                                 header,
-                                pix,
                                 drag_root.clone(),
                                 proj_hint_before,
                                 proj_hint_after,
@@ -1271,19 +1265,17 @@ impl Workspace {
                                     .child(updated_text),
                             ),
                     )
-                    .children(session_decorations.iter().take(2).enumerate().map(
-                        |(decoration_ix, decoration)| {
-                            entity_decoration_chip(
-                                (
-                                    ElementId::from(("sess-entity-decoration", ui_id)),
-                                    decoration_ix.to_string(),
-                                ),
-                                decoration,
-                                plugin_agent.is_none(),
-                                cx,
-                            )
-                        },
-                    ))
+                    .children(session_decorations.iter().take(2).map(|decoration| {
+                        entity_decoration_chip(
+                            (
+                                ElementId::from("sess-entity-decoration"),
+                                decoration.key.clone(),
+                            ),
+                            decoration,
+                            plugin_agent.is_none(),
+                            cx,
+                        )
+                    }))
                     // 分屏数继续用行尾小角标；第二行固定留给跨会话可比较的时间。
                     .children(subtitle.as_ref().map(|s| {
                         div()
@@ -1432,7 +1424,6 @@ impl Workspace {
                     .when(can_drag && dragging, |row| {
                         attach_session_drop_layers(
                             row,
-                            ix,
                             ui_id,
                             sess_hint_before,
                             sess_hint_after,
@@ -1667,7 +1658,6 @@ impl Workspace {
                                 .when(can_drag && dragging, |row| {
                                     attach_session_drop_layers(
                                         row,
-                                        ix * 100 + lix,
                                         ui_id,
                                         sess_hint_before && lix == 0,
                                         sess_hint_after && lix + 1 == raw_titles.len(),
@@ -2225,10 +2215,10 @@ impl Workspace {
 mod tests {
     use super::{
         PROJECT_ACTION_SLOT_HEIGHT, PROJECT_DISCLOSURE_ICON_SIZE, PROJECT_GUIDE_LEFT,
-        PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT,
-        SESSION_AGENT_ICON_BOX_SIZE, SESSION_AGENT_ICON_SIZE, project_disclosure_icon,
-        project_header_is_selected, session_row_is_selected, session_row_status_label,
-        shared_project_action_payload, status_text,
+        PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT, SESSION_AGENT_ICON_BOX_SIZE,
+        SESSION_AGENT_ICON_SIZE, project_disclosure_icon, project_header_is_selected,
+        session_row_is_selected, session_row_status_label, shared_project_action_payload,
+        status_text,
     };
     use crate::AgentStatus;
     use gpui_component::IconName;

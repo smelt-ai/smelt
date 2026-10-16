@@ -4,8 +4,8 @@
 
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use gpui_component::input::InputEvent;
@@ -67,6 +67,7 @@ impl Workspace {
         if !self.expanded.remove(&path) {
             self.expanded.insert(path);
         }
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -78,6 +79,7 @@ impl Workspace {
             self.collapsed_roots.insert(path);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -91,6 +93,7 @@ impl Workspace {
             self.pinned_roots.push(cwd);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -151,6 +154,8 @@ impl Workspace {
         self.ensure_dir_listing(root, cx);
         self.file_tree_selected = Some(path.to_string());
         self.file_tree_pending_reveal = Some(path.to_string());
+        self.try_flush_file_tree_reveal(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -181,7 +186,6 @@ impl Workspace {
             self.file_tree_scroll
                 .scroll_to_item(ix, ScrollStrategy::Nearest);
             self.file_tree_pending_reveal = None;
-            // 不 notify：本帧正在 render，scroll 在 prepaint 生效即可
         }
         let _ = cx;
     }
@@ -659,11 +663,14 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.dir_inflight.remove(&dir);
                 let current_generation = this.dir_generation.get(&dir).copied().unwrap_or(0);
-                // 删除发生在列目录期间时，这一包是旧快照。不写回，下一帧会按新代次再读。
+                // 删除发生在列目录期间时，这一包是旧快照。不写回，再排一次刷新去读新代次。
                 if current_generation == request_generation {
                     this.dir_cache
                         .insert(dir, (Instant::now(), Rc::new(entries)));
+                } else {
+                    this.schedule_visible_refresh(cx);
                 }
+                this.try_flush_file_tree_reveal(cx);
                 cx.notify();
             });
         })
@@ -763,6 +770,7 @@ impl Workspace {
             self.bump_dir_generation(&dir);
             self.dir_cache.remove(&dir);
         }
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 

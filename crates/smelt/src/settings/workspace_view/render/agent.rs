@@ -184,9 +184,10 @@ fn agent_groups(
                             for (ix, (label, command, removable)) in launch_rows.iter().enumerate() {
                                 let del_entity = launch_editor_entity.clone();
                                 let row_ix = ix;
+                                let row_key = label.entity_id();
                                 let delete_slot = if *removable {
                                     div()
-                                        .id(("del-launch", row_ix))
+                                        .id(("del-launch", row_key))
                                         .size(del_w)
                                         .flex()
                                         .flex_none()
@@ -214,7 +215,7 @@ fn agent_groups(
                                 };
                                 list = list.child(
                                     h_flex()
-                                        .id(("launch-row", row_ix))
+                                        .id(("launch-row", row_key))
                                         .w_full()
                                         .gap_2()
                                         .items_center()
@@ -681,6 +682,7 @@ fn agent_groups(
                                     profile_rows.iter().zip(profiles.iter()).enumerate()
                                 {
                                     let row_ix = ix;
+                                    let row_key = label.entity_id();
                                     let kind_entity = profile_editor_entity.clone();
                                     let del_entity = profile_editor_entity.clone();
                                     let current_kind_label = p
@@ -689,12 +691,12 @@ fn agent_groups(
                                         .unwrap_or_else(|| format!("未知 ({})", p.kind_id));
                                     list = list.child(
                                         h_flex()
-                                            .id(("profile-row", row_ix))
+                                            .id(("profile-row", row_key))
                                             .w_full()
                                             .gap_2()
                                             .items_center()
                                             .child(
-                                                Button::new(("profile-kind", row_ix))
+                                                Button::new(("profile-kind", row_key))
                                                     .ghost()
                                                     .small()
                                                     .w(kind_w)
@@ -725,7 +727,7 @@ fn agent_groups(
                                             )
                                             .child(
                                                 div()
-                                                    .id(("del-profile", row_ix))
+                                                    .id(("del-profile", row_key))
                                                     .size(del_w)
                                                     .flex()
                                                     .flex_none()

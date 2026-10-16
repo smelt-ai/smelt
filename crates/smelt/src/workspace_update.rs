@@ -660,7 +660,7 @@ impl Workspace {
                     }
                 }
                 if failed > 0 {
-                    this.background_error = Some(format!(
+                    this.report_background_error(format!(
                         "守护已重启，但有 {failed} 个终端没能重开（侧栏会话仍在，可关了再开）"
                     ));
                 } else {

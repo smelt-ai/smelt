@@ -28,14 +28,16 @@ impl Workspace {
         }
         window.focus(&self.focus_handle, cx);
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
-    pub(super) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute) {
+    pub(super) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute, cx: &mut Context<Self>) {
         self.nav.set_active(tab);
         if !self.active_tab().is_session() {
             self.stage_cover = None;
         }
+        self.schedule_visible_refresh(cx);
     }
 
     pub(super) fn pop_active_tab_to_root(&mut self) {
@@ -85,6 +87,7 @@ impl Workspace {
     pub(super) fn select_capabilities_tab(&mut self, tab: CapabilitiesTab, cx: &mut Context<Self>) {
         if self.nav.capabilities_tab() != tab {
             self.nav.set_capabilities_tab(tab);
+            self.schedule_visible_refresh(cx);
             cx.notify();
         }
     }
@@ -740,7 +743,7 @@ impl Workspace {
             smelt_core::default_conversation::NewConversationIntent::PickAgent => {}
             smelt_core::default_conversation::NewConversationIntent::CreateAgent => {
                 if self.agent_surface.conversation_draft_id.is_some() {
-                    self.reveal_workspace_tab(WorkspaceRoute::Agents);
+                    self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
                     window.focus(&self.focus_handle, cx);
                     self.save_state(cx);
                     cx.notify();
@@ -907,7 +910,7 @@ impl Workspace {
         self.nav.agents_mut().open_conversation(sid);
         self.agent_surface.editor = None;
         self.agent_surface.error = None;
-        self.reveal_workspace_tab(WorkspaceRoute::Agents);
+        self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
         self.sync_session_ui(window, cx);
         if let Some(view) = view {
             view.update(cx, |view, cx| {
@@ -1289,7 +1292,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_workspace_tab(WorkspaceRoute::Automations);
+        self.reveal_workspace_tab(WorkspaceRoute::Automations, cx);
         self.nav.automations_mut().open_editor(automation_id);
         self.select_automation_run(run_id, window, cx);
     }
@@ -1864,23 +1867,25 @@ impl Workspace {
             .editor
             .as_ref()
             .is_some_and(|editor| !editor.is_new);
-        if let Some(entry) = self
+        let flash_id = self
             .automation_surface
             .editor
             .as_mut()
             .and_then(|editor| editor.entries.get_mut(index))
-        {
-            entry.webhook_secret = smelt_core::automation::new_webhook_secret();
-        }
+            .map(|entry| {
+                let flash_id = format!(
+                    "automation-regen-webhook-{}",
+                    entry.schedule.time.entity_id()
+                );
+                entry.webhook_secret = smelt_core::automation::new_webhook_secret();
+                flash_id
+            });
         if should_save {
             if let Some(editor) = self.automation_surface.editor.as_mut() {
                 editor.draft_revision = editor.draft_revision.wrapping_add(1);
                 editor.error = None;
             }
-            self.persist_automation_editor(
-                Some((format!("automation-regen-webhook-{index}"), "已重新生成 ✓")),
-                cx,
-            );
+            self.persist_automation_editor(flash_id.map(|id| (id, "已重新生成 ✓")), cx);
         } else {
             self.touch_schedule_editor(cx);
         }

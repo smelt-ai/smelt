@@ -2,8 +2,8 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, ProcessGroupInfo,
-    RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity, append_prompt_text,
+    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
+    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity, append_prompt_text,
     apply_pending_config_selection, background_task_one_line, background_task_output_lines,
     background_task_running_for, background_task_summary, build_conversation_layout,
     build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
@@ -1499,6 +1499,36 @@ fn user_markdown_keeps_html_tags_literal() {
 
     let rendered = markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", None);
     assert!(rendered.contains("\\<panel>"));
+}
+
+fn long_tool(id: &str) -> AcpEntry {
+    AcpEntry::ToolCall {
+        id: id.to_string(),
+        title: String::new(),
+        kind: ToolKind::Other,
+        status: ToolCallStatus::Completed,
+        output: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+#[test]
+fn owner_id_cache_reuses_stable_tool_id() {
+    let stable = "tool-call-id-longer-than-inline";
+    let added = "another-tool-call-id-longer-than";
+    let mut entries = vec![long_tool(stable)];
+    let mut cache = OwnerIdCache::default();
+    cache.refresh(&entries, 0);
+    let first = cache.lookup.get(stable).unwrap().clone();
+
+    entries[0] = long_tool(stable);
+    cache.refresh(&entries, 0);
+    assert_eq!(cache.lookup.get(stable).unwrap().as_ptr(), first.as_ptr());
+
+    entries.push(long_tool(added));
+    cache.refresh(&entries, 1);
+    assert_eq!(cache.lookup.get(stable).unwrap().as_ptr(), first.as_ptr());
+    assert!(cache.lookup.contains(added));
 }
 
 #[test]
@@ -3620,14 +3650,14 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
     draw_settled(cx);
 
     let viewport = cx
-        .debug_bounds("ACP_TOOL_POP_LOG_text_1_0")
+        .debug_bounds("ACP_TOOL_POP_LOG_text_read-1_0")
         .expect("popover log viewport should paint");
     assert!(
-        cx.debug_bounds("ACP_TOOL_POP_LINE_1_0_0").is_some(),
+        cx.debug_bounds("ACP_TOOL_POP_LINE_read-1_0_0").is_some(),
         "viewport should paint the first line"
     );
     assert!(
-        cx.debug_bounds("ACP_TOOL_POP_LINE_1_0_40").is_none(),
+        cx.debug_bounds("ACP_TOOL_POP_LINE_read-1_0_40").is_none(),
         "line 40 is past the first screen and must not be built yet"
     );
 
@@ -3640,7 +3670,7 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
     draw_settled(cx);
 
     assert!(
-        cx.debug_bounds("ACP_TOOL_POP_LINE_1_0_40").is_some(),
+        cx.debug_bounds("ACP_TOOL_POP_LINE_read-1_0_40").is_some(),
         "scrolling the popover should reveal later lines"
     );
 }

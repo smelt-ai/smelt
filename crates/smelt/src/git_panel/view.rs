@@ -60,7 +60,11 @@ impl Workspace {
                     .child(
                         Self::modal_button(
                             "confirm-delete-worktree",
-                            if ready { "确定删除" } else { "检查中…" },
+                            if ready {
+                                "确定删除"
+                            } else {
+                                "检查中…"
+                            },
                             tint,
                             hover,
                             accent_text,
@@ -70,7 +74,13 @@ impl Workspace {
                         .disabled(!ready),
                     ),
             );
-        self.modal_shell(360., true, content, crate::overlay::ModalLayer::DeleteWorktree, cx)
+        self.modal_shell(
+            360.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DeleteWorktree,
+            cx,
+        )
     }
 
     /// 「关联 Worktree」弹窗：列出这个仓库的所有 worktree。主工作树不可删；其余
@@ -110,7 +120,7 @@ impl Workspace {
                     .gap_1()
                     .max_h(px(380.))
                     .overflow_y_scroll();
-                for (i, entry) in entries.iter().enumerate() {
+                for entry in entries.iter() {
                     let path = entry.path.clone();
                     let branch = entry.branch.clone();
                     let main_root = state.main_root.clone();
@@ -130,6 +140,7 @@ impl Workspace {
                         branch.clone().map(|b| (b, rgb(ui_theme::text_faint())))
                     };
                     let row = h_flex()
+                        .id((ElementId::from("worktree"), path.clone()))
                         .gap_2()
                         .items_center()
                         .justify_between()
@@ -170,7 +181,7 @@ impl Workspace {
                             if is_main {
                                 div().size(px(0.)).into_any_element()
                             } else if prunable {
-                                Button::new(("wt-prune", i))
+                                Button::new("wt-prune")
                                     .small()
                                     .label("清理")
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -178,7 +189,7 @@ impl Workspace {
                                     }))
                                     .into_any_element()
                             } else {
-                                Button::new(("wt-del", i))
+                                Button::new("wt-del")
                                     .small()
                                     .label("删除")
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -267,7 +278,13 @@ impl Workspace {
                     ),
             );
 
-        self.modal_shell(560., true, content, crate::overlay::ModalLayer::WorktreeList, cx)
+        self.modal_shell(
+            560.,
+            true,
+            content,
+            crate::overlay::ModalLayer::WorktreeList,
+            cx,
+        )
     }
 
     /// 「新建 Worktree」弹窗：分支名（留空 = detached）+ 检出目录两个输入框，
@@ -352,7 +369,13 @@ impl Workspace {
                     ),
             );
 
-        self.modal_shell(420., false, content, crate::overlay::ModalLayer::NewWorktree, cx)
+        self.modal_shell(
+            420.,
+            false,
+            content,
+            crate::overlay::ModalLayer::NewWorktree,
+            cx,
+        )
     }
 
     /// 「丢弃文件改动」确认弹窗。未跟踪文件是直接删盘，措辞要比 restore 更重。
@@ -414,7 +437,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(380., true, content, crate::overlay::ModalLayer::DiscardFile, cx)
+        self.modal_shell(
+            380.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DiscardFile,
+            cx,
+        )
     }
 
     /// 「丢弃这一块」确认弹窗。用危险配色，文案点明不可恢复——这个操作直接覆写
@@ -469,7 +498,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(380., true, content, crate::overlay::ModalLayer::DiscardHunk, cx)
+        self.modal_shell(
+            380.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DiscardHunk,
+            cx,
+        )
     }
 
     /// 「删除分支」确认弹窗。
@@ -526,7 +561,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(380., true, content, crate::overlay::ModalLayer::DeleteBranch, cx)
+        self.modal_shell(
+            380.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DeleteBranch,
+            cx,
+        )
     }
 
     /// 「丢弃全部改动」确认弹窗（照 render_discard_file_confirm，措辞更重——连未
@@ -577,7 +618,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(400., true, content, crate::overlay::ModalLayer::DiscardAll, cx)
+        self.modal_shell(
+            400.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DiscardAll,
+            cx,
+        )
     }
 
     /// Tool Panel 的窄版 GIT 面板：变更（STAGED / CHANGES）+ 操作

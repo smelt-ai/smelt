@@ -10,9 +10,8 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, App, Context, ElementId, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement,
-    MouseButton, ParentElement as _, Render, RenderOnce, StatefulInteractiveElement as _,
-    Styled as _, WeakEntity, Window, div, px,
+    IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -452,7 +451,7 @@ impl Render for NewSessionPickerState {
                 let hover_state = state.clone();
                 let selected = selected_index == Some(index);
                 let pin_key = item_key.clone();
-                let pin_button = Button::new(format!("new-session-picker-pin:{pin_key}"))
+                let pin_button = Button::new("new-session-picker-pin")
                     .custom(ButtonCustomVariant::new(cx))
                     .ghost()
                     .xsmall()
@@ -470,7 +469,7 @@ impl Render for NewSessionPickerState {
                 let row_label = format!("{} · {}", item.label, item.kind.label());
                 content = content.child(
                     div()
-                        .id(format!("new-session-picker-item:{section}:{row}"))
+                        .id((ElementId::from("new-session-picker-item"), item_key.clone()))
                         .h(px(PICKER_ROW_HEIGHT))
                         .mx_1()
                         .px_2()
@@ -568,10 +567,13 @@ impl RenderOnce for NewSessionPicker {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let workspace = self.workspace;
         let cwd = self.cwd;
-        // pix 会随项目排序改变，不能拿它单独缓存 cwd；状态以项目路径为主键，
-        // 否则拖动项目后，同一个列表位置会把新会话建到旧项目。
-        let picker_key = format!("new-session-picker:{}", cwd.as_deref().unwrap_or("default"));
-        let picker_state_key = format!("{picker_key}:state");
+        // 项目排序会改变下标。状态以项目路径为主键，拖动后同一个列表位置
+        // 不能把新会话建到旧项目。
+        let picker_root = cwd.as_deref().unwrap_or("default").to_string();
+        let picker_key =
+            ElementId::from((ElementId::from("new-session-picker"), picker_root.clone()));
+        let picker_state_key =
+            ElementId::from((ElementId::from("new-session-picker-state"), picker_root));
         let picker = window.use_keyed_state(picker_state_key, cx, {
             move |_, cx| NewSessionPickerState::new(workspace, cwd, cx)
         });

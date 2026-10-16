@@ -2,10 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
-use super::view::{BreadcrumbSeg, FileTreeRow, breadcrumb_segments, collect_file_tree_rows};
+use super::view::{
+    BreadcrumbSeg, FileTreeRow, breadcrumb_segments, collect_file_tree_rows, file_tree_row_id,
+};
 use super::{DirCache, SearchHit, build_search_tree, search_project};
-use std::sync::atomic::{AtomicBool, Ordering};
 use crate::git_panel::GitStatusData;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
 fn breadcrumb_segments_split_path_under_workspace_root() {
@@ -130,6 +132,54 @@ fn file_tree_rows_single_root_keeps_walk_order_without_header() {
                 git_mark: Some('M'),
             },
         ]
+    );
+}
+
+#[test]
+fn file_tree_row_identity_follows_path_when_a_directory_expands() {
+    let mut cache = DirCache::new();
+    cache.insert(
+        "/repo".into(),
+        cached(vec![("src", true), ("b.txt", false)]),
+    );
+    cache.insert("/repo/src".into(), cached(vec![("a.rs", false)]));
+    let collapsed = collect_file_tree_rows(
+        &["/repo".into()],
+        &HashSet::new(),
+        &HashSet::new(),
+        &cache,
+        &HashMap::new(),
+    );
+    let expanded_dirs = HashSet::from(["/repo/src".into()]);
+    let expanded = collect_file_tree_rows(
+        &["/repo".into()],
+        &expanded_dirs,
+        &HashSet::new(),
+        &cache,
+        &HashMap::new(),
+    );
+
+    fn id_of(rows: &[FileTreeRow], path: &str) -> Option<(&'static str, String)> {
+        rows.iter()
+            .find(|row| row.path() == Some(path))
+            .map(file_tree_row_id)
+            .map(|(kind, key)| (kind, key.to_string()))
+    }
+    assert_eq!(
+        id_of(&collapsed, "/repo/b.txt"),
+        Some(("file", "/repo/b.txt".to_string()))
+    );
+    assert_eq!(
+        id_of(&expanded, "/repo/b.txt"),
+        Some(("file", "/repo/b.txt".to_string()))
+    );
+    assert_ne!(
+        collapsed
+            .iter()
+            .position(|row| row.path() == Some("/repo/b.txt")),
+        expanded
+            .iter()
+            .position(|row| row.path() == Some("/repo/b.txt")),
     );
 }
 

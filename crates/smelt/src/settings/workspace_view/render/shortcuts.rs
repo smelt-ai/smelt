@@ -63,7 +63,14 @@ pub(super) fn shortcuts_page(
                         vec![
                             row(
                                 "打开设置",
-                                vec![bound_key(window, &crate::OpenSettings, "⌘,", border, popover, fg)],
+                                vec![bound_key(
+                                    window,
+                                    &crate::OpenSettings,
+                                    "⌘,",
+                                    border,
+                                    popover,
+                                    fg,
+                                )],
                             ),
                             fixed("打开命令面板", &["⌘K"]),
                             // 新建任务没有对应的 Action，不能交给 Kbd，否则键帽是空的。
@@ -102,8 +109,22 @@ pub(super) fn shortcuts_page(
                             row(
                                 "上一个 / 下一个会话",
                                 vec![
-                                    bound_key(window, &crate::PrevSession, "⌘↑", border, popover, fg),
-                                    bound_key(window, &crate::NextSession, "⌘↓", border, popover, fg),
+                                    bound_key(
+                                        window,
+                                        &crate::PrevSession,
+                                        "⌘↑",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                    bound_key(
+                                        window,
+                                        &crate::NextSession,
+                                        "⌘↓",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
                                 ],
                             ),
                             fixed("切换到第 1–9 个会话", &["⌘1…9"]),

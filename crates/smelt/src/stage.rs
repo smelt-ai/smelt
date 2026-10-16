@@ -359,7 +359,7 @@ impl Workspace {
                             crate::ide::open_in(&installed_ide, std::path::Path::new(&root));
                         workspace.update(cx, |ws, workspace_cx| {
                             if let Err(error) = result {
-                                ws.background_error = Some(error);
+                                ws.report_background_error(error);
                                 workspace_cx.notify();
                             }
                         });
@@ -401,7 +401,7 @@ impl Workspace {
 
     pub(crate) fn open_project_in_file_manager(&mut self, root: &str, cx: &mut Context<Self>) {
         if let Err(error) = crate::ide::open_in_file_manager(std::path::Path::new(root)) {
-            self.background_error = Some(error);
+            self.report_background_error(error);
             cx.notify();
         }
     }
@@ -574,7 +574,7 @@ impl Workspace {
                             cx.stop_propagation();
                             if promoted {
                                 this.set_stage_cover(None, window, cx);
-                                this.set_tool_panel_open(true);
+                                this.set_tool_panel_open(true, cx);
                             } else {
                                 this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
                             }

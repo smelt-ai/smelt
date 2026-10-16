@@ -62,7 +62,7 @@ struct ShellPanel {
 /// Tool Panel 里 gpui-shell 插件 tab 的槽位。`ToolPanelTab` 必须是 `Copy`，所以
 /// 运行时用下标，存档时换回插件 id（见 `key_for` / `slot_for_key`）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ShellTabSlot(u16);
+pub(crate) struct ShellTabSlot(pub(crate) u16);
 
 /// 发现并挂载全部插件。在工作台创建时调用（不是 render）：这里会读盘、执行脚本。
 ///
@@ -214,7 +214,11 @@ pub(crate) fn title(slot: ShellTabSlot) -> String {
 
 /// 存档里的稳定身份：插件 id。
 pub(crate) fn key_for(slot: ShellTabSlot) -> Option<String> {
-    with_panels(|panels| panels.get(usize::from(slot.0)).map(|panel| panel.id.clone()))
+    with_panels(|panels| {
+        panels
+            .get(usize::from(slot.0))
+            .map(|panel| panel.id.clone())
+    })
 }
 
 pub(crate) fn slot_for_key(key: &str) -> Option<ShellTabSlot> {

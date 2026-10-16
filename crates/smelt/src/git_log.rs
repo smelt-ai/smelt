@@ -326,7 +326,7 @@ use crate::git_panel::run_git;
 use gpui::{AppContext, Context};
 
 impl Workspace {
-    /// 进「日志」页时确保数据在（换了仓库也重拉）。`prepare_frame` 调用，必须便宜：
+    /// 进「日志」页时确保数据在（换了仓库也重拉）。可见数据刷新调用，必须便宜：
     /// 已经是这个 root 就直接返回，真正的 git 调用都在后台。
     pub fn ensure_git_log(&mut self, root: String, cx: &mut Context<Self>) {
         if self.git_log.loading || self.git_log.loaded_root.as_deref() == Some(root.as_str()) {

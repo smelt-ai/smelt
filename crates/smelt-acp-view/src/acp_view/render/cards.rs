@@ -48,7 +48,7 @@ impl AcpView {
                 buttons = buttons.child(
                     h_flex().w_full().min_w_0().child(
                         div()
-                            .id(format!("acp-perm-primary-{option_id}"))
+                            .id((gpui::ElementId::from("acp-perm-primary"), option_id.clone()))
                             .h(ui_theme::height::lg())
                             .px_4()
                             .flex()
@@ -86,7 +86,7 @@ impl AcpView {
                     ui_theme::text_muted()
                 };
                 let button = div()
-                    .id(format!("acp-perm-opt-{option_id}"))
+                    .id((gpui::ElementId::from("acp-perm-opt"), option_id.clone()))
                     .h(ui_theme::height::lg())
                     .px_3p5()
                     .flex()
@@ -338,7 +338,10 @@ impl AcpView {
                             .child(div().text_xs().text_color(muted).child(field.title.clone()))
                             .child(
                                 div()
-                                    .id(("acp-elicit-url", fix))
+                                    .id((
+                                        gpui::ElementId::from("acp-elicit-url"),
+                                        field.key.clone(),
+                                    ))
                                     .px_3()
                                     .py_2()
                                     .rounded_full()
@@ -378,14 +381,19 @@ impl AcpView {
                     ElicitFieldKindView::ExternalUrl(_) => unreachable!(),
                 };
                 let chosen = card.chosen.get(&fix).cloned().unwrap_or_default();
-                let mut list = v_flex().w_full().min_w_0().flex_shrink_0().gap_2();
+                let mut list = v_flex()
+                    .id((gpui::ElementId::from("acp-elicit-field"), field.key.clone()))
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .gap_2();
                 for (oix, opt) in options.iter().enumerate() {
                     let selected = chosen.contains(&oix);
                     let accent = gpui::rgb(ui_theme::accent());
                     list = list.child(
                         h_flex().w_full().min_w_0().child(
                             div()
-                                .id(format!("acp-elicit-opt-{fix}-{oix}"))
+                                .id(("acp-elicit-opt", oix))
                                 .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
                                 .w_full()
                                 .min_w_0()

@@ -378,11 +378,11 @@ impl AcpView {
             ];
             // Grok 空状态是「大标题 + 一排安静的胶囊」，不是带编号的功能卡片墙。
             let mut prompt_chips = h_flex().w_full().justify_center().gap_2().flex_wrap();
-            for (prompt_index, (title, _detail, prompt)) in quick_prompts.iter().enumerate() {
-                let prompt = (*prompt).to_string();
+            for (title, _detail, prompt) in quick_prompts {
+                let prompt = prompt.to_string();
                 prompt_chips = prompt_chips.child(
                     div()
-                        .id(("acp-empty-prompt", prompt_index))
+                        .id((gpui::ElementId::from("acp-empty-prompt"), title))
                         .px_3()
                         .py_1p5()
                         .rounded_full()
@@ -391,7 +391,7 @@ impl AcpView {
                         .text_color(t.foreground)
                         .cursor_pointer()
                         .hover(|chip| chip.bg(ui_theme::overlay(0x22)))
-                        .child((*title).to_string())
+                        .child(gpui::SharedString::new_static(title))
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.insert_prompt_text(&prompt, window, cx);
                         })),

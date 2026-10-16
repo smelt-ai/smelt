@@ -3,6 +3,26 @@
 use super::*;
 use smelt_core::daemon_state::DaemonPhase;
 
+/// 排队条目用正文当身份。相同正文按出现次序分开，删掉前面一条时后面的格子跟着正文走。
+fn queue_row_id<'a>(
+    kind: &'static str,
+    text: &'a str,
+    seen: &mut std::collections::HashMap<&'a str, usize>,
+) -> gpui::ElementId {
+    let n = {
+        let slot = seen.entry(text).or_insert(0);
+        let n = *slot;
+        *slot += 1;
+        n
+    };
+    let key = if n == 0 {
+        text.to_string()
+    } else {
+        format!("{text}\u{0}{n}")
+    };
+    gpui::ElementId::from((gpui::ElementId::from(kind), key))
+}
+
 impl AcpView {
     pub(super) fn render_composer(
         &self,
@@ -101,7 +121,10 @@ impl AcpView {
                 };
                 list = list.child(
                     h_flex()
-                        .id(("acp-completion-item", ix))
+                        .id((
+                            gpui::ElementId::from("acp-completion-item"),
+                            item.label.clone(),
+                        ))
                         .px_3()
                         .py_1p5()
                         .gap_2()
@@ -467,11 +490,27 @@ impl AcpView {
                         let immediate_action_available =
                             can_move_next && !self.immediate_cancel_pending;
                         let native_items = self.queued_steering.iter().map(|text| {
-                            (native_queue_item_kind_label(false), text.as_str())
+                            (false, text.as_str())
                         }).chain(self.queued_follow_up.iter().map(|text| {
-                            (native_queue_item_kind_label(true), text.as_str())
+                            (true, text.as_str())
                         }));
-                        for (ix, (kind, text)) in native_items.enumerate() {
+                        let mut seen_steer = std::collections::HashMap::new();
+                        let mut seen_follow = std::collections::HashMap::new();
+                        for (ix, (follow, text)) in native_items.enumerate() {
+                            let kind = native_queue_item_kind_label(follow);
+                            let row_id = queue_row_id(
+                                if follow {
+                                    "acp-native-queue-follow"
+                                } else {
+                                    "acp-native-queue-steer"
+                                },
+                                text,
+                                if follow {
+                                    &mut seen_follow
+                                } else {
+                                    &mut seen_steer
+                                },
+                            );
                             let preview: String = text.chars().take(60).collect();
                             let preview = if text.chars().count() > 60 {
                                 format!("{preview}…")
@@ -480,7 +519,7 @@ impl AcpView {
                             };
                             strip = strip.child(
                                 h_flex()
-                                    .id(("acp-native-queue-item", ix))
+                                    .id(row_id)
                                     .gap_2()
                                     .items_center()
                                     .px_2p5()
@@ -513,7 +552,7 @@ impl AcpView {
                                     .when(immediate_action_available, |row| {
                                         row.child(
                                             div()
-                                                .id(("acp-native-queue-immediate", ix))
+                                                .id("acp-native-queue-immediate")
                                                 .text_xs()
                                                 .text_color(gpui::rgb(if immediate_cancels_turn {
                                                     ui_theme::yellow()
@@ -577,7 +616,9 @@ impl AcpView {
                     );
                     let immediate_action_available =
                         can_move_next && !self.immediate_cancel_pending;
+                    let mut seen_prompts = std::collections::HashMap::new();
                     for (ix, (text, images)) in self.queued_prompts.iter().enumerate() {
+                        let row_id = queue_row_id("acp-queued-prompt", text, &mut seen_prompts);
                         let preview: String = text.chars().take(60).collect();
                         let preview = if text.chars().count() > 60 {
                             format!("{preview}…")
@@ -591,7 +632,7 @@ impl AcpView {
                         };
                         strip = strip.child(
                             h_flex()
-                                .id(("acp-queued-prompt", ix))
+                                .id(row_id)
                                 .gap_2()
                                 .items_center()
                                 .px_2p5()
@@ -624,7 +665,7 @@ impl AcpView {
                                 .when(immediate_action_available, |row| {
                                     row.child(
                                         div()
-                                            .id(("acp-queued-prompt-immediate", ix))
+                                            .id("acp-queued-prompt-immediate")
                                             .text_xs()
                                             .text_color(gpui::rgb(if immediate_cancels_turn {
                                                 ui_theme::yellow()
@@ -660,7 +701,7 @@ impl AcpView {
                                     |row| {
                                         row.child(
                                             div()
-                                                .id(("acp-queued-prompt-send", ix))
+                                                .id("acp-queued-prompt-send")
                                                 .text_xs()
                                                 .text_color(gpui::rgb(ui_theme::accent()))
                                                 .cursor_pointer()
@@ -682,7 +723,7 @@ impl AcpView {
                                 )
                                 .child(
                                     div()
-                                        .id(("acp-queued-prompt-remove", ix))
+                                        .id("acp-queued-prompt-remove")
                                         .text_xs()
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .cursor_pointer()
@@ -737,7 +778,7 @@ impl AcpView {
                         let preview_image = im.clone();
                         strip = strip.child(
                             div()
-                                .id(("acp-pending-img", ix))
+                                .id(("acp-pending-img", image_key))
                                 .relative()
                                 .cursor_pointer()
                                 .hover(|d| d.opacity(0.88))
@@ -1093,10 +1134,10 @@ impl AcpView {
             fill,
         );
         panel = panel.child(render_usage_stacked_bar(&legend, size));
-        for (i, row) in legend.into_iter().enumerate() {
+        for row in legend {
             panel = panel.child(
                 h_flex()
-                    .id(("acp-usage-row", i))
+                    .id((gpui::ElementId::from("acp-usage-row"), row.label))
                     .w_full()
                     .h(ui_theme::height::md())
                     .px_2()
@@ -1243,10 +1284,10 @@ impl AcpView {
             .max_h(px(320.))
             .overflow_y_scroll()
             .gap_1();
-        for (index, task) in running.into_iter().enumerate() {
+        for task in running {
             let id = task.id.clone();
             let mut row = v_flex()
-                .id(("acp-background-task", index))
+                .id((gpui::ElementId::from("acp-background-task"), id.clone()))
                 .gap_1()
                 .px_2()
                 .py_1p5()

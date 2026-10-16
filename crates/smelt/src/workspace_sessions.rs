@@ -403,6 +403,7 @@ impl Workspace {
                     this.active_session_revision != restore_active_revision,
                     this.active_session,
                 );
+                this.sync_session_ui(window, cx);
                 this.consume_pending_notification_session_jump(window, cx);
                 this.consume_pending_conversation_wakes(window, cx);
                 if let Some(Session {
@@ -418,7 +419,7 @@ impl Workspace {
                 if should_retry_failed_restore(failed, this.restore_retry_attempt) {
                     this.restore_retry_attempt += 1;
                     let delay = restore_retry_delay();
-                    this.background_error = Some(format!(
+                    this.report_background_error(format!(
                         "{failed} 个会话暂时没挂上（守护握手超时），{} 秒后自动重试…",
                         delay.as_secs()
                     ));
@@ -454,7 +455,7 @@ impl Workspace {
                     .detach();
                 } else {
                     if failed > 0 {
-                        this.background_error = Some(format!(
+                        this.report_background_error(format!(
                             "{failed} 个会话未能恢复，已保留在存档中。退出并重新打开 Smelt 会再试一次。"
                         ));
                         eprintln!(
@@ -486,6 +487,7 @@ impl Workspace {
                 // 真的没恢复成功的（比如终端 reattach 失败）得在这里被重新投影回来，
                 // 不能干等下一次目录推送。
                 this.reconcile_remote_catalog_projection(window, cx);
+                this.schedule_visible_refresh(cx);
                 cx.notify();
             });
         })
@@ -501,8 +503,12 @@ impl Workspace {
     /// 不依赖数组下标，所以拖拽排序、关闭前面的 session 都不会把快照串给别人。
     pub(crate) fn sync_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(new_id) = self.cur().map(|session| session.ui_id) else {
+            let changed = self.ui_session_id.is_some();
             self.park_active_project_ui();
             self.ui_session_id = None;
+            if changed {
+                self.schedule_visible_refresh(cx);
+            }
             return;
         };
         if self.ui_session_id == Some(new_id) {
@@ -536,6 +542,7 @@ impl Workspace {
         }
         self.ui_session_id = Some(new_id);
         self.apply_active_project_ui(window, cx);
+        self.schedule_visible_refresh(cx);
     }
 
     fn project_ui_key(&self, cx: &App) -> Option<String> {
@@ -571,6 +578,7 @@ impl Workspace {
         }
         self.park_active_project_ui();
         self.apply_active_project_ui(window, cx);
+        self.schedule_visible_refresh(cx);
     }
 
     pub(crate) fn restore_active_route_runtime(
@@ -1061,8 +1069,10 @@ impl Workspace {
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
+        self.sync_session_ui(window, cx);
         view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1138,6 +1148,7 @@ impl Workspace {
             self.activate(ix, window, cx);
         } else {
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
             cx.notify();
         }
     }
@@ -1350,7 +1361,7 @@ impl Workspace {
                 Ok(r) => r,
                 Err(_) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.background_error = Some("新建会话内部通道断开，请重试".into());
+                        this.report_background_error("新建会话内部通道断开，请重试");
                         cx.notify();
                     });
                     return;
@@ -1362,7 +1373,7 @@ impl Workspace {
                     eprintln!("[workspace] 新建会话失败（{cwd:?}）：{e:#}");
                     let msg = format!("新建会话失败：{e:#}");
                     let _ = this.update(cx, |this, cx| {
-                        this.background_error = Some(msg);
+                        this.report_background_error(msg);
                         cx.notify();
                     });
                     return;
@@ -1383,6 +1394,7 @@ impl Workspace {
                 this.session_list_revision = this.session_list_revision.wrapping_add(1);
                 this.active_session = this.sessions.len() - 1;
                 this.save_state(cx);
+                this.schedule_visible_refresh(cx);
                 eprintln!(
                     "[workspace] 新建会话成功，当前共 {} 个",
                     this.sessions.len()
@@ -1672,6 +1684,7 @@ impl Workspace {
         // 打开项目 = 想看这个项目，收掉盖在舞台上的覆盖页。
         self.stage_cover = None;
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1743,6 +1756,7 @@ impl Workspace {
         }
         self.collapsed_projects.remove(&root);
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1765,6 +1779,7 @@ impl Workspace {
             self.sync_project_ui(window, cx);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1868,7 +1883,7 @@ impl Workspace {
                 Ok(v) => v,
                 Err(_) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.background_error = Some("打开路径内部通道断开".into());
+                        this.report_background_error("打开路径内部通道断开");
                         cx.notify();
                     });
                     return;
@@ -1877,7 +1892,7 @@ impl Workspace {
 
             let _ = this.update(cx, |this, cx| {
                 if dirs.is_empty() {
-                    this.background_error = Some("拖入的路径无法作为项目目录打开".into());
+                    this.report_background_error("拖入的路径无法作为项目目录打开");
                 } else {
                     for dir in dirs {
                         this.add_project(dir, cx);
@@ -2004,6 +2019,7 @@ impl Workspace {
             }
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -2043,6 +2059,7 @@ impl Workspace {
         }
         remove_projects_under(&mut self.projects, &path);
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -2138,6 +2155,7 @@ impl Workspace {
         if changed {
             // Esc / 返回条也走这里。只改内存不落盘的话，冷启动会按存档再进全屏。
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
         }
         cx.notify();
     }
@@ -2305,6 +2323,7 @@ impl Workspace {
                 window.focus(&self.focus_handle, cx);
             }
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
             cx.notify();
         }
     }
@@ -2586,8 +2605,8 @@ impl Workspace {
         );
 
         let key = session_history::session_list_key(agent, profile_id.as_deref(), &cwd);
-        if let Some((_, sessions)) = self.session_list.get_mut(&key) {
-            let mut updated = sessions.as_ref().clone();
+        if let Some((_, list)) = self.session_list.get_mut(&key) {
+            let mut updated = list.sessions.as_ref().clone();
             for session in &mut updated {
                 if session.resume_id == resume_id {
                     session.custom_title = custom_title.clone();
@@ -2596,7 +2615,7 @@ impl Workspace {
                         .unwrap_or_else(|| session.agent_title.clone());
                 }
             }
-            *sessions = Rc::new(updated);
+            *list = session_history::HistoryListSnapshot::new(updated);
         }
 
         for session in &mut self.sessions {

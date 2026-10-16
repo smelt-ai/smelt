@@ -80,8 +80,8 @@ impl FsGrant {
     }
 
     fn parse(text: &str) -> Result<Self, String> {
-        let file: GrantFile =
-            serde_json::from_str(text).map_err(|error| format!("{GRANT_FILE} 格式错误：{error}"))?;
+        let file: GrantFile = serde_json::from_str(text)
+            .map_err(|error| format!("{GRANT_FILE} 格式错误：{error}"))?;
         for pattern in file.fs.read.iter().chain(&file.fs.write) {
             validate_pattern(pattern)?;
         }
@@ -149,7 +149,9 @@ impl HostFs {
                 let expanded = if let Some(rest) = pattern.strip_prefix(HOME_PREFIX) {
                     self.home.join(rest)
                 } else {
-                    project.as_ref()?.join(pattern.strip_prefix(PROJECT_PREFIX)?)
+                    project
+                        .as_ref()?
+                        .join(pattern.strip_prefix(PROJECT_PREFIX)?)
                 };
                 canonical_prefix(&expanded).ok()
             })
@@ -218,7 +220,12 @@ impl HostFs {
         rows.sort();
         Ok(HostValue::Array(
             rows.into_iter()
-                .map(|(name, kind)| HostObject::new().field("name", name).field("kind", kind).into())
+                .map(|(name, kind)| {
+                    HostObject::new()
+                        .field("name", name)
+                        .field("kind", kind)
+                        .into()
+                })
                 .collect(),
         ))
     }
@@ -280,13 +287,15 @@ impl HostFs {
     fn rename(&self, from: &str, to: &str) -> HostResult {
         let from = self.nofollow(from, Access::Write)?;
         let to = self.nofollow(to, Access::Write)?;
-        fs::rename(&from, &to).map(|()| HostValue::Null).map_err(|error| {
-            HostError::new(format!(
-                "移动 {} → {} 失败：{error}",
-                from.display(),
-                to.display()
-            ))
-        })
+        fs::rename(&from, &to)
+            .map(|()| HostValue::Null)
+            .map_err(|error| {
+                HostError::new(format!(
+                    "移动 {} → {} 失败：{error}",
+                    from.display(),
+                    to.display()
+                ))
+            })
     }
 
     /// 只删文件或软链本身。删目录请移进回收目录（rename），不提供递归删除。
@@ -480,10 +489,8 @@ mod tests {
 
     impl Sandbox {
         fn new() -> Self {
-            let home = std::env::temp_dir().join(format!(
-                "smelt-shell-fs-{}",
-                uuid::Uuid::new_v4().simple()
-            ));
+            let home = std::env::temp_dir()
+                .join(format!("smelt-shell-fs-{}", uuid::Uuid::new_v4().simple()));
             fs::create_dir_all(&home).unwrap();
             Self {
                 home: fs::canonicalize(&home).unwrap(),
@@ -557,9 +564,15 @@ mod tests {
 
         // 链接本身看得见……
         let lstat = host.lstat(&sandbox.s(".claude/skills/leak")).unwrap();
-        assert_eq!(lstat.get("kind").and_then(HostValue::as_str), Some("symlink"));
+        assert_eq!(
+            lstat.get("kind").and_then(HostValue::as_str),
+            Some("symlink")
+        );
         // ……内容读不穿。
-        assert!(host.read_text(&sandbox.s(".claude/skills/leak/SKILL.md")).is_err());
+        assert!(
+            host.read_text(&sandbox.s(".claude/skills/leak/SKILL.md"))
+                .is_err()
+        );
         assert!(host.list(&sandbox.s(".claude/skills/leak")).is_err());
     }
 
@@ -568,12 +581,21 @@ mod tests {
         let sandbox = Sandbox::new();
         let host = sandbox.host(GRANT);
         host.mkdir(&sandbox.s(".agents/skills/foo")).unwrap();
-        fs::write(sandbox.path(".agents/skills/foo/SKILL.md"), "---\nname: foo\n---\n").unwrap();
+        fs::write(
+            sandbox.path(".agents/skills/foo/SKILL.md"),
+            "---\nname: foo\n---\n",
+        )
+        .unwrap();
         host.mkdir(&sandbox.s(".claude/skills")).unwrap();
-        host.symlink(&sandbox.s(".agents/skills/foo"), &sandbox.s(".claude/skills/foo"))
-            .unwrap();
+        host.symlink(
+            &sandbox.s(".agents/skills/foo"),
+            &sandbox.s(".claude/skills/foo"),
+        )
+        .unwrap();
 
-        let text = host.read_text(&sandbox.s(".claude/skills/foo/SKILL.md")).unwrap();
+        let text = host
+            .read_text(&sandbox.s(".claude/skills/foo/SKILL.md"))
+            .unwrap();
         assert!(text.as_str().unwrap().contains("name: foo"));
         assert_eq!(
             host.readlink(&sandbox.s(".claude/skills/foo")).unwrap(),
@@ -581,7 +603,10 @@ mod tests {
         );
         let listing = host.list(&sandbox.s(".claude/skills")).unwrap();
         let first = &listing.as_array().unwrap()[0];
-        assert_eq!(first.get("kind").and_then(HostValue::as_str), Some("symlink"));
+        assert_eq!(
+            first.get("kind").and_then(HostValue::as_str),
+            Some("symlink")
+        );
     }
 
     #[test]
@@ -590,12 +615,17 @@ mod tests {
         let host = sandbox.host(GRANT);
         host.mkdir(&sandbox.s(".claude/skills")).unwrap();
         fs::create_dir_all(sandbox.path("outside")).unwrap();
-        assert!(host
-            .symlink(&sandbox.s("outside"), &sandbox.s(".claude/skills/x"))
-            .is_err());
-        assert!(host
-            .symlink(&sandbox.s(".agents/skills/missing"), &sandbox.s(".claude/skills/y"))
-            .is_err());
+        assert!(
+            host.symlink(&sandbox.s("outside"), &sandbox.s(".claude/skills/x"))
+                .is_err()
+        );
+        assert!(
+            host.symlink(
+                &sandbox.s(".agents/skills/missing"),
+                &sandbox.s(".claude/skills/y")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -605,13 +635,28 @@ mod tests {
         fs::create_dir_all(sandbox.path(".agents/skills")).unwrap();
         // 插件自己建不出这种链接（symlink 要求目标存在于根内），但磁盘随时会被
         // 别人改：直接用 std 造一条指向根外、目标不存在的悬空链接。
-        std::os::unix::fs::symlink(sandbox.path("ghost"), sandbox.path(".agents/skills/dangling"))
-            .unwrap();
-        assert!(host.mkdir(&sandbox.s(".agents/skills/dangling/child")).is_err());
+        std::os::unix::fs::symlink(
+            sandbox.path("ghost"),
+            sandbox.path(".agents/skills/dangling"),
+        )
+        .unwrap();
+        assert!(
+            host.mkdir(&sandbox.s(".agents/skills/dangling/child"))
+                .is_err()
+        );
         assert!(!sandbox.path("ghost").exists());
         // 悬空链接本身仍可 lstat、可删。
-        assert!(!host.lstat(&sandbox.s(".agents/skills/dangling")).unwrap().is_null());
-        assert!(host.stat(&sandbox.s(".agents/skills/dangling")).unwrap().is_null());
+        assert!(
+            !host
+                .lstat(&sandbox.s(".agents/skills/dangling"))
+                .unwrap()
+                .is_null()
+        );
+        assert!(
+            host.stat(&sandbox.s(".agents/skills/dangling"))
+                .unwrap()
+                .is_null()
+        );
         host.unlink(&sandbox.s(".agents/skills/dangling")).unwrap();
     }
 
@@ -620,13 +665,17 @@ mod tests {
         let sandbox = Sandbox::new();
         let host = sandbox.host(GRANT);
         host.mkdir(&sandbox.s(".agents/skills/a")).unwrap();
-        host.rename(&sandbox.s(".agents/skills/a"), &sandbox.s(".agents/skills/b"))
-            .unwrap();
+        host.rename(
+            &sandbox.s(".agents/skills/a"),
+            &sandbox.s(".agents/skills/b"),
+        )
+        .unwrap();
         assert!(sandbox.path(".agents/skills/b").is_dir());
         assert!(host.unlink(&sandbox.s(".agents/skills/b")).is_err());
-        assert!(host
-            .rename(&sandbox.s(".agents/skills/b"), &sandbox.s("stolen"))
-            .is_err());
+        assert!(
+            host.rename(&sandbox.s(".agents/skills/b"), &sandbox.s("stolen"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -639,7 +688,10 @@ mod tests {
             context.clone(),
         );
         let target = sandbox.s("repo/.agents/skills/x");
-        assert!(host.mkdir(&target).is_err(), "没有项目时 ${{project}} 根不存在");
+        assert!(
+            host.mkdir(&target).is_err(),
+            "没有项目时 ${{project}} 根不存在"
+        );
         context.borrow_mut().project_root = Some(sandbox.path("repo"));
         host.mkdir(&target).unwrap();
         assert!(sandbox.path("repo/.agents/skills/x").is_dir());

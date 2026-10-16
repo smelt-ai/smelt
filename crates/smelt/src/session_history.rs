@@ -34,8 +34,35 @@ pub(crate) fn format_count(n: u64) -> String {
     }
 }
 
-/// 历史会话「时间」文案：有明显跨度（>1 分钟）就顺带标一下这个会话跑了多久，
-/// 纯单条消息的会话就只显示时间点，不必画蛇添足展示"0 分钟"。
+/// 行元素键。有 resume id 用它；空 id 退回路径。在快照里算一次，render 只克隆。
+fn history_row_key(session: &SessionSummary) -> SharedString {
+    if session.resume_id.is_empty() {
+        SharedString::from(session.path.to_string_lossy().as_ref())
+    } else {
+        SharedString::from(session.resume_id.as_str())
+    }
+}
+
+/// 主行是展示标题。有自定义名称时副行留原始标题，否则副行是时间。
+fn history_row_labels(sessions: &[SessionSummary]) -> Vec<(SharedString, SharedString)> {
+    sessions
+        .iter()
+        .map(|session| {
+            let title = SharedString::from(session.title.as_str());
+            let when = session_when(session);
+            let secondary = if session.custom_title.is_some() && !when.is_empty() {
+                SharedString::from(format!("{} · {when}", session.agent_title))
+            } else if session.custom_title.is_some() {
+                SharedString::from(session.agent_title.as_str())
+            } else {
+                SharedString::from(when)
+            };
+            (title, secondary)
+        })
+        .collect()
+}
+
+/// 有明显跨度（超过 1 分钟）才标耗时。只有一条消息时只显示时间点。
 fn session_when(s: &SessionSummary) -> String {
     match (s.started_at, s.last_active_at) {
         (Some(start), Some(last)) if (last - start).num_minutes() >= 1 => format!(
@@ -48,6 +75,27 @@ fn session_when(s: &SessionSummary) -> String {
             .format("%m-%d %H:%M")
             .to_string(),
         _ => String::new(),
+    }
+}
+
+/// 一次扫描或一次改标题得到的历史列表。行文案和行元素键在这里算好，和
+/// `sessions` 一起放进 `session_list`，render 只克隆。不用分配地址当键：盒子
+/// 释放后，同一块地址会发给下一份列表。
+pub(crate) struct HistoryListSnapshot {
+    pub sessions: Rc<Vec<SessionSummary>>,
+    pub row_text: Rc<Vec<(SharedString, SharedString)>>,
+    pub row_keys: Rc<Vec<SharedString>>,
+}
+
+impl HistoryListSnapshot {
+    pub(crate) fn new(sessions: Vec<SessionSummary>) -> Self {
+        let row_keys = Rc::new(sessions.iter().map(history_row_key).collect::<Vec<_>>());
+        let row_text = Rc::new(history_row_labels(&sessions));
+        Self {
+            sessions: Rc::new(sessions),
+            row_text,
+            row_keys,
+        }
     }
 }
 
@@ -140,6 +188,10 @@ pub(crate) struct HistoryViewParams<'a> {
     pub profile_label: Option<String>,
     /// `resume_id` → 产品智能体定义 id。项目历史里靠它认出「这不是裸引擎会话」。
     pub history_agent_ids: Rc<HashMap<String, String>>,
+    /// 与未过滤列表下标对齐的标题、副标题。和 [`HistoryListSnapshot`] 一起生成。
+    pub row_text: Rc<Vec<(SharedString, SharedString)>>,
+    /// 与未过滤列表下标对齐的行元素键。
+    pub row_keys: Rc<Vec<SharedString>>,
 }
 
 /// 智能体 space 里的历史，或项目里绑过智能体定义的那几条，都按智能体续接。
@@ -172,6 +224,8 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         launch_override,
         profile_label,
         history_agent_ids,
+        row_text,
+        row_keys,
     } = params;
     // 智能体上下文：只留「继续对话」这一条按智能体续接的路径。
     let agent_context = restrict_to_kind.is_some();
@@ -272,6 +326,8 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                 let list = list.clone();
                 let selected_path_for_list = selected_path.clone();
                 let row_count = visible_indices.len();
+                let row_text = row_text.clone();
+                let row_keys = row_keys.clone();
                 uniform_list("session-list", row_count, move |range, _window, _app| {
                     range
                         .map(|row_ix| {
@@ -315,16 +371,14 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                         cwd,
                                     });
                             let has_custom_title = s.custom_title.is_some();
-                            let secondary_title = if s.custom_title.is_some() {
-                                let when = session_when(s);
-                                if when.is_empty() {
-                                    s.agent_title.clone()
-                                } else {
-                                    format!("{} · {when}", s.agent_title)
-                                }
-                            } else {
-                                session_when(s)
-                            };
+                            let (title, secondary_title) =
+                                row_text.get(ix).cloned().unwrap_or_else(|| {
+                                    (
+                                        SharedString::from(s.title.as_str()),
+                                        SharedString::default(),
+                                    )
+                                });
+                            let row_key = row_keys.get(ix).cloned().unwrap_or_else(|| history_row_key(s));
                             let ws_for_detail = workspace.clone();
                             let detail_path = path;
                             div()
@@ -333,7 +387,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                 .pb_1()
                                 .child(
                                     v_flex()
-                                        .id(("session-row", ix))
+                                        .id((ElementId::from("session-row"), row_key))
                                         .w_full()
                                         .h(px(54.))
                                         .justify_center()
@@ -349,7 +403,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                 .w_full()
                                                 .text_sm()
                                                 .truncate()
-                                                .child(s.title.clone()),
+                                                .child(title),
                                         )
                                         .child(
                                             div()
@@ -822,6 +876,8 @@ fn agent_tab_button(
                     this.session_detail_gen = this.session_detail_gen.wrapping_add(1);
                     this.session_detail = None;
                     this.history_detail_list_state.reset(0);
+                    // 换来源后立刻排一次刷新：缺缓存或超过 10 秒就重扫这份列表。
+                    this.schedule_visible_refresh(cx);
                     cx.notify();
                 }
             }),
@@ -946,8 +1002,10 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_list_inflight.remove(&key);
-                this.session_list
-                    .insert(key.clone(), (Instant::now(), Rc::new(sessions)));
+                this.session_list.insert(
+                    key.clone(),
+                    (Instant::now(), HistoryListSnapshot::new(sessions)),
+                );
                 this.history_agent_bindings
                     .insert(key.clone(), Rc::new(bindings));
                 if this.session_list_invalidated.remove(&key) {
@@ -1111,7 +1169,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(420., true, content, crate::overlay::ModalLayer::DeleteHistory, cx)
+        self.modal_shell(
+            420.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DeleteHistory,
+            cx,
+        )
     }
 
     /// 历史会话页的「迁移到 →」：读源 agent 落盘的 transcript，压成交接 prompt，
@@ -1286,15 +1350,65 @@ mod tests {
     // 带进这个测试模块会让 trait 解析图爆炸式增长，`cargo test` 编译期直接撞
     // rustc 的递归限制崩溃（甚至 SIGBUS）——只导入测试真正用到的几个名字就够了。
     use super::{
-        HistoryMigrationSource, HistorySourceTab, SessionDetail, Turn,
-        build_history_handoff_request, current_profile_launch, handoff_turns_from_history,
-        history_continue_label, history_row_is_agent_session, history_source_tabs,
-        list_sessions_for, normalized_profile_override_dir, project_dir,
+        HistoryListSnapshot, HistoryMigrationSource, HistorySourceTab, SessionDetail,
+        SessionSummary, Turn, build_history_handoff_request, current_profile_launch,
+        handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
+        history_source_tabs, list_sessions_for, normalized_profile_override_dir, project_dir,
     };
     use crate::settings::AgentHostState;
     use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind};
     use smelt_core::session_handoff::HandoffTurn;
     use std::path::Path;
+
+    fn summary(title: &str, custom: Option<&str>, agent_title: &str) -> SessionSummary {
+        SessionSummary {
+            path: std::path::PathBuf::new(),
+            title: title.to_string(),
+            agent_title: agent_title.to_string(),
+            custom_title: custom.map(str::to_string),
+            resume_id: String::new(),
+            started_at: None,
+            last_active_at: None,
+            message_count: 0,
+            total_tokens: 0,
+        }
+    }
+
+    #[test]
+    fn history_list_snapshot_keeps_each_lists_labels() {
+        let named =
+            HistoryListSnapshot::new(vec![summary("用户起的名", Some("用户起的名"), "原始标题")]);
+        assert_eq!(named.row_text[0].0.as_ref(), "用户起的名");
+        assert_eq!(named.row_text[0].1.as_ref(), "原始标题");
+
+        let older = HistoryListSnapshot::new(vec![summary("旧标题", None, "旧")]);
+        let newer = HistoryListSnapshot::new(vec![summary("新标题", None, "新")]);
+        assert_eq!(older.row_text[0].0.as_ref(), "旧标题");
+        assert_eq!(newer.row_text[0].0.as_ref(), "新标题");
+        drop(older);
+        let after = HistoryListSnapshot::new(vec![summary("另一份", None, "另一")]);
+        assert_eq!(after.row_text[0].0.as_ref(), "另一份");
+        assert_eq!(newer.row_text[0].0.as_ref(), "新标题");
+    }
+
+    #[test]
+    fn history_list_snapshot_keeps_row_element_key() {
+        let mut with_id = summary("标题", None, "原始");
+        with_id.resume_id = "resume-id-longer-than-inline".into();
+        with_id.path = std::path::PathBuf::from("/ignored/when/resume-id-is-present");
+        let snap = HistoryListSnapshot::new(vec![with_id]);
+        assert_eq!(snap.row_keys[0].as_ref(), "resume-id-longer-than-inline");
+        let cloned = snap.row_keys[0].clone();
+        assert_eq!(cloned.as_ptr(), snap.row_keys[0].as_ptr());
+
+        let mut path_only = summary("标题", None, "原始");
+        path_only.path = std::path::PathBuf::from("/tmp/session-path-longer-than-23");
+        let snap = HistoryListSnapshot::new(vec![path_only]);
+        assert_eq!(
+            snap.row_keys[0].as_ref(),
+            "/tmp/session-path-longer-than-23"
+        );
+    }
 
     fn write(dir: &Path, name: &str, lines: &[&str]) {
         std::fs::write(dir.join(name), lines.join("\n")).unwrap();

@@ -200,7 +200,8 @@ fn name_likely_truncated(name: &str, depth: usize, panel_w: f32) -> bool {
 }
 
 /// 只读缓存的递归收集目录条目（仅进入已展开且已缓存的文件夹）；绝不做任何 fs 调用。
-/// 展开了但尚未缓存的目录会被跳过——render 每帧检查并后台补齐，下一帧自动出现。
+/// 展开了但尚未缓存的目录会被跳过。展开、定位和可见数据刷新会去补目录列表，
+/// 缓存写回后再画出来。
 pub(super) fn walk_dir_cached(
     dir: &str,
     dir_cache: &DirCache,
@@ -251,6 +252,20 @@ impl FileTreeRow {
             FileTreeRow::Loading { .. } => None,
         }
     }
+}
+
+/// 行的元素身份是路径。上面插入或展开目录不会把后面行的按压状态挪走。
+pub(super) fn file_tree_row_id(row: &FileTreeRow) -> (&'static str, &str) {
+    match row {
+        FileTreeRow::Loading { root, .. } => ("root-loading", root.as_str()),
+        FileTreeRow::RootHeader { path, .. } => ("root", path.as_str()),
+        FileTreeRow::Entry { path, .. } => ("file", path.as_str()),
+    }
+}
+
+fn file_tree_row_element_id(row: &FileTreeRow) -> (ElementId, String) {
+    let (kind, key) = file_tree_row_id(row);
+    (ElementId::from(kind), key.to_string())
 }
 
 /// text_sm 是 0.875rem，默认行高是黄金比例。再留 2px，避免字形被行盒裁切。
@@ -511,8 +526,8 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
         accent,
     } = paint;
     match row {
-        FileTreeRow::Loading { depth, root } => div()
-            .id((ElementId::from("root-loading"), root.clone()))
+        FileTreeRow::Loading { depth, .. } => div()
+            .id(file_tree_row_element_id(row))
             .w(row_w)
             .h(row_h)
             .flex()
@@ -533,7 +548,7 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
             let root = path.clone();
             let focus_down = focus.clone();
             div()
-                .id((ElementId::from("root"), path.clone()))
+                .id(file_tree_row_element_id(row))
                 .w(row_w)
                 .h(row_h)
                 .flex()
@@ -614,7 +629,7 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
             let is_dir = *is_dir;
             let focus_down = focus;
             div()
-                .id((ElementId::from("file"), path.clone()))
+                .id(file_tree_row_element_id(row))
                 .w(row_w)
                 .h(row_h)
                 .flex()
@@ -1061,6 +1076,12 @@ impl Workspace {
                         cx,
                     )),
             );
-        self.modal_shell(360., true, content, crate::overlay::ModalLayer::DeleteFile, cx)
+        self.modal_shell(
+            360.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DeleteFile,
+            cx,
+        )
     }
 }

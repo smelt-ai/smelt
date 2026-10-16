@@ -2357,7 +2357,7 @@ struct Workspace {
     /// 提交/推送失败的原因，按**仓库根**分开，直接显示在该仓库的提交框下方。
     ///
     /// 提交失败必须在用户正盯着的地方说清楚：它是对一次明确点击的直接回应。
-    /// 走 `background_error` 只会弹一条系统通知，通知被静音或错过时，界面上
+    /// 走系统通知只会弹一条，通知被静音或错过时，界面上
     /// 「文件还在暂存区、什么都没发生」和成功毫无区别——pre-commit hook 因
     /// PATH 缺失而失败正是这样被当成「按钮没反应」。
     /// 下次对同一仓库发起提交/推送时清掉，不留过期错误。
@@ -2493,14 +2493,20 @@ struct Workspace {
     bg_color_picker: Option<Entity<ColorPickerState>>,
     /// 上面组件的变更订阅。
     settings_subs: Vec<Subscription>,
-    /// 上次应用到窗口的原生背景外观；外观改动时在 render 里同步。
+    /// 上次应用到窗口的原生背景外观。外观变化时才再发给 AppKit。
     applied_window_bg: Option<WindowBackgroundAppearance>,
-    /// 上次应用到原生 NSWindow 的整体透明度，避免每帧重复发送 AppKit 消息。
+    /// 上次应用到原生 NSWindow 的整体透明度，避免重复发送 AppKit 消息。
     applied_window_opacity: Option<f32>,
-    /// 上次安装/更新的液态玻璃材质档位；配置变化时 render 里重新 setStyle。
+    /// 上次安装/更新的液态玻璃材质档位。配置变化时才重新 setStyle。
     applied_glass_style: Option<liquid_glass::GlassStyle>,
     /// 上次应用到窗口的界面基准字号（rem_size）。
     applied_ui_font_px: Option<u32>,
+    /// 主窗口。没有 Window 的变更用它在本轮更新结束后、绘制前刷新可见数据。
+    window_handle: AnyWindowHandle,
+    /// 已经排队一次可见数据刷新。同一轮里的多次变更合并成一次。
+    visible_refresh_scheduled: bool,
+    /// 正在刷新可见数据。这段里的切会话不再排队第二次。
+    visible_refresh_running: bool,
     /// git status 缓存（root → (取得时刻, 数据)）。Git 页后台刷新，render 只读，
     /// 避免每帧同步跑 git status（大仓要 ~90ms，是掉帧元凶）。
     ///
@@ -2550,7 +2556,7 @@ struct Workspace {
     /// 注意：总览卡片那边（`self.sessions` 渲染，展示"最近一次 Claude 活动"）也复用
     /// 这份缓存，固定传 `ConversationAgentKind::Claude`——历史会话页加多 agent tab 不该改变
     /// 那个功能的行为，两处刻意共享同一套读写路径而不是各建一份。
-    session_list: HashMap<String, (Instant, Rc<Vec<session_history::SessionSummary>>)>,
+    session_list: HashMap<String, (Instant, session_history::HistoryListSnapshot)>,
     /// 正在后台扫描历史会话列表的 key（同上 `"{agent_id}:{cwd}"`，防重复并发 spawn）。
     session_list_inflight: HashSet<String>,
     /// 扫描期间发生删除等变更的 key；旧扫描完成后会自动再扫一次，避免旧快照回写。
@@ -2652,9 +2658,6 @@ struct Workspace {
     /// `index.lock` 属于这一个仓库，所以另一个仓库可以同时写。同一个根上的
     /// 提交、推送、获取、暂存、建工作树都进这一张表，由 `spawn_git` 占用和释放。
     git_writes: HashMap<String, git_panel::GitWrite>,
-    /// 各类后台操作（建/删 worktree、生成 commit message 等）失败时的提示，render
-    /// 顶部取走并弹成通知；后台任务里没有 Window，弹不了通知，所以先暂存到这。
-    background_error: Option<String>,
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
     provider_quota_refresh_tx: Option<smol::channel::Sender<provider_quota::QuotaTarget>>,
@@ -2700,6 +2703,8 @@ struct Workspace {
     _agent_host_sub: Option<Subscription>,
     /// provider 账户状态（额度）变化时重绘侧栏额度行。
     _provider_status_sub: Option<Subscription>,
+    /// 外观全局变化。不能放进 `settings_subs`：设置滑块重建时会清掉那个 vec。
+    _appearance_sub: Option<Subscription>,
     /// 正在后台 reattach 中、尚未插入侧栏的移动端终端会话 id。不去重会对同一 id
     /// 并发 open 两次，smeltd 第二次会顶掉前一个连接。
     remote_terminal_reattach_pending: HashSet<String>,
@@ -2843,6 +2848,9 @@ impl Workspace {
         if workspace_state_load_failed {
             eprintln!("[workspace] 暂停空快照写入，避免覆盖原数据");
         }
+        let workspace_load_notice = workspace_load_error.map(|error| {
+            format!("工作区存档无法打开，已停止写入以免覆盖原会话。{error}")
+        });
         // 旧版开合动画曾把过渡中的接近零宽度误存为用户偏好；加载时按侧栏
         // 可拖拽下限修复这类状态，避免下一次展开仍以错误宽度为目标。
         let sidebar_w = saved
@@ -3085,6 +3093,9 @@ impl Workspace {
             applied_window_opacity: None,
             applied_glass_style: None,
             applied_ui_font_px: None,
+            window_handle: window.window_handle(),
+            visible_refresh_scheduled: false,
+            visible_refresh_running: false,
             debug_hud: false,
             show_quit_confirm: false,
             quit_requested: false,
@@ -3109,8 +3120,6 @@ impl Workspace {
             discard_file_target: None,
             discard_all_target: None,
             git_writes: HashMap::new(),
-            background_error: workspace_load_error
-                .map(|error| format!("工作区存档无法打开，已停止写入以免覆盖原会话。{error}")),
             provider_quota_refresh_tx: None,
 
             daemon_outdated: None,
@@ -3130,6 +3139,7 @@ impl Workspace {
             _remote_sessions_sub: None,
             _agent_host_sub: None,
             _provider_status_sub: None,
+            _appearance_sub: None,
             remote_terminal_reattach_pending: HashSet::new(),
             remote_projected_terminal_ids: HashSet::new(),
             session_list_revision: 0,
@@ -3199,6 +3209,16 @@ impl Workspace {
                 |_, _, cx| cx.notify(),
             ),
         );
+        ws._appearance_sub = Some(cx.observe_global_in::<Appearance>(
+            window,
+            |this, _window, cx| this.schedule_visible_refresh(cx),
+        ));
+        ws.start_visible_data_watch(cx);
+        if let Some(message) = workspace_load_notice {
+            ws.report_background_error(message);
+        }
+        // 首帧绘制前就把输入框和缓存任务备好。观察器只在之后的外观变化时再排一次。
+        ws.refresh_visible_caches(window, cx);
         ws
     }
 
@@ -3587,6 +3607,7 @@ impl Workspace {
                     this.sessions.push(session);
                     this.session_list_revision = this.session_list_revision.wrapping_add(1);
                     this.save_state(cx);
+                    this.schedule_visible_refresh(cx);
                     cx.notify();
                 });
             })
@@ -3623,7 +3644,7 @@ impl Render for Workspace {
         // 工作台每帧都会重跑这里：debug 构建下，期间读写 SQLite 会被报出来。
         let _render_scope = smelt_core::sqlite_state::render_guard::RenderScope::enter();
         let _timing = smelt_ui::frame_stats::RenderTiming::start("Workspace");
-        // 数据准备与页面绘制分开：缓存/控件/窗口材质在 prepare_frame，下面只组页面。
+        // 帧上只清拖拽、认前台。目录、git、历史和窗口材质在选中与数据变化时刷新。
         self.prepare_frame(window, cx);
 
         // 插件 WebView 面板是原生 view，不随 GPUI 停止渲染而消失：每帧显式对齐
@@ -4427,15 +4448,8 @@ fn smelt_file_url_to_target(url: &str) -> Option<(String, Option<usize>)> {
 /// 重新拼出会话布局，跟正常重启应用效果一致。
 /// 返回值同时留下窗口句柄：主窗口还在不在看它，不看 Workspace 还能不能升级。
 fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) -> MainWindow {
-    let window_options = WindowOptions {
-        // 透明标题栏：红绿灯浮在内容上，拖拽 / 双击最大化由自绘顶栏接管。
-        // 纵向位置复用 gpui-component 与 34px TitleBar 配套的契约，再统一叠加
-        // 外壳顶部内边距；不要在这里写死旧布局偏移。横向保留 Smelt 的 18px 基准。
-        titlebar: Some(workspace_frame::titlebar_options(ui_theme::shell_padding())),
-        // 透明/模糊背景（跟随外观设置；终端底色带 alpha 时桌面透出）。
-        window_background: window_bg,
-        ..Default::default()
-    };
+    let window_options =
+        workspace_frame::workspace_window_options(ui_theme::shell_padding(), window_bg);
     let mut workspace = None;
     let window_handle = cx
         .open_window(window_options, |window, cx| {

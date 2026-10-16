@@ -322,6 +322,15 @@ impl ScheduleKind {
         }
     }
 
+    fn id_name(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Weekdays => "weekdays",
+            Self::Weekly => "weekly",
+            Self::Interval => "interval",
+        }
+    }
+
     fn is_interval(self) -> bool {
         matches!(self, Self::Interval)
     }
@@ -338,6 +347,13 @@ impl IntervalUnit {
         match self {
             Self::Minutes => "分钟",
             Self::Hours => "小时",
+        }
+    }
+
+    fn id_name(self) -> &'static str {
+        match self {
+            Self::Minutes => "minutes",
+            Self::Hours => "hours",
         }
     }
 }
@@ -359,6 +375,14 @@ impl IntervalDayScope {
             Self::Everyday => "每天",
             Self::Weekdays => "工作日",
             Self::Weekly => "每周",
+        }
+    }
+
+    fn id_name(self) -> &'static str {
+        match self {
+            Self::Everyday => "everyday",
+            Self::Weekdays => "weekdays",
+            Self::Weekly => "weekly",
         }
     }
 
@@ -1161,7 +1185,9 @@ fn render_trigger_entry(
             render_schedule_rule(index, &entry.schedule, false, entity, cx)
         }
     };
+    let row_key = entry.schedule.time.entity_id();
     automation_form_shell()
+        .id(("automation-trigger", row_key))
         .px_4()
         .py_3()
         .flex()
@@ -1197,7 +1223,7 @@ fn render_trigger_entry(
                         }),
                 )
                 .child(
-                    compact_chip(format!("automation-remove-trigger-{index}"))
+                    compact_chip("automation-remove-trigger")
                         .icon(crate::trash_icon())
                         .tooltip("删除触发器")
                         .on_click(move |_, _, cx| {
@@ -1374,9 +1400,10 @@ fn render_webhook_entry(
     let paused = stored.is_some_and(|automation| !automation.enabled);
     let live_url = (!editor.is_new && !entry.webhook_secret.is_empty())
         .then(|| smelt_core::automation::webhook_url(&base, &entry.webhook_secret));
-    let copy_id = format!("automation-copy-webhook-{index}");
-    let curl_id = format!("automation-copy-webhook-curl-{index}");
-    let regen_id = format!("automation-regen-webhook-{index}");
+    let row_key = entry.schedule.time.entity_id();
+    let copy_id = format!("automation-copy-webhook-{row_key}");
+    let curl_id = format!("automation-copy-webhook-curl-{row_key}");
+    let regen_id = format!("automation-regen-webhook-{row_key}");
     div()
         .flex()
         .flex_col()
@@ -1424,7 +1451,7 @@ fn render_webhook_entry(
                             .child(url),
                     )
                     .child(
-                        compact_chip(copy_id.clone())
+                        compact_chip("automation-copy-webhook")
                             .label(settings::flash_btn_label(&copy_id, "复制", cx))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
@@ -1448,7 +1475,7 @@ fn render_webhook_entry(
                         let copy_curl = webhook_curl_example(&url);
                         let copy_entity = copy_entity.clone();
                         let curl_id_click = curl_id.clone();
-                        compact_chip(curl_id.clone())
+                        compact_chip("automation-copy-webhook-curl")
                             .label(settings::flash_btn_label(&curl_id, "复制示例", cx))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_curl.clone()));
@@ -1463,7 +1490,7 @@ fn render_webhook_entry(
                 .when(!editor.is_new, |actions| {
                     let entity = entity.clone();
                     actions.child(
-                        compact_chip(regen_id.clone())
+                        compact_chip("automation-regen-webhook")
                             .loading(editor.saving_revision.is_some() && editor.quiet_save)
                             .label(settings::flash_btn_label(&regen_id, "重新生成地址", cx))
                             .on_click(move |_, _, cx| {
@@ -1497,21 +1524,19 @@ fn render_schedule_rule(
     cx: &App,
 ) -> AnyElement {
     let frequency = (!rule.kind.is_interval()).then(|| {
-        segmented_track(cx).children(ScheduleKind::clock_kinds().into_iter().enumerate().map(
-            |(kind_index, kind)| {
-                let selected = kind == rule.kind;
-                let frequency_entity = entity.clone();
-                compact_chip(format!("agent-trigger-frequency-{index}-{kind_index}"))
-                    .label(kind.label())
-                    .selected(selected)
-                    .toggled(selected)
-                    .on_click(move |_, _, cx| {
-                        frequency_entity.update(cx, |workspace, cx| {
-                            workspace.set_trigger_schedule_kind(index, kind, cx);
-                        });
-                    })
-            },
-        ))
+        segmented_track(cx).children(ScheduleKind::clock_kinds().into_iter().map(|kind| {
+            let selected = kind == rule.kind;
+            let frequency_entity = entity.clone();
+            compact_chip((ElementId::from("agent-trigger-frequency"), kind.id_name()))
+                .label(kind.label())
+                .selected(selected)
+                .toggled(selected)
+                .on_click(move |_, _, cx| {
+                    frequency_entity.update(cx, |workspace, cx| {
+                        workspace.set_trigger_schedule_kind(index, kind, cx);
+                    });
+                })
+        }))
     });
     let clock = |input: &Entity<InputState>, aria: &'static str| {
         framed_text_input(input, aria)
@@ -1524,12 +1549,12 @@ fn render_schedule_rule(
             .text_color(cx.theme().muted_foreground)
             .child(local_timezone_label())
     };
-    let weekday_picker = |id_prefix: &str| {
+    let weekday_picker = |id_prefix: &'static str| {
         segmented_track(cx).children((0..7).map(|day_index| {
             let bit = 1_u8 << day_index;
             let selected = rule.weekday_mask & bit != 0;
             let day_entity = entity.clone();
-            compact_chip(format!("{id_prefix}-{index}-{day_index}"))
+            compact_chip((id_prefix, day_index))
                 .w(px(32.))
                 .label(smelt_core::automation::SCHEDULE_DAY_LABELS[day_index])
                 .selected(selected)
@@ -1545,21 +1570,19 @@ fn render_schedule_rule(
     let schedule_control = match rule.kind {
         ScheduleKind::Interval => {
             let day_scope =
-                segmented_track(cx).children(IntervalDayScope::all().into_iter().enumerate().map(
-                    |(scope_index, scope)| {
-                        let selected = scope == rule.interval_day_scope;
-                        let scope_entity = entity.clone();
-                        compact_chip(format!("automation-interval-days-{index}-{scope_index}"))
-                            .label(scope.label())
-                            .selected(selected)
-                            .toggled(selected)
-                            .on_click(move |_, _, cx| {
-                                scope_entity.update(cx, |workspace, cx| {
-                                    workspace.set_interval_day_scope(index, scope, cx);
-                                });
-                            })
-                    },
-                ));
+                segmented_track(cx).children(IntervalDayScope::all().into_iter().map(|scope| {
+                    let selected = scope == rule.interval_day_scope;
+                    let scope_entity = entity.clone();
+                    compact_chip((ElementId::from("automation-interval-days"), scope.id_name()))
+                        .label(scope.label())
+                        .selected(selected)
+                        .toggled(selected)
+                        .on_click(move |_, _, cx| {
+                            scope_entity.update(cx, |workspace, cx| {
+                                workspace.set_interval_day_scope(index, scope, cx);
+                            });
+                        })
+                }));
             let mut interval_body = div()
                 .flex()
                 .flex_col()
@@ -1581,9 +1604,9 @@ fn render_schedule_rule(
                                     .map(|unit| {
                                         let selected = unit == interval_unit;
                                         let unit_entity = entity.clone();
-                                        compact_chip(format!(
-                                            "automation-interval-unit-{index}-{}",
-                                            unit.label()
+                                        compact_chip((
+                                            ElementId::from("automation-interval-unit"),
+                                            unit.id_name(),
                                         ))
                                         .label(unit.label())
                                         .selected(selected)
@@ -1627,7 +1650,7 @@ fn render_schedule_rule(
                         .child(clock(&rule.window_end, "结束时间"))
                         .child(timezone())
                         .child(
-                            compact_chip(format!("automation-interval-window-clear-{index}"))
+                            compact_chip("automation-interval-window-clear")
                                 .label("全天")
                                 .on_click(move |_, window, cx| {
                                     close_entity.update(cx, |workspace, cx| {
@@ -1640,7 +1663,7 @@ fn render_schedule_rule(
             } else {
                 let open_entity = entity.clone();
                 interval_body = interval_body.child(
-                    compact_chip(format!("automation-interval-window-open-{index}"))
+                    compact_chip("automation-interval-window-open")
                         .label("限制时段")
                         .on_click(move |_, window, cx| {
                             open_entity.update(cx, |workspace, cx| {
@@ -1682,7 +1705,7 @@ fn render_schedule_rule(
     };
     let remove = can_remove.then(|| {
         let remove_entity = entity.clone();
-        compact_chip(format!("automation-remove-schedule-{index}"))
+        compact_chip("automation-remove-schedule")
             .icon(crate::trash_icon())
             .tooltip("删除时间设置")
             .on_click(move |_, _, cx| {
