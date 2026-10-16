@@ -15,9 +15,9 @@ use crate::{
 
 impl Workspace {
     /// 「关闭项目」确认弹窗：说清会连带关掉几个会话（视觉同删 Worktree 那套危险配色）。
-    pub(crate) fn render_close_project_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_close_project_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some((label, _, n)) = self.close_project_target.clone() else {
-            return div();
+            return div().into_any_element();
         };
         let (fg, muted) = {
             let t = cx.theme();
@@ -53,12 +53,18 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(380., true, content, cx)
+        self.modal_shell(
+            380.,
+            true,
+            content,
+            crate::overlay::ModalLayer::CloseProject,
+            cx,
+        )
     }
 
     /// 「会话管理」弹窗：列出守护进程持有的全部会话，标出哪些是游离会话（没有任何
     /// 侧栏在追踪），逐个/批量清理。入口和弹层都在设置窗口里。
-    pub(crate) fn render_session_manager(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_session_manager(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted, border) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground, t.border)
@@ -84,14 +90,15 @@ impl Workspace {
                     .gap_1()
                     .max_h(px(360.))
                     .overflow_y_scroll();
-                for (row_index, s) in list.iter().enumerate() {
+                for s in list {
                     let is_detached = !tracked.contains(&s.id);
                     let is_acp = s.id.starts_with("acp-");
-                    let label = s
+                    let label: SharedString = s
                         .cwd
                         .clone()
                         .or_else(|| s.title.clone())
-                        .unwrap_or_else(|| s.id.clone());
+                        .unwrap_or_else(|| s.id.clone())
+                        .into();
                     let id_for_kill = s.id.clone();
                     rows = rows.child(
                         h_flex()
@@ -118,14 +125,17 @@ impl Workspace {
                                     )
                                     .child(
                                         div()
-                                            .id(("session-manager-label", row_index))
+                                            .id((
+                                                ElementId::from("session-manager-label"),
+                                                id_for_kill.clone(),
+                                            ))
                                             .flex_1()
                                             .min_w_0()
                                             .text_sm()
                                             .text_color(fg)
                                             .truncate()
                                             .tooltip({
-                                                let tip: SharedString = label.clone().into();
+                                                let tip = label.clone();
                                                 move |window, cx| {
                                                     gpui_component::tooltip::Tooltip::new(
                                                         tip.clone(),
@@ -133,7 +143,7 @@ impl Workspace {
                                                     .build(window, cx)
                                                 }
                                             })
-                                            .child(label),
+                                            .child(label.clone()),
                                     )
                                     .children(is_detached.then(|| {
                                         div()
@@ -215,7 +225,13 @@ impl Workspace {
                         ))
                     }),
             );
-        Self::modal_shell(420., true, content, cx)
+        self.modal_shell(
+            420.,
+            true,
+            content,
+            crate::overlay::ModalLayer::SessionManager,
+            cx,
+        )
     }
 
     /// 弹窗标题：半粗、跟正文同色阶，不要 `font_bold` + `text_lg` 喊出来。
@@ -223,36 +239,60 @@ impl Workspace {
         div().font_semibold().text_color(fg).child(label.into())
     }
 
-    /// 弹窗遮罩 + 居中卡片壳。Grok Bot：12px 圆角矩形、轻阴影、轻遮罩；
-    /// 胶囊只给按钮，不给整张卡。
+    /// 弹窗遮罩 + 居中卡片壳。沙色卡片和遮罩还是原来的；外壳换成
+    /// `gpui_base::Dialog`，只为了焦点陷阱。不走组件库那套 Dialog 皮肤。
+    ///
+    /// Esc 仍由 Workspace 捕获关掉。Dialog 的 Enter=Confirm 会无视当前按钮直接
+    /// 跑确定，危险操作不能这样，所以键盘上下文关掉。Tab 到按钮后，按钮自己的
+    /// Enter / Space 才生效。点遮罩不关闭。
     ///
     /// `heavy` 只比轻遮罩深一档（退出/删除仍用 true），不要把舞台压成纯黑。
     pub(crate) fn modal_shell(
+        &self,
         width: f32,
         heavy: bool,
         content: Div,
-        _cx: &mut Context<Self>,
-    ) -> Div {
+        layer: crate::overlay::ModalLayer,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let card = content
+            .occlude()
+            .w(px(width))
+            .p_5()
+            .bg(ui_theme::glass_floating())
+            .border_1()
+            .border_color(ui_theme::overlay(0x22))
+            .rounded(ui_theme::card_radius())
+            .shadow_sm()
+            .gap_4();
+        // 底下那层若也是 Dialog，会和最上层共用 dialog-host 与焦点句柄，
+        // 后画的列表会盖住确认框。底下只留卡片，焦点陷阱只挂最上层。
+        if !self.modal_is_top(layer) {
+            return div()
+                .absolute()
+                .inset_0()
+                .bg(ui_theme::glass_scrim(heavy))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(card)
+                .into_any_element();
+        }
         let backdrop = ui_theme::glass_scrim(heavy);
-        div()
-            .absolute()
-            .inset_0()
-            .bg(backdrop)
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                content
-                    .w(px(width))
-                    .p_5()
-                    .bg(ui_theme::glass_floating())
-                    .border_1()
-                    .border_color(ui_theme::overlay(0x22))
-                    .rounded(ui_theme::card_radius())
-                    .shadow_sm()
-                    .gap_4(),
+        gpui_base::Dialog::new(cx)
+            .focus_handle(self.modal_focus.clone())
+            .close_on_escape(false)
+            .close_on_backdrop_press(false)
+            .layer(layer.rank() as usize, true)
+            .backdrop(
+                div()
+                    .size_full()
+                    .bg(backdrop)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
             )
+            .popup(card)
+            .into_any_element()
     }
 
     /// 弹窗按钮的中性/强调配色：(中性底色, 中性 hover, 强调底色, 强调 hover, 强调文字色)。
@@ -269,7 +309,7 @@ impl Workspace {
                 Hsla::from(rgb(ui_theme::red())),
             )
         } else {
-            // 主操作跟 Grok Bot 发送钮同一套：近白/近黑实心胶囊，不用强调蓝。
+            // 主操作用当前主题的 primary（action_fill / action_on）。
             // danger 仍是红薄底，克制警示。
             (
                 neutral_bg,
@@ -281,30 +321,8 @@ impl Workspace {
         }
     }
 
-    /// 弹窗按钮的基础样式（尺寸/圆角/字号/底色/文字色/label），不含点击行为——大部分
-    /// 调用方直接用 [`Self::modal_button`]；`render_delete_worktree_confirm` 的
-    /// 「检查中…」禁用态需要条件性挂 hover/on_click，才会单独调这个再自己 `.when(...)`。
-    pub(crate) fn modal_button_base(
-        id: &'static str,
-        label: impl Into<SharedString>,
-        bg: Hsla,
-        text_color: Hsla,
-    ) -> Stateful<Div> {
-        div()
-            .id(id)
-            .h(px(32.))
-            .px_4()
-            .flex()
-            .items_center()
-            .rounded(ui_theme::row_radius())
-            .bg(bg)
-            .text_sm()
-            .font_medium()
-            .text_color(text_color)
-            .child(label.into())
-    }
-
-    /// 弹窗按钮：基础样式 + hover 变色 + 点击行为，覆盖绝大多数弹窗按钮的用法。
+    /// 弹窗按钮。用 `gpui_base::Button` 才进 Tab 序；Div 没有 tab stop。
+    /// 禁用时按钮自己丢掉焦点和点击。调用方用 `.disabled(...)`。
     pub(crate) fn modal_button(
         id: &'static str,
         label: &'static str,
@@ -313,15 +331,31 @@ impl Workspace {
         text_color: Hsla,
         on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        Self::modal_button_base(id, label, bg, text_color)
-            .cursor_pointer()
-            .hover(move |s| s.bg(hover_bg))
-            .on_click(cx.listener(on_click))
+    ) -> gpui_base::Button {
+        let host = cx.entity().downgrade();
+        gpui_base::Button::new(id)
+            .h(ui_theme::height::md())
+            .px_4()
+            .flex()
+            .items_center()
+            .rounded(ui_theme::row_radius())
+            .bg(bg)
+            .text_sm()
+            .font_medium()
+            .text_color(text_color)
+            .hover(move |style| style.bg(hover_bg))
+            .accessibility_label(label)
+            .child(label)
+            .on_click(move |event, window, cx| {
+                let Some(host) = host.upgrade() else {
+                    return;
+                };
+                host.update(cx, |this, cx| on_click(this, event, window, cx));
+            })
     }
 
     /// 渲染无条件退出确认弹层：轻遮罩 + 确认退出/取消按钮。
-    pub(crate) fn render_quit_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_quit_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -397,13 +431,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(320., true, content, cx)
+        self.modal_shell(320., true, content, crate::overlay::ModalLayer::Quit, cx)
     }
 
     /// 侧栏「重命名」弹层：与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩），
     /// 正文换成预填当前标题的文本框。仅在 self.rename_input 就绪时被调用（见
     /// start_rename/上面 .children(self.rename_target.is_some()...)）。
-    pub(crate) fn render_rename_session(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_rename_session(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -411,7 +445,7 @@ impl Workspace {
         let (neutral_bg, neutral_hover, tint, hover, accent_text) =
             Self::modal_accent_colors(false);
         let Some(input) = self.rename_input.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         // 会话行和分屏子行共用这个弹窗，标题得说清改的是哪个。
         let heading = match self.rename_target {
@@ -453,7 +487,7 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(320., false, content, cx)
+        self.modal_shell(320., false, content, crate::overlay::ModalLayer::Rename, cx)
     }
 
     /// 「重启守护进程」二次确认弹窗：明确告知会断开所有当前终端会话。与
@@ -461,7 +495,7 @@ impl Workspace {
     ///
     /// 入口只在设置窗「更新」页；弹层挂在设置窗上（见 `SettingsWindow::render`），
     /// 不再画到主窗口，避免「按钮在设置、确认框跑到主界面」的割裂感。
-    pub(crate) fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_daemon_restart_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -502,7 +536,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(320., true, content, cx)
+        self.modal_shell(
+            320.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DaemonRestart,
+            cx,
+        )
     }
 
     /// 当前文件有未保存改动、又点了别的文件时弹的确认弹窗：取消 / 不保存直接切换 /
@@ -511,7 +551,7 @@ impl Workspace {
         &self,
         target: String,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let (fg, muted) = {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
@@ -587,7 +627,13 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(360., true, content, cx)
+        self.modal_shell(
+            360.,
+            true,
+            content,
+            crate::overlay::ModalLayer::UnsavedFile,
+            cx,
+        )
     }
 
     /// 递归渲染分屏布局树：Leaf 渲染一个终端（活动 pane 描边 + 点击聚焦），
@@ -696,9 +742,19 @@ impl Workspace {
         let list_key = cwd
             .as_ref()
             .map(|c| crate::session_history::session_list_key(agent, profile_id.as_deref(), c));
-        let sessions = list_key
-            .as_ref()
-            .and_then(|k| self.session_list.get(k).map(|(_, d)| d.clone()));
+        let (sessions, row_text, row_keys) =
+            match list_key.as_ref().and_then(|key| self.session_list.get(key)) {
+                Some((_, list)) => (
+                    Some(list.sessions.clone()),
+                    list.row_text.clone(),
+                    list.row_keys.clone(),
+                ),
+                None => (
+                    None,
+                    std::rc::Rc::new(Vec::new()),
+                    std::rc::Rc::new(Vec::new()),
+                ),
+            };
         let list_state = match (cwd.as_ref(), sessions) {
             (None, _) => HistoryListState::NoProject,
             (Some(_), None) => HistoryListState::Loading,
@@ -724,8 +780,11 @@ impl Workspace {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect();
-            let mut history_agent_ids =
-                smelt_core::session_metadata::agent_definition_ids(agent, profile_id.as_deref());
+            let mut history_agent_ids = list_key
+                .as_ref()
+                .and_then(|key| self.history_agent_bindings.get(key))
+                .map(|bindings| bindings.as_ref().clone())
+                .unwrap_or_default();
             history_agent_ids.retain(|_, id| known.contains(id.as_str()));
             (
                 source_tabs,
@@ -748,6 +807,8 @@ impl Workspace {
                 launch_override,
                 profile_label,
                 history_agent_ids,
+                row_text,
+                row_keys,
             },
             cx,
         )

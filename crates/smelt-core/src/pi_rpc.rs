@@ -33,8 +33,10 @@ const SMELT_PERMISSION_TITLE: &str = "smelt.permission.v1";
 const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
+const SMELT_CODEMODE_COMMAND: &str = "smelt-codemode";
+const SMELT_CODEMODE_WIDGET: &str = "smelt-codemode";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct PiModel {
     provider: String,
     id: String,
@@ -46,6 +48,8 @@ struct PiModel {
 enum PendingConfig {
     Model(String),
     Thinking(String),
+    /// 请求的 `off` / `on`。回执只表示命令被处理，勾选以扩展回报的活动工具为准。
+    Codemode(String),
 }
 
 #[derive(Default)]
@@ -57,6 +61,8 @@ struct PiState {
     thinking_level: String,
     thinking_levels: Vec<String>,
     permission_mode: String,
+    /// 脚本工具是否已在活动工具集里。启动默认关，只信扩展回报。
+    codemode_enabled: bool,
     available_commands: Vec<(String, String)>,
     active_turn: bool,
     /// Pi 已经收下当前这条 prompt。没收下之前，`agent_settled` 属于上一轮，
@@ -74,6 +80,9 @@ struct PiState {
     pending_refusal_error: Option<String>,
     /// 用户停止后补问的 `get_state`。界面先停，这条回来才知道能不能再发。
     cancel_state_request_id: Option<String>,
+    /// 用户在应用里登录/改配置后补拉的 `get_available_models`。会话启动时那一次走
+    /// `rpc_call` 同步等，不走这里。
+    models_request_id: Option<String>,
     /// 压缩已经结束。拒绝用的快照可能仍写着 `isCompacting`，不能再把它当成还在忙。
     compaction_idle_pending: bool,
     /// 已发出、等 Pi 回执的 steer 请求。只用来把 `in_flight_rpc` 记账还回去；
@@ -81,9 +90,7 @@ struct PiState {
     steer_request_ids: HashSet<String>,
     follow_up_request_ids: HashSet<String>,
     compact_request_ids: HashSet<String>,
-    reload_request_ids: HashSet<String>,
-    /// `reload` 成功后补发的 `get_commands`。技能和提示词可能刚变过。
-    commands_refresh_id: Option<String>,
+
     /// `clear_queue` 回执后是否要把 in_flight 还回去（ClearQueue 动作才要）。
     pending_clear: Option<(String, bool)>,
     composer_restore_seq: u64,
@@ -104,6 +111,13 @@ struct PiState {
     /// fork 成功后补发 `get_state` 的请求 id：Pi 切到了新 session 文件，
     /// 本地 session id 必须跟着换，否则后续断线重连会恢复到被丢弃的旧分支。
     rewind_state_request_id: Option<String>,
+    /// 最近一条 `prompt` 写出的时刻，以及本会话已发出的条数。Pi 的 response 才算
+    /// 「收下」，而它前面压着整个 `before_agent_start`（扩展在那里做慢活就直接计
+    /// 在这段时延里），所以这是首轮卡顿唯一的可观测点。
+    prompt_sent_at: Option<std::time::Instant>,
+    prompts_sent: u64,
+    /// Smelt 侧会话 id，只用于日志可读（Pi 自己的 id 在 `session_id`）。
+    sid: String,
     next_request_id: u64,
 }
 
@@ -355,6 +369,7 @@ async fn run_connection(
         let mut writer = child_stdin;
         let mut lines = futures::io::BufReader::new(child_stdout).lines();
         let mut state = PiState::new();
+        state.sid = launch.sid.clone();
         let initialize = initialize_session(
             &mut lines,
             &mut writer,
@@ -693,33 +708,7 @@ where
         serde_json::json!({"type": "get_available_models"}),
     )
     .await?;
-    state.models = response_data(&response)?["models"]
-        .as_array()
-        .map(|models| models.iter().filter_map(parse_model).collect())
-        .unwrap_or_default();
-
-    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
-        for cp in settings.custom_providers {
-            for m in cp.models {
-                if !state
-                    .models
-                    .iter()
-                    .any(|existing| existing.provider == cp.id && existing.id == m.id)
-                {
-                    state.models.push(PiModel {
-                        provider: cp.id.clone(),
-                        id: m.id.clone(),
-                        name: if m.name.is_empty() {
-                            m.id.clone()
-                        } else {
-                            m.name
-                        },
-                        context_window: m.context_window,
-                    });
-                }
-            }
-        }
-    }
+    state.models = parse_available_models(response_data(&response)?);
 
     let force_agent_model = agent_model_from_launch(launch);
     if force_agent_model.is_some()
@@ -861,9 +850,9 @@ where
         native_queue: true,
         rewind: true,
     });
-    let _ = event_tx.try_send(ConversationEvent::AvailableCommands(
-        state.available_commands.clone(),
-    ));
+    let _ = event_tx.try_send(ConversationEvent::AvailableCommands(publishable_commands(
+        &state.available_commands,
+    )));
     if let Some(title) = state.session_name.clone() {
         let _ = event_tx.try_send(ConversationEvent::SessionTitle(Some(title)));
     }
@@ -1023,6 +1012,41 @@ fn apply_state_response(state: &mut PiState, data: &serde_json::Value) -> Result
     Ok(())
 }
 
+/// 把 `get_available_models` 的响应拼成完整模型目录。
+///
+/// Pi 只报它自己知道的 provider；`models.json` 里的自定义 provider 是我们这边的
+/// 配置，Pi 不认，所以要在这里并进去。会话初始化和运行中刷新目录走同一条路径，
+/// 否则刷新回来的列表会悄悄少掉自定义 provider。
+fn parse_available_models(data: &serde_json::Value) -> Vec<PiModel> {
+    let mut models: Vec<PiModel> = data["models"]
+        .as_array()
+        .map(|models| models.iter().filter_map(parse_model).collect())
+        .unwrap_or_default();
+
+    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
+        for cp in settings.custom_providers {
+            for m in cp.models {
+                if !models
+                    .iter()
+                    .any(|existing| existing.provider == cp.id && existing.id == m.id)
+                {
+                    models.push(PiModel {
+                        provider: cp.id.clone(),
+                        id: m.id.clone(),
+                        name: if m.name.is_empty() {
+                            m.id.clone()
+                        } else {
+                            m.name
+                        },
+                        context_window: m.context_window,
+                    });
+                }
+            }
+        }
+    }
+    models
+}
+
 fn parse_model(value: &serde_json::Value) -> Option<PiModel> {
     Some(PiModel {
         provider: value.get("provider")?.as_str()?.to_string(),
@@ -1149,7 +1173,7 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
     } else {
         "逐次审批"
     };
-    let _ = event_tx.try_send(ConversationEvent::ConfigOptions(vec![
+    let mut configs = vec![
         SessionConfigState {
             config_id: "mode".to_string(),
             name: "权限模式".to_string(),
@@ -1175,7 +1199,41 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
                 .collect(),
             boolean: None,
         },
-    ]));
+    ];
+    if codemode_command_available(state) {
+        configs.push(codemode_config(state));
+    }
+    let _ = event_tx.try_send(ConversationEvent::ConfigOptions(configs));
+}
+
+fn codemode_command_available(state: &PiState) -> bool {
+    state
+        .available_commands
+        .iter()
+        .any(|(name, _)| name == SMELT_CODEMODE_COMMAND)
+}
+
+fn codemode_config(state: &PiState) -> SessionConfigState {
+    SessionConfigState {
+        config_id: "codemode".to_string(),
+        name: "脚本工具".to_string(),
+        description: Some("模型写脚本调用其它工具，下一轮生效".to_string()),
+        current_name: if state.codemode_enabled { "开" } else { "关" }.to_string(),
+        options: vec![
+            ("off".to_string(), "关".to_string()),
+            ("on".to_string(), "开".to_string()),
+        ],
+        boolean: None,
+    }
+}
+
+/// 内部开关命令不进 slash 菜单。缺了它，会话配置行也不发布。
+fn publishable_commands(commands: &[(String, String)]) -> Vec<(String, String)> {
+    commands
+        .iter()
+        .filter(|(name, _)| name != SMELT_CODEMODE_COMMAND)
+        .cloned()
+        .collect()
 }
 
 fn thinking_name(level: &str) -> &str {
@@ -1287,7 +1345,8 @@ pub fn parse_session_slash(text: &str) -> Option<PiSessionSlash> {
     None
 }
 
-/// 已识别的会话命令不再交给模型。`turn_is_active == false` 时 `/shake` 仍是普通文本。
+/// 已识别的会话命令不再交给模型。`/reload` 官方 RPC 没有对应方法，不能用 prompt
+/// 模拟：那会占住 stdin 读循环，并可能停在「已用 0s」。直接拒绝。
 async fn consume_session_slash<W: AsyncWrite + Unpin>(
     text: &str,
     writer: &mut W,
@@ -1301,14 +1360,13 @@ async fn consume_session_slash<W: AsyncWrite + Unpin>(
     };
     match slash {
         PiSessionSlash::Reload => {
-            if turn_is_active {
-                finish_in_flight(in_flight_rpc);
-                let _ = event_tx.try_send(ConversationEvent::Status(
-                    "回合进行中，结束后再 /reload".to_string(),
-                ));
-                return Ok(true);
+            finish_in_flight(in_flight_rpc);
+            let _ = event_tx.try_send(ConversationEvent::Status(
+                "当前协议不支持 /reload，不会发给模型".to_string(),
+            ));
+            if !turn_is_active {
+                mark_provider_idle(state, event_tx);
             }
-            send_reload(writer, state).await?;
             Ok(true)
         }
         PiSessionSlash::Shake if turn_is_active => {
@@ -1365,6 +1423,7 @@ fn background_notice_from_outbound(message: &serde_json::Value) -> Option<Conver
         .filter(|id| !id.is_empty())?;
     Some(ConversationEvent::BackgroundNotice(
         crate::acp_chat::TaskNote {
+            kind: crate::acp_chat::TaskNoteKind::BackgroundTask,
             id: id.to_string(),
             title: message
                 .get("title")
@@ -1440,6 +1499,8 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 request["images"] = serde_json::Value::Array(images);
             }
             write_rpc(writer, &request).await?;
+            state.prompts_sent += 1;
+            state.prompt_sent_at = Some(std::time::Instant::now());
         }
         ConversationCommand::Steer { text, images } => {
             // steer 只对正在跑的回合有意义。界面和 Pi 都空了就降级成普通 prompt，
@@ -1569,6 +1630,21 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         ConversationCommand::SetConfigOption { config_id, value } => {
             handle_config_command(config_id, value, writer, event_tx, state, in_flight_rpc).await?;
         }
+        ConversationCommand::RefreshModels => {
+            // 发出去就不管了：响应回来时按 request id 认领（见 `models_request_id`）。
+            // 这里不能同步等——命令循环在这条路上没有 reader，等下去会把整条会话卡死。
+            let id = state.request_id("refresh-models");
+            state.models_request_id = Some(id.clone());
+            if write_rpc(
+                writer,
+                &serde_json::json!({"id": id, "type": "get_available_models"}),
+            )
+            .await
+            .is_err()
+            {
+                state.models_request_id = None;
+            }
+        }
         ConversationCommand::SetSessionTitle(title) => {
             let title = title.trim().to_string();
             // Pi 的 set_session_name 拒绝空名字；清空标题只在本地生效。
@@ -1589,15 +1665,6 @@ async fn handle_command<W: AsyncWrite + Unpin>(
         | ConversationCommand::Shutdown => {}
     }
     Ok(())
-}
-
-async fn send_reload<W: AsyncWrite + Unpin>(
-    writer: &mut W,
-    state: &mut PiState,
-) -> Result<(), String> {
-    let id = state.request_id("reload");
-    state.reload_request_ids.insert(id.clone());
-    write_rpc(writer, &serde_json::json!({"id": id, "type": "reload"})).await
 }
 
 async fn send_compact<W: AsyncWrite + Unpin>(
@@ -1678,6 +1745,30 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
             )
             .await?;
         }
+        "codemode" if matches!(value.as_str(), "off" | "on") => {
+            if !codemode_command_available(state) {
+                finish_in_flight(in_flight_rpc);
+                let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
+                    "当前 Pi 没有脚本工具",
+                )));
+                return Ok(());
+            }
+            // Pi 没有 set_active_tools。这条 prompt 只走扩展命令，回执是 handled，
+            // 不开模型回合，也不能记成用户消息。
+            let id = state.request_id("config-codemode");
+            state
+                .pending_configs
+                .insert(id.clone(), PendingConfig::Codemode(value.clone()));
+            write_rpc(
+                writer,
+                &serde_json::json!({
+                    "id": id,
+                    "type": "prompt",
+                    "message": format!("/{SMELT_CODEMODE_COMMAND} {value}"),
+                }),
+            )
+            .await?;
+        }
         "model" => {
             let Some((provider, model_id)) = value.split_once('/') else {
                 finish_in_flight(in_flight_rpc);
@@ -1727,6 +1818,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         .to_string();
     if state.prompt_request_id.as_deref() == Some(&id) {
         state.prompt_request_id = None;
+        // Pi 回这条 response 之前，这一轮还没真正开跑。首条通常最慢（扩展、MCP、
+        // skills 都在第一轮 run 里初始化），没有这行日志就只能靠体感。
+        if let Some(sent_at) = state.prompt_sent_at.take() {
+            crate::app_log::info(
+                "pi-rpc",
+                &format!(
+                    "会话 {} 第 {} 条 prompt 被 Pi 收下用时 {:?}（气泡在提交时已落地）",
+                    state.sid,
+                    state.prompts_sent,
+                    sent_at.elapsed()
+                ),
+            );
+        }
         if let Err(error) = ensure_response_success(&response) {
             // 先问 Pi 还在不在跑。忙着就不是这一条的失败，空了才是真的预检错误。
             state.pending_refusal_error = Some(error);
@@ -1824,6 +1928,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         }
         return Ok(());
     }
+    if state.models_request_id.as_deref() == Some(&id) {
+        state.models_request_id = None;
+        // 拉失败就维持旧目录：模型列表突然变空比列表过期严重得多。
+        if let Ok(()) = ensure_response_success(&response) {
+            let data = response.get("data").cloned().unwrap_or_default();
+            let models = parse_available_models(&data);
+            if !models.is_empty() && models != state.models {
+                state.models = models;
+                publish_configuration(state, event_tx);
+            }
+        }
+        return Ok(());
+    }
     if state.cancel_state_request_id.as_deref() == Some(&id) {
         state.cancel_state_request_id = None;
         match ensure_response_success(&response) {
@@ -1868,42 +1985,6 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             )));
         }
         finish_in_flight(in_flight_rpc);
-        return Ok(());
-    }
-    if state.reload_request_ids.remove(&id) {
-        match ensure_response_success(&response) {
-            Ok(()) => {
-                let _ = event_tx.try_send(ConversationEvent::Status(
-                    "已重新加载技能、扩展、提示词和上下文".to_string(),
-                ));
-                let refresh_id = state.request_id("commands");
-                state.commands_refresh_id = Some(refresh_id.clone());
-                write_rpc(
-                    writer,
-                    &serde_json::json!({"id": refresh_id, "type": "get_commands"}),
-                )
-                .await?;
-            }
-            Err(error) => {
-                let _ =
-                    event_tx.try_send(ConversationEvent::Status(format!("重新加载失败：{error}")));
-            }
-        }
-        // `/reload` 不触发 agent_start/agent_end。回执同时结束本地回合并声明 Pi 已空闲，
-        // 否则这条命令占住的发送闸门不会再开。失败详情已由 Status 展示。
-        let _ = event_tx.try_send(ConversationEvent::TurnEnded(StopReason::EndTurn));
-        mark_provider_idle(state, event_tx);
-        finish_in_flight(in_flight_rpc);
-        return Ok(());
-    }
-    if state.commands_refresh_id.as_deref() == Some(&id) {
-        state.commands_refresh_id = None;
-        if let Ok(data) = response_data(&response) {
-            state.available_commands = parse_pi_commands(data);
-            let _ = event_tx.try_send(ConversationEvent::AvailableCommands(
-                state.available_commands.clone(),
-            ));
-        }
         return Ok(());
     }
     if state
@@ -1979,6 +2060,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                     apply_requested_pi_model(state, &value, response.get("data"));
                 }
                 PendingConfig::Thinking(level) => state.thinking_level = level,
+                PendingConfig::Codemode(requested) => {
+                    let enabled = requested == "on";
+                    let handled = response
+                        .get("data")
+                        .and_then(|data| data.get("disposition"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("handled");
+                    if !handled || state.codemode_enabled != enabled {
+                        let _ = event_tx.try_send(ConversationEvent::Status(
+                            config_update_failure_status("脚本工具没有在下一轮生效"),
+                        ));
+                    }
+                }
             },
             Err(error) => {
                 let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
@@ -1993,7 +2087,7 @@ async fn handle_response<W: AsyncWrite + Unpin>(
 }
 
 fn finish_in_flight(counter: &AtomicUsize) {
-    let _ = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+    let _ = counter.try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
         value.checked_sub(1)
     });
 }
@@ -2391,6 +2485,17 @@ fn handle_event(
             }
         }
         Some("message_end") => {
+            // 后台子智能体的结果是自定义消息（`display: false`），实时到达时只有这里能看到。
+            // 只认子智能体：后台任务的状态行由守护进程自己发（`smelt_background_notify`），
+            // 这里再发一次会重复。
+            if let Some(message) = event.get("message")
+                && message.get("role").and_then(serde_json::Value::as_str) == Some("custom")
+                && let Some(note) = crate::acp_chat::task_note_from_pi_custom(message)
+                && note.kind == crate::acp_chat::TaskNoteKind::Subagent
+            {
+                let _ = event_tx.try_send(ConversationEvent::BackgroundNotice(note));
+                return;
+            }
             if let Some(message) = event.get("message")
                 && message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
             {
@@ -2536,7 +2641,9 @@ fn handle_event(
             }
         }
         Some("extension_ui_request") => {
-            handle_extension_ui(&event, event_tx, outbound_tx, state, launch)
+            if !apply_codemode_widget(&event, state, event_tx) {
+                handle_extension_ui(&event, event_tx, outbound_tx, state, launch)
+            }
         }
         Some("extension_error") => {
             let message = event
@@ -3739,6 +3846,35 @@ fn publish_extension_widget(
     }
 }
 
+/// 扩展用 widget 回报真实活动工具。菜单勾选只跟这个走。
+fn apply_codemode_widget(
+    request: &serde_json::Value,
+    state: &mut PiState,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+) -> bool {
+    if request.get("method").and_then(serde_json::Value::as_str) != Some("setWidget") {
+        return false;
+    }
+    if request.get("widgetKey").and_then(serde_json::Value::as_str) != Some(SMELT_CODEMODE_WIDGET) {
+        return false;
+    }
+    let Some(enabled) = request
+        .get("widgetLines")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|lines| lines.first())
+        .and_then(serde_json::Value::as_str)
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|payload| payload.get("enabled").and_then(serde_json::Value::as_bool))
+    else {
+        return true;
+    };
+    if state.codemode_enabled != enabled {
+        state.codemode_enabled = enabled;
+        publish_configuration(state, event_tx);
+    }
+    true
+}
+
 fn handle_extension_ui(
     request: &serde_json::Value,
     event_tx: &smol::channel::Sender<ConversationEvent>,
@@ -4100,7 +4236,6 @@ mod tests {
             resume_session_id: None,
             fork_session_id: None,
             fork_cut: None,
-            resume_needs_transcript_check: false,
         }
     }
 
@@ -4131,33 +4266,104 @@ mod tests {
         );
     }
 
-    /// `fork` 之后只剩调用线程。先挡住 `SIGCHLD` 再拉起子进程，回收线程会继承
-    /// 这份掩码，没有别的线程能接住信号。`Child::status()` 会停在这里。
+    /// 被拉起来跑探针的那个测试进程认这个变量；平时跑 `cargo test` 时探针直接返回。
+    #[cfg(unix)]
+    const REAP_PROBE_ENV: &str = "SMELT_TEST_REAP_PROBE";
+
+    /// 场景：没有任何线程能接住 `SIGCHLD`（守护进程 fork 后只剩调用线程时就是这样），
+    /// `Child::status()` 会一直停着。`PiProcessGuard` 必须照样把子进程收掉。
+    ///
+    /// 不能在测试进程里直接 `fork`：libtest 是多线程的，fork 出来的子进程只剩一个线程，
+    /// 别的测试线程那一刻若拿着 malloc 之类的锁，子进程一分配内存、一 spawn 就永远卡住——
+    /// 这是它在并行跑时偶发超时的原因。改成重新 exec 一个干净的测试进程，只跑下面的探针。
+    /// exec 前在子进程里挡住 `SIGCHLD`：信号掩码跨 exec 保留，新进程从第一个线程起就挡着，
+    /// 之后建的线程（包括 async-process 的回收线程）都继承，比原来只挡一个线程更严格。
     #[cfg(unix)]
     #[test]
     fn pi_process_guard_reaps_while_sigchld_is_blocked() {
-        let probe = unsafe { libc::fork() };
-        assert!(probe >= 0, "fork 失败");
-        if probe == 0 {
-            let code = reap_child_with_sigchld_blocked();
-            unsafe { libc::_exit(code) };
+        use std::os::unix::process::CommandExt as _;
+
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "pi_rpc::tests::reap_probe_with_sigchld_blocked",
+                "--ignored",
+                "--test-threads=1",
+                "--quiet",
+            ])
+            .env(REAP_PROBE_ENV, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // SAFETY: 只调用异步信号安全的 sigemptyset / sigaddset / sigprocmask。
+        unsafe {
+            command.pre_exec(|| {
+                let mut blocked = std::mem::zeroed();
+                if libc::sigemptyset(&mut blocked) != 0
+                    || libc::sigaddset(&mut blocked, libc::SIGCHLD) != 0
+                    || libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut status = 0;
-            let waited = unsafe { libc::waitpid(probe, &mut status, 0) };
-            let _ = sender.send((waited, status));
-        });
-        let finished = receiver.recv_timeout(std::time::Duration::from_secs(3));
-        let Ok((waited, status)) = finished else {
-            unsafe { libc::kill(probe, libc::SIGKILL) };
-            panic!("SIGCHLD 被挡住时收尸没有返回");
+        let mut probe = command.spawn().expect("拉起探针进程失败");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = probe.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                panic!("SIGCHLD 被挡住时收尸没有返回");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         };
-        assert_eq!(waited, probe);
-        assert!(
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-            "子进程退出状态 {status}"
+        let read_all = |pipe: Option<&mut dyn std::io::Read>| {
+            let mut text = String::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.read_to_string(&mut text);
+            }
+            text
+        };
+        let stdout = read_all(
+            probe
+                .stdout
+                .as_mut()
+                .map(|pipe| pipe as &mut dyn std::io::Read),
         );
+        let stderr = read_all(
+            probe
+                .stderr
+                .as_mut()
+                .map(|pipe| pipe as &mut dyn std::io::Read),
+        );
+        assert!(status.success(), "探针失败：{status}\n{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed"),
+            "探针必须真的跑过（改名后 --exact 匹配不到也会返回成功）：{stdout}"
+        );
+    }
+
+    /// 只在 `pi_process_guard_reaps_while_sigchld_is_blocked` 拉起的独立进程里有意义。
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "由 pi_process_guard_reaps_while_sigchld_is_blocked 在独立进程里启动"]
+    fn reap_probe_with_sigchld_blocked() {
+        if std::env::var_os(REAP_PROBE_ENV).is_none() {
+            return;
+        }
+        // 先确认场景成立：掩码确实跨 exec 带进来了，本线程（继承自主线程）挡着 SIGCHLD。
+        let inherited = unsafe {
+            let mut current = std::mem::zeroed();
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut current) == 0
+                && libc::sigismember(&current, libc::SIGCHLD) == 1
+        };
+        assert!(inherited, "探针进程没有继承到挡住 SIGCHLD 的掩码");
+        assert_eq!(reap_child_with_sigchld_blocked(), 0);
     }
 
     #[cfg(unix)]
@@ -4316,6 +4522,211 @@ mod tests {
                 option.config_id == "thought_level" && option.current_name == "高"
             })
         );
+        assert!(options.iter().all(|option| option.config_id != "codemode"));
+    }
+
+    fn with_codemode_command(state: &mut PiState) {
+        state
+            .available_commands
+            .push((SMELT_CODEMODE_COMMAND.to_string(), "toggle".to_string()));
+    }
+
+    fn codemode_option(options: &[SessionConfigState]) -> &SessionConfigState {
+        options
+            .iter()
+            .find(|option| option.config_id == "codemode")
+            .expect("脚本工具应单独成行")
+    }
+
+    #[test]
+    fn codemode_row_is_omitted_until_the_command_exists() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.thinking_levels = vec!["medium".to_string()];
+        publish_configuration(&state, &event_tx);
+        let ConversationEvent::ConfigOptions(options) = event_rx.try_recv().unwrap() else {
+            panic!("应发布会话配置");
+        };
+        assert!(options.iter().all(|option| option.config_id != "codemode"));
+
+        with_codemode_command(&mut state);
+        publish_configuration(&state, &event_tx);
+        let ConversationEvent::ConfigOptions(options) = event_rx.try_recv().unwrap() else {
+            panic!("命令出现后应重新发布");
+        };
+        let codemode = codemode_option(&options);
+        assert_eq!(codemode.name, "脚本工具");
+        assert_eq!(codemode.current_name, "关");
+        assert_eq!(
+            codemode.options,
+            vec![
+                ("off".to_string(), "关".to_string()),
+                ("on".to_string(), "开".to_string())
+            ]
+        );
+        assert_eq!(
+            publishable_commands(&state.available_commands),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    #[test]
+    fn codemode_widget_updates_the_checkmark_without_guessing() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.thinking_levels = vec!["medium".to_string()];
+        with_codemode_command(&mut state);
+
+        handle_event(
+            serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "widget-1",
+                "method": "setWidget",
+                "widgetKey": SMELT_CODEMODE_WIDGET,
+                "widgetLines": ["{\"enabled\":true}"]
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+
+        assert!(state.codemode_enabled);
+        let ConversationEvent::ConfigOptions(options) = event_rx.try_recv().unwrap() else {
+            panic!("回报开之后应刷新勾选");
+        };
+        assert_eq!(codemode_option(&options).current_name, "开");
+    }
+
+    #[test]
+    fn codemode_toggle_sends_a_handled_command_not_a_user_turn() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        with_codemode_command(&mut state);
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "codemode".to_string(),
+                value: ConfigValue::Select("on".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        let request = rpc_lines(writer).pop().unwrap();
+        assert_eq!(request["type"], "prompt");
+        assert_eq!(request["message"], "/smelt-codemode on");
+        assert!(!state.active_turn);
+        assert!(state.prompt_request_id.is_none());
+        assert!(!state.codemode_enabled);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn missing_codemode_command_does_not_start_a_prompt() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "codemode".to_string(),
+                value: ConfigValue::Select("on".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(rpc_lines(writer).is_empty());
+        assert!(!state.active_turn);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        let ConversationEvent::Status(status) = event_rx.try_recv().unwrap() else {
+            panic!("缺命令时应给出不支持状态");
+        };
+        assert!(status.starts_with("更新会话配置失败"));
+        assert!(status.contains("没有脚本工具"));
+    }
+
+    #[test]
+    fn codemode_response_without_widget_confirmation_is_a_failure() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.pending_configs.insert(
+            "smelt-config-codemode-1".into(),
+            PendingConfig::Codemode("on".into()),
+        );
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": "smelt-config-codemode-1",
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(!state.codemode_enabled);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        let ConversationEvent::Status(status) = event_rx.try_recv().unwrap() else {
+            panic!("没有扩展回报时不能把勾选改成开");
+        };
+        assert!(status.contains("没有在下一轮生效"));
+    }
+
+    #[test]
+    fn confirmed_codemode_response_keeps_the_checkmark() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.codemode_enabled = true;
+        state.thinking_levels = vec!["medium".to_string()];
+        with_codemode_command(&mut state);
+        state.pending_configs.insert(
+            "smelt-config-codemode-2".into(),
+            PendingConfig::Codemode("on".into()),
+        );
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": "smelt-config-codemode-2",
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        assert!(state.codemode_enabled);
+        assert!(event_rx.try_recv().is_ok_and(|event| {
+            matches!(event, ConversationEvent::ConfigOptions(options)
+                if codemode_option(&options).current_name == "开")
+        }));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -4786,6 +5197,55 @@ mod tests {
         assert_eq!(tool_kind("bash"), ToolKind::Execute);
         assert_eq!(tool_kind("subagent"), ToolKind::Collaborate);
         assert_eq!(tool_kind("stock_quote"), ToolKind::Other);
+    }
+
+    /// 后台子智能体的结果实时到达时画成状态行，不能变成用户消息；后台任务的同类
+    /// 自定义消息不在这里发，避免和守护进程自己发的状态行重复。
+    #[test]
+    fn live_subagent_result_becomes_a_task_note_once() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+
+        let custom = |custom_type: &str, id: &str| {
+            serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "custom",
+                    "customType": custom_type,
+                    "display": false,
+                    "content": [{"type": "text", "text": "<subagent-notification>…"}],
+                    "details": {"id": id, "title": "迁移", "status": "completed", "outputTail": "改好了"}
+                }
+            })
+        };
+        handle_event(
+            custom(crate::acp_chat::SMELT_SUBAGENT_RESULT_CUSTOM_TYPE, "sub-1"),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        handle_event(
+            custom(crate::acp_chat::SMELT_BACKGROUND_TASK_CUSTOM_TYPE, "bg-1"),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+
+        let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        let notes: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::BackgroundNotice(note) => Some(note),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1, "子智能体发一条，后台任务这里不发");
+        assert_eq!(notes[0].id, "sub-1");
+        assert_eq!(notes[0].kind, crate::acp_chat::TaskNoteKind::Subagent);
     }
 
     #[test]
@@ -6525,10 +6985,22 @@ mod tests {
         assert!(!parse_reload_slash("reload"));
     }
 
+    fn rpc_lines(writer: futures::io::Cursor<Vec<u8>>) -> Vec<serde_json::Value> {
+        String::from_utf8(writer.into_inner())
+            .unwrap()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     #[test]
-    fn slash_reload_sends_native_reload_instead_of_a_prompt() {
+    fn slash_reload_is_rejected_without_a_prompt() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         let mut state = PiState::new();
+        state
+            .available_commands
+            .push(("reload".into(), "Reload skills".into()));
         let in_flight = AtomicUsize::new(1);
         let mut writer = futures::io::Cursor::new(Vec::new());
 
@@ -6544,117 +7016,18 @@ mod tests {
         ))
         .unwrap();
 
-        let request: serde_json::Value =
-            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
-        assert_eq!(request["type"], "reload");
-        assert_eq!(state.reload_request_ids.len(), 1);
-        assert!(event_rx.try_recv().is_err());
+        assert!(rpc_lines(writer).is_empty());
         assert!(!state.active_turn);
-
-        let id = request["id"].as_str().unwrap().to_string();
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": id,
-                "type": "response",
-                "command": "reload",
-                "success": true
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("已重新加载")
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
+            Ok(ConversationEvent::Status(text)) if text.contains("不支持 /reload")
         ));
         assert!(matches!(
             event_rx.try_recv(),
             Ok(ConversationEvent::ProviderIdle)
         ));
-        let refresh: serde_json::Value =
-            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
-        assert_eq!(refresh["type"], "get_commands");
-        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
-
-        let refresh_id = refresh["id"].as_str().unwrap();
-        let mut writer = futures::io::Cursor::new(Vec::new());
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": refresh_id,
-                "type": "response",
-                "command": "get_commands",
-                "success": true,
-                "data": {
-                    "commands": [
-                        {"name": "reload", "description": "Reload skills"},
-                        {"name": "skill:new", "description": "刚加载的技能"}
-                    ]
-                }
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-        assert_eq!(
-            state.available_commands,
-            vec![
-                ("reload".to_string(), "Reload skills".to_string()),
-                ("skill:new".to_string(), "刚加载的技能".to_string()),
-            ]
-        );
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::AvailableCommands(commands))
-                if commands.iter().any(|(name, _)| name == "skill:new")
-        ));
-    }
-
-    #[test]
-    fn failed_slash_reload_also_ends_the_local_turn() {
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let mut state = PiState::new();
-        state.reload_request_ids.insert("reload-1".to_string());
-        let in_flight = AtomicUsize::new(1);
-        let mut writer = futures::io::Cursor::new(Vec::new());
-
-        smol::block_on(handle_response(
-            serde_json::json!({
-                "id": "reload-1",
-                "type": "response",
-                "command": "reload",
-                "success": false,
-                "error": "reload failed"
-            }),
-            &mut writer,
-            &event_tx,
-            &mut state,
-            &in_flight,
-        ))
-        .unwrap();
-
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("重新加载失败")
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
-        ));
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(ConversationEvent::ProviderIdle)
-        ));
-        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -6687,7 +7060,7 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("结束后再")
+            Ok(ConversationEvent::Status(text)) if text.contains("不支持 /reload")
         ));
     }
 
@@ -6820,7 +7193,7 @@ mod tests {
                     images: Vec::new(),
                 },
                 None,
-                Some("结束后再"),
+                Some("不支持 /reload"),
             ),
             (
                 ConversationCommand::Steer {
@@ -7055,9 +7428,8 @@ mod tests {
         .unwrap();
 
         let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
-        stream
-            .write_all(b"{\"op\":\"wait\",\"id\":\"bg-1\"}\n")
-            .unwrap();
+        let wait = serde_json::json!({"op": "wait", "id": started["id"]});
+        stream.write_all(format!("{wait}\n").as_bytes()).unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
         let finished: serde_json::Value = serde_json::from_str(line.trim()).unwrap();

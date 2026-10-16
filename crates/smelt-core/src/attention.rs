@@ -179,10 +179,19 @@ impl AttentionStore {
     /// Dock / 菜单栏数字：未读事件和仍未解决的行动项取并集，每个会话最多计 1。
     /// 因而普通完成在看过后消失，审批/输入/失败即使看过也会保留到 daemon 确认继续。
     pub fn badge_count(&self) -> usize {
-        self.current
-            .values()
-            .filter(|record| !record.read || record.item.kind.requires_action())
-            .count()
+        self.badge_sessions().len()
+    }
+
+    /// 菜单栏下拉用的同一集合。第二个值表示这条仍要处理，不能只当成未读完成。
+    pub fn badge_sessions(&self) -> Vec<(String, bool)> {
+        let mut sessions: Vec<_> = self
+            .current
+            .iter()
+            .filter(|(_, record)| !record.read || record.item.kind.requires_action())
+            .map(|(id, record)| (id.clone(), record.item.kind.requires_action()))
+            .collect();
+        sessions.sort_by(|left, right| left.0.cmp(&right.0));
+        sessions
     }
 
     pub fn unresolved_action_count(&self) -> usize {
@@ -537,6 +546,26 @@ mod tests {
             item("a", AttentionKind::Success, "done"),
             now + Duration::from_secs(2)
         ));
+    }
+
+    #[test]
+    fn badge_sessions_keep_unread_and_unresolved_actions_only() {
+        let now = Instant::now();
+        let mut store = AttentionStore::default();
+        store.publish(item("unread", AttentionKind::Success, "done"), now);
+        store.publish(item("seen-action", AttentionKind::Approval, "allow?"), now);
+        store.publish(item("seen-done", AttentionKind::Success, "done"), now);
+        store.mark_read("seen-action");
+        store.mark_read("seen-done");
+
+        assert_eq!(
+            store.badge_sessions(),
+            vec![
+                ("seen-action".to_string(), true),
+                ("unread".to_string(), false),
+            ]
+        );
+        assert_eq!(store.badge_count(), 2);
     }
 
     #[test]

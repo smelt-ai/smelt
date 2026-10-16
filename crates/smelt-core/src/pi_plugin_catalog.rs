@@ -1,7 +1,8 @@
 //! 智能体插件目录：枚举 Pi 会话可加载的 skill 与 extension。
 //!
-//! Pi 没有内置 MCP，可插拔的是 skill（Agent Skills 能力包）和 extension
-//! （注册工具/命令的 TS 模块）。裸 Pi 会自动发现全局资源及受信任项目中的原生资源；
+//! 可勾选的是 skill（Agent Skills 能力包）和 extension（注册工具/命令的 TS 模块）。
+//! MCP 服务器另有一份勾选（`AgentDefinition::mcp_servers`）：服务器本身是
+//! `~/.pi/agent/mcp.json` 里的全局配置（见 `pi_mcp`），智能体只连自己勾的那几个。裸 Pi 会自动发现全局资源及受信任项目中的原生资源；
 //! Smelt 的产品智能体则用勾选式加载：先关掉自动发现，再显式传入勾选插件和工作区技能。
 //!
 //! `discover_plugins` 只扫供产品智能体勾选的全局插件目录。智能体 space 和绑定目录里的

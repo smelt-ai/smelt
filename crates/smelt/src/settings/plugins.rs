@@ -97,7 +97,7 @@ fn discover_installed_plugins() -> Vec<InstalledPlugin> {
 }
 
 /// 守护里各插件的运行状态快照。设置页只渲染它，不自己去连守护。
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct PluginRuntimeStatuses {
     pub by_id: std::collections::HashMap<String, smelt_plugin_host::PluginStatus>,
     /// 查询本身失败时的原因（守护没跑、连不上等）。
@@ -106,52 +106,43 @@ pub struct PluginRuntimeStatuses {
 
 impl Global for PluginRuntimeStatuses {}
 
-/// 带节流的状态刷新：设置页每帧都会重建，不能每次都去连守护。
-pub fn refresh_plugin_statuses_throttled(cx: &mut App) {
-    use std::cell::Cell;
-    use std::time::{Duration, Instant};
-    const INTERVAL: Duration = Duration::from_secs(2);
-    thread_local! {
-        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
-    }
-    let now = Instant::now();
-    let due = LAST.with(|last| match last.get() {
-        Some(previous) if now.duration_since(previous) < INTERVAL => false,
-        _ => {
-            last.set(Some(now));
-            true
-        }
-    });
-    if due {
-        refresh_plugin_statuses(cx);
-    }
+/// 插件页打开时，状态轮询的间隔。查询本身在后台执行器里，间隔从结果写回之后算。
+pub(super) const PLUGIN_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 运行状态只出现在独立设置窗口的某个已安装插件页上。能力库和空的插件入口不查守护。
+pub(super) fn shows_plugin_runtime_status(
+    surface: SettingsSurface,
+    section: &SettingsSection,
+) -> bool {
+    surface == SettingsSurface::Window
+        && matches!(section, SettingsSection::Plugin { id } if !id.is_empty())
 }
 
-/// 到守护拉一次插件状态。跨进程 IO，放后台执行器，回主线程写 global。
-pub fn refresh_plugin_statuses(cx: &mut App) {
-    cx.spawn(async move |cx| {
-        let outcome = cx
-            .background_spawn(async move { terminal::plugin_statuses() })
-            .await;
-        cx.update(|cx| {
-            let snapshot = match outcome {
-                Ok(statuses) => PluginRuntimeStatuses {
-                    by_id: statuses
-                        .into_iter()
-                        .map(|status| (status.plugin_id.as_str().to_string(), status))
-                        .collect(),
-                    error: None,
-                },
-                Err(error) => PluginRuntimeStatuses {
-                    by_id: Default::default(),
-                    error: Some(error),
-                },
-            };
-            cx.set_global(snapshot);
-            cx.refresh_windows();
-        });
-    })
-    .detach();
+/// 把一次守护查询写进 Global。内容和当前快照一样就不动，避免无谓地通知观察者。
+pub(super) fn publish_plugin_runtime_statuses(
+    outcome: Result<Vec<smelt_plugin_host::PluginStatus>, String>,
+    cx: &mut App,
+) {
+    let next = match outcome {
+        Ok(statuses) => PluginRuntimeStatuses {
+            by_id: statuses
+                .into_iter()
+                .map(|status| (status.plugin_id.as_str().to_string(), status))
+                .collect(),
+            error: None,
+        },
+        Err(error) => PluginRuntimeStatuses {
+            by_id: Default::default(),
+            error: Some(error),
+        },
+    };
+    if cx
+        .try_global::<PluginRuntimeStatuses>()
+        .is_some_and(|current| current == &next)
+    {
+        return;
+    }
+    cx.set_global(next);
 }
 
 /// 把插件状态说成一句人话，附上失败原因。
@@ -212,8 +203,8 @@ pub fn apply_plugin_enabled(plugin_id: &str, enabled: bool, cx: &mut App) {
     cx.set_global(state);
     // 停用的插件必须立刻从 tab 栏消失，它的 WebView 也要一并收掉。
     crate::plugin_ui::refresh(cx);
-    // 守护那边起停进程需要一点时间，这里先清掉旧快照，避免设置页继续显示
-    // 上一轮的状态；下一次节流刷新会拉到新的。
+    // 守护那边起停进程需要一点时间。先清掉旧快照，避免设置页继续显示上一轮的状态。
+    // 插件页上的轮询会再拉一次。
     cx.set_global(PluginRuntimeStatuses::default());
 
     let plugin_id = plugin_id.to_string();
@@ -231,6 +222,29 @@ pub fn apply_plugin_enabled(plugin_id: &str, enabled: bool, cx: &mut App) {
 mod plugin_status_tests {
     use super::describe_plugin_status;
     use smelt_plugin_host::{PluginLifecycleState as State, PluginStatus};
+
+    #[test]
+    fn runtime_status_is_polled_only_while_a_plugin_page_is_open() {
+        let installed = super::SettingsSection::Plugin {
+            id: "com.example".into(),
+        };
+        assert!(super::shows_plugin_runtime_status(
+            super::SettingsSurface::Window,
+            &installed,
+        ));
+        assert!(!super::shows_plugin_runtime_status(
+            super::SettingsSurface::Window,
+            &super::SettingsSection::Plugin { id: String::new() },
+        ));
+        assert!(!super::shows_plugin_runtime_status(
+            super::SettingsSurface::Window,
+            &super::SettingsSection::AppearanceTheme,
+        ));
+        assert!(!super::shows_plugin_runtime_status(
+            super::SettingsSurface::Capabilities,
+            &installed,
+        ));
+    }
 
     fn status(state: State, last_error: Option<&str>) -> PluginStatus {
         PluginStatus {

@@ -40,6 +40,16 @@ pub async fn iroh_tunnel_path_status() -> Option<IrohPathStatus> {
         })
 }
 
+/// 距离隧道最近一次收到桌面数据过了多少毫秒。没有隧道或还没收到过数据时为 None。
+///
+/// 心跳 pong 和业务数据排在同一条有序流里，大消息传输期间 pong 会迟到；
+/// 只要字节还在到，连接就是活的。
+pub async fn iroh_tunnel_inbound_idle_ms() -> Option<u32> {
+    crate::iroh_tunnel::inbound_idle()
+        .await
+        .map(|idle| idle.as_millis().min(u32::MAX as u128) as u32)
+}
+
 /// App 启动时调用一次。
 #[frb(init)]
 pub fn init_app() {

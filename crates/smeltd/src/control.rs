@@ -13,7 +13,8 @@ use smelt_core::automation::{Automation, AutomationCommand, redact_automation_cr
 use smelt_core::automation_store::AutomationStore;
 use smelt_core::control_api::{
     AgentDefinitionGetResult, AgentDefinitionIdParams, AgentDefinitionListResult,
-    AgentDefinitionUpdateParams, AgentListParams, AgentSendParams, AutomationGetResult,
+    AgentDefinitionUpdateParams, AgentListParams, AgentMemoryRecordReadParams,
+    AgentMemoryRecordWriteParams, AgentMemorySessionParams, AgentSendParams, AutomationGetResult,
     AutomationListResult, AutomationRunOnceResult, AutomationSetEnabledParams,
     CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlError, ControlErrorCode,
     ControlMethod, ControlProtocolDescription, ControlRequestEnvelope, ControlResponse,
@@ -186,6 +187,39 @@ fn dispatch_control(
             match super::peer_messaging::list_agents(&params, sessions, acp_sessions) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => operation_error(control_version, &request_id, error),
+            }
+        }
+        ControlMethod::AgentMemoryMeta => {
+            let params: AgentMemorySessionParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::agent_memory_control::meta(&params, acp_sessions) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::AgentMemoryRecordRead => {
+            let params: AgentMemoryRecordReadParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::agent_memory_control::record_read(&params, acp_sessions) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::AgentMemoryRecordWrite => {
+            let params: AgentMemoryRecordWriteParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::agent_memory_control::record_write(&params, acp_sessions) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
             }
         }
         ControlMethod::AgentSend => {

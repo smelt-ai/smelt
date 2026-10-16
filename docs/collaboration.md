@@ -49,18 +49,19 @@ smelt 手里别人没有的牌是 **smeltd：终端会话能脱离人存活**。
 
 ### 为什么它在联机场景下是生死线
 
-无论本地还是联机场景，OSC 标题都不是状态来源；状态必须来自可验证的结构化生命周期事件。
+无论本地还是联机场景，会话名和状态都不来自 OSC。会话名来自 ACP `session_title` 或
+hook `SessionTitleChanged`，没有时用首条用户请求。状态必须来自可验证的结构化生命周期事件。
 
 联机场景下不行。手机上弹一张卡说「agent 在等你批准」，你点了 yes，结果它其实在跑测试——那个 `y` 就喂进了别的地方。**远程的人没有眼睛去纠错，状态必须是事实，不能是猜测。**
 
-### 三个信源，按可信度划分
+### 信源
 
-1. **OSC 0/2 + 9/777 + 响铃** —— 通用，标题只作展示，OSC/BEL 只作信息通知，绝不推断状态
-2. **Claude Code hook → `smelt-notify` 直写 smeltd socket** —— roadmap 已有此条；这是
-   **协议事实**，agent 亲口说的，可信度最高
-3. **`~/.claude/projects/*.jsonl` 的 watcher** —— AgentHub 借鉴项，第三方交叉验证
+1. **ACP `session_title` / hook `SessionTitleChanged`，以及首条 prompt 兜底** —— 会话名。OSC 0/2 不进入会话名。
+2. **agent hook → `smelt-notify` 直写 smeltd socket，以及 ACP 生命周期事件** —— 状态的协议事实。
+3. **OSC 9/99/777 与响铃** —— 只作信息通知，不推断状态，也不改会话名。
+4. **`~/.claude/projects/*.jsonl` 的 watcher** —— 用量与历史浏览，不是实时会话名。
 
-先把 schema 定死；只有协议事实进入状态通道，终端协议信号留在展示与信息通知通道。
+先把 schema 定死；只有协议事实进入状态通道和会话名。OSC 0/2 不在其中。
 
 ### schema 草案
 

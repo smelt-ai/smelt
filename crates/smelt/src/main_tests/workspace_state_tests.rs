@@ -173,7 +173,6 @@ mod restore_order_tests {
                 history_session_id: None,
                 sid: Some(format!("sid-{name}")),
                 refresh_launch_from_settings: false,
-                fork_origin: None,
                 conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
                 agent_session: None,
                 config_values: Vec::new(),

@@ -216,10 +216,37 @@ pub const SMELT_AGENT_INSTRUCTIONS_ENV: &str = "SMELT_AGENT_INSTRUCTIONS";
 /// 不会继承。
 pub const SMELT_AGENT_PLUGIN_ARGS_ENV: &str = "SMELT_AGENT_PLUGIN_ARGS";
 
+/// 产品智能体勾选的 MCP 服务器名（JSON 字符串数组，对应 `~/.pi/agent/mcp.json` 的键）。
+/// 启动器据此注册只连这几台的 MCP 扩展，消费后立刻删除。没勾任何服务器时不下发。
+pub const SMELT_AGENT_MCP_SERVERS_ENV: &str = "SMELT_AGENT_MCP_SERVERS";
+
+/// 勾了 MCP 服务器的智能体要额外加载的 Pi 内置扩展：`--no-extensions` 会把它们一起关掉，
+/// 而 MCP 工具默认（`codemode` / `deferred` 暴露）要靠它们才能被模型找到和调用。
+pub const PI_MCP_COMPANION_EXTENSIONS: [&str; 2] = ["builtin:codemode", "builtin:tool-search"];
+
 /// 产品智能体绑的默认模型。启动器消费后立刻删除，工具子进程不会继承。
 /// 成对出现才生效；只填一半等于没选。
 pub const SMELT_AGENT_MODEL_PROVIDER_ENV: &str = "SMELT_AGENT_MODEL_PROVIDER";
 pub const SMELT_AGENT_MODEL_ID_ENV: &str = "SMELT_AGENT_MODEL_ID";
+
+/// 产品智能体的记忆目录（绝对路径）。一个属于这个智能体，一个是跨智能体的用户全局层。
+/// 启动器消费后立刻删除：子智能体和工具子进程都不该读写记忆。见 `docs/agent-memory.md`。
+pub const SMELT_AGENT_MEMORY_DIR_ENV: &str = "SMELT_AGENT_MEMORY_DIR";
+pub const SMELT_USER_MEMORY_DIR_ENV: &str = "SMELT_USER_MEMORY_DIR";
+/// 无人值守的运行（自动化）。这类会话写的记忆一律进"待确认"，用户采纳后才生效。
+pub const SMELT_AGENT_UNATTENDED_ENV: &str = "SMELT_AGENT_UNATTENDED";
+
+/// 产品智能体的启动身份。设置刷新可以替换命令和普通 env，但不能丢掉它们，
+/// 否则重启后的会话就退化成普通 Pi 会话：插件和 MCP 的勾选一丢，Pi 会回到全量
+/// 自动发现，每场对话各连一遍 `mcp.json` 里的全部服务器。
+pub const SMELT_AGENT_LAUNCH_IDENTITY_ENVS: [&str; 6] = [
+    SMELT_AGENT_INSTRUCTIONS_ENV,
+    SMELT_AGENT_MEMORY_DIR_ENV,
+    SMELT_USER_MEMORY_DIR_ENV,
+    SMELT_AGENT_UNATTENDED_ENV,
+    SMELT_AGENT_PLUGIN_ARGS_ENV,
+    SMELT_AGENT_MCP_SERVERS_ENV,
+];
 
 /// 一家 ACP agent 的全部静态属性。**新增一种 agent = `CONVERSATION_AGENTS` 加一行 +
 /// 枚举加一条变体**，命令、显示名、设置项、新建菜单都从这张表派生。
@@ -787,8 +814,8 @@ pub static TERMINAL_AGENTS: &[TerminalAgentDescriptor] = &[
         cli_program: "codex",
         label: "Codex",
         quick_terminal_label: "Codex",
-        // 标题策略归 CLI 自己所有：Smelt 像普通终端一样接收其完整 OSC 0/2，
-        // 不通过启动参数压掉 spinner、项目名或其它 provider 自定义组成部分。
+        // 启动命令不改写 CLI 自己的标题配置。侧栏不读 OSC。
+        // 旧的 `tui.terminal_title=["thread-title"]` 只留在下面的迁移名单里。
         quick_terminal_cmd: "codex --dangerously-bypass-approvals-and-sandbox",
         previous_quick_terminal_cmds: &[concat!(
             "codex --dangerously-bypass-approvals-and-sandbox ",

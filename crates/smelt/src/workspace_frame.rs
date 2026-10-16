@@ -17,6 +17,24 @@ pub(crate) fn titlebar_options(shell_padding: Pixels) -> TitlebarOptions {
     options
 }
 
+/// 主工作台的窗口选项。顶栏是自绘的：空白处拖动、双击缩放都由
+/// [`with_window_drag`] 交给 `start_window_move` / `titlebar_double_click`。
+///
+/// `app_owns_titlebar_drag` 必须一起打开。否则 AppKit 仍把这 34px 当成系统
+/// 标题栏，macOS 27 会把单击扣住等双击判定，页签和顶栏按钮经常点不下去。
+/// 设置、会话追踪用系统标题栏，继续让 AppKit 拖，不要套这份选项。
+pub(crate) fn workspace_window_options(
+    shell_padding: Pixels,
+    window_background: WindowBackgroundAppearance,
+) -> WindowOptions {
+    WindowOptions {
+        titlebar: Some(titlebar_options(shell_padding)),
+        window_background,
+        app_owns_titlebar_drag: true,
+        ..Default::default()
+    }
+}
+
 /// 会话栏、舞台和工具栏共用的外壳。Grok Bot 分栏是贴边矩形，不是浮在壳里的圆角卡。
 pub(crate) fn card(surface: Hsla) -> Div {
     div()
@@ -57,23 +75,32 @@ pub(crate) fn with_window_drag<E: InteractiveElement>(el: E) -> E {
 }
 
 /// 会话内容区共用的背景图层：始终覆盖容器，裁切方式和终端保持一致。
-/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，主题底色/材质透出，
-/// 避免明亮图片直接铺满压过内容。
-pub(crate) fn background_image_layer(path: &str, opacity: f32) -> Div {
-    div().absolute().inset_0().child(
-        img(std::path::PathBuf::from(path))
-            .absolute()
-            .inset_0()
+/// `opacity` 是图片透明度（0–1）——图片做低透明度装饰层，主题底色透出。
+/// 透明度为 0 时不读文件。栅格图只画降采样预览，不把原图交给 `img()`。
+pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div {
+    let layer = div().absolute().inset_0();
+    if opacity <= 0.0 {
+        return layer;
+    }
+    let path = std::path::Path::new(path);
+    smelt_ui::image::ensure_file_preview(path, cx);
+    layer.child(
+        div()
             .size_full()
-            .object_fit(ObjectFit::Cover)
-            .opacity(opacity),
+            .opacity(opacity)
+            .child(smelt_ui::image::file_surface(
+                path,
+                smelt_ui::image::FileFit::Cover,
+            )),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TitlebarMouseAction, titlebar_mouse_action, titlebar_options};
-    use gpui::px;
+    use super::{
+        TitlebarMouseAction, titlebar_mouse_action, titlebar_options, workspace_window_options,
+    };
+    use gpui::{WindowBackgroundAppearance, px};
     use gpui_component::TitleBar;
 
     #[test]
@@ -106,5 +133,16 @@ mod tests {
             component_position.y + inset,
             "外壳顶部内边距变化时，交通灯必须随自绘顶栏一起移动"
         );
+    }
+
+    #[test]
+    fn self_drawn_titlebar_owns_its_drag() {
+        let options = workspace_window_options(px(0.), WindowBackgroundAppearance::Opaque);
+        assert!(
+            options.app_owns_titlebar_drag,
+            "自绘顶栏必须声明应用拥有拖动，否则 AppKit 扣住标题栏里的单击"
+        );
+        let titlebar = options.titlebar.expect("主窗口使用透明标题栏");
+        assert!(titlebar.appears_transparent);
     }
 }

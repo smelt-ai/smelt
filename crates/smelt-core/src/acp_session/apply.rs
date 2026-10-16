@@ -27,6 +27,37 @@ pub fn acknowledge_composer_restore(state: &mut AcpSessionState, revision: u64) 
     true
 }
 
+/// 立即发送已经认领了这一条。`clear_queue` 还回来的原文里拿掉一次出现，
+/// 不能再进输入框。没还回来说明 provider 已经把它吃掉或根本没进队列，调用方不得再发。
+pub fn take_claimed_queue_text(texts: &mut Vec<String>, claimed: &str) -> bool {
+    let Some(ix) = texts.iter().position(|text| text == claimed) else {
+        return false;
+    };
+    texts.remove(ix);
+    true
+}
+
+/// 活队列里第一次出现的文本。steering 附图跟着走；follow-up 没有附图。
+pub fn queued_item_images(
+    state: &AcpSessionState,
+    text: &str,
+) -> Option<(Vec<crate::acp_chat::AcpImage>, bool)> {
+    if let Some(ix) = state.queued_steering.iter().position(|item| item == text) {
+        return Some((
+            state
+                .queued_steering_images
+                .get(ix)
+                .cloned()
+                .unwrap_or_default(),
+            false,
+        ));
+    }
+    if state.queued_follow_up.iter().any(|item| item == text) {
+        return Some((Vec::new(), true));
+    }
+    None
+}
+
 /// 把没被收下的草稿还回输入框。文本和图片是同一份，revision 单调增加。
 /// 只有图、没有字也要还回去。
 pub fn queue_composer_restore(
@@ -64,6 +95,9 @@ pub struct ApplyOutcome {
     /// 本次事件替换了大体积 runtime debug sidecar。实时广播只在该位为真时携带
     /// sidecar，避免完整 provider payload 随每个流式 token 重复传输。
     pub runtime_debug_changed: bool,
+    /// 命令、配置、计划、队列、计时等会话信封变了。正文流式帧为 false，
+    /// 调用方省略信封，接收方保留上一份。
+    pub envelope_changed: bool,
     /// 相位刚变成需要人处理 → (标题, 正文, is_approval)，调用方决定要不要弹
     /// 通知（GUI 按各类 Agent 通知开关决定；这个决定权不下放到
     /// smeltd，因为那是纯 GUI 展示偏好，smeltd 不该知道）。
@@ -101,6 +135,7 @@ pub(super) fn resume_running(state: &mut AcpSessionState) {
 /// 分发里，避免为赋值再套一层函数。
 pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyOutcome {
     let mut outcome = ApplyOutcome::default();
+    let envelope_changed = !is_transcript_delta(&ev);
     let mut skip_persist = is_streaming_event(&ev);
     if clears_user_echo(&ev) {
         state.awaiting_user_echo = false;
@@ -167,7 +202,12 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::HistoryReplayStarted => {
             apply_history_replay_started(state, &mut outcome)
         }
-        ConversationEvent::HistoryReplayFinished => state.replaying_history = false,
+        ConversationEvent::HistoryReplayFinished => {
+            state.commit_replay();
+            // 提交换上的是整份正文。和回退一样，只有从 0 重发才能让窗口对齐。
+            // 从新长度发一帧空尾，窗口会把已有对话换成空的。
+            outcome.entries_offset = Some(0);
+        }
         ConversationEvent::RestoreFailed(failure) => apply_restore_failed(state, failure),
         ConversationEvent::UserChunk(text) => apply_user_chunk(state, &mut outcome, text),
         ConversationEvent::UserImage(image) => apply_user_image(state, &mut outcome, image),
@@ -278,6 +318,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
     }
 
     outcome.should_persist = !skip_persist;
+    outcome.envelope_changed = envelope_changed;
     outcome
 }
 
@@ -320,11 +361,30 @@ fn consumed_steering_count(old: &[String], new: &[String]) -> usize {
     }
 }
 
+fn is_transcript_delta(ev: &ConversationEvent) -> bool {
+    matches!(
+        ev,
+        ConversationEvent::AgentChunk { .. }
+            | ConversationEvent::ToolOutputDelta { .. }
+            | ConversationEvent::TerminalOutput { .. }
+            | ConversationEvent::ToolCall(_)
+            | ConversationEvent::ToolCallUpdate(_)
+            | ConversationEvent::ToolStarted { .. }
+            | ConversationEvent::ToolFinished { .. }
+            | ConversationEvent::ToolChildren { .. }
+            | ConversationEvent::ToolDebug { .. }
+            | ConversationEvent::UserChunk(_)
+            | ConversationEvent::UserImage(_)
+            | ConversationEvent::BackgroundNotice(_)
+    )
+}
+
 fn is_streaming_event(ev: &ConversationEvent) -> bool {
     matches!(
         ev,
         ConversationEvent::AgentChunk { .. }
             | ConversationEvent::TerminalOutput { .. }
+            | ConversationEvent::ToolOutputDelta { .. }
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
             | ConversationEvent::Model(_)
@@ -366,7 +426,13 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
 
 fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut ApplyOutcome) {
     outcome.entries_offset = Some(0);
-    state.entries.clear();
+    // 草稿必须从空缓冲重建，否则重放会追加到旧正文上。已发布的那份留在
+    // baseline，这一帧不能把 history_len 报成 0。
+    if state.replay_baseline.is_none() {
+        state.replay_baseline = Some(std::mem::take(&mut state.entries));
+    } else {
+        state.entries.clear();
+    }
     state.tool_debug.clear();
     state.note_tool_debug_changed();
     state.replaying_history = true;
@@ -376,8 +442,8 @@ fn apply_history_replay_started(state: &mut AcpSessionState, outcome: &mut Apply
 }
 
 fn apply_restore_failed(state: &mut AcpSessionState, failure: ConversationRestoreFailure) {
+    state.abandon_replay_scratch();
     super::force_end(state, AcpEndKind::RestoreFailed, failure.to_string());
-    state.replaying_history = false;
 }
 
 fn apply_user_chunk(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, text: String) {
@@ -442,10 +508,11 @@ fn apply_ready(
         && (!matches!(kind, ReadyKind::Fresh) || !state.entries.is_empty())
     {
         state.history_session_id = Some(session_id.to_string());
+        state.history_abandoned = false;
     }
     state.supports_image = supports_image;
     if !matches!(kind, ReadyKind::ResumedWithReplay) {
-        state.replaying_history = false;
+        state.abandon_replay_scratch();
     }
     match kind {
         ReadyKind::ResumedWithReplay => {}
@@ -1059,6 +1126,7 @@ fn apply_provider_session_id_changed(state: &mut AcpSessionState, session_id: Se
     }
     state.acp_session_id = Some(session_id.clone());
     state.history_session_id = Some(session_id);
+    state.history_abandoned = false;
 }
 
 /// 把一段 agent 正文/思考文本落进消息流：跟上一条同类 entry 合并，否则新起

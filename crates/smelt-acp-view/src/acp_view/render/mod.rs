@@ -6,20 +6,48 @@
 use super::*;
 use smelt_core::daemon_state::DaemonPhase;
 
+use super::ConversationTranscript;
+
 mod cards;
 mod composer;
 mod conversation;
 
 impl Render for AcpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_elicitation_inputs(window, cx);
-        self.apply_pending_composer_restore(window, cx);
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("AcpView");
+        self.settle_revealed_prompt();
+        // 技能目录一次就要数毫秒到几十毫秒。过期必须在启动规格变化时刷新，
+        // 不能留到绘制里扫盘。
+        debug_assert!(
+            !matches!(
+                loaded_skills_refresh(
+                    self.agent,
+                    &self.launch,
+                    &self.cwd,
+                    self.loaded_skills.as_ref(),
+                ),
+                LoadedSkillsRefresh::Rescan
+            ),
+            "技能目录过期却留到了绘制路径"
+        );
         let composer_focused = self
             .input
             .as_ref()
             .is_some_and(|input| input.focus_handle(cx).is_focused(window));
+        self.settle_composer_motion(cx.reduce_motion());
+        // 每个会话一条曲线。同一个窗口里换会话时不能接着上一条的焦点相位。
+        let focus_id: gpui::ElementId = ("acp-composer-focus", cx.entity_id()).into();
+        let composer_focus = unit_transition(
+            focus_id,
+            if composer_focused { 1.0 } else { 0.0 },
+            window,
+            cx,
+        );
+        if !cx.reduce_motion() && !self.pending_image_enter.is_empty() {
+            window.request_animation_frame();
+        }
         self.view(
-            composer_focused,
+            composer_focus,
             ambient_motion_enabled(
                 ambient_application_active(cx),
                 window.is_window_active(),
@@ -35,7 +63,7 @@ impl AcpView {
     /// 实际状态变更仍由父模块的方法集中处理。
     fn view(
         &self,
-        composer_focused: bool,
+        composer_focus: f32,
         animate_ambient: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -144,15 +172,14 @@ impl AcpView {
                             .child(
                                 div()
                                     .id("acp-restart")
-                                    .h(px(28.))
+                                    .h(ui_theme::height::sm())
                                     .px_3()
-                                    .rounded_full()
+                                    .rounded(ui_theme::row_radius())
                                     .bg(ui_theme::overlay(0x18))
                                     .flex()
                                     .items_center()
                                     .text_xs()
                                     .font_medium()
-                                    .cursor_pointer()
                                     .hover(|d| d.bg(ui_theme::overlay(0x28)))
                                     .child("重新开始")
                                     .on_click(cx.listener(|this, _ev, window, cx| {
@@ -223,6 +250,7 @@ impl AcpView {
                                 .rounded_full()
                                 .bg(ui_theme::overlay(0x14))
                                 .text_xs()
+                                .font_features(ui_theme::tabular_figures())
                                 .text_color(muted)
                                 .child(elapsed.clone()),
                         )
@@ -295,7 +323,7 @@ impl AcpView {
                         .child(
                             div()
                                 .id("acp-restart")
-                                .h(px(36.))
+                                .h(ui_theme::height::lg())
                                 .px_5()
                                 .rounded_full()
                                 .bg(gpui::rgb(ui_theme::action_fill()))
@@ -348,11 +376,11 @@ impl AcpView {
             ];
             // Grok 空状态是「大标题 + 一排安静的胶囊」，不是带编号的功能卡片墙。
             let mut prompt_chips = h_flex().w_full().justify_center().gap_2().flex_wrap();
-            for (prompt_index, (title, _detail, prompt)) in quick_prompts.iter().enumerate() {
-                let prompt = (*prompt).to_string();
+            for (title, _detail, prompt) in quick_prompts {
+                let prompt = prompt.to_string();
                 prompt_chips = prompt_chips.child(
                     div()
-                        .id(("acp-empty-prompt", prompt_index))
+                        .id((gpui::ElementId::from("acp-empty-prompt"), title))
                         .px_3()
                         .py_1p5()
                         .rounded_full()
@@ -361,7 +389,7 @@ impl AcpView {
                         .text_color(t.foreground)
                         .cursor_pointer()
                         .hover(|chip| chip.bg(ui_theme::overlay(0x22)))
-                        .child((*title).to_string())
+                        .child(gpui::SharedString::new_static(title))
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.insert_prompt_text(&prompt, window, cx);
                         })),
@@ -413,11 +441,7 @@ impl AcpView {
                                 .child(label)
                         }))
                         .children((self.agent == ConversationAgentKind::Pi).then(|| {
-                            let count = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
-                                &self.launch,
-                                self.cwd.as_deref().map(std::path::Path::new),
-                            )
-                            .len();
+                            let count = self.loaded_skills().len();
                             div().text_xs().text_color(muted).child(if count == 0 {
                                 "未加载技能".to_string()
                             } else {
@@ -427,95 +451,6 @@ impl AcpView {
                         .child(prompt_chips),
                 )
         });
-        let fork_banner = self.fork_origin.clone().map(|origin| {
-            let source_id = origin.session_id.clone();
-            let banner_text = fork_banner_text(&origin, self.agent);
-            let can_return = !origin.from_history;
-            h_flex()
-                .w_full()
-                .px_3()
-                .py_2()
-                .gap_2()
-                .items_center()
-                .border_b_1()
-                .border_color(t.border)
-                .text_xs()
-                .text_color(muted)
-                .child(Icon::new(IconName::SquareTerminal).xsmall())
-                .child(div().flex_1().min_w_0().truncate().child(banner_text))
-                .when(can_return, |row| {
-                    row.child(
-                        div()
-                            .id("acp-return-to-source")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(gpui::rgb(ui_theme::bg_hover())))
-                            .child("返回原会话")
-                            .on_click(cx.listener(move |_this, _ev, _window, cx| {
-                                cx.emit(AcpViewEvent::NavigateToSession(source_id.clone()));
-                            })),
-                    )
-                })
-                .into_any_element()
-        });
-        // GPUI 的可变高虚拟列表只构建视口与 overdraw 范围内的项。
-        // 每项的渲染通过 Entity 回到视图，保留工具卡的展开/收起交互。
-        let sticky_prompt = self
-            .entries
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(ix, entry)| {
-                is_user_entry(entry)
-                    && !matches!(entry, AcpEntry::User(text) if is_interrupt_marker(text))
-                    && self.list_state.item_is_above_viewport(*ix) == Some(true)
-            })
-            .map(|(_ix, entry)| {
-                let summary = match entry {
-                    AcpEntry::User(text) => text.split_whitespace().collect::<Vec<_>>().join(" "),
-                    AcpEntry::UserWithImages { text, images } => {
-                        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                        if text.is_empty() {
-                            format!("{} 张图片", images.len())
-                        } else {
-                            format!("{text} · {} 张图片", images.len())
-                        }
-                    }
-                    _ => unreachable!(),
-                };
-                h_flex()
-                    .absolute()
-                    .top(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
-                    .left_0()
-                    .right_0()
-                    .justify_center()
-                    .px_4()
-                    .pt_2()
-                    .child(
-                        h_flex()
-                            .id("acp-sticky-prompt")
-                            .w_full()
-                            .max_w(ui_theme::conversation_max_width())
-                            .h(px(38.))
-                            .px_3()
-                            .items_center()
-                            .rounded(ui_theme::card_radius())
-                            .border_1()
-                            .border_color(t.border)
-                            .bg(ui_theme::glass_floating())
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(gpui::rgb(ui_theme::text()))
-                                    .child(summary),
-                            ),
-                    )
-            });
         let jump_to_latest = self.viewing_history.then(|| {
             h_flex()
                 .absolute()
@@ -526,7 +461,9 @@ impl AcpView {
                 .child(
                     h_flex()
                         .id("acp-jump-to-latest")
-                        .h(px(36.))
+                        .role(gpui::Role::Button)
+                        .aria_label("回到最新")
+                        .h(ui_theme::height::lg())
                         .px_4()
                         .gap_2()
                         .items_center()
@@ -558,7 +495,6 @@ impl AcpView {
         });
         let border = t.border;
         let plan_bar = self.render_plan_bar(cx);
-        let background_bar = self.render_background_task_bar(cx);
         let history_error_banner = history_error.map(|error| {
             div()
                 .w_full()
@@ -572,14 +508,17 @@ impl AcpView {
                 .into_any_element()
         });
         // 顶上的条已经让开胶囊时，列表第一条不要再让一次。
-        let clear_capsule = history_error_banner.is_none()
-            && banner.is_none()
-            && fork_banner.is_none()
-            && plan_bar.is_none()
-            && background_bar.is_none();
-        let list = self.render_message_list(animate_ambient, clear_capsule, cx);
+        let clear_capsule = self.message_list_clears_capsule();
+        // 消息列表是独立缓存视图。这里每帧都会走到，但列表没脏时不会重排
+        // Markdown / 图片；打字只标脏输入框的祖先，不会标脏列表。
+        let list = self.transcript.clone().cached(
+            gpui::StyleRefinement::default()
+                .w_full()
+                .flex_1()
+                .min_h(gpui::px(0.)),
+        );
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
-        let input_row = self.render_composer(composer_focused, cx);
+        let input_row = self.render_composer(composer_focus, cx);
         v_flex()
             .size_full()
             .relative()
@@ -634,6 +573,10 @@ impl AcpView {
                         this.usage_popover_open = false;
                         cx.notify();
                         cx.stop_propagation();
+                    } else if this.background_tasks_open {
+                        this.background_tasks_open = false;
+                        cx.notify();
+                        cx.stop_propagation();
                     } else if this.completion.take().is_some() {
                         cx.notify();
                         cx.stop_propagation();
@@ -677,9 +620,7 @@ impl AcpView {
                     .pt(px(ui_theme::CHROME_ISLAND_CLEARANCE_PX))
                     .children(history_error_banner)
                     .children(banner)
-                    .children(fork_banner)
                     .children(plan_bar)
-                    .children(background_bar)
             }))
             .child(
                 v_flex()
@@ -693,7 +634,6 @@ impl AcpView {
                             .id("acp-message-scrollbar")
                             .mode(ScrollbarMode::Always)
                     }))
-                    .children(sticky_prompt)
                     .children(jump_to_latest)
                     .children(empty_conversation_state)
                     .children(starting_placeholder)
@@ -715,5 +655,63 @@ impl AcpView {
                     .child(msg.clone())
             }))
             .children(input_row)
+    }
+
+    fn message_list_clears_capsule(&self) -> bool {
+        let history_error_visible =
+            !matches!(self.phase, DaemonPhase::Connecting) && self.history_error.is_some();
+        if history_error_visible {
+            return false;
+        }
+        if self
+            .plan
+            .as_ref()
+            .is_some_and(|plan| !plan.entries.is_empty())
+        {
+            return false;
+        }
+        let show_starting_placeholder = should_show_starting_placeholder(
+            &self.phase,
+            self.entries.is_empty(),
+            self.history_session_id.is_some(),
+            self.pending_initial_prompt.is_some(),
+        );
+        let show_ended_placeholder =
+            matches!(self.phase, DaemonPhase::Dead) && self.entries.is_empty();
+        let non_fresh_starting =
+            matches!(self.phase, DaemonPhase::Connecting) && !self.is_fresh_conversation_start();
+        match self.phase {
+            DaemonPhase::Connecting if non_fresh_starting && !show_starting_placeholder => false,
+            DaemonPhase::Dead if !show_ended_placeholder => false,
+            _ => true,
+        }
+    }
+}
+
+impl Render for ConversationTranscript {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("Transcript");
+        let animate_ambient = ambient_motion_enabled(
+            ambient_application_active(cx),
+            window.is_window_active(),
+            true,
+        );
+        let reduce_motion = cx.reduce_motion();
+        let Some(host) = self.host.upgrade() else {
+            return div().into_any_element();
+        };
+        // 入场时钟在这次 settle 里才启动。先结算再要帧，新气泡的第一帧才会排下一帧。
+        // 帧要打在这条列表上：此刻的 current view 是 transcript，打在 AcpView 上不会让列表重画。
+        let decorative = host.update(cx, |view, _cx| {
+            view.settle_transcript_motion(reduce_motion);
+            view.decorative_transcript_motion()
+        });
+        if !reduce_motion && decorative {
+            window.request_animation_frame();
+        }
+        host.update(cx, |view, cx| {
+            let clear_capsule = view.message_list_clears_capsule();
+            view.render_message_list(animate_ambient, clear_capsule, cx)
+        })
     }
 }

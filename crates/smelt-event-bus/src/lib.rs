@@ -628,11 +628,6 @@ impl EventHub {
         }
     }
 
-    pub fn with_max_hops(mut self, max_hops: u16) -> Self {
-        self.max_hops = max_hops;
-        self
-    }
-
     pub fn register_snapshot_provider(
         &self,
         kind: SnapshotKind,
@@ -1263,24 +1258,6 @@ impl EventHub {
         self.store.is_some() && self.writer.is_some()
     }
 
-    pub fn command_result(
-        &self,
-        plugin_id: &PluginId,
-        command_id: &CommandId,
-    ) -> Result<Option<CommandResult>, EventBusError> {
-        self.store
-            .as_ref()
-            .ok_or_else(|| EventBusError::new("command dedupe requires an EventStore"))?
-            .get_command_result(plugin_id, command_id)
-    }
-
-    pub fn record_command_result(&self, result: &CommandResult) -> Result<bool, EventBusError> {
-        self.store
-            .as_ref()
-            .ok_or_else(|| EventBusError::new("command dedupe requires an EventStore"))?
-            .put_command_result(result)
-    }
-
     pub fn metrics(&self) -> EventHubMetrics {
         EventHubMetrics {
             durable_published: self.metrics.durable_published.load(Ordering::Relaxed),
@@ -1455,6 +1432,17 @@ impl EventHub {
             .remove(&(plugin_id.clone(), subscription_id.clone()))
             .is_some();
         Ok(removed)
+    }
+
+    /// 当前是否有订阅在听这个 topic。用于「请求只有订阅方能兑现」的场景：
+    /// 没人听就立刻回绝，而不是让请求方空等一个注定不会来的结果。
+    pub fn has_subscriber(&self, topic: &Topic) -> Result<bool, EventBusError> {
+        Ok(self
+            .subscribers
+            .lock()
+            .map_err(|_| EventBusError::new("subscriber registry lock poisoned"))?
+            .values()
+            .any(|subscriber| subscriber.topics.contains(topic)))
     }
 
     pub fn subscription_cursor(
@@ -2965,6 +2953,28 @@ mod tests {
             panic!("expected snapshot");
         };
         assert_eq!(snapshot.watermark, 0);
+    }
+
+    #[test]
+    fn has_subscriber_tracks_live_subscriptions_per_topic() {
+        let hub = EventHub::new(registry(DeliveryClass::Ephemeral, None), None);
+        let plugin = PluginId::new("com.example").unwrap();
+        let id = SubscriptionId::new("wake").unwrap();
+        assert!(!hub.has_subscriber(&topic("example.changed")).unwrap());
+        let _subscription = hub
+            .subscribe(
+                plugin.clone(),
+                id.clone(),
+                BTreeSet::from([topic("example.changed")]),
+                DeliveryClass::Ephemeral,
+                &BTreeSet::from([capability("session.read")]),
+                1,
+            )
+            .unwrap();
+        assert!(hub.has_subscriber(&topic("example.changed")).unwrap());
+        assert!(!hub.has_subscriber(&topic("other.changed")).unwrap());
+        hub.unsubscribe(&plugin, &id).unwrap();
+        assert!(!hub.has_subscriber(&topic("example.changed")).unwrap());
     }
 
     #[test]

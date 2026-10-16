@@ -16,11 +16,16 @@ Extension / Tool / Skill 交付。
 - `~/.pi/agent/extensions/`、项目 `.pi/extensions/` 以及 Pi 的 Skill 目录由
   `DefaultResourceLoader` 原生发现；Smelt 内置的 `subagent` 作为 Pi Extension 加载，
   不依赖用户全局安装。
-- Pi 本身不内置 MCP；当前不要把业务能力只放在 ACP/MCP 配置中。
+- Pi 1.1 起内置 MCP、codemode 和 tool search。对话菜单里的「脚本工具」打开 codemode，下一轮生效。Smelt 自己的业务能力仍以 Extension、Tool 和 Skill 交付，不只放进 MCP 配置。
+- 产品智能体勾选的 stdio MCP 服务器经共享网关（`src/mcp-gateway*.ts`）连接：整台机器每个服务器只起一个进程，
+  所有对话通过 `127.0.0.1` 上带令牌的 streamable HTTP 共用它。网关由第一个用到它的对话拉起（自成会话，对话结束不带走它），
+  状态文件在 `~/.smelt/run/mcp-gateway/`。服务器 10 分钟没有请求就停掉，下一次调用再拉起；列表类结果缓存到
+  服务器宣布变化为止，新对话接入不会唤醒它。没有对话、也没有服务器在跑时，网关 5 分钟后自行退出。
+  共享服务器在家目录运行、拿不到单个对话的 roots，服务器内的状态由所有对话共用。HTTP 服务器仍由 Pi 直连。
 
 ## 运行与安全
 
-发布时入口、Smelt Extensions、依赖补丁、`package.json` 和 `bun.lock` 会嵌入
+发布时入口、Smelt Extensions、`package.json` 和 `bun.lock` 会嵌入
 `smelt-core`。受管 Bun 与 Pi 分别以完整 SHA-256 identity 发布到
 `~/.smelt/runtime/store/bun/<generation-id>/` 和
 `~/.smelt/runtime/store/pi/<generation-id>/`；Pi generation identity 同时绑定 Bun

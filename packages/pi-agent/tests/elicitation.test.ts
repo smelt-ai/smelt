@@ -70,7 +70,7 @@ async function loadFactories(preceding: ExtensionFactory[] = []) {
 				eventBus,
 				runtime,
 				index < preceding.length
-					? "/Users/c.chen/.pi/agent/extensions/smelt_ask_user.ts"
+					? "/mock/home/.pi/agent/extensions/smelt_ask_user.ts"
 					: inlinePath(input, index),
 			),
 		),
@@ -87,6 +87,7 @@ async function loadHostExtensions(preceding: ExtensionFactory[] = []) {
 			description: tool.definition.description,
 			parameters: tool.definition.parameters,
 			promptGuidelines: tool.definition.promptGuidelines,
+			exposure: tool.definition.exposure ?? "direct",
 			sourceInfo: tool.sourceInfo,
 		}));
 	await loaded.runner.emit({ type: "session_start", reason: "startup" });

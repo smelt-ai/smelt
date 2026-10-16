@@ -1,0 +1,6 @@
+{
+  "id": "com.smelt.skills-native",
+  "name": "新技能",
+  "version": "0.1.0",
+  "entry": "main.js"
+}

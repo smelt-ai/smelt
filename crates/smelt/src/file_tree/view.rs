@@ -2,14 +2,16 @@
 //!
 //! 只组 UI。写缓存、打开文件、删盘的方法留在 `workspace.rs`。
 
+use gpui::ElementId;
 use gpui::InteractiveElement;
+use gpui::StatefulInteractiveElement;
 use gpui::prelude::FluentBuilder;
-use gpui::*;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::*;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
 use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
@@ -29,12 +31,17 @@ struct SearchTreeContext<'a> {
 fn search_tree_rows(
     dir: &SearchTreeDir,
     depth: usize,
-    row_id: &mut usize,
+    prefix: &str,
     context: &SearchTreeContext<'_>,
 ) -> Vec<AnyElement> {
     let mut rows = Vec::new();
 
     for (name, child) in &dir.dirs {
+        let mut rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         let mut label = name.clone();
         let mut visible_child = child;
         while visible_child.files.is_empty() && visible_child.dirs.len() == 1 {
@@ -45,14 +52,14 @@ fn search_tree_rows(
                 .expect("single child directory must exist");
             label.push_str(" / ");
             label.push_str(next_name);
+            rel.push('/');
+            rel.push_str(next_name);
             visible_child = next_child;
         }
 
-        let id = *row_id;
-        *row_id += 1;
         rows.push(
             div()
-                .id(("search-dir", id))
+                .id((ElementId::from("search-dir"), rel.clone()))
                 .flex()
                 .items_center()
                 .gap_1()
@@ -74,7 +81,7 @@ fn search_tree_rows(
                 .child(div().min_w_0().truncate().child(label))
                 .into_any_element(),
         );
-        rows.extend(search_tree_rows(visible_child, depth + 1, row_id, context));
+        rows.extend(search_tree_rows(visible_child, depth + 1, &rel, context));
     }
 
     for &ix in &dir.files {
@@ -86,13 +93,12 @@ fn search_tree_rows(
             .unwrap_or(hit.rel.as_str())
             .to_string();
         let path = hit.path.clone();
+        let rel = hit.rel.clone();
         let line = hit.line.as_ref().map(|(line, _)| *line);
-        let id = *row_id;
-        *row_id += 1;
         let open_view = context.view.clone();
         rows.push(
             div()
-                .id(("search-file", id))
+                .id((ElementId::from("search-file"), rel))
                 .flex()
                 .items_center()
                 .gap_1()
@@ -143,7 +149,6 @@ pub fn search_results_view(
     };
 
     let tree = build_search_tree(&state.hits);
-    let mut row_id = 0;
     let context = SearchTreeContext {
         hits: &state.hits,
         view: cx.entity(),
@@ -151,7 +156,7 @@ pub fn search_results_view(
         fg,
         hover,
     };
-    let rows = search_tree_rows(&tree, 0, &mut row_id, &context);
+    let rows = search_tree_rows(&tree, 0, "", &context);
 
     div()
         .id("search-results")
@@ -196,7 +201,8 @@ fn name_likely_truncated(name: &str, depth: usize, panel_w: f32) -> bool {
 }
 
 /// 只读缓存的递归收集目录条目（仅进入已展开且已缓存的文件夹）；绝不做任何 fs 调用。
-/// 展开了但尚未缓存的目录会被跳过——render 每帧检查并后台补齐，下一帧自动出现。
+/// 展开了但尚未缓存的目录会被跳过。展开、定位和可见数据刷新会去补目录列表，
+/// 缓存写回后再画出来。
 pub(super) fn walk_dir_cached(
     dir: &str,
     dir_cache: &DirCache,
@@ -217,29 +223,151 @@ pub(super) fn walk_dir_cached(
     }
 }
 
-/// 文件树视图：只读目录列表缓存渲染（ensure_dir_listing 后台刷新，绝不在这里碰
-/// 文件系统），已展开的文件夹递归显示，点击文件夹展开/收起、点击文件打开。
-///
-/// 未用 uniform_list 虚拟滚动：实测它对这里的行内容（含 Icon）的孤立测量会算出
-/// 异常偏大的行高，导致可视区间被判定只能塞下 1 行——已用隔离实验定位到具体是
-/// uniform_list 的度量逻辑而非容器高度链的问题。文件树条目量级远小于 git diff，
-/// 虚拟滚动只是锦上添花而非必需，故改走普通可滚动列表（与 git-files 同款写法），
-/// 优先保证正确显示；虚拟滚动作为后续可选优化记在 docs/roadmap.md。
-/// porcelain 两位状态码 → 简标 + 颜色（M 改 / A 增 / D 删 / ? 未跟踪）。
-fn git_status_badge(code: &str) -> Option<(char, gpui::Hsla)> {
-    // 取 index + worktree 两位里「更严重」的那个：D > A/? > M > 其它
+/// 文件树一行。顺序就是虚拟列表和键盘 `scroll_to_item` 的下标空间，两边必须共用
+/// [`collect_file_tree_rows`]，不能各自再走一遍目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FileTreeRow {
+    RootHeader {
+        path: String,
+        open: bool,
+    },
+    Loading {
+        depth: usize,
+        root: String,
+    },
+    Entry {
+        depth: usize,
+        name: String,
+        is_dir: bool,
+        path: String,
+        expanded: bool,
+        /// M / A / D / U。颜色在渲染时按主题解，不写进行数据。
+        git_mark: Option<char>,
+    },
+}
+
+impl FileTreeRow {
+    pub(super) fn path(&self) -> Option<&str> {
+        match self {
+            FileTreeRow::RootHeader { path, .. } | FileTreeRow::Entry { path, .. } => Some(path),
+            FileTreeRow::Loading { .. } => None,
+        }
+    }
+}
+
+/// 行的元素身份是路径。上面插入或展开目录不会把后面行的按压状态挪走。
+pub(super) fn file_tree_row_id(row: &FileTreeRow) -> (&'static str, &str) {
+    match row {
+        FileTreeRow::Loading { root, .. } => ("root-loading", root.as_str()),
+        FileTreeRow::RootHeader { path, .. } => ("root", path.as_str()),
+        FileTreeRow::Entry { path, .. } => ("file", path.as_str()),
+    }
+}
+
+fn file_tree_row_element_id(row: &FileTreeRow) -> (ElementId, String) {
+    let (kind, key) = file_tree_row_id(row);
+    (ElementId::from(kind), key.to_string())
+}
+
+/// text_sm 是 0.875rem，默认行高是黄金比例。再留 2px，避免字形被行盒裁切。
+/// 图标固定 14px，所以行高至少要能装下它。
+pub(super) fn file_tree_row_height(rem_px: f32) -> f32 {
+    let line = rem_px * 0.875 * std::f32::consts::GOLDEN_RATIO;
+    line.max(16.0) + 2.0
+}
+
+/// porcelain 两位状态码 → 简标（M 改 / A 增 / D 删 / ? 未跟踪）。
+fn git_status_mark(code: &str) -> Option<char> {
     let chars: String = code.chars().take(2).collect();
     if chars.contains('D') {
-        Some(('D', gpui::rgb(crate::ui_theme::red()).into()))
+        Some('D')
     } else if chars.contains('A') {
-        Some(('A', gpui::rgb(crate::ui_theme::green()).into()))
+        Some('A')
     } else if chars.contains('?') {
-        Some(('U', gpui::rgb(crate::ui_theme::blue()).into())) // untracked
+        Some('U')
     } else if chars.chars().any(|c| c != ' ' && c != '?') {
-        Some(('M', gpui::rgb(crate::ui_theme::yellow()).into()))
+        Some('M')
     } else {
         None
     }
+}
+
+fn git_mark_color(mark: char) -> Hsla {
+    match mark {
+        'D' => gpui::rgb(crate::ui_theme::red()).into(),
+        'A' => gpui::rgb(crate::ui_theme::green()).into(),
+        'U' => gpui::rgb(crate::ui_theme::blue()).into(),
+        _ => gpui::rgb(crate::ui_theme::yellow()).into(),
+    }
+}
+
+fn git_mark_index(files: &[(String, String)]) -> HashMap<&str, char> {
+    let mut marks = HashMap::new();
+    for (code, path) in files {
+        if let Some(mark) = git_status_mark(code) {
+            marks.insert(path.as_str(), mark);
+        }
+    }
+    marks
+}
+
+/// 展平当前可见树。只读缓存，不碰文件系统。单根不插标题行，和以前键盘导航的
+/// 下标一致；多根才有可折叠的根标题。
+pub(super) fn collect_file_tree_rows(
+    roots: &[String],
+    expanded: &HashSet<String>,
+    collapsed_roots: &HashSet<String>,
+    dir_cache: &DirCache,
+    git_status: &HashMap<String, (Instant, GitStatusData)>,
+) -> Vec<FileTreeRow> {
+    let multi = roots.len() > 1;
+    let mut rows = Vec::new();
+    for root in roots {
+        let marks = git_status
+            .get(root)
+            .map(|(_, data)| git_mark_index(&data.files));
+        let root_open = !collapsed_roots.contains(root);
+        if multi {
+            rows.push(FileTreeRow::RootHeader {
+                path: root.clone(),
+                open: root_open,
+            });
+            if !root_open {
+                continue;
+            }
+        }
+        if !dir_cache.contains_key(root) {
+            rows.push(FileTreeRow::Loading {
+                depth: usize::from(multi),
+                root: root.clone(),
+            });
+            continue;
+        }
+        let mut flat = Vec::new();
+        walk_dir_cached(root, dir_cache, expanded, usize::from(multi), &mut flat);
+        for (depth, name, is_dir, path, is_expanded) in flat {
+            let git_mark = if is_dir {
+                None
+            } else {
+                marks.as_ref().and_then(|marks| {
+                    Path::new(&path)
+                        .strip_prefix(root)
+                        .ok()
+                        .and_then(|rel| rel.to_str())
+                        .and_then(|rel| marks.get(rel).copied())
+                })
+            };
+            rows.push(FileTreeRow::Entry {
+                depth,
+                name,
+                is_dir,
+                path,
+                expanded: is_expanded,
+                git_mark,
+            });
+        }
+    }
+    rows
 }
 
 /// 文件树：单根时行为跟以前一致（根隐式展开、不显示根标题行）；工作区挂了 ≥2 个
@@ -252,7 +380,9 @@ pub(crate) struct FileTreeParams<'a> {
     /// 用户主动折叠起来的根目录（默认全展开，只有落在这个集合里的才收起）。
     pub collapsed_roots: &'a HashSet<String>,
     pub dir_cache: &'a DirCache,
-    pub scroll: &'a ScrollHandle,
+    /// 虚拟列表滚动句柄。行高由调用方给定，不能改回 uniform_list：
+    /// 它会孤立测量含 Icon 的行，算出异常行高，可视区只剩 1 行。
+    pub scroll: &'a VirtualListScrollHandle,
     pub open_path: Option<&'a str>,
     /// 键盘选中的条目路径（高亮边框，区别于「当前打开文件」的底色）。
     pub selected_path: Option<&'a str>,
@@ -295,271 +425,303 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
         return placeholder_view("加载中…", muted).into_any_element();
     }
 
-    let this = cx.entity();
+    let rows = Rc::new(collect_file_tree_rows(
+        roots,
+        expanded,
+        collapsed_roots,
+        dir_cache,
+        git_status,
+    ));
+    let rem = cx.global::<crate::settings::Appearance>().ui_font_px as f32;
+    let row_h = px(file_tree_row_height(rem));
+    // 行宽用列宽，避免虚拟列表用 MinContent 去量 Icon / 长文件名，把内容宽撑爆。
+    let row_w = px(panel_w.max(1.0));
+    let sizes = Rc::new(vec![size(row_w, row_h); rows.len()]);
+    let view = cx.entity();
     let focus_handle = focus_handle.clone();
+    let list_focus = focus_handle.clone();
+    let open_path = open_path.map(str::to_string);
+    let selected_path = selected_path.map(str::to_string);
+    let list = v_virtual_list(view.clone(), "file-tree", sizes, move |_, range, _, _| {
+        let open_path = open_path.as_deref();
+        let selected_path = selected_path.as_deref();
+        range
+            .map(|i| {
+                render_file_tree_row(FileTreeRowPaint {
+                    row: &rows[i],
+                    view: view.clone(),
+                    focus: list_focus.clone(),
+                    open_path,
+                    selected_path,
+                    panel_w,
+                    row_w,
+                    row_h,
+                    muted,
+                    fg,
+                    hover,
+                    active_bg,
+                    accent,
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+    .track_scroll(scroll)
+    .flex_1()
+    .min_h_0()
+    .w_full()
+    .overflow_x_hidden();
 
-    // 渲染一个文件/目录行。抽成闭包：多根时要在每个根的循环里各调一遍，且各传各的
-    // `row_root`（strip_prefix 基准）和 `changed`（该根的改动列表）。`i` 是全局唯一
-    // 行号，保证 ElementId 不撞。
-    let render_entry = |i: usize,
-                        depth: usize,
-                        name: String,
-                        is_dir: bool,
-                        path: String,
-                        is_expanded: bool,
-                        row_root: &str,
-                        changed: Option<&[(String, String)]>|
-     -> AnyElement {
-        let indent = px(8.0 + depth as f32 * 14.0);
-        // 展开箭头：目录用 chevron（展开朝下 / 收起朝右），文件留等宽占位对齐。
-        let arrow = if is_dir {
-            div()
-                .w(px(14.))
-                .flex()
-                .justify_center()
-                .child(
-                    Icon::new(if is_expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size(px(12.))
-                    .text_color(muted),
-                )
-                .into_any_element()
-        } else {
-            div().w(px(14.)).into_any_element()
-        };
-        // 类型图标：目录（展开 / 收起用不同文件夹图标）与文件区分。
-        let type_icon = Icon::new(if is_dir {
-            if is_expanded {
-                IconName::FolderOpen
-            } else {
-                IconName::Folder
-            }
-        } else {
-            IconName::File
-        })
-        .size(px(14.))
-        .text_color(if is_dir { fg } else { muted });
-        let this = this.clone();
-        let p = path.clone();
-        let this_menu = this.clone();
-        let p_menu = p.clone();
-        // 当前在右侧内容面板打开的文件：文件树里对应行常驻高亮，不用靠记忆去找。
-        let is_open = !is_dir && open_path == Some(path.as_str());
-        // git 状态：M/A/D/U 字母色标（只标文件，不往目录冒泡）。
-        let git_badge = if !is_dir {
-            changed.and_then(|files| {
-                Path::new(&path)
-                    .strip_prefix(row_root)
-                    .ok()
-                    .and_then(|rel| rel.to_str())
-                    .and_then(|rel| {
-                        files
-                            .iter()
-                            .find(|(_, p)| p == rel)
-                            .and_then(|(code, _)| git_status_badge(code))
-                    })
-            })
-        } else {
-            None
-        };
-        let is_selected = selected_path == Some(path.as_str());
-        let name_tip: SharedString = name.clone().into();
-        let show_name_tip = name_likely_truncated(&name, depth, panel_w);
-        div()
-            .id(("file", i))
-            .flex()
-            .items_center()
-            .gap_1()
-            .pl(indent)
-            .pr_2()
-            .py(px(1.0))
-            .text_sm()
-            .text_color(if is_dir { fg } else { muted })
-            .when(is_open, |el| el.bg(active_bg))
-            .when(is_selected, |el| {
-                el.border_l_2().border_color(accent).pl(indent - px(2.0))
-            })
-            .hover(move |s| s.bg(hover))
-            .on_click(move |_ev, window, cx| {
-                this.update(cx, |ws, cx| {
-                    ws.file_tree_selected = Some(p.clone());
-                    if is_dir {
-                        ws.toggle_expand(p.clone(), cx);
-                    } else {
-                        ws.view_file(p.clone(), window, cx);
-                    }
-                });
-            })
-            .context_menu(move |menu, _window, _cx| {
-                let this_term = this_menu.clone();
-                let p_term = p_menu.clone();
-                let this_copy = this_menu.clone();
-                let p_copy = p_menu.clone();
-                let this_finder = this_menu.clone();
-                let p_finder = p_menu.clone();
-                let this_del = this_menu.clone();
-                let p_del = p_menu.clone();
-                menu.item(
-                    PopupMenuItem::new("发送到终端").on_click(move |_ev, _window, cx| {
-                        this_term.update(cx, |ws, cx| ws.send_path_to_terminal(p_term.clone(), cx));
-                    }),
-                )
-                .item(
-                    PopupMenuItem::new("复制文件路径").on_click(move |_ev, _window, cx| {
-                        this_copy.update(cx, |ws, cx| {
-                            ws.copy_file_path_to_clipboard(p_copy.clone(), cx)
-                        });
-                    }),
-                )
-                .item(
-                    PopupMenuItem::new("在 Finder 中显示").on_click(move |_ev, _window, cx| {
-                        this_finder.update(cx, |ws, cx| {
-                            ws.reveal_path_in_finder(p_finder.clone(), cx);
-                        });
-                    }),
-                )
-                .item(
-                    PopupMenuItem::new("删除文件").on_click(move |_ev, _window, cx| {
-                        this_del
-                            .update(cx, |ws, cx| ws.start_delete_file(p_del.clone(), is_dir, cx));
-                    }),
-                )
-            })
-            .child(arrow)
-            .child(type_icon)
-            // tooltip 只挂在文件名格子上，且仅当可能被截断时才显示——避免像
-            // Cargo.toml 这种短名也弹 tooltip，跟右键菜单叠在一起。
-            .child(
-                div()
-                    .id(("file-name", i))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(name)
-                    .when(show_name_tip, |el| {
-                        el.tooltip(move |window, cx| {
-                            Tooltip::new(name_tip.clone()).build(window, cx)
-                        })
-                    }),
-            )
-            .children(git_badge.map(|(ch, color)| {
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .font_bold()
-                    .text_color(color)
-                    .child(ch.to_string())
-            }))
-            .into_any_element()
-    };
-
-    // 根标题行（仅多根时渲染）：可折叠，点击切换 collapsed_roots。样式比子项醒目
-    // 一档（加粗 + 常驻文件夹图标），一眼分出「这是一个项目根」。
-    let render_root_header = |i: usize, root: &str, root_open: bool| -> AnyElement {
-        let name = root
-            .rsplit('/')
-            .find(|s| !s.is_empty())
-            .unwrap_or(root)
-            .to_string();
-        let this = this.clone();
-        let rp = root.to_string();
-        div()
-            .id(("root", i))
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py(px(2.0))
-            .text_sm()
-            .font_semibold()
-            .text_color(fg)
-            .hover(move |s| s.bg(hover))
-            .on_click(move |_ev, _window, cx| {
-                this.update(cx, |ws, cx| ws.toggle_root_collapsed(rp.clone(), cx));
-            })
-            .child(
-                div().w(px(14.)).flex().justify_center().child(
-                    Icon::new(if root_open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size(px(12.))
-                    .text_color(muted),
-                ),
-            )
-            .child(Icon::new(IconName::FolderOpen).size(px(14.)).text_color(fg))
-            .child(div().flex_1().min_w_0().truncate().child(name))
-            .into_any_element()
-    };
-
-    let mut rows: Vec<AnyElement> = Vec::new();
-    let mut i = 0usize;
-    for root in roots {
-        let changed = git_status.get(root).map(|(_, d)| d.files.as_slice());
-        let root_open = !collapsed_roots.contains(root);
-        if multi {
-            rows.push(render_root_header(i, root, root_open));
-            i += 1;
-            if !root_open {
-                continue;
-            }
-        }
-        // 根目录尚未缓存：多根时在标题下给一行「加载中…」（单根已在上面早退兜底）。
-        if !dir_cache.contains_key(root) {
-            rows.push(
-                div()
-                    .id(("root-loading", i))
-                    .pl(px(if multi { 22.0 } else { 8.0 }))
-                    .py(px(1.0))
-                    .text_sm()
-                    .text_color(muted)
-                    .child("加载中…")
-                    .into_any_element(),
-            );
-            i += 1;
-            continue;
-        }
-        // 多根时子项缩进一级，给根标题让位；单根从 0 起（跟以前一致）。
-        let base_depth = if multi { 1 } else { 0 };
-        let mut flat: Vec<(usize, String, bool, String, bool)> = Vec::new();
-        walk_dir_cached(root, dir_cache, expanded, base_depth, &mut flat);
-        for (depth, name, is_dir, path, is_expanded) in flat {
-            rows.push(render_entry(
-                i,
-                depth,
-                name,
-                is_dir,
-                path,
-                is_expanded,
-                root,
-                changed,
-            ));
-            i += 1;
-        }
-    }
-
+    // 滚动条是 absolute inset_0。父级必须 relative，否则它会对齐到文件面板
+    // （含左侧编辑器）那个定位祖先：滑块按整页高度算，滚到底看起来还停在上面。
     div()
-        .id("file-tree")
+        .id("file-tree-host")
+        .relative()
         .flex_1()
         .min_w_0()
         .min_h_0()
         .overflow_hidden()
-        .overflow_y_scroll()
         .flex()
         .flex_col()
-        .py_1()
         .track_focus(&focus_handle)
-        .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-            window.focus(&focus_handle, cx);
+        .on_mouse_down(MouseButton::Left, {
+            let focus_handle = focus_handle.clone();
+            move |_ev, window, cx| {
+                window.focus(&focus_handle, cx);
+            }
         })
-        .track_scroll(scroll)
+        .child(list)
         .vertical_scrollbar(scroll)
-        .children(rows)
         .into_any_element()
+}
+
+struct FileTreeRowPaint<'a> {
+    row: &'a FileTreeRow,
+    view: Entity<Workspace>,
+    focus: FocusHandle,
+    open_path: Option<&'a str>,
+    selected_path: Option<&'a str>,
+    panel_w: f32,
+    row_w: Pixels,
+    row_h: Pixels,
+    muted: Hsla,
+    fg: Hsla,
+    hover: Hsla,
+    active_bg: Hsla,
+    accent: Hsla,
+}
+
+fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
+    let FileTreeRowPaint {
+        row,
+        view,
+        focus,
+        open_path,
+        selected_path,
+        panel_w,
+        row_w,
+        row_h,
+        muted,
+        fg,
+        hover,
+        active_bg,
+        accent,
+    } = paint;
+    match row {
+        FileTreeRow::Loading { depth, .. } => div()
+            .id(file_tree_row_element_id(row))
+            .w(row_w)
+            .h(row_h)
+            .flex()
+            .items_center()
+            .pl(px(8.0 + *depth as f32 * 14.0))
+            .pr_2()
+            .text_sm()
+            .text_color(muted)
+            .child("加载中…")
+            .into_any_element(),
+        FileTreeRow::RootHeader { path, open } => {
+            let name = path
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or(path)
+                .to_string();
+            let toggle = view.clone();
+            let root = path.clone();
+            let focus_down = focus.clone();
+            div()
+                .id(file_tree_row_element_id(row))
+                .w(row_w)
+                .h(row_h)
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .text_sm()
+                .font_semibold()
+                .text_color(fg)
+                .hover(move |s| s.bg(hover))
+                .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+                    window.focus(&focus_down, cx);
+                })
+                .on_click(move |_ev, _window, cx| {
+                    toggle.update(cx, |ws, cx| ws.toggle_root_collapsed(root.clone(), cx));
+                })
+                .child(
+                    div().w(px(14.)).flex().justify_center().child(
+                        Icon::new(if *open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size(px(12.))
+                        .text_color(muted),
+                    ),
+                )
+                .child(Icon::new(IconName::FolderOpen).size(px(14.)).text_color(fg))
+                .child(div().flex_1().min_w_0().truncate().child(name))
+                .into_any_element()
+        }
+        FileTreeRow::Entry {
+            depth,
+            name,
+            is_dir,
+            path,
+            expanded,
+            git_mark,
+        } => {
+            let indent = px(8.0 + *depth as f32 * 14.0);
+            let arrow = if *is_dir {
+                div()
+                    .w(px(14.))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        Icon::new(if *expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size(px(12.))
+                        .text_color(muted),
+                    )
+                    .into_any_element()
+            } else {
+                div().w(px(14.)).into_any_element()
+            };
+            let type_icon = Icon::new(if *is_dir {
+                if *expanded {
+                    IconName::FolderOpen
+                } else {
+                    IconName::Folder
+                }
+            } else {
+                IconName::File
+            })
+            .size(px(14.))
+            .text_color(if *is_dir { fg } else { muted });
+            let is_open = !*is_dir && open_path == Some(path.as_str());
+            let is_selected = selected_path == Some(path.as_str());
+            let show_name_tip = name_likely_truncated(name, *depth, panel_w);
+            let name_label: SharedString = name.clone().into();
+            let click_view = view.clone();
+            let click_path = path.clone();
+            let menu_view = view.clone();
+            let menu_path = path.clone();
+            let is_dir = *is_dir;
+            let focus_down = focus;
+            div()
+                .id(file_tree_row_element_id(row))
+                .w(row_w)
+                .h(row_h)
+                .flex()
+                .items_center()
+                .gap_1()
+                .pl(indent)
+                .pr_2()
+                .overflow_hidden()
+                .text_sm()
+                .text_color(if is_dir { fg } else { muted })
+                .when(is_open, |el| el.bg(active_bg))
+                .when(is_selected, |el| {
+                    el.border_l_2().border_color(accent).pl(indent - px(2.0))
+                })
+                .hover(move |s| s.bg(hover))
+                .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+                    window.focus(&focus_down, cx);
+                })
+                .on_click(move |_ev, window, cx| {
+                    click_view.update(cx, |ws, cx| {
+                        ws.file_tree_selected = Some(click_path.clone());
+                        if is_dir {
+                            ws.toggle_expand(click_path.clone(), cx);
+                        } else {
+                            ws.view_file(click_path.clone(), window, cx);
+                        }
+                    });
+                })
+                .context_menu(move |menu, _window, _cx| {
+                    let this_term = menu_view.clone();
+                    let p_term = menu_path.clone();
+                    let this_copy = menu_view.clone();
+                    let p_copy = menu_path.clone();
+                    let this_finder = menu_view.clone();
+                    let p_finder = menu_path.clone();
+                    let this_del = menu_view.clone();
+                    let p_del = menu_path.clone();
+                    menu.item(
+                        PopupMenuItem::new("发送到终端").on_click(move |_ev, _window, cx| {
+                            this_term
+                                .update(cx, |ws, cx| ws.send_path_to_terminal(p_term.clone(), cx));
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("复制文件路径").on_click(move |_ev, _window, cx| {
+                            this_copy.update(cx, |ws, cx| {
+                                ws.copy_file_path_to_clipboard(p_copy.clone(), cx)
+                            });
+                        }),
+                    )
+                    .item(PopupMenuItem::new("在 Finder 中显示").on_click(
+                        move |_ev, _window, cx| {
+                            this_finder.update(cx, |ws, cx| {
+                                ws.reveal_path_in_finder(p_finder.clone(), cx);
+                            });
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new("删除文件").on_click(move |_ev, _window, cx| {
+                            this_del.update(cx, |ws, cx| {
+                                ws.start_delete_file(p_del.clone(), is_dir, cx)
+                            });
+                        }),
+                    )
+                })
+                .child(arrow)
+                .child(type_icon)
+                .child(
+                    div()
+                        .id("file-name")
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(name_label.clone())
+                        .when(show_name_tip, |el| {
+                            el.tooltip(move |window, cx| {
+                                Tooltip::new(name_label.clone()).build(window, cx)
+                            })
+                        }),
+                )
+                .children(git_mark.map(|mark| {
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .font_bold()
+                        .text_color(git_mark_color(mark))
+                        .child(mark.to_string())
+                }))
+                .into_any_element()
+        }
+    }
 }
 
 // ===================== 文件内容面板 =====================
@@ -683,7 +845,7 @@ pub fn file_content_parts(
                     let is_dir = !is_last;
                     let this = this.clone();
                     let seg_el = div()
-                        .id(("file-breadcrumb-seg", i))
+                        .id((ElementId::from("file-breadcrumb-seg"), path.clone()))
                         .flex_shrink_0()
                         .px(px(8.))
                         .py(px(5.))
@@ -740,19 +902,18 @@ pub fn file_content_parts(
                         ),
                 )
                 .when(is_md, |el| {
+                    let markdown_label = if preview { "查看原始码" } else { "查看预览" };
                     el.child(
                         div()
                             .id("markdown-view-toggle")
+                            .role(gpui::Role::Button)
+                            .aria_label(markdown_label)
                             .flex_shrink_0()
                             .text_xs()
                             .text_color(fg)
                             .cursor_pointer()
                             .hover(|el| el.opacity(0.75))
-                            .child(if preview {
-                                "查看原始码"
-                            } else {
-                                "查看预览"
-                            })
+                            .child(markdown_label)
                             .on_click(cx.listener(move |ws, _ev, _window, cx| {
                                 ws.set_file_preview(!preview, cx)
                             })),
@@ -761,6 +922,12 @@ pub fn file_content_parts(
                 .child(
                     div()
                         .id("file-tree-toggle")
+                        .role(gpui::Role::Button)
+                        .aria_label(if file_tree_open {
+                            "收起文件树"
+                        } else {
+                            "展开文件树"
+                        })
                         .flex()
                         .items_center()
                         .justify_center()
@@ -801,11 +968,12 @@ pub fn file_content_parts(
                     .items_center()
                     .justify_center()
                     .bg(rgb(crate::ui_theme::bg_stage()))
-                    .child(
-                        img(std::path::PathBuf::from(&of.path))
-                            .size_full()
-                            .object_fit(ObjectFit::Contain),
-                    )
+                    .child({
+                        let path = std::path::Path::new(&of.path);
+                        // 栅格图只画降采样预览。未完成时是空盒子，不把原图交给 `img()`。
+                        smelt_ui::image::ensure_file_preview(path, cx);
+                        smelt_ui::image::file_surface(path, smelt_ui::image::FileFit::Contain)
+                    })
                     .into_any_element()
             } else if preview {
                 div()
@@ -818,7 +986,7 @@ pub fn file_content_parts(
                     .child(div().text_sm().text_color(fg).child(
                         crate::markdown_mermaid::markdown_view(
                             "md-preview-body",
-                            of.editor.read(cx).value().to_string(),
+                            of.preview_source.clone(),
                         ),
                     ))
                     .into_any_element()
@@ -865,11 +1033,11 @@ pub fn file_content_parts(
 
 impl Workspace {
     /// 「删除文件」二次确认弹窗。
-    pub fn render_delete_file_confirm(&self, cx: &mut Context<Self>) -> Div {
+    pub fn render_delete_file_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let Some(target) = self.delete_file_target.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         let fg = cx.theme().foreground;
 
@@ -914,6 +1082,12 @@ impl Workspace {
                         cx,
                     )),
             );
-        Self::modal_shell(360., true, content, cx)
+        self.modal_shell(
+            360.,
+            true,
+            content,
+            crate::overlay::ModalLayer::DeleteFile,
+            cx,
+        )
     }
 }

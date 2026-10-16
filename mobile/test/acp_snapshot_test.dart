@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/models/acp_snapshot.dart';
 
@@ -160,6 +162,33 @@ void main() {
       expect((merged.entries[1] as AcpEntryAssistant).text, 'old answer');
       expect((merged.entries[2] as AcpEntryAssistant).text, 'new tail');
       expect(merged.phase, isA<AcpPhaseIdle>());
+    });
+
+    test('keeps the session envelope when a streaming frame omits it', () {
+      final original = AcpSnapshot(
+        entries: const [AcpEntryUser(text: 'first')],
+        phase: const AcpPhaseThinking(),
+        availableCommands: const [
+          ['plan', 'Plan'],
+        ],
+        snapshotRevision: 1,
+      );
+      final update = AcpSnapshot(
+        entriesOffset: 1,
+        entriesTotal: 2,
+        snapshotRevision: 2,
+        entries: const [AcpEntryAssistant(text: 'tail')],
+        phase: const AcpPhaseThinking(),
+        envelopeOmitted: true,
+      );
+
+      final merged = original.merge(update);
+
+      expect(merged.availableCommands, [
+        ['plan', 'Plan'],
+      ]);
+      expect(merged.entries, hasLength(2));
+      expect((merged.entries.last as AcpEntryAssistant).text, 'tail');
     });
 
     test('drops an untrusted prefix when entries_offset is out of range', () {
@@ -453,5 +482,46 @@ void main() {
       expect(model.currentProvider, isNull);
       expect(model.options.length, 1);
     });
+  });
+
+  test('thumbnail images keep their original reference through the cache', () {
+    final snapshot = AcpSnapshot.fromJson({
+      'snapshot': {
+        'entries_offset': 7,
+        'entries': [
+          {
+            'ToolCall': {
+              'id': 'read-1',
+              'title': 'screenshot.png',
+              'kind': 'read',
+              'status': 'completed',
+              'output': [
+                {
+                  'Image': {
+                    'mime': 'image/jpeg',
+                    'data_b64': 'dGh1bWI=',
+                    'original': {'entry': 7, 'digest': 'abc'},
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        'phase': 'idle',
+      },
+    });
+
+    final cached = AcpSnapshot.fromJson(
+      jsonDecode(jsonEncode(snapshot.toJson())) as Map<String, dynamic>,
+    );
+    final tool = cached.entries.single as AcpEntryToolCall;
+    final image = (tool.output.single as ToolOutputImage).image;
+    expect(image.mimeType, 'image/jpeg');
+    expect(image.base64, 'dGh1bWI=');
+    expect(image.original, const AcpImageOriginal(entry: 7, digest: 'abc'));
+    expect(
+      AcpImageData(mimeType: 'image/png', base64: 'eA==').toJson(),
+      {'mime': 'image/png', 'data_b64': 'eA=='},
+    );
   });
 }

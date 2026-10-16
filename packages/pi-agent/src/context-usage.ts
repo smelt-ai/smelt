@@ -1093,6 +1093,7 @@ export function createContextUsageExtension(): (pi: ExtensionAPI) => void {
 					executeHandoff(ctx, instructions);
 				},
 			});
+			// 不注册 /reload。官方 RPC 没有 reload，用 prompt 模拟会占住 stdin 读循环。
 		}
 
 		pi.on("input", async (event, ctx) => {

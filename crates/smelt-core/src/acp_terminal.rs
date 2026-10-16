@@ -16,6 +16,13 @@ use agent_client_protocol::schema::v1::TerminalExitStatus;
 
 const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 1024 * 1024;
 
+/// 进程退出后，最多再等这么久让读线程把管道里剩下的输出读完。正常情况下读到 EOF
+/// 就立刻往下走；只有后台孙进程继承了 stdout/stderr 一直不关时才会等满。
+const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// stdout、stderr 两个读线程读到 EOF 后各记一次。
+const READER_COUNT: usize = 2;
+
 #[derive(Clone, Debug, Default)]
 pub struct TerminalSnapshot {
     pub output: String,
@@ -141,6 +148,7 @@ impl AcpTerminals {
         }));
         let exit = Arc::new(Mutex::new(None));
         let exit_signal = Arc::new((Mutex::new(false), Condvar::new()));
+        let readers_done = Arc::new((Mutex::new(0usize), Condvar::new()));
         let id = uuid::Uuid::new_v4().to_string();
 
         spawn_reader(
@@ -149,6 +157,7 @@ impl AcpTerminals {
             id.clone(),
             event_tx.clone(),
             Arc::clone(&exit),
+            Arc::clone(&readers_done),
         );
         spawn_reader(
             stderr,
@@ -156,16 +165,27 @@ impl AcpTerminals {
             id.clone(),
             event_tx.clone(),
             Arc::clone(&exit),
+            Arc::clone(&readers_done),
         );
 
         let wait_output = Arc::clone(&output);
         let wait_exit = Arc::clone(&exit);
         let wait_signal = Arc::clone(&exit_signal);
         let wait_id = id.clone();
+        let readers_done = Arc::clone(&readers_done);
         std::thread::Builder::new()
             .name(format!("smelt-acp-term-wait-{}", &id[..id.len().min(8)]))
             .spawn(move || {
                 let status = child.wait();
+                // 退出码先到，管道里可能还有没读完的输出。等读线程读到 EOF 再定稿，
+                // 否则 `wait_for_exit` 和退出事件会丢掉最后一段。
+                {
+                    let (lock, cvar) = &*readers_done;
+                    let done = lock.lock().unwrap_or_else(|err| err.into_inner());
+                    let _ = cvar
+                        .wait_timeout_while(done, OUTPUT_DRAIN_GRACE, |done| *done < READER_COUNT)
+                        .unwrap_or_else(|err| err.into_inner());
+                }
                 let (exit_code, signal) = match status {
                     Ok(status) => unix_exit(status),
                     Err(_) => (None, Some("wait-failed".into())),
@@ -289,6 +309,7 @@ fn spawn_reader(
     terminal_id: String,
     event_tx: smol::channel::Sender<(String, TerminalSnapshot)>,
     exit: Arc<Mutex<Option<TerminalExitStatus>>>,
+    done: Arc<(Mutex<usize>, Condvar)>,
 ) {
     let _ = std::thread::Builder::new()
         .name(format!(
@@ -297,32 +318,94 @@ fn spawn_reader(
         ))
         .spawn(move || {
             let mut buf = [0u8; 4096];
+            let mut decoder = Utf8Stream::default();
             loop {
-                match pipe.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                        let snapshot = {
-                            let mut guard = output.lock().unwrap_or_else(|err| err.into_inner());
-                            guard.append(&chunk);
-                            let exit = exit.lock().unwrap_or_else(|err| err.into_inner());
-                            TerminalSnapshot {
-                                output: guard.text.clone(),
-                                truncated: guard.truncated,
-                                exit_code: exit
-                                    .as_ref()
-                                    .and_then(|status| status.exit_code)
-                                    .and_then(|code| i32::try_from(code).ok()),
-                                signal: exit.as_ref().and_then(|status| status.signal.clone()),
-                            }
-                        };
-                        let _ = event_tx.try_send((terminal_id.clone(), snapshot));
-                    }
+                let chunk = match pipe.read(&mut buf) {
+                    Ok(0) => decoder.finish(),
+                    Ok(n) => decoder.push(&buf[..n]),
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
+                    Err(_) => decoder.finish(),
+                };
+                if !chunk.is_empty() {
+                    let snapshot = {
+                        let mut guard = output.lock().unwrap_or_else(|err| err.into_inner());
+                        guard.append(&chunk);
+                        let exit = exit.lock().unwrap_or_else(|err| err.into_inner());
+                        TerminalSnapshot {
+                            output: guard.text.clone(),
+                            truncated: guard.truncated,
+                            exit_code: exit
+                                .as_ref()
+                                .and_then(|status| status.exit_code)
+                                .and_then(|code| i32::try_from(code).ok()),
+                            signal: exit.as_ref().and_then(|status| status.signal.clone()),
+                        }
+                    };
+                    let _ = event_tx.try_send((terminal_id.clone(), snapshot));
+                }
+                if decoder.is_finished() {
+                    break;
                 }
             }
+            let (lock, cvar) = &*done;
+            *lock.lock().unwrap_or_else(|err| err.into_inner()) += 1;
+            cvar.notify_all();
         });
+}
+
+/// 把分块读到的字节按 UTF-8 解成文本。管道按字节切块，一个多字节字符（中文、emoji）
+/// 可能被切在两块之间；逐块 `from_utf8_lossy` 会把两半各自变成「�」。这里把块尾不完整的
+/// 字节留到下一块再解，真正非法的字节才替换成 U+FFFD。
+#[derive(Default)]
+struct Utf8Stream {
+    pending: Vec<u8>,
+    finished: bool,
+}
+
+impl Utf8Stream {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut out = String::new();
+        let mut rest: &[u8] = &self.pending;
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(text) => {
+                    out.push_str(text);
+                    rest = &[];
+                    break;
+                }
+                Err(err) => {
+                    let (valid, after) = rest.split_at(err.valid_up_to());
+                    // SAFETY: `valid_up_to` 之前的字节已校验为合法 UTF-8。
+                    out.push_str(unsafe { std::str::from_utf8_unchecked(valid) });
+                    match err.error_len() {
+                        // 块尾是一个还没收全的字符：留到下一块。
+                        None => {
+                            rest = after;
+                            break;
+                        }
+                        Some(len) => {
+                            out.push(char::REPLACEMENT_CHARACTER);
+                            rest = &after[len..];
+                        }
+                    }
+                }
+            }
+        }
+        self.pending = rest.to_vec();
+        out
+    }
+
+    /// 输入结束：剩下的半个字符再也等不到后半，按非法字节处理。
+    fn finish(&mut self) -> String {
+        self.finished = true;
+        let rest = std::mem::take(&mut self.pending);
+        String::from_utf8_lossy(&rest).into_owned()
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished
+    }
 }
 
 fn unix_exit(status: std::process::ExitStatus) -> (Option<i32>, Option<String>) {
@@ -413,6 +496,133 @@ mod tests {
     fn rejects_relative_fs_paths() {
         assert!(read_text_file(std::path::Path::new("rel.txt"), None, None).is_err());
         assert!(write_text_file(std::path::Path::new("rel.txt"), "x").is_err());
+    }
+
+    #[test]
+    fn utf8_split_across_reads_is_reassembled() {
+        let text = "中文🙂ok";
+        let bytes = text.as_bytes();
+        // 每一个切点都试一遍：任何位置切开，拼回来都必须和原文一致。
+        for cut in 0..=bytes.len() {
+            let mut stream = Utf8Stream::default();
+            let mut out = stream.push(&bytes[..cut]);
+            out.push_str(&stream.push(&bytes[cut..]));
+            out.push_str(&stream.finish());
+            assert_eq!(out, text, "切在第 {cut} 字节");
+        }
+    }
+
+    #[test]
+    fn invalid_bytes_become_replacement_characters_without_stalling() {
+        let mut stream = Utf8Stream::default();
+        // 0xFF 永远不可能是合法 UTF-8：立刻替换，不能当成"没收全"一直攒着。
+        assert_eq!(stream.push(b"a\xFFb"), "a\u{FFFD}b");
+        // 结尾只收到半个汉字就结束了：结束时按非法字节输出。
+        assert_eq!(stream.push(&"中".as_bytes()[..2]), "");
+        assert_eq!(stream.finish(), "\u{FFFD}");
+    }
+
+    /// 走真实读线程：管道每次只给几个字节，汉字被切开，输出里不能出现「�」。
+    #[test]
+    fn reader_thread_keeps_multibyte_characters_split_between_reads() {
+        struct Trickle(Vec<u8>, usize);
+        impl Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let remaining = &self.0[self.1..];
+                let n = remaining.len().min(2).min(buf.len());
+                buf[..n].copy_from_slice(&remaining[..n]);
+                self.1 += n;
+                Ok(n)
+            }
+        }
+        let output = Arc::new(Mutex::new(OutputBuf {
+            text: String::new(),
+            truncated: false,
+            byte_limit: DEFAULT_OUTPUT_BYTE_LIMIT,
+        }));
+        let done = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let (tx, _rx) = smol::channel::unbounded();
+        spawn_reader(
+            Trickle("你好，世界".as_bytes().to_vec(), 0),
+            Arc::clone(&output),
+            "trickle".into(),
+            tx,
+            Arc::new(Mutex::new(None)),
+            Arc::clone(&done),
+        );
+        let (lock, cvar) = &*done;
+        let finished = cvar
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |done| {
+                *done < 1
+            })
+            .unwrap();
+        assert_eq!(*finished.0, 1, "读线程应读到 EOF 后结束");
+        assert_eq!(output.lock().unwrap().text, "你好，世界");
+    }
+
+    /// 退出时管道里还有没读完的输出：`wait` 返回、退出事件发出之前必须读完。
+    /// 读线程每读一块都要克隆整份缓冲（最多 1MB），追不上进程退出——以前等待线程
+    /// 一拿到退出码就取快照，最后那段（这里是 `END`）常常丢掉。
+    #[test]
+    fn exit_waits_for_the_output_still_in_the_pipe() {
+        let terminals = AcpTerminals::new();
+        let (tx, rx) = smol::channel::unbounded();
+        let id = terminals
+            .create(
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "head -c 2000000 /dev/zero | tr '\\0' a; echo; echo END".into(),
+                ],
+                Vec::new(),
+                None,
+                None,
+                tx,
+            )
+            .expect("create");
+        let status = terminals.wait(&id).expect("wait");
+        assert_eq!(status.exit_code, Some(0));
+        let snapshot = terminals.snapshot(&id).expect("snapshot");
+        assert!(snapshot.truncated, "输出超过 1MB，应从头截断");
+        assert!(
+            snapshot.output.ends_with("END\n"),
+            "wait 返回时最后一段输出必须已经读进来"
+        );
+        let exit_event = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|(_, snapshot)| snapshot)
+            .find(|snapshot| snapshot.exit_code.is_some())
+            .expect("退出事件");
+        assert!(
+            exit_event.output.ends_with("END\n"),
+            "带退出码的那条事件也要带上完整输出"
+        );
+        terminals.release(&id).expect("release");
+    }
+
+    /// 后台孙进程继承了 stdout、一直不关：不能因为等 EOF 就永远不报告退出。
+    #[test]
+    fn exit_is_reported_even_if_a_grandchild_keeps_the_pipe_open() {
+        let terminals = AcpTerminals::new();
+        let (tx, _rx) = smol::channel::unbounded();
+        let id = terminals
+            .create(
+                "/bin/sh".into(),
+                vec!["-c".into(), "sleep 30 & echo started".into()],
+                Vec::new(),
+                None,
+                None,
+                tx,
+            )
+            .expect("create");
+        let started = std::time::Instant::now();
+        let status = terminals.wait(&id).expect("wait");
+        assert_eq!(status.exit_code, Some(0));
+        assert!(
+            started.elapsed() < OUTPUT_DRAIN_GRACE + Duration::from_secs(5),
+            "孙进程占着管道时，最多再等一个宽限期就要报告退出"
+        );
+        assert!(terminals.snapshot(&id).unwrap().output.contains("started"));
+        // drop 时按进程组杀掉，sleep 30 一起结束。
     }
 
     #[test]

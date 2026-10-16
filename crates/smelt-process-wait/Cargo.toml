@@ -1,0 +1,12 @@
+# 等到一组 pid 里任意一个退出。smelt-core 和 smelt-plugin-host 都要这份，
+# 但不能让插件宿主依赖 smelt-core（会带上 ACP 和 SQLite）。
+[package]
+name = "smelt-process-wait"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"

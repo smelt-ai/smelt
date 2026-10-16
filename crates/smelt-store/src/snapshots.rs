@@ -37,6 +37,8 @@ pub struct AppearanceSnapshot {
     pub blur: bool,
     pub glass_style: String,
     pub theme_mode: String,
+    /// 主题注册名，例如 `Default Dark`、`Ayu Light`。旧库没有这一项、或仍是已删除的 Sand 时，按 `theme_mode` 落到 Default。
+    pub theme_name: String,
     pub ui_font_px: u32,
     pub ui_font_family: String,
     pub font_px: u32,
@@ -163,10 +165,14 @@ pub struct AgentDefinitionRecord {
     pub engine_kind_id: String,
     pub prompt: String,
     pub plugins_json: Vec<u8>,
+    /// 勾选要连接的 MCP 服务器名（JSON 字符串数组）；空数组表示不连任何 MCP 服务器。
+    pub mcp_servers_json: Vec<u8>,
     pub context_folders_json: Vec<u8>,
     pub context_links_json: Vec<u8>,
     pub model_provider: String,
     pub model_id: String,
+    /// 关闭时不注入、不写入记忆；已有记忆文件保留。
+    pub memory_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -292,4 +298,36 @@ pub struct PublishedWorkspaceMenuSnapshot {
     pub source_revision: u64,
     pub projects_json: Vec<u8>,
     pub sessions_json: Vec<u8>,
+}
+
+/// 记忆的来源可信度。`pending`：读过外部内容的那一轮或无人值守的运行写的，不注入、不召回，
+/// 用户采纳后变成 `trusted`。没有记录的记忆文件（用户手写、旧数据）按 `trusted` 处理。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryTrust {
+    Trusted,
+    Pending,
+}
+
+impl MemoryTrust {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryUsageRecord {
+    pub file_name: String,
+    pub read_count: u64,
+    pub last_read_at_ms: i64,
+}
+
+/// 一层记忆（一个 scope）的元数据。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryMetaSnapshot {
+    pub usage: Vec<MemoryUsageRecord>,
+    /// 待确认的文件名和原因。
+    pub pending: Vec<(String, String)>,
 }

@@ -535,6 +535,7 @@ describe("context usage buckets", () => {
 		// 1. Verify commands registration
 		expect(commands.has("shake")).toBe(true);
 		expect(commands.has("handoff")).toBe(true);
+		expect(commands.has("reload")).toBe(false);
 
 		// 2. Test shake command execution
 		const shakeCmd = commands.get("shake")!;
@@ -560,5 +561,9 @@ describe("context usage buckets", () => {
 
 		const normalInputRes = await inputHandler!({ text: "hello world" }, context);
 		expect(normalInputRes).toEqual({ action: "continue" });
+
+		// /reload 不在扩展里模拟。宿主拒绝它，input 也不能把它变成重载。
+		const reloadInputRes = await inputHandler!({ text: "/reload" }, context);
+		expect(reloadInputRes).toEqual({ action: "continue" });
 	});
 });

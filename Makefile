@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install clean fmt fmt-check lint lint-sh test sdk-check pi-agent-check check-all
+.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test sdk-check pi-agent-check check-all
 
 build run install: SHELL := /bin/bash
 
@@ -34,6 +34,17 @@ lint-sh: ## 检查 shell 脚本里 $$var 紧跟非 ASCII 的写法
 	fi
 	@echo "✓ shell 脚本变量引用检查通过"
 
+lint-paths: ## 检查源码中硬编码的开发者本机绝对路径（/Users/<personal>）
+	@# 单测与源码禁止硬编码个人用户主目录。虚拟路径请使用 /workspace/... 或 /Users/{me,test,mock,example,shared}。
+	@out=$$(git grep -nE '/Users/[a-zA-Z0-9._-]+' -- \
+		':(exclude)node_modules' ':(exclude)vendor' ':(exclude)dist' ':(exclude)target' \
+		| grep -vE '/Users/(me|test|example|someone|shared|ci|mock|x|a|中文)(/|"|'"'"')' || true); \
+	if [ -n "$$out" ]; then \
+		echo "✗ 发现源码中硬编码了个人本机主目录路径，请改用通用虚拟路径（/workspace/... 或 /Users/me/...）："; \
+		echo "$$out"; exit 1; \
+	fi
+	@echo "✓ 本地绝对路径合规检查通过"
+
 test: ## 运行全工作区单元测试（nextest：smeltd handoff 不能同进程跑）
 	@cargo nextest --version >/dev/null 2>&1 || { \
 		echo "✗ 需要 cargo-nextest（与 CI 同一运行器）。安装：cargo install cargo-nextest --locked"; exit 1; }
@@ -54,7 +65,7 @@ pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 		&& "$$bun" run check \
 		&& "$$bun" run production-smoke
 
-check-all: fmt-check lint lint-sh test sdk-check pi-agent-check ## 完整检查 (格式 + Clippy + shell + Rust/TS 测试)
+check-all: fmt-check lint lint-sh lint-paths test sdk-check pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
 
 build: ## 编译 release 二进制（GUI + 守护 + helpers）
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
@@ -78,10 +89,11 @@ dist: ## 用已有 release 产物打包 app + dmg
 dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
 
-install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
+install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
 	@# 旧包再装一遍，守护永远跑不到新代码，插件映射竞态也修不进去。Shared Bun
 	@# package 没有 cargo binary，因此同时检查整个 bundled package 的源内容。
+	@# codesign -dv 不打印证书名，Authority= 从 -dvv 才出现。少这一级时已签好的包也会被当成签名不对。
 	@./scripts/bundled-plugins.sh dirs >/dev/null || { \
 		echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝安装"; exit 1; \
 	}
@@ -96,6 +108,15 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 	else \
 		plugin_sources_changed=missing; \
 	fi; \
+	sig_ok=0; \
+	identity="$${SMELT_CODESIGN_IDENTITY:-Smelt Local Signing}"; \
+	if [ -d dist/Smelt.app ]; then \
+		sig="$$(codesign -dvv dist/Smelt.app 2>&1 || true)"; \
+		case "$$sig" in \
+			*Signature=adhoc*|*linker-signed*) ;; \
+			*) printf '%s\n' "$$sig" | grep -F -q "Authority=$$identity" && sig_ok=1 ;; \
+		esac; \
+	fi; \
 	if [ ! -d dist/Smelt.app ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(DAEMON) ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(BIN) ] \
@@ -107,14 +128,49 @@ install: ## 原子安装到 /Applications；活跃 ACP 不阻塞，旧 runtime �
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
 		|| [ target/release/smelt-agent-mcp -nt dist/Smelt.app/Contents/MacOS/smelt-agent-mcp ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
-		|| [ -n "$$plugin_sources_changed" ]; then \
-		echo "· dist 落后于 release 或 bundled plugin package，重新打包"; \
-		./scripts/package-mac.sh; \
+		|| [ -n "$$plugin_sources_changed" ] \
+		|| [ "$$sig_ok" -ne 1 ]; then \
+		echo "· dist 落后于 release、签名不对，或 bundled plugin package，重新打包"; \
+		./scripts/package-mac.sh --no-dmg; \
 	fi
 	@# 存量 make install 仍走旧的显式安装入口；在线更新已改由进程外 installer
 	@# 在 GUI 完全退出后提交。这里保留 daemon handoff 语义，后续再收敛到同一 core。
 	@./target/release/$(BIN) --install-app dist/Smelt.app /Applications/Smelt.app
 	@echo "✅ 安装完成"
 
-clean: ## 清理 dist/ 产物
-	rm -rf dist
+dev: ## 编译 release 并原子安装到 /Applications（= make build 后 make install）
+	@# 不写成 `dev: build install` 依赖：make -j 会把两者并行，install 可能装上旧产物。
+	@$(MAKE) --no-print-directory build
+	@$(MAKE) --no-print-directory install
+
+clean: ## 清理 make build / make install 的构建产物（target/ 与 dist/，不卸载已安装的 App）
+	@set -eu; \
+	target_dir="$${CARGO_TARGET_DIR:-target}"; \
+	kb_of() { if [ -e "$$1" ]; then du -sk "$$1" | awk '{print $$1}'; else echo 0; fi; }; \
+	human() { \
+		kb="$$1"; \
+		if [ "$$kb" -ge 1048576 ]; then awk -v k="$$kb" 'BEGIN { printf "%.1f GB", k/1048576 }'; \
+		elif [ "$$kb" -ge 1024 ]; then awk -v k="$$kb" 'BEGIN { printf "%.1f MB", k/1024 }'; \
+		else printf '%s KB' "$$kb"; fi; \
+	}; \
+	before_target=$$(kb_of "$$target_dir"); \
+	before_dist=$$(kb_of dist); \
+	cargo clean; \
+	rm -rf dist; \
+	after_target=$$(kb_of "$$target_dir"); \
+	after_dist=$$(kb_of dist); \
+	freed_target=$$((before_target - after_target)); \
+	freed_dist=$$((before_dist - after_dist)); \
+	if [ "$$freed_target" -lt 0 ]; then freed_target=0; fi; \
+	if [ "$$freed_dist" -lt 0 ]; then freed_dist=0; fi; \
+	freed=$$((freed_target + freed_dist)); \
+	if [ "$$freed" -eq 0 ]; then \
+		echo "没有可清理的构建产物"; \
+	else \
+		parts=""; \
+		if [ "$$freed_target" -gt 0 ]; then parts="target $$(human $$freed_target)"; fi; \
+		if [ "$$freed_dist" -gt 0 ]; then \
+			if [ -n "$$parts" ]; then parts="$${parts}，dist $$(human $$freed_dist)"; else parts="dist $$(human $$freed_dist)"; fi; \
+		fi; \
+		echo "✅ 已清理 $$(human $$freed)（$${parts}）"; \
+	fi

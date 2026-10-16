@@ -48,6 +48,8 @@ Smelt 自有的结构化本地状态统一存放在：
 | `agent_acp_config_memory` | 各家最近一次显式选择的模型等配置 |
 | `agent_definition` | 用户定义的本地智能体 |
 | `agent_profile` | 手动添加的 workspace profile |
+| `agent_memory_usage` | 智能体记忆的使用统计；主键 `(scope, file_name)`，scope 为 `agent:<id>` 或 `user` |
+| `agent_memory_provenance` | 智能体记忆的来源（可信 / 待确认）；记忆正文是 Markdown 文件，不进库 |
 | `remote_acp_session` | 守护进程远程 ACP 会话目录 |
 | `remote_terminal_session` | 守护进程远程终端会话目录 |
 | `published_session` | 守护进程已发布会话身份（崩溃恢复） |
@@ -110,3 +112,5 @@ SQLite 只承载 Smelt 自有结构化状态。以下内容保持文件系统语
 - GUI 独占 workspace 和界面设置的写入；
 - SQLite 负责跨进程事务与锁，不改变既有领域 owner；
 - 新功能必须通过 `smelt-store`/强类型 repository 接入，不能在业务模块直接打开数据库。
+  Pi 启动器等不链接 `smelt-store` 的进程，调主 daemon 的控制方法由它代办（例如智能体记忆的
+  元数据走 `agent.memory.*`）；独立 ACP 会话宿主不初始化 SQLite，不能代办。

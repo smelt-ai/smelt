@@ -3,53 +3,6 @@
 
 use super::*;
 
-fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::fs::File) {
-    let mut fds = [0i32; 2];
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() 失败");
-    let read_end = unsafe { std::fs::File::from_raw_fd(fds[0]) };
-    let master = unsafe { std::fs::File::from_raw_fd(fds[1]) };
-    let child = std::process::Command::new("true").spawn().unwrap();
-    let pid = child.id() as i32;
-    drop(child);
-    let state = Arc::new(Mutex::new(SessionState {
-        phase,
-        ..Default::default()
-    }));
-    let subscribers = new_event_hub();
-    let color_replies = Arc::new(Mutex::new(VecDeque::new()));
-    let listener = StateListener::with_color_replies(
-        Arc::clone(&state),
-        subscribers,
-        Arc::clone(&color_replies),
-    );
-    let sess = Arc::new(Session {
-        instance: next_session_instance(),
-        geometry_token: uuid::Uuid::new_v4().simple().to_string(),
-        child: TerminalChild::start(pid).unwrap(),
-        ctl: Mutex::new(Ctl {
-            master,
-            jolt: false,
-            cols,
-            rows,
-            cell_w: 0,
-            cell_h: 0,
-            remote_viewports: 0,
-            remote_grace: 0,
-            cwd: None,
-        }),
-        input_gate: Mutex::new(()),
-        out: Mutex::new(Out {
-            clients: Vec::new(),
-            watchers: Vec::new(),
-        }),
-        output_gate: Mutex::new(()),
-        color_replies,
-        term: Mutex::new(new_daemon_term(rows, cols, listener)),
-        state,
-    });
-    (sess, read_end)
-}
-
 fn call_input(sessions: &Sessions, id: &str, data: &str) -> serde_json::Value {
     let (server, client) = UnixStream::pair().unwrap();
     let remote_state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));

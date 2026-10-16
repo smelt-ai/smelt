@@ -1,115 +1,57 @@
 use super::*;
 use std::os::unix::fs::MetadataExt;
 
-#[test]
-fn renamed_staging_executable_falls_back_to_stable_smeltd_path() {
+fn scratch(label: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "smeltd-renamed-executable-{}-{}",
+        "smeltd-{label}-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let staged = root.join("smeltd.next");
-    let stable = root.join("smeltd");
-    std::fs::write(&stable, b"current daemon image").unwrap();
+    root
+}
 
+#[test]
+fn content_fingerprint_matches_plugin_host() {
+    let root = scratch("fingerprint");
+    let path = root.join("image");
+    std::fs::write(&path, b"same-bytes").unwrap();
     assert_eq!(
-        daemon_executable_from_current(staged).unwrap(),
-        stable,
-        "macOS rename 后 current_exe 仍可能指向已不存在的 smeltd.next"
+        smelt_core::daemon_image::content_fingerprint(&path).unwrap(),
+        smelt_plugin_host::executable_fingerprint(&path).unwrap()
     );
-    let leftover_pin = root.join(".smeltd.image.11309");
-    assert_eq!(
-        daemon_executable_from_current(leftover_pin).unwrap(),
-        stable,
-        "历史硬链被删后必须回退到正式 smeltd，不能 ENOENT 把宿主 spawn 打挂"
-    );
-
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn existing_staging_executable_wins_until_the_rename_finishes() {
-    let root = std::env::temp_dir().join(format!(
-        "smeltd-staged-executable-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let staged = root.join("smeltd.install.42.next");
-    let stable = root.join("smeltd");
-    std::fs::write(&staged, b"new daemon image").unwrap();
-    std::fs::write(&stable, b"old daemon image").unwrap();
+fn symlink_launch_name_pins_the_image_file() {
+    let root = scratch("pin-symlink");
+    let src = root.join("src");
+    std::fs::write(&src, b"mapped-image").unwrap();
+    let image = smelt_core::daemon_image::publish_image(&root, &src).unwrap();
+    smelt_core::daemon_image::retarget_launch_symlink(&root, &image).unwrap();
 
-    assert_eq!(
-        daemon_executable_from_current(staged.clone()).unwrap(),
-        staged,
-        "rename 前必须继续派生暂存的新版本，不能退回旧的稳定文件"
+    let pinned = open_mapped_image(&root.join("smeltd")).expect("应从启动名钉住映像");
+    let image_meta = std::fs::symlink_metadata(&image).unwrap();
+    assert_eq!(pinned.path, image);
+    assert_eq!(pinned.dev, image_meta.dev());
+    assert_eq!(pinned.ino, image_meta.ino());
+    assert_ne!(
+        pinned.ino,
+        std::fs::symlink_metadata(root.join("smeltd"))
+            .unwrap()
+            .ino(),
+        "钉住的必须是映像文件，不是启动名这根链接"
     );
-
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn handoff_staging_executable_is_promoted_before_daemon_startup() {
-    let root = std::env::temp_dir().join(format!(
-        "smeltd-promote-staging-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let staged = root.join("smeltd.next");
-    let stable = root.join("smeltd");
-    std::fs::write(&staged, b"new daemon image").unwrap();
-    std::fs::write(&stable, b"old daemon image").unwrap();
-
-    assert_eq!(
-        promote_staged_handoff_executable(&staged, true).unwrap(),
-        Some(stable.clone()),
-        "handoff 启动必须在初始化 daemon 前把暂存映像提升到正式路径"
-    );
-    assert!(!staged.exists(), "提升后不能继续遗留 smeltd.next");
-    assert_eq!(std::fs::read(&stable).unwrap(), b"new daemon image");
-
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn ordinary_staging_launch_does_not_install_itself() {
-    let root = std::env::temp_dir().join(format!(
-        "smeltd-no-promote-without-handoff-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let staged = root.join("smeltd.install.42.next");
-    let stable = root.join("smeltd");
-    std::fs::write(&staged, b"candidate daemon image").unwrap();
-    std::fs::write(&stable, b"stable daemon image").unwrap();
-
-    assert_eq!(
-        promote_staged_handoff_executable(&staged, false).unwrap(),
-        None,
-        "没有 SMELTD_HANDOFF 时不能把手工运行的暂存文件安装成正式 daemon"
-    );
-    assert!(staged.is_file());
-    assert_eq!(std::fs::read(&stable).unwrap(), b"stable daemon image");
-
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn replaced_directory_entry_is_not_the_session_host_image() {
-    let root = std::env::temp_dir().join(format!(
-        "smeltd-pinned-image-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let path = root.join("smeltd");
+    let root = scratch("pinned-image");
+    let path = root.join("smeltd-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     std::fs::write(&path, b"running-image").unwrap();
-    let meta = std::fs::metadata(&path).unwrap();
-    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(&path).unwrap();
     let dev = meta.dev();
     let ino = meta.ino();
 
@@ -122,7 +64,7 @@ fn replaced_directory_entry_is_not_the_session_host_image() {
         "覆盖路径之后不能再把目录项当成正在跑的映像"
     );
 
-    let error = session_host_executable_from(path, Some((dev, ino)))
+    let error = session_host_executable_from(&path, Some((dev, ino)))
         .expect_err("路径已换 inode 时必须拒绝启动，不能去跑那份新文件");
     assert!(
         error.to_string().contains("另一份映像"),
@@ -137,68 +79,96 @@ fn replaced_directory_entry_is_not_the_session_host_image() {
 }
 
 #[test]
-fn matching_inode_keeps_the_current_exe_path() {
-    let root = std::env::temp_dir().join(format!(
-        "smeltd-same-inode-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let path = root.join("smeltd");
+fn matching_inode_keeps_the_pinned_path() {
+    let root = scratch("same-inode");
+    let path = root.join("smeltd-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     std::fs::write(&path, b"running-image").unwrap();
-    let meta = std::fs::metadata(&path).unwrap();
-    let chosen =
-        session_host_executable_from(path.clone(), Some((meta.dev(), meta.ino()))).unwrap();
+    let meta = std::fs::symlink_metadata(&path).unwrap();
+    let chosen = session_host_executable_from(&path, Some((meta.dev(), meta.ino()))).unwrap();
     assert_eq!(chosen, path);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn session_host_falls_back_to_stable_when_staging_path_is_replaced() {
-    let root = std::env::temp_dir().join(format!(
-        "smeltd-fallback-stable-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let staged = root.join("smeltd.next");
-    let stable = root.join("smeltd");
-    std::fs::write(&stable, b"original-running-image").unwrap();
-    let meta = std::fs::metadata(&stable).unwrap();
-    use std::os::unix::fs::MetadataExt;
-    let dev = meta.dev();
-    let ino = meta.ino();
+fn retargeted_launch_symlink_does_not_change_the_session_host() {
+    let root = scratch("retarget");
+    let old_src = root.join("old");
+    let new_src = root.join("new");
+    std::fs::write(&old_src, b"running-image").unwrap();
+    std::fs::write(&new_src, b"next-image").unwrap();
+    let old_image = smelt_core::daemon_image::publish_image(&root, &old_src).unwrap();
+    let new_image = smelt_core::daemon_image::publish_image(&root, &new_src).unwrap();
+    smelt_core::daemon_image::retarget_launch_symlink(&root, &old_image).unwrap();
+    let pinned = open_mapped_image(&old_image).unwrap();
 
-    // staged 文件被别人重新写成了新映像（inode 改变）
-    std::fs::write(&staged, b"newer-staged-image").unwrap();
+    smelt_core::daemon_image::retarget_launch_symlink(&root, &new_image).unwrap();
 
-    let chosen = session_host_executable_from(staged, Some((dev, ino))).unwrap();
-    assert_eq!(chosen, stable);
+    let chosen =
+        session_host_executable_from(&pinned.path, Some((pinned.dev, pinned.ino))).unwrap();
+    assert_eq!(chosen, old_image);
+    assert_ne!(chosen, root.join("smeltd"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn staged_successor_is_the_sibling_next_file() {
-    let root = std::env::temp_dir().join(format!(
-        "smeltd-staged-successor-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let live = root.join("smeltd");
-    let next = root.join("smeltd.next");
-    std::fs::write(&live, b"running").unwrap();
+fn sibling_with_the_old_inode_is_not_a_fallback() {
+    let root = scratch("no-fallback");
+    let image =
+        root.join("smeltd-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    std::fs::write(&image, b"original-running-image").unwrap();
+    let stable = root.join("smeltd");
+    std::fs::hard_link(&image, &stable).unwrap();
+    let meta = std::fs::symlink_metadata(&image).unwrap();
+    let dev = meta.dev();
+    let ino = meta.ino();
+
+    let replacement = root.join("replacement");
+    std::fs::write(&replacement, b"newer-image").unwrap();
+    std::fs::rename(&replacement, &image).unwrap();
+
+    let error = session_host_executable_from(&image, Some((dev, ino)))
+        .expect_err("旁边就算还留着旧 inode，也不能拿它当会话宿主");
+    assert!(
+        error.to_string().contains("另一份映像"),
+        "实际错误：{error}"
+    );
+    assert!(stable.is_file());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unpinned_session_host_is_refused() {
+    let root = scratch("unpinned");
+    let path = root.join("smeltd");
+    std::fs::write(&path, b"running-image").unwrap();
+    let error = session_host_executable_from(&path, None).expect_err("没钉住就不能启动宿主");
+    assert!(
+        error.to_string().contains("没有钉住守护映像"),
+        "实际错误：{error}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pending_symlink_is_the_successor_image() {
+    let root = scratch("pending-successor");
+    let live_src = root.join("live-src");
+    let next_src = root.join("next-src");
+    std::fs::write(&live_src, b"running").unwrap();
+    std::fs::write(&next_src, b"pending").unwrap();
+    let live = smelt_core::daemon_image::publish_image(&root, &live_src).unwrap();
     assert_eq!(staged_successor_executable(&live), None);
 
-    std::fs::write(&next, b"pending").unwrap();
+    let next = smelt_core::daemon_image::publish_image(&root, &next_src).unwrap();
+    smelt_core::daemon_image::retarget_pending_symlink(&root, &next).unwrap();
     assert_eq!(
         staged_successor_executable(&live).as_deref(),
-        Some(next.as_path())
+        Some(std::fs::canonicalize(&next).unwrap().as_path())
     );
     assert_eq!(
         staged_successor_executable(&next),
         None,
-        "已经在跑 .next 时不能把自身再当成待升级候选"
+        "已经在跑这份映像时不能把自身再当成待升级候选"
     );
 
     std::fs::remove_dir_all(root).unwrap();

@@ -95,6 +95,8 @@ pub struct GitDiff {
     pub patchable: bool,
     pub scope: DiffScope,
     pub has_staged: bool,
+    /// 原始补丁。`None` 还在读取；`Some("")` 是已经读完的空差异。
+    pub patch: Option<String>,
 }
 
 pub struct ParsedDiff {
@@ -305,25 +307,38 @@ pub fn parse_branch_status_line(b: &str) -> (String, Option<String>, u32, u32) {
     (head.trim().to_string(), Some(upstream), ahead, behind)
 }
 
+/// 解析 `git status --porcelain=v1 -b -z` 的输出。
+///
+/// 必须用 `-z`：不加时 git 会把中文、空格、引号等路径转义成 `"\344\270\255.txt"`
+/// 这种 C 字符串，重命名还会写成 `old -> new`，按原样当路径就成了乱码。`-z` 下
+/// 条目以 NUL 分隔、路径原样输出；重命名/复制写成 `XY 新路径\0旧路径\0`。
 pub fn parse_git_status(text: &str) -> GitStatusData {
     let mut status = GitStatusData {
         ok: true,
         ..Default::default()
     };
-    for line in text.lines() {
-        if let Some(branch) = line.strip_prefix("## ") {
+    let mut entries = text.split('\0');
+    while let Some(entry) = entries.next() {
+        if let Some(branch) = entry.strip_prefix("## ") {
             let (name, upstream, ahead, behind) = parse_branch_status_line(branch);
             status.branch = name;
             status.upstream = upstream;
             status.ahead = ahead;
             status.behind = behind;
-        } else if line.len() >= 3 {
-            // 未跟踪目录 / 嵌套 git 仓库（常被当成 submodule）porcelain 会写成
-            // `?? path/`。文件树按 `/` 切最后一段，尾斜杠会得到空文件名直接丢掉。
-            let path = line[3..].trim_end_matches('/').to_string();
-            if !path.is_empty() {
-                status.files.push((line[..2].to_string(), path));
-            }
+            continue;
+        }
+        let (Some(xy), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        if xy.contains(['R', 'C']) {
+            // 紧跟的那一段是旧路径，列表只显示新路径。
+            entries.next();
+        }
+        // 未跟踪目录 / 嵌套 git 仓库（常被当成 submodule）porcelain 会写成
+        // `?? path/`。文件树按 `/` 切最后一段，尾斜杠会得到空文件名直接丢掉。
+        let path = path.trim_end_matches('/');
+        if !path.is_empty() {
+            status.files.push((xy.to_string(), path.to_string()));
         }
     }
     status
@@ -378,7 +393,13 @@ pub fn load_git_status_with(subprocess: &dyn Subprocess, root: &str) -> GitStatu
         // 以前强制 `none` 是「靠父仓 status 发现子仓」那套模型的遗留：不强制就一个
         // 子仓都找不到。现在仓库由 discovery 独立发现，强制只剩副作用——用户明明
         // 配了 `ignore = all`，父仓还是塞进来一条 gitlink，跟子仓自己的分组重复。
-        &["status", "--porcelain=v1", "--untracked-files=all", "-b"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "-b",
+            "-z",
+        ],
     ) else {
         return GitStatusData::default();
     };
@@ -629,30 +650,85 @@ fn run_git_net_with(subprocess: &dyn Subprocess, root: &str, args: &[&str]) -> R
     )
 }
 
+/// 推送当前分支。
+///
+/// 有上游就只跑 `git push`，失败原样返回 git 的诊断——不能再「失败就换个远端重试」：
+/// 网络断开、被拒绝（non-fast-forward）、没权限都不是「缺上游」，换远端重试只会
+/// 用一条无关的报错（比如仓库根本没有 origin）把真正的原因盖掉。
+/// 没上游时才 `push -u <远端> <分支>` 建立跟踪，远端怎么选见 [`default_push_remote`]。
 pub fn push_current_with(
     subprocess: &dyn Subprocess,
     root: &str,
     branch: &str,
 ) -> Result<(), String> {
     let env = [("GIT_OPTIONAL_LOCKS", "0"), ("GIT_TERMINAL_PROMPT", "0")];
-    let first = subprocess
-        .run("git", &["-C", root, "push"], None, &env)
-        .map_err(|error| error.to_string())?;
-    if first.success() {
-        return Ok(());
+    if branch.is_empty() || has_upstream(subprocess, root) {
+        return checked(
+            subprocess.run("git", &["-C", root, "push"], None, &env),
+            "git push 失败",
+        );
     }
-    if branch.is_empty() {
-        return Err(git_err(&first, "git push 失败"));
-    }
+    let remote = default_push_remote(subprocess, root, branch)?;
     checked(
         subprocess.run(
             "git",
-            &["-C", root, "push", "-u", "origin", branch],
+            &["-C", root, "push", "-u", &remote, branch],
             None,
             &env,
         ),
         "git push 失败",
     )
+}
+
+fn has_upstream(subprocess: &dyn Subprocess, root: &str) -> bool {
+    run_git_with(
+        subprocess,
+        root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .is_ok_and(|out| out.success())
+}
+
+/// 分支还没上游时推到哪个远端，口径跟 git 自己一致：
+/// `remote.pushDefault` > 唯一的远端 > 名为 `origin` 的远端。
+/// 多个远端又没有 origin 时（比如同时挂着 gh / nio），猜哪个都可能推错地方，
+/// 直接报错让用户自己指定，而不是瞎推。
+fn default_push_remote(
+    subprocess: &dyn Subprocess,
+    root: &str,
+    branch: &str,
+) -> Result<String, String> {
+    if let Ok(out) = run_git_with(subprocess, root, &["config", "--get", "remote.pushDefault"]) {
+        let name = out.stdout_str().trim().to_string();
+        if out.success() && !name.is_empty() {
+            return Ok(name);
+        }
+    }
+    let out = run_git_with(subprocess, root, &["remote"]).map_err(|error| error.to_string())?;
+    if !out.success() {
+        return Err(git_err(&out, "读取远端列表失败"));
+    }
+    let remotes: Vec<String> = out
+        .stdout_str()
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    match remotes.as_slice() {
+        [] => Err("仓库没有配置任何远端，无法推送".to_string()),
+        [only] => Ok(only.clone()),
+        _ if remotes.iter().any(|name| name == "origin") => Ok("origin".to_string()),
+        _ => Err(format!(
+            "分支「{branch}」还没有上游，且有多个远端（{}），请先执行 git push -u <远端> {branch} 指定推送目标",
+            remotes.join("、")
+        )),
+    }
 }
 
 pub fn push_current(root: &str, branch: &str) -> Result<(), String> {
@@ -1042,7 +1118,15 @@ husky - pre-commit hook exited with code 127 (error)"
             .to_vec();
         let sp = MockSubprocess::new().when(
             "git",
-            &["-C", "/repo", "commit", "-m", "msg"],
+            &[
+                "-C",
+                "/repo",
+                "-c",
+                "core.quotePath=false",
+                "commit",
+                "-m",
+                "msg",
+            ],
             Output {
                 code: Some(1),
                 stdout: Vec::new(),
@@ -1059,7 +1143,15 @@ husky - pre-commit hook exited with code 127 (error)"
     fn failed_commit_does_not_attempt_push() {
         let sp = MockSubprocess::new().when(
             "git",
-            &["-C", "/repo", "commit", "-m", "msg"],
+            &[
+                "-C",
+                "/repo",
+                "-c",
+                "core.quotePath=false",
+                "commit",
+                "-m",
+                "msg",
+            ],
             Output {
                 code: Some(1),
                 stdout: Vec::new(),
@@ -1073,7 +1165,7 @@ husky - pre-commit hook exited with code 127 (error)"
     #[test]
     fn status_parser_reads_branch_and_files() {
         let status = parse_git_status(
-            "## main...origin/main [ahead 2, behind 1]\n M src/lib.rs\n?? notes.md\n",
+            "## main...origin/main [ahead 2, behind 1]\0 M src/lib.rs\0?? notes.md\0",
         );
         assert_eq!(status.branch, "main");
         assert_eq!(status.upstream.as_deref(), Some("origin/main"));
@@ -1081,10 +1173,25 @@ husky - pre-commit hook exited with code 127 (error)"
         assert_eq!(status.files.len(), 2);
     }
 
+    /// 输出取自真实 `git status --porcelain=v1 -b -z`：中文、空格、引号原样保留，
+    /// 重命名只留新路径，不能把旧路径当成另一条改动。
+    #[test]
+    fn status_parser_keeps_non_ascii_and_renamed_paths_verbatim() {
+        let status = parse_git_status("## main\0 M 中文 名.txt\0R  新.txt\0old.txt\0?? q\"x.txt\0");
+        assert_eq!(
+            status.files,
+            vec![
+                (" M".into(), "中文 名.txt".into()),
+                ("R ".into(), "新.txt".into()),
+                ("??".into(), "q\"x.txt".into()),
+            ]
+        );
+    }
+
     #[test]
     fn status_parser_keeps_submodule_and_nested_repo_paths() {
         let status =
-            parse_git_status("## main\n M vendor/lib\n m vendor/dirty\n?? skills/fx-deploy/\n");
+            parse_git_status("## main\0 M vendor/lib\0 m vendor/dirty\0?? skills/fx-deploy/\0");
         assert_eq!(
             status.files,
             vec![
@@ -1144,17 +1251,20 @@ husky - pre-commit hook exited with code 127 (error)"
         let status_args = [
             "-C",
             "/repo",
+            "-c",
+            "core.quotePath=false",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "-b",
+            "-z",
         ];
         let subprocess = MockSubprocess::new().when(
             "git",
             &status_args,
             Output {
                 code: Some(0),
-                stdout: b"## main\n M src/lib.rs\n".to_vec(),
+                stdout: b"## main\0 M src/lib.rs\0".to_vec(),
                 stderr: Vec::new(),
             },
         );
@@ -1182,6 +1292,102 @@ husky - pre-commit hook exited with code 127 (error)"
         run_git(&root, &["config", "user.email", "t@t"]).unwrap();
         run_git(&root, &["config", "user.name", "t"]).unwrap();
         root
+    }
+
+    /// 建一个带一次提交、当前在 `feature` 分支上的仓库，并按 `remotes` 挂上本地 bare 远端。
+    fn repo_with_remotes(tmp: &Path, remotes: &[&str]) -> String {
+        let root = init_repo(&tmp.join("work"));
+        run_git(&root, &["checkout", "-q", "-b", "feature"]).unwrap();
+        std::fs::write(Path::new(&root).join("a.txt"), "one\n").unwrap();
+        run_git(&root, &["add", "a.txt"]).unwrap();
+        run_git(&root, &["commit", "-qm", "seed"]).unwrap();
+        for name in remotes {
+            let bare = tmp.join(format!("{name}.git"));
+            let bare = bare.to_str().unwrap();
+            run_git(&root, &["init", "-q", "--bare", bare]).unwrap();
+            run_git(&root, &["remote", "add", name, bare]).unwrap();
+        }
+        root
+    }
+
+    fn remote_has_branch(tmp: &Path, remote: &str, branch: &str) -> bool {
+        let bare = tmp.join(format!("{remote}.git"));
+        run_git(
+            bare.to_str().unwrap(),
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .unwrap()
+        .success()
+    }
+
+    /// 已有上游时 push 失败，必须原样报出这次失败的原因。
+    ///
+    /// 旧实现失败后无条件回退 `push -u origin`：仓库只有 nio / gh 两个远端时，
+    /// 用户看到的是 "'origin' does not appear to be a git repository"，真正的原因被盖掉了。
+    #[test]
+    fn push_failure_with_upstream_reports_the_real_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo_with_remotes(tmp.path(), &["nio", "gh"]);
+        run_git(&root, &["push", "-q", "-u", "nio", "feature"]).unwrap();
+        // 让上游远端变得不可达：模拟网络 / 权限一类与「缺上游」无关的失败。
+        let gone = tmp.path().join("gone.git");
+        run_git(&root, &["remote", "set-url", "nio", gone.to_str().unwrap()]).unwrap();
+        std::fs::write(Path::new(&root).join("a.txt"), "two\n").unwrap();
+        run_git(&root, &["commit", "-qam", "next"]).unwrap();
+
+        let err = push_current(&root, "feature").expect_err("远端不可达必须报错");
+        assert!(!err.contains("origin"), "不该去推不存在的 origin：{err}");
+        assert!(err.contains("gone.git"), "应报出真实失败的远端：{err}");
+        assert!(
+            !remote_has_branch(tmp.path(), "gh", "feature"),
+            "失败后不能擅自改推到别的远端"
+        );
+    }
+
+    /// 新分支没上游、仓库只有一个远端（叫什么都行）：推到它并建立跟踪。
+    #[test]
+    fn first_push_uses_the_only_remote_even_if_not_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo_with_remotes(tmp.path(), &["nio"]);
+
+        push_current(&root, "feature").expect("唯一远端应能直接推送");
+        assert!(remote_has_branch(tmp.path(), "nio", "feature"));
+        assert_eq!(
+            load_git_status(&root).upstream.as_deref(),
+            Some("nio/feature")
+        );
+    }
+
+    /// 没上游、多个远端且没有 origin：不猜，报错让用户指定。
+    #[test]
+    fn first_push_with_ambiguous_remotes_asks_instead_of_guessing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo_with_remotes(tmp.path(), &["gh", "nio"]);
+
+        let err = push_current(&root, "feature").expect_err("多远端不能瞎猜");
+        assert!(
+            err.contains("gh") && err.contains("nio"),
+            "应列出可选远端：{err}"
+        );
+        assert!(!remote_has_branch(tmp.path(), "gh", "feature"));
+        assert!(!remote_has_branch(tmp.path(), "nio", "feature"));
+    }
+
+    /// 配了 `remote.pushDefault` 就跟 git 一样听它的。
+    #[test]
+    fn first_push_honors_remote_push_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo_with_remotes(tmp.path(), &["gh", "nio"]);
+        run_git(&root, &["config", "remote.pushDefault", "nio"]).unwrap();
+
+        push_current(&root, "feature").expect("有 pushDefault 应能推送");
+        assert!(remote_has_branch(tmp.path(), "nio", "feature"));
+        assert!(!remote_has_branch(tmp.path(), "gh", "feature"));
     }
 
     /// 每个仓库只报自己的文件。

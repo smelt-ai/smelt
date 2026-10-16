@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
-    io::Read as _,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Command,
@@ -18,6 +17,14 @@ use std::{
 };
 
 pub(crate) const BUN_VERSION: &str = "1.4.0";
+
+#[cfg(any(target_os = "macos", test))]
+/// 当前受管 Bun 的固定入口，相对 runtime 根目录。generation 目录名带哈希、随版本变，
+/// 写进外部配置（如 `mcp.json` 的 `command`）的路径必须是这一条。
+const BUN_LAUNCHER: &str = "bin/bun";
+
+/// [`BUN_LAUNCHER`] 的 `~/` 写法。Pi 会展开 `mcp.json` 里 `command` 开头的 `~/`。
+pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun";
 pub(crate) const PI_BRIDGE_PROTOCOL: &str = "smelt-pi-rpc-v1";
 include!(concat!(env!("OUT_DIR"), "/pi_agent_runtime_files.rs"));
 
@@ -219,6 +226,8 @@ fn sync_managed_bun_locked(
     }
     let lease = store.acquire_shared_locked(GenerationKind::Bun, &manifest.generation_id)?;
     store.write_current_locked(GenerationKind::Bun, &manifest.generation_id)?;
+    // 先把固定入口切到新 generation，再回收旧的：顺序反过来，入口会短暂悬空。
+    publish_bun_launcher(store.runtime_root(), &root.join("bun"))?;
     let mut keep = HashSet::new();
     keep.insert(manifest.generation_id.clone());
     store.gc_kind_locked(GenerationKind::Bun, &keep);
@@ -227,6 +236,30 @@ fn sync_managed_bun_locked(
         generation_id: manifest.generation_id,
         lease,
     })
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// 把 `<runtime>/bin/bun` 原子地指向 `bun`：先建临时符号链接再 rename 覆盖，
+/// 正在通过旧链接启动的进程不会撞上「文件不存在」。
+fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
+    let launcher = runtime_root.join(BUN_LAUNCHER);
+    if fs::read_link(&launcher).is_ok_and(|target| target == bun) {
+        return Ok(());
+    }
+    let dir = launcher.parent().unwrap_or(runtime_root);
+    fs::create_dir_all(dir).map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+    let temporary = dir.join(format!(
+        ".bun-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = std::os::unix::fs::symlink(bun, &temporary)
+        .and_then(|()| fs::rename(&temporary, &launcher))
+        .map_err(|error| format!("更新 Bun 固定入口 {} 失败：{error}", launcher.display()));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -371,7 +404,7 @@ pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRu
                 materialize_pi_files(staging)?;
                 run_pi_install(&bun_runtime, &manager, staging)?;
                 if !managed_pi_agent_dependencies_installed(staging) {
-                    return Err("Pi 依赖安装完成，但必要的 RPC 补丁或入口不完整".to_string());
+                    return Err("Pi 依赖安装完成，但 RPC 入口不完整".to_string());
                 }
                 Ok(())
             },
@@ -463,42 +496,12 @@ fn managed_pi_agent_dependencies_installed(root: &Path) -> bool {
         root.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/rpc-entry.js");
     let rpc_mode =
         root.join("node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js");
-    rpc_entry.is_file()
-        && fs::read_to_string(rpc_mode)
-            .is_ok_and(|source| pi_rpc_duplicate_rebind_patch_is_applied(&source))
-}
-
-pub(crate) fn pi_rpc_duplicate_rebind_patch_is_applied(source: &str) -> bool {
-    ["new_session", "switch_session", "fork", "clone"]
-        .into_iter()
-        .all(|command| {
-            let marker = format!("case \"{command}\": {{");
-            let Some(start) = source.find(&marker) else {
-                return false;
-            };
-            let after_marker = &source[start + marker.len()..];
-            let end = after_marker
-                .find("\n            case \"")
-                .unwrap_or(after_marker.len());
-            !after_marker[..end].contains("await rebindSession()")
-        })
+    rpc_entry.is_file() && rpc_mode.is_file()
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file =
-        fs::File::open(path).map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
+    crate::daemon_image::content_fingerprint(path)
+        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))
 }
 
 #[cfg(target_os = "macos")]
@@ -545,6 +548,27 @@ pub(crate) fn pi_runtime_files() -> &'static [(&'static str, &'static str)] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bun_launcher_follows_the_latest_generation() {
+        let runtime =
+            std::env::temp_dir().join(format!("smelt-bun-launcher-{}", uuid::Uuid::new_v4()));
+        let first = runtime.join("store/bun/bun-a/bun");
+        let second = runtime.join("store/bun/bun-b/bun");
+
+        publish_bun_launcher(&runtime, &first).unwrap();
+        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), first);
+        publish_bun_launcher(&runtime, &first).unwrap();
+        publish_bun_launcher(&runtime, &second).unwrap();
+        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), second);
+        assert!(
+            MANAGED_BUN_LAUNCHER_HOME_PATH.ends_with(BUN_LAUNCHER),
+            "写进外部配置的路径必须就是这个入口"
+        );
+        let leftovers = fs::read_dir(runtime.join("bin")).unwrap().count();
+        assert_eq!(leftovers, 1, "临时链接不能留下");
+        fs::remove_dir_all(runtime).ok();
+    }
+
     fn collect_runtime_files(dir: &Path, package: &Path, output: &mut Vec<String>) {
         for entry in fs::read_dir(dir).expect("读取 runtime 源码目录") {
             let path = entry.expect("读取 runtime 源码项").path();
@@ -572,7 +596,10 @@ mod tests {
         let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/pi-agent");
         let mut expected = vec!["bun.lock".to_string(), "package.json".to_string()];
         collect_runtime_files(&package.join("src"), &package, &mut expected);
-        collect_runtime_files(&package.join("patches"), &package, &mut expected);
+        let patches = package.join("patches");
+        if patches.is_dir() {
+            collect_runtime_files(&patches, &package, &mut expected);
+        }
         expected.sort();
 
         let mut embedded = pi_runtime_files()
@@ -596,28 +623,6 @@ mod tests {
         assert_eq!(manifest["version"], pi_runtime_version());
         let main = include_str!("../../../packages/pi-agent/src/main.ts");
         assert!(main.contains("registerBunOAuthFlows()"));
-    }
-
-    #[test]
-    fn rpc_patch_postcondition_covers_every_session_replacement_handler() {
-        let clean = ["new_session", "switch_session", "fork", "clone"]
-            .into_iter()
-            .map(|name| format!("case \"{name}\": {{\n return success();\n }}\n"))
-            .collect::<String>();
-        assert!(pi_rpc_duplicate_rebind_patch_is_applied(&clean));
-        for name in ["new_session", "switch_session", "fork", "clone"] {
-            let drifted = clean.replacen(
-                &format!("case \"{name}\": {{"),
-                &format!("case \"{name}\": {{\n await rebindSession();"),
-                1,
-            );
-            assert!(!pi_rpc_duplicate_rebind_patch_is_applied(&drifted));
-        }
-        assert!(!pi_rpc_duplicate_rebind_patch_is_applied(&clean.replacen(
-            "case \"clone\": {",
-            "case \"removed\": {",
-            1,
-        )));
     }
 
     #[cfg(target_os = "macos")]

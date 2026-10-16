@@ -31,7 +31,6 @@ fn recovered_state(id: &str) -> SessionState {
         agent_mcp: true,
         agent_token: "should-not-persist".to_string(),
         title: Some("崩溃前的会话".to_string()),
-        prompt_title: None,
         phase: Phase::AwaitingApproval,
         phase_since: 100,
         pending_question: Some("要不要继续".to_string()),
@@ -250,7 +249,6 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
             make_acp_session(
                 "acp-1",
                 None,
-                false,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
                 None,
                 None,

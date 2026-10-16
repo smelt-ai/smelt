@@ -1,0 +1,192 @@
+[
+  {
+    "name": "Default Dark",
+    "mode": "dark",
+    "family": "Default"
+  },
+  {
+    "name": "Default Light",
+    "mode": "light",
+    "family": "Default"
+  },
+  {
+    "name": "Adventure",
+    "mode": "dark",
+    "family": "Adventure"
+  },
+  {
+    "name": "Adventure Time",
+    "mode": "dark",
+    "family": "Adventure"
+  },
+  {
+    "name": "Alduin",
+    "mode": "dark",
+    "family": "Alduin"
+  },
+  {
+    "name": "Asciinema",
+    "mode": "dark",
+    "family": "Asciinema"
+  },
+  {
+    "name": "Aurora Light",
+    "mode": "light",
+    "family": "Aurora"
+  },
+  {
+    "name": "Ayu Dark",
+    "mode": "dark",
+    "family": "Ayu"
+  },
+  {
+    "name": "Ayu Light",
+    "mode": "light",
+    "family": "Ayu"
+  },
+  {
+    "name": "Catppuccin Frappe",
+    "mode": "dark",
+    "family": "Catppuccin"
+  },
+  {
+    "name": "Catppuccin Latte",
+    "mode": "light",
+    "family": "Catppuccin"
+  },
+  {
+    "name": "Catppuccin Macchiato",
+    "mode": "dark",
+    "family": "Catppuccin"
+  },
+  {
+    "name": "Catppuccin Mocha",
+    "mode": "dark",
+    "family": "Catppuccin"
+  },
+  {
+    "name": "Everforest Dark",
+    "mode": "dark",
+    "family": "Everforest"
+  },
+  {
+    "name": "Everforest Light",
+    "mode": "light",
+    "family": "Everforest"
+  },
+  {
+    "name": "Fahrenheit",
+    "mode": "dark",
+    "family": "Fahrenheit"
+  },
+  {
+    "name": "Flexoki Dark",
+    "mode": "dark",
+    "family": "Flexoki"
+  },
+  {
+    "name": "Flexoki Light",
+    "mode": "light",
+    "family": "Flexoki"
+  },
+  {
+    "name": "Gruvbox Dark",
+    "mode": "dark",
+    "family": "Gruvbox"
+  },
+  {
+    "name": "Gruvbox Light",
+    "mode": "light",
+    "family": "Gruvbox"
+  },
+  {
+    "name": "Harper",
+    "mode": "dark",
+    "family": "Harper"
+  },
+  {
+    "name": "Hybrid Dark",
+    "mode": "dark",
+    "family": "Hybrid"
+  },
+  {
+    "name": "Hybrid Light",
+    "mode": "light",
+    "family": "Hybrid"
+  },
+  {
+    "name": "Jellybeans",
+    "mode": "dark",
+    "family": "Jellybeans"
+  },
+  {
+    "name": "Kibble",
+    "mode": "dark",
+    "family": "Kibble"
+  },
+  {
+    "name": "macOS Classic Dark",
+    "mode": "dark",
+    "family": "macOS Classic"
+  },
+  {
+    "name": "macOS Classic Light",
+    "mode": "light",
+    "family": "macOS Classic"
+  },
+  {
+    "name": "Mellifluous Dark",
+    "mode": "dark",
+    "family": "Mellifluous"
+  },
+  {
+    "name": "Mellifluous Light",
+    "mode": "light",
+    "family": "Mellifluous"
+  },
+  {
+    "name": "Molokai Dark",
+    "mode": "dark",
+    "family": "Molokai"
+  },
+  {
+    "name": "Molokai Light",
+    "mode": "light",
+    "family": "Molokai"
+  },
+  {
+    "name": "Solarized Dark",
+    "mode": "dark",
+    "family": "Solarized"
+  },
+  {
+    "name": "Solarized Light",
+    "mode": "light",
+    "family": "Solarized"
+  },
+  {
+    "name": "Spaceduck",
+    "mode": "dark",
+    "family": "Spaceduck"
+  },
+  {
+    "name": "Tokyo Moon",
+    "mode": "dark",
+    "family": "Tokyo"
+  },
+  {
+    "name": "Tokyo Night",
+    "mode": "dark",
+    "family": "Tokyo"
+  },
+  {
+    "name": "Tokyo Storm",
+    "mode": "dark",
+    "family": "Tokyo"
+  },
+  {
+    "name": "Twilight",
+    "mode": "dark",
+    "family": "Twilight"
+  }
+]

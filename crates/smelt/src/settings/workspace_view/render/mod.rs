@@ -16,29 +16,87 @@ mod collaboration;
 mod dsh_model;
 mod maintenance;
 mod pi_auth;
+mod pi_mcp;
+mod pi_memory;
 mod pi_model;
 mod pi_plugin;
 mod plugins;
 mod shortcuts;
 
+/// 设置页里 26px 的小按钮。悬停色由各页自己挂：多数跟边框色走，维护页有的按钮要单独指定。
+fn settings_chip_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    fg: Hsla,
+    popover: Hsla,
+    border: Hsla,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(26.))
+        .px_3()
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(fg)
+        .bg(popover)
+        .border_1()
+        .border_color(border)
+        .child(label.into())
+}
+
 /// 渲染独立设置页面：左侧两级菜单切换内容页，右侧只显示当前选中项。
 pub(super) fn render_settings_content(
     entity: Entity<Workspace>,
-    scope: SettingsScope,
     snapshot: &SettingsRenderSnapshot,
     _cx: &App,
 ) -> Div {
     div().size_full().child(SettingsShell {
         entity,
-        scope,
         snapshot: snapshot.clone(),
     })
+}
+
+/// 能力库正文：只画当前页签那一页。页头和页签在 Workspace 那边，跟智能体、自动化同一条页头。
+pub(super) fn render_capabilities_content(
+    entity: Entity<Workspace>,
+    snapshot: &SettingsRenderSnapshot,
+    cx: &App,
+) -> Div {
+    let tab = snapshot.capabilities_tab;
+    let page = match tab {
+        // 模型、MCP 页自己排版：居中限宽、表单就地展开，不走 Settings 的「标签左、值右」两栏。
+        crate::CapabilitiesTab::Models => {
+            return div()
+                .size_full()
+                .child(pi_model::pi_model_page(entity, snapshot, cx));
+        }
+        crate::CapabilitiesTab::Mcp => {
+            return div()
+                .size_full()
+                .child(pi_mcp::pi_mcp_page(entity, snapshot, cx));
+        }
+        crate::CapabilitiesTab::Plugins => pi_plugin::pi_plugin_page(entity, snapshot, cx),
+        crate::CapabilitiesTab::Memory => pi_memory::pi_memory_page(cx),
+    };
+    div().size_full().child(
+        // 借 Settings 的内容排版，关掉它自带的分组侧栏。
+        Settings::new(SharedString::from(format!(
+            "capabilities-pane:{}",
+            tab.element_id()
+        )))
+        .sidebar_width(px(0.))
+        .sidebar_size_range(px(0.)..px(0.))
+        .pages(vec![page]),
+    )
 }
 
 #[derive(IntoElement)]
 struct SettingsShell {
     entity: Entity<Workspace>,
-    scope: SettingsScope,
     snapshot: SettingsRenderSnapshot,
 }
 
@@ -52,14 +110,13 @@ impl RenderOnce for SettingsShell {
             .try_global::<PluginEnablementState>()
             .map(|state| state.catalog.clone())
             .unwrap_or_default();
-        let scope_nav = self.scope.nav(&plugins);
-        let nav = filter_settings_nav(&scope_nav, &query);
-        // 选中页由 Workspace 单点持有，另一扇窗口切页会连带改到这里；不属于本窗口
-        // 就回退到本窗口的首页，否则侧栏没有对应项、右侧却画着别的窗口的内容。
-        let selected = if nav_contains(&scope_nav, &self.snapshot.settings_section) {
+        let full_nav = settings_nav(&plugins);
+        let nav = filter_settings_nav(&full_nav, &query);
+        // 选中的插件页可能已经被卸载；侧栏没有对应项时回到首页，别画一页侧栏里找不到的内容。
+        let selected = if nav_contains(&full_nav, &self.snapshot.settings_section) {
             self.snapshot.settings_section.clone()
         } else {
-            self.scope.default_section()
+            SettingsSection::default()
         };
         let page = section_page(self.entity.clone(), &self.snapshot, &selected, &plugins, cx);
 
@@ -213,8 +270,6 @@ fn section_page(
         SettingsSection::AppearanceTerminal => appearance::terminal_page(entity, snapshot, cx),
         SettingsSection::AppearanceWindow => appearance::window_page(entity, snapshot, cx),
         SettingsSection::DshModel => dsh_model::dsh_model_page(entity, snapshot, cx),
-        SettingsSection::PiModel => pi_model::pi_model_page(entity, snapshot, cx),
-        SettingsSection::PiPlugins => pi_plugin::pi_plugin_page(entity, snapshot, cx),
         SettingsSection::AgentRuntime => agent::runtime_page(entity, snapshot, cx),
         SettingsSection::AgentLaunch => agent::launch_page(entity, snapshot, cx),
         SettingsSection::AgentWorkspace => agent::workspace_page(entity, snapshot, cx),

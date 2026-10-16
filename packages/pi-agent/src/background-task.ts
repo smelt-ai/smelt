@@ -5,6 +5,16 @@ import { keepsForegroundTimeout, watchHostCommand } from "./bash-run.ts";
 
 /** 会话宿主创建的控制套接字。任务进程不在 Pi 里。 */
 export const SMELT_BACKGROUND_TASK_SOCK_ENV = "SMELT_BACKGROUND_TASK_SOCK";
+/**
+ * 这个 Pi 进程在宿主里的归属。会话本身不设（空串）；后台子智能体由父进程设成
+ * `"<父归属>/<子智能体>"`。宿主按它隔离任务：查询、停止、完成通知都只在同一归属里，
+ * 子智能体的命令不会进父会话，父会话结束子智能体时连它名下的任务一起停。
+ */
+export const SMELT_BACKGROUND_TASK_OWNER_ENV = "SMELT_BACKGROUND_TASK_OWNER";
+
+export function backgroundTaskOwner(environment: NodeJS.ProcessEnv = process.env): string {
+	return environment[SMELT_BACKGROUND_TASK_OWNER_ENV]?.trim() ?? "";
+}
 export const SMELT_BACKGROUND_TASK_EXTENSION_NAME = "smelt-background-task";
 export const SMELT_BACKGROUND_TASK_EXTENSION_PATH = `<inline:${SMELT_BACKGROUND_TASK_EXTENSION_NAME}>`;
 export const SMELT_BACKGROUND_TASK_TOOL_NAME = "background_task";
@@ -152,7 +162,7 @@ function ensureCompletionListener(pi: ExtensionAPI, state: CompletionListener): 
 		queueMicrotask(() => ensureCompletionListener(pi, state));
 	};
 	socket.on("connect", () => {
-		socket.write(`${JSON.stringify({ op: "listen" })}\n`);
+		socket.write(`${JSON.stringify({ op: "listen", owner: backgroundTaskOwner() })}\n`);
 	});
 	socket.on("data", (chunk: Buffer | string) => {
 		buffer += chunk.toString();
@@ -229,7 +239,99 @@ export function callBackgroundHost(
 		socket.on("timeout", () => finish({ ok: false, error: "后台任务请求超时" }));
 		socket.on("error", (error) => finish({ ok: false, error: error.message }));
 		socket.on("close", () => finish({ ok: false, error: "后台任务连接已断开" }));
-		socket.write(`${JSON.stringify(request)}\n`);
+		socket.write(`${JSON.stringify({ owner: backgroundTaskOwner(), ...request })}\n`);
+	});
+}
+
+/**
+ * 子智能体结束：停掉它（及它的后代）名下还在跑的任务，结果不再送给任何人。
+ * 只能结束自己的后代，宿主会拒绝越级。
+ */
+export function endBackgroundTaskOwner(target: string): Promise<BackgroundHostResponse> {
+	return callBackgroundHost(process.env[SMELT_BACKGROUND_TASK_SOCK_ENV], { op: "end_owner", target });
+}
+
+/** 挂接在宿主里的一个后台任务。`finish` 只算第一次，之后的调用什么也不做。 */
+export type AttachedBackgroundTask = {
+	id: string;
+	progress(text: string): void;
+	finish(status: "completed" | "failed" | "stopped"): void;
+};
+
+/** 等宿主回 id 最多这么久。宿主不应答时不能把派子智能体卡住。 */
+const ATTACH_ACK_TIMEOUT_MS = 5_000;
+
+/**
+ * 把不由宿主启动的后台工作（后台子智能体）登记进宿主，让它和后台命令一样出现在会话的
+ * 后台任务列表里，模型也能用 list / stop 管它。这条连接就是它的命：断开即结束，Pi 被杀
+ * 也不会留下一个永远在跑的假任务。宿主要停它时（模型调 stop、会话结束）调用 `onStop`。
+ *
+ * 拿不到宿主（不在 Smelt 里、套接字不通）时返回 undefined：调用方照常干活，只是看不到。
+ */
+export function attachBackgroundTask(
+	request: { title: string; command: string; toolCallId?: string },
+	onStop: () => void,
+	socketPath = process.env[SMELT_BACKGROUND_TASK_SOCK_ENV],
+): Promise<AttachedBackgroundTask | undefined> {
+	if (!socketPath) return Promise.resolve(undefined);
+	return new Promise((resolve) => {
+		const socket: Socket = connect(socketPath);
+		let attached: AttachedBackgroundTask | undefined;
+		let settled = false;
+		let ended = false;
+		let buffer = "";
+		const settle = (task: AttachedBackgroundTask | undefined) => {
+			if (settled) return;
+			settled = true;
+			resolve(task);
+		};
+		const send = (message: Record<string, unknown>) => {
+			if (ended || socket.destroyed) return;
+			socket.write(`${JSON.stringify(message)}\n`);
+		};
+		socket.setTimeout(ATTACH_ACK_TIMEOUT_MS);
+		socket.on("timeout", () => {
+			socket.destroy();
+			settle(undefined);
+		});
+		socket.on("data", (chunk: Buffer | string) => {
+			buffer += chunk.toString();
+			let newline = buffer.indexOf("\n");
+			while (newline >= 0) {
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				newline = buffer.indexOf("\n");
+				let message: { ok?: unknown; id?: unknown; op?: unknown };
+				try {
+					message = JSON.parse(line);
+				} catch {
+					continue;
+				}
+				if (!attached) {
+					if (message.ok !== true || typeof message.id !== "string") {
+						socket.destroy();
+						settle(undefined);
+						return;
+					}
+					socket.setTimeout(0);
+					attached = {
+						id: message.id,
+						progress: (text) => send({ op: "progress", text }),
+						finish: (status) => {
+							send({ op: "finish", status });
+							ended = true;
+							socket.end();
+						},
+					};
+					settle(attached);
+					continue;
+				}
+				if (message.op === "stop") onStop();
+			}
+		});
+		socket.on("error", () => settle(undefined));
+		socket.on("close", () => settle(undefined));
+		send({ op: "attach", owner: backgroundTaskOwner(), ...request });
 	});
 }
 
@@ -287,7 +389,7 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 			label: "后台输出",
 			description: "按字节偏移读取一个后台任务的日志。用返回的 nextOffset 翻页，单次最多 64 KiB。",
 			parameters: Type.Object({
-				id: Type.String({ description: "任务 id，例如 bg-1" }),
+				id: Type.String({ description: "任务 id，例如 bg-3f9a2c71" }),
 				offset: Type.Optional(Type.Number({ description: "起始字节，默认 0" })),
 				limitBytes: Type.Optional(Type.Number({ description: "本次最多读取的字节数，默认 16384" })),
 			}),

@@ -6,7 +6,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde_json::{Map, Number, Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const APPEARANCE_SCOPE: &str = "appearance";
 const LAUNCH_SCOPE: &str = "launch";
@@ -681,7 +681,25 @@ pub(crate) fn write_appearance_snapshot(
     write_scoped_object(transaction, APPEARANCE_SCOPE, &appearance_object(snapshot))
 }
 
+/// 已删掉的 Sand 主题，以及缺名字的旧记录，按当时的明暗落到库自带的 Default。
+fn migrated_theme_name(raw: &str, theme_mode: &str) -> String {
+    if raw.is_empty() || raw == "Sand Dark" || raw == "Sand Light" {
+        if theme_mode == "light" {
+            "Default Light".to_string()
+        } else {
+            "Default Dark".to_string()
+        }
+    } else {
+        raw.to_string()
+    }
+}
+
 fn appearance_from_object(object: &Map<String, Value>) -> AppearanceSnapshot {
+    let theme_mode = object
+        .get("theme_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("dark")
+        .to_string();
     AppearanceSnapshot {
         bg_color: object.get("bg_color").and_then(Value::as_u64).unwrap_or(0) as u32,
         bg_image: object
@@ -699,11 +717,11 @@ fn appearance_from_object(object: &Map<String, Value>) -> AppearanceSnapshot {
             .and_then(Value::as_str)
             .unwrap_or("regular")
             .to_string(),
-        theme_mode: object
-            .get("theme_mode")
-            .and_then(Value::as_str)
-            .unwrap_or("dark")
-            .to_string(),
+        theme_mode: theme_mode.clone(),
+        theme_name: migrated_theme_name(
+            object.get("theme_name").and_then(Value::as_str).unwrap_or(""),
+            &theme_mode,
+        ),
         ui_font_px: object
             .get("ui_font_px")
             .and_then(Value::as_u64)
@@ -731,6 +749,7 @@ fn appearance_object(snapshot: &AppearanceSnapshot) -> Map<String, Value> {
     object.insert("blur".into(), json!(snapshot.blur));
     object.insert("glass_style".into(), json!(snapshot.glass_style));
     object.insert("theme_mode".into(), json!(snapshot.theme_mode));
+    object.insert("theme_name".into(), json!(snapshot.theme_name));
     object.insert("ui_font_px".into(), json!(snapshot.ui_font_px));
     object.insert("ui_font_family".into(), json!(snapshot.ui_font_family));
     object.insert("font_px".into(), json!(snapshot.font_px));
@@ -1446,10 +1465,46 @@ fn write_workspace(transaction: &Transaction<'_>, value: &Value) -> Result<(), S
     write_workspace_snapshot(transaction, &workspace_from_document(value)?)
 }
 
+/// 行已经存在时，恢复身份以库里的值为准。窗口快照可以在第一次插入时填上，
+/// 之后不能改写或清空；换 id、放弃旧 id 只走守护进程的显式写入。
+fn preserved_history_session_ids(
+    transaction: &Transaction<'_>,
+) -> Result<HashMap<String, Option<String>>, StoreError> {
+    let mut statement =
+        transaction.prepare("SELECT session_id, history_session_id FROM acp_detail")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let mut preserved = HashMap::new();
+    for row in rows {
+        let (session_id, history_session_id) = row?;
+        preserved.insert(session_id, history_session_id);
+    }
+    Ok(preserved)
+}
+
+fn normalize_history_id(id: Option<&str>) -> Option<String> {
+    id.map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn history_session_id_for_rewrite(
+    session_id: &str,
+    preserved: &HashMap<String, Option<String>>,
+) -> Option<String> {
+    // 没有行，或列还是空，第一次落库也不采用窗口载荷。
+    // 这一列只由守护进程 remember / clear 来写。
+    preserved
+        .get(session_id)
+        .and_then(|stored| normalize_history_id(stored.as_deref()))
+}
+
 pub(crate) fn write_workspace_snapshot(
     transaction: &Transaction<'_>,
     snapshot: &WorkspaceSnapshot,
 ) -> Result<(), StoreError> {
+    let preserved_history = preserved_history_session_ids(transaction)?;
     delete_workspace(transaction)?;
     delete_document_scope(transaction, "workspace.json")?;
     write_scoped_object(
@@ -1483,6 +1538,7 @@ pub(crate) fn write_workspace_snapshot(
             &project_roots,
             &mut used_group_ids,
             &mut used_session_ids,
+            &preserved_history,
         )?;
     }
     Ok(())
@@ -1712,7 +1768,6 @@ fn layout_from_value(value: &Value) -> WorkspaceLayoutNode {
 
 fn acp_from_value(value: &Value) -> WorkspaceAcpRecord {
     let launch = value.get("launch").and_then(Value::as_object);
-    let fork = value.get("fork_origin").and_then(Value::as_object);
     WorkspaceAcpRecord {
         cwd: as_str(value.get("cwd")).map(str::to_string),
         sid: as_str(value.get("sid")).map(str::to_string),
@@ -1729,22 +1784,12 @@ fn acp_from_value(value: &Value) -> WorkspaceAcpRecord {
             .get("refresh_launch_from_settings")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        fork_session_id: fork
-            .and_then(|fork| as_str(fork.get("session_id")))
-            .map(str::to_string),
-        fork_title: fork
-            .and_then(|fork| as_str(fork.get("title")))
-            .map(str::to_string),
-        fork_agent: fork
-            .and_then(|fork| as_str(fork.get("agent")))
-            .map(str::to_string),
-        fork_profile_label: fork
-            .and_then(|fork| as_str(fork.get("profile_label")))
-            .map(str::to_string),
-        fork_from_history: fork
-            .and_then(|fork| fork.get("from_history"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        // 分叉来源不再属于对话。写入时清空旧列，避免下次读回。
+        fork_session_id: None,
+        fork_title: None,
+        fork_agent: None,
+        fork_profile_label: None,
+        fork_from_history: false,
         pending_prompt: as_str(value.get("pending_prompt")).map(str::to_string),
         pending_delivery_id: as_str(value.get("pending_delivery_id")).map(str::to_string),
         agent_definition_id: as_str(value.get("agent_definition_id")).map(str::to_string),
@@ -1764,6 +1809,7 @@ fn write_session_record(
     project_roots: &[String],
     used_group_ids: &mut HashSet<String>,
     used_session_ids: &mut HashSet<String>,
+    preserved_history: &HashMap<String, Option<String>>,
 ) -> Result<(), StoreError> {
     let anchor = saved
         .acp
@@ -1819,7 +1865,9 @@ fn write_session_record(
                  ) VALUES (?1, ?2, NULL, 0, 'leaf', NULL, ?3, NULL)",
             params![format!("{group_id}:node:0"), group_id, session_id],
         )?;
-        write_acp_record(transaction, &session_id, acp)?;
+        let history_key = acp.sid.as_deref().unwrap_or(session_id.as_str());
+        let history_session_id = history_session_id_for_rewrite(history_key, preserved_history);
+        write_acp_record(transaction, &session_id, acp, history_session_id.as_deref())?;
         session_id
     } else {
         let mut node_counter = 0usize;
@@ -1973,6 +2021,7 @@ fn write_acp_record(
     transaction: &Transaction<'_>,
     session_id: &str,
     acp: &WorkspaceAcpRecord,
+    history_session_id: Option<&str>,
 ) -> Result<(), StoreError> {
     transaction.execute(
         "INSERT INTO acp_detail(
@@ -1987,7 +2036,7 @@ fn write_acp_record(
             session_id,
             acp.agent,
             acp.profile_id.as_deref(),
-            acp.history_session_id.as_deref(),
+            history_session_id,
             acp.launch_command,
             i64::from(acp.refresh_launch_from_settings),
             acp.fork_session_id.as_deref(),
@@ -2035,6 +2084,71 @@ fn write_acp_record(
         acp.pending_agent_preset_json.as_deref(),
     )?;
     Ok(())
+}
+
+pub(crate) fn remember_history_session_id(
+    connection: &Connection,
+    session_id: &str,
+    history_id: &str,
+) -> Result<bool, StoreError> {
+    let Some(session_id) = normalize_history_id(Some(session_id)) else {
+        return Ok(false);
+    };
+    let Some(history_id) = normalize_history_id(Some(history_id)) else {
+        return Ok(false);
+    };
+    let updated = connection.execute(
+        "UPDATE acp_detail SET history_session_id = ?1 WHERE session_id = ?2",
+        params![history_id, session_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub(crate) fn clear_history_session_id(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<bool, StoreError> {
+    let Some(session_id) = normalize_history_id(Some(session_id)) else {
+        return Ok(false);
+    };
+    let updated = connection.execute(
+        "UPDATE acp_detail SET history_session_id = NULL WHERE session_id = ?1",
+        [session_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub(crate) fn history_session_id(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<String>, StoreError> {
+    Ok(match stored_history_identity(connection, session_id)? {
+        crate::StoredHistoryIdentity::Bound(id) => Some(id),
+        crate::StoredHistoryIdentity::NoRow | crate::StoredHistoryIdentity::Unbound => None,
+    })
+}
+
+pub(crate) fn stored_history_identity(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<crate::StoredHistoryIdentity, StoreError> {
+    let Some(session_id) = normalize_history_id(Some(session_id)) else {
+        return Ok(crate::StoredHistoryIdentity::NoRow);
+    };
+    let stored = connection
+        .query_row(
+            "SELECT history_session_id FROM acp_detail WHERE session_id = ?1",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(match stored {
+        None => crate::StoredHistoryIdentity::NoRow,
+        Some(id) => match normalize_history_id(id.as_deref()) {
+            Some(id) => crate::StoredHistoryIdentity::Bound(id),
+            None => crate::StoredHistoryIdentity::Unbound,
+        },
+    })
 }
 
 fn write_optional_json_tree(
@@ -2112,11 +2226,12 @@ pub(crate) fn read_workspace_snapshot(
             row.get::<_, i64>(3)?,
         ))
     })?;
+    let groups = group_rows.collect::<Result<Vec<_>, _>>()?;
+    let cache = load_workspace_read_cache(connection)?;
     let mut sessions = Vec::new();
-    for row in group_rows {
-        let (group_id, active_session_id, custom_title, last_updated_at) = row?;
+    for (group_id, active_session_id, custom_title, last_updated_at) in groups {
         sessions.push(session_from_value(&read_session_group(
-            connection,
+            &cache,
             &group_id,
             active_session_id.as_deref(),
             custom_title,
@@ -2259,18 +2374,6 @@ fn acp_to_value(acp: &WorkspaceAcpRecord) -> Value {
         "automation_id": acp.automation_id,
     });
     let object = value.as_object_mut().expect("acp object");
-    if let (Some(session_id), Some(title)) = (&acp.fork_session_id, &acp.fork_title) {
-        object.insert(
-            "fork_origin".into(),
-            json!({
-                "session_id": session_id,
-                "title": title,
-                "agent": acp.fork_agent,
-                "profile_label": acp.fork_profile_label,
-                "from_history": acp.fork_from_history,
-            }),
-        );
-    }
     for (key, raw) in [
         ("config_values", acp.config_values_json.as_deref()),
         (
@@ -2293,37 +2396,223 @@ fn acp_to_value(acp: &WorkspaceAcpRecord) -> Value {
     value
 }
 
-fn read_session_group(
+#[derive(Clone)]
+struct LayoutNodeRow {
+    id: String,
+    group_id: String,
+    parent_id: Option<String>,
+    position: i64,
+    kind: String,
+    axis: Option<String>,
+    session_id: Option<String>,
+    size_px: Option<f64>,
+}
+
+struct SessionSqlRow {
+    kind: String,
+    cwd: Option<String>,
+    custom_title: Option<String>,
+    launch_label: Option<String>,
+    launch_command: Option<String>,
+}
+
+struct WorkspaceReadCache {
+    layout_children: HashMap<(String, String), Vec<LayoutNodeRow>>,
+    layout_by_id: HashMap<String, LayoutNodeRow>,
+    sessions: HashMap<String, SessionSqlRow>,
+    acp_session_by_group: HashMap<String, String>,
+    acp_rows: HashMap<String, AcpRow>,
+    kv: HashMap<String, BTreeMap<String, KvNode>>,
+}
+
+fn load_workspace_read_cache(connection: &Connection) -> Result<WorkspaceReadCache, StoreError> {
+    let mut layout_children: HashMap<(String, String), Vec<LayoutNodeRow>> = HashMap::new();
+    let mut layout_by_id = HashMap::new();
+    let mut layout_statement = connection.prepare(
+        "SELECT id, group_id, parent_id, position, kind, axis, session_id, size_px
+         FROM layout_node",
+    )?;
+    let layout_rows = layout_statement.query_map([], |row| {
+        Ok(LayoutNodeRow {
+            id: row.get(0)?,
+            group_id: row.get(1)?,
+            parent_id: row.get(2)?,
+            position: row.get(3)?,
+            kind: row.get(4)?,
+            axis: row.get(5)?,
+            session_id: row.get(6)?,
+            size_px: row.get(7)?,
+        })
+    })?;
+    for row in layout_rows {
+        let node = row?;
+        layout_by_id.insert(node.id.clone(), node.clone());
+        let parent_key = node.parent_id.clone().unwrap_or_default();
+        layout_children
+            .entry((node.group_id.clone(), parent_key))
+            .or_default()
+            .push(node);
+    }
+    for children in layout_children.values_mut() {
+        children.sort_by_key(|node| node.position);
+    }
+
+    let mut sessions = HashMap::new();
+    let mut acp_session_by_group = HashMap::new();
+    let mut session_statement = connection.prepare(
+        "SELECT id, group_id, kind, cwd, custom_title, launch_label, launch_command
+         FROM session ORDER BY rowid",
+    )?;
+    let session_rows = session_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            SessionSqlRow {
+                kind: row.get(2)?,
+                cwd: row.get(3)?,
+                custom_title: row.get(4)?,
+                launch_label: row.get(5)?,
+                launch_command: row.get(6)?,
+            },
+        ))
+    })?;
+    for row in session_rows {
+        let (id, group_id, session) = row?;
+        if session.kind == "acp" {
+            acp_session_by_group
+                .entry(group_id)
+                .or_insert_with(|| id.clone());
+        }
+        sessions.insert(id, session);
+    }
+
+    let mut acp_rows = HashMap::new();
+    let mut acp_statement = connection.prepare(
+        "SELECT session_id, agent, profile_id, history_session_id, launch_command,
+                refresh_launch_from_settings, pending_prompt, pending_delivery_id,
+                agent_definition_id, automation_id
+         FROM acp_detail",
+    )?;
+    let acp_detail_rows = acp_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            AcpRow {
+                agent: row.get(1)?,
+                profile_id: row.get(2)?,
+                history_session_id: row.get(3)?,
+                launch_command: row.get(4)?,
+                refresh_launch_from_settings: row.get::<_, i64>(5)? != 0,
+                pending_prompt: row.get(6)?,
+                pending_delivery_id: row.get(7)?,
+                agent_definition_id: row.get(8)?,
+                automation_id: row.get(9)?,
+            },
+        ))
+    })?;
+    for row in acp_detail_rows {
+        let (session_id, detail) = row?;
+        acp_rows.insert(session_id, detail);
+    }
+
+    let mut kv: HashMap<String, BTreeMap<String, KvNode>> = HashMap::new();
+    let mut kv_statement = connection.prepare(
+        "SELECT scope, key, value_type,
+                CASE WHEN value_type = 'blob' THEN NULL ELSE CAST(value AS TEXT) END
+         FROM kv
+         WHERE scope LIKE 'acp:%' OR scope LIKE 'session_group:%'
+         ORDER BY scope, key",
+    )?;
+    let kv_rows = kv_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            KvNode {
+                value_type: row.get(2)?,
+                value: row.get(3)?,
+            },
+        ))
+    })?;
+    for row in kv_rows {
+        let (scope, key, node) = row?;
+        kv.entry(scope).or_default().insert(key, node);
+    }
+
+    Ok(WorkspaceReadCache {
+        layout_children,
+        layout_by_id,
+        sessions,
+        acp_session_by_group,
+        acp_rows,
+        kv,
+    })
+}
+
+fn cached_json(
+    cache: &WorkspaceReadCache,
+    scope: &str,
+    root: &str,
+) -> Result<Option<Value>, StoreError> {
+    let Some(nodes) = cache.kv.get(scope) else {
+        return Ok(None);
+    };
+    decode_json_tree(nodes, root)
+}
+
+pub(crate) fn read_session_agent_definition_ids(
     connection: &Connection,
+) -> Result<Option<BTreeMap<String, String>>, StoreError> {
+    let has_groups: bool =
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM session_group)", [], |row| {
+            row.get(0)
+        })?;
+    if !has_groups {
+        return Ok(None);
+    }
+    let mut statement = connection.prepare(
+        "SELECT session_id, agent_definition_id FROM acp_detail
+         WHERE agent_definition_id IS NOT NULL AND agent_definition_id != ''",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut map = BTreeMap::new();
+    for row in rows {
+        let (sid, id) = row?;
+        let sid = sid.trim();
+        let id = id.trim();
+        if sid.is_empty() || id.is_empty() {
+            continue;
+        }
+        map.insert(sid.to_string(), id.to_string());
+    }
+    Ok(Some(map))
+}
+
+fn read_session_group(
+    cache: &WorkspaceReadCache,
     group_id: &str,
     active_session_id: Option<&str>,
     custom_title: Option<String>,
     last_updated_at: i64,
 ) -> Result<Value, StoreError> {
-    let root_id = connection.query_row(
-        "SELECT id FROM layout_node
-             WHERE group_id = ?1 AND parent_id IS NULL",
-        [group_id],
-        |row| row.get::<_, String>(0),
-    )?;
+    let root_id = cache
+        .layout_children
+        .get(&(group_id.to_string(), String::new()))
+        .and_then(|children| children.first())
+        .map(|node| node.id.clone())
+        .ok_or_else(|| StoreError::from(rusqlite::Error::QueryReturnedNoRows))?;
     let mut leaf_ids = Vec::new();
-    let layout = read_layout_node(connection, group_id, &root_id, &mut leaf_ids)?;
+    let layout = read_layout_node(cache, group_id, &root_id, &mut leaf_ids)?;
     let active = active_session_id
         .and_then(|active| leaf_ids.iter().position(|session_id| session_id == active))
         .unwrap_or(0);
-    let acp_session = connection
-        .query_row(
-            "SELECT id FROM session WHERE group_id = ?1 AND kind = 'acp' LIMIT 1",
-            [group_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let acp = acp_session
-        .as_deref()
-        .map(|session_id| read_acp_detail(connection, session_id))
+    let acp = cache
+        .acp_session_by_group
+        .get(group_id)
+        .map(|session_id| read_acp_detail(cache, session_id))
         .transpose()?
         .unwrap_or(Value::Null);
-    let route = read_json_tree(connection, &group_scope(group_id), "route")?.unwrap_or(Value::Null);
+    let route = cached_json(cache, &group_scope(group_id), "route")?.unwrap_or(Value::Null);
     Ok(json!({
         "layout": layout,
         "active": active,
@@ -2335,69 +2624,54 @@ fn read_session_group(
 }
 
 fn read_layout_node(
-    connection: &Connection,
+    cache: &WorkspaceReadCache,
     group_id: &str,
     node_id: &str,
     leaf_ids: &mut Vec<String>,
 ) -> Result<Value, StoreError> {
-    let (kind, axis, session_id) = connection.query_row(
-        "SELECT kind, axis, session_id FROM layout_node WHERE id = ?1 AND group_id = ?2",
-        params![node_id, group_id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        },
-    )?;
+    let node = cache
+        .layout_by_id
+        .get(node_id)
+        .filter(|node| node.group_id == group_id)
+        .ok_or_else(|| StoreError::from(rusqlite::Error::QueryReturnedNoRows))?;
+    let kind = node.kind.clone();
+    let axis = node.axis.clone();
+    let session_id = node.session_id.clone();
     if kind == "leaf" {
         let session_id = session_id.ok_or_else(|| StoreError::LayoutLeafMissingSession {
             node_id: node_id.to_string(),
         })?;
-        let (session_kind, cwd, custom_title, launch_label, launch_command) = connection
-            .query_row(
-                "SELECT kind, cwd, custom_title, launch_label, launch_command
-                 FROM session WHERE id = ?1",
-                [&session_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                },
-            )?;
+        let session = cache
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| StoreError::from(rusqlite::Error::QueryReturnedNoRows))?;
         leaf_ids.push(session_id.clone());
         return Ok(json!({
             "Leaf": {
-                "cwd": cwd,
-                "id": if session_kind == "terminal" { Some(session_id) } else { None },
-                "custom_title": custom_title,
-                "launch_label": launch_label,
-                "launch_cmd": launch_command,
+                "cwd": session.cwd.clone(),
+                "id": if session.kind == "terminal" { Some(session_id) } else { None },
+                "custom_title": session.custom_title.clone(),
+                "launch_label": session.launch_label.clone(),
+                "launch_cmd": session.launch_command.clone(),
             }
         }));
     }
 
-    let mut statement = connection.prepare(
-        "SELECT id, size_px FROM layout_node
-             WHERE group_id = ?1 AND parent_id = ?2 ORDER BY position",
-    )?;
-    let rows = statement.query_map(params![group_id, node_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Option<f64>>(1)?))
-    })?;
-    let children_with_sizes = rows.collect::<Result<Vec<_>, _>>()?;
+    let empty = Vec::new();
+    let children_with_sizes = cache
+        .layout_children
+        .get(&(group_id.to_string(), node_id.to_string()))
+        .unwrap_or(&empty);
     let all_sized = !children_with_sizes.is_empty()
-        && children_with_sizes.iter().all(|(_, size)| size.is_some());
+        && children_with_sizes
+            .iter()
+            .all(|child| child.size_px.is_some());
     let mut children = Vec::new();
     let mut sizes = Vec::new();
-    for (child_id, size) in children_with_sizes {
-        children.push(read_layout_node(connection, group_id, &child_id, leaf_ids)?);
+    for child in children_with_sizes {
+        children.push(read_layout_node(cache, group_id, &child.id, leaf_ids)?);
         if all_sized {
-            sizes.push(json!(size.unwrap_or_default()));
+            sizes.push(json!(child.size_px.unwrap_or_default()));
         }
     }
     Ok(json!({
@@ -2409,75 +2683,38 @@ fn read_layout_node(
     }))
 }
 
+#[derive(Clone)]
 struct AcpRow {
     agent: String,
     profile_id: Option<String>,
     history_session_id: Option<String>,
     launch_command: String,
     refresh_launch_from_settings: bool,
-    fork_session_id: Option<String>,
-    fork_title: Option<String>,
-    fork_agent: Option<String>,
-    fork_profile_label: Option<String>,
-    fork_from_history: bool,
     pending_prompt: Option<String>,
     pending_delivery_id: Option<String>,
     agent_definition_id: Option<String>,
     automation_id: Option<String>,
 }
 
-fn read_acp_detail(connection: &Connection, session_id: &str) -> Result<Value, StoreError> {
-    let (cwd, row) = connection.query_row(
-        "SELECT s.cwd, d.agent, d.profile_id, d.history_session_id, d.launch_command,
-                    d.refresh_launch_from_settings, d.fork_session_id, d.fork_title,
-                    d.fork_agent, d.fork_profile_label, d.fork_from_history,
-                    d.pending_prompt, d.pending_delivery_id,
-                    d.agent_definition_id, d.automation_id
-             FROM acp_detail d JOIN session s ON s.id = d.session_id
-             WHERE d.session_id = ?1",
-        [session_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                AcpRow {
-                    agent: row.get(1)?,
-                    profile_id: row.get(2)?,
-                    history_session_id: row.get(3)?,
-                    launch_command: row.get(4)?,
-                    refresh_launch_from_settings: row.get::<_, i64>(5)? != 0,
-                    fork_session_id: row.get(6)?,
-                    fork_title: row.get(7)?,
-                    fork_agent: row.get(8)?,
-                    fork_profile_label: row.get(9)?,
-                    fork_from_history: row.get::<_, i64>(10)? != 0,
-                    pending_prompt: row.get(11)?,
-                    pending_delivery_id: row.get(12)?,
-                    agent_definition_id: row.get(13)?,
-                    automation_id: row.get(14)?,
-                },
-            ))
-        },
-    )?;
+fn read_acp_detail(cache: &WorkspaceReadCache, session_id: &str) -> Result<Value, StoreError> {
+    let row = cache
+        .acp_rows
+        .get(session_id)
+        .ok_or_else(|| StoreError::from(rusqlite::Error::QueryReturnedNoRows))?
+        .clone();
+    let cwd = cache
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.cwd.clone());
     let scope = acp_scope(session_id);
-    let env = read_json_tree(connection, &scope, "env")?.unwrap_or_else(|| json!({}));
-    let config_values =
-        read_json_tree(connection, &scope, "config_values")?.unwrap_or_else(|| json!([]));
-    let conversation_binding = read_json_tree(connection, &scope, "conversation_binding")?
+    let env = cached_json(cache, &scope, "env")?.unwrap_or_else(|| json!({}));
+    let config_values = cached_json(cache, &scope, "config_values")?.unwrap_or_else(|| json!([]));
+    let conversation_binding = cached_json(cache, &scope, "conversation_binding")?
         .unwrap_or_else(|| json!({"type": "direct"}));
-    let agent_session = read_json_tree(connection, &scope, "agent_session")?.unwrap_or(Value::Null);
+    let agent_session = cached_json(cache, &scope, "agent_session")?.unwrap_or(Value::Null);
     let pending_agent_preset =
-        read_json_tree(connection, &scope, "pending_agent_preset")?.unwrap_or(Value::Null);
-    let session_title = read_json_tree(connection, &scope, "session_title")?.unwrap_or(Value::Null);
-    let fork_origin = match (row.fork_session_id, row.fork_title) {
-        (Some(origin_session_id), Some(title)) => json!({
-            "session_id": origin_session_id,
-            "title": title,
-            "agent": row.fork_agent,
-            "profile_label": row.fork_profile_label,
-            "from_history": row.fork_from_history,
-        }),
-        _ => Value::Null,
-    };
+        cached_json(cache, &scope, "pending_agent_preset")?.unwrap_or(Value::Null);
+    let session_title = cached_json(cache, &scope, "session_title")?.unwrap_or(Value::Null);
     Ok(json!({
         "cwd": cwd,
         "launch": {"command": row.launch_command, "env": env},
@@ -2486,7 +2723,6 @@ fn read_acp_detail(connection: &Connection, session_id: &str) -> Result<Value, S
         "history_session_id": row.history_session_id,
         "sid": session_id,
         "refresh_launch_from_settings": row.refresh_launch_from_settings,
-        "fork_origin": fork_origin,
         "conversation_binding": conversation_binding,
         "agent_session": agent_session,
         "config_values": config_values,

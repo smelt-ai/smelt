@@ -89,9 +89,6 @@ pub struct ConversationLaunch {
     /// `occurrence` 与 `ConversationCommand::Rewind` 同语义：在 agent 的可分叉
     /// 列表里按文本配对，`occurrence` 是同文本消息中的第几条（从 0 数起）。
     pub fork_cut: Option<AcpForkCut>,
-    /// 旧 smeltd handoff 格式兼容字段。历史是否存在现在一律由 agent 的
-    /// `session/load` 判断，Smelt 不再检查任何 agent 的私有 transcript 路径。
-    pub resume_needs_transcript_check: bool,
 }
 
 /// 「分叉副本的切点」：见 `ConversationLaunch::fork_cut`。
@@ -162,6 +159,13 @@ pub enum ConversationCommand {
         config_id: String,
         value: ConfigValue,
     },
+    /// 重新拉取模型目录。
+    ///
+    /// 模型目录是会话启动时问 agent 要的一份快照（Pi 走 `get_available_models`）。
+    /// 用户在应用里登录了新 provider、改了模型配置之后，这份快照就过期了，但会话
+    /// 不会自己知道——所以由 UI 侧订阅账户状态变化后发这条命令。不支持的驱动静默
+    /// 忽略：它们的模型列表本来就不随本机配置变化。
+    RefreshModels,
     /// 改会话名。用户在侧栏重命名后同步给 agent，让 agent 侧的会话档也叫这个名字。
     /// 不是所有 agent 都支持，不支持的静默忽略——重命名对本地侧栏始终生效。
     SetSessionTitle(String),
@@ -295,11 +299,11 @@ pub enum ConversationEvent {
     /// 冷恢复即将由 agent 重放完整历史。必须先清空 daemon 中的旧投影；Ready
     /// 到达时历史可能已经同步回放完，不能再在那里清空。
     HistoryReplayStarted,
-    /// 重放确实结束。只有能判定边界的 provider 才发（pi 是先把
-    /// `get_messages` 全量重放完再握手）；ACP 的 `session/load` 在 Ready 之后仍可能
-    /// 继续推历史，那条路径继续由「下一条 prompt」兜底。没有这个信号时，
-    /// 用户恢复后只要不发消息，`replaying_history` 就会一直挂着 true，
-    /// 把「是否有活跃回合」、「是否在执行工具」和 GUI 的列表高度提示全部拖成失真。
+    /// 重放确实结束：草稿到齐，可以一次性换上。pi 在全量重放完 `get_messages`
+    /// 后发；ACP 的 `session/load` 在响应返回、并把会话队列里响应前的重放全部
+    /// 排空之后发（ACP 规范要求重放先于响应）。没有这个信号时，`replaying_history`
+    /// 会一直挂着 true，把「是否有活跃回合」、「是否在执行工具」和 GUI 的列表
+    /// 高度提示全部拖成失真。
     HistoryReplayFinished,
     /// `session/load` 失败。smeltd 的恢复 supervisor 根据失败类型和本地投影
     /// 决定是否重试、报错或降级为 `session/new`。
@@ -495,9 +499,8 @@ impl ConversationEvent {
 pub enum ReadyKind {
     /// 全新会话。本地若有旧历史，UI 插一条分割线标明「以下是新对话」。
     Fresh,
-    /// `session/load` 续接：agent 会重放完整历史。不同连接实现可能在 Ready
-    /// 前后投递回放通知；投影由 `HistoryReplayStarted` 提前清空，Ready 本身
-    /// 不得再修改消息。
+    /// `session/load` 续接：agent 会重放完整历史。归约器先把草稿清空，已发布
+    /// 正文留到 `HistoryReplayFinished` 再换上。Ready 本身不得修改消息。
     ResumedWithReplay,
     /// smeltd 无缝升级继承 agent stdio fd，且这次没有重放历史。
     /// 投影保持交接时的样子：旧文件里的正文还在；新文件加载失败时只剩未完成的一轮。
@@ -1225,7 +1228,6 @@ pub fn spawn_acp(
                 resume_session_id,
                 fork_session_id,
                 fork_cut,
-                resume_needs_transcript_check,
             } = launch;
             let launch = ConversationLaunch {
                 launch: ConversationLaunchSpec {
@@ -1241,7 +1243,6 @@ pub fn spawn_acp(
                 resume_session_id,
                 fork_session_id,
                 fork_cut,
-                resume_needs_transcript_check,
             };
             let result = smol::block_on(run_connection(
                 &launch,
@@ -2085,12 +2086,24 @@ async fn run_connection(
                         .await
                     {
                         Ok(restored) => {
-                            let (session, loaded) = restored.into_parts();
+                            let (mut session, loaded) = restored.into_parts();
                             publish_session_surface(
                                 loaded.config_options.as_deref(),
                                 loaded.modes.as_ref(),
                                 &channels.event_tx,
                             );
+                            // 响应前的重放在会话自己的队列里，还没进事件通道。先排空，
+                            // 再收尾：草稿要等正文全部到齐才一次性换上；先发收尾会让
+                            // 草稿以空正文提交，随后的历史被当成实时消息。
+                            drain_loaded_replay(
+                                &mut session,
+                                &channels.event_tx,
+                                &mut ReplayCursor::default(),
+                            )
+                            .await?;
+                            let _ = channels
+                                .event_tx
+                                .try_send(ConversationEvent::HistoryReplayFinished);
                             signal_acp_handshake_complete(&handshake_complete);
                             return drive_session(
                                 session,
@@ -3251,6 +3264,9 @@ async fn drive_session<S: SessionDrive>(
             }
             // 通用 ACP 没有改会话名的方法；本地标题已经改好，这里无声跳过。
             Next::Cmd(Some(ConversationCommand::SetSessionTitle(_))) => {}
+            // 通用 ACP 的模型列表由 agent 在 `session/update` 里自己推，没有「重拉」
+            // 这个动作；这条命令是给 Pi 那条路径的。
+            Next::Cmd(Some(ConversationCommand::RefreshModels)) => {}
             Next::Cmd(Some(ConversationCommand::SetConfigOption { config_id, value })) => {
                 if turn_active {
                     queue_config_option(
@@ -3385,7 +3401,7 @@ impl Drop for RpcCompletionGuard {
 }
 
 fn finish_rpc(in_flight_rpc: &AtomicUsize) {
-    let _ = in_flight_rpc.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    let _ = in_flight_rpc.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
 /// 当前 turn 还在运行时只保留同一 config id 的最后一次选择。被覆盖的请求
@@ -7058,6 +7074,84 @@ mod prompt_failure_tests {
 /// 存在的理由：148 个单测全绿的那版桥，一接真 runtime 就暴露了 4 个致命 bug。
 /// 「回合失败不能杀会话」这条同样只有真跑一遍才算数——它牵涉 SDK 回调、
 /// 连接驱动任务、事件通道三层，全 mock 就只是在测我自己的假设。
+/// `session/load` 的端到端顺序：真起一个 stdio agent 进程走完整条 spawn 路径。
+/// SDK 2.1 把响应前的重放放进会话自己的队列，要等驱动读出来才进事件通道；
+/// 只看单测里的归约器测不出「收尾信号抢在重放正文前面」。
+#[cfg(test)]
+mod session_load_replay_tests {
+    use super::*;
+
+    fn event_name(event: &ConversationEvent) -> &'static str {
+        match event {
+            ConversationEvent::HistoryReplayStarted => "Started",
+            ConversationEvent::HistoryReplayFinished => "Finished",
+            ConversationEvent::UserChunk(_) => "User",
+            ConversationEvent::AgentChunk { .. } => "Agent",
+            ConversationEvent::Ready { .. } => "Ready",
+            ConversationEvent::Fatal(_) => "Fatal",
+            ConversationEvent::RestoreFailed(_) => "RestoreFailed",
+            _ => "other",
+        }
+    }
+
+    #[test]
+    fn replay_is_delivered_before_history_replay_finished() {
+        let agent = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_acp_agent.py");
+        let handle = spawn_acp(
+            ConversationLaunch {
+                launch: ConversationLaunchSpec {
+                    command: format!("python3 {agent}"),
+                    env: Default::default(),
+                },
+                ephemeral_env: Default::default(),
+                cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                sid: "acp-load-order".to_string(),
+                agent_token: String::new(),
+                agent_mcp: false,
+                agent_mcp_cli_args: Vec::new(),
+                resume_session_id: Some(SessionId::new("session-from-disk")),
+                fork_session_id: None,
+                fork_cut: None,
+            },
+            None,
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let next = smol::block_on(async {
+                smol::future::race(async { handle.event_rx.recv().await.ok() }, async {
+                    smol::Timer::after(std::time::Duration::from_millis(200)).await;
+                    None
+                })
+                .await
+            });
+            let Some(event) = next else { continue };
+            let name = event_name(&event);
+            if name != "other" {
+                seen.push(name);
+            }
+            if matches!(name, "Ready" | "Fatal" | "RestoreFailed") {
+                break;
+            }
+        }
+        let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+
+        let position = |name: &str| seen.iter().position(|seen| *seen == name);
+        let finished = position("Finished").unwrap_or_else(|| panic!("没有收尾信号：{seen:?}"));
+        let agent = position("Agent").unwrap_or_else(|| panic!("重放正文没送达：{seen:?}"));
+        let user = position("User").unwrap_or_else(|| panic!("重放的用户消息没送达：{seen:?}"));
+        assert!(
+            position("Started").is_some_and(|started| started < user),
+            "{seen:?}"
+        );
+        assert!(
+            user < finished && agent < finished,
+            "重放正文必须先于 HistoryReplayFinished，否则草稿以空正文提交、历史被当成实时消息：{seen:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod dsh_live_tests {
     use super::*;
@@ -7130,7 +7224,6 @@ mod dsh_live_tests {
                 resume_session_id: None,
                 fork_session_id: None,
                 fork_cut: None,
-                resume_needs_transcript_check: false,
             },
             None,
         );
@@ -7220,7 +7313,6 @@ mod dsh_live_tests {
                 resume_session_id: None,
                 fork_session_id: None,
                 fork_cut: None,
-                resume_needs_transcript_check: false,
             },
             None,
         );

@@ -9,10 +9,15 @@ workspace = true
 # GUI（workspace）与守护（smeltd/gateway）共用的无 UI 逻辑：终端文本提取、OSC 通知
 # 扫描、权限菜单解析。这里绝不引 GPUI，也不包含移动端远程网关。
 
+[features]
+# 只给下游 crate 的测试用（作为 dev-dependency 打开）：暴露绕过归约器的测试钩子。
+test-support = []
+
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
 smelt-store = { path = "../smelt-store" }
 smelt-plugin-api = { path = "../smelt-plugin-api" }
+smelt-process-wait = { path = "../smelt-process-wait" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

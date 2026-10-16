@@ -4,8 +4,48 @@
 //! 3. 在存储初始化器中补对应版本的事务迁移。
 //!
 //! 迁移必须先读出旧数据，再替换结构；认不出的库一律拒绝打开。
+//!
+//! 只是给表加一列、且该表没有表级约束时，用 `ALTER TABLE … ADD COLUMN`，并把新列写在
+//! `CREATE_SCHEMA` 里这张表的最后：SQLite 只改表定义、不搬数据，改完的建表语句去掉空白后
+//! 也和 `CREATE_SCHEMA` 一致。改约束、改默认值、删列、调列序这些 ALTER 做不到的，才整表重建。
+//! 默认值要和列类型一致：BLOB 列用 `X'…'`，不要写文本字面量。
 
-pub const TABLES: [&str; 29] = [
+pub const TABLES: [&str; 31] = [
+    "acp_detail",
+    "agent_acp_command",
+    "agent_acp_config_memory",
+    "agent_acp_env",
+    "agent_definition",
+    "agent_memory_provenance",
+    "agent_memory_usage",
+    "agent_profile",
+    "agent_ui_pref",
+    "automation",
+    "automation_meta",
+    "automation_run",
+    "automation_run_transcript",
+    "automation_state",
+    "command_dedupe",
+    "event_dead_letter",
+    "event_delivery_retry",
+    "event_log",
+    "event_outbox",
+    "history_title",
+    "kv",
+    "launch_entry",
+    "layout_node",
+    "peer_message_command",
+    "project",
+    "published_session",
+    "remote_acp_session",
+    "remote_terminal_session",
+    "session",
+    "session_group",
+    "subscription_cursor",
+];
+
+/// v12 的表清单。v13 加了智能体记忆的元数据表（使用统计、来源）。
+pub const V12_TABLES: [&str; 29] = [
     "acp_detail",
     "agent_acp_command",
     "agent_acp_config_memory",
@@ -354,12 +394,30 @@ CREATE TABLE agent_definition (
   engine_kind_id TEXT NOT NULL,
   prompt TEXT NOT NULL,
   plugins_json BLOB NOT NULL,
+  mcp_servers_json BLOB NOT NULL DEFAULT X'5B5D',
   context_folders_json BLOB NOT NULL,
   context_links_json BLOB NOT NULL,
   model_provider TEXT NOT NULL DEFAULT '',
   model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
   position INTEGER NOT NULL CHECK (position >= 0)
 );
+CREATE TABLE agent_memory_provenance (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  trust TEXT NOT NULL CHECK (trust IN ('trusted', 'pending')),
+  reason TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  written_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
+CREATE TABLE agent_memory_usage (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  read_count INTEGER NOT NULL CHECK (read_count >= 0),
+  last_read_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
 CREATE TABLE agent_profile (
   id TEXT PRIMARY KEY,
   kind_id TEXT NOT NULL,
@@ -776,4 +834,114 @@ SELECT
   context_folders_json, context_links_json, '', '', position
 FROM agent_definition_v11;
 DROP TABLE agent_definition_v11;
+";
+
+/// v12 → v13：智能体记忆的元数据（使用统计、来源）。记忆正文仍是 Markdown 文件，
+/// 这两张表只存结构化状态，scope 为 `agent:<智能体 id>` 或 `user`。
+pub const MIGRATE_V12_TO_V13: &str = "
+CREATE TABLE agent_memory_provenance (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  trust TEXT NOT NULL CHECK (trust IN ('trusted', 'pending')),
+  reason TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  written_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
+CREATE TABLE agent_memory_usage (
+  scope TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  read_count INTEGER NOT NULL CHECK (read_count >= 0),
+  last_read_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (scope, file_name)
+) WITHOUT ROWID;
+";
+
+/// v13 → v14：智能体可以关闭记忆。关闭时不注入、不写入，已有记忆文件保留。
+pub const MIGRATE_V13_TO_V14: &str = "
+ALTER TABLE agent_definition RENAME TO agent_definition_v13;
+CREATE TABLE agent_definition (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  engine_kind_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  plugins_json BLOB NOT NULL,
+  context_folders_json BLOB NOT NULL,
+  context_links_json BLOB NOT NULL,
+  model_provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+INSERT INTO agent_definition(
+  id, name, description, engine_kind_id, prompt, plugins_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+)
+SELECT
+  id, name, description, engine_kind_id, prompt, plugins_json,
+  context_folders_json, context_links_json, model_provider, model_id, 1, position
+FROM agent_definition_v13;
+DROP TABLE agent_definition_v13;
+";
+
+/// v14 → v15：智能体勾选要连接的 MCP 服务器名（`mcp.json` 里 `mcpServers` 的键）。
+/// 已有智能体迁移后为空，即不连任何 MCP 服务器。回填值显式转成 BLOB：
+/// 文本 '[]' 读成 `Vec<u8>` 时 rusqlite 会报类型不符。
+pub const MIGRATE_V14_TO_V15: &str = "
+ALTER TABLE agent_definition RENAME TO agent_definition_v14;
+CREATE TABLE agent_definition (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  engine_kind_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  plugins_json BLOB NOT NULL,
+  mcp_servers_json BLOB NOT NULL DEFAULT '[]',
+  context_folders_json BLOB NOT NULL,
+  context_links_json BLOB NOT NULL,
+  model_provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+INSERT INTO agent_definition(
+  id, name, description, engine_kind_id, prompt, plugins_json, mcp_servers_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+)
+SELECT
+  id, name, description, engine_kind_id, prompt, plugins_json, CAST('[]' AS BLOB),
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+FROM agent_definition_v14;
+DROP TABLE agent_definition_v14;
+";
+
+/// v15 → v16：`agent_definition.mcp_servers_json` 的默认值从文本 `'[]'` 改成 BLOB `X'5B5D'`，
+/// 与列类型一致。SQLite 改不了已有列的默认值，只能重建表；列顺序和其余定义不变。
+pub const MIGRATE_V15_TO_V16: &str = "
+ALTER TABLE agent_definition RENAME TO agent_definition_v15;
+CREATE TABLE agent_definition (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  engine_kind_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  plugins_json BLOB NOT NULL,
+  mcp_servers_json BLOB NOT NULL DEFAULT X'5B5D',
+  context_folders_json BLOB NOT NULL,
+  context_links_json BLOB NOT NULL,
+  model_provider TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
+  memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+INSERT INTO agent_definition(
+  id, name, description, engine_kind_id, prompt, plugins_json, mcp_servers_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+)
+SELECT
+  id, name, description, engine_kind_id, prompt, plugins_json, mcp_servers_json,
+  context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
+FROM agent_definition_v15;
+DROP TABLE agent_definition_v15;
 ";

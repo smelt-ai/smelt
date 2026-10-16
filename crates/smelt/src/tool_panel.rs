@@ -4,11 +4,11 @@
 //!
 //! 从 main.rs 拆出的 `impl Workspace` 方法，字段仍在 main.rs。
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 
-use crate::{StageCover, Workspace, resizable_split, ui_theme};
+use crate::{StageCover, Workspace, ui_theme};
 
 pub(crate) const MIN_FILE_TREE_WIDTH: f32 = 190.0;
 /// 文件树是导航区而不是主内容区；限制最大值既能修正早期“按比例保存”留下的异常
@@ -32,6 +32,8 @@ pub(crate) enum ToolPanelTab {
     Git,
     History,
     Plugin(crate::plugin_ui::PluginTabSlot),
+    /// gpui-shell 插件（可行性原型，见 `shell_plugins`），与 `Plugin` 互不相干。
+    Shell(crate::shell_plugins::ShellTabSlot),
 }
 
 impl serde::Serialize for ToolPanelTab {
@@ -47,6 +49,15 @@ impl serde::Serialize for ToolPanelTab {
                     use serde::ser::SerializeMap;
                     let mut map = serializer.serialize_map(Some(1))?;
                     map.serialize_entry("plugin", &key)?;
+                    map.end()
+                }
+                None => serializer.serialize_str(DEFAULT_PANEL_KEY),
+            },
+            Self::Shell(slot) => match crate::shell_plugins::key_for(*slot) {
+                Some(key) => {
+                    use serde::ser::SerializeMap;
+                    let mut map = serializer.serialize_map(Some(1))?;
+                    map.serialize_entry("shell", &key)?;
                     map.end()
                 }
                 None => serializer.serialize_str(DEFAULT_PANEL_KEY),
@@ -71,6 +82,7 @@ impl<'de> serde::Deserialize<'de> for ToolPanelTab {
         enum Wire {
             Builtin(String),
             Plugin { plugin: String },
+            Shell { shell: String },
         }
         Ok(
             match <Wire as serde::Deserialize>::deserialize(deserializer)? {
@@ -78,6 +90,9 @@ impl<'de> serde::Deserialize<'de> for ToolPanelTab {
                 // 插件被卸载或停用后，存档里指向它的 tab 自动降级——
                 // 这是"可拔插"在持久化层该有的样子，不是错误。
                 Wire::Plugin { plugin } => Self::plugin_or_files(&plugin),
+                Wire::Shell { shell } => {
+                    crate::shell_plugins::slot_for_key(&shell).map_or(Self::Files, Self::Shell)
+                }
             },
         )
     }
@@ -105,10 +120,26 @@ impl ToolPanelTab {
         Self::plugin_or_files(MIGRATED_SKILLS_TAB_KEY)
     }
 
+    /// 页签元素身份。插件增删会平移槽位下标，key 不会。
+    fn element_key(self) -> String {
+        match self {
+            Self::Plugin(slot) => {
+                crate::plugin_ui::key_for(slot).unwrap_or_else(|| format!("plugin:{}", slot.0))
+            }
+            Self::Shell(slot) => {
+                crate::shell_plugins::key_for(slot).unwrap_or_else(|| format!("shell:{}", slot.0))
+            }
+            builtin => builtin_panel(builtin)
+                .map(|panel| panel.key.to_string())
+                .unwrap_or_else(|| DEFAULT_PANEL_KEY.to_string()),
+        }
+    }
+
     fn label(self) -> String {
         match self {
             // 插件面板的标题来自 manifest，只有运行时才知道。
             Self::Plugin(slot) => crate::plugin_ui::title(slot),
+            Self::Shell(slot) => crate::shell_plugins::title(slot),
             builtin => builtin_panel(builtin).map_or_else(String::new, |p| p.title.to_string()),
         }
     }
@@ -209,9 +240,7 @@ impl Workspace {
                     .w(px(1.))
                     .h_full()
                     .bg(rgb(ui_theme::border_dim()))
-                    .group_hover(id, |line| {
-                        line.bg(resizable_split::resize_handle_hover_color())
-                    }),
+                    .group_hover(id, |line| line.bg(rgb(ui_theme::text_faint()))),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -276,6 +305,7 @@ impl Workspace {
     pub(crate) fn toggle_file_tree(&mut self, cx: &mut Context<Self>) {
         self.file_tree_open = !self.file_tree_open;
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -285,13 +315,11 @@ impl Workspace {
             .is_some_and(StageCover::is_tool_panel_cover)
     }
 
-    /// 当前中央 Tool Panel 舞台正在展示的 tab。新状态由 Tool Panel 自己的 tab 保存；
-    /// 运行时若暂时读到旧具体 StageCover 变体，则从变体本身推导。
+    /// 当前中央 Tool Panel 舞台正在展示的 tab。
     pub(crate) fn active_stage_tool_panel_tab(&self) -> Option<ToolPanelTab> {
         match self.stage_cover {
             Some(StageCover::ToolPanel) => Some(self.tool_panel_tab),
             Some(StageCover::Unknown) | None => None,
-            Some(view) => view.legacy_tool_panel_tab(),
         }
     }
 
@@ -300,20 +328,24 @@ impl Workspace {
     }
 
     /// 唯一改 `tool_panel_open` 的入口：持久状态与可复用过渡状态同步更新。
-    pub(crate) fn set_tool_panel_open(&mut self, open: bool) {
+    pub(crate) fn set_tool_panel_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        let changed = self.tool_panel_open != open;
         self.tool_panel_transition.set_open(open);
         self.tool_panel_open = open;
+        if changed {
+            self.schedule_visible_refresh(cx);
+        }
     }
 
     /// 切换 Tool Panel 显隐（或全屏退出），与右上角按钮逻辑对齐。
     pub(crate) fn toggle_tool_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tool_panel_promoted() {
             self.set_stage_cover(None, window, cx);
-            self.set_tool_panel_open(false);
+            self.set_tool_panel_open(false, cx);
             self.focus_active_stage(window, cx);
         } else {
             let next_open = !self.tool_panel_open;
-            self.set_tool_panel_open(next_open);
+            self.set_tool_panel_open(next_open, cx);
             if !next_open {
                 self.focus_active_stage(window, cx);
             }
@@ -324,36 +356,23 @@ impl Workspace {
 
     /// Tool Panel tab 点击：停靠态同 tab 可收合面板；全屏态只切换内容，不改变
     /// 全屏展示状态。全屏的进入/退出由容器按钮（或 Esc）负责。
-    pub(crate) fn toggle_tool_panel_tab(
-        &mut self,
-        tab: ToolPanelTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn toggle_tool_panel_tab(&mut self, tab: ToolPanelTab, cx: &mut Context<Self>) {
         if self.tool_panel_promoted() {
             // 全屏态切换内容仍用当前 Tool Panel tab；点击当前 tab
             // 也保持全屏，避免内容导航反向改变容器展示状态。
-            let active_tab = self
-                .active_stage_tool_panel_tab()
-                .unwrap_or(self.tool_panel_tab);
-            if active_tab != tab {
+            if self.tool_panel_tab != tab {
                 if tab == ToolPanelTab::Git {
                     self.reset_git_diff_view();
                 }
                 self.tool_panel_tab = tab;
-            } else if self.tool_panel_tab != tab {
-                // 旧具体 StageCover 变体运行时兼容：统一当前内容字段。
-                self.tool_panel_tab = tab;
-            }
-            if self.stage_cover != Some(StageCover::ToolPanel) {
-                self.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
             }
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
             cx.notify();
             return;
         }
         if self.tool_panel_tab == tab && self.tool_panel_open {
-            self.set_tool_panel_open(false);
+            self.set_tool_panel_open(false, cx);
         } else {
             if tab == ToolPanelTab::Git
                 && should_reset_git_diff_on_dock_selection(
@@ -366,9 +385,10 @@ impl Workspace {
                 self.reset_git_diff_view();
             }
             self.tool_panel_tab = tab;
-            self.set_tool_panel_open(true);
+            self.set_tool_panel_open(true, cx);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -387,19 +407,45 @@ impl Workspace {
                 .into_iter()
                 .map(ToolPanelTab::Plugin),
         );
-        let click_tabs = tabs.clone();
+        tabs.extend(
+            crate::shell_plugins::slots()
+                .into_iter()
+                .map(ToolPanelTab::Shell),
+        );
         // 停靠 rail 收起期间不保留高亮；全屏 rail 始终高亮当前 Tool Panel tab。
         let selected_index = (stage_rail || self.tool_panel_open)
             .then(|| tabs.iter().position(|t| *t == active_tab))
             .flatten();
 
-        let tab = |t: ToolPanelTab, badge: usize| {
-            let mut b = Tab::new()
-                .label(t.label())
-                // 页签拦住自己的点击。这一行其余空白走下面的拖窗口。
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-            if badge > 0 {
-                b = b.suffix(
+        // 下划线跟着选中页签滑过去，不是在两个页签之间瞬移。
+        let mut track = smelt_ui::segmented::segmented_track(
+            if stage_rail {
+                "stage-tool-panel-rail"
+            } else {
+                "tool-panel-rail"
+            },
+            smelt_ui::segmented::SegmentedVariant::Underline,
+            selected_index,
+        );
+        for (ix, entry) in tabs.iter().copied().enumerate() {
+            // 角标由面板自己声明，不在这里特判某个 tab。
+            let badge = builtin_panel(entry)
+                .and_then(|panel| panel.badge)
+                .map_or(0, |badge| badge(self, cx));
+            let tab_key = entry.element_key();
+            let tab = smelt_ui::segmented::underline_segment(
+                (ElementId::from("tool-panel-tab"), tab_key),
+                entry.label(),
+                selected_index == Some(ix),
+                cx,
+            )
+            // 页签拦住自己的点击。这一行其余空白走下面的拖窗口。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |ws, _, _window, cx| {
+                ws.toggle_tool_panel_tab(entry, cx);
+            }))
+            .when(badge > 0, |tab| {
+                tab.child(
                     div()
                         .px(px(5.))
                         .rounded_full()
@@ -408,34 +454,25 @@ impl Workspace {
                         .font_semibold()
                         .text_color(rgb(ui_theme::action_on()))
                         .child(badge.to_string()),
-                );
-            }
-            b
-        };
-
-        let mut tab_bar = TabBar::new(if stage_rail {
-            "stage-tool-panel-rail"
-        } else {
-            "tool-panel-rail"
-        })
-        .underline()
-        .with_size(gpui_component::Size::XSmall)
-        .flex_1()
-        .on_click(cx.listener(move |ws, ix: &usize, window, cx| {
-            if let Some(tab) = click_tabs.get(*ix).copied() {
-                ws.toggle_tool_panel_tab(tab, window, cx);
-            }
-        }));
-        if let Some(ix) = selected_index {
-            tab_bar = tab_bar.selected_index(ix);
+                )
+            });
+            track = track.child(tab);
         }
-        for entry in &tabs {
-            // 角标由面板自己声明，不在这里特判某个 tab。
-            let badge = builtin_panel(*entry)
-                .and_then(|panel| panel.badge)
-                .map_or(0, |badge| badge(self, cx));
-            tab_bar = tab_bar.child(tab(*entry, badge));
-        }
+        // 页签多到放不下时横向滚动，底下那条分隔线和原来的页签栏一致。
+        let tab_bar = div()
+            .id(if stage_rail {
+                "stage-tool-panel-tabs"
+            } else {
+                "tool-panel-tabs"
+            })
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(track);
 
         crate::workspace_frame::with_window_drag(
             div()
@@ -514,6 +551,11 @@ impl Workspace {
     ) -> AnyElement {
         match tab {
             ToolPanelTab::Plugin(slot) => self.render_plugin_tab(slot, window, cx),
+            ToolPanelTab::Shell(slot) => {
+                // 插件经 smelt-workspace.context() 读当前项目；这里只写内存。
+                crate::shell_plugins::set_project_root(self.active_project_root(cx));
+                crate::shell_plugins::render(slot, cx)
+            }
             builtin => match builtin_panel(builtin) {
                 Some(panel) => (panel.render)(self, window, cx),
                 // 注册表里没有就不渲染：这是声明与实现脱节，不应该 panic 拖垮整个窗口。
@@ -533,7 +575,7 @@ impl Workspace {
     ) -> AnyElement {
         // 「EXPLORER」标题行去掉：上面已经有 FILES tab 高亮，这行纯属多余的重复标签。
         // 有查询串 → 显示搜索结果；否则显示文件树（跟旧全屏页行为一致，
-        // file_filter/search_results 已在 prepare_frame 懒创建 + 刷新）。
+        // file_filter/search_results 在打开文件页时懒创建 + 刷新）。
         let has_query = self
             .file_filter
             .as_ref()
@@ -554,7 +596,7 @@ impl Workspace {
                 Some(state) => {
                     crate::file_tree::search_results_view(state, &self.file_tree_scroll, cx)
                 }
-                // ensure_search 已在 prepare_frame 置位，通常到不了这里。
+                // ensure_search 已在打开文件页或改查询时置位，通常到不了这里。
                 None => div().flex_1().into_any_element(),
             }
         } else {
@@ -574,7 +616,7 @@ impl Workspace {
                 cx,
             )
         };
-        // 顶部搜索框（file_filter 已在 prepare_frame 懒创建）。
+        // 顶部搜索框（file_filter 在打开文件页时懒创建）。
         let search_box = self.file_filter.as_ref().map(|state| {
             div()
                 .px_2()
@@ -711,10 +753,6 @@ mod tests {
     #[test]
     fn tool_panel_fullscreen_is_panel_level() {
         assert!(StageCover::ToolPanel.is_tool_panel_cover());
-        assert!(StageCover::Files.is_tool_panel_cover());
-        assert!(StageCover::Git.is_tool_panel_cover());
-        assert!(StageCover::Skills.is_tool_panel_cover());
-        assert!(StageCover::History.is_tool_panel_cover());
         assert!(!StageCover::Unknown.is_tool_panel_cover());
     }
 

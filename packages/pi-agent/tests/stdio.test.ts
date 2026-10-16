@@ -34,6 +34,7 @@ describe("Pi RPC stdio entry", () => {
 		});
 		children.push(child);
 
+		const stdout = new JsonlReader(child.stdout);
 		child.stdin.write(
 			`${JSON.stringify({
 				id: "state",
@@ -42,8 +43,7 @@ describe("Pi RPC stdio entry", () => {
 		);
 		await child.stdin.flush();
 
-		const line = await readLine(child.stdout);
-		const response = JSON.parse(line) as {
+		const response = (await stdout.response("state")) as {
 			id: string;
 			type: string;
 			command: string;
@@ -65,7 +65,7 @@ describe("Pi RPC stdio entry", () => {
 		]);
 	});
 
-	test("binds extensions exactly once after a successful new_session", async () => {
+	test("new_session emits session_start on startup and on each upstream rebind", async () => {
 		const agentDir = await mkdtemp(join(tmpdir(), "smelt-pi-rebind-test-"));
 		tempDirs.push(agentDir);
 		const startsFile = join(agentDir, "session-starts.jsonl");
@@ -99,16 +99,17 @@ describe("Pi RPC stdio entry", () => {
 		);
 		children.push(child);
 
+		const stdout = new JsonlReader(child.stdout);
 		child.stdin.write(`${JSON.stringify({ id: "initial", type: "get_state" })}\n`);
 		await child.stdin.flush();
-		expect(JSON.parse(await readLine(child.stdout))).toMatchObject({
+		expect(await stdout.response("initial")).toMatchObject({
 			id: "initial",
 			success: true,
 		});
 
 		child.stdin.write(`${JSON.stringify({ id: "new", type: "new_session" })}\n`);
 		await child.stdin.flush();
-		expect(JSON.parse(await readLine(child.stdout))).toMatchObject({
+		expect(await stdout.response("new")).toMatchObject({
 			id: "new",
 			success: true,
 		});
@@ -117,30 +118,45 @@ describe("Pi RPC stdio entry", () => {
 			.trim()
 			.split("\n")
 			.map((line) => JSON.parse(line) as { reason: string });
-		expect(starts).toHaveLength(2);
-		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
+		// 官方 RPC 在 new_session 里还会再 rebind 一次，所以 startup 之后有两次 new。
+		expect(starts.map((event) => event.reason)).toEqual(["startup", "new", "new"]);
 	});
 });
 
-async function readLine(stream: ReadableStream<Uint8Array>): Promise<string> {
-	const reader = stream.getReader();
-	const decoder = new TextDecoder();
-	let text = "";
-	try {
-		while (!text.includes("\n")) {
+/**
+ * Pi RPC 的 stdout 上响应和事件（如扩展的 setWidget）交错输出。
+ * 跨次读取保留缓冲，不丢同一块里的后续行；按 id 找响应，跳过事件。
+ */
+class JsonlReader {
+	private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
+	private readonly decoder = new TextDecoder();
+	private buffer = "";
+
+	constructor(stream: ReadableStream<Uint8Array>) {
+		this.reader = stream.getReader();
+	}
+
+	async response(id: string): Promise<Record<string, unknown>> {
+		for (;;) {
+			const message = JSON.parse(await this.line()) as Record<string, unknown>;
+			if (message.type === "response" && message.id === id) return message;
+		}
+	}
+
+	private async line(): Promise<string> {
+		while (!this.buffer.includes("\n")) {
 			const chunk = await Promise.race([
-				reader.read(),
+				this.reader.read(),
 				Bun.sleep(5_000).then(() => {
 					throw new Error("Timed out waiting for Pi RPC response");
 				}),
 			]);
-			if (chunk.done) break;
-			text += decoder.decode(chunk.value, { stream: true });
+			if (chunk.done) throw new Error("Pi RPC process closed without a response");
+			this.buffer += this.decoder.decode(chunk.value, { stream: true });
 		}
-	} finally {
-		reader.releaseLock();
+		const end = this.buffer.indexOf("\n");
+		const line = this.buffer.slice(0, end);
+		this.buffer = this.buffer.slice(end + 1);
+		return line;
 	}
-	const [line] = text.split("\n");
-	if (!line) throw new Error("Pi RPC process closed without a response");
-	return line;
 }

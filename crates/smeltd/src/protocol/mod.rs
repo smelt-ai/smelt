@@ -117,8 +117,10 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
             &event_hub,
             &remote_sessions,
         ),
-        DaemonOperation::AcpWatch => handle_acp_watch(conn, reader, &v, acp_sessions),
-        DaemonOperation::AcpSnapshot => handle_acp_snapshot(conn, &v, &acp_sessions),
+        DaemonOperation::AcpWatch => {
+            handle_acp_watch(conn, reader, &v, acp_sessions, &workspace_menu, &event_hub)
+        }
+        DaemonOperation::AcpSnapshot => handle_acp_snapshot(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::AcpSkills => handle_acp_skills(conn, &v, &acp_sessions),
         DaemonOperation::AcpSubmitInput => {
             handle_acp_submit_input(conn, &v, &acp_sessions, &event_hub)
@@ -145,6 +147,9 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         DaemonOperation::EventPublish => handle_event_publish(conn, &v, &automations, &event_hub),
         DaemonOperation::RemoteRenameResume => {
             handle_remote_rename_resume(conn, &v, &remote_sessions, &event_hub)
+        }
+        DaemonOperation::ConversationRename => {
+            handle_conversation_rename(conn, &v, &acp_sessions, &remote_sessions, &event_hub)
         }
         DaemonOperation::Kill => handle_kill(conn, &v, &sessions, &remote_sessions, &event_hub),
         DaemonOperation::Upgrade => {

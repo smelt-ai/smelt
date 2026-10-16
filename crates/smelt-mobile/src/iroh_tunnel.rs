@@ -10,12 +10,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use once_cell::sync::Lazy;
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
@@ -50,6 +52,42 @@ struct Shared {
     /// 缓存的 QUIC 连接。一条 QUIC 连接可以承载任意多条流，所以正常情况下
     /// 只拨号一次；掉线后由下一个请求触发重拨。
     conn: Mutex<Option<Connection>>,
+    inbound: InboundActivity,
+}
+
+/// 隧道最近一次从桌面收到流数据的时刻。
+///
+/// 手机的应用层心跳和业务数据走同一条有序流：一份大快照经 relay 传几十秒时，
+/// 排在它后面的 pong 回不来，但字节一直在到。判断「连接还活着」要看这个，
+/// 而不是 pong——pong 只能说明队列不忙。真断网时 QUIC 自己的保活会在空闲
+/// 超时后关掉连接，流跟着断，WebSocket 也就断了。
+struct InboundActivity {
+    origin: Instant,
+    /// 距 `origin` 的毫秒数 + 1；0 表示还没收到过。
+    last: AtomicU64,
+}
+
+impl InboundActivity {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            last: AtomicU64::new(0),
+        }
+    }
+
+    fn mark(&self) {
+        let now = self.origin.elapsed().as_millis() as u64 + 1;
+        self.last.fetch_max(now, Ordering::Relaxed);
+    }
+
+    fn idle(&self) -> Option<Duration> {
+        let last = self.last.load(Ordering::Relaxed).checked_sub(1)?;
+        Some(
+            self.origin
+                .elapsed()
+                .saturating_sub(Duration::from_millis(last)),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +193,7 @@ pub async fn start(endpoint_id: &str, relay_address: &str) -> Result<u16> {
         peer,
         target: EndpointAddr::new(peer).with_relay_url(relay.url.clone()),
         conn: Mutex::new(None),
+        inbound: InboundActivity::new(),
     });
 
     // 先拨一次：把「对方不在线 / EndpointId 打错」这类错误在 start 就报出来，
@@ -224,6 +263,17 @@ pub async fn path_status() -> Option<TunnelPathStatus> {
     shared.path_status().await
 }
 
+/// 距离隧道最近一次收到桌面数据过了多久。没有隧道或还没收到过数据时为 None。
+pub async fn inbound_idle() -> Option<Duration> {
+    let guard = TUNNEL.lock().await;
+    guard
+        .as_ref()
+        .filter(|t| !t.accept_task.is_finished())?
+        .shared
+        .inbound
+        .idle()
+}
+
 fn shutdown(tunnel: Tunnel) {
     tunnel.accept_task.abort();
     let shared = tunnel.shared;
@@ -236,14 +286,18 @@ fn shutdown(tunnel: Tunnel) {
 /// 一条本地 TCP 连接 ⟷ 一条 iroh 双向流，逐字节转发。
 async fn pump(tcp: TcpStream, shared: Arc<Shared>) -> Result<()> {
     let conn = shared.connection().await?;
-    let result = pump_connection(tcp, &conn).await;
+    let result = pump_connection(tcp, &conn, &shared.inbound).await;
     if result.is_err() {
         shared.invalidate_connection(&conn).await;
     }
     result
 }
 
-async fn pump_connection(tcp: TcpStream, conn: &Connection) -> Result<()> {
+async fn pump_connection(
+    tcp: TcpStream,
+    conn: &Connection,
+    inbound: &InboundActivity,
+) -> Result<()> {
     let (mut send, mut recv) = conn.open_bi().await.context("开流失败")?;
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
 
@@ -251,10 +305,7 @@ async fn pump_connection(tcp: TcpStream, conn: &Connection) -> Result<()> {
         tokio::io::copy(&mut tcp_read, &mut send).await?;
         send.finish().map_err(std::io::Error::other)
     };
-    let down = async {
-        tokio::io::copy(&mut recv, &mut tcp_write).await?;
-        tcp_write.shutdown().await
-    };
+    let down = forward_inbound(&mut recv, &mut tcp_write, inbound);
 
     tokio::select! {
         r = up => r?,
@@ -263,9 +314,58 @@ async fn pump_connection(tcp: TcpStream, conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// 桌面 → 手机方向的转发，每收到一块就记一次活动。
+async fn forward_inbound(
+    mut from: impl AsyncRead + Unpin,
+    mut to: impl AsyncWrite + Unpin,
+    activity: &InboundActivity,
+) -> std::io::Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let read = from.read(&mut buf).await?;
+        if read == 0 {
+            return to.shutdown().await;
+        }
+        activity.mark();
+        to.write_all(&buf[..read]).await?;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_forwarding_records_activity_while_bytes_flow() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let activity = InboundActivity::new();
+            assert_eq!(activity.idle(), None, "没收到过数据就没有活动证据");
+
+            let (mut desktop, tunnel_in) = tokio::io::duplex(1024);
+            let (tunnel_out, mut app) = tokio::io::duplex(1024);
+            let forward = forward_inbound(tunnel_in, tunnel_out, &activity);
+            let drive = async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                desktop.write_all(b"chunk").await.unwrap();
+                let mut got = [0u8; 5];
+                app.read_exact(&mut got).await.unwrap();
+                assert_eq!(&got, b"chunk");
+                let idle = activity.idle().expect("收到数据后要有活动");
+                assert!(idle < Duration::from_millis(50), "刚收到数据：{idle:?}");
+
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                let idle = activity.idle().unwrap();
+                assert!(idle >= Duration::from_millis(120), "之后没再收到：{idle:?}");
+                drop(desktop);
+                let mut rest = Vec::new();
+                app.read_to_end(&mut rest).await.unwrap();
+                assert!(rest.is_empty());
+            };
+            let (forwarded, ()) = tokio::join!(forward, drive);
+            forwarded.unwrap();
+        });
+    }
 
     #[test]
     fn rejects_malformed_endpoint_id() {

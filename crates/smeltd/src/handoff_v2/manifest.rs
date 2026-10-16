@@ -86,10 +86,13 @@ pub enum AcpHandoff {
         launch: smelt_core::agent_kind::ConversationLaunchSpec,
         agent_mcp: bool,
         agent_token: String,
-        agent_needs_transcript_check: bool,
         runtime_spec_fingerprint: Option<String>,
         conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
         snapshot: smelt_core::acp_session::ConversationSnapshot,
+        /// 前任快照读端已经从 socket 预取、继任者必须先读的字节。空表示停在行边界。
+        /// 老清单没有这个字段。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_host_bytes: Vec<u8>,
     },
     Direct {
         id: String,
@@ -98,7 +101,6 @@ pub enum AcpHandoff {
         launch: smelt_core::agent_kind::ConversationLaunchSpec,
         agent_mcp: bool,
         agent_token: String,
-        agent_needs_transcript_check: bool,
         runtime_spec_fingerprint: Option<String>,
         conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
         snapshot: smelt_core::acp_session::ConversationSnapshot,
@@ -487,10 +489,10 @@ mod tests {
             launch: launch_fixture(),
             agent_mcp: true,
             agent_token: "tok".to_string(),
-            agent_needs_transcript_check: false,
             runtime_spec_fingerprint: None,
             conversation_binding: None,
             snapshot: snapshot_fixture(),
+            pending_host_bytes: Vec::new(),
         }
     }
 
@@ -502,7 +504,6 @@ mod tests {
             launch: launch_fixture(),
             agent_mcp: false,
             agent_token: String::new(),
-            agent_needs_transcript_check: true,
             runtime_spec_fingerprint: Some("fp".to_string()),
             conversation_binding: None,
             snapshot: snapshot_fixture(),
@@ -588,6 +589,20 @@ mod tests {
             decoded.sessions[1].child,
             TerminalChildHandoff::ExitedDuringHandoff { pid: 101 }
         ));
+    }
+
+    #[test]
+    fn hosted_handoff_without_pending_bytes_still_decodes() {
+        let mut value = serde_json::to_value(hosted_acp("a1")).unwrap();
+        value.as_object_mut().unwrap().remove("pending_host_bytes");
+        let decoded: AcpHandoff = serde_json::from_value(value).unwrap();
+        let AcpHandoff::Hosted {
+            pending_host_bytes, ..
+        } = decoded
+        else {
+            panic!("缺省字节前缀的旧清单仍应是 hosted");
+        };
+        assert!(pending_host_bytes.is_empty());
     }
 
     #[test]

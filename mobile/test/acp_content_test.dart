@@ -93,4 +93,80 @@ void main() {
 
     expect(identical(firstProvider, secondProvider), isTrue);
   });
+
+  testWidgets('opening a thumbnail loads the original and offers retry', (
+    tester,
+  ) async {
+    String png(int width) =>
+        base64Encode(img.encodePng(img.Image(width: width, height: 1)));
+    final requests = <AcpImageOriginal>[];
+    var fail = true;
+    const original = AcpImageOriginal(entry: 3, digest: 'abc');
+
+    await tester.pumpWidget(
+      _host(
+        AcpImageThumbnail(
+          image: AcpImageData(
+            mimeType: 'image/png',
+            base64: png(1),
+            original: original,
+          ),
+          loadOriginal: (ref) async {
+            requests.add(ref);
+            if (fail) throw StateError('offline');
+            return AcpImageData(mimeType: 'image/png', base64: png(2));
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(AcpImageThumbnail));
+    await tester.pumpAndSettle();
+    expect(requests, [original]);
+    expect(find.textContaining('offline'), findsOneWidget);
+
+    fail = false;
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(requests, [original, original]);
+    expect(find.textContaining('offline'), findsNothing);
+    final shown = tester
+        .widgetList<Image>(find.byType(Image))
+        .map((image) => image.image)
+        .whereType<MemoryImage>()
+        .map((image) => image.bytes)
+        .toList();
+    expect(shown, anyElement(equals(base64Decode(png(2)))));
+  });
+
+  testWidgets('a reference without a thumbnail still opens the original', (
+    tester,
+  ) async {
+    var loads = 0;
+    await tester.pumpWidget(
+      _host(
+        AcpImageThumbnail(
+          image: const AcpImageData(
+            mimeType: 'image/heic',
+            base64: '',
+            original: AcpImageOriginal(entry: 0, digest: 'x'),
+          ),
+          loadOriginal: (_) async {
+            loads++;
+            return AcpImageData(
+              mimeType: 'image/png',
+              base64: base64Encode(
+                img.encodePng(img.Image(width: 1, height: 1)),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    expect(find.byIcon(Icons.image_outlined), findsOneWidget);
+    await tester.tap(find.byType(AcpImageThumbnail));
+    await tester.pumpAndSettle();
+    expect(loads, 1);
+  });
 }

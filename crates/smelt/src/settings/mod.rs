@@ -25,16 +25,18 @@ use gpui_component::*;
 use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
 mod agent_hooks;
+mod memory;
 mod nav;
 mod pi_auth;
+mod pi_mcp;
 pub(crate) mod plugins;
 mod remote;
 mod workspace;
 mod workspace_view;
 
 pub(crate) use nav::{
-    SettingsCategoryId, SettingsNavCategory, SettingsScope, SettingsSection, filter_settings_nav,
-    nav_contains,
+    SettingsCategoryId, SettingsNavCategory, SettingsSection, filter_settings_nav, nav_contains,
+    settings_nav,
 };
 pub(super) use plugins::*;
 pub(super) use remote::*;
@@ -58,6 +60,10 @@ pub(super) use agent_hooks::{
 
 fn default_theme_mode() -> ThemeMode {
     ThemeMode::Dark
+}
+
+fn default_theme_name() -> String {
+    smelt_core::theme_index::DEFAULT_DARK.to_string()
 }
 
 /// 界面字号（基准 rem，px）默认值与取值范围。
@@ -104,9 +110,12 @@ pub struct Appearance {
     /// 液态玻璃材质档位（macOS 26+；旧系统忽略）。老配置文件缺省 = 标准。
     #[serde(default)]
     pub glass_style: liquid_glass::GlassStyle,
-    /// 明暗主题模式。
+    /// 明暗。跟着 `theme_name` 走，CLI 的 `appearance.theme_mode` 会把主题拨到同一族的另一侧。
     #[serde(default = "default_theme_mode")]
     pub theme_mode: ThemeMode,
+    /// 主题名，对应注册表里的 `name`，例如 `Default Dark`、`Ayu Light`。
+    #[serde(default = "default_theme_name")]
+    pub theme_name: String,
     /// 界面字号（基准 rem，px）。控制侧边栏、Agent 会话、设置页等全局 UI 元素的排版缩放。
     #[serde(default = "default_ui_font_px")]
     pub ui_font_px: u32,
@@ -135,6 +144,7 @@ impl Default for Appearance {
             blur: true,
             glass_style: liquid_glass::GlassStyle::Regular,
             theme_mode: ThemeMode::Dark,
+            theme_name: default_theme_name(),
             ui_font_px: default_ui_font_px(),
             ui_font_family: String::new(),
             font_px: default_font_px(),
@@ -273,32 +283,37 @@ pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
     cx.set_global(settings);
 }
 
-/// 把主题模式落到所有吃颜色的层：gpui-component 部件、自绘 UI 语义色板、终端调色板。
-/// **唯一入口**——三处必须同时切，漏一处就是「面板变浅了但终端还是黑的」这种半吊子。
-/// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`
-/// （启动时还没有窗口，切换时才需要）。
 /// CLI 改过 SQLite 后，打开设置页时把外观重新套上窗口。
 pub fn reload_appearance_from_store(cx: &mut App) {
-    let appearance = load_appearance();
+    install_appearance(load_appearance(), cx);
+}
+
+/// 把一份完整外观套到所有层并重绘。外观的真源是 SQLite，内存里的全局只是它的投影。
+fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_px(appearance.font_px);
     terminal_view::set_font_family(&appearance.font_family);
     cx.set_global(appearance.clone());
-    apply_theme_mode(appearance.theme_mode, cx);
+    apply_named_theme(&appearance.theme_name, cx);
     apply_bg_color(&appearance);
     cx.refresh_windows();
 }
 
-pub fn apply_theme_mode(mode: ThemeMode, cx: &mut App) {
-    Theme::change(mode, None, cx);
-    crate::ui_theme::set_light(!mode.is_dark());
-    terminal::set_dark_mode(mode.is_dark());
-    // Theme::change 装的是组件库自带色板，跟 ui_theme 是两套值——同屏里
-    // `t.border` 和 `ui_theme::border_mid()` 挨着出现就会差一档。这里按语义位
-    // 把组件库主题覆写成 ui_theme 的值，色真源收敛成一个。
-    // 覆写必须在 Theme::change 之后：它会整套 apply_config 覆盖回默认。
-    crate::ui_theme::apply_to_component_theme(cx);
-    // Theme::change 会把 font_size / mono_font_family 重置回组件库默认；
-    // 必须写回 Appearance，否则界面字号闪回 16px，markdown 代码块也会掉回 Menlo。
+/// 按主题名装上配色。组件库走 `apply_config`，自绘色板从这份主题投影，终端跟着明暗切。
+/// 字号和字体在装完之后写回 Appearance，主题文件里的字号不覆盖用户设置。
+/// 只改全局态不重绘，调用方自己决定什么时候 `cx.refresh_windows()`。
+pub fn apply_named_theme(name: &str, cx: &mut App) {
+    let applied = smelt_ui::theme_catalog::apply(name, cx);
+    let dark = if applied && cx.has_global::<Theme>() {
+        cx.global::<Theme>().is_dark()
+    } else {
+        cx.try_global::<Appearance>()
+            .map(|appearance| appearance.theme_mode.is_dark())
+            .unwrap_or(true)
+    };
+    if !applied {
+        crate::ui_theme::set_light(!dark);
+    }
+    terminal::set_dark_mode(dark);
     sync_theme_fonts(cx);
     publish_terminal_theme();
 }
@@ -324,12 +339,16 @@ fn sync_theme_fonts(cx: &mut App) {
         .try_global::<Appearance>()
         .map(|a| (a.ui_font_px, resolved_ui_font_family(a)))
         .unwrap_or((DEFAULT_UI_FONT_PX, SYSTEM_UI_FONT.into()));
-    if cx.has_global::<Theme>() {
-        let theme = cx.global_mut::<Theme>();
+    if !cx.has_global::<Theme>() {
+        return;
+    }
+    // Root 每帧用 Theme.font_size 设 rem。update 结尾的 sync_base 用当前主题
+    // 重写分栏手柄和滚动条，这里不再另涂一层。
+    Theme::update(cx, |theme| {
         theme.font_size = px(ui_font_px as f32);
         theme.font_family = ui_family;
         theme.mono_font_family = terminal_view::font_family().into();
-    }
+    });
 }
 
 /// 把「当前生效的终端配色」落盘给守护/网关，转发给移动端。
@@ -339,7 +358,7 @@ fn sync_theme_fonts(cx: &mut App) {
 /// TUI 以为的底色跟实际底色对不上，就是对比度问题。所以颜色真源只有 PC 这一份，
 /// 而且一部手机可以连多台设备，配色必须**按设备**下发而不是客户端内置。
 ///
-/// 主题模式、用户自选底色变化时都要调（见 `apply_theme_mode` / `apply_appearance`）。
+/// 主题、用户自选底色变化时都要调（见 `apply_named_theme` / `apply_appearance`）。
 pub fn publish_terminal_theme() {
     smelt_core::terminal_theme::publish(&current_terminal_theme());
 }
@@ -375,14 +394,21 @@ pub fn load_appearance() -> Appearance {
     }
 }
 
-/// 写回外观设置；失败由统一存储入口记录，界面主流程继续运行。
-fn save_appearance(a: &Appearance) {
-    persist_appearance(a);
-}
-
-fn persist_appearance(appearance: &Appearance) {
-    if let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() {
-        let _ = store.put_appearance_snapshot(&snapshot_from_appearance(appearance));
+/// 提交一次界面编辑，返回库里提交后的完整外观。
+///
+/// 只落 `before → after` 改过的字段（见 `appearance_settings::commit_edit`）：设置页
+/// 打开期间 CLI / Control API 可能改过别的字段，不能用内存旧副本整份覆盖。
+/// 写库失败时记日志并沿用本地编辑结果，界面主流程继续运行。
+fn commit_appearance(before: &Appearance, after: &Appearance) -> Appearance {
+    match smelt_core::appearance_settings::commit_edit(
+        &snapshot_from_appearance(before),
+        &snapshot_from_appearance(after),
+    ) {
+        Ok(committed) => appearance_from_snapshot(committed),
+        Err(error) => {
+            eprintln!("[storage] 保存外观设置失败: {error}");
+            after.clone()
+        }
     }
 }
 
@@ -401,6 +427,11 @@ fn snapshot_from_appearance(appearance: &Appearance) -> smelt_store::AppearanceS
             .ok()
             .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_else(|| "dark".into()),
+        theme_name: if appearance.theme_name.trim().is_empty() {
+            default_theme_name()
+        } else {
+            appearance.theme_name.clone()
+        },
         ui_font_px: appearance.ui_font_px,
         ui_font_family: appearance.ui_font_family.clone(),
         font_px: appearance.font_px,
@@ -419,8 +450,13 @@ fn appearance_from_snapshot(snapshot: smelt_store::AppearanceSnapshot) -> Appear
             "clear" => liquid_glass::GlassStyle::Clear,
             _ => liquid_glass::GlassStyle::Regular,
         },
-        theme_mode: serde_json::from_value(serde_json::Value::String(snapshot.theme_mode))
+        theme_mode: serde_json::from_value(serde_json::Value::String(snapshot.theme_mode.clone()))
             .unwrap_or_else(|_| default_theme_mode()),
+        theme_name: if snapshot.theme_name.trim().is_empty() {
+            default_theme_name()
+        } else {
+            snapshot.theme_name
+        },
         ui_font_px: snapshot.ui_font_px,
         ui_font_family: snapshot.ui_font_family,
         font_px: snapshot.font_px,
@@ -652,7 +688,7 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
     cx.set_global(c);
 }
 
-// ===================== Agent UI / Claude hooks（B 路线） =====================
+// ===================== Agent 身份与宿主状态 =====================
 //
 // ConversationAgentKind / AcpProfile 搬进 smelt-core（本身不需要 GPUI），AgentHostState
 // （需要 `gpui::Global`）搬进 smelt-ui——都是 acp_view.rs 独立成 smelt-acp-view
@@ -854,12 +890,19 @@ pub(crate) fn copy_with_feedback(text: String, btn_id: &'static str, cx: &mut Ap
 /// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
 /// 供只有 `&mut App`（没有 `Context<Self>`）的场景用，比如设置页 SettingField 的 get/set 闭包。
 fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
-    let mut a = cx.global::<Appearance>().clone();
-    f(&mut a);
-    save_appearance(&a);
+    let before = cx.global::<Appearance>().clone();
+    let mut edited = before.clone();
+    f(&mut edited);
+    let committed = commit_appearance(&before, &edited);
+    if snapshot_from_appearance(&committed) != snapshot_from_appearance(&edited) {
+        // 合并带进了别的进程刚提交的字段（主题、字体等），只套底色和字体不够，
+        // 整份重新安装，界面与库保持一致。
+        install_appearance(committed, cx);
+        return;
+    }
     // 用户自选底色要镜像给 PTY 线程（OSC 11 应答）和移动端配色快照，三处同源。
-    apply_bg_color(&a);
-    cx.set_global(a);
+    apply_bg_color(&committed);
+    cx.set_global(committed);
     sync_theme_fonts(cx);
 }
 
@@ -1538,6 +1581,11 @@ struct SettingsRenderSnapshot {
     /// 注销、刷新这类一次性操作的最近一次错误。
     pi_auth_error: Option<String>,
     pi_auth_show_all: bool,
+    /// `~/.pi/agent/mcp.json` 里的服务器。文件很小，每次刷新快照时重读，外部改动也能跟上。
+    pi_mcp_servers: Result<Vec<smelt_core::pi_mcp::PiMcpServer>, String>,
+    pi_mcp_login: Option<String>,
+    pi_mcp_pending_remove: Option<String>,
+    pi_mcp_error: Option<String>,
     pi_model_editor_error: Option<String>,
     pi_model_settings: Result<smelt_core::pi_model_settings::PiModelSettings, String>,
     pi_settings: Result<smelt_core::pi_model_settings::PiSettingsSummary, String>,
@@ -1553,25 +1601,127 @@ struct SettingsRenderSnapshot {
     daemon_info: Option<terminal::DaemonInfo>,
     settings_section: SettingsSection,
     settings_page_nonce: usize,
+    /// 能力库当前页签。和 `settings_section` 分开记：设置窗口和能力库可以同时开着，
+    /// 各看各的页。
+    capabilities_tab: crate::CapabilitiesTab,
     show_daemon_restart_confirm: bool,
     session_manager_open: bool,
 }
 
-/// 设置窗口的内容子视图。将它与外层的键盘/性能 HUD 分开，HUD 的逐帧采样不会重建
-/// 全部 Settings 元素，也不会重新布局二维码和设置侧栏。
+/// 设置内容画在哪。两处共用同一套快照和节流刷新，只是外壳不同。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsSurface {
+    /// 独立设置窗口：左侧两级导航，右侧当前页。
+    Window,
+    /// 主窗口「能力库」页的正文。页头和页签由 Workspace 画，这里只画当前页签的内容。
+    Capabilities,
+}
+
+/// 设置内容子视图。独立设置窗口里，它和外层的键盘/性能 HUD 分开，HUD 的逐帧采样不会
+/// 重建全部 Settings 元素；主窗口里，它把设置快照和终端等高频通知隔开。
 pub struct SettingsContentView {
     workspace: Entity<Workspace>,
-    /// 本窗口显示哪一档内容。同一个 Workspace 可以同时被多扇作用域不同的窗口观察。
-    scope: SettingsScope,
+    surface: SettingsSurface,
     snapshot: SettingsRenderSnapshot,
     _observe_workspace: Subscription,
     _observe_settings_globals: Vec<Subscription>,
+    /// 运行状态不在设置快照里，绘制时直接读 Global。观察者只 notify 本视图，
+    /// 不走 250ms 的整页快照刷新。
+    _observe_plugin_statuses: Subscription,
+    /// 插件页可见时的状态轮询。离开页面或关掉设置窗口就 drop，查询随之取消。
+    plugin_status_task: Option<Task<()>>,
     last_refresh: Option<Instant>,
     refresh_pending: bool,
     refresh_generation: u64,
 }
 
 impl SettingsContentView {
+    /// `snapshot` 由调用方在创建前同步取好；构造期间不能再回头 update Workspace。
+    fn new(
+        workspace: Entity<Workspace>,
+        surface: SettingsSurface,
+        snapshot: SettingsRenderSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self {
+            _observe_workspace: cx.observe_in(
+                &workspace,
+                window,
+                |this: &mut SettingsContentView, _, window, cx| {
+                    this.request_refresh(window, cx);
+                },
+            ),
+            workspace,
+            surface,
+            snapshot,
+            _observe_settings_globals: vec![
+                Self::observe_settings_global::<Appearance>(window, cx),
+                Self::observe_settings_global::<LaunchConfig>(window, cx),
+                Self::observe_settings_global::<AgentHostState>(window, cx),
+                Self::observe_settings_global::<AcpRuntimeState>(window, cx),
+                Self::observe_settings_global::<UpdateSettings>(window, cx),
+                Self::observe_settings_global::<CleanupState>(window, cx),
+                Self::observe_settings_global::<CopyFlash>(window, cx),
+                Self::observe_settings_global::<RemoteConfig>(window, cx),
+                Self::observe_settings_global::<RemoteRuntimeState>(window, cx),
+                Self::observe_settings_global::<IrohRuntimeState>(window, cx),
+                Self::observe_settings_global::<IrohConnectionsState>(window, cx),
+                Self::observe_settings_global::<crate::worktree_inherit::WorktreeInheritSettings>(
+                    window, cx,
+                ),
+                Self::observe_settings_global::<PluginEnablementState>(window, cx),
+            ],
+            _observe_plugin_statuses: cx.observe_global_in::<PluginRuntimeStatuses>(
+                window,
+                |this, _, cx| {
+                    if this.shows_plugin_runtime_status() {
+                        cx.notify();
+                    }
+                },
+            ),
+            plugin_status_task: None,
+            // 初始快照已经同步取好；避免刚打开就被第一条后台流式通知立即打穿缓存。
+            last_refresh: Some(Instant::now()),
+            refresh_pending: false,
+            refresh_generation: 0,
+        };
+        this.sync_plugin_status_watch(cx);
+        this
+    }
+
+    fn shows_plugin_runtime_status(&self) -> bool {
+        plugins::shows_plugin_runtime_status(self.surface, &self.snapshot.settings_section)
+    }
+
+    /// 进入插件页时开始轮询，离开时丢掉 `Task`。绘制只读 Global，不再从 render 里发起查询。
+    fn sync_plugin_status_watch(&mut self, cx: &mut Context<Self>) {
+        if !self.shows_plugin_runtime_status() {
+            self.plugin_status_task = None;
+            return;
+        }
+        if self.plugin_status_task.is_some() {
+            return;
+        }
+        self.plugin_status_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let outcome = cx
+                    .background_spawn(async move { terminal::plugin_statuses() })
+                    .await;
+                let show = this
+                    .update(cx, |this, _cx| this.shows_plugin_runtime_status())
+                    .unwrap_or(false);
+                if !show {
+                    return;
+                }
+                cx.update(|cx| plugins::publish_plugin_runtime_statuses(outcome, cx));
+                cx.background_executor()
+                    .timer(plugins::PLUGIN_STATUS_POLL_INTERVAL)
+                    .await;
+            }
+        }));
+    }
+
     fn observe_settings_global<G: Global + 'static>(
         window: &Window,
         cx: &mut Context<Self>,
@@ -1588,13 +1738,22 @@ impl SettingsContentView {
         self.last_refresh = Some(Instant::now());
         self.refresh_pending = false;
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        self.sync_plugin_status_watch(cx);
         cx.notify();
     }
 
     fn request_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 子菜单切换必须立刻生效，不能被设置页 250ms 刷新节流挡住。
-        let current_section = self.workspace.read(cx).settings_section.clone();
-        if current_section != self.snapshot.settings_section {
+        // 子菜单和页签切换必须立刻生效，不能被设置页 250ms 刷新节流挡住。
+        let (current_section, current_tab) = {
+            let workspace = self.workspace.read(cx);
+            (
+                workspace.settings_section.clone(),
+                workspace.nav.capabilities_tab(),
+            )
+        };
+        if current_section != self.snapshot.settings_section
+            || current_tab != self.snapshot.capabilities_tab
+        {
             self.refresh_snapshot(window, cx);
             return;
         }
@@ -1635,11 +1794,25 @@ impl SettingsContentView {
 }
 
 impl Render for SettingsContentView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 设置内容 +（可选）守护管理弹层：弹层必须画在本窗，不能只改 Workspace 上的
-        // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("SettingsContent");
         let snapshot = self.snapshot.clone();
         let workspace = self.workspace.clone();
+        if self.surface == SettingsSurface::Capabilities {
+            // 能力库只有模型、插件、记忆三页，没有维护页那些弹层；弹层若也画在这里，
+            // 设置窗口开着时会在主窗口再弹一份。
+            return div()
+                .size_full()
+                .child(Workspace::render_capabilities_content(
+                    workspace, &snapshot, cx,
+                ))
+                .into_any_element();
+        }
+
+        // 设置内容 +（可选）守护管理弹层：弹层必须画在本窗，不能只改 Workspace 上的
+        // flag 却在主窗口 render——用户点的是设置里的按钮，弹窗却跑到主界面。
+        // 焦点也在这扇窗里记，不能放到主窗口的 prepare。
+        workspace.update(cx, |ws, cx| ws.sync_settings_modal_focus(window, cx));
         let show_daemon_restart_confirm = snapshot.show_daemon_restart_confirm;
         let session_manager_open = snapshot.session_manager_open;
 
@@ -1648,7 +1821,6 @@ impl Render for SettingsContentView {
             .size_full()
             .child(Workspace::render_settings_content(
                 workspace.clone(),
-                self.scope,
                 &snapshot,
                 cx,
             ))
@@ -1662,6 +1834,7 @@ impl Render for SettingsContentView {
                 session_manager_open
                     .then(|| workspace.update(cx, |ws, cx| ws.render_session_manager(cx))),
             )
+            .into_any_element()
     }
 }
 
@@ -1675,84 +1848,14 @@ pub struct SettingsWindow {
     applied_window_opacity: Option<f32>,
     applied_glass_style: Option<liquid_glass::GlassStyle>,
     applied_ui_font_px: Option<u32>,
-    /// 设置窗口独立采样，不能复用主工作区的 FPS：两个窗口的布局负载不同。
+    /// 调试 HUD 开关。监视器按窗口各一份：两个窗口的布局负载不同。
     debug_hud: bool,
-    last_frame: Option<Instant>,
-    fps_ema: f32,
-    debug_mem_rss: Option<u64>,
-    debug_mem_sampled_at: Option<Instant>,
 }
 
 impl SettingsWindow {
     fn toggle_debug_hud(&mut self, cx: &mut Context<Self>) {
         self.debug_hud = !self.debug_hud;
-        self.fps_ema = 0.0;
-        self.last_frame = None;
-        self.debug_mem_rss = None;
-        self.debug_mem_sampled_at = None;
         cx.notify();
-    }
-
-    fn update_debug_hud(&mut self, window: &mut Window) {
-        if !self.debug_hud {
-            self.last_frame = None;
-            self.debug_mem_rss = None;
-            self.debug_mem_sampled_at = None;
-            return;
-        }
-
-        let now = Instant::now();
-        if let Some(previous) = self.last_frame {
-            let delta = now.saturating_duration_since(previous).as_secs_f32();
-            if delta > 0.0 {
-                let instantaneous_fps = 1.0 / delta;
-                self.fps_ema = if self.fps_ema <= 0.0 {
-                    instantaneous_fps
-                } else {
-                    self.fps_ema * 0.9 + instantaneous_fps * 0.1
-                };
-            }
-        }
-        self.last_frame = Some(now);
-
-        if self.debug_mem_sampled_at.is_none_or(|sampled_at| {
-            now.saturating_duration_since(sampled_at) >= Duration::from_secs(1)
-        }) {
-            self.debug_mem_rss = crate::mem_usage::current_rss_bytes();
-            self.debug_mem_sampled_at = Some(now);
-        }
-        window.request_animation_frame();
-    }
-
-    fn render_debug_hud(&self) -> Div {
-        let fps = self.fps_ema;
-        let frame_ms = if fps > 0.0 { 1000.0 / fps } else { 0.0 };
-        let memory = self
-            .debug_mem_rss
-            .map(crate::mem_usage::format_rss)
-            .unwrap_or_else(|| "-".into());
-        let color = if fps >= 55.0 {
-            rgb(crate::ui_theme::green())
-        } else if fps >= 30.0 {
-            rgb(crate::ui_theme::yellow())
-        } else {
-            rgb(crate::ui_theme::red())
-        };
-
-        div()
-            .absolute()
-            .top(px(40.))
-            .right(px(12.))
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(crate::ui_theme::tint(crate::ui_theme::bg_card(), 0xcc))
-            .border_1()
-            .border_color(crate::ui_theme::overlay(0x22))
-            .font_family(terminal_view::font_family())
-            .text_xs()
-            .text_color(color)
-            .child(format!("{fps:.0} FPS · {frame_ms:.1} ms · RSS {memory}"))
     }
 }
 
@@ -1762,8 +1865,9 @@ impl Render for SettingsWindow {
             self.did_focus = true;
             window.focus(&self.focus_handle, cx);
         }
-        self.update_debug_hud(window);
-        let debug_hud = self.debug_hud.then(|| self.render_debug_hud());
+        let debug_hud = self
+            .debug_hud
+            .then(|| crate::overlay::debug_hud(window, cx));
 
         let ui_font_px = cx.global::<Appearance>().ui_font_px;
         if self.applied_ui_font_px != Some(ui_font_px) {
@@ -1807,10 +1911,9 @@ impl Render for SettingsWindow {
     }
 }
 
-/// 各作用域设置窗口的单例句柄：已经开着就聚焦复用，避免重复开出好几扇一样的窗口。
-#[derive(Default)]
-pub struct SettingsWindowHandles(pub std::collections::HashMap<SettingsScope, WindowHandle<Root>>);
-impl Global for SettingsWindowHandles {}
+/// 设置窗口的单例句柄：已经开着就聚焦复用，避免重复开出好几扇一样的窗口。
+pub struct SettingsWindowHandle(pub WindowHandle<Root>);
+impl Global for SettingsWindowHandle {}
 
 // ===================== Workspace 方法 =====================
 

@@ -19,11 +19,12 @@ use smelt_plugin_api::{
     AgentMessageDelivered, AggregateRef, CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION,
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
     CORE_SNAPSHOT_WORKSPACE_MENU, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
+    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+    CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_MENU_CHANGED, Capability,
-    CoreProjectionEvent, CoreSessionPhase, CorrelationId, DeliveryClass, EventEnvelope, EventId,
-    EventSource, PluginId, PublisherIdentity, SessionStateChanged, SessionStateRemoved,
-    SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
+    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId, DeliveryClass,
+    EventEnvelope, EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged,
+    SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
 use smelt_store::{PeerMessageCommandResult, PeerMessageCommitOutcome};
 
@@ -469,6 +470,30 @@ impl DaemonEventHub {
             ProjectionTarget::WorkspaceMenu => projection.workspace_menu = Some(event),
             ProjectionTarget::Automations => projection.automations = Some(event),
         }
+        Ok(true)
+    }
+
+    /// 请桌面端把一段冷恢复的对话拉起来。返回 `false` 表示此刻没有任何一方
+    /// 能兑现这个请求（桌面端没开），调用方应立刻放弃而不是空等。
+    pub(crate) fn request_conversation_wake(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, EventBusError> {
+        let topic = Topic::new(CORE_TOPIC_CONVERSATION_WAKE_REQUESTED)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(false);
+        }
+        let payload = ConversationWakeRequested {
+            session_id: session_id.to_string(),
+        };
+        self.publish_core(
+            CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+            serde_json::to_value(payload).map_err(|error| {
+                EventBusError::new(format!("serialize conversation wake request: {error}"))
+            })?,
+            None,
+        )?;
         Ok(true)
     }
 

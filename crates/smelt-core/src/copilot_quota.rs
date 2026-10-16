@@ -39,7 +39,7 @@ pub struct CopilotQuota {
 pub struct CopilotQuotaStatus {
     pub quota: Option<CopilotQuota>,
     pub checked_at_ms: u64,
-    /// 最近一次刷新失败原因；有 quota 时表示当前展示的是上一次成功结果。
+    /// 最近一次刷新失败原因。失败即失效，此时 quota 为空、侧栏不显示。
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -75,10 +75,19 @@ const COPILOT_QUOTA_ENDPOINT: &str = "https://api.github.com/copilot_internal/us
 /// 使用本机 Copilot/GitHub 凭据查询当前账户额度。
 ///
 /// 凭据只在本函数的栈和 reqwest 请求期间存在，不会返回、序列化或写入日志。
-/// 只使用 Copilot CLI/IDE 的 `apps.json` 凭据，不读取通用 GitHub 环境变量，
-/// 避免运行 Smelt 的宿主环境把无 Copilot 权限的 token 混进来。
+/// 只使用 Copilot 自己落下的凭据（IDE/旧 CLI 的 `apps.json`、新版 Copilot CLI
+/// 的系统钥匙串），不读取通用 GitHub 环境变量，避免运行 Smelt 的宿主环境把无
+/// Copilot 权限的 token 混进来。
 pub async fn fetch_copilot_quota() -> anyhow::Result<Option<CopilotQuota>> {
-    let token = local_copilot_token()?;
+    fetch_copilot_quota_with_token(&local_copilot_token()?).await
+}
+
+/// 用调用方给定的 GitHub OAuth 令牌查额度，供 Pi 这类把凭据存在别处的宿主复用。
+///
+/// 令牌必须是 GitHub 的 OAuth 令牌（`gho_` / `ghu_`），**不是**
+/// `copilot_internal/v2/token` 换来的短期 Copilot 令牌（`tid=…`）。后者是模型
+/// 推理用的，打这个额度接口固定 401。
+pub async fn fetch_copilot_quota_with_token(token: &str) -> anyhow::Result<Option<CopilotQuota>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
@@ -169,7 +178,81 @@ fn local_copilot_token() -> anyhow::Result<String> {
         }
     }
 
+    if let Some(token) = copilot_cli_keychain_token() {
+        return Ok(token);
+    }
+
     Err(anyhow::anyhow!("Copilot local credentials were not found"))
+}
+
+/// 新版 Copilot CLI（`~/.copilot`）登录后不写 `apps.json`：`config.json` 只记录
+/// 登录了谁，OAuth 令牌放在系统钥匙串，service 为 `copilot-cli`，account 为
+/// `{host}:{login}`（如 `https://github.com:octocat`）。
+const COPILOT_CLI_KEYCHAIN_SERVICE: &str = "copilot-cli";
+
+fn copilot_cli_keychain_token() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let config_path = dirs::home_dir()?.join(".copilot/config.json");
+    let body = fs::read_to_string(config_path).ok()?;
+    copilot_cli_keychain_accounts(&body)
+        .iter()
+        .find_map(|account| read_copilot_cli_keychain_token(account))
+}
+
+/// 从 Copilot CLI 的 `config.json` 推出钥匙串 account，最近登录的用户排第一。
+///
+/// 文件由 CLI 自动维护，开头带 `//` 整行注释，不是严格 JSON，先去掉注释行再解析。
+fn copilot_cli_keychain_accounts(config_body: &str) -> Vec<String> {
+    let json = config_body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return Vec::new();
+    };
+    let account = |user: &serde_json::Value| -> Option<String> {
+        let host = user.get("host")?.as_str()?.trim();
+        let login = user.get("login")?.as_str()?.trim();
+        (!host.is_empty() && !login.is_empty()).then(|| format!("{host}:{login}"))
+    };
+
+    let mut accounts = Vec::new();
+    let users = value.get("lastLoggedInUser").into_iter().chain(
+        value
+            .get("loggedInUsers")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten(),
+    );
+    for account in users.filter_map(account) {
+        if !accounts.contains(&account) {
+            accounts.push(account);
+        }
+    }
+    accounts
+}
+
+fn read_copilot_cli_keychain_token(account: &str) -> Option<String> {
+    let output = std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            COPILOT_CLI_KEYCHAIN_SERVICE,
+            "-a",
+            account,
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(output.stdout).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 fn copilot_apps_paths() -> Vec<PathBuf> {
@@ -305,6 +388,37 @@ mod tests {
         assert_eq!(quota.remaining, 297.0);
         assert_eq!(quota.limit, Some(300.0));
         assert_eq!(quota.used, Some(3.0));
+    }
+
+    #[test]
+    fn copilot_cli_accounts_come_from_commented_config_with_last_user_first() {
+        let body = r#"// User settings belong in settings.json.
+// This file is managed automatically.
+{
+  "trustedFolders": ["/tmp/a//b"],
+  "loggedInUsers": [
+    {"host": "https://github.com", "login": "alice", "kind": "githubDotCom"},
+    {"host": "https://github.com", "login": "bob", "kind": "githubDotCom"}
+  ],
+  "lastLoggedInUser": {"host": "https://github.com", "login": "bob"}
+}"#;
+        assert_eq!(
+            copilot_cli_keychain_accounts(body),
+            vec![
+                "https://github.com:bob".to_string(),
+                "https://github.com:alice".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn copilot_cli_config_without_login_has_no_accounts() {
+        assert!(copilot_cli_keychain_accounts("// header\n{\"firstLaunchAt\": \"x\"}").is_empty());
+        assert!(copilot_cli_keychain_accounts("not json").is_empty());
+        assert!(
+            copilot_cli_keychain_accounts(r#"{"lastLoggedInUser": {"host": "", "login": "x"}}"#)
+                .is_empty()
+        );
     }
 
     #[test]

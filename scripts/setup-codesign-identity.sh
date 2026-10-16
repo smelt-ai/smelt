@@ -49,13 +49,19 @@ openssl req -x509 -newkey rsa:2048 -keyout "$WORKDIR/key.pem" -out "$WORKDIR/cer
 
 # p12 导出密码随机生成，本地留一份供后续拷去 GitHub secrets；这张证书只用来给
 # TCC 提供稳定身份锚点，不是什么高价值密钥，本地明文存密码可接受。
-# -legacy：OpenSSL 3.x 默认用 AES+SHA256 加密 pkcs12，macOS `security import`
-# 认的是老式 3DES/RC2，不加这个会报「MAC verification failed（像密码错但其实
-# 是算法不兼容）」。
+# OpenSSL 3 默认用 AES+SHA256 加密 pkcs12，macOS `security import` 认的是老式
+# 3DES/RC2。不加 -legacy 会报 MAC verification failed（像密码错，其实是算法不兼容）。
+# 系统自带的 LibreSSL 没有 -legacy，它的默认导出已经是老格式。
 P12_PASSWORD="$(openssl rand -base64 24)"
-openssl pkcs12 -export -legacy -out "${P12_PATH}" \
-  -inkey "$WORKDIR/key.pem" -in "$WORKDIR/cert.pem" \
+pkcs12_args=(
+  -export -out "${P12_PATH}"
+  -inkey "$WORKDIR/key.pem" -in "$WORKDIR/cert.pem"
   -passout "pass:$P12_PASSWORD" -name "${CERT_CN}"
+)
+if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
+  pkcs12_args+=(-legacy)
+fi
+openssl pkcs12 "${pkcs12_args[@]}"
 printf '%s' "$P12_PASSWORD" > "$PASS_PATH"
 chmod 600 "${P12_PATH}" "$PASS_PATH"
 

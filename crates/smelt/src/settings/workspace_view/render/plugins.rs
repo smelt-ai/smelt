@@ -1,6 +1,7 @@
 //! 设置页：bundled 插件。每个插件一页，开关在第一项，配置跟在后面。
 
 use super::*;
+use smelt_ui::IconAction as _;
 
 pub(super) fn plugin_page(
     entity: Entity<Workspace>,
@@ -62,7 +63,6 @@ pub(super) fn plugin_page(
                             .child(format!("拒绝加载：{error}"))
                             .into_any_element();
                     }
-                    refresh_plugin_statuses_throttled(cx);
                     let snapshot = cx.try_global::<PluginRuntimeStatuses>().cloned();
                     let (text, dim) = match snapshot {
                         // 连不上守护本身也要说出来，否则和"插件没起来"分不清。
@@ -389,7 +389,7 @@ fn plugin_text_item(item: &smelt_plugin_api::SettingsItemView) -> SettingItem {
                             .small()
                             .ghost()
                             .icon(IconName::Copy)
-                            .tooltip("复制")
+                            .icon_action("复制")
                             .on_click(move |_, _window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     copy_value.clone(),
@@ -429,6 +429,8 @@ fn plugin_toggle_item(
     let action_id = action.id.as_str().to_string();
     let value = *value;
     let disabled = *disabled || action.disabled;
+    // 字段闭包是 'static，不能把 `item` 上的标题引用带进去。
+    let title = title.clone();
     let mut setting = SettingItem::new(
         title.clone(),
         SettingField::render(move |_, _, cx: &mut App| {
@@ -442,6 +444,7 @@ fn plugin_toggle_item(
             ))
             .checked(value)
             .disabled(disabled || pending)
+            .accessibility_label(title.clone())
             .on_click(move |checked, _, cx| {
                 crate::plugin_ui::run_settings_action(
                     plugin_for_click.clone(),

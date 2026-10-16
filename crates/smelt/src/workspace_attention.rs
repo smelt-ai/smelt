@@ -2,6 +2,31 @@
 
 use super::*;
 
+fn session_attention_ids(session: &Session, cx: &App) -> Vec<String> {
+    match &session.kind {
+        SessionKind::Term { .. } => session
+            .term_leaves()
+            .iter()
+            .map(|pane| pane.read(cx).session_id().to_string())
+            .collect(),
+        SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
+    }
+}
+
+/// 菜单项点下去要露出来的那个守护会话 id。终端会话可能分屏：优先挂着提醒的
+/// pane，其次当前活动 pane，再其次第一个；对话只有一个 id。
+fn menu_jump_target(
+    ids: &[String],
+    badge: &std::collections::HashMap<String, bool>,
+    active_id: Option<&str>,
+) -> Option<String> {
+    ids.iter()
+        .find(|id| badge.contains_key(*id))
+        .or_else(|| ids.iter().find(|id| Some(id.as_str()) == active_id))
+        .or_else(|| ids.first())
+        .cloned()
+}
+
 impl Workspace {
     /// 跳到某条通知：切到该会话 + 聚焦该 pane。
     pub(crate) fn goto_notification(
@@ -114,7 +139,7 @@ impl Workspace {
     }
 
     /// 将会话状态和统一 AttentionStore 投影到 Dock、菜单栏数字和下拉菜单。调用方是应用级
-    /// attention observer、daemon 订阅和 render 兜底；快照去重保证重复调用便宜。
+    /// attention observer、daemon 订阅和可见数据刷新兜底；快照去重保证重复调用便宜。
     pub(crate) fn sync_notification_surfaces(&mut self, cx: &App) {
         let attention_count = cx
             .try_global::<AttentionGlobal>()
@@ -142,29 +167,97 @@ impl Workspace {
             status_item::set_counts(attention_count, running_count);
         }
 
+        let badge: std::collections::HashMap<String, bool> = cx
+            .try_global::<AttentionGlobal>()
+            .map(|store| {
+                store
+                    .0
+                    .lock()
+                    .unwrap()
+                    .badge_sessions()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut menu_order: Vec<usize> = (0..self.sessions.len()).collect();
         menu_order.sort_by_key(|&ix| statuses[ix].rank());
         let menu_snapshot: Vec<status_item::SessionEntry> = menu_order
             .into_iter()
-            .map(|ix| {
+            .filter_map(|ix| {
                 let status = statuses[ix];
-                let status_text = match status {
-                    AgentStatus::NeedsYou => "需要你",
-                    AgentStatus::Running => "运行中",
-                    AgentStatus::Idle => "空闲",
+                let mut listed = matches!(status, AgentStatus::NeedsYou | AgentStatus::Running);
+                let mut requires_action = status == AgentStatus::NeedsYou;
+                let ids = session_attention_ids(&self.sessions[ix], cx);
+                for id in &ids {
+                    if let Some(action) = badge.get(id) {
+                        listed = true;
+                        requires_action |= *action;
+                    }
+                }
+                if !listed {
+                    return None;
+                }
+                let active_id = self.sessions[ix]
+                    .active_term()
+                    .map(|pane| pane.read(cx).session_id().to_string());
+                let session_id = menu_jump_target(&ids, &badge, active_id.as_deref())?;
+                let status_text = if requires_action {
+                    "需要你"
+                } else if status == AgentStatus::Running {
+                    "运行中"
+                } else {
+                    "未读"
                 };
-                status_item::SessionEntry {
-                    session_ix: ix,
+                let color_status = if requires_action {
+                    AgentStatus::NeedsYou
+                } else {
+                    statuses[ix]
+                };
+                Some(status_item::SessionEntry {
+                    session_id,
                     title: self.sessions[ix].title(cx),
                     status_text,
-                    color: ui_theme::agent_status_rgb8(status),
+                    color: ui_theme::agent_status_rgb8(color_status),
                     agent: self.sessions[ix].agent_icon_id(cx),
-                }
+                })
             })
             .collect();
         if self.status_menu_snapshot.as_ref() != Some(&menu_snapshot) {
             status_item::update_menu(&menu_snapshot);
             self.status_menu_snapshot = Some(menu_snapshot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::menu_jump_target;
+    use std::collections::HashMap;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn menu_jumps_to_the_pane_that_raised_attention() {
+        let badge = HashMap::from([("right".to_string(), true)]);
+        assert_eq!(
+            menu_jump_target(&ids(&["left", "right"]), &badge, Some("left")).as_deref(),
+            Some("right")
+        );
+    }
+
+    #[test]
+    fn menu_falls_back_to_the_active_pane_then_the_first() {
+        let badge = HashMap::new();
+        assert_eq!(
+            menu_jump_target(&ids(&["left", "right"]), &badge, Some("right")).as_deref(),
+            Some("right")
+        );
+        assert_eq!(
+            menu_jump_target(&ids(&["left", "right"]), &badge, None).as_deref(),
+            Some("left")
+        );
+        assert_eq!(menu_jump_target(&[], &badge, None), None);
     }
 }

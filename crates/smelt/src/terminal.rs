@@ -8,7 +8,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
@@ -518,15 +517,14 @@ impl TerminalWriter {
     }
 }
 
-/// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态；PtyWrite /
-/// Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
+/// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态。
+/// OSC 0/2 标题直接忽略：它不是会话名，这里也不保存。
+/// PtyWrite / Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
 /// 旧守护没有声明该能力时才在客户端兜底。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
 struct EventProxy {
     bell_notify: NotifySlot,
-    /// 终端标题（OSC 0/2）——Claude Code 用它报告任务名和展示装饰。
-    title: Arc<Mutex<Option<String>>>,
     /// 守护连接写队列，跟 [`Terminal`] 自己发键盘输入共用同一个单消费者，保证帧不会
     /// 交叉，同时调用方不直接执行 socket I/O。
     writer: TerminalWriter,
@@ -571,11 +569,6 @@ impl EventListener for EventProxy {
             Event::Bell => {
                 if let Ok(mut bell) = self.bell_notify.lock() {
                     *bell = Some("🔔 响铃".to_string());
-                }
-            }
-            Event::Title(t) => {
-                if let Ok(mut g) = self.title.lock() {
-                    *g = Some(t);
                 }
             }
             // 光标位置 / 设备属性等查询-应答协议：不回应会让依赖精确光标位置渲染
@@ -655,9 +648,9 @@ fn sock_path() -> std::path::PathBuf {
 /// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
 /// 避免 macOS 对签名文件覆盖时 SIGKILL smeltd → 会话全灭 → 对话被「重新初始化」。
 ///
-/// **硬约束**：smeltd 进程的 `current_exe` 必须是 `~/.smelt/bin/smeltd`，绝不能是
-/// `Smelt.app/Contents/MacOS/smeltd`。否则用户用 Finder 拖 DMG 覆盖 App 时内核会
-/// 干掉守护，所有 Claude/Grok PTY 死掉，GUI 重开只能 spawn 新进程 → 对话「重新初始化」。
+/// **硬约束**：正在跑的 smeltd 必须映射 `~/.smelt/bin/` 里的一份映像，绝不能映射
+/// `Smelt.app` 里的那份。否则用户用 Finder 拖 DMG 覆盖 App 时内核会干掉守护。
+/// `smeltd` 这个名字只是指向当前映像的符号链接。
 fn managed_daemon_dir() -> std::path::PathBuf {
     smelt_paths::smelt_home()
         .unwrap_or_else(|| "/tmp/.smelt".into())
@@ -665,11 +658,7 @@ fn managed_daemon_dir() -> std::path::PathBuf {
 }
 
 pub fn managed_daemon_path() -> std::path::PathBuf {
-    managed_daemon_dir().join("smeltd")
-}
-
-fn staged_daemon_path() -> std::path::PathBuf {
-    managed_daemon_dir().join("smeltd.next")
+    managed_daemon_dir().join(smelt_core::daemon_image::LAUNCH_NAME)
 }
 
 /// 路径是否落在某个 `.app` 包内（装 DMG 会被覆盖/删除）。
@@ -689,8 +678,8 @@ fn same_daemon_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
-/// 进程是否已住在 managed 目录（正式名 smeltd 或交接中的 smeltd.next 都算）。
-/// rename next→smeltd 后 macOS 上 current_exe 可能仍报旧路径名，不能只比文件名。
+/// 进程是否已住在 managed 目录。映像文件名是 `smeltd-<指纹>`，启动名是旁边的链接。
+/// 不能只认文件名 `smeltd`：交接后的进程报的是映像自己的路径。
 fn exe_is_managed(exe: &std::path::Path) -> bool {
     let managed = managed_daemon_path();
     if same_daemon_path(exe, &managed) {
@@ -700,7 +689,7 @@ fn exe_is_managed(exe: &std::path::Path) -> bool {
     if exe.starts_with(&dir) {
         return true;
     }
-    // current_exe 仍写 smeltd.next 但文件已 rename：比 inode
+    // 启动名已经拨走，进程仍报着原来的路径：比 inode。
     if let (Ok(em), Ok(mm)) = (std::fs::metadata(exe), std::fs::metadata(&managed)) {
         #[cfg(unix)]
         {
@@ -1181,34 +1170,38 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-/// 守护没在跑时把 `src` 装到正式路径 `~/.smelt/bin/smeltd`。
-/// 先写 `smeltd.next` 再 rename，避免半截文件。
-/// 文件仍被进程映射时，不 rename，只留下 `smeltd.next`。
+fn reap_managed_daemon_images(dir: &std::path::Path) {
+    if let Err(error) = smelt_core::daemon_image::reap_unused_images(dir) {
+        eprintln!("[workspace] 回收旧守护映像失败：{error}");
+    }
+}
+
+/// 守护没在跑时发布一份不可变映像，并把启动名拨过去。
+/// 启动名这个目录项仍被进程映射时，只挂 `smeltd.pending`，不拨链接。
 fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
+        let image = smelt_core::daemon_image::publish_image(&dir, src)?;
         if managed.is_file() && path_is_live_executable(&managed) {
-            stage_managed_daemon_update(src)?;
+            smelt_core::daemon_image::retarget_pending_symlink(&dir, &image)?;
             eprintln!(
-                "[workspace] {} 仍被进程映射，不覆盖，已暂存 smeltd.next",
+                "[workspace] {} 仍被进程映射，不改启动名，已挂上 smeltd.pending",
                 managed.display()
             );
+            reap_managed_daemon_images(&dir);
             return Ok(managed);
         }
-        let staged = staged_daemon_path();
-        stage_daemon_binary(src, &staged)?;
-        // Unix rename 会原子替换目标；先 remove 会制造一个路径不存在的窗口，
-        // 此时若硬重启恰好发生，新守护将无文件可执行。
-        std::fs::rename(&staged, &managed)?;
+        smelt_core::daemon_image::retarget_launch_after_commit(&image)?;
         eprintln!(
             "[workspace] 已同步守护 {} → {}",
             src.display(),
-            managed.display()
+            image.display()
         );
     }
+    reap_managed_daemon_images(&dir);
     if managed.is_file() {
         Ok(managed)
     } else {
@@ -1219,62 +1212,32 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     }
 }
 
-/// 守护在跑时只把新映像写到 `smeltd.next`，绝不覆盖正在 exec 的 `smeltd`。
-/// ACP host 从 `current_exe()` 派生，那条路径必须始终是运行中的映像。
+/// 守护在跑时只发布新映像并挂上 `smeltd.pending`。启动名留到交接提交之后再拨。
 fn stage_managed_daemon_update(src: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
-    let staged = staged_daemon_path();
-    stage_daemon_binary(src, &staged)?;
+    stage_daemon_update_in(&dir, src)
+}
+
+/// `dir` 由调用方给。测试必须用临时目录，不能写真实的 `managed_daemon_path()`。
+fn stage_daemon_update_in(
+    dir: &std::path::Path,
+    src: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let image = smelt_core::daemon_image::publish_image(dir, src)?;
+    smelt_core::daemon_image::retarget_pending_symlink(dir, &image)?;
+    reap_managed_daemon_images(dir);
     eprintln!(
         "[workspace] 已暂存守护更新 {} → {}",
         src.display(),
-        staged.display()
+        image.display()
     );
-    Ok(staged)
+    Ok(image)
 }
 
 fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
-    let staged = staged_daemon_path();
-    if staged.is_file() {
-        return Some(staged);
-    }
-    bundled_daemon_path()
-}
-
-fn stage_daemon_binary(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
-    if same_daemon_path(src, dest) {
-        return Ok(());
-    }
-    let _ = std::fs::remove_file(dest);
-    std::fs::copy(src, dest)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(dest)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(dest, perms)?;
-    }
-    Ok(())
-}
-
-/// 完成暂存映像到正式路径的安装。新版 smeltd 会在 handoff 启动最早期自行完成
-/// `next -> smeltd` 并以正式路径继续 exec；旧版仍由 GUI 在确认升级后执行 rename。
-fn finish_staged_managed_install(
-    staged: &std::path::Path,
-    managed: &std::path::Path,
-) -> std::io::Result<()> {
-    if staged == managed {
-        return Ok(());
-    }
-    if managed.is_file() && path_is_live_executable(managed) {
-        return Ok(());
-    }
-    match std::fs::rename(staged, managed) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && managed.is_file() => Ok(()),
-        Err(error) => Err(error),
-    }
+    smelt_core::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
 }
 
 fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
@@ -1286,11 +1249,10 @@ fn try_handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
     handoff_daemon_to_managed_once(src)
 }
 
-/// 把正在跑的守护用一次 handoff 迁到 `~/.smelt/bin/smeltd`（会话 PTY 保留）。
+/// 把正在跑的守护用一次 handoff 迁到 `~/.smelt/bin` 里的一份新映像（会话 PTY 保留）。
 ///
-/// 若目标路径正是当前 running 的文件，先落到 `smeltd.next`。新映像确认自己已通过
-/// exec 后会在启动任何线程前自行 rename，并以正式路径做一次轻量 exec；这一步不重复
-/// 会话快照。旧映像不支持自行提升时，仍由本函数在确认 handoff 后完成 rename。
+/// 无论现在跑的是不是 managed 路径，都先发布不可变映像再 exec 那份文件。
+/// 启动名要等升级成功才拨；失败时链接保持原样，候选留在 `smeltd.pending`。
 ///
 /// 一次尝试：Busy 原样返回，由 GUI 在回合结束后再发一次 upgrade。
 fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
@@ -1301,44 +1263,43 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
         return UpgradeOutcome::Failed;
     }
 
-    // 正在跑的是否已在 managed 路径上（覆盖同路径必须用 .next）。
-    let running_on_managed = match probe_daemon_detail() {
-        DaemonProbe::Running {
-            exe_path: Some(ref p),
-            ..
-        } => exe_is_managed(std::path::Path::new(p)),
-        _ => false,
+    let image = match smelt_core::daemon_image::publish_image(&dir, src) {
+        Ok(image) => image,
+        Err(e) => {
+            eprintln!("[workspace] 发布守护映像失败：{e}");
+            reap_managed_daemon_images(&dir);
+            return UpgradeOutcome::Failed;
+        }
     };
-
-    let target = if running_on_managed {
-        dir.join("smeltd.next")
-    } else {
-        managed.clone()
-    };
-    if let Err(e) = stage_daemon_binary(src, &target) {
-        eprintln!("[workspace] 暂存守护失败（{}）：{e}", target.display());
+    if let Err(e) = smelt_core::daemon_image::retarget_pending_symlink(&dir, &image) {
+        eprintln!("[workspace] 挂上 smeltd.pending 失败：{e}");
+        reap_managed_daemon_images(&dir);
         return UpgradeOutcome::Failed;
     }
 
-    let outcome = upgrade_daemon_exe(Some(&target));
+    let outcome = upgrade_daemon_exe(Some(&image));
     match outcome {
         UpgradeOutcome::Upgraded => {
-            if let Err(e) = finish_staged_managed_install(&target, &managed) {
+            if let Err(e) = smelt_core::daemon_image::retarget_launch_after_commit(&image) {
                 eprintln!(
                     "[workspace] 完成 managed 安装失败：{e}（目标：{}）",
                     managed.display()
                 );
             }
+            reap_managed_daemon_images(&dir);
             eprintln!("[workspace] 守护已迁入 managed：{}", managed.display());
             UpgradeOutcome::Upgraded
         }
-        UpgradeOutcome::Busy => UpgradeOutcome::Busy,
+        UpgradeOutcome::Busy => {
+            reap_managed_daemon_images(&dir);
+            UpgradeOutcome::Busy
+        }
         other => {
-            // 失败时把候选留在 smeltd.next。不能扶正到正在跑的 smeltd：
-            // ACP host 从那条路径派生，覆盖它就是混版本。
+            // 失败时启动名不动。候选留在 pending，下次再 exec 同一份映像。
+            reap_managed_daemon_images(&dir);
             eprintln!(
                 "[workspace] handoff 到 managed 失败（{other:?}），候选：{}",
-                target.display()
+                image.display()
             );
             other
         }
@@ -1497,9 +1458,9 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
                     let _ = stage_managed_daemon_update(&bundled);
                 }
             } else if content_differs {
-                // 守护已在 managed（含版本旧）：只把新映像写到 smeltd.next，**不
-                // 覆盖正在跑的 smeltd，也不 exec**。连接路径偷偷换代正是「用着用着
-                // 终端全卡」的根源。真正的换代交给 GUI 空闲升级或用户手动点升级。
+                // 守护已在 managed（含版本旧）：只发布新映像并挂 pending，**不拨
+                // 启动名，也不 exec**。连接路径偷偷换代正是「用着用着终端全卡」的
+                // 根源。真正的换代交给 GUI 空闲升级或用户手动点升级。
                 let _ = stage_managed_daemon_update(&bundled);
             }
             Ok(managed_daemon_path())
@@ -1589,7 +1550,10 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         use std::process::Stdio;
         let exe = std::env::current_exe().ok();
         let in_app_bundle = exe.as_ref().is_some_and(|e| path_inside_app_bundle(e));
-        let mut cmd = std::process::Command::new(&daemon);
+        // exec 不可变映像本身，不要 exec 启动名。否则 current_exe 停在链接上，
+        // 链接一拨，会话宿主就会看到另一份文件。
+        let spawn_at = std::fs::canonicalize(&daemon).unwrap_or_else(|_| daemon.clone());
+        let mut cmd = std::process::Command::new(&spawn_at);
         smelt_paths::export_to(&mut cmd);
         smelt_core::tty_color::clear_command(&mut cmd);
         cmd.process_group(0)
@@ -1602,7 +1566,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘——
         // 关闭“spawn 与守护启动哈希之间磁盘被替换”的竞态窗口（与 handoff 经
         // SMELTD_PLUGIN_DAEMON_FINGERPRINT 传指纹同一机制）。
-        if let Ok(fingerprint) = smelt_plugin_host::executable_fingerprint(&daemon) {
+        if let Ok(fingerprint) = smelt_plugin_host::executable_fingerprint(&spawn_at) {
             cmd.env("SMELTD_PLUGIN_DAEMON_FINGERPRINT", fingerprint);
         }
         match cmd.spawn() {
@@ -1610,12 +1574,12 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
                 eprintln!(
                     "[workspace] 已拉起 smeltd pid={} ({}) menubar={}",
                     child.id(),
-                    daemon.display(),
+                    spawn_at.display(),
                     in_app_bundle
                 );
                 None
             }
-            Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", daemon.display())),
+            Err(e) => Some(format!("拉起 smeltd 失败（{}）：{e}", spawn_at.display())),
         }
     };
 
@@ -1962,8 +1926,8 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
 /// 安装时对运行中守护的处置决策。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InstallCommitAction {
-    /// 守护已在 managed 路径：只把候选二进制写到 `smeltd.next`，不覆盖正在跑的
-    /// `smeltd`，不 handoff。版本升级交给空闲无缝升级；安装永不因此阻塞。
+    /// 守护已在 managed 路径：只发布新映像并挂 pending，不拨启动名，不 handoff。
+    /// 版本升级交给空闲无缝升级；安装永不因此阻塞。
     StageDiskOnly,
     /// 守护仍在 .app 里（或路径未知）：必须 handoff 迁出，否则换 App 会 SIGKILL 它。
     RelocateHandoff,
@@ -2083,10 +2047,15 @@ where
         .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Smelt.app"));
     match install_local_app_bundle(&source, &target) {
         Ok(AppInstallOutcome::Installed) => {
-            let pending = staged_daemon_path();
-            if pending.is_file() {
+            let dir = managed_daemon_dir();
+            if let Some(pending) = smelt_core::daemon_image::pending_image(&dir) {
                 match upgrade_daemon_exe(Some(&pending)) {
                     UpgradeOutcome::Upgraded => {
+                        if let Err(error) =
+                            smelt_core::daemon_image::retarget_launch_after_commit(&pending)
+                        {
+                            eprintln!("[workspace] 升级后改写启动名失败：{error}");
+                        }
                         eprintln!("✅ 守护进程已无缝升级到最新版本");
                     }
                     UpgradeOutcome::Busy => {
@@ -2096,11 +2065,20 @@ where
                         eprintln!("ℹ️ 守护进程无需或无法直接无缝升级（已暂存，下次启动生效）");
                     }
                 }
-            } else if matches!(probe_daemon(), DaemonProbe::Running { .. }) {
-                let managed = managed_daemon_path();
-                if managed.is_file() {
-                    match upgrade_daemon_exe(Some(&managed)) {
+            } else if let DaemonProbe::Running { exe_path, .. } = probe_daemon_detail()
+                && let Ok(image) = std::fs::canonicalize(managed_daemon_path())
+            {
+                let already = exe_path
+                    .as_deref()
+                    .is_some_and(|exe| same_daemon_path(std::path::Path::new(exe), &image));
+                if !already {
+                    match upgrade_daemon_exe(Some(&image)) {
                         UpgradeOutcome::Upgraded => {
+                            if let Err(error) =
+                                smelt_core::daemon_image::retarget_launch_after_commit(&image)
+                            {
+                                eprintln!("[workspace] 升级后改写启动名失败：{error}");
+                            }
                             eprintln!("✅ 守护进程已无缝升级到最新版本");
                         }
                         UpgradeOutcome::Busy => {
@@ -2110,6 +2088,7 @@ where
                     }
                 }
             }
+            reap_managed_daemon_images(&dir);
             eprintln!(
                 "✅ 已安装 {}（守护交接与插件映射与在线更新相同）",
                 target.display()
@@ -2608,18 +2587,16 @@ pub(crate) use smelt_core::daemon_state::{
 };
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
-/// - kitty_keyboard：默认 false 时 alacritty 会把 `CSI > 1 u` 静默丢掉
-///   （push_keyboard_mode 里直接 return），DISAMBIGUATE_ESC_CODES 永远置不上，
-///   Shift+Enter 也就永远退化成裸 Enter。见 kitty_keyboard_mode / keystroke_to_bytes。
+/// - 解析语义（kitty_keyboard 等）来自 `smelt_core::term_config`，与 smeltd 的权威
+///   Term 同源；GUI 不得在这里单独改解析语义。
 /// - semantic_escape_chars：双击选词的断词字符。默认集合只有半角标点，中文场景下
 ///   全角标点也该断词（双击「数据层：字段」不该整段连选），追加常用全角标点。
 fn term_config() -> Config {
     Config {
-        kitty_keyboard: true,
         semantic_escape_chars: format!(
             "{SEMANTIC_ESCAPE_CHARS}：，。；！？、（）「」『』【】《》“”‘’"
         ),
-        ..Config::default()
+        ..smelt_core::term_config::emulation_config()
     }
 }
 
@@ -2835,8 +2812,6 @@ pub struct Terminal {
     notify: NotifySlot,
     /// BEL 普通提醒槽，与 OSC 分开，结构化 agent 激活后仍可独立提醒。
     bell_notify: NotifySlot,
-    /// 终端标题（任务展示元数据；UI 读 current_title 用于总览）。
-    title: Arc<Mutex<Option<String>>>,
     /// `take_damage` 用来识别「光标真的动了」——alacritty 每帧都会把当前光标格标脏，
     /// 静止时要滤掉；但光标移动后若只标了新位置那一格，也得算变化（见 take_damage）。
     last_damage_cursor: Mutex<Option<(i32, usize)>>,
@@ -2913,21 +2888,13 @@ fn open_request(
     })
 }
 
-/// reattach 快照整段灌进客户端 Term 之后：贴底 + 补鼠标模式位。
+/// reattach 快照整段灌进客户端 Term 之后：贴底，避免停在 history 中间。
 ///
-/// 快照灌完后的 reattach 收尾。
-///
-/// - 贴底：避免停在 history 中间。
-/// - `\x1b[0m`：清 SGR 状态机，降低「快照末半截真彩参数当正文」
-///   （顶行出现 `48;2;…m` 碎片）的概率。
-/// - **不再本地伪造 MOUSE_MODE**：以前补 `1006h/1002h` 只改客户端 Term，
-///   进程侧若未开鼠标，滚轮按 SGR 发出去会被 Ignored →「恢复后滚不动」。
-///   无 mouse 的备用屏改走方向键兜底（见 `scroll_wheel_plan`）。
-fn finalize_reattach_term(term: &mut Term<EventProxy>, parser: &mut Processor) {
+/// 只动视口，**不改任何解析状态**：keyframe 是守护权威 Term 的完整状态（模式、当前
+/// SGR、光标），实时字节是对它的增量；本地再补 `\x1b[0m` 或伪造模式位都会让副本
+/// 偏离真相（以前清 SGR，紧随其后的彩色输出就按默认色画）。
+fn finalize_reattach_term(term: &mut Term<EventProxy>) {
     term.scroll_display(Scroll::Bottom);
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        parser.advance(term, b"\x1b[0m");
-    }));
 }
 
 impl Terminal {
@@ -3000,11 +2967,10 @@ impl Terminal {
         };
         let writer = TerminalWriter::start(buffered.get_ref().try_clone()?)?;
 
-        // 2) alacritty 终端状态机（EventProxy 维护标题，把 PTY 自动
-        //    应答写回下面这个共享写端）
+        // 2) alacritty 终端状态机。EventProxy 把 PTY 自动应答写回共享写端。
+        //    OSC 0/2 不保存。
         let notify: NotifySlot = Arc::new(Mutex::new(None));
         let bell_notify: NotifySlot = Arc::new(Mutex::new(None));
-        let title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let metrics = Arc::new(Mutex::new(TermMetrics {
             rows: size.rows as u16,
             cols: size.cols as u16,
@@ -3017,7 +2983,6 @@ impl Terminal {
             &size,
             EventProxy {
                 bell_notify: bell_notify.clone(),
-                title: title.clone(),
                 writer: writer.clone(),
                 metrics: metrics.clone(),
                 daemon_handles_color_requests,
@@ -3056,7 +3021,7 @@ impl Terminal {
             // 每个字节仍然逐一喂给 osc（状态机不断流），只是根据这个字节的绝对位置
             // 决定它触发的通知该进哪个槽，边界处不会解析错位。
             let sink: Mutex<Option<String>> = Mutex::new(None);
-            // reattach 快照是否已整段喂完；越过边界时补一次「贴底 + 鼠标位兜底」。
+            // reattach 快照是否已整段喂完；越过边界时贴底一次。
             let mut replay_finalized = replay_len == 0;
             loop {
                 match reader.read(&mut buf) {
@@ -3109,10 +3074,10 @@ impl Terminal {
                                 start = end;
                             }
                             parser.advance(&mut *term, &buf[start..n]);
-                            // 快照刚灌完：贴底 + 清 SGR。不再为「jolt 半屏」再贴一次。
+                            // 快照刚灌完：贴底。不再为「jolt 半屏」再贴一次。
                             if !replay_finalized && bytes_seen >= replay_len {
                                 replay_finalized = true;
-                                finalize_reattach_term(&mut term, &mut parser);
+                                finalize_reattach_term(&mut term);
                             }
                         }
                         // 喂完这批立刻请求一次重绘（Zed 式：内容生产者驱动重绘）。
@@ -3144,7 +3109,6 @@ impl Terminal {
             remote_geometry_locked: false,
             notify,
             bell_notify,
-            title,
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),
@@ -3229,11 +3193,6 @@ impl Terminal {
     /// 取走一次普通终端 BEL 提醒；它不携带 Agent 状态语义。
     pub fn take_bell_notification(&self) -> Option<String> {
         self.bell_notify.lock().ok()?.take()
-    }
-
-    /// 当前终端标题（agent 报告的任务名或装饰）；未设置返回 None。
-    pub fn current_title(&self) -> Option<String> {
-        self.title.lock().ok().and_then(|g| g.clone())
     }
 
     /// 自上次调用以来，终端网格内容是否真的变化了（读并清 alacritty 自带的
@@ -4005,6 +3964,19 @@ impl Terminal {
 mod damage_gate_tests {
     use super::*;
 
+    /// 这组测试连真实守护进程：测试进程在沙箱 home 里，只能用构建目录里的 smeltd
+    /// （`target/<profile>/smeltd`）。单独 `cargo test -p smelt` 不会构建它，缺了就说清楚
+    /// 怎么补，别让人去查 `~/.smelt/bin`。
+    fn spawn_test_terminal(dir: &std::path::Path, id: &str) -> Terminal {
+        if bundled_daemon_path().is_none() {
+            panic!(
+                "缺少构建目录里的 smeltd：这组测试要连真实守护进程，请先 `cargo build -p smeltd`\
+                 （`make test` 会一并构建）"
+            );
+        }
+        Terminal::spawn(24, 80, dir.to_str(), id, None).expect("spawn 失败")
+    }
+
     /// 一次性测试会话的自动清理：Drop 无论函数正常返回还是中途 panic（assert
     /// 失败）都会执行，不像原来手写在函数末尾的 `kill_remote(&id)`——那种写法
     /// 一旦前面某个 assert 炸了就会被 unwind 跳过，永远执行不到。
@@ -4033,7 +4005,7 @@ mod damage_gate_tests {
         let _ = std::fs::create_dir_all(&dir);
         let id = format!("dead-test-{}", uuid_like());
         // 不持 guard：会话由下面的 kill_remote 主动清理。
-        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let term = spawn_test_terminal(&dir, &id);
         assert!(!term.is_dead(), "刚连上不该是断的");
 
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
@@ -4094,7 +4066,7 @@ mod damage_gate_tests {
         let id = format!("damage-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let mut term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let mut term = spawn_test_terminal(&dir, &id);
 
         // 等 shell 起来后进入 cat：前台进程阻塞读，不再周期性画 prompt。
         thread::sleep(Duration::from_millis(500));
@@ -4164,7 +4136,7 @@ mod damage_gate_tests {
         let id = format!("kitty-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let term = spawn_test_terminal(&dir, &id);
         thread::sleep(Duration::from_millis(800)); // 等 shell 起来
 
         assert!(!term.kitty_keyboard_mode(), "shell 刚起来时不该开着");
@@ -4200,7 +4172,7 @@ mod damage_gate_tests {
         let id = format!("cursor-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let term = spawn_test_terminal(&dir, &id);
         thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀，避免并发 advance 干扰
 
         let frame = term.snapshot();
@@ -4257,7 +4229,7 @@ mod damage_gate_tests {
         let id = format!("selscroll-test-{}", uuid_like());
         let _guard = TestSessionGuard(id.clone());
 
-        let mut term = Terminal::spawn(24, 80, dir.to_str(), &id, None).expect("spawn 失败");
+        let mut term = spawn_test_terminal(&dir, &id);
         thread::sleep(Duration::from_millis(800)); // 等 shell 启动输出沉淀
 
         // 注入 40 行，把内容顶进 scrollback（24 行屏高）。
@@ -4397,7 +4369,7 @@ mod successor_daemon_tests {
 mod install_commit_tests {
     use super::*;
 
-    /// 核心回归：守护已在 managed 路径时安装只写 smeltd.next，不 handoff——
+    /// 核心回归：守护已在 managed 路径时安装只发布新映像，不 handoff——
     /// 此前无条件 handoff，ACP 忙就 exit 75 半安装（映射写了、App 没换）。
     #[test]
     fn managed_daemon_stages_disk_only() {
@@ -4406,8 +4378,9 @@ mod install_commit_tests {
             install_commit_action_for_running_daemon(Some(&managed)),
             InstallCommitAction::StageDiskOnly
         );
-        // next 暂存态仍在 managed 目录内：同样不得在安装时 handoff。
-        let staged = managed_daemon_dir().join("smeltd.next");
+        // 不可变映像仍在 managed 目录内：同样不得在安装时 handoff。
+        let staged = managed_daemon_dir()
+            .join("smeltd-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
         assert_eq!(
             install_commit_action_for_running_daemon(Some(&staged)),
             InstallCommitAction::StageDiskOnly
@@ -4480,32 +4453,35 @@ mod install_commit_tests {
     }
 
     #[test]
-    fn staging_an_update_does_not_replace_the_live_managed_binary() {
-        let dir = managed_daemon_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let live = managed_daemon_path();
-        let staged = staged_daemon_path();
-        std::fs::write(&live, b"running-image").unwrap();
-        let src = std::env::temp_dir().join(format!(
-            "smelt-stage-src-{}-{}",
+    fn staging_an_update_does_not_replace_the_live_launch_file() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!(
+            "smelt-stage-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let launch = dir.join("smeltd");
+        std::fs::write(&launch, b"running-image").unwrap();
+        let launch_inode = std::fs::metadata(&launch).unwrap().ino();
+        let src = dir.join("src");
         std::fs::write(&src, b"pending-image").unwrap();
 
-        let dest = stage_managed_daemon_update(&src).unwrap();
-        assert_eq!(dest, staged);
-        assert_eq!(std::fs::read(&live).unwrap(), b"running-image");
-        assert_eq!(std::fs::read(&staged).unwrap(), b"pending-image");
+        let dest = stage_daemon_update_in(&dir, &src).unwrap();
+        assert_eq!(std::fs::read(&launch).unwrap(), b"running-image");
+        assert_eq!(std::fs::metadata(&launch).unwrap().ino(), launch_inode);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"pending-image");
         assert_eq!(
-            pending_upgrade_exe().as_deref(),
-            Some(staged.as_path()),
-            "空闲升级必须 exec smeltd.next，不能再 exec 正在跑的旧文件"
+            smelt_core::daemon_image::pending_image(&dir).as_deref(),
+            Some(std::fs::canonicalize(&dest).unwrap().as_path()),
+            "空闲升级必须 exec 新映像，不能再 exec 正在跑的旧文件"
         );
 
-        let _ = std::fs::remove_file(&src);
-        let _ = std::fs::remove_file(&staged);
-        let _ = std::fs::remove_file(&live);
+        let image_inode = std::fs::metadata(&dest).unwrap().ino();
+        let again = stage_daemon_update_in(&dir, &src).unwrap();
+        assert_eq!(again, dest);
+        assert_eq!(std::fs::metadata(&again).unwrap().ino(), image_inode);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -4748,33 +4724,6 @@ mod managed_daemon_ensure_tests {
         assert_eq!(result.unwrap(), managed);
         assert_eq!(calls.get(), 1, "文件消失后不能继续盲信 ensure 缓存");
         let _ = std::fs::remove_file(managed);
-    }
-
-    #[test]
-    fn daemon_promoted_staging_file_is_a_completed_install() {
-        let root = managed_test_file("daemon-promoted-staging");
-        let staged = root.join("smeltd.next");
-        let managed = root.join("smeltd");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&managed, b"new daemon image").unwrap();
-
-        finish_staged_managed_install(&staged, &managed)
-            .expect("daemon 已自行提升到正式路径时 GUI 不应再报 rename 失败");
-        assert_eq!(std::fs::read(&managed).unwrap(), b"new daemon image");
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn missing_staging_and_managed_files_is_not_a_completed_install() {
-        let root = managed_test_file("missing-staging-and-managed");
-        let staged = root.join("smeltd.next");
-        let managed = root.join("smeltd");
-
-        assert!(
-            finish_staged_managed_install(&staged, &managed).is_err(),
-            "两个路径都不存在时不能把真实安装丢失误判成 daemon 已自行提升"
-        );
     }
 
     #[test]
@@ -5066,7 +5015,6 @@ mod event_proxy_answers_tests {
             .unwrap();
         let proxy = EventProxy {
             bell_notify: Arc::new(Mutex::new(None)),
-            title: Arc::new(Mutex::new(None)),
             writer: TerminalWriter::start(sock).expect("writer 启动失败"),
             metrics: Arc::new(Mutex::new(TermMetrics {
                 rows: 24,
@@ -5118,11 +5066,12 @@ mod event_proxy_answers_tests {
     }
 
     /// 兼容旧守护：`OSC 11 ?`（查询当前背景色）仍要由客户端兜底，回应里应带上当前主题的
-    /// 默认背景色（深色下 `bg_stage` = `0x070707`，跟随卡片配色）而不是空/无回应。
+    /// 默认背景色（深色下 `bg_stage` = `0x0a0a0a`，库 Default 的窗口底）而不是空/无回应。
     #[test]
     fn background_color_query_gets_answered() {
         let _guard = lock_theme_globals();
         set_dark_mode(true); // 全局态，跟其它测试共进程跑，显式定住深色断言的前提
+        crate::ui_theme::set_light(false);
         set_bg_override(None);
         let (proxy, mut probe) = make_proxy();
         let size = TermSize { rows: 24, cols: 80 };
@@ -5134,8 +5083,8 @@ mod event_proxy_answers_tests {
         let (ty, resp) = read_frame(&mut probe);
         assert_eq!(ty, 0);
         assert!(
-            resp.contains("rgb:0707/0707/0707"),
-            "应含默认背景色（bg_stage 深色 0x070707）的 rgb 十六进制，实际: {resp:?}"
+            resp.contains("rgb:0a0a/0a0a/0a0a"),
+            "应含默认背景色（bg_stage 深色 0x0a0a0a）的 rgb 十六进制，实际: {resp:?}"
         );
     }
 
@@ -5234,6 +5183,24 @@ mod event_proxy_answers_tests {
             "TUI 退出后应还原，否则 shell 里 Shift+Enter 会吐出 `[13;2u` 乱码"
         );
     }
+
+    /// reattach 时 keyframe 是守护权威 Term 的完整状态（含模式与当前 SGR），实时字节
+    /// 是对它的增量。收尾不得再本地改写任何解析状态，否则接下来的输出会按错样式画。
+    #[test]
+    fn reattach_finalize_keeps_keyframe_state() {
+        let (proxy, _probe) = make_proxy();
+        let size = TermSize { rows: 4, cols: 20 };
+        let mut term = Term::new(term_config(), &size, proxy);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[>1u\x1b[31m");
+        let mode_before = *term.mode();
+        let template_before = term.grid().cursor.template.clone();
+
+        finalize_reattach_term(&mut term);
+
+        assert_eq!(*term.mode(), mode_before);
+        assert_eq!(term.grid().cursor.template.fg, template_before.fg);
+    }
 }
 
 #[cfg(test)]
@@ -5246,7 +5213,6 @@ mod bell_notification_tests {
         let bell_notify = Arc::new(Mutex::new(None));
         let proxy = EventProxy {
             bell_notify: Arc::clone(&bell_notify),
-            title: Arc::new(Mutex::new(None)),
             writer: TerminalWriter::start(sock).expect("writer 启动失败"),
             metrics: Arc::new(Mutex::new(TermMetrics {
                 rows: 24,
@@ -5284,7 +5250,6 @@ mod resize_tests {
         }));
         let proxy = EventProxy {
             bell_notify: Arc::new(Mutex::new(None)),
-            title: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
             daemon_handles_color_requests: false,
@@ -5304,7 +5269,6 @@ mod resize_tests {
                 remote_geometry_locked: false,
                 notify: Arc::new(Mutex::new(None)),
                 bell_notify: Arc::new(Mutex::new(None)),
-                title: Arc::new(Mutex::new(None)),
                 last_damage_cursor: Mutex::new(None),
                 search_query: Mutex::new(String::new()),
                 search_matches: Mutex::new(Vec::new()),
@@ -5464,7 +5428,6 @@ mod search_resync_tests {
         }));
         let proxy = EventProxy {
             bell_notify: Arc::new(Mutex::new(None)),
-            title: Arc::new(Mutex::new(None)),
             writer: writer.clone(),
             metrics: metrics.clone(),
             daemon_handles_color_requests: false,
@@ -5480,7 +5443,6 @@ mod search_resync_tests {
             remote_geometry_locked: false,
             notify: Arc::new(Mutex::new(None)),
             bell_notify: Arc::new(Mutex::new(None)),
-            title: Arc::new(Mutex::new(None)),
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
             search_matches: Mutex::new(Vec::new()),

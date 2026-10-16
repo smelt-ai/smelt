@@ -4,11 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::acp_chat::AcpEntry;
-use crate::agent_definition_store::{AgentExecutionDefinition, load_agent_execution_definition};
+use crate::agent_definition_store::{
+    AgentExecutionDefinition, agent_space_in, build_automation_run_instructions,
+    load_agent_execution_definition,
+};
 use crate::automation::{
-    AUTOMATION_FILE_SCHEMA_VERSION, AutomationCommand, AutomationCommandResult,
-    AutomationEventPublished, AutomationFile, AutomationInboundEvent, AutomationRun,
-    AutomationRunSource, AutomationRunStatus, AutomationState, MAX_RUN_ERROR_BYTES,
+    AUTOMATION_FILE_SCHEMA_VERSION, Automation, AutomationAction, AutomationCommand,
+    AutomationCommandResult, AutomationEventPublished, AutomationFile, AutomationInboundEvent,
+    AutomationRun, AutomationRunSource, AutomationRunStatus, AutomationState, MAX_RUN_ERROR_BYTES,
     MAX_RUN_OUTPUT_BYTES, apply_automation_command, claim_due_automations, prune_runs,
     publish_automation_event,
 };
@@ -45,7 +48,7 @@ pub struct AutomationOwner {
     file: AutomationFile,
     path: Option<PathBuf>,
     store: Option<smelt_store::Store>,
-    workspace_root: Option<PathBuf>,
+    workspaces: Option<WorkspaceRoots>,
     writable: bool,
     persist: bool,
 }
@@ -69,7 +72,7 @@ impl AutomationOwner {
             file,
             path: None,
             store: None,
-            workspace_root: None,
+            workspaces: None,
             writable: true,
             persist: false,
         }
@@ -92,14 +95,12 @@ impl AutomationOwner {
                 },
                 path,
                 store: None,
-                workspace_root: None,
+                workspaces: None,
                 writable: false,
                 persist,
             };
         };
-        let workspace_root = storage_path
-            .parent()
-            .map(|parent| parent.join("workspaces").join("automations"));
+        let workspaces = WorkspaceRoots::beside(&storage_path);
         let store = if persist {
             match open_automation_store(&storage_path) {
                 Ok(store) => Some(store),
@@ -111,7 +112,7 @@ impl AutomationOwner {
                         },
                         path,
                         store: None,
-                        workspace_root,
+                        workspaces,
                         writable: false,
                         persist,
                     };
@@ -131,7 +132,7 @@ impl AutomationOwner {
                     },
                     path,
                     store,
-                    workspace_root,
+                    workspaces,
                     writable: false,
                     persist,
                 };
@@ -147,7 +148,7 @@ impl AutomationOwner {
                     .map(|automation| automation.id.clone())
                     .collect::<Vec<_>>();
                 let normalized =
-                    assign_managed_workspaces(&mut file, workspace_root.as_deref(), automation_ids)
+                    assign_managed_workspaces(&mut file, workspaces.as_ref(), automation_ids)
                         .and_then(|()| {
                             normalize_loaded_file(&mut file, now, &timezone_fingerprint)
                         });
@@ -163,7 +164,7 @@ impl AutomationOwner {
                                     file,
                                     path,
                                     store,
-                                    workspace_root,
+                                    workspaces,
                                     writable: false,
                                     persist,
                                 };
@@ -177,7 +178,7 @@ impl AutomationOwner {
                                     file,
                                     path,
                                     store,
-                                    workspace_root,
+                                    workspaces,
                                     writable: false,
                                     persist,
                                 };
@@ -187,7 +188,7 @@ impl AutomationOwner {
                             file,
                             path,
                             store,
-                            workspace_root,
+                            workspaces,
                             writable: true,
                             persist,
                         }
@@ -198,7 +199,7 @@ impl AutomationOwner {
                             file,
                             path,
                             store,
-                            workspace_root,
+                            workspaces,
                             writable: false,
                             persist,
                         }
@@ -212,7 +213,7 @@ impl AutomationOwner {
                 },
                 path,
                 store,
-                workspace_root,
+                workspaces,
                 writable: true,
                 persist,
             },
@@ -253,14 +254,14 @@ impl AutomationOwner {
         candidate.store_error = None;
         match &mut command {
             AutomationCommand::Upsert { automation } => {
-                assign_upsert_workspace(automation, self.workspace_root.as_deref())?;
+                assign_upsert_workspace(automation, self.workspaces.as_ref())?;
             }
             AutomationCommand::SetEnabled {
                 automation_id,
                 enabled: true,
             } => assign_managed_workspaces(
                 &mut candidate,
-                self.workspace_root.as_deref(),
+                self.workspaces.as_ref(),
                 [automation_id.clone()],
             )?,
             _ => {}
@@ -331,7 +332,7 @@ impl AutomationOwner {
         candidate.store_error = None;
         assign_managed_workspaces(
             &mut candidate,
-            self.workspace_root.as_deref(),
+            self.workspaces.as_ref(),
             [automation_id.clone()],
         )?;
         let result = apply_automation_command(
@@ -344,7 +345,7 @@ impl AutomationOwner {
             AutomationCommandResult::Applied(_) => unreachable!("RunOnce returns a Run"),
         };
         if let Some(execution) = execution {
-            bind_agent_execution(&mut candidate, &run_id, execution)?;
+            bind_agent_execution(&mut candidate, &run_id, execution, self.workspaces.as_ref())?;
         }
         self.commit(candidate)?;
         let result = AutomationCommandResult::Run(Box::new(
@@ -375,14 +376,19 @@ impl AutomationOwner {
             .filter(|automation| automation.enabled)
             .map(|automation| automation.id.clone())
             .collect::<Vec<_>>();
-        assign_managed_workspaces(&mut candidate, self.workspace_root.as_deref(), enabled_ids)?;
+        assign_managed_workspaces(&mut candidate, self.workspaces.as_ref(), enabled_ids)?;
         let claimed = claim_due_automations(&mut candidate, now.clone());
         let mut runs = Vec::new();
         for claimed_run in claimed {
             if let Some(agent_definition_id) = claimed_run.context.action.agent_definition_id() {
                 match load_agent_execution_definition(agent_definition_id) {
                     Ok(execution) => {
-                        bind_agent_execution(&mut candidate, &claimed_run.id, &execution)?;
+                        bind_agent_execution(
+                            &mut candidate,
+                            &claimed_run.id,
+                            &execution,
+                            self.workspaces.as_ref(),
+                        )?;
                         runs.push(
                             candidate
                                 .runs
@@ -451,7 +457,7 @@ impl AutomationOwner {
             })
             .map(|automation| automation.id.clone())
             .collect::<Vec<_>>();
-        assign_managed_workspaces(&mut candidate, self.workspace_root.as_deref(), matched_ids)?;
+        assign_managed_workspaces(&mut candidate, self.workspaces.as_ref(), matched_ids)?;
         let published = publish_automation_event(&mut candidate, &event, now.clone())?;
         for run in &published.runs {
             if run.status != AutomationRunStatus::Starting {
@@ -461,7 +467,12 @@ impl AutomationOwner {
                 continue;
             };
             match load_agent_execution_definition(agent_definition_id) {
-                Ok(execution) => bind_agent_execution(&mut candidate, &run.id, &execution)?,
+                Ok(execution) => bind_agent_execution(
+                    &mut candidate,
+                    &run.id,
+                    &execution,
+                    self.workspaces.as_ref(),
+                )?,
                 Err(error) => {
                     let stored = candidate
                         .runs
@@ -525,7 +536,7 @@ impl AutomationOwner {
         candidate.store_error = None;
         assign_managed_workspaces(
             &mut candidate,
-            self.workspace_root.as_deref(),
+            self.workspaces.as_ref(),
             [automation_id.clone()],
         )?;
         let result = apply_automation_command(
@@ -546,7 +557,12 @@ impl AutomationOwner {
                 && let Some(agent_definition_id) = run.context.action.agent_definition_id()
             {
                 match load_agent_execution_definition(agent_definition_id) {
-                    Ok(execution) => bind_agent_execution(&mut candidate, &run.id, &execution)?,
+                    Ok(execution) => bind_agent_execution(
+                        &mut candidate,
+                        &run.id,
+                        &execution,
+                        self.workspaces.as_ref(),
+                    )?,
                     Err(error) => {
                         let stored = candidate
                             .runs
@@ -583,22 +599,19 @@ impl AutomationOwner {
     pub fn bind_run_execution(
         &mut self,
         run_id: &str,
-        agent_definition_name: String,
-        engine_kind_id: String,
-        agent_instructions: String,
+        execution: &AgentExecutionDefinition,
     ) -> Result<AutomationFile, String> {
+        let workspaces = self.workspaces.clone();
         self.mutate_run(run_id, |run| {
             if run.status.is_terminal() {
                 return Err(format!("Run {} 已结束", run.id));
             }
             if let Some(existing) = run.context.engine_kind_id.as_deref()
-                && existing != engine_kind_id
+                && existing != execution.kind.id()
             {
                 return Err("Run 已绑定到不同的智能体执行引擎".to_string());
             }
-            run.context.agent_definition_name = Some(agent_definition_name);
-            run.context.engine_kind_id = Some(engine_kind_id);
-            run.context.agent_instructions = Some(agent_instructions);
+            bind_run_context(run, execution, workspaces.as_ref());
             Ok(())
         })
     }
@@ -801,8 +814,76 @@ fn automation_workspace_path(root: &Path, automation_id: &str) -> PathBuf {
     root.join(encoded)
 }
 
-fn ensure_automation_workspace(root: &Path, automation_id: &str) -> Result<String, String> {
-    let workspace = automation_workspace_path(root, automation_id);
+/// 自动化工作目录的两个根，都从存储所在的 smelt home 推出来。
+///
+/// 智能体自动化跑在它的 space 下的 `automations/` 里，每条一个子目录：能读到它在
+/// 对话里攒下的东西，又不会和别的自动化互相覆盖。Shell 没有智能体，留在托管目录；
+/// 那里也是智能体自动化搬进 space 之前的旧位置。
+#[derive(Clone, Debug)]
+struct WorkspaceRoots {
+    managed: PathBuf,
+    agent_spaces: PathBuf,
+}
+
+impl WorkspaceRoots {
+    fn beside(storage_path: &Path) -> Option<Self> {
+        let home = storage_path.parent()?;
+        Some(Self {
+            managed: home.join("workspaces").join("automations"),
+            agent_spaces: home.join("agents"),
+        })
+    }
+
+    fn agent_space(&self, agent_definition_id: &str) -> Option<PathBuf> {
+        agent_space_in(&self.agent_spaces, agent_definition_id)
+    }
+
+    fn workspace_for(&self, automation: &Automation) -> Result<PathBuf, String> {
+        match &automation.action {
+            AutomationAction::Agent {
+                agent_definition_id,
+                ..
+            } => {
+                let space = self
+                    .agent_space(agent_definition_id)
+                    .ok_or_else(|| format!("智能体 id 不能用作目录名: {agent_definition_id}"))?;
+                Ok(automation_workspace_path(
+                    &space.join("automations"),
+                    &automation.id,
+                ))
+            }
+            AutomationAction::Shell { .. } => {
+                Ok(automation_workspace_path(&self.managed, &automation.id))
+            }
+        }
+    }
+}
+
+/// 旧产出跟着搬进 space。搬不动（比如 space 链到了另一块盘）就留在原处、
+/// 从空目录开始，不为此拦下整个存储的载入。
+fn move_legacy_workspace(legacy: &Path, workspace: &Path) {
+    if legacy == workspace || fs::symlink_metadata(workspace).is_ok() {
+        return;
+    }
+    if !fs::symlink_metadata(legacy).is_ok_and(|metadata| metadata.is_dir()) {
+        return;
+    }
+    if let Some(parent) = workspace.parent()
+        && fs::create_dir_all(parent).is_ok()
+    {
+        let _ = fs::rename(legacy, workspace);
+    }
+}
+
+fn ensure_automation_workspace(
+    roots: &WorkspaceRoots,
+    automation: &Automation,
+) -> Result<String, String> {
+    let workspace = roots.workspace_for(automation)?;
+    move_legacy_workspace(
+        &automation_workspace_path(&roots.managed, &automation.id),
+        &workspace,
+    );
     fs::create_dir_all(&workspace).map_err(|error| {
         format!(
             "创建自动化 Smelt 工作区失败（{}）: {error}",
@@ -841,10 +922,10 @@ fn ensure_automation_workspace(root: &Path, automation_id: &str) -> Result<Strin
 
 fn assign_managed_workspaces(
     file: &mut AutomationFile,
-    root: Option<&Path>,
+    roots: Option<&WorkspaceRoots>,
     automation_ids: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
-    let Some(root) = root else {
+    let Some(roots) = roots else {
         return Ok(());
     };
     let automation_ids = automation_ids
@@ -865,7 +946,12 @@ fn assign_managed_workspaces(
     let workspaces = automation_ids
         .iter()
         .map(|automation_id| {
-            ensure_automation_workspace(root, automation_id)
+            let automation = file
+                .automations
+                .iter()
+                .find(|automation| automation.id == automation_id.as_str())
+                .expect("managed workspace ids were filtered against this file");
+            ensure_automation_workspace(roots, automation)
                 .map(|workspace| (automation_id, workspace))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -882,14 +968,14 @@ fn assign_managed_workspaces(
 }
 
 fn assign_upsert_workspace(
-    automation: &mut crate::automation::Automation,
-    root: Option<&Path>,
+    automation: &mut Automation,
+    roots: Option<&WorkspaceRoots>,
 ) -> Result<(), String> {
-    let Some(root) = root else {
+    let Some(roots) = roots else {
         return Ok(());
     };
     automation.validate()?;
-    automation.workspace_dir = Some(ensure_automation_workspace(root, &automation.id)?);
+    automation.workspace_dir = Some(ensure_automation_workspace(roots, automation)?);
     Ok(())
 }
 
@@ -961,6 +1047,7 @@ fn snapshot_from_file(file: &AutomationFile) -> Result<smelt_store::AutomationSn
 }
 
 fn file_from_snapshot(snapshot: smelt_store::AutomationSnapshot) -> Result<AutomationFile, String> {
+    let has_retired_sinks = snapshot.schema_version < 2;
     Ok(AutomationFile {
         schema_version: snapshot.schema_version,
         store_id: snapshot.store_id,
@@ -969,7 +1056,12 @@ fn file_from_snapshot(snapshot: smelt_store::AutomationSnapshot) -> Result<Autom
         automations: snapshot
             .automations
             .into_iter()
-            .map(automation_from_record)
+            .map(|mut record| {
+                if has_retired_sinks {
+                    record.sinks_json = drop_retired_sinks(&record.sinks_json)?;
+                }
+                automation_from_record(record)
+            })
             .collect::<Result<Vec<_>, _>>()?,
         states: snapshot.states.into_iter().map(state_from_record).collect(),
         runs: snapshot
@@ -1008,6 +1100,18 @@ fn automation_from_record(
         action: decode_json(&record.action_json, "action")?,
         sinks: decode_json(&record.sinks_json, "sinks")?,
     })
+}
+
+/// v1 → v2：飞书 / Webhook sink 已从模型删除，剩下为空时回到默认的应用通知。
+fn drop_retired_sinks(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut sinks: Vec<serde_json::Value> = decode_json(raw, "sinks")?;
+    sinks.retain(|sink| {
+        !matches!(
+            sink.get("type").and_then(serde_json::Value::as_str),
+            Some("feishu" | "webhook")
+        )
+    });
+    encode_json(&sinks)
 }
 
 fn state_record(state: &AutomationState) -> smelt_store::AutomationStateRecord {
@@ -1145,16 +1249,30 @@ fn bind_agent_execution(
     file: &mut AutomationFile,
     run_id: &str,
     execution: &AgentExecutionDefinition,
+    workspaces: Option<&WorkspaceRoots>,
 ) -> Result<(), String> {
     let run = file
         .runs
         .iter_mut()
         .find(|run| run.id == run_id)
         .ok_or_else(|| format!("Run 不存在: {run_id}"))?;
+    bind_run_context(run, execution, workspaces);
+    Ok(())
+}
+
+/// 固化这次运行的智能体快照；定义之后再改，不影响已经排上的运行。
+fn bind_run_context(
+    run: &mut AutomationRun,
+    execution: &AgentExecutionDefinition,
+    workspaces: Option<&WorkspaceRoots>,
+) {
+    let space = workspaces.and_then(|roots| roots.agent_space(&execution.definition.id));
     run.context.agent_definition_name = Some(execution.definition.name.clone());
     run.context.engine_kind_id = Some(execution.kind.id().to_string());
-    run.context.agent_instructions = Some(execution.definition.prompt.clone());
-    Ok(())
+    run.context.agent_instructions = Some(build_automation_run_instructions(
+        &execution.definition,
+        space.as_deref(),
+    ));
 }
 
 fn refresh_schedule_states<Tz>(file: &mut AutomationFile, now: DateTime<Tz>, timezone_changed: bool)
@@ -1259,7 +1377,7 @@ mod tests {
     use crate::agent_definition::AgentDefinition;
     use crate::agent_kind::ConversationAgentKind;
     use crate::automation::{
-        Automation, AutomationRunContext, AutomationRunSource, AutomationSchedule,
+        Automation, AutomationRunContext, AutomationRunSource, AutomationSchedule, AutomationSink,
         AutomationTrigger,
     };
     use chrono::{TimeZone, Utc};
@@ -1422,10 +1540,11 @@ mod tests {
     }
 
     #[test]
-    fn owner_assigns_and_recreates_a_stable_managed_workspace() {
+    fn agent_automation_works_inside_its_agent_space() {
         let temp = tempfile::tempdir().unwrap();
         let store_path = temp.path().join("automations.json");
-        let workspace_root = temp.path().join("workspaces").join("automations");
+        let space = temp.path().join("agents").join("agent-1");
+        let workspace_root = space.join("automations");
         let mut owner =
             AutomationOwner::load_from_paths(Some(store_path), Utc::now(), "UTC".to_string(), true);
         let missing_workspace = automation_workspace_path(&workspace_root, "missing");
@@ -1492,7 +1611,7 @@ mod tests {
                 engine_kind_id: ConversationAgentKind::Pi.id().into(),
                 prompt: "Instructions".into(),
                 plugins: Vec::new(),
-                context_folders: Vec::new(),
+                context_folders: vec!["/work/reports".into()],
                 context_links: Vec::new(),
                 ..Default::default()
             },
@@ -1506,13 +1625,100 @@ mod tests {
             .run()
             .unwrap();
         assert_eq!(run.context.cwd, workspace.to_str().unwrap());
+        let instructions = run.context.agent_instructions.unwrap();
+        assert!(instructions.starts_with("Instructions"), "{instructions}");
+        assert!(instructions.contains("/work/reports"), "{instructions}");
+        assert!(
+            instructions.contains(space.to_str().unwrap()),
+            "{instructions}"
+        );
+    }
+
+    #[test]
+    fn shell_automation_keeps_a_managed_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut owner = AutomationOwner::load_from_paths(
+            Some(temp.path().join("automations.json")),
+            Utc::now(),
+            "UTC".to_string(),
+            true,
+        );
+        let mut definition = automation();
+        definition.action = crate::automation::AutomationAction::shell("true", Vec::new());
+
+        owner
+            .apply(
+                AutomationCommand::Upsert {
+                    automation: Box::new(definition),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+
+        let expected = automation_workspace_path(
+            &temp.path().join("workspaces").join("automations"),
+            "automation-1",
+        );
+        assert_eq!(
+            owner.snapshot().automations[0].workspace_dir.as_deref(),
+            expected.to_str()
+        );
+        assert!(expected.is_dir());
+    }
+
+    #[test]
+    fn startup_moves_an_agent_workspace_into_its_agent_space() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = automation_workspace_path(
+            &temp.path().join("workspaces").join("automations"),
+            "automation-1",
+        );
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("report.md"), "yesterday").unwrap();
+        let mut file = AutomationFile {
+            timezone_fingerprint: "UTC".to_string(),
+            ..Default::default()
+        };
+        let mut definition = automation();
+        definition.workspace_dir = legacy.to_str().map(str::to_owned);
+        file.automations.push(definition);
+        seed_snapshot(temp.path(), &file);
+
+        let owner = AutomationOwner::load_from_paths(
+            Some(temp.path().join("automations.json")),
+            Utc::now(),
+            "UTC".to_string(),
+            true,
+        );
+
+        let moved = automation_workspace_path(
+            &temp
+                .path()
+                .join("agents")
+                .join("agent-1")
+                .join("automations"),
+            "automation-1",
+        );
+        assert_eq!(
+            owner.snapshot().automations[0].workspace_dir.as_deref(),
+            moved.to_str()
+        );
+        assert_eq!(
+            std::fs::read_to_string(moved.join("report.md")).unwrap(),
+            "yesterday"
+        );
+        assert!(!legacy.exists());
     }
 
     #[test]
     fn startup_replaces_a_legacy_workspace_with_the_managed_path() {
         let temp = tempfile::tempdir().unwrap();
         let store_path = temp.path().join("automations.json");
-        let workspace_root = temp.path().join("workspaces").join("automations");
+        let workspace_root = temp
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("automations");
         let mut file = AutomationFile {
             timezone_fingerprint: "UTC".to_string(),
             ..Default::default()
@@ -1543,6 +1749,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn v1_store_drops_notification_targets_that_never_delivered() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut file = AutomationFile {
+            timezone_fingerprint: "UTC".to_string(),
+            ..Default::default()
+        };
+        for id in ["app-and-feishu", "feishu-only"] {
+            let mut definition = automation();
+            definition.id = id.to_string();
+            file.automations.push(definition);
+        }
+        let mut snapshot = snapshot_from_file(&file).unwrap();
+        snapshot.schema_version = 1;
+        snapshot.automations[0].sinks_json =
+            br#"[{"type":"local"},{"type":"feishu","chat_id":"oc_1"}]"#.to_vec();
+        snapshot.automations[1].sinks_json =
+            br#"[{"type":"webhook","url":"https://example.com/hook"},{"type":"feishu","chat_id":"oc_2"}]"#
+                .to_vec();
+        smelt_store::Store::open_or_create(temp.path().join(smelt_store::DATABASE_FILE_NAME))
+            .unwrap()
+            .put_automation_snapshot(&snapshot)
+            .unwrap();
+
+        let owner = AutomationOwner::load_from_paths(
+            Some(temp.path().join("automations.json")),
+            Utc::now(),
+            "UTC".to_string(),
+            true,
+        );
+
+        let loaded = owner.snapshot();
+        assert_eq!(loaded.store_error, None);
+        let sinks = |file: &AutomationFile, id: &str| {
+            file.automations
+                .iter()
+                .find(|automation| automation.id == id)
+                .map(|automation| automation.sinks.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            sinks(&loaded, "app-and-feishu"),
+            vec![AutomationSink::Local]
+        );
+        assert!(sinks(&loaded, "feishu-only").is_empty());
+        let persisted = persisted_file(temp.path());
+        assert_eq!(persisted.schema_version, AUTOMATION_FILE_SCHEMA_VERSION);
+        assert_eq!(
+            sinks(&persisted, "app-and-feishu"),
+            vec![AutomationSink::Local]
+        );
+        assert!(
+            persisted
+                .automations
+                .iter()
+                .all(crate::automation::Automation::notifies_app)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn owner_rejects_a_symlinked_managed_workspace() {
@@ -1550,7 +1815,11 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let store_path = temp.path().join("automations.json");
-        let workspace_root = temp.path().join("workspaces").join("automations");
+        let workspace_root = temp
+            .path()
+            .join("agents")
+            .join("agent-1")
+            .join("automations");
         std::fs::create_dir_all(&workspace_root).unwrap();
         let outside = temp.path().join("outside");
         std::fs::create_dir(&outside).unwrap();

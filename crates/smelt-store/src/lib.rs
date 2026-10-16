@@ -23,6 +23,8 @@ mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod documents;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod memory;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
 mod snapshots;
 
@@ -30,15 +32,24 @@ pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AppearanceSnapshot,
     AutoModelSnapshot, HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
-    PublishedSessionRecord, PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot,
-    QuotaCacheSnapshot, RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
+    MemoryMetaSnapshot, MemoryTrust, MemoryUsageRecord, PublishedSessionRecord,
+    PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot,
+    RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
     RemoteTerminalSessionRecord, TerminalThemeSnapshot, UpdateSettingsSnapshot,
     UpdateStateSnapshot, WorkspaceAcpRecord, WorkspaceLayoutNode, WorkspaceProjectRecord,
     WorkspaceSessionRecord, WorkspaceSnapshot, WorktreeInheritSnapshot,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
-pub const STORE_SCHEMA_VERSION: u32 = 12;
+
+/// 智能体记忆元数据的 scope：某个智能体自己的那一层。
+pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
+    format!("agent:{agent_definition_id}")
+}
+
+/// 智能体记忆元数据的 scope：跨智能体的用户全局层。
+pub const USER_MEMORY_SCOPE: &str = "user";
+pub const STORE_SCHEMA_VERSION: u32 = 16;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -224,6 +235,17 @@ impl std::fmt::Debug for Store {
     }
 }
 
+/// `acp_detail.history_session_id` 的三种事实。没有行，和行在但列是空，不能合成同一个 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredHistoryIdentity {
+    /// 还没有 `acp_detail` 行。显式开会话可以带上选中的对话文件。
+    NoRow,
+    /// 行在，列是空。窗口缓存不能把旧 id 填回来。
+    Unbound,
+    /// 守护进程已经确认的对话身份。
+    Bound(String),
+}
+
 impl Store {
     /// 打开已有库。文件不在、或只剩 WAL/SHM sidecar 时失败，绝不建空库。
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -365,16 +387,60 @@ impl Store {
         imp::get_appearance_snapshot(&self.backend)
     }
 
-    pub fn put_appearance_snapshot(&self, snapshot: &AppearanceSnapshot) -> Result<(), StoreError> {
-        imp::put_appearance_snapshot(&self.backend, snapshot)
+    /// 在同一个 IMMEDIATE 事务里读-改-写外观快照，返回提交后的值。
+    ///
+    /// GUI、smeltd（Control API）和 `smelt settings` CLI 是三个进程、三条连接，都会改
+    /// 外观。读和写不在同一把写锁里，后写的一方就会拿旧值把别人刚提交的修改覆盖掉。
+    /// `modify` 返回错误时整笔回滚。
+    pub fn modify_appearance_snapshot<E: From<StoreError>>(
+        &self,
+        missing: impl FnOnce() -> AppearanceSnapshot,
+        modify: impl FnOnce(&mut AppearanceSnapshot) -> Result<(), E>,
+    ) -> Result<AppearanceSnapshot, E> {
+        imp::modify_appearance_snapshot(&self.backend, missing, modify)
     }
 
     pub fn get_workspace_snapshot(&self) -> Result<Option<WorkspaceSnapshot>, StoreError> {
         imp::get_workspace_snapshot(&self.backend)
     }
 
+    /// 会话 id → 智能体定义 id。关系表已存在时返回 `Some`（可以是空表）；
+    /// 只有旧 JSON 工作区时返回 `None`，调用方再走快照回退。
+    pub fn session_agent_definition_ids(
+        &self,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+        imp::session_agent_definition_ids(&self.backend)
+    }
+
     pub fn put_workspace_snapshot(&self, snapshot: &WorkspaceSnapshot) -> Result<(), StoreError> {
         imp::put_workspace_snapshot(&self.backend, snapshot)
+    }
+
+    /// 守护进程确认了一份可恢复的对话身份。行还不存在时返回 `false`，不建行。
+    pub fn remember_history_session_id(
+        &self,
+        session_id: &str,
+        history_id: &str,
+    ) -> Result<bool, StoreError> {
+        imp::remember_history_session_id(&self.backend, session_id, history_id)
+    }
+
+    /// 读这份会话已经确认的对话身份。没有行、或还没确认过，都是 `None`。
+    pub fn history_session_id(&self, session_id: &str) -> Result<Option<String>, StoreError> {
+        imp::history_session_id(&self.backend, session_id)
+    }
+
+    /// 没有行、行在但还没确认、已经确认。恢复时这三件事要分开。
+    pub fn stored_history_identity(
+        &self,
+        session_id: &str,
+    ) -> Result<StoredHistoryIdentity, StoreError> {
+        imp::stored_history_identity(&self.backend, session_id)
+    }
+
+    /// 守护进程明确放弃这份身份（历史文件已经读不出来）。窗口存档不能把它填回来。
+    pub fn clear_history_session_id(&self, session_id: &str) -> Result<bool, StoreError> {
+        imp::clear_history_session_id(&self.backend, session_id)
     }
 
     /// 残留 workspace JSON 文档导入成类型化快照。活路径不要再走 JSON 文档入口。
@@ -406,15 +472,66 @@ impl Store {
         imp::insert_agent_definition(&self.backend, record)
     }
 
-    pub fn update_agent_definition(
+    /// 在同一个 IMMEDIATE 事务里读-改-写一条智能体定义，返回提交后的行。
+    ///
+    /// GUI 与 smeltd（Control API / CLI）都会改定义；只提供这一条更新入口，避免任一方
+    /// 拿事务外读到的旧整行回写。行不存在（已被别人删除）返回 `Ok(None)`，不会建行；
+    /// `modify` 不得改 `id`，返回错误时整笔回滚。
+    pub fn modify_agent_definition<E: From<StoreError>>(
         &self,
-        record: &AgentDefinitionRecord,
-    ) -> Result<bool, StoreError> {
-        imp::update_agent_definition(&self.backend, record)
+        id: &str,
+        modify: impl FnOnce(&mut AgentDefinitionRecord) -> Result<(), E>,
+    ) -> Result<Option<AgentDefinitionRecord>, E> {
+        imp::modify_agent_definition(&self.backend, id, modify)
     }
 
     pub fn delete_agent_definition(&self, id: &str) -> Result<bool, StoreError> {
         imp::delete_agent_definition(&self.backend, id)
+    }
+
+    /// 智能体记忆：模型读了一次某条记忆。`scope` 见 [`memory_scope_for_agent`]。
+    pub fn record_memory_read(
+        &self,
+        scope: &str,
+        file_name: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::record_memory_read(&self.backend, scope, file_name, now_ms)
+    }
+
+    /// 智能体记忆：一次成功写入的来源。
+    pub fn record_memory_write(
+        &self,
+        scope: &str,
+        file_name: &str,
+        trust: MemoryTrust,
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::record_memory_write(
+            &self.backend,
+            scope,
+            file_name,
+            trust,
+            reason,
+            session_id,
+            now_ms,
+        )
+    }
+
+    /// 用户采纳一条待确认的记忆。返回是否真有一条待确认被改成可信。
+    pub fn approve_memory(&self, scope: &str, file_name: &str) -> Result<bool, StoreError> {
+        imp::approve_memory(&self.backend, scope, file_name)
+    }
+
+    /// 删掉一条记忆的元数据（文件已删，或同名重建时不该继承）。
+    pub fn forget_memory(&self, scope: &str, file_name: &str) -> Result<(), StoreError> {
+        imp::forget_memory(&self.backend, scope, file_name)
+    }
+
+    pub fn memory_meta(&self, scope: &str) -> Result<MemoryMetaSnapshot, StoreError> {
+        imp::memory_meta(&self.backend, scope)
     }
 
     pub fn get_remote_session_snapshot(
@@ -1286,16 +1403,22 @@ mod imp {
         crate::documents::read_appearance_snapshot(&connection)
     }
 
-    pub(super) fn put_appearance_snapshot(
+    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
         backend: &Backend,
-        snapshot: &super::AppearanceSnapshot,
-    ) -> Result<(), StoreError> {
+        missing: impl FnOnce() -> super::AppearanceSnapshot,
+        modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
+    ) -> Result<super::AppearanceSnapshot, E> {
         let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_appearance_snapshot(&transaction, snapshot)?;
-        transaction.commit()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let mut snapshot =
+            crate::documents::read_appearance_snapshot(&transaction)?.unwrap_or_else(missing);
+        modify(&mut snapshot)?;
+        crate::documents::write_appearance_snapshot(&transaction, &snapshot)?;
+        transaction.commit().map_err(StoreError::from)?;
         secure_sidecar_permissions(&backend.path);
-        Ok(())
+        Ok(snapshot)
     }
 
     pub(super) fn get_workspace_snapshot(
@@ -1303,6 +1426,13 @@ mod imp {
     ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
         crate::documents::read_workspace_snapshot(&connection)
+    }
+
+    pub(super) fn session_agent_definition_ids(
+        backend: &Backend,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::documents::read_session_agent_definition_ids(&connection)
     }
 
     pub(super) fn put_workspace_snapshot(
@@ -1315,6 +1445,46 @@ mod imp {
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
+    }
+
+    pub(super) fn remember_history_session_id(
+        backend: &Backend,
+        session_id: &str,
+        history_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated =
+            crate::documents::remember_history_session_id(&transaction, session_id, history_id)?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
+    pub(super) fn history_session_id(
+        backend: &Backend,
+        session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::documents::history_session_id(&connection, session_id)
+    }
+
+    pub(super) fn stored_history_identity(
+        backend: &Backend,
+        session_id: &str,
+    ) -> Result<super::StoredHistoryIdentity, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::documents::stored_history_identity(&connection, session_id)
+    }
+
+    pub(super) fn clear_history_session_id(
+        backend: &Backend,
+        session_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = crate::documents::clear_history_session_id(&transaction, session_id)?;
+        transaction.commit()?;
+        Ok(updated)
     }
 
     pub(super) fn workspace_snapshot_from_json(
@@ -1374,25 +1544,116 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn update_agent_definition(
+    pub(super) fn modify_agent_definition<E: From<StoreError>>(
         backend: &Backend,
-        record: &super::AgentDefinitionRecord,
-    ) -> Result<bool, StoreError> {
+        id: &str,
+        modify: impl FnOnce(&mut super::AgentDefinitionRecord) -> Result<(), E>,
+    ) -> Result<Option<super::AgentDefinitionRecord>, E> {
         let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = crate::catalog::update_agent_definition(&transaction, record)?;
-        transaction.commit()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let Some(mut record) = crate::catalog::query_agent_definition(&transaction, id)? else {
+            return Ok(None);
+        };
+        modify(&mut record)?;
+        if record.id != id {
+            return Err(StoreError::AgentDefinitionIdChanged {
+                from: id.to_string(),
+                to: record.id,
+            }
+            .into());
+        }
+        crate::catalog::update_agent_definition(&transaction, &record)?;
+        transaction.commit().map_err(StoreError::from)?;
         secure_sidecar_permissions(&backend.path);
-        Ok(changed)
+        Ok(Some(record))
     }
 
     pub(super) fn delete_agent_definition(backend: &Backend, id: &str) -> Result<bool, StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed = crate::catalog::delete_agent_definition(&transaction, id)?;
+        if changed {
+            // 记忆跟着智能体走：定义删了，它的记忆元数据一起删。
+            crate::memory::forget_scope(&transaction, &super::memory_scope_for_agent(id))?;
+        }
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(changed)
+    }
+
+    fn write_memory<T>(
+        backend: &Backend,
+        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = write(&transaction)?;
+        transaction.commit()?;
+        secure_sidecar_permissions(&backend.path);
+        Ok(result)
+    }
+
+    pub(super) fn record_memory_read(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::record_read(transaction, scope, file_name, now_ms)
+        })
+    }
+
+    pub(super) fn record_memory_write(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+        trust: super::MemoryTrust,
+        reason: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::record_write(
+                transaction,
+                scope,
+                file_name,
+                trust,
+                reason,
+                session_id,
+                now_ms,
+            )
+        })
+    }
+
+    pub(super) fn approve_memory(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<bool, StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::approve(transaction, scope, file_name)
+        })
+    }
+
+    pub(super) fn forget_memory(
+        backend: &Backend,
+        scope: &str,
+        file_name: &str,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::memory::forget(transaction, scope, file_name)
+        })
+    }
+
+    pub(super) fn memory_meta(
+        backend: &Backend,
+        scope: &str,
+    ) -> Result<super::MemoryMetaSnapshot, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::memory::read_meta(&connection, scope)
     }
 
     pub(super) fn get_remote_session_snapshot(
@@ -2907,6 +3168,54 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 15 {
+            if !schema_matches_v15(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v16_agent_mcp_servers_default(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 14 {
+            if !schema_matches_v14(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v15_agent_mcp_servers(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 13 {
+            if !schema_matches_v13(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v14_agent_memory_switch(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 12 {
+            if !schema_matches_v12(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v13_memory_tables(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 11 {
             if !schema_matches_v11(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -3021,15 +3330,64 @@ mod imp {
     fn apply_v12_agent_model_columns(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
-        if table_columns(transaction, "agent_definition")?
+        if !table_columns(transaction, "agent_definition")?
             .iter()
             .any(|column| column == "model_provider")
         {
-            return Ok(());
+            transaction.execute_batch(crate::schema::MIGRATE_V11_TO_V12)?;
         }
-        transaction
-            .execute_batch(crate::schema::MIGRATE_V11_TO_V12)
-            .map_err(StoreError::from)
+        apply_v13_memory_tables(transaction)
+    }
+
+    fn apply_v13_memory_tables(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "agent_memory_usage")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V12_TO_V13)?;
+        }
+        apply_v14_agent_memory_switch(transaction)
+    }
+
+    fn apply_v14_agent_memory_switch(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "agent_definition")?
+            .iter()
+            .any(|column| column == "memory_enabled")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V13_TO_V14)?;
+        }
+        apply_v15_agent_mcp_servers(transaction)
+    }
+
+    fn apply_v15_agent_mcp_servers(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "agent_definition")?
+            .iter()
+            .any(|column| column == "mcp_servers_json")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V14_TO_V15)?;
+        }
+        apply_v16_agent_mcp_servers_default(transaction)
+    }
+
+    /// v15 建的列默认值是文本 `'[]'`，与 BLOB 列类型不一致；v16 改成 `X'5B5D'`。
+    /// 看列的默认值决定要不要重建，已经是 BLOB 默认值就跳过。
+    fn apply_v16_agent_mcp_servers_default(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        let default: Option<String> = transaction.query_row(
+            "SELECT dflt_value FROM pragma_table_info('agent_definition')
+             WHERE name = 'mcp_servers_json'",
+            [],
+            |row| row.get(0),
+        )?;
+        if default.as_deref() == Some("'[]'") {
+            transaction.execute_batch(crate::schema::MIGRATE_V15_TO_V16)?;
+        }
+        Ok(())
     }
 
     fn unrecognized_schema_error(version: u32) -> StoreError {
@@ -3047,12 +3405,52 @@ mod imp {
         )
     }
 
-    fn schema_matches_v11(connection: &Connection) -> Result<bool, StoreError> {
+    fn schema_matches_v15(connection: &Connection) -> Result<bool, StoreError> {
         Ok(
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
                 && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V15)?,
+        )
+    }
+
+    fn schema_matches_v14(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V14)?,
+        )
+    }
+
+    fn schema_matches_v13(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V13)?,
+        )
+    }
+
+    fn schema_matches_v12(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V12)?,
+        )
+    }
+
+    fn schema_matches_v11(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
                 && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V11)?,
         )
     }
@@ -3062,7 +3460,7 @@ mod imp {
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
                 && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V10)?,
         )
     }
@@ -3357,6 +3755,13 @@ mod imp {
         ) || object.name == "automation_run_automation_created_idx"
     }
 
+    fn is_v13_memory_schema_object(object: &SchemaObject) -> bool {
+        matches!(
+            object.table_name.as_str(),
+            "agent_memory_provenance" | "agent_memory_usage"
+        )
+    }
+
     fn is_v10_catalog_schema_object(object: &SchemaObject) -> bool {
         matches!(
             object.table_name.as_str(),
@@ -3381,6 +3786,10 @@ mod imp {
         V9,
         V10,
         V11,
+        V12,
+        V13,
+        V14,
+        V15,
         Current,
     }
 
@@ -3413,6 +3822,10 @@ mod imp {
         static V9_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V10_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V11_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V12_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V13_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V14_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V15_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3440,6 +3853,7 @@ mod imp {
                     .filter(|object| {
                         !is_v9_automation_schema_object(object)
                             && !is_v10_catalog_schema_object(object)
+                            && !is_v13_memory_schema_object(object)
                     })
                     .collect()
             }),
@@ -3451,6 +3865,7 @@ mod imp {
                             object.name != "acp_detail"
                                 && !is_v9_automation_schema_object(object)
                                 && !is_v10_catalog_schema_object(object)
+                                && !is_v13_memory_schema_object(object)
                         })
                         .collect()
                 })
@@ -3470,6 +3885,7 @@ mod imp {
                                 )
                                 && object.name != "automation_run_automation_created_idx"
                                 && !is_v10_catalog_schema_object(object)
+                                && !is_v13_memory_schema_object(object)
                         })
                         .collect()
                 })
@@ -3477,10 +3893,19 @@ mod imp {
             SchemaGeneration::V9 => cached_schema_objects(&V9_OBJECTS, |objects| {
                 objects
                     .into_iter()
-                    .filter(|object| !is_v10_catalog_schema_object(object))
+                    .filter(|object| {
+                        !is_v10_catalog_schema_object(object)
+                            && !is_v13_memory_schema_object(object)
+                    })
                     .collect()
             }),
-            SchemaGeneration::V10 => cached_schema_objects(&V10_OBJECTS, |mut objects| {
+            SchemaGeneration::V10 => cached_schema_objects(&V10_OBJECTS, |objects| {
+                let mut objects: Vec<_> = objects
+                    .into_iter()
+                    .filter(|object| !is_v13_memory_schema_object(object))
+                    .collect();
+                strip_agent_definition_mcp_column(&mut objects);
+                strip_agent_definition_memory_column(&mut objects);
                 strip_agent_definition_model_columns(&mut objects);
                 for object in &mut objects {
                     if matches!(
@@ -3492,8 +3917,42 @@ mod imp {
                 }
                 objects
             }),
-            SchemaGeneration::V11 => cached_schema_objects(&V11_OBJECTS, |mut objects| {
+            SchemaGeneration::V11 => cached_schema_objects(&V11_OBJECTS, |objects| {
+                let mut objects: Vec<_> = objects
+                    .into_iter()
+                    .filter(|object| !is_v13_memory_schema_object(object))
+                    .collect();
+                strip_agent_definition_mcp_column(&mut objects);
+                strip_agent_definition_memory_column(&mut objects);
                 strip_agent_definition_model_columns(&mut objects);
+                objects
+            }),
+            SchemaGeneration::V12 => cached_schema_objects(&V12_OBJECTS, |objects| {
+                let mut objects: Vec<_> = objects
+                    .into_iter()
+                    .filter(|object| !is_v13_memory_schema_object(object))
+                    .collect();
+                strip_agent_definition_mcp_column(&mut objects);
+                strip_agent_definition_memory_column(&mut objects);
+                objects
+            }),
+            SchemaGeneration::V13 => cached_schema_objects(&V13_OBJECTS, |mut objects| {
+                strip_agent_definition_mcp_column(&mut objects);
+                strip_agent_definition_memory_column(&mut objects);
+                objects
+            }),
+            SchemaGeneration::V14 => cached_schema_objects(&V14_OBJECTS, |mut objects| {
+                strip_agent_definition_mcp_column(&mut objects);
+                objects
+            }),
+            SchemaGeneration::V15 => cached_schema_objects(&V15_OBJECTS, |mut objects| {
+                for object in &mut objects {
+                    if object.name == "agent_definition" {
+                        object.sql = object
+                            .sql
+                            .replace(MCP_COLUMN_NORMALIZED, MCP_COLUMN_V15_NORMALIZED);
+                    }
+                }
                 objects
             }),
             SchemaGeneration::Current => cached_schema_objects(&CURRENT_OBJECTS, |objects| objects),
@@ -3532,6 +3991,27 @@ mod imp {
             .filter(|character| !character.is_whitespace())
             .flat_map(char::to_lowercase)
             .collect()
+    }
+
+    /// `mcp_servers_json` 列定义去空白、转小写后的样子：当前（v16 起）和 v15。
+    const MCP_COLUMN_NORMALIZED: &str = "mcp_servers_jsonblobnotnulldefaultx'5b5d',";
+    const MCP_COLUMN_V15_NORMALIZED: &str = "mcp_servers_jsonblobnotnulldefault'[]',";
+
+    fn strip_agent_definition_mcp_column(objects: &mut [SchemaObject]) {
+        for object in objects {
+            if object.name == "agent_definition" {
+                object.sql = object.sql.replace(MCP_COLUMN_NORMALIZED, "");
+            }
+        }
+    }
+
+    fn strip_agent_definition_memory_column(objects: &mut [SchemaObject]) {
+        const NEEDLE: &str = "memory_enabledintegernotnulldefault1check(memory_enabledin(0,1)),";
+        for object in objects {
+            if object.name == "agent_definition" {
+                object.sql = object.sql.replace(NEEDLE, "");
+            }
+        }
     }
 
     fn strip_agent_definition_model_columns(objects: &mut [SchemaObject]) {
@@ -3773,21 +4253,52 @@ mod imp {
     ) -> Result<Option<super::AppearanceSnapshot>, StoreError> {
         unsupported()
     }
-    pub(super) fn put_appearance_snapshot(
+    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
         _backend: &Backend,
-        _snapshot: &super::AppearanceSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
+        _missing: impl FnOnce() -> super::AppearanceSnapshot,
+        _modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
+    ) -> Result<super::AppearanceSnapshot, E> {
+        Err(StoreError::SqliteDisabledOnMobile.into())
     }
     pub(super) fn get_workspace_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
         unsupported()
     }
+    pub(super) fn session_agent_definition_ids(
+        _backend: &Backend,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+        unsupported()
+    }
     pub(super) fn put_workspace_snapshot(
         _backend: &Backend,
         _snapshot: &super::WorkspaceSnapshot,
     ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn remember_history_session_id(
+        _backend: &Backend,
+        _session_id: &str,
+        _history_id: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn history_session_id(
+        _backend: &Backend,
+        _session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn stored_history_identity(
+        _backend: &Backend,
+        _session_id: &str,
+    ) -> Result<super::StoredHistoryIdentity, StoreError> {
+        unsupported()
+    }
+    pub(super) fn clear_history_session_id(
+        _backend: &Backend,
+        _session_id: &str,
+    ) -> Result<bool, StoreError> {
         unsupported()
     }
     pub(super) fn workspace_snapshot_from_json(
@@ -3823,16 +4334,56 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn update_agent_definition(
+    pub(super) fn modify_agent_definition<E: From<StoreError>>(
         _backend: &Backend,
-        _record: &super::AgentDefinitionRecord,
-    ) -> Result<bool, StoreError> {
-        unsupported()
+        _id: &str,
+        _modify: impl FnOnce(&mut super::AgentDefinitionRecord) -> Result<(), E>,
+    ) -> Result<Option<super::AgentDefinitionRecord>, E> {
+        Err(StoreError::SqliteDisabledOnMobile.into())
     }
     pub(super) fn delete_agent_definition(
         _backend: &Backend,
         _id: &str,
     ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn record_memory_read(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn record_memory_write(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+        _trust: super::MemoryTrust,
+        _reason: &str,
+        _session_id: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn approve_memory(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn forget_memory(
+        _backend: &Backend,
+        _scope: &str,
+        _file_name: &str,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn memory_meta(
+        _backend: &Backend,
+        _scope: &str,
+    ) -> Result<super::MemoryMetaSnapshot, StoreError> {
         unsupported()
     }
     pub(super) fn get_remote_session_snapshot(
@@ -4278,6 +4829,300 @@ mod tests {
 
     fn v10_schema() -> String {
         format!("{}\n{}", v9_schema(), crate::schema::MIGRATE_V9_TO_V10)
+    }
+
+    #[test]
+    fn memory_metadata_round_trip_and_follows_the_agent() {
+        let dir = temp_dir("memory-meta");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let agent = memory_scope_for_agent("agent-1");
+        store
+            .insert_agent_definition(&AgentDefinitionRecord {
+                id: "agent-1".into(),
+                name: "写作".into(),
+                description: String::new(),
+                engine_kind_id: "pi".into(),
+                prompt: String::new(),
+                plugins_json: b"[]".to_vec(),
+                mcp_servers_json: b"[]".to_vec(),
+                context_folders_json: b"[]".to_vec(),
+                context_links_json: b"[]".to_vec(),
+                model_provider: String::new(),
+                model_id: String::new(),
+                memory_enabled: true,
+            })
+            .unwrap();
+
+        store.record_memory_read(&agent, "fact.md", 1_000).unwrap();
+        store.record_memory_read(&agent, "fact.md", 2_000).unwrap();
+        store
+            .record_memory_write(
+                &agent,
+                "rule.md",
+                MemoryTrust::Pending,
+                "外部内容",
+                "s1",
+                3_000,
+            )
+            .unwrap();
+        store
+            .record_memory_write(
+                USER_MEMORY_SCOPE,
+                "me.md",
+                MemoryTrust::Pending,
+                "外部内容",
+                "s1",
+                3_000,
+            )
+            .unwrap();
+        let meta = store.memory_meta(&agent).unwrap();
+        assert_eq!(
+            meta.usage,
+            [MemoryUsageRecord {
+                file_name: "fact.md".into(),
+                read_count: 2,
+                last_read_at_ms: 2_000
+            }]
+        );
+        assert_eq!(
+            meta.pending,
+            [("rule.md".to_string(), "外部内容".to_string())]
+        );
+
+        assert!(store.approve_memory(&agent, "rule.md").unwrap());
+        assert!(
+            !store.approve_memory(&agent, "rule.md").unwrap(),
+            "已经可信的不算再采纳一次"
+        );
+        assert!(store.memory_meta(&agent).unwrap().pending.is_empty());
+
+        store.forget_memory(&agent, "fact.md").unwrap();
+        assert!(store.memory_meta(&agent).unwrap().usage.is_empty());
+
+        store.record_memory_read(&agent, "fact.md", 4_000).unwrap();
+        assert!(store.delete_agent_definition("agent-1").unwrap());
+        assert_eq!(
+            store.memory_meta(&agent).unwrap(),
+            MemoryMetaSnapshot::default()
+        );
+        assert_eq!(
+            store.memory_meta(USER_MEMORY_SCOPE).unwrap().pending.len(),
+            1,
+            "全局层不属于任何一个智能体"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_v13_by_adding_the_agent_memory_switch_defaulting_on() {
+        let dir = temp_dir("migrate-v13-memory-switch");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE agent_definition RENAME TO agent_definition_v14;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );
+                 DROP TABLE agent_definition_v14;
+                 INSERT INTO agent_definition VALUES
+                   ('writer', '写作', '', 'pi', '先列提纲', X'5B5D', X'5B5D', X'5B5D', 'p', 'm', 0);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 13).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].prompt, "先列提纲");
+        assert_eq!(agents[0].model_id, "m");
+        assert!(agents[0].memory_enabled, "已有智能体默认开着记忆");
+
+        store
+            .modify_agent_definition::<StoreError>("writer", |agent| {
+                agent.memory_enabled = false;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert!(!agents[0].memory_enabled);
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_v14_by_adding_agent_mcp_servers_defaulting_empty() {
+        let dir = temp_dir("migrate-v14-mcp-servers");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE agent_definition RENAME TO agent_definition_v15;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );
+                 DROP TABLE agent_definition_v15;
+                 INSERT INTO agent_definition VALUES
+                   ('writer', '写作', '', 'pi', '先列提纲', X'5B5D', X'5B5D', X'5B5D', 'p', 'm', 0, 0);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 14).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].prompt, "先列提纲");
+        assert!(!agents[0].memory_enabled, "迁移保留原有的记忆开关");
+        assert_eq!(
+            agents[0].mcp_servers_json,
+            b"[]".to_vec(),
+            "已有智能体默认不连任何 MCP 服务器"
+        );
+
+        store
+            .modify_agent_definition::<StoreError>("writer", |agent| {
+                agent.mcp_servers_json = br#"["github"]"#.to_vec();
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].mcp_servers_json, br#"["github"]"#.to_vec());
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v15 发出去的库：`mcp_servers_json` 默认值是文本 `'[]'`。升到 v16 后默认值改成 BLOB，
+    /// 已勾选的 MCP 服务器和其余字段原样保留。
+    #[test]
+    fn migrates_v15_by_switching_mcp_servers_default_to_blob() {
+        let dir = temp_dir("migrate-v15-mcp-default");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE agent_definition;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   mcp_servers_json BLOB NOT NULL DEFAULT '[]',
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );
+                 INSERT INTO agent_definition VALUES
+                   ('writer', '写作', '', 'pi', '先列提纲', X'5B5D', CAST('[\"figma\"]' AS BLOB),
+                    X'5B5D', X'5B5D', 'p', 'm', 0, 0);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 15).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let agents = store.get_agent_ui_snapshot().unwrap().unwrap().agents;
+        assert_eq!(agents[0].prompt, "先列提纲");
+        assert!(!agents[0].memory_enabled);
+        assert_eq!(agents[0].mcp_servers_json, br#"["figma"]"#.to_vec());
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let default: String = connection
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('agent_definition')
+                 WHERE name = 'mcp_servers_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default, "X'5B5D'");
+        drop(connection);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_v12_by_adding_memory_tables() {
+        let dir = temp_dir("migrate-v12-memory");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE agent_memory_usage; DROP TABLE agent_memory_provenance;
+                 DROP TABLE agent_definition;
+                 CREATE TABLE agent_definition (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   description TEXT NOT NULL,
+                   engine_kind_id TEXT NOT NULL,
+                   prompt TEXT NOT NULL,
+                   plugins_json BLOB NOT NULL,
+                   context_folders_json BLOB NOT NULL,
+                   context_links_json BLOB NOT NULL,
+                   model_provider TEXT NOT NULL DEFAULT '',
+                   model_id TEXT NOT NULL DEFAULT '',
+                   position INTEGER NOT NULL CHECK (position >= 0)
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project(root, position, collapsed) VALUES ('/repo', 0, 0)",
+                [],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 12).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let workspace = store.get_workspace_snapshot().unwrap().unwrap();
+        assert_eq!(workspace.projects[0].root, "/repo");
+        store.record_memory_read("user", "a.md", 1).unwrap();
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5857,6 +6702,118 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    fn acp_workspace(history_session_id: Option<&str>) -> Vec<u8> {
+        let history = match history_session_id {
+            Some(id) => serde_json::json!(id),
+            None => serde_json::Value::Null,
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "sessions": [{
+                "layout": {"Leaf": {"cwd": "/repo"}},
+                "acp": {
+                    "sid": "acp-1",
+                    "cwd": "/repo",
+                    "agent": "pi",
+                    "launch": {"command": "smelt-pi-agent"},
+                    "history_session_id": history
+                }
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn stored_history_id(store: &Store) -> Option<String> {
+        let raw = store.get("json", "workspace.json").unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        value["sessions"][0]["acp"]["history_session_id"]
+            .as_str()
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn daemon_confirmed_history_id_survives_workspace_rewrite() {
+        let dir = temp_dir("history-owner");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        assert!(
+            !store
+                .remember_history_session_id("acp-1", "pi-confirmed")
+                .unwrap()
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::NoRow
+        );
+        store
+            .put("json", "workspace.json", &acp_workspace(Some("from-gui")))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store),
+            None,
+            "第一次落库后这一列仍是空的，要等守护进程确认"
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::Unbound
+        );
+        assert!(
+            store
+                .remember_history_session_id("acp-1", "pi-confirmed")
+                .unwrap()
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::Bound("pi-confirmed".into())
+        );
+        assert!(!store.remember_history_session_id("acp-1", "  ").unwrap());
+
+        store
+            .put("json", "workspace.json", &acp_workspace(None))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store).as_deref(),
+            Some("pi-confirmed"),
+            "窗口存档没带恢复身份时，不能把守护进程已经确认的 id 写成空"
+        );
+        store
+            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store).as_deref(),
+            Some("pi-confirmed"),
+            "行已经存在后，窗口快照不能换成另一份 id"
+        );
+
+        assert!(
+            store
+                .remember_history_session_id("acp-1", "pi-next")
+                .unwrap()
+        );
+        store
+            .put("json", "workspace.json", &acp_workspace(None))
+            .unwrap();
+        assert_eq!(stored_history_id(&store).as_deref(), Some("pi-next"));
+
+        assert!(store.clear_history_session_id("acp-1").unwrap());
+        store
+            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
+            .unwrap();
+        assert_eq!(
+            stored_history_id(&store),
+            None,
+            "守护进程放弃的身份，窗口旧值不能再写回来"
+        );
+        assert_eq!(store.history_session_id("acp-1").unwrap(), None);
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::Unbound
+        );
+        assert_eq!(
+            store.stored_history_identity("acp-missing").unwrap(),
+            StoredHistoryIdentity::NoRow
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn workspace_snapshot_keeps_live_sidebar_fields() {
         let raw = serde_json::to_vec(&serde_json::json!({
@@ -5961,6 +6918,53 @@ mod tests {
         assert_eq!(snapshot.ui_font_px, 16);
         assert_eq!(snapshot.font_px, 13);
         assert_eq!(snapshot.theme_mode, "light");
+        assert_eq!(snapshot.theme_name, "Default Light");
+
+        store
+            .put(
+                "json",
+                "appearance.json",
+                br#"{"theme_mode":"dark","theme_name":"Sand Dark"}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_appearance_snapshot()
+                .unwrap()
+                .unwrap()
+                .theme_name,
+            "Default Dark"
+        );
+        store
+            .put(
+                "json",
+                "appearance.json",
+                br#"{"theme_mode":"light","theme_name":"Sand Dark"}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_appearance_snapshot()
+                .unwrap()
+                .unwrap()
+                .theme_name,
+            "Default Light"
+        );
+        store
+            .put(
+                "json",
+                "appearance.json",
+                br#"{"theme_mode":"light","theme_name":"Ayu Light"}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_appearance_snapshot()
+                .unwrap()
+                .unwrap()
+                .theme_name,
+            "Ayu Light"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6009,10 +7013,12 @@ mod tests {
                 engine_kind_id: "pi".into(),
                 prompt: "先核对成交".into(),
                 plugins_json: b"[]".to_vec(),
+                mcp_servers_json: b"[]".to_vec(),
                 context_folders_json: b"[]".to_vec(),
                 context_links_json: b"[]".to_vec(),
                 model_provider: String::new(),
                 model_id: String::new(),
+                memory_enabled: true,
             }],
             profiles: vec![AgentProfileRecord {
                 id: "profile-1".into(),
@@ -6034,10 +7040,12 @@ mod tests {
             engine_kind_id: "pi".into(),
             prompt: "先列提纲".into(),
             plugins_json: b"[]".to_vec(),
+            mcp_servers_json: b"[]".to_vec(),
             context_folders_json: b"[]".to_vec(),
             context_links_json: b"[]".to_vec(),
             model_provider: String::new(),
             model_id: String::new(),
+            memory_enabled: true,
         };
         store.insert_agent_definition(&extra).unwrap();
         store.put_agent_ui_prefs(&agent_ui).unwrap();
@@ -6046,9 +7054,20 @@ mod tests {
         assert_eq!(after_prefs.agents[1].id, "agent-2");
         assert!(!after_prefs.cross_agent_enabled);
 
-        let mut renamed = extra;
-        renamed.name = "改名".into();
-        assert!(store.update_agent_definition(&renamed).unwrap());
+        let renamed = store
+            .modify_agent_definition::<StoreError>("agent-2", |record| {
+                record.name = "改名".into();
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "改名");
+        assert!(
+            store
+                .modify_agent_definition::<StoreError>("missing", |_| Ok(()))
+                .unwrap()
+                .is_none()
+        );
         assert!(store.delete_agent_definition("agent-2").unwrap());
         assert!(!store.delete_agent_definition("agent-2").unwrap());
         let after_delete = store.get_agent_ui_snapshot().unwrap().unwrap();

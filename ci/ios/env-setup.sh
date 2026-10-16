@@ -18,6 +18,7 @@
 #   PUB_HOSTED_URL            pub 包管理源
 #   GEM_SOURCE_URL            RubyGems 镜像（装 CocoaPods 用）
 #   COCOAPODS_CDN_URL         CocoaPods 的 spec 源
+#   SMELT_IOS_RUBY            指定装 CocoaPods 用的 ruby 可执行文件
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
@@ -27,6 +28,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
 #            否则两边会把 iOS/Android 工程来回迁移。理由见那里的注释。
 # CocoaPods  iOS 构建时 flutter 会自动调 pod install 装 Runner 的原生依赖。
 REQUIRED_COCOAPODS="1.15.2"
+# Ruby       CocoaPods 的原生依赖 ffi 要求 >= 3.0。macOS 自带的 ruby 停在 2.6，
+#            且 Apple 已标为 deprecated，所以不能指望系统 ruby。
+REQUIRED_RUBY="3.0"
+
+# resolve_ruby 的结果
+RUBY_BIN=""
 
 CHECK_ONLY=0
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
@@ -93,9 +100,40 @@ setup_flutter() {
 }
 
 # ── CocoaPods ───────────────────────────────────────────────────────────────
-# 用系统 ruby 的 gem，但把 GEM_HOME 指到我们自己的目录：这样不需要 sudo，也不会
-# 往机器共用的 gem 目录里塞东西。装到 ~/.gem（--user-install 的默认位置）同样会
-# 影响别的项目，所以也不用。
+# 找一个能装 CocoaPods 的 ruby。
+#
+# 不用 /usr/bin/ruby：macOS 自带的是 2.6.10，而 CocoaPods 依赖的 ffi 要求
+# ruby >= 3.0，用系统 ruby 装一定在编 ffi 原生扩展时挂掉。Apple 不会再更新自带
+# 的 ruby，所以这里不做向下兼容，直接要求一个独立安装的 ruby。
+resolve_ruby() {
+  local candidates=()
+  [[ -n "${SMELT_IOS_RUBY:-}" ]] && candidates+=("$SMELT_IOS_RUBY")
+  # PATH 上的优先（rbenv/asdf/chruby 管的都在这），然后是 Homebrew 的固定位置。
+  candidates+=("$(command -v ruby || true)")
+  candidates+=(/opt/homebrew/opt/ruby/bin/ruby /usr/local/opt/ruby/bin/ruby)
+
+  local bin have
+  for bin in "${candidates[@]}"; do
+    [[ -n "$bin" && -x "$bin" ]] || continue
+    have="$(tool_version "$bin" -v)"
+    if [[ -n "$have" ]] && version_ge "$(numeric_version "$have")" "$REQUIRED_RUBY"; then
+      RUBY_BIN="$bin"
+      ok "Ruby ${have}（${bin}）"
+      return 0
+    fi
+  done
+
+  [[ -n "${SMELT_IOS_RUBY:-}" ]] \
+    && die "SMELT_IOS_RUBY 指向的 ruby 不可用或低于 ${REQUIRED_RUBY}：${SMELT_IOS_RUBY}"
+  die "找不到 >= $REQUIRED_RUBY 的 ruby。系统自带的 ruby 太旧，CocoaPods 依赖的 ffi
+  在它上面编不过。装一个：
+    brew install ruby
+  或用 SMELT_IOS_RUBY 指向已有的 ruby。"
+}
+
+# 用 resolve_ruby 挑中的 ruby 的 gem，但把 GEM_HOME 指到我们自己的目录：这样不需要
+# sudo，也不会往机器共用的 gem 目录里塞东西。装到 ~/.gem（--user-install 的默认
+# 位置）同样会影响别的项目，所以也不用。
 setup_cocoapods() {
   # 只设 GEM_HOME，不设 GEM_PATH。gem install 会装到 GEM_HOME，而搜索路径仍然
   # 保留 ruby 自带的 gem 目录——CocoaPods 依赖 base64、json 这些随 ruby 分发的
@@ -112,13 +150,17 @@ setup_cocoapods() {
 
   command -v gem >/dev/null 2>&1 || die "找不到 gem，无法安装 CocoaPods"
 
+  # 只在确实要装的时候才挑 ruby：机器上已经有可用的 pod 时，不该因为系统 ruby
+  # 太旧就把整个环境判死。
+  resolve_ruby
+
   info "安装 CocoaPods 到 $GEM_HOME_DIR"
-  # 不锁具体版本，装最新的即可：REQUIRED_COCOAPODS 是下限，不是钉子。构建机的
-  # ruby 版本未知，锁一个老版本反而容易碰上原生扩展编不过。
+  # 不锁具体版本，装最新的即可：REQUIRED_COCOAPODS 是下限，不是钉子。
   local gem_args=(install cocoapods --no-document)
   [[ -n "${GEM_SOURCE_URL:-}" ]] && gem_args+=(--clear-sources --source "$GEM_SOURCE_URL")
-  # 装的是纯 ruby + 少量原生扩展（ffi），CLT 已在 preflight 里确认过。
-  gem "${gem_args[@]}" \
+  # 走 `ruby -S gem` 而不是裸 `gem`：PATH 上的 gem 未必属于 resolve_ruby 挑中的
+  # 那个 ruby，混用会把原生扩展编到错的 ABI 上。
+  "$RUBY_BIN" -S gem "${gem_args[@]}" \
     || die "安装 CocoaPods 失败。内网机器请设置 GEM_SOURCE_URL 指向 RubyGems 镜像。"
 
   local now

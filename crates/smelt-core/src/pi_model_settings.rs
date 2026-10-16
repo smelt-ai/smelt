@@ -539,7 +539,7 @@ pub fn load_pi_model_settings_at(agent_dir: &Path) -> Result<PiModelSettings, St
     })
 }
 
-fn read_or_create_json(path: &Path) -> Result<serde_json::Value, String> {
+pub(crate) fn read_or_create_json(path: &Path) -> Result<serde_json::Value, String> {
     if path.is_file() {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
@@ -549,7 +549,11 @@ fn read_or_create_json(path: &Path) -> Result<serde_json::Value, String> {
     }
 }
 
-fn write_json_file(path: &Path, value: &serde_json::Value, secure: bool) -> Result<(), String> {
+pub(crate) fn write_json_file(
+    path: &Path,
+    value: &serde_json::Value,
+    secure: bool,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;

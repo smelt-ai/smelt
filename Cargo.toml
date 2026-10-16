@@ -11,6 +11,7 @@ members = [
     "crates/smelt-paths",
     "crates/smelt-plugin-api",
     "crates/smelt-plugin-host",
+    "crates/smelt-process-wait",
     "crates/smelt-event-bus",
     "crates/smelt-store",
     "crates/smelt-pairing",
@@ -39,11 +40,26 @@ rust-version = "1.97.0"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 
-# GPUI's macOS dependency chain still uses block 0.1.6, whose opaque Objective-C
-# class symbol is declared as an uninhabited enum. Keep the API/version unchanged
-# and patch only that FFI declaration until GPUI migrates to block2/objc2.
 [patch.crates-io]
-block = { path = "vendor/block-0.1.6" }
+# GPUI 用 crates.io 的 gpui-pre =0.3.9，即 gpui-kit 钉的快照。先不用 gpui-fast。
+# gpui-shell 的标准库（LLRT 模块）依赖 crates.io 的 `rquickjs`，gpui-kit 在它自己的
+# 工作区里把它 patch 成转发到 quickjs-jit 的兼容包，两边才是同一套类型和 VM。
+# patch 不随依赖传递，所以这里照抄一份，来源必须和下面的 gpui-kit 一致。
+rquickjs = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+
+# gpui-kit 临时换成 fork：zzfn/gpui-kit 的 `smelt` 分支 = 上游 1e7ffaa + gpui-shell
+# 嵌入宿主需要的改动（PluginManager::load_with_policy、set_editor_files、退出时
+# 任务表已销毁则跳过取消），待提上游。
+# 各 crate 的依赖声明不动，切换只在这一处；上游合并后删掉整段、把 rev 升到合并后的上游。
+# 用到的 gpui-kit 包必须整套一起换，混用会出现两份 gpui_base。
+# 本地改 fork 时可临时把这里换成 path = "../../wawa/gpui-kit/crates/..."，别提交。
+[patch."https://github.com/longbridge/gpui-kit"]
+gpui-base = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+gpui-component = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+gpui-fps = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+gpui-kit-assets = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+gpui-shell = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+gpui-component-shell = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

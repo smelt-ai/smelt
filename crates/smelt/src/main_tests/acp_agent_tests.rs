@@ -158,7 +158,6 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
         )),
         sid: Some("acp-1".into()),
         refresh_launch_from_settings: false,
-        fork_origin: None,
         conversation_binding: smelt_core::conversation::ConversationBinding::Plugin {
             plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
             route: smelt_plugin_api::PluginInputRouteBinding {
@@ -263,7 +262,7 @@ fn legacy_entries_are_readable_but_not_written_back() {
             { "Assistant": { "text": "old answer", "thought": false } }
         ]
     }))
-    .expect("旧 entries 字段不能让整个 ACP 会话存档解析失败");
+    .expect("不认识的 entries 字段不能让整个 ACP 会话存档解析失败");
 
     let migrated = serde_json::to_value(&legacy).unwrap();
     assert!(

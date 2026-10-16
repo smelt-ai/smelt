@@ -2,12 +2,13 @@
 # 把 workspace GUI 打包成可分发的 Smelt.app（Apple Silicon / arm64，不签名）。
 #
 # 用法：
-#   ./scripts/package-mac.sh            # 用已有 release 产物组装
+#   ./scripts/package-mac.sh            # 用已有 release 产物组装，并打 dmg
 #   ./scripts/package-mac.sh --build    # 先 cargo build --release 再组装
+#   ./scripts/package-mac.sh --no-dmg   # 只组装 .app。make install 走这条，本机开发不打分发映像
 #
 # 产物：
 #   dist/Smelt.app     —— 可双击运行的应用
-#   dist/Smelt.dmg     —— 分发件（定制拖拽安装窗口）
+#   dist/Smelt.dmg     —— 分发件（定制拖拽安装窗口；--no-dmg 时不产生）
 set -euo pipefail
 
 APP_NAME="Smelt"
@@ -29,23 +30,41 @@ AGENT_MCP_BIN="$ROOT/target/release/smelt-agent-mcp" # Agent 间消息的 STDIO 
 INSTALLER_BIN="$ROOT/target/release/smelt-installer" # GUI 退出后提交原子 App 交换
 PLUGIN_SOURCES="$ROOT/plugins"        # 每个子目录一个插件包（基础 manifest + 可选 UI sidecar/web）
 
-# dmgbuild 1.6.7 要求 Python >= 3.10；Command Line Tools 自带的
-# /usr/bin/python3 在新 macOS 上仍可能是 3.9，必须在耗时编译前报清楚。
+BUILD=0
+SKIP_DMG=0
+for arg in "$@"; do
+  case "$arg" in
+    --build) BUILD=1 ;;
+    --no-dmg) SKIP_DMG=1 ;;
+    *)
+      echo "✗ 未知参数：$arg" >&2
+      echo "  用法：$(basename "$0") [--build] [--no-dmg]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# 组装 .app 只用 python3 读插件清单，3.9 就够。dmgbuild 1.6.7 才要求 Python >= 3.10。
 PYTHON_COMMAND="${SMELT_PYTHON:-python3}"
 if ! PYTHON="$(command -v "$PYTHON_COMMAND")"; then
   echo "✗ 找不到 Python 解释器：$PYTHON_COMMAND" >&2
-  echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
+  if [[ "$SKIP_DMG" -eq 0 ]]; then
+    echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
+  fi
   exit 1
 fi
-if ! PYTHON_VERSION="$("$PYTHON" -c \
-  'import sys; print(".".join(map(str, sys.version_info[:3]))); sys.exit(sys.version_info < (3, 10))')"; then
-  echo "✗ 打包需要 Python >= 3.10，当前为 ${PYTHON_VERSION}（${PYTHON}）" >&2
-  echo "  macOS Command Line Tools 的 /usr/bin/python3 可能仍是 3.9。" >&2
-  echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
-  exit 1
+if [[ "$SKIP_DMG" -eq 0 ]]; then
+  if ! PYTHON_VERSION="$("$PYTHON" -c \
+    'import sys; print(".".join(map(str, sys.version_info[:3]))); sys.exit(sys.version_info < (3, 10))')"; then
+    echo "✗ 打包 dmg 需要 Python >= 3.10，当前为 ${PYTHON_VERSION}（${PYTHON}）" >&2
+    echo "  macOS Command Line Tools 的 /usr/bin/python3 可能仍是 3.9。" >&2
+    echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
+    echo "  本机开发安装用：./scripts/package-mac.sh --no-dmg" >&2
+    exit 1
+  fi
 fi
 
-if [[ "${1:-}" == "--build" ]]; then
+if [[ "$BUILD" -eq 1 ]]; then
   echo "▶ 编译 release …"
   if ! "$ROOT/scripts/bundled-plugins.sh" dirs >/dev/null; then
     echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝继续打包" >&2
@@ -109,6 +128,42 @@ if ! file "$BIN" | grep -q "arm64"; then
   echo "✗ $BIN 不是 arm64，同事的 Apple Silicon Mac 会闪退。请在 Apple Silicon 上编译。" >&2
   exit 1
 fi
+
+# 在临时目录组装。签名校验通过前不碰 dist 里的正式包，失败的半成品不能被
+# make install 当成已经打好的 Smelt.app。
+mkdir -p "$DIST"
+PUBLISHED_APP="$APP"
+STAGE_PARENT="$(mktemp -d "$DIST/.package-stage.XXXXXX")"
+APP="$STAGE_PARENT/$APP_NAME.app"
+MACOS="$APP/Contents/MacOS"
+RES="$APP/Contents/Resources"
+published=false
+cleanup_unpublished_stage() {
+  status=$?
+  trap - EXIT INT TERM
+  if [[ "$published" != true && -n "${STAGE_PARENT:-}" && -d "$STAGE_PARENT" ]]; then
+    rm -rf -- "$STAGE_PARENT"
+  fi
+  exit "$status"
+}
+trap cleanup_unpublished_stage EXIT INT TERM
+
+publish_signed_app() {
+  local next="$DIST/.$APP_NAME.app.next"
+  local prev="$DIST/.$APP_NAME.app.prev"
+  rm -rf -- "$next"
+  mv -- "$APP" "$next"
+  if [[ -d "$PUBLISHED_APP" ]]; then
+    rm -rf -- "$prev"
+    mv -- "$PUBLISHED_APP" "$prev"
+  fi
+  mv -- "$next" "$PUBLISHED_APP"
+  published=true
+  rm -rf -- "$prev" "$STAGE_PARENT"
+  APP="$PUBLISHED_APP"
+  MACOS="$APP/Contents/MacOS"
+  RES="$APP/Contents/Resources"
+}
 
 echo "▶ 组装 $APP_NAME.app (v$VERSION) …"
 rm -rf "$APP"
@@ -186,6 +241,24 @@ for dir in "${plugin_dirs[@]}"; do
     cp -R "${dir}assets" "$target/assets"
   fi
   echo "  … 打包插件：${plugin_id}"
+done
+
+# gpui-shell 插件（可行性原型，见 crates/smelt/src/shell_plugins）：与上面的 bun
+# 插件体系无关，整目录随 App 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell
+# 加载时写编辑器文件的行为，不会写进已签名的 .app）。
+SHELL_PLUGINS="$RES/shell-plugins"
+for dir in "$ROOT"/shell-plugins/*/; do
+  [[ -f "${dir}gpui-shell.json" ]] || continue
+  target="$SHELL_PLUGINS/$(basename "$dir")"
+  mkdir -p "$target"
+  for file in "$dir"*; do
+    case "$(basename "$file")" in
+      # gpui-shell 生成给编辑器用的文件，不是插件内容。
+      gpui-kit.d.ts|jsconfig.json) continue ;;
+    esac
+    cp -R "$file" "$target/"
+  done
+  echo "  … 打包 gpui-shell 插件：$(basename "$dir")"
 done
 
 # 可选：把当前包对应的内部发布地址写进 App。若发布系统是在打包后才生成
@@ -278,42 +351,37 @@ xattr -cr "$APP" || true
 #    Mach-O 都带 Hardened Runtime。公证与 staple 在 ci/mac/ci.sh 的 notarize 阶段做。
 #
 # 2) 自签名（scripts/setup-codesign-identity.sh 生成的 "Smelt Local Signing"）：
-#    只解决本机身份稳定，过不了公证，自用/局域网分发够用。事件总线会校验正在运行
-#    进程的共同签名证书，因此不能回退到各二进制身份互不相同的 ad-hoc 签名。
+#    只解决本机身份稳定，过不了公证。事件总线要正在运行的进程共用同一张证书。
 #
 # CI 通过 SMELT_CODESIGN_IDENTITY 指定身份（发布时给 "Developer ID Application: … (TEAMID)"）。
+# 不设时用本机「Smelt Local Signing」。身份缺失或写成 "-" 时直接失败，不会调用 codesign -。
 IDENTITY="${SMELT_CODESIGN_IDENTITY:-Smelt Local Signing}"
-IDENTITY_FOUND=false
-if [[ "$IDENTITY" != "-" ]]; then
-  if security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
-    IDENTITY_FOUND=true
-  elif [[ "$IDENTITY" == "Smelt Local Signing" ]] \
-    && security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
-    # Self-signed local certificates have no trusted chain, so find-identity may omit them even
-    # though codesign can use the matching private key imported by setup-codesign-identity.sh.
-    IDENTITY_FOUND=true
-  fi
-fi
-if [[ "$IDENTITY" != "-" && "$IDENTITY_FOUND" != true ]]; then
-  # Developer ID 是发布/公证场景，签不上就该立刻失败——静默回退 ad-hoc 会签出一个过不了
-  # 公证的包，要拖到后面 notarize 阶段才炸，反馈太晚，还可能被误当成功件分发。
-  # preflight 逐项自查，把常见根因（keychain 没解锁/没导入证书）直接摊在日志里。
-  if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
-    echo "✗ 未找到 Developer ID 签名身份「${IDENTITY}」，发布构建拒绝回退 ad-hoc。"
-    echo "  当前 codesigning 身份清单："
-    security find-identity -v -p codesigning || true
-    echo "  自查：1) keychain 已解锁？(security unlock-keychain)"
-    echo "        2) Developer ID Application 证书+私钥已导入该 keychain？"
-    echo "        3) SMELT_CODESIGN_IDENTITY 与 find-identity 里的 common-name 完全一致？"
-    exit 1
-  fi
-  echo "✗ 未找到签名身份「${IDENTITY}」，事件总线安全认证不支持回退 ad-hoc。"
-  echo "  一次性修复：./scripts/setup-codesign-identity.sh"
+if [[ -z "$IDENTITY" || "$IDENTITY" == "-" ]]; then
+  echo "✗ 签名身份无效。打包只接受钥匙串里的证书，不接受 ad-hoc（-）。" >&2
+  echo "  本机：./scripts/setup-codesign-identity.sh" >&2
+  echo "  发布：设置 SMELT_CODESIGN_IDENTITY 为 Developer ID Application: … (TEAMID)" >&2
   exit 1
 fi
-if [[ "$IDENTITY" == "-" ]]; then
-  echo "✗ 事件总线安全认证要求所有 Smelt 进程共享证书签名，不支持 ad-hoc 签名。"
-  echo "  一次性修复：./scripts/setup-codesign-identity.sh"
+IDENTITY_FOUND=false
+if security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
+  IDENTITY_FOUND=true
+elif [[ "$IDENTITY" == "Smelt Local Signing" ]] \
+  && security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+  # 自签名没有系统信任链，find-identity 可能不列出，但 codesign 仍能用导入的私钥。
+  IDENTITY_FOUND=true
+fi
+if [[ "$IDENTITY_FOUND" != true ]]; then
+  if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
+    echo "✗ 未找到 Developer ID 签名身份「${IDENTITY}」。" >&2
+    echo "  当前 codesigning 身份清单：" >&2
+    security find-identity -v -p codesigning || true
+    echo "  自查：1) keychain 已解锁？(security unlock-keychain)" >&2
+    echo "        2) Developer ID Application 证书+私钥已导入该 keychain？" >&2
+    echo "        3) SMELT_CODESIGN_IDENTITY 与 find-identity 里的 common-name 完全一致？" >&2
+    exit 1
+  fi
+  echo "✗ 未找到签名身份「${IDENTITY}」。" >&2
+  echo "  一次性修复：./scripts/setup-codesign-identity.sh" >&2
   exit 1
 fi
 
@@ -347,6 +415,14 @@ else
   echo "▶ 自签名（身份：${IDENTITY}，仅稳定权限，过不了公证）…"
   codesign --force --deep --sign "$IDENTITY" "$APP"
   codesign --verify --deep --strict "$APP" && echo "  ✓ 签名校验通过"
+fi
+publish_signed_app
+
+if [[ "$SKIP_DMG" -eq 1 ]]; then
+  echo ""
+  echo "✅ 完成"
+  echo "   应用：   $APP"
+  exit 0
 fi
 
 echo "▶ 打 dmg（定制安装窗口）…"

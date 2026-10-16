@@ -31,7 +31,7 @@ use crate::daemon_state::DaemonPhase;
 mod apply;
 pub use apply::{
     ApplyOutcome, acknowledge_composer_restore, apply_event, finalize_dangling_tool_calls,
-    queue_composer_restore,
+    queue_composer_restore, queued_item_images, take_claimed_queue_text,
 };
 use apply::{pending_action_phase, resume_running};
 
@@ -214,7 +214,7 @@ pub struct PendingElicitation {
     pub message: String,
     pub fields: Vec<ElicitFieldView>,
     /// 已选中的 (字段下标 → 选项下标列表)，跟旧版 `ElicitCard.chosen` 同一份
-    /// 语义——GUI 要能画出「已经点了哪些」，不能重连一次就清空選択态。
+    /// 语义——GUI 要能画出「已经点了哪些」，不能重连一次就清空选择态。
     pub chosen: BTreeMap<usize, Vec<usize>>,
     #[serde(default)]
     pub text_values: BTreeMap<usize, String>,
@@ -276,6 +276,10 @@ pub struct BackgroundTaskView {
     pub started_at_ms: u64,
     #[serde(default)]
     pub finished_at_ms: Option<u64>,
+    /// 挂接任务（后台子智能体）是哪次工具调用派出去的。界面据此把那张派发卡片
+    /// 画成还在后台跑；宿主自己起的命令没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -548,6 +552,90 @@ pub struct RuntimeDebug {
     pub model_call: Option<RuntimeDebugModelCall>,
 }
 
+impl RuntimeDebugModelCall {
+    /// 父进程镜像留的账本：序号、模型和时间还在，请求体与响应体不留。
+    fn ledger(&self) -> Self {
+        Self {
+            sequence: self.sequence,
+            turn: self.turn,
+            compaction_sequence: self.compaction_sequence,
+            captured_at_ms: self.captured_at_ms,
+            source: self.source.clone(),
+            payload_source: self.payload_source.clone(),
+            model: self.model.clone(),
+            request_captured_at_ms: self.request_captured_at_ms,
+            response_captured_at_ms: self.response_captured_at_ms,
+            response_metadata: self.response_metadata.clone(),
+            redacted_paths: self.redacted_paths.clone(),
+            pi_context_redacted_paths: self.pi_context_redacted_paths.clone(),
+            request_headers: self.request_headers.clone(),
+            response_redacted_paths: self.response_redacted_paths.clone(),
+            ..Self::default()
+        }
+    }
+}
+
+impl RuntimeDebugCompaction {
+    fn ledger(&self) -> Self {
+        let source_messages_omitted = self
+            .source_messages_omitted
+            .saturating_add(self.source_messages.len());
+        Self {
+            sequence: self.sequence,
+            turn: self.turn,
+            status: self.status.clone(),
+            reason: self.reason.clone(),
+            will_retry: self.will_retry,
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            first_kept_entry_id: self.first_kept_entry_id.clone(),
+            tokens_before: self.tokens_before,
+            is_split_turn: self.is_split_turn,
+            previous_summary: self.previous_summary.clone(),
+            summarized_message_count: self.summarized_message_count,
+            turn_prefix_message_count: self.turn_prefix_message_count,
+            source_messages_omitted,
+            summary: self.summary.clone(),
+            usage: self.usage.clone(),
+            from_extension: self.from_extension,
+            aborted: self.aborted,
+            error_message: self.error_message.clone(),
+            request_headers: self.request_headers.clone(),
+            response_metadata: self.response_metadata.clone(),
+            source_messages: Vec::new(),
+        }
+    }
+}
+
+impl RuntimeDebug {
+    /// 去掉会把进程撑大的正文。轨迹窗口要的完整请求只在变更帧上走一遭，不进父镜像。
+    pub fn ledger(&self) -> Self {
+        Self {
+            version: self.version,
+            source: self.source.clone(),
+            system_prompt: None,
+            tools: Vec::new(),
+            model_calls: self
+                .model_calls
+                .iter()
+                .map(RuntimeDebugModelCall::ledger)
+                .collect(),
+            model_calls_omitted: self.model_calls_omitted,
+            compactions: self
+                .compactions
+                .iter()
+                .map(RuntimeDebugCompaction::ledger)
+                .collect(),
+            compactions_omitted: self.compactions_omitted,
+            model_call: None,
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// smeltd → GUI 的完整快照：`acp_watch`/`acp_open` 接上时发一份，之后每次
 /// `apply_event` 有实质变化再发一份。entries 使用尾片增量；大体积 runtime debug
 /// sidecar 只在变更帧、显式全量恢复和初始 attach 时携带，避免完整模型历史随每个
@@ -597,6 +685,10 @@ pub struct ConversationSnapshot {
     pub acp_session_id: Option<String>,
     /// 跨进程恢复时传给 `session/load` 的 canonical history id。
     pub history_session_id: Option<String>,
+    /// 这份历史已经确认读不出来。和 `history_session_id` 同属会话身份：
+    /// 有 id 时以 id 为准；没有 id 且为真，才清空库里的恢复身份。
+    /// 旧快照没有这个字段，按未放弃读。
+    pub history_abandoned: bool,
     pub supports_image: bool,
     pub available_commands: Vec<(String, String)>,
     pub usage: Option<(u64, u64)>,
@@ -673,6 +765,10 @@ pub struct ConversationSnapshot {
     /// 旧交接文件没有这个字段，仍按其中的 `entries` 恢复。
     #[serde(default)]
     pub history_omitted: bool,
+    /// 这帧只带正文尾部和相位。命令、配置、计划、队列、计时等信封没变，
+    /// 接收方必须保留上一份，不能把空列表当成清空。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub envelope_omitted: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -710,6 +806,8 @@ struct ConversationSnapshotDe {
     acp_session_id: Option<String>,
     #[serde(default)]
     history_session_id: Option<String>,
+    #[serde(default)]
+    history_abandoned: bool,
     supports_image: bool,
     available_commands: Vec<(String, String)>,
     usage: Option<(u64, u64)>,
@@ -756,6 +854,8 @@ struct ConversationSnapshotDe {
     history_error: Option<String>,
     #[serde(default)]
     history_omitted: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    envelope_omitted: bool,
 }
 
 impl From<ConversationSnapshotDe> for ConversationSnapshot {
@@ -784,6 +884,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             status_line: de.status_line,
             acp_session_id: de.acp_session_id,
             history_session_id: de.history_session_id,
+            history_abandoned: de.history_abandoned,
             supports_image: de.supports_image,
             available_commands: de.available_commands,
             usage: de.usage,
@@ -811,6 +912,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             should_persist: de.should_persist,
             history_error: de.history_error,
             history_omitted: de.history_omitted,
+            envelope_omitted: de.envelope_omitted,
         }
     }
 }
@@ -840,6 +942,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             status_line: snap.status_line,
             acp_session_id: snap.acp_session_id,
             history_session_id: snap.history_session_id,
+            history_abandoned: snap.history_abandoned,
             supports_image: snap.supports_image,
             available_commands: snap.available_commands,
             usage: snap.usage,
@@ -867,6 +970,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             should_persist: snap.should_persist,
             history_error: snap.history_error,
             history_omitted: snap.history_omitted,
+            envelope_omitted: snap.envelope_omitted,
         }
     }
 }
@@ -933,7 +1037,7 @@ pub struct LivePermission {
 }
 
 /// 选择题卡片：字段原始形态保留在 `raw_fields`（翻译回
-/// `ElicitationContentValue` 要用），`chosen` 是当前選択态。
+/// `ElicitationContentValue` 要用），`chosen` 是当前选择态。
 pub struct LiveElicitation {
     pub message: String,
     pub raw_fields: Vec<ElicitField>,
@@ -948,6 +1052,18 @@ pub struct LiveElicitation {
     pub raw_request_line: Option<String>,
 }
 
+fn last_user_index(entries: &[AcpEntry]) -> Option<usize> {
+    entries
+        .iter()
+        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
+}
+
+/// 一次宿主快照合并的结果。调试正文只活到父进程把这一帧写给已经打开的窗口。
+pub struct HostedSnapshotMerge {
+    pub changed_from: usize,
+    pub runtime_debug: Option<RuntimeDebug>,
+}
+
 /// smeltd 侧一份 ACP 会话的完整活体状态。协议事件走 `apply_event`，用户动作走
 /// `apply_user_action` / `note_*`；连接级结束（所有权冲突、provider 没退出、
 /// 传输断开）走 [`force_end`]。smeltd 不得再直接写 `phase`。
@@ -956,7 +1072,15 @@ pub struct LiveElicitation {
 /// Thinking / AwaitingApproval / WaitingForUser / Dead；Succeeded、Failed、
 /// ExecutingTool 是守护广播层的投影。
 pub struct AcpSessionState {
-    pub entries: Vec<AcpEntry>,
+    /// 归约器的工作缓冲。重放期间它是从空缓冲重建的草稿，不是会话正文，
+    /// 所以不对外公开：外部一律读 [`Self::entries`]（已发布正文）。
+    /// 父进程镜像在合并宿主快照后会丢掉已提交前缀，只留当前回合；
+    /// 这时 `entries[0]` 的绝对下标是 [`Self::entries_base`]。
+    /// 会话宿主的归约从 0 开始。死亡宿主的重启种子可能只是这一截后缀，
+    /// 重放提交后 [`Self::commit_replay`] 把下标清回 0。
+    entries: Vec<AcpEntry>,
+    /// `entries` 之前还有这么多条已提交正文不在这个缓冲里。
+    entries_base: usize,
     pub tool_debug: BTreeMap<String, ToolCallDebug>,
     /// 只在内存里递增。快照不带它。连接用它判断这帧要不要再带整张工具参数表。
     pub tool_debug_generation: u64,
@@ -980,13 +1104,20 @@ pub struct AcpSessionState {
     pub acp_session_id: Option<String>,
     /// 已确认的历史会话 id。恢复成功建立新 runtime 连接时也不能覆盖它。
     pub history_session_id: Option<String>,
+    /// 这份历史已经确认读不出来。和 `history_session_id` 同属会话身份。
+    /// 有 id 时以 id 为准；没有 id 且为真，才清空库里的恢复身份。
+    pub history_abandoned: bool,
     pub supports_image: bool,
     /// 「等自己刚发那条 prompt 的回声」，见旧版字段同名注释——语义原样保留。
     pub awaiting_user_echo: bool,
     /// `session/load` 正在重建历史投影。回放通知和实时通知共用同一套 ACP
     /// update，必须在本地记住这段边界，避免历史 assistant/tool 消息把空闲
-    /// 会话误标成 Running。下一次用户 prompt 发出时结束回放态。
+    /// 会话误标成 Running。收到 `HistoryReplayFinished`（或失败重置、中途发新 prompt）时收尾结束。
     pub replaying_history: bool,
+    /// 重放期间 `entries` 是从空缓冲重建的草稿。已经交给窗口的正文留在这里。
+    /// 快照、活帧和历史分页都读它；草稿重建完再一次性换上，中间那帧空缓冲
+    /// 不能被当成「会话现在没有消息」。
+    replay_baseline: Option<Vec<AcpEntry>>,
     pub available_commands: Vec<(String, String)>,
     pub usage: Option<(u64, u64)>,
     pub usage_cached_read: Option<u64>,
@@ -1031,6 +1162,7 @@ impl Default for AcpSessionState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            entries_base: 0,
             tool_debug: BTreeMap::new(),
             tool_debug_generation: 0,
             runtime_debug: RuntimeDebug::default(),
@@ -1048,9 +1180,11 @@ impl Default for AcpSessionState {
             status_line: None,
             acp_session_id: None,
             history_session_id: None,
+            history_abandoned: false,
             supports_image: true,
             awaiting_user_echo: false,
             replaying_history: false,
+            replay_baseline: None,
             available_commands: Vec::new(),
             usage: None,
             usage_cached_read: None,
@@ -1123,7 +1257,9 @@ impl AcpSessionState {
             snap.phase
         };
         let mut restored = Self {
+            // `entries` 是从 `entries_offset` 开始的一截。忽略这个下标会把后缀当成全文。
             entries: snap.entries,
+            entries_base: snap.entries_offset,
             tool_debug: snap.tool_debug.unwrap_or_default(),
             tool_debug_generation: 0,
             runtime_debug: snap.runtime_debug.unwrap_or_default(),
@@ -1141,9 +1277,11 @@ impl AcpSessionState {
             status_line: snap.status_line,
             acp_session_id: snap.acp_session_id,
             history_session_id: snap.history_session_id,
+            history_abandoned: snap.history_abandoned,
             supports_image: snap.supports_image,
             awaiting_user_echo: false,
             replaying_history: false,
+            replay_baseline: None,
             available_commands: snap.available_commands,
             usage: snap.usage,
             usage_cached_read: snap.usage_cached_read,
@@ -1181,14 +1319,18 @@ impl AcpSessionState {
 
     /// 把独立 ACP session host 发来的 wire 快照合并进 daemon 的只读镜像。
     ///
-    /// session host 才持有真实 JSON-RPC responder 与回合队列；daemon 这份状态只
-    /// 服务于 list/watch/任务对账。因此待审批卡片在这里恢复为 `responder=None`，
-    /// 用户动作必须继续转发给 host，不能在这份镜像上调用 `select_permission` /
-    /// `submit_elicitation`。
+    /// session host 才持有真实 JSON-RPC responder、回合队列和已提交正文。daemon
+    /// 这份状态只服务于 list/watch/任务对账，所以只留下当前回合（空闲时留下
+    /// 刚结束的那一轮，供自动化取输出）。更早的正文向宿主分页要。
+    /// 分页失败也不把整段放回这里：权威正文在宿主和会话文件里。
     ///
-    /// 返回最早变化的 entry 下标。增量快照的前缀若不在本地，说明 daemon 在
-    /// exec/重连窗口漏过了基线；调用方应请求 host 重发 offset=0 的完整快照。
-    pub fn merge_hosted_snapshot(&mut self, snap: ConversationSnapshot) -> Result<usize, String> {
+    /// 待审批卡片在这里恢复为 `responder=None`，用户动作必须继续转发给 host。
+    /// 返回最早变化的绝对 entry 下标，以及本帧完整的调试体（镜像里只留账本）。
+    /// 增量尾巴接不上本地末端时，调用方应请求 host 重发完整快照。
+    pub fn merge_hosted_snapshot(
+        &mut self,
+        snap: ConversationSnapshot,
+    ) -> Result<HostedSnapshotMerge, String> {
         let ConversationSnapshot {
             entries_offset,
             entries_total,
@@ -1209,6 +1351,7 @@ impl AcpSessionState {
             status_line,
             acp_session_id,
             history_session_id,
+            history_abandoned,
             supports_image,
             available_commands,
             usage,
@@ -1236,12 +1379,13 @@ impl AcpSessionState {
             should_persist: _,
             history_error: _,
             history_omitted: _,
+            envelope_omitted,
         } = snap;
 
-        if entries_offset > self.entries.len() {
+        let local_end = self.entries_base + self.entries.len();
+        if entries_offset > local_end {
             return Err(format!(
-                "host 快照缺少历史前缀：offset={entries_offset}, local={}",
-                self.entries.len()
+                "host 快照缺少历史前缀：offset={entries_offset}, local={local_end}"
             ));
         }
         let merged_len = entries_offset.saturating_add(entries.len());
@@ -1252,76 +1396,124 @@ impl AcpSessionState {
             ));
         }
 
-        self.entries.truncate(entries_offset);
-        self.entries.extend(entries);
+        let changed_from = entries_offset;
+        if entries_offset < self.entries_base {
+            // 尾巴盖过了已经丢掉的前缀。先整段接上，下面再按回合裁。
+            self.entries_base = entries_offset;
+            self.entries = entries;
+        } else {
+            let local_index = entries_offset - self.entries_base;
+            self.entries.truncate(local_index);
+            self.entries.extend(entries);
+        }
         if let Some(tool_debug) = tool_debug {
             self.tool_debug = tool_debug;
             self.note_tool_debug_changed();
         }
-        if let Some(runtime_debug) = runtime_debug {
-            self.runtime_debug = runtime_debug;
+        let runtime_debug = if let Some(runtime_debug) = runtime_debug {
+            self.runtime_debug = runtime_debug.ledger();
+            Some(runtime_debug)
+        } else {
+            None
+        };
+        // 没带标题不是清空。流式尾巴经常省略标题，盖掉已有协议标题后，
+        // 父镜像只会用当前这一截的提问当兜底，侧栏就闪成另一串字再跳回来。
+        if let Some(title) = crate::session_title::provider_session_title(session_title.as_deref())
+        {
+            self.protocol_title = Some(title.to_string());
         }
-        self.protocol_title = session_title;
         self.phase = phase;
         self.end_reason = end_reason;
         self.end_kind = end_kind;
-        self.accepted_delivery_ids = accepted_delivery_ids;
-        self.active_delivery_id = active_delivery_id;
-        self.completed_delivery_id = completed_delivery_id;
-        self.permissions = pending_permissions
-            .into_iter()
-            .map(|permission| LivePermission {
-                question: permission.question,
-                tool_call_id: permission.tool_call_id,
-                options: permission.options,
-                details: permission.details,
-                responder: None,
-                raw_request_line: None,
-            })
-            .collect();
-        self.elicitation = pending_elicitation.map(|elicitation| LiveElicitation {
-            message: elicitation.message,
-            raw_fields: elicitation
-                .fields
+        if !envelope_omitted {
+            self.accepted_delivery_ids = accepted_delivery_ids;
+            self.active_delivery_id = active_delivery_id;
+            self.completed_delivery_id = completed_delivery_id;
+            self.permissions = pending_permissions
                 .into_iter()
-                .map(mirror_elicitation_field)
-                .collect(),
-            chosen: elicitation.chosen,
-            text_values: elicitation.text_values,
-            responder: None,
-            recovered_tool_call_id: None,
-            raw_request_line: None,
-        });
-        self.status_line = status_line;
+                .map(|permission| LivePermission {
+                    question: permission.question,
+                    tool_call_id: permission.tool_call_id,
+                    options: permission.options,
+                    details: permission.details,
+                    responder: None,
+                    raw_request_line: None,
+                })
+                .collect();
+            self.elicitation = pending_elicitation.map(|elicitation| LiveElicitation {
+                message: elicitation.message,
+                raw_fields: elicitation
+                    .fields
+                    .into_iter()
+                    .map(mirror_elicitation_field)
+                    .collect(),
+                chosen: elicitation.chosen,
+                text_values: elicitation.text_values,
+                responder: None,
+                recovered_tool_call_id: None,
+                raw_request_line: None,
+            });
+            self.status_line = status_line;
+            self.available_commands = available_commands;
+            self.usage = usage;
+            self.usage_cached_read = usage_cached_read;
+            self.usage_cost = usage_cost;
+            self.usage_breakdown = usage_breakdown;
+            self.plan = plan;
+            self.background_tasks = background_tasks;
+            self.model = model;
+            self.config_options = config_options;
+            self.supports_compaction = supports_compaction;
+            self.supports_native_queue = supports_native_queue;
+            self.supports_rewind = supports_rewind;
+            self.compacting = compacting;
+            self.queued_steering = queued_steering;
+            self.queued_steering_images.clear();
+            self.queued_follow_up = queued_follow_up;
+            self.composer_restore_revision = composer_restore_revision;
+            self.composer_restore_texts = composer_restore_texts;
+            self.composer_restore_images = composer_restore_images;
+            self.turn_started_at_ms = turn_started_at_ms;
+            self.turn_timings = turn_timings;
+        }
         self.acp_session_id = acp_session_id;
-        self.history_session_id = history_session_id;
+        self.history_session_id = history_session_id.filter(|id| !id.trim().is_empty());
+        self.history_abandoned = history_abandoned;
         self.supports_image = supports_image;
         self.awaiting_user_echo = false;
         self.replaying_history = replaying_history;
-        self.available_commands = available_commands;
-        self.usage = usage;
-        self.usage_cached_read = usage_cached_read;
-        self.usage_cost = usage_cost;
-        self.usage_breakdown = usage_breakdown;
-        self.plan = plan;
-        self.background_tasks = background_tasks;
-        self.model = model;
-        self.config_options = config_options;
-        self.supports_compaction = supports_compaction;
-        self.supports_native_queue = supports_native_queue;
-        self.supports_rewind = supports_rewind;
-        self.compacting = compacting;
-        self.queued_steering = queued_steering;
-        self.queued_steering_images.clear();
-        self.queued_follow_up = queued_follow_up;
-        self.composer_restore_revision = composer_restore_revision;
-        self.composer_restore_texts = composer_restore_texts;
-        self.composer_restore_images = composer_restore_images;
-        self.turn_started_at_ms = turn_started_at_ms;
-        self.turn_timings = turn_timings;
         self.completed_unread = completed_unread;
         self.turn_outcome = turn_outcome;
-        Ok(entries_offset)
+        self.retain_mirror_suffix();
+        Ok(HostedSnapshotMerge {
+            changed_from,
+            runtime_debug,
+        })
+    }
+
+    /// 父镜像不保留已提交前缀。进行中的回合从最后一条用户消息留到末尾；
+    /// 空闲时同样留下刚结束的那一轮，自动化要拿它的输出，恢复判断也才知道这不是空会话。
+    fn retain_mirror_suffix(&mut self) {
+        let active = self.turn_started_at_ms.is_some()
+            || matches!(
+                self.phase,
+                DaemonPhase::Thinking
+                    | DaemonPhase::ExecutingTool
+                    | DaemonPhase::AwaitingApproval
+                    | DaemonPhase::WaitingForUser
+            )
+            || crate::acp_chat::has_unfinished_tool_call(&self.entries);
+        let keep_from = if active {
+            last_user_index(&self.entries).unwrap_or(0)
+        } else {
+            last_user_index(&self.entries).unwrap_or(self.entries.len())
+        };
+        if keep_from == 0 {
+            return;
+        }
+        self.entries.drain(0..keep_from);
+        self.entries.shrink_to_fit();
+        self.entries_base += keep_from;
     }
 
     /// 当前有没有一张卡（权限/选择题）正等着人处理，有就带上它原始请求那行
@@ -1341,10 +1533,62 @@ impl AcpSessionState {
     }
 
     /// 协议标题优先；Agent 尚未上报或明确清空时，用首条用户消息兜底。
+    /// 标题已经在协议里时不再扫描正文。
     pub fn resolved_session_title(&self) -> Option<String> {
-        self.protocol_title
-            .clone()
-            .or_else(|| crate::acp_chat::auto_title(&self.entries))
+        if let Some(title) =
+            crate::session_title::provider_session_title(self.protocol_title.as_deref())
+        {
+            return Some(title.to_string());
+        }
+        let fallback = crate::acp_chat::auto_title(self.entries());
+        crate::session_title::session_name(None, fallback.as_deref())
+    }
+
+    /// 会话正文：窗口、分页、活帧、回退校验与持久化看到的都是这一份。
+    /// 重放草稿还没换上之前，这里是重放前已发布的那一份。
+    /// 父镜像裁过前缀时，这只是绝对历史末尾的那一截。
+    pub fn entries(&self) -> &[AcpEntry] {
+        self.replay_baseline.as_deref().unwrap_or(&self.entries)
+    }
+
+    /// 父镜像丢掉的已提交前缀长度。宿主和同进程会话是 0。
+    pub fn entries_base(&self) -> usize {
+        self.entries_base
+    }
+
+    /// 重启宿主前把整段正文放回父镜像，作为新宿主的种子。下一帧合并会再裁掉。
+    pub fn install_resident_entries(&mut self, entries: Vec<AcpEntry>) {
+        self.entries = entries;
+        self.entries_base = 0;
+    }
+
+    /// 绝对历史长度。父镜像即使只留着当前回合，这个数仍是宿主那边的总长度。
+    pub fn entries_total(&self) -> usize {
+        self.entries_base + self.entries().len()
+    }
+
+    /// 测试搭场景用：直接改工作缓冲，绕过归约器。正式代码不得启用。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn entries_mut(&mut self) -> &mut Vec<AcpEntry> {
+        &mut self.entries
+    }
+
+    /// 重放草稿是从 0 开始的完整投影。提交时丢掉上一份正文，并把后缀下标清掉。
+    /// 没在重放时调用只清标志。后缀种子的绝对长度要留到真正的重放提交。
+    pub fn commit_replay(&mut self) {
+        let committing_scratch = self.replay_baseline.take().is_some();
+        if committing_scratch {
+            self.entries_base = 0;
+        }
+        self.replaying_history = false;
+    }
+
+    /// 重放没有形成完整投影。草稿不能当会话，回到开始重放前已发布的正文。
+    pub fn abandon_replay_scratch(&mut self) {
+        if let Some(baseline) = self.replay_baseline.take() {
+            self.entries = baseline;
+        }
+        self.replaying_history = false;
     }
 
     /// `should_persist` 不是从 `self` 能算出来的——它是"这次变化是怎么发生的"
@@ -1353,6 +1597,8 @@ impl AcpSessionState {
     /// 已落进会话文件的历史终点，以及还没写完的这一轮。
     /// 空闲且没有进行中的工具时，这一轮是空的。
     pub fn open_turn_range(&self) -> (usize, usize) {
+        let entries = self.entries();
+        let total = self.entries_base + entries.len();
         let active = self.turn_started_at_ms.is_some()
             || matches!(
                 self.phase,
@@ -1361,26 +1607,46 @@ impl AcpSessionState {
                     | DaemonPhase::AwaitingApproval
                     | DaemonPhase::WaitingForUser
             )
-            || crate::acp_chat::has_unfinished_tool_call(&self.entries);
+            || crate::acp_chat::has_unfinished_tool_call(entries);
         if !active {
-            return (self.entries.len(), self.entries.len());
+            return (total, total);
         }
-        let start = self
-            .entries
-            .iter()
-            .rposition(|entry| {
-                matches!(
-                    entry,
-                    crate::acp_chat::AcpEntry::User(_)
-                        | crate::acp_chat::AcpEntry::UserWithImages { .. }
-                )
-            })
-            .unwrap_or(0);
-        (start, self.entries.len())
+        let start = last_user_index(entries).unwrap_or(0);
+        (self.entries_base + start, total)
     }
 
     pub fn to_snapshot(&self, should_persist: bool) -> ConversationSnapshot {
         self.to_snapshot_since(should_persist, 0)
+    }
+
+    /// 旁观或历史首帧。活状态始终来自当前镜像。
+    /// `hosted_page` 只用来补 `[offset, entries_base)` 里已经丢掉的正文；
+    /// 镜像里还留着的后缀以这里为准，分页等待期间的流式更新不会被旧页盖住。
+    /// 页的总长度对不上、或没有盖到后缀起点时，退回镜像自己能证明的那一截。
+    pub fn snapshot_with_older_page(
+        &self,
+        offset: usize,
+        hosted_page: Option<&ConversationSnapshot>,
+    ) -> ConversationSnapshot {
+        let mut snapshot = self.to_snapshot_since(false, offset);
+        let Some(page) = hosted_page else {
+            return snapshot;
+        };
+        let base = self.entries_base;
+        let total = self.entries_total();
+        if offset >= base || page.entries_total != total || page.entries_offset > offset {
+            return snapshot;
+        }
+        let start_in_page = offset - page.entries_offset;
+        let base_in_page = base - page.entries_offset;
+        if base_in_page > page.entries.len() || start_in_page > base_in_page {
+            return snapshot;
+        }
+        let mut entries = page.entries[start_in_page..base_in_page].to_vec();
+        entries.append(&mut snapshot.entries);
+        snapshot.entries = entries;
+        snapshot.entries_offset = offset;
+        snapshot
     }
 
     pub fn to_snapshot_since(
@@ -1388,7 +1654,8 @@ impl AcpSessionState {
         should_persist: bool,
         entries_offset: usize,
     ) -> ConversationSnapshot {
-        self.to_snapshot_range(should_persist, entries_offset, self.entries.len())
+        // 终点是绝对长度。父镜像裁过前缀后，本地 `entries.len()` 比这个数小。
+        self.to_snapshot_range(should_persist, entries_offset, self.entries_total())
     }
 
     pub fn to_snapshot_range(
@@ -1397,70 +1664,158 @@ impl AcpSessionState {
         entries_offset: usize,
         entries_end: usize,
     ) -> ConversationSnapshot {
-        let entries_total = self.entries.len();
-        let entries_end = entries_end.min(entries_total);
-        let entries_offset = entries_offset.min(entries_end);
+        self.to_snapshot_range_selective(
+            should_persist,
+            entries_offset,
+            entries_end,
+            true,
+            true,
+            true,
+        )
+    }
+
+    /// 与 [`Self::to_snapshot_range`] 相同，但可以不克隆工具参数表、runtime debug
+    /// 和会话信封。流式正文帧只带尾部条目。
+    pub fn to_snapshot_range_selective(
+        &self,
+        should_persist: bool,
+        entries_offset: usize,
+        entries_end: usize,
+        include_tool_debug: bool,
+        include_runtime_debug: bool,
+        include_envelope: bool,
+    ) -> ConversationSnapshot {
+        let published = self.entries();
+        let base = self.entries_base;
+        let entries_total = base + published.len();
+        // 调用方传入的是绝对下标。终点落在已丢掉的前缀里时抬到后缀起点，避免下溢。
+        let entries_end = entries_end.clamp(base.min(entries_total), entries_total);
+        let requested = entries_offset.min(entries_end);
+        // 要的起点落在已丢掉的前缀里时，只能从还留着的那一截开始，不能把下标说成 0。
+        let entries_offset = requested.max(base).min(entries_end);
+        let local_start = entries_offset - base;
+        let local_end = entries_end - base;
+        let entries = published[local_start..local_end].to_vec();
         ConversationSnapshot {
             entries_offset,
             entries_total,
             snapshot_revision: 0,
-            session_title: self.resolved_session_title(),
+            session_title: include_envelope
+                .then(|| self.resolved_session_title())
+                .flatten(),
             replaying_history: self.replaying_history,
-            entries: self.entries[entries_offset..entries_end].to_vec(),
-            tool_debug: Some(self.tool_debug.clone()),
-            runtime_debug: Some(self.runtime_debug.clone()),
+            entries,
+            tool_debug: include_tool_debug.then(|| self.tool_debug.clone()),
+            runtime_debug: include_runtime_debug.then(|| self.runtime_debug.clone()),
             phase: self.phase,
             end_reason: self.end_reason.clone(),
             end_kind: self.end_kind,
-            accepted_delivery_ids: self.accepted_delivery_ids.clone(),
-            active_delivery_id: self.active_delivery_id.clone(),
-            completed_delivery_id: self.completed_delivery_id.clone(),
-            pending_permissions: self
-                .permissions
-                .iter()
-                .map(|p| PendingPermission {
-                    question: p.question.clone(),
-                    tool_call_id: p.tool_call_id.clone(),
-                    options: p.options.clone(),
-                    details: p.details.clone(),
+            accepted_delivery_ids: if include_envelope {
+                self.accepted_delivery_ids.clone()
+            } else {
+                Default::default()
+            },
+            active_delivery_id: include_envelope
+                .then(|| self.active_delivery_id.clone())
+                .flatten(),
+            completed_delivery_id: include_envelope
+                .then(|| self.completed_delivery_id.clone())
+                .flatten(),
+            pending_permissions: if include_envelope {
+                self.permissions
+                    .iter()
+                    .map(|p| PendingPermission {
+                        question: p.question.clone(),
+                        tool_call_id: p.tool_call_id.clone(),
+                        options: p.options.clone(),
+                        details: p.details.clone(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            pending_elicitation: if include_envelope {
+                self.elicitation.as_ref().map(|e| PendingElicitation {
+                    message: e.message.clone(),
+                    fields: e.raw_fields.iter().map(elicit_field_view).collect(),
+                    chosen: e.chosen.clone(),
+                    text_values: e.text_values.clone(),
                 })
-                .collect(),
-            pending_elicitation: self.elicitation.as_ref().map(|e| PendingElicitation {
-                message: e.message.clone(),
-                fields: e.raw_fields.iter().map(elicit_field_view).collect(),
-                chosen: e.chosen.clone(),
-                text_values: e.text_values.clone(),
-            }),
-            status_line: self.status_line.clone(),
+            } else {
+                None
+            },
+            status_line: include_envelope.then(|| self.status_line.clone()).flatten(),
             acp_session_id: self.acp_session_id.clone(),
             history_session_id: self.history_session_id.clone(),
+            history_abandoned: self.history_abandoned,
             supports_image: self.supports_image,
-            available_commands: self.available_commands.clone(),
+            available_commands: if include_envelope {
+                self.available_commands.clone()
+            } else {
+                Vec::new()
+            },
             usage: self.usage,
             usage_cached_read: self.usage_cached_read,
             usage_cost: self.usage_cost,
-            usage_breakdown: self.usage_breakdown.clone(),
-            plan: self.plan.clone(),
-            background_tasks: self.background_tasks.clone(),
-            model: self.model.clone(),
-            config_options: self.config_options.clone(),
+            usage_breakdown: include_envelope
+                .then(|| self.usage_breakdown.clone())
+                .flatten(),
+            plan: include_envelope.then(|| self.plan.clone()).flatten(),
+            background_tasks: if include_envelope {
+                self.background_tasks.clone()
+            } else {
+                Vec::new()
+            },
+            model: include_envelope.then(|| self.model.clone()).flatten(),
+            config_options: if include_envelope {
+                self.config_options.clone()
+            } else {
+                Vec::new()
+            },
             conversation_state: None,
             supports_compaction: self.supports_compaction,
             supports_native_queue: self.supports_native_queue,
             supports_rewind: self.supports_rewind,
             compacting: self.compacting,
-            queued_steering: self.queued_steering.clone(),
-            queued_follow_up: self.queued_follow_up.clone(),
-            composer_restore_revision: self.composer_restore_revision,
-            composer_restore_texts: self.composer_restore_texts.clone(),
-            composer_restore_images: self.composer_restore_images.clone(),
-            turn_started_at_ms: self.turn_started_at_ms,
-            turn_timings: self.turn_timings.clone(),
+            queued_steering: if include_envelope {
+                self.queued_steering.clone()
+            } else {
+                Vec::new()
+            },
+            queued_follow_up: if include_envelope {
+                self.queued_follow_up.clone()
+            } else {
+                Vec::new()
+            },
+            composer_restore_revision: if include_envelope {
+                self.composer_restore_revision
+            } else {
+                0
+            },
+            composer_restore_texts: if include_envelope {
+                self.composer_restore_texts.clone()
+            } else {
+                Vec::new()
+            },
+            composer_restore_images: if include_envelope {
+                self.composer_restore_images.clone()
+            } else {
+                Vec::new()
+            },
+            turn_started_at_ms: include_envelope
+                .then_some(self.turn_started_at_ms)
+                .flatten(),
+            turn_timings: if include_envelope {
+                self.turn_timings.clone()
+            } else {
+                Vec::new()
+            },
             completed_unread: self.completed_unread,
             turn_outcome: self.turn_outcome,
             should_persist,
             history_error: None,
             history_omitted: false,
+            envelope_omitted: !include_envelope,
         }
     }
 }
@@ -1478,7 +1833,7 @@ pub struct SessionLive {
     pub status_line: Option<String>,
     /// 已提交历史的长度。`None` 表示这帧仍把历史放在快照 `entries` 里（旧守护）。
     pub history_len: Option<usize>,
-    /// 还没写进会话文件的这一轮：用户刚发出的消息、半句话、进行中的工具。
+    /// 旧帧在快照解析失败时用来保住当前回合。新守护不再填写：正文只在快照 `entries`。
     pub open_turn: Vec<crate::acp_chat::AcpEntry>,
 }
 
@@ -1497,11 +1852,27 @@ impl SessionLive {
         }
     }
 
+    /// 活状态头。`history_len == None`，正文仍由快照 `entries` 携带。
+    /// 不克隆 entries、工具参数表或 runtime debug。
+    pub fn header_from_state(state: &AcpSessionState) -> Self {
+        Self {
+            phase: state.phase,
+            end_reason: state.end_reason.clone(),
+            end_kind: state.end_kind,
+            acp_session_id: state.acp_session_id.clone(),
+            history_session_id: state.history_session_id.clone(),
+            session_title: state.resolved_session_title(),
+            status_line: state.status_line.clone(),
+            history_len: None,
+            open_turn: Vec::new(),
+        }
+    }
+
+    /// 窗口投影。`history_len` 标出已提交历史的终点；当前回合的正文不在这里复制。
     pub fn from_state(state: &AcpSessionState) -> Self {
-        let (history_len, end) = state.open_turn_range();
-        let mut live = Self::from_snapshot(&state.to_snapshot(false));
+        let (history_len, _) = state.open_turn_range();
+        let mut live = Self::header_from_state(state);
         live.history_len = Some(history_len);
-        live.open_turn = state.entries[history_len..end].to_vec();
         live
     }
 
@@ -1539,6 +1910,67 @@ impl SessionLive {
                 .and_then(|entries| serde_json::from_value(entries.clone()).ok())
                 .unwrap_or_default(),
         })
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SessionLiveDe {
+    phase: DaemonPhase,
+    #[serde(default)]
+    end_reason: String,
+    #[serde(default)]
+    end_kind: AcpEndKind,
+    #[serde(default)]
+    acp_session_id: Option<String>,
+    #[serde(default)]
+    history_session_id: Option<String>,
+    #[serde(default)]
+    session_title: Option<String>,
+    #[serde(default)]
+    status_line: Option<String>,
+    #[serde(default)]
+    history_len: Option<usize>,
+    #[serde(default)]
+    open_turn: Vec<crate::acp_chat::AcpEntry>,
+}
+
+impl From<SessionLiveDe> for SessionLive {
+    fn from(value: SessionLiveDe) -> Self {
+        Self {
+            phase: value.phase,
+            end_reason: value.end_reason,
+            end_kind: value.end_kind,
+            acp_session_id: value.acp_session_id,
+            history_session_id: value.history_session_id,
+            session_title: value.session_title,
+            status_line: value.status_line,
+            history_len: value.history_len,
+            open_turn: value.open_turn,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SessionLive {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SessionLiveDe::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// 守护推给窗口的一帧。正文只在 `snapshot`；`live` 是相位和历史边界。
+/// 恢复身份的放弃标志在 `snapshot.history_abandoned` 上，和会话状态同一份。
+#[derive(serde::Serialize)]
+pub struct AcpSnapshotFrame<'a> {
+    pub live: &'a SessionLive,
+    pub snapshot: &'a ConversationSnapshot,
+    pub provider_pid: Option<i32>,
+}
+
+impl AcpSnapshotFrame<'_> {
+    pub fn to_line_bytes(&self) -> Vec<u8> {
+        let mut bytes =
+            serde_json::to_vec(self).expect("ACP snapshot frame contains only serializable data");
+        bytes.push(b'\n');
+        bytes
     }
 }
 
@@ -1681,6 +2113,7 @@ pub fn force_end(state: &mut AcpSessionState, kind: AcpEndKind, msg: impl Into<S
 /// 「重新开始」/新建时的相位重置：跟旧版 `AcpView::restart` 里那几行对应（cmd/
 /// spawn 那部分是 smeltd 的事，不在这个纯状态函数里）。
 pub fn reset_for_restart(state: &mut AcpSessionState) {
+    state.abandon_replay_scratch();
     state.permissions.clear();
     state.runtime_debug = RuntimeDebug::default();
     state.elicitation = None;
@@ -1690,7 +2123,6 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.usage_breakdown = None;
     state.completed_unread = false;
     state.turn_outcome = None;
-    state.replaying_history = false;
     state.awaiting_user_echo = false;
     state.cancelled_tool_call_ids.clear();
     state.cancelled_turn_seq = None;
@@ -1757,8 +2189,17 @@ pub fn note_prompt_sent_with_delivery(
     // 排队，则由 Ready 分支在看到本地回显后补上。
     if state.history_session_id.is_none() {
         state.history_session_id = state.acp_session_id.clone();
+        if state.history_session_id.is_some() {
+            state.history_abandoned = false;
+        }
     }
-    state.replaying_history = false;
+    // 草稿还是空的，说明重放还没交出新正文，新消息接在上一份已发布正文上。
+    // 草稿里已经有重放出来的条目时，那份草稿就是新投影，不能退回旧正文。
+    if state.entries.is_empty() {
+        state.abandon_replay_scratch();
+    } else {
+        state.commit_replay();
+    }
     state.cancel_requested = false;
     // 上一回合若还有未终态工具，用「下一条已发出」作为收尾信号，而不是睡一轮。
     // 之后到达的 ToolFinished 仍可按 tool id 改写（未取消的条目）。
@@ -1785,6 +2226,48 @@ pub fn note_prompt_sent_with_delivery(
         started_at_ms,
         ended_at_ms: None,
     });
+}
+
+/// 撤回 [`note_prompt_sent_with_delivery`] 刚写下的那条用户消息。
+///
+/// 只用在这条 prompt 最终没能进模型、正文要还给输入框的场景（Pi 预检失败 /
+/// 用户取消）——正文回了输入框，消息流里就不能再留着它，否则同一句话会在
+/// 两处同时存在。
+///
+/// 只撤可逆的那部分：`history_session_id` 的升级和悬空工具收尾都是单调的，
+/// 回滚它们只会把别的东西弄坏。最后一条不是刚写下的用户消息时一律不动
+/// 状态返回 `None`：那说明已经有新正文长进来，此时删条目只会错位。
+pub fn undo_prompt_sent(
+    state: &mut AcpSessionState,
+) -> Option<(String, Vec<crate::acp_chat::AcpImage>)> {
+    let last_index = state.entries.len().checked_sub(1)?;
+    if !matches!(
+        state.entries.last(),
+        Some(AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+    ) {
+        return None;
+    }
+    // 这一轮必须是「刚开头」：计时条目指向最后这条用户消息且还没收尾。
+    match state.turn_timings.last() {
+        Some(timing) if timing.user_index == last_index && timing.ended_at_ms.is_none() => {}
+        _ => return None,
+    }
+    let taken = match state.entries.pop()? {
+        AcpEntry::User(text) => (text, Vec::new()),
+        AcpEntry::UserWithImages { text, images } => (text, images),
+        // 上面已经匹配过类型，这里不可能走到。
+        other => {
+            state.entries.push(other);
+            return None;
+        }
+    };
+    state.turn_timings.pop();
+    state.turn_seq = state.turn_seq.saturating_sub(1);
+    state.awaiting_user_echo = false;
+    state.turn_started_at_ms = None;
+    state.active_delivery_id = None;
+    state.phase = DaemonPhase::Idle;
+    Some(taken)
 }
 
 const PROVIDER_STILL_RUNNING_STATUS: &str = "已排队，这一轮结束后再发";
@@ -1828,6 +2311,28 @@ pub fn note_cancel_requested(state: &mut AcpSessionState) {
     {
         state.phase = DaemonPhase::Thinking;
     }
+}
+
+/// 中途插入只对还在跑的回合有意义。
+///
+/// 取消会先把界面收成 Idle，Pi 的闸门却要等 provider 真正空闲才放开。
+/// 这段窗口里再 steer，消息会回到「当前回合」队列；用户再点一次立即发送，
+/// 下一条 prompt 会把队列里那份和自己一起送进对话。
+pub fn is_cancel_requested(state: &AcpSessionState) -> bool {
+    state.cancel_requested
+}
+
+pub fn accepts_mid_turn_steer(state: &AcpSessionState) -> bool {
+    if state.cancel_requested {
+        return false;
+    }
+    matches!(
+        state.phase,
+        DaemonPhase::Thinking
+            | DaemonPhase::ExecutingTool
+            | DaemonPhase::AwaitingApproval
+            | DaemonPhase::WaitingForUser
+    )
 }
 
 pub(super) fn unix_time_ms() -> u64 {
@@ -1898,7 +2403,7 @@ pub fn set_elicitation_text(state: &mut AcpSessionState, field_ix: usize, value:
 }
 
 /// 提交选择题：把 `chosen` 翻译回 `ElicitationContentValue` 传给 responder。
-/// 跟旧版 `submit_elicitation` 一致；字段没有選択就跳过（agent 那边按 schema
+/// 跟旧版 `submit_elicitation` 一致；字段没有选择就跳过（agent 那边按 schema
 /// 自己决定必填与否，这里不做客户端校验）。
 pub fn submit_elicitation(state: &mut AcpSessionState) {
     let Some(mut card) = state.elicitation.take() else {
@@ -2028,6 +2533,9 @@ pub enum AcpUserAction {
     SetSessionTitle {
         title: String,
     },
+    /// 本机 provider 凭据或模型配置变了，请 agent 重拉一次模型目录。
+    /// 旧客户端不会发；不支持的驱动静默忽略。
+    RefreshModels,
     /// 等当前回合完全结束后再送。不支持原生队列的驱动按普通 Prompt 排队。
     FollowUp {
         text: String,
@@ -2044,6 +2552,11 @@ pub enum AcpUserAction {
     },
     /// 清空 provider 侧队列并把原文还回输入框，不中止当前回合。
     ClearQueue,
+    /// 把原生队列里的这一条从 provider 拿走，停掉当前回答，等 provider 真正空闲后只发一次。
+    /// 再发同一个文本是同一个动作，不会再发一遍。旧 daemon 不认识，会回 unknown variant。
+    DeliverQueuedNow {
+        text: String,
+    },
     /// 编辑并重发最后一条用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
     /// 回输入框供修改。`entry_index` 是投影里的绝对 entry 下标。仅空闲
     /// 会话可回退；旧 daemon 不认识这个动作，会回 unknown variant 错误。
@@ -2064,6 +2577,70 @@ pub enum AcpUserAction {
     },
     ElicitationSubmit,
     ElicitationDismiss,
+    /// 父进程镜像不再常驻已提交正文。分页向 session host 要绝对下标 `before` 之前的一页。
+    /// 只在主 daemon 与宿主之间使用；GUI 不发这个动作。
+    HistoryPage {
+        request_id: u64,
+        before: usize,
+        limit: usize,
+    },
+}
+
+/// 一个本端解析不了的用户动作。
+///
+/// 区分两种情况是有意义的：对端比本端新（发来了这一版还不认识的动作）通常只需要
+/// 升级守护进程，而畸形 JSON 是真的坏消息。两者都只让这一次动作失败，不拆连接。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownUserAction {
+    /// 动作名。能认出名字说明消息形状是对的，只是本端不认识这个动作。
+    pub name: Option<String>,
+    /// 本端比对端旧（收到了未知的动作名），而不是消息本身坏掉。
+    pub newer_peer: bool,
+    pub detail: String,
+}
+
+impl UnknownUserAction {
+    /// 回给对端、也写进日志的一句话。
+    pub fn message(&self) -> String {
+        match (&self.name, self.newer_peer) {
+            (Some(name), true) => {
+                format!("unsupported ACP action `{name}`: this build is older than the client")
+            }
+            (Some(name), false) => format!("invalid ACP action `{name}`: {}", self.detail),
+            (None, _) => format!("invalid ACP action: {}", self.detail),
+        }
+    }
+}
+
+/// 解析一个用户动作，把「本端不认识」和「根本不是个动作」分开。
+///
+/// `AcpUserAction` 是 externally tagged enum，serde 的 `#[serde(other)]` 只支持
+/// internally / adjacently tagged 形状，对它用不了；而换标记方式会改变 wire 格式，
+/// 把所有旧端一起打死。所以兜底只能放在解析这一处。
+pub fn parse_user_action(
+    value: serde_json::Value,
+) -> Result<AcpUserAction, Box<UnknownUserAction>> {
+    let error = match serde_json::from_value::<AcpUserAction>(value.clone()) {
+        Ok(action) => return Ok(action),
+        Err(error) => error,
+    };
+    let detail = error.to_string();
+    Err(Box::new(UnknownUserAction {
+        name: user_action_name(&value),
+        // serde 对未知变体固定报 `unknown variant \`X\`, expected one of ...`。
+        // 认错了只影响这句提示文案，不影响「这次动作失败」这个行为本身。
+        newer_peer: detail.starts_with("unknown variant"),
+        detail,
+    }))
+}
+
+/// 从 wire 形状里取动作名：unit variant 是裸字符串，带数据的是单键对象。
+fn user_action_name(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(name) => Some(name.clone()),
+        serde_json::Value::Object(map) if map.len() == 1 => map.keys().next().cloned(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

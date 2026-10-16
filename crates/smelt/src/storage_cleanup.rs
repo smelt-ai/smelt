@@ -66,6 +66,7 @@ fn obsolete_home_files(home: &Path) -> Vec<PathBuf> {
         home.join("update-state.json"),
         home.join("terminal-theme.json"),
         home.join("quota-cache.json"),
+        home.join("handoff.json"),
         home.join("worktree-inherit.json"),
         home.join("session_metadata.json"),
         home.join("workspace_menu.json"),
@@ -241,6 +242,7 @@ mod tests {
         fs::write(dir.join("appearance.json"), "{}").unwrap();
         fs::write(dir.join("launch.json"), "{}").unwrap();
         fs::write(dir.join("agent_ui.json"), "{}").unwrap();
+        fs::write(dir.join("handoff.json"), "{}").unwrap();
         fs::write(dir.join("smelt.sqlite3"), []).unwrap();
         fs::create_dir_all(dir.join("migration-backups")).unwrap();
         fs::create_dir_all(dir.join("projects")).unwrap();
@@ -261,6 +263,7 @@ mod tests {
         assert!(files.contains(&dir.join("appearance.json")));
         assert!(files.contains(&dir.join("launch.json")));
         assert!(files.contains(&dir.join("agent_ui.json")));
+        assert!(files.contains(&dir.join("handoff.json")));
         assert!(!files.contains(&dir.join("smelt.sqlite3")));
         let dirs = obsolete_home_dirs(&dir);
         assert!(dirs.contains(&dir.join("migration-backups")));

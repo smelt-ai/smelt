@@ -240,12 +240,21 @@ impl Subprocess for MockSubprocess {
 
 // ===================== Consumer：只依赖 trait 的纯逻辑 =====================
 
-/// 跑一条 git 子命令：固定 `-C root` + `GIT_OPTIONAL_LOCKS=0`。
+/// 跑一条 git 子命令：固定 `-C root -c core.quotePath=false` + `GIT_OPTIONAL_LOCKS=0`。
+///
+/// `core.quotePath=false`：默认 git 会把中文等非 ASCII 路径转义成 `"\344\270\255"`，
+/// diff 文件头、`show --name-status` 这些人读的输出里路径就成了乱码。这里统一关掉，
+/// 调用方拿到的就是原样 UTF-8 路径。需要严格分隔的场景（status）另外用 `-z`。
 ///
 /// 这是 Consumer 的样板——**只认 [`Subprocess`]，不认 `std::process`**，所以
 /// 本地面板和将来的远程 worktree 用的是同一份 git 调用逻辑，不会各自漂移。
 pub fn run_git(sp: &dyn Subprocess, root: &Path, args: &[&str]) -> io::Result<Output> {
-    let mut full_args = vec!["-C", root.to_str().unwrap_or(".")];
+    let mut full_args = vec![
+        "-C",
+        root.to_str().unwrap_or("."),
+        "-c",
+        "core.quotePath=false",
+    ];
     full_args.extend(args);
     sp.run("git", &full_args, None, &[("GIT_OPTIONAL_LOCKS", "0")])
 }
@@ -257,7 +266,12 @@ pub fn run_git_stdin(
     args: &[&str],
     input: &str,
 ) -> io::Result<Output> {
-    let mut full_args = vec!["-C", root.to_str().unwrap_or(".")];
+    let mut full_args = vec![
+        "-C",
+        root.to_str().unwrap_or("."),
+        "-c",
+        "core.quotePath=false",
+    ];
     full_args.extend(args);
     sp.run_with_stdin(
         "git",
@@ -294,7 +308,7 @@ mod tests {
     fn run_git_contract_holds_on_mock_provider() {
         let sp = MockSubprocess::new().when(
             "git",
-            &["-C", ".", "--version"],
+            &["-C", ".", "-c", "core.quotePath=false", "--version"],
             Output {
                 code: Some(0),
                 stdout: b"git version 2.40.0".to_vec(),

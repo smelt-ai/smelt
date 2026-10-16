@@ -60,6 +60,9 @@ define_control_methods! {
     SessionList => (SESSION_LIST_METHOD, "session.list"),
     AgentList => (AGENT_LIST_METHOD, "agent.list"),
     AgentSend => (AGENT_SEND_METHOD, "agent.send"),
+    AgentMemoryMeta => (AGENT_MEMORY_META_METHOD, "agent.memory.meta"),
+    AgentMemoryRecordRead => (AGENT_MEMORY_RECORD_READ_METHOD, "agent.memory.record_read"),
+    AgentMemoryRecordWrite => (AGENT_MEMORY_RECORD_WRITE_METHOD, "agent.memory.record_write"),
     AgentDefinitionList => (AGENT_DEFINITION_LIST_METHOD, "agent.definition.list"),
     AgentDefinitionGet => (AGENT_DEFINITION_GET_METHOD, "agent.definition.get"),
     AgentDefinitionCreate => (AGENT_DEFINITION_CREATE_METHOD, "agent.definition.create"),
@@ -123,6 +126,36 @@ impl ControlCall for AgentSend {
     type Result = AgentSendResult;
 
     const METHOD: ControlMethod = ControlMethod::AgentSend;
+}
+
+/// 智能体记忆的元数据（使用统计、来源）在主库，由主 daemon 代 Pi 读写。调用方用会话 id
+/// 和 daemon 发给该会话的 capability token 证明身份；记忆层由 daemon 按会话的启动规格
+/// 决定，调用方只能操作自己这个会话的两层记忆。见 `docs/agent-memory.md`。
+pub enum AgentMemoryMeta {}
+
+impl ControlCall for AgentMemoryMeta {
+    type Params = AgentMemorySessionParams;
+    type Result = AgentMemoryMetaResult;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryMeta;
+}
+
+pub enum AgentMemoryRecordRead {}
+
+impl ControlCall for AgentMemoryRecordRead {
+    type Params = AgentMemoryRecordReadParams;
+    type Result = EmptyParams;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryRecordRead;
+}
+
+pub enum AgentMemoryRecordWrite {}
+
+impl ControlCall for AgentMemoryRecordWrite {
+    type Params = AgentMemoryRecordWriteParams;
+    type Result = EmptyParams;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryRecordWrite;
 }
 
 pub enum AgentDefinitionList {}
@@ -297,6 +330,90 @@ pub struct AgentSendParams {
 pub struct AgentSendResult {
     pub message_id: String,
     pub target_session_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemorySessionParams {
+    pub session_id: String,
+    pub token: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMemoryLayer {
+    /// 这个智能体自己的记忆。
+    Agent,
+    /// 跨智能体的用户全局记忆。
+    User,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMemoryTrust {
+    Trusted,
+    Pending,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryRecordReadParams {
+    pub session_id: String,
+    pub token: String,
+    pub layer: AgentMemoryLayer,
+    pub file: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryRecordWriteParams {
+    pub session_id: String,
+    pub token: String,
+    pub layer: AgentMemoryLayer,
+    pub file: String,
+    pub trust: AgentMemoryTrust,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryUsageEntry {
+    pub file: String,
+    pub read_count: u64,
+    pub last_read_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryLayerMeta {
+    pub usage: Vec<AgentMemoryUsageEntry>,
+    /// 待确认的文件名。
+    pub pending: Vec<String>,
+}
+
+/// 会话没有某一层记忆（普通会话）时，那一层为空。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryMetaResult {
+    /// 智能体当前是否开着记忆。会话启动后用户可能关掉，关掉后不注入、不写入。
+    pub enabled: bool,
+    pub agent: AgentMemoryLayerMeta,
+    pub user: AgentMemoryLayerMeta,
+    /// 用户配置的向量检索服务；没配为空，Pi 退回关键词 + 模型重排。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<AgentMemoryEmbedding>,
+    /// 用户指定的重排模型；没指定为空，Pi 自动挑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_model: Option<AgentMemoryRerankModel>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryRerankModel {
+    pub provider: String,
+    pub id: String,
+}
+
+/// OpenAI 兼容的 `/embeddings` 服务。只发给通过认证的会话。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryEmbedding {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -677,6 +794,34 @@ mod tests {
         );
     }
 
+    /// Pi 启动器（`packages/pi-agent/src/memory-host.ts`）按这份样例解析 daemon 的回复。
+    /// 两边共用同一个文件，任何一边改了线上格式都会让对方的测试失败。
+    #[test]
+    fn agent_memory_meta_response_matches_the_pi_client_fixture() {
+        let response = ControlResponse::ok(
+            "req-1",
+            AgentMemoryMetaResult {
+                enabled: true,
+                embedding: None,
+                rerank_model: None,
+                agent: AgentMemoryLayerMeta {
+                    usage: vec![AgentMemoryUsageEntry {
+                        file: "fact.md".into(),
+                        read_count: 2,
+                        last_read_at_ms: 1000,
+                    }],
+                    pending: vec!["x.md".into()],
+                },
+                user: AgentMemoryLayerMeta::default(),
+            },
+        );
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../packages/pi-agent/tests/fixtures/agent-memory-meta-response.json"
+        ))
+        .unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), fixture);
+    }
+
     #[test]
     fn method_registry_names_are_unique_and_round_trip() {
         let mut names = std::collections::HashSet::new();
@@ -687,7 +832,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
     }
 
     #[test]

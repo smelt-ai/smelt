@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { keepsForegroundTimeout, watchHostCommand } from "../src/bash-run.ts";
 import {
+	attachBackgroundTask,
 	callBackgroundHost,
 	completionSendOptions,
 	detachedShellCommand,
@@ -255,5 +256,81 @@ describe("background task host client", () => {
 				server.close((error) => (error ? reject(error) : resolve()));
 			});
 		}
+	});
+});
+
+describe("attached background task", () => {
+	/** 收下挂接请求、回一个 id，之后把每一行记下来；`stop()` 往连接里写停止请求。 */
+	async function fakeAttachHost() {
+		const path = join(tmpdir(), `smelt-bg-attach-${process.pid}-${Math.random().toString(16).slice(2)}.sock`);
+		const lines: Record<string, unknown>[] = [];
+		let peer: import("node:net").Socket | undefined;
+		let closed!: () => void;
+		const connectionClosed = new Promise<void>((resolve) => {
+			closed = resolve;
+		});
+		const server = createServer((socket) => {
+			peer = socket;
+			let buffer = "";
+			socket.on("data", (chunk) => {
+				buffer += chunk.toString();
+				let newline = buffer.indexOf("\n");
+				while (newline >= 0) {
+					const line = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+					buffer = buffer.slice(newline + 1);
+					newline = buffer.indexOf("\n");
+					lines.push(line);
+					if (line.op === "attach") socket.write(`${JSON.stringify({ ok: true, id: "bg-sub" })}\n`);
+				}
+			});
+			socket.on("close", () => closed());
+		});
+		await new Promise<void>((resolve) => server.listen(path, resolve));
+		return {
+			path,
+			lines,
+			connectionClosed,
+			stop: () => peer?.write(`${JSON.stringify({ op: "stop" })}\n`),
+			close: () =>
+				new Promise<void>((resolve, reject) => {
+					server.close((error) => (error ? reject(error) : resolve()));
+				}),
+		};
+	}
+
+	test("registers with the tool call, reports progress, relays stop, and finishes once", async () => {
+		const host = await fakeAttachHost();
+		try {
+			let stops = 0;
+			const task = await attachBackgroundTask(
+				{ title: "8 个并行任务", command: "子智能体 sub-3", toolCallId: "call-1" },
+				() => {
+					stops += 1;
+				},
+				host.path,
+			);
+			expect(task?.id).toBe("bg-sub");
+			expect(host.lines[0]).toMatchObject({ op: "attach", title: "8 个并行任务", toolCallId: "call-1" });
+
+			task!.progress("2/8 done");
+			host.stop();
+			await Bun.sleep(50);
+			expect(stops).toBe(1);
+
+			task!.finish("stopped");
+			task!.finish("failed");
+			await host.connectionClosed;
+			expect(host.lines.slice(1)).toEqual([
+				{ op: "progress", text: "2/8 done" },
+				{ op: "finish", status: "stopped" },
+			]);
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("runs untracked when the host is unreachable", async () => {
+		const missing = join(tmpdir(), `smelt-bg-missing-${process.pid}.sock`);
+		expect(await attachBackgroundTask({ title: "t", command: "c" }, () => {}, missing)).toBeUndefined();
 	});
 });

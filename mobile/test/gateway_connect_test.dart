@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:smelt_mobile/models/acp_snapshot.dart';
 import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/session_cache_store.dart';
 
@@ -317,6 +318,76 @@ void main() {
     await server.close(force: true);
   });
 
+  test('loads original images on demand and fails them on disconnect', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final socketReady = Completer<WebSocket>();
+    final requests = <Map<String, dynamic>>[];
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] != 'loadImage') return;
+        final params = message['params'] as Map<String, dynamic>;
+        requests.add(params);
+        if (params['digest'] == 'gone') return; // 不回应，等断线
+        socket.add(
+          jsonEncode({
+            'type': 'image',
+            'sessionId': params['sessionId'],
+            'entry': params['entry'],
+            'digest': params['digest'],
+            if (params['digest'] == 'ok') ...{
+              'mime': 'image/png',
+              'data_b64': 'b3JpZ2luYWw=',
+            } else
+              'error': 'image no longer in this session',
+          }),
+        );
+      });
+      socketReady.complete(socket);
+    });
+
+    final service = GatewayService();
+    await service.connect('http://127.0.0.1:${server.port}', 'token');
+    final socket = await socketReady.future;
+    await _waitFor(() => service.state == WsState.connected);
+
+    const ok = AcpImageOriginal(entry: 4, digest: 'ok');
+    final first = service.loadImage('acp-1', ok);
+    final duplicate = service.loadImage('acp-1', ok);
+    final image = await first;
+    expect(await duplicate, same(image));
+    expect(image.base64, 'b3JpZ2luYWw=');
+    expect(requests, hasLength(1));
+    expect(requests.single, {'sessionId': 'acp-1', 'entry': 4, 'digest': 'ok'});
+
+    await expectLater(
+      service.loadImage(
+        'acp-1',
+        const AcpImageOriginal(entry: 4, digest: 'stale'),
+      ),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('no longer'),
+        ),
+      ),
+    );
+
+    final orphan = service.loadImage(
+      'acp-1',
+      const AcpImageOriginal(entry: 5, digest: 'gone'),
+    );
+    await _waitFor(() => requests.length == 3);
+    await socket.close();
+    await expectLater(orphan, throwsA(isA<StateError>()));
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
   test('reports the selected iroh path and end-to-end latency', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final socketReady = Completer<WebSocket>();
@@ -488,6 +559,75 @@ void main() {
     );
     await service.connect('http://127.0.0.1:${server.port}', 'tok');
     await _waitFor(() => pingCount >= 3);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
+  test('a late pong behind a large transfer does not drop an iroh link', () async {
+    // 回归点：一份大快照经 relay 传几十秒，pong 排在它后面迟到。字节一直在
+    // 到就只是慢；以前会被判死、重连、重新要快照，永远加载不完。
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var openCount = 0;
+    var pingCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      openCount++;
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((data) {
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
+        if (message['method'] == 'ping') pingCount++;
+      });
+    });
+
+    Duration? inboundIdle = Duration.zero;
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      metricsInterval: const Duration(milliseconds: 30),
+      pongTimeout: const Duration(milliseconds: 100),
+      irohTunnelOpener: (_, _) async => server.port,
+      irohInboundIdleProbe: () async => inboundIdle,
+    );
+    await service.connect(
+      'smelt+iroh://k7d3ffb1c9a24e5f?relay=https%3A%2F%2Frelay.test',
+      'tok',
+    );
+    await _waitFor(() => service.state == WsState.connected);
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+
+    expect(service.state, WsState.connected);
+    expect(openCount, 1);
+    expect(pingCount, 1, reason: '上一个 ping 没回之前不再发新的');
+
+    // 字节也停了：这才是真的失去响应。
+    inboundIdle = const Duration(seconds: 1);
+    await _waitFor(() => openCount >= 2);
+
+    service.disconnect();
+    await server.close(force: true);
+  });
+
+  test('without tunnel evidence an overdue pong still drops the link', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var openCount = 0;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      openCount++;
+      socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
+      socket.listen((_) {});
+    });
+
+    // 直连不看隧道；探针就算说「刚收到过」也不能拿来给直连续命。
+    final service = GatewayService(
+      connectTimeout: const Duration(seconds: 2),
+      reconnectDelay: const Duration(milliseconds: 20),
+      metricsInterval: const Duration(milliseconds: 30),
+      pongTimeout: const Duration(milliseconds: 100),
+      irohInboundIdleProbe: () async => Duration.zero,
+    );
+    await service.connect('http://127.0.0.1:${server.port}', 'tok');
+    await _waitFor(() => openCount >= 2);
 
     service.disconnect();
     await server.close(force: true);

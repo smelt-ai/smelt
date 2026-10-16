@@ -5,18 +5,16 @@
 // 用到的名字。
 use super::RepoSet;
 use super::{
-    AggregateDiffRow, DiffKind, DiffReviewRow, DiffScope, FILE_LINE_H, GitDiff, GitStatusData,
-    GitStatusResponseAction, PendingGitIndexOp, aggregate_all_files_collapsed,
-    aggregate_diff_ready_for_file, aggregate_diff_rows, aggregate_file_body_heights,
-    aggregate_file_header_paths, aggregate_file_row_index, aggregate_file_scroll_top,
-    aggregate_sticky_header, aggregate_sticky_headers, build_git_tree, build_split_rows,
-    clear_confirmed_git_index_ops, create_worktree, full_file_path, git_empty_list_message,
-    git_index_op_in_flight, git_status_response_action, git_status_retry_delay, hunk_patch,
-    insert_comment_composer, is_regular_worktree_file, parse_diff, parse_diff_with_file_headers,
-    parse_worktree_list, repo_needs_attention, resolve_git_write_target, run_git, run_git_stdin,
-    should_close_aggregate_diff, split_staged_and_changed, sticky_toggle_scroll_top,
-    toggle_aggregate_collapse_all,
+    DiffScope, GitDiff, GitStatusData, GitStatusResponseAction, GitWrite, PendingGitIndexOp,
+    aggregate_diff_ready_for_file, build_git_tree, clear_confirmed_git_index_ops,
+    commit_button_label, create_worktree, diff_feedback_text, diff_parse_failure,
+    diff_scroll_target, full_file_path, git_empty_list_message, git_index_op_in_flight,
+    git_status_response_action, git_status_retry_delay, hunk_line_anchor, hunk_patch,
+    is_regular_worktree_file, parse_diff, parse_diff_with_file_headers, parse_worktree_list,
+    release_git_write, repo_needs_attention, reserve_git_write, resolve_git_write_target, run_git,
+    run_git_stdin, should_close_aggregate_diff, split_staged_and_changed,
 };
+use smelt_git::DiffKind;
 use smelt_git::discovery::DiscoveredRepo;
 use std::path::Path;
 
@@ -68,63 +66,6 @@ fn tree_compacts_single_child_dir_chains() {
     assert_eq!(rows[1].name, "main.rs");
     assert_eq!(rows[1].path, "crates/smelt/src/main.rs");
     assert_eq!(rows[1].depth, 1);
-}
-
-#[test]
-fn aggregate_rows_keep_later_files_after_a_collapsed_file() {
-    let raw = concat!(
-        "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
-        "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
-    );
-    let parsed = parse_diff_with_file_headers(raw);
-    let mut collapsed = std::collections::HashSet::new();
-    collapsed.insert("one.rs".to_string());
-    let rows = aggregate_diff_rows(&parsed.lines, &collapsed);
-    let headers: Vec<&str> = rows
-        .iter()
-        .filter_map(|row| match row {
-            AggregateDiffRow::Header { path, .. } => Some(path.as_str()),
-            AggregateDiffRow::Line(_) => None,
-        })
-        .collect();
-    assert_eq!(headers, vec!["one.rs", "two.rs"]);
-    assert!(
-        rows.iter()
-            .any(|row| matches!(row, AggregateDiffRow::Line(_)))
-    );
-}
-
-#[test]
-fn aggregate_collapse_all_toggles_every_file_header() {
-    let raw = concat!(
-        "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
-        "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
-    );
-    let parsed = parse_diff_with_file_headers(raw);
-    let paths = aggregate_file_header_paths(&parsed.lines);
-    assert_eq!(paths, vec!["one.rs", "two.rs"]);
-    let mut collapsed = std::collections::HashSet::new();
-    assert!(!aggregate_all_files_collapsed(&paths, &collapsed));
-    toggle_aggregate_collapse_all(&paths, &mut collapsed);
-    assert!(aggregate_all_files_collapsed(&paths, &collapsed));
-    toggle_aggregate_collapse_all(&paths, &mut collapsed);
-    assert!(collapsed.is_empty());
-}
-
-#[test]
-fn aggregate_file_navigation_uses_the_continuous_row_index() {
-    let raw = concat!(
-        "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
-        "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
-    );
-    let parsed = parse_diff_with_file_headers(raw);
-    let rows = aggregate_diff_rows(&parsed.lines, &Default::default());
-    let row = aggregate_file_row_index(&parsed.lines, "two.rs", &Default::default())
-        .expect("later file must be reachable from the aggregate list");
-    assert!(matches!(
-        rows[row],
-        AggregateDiffRow::Header { ref path, .. } if path == "two.rs"
-    ));
 }
 
 #[test]
@@ -216,9 +157,8 @@ fn authoritative_status_only_clears_completed_operations_for_its_root() {
 
 #[test]
 fn stale_aggregate_is_not_ready_for_a_missing_navigation_target() {
-    let parsed = parse_diff_with_file_headers(
-        "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
-    );
+    let raw = "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n";
+    let parsed = parse_diff_with_file_headers(raw);
     let diff = GitDiff {
         root: "/repo".into(),
         path: "全部更改".into(),
@@ -230,6 +170,7 @@ fn stale_aggregate_is_not_ready_for_a_missing_navigation_target() {
         patchable: false,
         scope: DiffScope::All,
         has_staged: false,
+        patch: Some(raw.into()),
     };
 
     assert!(
@@ -242,146 +183,6 @@ fn stale_aggregate_is_not_ready_for_a_missing_navigation_target() {
         DiffScope::All,
         "one.rs"
     ));
-}
-
-#[test]
-fn aggregate_navigation_scroll_top_uses_the_rendered_row_heights() {
-    let raw = concat!(
-        "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
-        "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
-    );
-    let parsed = parse_diff_with_file_headers(raw);
-
-    assert_eq!(
-        aggregate_file_scroll_top(&parsed.lines, "two.rs", &Default::default(), false, None,),
-        Some(FILE_LINE_H + 8.0 + FILE_LINE_H * 2.0),
-        "文件标题比代码行高，不能用行号乘固定行高近似滚动位置"
-    );
-
-    assert_eq!(
-        aggregate_file_scroll_top(&parsed.lines, "two.rs", &Default::default(), false, Some(2),),
-        Some(FILE_LINE_H + 8.0 + FILE_LINE_H * 2.0 + super::COMMENT_COMPOSER_H),
-        "目标标题在评论器之后时必须补上评论器的真实高度"
-    );
-
-    let collapsed = std::collections::HashSet::from(["one.rs".to_string()]);
-    assert_eq!(
-        aggregate_file_scroll_top(&parsed.lines, "two.rs", &collapsed, false, None),
-        Some(FILE_LINE_H + 8.0),
-        "折叠文件的正文不应继续占用导航滚动高度"
-    );
-
-    assert_eq!(
-        aggregate_file_scroll_top(&parsed.lines, "two.rs", &Default::default(), true, None),
-        Some(FILE_LINE_H * 2.0),
-        "并排视图每个虚拟行等高，应按并排后的行号定位"
-    );
-}
-
-#[test]
-fn aggregate_sticky_header_tracks_the_scrolled_file() {
-    let rows = vec![
-        DiffReviewRow::Header {
-            path: "one.rs".into(),
-            adds: 1,
-            dels: 1,
-        },
-        DiffReviewRow::Line(0),
-        DiffReviewRow::Line(1),
-        DiffReviewRow::Header {
-            path: "two.rs".into(),
-            adds: 2,
-            dels: 0,
-        },
-        DiffReviewRow::Line(2),
-    ];
-    let headers = aggregate_sticky_headers(&rows, &[], &[], false);
-
-    assert_eq!(
-        aggregate_sticky_header(&headers, 0.0, None)
-            .as_ref()
-            .map(|header| header.path.as_str()),
-        None
-    );
-    assert_eq!(
-        aggregate_sticky_header(&headers, -(FILE_LINE_H + 8. + FILE_LINE_H * 2. + 0.1), None)
-            .as_ref()
-            .map(|header| (header.path.as_str(), header.adds, header.dels)),
-        Some(("two.rs", 2, 0))
-    );
-
-    // 下一个标题进入 sticky 高度范围时，当前标题应连续向上顶出，而不是瞬间换字。
-    let before_boundary = aggregate_sticky_header(&headers, -60.0, None)
-        .expect("first file remains sticky before the boundary");
-    assert_eq!(before_boundary.path, "one.rs");
-    assert!(before_boundary.offset_y < 0.0);
-    assert!(before_boundary.offset_y > -before_boundary.height);
-}
-
-#[test]
-fn aggregate_sticky_header_tracks_split_rows() {
-    let raw = concat!(
-        "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
-        "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
-    );
-    let parsed = parse_diff_with_file_headers(raw);
-    let split_rows = build_split_rows(&parsed.lines);
-    let headers = aggregate_sticky_headers(&[], &split_rows, &parsed.lines, true);
-
-    assert_eq!(
-        aggregate_sticky_header(&headers, -(FILE_LINE_H * 2. + 0.1), None)
-            .as_ref()
-            .map(|header| (header.path.as_str(), header.adds, header.dels)),
-        Some(("two.rs", 1, 1))
-    );
-}
-
-#[test]
-fn aggregate_sticky_body_height_ignores_collapsed_rows() {
-    let raw = concat!(
-        "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n",
-        "diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n",
-    );
-    let parsed = parse_diff_with_file_headers(raw);
-    let heights = aggregate_file_body_heights(&parsed.lines);
-    assert_eq!(heights, vec![40.0, 40.0]);
-
-    let mut collapsed = std::collections::HashSet::new();
-    collapsed.insert("one.rs".to_string());
-    let rows = aggregate_diff_rows(&parsed.lines, &collapsed)
-        .into_iter()
-        .map(|row| match row {
-            AggregateDiffRow::Header { path, adds, dels } => {
-                DiffReviewRow::Header { path, adds, dels }
-            }
-            AggregateDiffRow::Line(index) => DiffReviewRow::Line(index),
-        })
-        .collect::<Vec<_>>();
-    let headers = aggregate_sticky_headers(&rows, &[], &parsed.lines, false);
-    assert_eq!(headers.len(), 2);
-    assert_eq!(headers[0].body_height, 40.0);
-    // 第一文件虽折叠，第二标题仍紧跟其后；body_height 不能被压成 0。
-    assert_eq!(headers[1].top, FILE_LINE_H + 8.0);
-}
-
-#[test]
-fn sticky_toggle_scroll_top_only_moves_when_collapsing() {
-    assert_eq!(
-        sticky_toggle_scroll_top(420.0, 100.0, 28.0, 200.0, false),
-        220.0
-    );
-    assert_eq!(
-        sticky_toggle_scroll_top(120.0, 100.0, 28.0, 200.0, false),
-        120.0
-    );
-    assert_eq!(
-        sticky_toggle_scroll_top(420.0, 100.0, 28.0, 200.0, true),
-        620.0
-    );
-    assert_eq!(
-        sticky_toggle_scroll_top(120.0, 100.0, 28.0, 200.0, true),
-        120.0
-    );
 }
 
 /// 分叉处必须停止压缩，各分支自己成行。
@@ -507,30 +308,86 @@ fn aggregate_diff_keeps_a_heading_for_each_file() {
     assert_eq!(headings, vec!["one.rs", "two.rs"]);
 }
 
+/// 块按钮挂在第一行有新文件行号的位置；纯删除才退回旧文件行号。
 #[test]
-fn comment_composer_opens_only_after_anchor_is_activated() {
-    let parsed = parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n");
-    let selected = std::collections::HashSet::from([0usize]);
-    let base = (0..parsed.lines.len())
-        .map(DiffReviewRow::Line)
-        .collect::<Vec<_>>();
-
-    let mut dragging = base.clone();
-    insert_comment_composer(&mut dragging, &selected, false);
-    assert!(
-        !dragging
-            .iter()
-            .any(|row| matches!(row, DiffReviewRow::CommentComposer)),
-        "单纯拖选不能改变虚拟列表高度"
+fn hunk_anchor_prefers_the_modified_side() {
+    let changed =
+        parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-old\n+new\n ctx\n");
+    assert_eq!(
+        hunk_line_anchor(&changed.lines, &changed.hunks[0]),
+        Some((true, 1)),
+        "新增行的新文件行号应优先于后面的上下文"
     );
 
-    let mut opened = base;
-    insert_comment_composer(&mut opened, &selected, true);
-    assert!(
-        opened
-            .iter()
-            .any(|row| matches!(row, DiffReviewRow::CommentComposer)),
-        "点击评论锚点后才插入评论器"
+    let context_first =
+        parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -10,3 +10,3 @@\n ctx\n-old\n+new\n");
+    assert_eq!(
+        hunk_line_anchor(&context_first.lines, &context_first.hunks[0]),
+        Some((true, 10)),
+        "块从上下文起时，锚点是该块第一行，不是后面的改动行"
+    );
+
+    let deleted = parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -3,1 +2,0 @@\n-gone\n");
+    assert_eq!(
+        hunk_line_anchor(&deleted.lines, &deleted.hunks[0]),
+        Some((false, 3)),
+        "纯删除没有新文件行号，应落在旧文件第 3 行"
+    );
+}
+
+/// 写进终端的评论带文件和行号，不附带回车以外的发送动作。
+#[test]
+fn diff_feedback_names_the_file_and_keeps_the_selection() {
+    assert_eq!(
+        diff_feedback_text("src/a.rs", 8, 3, "hello", "看这里"),
+        "对 src/a.rs 的这几行有反馈：\nL3-L8\nhello\n\n看这里\n"
+    );
+    assert_eq!(
+        diff_feedback_text("src/a.rs", 3, 3, "hello\n", ""),
+        "对 src/a.rs 的这几行有反馈：\nL3\nhello\n",
+        "已有换行不再补；空评论不另起一段"
+    );
+}
+
+/// 右侧点的是状态路径。重命名要滚到组件展示的新路径，空格不能按空白切开。
+#[test]
+fn diff_scroll_target_uses_the_component_path() {
+    let patch = "\
+diff --git a/old name.rs b/new name.rs
+similarity index 90%
+rename from old name.rs
+rename to new name.rs
+--- a/old name.rs
++++ b/new name.rs
+@@ -1 +1 @@
+-a
++b
+";
+    let files = gpui_component::diff::DiffFile::parse(patch).expect("rename diff");
+    assert_eq!(
+        diff_scroll_target(&files, "new name.rs"),
+        Some("new name.rs")
+    );
+    assert_eq!(
+        diff_scroll_target(&files, "old name.rs"),
+        Some("new name.rs"),
+        "点旧路径也落到展示用的新路径"
+    );
+    assert_eq!(diff_scroll_target(&files, "missing.rs"), None);
+}
+
+/// 空补丁是「无差异」。不像 diff 的原文原样显示，像 diff 但解析失败才用解析器的说明。
+#[test]
+fn diff_parse_failure_keeps_non_diff_text() {
+    assert_eq!(diff_parse_failure("  \n", "ignored"), "（无差异）");
+    assert_eq!(
+        diff_parse_failure("fatal: not a git repository", "parser"),
+        "fatal: not a git repository"
+    );
+    let combined = "diff --git a/f b/f\n@@@ -1,1 -1,1 +1,1 @@@\n";
+    assert_eq!(
+        diff_parse_failure(combined, "combined diff"),
+        "combined diff"
     );
 }
 
@@ -575,21 +432,6 @@ fn hunk_patch_still_applies_after_hiding_header_lines() {
         String::from_utf8_lossy(&applied.stderr)
     );
     let _ = std::fs::remove_dir_all(&root);
-}
-
-/// 行号列宽跟着最大行号走：小文件不该按四位数留白，大文件也不能挤成一团。
-#[test]
-fn gutter_width_tracks_the_largest_line_number() {
-    use super::gutter_width;
-    let parsed_small =
-        parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n");
-    let parsed_big =
-        parse_diff("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1200,2 +1200,2 @@\n-a\n+b\n c\n");
-    let small = gutter_width(&parsed_small.lines);
-    let big = gutter_width(&parsed_big.lines);
-    assert!(small < big, "四位数行号该比个位数宽：{small} vs {big}");
-    assert!(small < 30.0, "两位数以内不该占到 30px：{small}");
-    assert!(big < 50.0, "四位数也不该超过 50px：{big}");
 }
 
 /// 隔得够远的两处改动 → git 一定分成两个 hunk，且每段的 range 覆盖自己的行。
@@ -883,6 +725,34 @@ fn repo_set(repos: Vec<DiscoveredRepo>) -> RepoSet {
         repos,
         truncated: false,
     }
+}
+
+#[test]
+fn commit_button_names_only_its_own_operation() {
+    assert_eq!(commit_button_label(None), "提交并推送");
+    assert_eq!(commit_button_label(Some(GitWrite::Commit)), "提交中…");
+    assert_eq!(
+        commit_button_label(Some(GitWrite::CommitAndPush)),
+        "提交并推送中…"
+    );
+    assert_eq!(commit_button_label(Some(GitWrite::Push)), "推送中…");
+    assert_eq!(commit_button_label(Some(GitWrite::Fetch)), "提交并推送");
+    assert_eq!(commit_button_label(Some(GitWrite::Checkout)), "提交并推送");
+}
+
+/// `index.lock` 属于一个仓库。占用 A 不得挡住 B，释放也只认当初占进去的那个操作。
+#[test]
+fn a_repository_write_excludes_only_that_repository() {
+    use std::collections::HashMap;
+    let mut writes = HashMap::new();
+    assert!(reserve_git_write(&mut writes, "/a", GitWrite::Commit));
+    assert!(!reserve_git_write(&mut writes, "/a", GitWrite::Fetch));
+    assert!(reserve_git_write(&mut writes, "/b", GitWrite::Fetch));
+    assert!(!release_git_write(&mut writes, "/a", GitWrite::Fetch));
+    assert_eq!(writes.get("/a"), Some(&GitWrite::Commit));
+    assert!(release_git_write(&mut writes, "/a", GitWrite::Commit));
+    assert!(!writes.contains_key("/a"));
+    assert_eq!(writes.get("/b"), Some(&GitWrite::Fetch));
 }
 
 /// 写操作必须落到用户选中的那个仓库。

@@ -396,43 +396,64 @@ impl Workspace {
         cx.notify();
     }
 
-    fn dsh_custom_model_editor(
-        model: Option<&NativeDshCustomModel>,
+    /// 自定义模型的四个输入框。Pi 和 DSH 的字段、占位文案一样；两边的保存路径仍各自走。
+    fn custom_model_inputs(
+        id: String,
+        name: String,
+        context_window: String,
+        max_tokens: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> DshCustomModelEditor {
+    ) -> (
+        Entity<gpui_component::input::InputState>,
+        Entity<gpui_component::input::InputState>,
+        Entity<gpui_component::input::InputState>,
+        Entity<gpui_component::input::InputState>,
+    ) {
         use gpui_component::input::InputState;
 
         let id = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("例如 gpt-5-mini")
-                .default_value(model.map(|model| model.id.clone()).unwrap_or_default())
+                .default_value(id)
         });
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("显示名称（可选）")
-                .default_value(model.map(|model| model.name.clone()).unwrap_or_default())
+                .default_value(name)
         });
         let context_window = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("上下文长度（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.context_window)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
+                .default_value(context_window)
         });
         let max_tokens = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("最大输出（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.max_tokens)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
+                .default_value(max_tokens)
         });
+        (id, name, context_window, max_tokens)
+    }
+
+    fn dsh_custom_model_editor(
+        model: Option<&NativeDshCustomModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DshCustomModelEditor {
+        let (id, name, context_window, max_tokens) = Self::custom_model_inputs(
+            model.map(|model| model.id.clone()).unwrap_or_default(),
+            model.map(|model| model.name.clone()).unwrap_or_default(),
+            model
+                .and_then(|model| model.context_window)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            model
+                .and_then(|model| model.max_tokens)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
         DshCustomModelEditor {
             id,
             name,
@@ -1662,9 +1683,13 @@ impl Workspace {
             .get_or_init(smelt_core::pi_model_settings::load_pi_model_settings)
     }
 
-    /// 丢掉缓存，下次读取重新读盘。
-    pub(super) fn reload_pi_model_settings(&mut self) {
+    /// 丢掉缓存，下次读取重新读盘，并告知活着的会话「Pi 的凭据/模型配置变了」。
+    ///
+    /// 登录、登出、改 `models.json` 都汇到这里，所以通知也放这里——散在各个调用点
+    /// 早晚漏一个，漏掉的那个就是「登录了但菜单里没出现」的 bug。
+    pub(super) fn reload_pi_model_settings(&mut self, cx: &mut App) {
         self.pi_model_settings.take();
+        smelt_ui::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
     }
 
     /// 用刚写盘的内容顶掉缓存，省掉一次立刻重读。
@@ -1733,11 +1758,41 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn set_pi_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
+    /// 直接改默认模型的推理强度并写盘。只在用户选过默认模型时可用（界面会禁用），
+    /// 否则写进去的 provider/model 会是 Pi 的兜底值，等于替用户做了选择。
+    pub fn set_pi_default_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
+        let summary = match smelt_core::pi_model_settings::pi_settings_summary() {
+            Ok(summary) => summary,
+            Err(error) => {
+                crate::status_item::notify_error(&error);
+                return;
+            }
+        };
+        let Some((provider, model)) = summary.default_model.and_then(|model| {
+            Some((
+                model.provider.filter(|v| !v.trim().is_empty())?,
+                model.model.filter(|v| !v.trim().is_empty())?,
+            ))
+        }) else {
+            crate::status_item::notify_error("先选一个默认模型，再调推理强度");
+            return;
+        };
+        let config = smelt_core::pi_model_settings::PiDefaultModelConfig {
+            provider,
+            model,
+            base_url: String::new(),
+            thinking_level: level.clone(),
+        };
+        if let Err(error) = smelt_core::pi_model_settings::save_pi_default_model(&config, None) {
+            crate::status_item::notify_error(&error);
+            return;
+        }
+        // 手动填写表单开着时也同步，免得稍后保存表单把这次改动盖回去。
         if let Some(editor) = &mut self.pi_model_editor {
             editor.thinking_level = level;
-            cx.notify();
         }
+        self.reload_pi_model_settings(cx);
+        cx.notify();
     }
 
     pub fn save_pi_model_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1801,7 +1856,7 @@ impl Workspace {
 
         self.pi_model_editor = None;
         self.pi_model_editor_error = None;
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         crate::status_item::notify_success("Pi 模型配置已保存");
         cx.notify();
     }
@@ -1811,38 +1866,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PiCustomModelEditor {
-        use gpui_component::input::InputState;
-
-        let id = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("例如 gpt-5-mini")
-                .default_value(model.map(|model| model.id.clone()).unwrap_or_default())
-        });
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("显示名称（可选）")
-                .default_value(model.map(|model| model.name.clone()).unwrap_or_default())
-        });
-        let context_window = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("上下文长度（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.context_window)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
-        });
-        let max_tokens = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("最大输出（可选）")
-                .default_value(
-                    model
-                        .and_then(|model| model.max_tokens)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
-        });
+        let (id, name, context_window, max_tokens) = Self::custom_model_inputs(
+            model.map(|model| model.id.clone()).unwrap_or_default(),
+            model.map(|model| model.name.clone()).unwrap_or_default(),
+            model
+                .and_then(|model| model.context_window)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            model
+                .and_then(|model| model.max_tokens)
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
         PiCustomModelEditor {
             id,
             name,
@@ -2314,7 +2351,7 @@ impl Workspace {
 
         self.pi_custom_provider_editor = None;
         self.pi_model_editor_error = None;
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         crate::status_item::notify_success(if auto {
             format!("自定义 Provider {id} 已保存，模型目录将在每次启动时刷新")
         } else {
@@ -2335,7 +2372,7 @@ impl Workspace {
             return;
         }
         smelt_core::pi_auto_models::update(|store| store.set_auto(&provider_id, false));
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         crate::status_item::notify_success(format!("已移除自定义 Provider {provider_id}"));
         cx.notify();
     }
@@ -2350,6 +2387,7 @@ impl Workspace {
             PiConfigFileKind::Settings => smelt_core::pi_model_settings::pi_settings_path(),
             PiConfigFileKind::Models => smelt_core::pi_model_settings::pi_models_path(),
             PiConfigFileKind::Credentials => smelt_core::pi_model_settings::pi_auth_path(),
+            PiConfigFileKind::Mcp => smelt_core::pi_mcp::pi_mcp_path(),
         };
         if !path.exists() {
             use std::io::Write as _;
@@ -2394,7 +2432,7 @@ impl Workspace {
     }
 
     pub(super) fn refresh_pi_settings(&mut self, cx: &mut Context<Self>) {
-        self.reload_pi_model_settings();
+        self.reload_pi_model_settings(cx);
         cx.notify();
     }
 
@@ -2485,6 +2523,7 @@ pub enum PiConfigFileKind {
     Settings,
     Models,
     Credentials,
+    Mcp,
 }
 
 impl Workspace {

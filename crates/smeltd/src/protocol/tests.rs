@@ -7,12 +7,13 @@ use super::auth::{
 use super::*;
 use smelt_plugin_api::{
     Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_CAPABILITY_AUTOMATION_READ,
-    CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
-    CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, Capability, DeliveryClass, EVENT_BUS_PROTOCOL_VERSION,
-    FIRST_PARTY_DESKTOP_PLUGIN_ID, FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind,
-    Nack, NackDisposition, PluginId, ProtocolRange, SubscribeControlMessage, SubscribeErrorCode,
-    SubscribeMessage, SubscribeRequest, SubscriptionDeclaration, SubscriptionId,
+    CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
+    CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ,
+    CORE_TOPIC_AGENT_MESSAGE_DELIVERED, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
+    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID,
+    FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind, Nack, NackDisposition, PluginId,
+    ProtocolRange, SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
+    SubscriptionDeclaration, SubscriptionId,
 };
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
@@ -311,6 +312,7 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
             Capability::new(CORE_CAPABILITY_REMOTE_SESSIONS_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_WORKSPACE_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap(),
+            Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap(),
         ])
     );
 
@@ -334,6 +336,12 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
         gateway
             .capabilities
             .contains(&Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap())
+    );
+    assert!(
+        !gateway
+            .capabilities
+            .contains(&Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap()),
+        "网关兑现不了唤醒请求，不能订阅它，否则 daemon 会误以为有桌面端在场"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -752,56 +760,160 @@ fn macos_local_signed_kernel_identity_values() {
     );
 }
 
+/// 探针进程认这个变量；平时跑单测时探针直接返回。
+#[cfg(target_os = "macos")]
+const REPLACEMENT_PROBE_ENV: &str = "SMELTD_REPLACEMENT_PROBE_CHILD";
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_kernel_identity_survives_binary_replacement() {
-    // 活体回归：把本测试二进制文件原地换掉（rename 语义，和安装器同一招），
-    // 再查自己身份必须成功且一致。
+    // 活体回归：进程运行中把它的二进制文件原地换掉（rename 语义，和安装器同一招），
+    // 再查它的身份必须成功且一致。
     //
     // 背景：旧实现（Security framework 动态查询）在**签名构建**于此报 -67034
     // （生产实证×2：昨天 CheckValidity，今天 SigningInformation 链）。
     // ad-hoc 下旧链条碰巧不报错（无 CMS 可比）——这也正是 dev 难以复现生产
     // 故障的原因。新路径只问内核，对构建类型无依赖，一律免疫；Fake 永远
-    // 表达不出这条（它不进框架）。取代旧的 Fake 版自更新测试——那版换的是
-    // 假路径里的假字节，什么都没证明。
-    let exe = std::env::current_exe().expect("test binary path");
-    let backup = exe.with_extension("identity-test-bak");
-    let _ = std::fs::remove_file(&backup);
-    std::fs::copy(&exe, &backup).expect("backup test binary");
-    struct RestoreOnDrop {
-        backup: PathBuf,
-        target: PathBuf,
-    }
-    impl Drop for RestoreOnDrop {
+    // 表达不出这条（它不进框架）。
+    //
+    // 换的是测试二进制的一份拷贝，由拷贝拉起的探针进程查自己的身份。不能换正在跑的
+    // 测试二进制本身：同一个测试进程里还有别的用例并发读它（证书、拷贝），会读到垃圾；
+    // 进程中途被杀时，坏文件还会一直留在 target 里。
+    let dir = std::env::temp_dir().join(format!(
+        "smeltd-identity-replacement-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    struct RemoveDir(PathBuf);
+    impl Drop for RemoveDir {
         fn drop(&mut self) {
-            // panic 也要恢复。即使没恢复 cargo 也会按 mtime 重编，自愈。
-            if self.backup.exists() {
-                let _ = std::fs::rename(&self.backup, &self.target);
-            }
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
-    let _restore = RestoreOnDrop {
-        backup: backup.clone(),
-        target: exe.clone(),
-    };
+    let _cleanup = RemoveDir(dir.clone());
+    let copy = dir.join("probe");
+    std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+
+    let mut probe = std::process::Command::new(&copy)
+        .env(REPLACEMENT_PROBE_ENV, "1")
+        .args([
+            "--exact",
+            "protocol::tests::replacement_probe_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn probe copy");
+    /// 不管测试怎么结束都收掉探针，并让看门狗退出（否则它可能在 pid 被复用后误杀）。
+    struct KillOnDrop(
+        std::process::Child,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    );
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let mut stdin = probe.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(probe.stdout.take().unwrap());
+    let mut stderr = probe.stderr.take().unwrap();
+    // 看门狗：60 秒内没走完就杀掉探针，读端随之 EOF，测试失败而不是挂住。
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let finished = std::sync::Arc::clone(&finished);
+        let pid = probe.id() as libc::pid_t;
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                if finished.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        });
+    }
+    let probe = KillOnDrop(probe, finished);
+
+    // 探针先报一次身份，然后停在 stdin 上等我们换文件。
+    let before = read_probe_line(&mut stdout, "before=");
+    // 原地换掉运行中二进制的文件（新 inode；运行中进程不受影响）。
+    // 注意：绝不能原地写旧 inode——内核会按代码签名 crash 直接 SIGKILL 进程。
+    let replacement = dir.join("probe.new");
+    std::fs::write(&replacement, b"not-a-macho-at-all").unwrap();
+    std::fs::rename(&replacement, &copy).unwrap();
+    {
+        use std::io::Write as _;
+        writeln!(stdin, "replaced").unwrap();
+    }
+    let during = read_probe_line(&mut stdout, "during=");
+    assert_eq!(before, during, "换文件前后内核身份必须一致");
+
+    let mut rest = String::new();
+    {
+        use std::io::Read as _;
+        let _ = stdout.read_to_string(&mut rest);
+    }
+    let mut probe = probe;
+    let status = probe.0.wait().unwrap();
+    let mut err = String::new();
+    {
+        use std::io::Read as _;
+        let _ = stderr.read_to_string(&mut err);
+    }
+    assert!(status.success(), "探针失败：{status}\n{rest}\n{err}");
+    assert!(
+        rest.contains("1 passed"),
+        "探针必须真的跑过（改名后 --exact 匹配不到也会返回成功）：{rest}"
+    );
+}
+
+/// 读探针输出，直到出现带 `prefix` 的那一行，返回它后面的内容。探针卡住时由看门狗杀掉，
+/// 这里读到 EOF 就失败，不会挂住测试。
+#[cfg(target_os = "macos")]
+fn read_probe_line(reader: &mut impl std::io::BufRead, prefix: &str) -> String {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            panic!("探针没有输出 {prefix}（已退出或被看门狗杀掉）");
+        }
+        // libtest 先打出「test xxx ... 」不换行，探针的第一行会接在它后面，不能按行首匹配。
+        if let Some(at) = line.find(prefix) {
+            return line[at + prefix.len()..].trim_end().to_string();
+        }
+    }
+}
+
+/// 只在 `macos_kernel_identity_survives_binary_replacement` 拉起的拷贝里有意义：
+/// 报一次自己的内核身份，等父进程把自己的二进制换掉，再报一次。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "由 macos_kernel_identity_survives_binary_replacement 在独立进程里启动"]
+fn replacement_probe_child() {
+    if std::env::var_os(REPLACEMENT_PROBE_ENV).is_none() {
+        return;
+    }
     let verifier = SystemPeerCodeIdentity;
     let token = self_audit_token().expect("self audit token");
     let before = verifier
         .kernel_identity(token)
         .expect("identity query must succeed");
-    // 原地换掉运行中二进制的文件（新 inode；运行中进程不受影响）。
-    // 注意：绝不能原地写旧 inode——内核会按代码签名 crash 直接 SIGKILL 本进程。
-    let replacement = exe.with_extension("identity-test-new");
-    std::fs::write(&replacement, b"not-a-macho-at-all").unwrap();
-    std::fs::rename(&replacement, &exe).unwrap();
+    println!("before={before:?}");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).unwrap();
     let during = verifier
         .kernel_identity(token)
         .expect("identity must survive on-disk replacement (this was -67034)");
-    assert_eq!(before, during, "换文件前后内核身份必须一致");
-    drop(_restore);
-    assert!(!backup.exists(), "备份应已搬回原位");
-    let after = verifier.kernel_identity(token).expect("identity query");
-    assert_eq!(before, after);
+    println!("during={during:?}");
 }
 
 #[cfg(target_os = "macos")]

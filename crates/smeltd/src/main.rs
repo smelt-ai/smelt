@@ -108,10 +108,6 @@
 //! 回滚 tripwire：successor 若已迁移 store sqlite schema，老进程不可再服务，
 //! 此时 exit 交由拉起逻辑重开新版（结局=旧版最坏情况，显式可观测）。
 //!
-//! legacy exec-self 文件交接（一代兼容）：旧二进制仍会 exec 新二进制并传
-//! SMELTD_HANDOFF 文件路径；新二进制保留文件读端。TODO(下版)：删文件读端、
-//! `handoff_path` 清理逻辑与 `.next` 启动自提升。
-//!
 //! ## 内嵌远程网关（`remote_start`/`remote_stop`/`remote_status`）
 //!
 //! 路由/handler 全在 `smelt_remote_gateway` crate（跟独立进程版 `gateway.rs` 共用一份，
@@ -176,8 +172,10 @@
 //! 时机、不管权限。
 
 mod acp_host;
+mod acp_idle;
 mod acp_registry;
 mod acp_runtime_host;
+mod agent_memory_control;
 mod automation_runtime;
 mod control;
 mod event_hub;
@@ -206,8 +204,8 @@ use session_directory::SessionDirectory;
 #[cfg(test)]
 pub(crate) use session_state::AgentBlocker;
 pub(crate) use session_state::{
-    Phase, PhaseSource, SessionState, apply_agent_event, apply_terminal_title, bump_state_revision,
-    commit_session_phase, next_session_instance, now_unix,
+    Phase, PhaseSource, SessionState, apply_agent_event, bump_state_revision, commit_session_phase,
+    next_session_instance, now_unix,
 };
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent};
 use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboundEvent};
@@ -280,158 +278,123 @@ fn sock_path() -> std::path::PathBuf {
     dir.join("smeltd.sock")
 }
 
-fn is_staged_daemon_executable(path: &std::path::Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("smeltd") && name.ends_with(".next"))
-}
-
-/// 从暂存文件接过 handoff 的新映像已经成功通过了一次 `exec`。在启动任何线程、
-/// 消费交接文件之前，把它原子提升为正式路径；随后 main 会再做一次不涉及会话快照的
-/// 轻量 `exec`，让 macOS 的进程名也成为 `smeltd`。
-///
-/// 普通手工运行 `.next` 不得触发安装，只有携带 `SMELTD_HANDOFF` 的升级映像才允许。
-fn promote_staged_handoff_executable(
-    current: &std::path::Path,
-    came_from_handoff: bool,
-) -> std::io::Result<Option<std::path::PathBuf>> {
-    if !came_from_handoff || !is_staged_daemon_executable(current) {
-        return Ok(None);
-    }
-    let stable = current.with_file_name("smeltd");
-    std::fs::rename(current, &stable)?;
-    Ok(Some(stable))
-}
-
-fn finalize_staged_handoff_executable() {
-    let came_from_handoff = std::env::var_os("SMELTD_HANDOFF").is_some()
-        || std::env::var_os("SMELTD_HANDOFF_SOCK").is_some();
-    let Ok(current) = std::env::current_exe() else {
-        return;
-    };
-    let stable = match promote_staged_handoff_executable(&current, came_from_handoff) {
-        Ok(Some(stable)) => stable,
-        Ok(None) => return,
-        Err(error) => {
-            eprintln!(
-                "smeltd 暂存映像提升到正式路径失败（{}）：{error}",
-                current.display()
-            );
-            return;
-        }
-    };
-
-    // 此时没有业务线程，SMELTD_HANDOFF、插件指纹与上一映像继承的 fd 都保持原样。
-    // 第二次 exec 只校正 executable path / 进程显示名，不重新生成或消费 handoff。
-    use std::os::unix::process::CommandExt;
-    let error = std::process::Command::new(&stable).exec();
-    // 同一 inode 刚刚已从暂存路径成功 exec，正常不会走到这里。失败时继续当前映像，
-    // daemon 仍可恢复会话；daemon_executable_from_current 会回退到正式路径。
-    eprintln!(
-        "smeltd 从正式路径重新 exec 失败（{}）：{error}",
-        stable.display()
-    );
-}
-
-/// 返回 `current_exe()` 这条路径现在指向的文件。参数化一层是为了覆盖 macOS 上
-/// `current_exe()` 在文件被 rename 后仍返回旧启动路径的行为。
-///
-/// 路径还在不等于映像还是启动时那一份：原地替换（rename 覆盖 `smeltd`）后路径
-/// 仍在，inode 已经换了。会话宿主不能走这里，必须用 [`session_host_executable`]。
-fn daemon_executable_from_current(
-    current: std::path::PathBuf,
-) -> std::io::Result<std::path::PathBuf> {
-    // 路径没了（rename 掉 smeltd.next、删掉历史硬链、测试误伤）时，回退到同目录的
-    // 正式 `smeltd`，不能把「文件不存在」抛给调用方。
-    if current.is_file() {
-        return Ok(current);
-    }
-
-    let stable = current.with_file_name("smeltd");
-    if stable.is_file() {
-        return Ok(stable);
-    }
-
-    Err(std::io::Error::new(
-        ErrorKind::NotFound,
-        format!(
-            "守护可执行文件不存在：{}（稳定路径：{}）",
-            current.display(),
-            stable.display()
-        ),
-    ))
-}
-
-fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
-    daemon_executable_from_current(std::env::current_exe()?)
-}
-
-/// 启动时 `current_exe()` 的 inode。安装协议保证这条路径在进程活着时不会被换成
-/// 另一份文件；spawn 前再对一次，对不上就拒绝启动，而不是去跑目录里的新文件。
-struct PinnedDaemonInode {
+/// 启动时钉住的那份普通文件。会话宿主只 exec 这条路径，不再回头看启动名现在指向谁。
+struct PinnedDaemonImage {
+    path: std::path::PathBuf,
     dev: u64,
     ino: u64,
 }
 
-static PINNED_DAEMON_INODE: OnceLock<PinnedDaemonInode> = OnceLock::new();
+static PINNED_DAEMON_IMAGE: OnceLock<PinnedDaemonImage> = OnceLock::new();
 
-fn pin_running_daemon_image() {
-    let Ok(path) = std::env::current_exe() else {
-        return;
-    };
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return;
-    };
-    use std::os::unix::fs::MetadataExt;
-    let _ = PINNED_DAEMON_INODE.set(PinnedDaemonInode {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    });
+fn daemon_executable_path() -> std::io::Result<std::path::PathBuf> {
+    PINNED_DAEMON_IMAGE
+        .get()
+        .map(|pinned| pinned.path.clone())
+        .ok_or_else(|| std::io::Error::other("没有钉住守护映像"))
 }
 
+/// 钉住本次 exec 真正映射的普通文件。
+///
+/// `current_exe()` 经常是启动时用的那条路径。若有人从符号链接 `smeltd` 拉起，
+/// 这里只顺着链接读一次，打开目标文件（`O_NOFOLLOW`，不再二次解析）。
+/// 之后启动名被拨到别的映像，也不改变已经钉住的路径。
+fn pin_running_daemon_image() {
+    let Ok(path) = std::env::current_exe() else {
+        eprintln!("smeltd 无法读取当前可执行路径，会话宿主将拒绝启动");
+        return;
+    };
+    let Some(pinned) = open_mapped_image(&path) else {
+        eprintln!(
+            "smeltd 没有钉住守护映像（{}），会话宿主将拒绝启动",
+            path.display()
+        );
+        return;
+    };
+    let _ = PINNED_DAEMON_IMAGE.set(pinned);
+}
+
+fn open_mapped_image(current: &std::path::Path) -> Option<PinnedDaemonImage> {
+    if let Some(pinned) = open_regular_nofollow(current) {
+        return Some(pinned);
+    }
+    let target = std::fs::read_link(current).ok()?;
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        current.parent()?.join(target)
+    };
+    open_regular_nofollow(&resolved)
+}
+
+fn open_regular_nofollow(path: &std::path::Path) -> Option<PinnedDaemonImage> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    Some(PinnedDaemonImage {
+        path: path.to_path_buf(),
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+/// 不跟随符号链接。钉住的必须是那个普通文件本身；路径变成链接就当成映像已经换了。
 fn path_has_inode(path: &std::path::Path, dev: u64, ino: u64) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
+    if !meta.is_file() {
+        return false;
+    }
     use std::os::unix::fs::MetadataExt;
     meta.dev() == dev && meta.ino() == ino
 }
 
 fn session_host_executable_from(
-    current: std::path::PathBuf,
+    pinned_path: &std::path::Path,
     pinned: Option<(u64, u64)>,
 ) -> std::io::Result<std::path::PathBuf> {
     let Some((dev, ino)) = pinned else {
-        return Ok(current);
+        return Err(std::io::Error::other("没有钉住守护映像"));
     };
-    if path_has_inode(&current, dev, ino) {
-        return Ok(current);
-    }
-    let stable = current.with_file_name("smeltd");
-    if stable.is_file() && path_has_inode(&stable, dev, ino) {
-        return Ok(stable);
+    if path_has_inode(pinned_path, dev, ino) {
+        return Ok(pinned_path.to_path_buf());
     }
     Err(std::io::Error::other(format!(
         "smeltd 路径已指向另一份映像，拒绝用它启动会话宿主：{}",
-        current.display()
+        pinned_path.display()
     )))
 }
 
-/// 会话宿主必须和本进程是同一个 inode。路径被换掉时直接失败，不能 exec 新文件，
-/// 也不能另拷一份再跑——那份拷贝的 `current_exe()` 和签名都不再是正在映射的映像。
+/// 会话宿主必须和本进程是同一个 inode。钉住的文件被换掉时直接失败。
+/// 不能改去 exec 启动名现在指向的文件，也不能另拷一份再跑。
 fn session_host_executable() -> std::io::Result<std::path::PathBuf> {
-    let current = daemon_executable_path()?;
-    let pinned = PINNED_DAEMON_INODE
+    let pinned = PINNED_DAEMON_IMAGE
         .get()
-        .map(|pinned| (pinned.dev, pinned.ino));
-    session_host_executable_from(current, pinned)
+        .ok_or_else(|| std::io::Error::other("没有钉住守护映像"))?;
+    session_host_executable_from(&pinned.path, Some((pinned.dev, pinned.ino)))
 }
 
-/// 已 stage、尚未应用到运行中守护的候选映像。daemon 在跑时安装只写这个文件，
-/// 不覆盖正在 exec 的 `smeltd`，所以 `current_exe()` 派生的 ACP host 永远跟主进程同版。
+/// 已经写好、还没切到运行中守护的下一份映像。只认 `smeltd.pending` 这根链接，
+/// 不认会被覆盖的 `smeltd.next`。正在跑的就是这份文件时，不当成候选。
 fn staged_successor_executable(running: &std::path::Path) -> Option<std::path::PathBuf> {
-    let next = running.with_file_name("smeltd.next");
-    (next.is_file() && next != running).then_some(next)
+    let pending = smelt_core::daemon_image::pending_image(running.parent()?)?;
+    (!same_device_inode(running, &pending)).then_some(pending)
+}
+
+fn same_device_inode(left: &std::path::Path, right: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
 }
 
 /// 进程指纹钉死（启动时调一次）：env 传过来的优先（handoff successor 的候选
@@ -476,18 +439,8 @@ fn bind_single_instance(
     UnixListener::bind(path).map(Some)
 }
 
-fn bind_fresh_daemon(
-    path: &std::path::Path,
-    stale_handoff: &std::path::Path,
-    check_existing: bool,
-) -> std::io::Result<Option<UnixListener>> {
-    let listener = bind_single_instance(path, check_existing)?;
-    if listener.is_some() {
-        // 只有确认自己取得 listener 后才能清理。若已有 daemon 正在 upgrade，
-        // 它刚写下的 handoff 是活数据，竞争启动者必须原样保留并直接退出。
-        let _ = std::fs::remove_file(stale_handoff);
-    }
-    Ok(listener)
+fn bind_fresh_daemon(path: &std::path::Path) -> std::io::Result<Option<UnixListener>> {
+    bind_single_instance(path, true)
 }
 
 fn secure_daemon_socket(path: &std::path::Path) -> std::io::Result<()> {
@@ -948,16 +901,6 @@ fn broadcast_state(event_hub: &EventHubHandle, state: &SessionState) {
         }
         Ok(false) => {}
         Err(error) => eprintln!("[event-hub] session state publish failed: {error}"),
-    }
-}
-
-/// 瞬时展示状态只进订阅总线，不进崩溃恢复目录。OSC 标题可能是
-/// spinner 帧；将它落盘会让整份 sessions 文档持续重写。与持久广播共用
-/// commit gate，避免 EventHub 发布和目录提交交错；迟到 revision 由 EventHub 拒绝。
-fn broadcast_transient_state(event_hub: &EventHubHandle, state: &SessionState) {
-    let _commit = STATE_DIRECTORY_COMMIT_GATE.lock().unwrap();
-    if let Err(error) = event_hub.publish_session(state) {
-        eprintln!("[event-hub] transient session state publish failed: {error}");
     }
 }
 
@@ -1447,9 +1390,8 @@ fn is_known_remote_session(
         .map(|catalog| catalog.kind_for(id) == Some(kind))
 }
 
-/// 常驻 Term 的事件监听：接住 alacritty 解析出的 `Event::Title`/`Event::Bell`，
-/// 写进共享的 `SessionState`，顺带广播给所有 `subscribe` 连接。标题仅更新展示
-/// 元数据，绝不能影响 phase 或其它回合状态。
+/// 常驻 Term 的事件监听。OSC 标题留在终端网格自己的标题栏，这里直接丢掉。
+/// Bell 只刷新活动时间并广播。颜色查询在网格锁内入队，泵释放锁后再写回。
 #[derive(Clone)]
 struct StateListener {
     state: Arc<Mutex<SessionState>>,
@@ -1488,35 +1430,20 @@ impl EventListener for StateListener {
             }
             return;
         }
+        // OSC 0/2 不是会话名，也不广播。
+        let Event::Bell = event else {
+            return;
+        };
 
-        let (snapshot, transient) = {
+        let snapshot = {
             let Ok(mut st) = self.state.lock() else {
                 return;
             };
-            let transient = match event {
-                Event::Title(t) => {
-                    let title_changed = apply_terminal_title(&mut st, &t);
-                    if !title_changed {
-                        return;
-                    }
-                    // 标题 spinner 不是会话活动：不改 updated_at，不干扰
-                    // “最近会话”排序和空闲时长。
-                    true
-                }
-                Event::Bell => {
-                    st.updated_at = now_unix();
-                    false
-                }
-                _ => return,
-            };
+            st.updated_at = now_unix();
             bump_state_revision(&mut st);
-            (st.clone(), transient)
+            st.clone()
         };
-        if transient {
-            broadcast_transient_state(&self.event_hub, &snapshot);
-        } else {
-            broadcast_state(&self.event_hub, &snapshot);
-        }
+        broadcast_state(&self.event_hub, &snapshot);
     }
 }
 
@@ -1805,18 +1732,22 @@ fn publish_remote_geometry_release(sess: &Session) {
 
 /// 开/关 fd 的 CLOEXEC 标志。平时所有 fd 都应带 CLOEXEC（不泄漏给 spawn 出的 shell）；
 /// 仅在 exec 交接前对要带过去的 fd 关掉。
-fn set_cloexec(fd: RawFd, on: bool) {
+fn set_cloexec(fd: RawFd, on: bool) -> std::io::Result<()> {
     unsafe {
-        let cur = libc::fcntl(fd, libc::F_GETFD);
-        if cur >= 0 {
-            let new = if on {
-                cur | libc::FD_CLOEXEC
-            } else {
-                cur & !libc::FD_CLOEXEC
-            };
-            libc::fcntl(fd, libc::F_SETFD, new);
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let flags = if on {
+            flags | libc::FD_CLOEXEC
+        } else {
+            flags & !libc::FD_CLOEXEC
+        };
+        if libc::fcntl(fd, libc::F_SETFD, flags) < 0 {
+            return Err(std::io::Error::last_os_error());
         }
     }
+    Ok(())
 }
 
 /// dup 一个 fd 并包成 File。dup 出的新 fd 默认**不带** CLOEXEC，这里立即补上——
@@ -1824,7 +1755,7 @@ fn set_cloexec(fd: RawFd, on: bool) {
 fn dup_file(fd: RawFd) -> anyhow::Result<std::fs::File> {
     let d = unsafe { libc::dup(fd) };
     anyhow::ensure!(d >= 0, "dup({fd}) 失败");
-    set_cloexec(d, true);
+    set_cloexec(d, true)?;
     Ok(unsafe { std::fs::File::from_raw_fd(d) })
 }
 
@@ -1983,7 +1914,7 @@ impl Dimensions for DaemonTermSize {
 fn daemon_term_config() -> TermConfig {
     TermConfig {
         scrolling_history: TERM_HISTORY,
-        ..TermConfig::default()
+        ..smelt_core::term_config::emulation_config()
     }
 }
 
@@ -2080,14 +2011,13 @@ fn main() {
     // 独立 ACP 会话宿主只跑一条私有控制连接，不能初始化 SQLite、绑定全局
     // smeltd.sock 或启动菜单/远程服务。尽量早分流也避免每个会话宿主各起一套
     // app_log tee 后台线程。
+    // 会话宿主和主进程都要钉住自己映射的那份文件。钉晚了，启动名若已被拨走，
+    // 再去解析 `current_exe()` 就会拿到下一份映像。
+    pin_running_daemon_image();
     if acp_runtime_host::is_session_host_process() {
         acp_runtime_host::run_session_host();
         return;
     }
-    // 在线升级先 exec 已验证存在的暂存映像；候选映像一旦真的启动，就在任何线程和
-    // 状态初始化之前把自身提升到正式路径，再以正式名继续同一份 handoff。
-    finalize_staged_handoff_executable();
-    pin_running_daemon_image();
     smelt_core::sqlite_state::enable_sqlite_state();
     // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
     // 先装 panic hook，再记一条启动事件——守护本身没有终端可看，崩溃/异常全靠这份
@@ -2124,10 +2054,7 @@ fn main() {
     }
     // 钉住启动时刻：晚一步取到的就是「首次有人问 version」的时间，不是启动时间。
     started_at();
-    // 无缝升级交接：上一代进程 exec 本二进制前写好交接文件并把路径放在环境变量里。
-    // 立即摘掉环境变量：它只对"本次 exec 交接"有意义，不能传染给之后 spawn 的 shell。
-    let handoff = std::env::var("SMELTD_HANDOFF").ok();
-    // 交接 v2 import 模式：socketpair 端 fd 号（与 legacy 文件路径互斥，v2 优先）。
+    // 交接 v2 import 模式：socketpair 端 fd 号。旧的 SMELTD_HANDOFF 文件路径不再读取。
     let import_sock = std::env::var("SMELTD_HANDOFF_SOCK")
         .ok()
         .and_then(|fd| fd.parse::<RawFd>().ok());
@@ -2139,7 +2066,6 @@ fn main() {
         std::env::remove_var("SMELTD_HANDOFF_SOCK");
         std::env::remove_var("SMELTD_PLUGIN_DAEMON_FINGERPRINT");
     }
-    let came_from_handoff = handoff.is_some();
     // 进程指纹启动时钉死：env（handoff successor / GUI 拉起传入）优先，否则对
     // current_exe 文件哈希一次。此后进程生命期内不再重哈希磁盘——StageDiskOnly
     // 后磁盘是新的、进程还是老的，重哈希会拿错插件集（与 -67034 同一类耦合）。
@@ -2149,22 +2075,9 @@ fn main() {
         return;
     }
 
-    // `exec` 保留直接子进程与已经退出但尚未 wait 的状态，却销毁上一映像的所有
-    // reaper 线程。必须在恢复终端/ACP/插件 Host、启动任何新 child owner 之前做一次
-    // 有界 WNOHANG sweep；运行期绝不再用 waitpid(-1)，后续全部交给精确 PID owner。
-    if came_from_handoff {
-        let reaped = reap_inherited_exited_children_at_exec_boundary();
-        if reaped > 0 {
-            dlog(&format!(
-                "upgrade: 启动边界已回收 {reaped} 个上一映像遗留的退出子进程"
-            ));
-        }
-    }
-
     let path = sock_path();
     // EventHub 的实时连接列表不参与无缝升级交接；每个进程从空列表开始，
     // durable log/cursor 则复用 smelt.sqlite3。
-    // 建在 resume_handoff 之前：交接恢复的会话也要把状态投影到同一个 EventHub。
     let event_hub = match event_hub::DaemonEventHub::open_default() {
         Ok(event_hub) => event_hub,
         Err(error) => {
@@ -2177,70 +2090,36 @@ fn main() {
     // 即可。读取异常时 fail-closed，绝不把损坏文档当成空目录发布给 GUI。
     let remote_sessions = new_remote_sessions();
     let workspace_menu = new_workspace_menu();
-    let (listener, sessions, acp_sessions) = match handoff.and_then(|p| {
-        resume_handoff_with_remote(
-            &p,
-            &event_hub,
-            Some(Arc::clone(&remote_sessions)),
-            /* legacy_rehome */ true,
-        )
-    }) {
-        Some(x) => {
-            let acp_n = x.2.snapshot().len();
-            dlog(&format!(
-                "upgrade: 交接完成，恢复 {} 个终端会话 + {acp_n} 个 ACP 会话",
-                x.1.len()
-            ));
-            // 交接的会话是活的：空身份目录，由后续广播持续更新落盘。
-            *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) =
-                Some(SessionDirectory::new());
-            x
-        }
-        None => {
-            if came_from_handoff {
-                dlog("upgrade: 交接文件恢复失败，走全新启动（会话丢失但守护存活）");
-            }
-            // 单实例检查只在「不是从交接来的」这条路径上做：能连上说明已有活守护，
-            // 直接退出。若 came_from_handoff 为真，说明本进程就是刚从上一代 exec
-            // 过来的替身——这种情况下绝不能做这个检查：上一代把监听 fd 的 CLOEXEC
-            // 清掉了，我们已经继承着它，此时 connect 这个 path 会连上我们自己继承
-            // 的那份监听 fd（进 backlog 即成功），于是把「自己」误判成「已有别的
-            // 守护」而直接 return 退出——刚交接过来的进程当场自杀，所有会话陪葬。
-            // 交接失败时唯一正确的动作是：忽略那份不可追溯的旧监听 fd（它会作为
-            // 一个泄漏的 fd 留在本进程里，无害但也无法优雅关闭——resume_handoff
-            // 失败通常发生在 JSON 都解析不出来的极端情况，代价可接受），把 socket
-            // 文件净空重 bind，保证守护本身不能倒。
-            let listener = match bind_fresh_daemon(&path, &handoff_path(), !came_from_handoff) {
-                Ok(Some(l)) => l,
-                Ok(None) => return,
-                Err(e) => {
-                    // 曾经是静默 return：守护无声消失、sock 残留，外面完全查不到
-                    // 死因（排障时被坑过——必须留痕）。
-                    dlog(&format!("bind {} 失败，守护退出：{e}", path.display()));
-                    return;
-                }
-            };
-            // socket 仅本用户可读写。权限收紧失败时不能留下一个仍接受连接的 daemon。
-            if let Err(error) = secure_daemon_socket(&path) {
-                dlog(&format!(
-                    "设置 {} 权限失败，守护退出：{error}",
-                    path.display()
-                ));
-                drop(listener);
-                let _ = std::fs::remove_file(&path);
-                std::process::exit(1);
-            }
-            // 崩溃恢复：非 handoff 启动时，落盘有内容就说明上次非正常退出
-            // （正常 shutdown 会清空）。灌进身份目录，runtime=false，保留最后相位。
-            let directory = SessionDirectory::restore_from_disk();
-            let recovered = directory.snapshot().len();
-            if recovered > 0 {
-                dlog(&format!("崩溃恢复：{recovered} 个会话恢复为已断连状态"));
-            }
-            *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(directory);
-            (listener, new_sessions(), new_acp_sessions())
+    let listener = match bind_fresh_daemon(&path) {
+        Ok(Some(l)) => l,
+        Ok(None) => return,
+        Err(e) => {
+            // 曾经是静默 return：守护无声消失、sock 残留，外面完全查不到
+            // 死因（排障时被坑过——必须留痕）。
+            dlog(&format!("bind {} 失败，守护退出：{e}", path.display()));
+            return;
         }
     };
+    // socket 仅本用户可读写。权限收紧失败时不能留下一个仍接受连接的 daemon。
+    if let Err(error) = secure_daemon_socket(&path) {
+        dlog(&format!(
+            "设置 {} 权限失败，守护退出：{error}",
+            path.display()
+        ));
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        std::process::exit(1);
+    }
+    // 崩溃恢复：落盘有内容就说明上次非正常退出（正常 shutdown 会清空）。
+    // 灌进身份目录，runtime=false，保留最后相位。
+    let directory = SessionDirectory::restore_from_disk();
+    let recovered = directory.snapshot().len();
+    if recovered > 0 {
+        dlog(&format!("崩溃恢复：{recovered} 个会话恢复为已断连状态"));
+    }
+    *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(directory);
+    let sessions = new_sessions();
+    let acp_sessions = new_acp_sessions();
 
     let automations = new_automation_store();
 
@@ -2259,7 +2138,7 @@ fn main() {
         Arc::clone(&acp_sessions),
         Arc::clone(&remote_sessions),
         Arc::clone(&event_hub),
-        came_from_handoff,
+        false,
     );
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
 
@@ -2286,7 +2165,7 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
         std::process::exit(2);
     }
     // CLOEXEC 复位：spawn 时放行过，此后沿用"一切 fd 默认 CLOEXEC"纪律。
-    set_cloexec(sock_fd, true);
+    let _ = set_cloexec(sock_fd, true);
     // SAFETY：fd 有效性刚校验过，且该号只属于这次 import（predecessor 传参保证）。
     let sock = unsafe { UnixStream::from_raw_fd(sock_fd) };
 
@@ -2388,14 +2267,14 @@ fn wait_for_predecessor_exit(sock: &UnixStream, timeout: Duration) {
     }
 }
 
-/// headless 空闲自升级：没人看时，把已 stage 的 `smeltd.next` 应用到运行中的守护。
+/// headless 空闲自升级：没人看时，把 `smeltd.pending` 指向的新映像应用到运行中的守护。
 /// 每 60s 看一次（与 GUI 的 watch 同频，首轮延迟 60s，把先手让给 GUI）。
 /// 门控：
 /// - 指纹未知（None）不升：证明不了自己旧，别乱动。
 /// - 有活着的观看连接（桌面 event subscribe / 终端 open·watch / ACP open·watch）
 ///   不升：GUI 活着，它有空闲门控（agent 忙不闪终端），让它拥有升级时机。
-/// - 只 exec `smeltd.next`。正在跑的 `smeltd` 在升级完成前不准被替换，ACP host
-///   从 `current_exe()` 派生，必须跟主进程同版。
+/// - 只 exec pending 指向的那份不可变映像。启动名在提交前不动，会话宿主继续
+///   exec 本进程钉住的文件。
 /// - ACP/peer 忙：不自判，直接发 upgrade op 让 handler 回 busy（单一数据源），
 ///   等下一轮。
 ///   发的是对自己 socket 的 upgrade op，复用同一套事务/回滚/busy 语义；
@@ -2570,6 +2449,9 @@ fn run_serve_loop(
     // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
     spawn_headless_self_upgrade(daemon_fingerprint.clone());
 
+    // 闲置会话挂起（见 acp_idle）。冷启动和升级交接都走到这里；会话宿主进程不走。
+    acp_idle::spawn_acp_idle_reaper(Arc::clone(&acp_sessions), Arc::clone(&remote_sessions));
+
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
     let accept_loop = move || {
@@ -2634,11 +2516,6 @@ fn run_serve_loop(
     accept_loop();
 }
 
-/// 交接文件路径（跟 socket 同目录）。
-fn handoff_path() -> std::path::PathBuf {
-    sock_path().with_file_name("handoff.json")
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct OwnedAcpHandoff {
     pid: i32,
@@ -2654,7 +2531,6 @@ struct ValidatedAcpHandoff {
     acp_session_id: String,
     cwd: Option<String>,
     launch: smelt_core::agent_kind::ConversationLaunchSpec,
-    agent_needs_transcript_check: bool,
     pending_raw_line: Option<String>,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
 }
@@ -2677,8 +2553,8 @@ struct ValidatedHostedAcpHandoff {
     runtime_spec_fingerprint: Option<String>,
     agent_mcp: bool,
     agent_token: String,
-    agent_needs_transcript_check: bool,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
+    pending_host_bytes: Vec<u8>,
 }
 
 fn acp_turn_is_active(
@@ -2708,7 +2584,7 @@ fn state_has_active_turn(state: &smelt_core::acp_session::AcpSessionState) -> bo
         state.phase,
         state.turn_started_at_ms,
         state.replaying_history,
-        &state.entries,
+        state.entries(),
     )
 }
 
@@ -2810,9 +2686,6 @@ fn validate_acp_handoff_item(
         acp_session_id,
         cwd: item["cwd"].as_str().map(String::from),
         launch: launch_spec_from_handoff_item(item),
-        agent_needs_transcript_check: item["agent_needs_transcript_check"]
-            .as_bool()
-            .unwrap_or(false),
         pending_raw_line: item["pending_raw_line"].as_str().map(String::from),
         conversation_binding: item
             .get("conversation_binding")
@@ -2870,6 +2743,18 @@ fn validate_hosted_acp_handoff_item(
         && item["agent_token"]
             .as_str()
             .is_some_and(|token| !token.is_empty());
+    let pending_host_bytes = match item.get("pending_host_bytes") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(value) => {
+            let Ok(bytes) = serde_json::from_value::<Vec<u8>>(value.clone()) else {
+                return HostedAcpHandoffItemValidation::CleanupRequired(owned);
+            };
+            if bytes.len() > acp_runtime_host::HOST_HANDOFF_RESIDUAL_LIMIT {
+                return HostedAcpHandoffItemValidation::CleanupRequired(owned);
+            }
+            bytes
+        }
+    };
 
     HostedAcpHandoffItemValidation::Restore(Box::new(ValidatedHostedAcpHandoff {
         id: id.to_string(),
@@ -2884,13 +2769,11 @@ fn validate_hosted_acp_handoff_item(
             .map(String::from),
         agent_mcp,
         agent_token,
-        agent_needs_transcript_check: item["agent_needs_transcript_check"]
-            .as_bool()
-            .unwrap_or(false),
         conversation_binding: item
             .get("conversation_binding")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok()),
+        pending_host_bytes,
     }))
 }
 
@@ -2958,32 +2841,6 @@ fn wait_for_exact_child(pid: i32) -> TerminalChildExit {
             TerminalChildExit::WaitFailed(error)
         }
     }
-}
-
-/// `exec` 交接会保留 daemon PID 与父子关系，却会丢掉上一映像中的回收线程。
-/// 这里只允许在新映像尚未恢复任何 child owner 的独占启动边界调用：此刻旧线程已随
-/// `exec` 消失，新 waiter 尚未建立，因此不会抢 ACP、插件 Host 或终端的退出状态。
-/// 存活子进程由 WNOHANG 原样保留，稍后交回各自的精确 PID owner。
-fn reap_inherited_exited_children_at_exec_boundary() -> usize {
-    let mut reaped = 0;
-    loop {
-        let waited = waitpid_retry(-1, libc::WNOHANG);
-        if waited > 0 {
-            reaped += 1;
-            continue;
-        }
-        if waited == 0 {
-            break;
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::ECHILD) => break,
-            error => {
-                dlog(&format!("upgrade: 启动边界清理遗留子进程失败：{error:?}"));
-                break;
-            }
-        }
-    }
-    reaped
 }
 
 /// 交接清理动刀前的身份门：pid 启动早于快照时刻才是原进程。复用只能发生在
@@ -3095,8 +2952,8 @@ fn resume_hosted_acp_handoff_item(
         runtime_spec_fingerprint,
         agent_mcp,
         agent_token,
-        agent_needs_transcript_check,
         conversation_binding,
+        pending_host_bytes,
     } = validated;
     let snapshot_revision = snapshot.snapshot_revision;
     let pending_agent_preset = snapshot
@@ -3143,6 +3000,7 @@ fn resume_hosted_acp_handoff_item(
         prompt_in_flight: AtomicBool::new(prompt_in_flight),
         automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        immediate_delivery: Mutex::new(None),
         unaccepted_prompt: Mutex::new(None),
         provider_hold: AtomicBool::new(false),
         hosted_handle: Mutex::new(None),
@@ -3150,7 +3008,6 @@ fn resume_hosted_acp_handoff_item(
         handle: Mutex::new(None),
         unreaped_pid: Mutex::new(None),
         cwd,
-        agent_needs_transcript_check,
         state,
         output_gate: Mutex::new(()),
         out: Mutex::new(AcpOut {
@@ -3165,6 +3022,8 @@ fn resume_hosted_acp_handoff_item(
         agent_session: Mutex::new(agent_session),
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
+        durable_history_session_id: Mutex::new(None),
+        idle: Default::default(),
     });
     if !created {
         cleanup_rejected_hosted_acp_handoff(owned, snapshot_wall);
@@ -3178,13 +3037,16 @@ fn resume_hosted_acp_handoff_item(
     }
 
     if !keep_host {
-        let resume_id = slot
-            .value
-            .reduced
-            .lock()
-            .unwrap()
-            .history_session_id
-            .clone();
+        let resume_id = {
+            let known = slot
+                .value
+                .reduced
+                .lock()
+                .unwrap()
+                .history_session_id
+                .clone();
+            resolve_resume_id(&id, None, known, true)
+        };
         let launch = slot
             .value
             .launch_spec
@@ -3207,6 +3069,7 @@ fn resume_hosted_acp_handoff_item(
             None,
             Arc::clone(acp_sessions),
             event_hub,
+            false,
         );
         return;
     }
@@ -3217,7 +3080,12 @@ fn resume_hosted_acp_handoff_item(
         provider_pid,
     } = owned;
     let hosted = match unsafe {
-        acp_runtime_host::HostedConversationHandle::from_handoff(host_pid, host_fd, provider_pid)
+        acp_runtime_host::HostedConversationHandle::from_handoff(
+            host_pid,
+            host_fd,
+            provider_pid,
+            pending_host_bytes,
+        )
     } {
         Ok(hosted) => hosted,
         Err(error) => {
@@ -3275,16 +3143,18 @@ fn legacy_rehome_is_safe(
 /// `legacy_rehome`：是否执行上面那步迁移。它会杀掉旧连接并重新 spawn 宿主，
 /// 属于有副作用的动作，所以由调用方显式选择，而不是靠 `cfg!(test)` 猜构建
 /// 类型——那样测试里这条分支按构造永远不可达，等于没有覆盖。
+///
+/// 生产启动不再读交接文件。这个入口只给单测喂 JSON，恢复核心和 v2 socket 共用。
+#[cfg(test)]
 fn resume_handoff_with_remote(
     path: &str,
     event_hub: &EventHubHandle,
     remote_sessions: Option<RemoteSessions>,
     legacy_rehome: bool,
 ) -> Option<(UnixListener, Sessions, AcpSessions)> {
-    // legacy 文件入口（一代兼容）：读文件 → Value → 恢复核心。
-    // 交接 v2 走 socket + typed manifest，经 bridge 调同一恢复核心。
+    // 单测把交接 JSON 写成临时文件再喂给恢复核心。生产启动不走这里。
     let data = std::fs::read_to_string(path).ok()?;
-    let _ = std::fs::remove_file(path); // 读到手就删，避免残留被下次启动误认
+    let _ = std::fs::remove_file(path);
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
     resume_from_value(
         &v,
@@ -3311,7 +3181,7 @@ pub(crate) fn resume_from_value(
     if unsafe { libc::fcntl(listen_fd, libc::F_GETFD) } < 0 {
         return None;
     }
-    set_cloexec(listen_fd, true);
+    let _ = set_cloexec(listen_fd, true);
     let listener = unsafe { UnixListener::from_raw_fd(listen_fd) };
 
     #[cfg(target_os = "macos")]
@@ -3433,7 +3303,7 @@ pub(crate) fn resume_from_value(
             }
             continue;
         }
-        set_cloexec(fd, true);
+        let _ = set_cloexec(fd, true);
         let master = unsafe { std::fs::File::from_raw_fd(fd) };
         if set_fd_nonblocking(master.as_raw_fd(), true).is_err() {
             drop(master);
@@ -3472,7 +3342,7 @@ pub(crate) fn resume_from_value(
         let alt_flag = item["alt_screen"].as_bool().unwrap_or(false);
         // 旧 handoff 文件可能仍带 "buf"（环形原始字节）——**忽略，永不 feed**。
         // 状态通道不参与交接：新进程里全新一份 SessionState（launch 会写回，便于
-        // snapshot 识别 agent）。hook/ACP 很快会补 phase，终端标题会独立更新。
+        // snapshot 识别 agent）。phase 和会话名随后只由 hook/ACP 写回，不从 OSC 恢复。
         let instance = next_session_instance();
         let state = Arc::new(Mutex::new(SessionState {
             id: id.to_string(),
@@ -3645,7 +3515,6 @@ pub(crate) fn resume_from_value(
             acp_session_id,
             cwd,
             launch,
-            agent_needs_transcript_check,
             pending_raw_line,
             conversation_binding,
         } = validated;
@@ -3704,6 +3573,7 @@ pub(crate) fn resume_from_value(
             prompt_in_flight: AtomicBool::new(recover_running_turn),
             automation_watch: Mutex::new(None),
             pending_prompts: Mutex::new(VecDeque::new()),
+            immediate_delivery: Mutex::new(None),
             unaccepted_prompt: Mutex::new(None),
             provider_hold: AtomicBool::new(false),
             hosted_handle: Mutex::new(None),
@@ -3711,7 +3581,6 @@ pub(crate) fn resume_from_value(
             handle: Mutex::new(None),
             unreaped_pid: Mutex::new(None),
             cwd,
-            agent_needs_transcript_check,
             state,
             output_gate: Mutex::new(()),
             out: Mutex::new(AcpOut {
@@ -3733,6 +3602,8 @@ pub(crate) fn resume_from_value(
             agent_session: Mutex::new(agent_session),
             conversation_submit: Mutex::new(()),
             pending_agent_preset: Mutex::new(pending_agent_preset),
+            durable_history_session_id: Mutex::new(None),
+            idle: Default::default(),
         });
         if !created {
             cleanup_rejected_acp_handoff(owned, snapshot_wall);
@@ -3750,8 +3621,8 @@ pub(crate) fn resume_from_value(
             stdin_fd,
             stdout_fd,
         } = owned;
-        set_cloexec(stdin_fd, true);
-        set_cloexec(stdout_fd, true);
+        let _ = set_cloexec(stdin_fd, true);
+        let _ = set_cloexec(stdout_fd, true);
         let drain_id = id.clone();
         let event_rx = {
             let _lifecycle = slot.lifecycle.lock().unwrap();
@@ -3775,7 +3646,10 @@ pub(crate) fn resume_from_value(
             event_rx
         };
         if legacy_rehome_safe {
-            let resume_id = known_acp_resume_id(&slot.value.reduced.lock().unwrap());
+            let resume_id = {
+                let known = known_acp_resume_id(&slot.value.reduced.lock().unwrap());
+                resolve_resume_id(&drain_id, None, known, true)
+            };
             let resume_ids = resume_id.iter().cloned().collect::<Vec<_>>();
             let _lifecycle = slot.lifecycle.lock().unwrap();
             if retire_acp_runtime(&slot.value) {
@@ -3792,6 +3666,7 @@ pub(crate) fn resume_from_value(
                     None,
                     Arc::clone(&acp_sessions),
                     event_hub,
+                    false,
                 );
             } else {
                 let mut reduced = slot.value.reduced.lock().unwrap();
@@ -3915,33 +3790,6 @@ fn handle_upgrade(
     listen_fd: RawFd,
 ) {
     let mut c = conn;
-    // 可选 `"exe":"/path/to/smeltd"`：spawn 指定二进制做 successor。暂存
-    // `.next` 原样 exec，COMMIT 之后才扶正到正式路径。未传则 spawn current_exe。
-    let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-        let path = std::path::PathBuf::from(p);
-        if !path.is_file() {
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) })
-            );
-            return;
-        }
-        path
-    } else {
-        match daemon_executable_path() {
-            Ok(p) => p,
-            Err(_) => {
-                let _ = writeln!(
-                    c,
-                    "{}",
-                    serde_json::json!({ "ok": false, "err": "current_exe 失败" })
-                );
-                return;
-            }
-        }
-    };
-
     // 从收集任何会话列表/快照之前就冻结全部真实 spawn，并一直持有到 exec 成功
     // （不返回）或失败回滚结束。这样快照里不会漏掉已经 fork、但尚未把 pid/fd
     // 发布到 ConversationHandle.stdio 的 ACP 子进程。
@@ -3984,6 +3832,34 @@ fn handle_upgrade(
         return;
     }
 
+    // busy 是可重试的瞬时状态，先于映像校验报告。
+    // 可选 `"exe"`：spawn 指定的不可变映像做 successor。启动名要等 COMMIT 之后
+    // 再拨过去。未传则 spawn 本进程钉住的那份文件。
+    let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        let path = std::path::PathBuf::from(p);
+        if !path.is_file() {
+            let _ = writeln!(
+                c,
+                "{}",
+                serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) })
+            );
+            return;
+        }
+        path
+    } else {
+        match daemon_executable_path() {
+            Ok(p) => p,
+            Err(error) => {
+                let _ = writeln!(
+                    c,
+                    "{}",
+                    serde_json::json!({ "ok": false, "err": format!("找不到当前守护映像：{error}") })
+                );
+                return;
+            }
+        }
+    };
+
     // 交接 v2：快照→typed manifest→spawn successor→传 manifest/fd/grid→
     // READY→COMMIT。COMMIT 发出前任何失败都回滚（reply false，原地继续服务）；
     // 只有库被 successor 迁移过才 exit（结局=旧版最坏情况，显式可观测）。
@@ -3998,6 +3874,7 @@ fn handle_upgrade(
             std::process::exit(0);
         }
         handoff_v2::predecessor::TransactionOutcome::RolledBack { reason } => {
+            acp_host::resume_acp_after_handoff_rollback(acp_sessions);
             if handoff_v2::predecessor::store_migrated_since(pre_schema) {
                 let _ = writeln!(
                     c,
@@ -4014,7 +3891,8 @@ fn handle_upgrade(
     }
 }
 
-/// 开 PTY + 起 shell（环境设置与 GUI 内嵌版完全一致，见 terminal_view.rs 的注释）。
+/// 开 PTY + 起 shell。交互环境在下面的 `apply_interactive_pty_env`：PTY 只活在守护里，
+/// GUI 的 `terminal.rs` 只消费字节流。
 /// `launch`：项目「+」悬浮菜单的 Claude Code / Codex 快捷入口——把要跑的命令直接编进
 /// 启动命令行（`-ilc '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
 /// 这样从根上没有"shell 是否已经在读 stdin"的时序问题，命令跑完会 exec 回一个

@@ -15,6 +15,8 @@
 //! 依赖带进 `smelt-core`。见 docs/remote-ops-roadmap.md（Phase 1/2）、
 //! docs/collaboration.md（安全底线）。
 
+mod mobile_image;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -878,7 +880,10 @@ fn apply_mobile_lifecycle_event(hub: &MobileLifecycleHub, event: DaemonStateEven
             hub.apply_automations(automations);
             false
         }
-        DaemonStateEvent::Disconnected => false,
+        // 网关不订阅唤醒请求：它兑现不了，订阅了反而会让 daemon 误以为桌面端在场。
+        DaemonStateEvent::ConversationWakeRequested { .. } | DaemonStateEvent::Disconnected => {
+            false
+        }
     }
 }
 
@@ -1638,6 +1643,9 @@ enum AcpWsRequest {
     Subscribe { params: SubscribeParams },
     #[serde(rename = "loadHistory")]
     LoadHistory { params: LoadHistoryParams },
+    /// 快照里的大图只有缩略图，点开看时按引用取原图。
+    #[serde(rename = "loadImage")]
+    LoadImage { params: LoadImageParams },
     /// 输入栏的「技能」入口：按需问一次，不跟着快照推。
     #[serde(rename = "listSessionSkills")]
     ListSessionSkills { params: SessionActionParams },
@@ -2137,6 +2145,14 @@ struct ElicitationTextParams {
 }
 
 #[derive(serde::Deserialize)]
+struct LoadImageParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    entry: u64,
+    digest: String,
+}
+
+#[derive(serde::Deserialize)]
 struct SessionActionParams {
     #[serde(rename = "sessionId")]
     session_id: String,
@@ -2473,6 +2489,10 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                         };
                         let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(response.into())).await;
                     }
+                    AcpWsRequest::LoadImage { params } => {
+                        let response = load_original_image(&params).await;
+                        let _ = futures::SinkExt::send(&mut ws_tx, Message::Text(response.to_string().into())).await;
+                    }
                     AcpWsRequest::Unsubscribe => {
                         if let Some((_, stop_tx, handle)) = current_subscription.take() {
                             let _ = stop_tx.send(true);
@@ -2687,6 +2707,37 @@ async fn dispatch_mobile_action(
 }
 
 /// 后台任务：监听 smeltd 的 acp_watch 推送
+// 手机只渲染正文。daemon 的调试 sidecar 里装着每次模型调用的完整 provider
+// payload，图片会在每次调用里重复一份：一个带十几张截图的会话快照能到 90MB+，
+// 经 relay 传不完，心跳 pong 排在它后面超时，手机断线重连再要一份，死循环。
+fn acp_watch_request(
+    session_id: &str,
+    history_session_id: Option<&str>,
+    known_entries: Option<usize>,
+    snapshot_revision: Option<u64>,
+    tail_limit: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "op": DaemonOperation::AcpWatch,
+        "id": session_id,
+        "history_session_id": history_session_id,
+        "known_entries": known_entries,
+        "snapshot_revision": snapshot_revision,
+        "tail_limit": tail_limit,
+        "include_debug": false,
+    })
+}
+
+fn acp_history_request(session_id: &str, before_offset: usize, limit: usize) -> serde_json::Value {
+    serde_json::json!({
+        "op": DaemonOperation::AcpSnapshot,
+        "id": session_id,
+        "before": before_offset,
+        "limit": limit,
+        "include_debug": false,
+    })
+}
+
 async fn acp_watch_loop(
     session_id: String,
     history_session_id: Option<String>,
@@ -2703,15 +2754,13 @@ async fn acp_watch_loop(
     };
     let (reader, mut writer) = stream.into_split();
 
-    // 发送 acp_watch 请求
-    let req = serde_json::json!({
-        "op": DaemonOperation::AcpWatch,
-        "id": session_id,
-        "history_session_id": history_session_id,
-        "known_entries": known_entries,
-        "snapshot_revision": snapshot_revision,
-        "tail_limit": tail_limit,
-    });
+    let req = acp_watch_request(
+        &session_id,
+        history_session_id.as_deref(),
+        known_entries,
+        snapshot_revision,
+        tail_limit,
+    );
     let req_line = format!("{req}\n");
     if writer.write_all(req_line.as_bytes()).await.is_err() {
         return;
@@ -2738,9 +2787,22 @@ async fn acp_watch_loop(
                     Ok(0) => break, // EOF
                     Ok(_) => {
                         let trimmed = line.trim();
-                        if !trimmed.is_empty()
-                            && tx.send(tag_snapshot_line(trimmed, &session_id)).await.is_err()
-                        {
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Some(reason) = acp_watch_unavailable_reason(trimmed) {
+                            let message = serde_json::json!({
+                                "type": "sessionUnavailable",
+                                "sessionId": session_id,
+                                "reason": reason,
+                            });
+                            let _ = tx.send(message.to_string()).await;
+                            break;
+                        }
+                        let Ok(projected) = mobile_snapshot_line(trimmed, &session_id).await else {
+                            break;
+                        };
+                        if tx.send(projected).await.is_err() {
                             break;
                         }
                     }
@@ -2749,6 +2811,17 @@ async fn acp_watch_loop(
             }
         }
     }
+}
+
+/// daemon 接不上这段对话（没在跑、桌面端也没把它拉起来）时回的那一行。
+/// 必须原样告诉手机，否则对话页只会一直转圈。
+fn acp_watch_unavailable_reason(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    value
+        .get("unavailable")?
+        .get("reason")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// 问一次 daemon：这场对话现在加载了哪些技能。技能要读本机文件系统，只有 daemon
@@ -2796,18 +2869,67 @@ async fn read_acp_history(
     before_offset: usize,
     limit: usize,
 ) -> Result<String, String> {
+    let line = read_acp_snapshot_line(session_id, before_offset, limit).await?;
+    mobile_snapshot_line(&line, session_id)
+        .await
+        .map_err(|error| format!("snapshot projection failed: {error}"))
+}
+
+/// 缩略图要解码、缩放、编码大图，放到阻塞线程池，别占住 WebSocket 的异步线程。
+async fn mobile_snapshot_line(
+    line: &str,
+    session_id: &str,
+) -> Result<String, tokio::task::JoinError> {
+    let line = line.to_string();
+    let session_id = session_id.to_string();
+    tokio::task::spawn_blocking(move || mobile_image::mobile_snapshot_line(&line, &session_id))
+        .await
+}
+
+async fn load_original_image(params: &LoadImageParams) -> serde_json::Value {
+    let mut response = serde_json::json!({
+        "type": "image",
+        "sessionId": params.session_id,
+        "entry": params.entry,
+        "digest": params.digest,
+    });
+    let Ok(before) = usize::try_from(params.entry + 1) else {
+        response["error"] = "image not found".into();
+        return response;
+    };
+    let found = match read_acp_snapshot_line(&params.session_id, before, 1).await {
+        Ok(line) => {
+            let (entry, digest) = (params.entry, params.digest.clone());
+            tokio::task::spawn_blocking(move || mobile_image::original_image(&line, entry, &digest))
+                .await
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error),
+    };
+    match found {
+        Ok(Some(image)) => {
+            response["mime"] = image.mime.into();
+            response["data_b64"] = image.data_b64.into();
+        }
+        // 条目被回退或压缩改写过，引用对不上了。
+        Ok(None) => response["error"] = "image no longer in this session".into(),
+        Err(error) => response["error"] = error.into(),
+    }
+    response
+}
+
+async fn read_acp_snapshot_line(
+    session_id: &str,
+    before_offset: usize,
+    limit: usize,
+) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
     let stream = tokio::net::UnixStream::connect(sock_path())
         .await
         .map_err(|e| format!("connect failed: {e}"))?;
     let (reader, mut writer) = stream.into_split();
-    let request = serde_json::json!({
-        "op": DaemonOperation::AcpSnapshot,
-        "id": session_id,
-        "before": before_offset,
-        "limit": limit,
-    });
+    let request = acp_history_request(session_id, before_offset, limit);
     let req_line = format!("{request}\n");
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -2823,24 +2945,12 @@ async fn read_acp_history(
         .await
         .map_err(|_| "read timeout".to_string())?
         .map_err(|e| format!("read failed: {e}"))?;
-    if response.trim().is_empty() {
+    let response = response.trim();
+    if response.is_empty() {
         Err("session not found".to_string())
     } else {
-        Ok(tag_snapshot_line(response.trim(), session_id))
+        Ok(response.to_string())
     }
-}
-
-fn tag_snapshot_line(line: &str, session_id: &str) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return line.to_string();
-    };
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "sessionId".to_string(),
-            serde_json::Value::String(session_id.to_string()),
-        );
-    }
-    value.to_string()
 }
 
 async fn send_acp_action(session_id: &str, action: serde_json::Value) -> Result<(), String> {
@@ -2955,8 +3065,35 @@ async fn respond_acp_approval(
 mod tests {
     use super::*;
 
+    #[test]
+    fn acp_watch_unavailable_line_is_recognized_and_snapshots_are_not() {
+        assert_eq!(
+            acp_watch_unavailable_reason(r#"{"unavailable":{"reason":"Smelt is not open"}}"#)
+                .as_deref(),
+            Some("Smelt is not open")
+        );
+        assert_eq!(
+            acp_watch_unavailable_reason(r#"{"snapshot":{"entries":[]}}"#),
+            None
+        );
+    }
+
     /// 手机只认 `section` + `target` 两个字段来分组和分派。这两个名字一旦漂了，
     /// 选择器会静默变成空列表——所以把下发的 JSON 形状钉死在测试里。
+    #[test]
+    fn mobile_snapshot_requests_leave_the_debug_sidecars_on_the_desktop() {
+        let watch = acp_watch_request("acp-1", Some("history-1"), Some(3), Some(9), 100);
+        assert_eq!(watch["op"], "acp_watch");
+        assert_eq!(watch["history_session_id"], "history-1");
+        assert_eq!(watch["tail_limit"], 100);
+        assert_eq!(watch["include_debug"], false);
+
+        let history = acp_history_request("acp-1", 40, 100);
+        assert_eq!(history["op"], "acp_snapshot");
+        assert_eq!(history["before"], 40);
+        assert_eq!(history["include_debug"], false);
+    }
+
     #[test]
     fn launch_actions_carry_their_section_and_target() {
         use smelt_core::new_session::{

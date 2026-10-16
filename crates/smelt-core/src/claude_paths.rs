@@ -1,6 +1,5 @@
-//! Claude Code 本地存储路径规则：项目目录编码、transcript 文件、记忆目录。
-//! 唯一权威来源——`smelt`（历史会话页、记忆页）和这里将要托管的 ACP 连接层
-//! （Claude 的续接可行性预检）都用它，不许各自复制一份编码规则。
+//! Claude Code 本地存储路径规则：项目目录编码和 projects 根目录。
+//! 历史会话扫描只用这一份，不许再复制编码规则。
 //!
 //! Claude Code 支持用 `CLAUDE_CONFIG_DIR` 环境变量把整个 `~/.claude` 换成
 //! 别的目录（多账号场景常用）；没设就还是默认位置，绝大多数用户零行为变化。
@@ -36,24 +35,6 @@ fn claude_home(override_dir: Option<&str>) -> PathBuf {
         .join(".claude")
 }
 
-/// 某个会话的 transcript 文件路径（`<项目目录>/<会话 id>.jsonl`）。
-///
-/// ACP 的会话 id 就是 Claude Code 的 transcript 文件名（实测印证）；这个文件
-/// 存在与否 = 这段对话有没有真正落盘 = 续接有没有可能成功。ACP 连接层靠它
-/// 避开注定失败的 `session/resume`（省下约 2 秒白等）。
-pub fn transcript_path(cwd: &str, session_id: &str, override_dir: Option<&str>) -> PathBuf {
-    projects_root(override_dir)
-        .join(project_dir(cwd))
-        .join(format!("{session_id}.jsonl"))
-}
-
-/// 某个项目的记忆目录（`<项目目录>/memory`）。
-pub fn memory_dir(cwd: &str, override_dir: Option<&str>) -> PathBuf {
-    projects_root(override_dir)
-        .join(project_dir(cwd))
-        .join("memory")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,8 +42,8 @@ mod tests {
     #[test]
     fn project_dir_replaces_slashes_and_dots() {
         assert_eq!(
-            project_dir("/Users/c.chen/dev/smelt"),
-            "-Users-c-chen-dev-smelt"
+            project_dir("/workspace/alice.smith/dev/project"),
+            "-workspace-alice-smith-dev-project"
         );
     }
 }

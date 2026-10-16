@@ -13,6 +13,12 @@ impl Workspace {
         if tab.releases_plugin_key() {
             smelt_webview::release_focus(window);
         }
+        if tab != WorkspaceRoute::Agents {
+            self.abandon_new_conversation_create(cx);
+        } else if self.agent_surface.conversation_draft_id.is_some() {
+            // 侧栏「智能体」回根页。草稿还没提交，离开编辑器就等于取消。
+            self.cancel_conversation_draft(cx);
+        }
         self.nav.set_active(tab.clone());
         if tab.sidebar_opens_root() {
             self.pop_active_tab_to_root();
@@ -22,14 +28,16 @@ impl Workspace {
         }
         window.focus(&self.focus_handle, cx);
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
-    pub(super) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute) {
+    pub(super) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute, cx: &mut Context<Self>) {
         self.nav.set_active(tab);
         if !self.active_tab().is_session() {
             self.stage_cover = None;
         }
+        self.schedule_visible_refresh(cx);
     }
 
     pub(super) fn pop_active_tab_to_root(&mut self) {
@@ -53,7 +61,7 @@ impl Workspace {
     ) {
         debug_assert!(matches!(
             route,
-            WorkspaceRoute::Agents | WorkspaceRoute::Automations
+            WorkspaceRoute::Agents | WorkspaceRoute::Automations | WorkspaceRoute::Capabilities
         ));
         if route == WorkspaceRoute::Agents {
             settings::reload_agent_definitions(cx);
@@ -65,19 +73,23 @@ impl Workspace {
         self.open_agent_product_route(WorkspaceRoute::Agents, window, cx);
     }
 
-    pub(super) fn toggle_agent_conversations_collapsed(
+    /// 直接打开能力库的某个页签，比如智能体编辑器里「插件 · 管理」。
+    pub(super) fn open_capabilities(
         &mut self,
-        agent_id: &str,
+        tab: CapabilitiesTab,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if agent_id.is_empty() {
-            return;
+        self.nav.set_capabilities_tab(tab);
+        self.open_agent_product_route(WorkspaceRoute::Capabilities, window, cx);
+    }
+
+    pub(super) fn select_capabilities_tab(&mut self, tab: CapabilitiesTab, cx: &mut Context<Self>) {
+        if self.nav.capabilities_tab() != tab {
+            self.nav.set_capabilities_tab(tab);
+            self.schedule_visible_refresh(cx);
+            cx.notify();
         }
-        if !self.collapsed_agents.remove(agent_id) {
-            self.collapsed_agents.insert(agent_id.to_string());
-        }
-        self.save_state(cx);
-        cx.notify();
     }
 
     pub(super) fn create_agent(
@@ -94,7 +106,7 @@ impl Workspace {
             format!("{} 智能体 {}", kind.short_label(), existing + 1)
         };
         let selected = id.clone();
-        settings::apply_agent_host(
+        let saved = settings::try_apply_agent_host(
             move |config| {
                 config.agents.push(settings::AgentDefinition {
                     id,
@@ -105,6 +117,10 @@ impl Workspace {
             },
             cx,
         );
+        if self.agent_surface.arm_conversation_on_create && saved {
+            self.agent_surface.arm_conversation_on_create = false;
+            self.agent_surface.conversation_draft_id = Some(selected.clone());
+        }
         self.open_agent_definition(selected, window, cx);
     }
 
@@ -147,6 +163,30 @@ impl Workspace {
                     agent.plugins.remove(pos);
                 } else {
                     agent.plugins.push(plugin_id.clone());
+                }
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// 勾选 / 取消勾选一台 MCP 服务器。新开的对话只连勾选的服务器，没勾就不连。
+    pub(super) fn toggle_agent_mcp_server(
+        &mut self,
+        agent_id: String,
+        server: String,
+        cx: &mut Context<Self>,
+    ) {
+        settings::apply_agent_host(
+            move |config| {
+                let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id)
+                else {
+                    return;
+                };
+                if let Some(pos) = agent.mcp_servers.iter().position(|name| *name == server) {
+                    agent.mcp_servers.remove(pos);
+                } else {
+                    agent.mcp_servers.push(server.clone());
                 }
             },
             cx,
@@ -279,8 +319,191 @@ impl Workspace {
     pub(super) fn refresh_agent_plugins(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.agent_surface.editor.as_mut() {
             editor.plugins = discover_plugins();
+            editor.mcp_servers = load_mcp_servers_for_editor();
         }
         cx.notify();
+    }
+
+    /// 重新扫描记忆目录。智能体在对话里写了新记忆后，不用重开编辑器就能看到。
+    pub(super) fn refresh_agent_memories(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            editor.memories = AgentMemories::scan(&editor.id);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn select_agent_editor_tab(&mut self, tab: AgentEditorTab, cx: &mut Context<Self>) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            editor.tab = tab;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_agent_memory_filter(&mut self, filter: MemoryFilter, cx: &mut Context<Self>) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            editor.memory_filter = filter;
+        }
+        cx.notify();
+    }
+
+    /// 一次只展开一条；再点同一条收起。
+    pub(super) fn toggle_agent_memory_expanded(
+        &mut self,
+        layer: MemoryLayer,
+        file_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.agent_surface.editor.as_mut() {
+            let target = (layer, file_name);
+            editor.expanded_memory = if editor.expanded_memory.as_ref() == Some(&target) {
+                None
+            } else {
+                Some(target)
+            };
+        }
+        cx.notify();
+    }
+
+    /// 使用次数和待确认状态存在主库，是智能体在一轮里写完文件之后才记的，目录监听
+    /// 看不到。有对话停下来时这些已经落库，编辑器开着就重扫一次。
+    pub(crate) fn refresh_agent_memories_after_turns(
+        &mut self,
+        states: &[smelt_core::daemon_state::DaemonSessionState],
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_surface.editor.is_some()
+            && states
+                .iter()
+                .any(|state| session_phase_settled(state.effective_phase()))
+        {
+            self.refresh_agent_memories(cx);
+        }
+    }
+
+    /// 监听两层记忆目录。回调在 notify 的线程上，只发唤醒信号；一次写入会连着来好几个
+    /// 事件，稍等一下合并成一次重扫。返回的 watcher 一 drop，发送端跟着释放，任务就结束。
+    fn watch_agent_memories(
+        &mut self,
+        agent_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<notify::RecommendedWatcher> {
+        use notify::Watcher as _;
+
+        let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok() {
+                let _ = wake_tx.try_send(());
+            }
+        })
+        .ok()?;
+        let mut watching = false;
+        for layer in [MemoryLayer::Agent, MemoryLayer::User] {
+            // 目录不存在就监听不了；先建好，智能体第一次写记忆时卡片也能刷新。
+            let Some(dir) = layer.dir(agent_id) else {
+                continue;
+            };
+            if std::fs::create_dir_all(&dir).is_ok()
+                && watcher
+                    .watch(&dir, notify::RecursiveMode::NonRecursive)
+                    .is_ok()
+            {
+                watching = true;
+            }
+        }
+        if !watching {
+            return None;
+        }
+        cx.spawn(async move |this, cx| {
+            while wake_rx.recv().await.is_ok() {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                while wake_rx.try_recv().is_ok() {}
+                if this
+                    .update(cx, |this, cx| this.refresh_agent_memories(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Some(watcher)
+    }
+
+    pub(super) fn open_agent_memory_file(
+        &mut self,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.error = crate::ide::open_in_system_text_editor(&path).err();
+        cx.notify();
+    }
+
+    pub(super) fn open_agent_memory_folder(
+        &mut self,
+        agent_id: String,
+        layer: MemoryLayer,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.error = match layer.dir(&agent_id) {
+            Some(dir) => std::fs::create_dir_all(&dir)
+                .map_err(|error| format!("无法创建记忆目录：{error}"))
+                .and_then(|()| crate::ide::open_in_file_manager(&dir))
+                .err(),
+            None => Some("找不到记忆目录".to_string()),
+        };
+        cx.notify();
+    }
+
+    /// 点删除只是弹确认；记忆删了就没了，全局记忆还会从所有智能体里消失。
+    pub(super) fn request_delete_agent_memory(
+        &mut self,
+        target: MemoryDeleteTarget,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.pending_memory_delete = Some(target);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_delete_agent_memory(&mut self, cx: &mut Context<Self>) {
+        self.agent_surface.pending_memory_delete = None;
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_delete_agent_memory(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.agent_surface.pending_memory_delete.take() else {
+            return;
+        };
+        let MemoryDeleteTarget {
+            agent_id,
+            layer,
+            file_name,
+            ..
+        } = target;
+        self.agent_surface.error = match layer.dir(&agent_id) {
+            Some(dir) => {
+                smelt_core::agent_memory::delete_memory(&dir, &layer.scope(&agent_id), &file_name)
+            }
+            .map_err(|error| format!("删除记忆失败：{error}"))
+            .err(),
+            None => Some("找不到记忆目录".to_string()),
+        };
+        self.refresh_agent_memories(cx);
+    }
+
+    pub(super) fn approve_agent_memory(
+        &mut self,
+        agent_id: String,
+        layer: MemoryLayer,
+        file_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_surface.error =
+            smelt_core::agent_memory::approve_memory(&layer.scope(&agent_id), &file_name)
+                .map_err(|error| format!("采纳记忆失败：{error}"))
+                .err();
+        self.refresh_agent_memories(cx);
     }
 
     pub(super) fn finish_automation_name_edit(&mut self, cx: &mut Context<Self>) {
@@ -296,6 +519,14 @@ impl Workspace {
         self.agent_surface.error = None;
         self.save_state(cx);
         cx.notify();
+    }
+
+    pub(super) fn close_agent_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_conversation_draft() {
+            self.cancel_conversation_draft(cx);
+            return;
+        }
+        self.close_agent_definition(cx);
     }
 
     pub(super) fn ensure_agent_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -397,6 +628,16 @@ impl Workspace {
             }),
         );
 
+        let memory_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称、描述或正文"));
+        subscriptions.push(cx.subscribe(&memory_query, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
+
+        let memories = AgentMemories::scan(&id);
+        let memory_watcher = self.watch_agent_memories(&id, cx);
         self.agent_surface.editor = Some(AgentEditor {
             id,
             name,
@@ -404,6 +645,13 @@ impl Workspace {
             instructions,
             context_link,
             plugins: discover_plugins(),
+            mcp_servers: load_mcp_servers_for_editor(),
+            memories,
+            tab: AgentEditorTab::default(),
+            memory_query,
+            memory_filter: MemoryFilter::default(),
+            expanded_memory: None,
+            _memory_watcher: memory_watcher,
             _subscriptions: subscriptions,
         });
         window.focus(&self.focus_handle, cx);
@@ -466,29 +714,160 @@ impl Workspace {
         );
     }
 
-    /// 侧栏最顶「聊天」：用 Pi 裸引擎新开一段工作台对话。
-    /// 进「对话」栏，不进项目列表，也不绑某个产品智能体定义。
-    pub(super) fn start_workbench_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(fallback_cwd) = ensure_workbench_conversation_cwd() else {
-            self.agent_surface.error = Some("无法创建对话工作区".to_string());
+    /// 侧栏「新对话」。有默认就直接开；没有可对话智能体就去创建；有人但没默认时
+    /// 选择器自己处理，这里不猜。
+    pub(super) fn begin_new_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stored = stored_default_conversation_agent();
+        let draft = self.agent_surface.conversation_draft_id.clone();
+        let (intent, clear_stored, agents_empty) = {
+            let agents = &cx.global::<settings::AgentHostState>().agents;
+            let resolution = smelt_core::default_conversation::resolve_new_conversation(
+                agents,
+                stored.as_deref(),
+                draft.as_deref(),
+            );
+            (
+                resolution.intent,
+                resolution.clear_stored_default,
+                agents.is_empty(),
+            )
+        };
+        if clear_stored {
+            clear_default_conversation_agent();
+        }
+        match intent {
+            smelt_core::default_conversation::NewConversationIntent::Start { agent_id } => {
+                self.discard_uncommitted_draft(Some(&agent_id), cx);
+                self.start_agent_conversation(agent_id, window, cx);
+            }
+            smelt_core::default_conversation::NewConversationIntent::PickAgent => {}
+            smelt_core::default_conversation::NewConversationIntent::CreateAgent => {
+                if self.agent_surface.conversation_draft_id.is_some() {
+                    self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
+                    window.focus(&self.focus_handle, cx);
+                    self.save_state(cx);
+                    cx.notify();
+                    return;
+                }
+                if agents_empty {
+                    self.agent_surface.arm_conversation_on_create = true;
+                }
+                self.open_agents_route(window, cx);
+            }
+        }
+    }
+
+    /// 选择器里点了一个智能体。`start` 为真时同时开对话；更换默认时只改记录。
+    ///
+    /// 智能体页上的「新对话」不走这里，避免点一次专用智能体就把侧栏默认抢走。
+    pub(super) fn choose_default_conversation_agent(
+        &mut self,
+        id: String,
+        start: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ready = cx
+            .global::<settings::AgentHostState>()
+            .agents
+            .iter()
+            .any(|agent| agent.id == id && agent.is_conversation_ready());
+        if !ready {
+            if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
+                clear_default_conversation_agent();
+            }
+            self.agent_surface.error = Some("这个智能体不能用来开对话".to_string());
             cx.notify();
             return;
+        }
+        self.discard_uncommitted_draft(Some(&id), cx);
+        set_default_conversation_agent(&id);
+        if start {
+            self.start_agent_conversation(id, window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn commit_conversation_draft(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.agent_surface.conversation_draft_id.clone() else {
+            return;
         };
-        self.agent_surface.error = None;
-        self.add_acp_session(
-            NewAcpSessionRequest {
-                agent: settings::ConversationAgentKind::Pi,
-                launch_override: None,
-                profile_id: None,
-                agent_definition: None,
-                fallback_cwd: Some(fallback_cwd),
-                pending_prompt: None,
-                automation_id: None,
-                activate: true,
-            },
-            window,
+        let ready = cx
+            .global::<settings::AgentHostState>()
+            .agents
+            .iter()
+            .any(|agent| agent.id == id && agent.is_conversation_ready());
+        if !ready {
+            self.agent_surface.error = Some("这个智能体还不能开始对话".to_string());
+            cx.notify();
+            return;
+        }
+        self.agent_surface.conversation_draft_id = None;
+        self.agent_surface.arm_conversation_on_create = false;
+        set_default_conversation_agent(&id);
+        self.start_agent_conversation(id, window, cx);
+    }
+
+    pub(super) fn editing_conversation_draft(&self) -> bool {
+        self.agent_surface
+            .conversation_draft_id
+            .as_deref()
+            .is_some_and(|id| self.nav.agents().editor_id() == Some(id))
+    }
+
+    fn abandon_new_conversation_create(&mut self, cx: &mut Context<Self>) {
+        self.agent_surface.arm_conversation_on_create = false;
+        if self.agent_surface.conversation_draft_id.is_some() {
+            self.cancel_conversation_draft(cx);
+        }
+    }
+
+    /// `keep` 是这次要留下的智能体。草稿就是它时只清标记，不删除。
+    fn discard_uncommitted_draft(&mut self, keep: Option<&str>, cx: &mut Context<Self>) {
+        let Some(draft_id) = self.agent_surface.conversation_draft_id.clone() else {
+            return;
+        };
+        if keep == Some(draft_id.as_str()) {
+            self.agent_surface.conversation_draft_id = None;
+            self.agent_surface.arm_conversation_on_create = false;
+            return;
+        }
+        self.cancel_conversation_draft(cx);
+    }
+
+    fn cancel_conversation_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.agent_surface.conversation_draft_id.take() else {
+            return;
+        };
+        self.agent_surface.arm_conversation_on_create = false;
+        let removed_id = id.clone();
+        if !settings::try_apply_agent_host(
+            move |config| config.agents.retain(|agent| agent.id != removed_id),
             cx,
-        );
+        ) {
+            self.agent_surface.conversation_draft_id = None;
+            self.agent_surface.error = cx
+                .global::<settings::AgentHostState>()
+                .persistence_error
+                .clone()
+                .or_else(|| Some("取消新建失败，这个智能体还在".to_string()));
+            cx.notify();
+            return;
+        }
+        if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
+            clear_default_conversation_agent();
+        }
+        self.nav.agents_mut().pop_to_root();
+        self.agent_surface.selected_id = None;
+        self.agent_surface.editor = None;
+        self.agent_surface.error = None;
+        self.save_state(cx);
+        cx.notify();
     }
 
     pub(crate) fn open_agent_conversation(
@@ -531,7 +910,7 @@ impl Workspace {
         self.nav.agents_mut().open_conversation(sid);
         self.agent_surface.editor = None;
         self.agent_surface.error = None;
-        self.reveal_workspace_tab(WorkspaceRoute::Agents);
+        self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
         self.sync_session_ui(window, cx);
         if let Some(view) = view {
             view.update(cx, |view, cx| {
@@ -586,6 +965,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 开关智能体的长期记忆。关掉后新对话不注入、不写入；正在进行的对话下一轮生效。
+    /// 已有记忆文件保留，重新打开后照常使用。
+    pub(super) fn set_agent_memory_enabled(
+        &mut self,
+        id: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        settings::apply_agent_host(
+            move |config| {
+                if let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == id) {
+                    agent.memory_enabled = enabled;
+                }
+            },
+            cx,
+        );
+        self.agent_surface.error = None;
+        cx.notify();
+    }
+
     pub(super) fn set_agent_model(
         &mut self,
         id: String,
@@ -619,7 +1018,38 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn delete_agent(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(super) fn start_delete_agent(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(name) = cx
+            .global::<settings::AgentHostState>()
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .map(|agent| agent_display_name(&agent.name))
+        else {
+            return;
+        };
+        let conversations = self.agent_conversation_count(&id);
+        self.agent_surface.pending_delete = Some(AgentDeleteTarget {
+            id,
+            name,
+            conversations,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_delete_agent(&mut self, cx: &mut Context<Self>) {
+        self.agent_surface.pending_delete = None;
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_delete_agent(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.agent_surface.pending_delete.take() {
+            self.delete_agent(target.id, cx);
+        }
+        cx.notify();
+    }
+
+    fn delete_agent(&mut self, id: String, cx: &mut Context<Self>) {
         self.agent_surface.error = None;
         let config = cx.global::<settings::AgentHostState>();
         if let Some(error) = &config.automation_store_error {
@@ -654,7 +1084,13 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.collapsed_agents.remove(&id);
+        if self.agent_surface.conversation_draft_id.as_deref() == Some(id.as_str()) {
+            self.agent_surface.conversation_draft_id = None;
+            self.agent_surface.arm_conversation_on_create = false;
+        }
+        if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
+            clear_default_conversation_agent();
+        }
         if self
             .automation_surface
             .editor
@@ -856,22 +1292,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_workspace_tab(WorkspaceRoute::Automations);
+        self.reveal_workspace_tab(WorkspaceRoute::Automations, cx);
         self.nav.automations_mut().open_editor(automation_id);
         self.select_automation_run(run_id, window, cx);
-    }
-
-    /// 打开这条自动化的编辑器，右侧停在任务表单，不选中某一次运行。
-    pub(super) fn open_catalog_automation_task(
-        &mut self,
-        automation_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.automation_surface.selected_run_id = None;
-        self.automation_surface.live_view = None;
-        self.automation_surface.live_sub = None;
-        self.nav.automations_mut().open_editor(automation_id);
-        cx.notify();
     }
 
     pub(super) fn close_automation_editor(&mut self, cx: &mut Context<Self>) {
@@ -918,14 +1341,25 @@ impl Workspace {
     }
 
     pub(super) fn add_automation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let agent_id = self.ready_automation_agent_id(cx).unwrap_or_default();
+        self.add_automation_for_agent(agent_id, window, cx);
+    }
+
+    /// 为指定智能体新建自动化。绑定的就是这一个，不改用当前选中或列表里的第一个。
+    pub(super) fn add_automation_for_agent(
+        &mut self,
+        agent_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.automation_surface.catalog_tab = AutomationCatalogTab::Tasks;
-        let action = if let Some(agent_id) = self.ready_automation_agent_id(cx) {
+        let action = if agent_id.trim().is_empty() {
+            settings::AutomationAction::shell(String::new(), Vec::new())
+        } else {
             settings::AutomationAction::Agent {
                 agent_definition_id: agent_id,
                 prompt: None,
             }
-        } else {
-            settings::AutomationAction::shell(String::new(), Vec::new())
         };
         let automation = settings::Automation {
             id: uuid::Uuid::new_v4().to_string(),
@@ -949,7 +1383,6 @@ impl Workspace {
             return;
         };
         self.automation_surface.catalog_tab = AutomationCatalogTab::Tasks;
-        let agent_id = self.ready_automation_agent_id(cx);
         let automation = settings::Automation {
             id: uuid::Uuid::new_v4().to_string(),
             name: template.name.to_string(),
@@ -957,24 +1390,65 @@ impl Workspace {
             workspace_dir: None,
             trigger: settings::AutomationTrigger::schedule(template.schedule),
             action: settings::AutomationAction::Agent {
-                agent_definition_id: agent_id.clone().unwrap_or_default(),
+                agent_definition_id: self.ready_automation_agent_id(cx).unwrap_or_default(),
                 prompt: Some(template.prompt.to_string()),
             },
             sinks: vec![settings::AutomationSink::Local],
         };
-        if agent_id.is_some() {
-            self.submit_automation_command(
-                smelt_core::automation::AutomationCommand::Upsert {
-                    automation: Box::new(automation),
-                },
-                cx,
-            );
-        } else {
-            self.open_automation_editor_for(automation, true, window, cx);
+        self.open_automation_editor_for(automation, true, window, cx);
+    }
+
+    pub(super) fn create_automation_from_editor(&mut self, cx: &mut Context<Self>) {
+        if self
+            .automation_surface
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.is_new)
+        {
+            self.persist_automation_editor(None, cx);
         }
     }
 
-    pub(super) fn delete_automation(&mut self, automation_id: String, cx: &mut Context<Self>) {
+    pub(super) fn start_delete_automation(
+        &mut self,
+        automation_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let state = cx.global::<settings::AgentHostState>();
+        let Some(automation) = state
+            .automations
+            .iter()
+            .find(|automation| automation.id == automation_id)
+        else {
+            return;
+        };
+        let name = if automation.name.trim().is_empty() {
+            "未命名自动化".to_string()
+        } else {
+            automation.name.clone()
+        };
+        let runs = state.automation_runs_for(&automation_id).len();
+        self.automation_surface.pending_delete = Some(AutomationDeleteTarget {
+            id: automation_id,
+            name,
+            runs,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_delete_automation(&mut self, cx: &mut Context<Self>) {
+        self.automation_surface.pending_delete = None;
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_delete_automation(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.automation_surface.pending_delete.take() {
+            self.delete_automation(target.id, cx);
+        }
+        cx.notify();
+    }
+
+    fn delete_automation(&mut self, automation_id: String, cx: &mut Context<Self>) {
         if self
             .automation_surface
             .editor
@@ -1082,7 +1556,7 @@ impl Workspace {
         };
         let name = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("我的自动化任务")
+                .placeholder("给它起个名字")
                 .default_value(automation.name.clone())
         });
         let prompt = cx.new(|cx| {
@@ -1127,12 +1601,6 @@ impl Workspace {
             ));
         }
         let notification = settings::AutomationNotificationPreset::from_sinks(&automation.sinks);
-        let feishu_chat_default = automation.feishu_chat_id().unwrap_or("").to_string();
-        let feishu_chat = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("飞书会话 ID，例如 oc_xxx")
-                .default_value(feishu_chat_default)
-        });
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(&name, window, {
             move |this, _, event: &InputEvent, window, cx| {
@@ -1164,13 +1632,6 @@ impl Workspace {
                 }
             }
         }));
-        subscriptions.push(cx.subscribe(&feishu_chat, {
-            move |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.clear_automation_editor_error(cx);
-                }
-            }
-        }));
         self.automation_surface.editor = Some(AutomationEditor {
             instance_id: uuid::Uuid::new_v4(),
             action_kind,
@@ -1184,7 +1645,6 @@ impl Workspace {
             retained_events,
             entries,
             notification,
-            feishu_chat,
             draft_revision: 0,
             saving_revision: None,
             quiet_save: false,
@@ -1367,6 +1827,7 @@ impl Workspace {
         self.touch_schedule_editor(cx);
     }
 
+    /// 已创建的自动化改动后自动保存；新建的只记修改，等用户点「创建」。
     pub(super) fn touch_schedule_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.automation_surface.editor.as_mut() else {
             return;
@@ -1374,7 +1835,11 @@ impl Workspace {
         editor.draft_revision = editor.draft_revision.wrapping_add(1);
         editor.error = None;
         let token = editor.draft_revision;
+        let autosave = !editor.is_new;
         cx.notify();
+        if !autosave {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(400))
@@ -1402,23 +1867,25 @@ impl Workspace {
             .editor
             .as_ref()
             .is_some_and(|editor| !editor.is_new);
-        if let Some(entry) = self
+        let flash_id = self
             .automation_surface
             .editor
             .as_mut()
             .and_then(|editor| editor.entries.get_mut(index))
-        {
-            entry.webhook_secret = smelt_core::automation::new_webhook_secret();
-        }
+            .map(|entry| {
+                let flash_id = format!(
+                    "automation-regen-webhook-{}",
+                    entry.schedule.time.entity_id()
+                );
+                entry.webhook_secret = smelt_core::automation::new_webhook_secret();
+                flash_id
+            });
         if should_save {
             if let Some(editor) = self.automation_surface.editor.as_mut() {
                 editor.draft_revision = editor.draft_revision.wrapping_add(1);
                 editor.error = None;
             }
-            self.persist_automation_editor(
-                Some((format!("automation-regen-webhook-{index}"), "已重新生成 ✓")),
-                cx,
-            );
+            self.persist_automation_editor(flash_id.map(|id| (id, "已重新生成 ✓")), cx);
         } else {
             self.touch_schedule_editor(cx);
         }
@@ -1482,32 +1949,12 @@ impl Workspace {
         let Some(editor) = self.automation_surface.editor.as_ref() else {
             return;
         };
-        if editor.saving_revision.is_some() {
+        if editor.saving_revision.is_some() || !editor.missing_fields(cx).is_empty() {
             return;
         }
-        let name = editor.name.read(cx).value().trim().to_string();
-        let prompt_raw = editor.prompt.read(cx).value().trim().to_string();
-        let prompt = if prompt_raw.is_empty() {
-            None
-        } else {
-            Some(prompt_raw)
+        let Ok(trigger) = trigger_from_editor(editor, cx) else {
+            return;
         };
-        let command = editor.command.read(cx).value().trim().to_string();
-        let trigger = trigger_from_editor(editor, cx);
-        let agent_exists = cx
-            .global::<settings::AgentHostState>()
-            .agents
-            .iter()
-            .any(|agent| agent.id == editor.agent_id);
-        let incomplete = name.is_empty()
-            || (editor.action_kind == settings::AutomationActionKindId::Agent
-                && (editor.agent_id.is_empty() || !agent_exists))
-            || (editor.action_kind == settings::AutomationActionKindId::Shell
-                && command.is_empty())
-            || trigger.is_err();
-        if incomplete {
-            return;
-        }
 
         let automation_id = editor.automation_id.clone();
         let enabled = cx
@@ -1517,27 +1964,16 @@ impl Workspace {
             .find(|automation| automation.id == automation_id)
             .map(|automation| automation.enabled)
             .unwrap_or(true);
-        let action = match editor.action_kind {
-            settings::AutomationActionKindId::Agent => settings::AutomationAction::Agent {
-                agent_definition_id: editor.agent_id.clone(),
-                prompt,
-            },
-            settings::AutomationActionKindId::Shell => {
-                settings::AutomationAction::shell(command, Vec::new())
-            }
-        };
-        let sinks = editor
-            .notification
-            .to_sinks(&editor.feishu_chat.read(cx).value());
         let automation = settings::Automation {
             id: automation_id.clone(),
-            name,
+            name: editor.name.read(cx).value().trim().to_string(),
             enabled,
             workspace_dir: None,
-            trigger: trigger.expect("validated trigger"),
-            action,
-            sinks,
+            trigger,
+            action: editor.action(cx),
+            sinks: editor.notification.to_sinks(),
         };
+        let created_name = editor.is_new.then(|| automation.name.clone());
         let editor_instance_id = editor.instance_id;
         let draft_revision = editor.draft_revision;
         if let Some(editor) = self.automation_surface.editor.as_mut() {
@@ -1574,6 +2010,11 @@ impl Workspace {
                                 false
                             } else {
                                 editor.is_new = false;
+                                if let Some(name) = &created_name {
+                                    crate::status_item::notify_success(format!(
+                                        "已创建自动化「{name}」"
+                                    ));
+                                }
                                 if let Some((flash_id, flash_label)) = flash {
                                     settings::flash_button(flash_id, flash_label, cx);
                                 }
@@ -1605,13 +2046,21 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn agent_conversation_count(&self, agent_id: &str, cx: &App) -> usize {
+    pub(super) fn agent_conversation_count(&self, agent_id: &str) -> usize {
         self.sessions
             .iter()
-            .filter(|session| {
-                session.is_agent_conversation(cx)
-                    && session.agent_definition_id.as_deref() == Some(agent_id)
-            })
+            .filter(|session| self.session_belongs_to_agent(session, agent_id))
             .count()
+    }
+
+    pub(super) fn session_belongs_to_agent(
+        &self,
+        session: &crate::Session,
+        agent_id: &str,
+    ) -> bool {
+        bound_agent_definition_id(
+            session.agent_definition_id.as_deref(),
+            session.automation_id.as_deref(),
+        ) == Some(agent_id)
     }
 }

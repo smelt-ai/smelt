@@ -34,9 +34,12 @@ use gpui::{
 };
 use gpui_component::ActiveTheme;
 use gpui_component::text::{
-    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewStyle, markdown_ast,
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewState, TextViewStyle,
+    markdown_ast,
 };
 use sha2::{Digest, Sha256};
+
+use crate::IconAction as _;
 
 /// rusty-mermaid（crates.io `=0.2.0`）默认字体栈——见其
 /// `rusty_mermaid_core::font_fallback::SVG_FONT_FAMILY` 常量。整份字体栈都是西文
@@ -298,9 +301,43 @@ fn markdown_text_view_style() -> TextViewStyle {
         background_color: Some(rgb(crate::ui_theme::bg_selected()).into()),
         ..Default::default()
     };
-    let mut style = TextViewStyle::default().inline_code(inline_code);
+    // 右上角挂了语言名和复制按钮（见 `code_block_corner`），首行要让开它，跟
+    // gpui-component 自带语言标签时的留白一致。
+    let code_block = gpui::StyleRefinement::default().pt(px(28.));
+    let mut style = TextViewStyle::default()
+        .inline_code(inline_code)
+        .code_block(code_block);
     style.is_dark = !crate::ui_theme::is_light();
     style
+}
+
+/// 围栏代码块右上角：语言名 + 复制按钮。
+///
+/// 一旦接了 `code_block_actions`，gpui-component 就不再画它自带的语言标签，所以
+/// 语言名在这里一并画。按钮 id 用固定的 `"copy"` 即可：框架按代码块给 actions
+/// 套了一层带位置的 id，不同代码块之间不会撞。
+fn code_block_corner(
+    code_block: &gpui_base::text::CodeBlock,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let lang = code_block.lang().filter(|lang| !lang.is_empty());
+    gpui_component::h_flex()
+        .gap_1()
+        .items_center()
+        .children(lang.map(|lang| {
+            div()
+                .px_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(lang)
+        }))
+        .child(
+            gpui_component::clipboard::Clipboard::new("copy")
+                .value(code_block.code())
+                .icon_action("复制代码"),
+        )
+        .into_any_element()
 }
 
 fn markdown_view_with_selection(
@@ -308,9 +345,21 @@ fn markdown_view_with_selection(
     text: impl Into<SharedString>,
     selectable: bool,
 ) -> TextView {
-    TextView::markdown(id, text)
-        .selectable(selectable)
-        .style(markdown_text_view_style())
+    with_markdown_hooks(TextView::markdown(id, text).selectable(selectable))
+}
+
+/// 和 [`markdown_view_clickable`] 一样的 Markdown，只是解析状态由调用方持有。
+///
+/// `TextView::markdown` 把解析结果挂在元素上，元素有一帧没画就丢掉。虚拟列表里的行
+/// 滚出渲染范围再回来，超过 4KB 的正文要先以空内容等后台重新解析，行高跟着跳。
+/// 这类地方自己留住 `TextViewState`，用这个入口画。
+pub fn markdown_view_for_state(state: &gpui::Entity<TextViewState>) -> TextView {
+    with_markdown_hooks(TextView::new(state).selectable(true))
+}
+
+fn with_markdown_hooks(view: TextView) -> TextView {
+    view.style(markdown_text_view_style())
+        .code_block_actions(code_block_corner)
         .markdown_extensions(shared_markdown_extensions().clone())
 }
 

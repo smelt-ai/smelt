@@ -6,7 +6,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Clone, Debug, Default)]
 pub struct LocalProjectRegistry {
@@ -64,40 +63,6 @@ pub enum RepositoryResolution {
     },
 }
 
-fn binding_for_path(root: PathBuf) -> LocalProjectBinding {
-    LocalProjectBinding {
-        root: root.to_string_lossy().into_owned(),
-        repositories: discover_repositories(&root),
-    }
-}
-
-/// 从 daemon 当前发布的项目根构建一次目录快照。项目列表是唯一事实，不另行落盘。
-pub fn catalog_from_open_projects(roots: &[String]) -> (LocalProjectRegistry, Vec<String>) {
-    let mut registry = LocalProjectRegistry::default();
-    let mut errors = Vec::new();
-    for root in roots {
-        let path = match canonical_directory(root) {
-            Ok(path) => path,
-            Err(error) => {
-                errors.push(format!("{root}: {error}"));
-                continue;
-            }
-        };
-        let path = path.to_string_lossy().into_owned();
-        if registry
-            .projects
-            .iter()
-            .any(|project| same_path(&project.root, &path))
-        {
-            continue;
-        }
-        registry
-            .projects
-            .push(binding_for_path(PathBuf::from(path)));
-    }
-    (registry, errors)
-}
-
 /// 分别解析任务需要的每个 remote，不要求这些 checkout 位于同一个父目录。
 /// 这允许用户把 A/B 作为两个独立的 Smelt 项目打开，任务仍能组成一个执行 workspace。
 pub fn resolve_repositories(
@@ -149,18 +114,6 @@ pub fn resolve_repositories(
     RepositoryResolution::Matched(selected)
 }
 
-/// 无 repo 信息时的唯一安全兜底：只有一个已打开项目，返回该项目登记的全部 Git repo。
-pub fn repositories_for_unique_project(
-    registry: &LocalProjectRegistry,
-) -> Option<Vec<LocalRepositoryBinding>> {
-    let [project] = registry.projects.as_slice() else {
-        return None;
-    };
-    Path::new(&project.root)
-        .is_dir()
-        .then(|| project.repositories.clone())
-}
-
 /// 返回某个已登记 checkout 所属的 Smelt 项目根。任务 cwd 使用这个根可以通过
 /// “已明确打开项目”的授权校验，即使该 checkout 是多仓库 workspace 的子目录。
 pub fn project_root_for_repository(
@@ -177,18 +130,6 @@ pub fn project_root_for_repository(
     })
 }
 
-/// 判断路径是否仍是 Smelt 当前明确打开并登记的项目根。
-pub fn is_registered_project(registry: &LocalProjectRegistry, root: &Path) -> bool {
-    if !root.is_dir() {
-        return false;
-    }
-    let root = normalized_path(root);
-    registry
-        .projects
-        .iter()
-        .any(|project| normalized_path(Path::new(&project.root)) == root)
-}
-
 /// 判断一个已登记项目是否是包含多个 Git checkout 的本地 workspace。
 /// 该信息主要供原地执行/兼容逻辑做目录级并发判断；新 Issue 会为每个 repo 创建子 worktree。
 pub fn is_multi_repository_project(registry: &LocalProjectRegistry, root: &Path) -> bool {
@@ -201,113 +142,8 @@ pub fn is_multi_repository_project(registry: &LocalProjectRegistry, root: &Path)
     })
 }
 
-fn canonical_directory(path: &str) -> Result<PathBuf, String> {
-    let path = Path::new(path.trim());
-    if !path.is_dir() {
-        return Err(format!("本地项目目录不存在: {}", path.display()));
-    }
-    std::fs::canonicalize(path).map_err(|error| format!("无法解析本地项目目录: {error}"))
-}
-
-fn same_path(left: &str, right: &str) -> bool {
-    let left = normalized_path(Path::new(left));
-    let right = normalized_path(Path::new(right));
-    left == right
-}
-
 fn normalized_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn discover_repositories(root: &Path) -> Vec<LocalRepositoryBinding> {
-    let mut candidates = Vec::new();
-    if root.join(".git").exists() {
-        candidates.push(root.to_path_buf());
-    }
-    // 多仓库 workspace 只探测用户选择目录的直接子目录，不递归扫描整个磁盘。
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && path.join(".git").exists() {
-                candidates.push(path);
-            }
-        }
-    }
-
-    let mut seen_paths = BTreeSet::new();
-    let mut repositories = Vec::new();
-    for candidate in candidates {
-        let Some(repository) = inspect_repository(&candidate) else {
-            continue;
-        };
-        if seen_paths.insert(repository.path.clone()) {
-            repositories.push(repository);
-        }
-    }
-    repositories.sort_by(|left, right| left.path.cmp(&right.path));
-    repositories
-}
-
-fn inspect_repository(candidate: &Path) -> Option<LocalRepositoryBinding> {
-    let top = git_output(candidate, &["rev-parse", "--show-toplevel"])?;
-    let top = PathBuf::from(top.trim()).canonicalize().ok()?;
-
-    // 不能只认 `origin`：多 remote 仓库（如内部 GitLab + 公开镜像）可能压根没有
-    // 名为 origin 的 remote，此前会被整个跳过，导致远端任务误报没有匹配的已打开
-    // checkout。这里枚举全部 remote，任意一个命中即可匹配。
-    let mut names = git_output(&top, &["remote"])
-        .map(|out| {
-            out.lines()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    // 主 key 需稳定（worktree 目录名依赖它）：origin > upstream > 其余按名称排序。
-    names.sort_by_key(|name| {
-        let rank = match name.as_str() {
-            "origin" => 0,
-            "upstream" => 1,
-            _ => 2,
-        };
-        (rank, name.clone())
-    });
-
-    let mut remote_keys = Vec::new();
-    for name in &names {
-        let Some(url) = git_output(&top, &["remote", "get-url", name]) else {
-            continue;
-        };
-        let Some(key) = canonical_repo_key(&url) else {
-            continue;
-        };
-        if !remote_keys.contains(&key) {
-            remote_keys.push(key);
-        }
-    }
-
-    let remote_key = remote_keys.first()?.clone();
-    Some(LocalRepositoryBinding {
-        path: top.to_string_lossy().into_owned(),
-        remote_key,
-        remote_keys,
-    })
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!value.is_empty()).then_some(value)
 }
 
 /// 把 HTTPS、SSH 和 scp shorthand 统一为 host/path，保留 host 避免不同 Git 服务的
@@ -363,85 +199,6 @@ mod tests {
                 .map(|(path, remote_key)| LocalRepositoryBinding::new(*path, *remote_key))
                 .collect(),
         }
-    }
-
-    #[test]
-    fn discovers_repository_without_origin_remote() {
-        // 回归：仓库只有自定义 remote（无 origin）时，此前整个 checkout 会被跳过，
-        // 远端任务会因此误报没有匹配的已打开 checkout。
-        let root = temp_project("no-origin");
-        let run = |args: &[&str]| {
-            let ok = Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .output()
-                .expect("git")
-                .status
-                .success();
-            assert!(ok, "git {args:?} 失败");
-        };
-        run(&["init", "-q"]);
-        run(&[
-            "remote",
-            "add",
-            "nio",
-            "git@gitlab.example.com:acme/smelt.git",
-        ]);
-        run(&["remote", "add", "gh", "git@github.com:smelt-ai/smelt.git"]);
-
-        let repositories = discover_repositories(&root);
-        assert_eq!(repositories.len(), 1, "应发现 1 个仓库: {repositories:?}");
-        let repository = &repositories[0];
-        assert!(repository.matches_remote_key("gitlab.example.com/acme/smelt"));
-        assert!(repository.matches_remote_key("github.com/smelt-ai/smelt"));
-        // 无 origin 时主 key 取名称排序首个（gh < nio），保证 worktree 身份稳定。
-        assert_eq!(repository.remote_key, "github.com/smelt-ai/smelt");
-
-        let registry = LocalProjectRegistry {
-            projects: vec![LocalProjectBinding {
-                root: root.to_string_lossy().into_owned(),
-                repositories: repositories.clone(),
-            }],
-        };
-        let resolution = resolve_repositories(
-            &registry,
-            &["git@gitlab.example.com:acme/smelt.git".to_string()],
-        );
-        assert!(
-            matches!(resolution, RepositoryResolution::Matched(ref found) if found.len() == 1),
-            "非 origin remote 也应解析成功: {resolution:?}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn origin_wins_as_primary_key_when_present() {
-        let root = temp_project("with-origin");
-        let run = |args: &[&str]| {
-            Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .output()
-                .expect("git");
-        };
-        run(&["init", "-q"]);
-        run(&["remote", "add", "zzz", "git@git.example.com:org/zzz.git"]);
-        run(&[
-            "remote",
-            "add",
-            "origin",
-            "git@git.example.com:org/main.git",
-        ]);
-
-        let repositories = discover_repositories(&root);
-        assert_eq!(repositories.len(), 1);
-        assert_eq!(repositories[0].remote_key, "git.example.com/org/main");
-        assert!(repositories[0].matches_remote_key("git.example.com/org/zzz"));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

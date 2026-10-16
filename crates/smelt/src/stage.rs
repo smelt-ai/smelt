@@ -3,16 +3,18 @@
 //!
 //! 标题不拉成通栏。它是舞台列正中的一颗胶囊，右栏打开时也不跟着偏到分栏上。
 //! 标题槽只填当前舞台没有自己页头的那一面（项目会话、智能体对话、插件面）。
+//! 对话里最近一问整条滚出视口后，胶囊换成那一问，按下滚回去。
 //! 智能体/自动化目录和钻取已有页头，铬不重复写，也不回落到上一会话。
 //!
 //! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::prelude::FluentBuilder;
+use gpui::StatefulInteractiveElement;
 use gpui::*;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
 
-use crate::{StageCover, Workspace, WorkspaceRoute, ui_theme, workspace_frame};
+use crate::{StageCover, Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
 
 /// 共用顶栏标题槽。目录/编辑器/自动化钻取都有页头，那些面必须是 `Hidden`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +23,8 @@ pub(crate) enum ChromeTitle {
     Visible {
         title: String,
         model: Option<String>,
+        /// 标题所属的对话。它的提问滚出视口后，胶囊换成那一问。
+        conversation: Option<Entity<acp_view::AcpView>>,
     },
 }
 
@@ -28,6 +32,7 @@ pub(crate) enum ChromeTitle {
 pub(crate) struct ChromeSessionTitle {
     pub title: String,
     pub model: Option<String>,
+    pub conversation: Option<Entity<acp_view::AcpView>>,
 }
 
 impl ChromeTitle {
@@ -36,6 +41,7 @@ impl ChromeTitle {
             Some(session) if !session.title.trim().is_empty() => Self::Visible {
                 title: session.title,
                 model: session.model,
+                conversation: session.conversation,
             },
             _ => Self::Hidden,
         }
@@ -53,7 +59,7 @@ pub(crate) fn stage_has_page_header(
     }
     match route {
         WorkspaceRoute::Agents => !agent_conversation_open,
-        WorkspaceRoute::Automations => true,
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => true,
         WorkspaceRoute::Session | WorkspaceRoute::Plugin { .. } => false,
     }
 }
@@ -102,9 +108,13 @@ pub(crate) fn chrome_title_for_stage(
     match route {
         WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
         WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
-        WorkspaceRoute::Automations => ChromeTitle::Hidden,
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => ChromeTitle::Hidden,
         WorkspaceRoute::Plugin { .. } => match plugin_title {
-            Some(title) if !title.trim().is_empty() => ChromeTitle::Visible { title, model: None },
+            Some(title) if !title.trim().is_empty() => ChromeTitle::Visible {
+                title,
+                model: None,
+                conversation: None,
+            },
             _ => ChromeTitle::Hidden,
         },
     }
@@ -116,42 +126,76 @@ pub(crate) const CHROME_TOGGLE_RESERVE: f32 = 72.;
 /// 静止宽度。胶囊浮在内容第一行正中，左右常是终端自己的路径和用量，只能留一个短名字。
 const CHROME_ISLAND_MAX_WIDTH: f32 = 200.;
 
+/// 吸顶提问只出现在对话上，要认得出是哪一问，比名字宽。
+const CHROME_PROMPT_ISLAND_MAX_WIDTH: f32 = 480.;
+
+/// 胶囊外壳。悬停说完整身份：名字 · 模型。
+fn chrome_island(id: &'static str, max_width: f32, tip: String) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(ui_theme::CHROME_ISLAND_HEIGHT_PX))
+        .max_w(px(max_width))
+        .px_3()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        // 浮层实色：平时一档卡片底，指上去再抬到悬停色。不透、不糊。
+        .bg(ui_theme::glass_floating())
+        .border_1()
+        .border_color(ui_theme::card_stroke())
+        .hover(|island| island.bg(rgb(ui_theme::bg_hover())))
+        .shadow_lg()
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
+}
+
 /// 舞台标题胶囊。只显示名字；模型留在悬停和输入条上。
-fn chrome_title_island(title: String, model: Option<String>) -> Stateful<Div> {
-    let tip = match &model {
-        Some(model) if !model.is_empty() => format!("{title} · {model}"),
-        _ => title.clone(),
-    };
+fn chrome_title_island(title: String, tip: String) -> Stateful<Div> {
     workspace_frame::with_window_drag(
-        div()
-            .id("stage-title")
-            .h(px(ui_theme::CHROME_ISLAND_HEIGHT_PX))
-            .max_w(px(CHROME_ISLAND_MAX_WIDTH))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            // 浮层实色：平时一档卡片底，指上去再抬到悬停色。不透、不糊。
-            .bg(ui_theme::glass_floating())
-            .border_1()
-            .border_color(ui_theme::card_stroke())
-            .hover(|island| island.bg(rgb(ui_theme::bg_hover())))
-            .shadow_lg()
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(ui_theme::text_bright()))
-                    .truncate()
-                    .child(title),
-            )
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-            }),
+        chrome_island("stage-title", CHROME_ISLAND_MAX_WIDTH, tip).child(
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .text_sm()
+                .font_semibold()
+                .text_color(rgb(ui_theme::text_bright()))
+                .truncate()
+                .child(title),
+        ),
     )
+}
+
+/// 吸顶提问。按下滚回那一问，所以不当拖窗口的把手。
+fn chrome_prompt_island(
+    prompt: String,
+    tip: String,
+    conversation: Entity<acp_view::AcpView>,
+) -> Stateful<Div> {
+    chrome_island("stage-pinned-prompt", CHROME_PROMPT_ISLAND_MAX_WIDTH, tip)
+        .gap_1p5()
+        .cursor_pointer()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(rgb(ui_theme::text_muted()))
+                .child("↑"),
+        )
+        .child(
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .text_sm()
+                .text_color(rgb(ui_theme::text()))
+                .truncate()
+                .child(prompt),
+        )
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            conversation.update(cx, |view, cx| view.reveal_pinned_prompt(cx));
+        })
 }
 
 /// 首次 IDE 扫描完成后需要更新的菜单。菜单可能已经被用户关闭，因此只持有弱引用。
@@ -316,7 +360,7 @@ impl Workspace {
                             crate::ide::open_in(&installed_ide, std::path::Path::new(&root));
                         workspace.update(cx, |ws, workspace_cx| {
                             if let Err(error) = result {
-                                ws.background_error = Some(error);
+                                ws.report_background_error(error);
                                 workspace_cx.notify();
                             }
                         });
@@ -358,7 +402,7 @@ impl Workspace {
 
     pub(crate) fn open_project_in_file_manager(&mut self, root: &str, cx: &mut Context<Self>) {
         if let Err(error) = crate::ide::open_in_file_manager(std::path::Path::new(root)) {
-            self.background_error = Some(error);
+            self.report_background_error(error);
             cx.notify();
         }
     }
@@ -380,16 +424,19 @@ impl Workspace {
                 .map(|(ix, view)| ChromeSessionTitle {
                     title: self.sessions[ix].title(cx),
                     model: view.read(cx).model_name(),
+                    conversation: Some(view),
                 });
         let project_session = self.sessions.get(self.active_session).and_then(|session| {
             if session.is_product_conversation(cx) {
                 return None;
             }
+            let conversation = session.active_acp().cloned();
             Some(ChromeSessionTitle {
                 title: session.title(cx),
-                model: session
-                    .active_acp()
+                model: conversation
+                    .as_ref()
                     .and_then(|view| view.read(cx).model_name()),
+                conversation,
             })
         });
         let plugin_title = match self.active_tab() {
@@ -415,9 +462,26 @@ impl Workspace {
         fullscreen: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let (title, model) = match self.chrome_title(cx) {
-            ChromeTitle::Visible { title, model } => (Some(title), model),
-            ChromeTitle::Hidden => (None, None),
+        let island = match self.chrome_title(cx) {
+            ChromeTitle::Hidden => None,
+            ChromeTitle::Visible {
+                title,
+                model,
+                conversation,
+            } => {
+                let tip = match &model {
+                    Some(model) if !model.is_empty() => format!("{title} · {model}"),
+                    _ => title.clone(),
+                };
+                let pinned = conversation.and_then(|view| {
+                    let prompt = view.read(cx).pinned_prompt()?;
+                    Some((prompt, view))
+                });
+                Some(match pinned {
+                    Some((prompt, view)) => chrome_prompt_island(prompt, tip, view),
+                    None => chrome_title_island(title, tip),
+                })
+            }
         };
         // 右栏收起时开关叠在舞台右缘，居中范围要让开它。
         let stage_right = if panel_reserve > px(0.) {
@@ -445,7 +509,7 @@ impl Workspace {
                     div().absolute().top_0().left(left).right(right).h(height),
                 )
             }))
-            .children(title.map(|title| {
+            .children(island.map(|island| {
                 div()
                     .absolute()
                     .top(px(ui_theme::CHROME_ISLAND_TOP_PX))
@@ -455,7 +519,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(chrome_title_island(title, model))
+                    .child(island)
             }))
             .child(
                 div()
@@ -473,6 +537,13 @@ impl Workspace {
     pub(crate) fn render_window_trailing_toggles(&self, cx: &mut Context<Self>) -> Div {
         let promoted = self.tool_panel_promoted();
         let panel_visible = self.tool_panel_open || promoted;
+        let fullscreen_toggle = cx.entity().downgrade();
+        let panel_toggle = cx.entity().downgrade();
+        let fullscreen_label = if promoted {
+            "收回右侧面板"
+        } else {
+            "全屏显示右侧面板"
+        };
         h_flex()
             .flex_none()
             .items_center()
@@ -480,6 +551,8 @@ impl Workspace {
             .children((promoted || self.tool_panel_open).then(|| {
                 div()
                     .id("tool-panel-fullscreen-toggle")
+                    .role(Role::Button)
+                    .aria_label(fullscreen_label)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -498,12 +571,7 @@ impl Workspace {
                         .size_4(),
                     )
                     .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(if promoted {
-                            "收回右侧面板"
-                        } else {
-                            "全屏显示右侧面板"
-                        })
-                        .build(window, cx)
+                        gpui_component::tooltip::Tooltip::new(fullscreen_label).build(window, cx)
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -511,7 +579,7 @@ impl Workspace {
                             cx.stop_propagation();
                             if promoted {
                                 this.set_stage_cover(None, window, cx);
-                                this.set_tool_panel_open(true);
+                                this.set_tool_panel_open(true, cx);
                             } else {
                                 this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
                             }
@@ -519,10 +587,24 @@ impl Workspace {
                             cx.notify();
                         }),
                     )
+                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                        let _ = fullscreen_toggle.update(cx, |this, cx| {
+                            if promoted {
+                                this.set_stage_cover(None, window, cx);
+                                this.set_tool_panel_open(true, cx);
+                            } else {
+                                this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
+                            }
+                            this.save_state(cx);
+                            cx.notify();
+                        });
+                    })
             }))
             .child(
                 div()
                     .id("tool-panel-toggle")
+                    .role(Role::Button)
+                    .aria_label("切换右侧面板")
                     .flex()
                     .items_center()
                     .justify_center()
@@ -541,7 +623,9 @@ impl Workspace {
                         .size_4(),
                     )
                     .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("切换右侧面板  ⌥⌘B").build(window, cx)
+                        gpui_component::tooltip::Tooltip::new("切换右侧面板")
+                            .action(&crate::ToggleToolPanel, None)
+                            .build(window, cx)
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -549,7 +633,11 @@ impl Workspace {
                             cx.stop_propagation();
                             this.toggle_tool_panel(window, cx);
                         }),
-                    ),
+                    )
+                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+                        let _ = panel_toggle
+                            .update(cx, |this, cx| this.toggle_tool_panel(window, cx));
+                    }),
             )
     }
 }
@@ -567,6 +655,7 @@ mod tests {
         ChromeSessionTitle {
             title: ".: - Waiting for response... - PI-Desktop 插件架构与 UI 扩展边界 - grok".into(),
             model: None,
+            conversation: None,
         }
     }
 
@@ -574,6 +663,7 @@ mod tests {
         ChromeSessionTitle {
             title: "查登录".into(),
             model: Some("grok-4".into()),
+            conversation: None,
         }
     }
 
@@ -612,6 +702,7 @@ mod tests {
             ChromeTitle::Visible {
                 title: "查登录".into(),
                 model: Some("grok-4".into()),
+                conversation: None,
             },
         );
     }
@@ -623,6 +714,7 @@ mod tests {
             ChromeTitle::Visible {
                 title: grok().title,
                 model: None,
+                conversation: None,
             },
         );
         assert_eq!(
@@ -652,6 +744,7 @@ mod tests {
             ChromeTitle::Visible {
                 title: "看板".into(),
                 model: None,
+                conversation: None,
             },
         );
         assert_eq!(
@@ -677,6 +770,7 @@ mod tests {
                 Some(ChromeSessionTitle {
                     title: "   ".into(),
                     model: None,
+                    conversation: None,
                 }),
                 None,
                 false,
@@ -719,6 +813,11 @@ mod tests {
         assert!(stage_content_drag_band(true, false, px(0.), true).is_none());
         assert!(stage_has_page_header(
             &WorkspaceRoute::Automations,
+            false,
+            false
+        ));
+        assert!(stage_has_page_header(
+            &WorkspaceRoute::Capabilities,
             false,
             false
         ));

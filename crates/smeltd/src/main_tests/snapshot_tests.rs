@@ -558,3 +558,86 @@ fn snapshot_preserves_osc8_hyperlink() {
     );
     assert!(snap.windows(4).any(|w| w == b"link"));
 }
+
+/// keyframe 是 daemon 权威 Term 交给接收端（GUI / 手机 / handoff 后继）的**唯一**状态
+/// 契约：接收端解析完 keyframe 后，所有会改变后续输入编码或输出解释的模式都必须和
+/// 源 Term 一致。逐项列出协议可设置的模式，任何一项漏恢复都会在重连后才暴露
+/// （典型：kitty 键盘协议丢了，Claude Code 的 Shift+Enter 退化成裸回车）。
+#[test]
+fn snapshot_round_trips_every_protocol_mode() {
+    // VI 是本地 UI 状态，不由 PTY 字节驱动；其余位都必须能还原。
+    let comparable = !TermMode::VI;
+    let cases: &[(&str, &[u8])] = &[
+        ("kitty disambiguate", b"\x1b[>1u"),
+        ("kitty flags 1|2|8", b"\x1b[>11u"),
+        ("kitty on alt screen", b"\x1b[?1049h\x1b[>1u"),
+        ("kitty pushed then popped", b"\x1b[>1u\x1b[<u"),
+        ("app keypad", b"\x1b="),
+        ("alternate scroll off", b"\x1b[?1007l"),
+        ("urgency hints off", b"\x1b[?1042l"),
+        ("utf8 mouse", b"\x1b[?1000h\x1b[?1005h"),
+        ("sgr drag mouse", b"\x1b[?1002h\x1b[?1006h"),
+        ("motion mouse", b"\x1b[?1003h"),
+        ("insert", b"\x1b[4h"),
+        ("line feed new line", b"\x1b[20h"),
+        ("origin", b"\x1b[?6h"),
+        ("autowrap off", b"\x1b[?7l"),
+        ("hidden cursor", b"\x1b[?25l"),
+        (
+            "app cursor + paste + focus",
+            b"\x1b[?1h\x1b[?2004h\x1b[?1004h",
+        ),
+    ];
+    for (name, setup) in cases {
+        let size = DaemonTermSize { rows: 4, cols: 20 };
+        let mut original = Term::new(daemon_term_config(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut original, b"hello\r\n");
+        parser.advance(&mut original, setup);
+
+        let snap = snapshot_ansi(&original, None);
+        let mut restored = Term::new(daemon_term_config(), &size, VoidListener);
+        let mut restored_parser: Processor = Processor::new();
+        restored_parser.advance(&mut restored, &snap);
+
+        assert_eq!(
+            *restored.mode() & comparable,
+            *original.mode() & comparable,
+            "{name}: keyframe 没能还原模式"
+        );
+    }
+}
+
+/// keyframe 必须是绝对状态：接收端不一定是新建 Term（手机按预算重拉历史、GUI 复用
+/// 网格），残留的模式要被显式复位，而不是只「补上缺的」。
+#[test]
+fn snapshot_resets_stale_modes_on_a_reused_receiver() {
+    let size = DaemonTermSize { rows: 4, cols: 20 };
+    let mut original = Term::new(daemon_term_config(), &size, VoidListener);
+    let mut parser: Processor = Processor::new();
+    parser.advance(&mut original, b"plain shell\r\n");
+
+    let mut receiver = Term::new(daemon_term_config(), &size, VoidListener);
+    let mut receiver_parser: Processor = Processor::new();
+    receiver_parser.advance(
+        &mut receiver,
+        b"\x1b[>1u\x1b[>1u\x1b=\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[4h\x1b[20h\x1b[?1007l\x1b[?1005h",
+    );
+    receiver_parser.advance(&mut receiver, &snapshot_ansi(&original, None));
+
+    assert_eq!(
+        *receiver.mode() & !TermMode::VI,
+        *original.mode() & !TermMode::VI
+    );
+}
+
+/// GUI 与 daemon 解析同一串 PTY 字节，模式语义必须一致——两份 Term 配置一旦漂移
+/// （历史上 GUI 开了 kitty_keyboard、daemon 没开），daemon 这份「真相」就是错的。
+#[test]
+fn daemon_term_tracks_kitty_keyboard_protocol() {
+    let size = DaemonTermSize { rows: 2, cols: 10 };
+    let mut term = Term::new(daemon_term_config(), &size, VoidListener);
+    let mut parser: Processor = Processor::new();
+    parser.advance(&mut term, b"\x1b[>1u");
+    assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+}

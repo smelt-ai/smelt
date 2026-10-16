@@ -60,14 +60,16 @@ smelt {version}
 
 用法：
   smelt                         启动图形界面
-  smelt agent list|get|create|update|delete|chat|plugins
+  smelt agent list|get|create|update|delete|chat|conversations|conversation-rename|plugins
   smelt automation list|get|create|update|enable|disable|run|delete
   smelt settings get
   smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
+  smelt settings set appearance.theme=\"Ayu Dark\"
+  smelt settings set memory.embedding_base_url=http://localhost:11434/v1 memory.embedding_model=bge-m3
 
 智能体：
-  smelt agent create --name <名称> [--prompt <工作方式>] [--plugin <id>]...
-  smelt agent update <id> [--name <名称>] [--prompt <工作方式>]
+  smelt agent create --name <名称> [--prompt <工作方式>] [--plugin <id>]... [--memory on|off]
+  smelt agent update <id> [--name <名称>] [--prompt <工作方式>] [--memory on|off]
 
 自动化（写操作需要 smeltd）：
   smelt automation create --name <名称> --agent <智能体id> --every-hours 1 [--prompt <单次输入>]
@@ -76,6 +78,8 @@ smelt {version}
   smelt automation update <id> [--name ...] [--prompt ...] [--every-hours N]
   smelt automation enable|disable|run|delete <id>
   smelt agent chat <id>              用该定义开一场对话（需要 smeltd）
+  smelt agent conversations          列出产品对话（需要 smeltd）
+  smelt agent conversation-rename <session_id> --title <标题>
   smelt agent plugins                列出可绑到智能体的 Pi 插件
 
 stdout 为 JSON。
@@ -137,6 +141,23 @@ fn run_agent(args: &[String]) -> i32 {
             };
             match smelt_core::session_control::create_agent_conversation(id) {
                 Ok(created) => print_ok(&created),
+                Err(error) => fail(&error),
+            }
+        }
+        Some("conversations") => match smelt_core::session_control::list_agent_conversations() {
+            Ok(conversations) => print_ok(&serde_json::json!({ "conversations": conversations })),
+            Err(error) => fail(&error),
+        },
+        Some("conversation-rename") => {
+            let Some(id) = args.get(1).map(String::as_str).filter(|id| !id.is_empty()) else {
+                return usage("smelt agent conversation-rename <session_id> --title <标题>");
+            };
+            let title = match conversation_title_flag(&args[2..]) {
+                Ok(title) => title,
+                Err(message) => return usage(&message),
+            };
+            match smelt_core::session_control::rename_agent_conversation(id, &title) {
+                Ok(renamed) => print_ok(&renamed),
                 Err(error) => fail(&error),
             }
         }
@@ -575,6 +596,7 @@ fn parse_create(args: &[String]) -> Result<AgentDefinitionCreate, String> {
         plugins: flags.plugins,
         context_folders: flags.folders,
         context_links: flags.links,
+        memory_enabled: flags.memory_enabled,
         ..Default::default()
     })
 }
@@ -591,6 +613,7 @@ fn parse_patch(args: &[String]) -> Result<AgentDefinitionPatch, String> {
         plugins: flags.plugins_set.then_some(flags.plugins),
         context_folders: flags.folders_set.then_some(flags.folders),
         context_links: flags.links_set.then_some(flags.links),
+        memory_enabled: flags.memory_enabled,
         ..Default::default()
     };
     if patch == AgentDefinitionPatch::default() {
@@ -611,6 +634,28 @@ struct Flags {
     plugins_set: bool,
     folders_set: bool,
     links_set: bool,
+    memory_enabled: Option<bool>,
+}
+
+fn conversation_title_flag(args: &[String]) -> Result<String, String> {
+    let mut title = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--title" => {
+                title = Some(
+                    args.get(index + 1)
+                        .cloned()
+                        .ok_or_else(|| "--title 需要一个值".to_string())?,
+                );
+                index += 2;
+            }
+            other => return Err(format!("未知参数: {other}")),
+        }
+    }
+    title
+        .filter(|title| !title.trim().is_empty())
+        .ok_or_else(|| "smelt agent conversation-rename <session_id> --title <标题>".to_string())
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, String> {
@@ -628,6 +673,13 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--name" => flags.name = Some(value(index, arg)?),
             "--prompt" => flags.prompt = Some(value(index, arg)?),
             "--engine" => flags.engine_kind_id = Some(value(index, arg)?),
+            "--memory" => {
+                flags.memory_enabled = Some(match value(index, arg)?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("--memory 只能是 on 或 off，收到 {other}")),
+                });
+            }
             "--plugin" => {
                 flags.plugins_set = true;
                 flags.plugins.push(value(index, arg)?);
@@ -671,6 +723,31 @@ fn fail(message: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_flag_turns_agent_memory_on_or_off() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_patch(&args(&["--memory", "off"]))
+                .unwrap()
+                .memory_enabled,
+            Some(false)
+        );
+        assert_eq!(
+            parse_create(&args(&["--name", "写作", "--memory", "on"]))
+                .unwrap()
+                .memory_enabled,
+            Some(true)
+        );
+        assert_eq!(
+            parse_create(&args(&["--name", "写作"]))
+                .unwrap()
+                .memory_enabled,
+            None,
+            "不写就用默认（开）"
+        );
+        assert!(parse_patch(&args(&["--memory", "maybe"])).is_err());
+    }
 
     #[test]
     fn help_and_version_are_cli_commands() {

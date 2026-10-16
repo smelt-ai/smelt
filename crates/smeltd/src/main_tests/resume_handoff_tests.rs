@@ -675,7 +675,7 @@ fn handoff_dangling_tool_is_not_recovered_as_an_active_turn() {
 
     let restored = smelt_core::acp_session::AcpSessionState::from_snapshot(snapshot);
     assert!(
-        !smelt_core::acp_chat::has_unfinished_tool_call(&restored.entries),
+        !smelt_core::acp_chat::has_unfinished_tool_call(restored.entries()),
         "已结束回合的悬空工具必须在恢复时收尾"
     );
     assert!(
@@ -814,8 +814,8 @@ fn connecting_hosted_handoff_does_not_keep_the_process() {
             runtime_spec_fingerprint: None,
             agent_mcp: false,
             agent_token: String::new(),
-            agent_needs_transcript_check: false,
             conversation_binding: None,
+            pending_host_bytes: Vec::new(),
         },
         &sessions,
         &no_subs(),
@@ -866,6 +866,7 @@ fn hosted_handoff_accepts_an_active_snapshot_without_sdk_reconstruction() {
     assert_eq!(validated.id, "acp-hosted");
     assert_eq!(validated.launch.command, "provider --acp");
     assert_eq!(validated.host_snapshot_revision, 9);
+    assert!(validated.pending_host_bytes.is_empty());
     assert_eq!(
         validated.owned,
         OwnedHostedAcpHandoff {
@@ -873,6 +874,25 @@ fn hosted_handoff_accepts_an_active_snapshot_without_sdk_reconstruction() {
             host_fd: 40,
             provider_pid: Some(401),
         }
+    );
+}
+
+#[test]
+fn invalid_pending_host_bytes_are_not_imported() {
+    let item = serde_json::json!({
+        "runtime": "hosted",
+        "id": "acp-hosted",
+        "host_fd": 40,
+        "host_pid": 400,
+        "snapshot": sample_snapshot("sid-hosted"),
+        "pending_host_bytes": "not-bytes",
+    });
+    assert!(
+        matches!(
+            validate_hosted_acp_handoff_item(&item, |_| true),
+            HostedAcpHandoffItemValidation::CleanupRequired(_)
+        ),
+        "坏的行首前缀不能接上，否则继任者会从半行中间开始读"
     );
 }
 
@@ -1040,6 +1060,7 @@ fn acp_session_with_valid_fds_and_session_id_is_recovered() {
             "pid": pid,
             "cwd": "/tmp/proj",
             "cmd": "claude --dangerously-skip-permissions",
+            // 旧交接多出来的字段。恢复不再读它，留在夹具里确认旧文件仍能起来。
             "agent_needs_transcript_check": true,
             "snapshot": sample_snapshot("sid-1"),
             "pending_raw_line": null,
@@ -1051,13 +1072,12 @@ fn acp_session_with_valid_fds_and_session_id_is_recovered() {
     let slot = acp.get("acp-1").expect("acp-1 应被恢复");
     let sess = &slot.value;
     assert_eq!(sess.cwd.as_deref(), Some("/tmp/proj"));
-    assert!(sess.agent_needs_transcript_check);
     assert!(
         sess.handle.lock().unwrap().is_some(),
         "应该已经起了 resume 连接"
     );
     let reduced = sess.reduced.lock().unwrap();
-    assert_eq!(reduced.entries.len(), 1);
+    assert_eq!(reduced.entries().len(), 1);
     assert_eq!(reduced.acp_session_id.as_deref(), Some("sid-1"));
     assert_eq!(reduced.history_session_id.as_deref(), Some("sid-1"));
 }

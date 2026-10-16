@@ -9,12 +9,13 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, App, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Render, RenderOnce, StatefulInteractiveElement as _,
-    Styled as _, WeakEntity, Window, div, px,
+    Anchor, App, Context, ElementId, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use smelt_ui::IconAction as _;
 use gpui_component::popover::{Popover, PopoverState};
 use gpui_component::{Icon, IconName, IndexPath, Sizable as _, StyledExt as _};
 
@@ -451,13 +452,13 @@ impl Render for NewSessionPickerState {
                 let hover_state = state.clone();
                 let selected = selected_index == Some(index);
                 let pin_key = item_key.clone();
-                let pin_button = Button::new(format!("new-session-picker-pin:{pin_key}"))
+                let pin_button = Button::new("new-session-picker-pin")
                     .custom(ButtonCustomVariant::new(cx))
                     .ghost()
                     .xsmall()
                     .flex_shrink_0()
                     .icon(pin_icon)
-                    .tooltip(pin_tip)
+                    .icon_action(pin_tip)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -469,7 +470,9 @@ impl Render for NewSessionPickerState {
                 let row_label = format!("{} · {}", item.label, item.kind.label());
                 content = content.child(
                     div()
-                        .id(format!("new-session-picker-item:{section}:{row}"))
+                        .id((ElementId::from("new-session-picker-item"), item_key.clone()))
+                        .role(gpui::Role::Button)
+                        .aria_label(row_label.clone())
                         .h(px(PICKER_ROW_HEIGHT))
                         .mx_1()
                         .px_2()
@@ -542,23 +545,24 @@ pub(super) struct NewSessionPicker {
 
 /// 构造与会话数完全同槽的「+」触发器；命中区比旧版 xsmall 更大，但可见性仍只由
 /// 项目行 hover 切换，避免每个项目常驻一个高对比操作。
+/// 按钮 id 跟项目路径走。下标会在拖动排序后指到别的项目。
 pub(super) fn new_session_picker(
-    project_index: usize,
     workspace: Entity<Workspace>,
     cwd: String,
     cx: &App,
 ) -> NewSessionPicker {
+    let trigger_id = ElementId::from((ElementId::from("proj-new"), cwd.clone()));
     NewSessionPicker {
         workspace,
         cwd: (!cwd.is_empty()).then_some(cwd),
-        trigger: Button::new(("proj-new", project_index))
+        trigger: Button::new(trigger_id)
             .custom(ButtonCustomVariant::new(cx))
             .opacity(0.0)
             .group_hover(super::PROJ_HEADER_GROUP, |style| style.opacity(1.0))
             .small()
             .size(px(super::PROJECT_NEW_BUTTON_SIZE))
             .icon(IconName::Plus)
-            .tooltip("新建会话"),
+            .icon_action("新建会话"),
     }
 }
 
@@ -566,10 +570,13 @@ impl RenderOnce for NewSessionPicker {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let workspace = self.workspace;
         let cwd = self.cwd;
-        // pix 会随项目排序改变，不能拿它单独缓存 cwd；状态以项目路径为主键，
-        // 否则拖动项目后，同一个列表位置会把新会话建到旧项目。
-        let picker_key = format!("new-session-picker:{}", cwd.as_deref().unwrap_or("default"));
-        let picker_state_key = format!("{picker_key}:state");
+        // 项目排序会改变下标。状态以项目路径为主键，拖动后同一个列表位置
+        // 不能把新会话建到旧项目。
+        let picker_root = cwd.as_deref().unwrap_or("default").to_string();
+        let picker_key =
+            ElementId::from((ElementId::from("new-session-picker"), picker_root.clone()));
+        let picker_state_key =
+            ElementId::from((ElementId::from("new-session-picker-state"), picker_root));
         let picker = window.use_keyed_state(picker_state_key, cx, {
             move |_, cx| NewSessionPickerState::new(workspace, cwd, cx)
         });

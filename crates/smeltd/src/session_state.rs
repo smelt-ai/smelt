@@ -18,9 +18,8 @@ pub(crate) fn now_unix() -> u64 {
 }
 
 /// 会话状态通道（见 docs/notification-architecture.md）。只有 hook 事件归约
-/// （`agent_event` op）和 ACP 投影能改变 phase；终端标题及 OSC/BEL 只保留展示
-/// 或信息通知语义。schema 定死，字段不够用再加，不删不改类型——远程端/GUI 都按
-/// 这份 schema 解码。
+/// （`agent_event` op）和 ACP 投影能改变 phase。OSC 不是会话名，BEL 只作信息
+/// 通知。schema 定死，字段不够用再加，不删不改类型——远程端/GUI 都按这份 schema 解码。
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct SessionState {
     pub(crate) id: String,
@@ -41,13 +40,10 @@ pub(crate) struct SessionState {
     /// list/subscribe，因此其它 agent 即使知道 session id 也不能冒充它回复。
     #[serde(skip)]
     pub(crate) agent_token: String,
-    /// GUI/远程端使用的当前标题。OSC 0/2 到达时保留原始 payload；
-    /// 尚未收到终端/provider 标题时，可由首条 UserPromptSubmit 生成兜底。
+    /// 会话名。非空的 provider 标题（`SessionTitleChanged`，或 ACP 的
+    /// `session_title`）直接替换。还没有名字时，首条能抽出标题的 prompt 写一次。
+    /// 已有名字不被后来的 prompt 改掉。换对话时清空。OSC 0/2 不是会话名。
     pub(crate) title: Option<String>,
-    /// 当前 runtime 是否已经从首条 prompt 生成过兜底标题。只阻止
-    /// 后续 prompt 不断改名；OSC 标题按终端协议仍可原样更新展示。
-    #[serde(skip)]
-    pub(crate) prompt_title: Option<String>,
     /// 该终端此刻正在对话的 provider 会话 id（Copilot `sessionId` 等）。由每条
     /// hook 携带，因此 TUI 内部 `/resume`、退出重开都会自动改写，不需要另外的
     /// 握手或代次推断。None = 这家 provider 的 hook 不带 id，或还没有事件到达。
@@ -98,7 +94,6 @@ impl Default for SessionState {
             agent_mcp: false,
             agent_token: String::new(),
             title: None,
-            prompt_title: None,
             conversation_id: None,
             phase: Phase::Idle,
             phase_since: 0,
@@ -206,16 +201,6 @@ fn event_matches_blocker(blocker: &AgentBlocker, event: &AgentEvent) -> bool {
     true
 }
 
-/// 归约 OSC 0/2 标题。payload 按终端协议视为不透明字符串：只去重，
-/// 不删 spinner，不猜 shell / 产品 / provider 语义。
-pub(crate) fn apply_terminal_title(state: &mut SessionState, title: &str) -> bool {
-    if state.title.as_deref() == Some(title) {
-        return false;
-    }
-    state.title = Some(title.to_string());
-    true
-}
-
 /// 对话绑定的切换结果。标题清空只发生在 `Switched` 一处。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BindingTransition {
@@ -227,8 +212,8 @@ enum BindingTransition {
 /// 归约当前对话身份。子任务事件不参与：它们可能携带子会话自己的 id，会把
 /// 主对话的绑定冲掉。
 ///
-/// 换对话时（id 变了）连带清掉上一段对话遗留的标题：OSC 标题和 prompt 兜底名
-/// 都属于旧对话，留着就会让侧栏顶着上一段对话的名字。
+/// 换对话时（id 变了）清掉上一段对话的会话名。
+/// 留着就会让侧栏顶着上一段对话的名字。
 fn switch_conversation(state: &mut SessionState, event: &AgentEvent) -> BindingTransition {
     if matches!(
         event.kind,
@@ -249,16 +234,15 @@ fn switch_conversation(state: &mut SessionState, event: &AgentEvent) -> BindingT
     }
     if state.conversation_id.is_some() {
         state.title = None;
-        state.prompt_title = None;
     }
     state.conversation_id = Some(id.to_string());
     BindingTransition::Switched
 }
 
-/// 首条 prompt 的本地兜底标题：只写一次，后续 prompt 不改名；
-/// OSC/权威标题仍可原样更新展示。
+/// 还没有会话名时，用这条 prompt 兜底。已有名字保持不变。
+/// 显式改名只走 `SessionTitleChanged`。
 fn note_prompt_fallback(state: &mut SessionState, event: &AgentEvent) {
-    if state.prompt_title.is_some() {
+    if state.title.is_some() {
         return;
     }
     if let Some(title) = event
@@ -266,10 +250,7 @@ fn note_prompt_fallback(state: &mut SessionState, event: &AgentEvent) {
         .as_deref()
         .and_then(smelt_core::session_title::prompt_title)
     {
-        state.prompt_title = Some(title.clone());
-        if state.title.is_none() {
-            state.title = Some(title);
-        }
+        state.title = Some(title);
     }
 }
 
@@ -305,11 +286,10 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
 
     match occupancy {
         Occupancy::Metadata => {
-            if let Some(title) = event
-                .conversation_title
-                .as_deref()
-                .map(str::trim)
-                .filter(|title| !title.is_empty())
+            if event.kind == AgentEventKind::SessionTitleChanged
+                && let Some(title) = smelt_core::session_title::provider_session_title(
+                    event.conversation_title.as_deref(),
+                )
             {
                 state.title = Some(title.to_string());
             }
@@ -414,7 +394,16 @@ mod agent_event_reducer_tests {
         apply_agent_event(&mut state, &started);
         assert_eq!(state.conversation_id.as_deref(), Some("conv-1"));
 
-        apply_terminal_title(&mut state, "Compare Pi and DSH Harness");
+        let mut prompt = event(AgentEventKind::PromptSubmitted);
+        prompt.conversation_id = Some("conv-1".into());
+        prompt.conversation_title = Some("先问一句".into());
+        apply_agent_event(&mut state, &prompt);
+
+        let mut named = event(AgentEventKind::SessionTitleChanged);
+        named.conversation_id = Some("conv-1".into());
+        named.conversation_title = Some("Compare Pi and DSH Harness".into());
+        apply_agent_event(&mut state, &named);
+
         let mut same = event(AgentEventKind::ToolFinished);
         same.conversation_id = Some("conv-1".into());
         apply_agent_event(&mut state, &same);
@@ -667,21 +656,16 @@ mod agent_event_reducer_tests {
     }
 
     #[test]
-    fn terminal_title_cannot_start_a_turn_but_grok_prompt_can() {
-        let mut state = SessionState::default();
-        assert!(apply_terminal_title(
-            &mut state,
-            "Thinking - TSLA 趋势且入场与 put 判断 - grok"
-        ));
-        assert_eq!(state.phase, Phase::Idle);
-        assert!(!state.turn_events);
-
-        assert!(apply_agent_event(
-            &mut state,
-            &AgentEvent::new("grok", AgentEventKind::PromptSubmitted)
-        ));
-        assert_eq!(state.phase, Phase::Thinking);
-        assert!(state.turn_events);
+    fn prompt_sets_the_session_name_and_opens_a_turn() {
+        for provider in ["codex", "claude", "copilot", "grok", "opencode"] {
+            let mut state = SessionState::default();
+            let mut prompt = AgentEvent::new(provider, AgentEventKind::PromptSubmitted);
+            prompt.conversation_title = Some("修一下".into());
+            assert!(apply_agent_event(&mut state, &prompt));
+            assert_eq!(state.phase, Phase::Thinking);
+            assert!(state.turn_events);
+            assert_eq!(state.title.as_deref(), Some("修一下"));
+        }
     }
 
     #[test]
@@ -704,8 +688,11 @@ mod agent_event_reducer_tests {
         assert!(state.structured_events);
         assert!(!state.turn_events);
 
-        assert!(apply_terminal_title(&mut state, "OpenCode"));
-        assert_eq!(state.title.as_deref(), Some("OpenCode"));
+        let mut blank = AgentEvent::new("opencode", AgentEventKind::SessionTitleChanged);
+        blank.conversation_title = Some("   ".into());
+        assert!(apply_agent_event(&mut state, &blank));
+        assert_eq!(state.title.as_deref(), Some("修复 OpenCode 标题"));
+        assert_eq!(state.phase, Phase::ExecutingTool);
     }
 
     #[test]
@@ -744,46 +731,44 @@ mod agent_event_reducer_tests {
     }
 
     #[test]
-    fn prompt_fallback_does_not_rewrite_or_freeze_osc_title_frames() {
+    fn provider_title_replaces_prompt_and_later_prompts_do_not_rename() {
         let mut state = SessionState {
             cwd: Some("/Users/me/code/smelt".into()),
-            launch: Some("codex --dangerously-bypass-approvals-and-sandbox".into()),
-            ..Default::default()
-        };
-        assert!(apply_terminal_title(&mut state, "⠋ smelt"));
-        assert!(apply_agent_event(
-            &mut state,
-            &prompt_with_title("修复 Codex 终端标题")
-        ));
-        assert_eq!(state.title.as_deref(), Some("⠋ smelt"));
-
-        assert!(apply_terminal_title(&mut state, "⠙ smelt"));
-        assert_eq!(state.title.as_deref(), Some("⠙ smelt"));
-    }
-
-    #[test]
-    fn explicit_terminal_thread_title_wins_and_later_prompts_do_not_rename() {
-        let mut state = SessionState {
-            cwd: Some("/Users/me/code/smelt".into()),
-            launch: Some("codex -c 'tui.terminal_title=[\"thread-title\"]'".into()),
+            launch: Some("codex".into()),
             ..Default::default()
         };
         apply_agent_event(&mut state, &prompt_with_title("第一条需求"));
         assert_eq!(state.title.as_deref(), Some("第一条需求"));
 
-        assert!(apply_terminal_title(&mut state, "用户显式命名"));
+        let mut named = event(AgentEventKind::SessionTitleChanged);
+        named.conversation_title = Some("用户显式命名".into());
+        apply_agent_event(&mut state, &named);
+        assert_eq!(state.title.as_deref(), Some("用户显式命名"));
+
         apply_agent_event(&mut state, &prompt_with_title("第二条需求"));
         assert_eq!(state.title.as_deref(), Some("用户显式命名"));
     }
 
     #[test]
-    fn resumed_explicit_thread_title_is_not_replaced_by_prompt_fallback() {
+    fn later_prompt_does_not_replace_an_existing_title() {
         let mut state = SessionState {
-            cwd: Some("/Users/me/code/smelt".into()),
-            launch: Some("codex -c 'tui.terminal_title=[\"thread-title\"]'".into()),
+            title: Some("已恢复的名字".into()),
             ..Default::default()
         };
-        apply_terminal_title(&mut state, "已有会话名");
+        apply_agent_event(&mut state, &prompt_with_title("新的第一条"));
+        assert_eq!(state.title.as_deref(), Some("已恢复的名字"));
+    }
+
+    #[test]
+    fn established_provider_title_is_not_replaced_by_prompt_fallback() {
+        let mut state = SessionState {
+            cwd: Some("/Users/me/code/smelt".into()),
+            launch: Some("codex".into()),
+            ..Default::default()
+        };
+        let mut named = event(AgentEventKind::SessionTitleChanged);
+        named.conversation_title = Some("已有会话名".into());
+        apply_agent_event(&mut state, &named);
         apply_agent_event(&mut state, &prompt_with_title("恢复后的新问题"));
         assert_eq!(state.title.as_deref(), Some("已有会话名"));
     }

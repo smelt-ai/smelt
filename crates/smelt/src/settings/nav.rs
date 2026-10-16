@@ -15,8 +15,6 @@ pub enum SettingsSection {
     AppearanceTerminal,
     AppearanceWindow,
     DshModel,
-    PiModel,
-    PiPlugins,
     AgentRuntime,
     AgentLaunch,
     AgentWorkspace,
@@ -48,8 +46,6 @@ impl SettingsSection {
             Self::AppearanceTerminal => "appearance-terminal".into(),
             Self::AppearanceWindow => "appearance-window".into(),
             Self::DshModel => "dsh-model".into(),
-            Self::PiModel => "pi-model".into(),
-            Self::PiPlugins => "pi-plugins".into(),
             Self::AgentRuntime => "agent-runtime".into(),
             Self::AgentLaunch => "agent-launch".into(),
             Self::AgentWorkspace => "agent-workspace".into(),
@@ -103,108 +99,11 @@ pub struct SettingsNavCategory {
     pub children: Vec<SettingsNavLeaf>,
 }
 
-/// 设置窗口的作用域。同一套壳可以开出多扇内容不同的窗口，各自单例。
-///
-/// 智能体的模型与插件是「配一次就去用」的东西，塞进通用设置里要翻三层；这里让它
-/// 从智能体页头直接开一扇只有这两页的窗口，而不是在设置里再放一份入口。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum SettingsScope {
-    /// 通用设置窗口。
-    #[default]
-    All,
-    /// 智能体设置窗口：只有 Pi 模型与智能体插件。
-    AgentSetup,
-}
-
-impl SettingsScope {
-    pub fn window_title(self) -> &'static str {
-        match self {
-            Self::All => "设置",
-            Self::AgentSetup => "智能体设置",
-        }
-    }
-
-    /// 目标 section 不属于本窗口时的兜底页。
-    pub fn default_section(self) -> SettingsSection {
-        match self {
-            Self::All => SettingsSection::AppearanceTheme,
-            Self::AgentSetup => SettingsSection::PiModel,
-        }
-    }
-
-    /// 本窗口该显示哪些页。
-    pub fn nav(self, plugins: &[InstalledPlugin]) -> Vec<SettingsNavCategory> {
-        match self {
-            Self::All => settings_nav(plugins),
-            Self::AgentSetup => agent_setup_nav(),
-        }
-    }
-
-    /// section 是否属于本窗口。不属于就该回退，否则会画出侧栏里根本没有的页。
-    pub fn contains(self, section: &SettingsSection) -> bool {
-        nav_contains(&self.nav(&[]), section)
-    }
-}
-
 /// 已构造好的侧栏里有没有这一页。渲染时用它，省掉为判断归属再建一棵树。
 pub fn nav_contains(nav: &[SettingsNavCategory], section: &SettingsSection) -> bool {
     nav.iter()
         .flat_map(|category| category.children.iter())
         .any(|child| &child.section == section)
-}
-
-/// 智能体设置窗口的侧栏：只放「配好就能开跑」的两页。
-pub fn agent_setup_nav() -> Vec<SettingsNavCategory> {
-    vec![SettingsNavCategory {
-        id: SettingsCategoryId::Agent,
-        title: "智能体",
-        keywords: &["Agent", "智能体", "AI"],
-        default_open: true,
-        children: vec![
-            leaf(
-                "模型",
-                IconName::Bot,
-                SettingsSection::PiModel,
-                &[
-                    "Pi",
-                    "pi",
-                    "智能体",
-                    "模型",
-                    "model",
-                    "凭据",
-                    "API",
-                    "API key",
-                    "API 密钥",
-                    "API 地址",
-                    "密钥",
-                    "token",
-                    "provider",
-                    "供应商",
-                    "网关",
-                    "endpoint",
-                    "base url",
-                ],
-            ),
-            leaf(
-                "插件",
-                IconName::LayoutDashboard,
-                SettingsSection::PiPlugins,
-                &[
-                    "插件",
-                    "plugin",
-                    "技能",
-                    "skill",
-                    "扩展",
-                    "extension",
-                    "能力",
-                    "工具",
-                    "Pi",
-                    "pi",
-                    "智能体",
-                ],
-            ),
-        ],
-    }]
 }
 
 /// 设置侧栏的两级导航。一级分类默认展开；插件子项来自当前已安装清单。
@@ -229,6 +128,10 @@ pub fn settings_nav(plugins: &[InstalledPlugin]) -> Vec<SettingsNavCategory> {
                         "夜间",
                         "浅色",
                         "亮色",
+                        "配色",
+                        "Default",
+                        "Ayu",
+                        "Catppuccin",
                         "界面字号",
                         "UI 字号",
                         "界面字体",
@@ -719,16 +622,15 @@ mod tests {
 
     #[test]
     fn nav_categories_are_default_open_two_level_branches() {
-        for nav in [settings_nav(&[]), agent_setup_nav()] {
-            assert!(
-                nav.iter().all(|category| !category.children.is_empty()),
-                "一级分类下面必须有二级页面，不能混入同级叶子"
-            );
-            assert!(
-                nav.iter().all(|category| category.default_open),
-                "所有一级分类都应默认展开，让二级页面直接可见"
-            );
-        }
+        let nav = settings_nav(&[]);
+        assert!(
+            nav.iter().all(|category| !category.children.is_empty()),
+            "一级分类下面必须有二级页面，不能混入同级叶子"
+        );
+        assert!(
+            nav.iter().all(|category| category.default_open),
+            "所有一级分类都应默认展开，让二级页面直接可见"
+        );
     }
 
     #[test]
@@ -864,32 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_scope_owns_the_pi_pages_and_the_main_window_does_not_show_them_twice() {
-        let agent_titles = child_titles(&agent_setup_nav(), SettingsCategoryId::Agent);
-        assert_eq!(agent_titles, ["模型", "插件"]);
-
-        // 两页只在智能体窗口出现：留在通用设置里就成了两处入口、两处维护。
-        let main_sections = settings_nav(&[])
-            .iter()
-            .flat_map(|category| category.children.iter())
-            .map(|child| child.section.clone())
-            .collect::<Vec<_>>();
-        assert!(!main_sections.contains(&SettingsSection::PiModel));
-        assert!(!main_sections.contains(&SettingsSection::PiPlugins));
-
-        assert!(SettingsScope::AgentSetup.contains(&SettingsSection::PiModel));
-        assert!(SettingsScope::AgentSetup.contains(&SettingsSection::PiPlugins));
-        assert!(!SettingsScope::AgentSetup.contains(&SettingsSection::AppearanceTheme));
-        assert!(SettingsScope::All.contains(&SettingsSection::AppearanceTheme));
-        assert!(!SettingsScope::All.contains(&SettingsSection::PiModel));
-
-        // 兜底页必须是本窗口自己有的页，否则回退会画出侧栏里没有的内容。
-        for scope in [SettingsScope::All, SettingsScope::AgentSetup] {
-            assert!(scope.contains(&scope.default_section()), "{scope:?}");
-        }
-    }
-
-    #[test]
     fn every_destination_is_a_second_level_leaf() {
         let nav = settings_nav(&[]);
         assert!(nav.iter().all(|category| !category.children.is_empty()));
@@ -902,6 +778,17 @@ mod tests {
         assert_eq!(visible_destinations.len(), 15);
         assert!(visible_destinations.contains(&SettingsSection::DshModel));
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
+    }
+
+    #[test]
+    fn element_keys_are_unique() {
+        let keys = settings_nav(&[])
+            .into_iter()
+            .flat_map(|category| category.children)
+            .map(|child| child.section.element_key())
+            .collect::<Vec<_>>();
+        let unique = keys.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), keys.len(), "{keys:?}");
     }
 
     #[test]

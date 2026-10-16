@@ -7,12 +7,14 @@
 //! 字段仍声明在 `main.rs` 的 `Workspace` 里。数据修改在 `workspace.rs`，
 //! 智能体页面在 `view.rs`，自动化页面在 `automation_view.rs`。
 
+use std::sync::Mutex;
+
 use chrono::{Local, TimeZone, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, NumberInput, Textarea, TextareaState};
-use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Selectable as _,
@@ -20,8 +22,9 @@ use gpui_component::{
 };
 
 use crate::workspace_sessions::NewAcpSessionRequest;
-use crate::{AgentStatus, Workspace, WorkspaceRoute, acp_view, settings};
+use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
 use smelt_core::pi_plugin_catalog::{PiPlugin, discover_plugins};
+use smelt_ui::IconAction as _;
 
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
 pub(crate) struct AgentsSurface {
@@ -29,6 +32,14 @@ pub(crate) struct AgentsSurface {
     pub(crate) selected_id: Option<String>,
     pub(crate) editor: Option<AgentEditor>,
     pub(crate) error: Option<String>,
+    /// 正在等二次确认删除的智能体。
+    pub(crate) pending_delete: Option<AgentDeleteTarget>,
+    /// 正在等二次确认删除的记忆。
+    pub(crate) pending_memory_delete: Option<MemoryDeleteTarget>,
+    /// 从侧栏「新对话」进来、还没有可对话的智能体。下一次新建走草稿，不是普通创建。
+    pub(crate) arm_conversation_on_create: bool,
+    /// 这次「新对话」新建的草稿。点「开始对话」才设默认；返回则删掉。
+    pub(crate) conversation_draft_id: Option<String>,
 }
 
 impl AgentsSurface {
@@ -37,8 +48,31 @@ impl AgentsSurface {
             selected_id,
             editor: None,
             error: None,
+            pending_delete: None,
+            pending_memory_delete: None,
+            arm_conversation_on_create: false,
+            conversation_draft_id: None,
         }
     }
+}
+
+pub(crate) struct AgentDeleteTarget {
+    id: String,
+    name: String,
+    conversations: usize,
+}
+
+pub(crate) struct MemoryDeleteTarget {
+    agent_id: String,
+    layer: MemoryLayer,
+    file_name: String,
+    name: String,
+}
+
+pub(crate) struct AutomationDeleteTarget {
+    id: String,
+    name: String,
+    runs: usize,
 }
 
 /// 自动化目录根页的分段：任务表 / 全局 Run。
@@ -59,6 +93,12 @@ pub(crate) struct AutomationsSurface {
     pub(crate) template_filter: Option<automation_templates::AutomationTemplateCategory>,
     /// 编辑器里选中的那一次运行。`None` 表示右侧仍是任务表单。
     pub(crate) selected_run_id: Option<String>,
+    /// 正在等二次确认删除的自动化。
+    pub(crate) pending_delete: Option<AutomationDeleteTarget>,
+    /// 选中运行的落库内容。后台读好再放进来，render 里不读库。
+    pub(crate) run_detail: Option<automation_run_detail::AutomationRunDetail>,
+    /// 正在后台读取的那份运行版本，防止逐帧重复排读取。
+    pub(crate) run_detail_loading: Option<automation_run_detail::RunDetailKey>,
 }
 
 impl Default for AutomationsSurface {
@@ -71,6 +111,9 @@ impl Default for AutomationsSurface {
             catalog_tab: AutomationCatalogTab::Tasks,
             template_filter: None,
             selected_run_id: None,
+            pending_delete: None,
+            run_detail: None,
+            run_detail_loading: None,
         }
     }
 }
@@ -85,7 +128,177 @@ pub(crate) struct AgentEditor {
     context_link: Entity<InputState>,
     /// 打开编辑器时扫一次磁盘的插件目录；不在渲染里扫，避免每次输入都读文件。
     plugins: Vec<PiPlugin>,
+    /// `~/.pi/agent/mcp.json` 里的服务器，同样只在打开编辑器和点刷新时读。
+    mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
+    /// 同理，记忆不在渲染里扫：打开编辑器、记忆目录有变化、有对话停下来、
+    /// 点刷新或删除后才重扫。
+    memories: AgentMemories,
+    /// 当前页签。每次打开编辑器回到配置。
+    tab: AgentEditorTab,
+    /// 记忆页签的搜索框和筛选。
+    memory_query: Entity<InputState>,
+    memory_filter: MemoryFilter,
+    /// 记忆页签里展开看全文的那条记忆。只是看，改仍走系统编辑器。
+    expanded_memory: Option<(MemoryLayer, String)>,
+    /// 监听两层记忆目录，智能体或外部编辑器改了文件，卡片自己刷新。跟着编辑器走：
+    /// 关掉或换一个智能体时 drop，监听随之停止。
+    _memory_watcher: Option<notify::RecommendedWatcher>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。
+#[derive(Default)]
+pub(crate) struct AgentMemories {
+    agent: smelt_core::agent_memory::MemoryListing,
+    user: smelt_core::agent_memory::MemoryListing,
+}
+
+impl AgentMemories {
+    pub(crate) fn scan(agent_id: &str) -> Self {
+        let list = |layer: MemoryLayer| {
+            layer
+                .dir(agent_id)
+                .map(|dir| smelt_core::agent_memory::list_memories(&dir, &layer.scope(agent_id)))
+                .unwrap_or_default()
+        };
+        Self {
+            agent: list(MemoryLayer::Agent),
+            user: list(MemoryLayer::User),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryLayer {
+    Agent,
+    User,
+}
+
+impl MemoryLayer {
+    pub(crate) fn scope(self, agent_id: &str) -> smelt_core::agent_memory::MemoryScope {
+        match self {
+            Self::Agent => smelt_core::agent_memory::MemoryScope::Agent(agent_id.to_string()),
+            Self::User => smelt_core::agent_memory::MemoryScope::User,
+        }
+    }
+
+    pub(crate) fn dir(self, agent_id: &str) -> Option<std::path::PathBuf> {
+        match self {
+            Self::Agent => smelt_core::agent_definition_store::agent_memory_dir(agent_id),
+            Self::User => smelt_core::agent_definition_store::user_memory_dir(),
+        }
+    }
+}
+
+/// 会话是否停在两步之间。记忆的读写元数据在工具结果里落库，模型还在想或工具还在跑
+/// 时重扫可能赶在写文件之后、记元数据之前。
+pub(crate) fn session_phase_settled(phase: smelt_core::daemon_state::DaemonPhase) -> bool {
+    use smelt_core::daemon_state::DaemonPhase;
+    !matches!(
+        phase,
+        DaemonPhase::Connecting | DaemonPhase::Thinking | DaemonPhase::ExecutingTool
+    )
+}
+
+/// 编辑页的两个页签。配置是设一次就不怎么动的东西；记忆是会一直长的数据，单独一页，
+/// 不把插件和 MCP 挤到后面去。
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(crate) enum AgentEditorTab {
+    #[default]
+    Config,
+    Memory,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(crate) enum MemoryFilter {
+    #[default]
+    All,
+    Pending,
+    Rules,
+    Facts,
+}
+
+impl MemoryFilter {
+    const ALL: [Self; 4] = [Self::All, Self::Pending, Self::Rules, Self::Facts];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Pending => "待确认",
+            Self::Rules => "规则",
+            Self::Facts => "事实",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::All => "所有记忆",
+            Self::Pending => "没生效、等你采纳的记忆",
+            Self::Rules => "你本人的情况和你纠正过的做法，每轮都带上",
+            Self::Facts => "项目、资源一类的信息，用到时才召回",
+        }
+    }
+
+    fn element_id(self) -> &'static str {
+        match self {
+            Self::All => "agent-memory-filter-all",
+            Self::Pending => "agent-memory-filter-pending",
+            Self::Rules => "agent-memory-filter-rules",
+            Self::Facts => "agent-memory-filter-facts",
+        }
+    }
+
+    fn matches(self, entry: &smelt_core::agent_memory::MemoryEntry) -> bool {
+        let rule = smelt_core::agent_memory::is_rule_memory_kind(entry.kind.as_deref());
+        match self {
+            Self::All => true,
+            Self::Pending => entry.pending_reason.is_some(),
+            Self::Rules => rule,
+            Self::Facts => !rule,
+        }
+    }
+}
+
+/// 记忆页签里一层要显示的记忆。搜索不分大小写，名字、描述、文件名、正文任一命中即可。
+/// 待确认要用户处理，排最前；其余按最近用过排，没用过的垫底，同档按名字。
+pub(crate) fn visible_memories<'a>(
+    entries: &'a [smelt_core::agent_memory::MemoryEntry],
+    query: &str,
+    filter: MemoryFilter,
+) -> Vec<&'a smelt_core::agent_memory::MemoryEntry> {
+    let query = query.trim().to_lowercase();
+    let mut visible: Vec<_> = entries
+        .iter()
+        .filter(|entry| filter.matches(entry))
+        .filter(|entry| {
+            query.is_empty()
+                || [
+                    &entry.name,
+                    &entry.description,
+                    &entry.file_name,
+                    &entry.body,
+                ]
+                .iter()
+                .any(|field| field.to_lowercase().contains(&query))
+        })
+        .collect();
+    visible.sort_by(|a, b| {
+        b.pending_reason
+            .is_some()
+            .cmp(&a.pending_reason.is_some())
+            .then_with(|| b.last_used.cmp(&a.last_used))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    visible
+}
+
+/// 配置页摘要行的条数。只报数，不列条目，记忆再多也是一行。
+pub(crate) fn memory_summary_text(agent: usize, user: usize) -> String {
+    if agent + user == 0 {
+        "还没有记忆".to_string()
+    } else {
+        format!("这个智能体 {agent} 条 · 全局 {user} 条")
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,6 +323,15 @@ impl ScheduleKind {
         }
     }
 
+    fn id_name(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Weekdays => "weekdays",
+            Self::Weekly => "weekly",
+            Self::Interval => "interval",
+        }
+    }
+
     fn is_interval(self) -> bool {
         matches!(self, Self::Interval)
     }
@@ -126,6 +348,13 @@ impl IntervalUnit {
         match self {
             Self::Minutes => "分钟",
             Self::Hours => "小时",
+        }
+    }
+
+    fn id_name(self) -> &'static str {
+        match self {
+            Self::Minutes => "minutes",
+            Self::Hours => "hours",
         }
     }
 }
@@ -147,6 +376,14 @@ impl IntervalDayScope {
             Self::Everyday => "每天",
             Self::Weekdays => "工作日",
             Self::Weekly => "每周",
+        }
+    }
+
+    fn id_name(self) -> &'static str {
+        match self {
+            Self::Everyday => "everyday",
+            Self::Weekdays => "weekdays",
+            Self::Weekly => "weekly",
         }
     }
 
@@ -195,7 +432,6 @@ pub(crate) struct AutomationEditor {
     retained_events: Vec<settings::EventIngress>,
     entries: Vec<TriggerEntryEditor>,
     notification: settings::AutomationNotificationPreset,
-    feishu_chat: Entity<InputState>,
     draft_revision: u64,
     saving_revision: Option<u64>,
     /// 重新生成地址这类后台提交不让顶栏「运行一次」进入 loading 状态。
@@ -246,142 +482,155 @@ fn ensure_agent_conversation_cwd(agent_definition_id: &str) -> Option<String> {
     Some(dir.to_string_lossy().into_owned())
 }
 
-fn ensure_workbench_conversation_cwd() -> Option<String> {
-    let dir = smelt_core::agent_definition_store::ensure_workbench_conversation_workspace()?;
-    Some(dir.to_string_lossy().into_owned())
+/// 侧栏「新对话」的文案。有默认时带上名字，没有就只写动作。
+fn new_conversation_row_label(agent_name: Option<&str>) -> String {
+    match agent_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("新对话 · {name}"),
+        None => "新对话".to_string(),
+    }
+}
+
+struct DefaultConversationCache {
+    loaded: bool,
+    agent_id: Option<String>,
+}
+
+static DEFAULT_CONVERSATION_CACHE: Mutex<DefaultConversationCache> =
+    Mutex::new(DefaultConversationCache {
+        loaded: false,
+        agent_id: None,
+    });
+
+fn with_default_conversation_cache<T>(f: impl FnOnce(&mut DefaultConversationCache) -> T) -> T {
+    let mut guard = DEFAULT_CONVERSATION_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+/// 侧栏默认智能体。第一次读取才碰 SQLite，之后只看这份缓存。
+fn stored_default_conversation_agent() -> Option<String> {
+    with_default_conversation_cache(|cache| {
+        if !cache.loaded {
+            cache.agent_id = smelt_core::default_conversation::load_default_conversation_agent();
+            cache.loaded = true;
+        }
+        cache.agent_id.clone()
+    })
+}
+
+fn set_default_conversation_agent(agent_id: &str) {
+    if let Err(error) = smelt_core::default_conversation::save_default_conversation_agent(agent_id)
+    {
+        eprintln!("[default-conversation] 保存默认智能体失败: {error}");
+    }
+    let agent_id = agent_id.trim().to_string();
+    with_default_conversation_cache(|cache| {
+        cache.loaded = true;
+        cache.agent_id = Some(agent_id);
+    });
+}
+
+fn clear_default_conversation_agent() {
+    if let Err(error) = smelt_core::default_conversation::clear_default_conversation_agent() {
+        eprintln!("[default-conversation] 清除默认智能体失败: {error}");
+    }
+    with_default_conversation_cache(|cache| {
+        cache.loaded = true;
+        cache.agent_id = None;
+    });
 }
 
 /// 对话行图标色。只跟状态走：选中已经由行底色表达。
 ///
-/// 空闲选中如果再走 accent 蓝，就会和运行中撞色——选中那条永远看不出在不在跑。
+/// 空闲选中如果再走强调色，就会和运行中撞色——选中那条永远看不出在不在跑。
 fn conversation_icon_color(status: AgentStatus, phase: Option<f32>) -> gpui::Rgba {
     Workspace::session_icon_color(status, phase)
 }
 
-/// 对话行的状态图标。语义与项目会话行同一套：三态上色，Running 进入时短暂
-/// 提亮一次，随后回落静态蓝——不让一个长任务永久持有动画 timer。
+/// 这段对话属于哪个智能体：只看创建时写下的绑定。
 ///
-/// 选中态不再单独染色：状态色本身就是这一行要传达的信息，被选中压过去就等于
-/// 「选中的那条永远看不出在不在跑」。选中与否已经由整行底色表达。
-fn conversation_status_icon(
-    session_id: &str,
-    status: AgentStatus,
-    animate_running: bool,
-    engine: Option<settings::ConversationAgentKind>,
-) -> AnyElement {
-    let color = move |phase: Option<f32>| conversation_icon_color(status, phase);
-    let icon = move || match engine {
-        Some(kind) => Icon::empty().path(kind.icon_asset()),
-        None => Icon::new(IconName::Inbox),
-    };
-    if animate_running && status == AgentStatus::Running {
-        return smelt_ui::motion::ambient_animation(
-            format!("product-conv-glow-{session_id}"),
-            crate::session_list::SESSION_GLOW_PERIOD,
-            true,
-            move |phase| icon().size(px(17.)).text_color(color(Some(phase))),
-        )
-        .into_any_element();
+/// 项目里选智能体开的也算。旧的工作台裸对话没有绑定，不算任何智能体。
+/// 自动化 Run 虽然可能带着同一个 id，但那不是对话。不从 cwd 反推——项目
+/// 路径说明不了是谁，space 子目录也不是另一个智能体。
+fn bound_agent_definition_id<'a>(
+    definition_id: Option<&'a str>,
+    automation_id: Option<&str>,
+) -> Option<&'a str> {
+    if automation_id.is_some() {
+        return None;
     }
-    icon()
-        .size(px(17.))
-        .text_color(color(None))
-        .into_any_element()
+    definition_id.map(str::trim).filter(|id| !id.is_empty())
 }
 
-const AGENT_CONV_HEADER_GROUP: &str = "agent-conv-header";
-const AGENT_SESSION_INDENT: f32 = 22.;
-const AGENT_GUIDE_LEFT: f32 = 18.;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentConversationInput {
-    session_ix: usize,
-    definition_id: Option<String>,
-    cwd: Option<String>,
+/// 侧栏「最近对话」：按最近活动排，新的在前。
+fn recent_conversation_order(updated_at: &[u64]) -> Vec<usize> {
+    let mut ixes: Vec<usize> = (0..updated_at.len()).collect();
+    ixes.sort_by(|left, right| {
+        updated_at[*right]
+            .cmp(&updated_at[*left])
+            .then(left.cmp(right))
+    });
+    ixes
 }
 
-impl AgentConversationInput {
-    fn new(session_ix: usize, definition_id: Option<&str>, cwd: Option<&str>) -> Self {
-        Self {
-            session_ix,
-            definition_id: definition_id.map(str::to_string),
-            cwd: cwd.map(str::to_string),
-        }
-    }
-
-    fn resolved_definition_id(&self) -> Option<String> {
-        self.definition_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                self.cwd.as_deref().and_then(|cwd| {
-                    smelt_core::agent_definition_store::agent_definition_id_for_space(
-                        std::path::Path::new(cwd),
-                    )
-                })
-            })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentConversationGroup {
-    agent_id: String,
-    agent_name: String,
-    session_ixes: Vec<usize>,
-}
-
-/// 侧栏「对话」按智能体分组：定义顺序优先，找不到定义的对话收进「其他」。
-fn group_agent_conversations(
-    agents: &[(String, String)],
-    conversations: &[AgentConversationInput],
-) -> Vec<AgentConversationGroup> {
-    let mut groups: Vec<AgentConversationGroup> = agents
+/// 行首头像：智能体取显示名第一个字；没绑智能体的工作台对话标 Pi。
+/// 绑了智能体的会话行首头像。没绑（工作台「新对话」、裸引擎）返回 `None`。
+pub(crate) fn bound_agent_mark(
+    definition_id: Option<&str>,
+    automation_id: Option<&str>,
+    agents: &[settings::AgentDefinition],
+) -> Option<String> {
+    let id = bound_agent_definition_id(definition_id, automation_id)?;
+    let name = agents
         .iter()
-        .map(|(id, name)| AgentConversationGroup {
-            agent_id: id.clone(),
-            agent_name: agent_display_name(name),
-            session_ixes: Vec::new(),
-        })
-        .collect();
-    let mut orphans = Vec::new();
-    for conversation in conversations {
-        match conversation.resolved_definition_id() {
-            Some(id) => {
-                if let Some(group) = groups.iter_mut().find(|group| group.agent_id == id) {
-                    group.session_ixes.push(conversation.session_ix);
-                } else {
-                    orphans.push(conversation.session_ix);
-                }
-            }
-            None => orphans.push(conversation.session_ix),
+        .find(|agent| agent.id == id)
+        .map(|agent| agent_display_name(&agent.name));
+    Some(conversation_agent_mark(name.as_deref().or(Some(id))))
+}
+
+fn conversation_agent_mark(agent_name: Option<&str>) -> String {
+    match agent_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.chars().next().unwrap_or('智').to_string(),
+        None => "Pi".to_string(),
+    }
+}
+
+fn is_cjk(ch: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+}
+
+/// 目录和页头上的缩写。中文取前两字，「日志」比单独一个「日」认得出来；
+/// 英文取开头的两个字母，像 Pi。
+fn agent_catalog_monogram(name: &str) -> String {
+    let name = name.trim();
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return "智".to_string();
+    };
+    if is_cjk(first) {
+        return match chars.next() {
+            Some(second) if is_cjk(second) => format!("{first}{second}"),
+            _ => first.to_string(),
+        };
+    }
+    let mut word = String::new();
+    word.push(first);
+    for ch in chars {
+        if word.chars().count() >= 2 || ch.is_whitespace() || is_cjk(ch) {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            word.push(ch);
+        } else {
+            break;
         }
     }
-    groups.retain(|group| !group.session_ixes.is_empty());
-    if !orphans.is_empty() {
-        groups.push(AgentConversationGroup {
-            agent_id: String::new(),
-            agent_name: "其他".into(),
-            session_ixes: orphans,
-        });
-    }
-    groups
+    word
 }
 
-fn agent_conversation_group_status(
-    session_ixes: &[usize],
-    statuses: &[AgentStatus],
-) -> AgentStatus {
-    AgentStatus::highest(
-        session_ixes
-            .iter()
-            .filter_map(|&session_ix| statuses.get(session_ix).copied()),
-    )
-}
-
-/// 分组标题已经表达智能体身份；对话行只展示用户命名或对话自己的自动标题。
-fn nested_agent_conversation_title(custom_title: Option<&str>, auto_title: Option<&str>) -> String {
+/// 对话行只展示用户命名或对话自己的自动标题。
+fn conversation_row_title(custom_title: Option<&str>, auto_title: Option<&str>) -> String {
     custom_title
         .map(str::trim)
         .filter(|title| !title.is_empty())
@@ -391,9 +640,13 @@ fn nested_agent_conversation_title(custom_title: Option<&str>, auto_title: Optio
 }
 
 fn compact_instructions(value: &str) -> String {
+    excerpt_text(value, 96)
+}
+
+fn excerpt_text(value: &str, limit: usize) -> String {
     let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = value.chars();
-    let mut compact = chars.by_ref().take(96).collect::<String>();
+    let mut compact = chars.by_ref().take(limit).collect::<String>();
     if chars.next().is_some() {
         compact.push('…');
     }
@@ -583,6 +836,44 @@ fn trigger_from_editor(
     }
     trigger.validate()?;
     Ok(trigger)
+}
+
+impl AutomationEditor {
+    fn action(&self, cx: &App) -> settings::AutomationAction {
+        match self.action_kind {
+            settings::AutomationActionKindId::Agent => {
+                let prompt = self.prompt.read(cx).value().trim().to_string();
+                settings::AutomationAction::Agent {
+                    agent_definition_id: self.agent_id.clone(),
+                    prompt: (!prompt.is_empty()).then_some(prompt),
+                }
+            }
+            settings::AutomationActionKindId::Shell => settings::AutomationAction::shell(
+                self.command.read(cx).value().trim().to_string(),
+                Vec::new(),
+            ),
+        }
+    }
+
+    fn missing_fields(&self, cx: &App) -> Vec<&'static str> {
+        let agent_exists = !self.agent_id.is_empty()
+            && cx
+                .global::<settings::AgentHostState>()
+                .agents
+                .iter()
+                .any(|agent| agent.id == self.agent_id);
+        let has_schedule = self
+            .entries
+            .iter()
+            .any(|entry| entry.trigger_kind != settings::AutomationTriggerKindId::Webhook);
+        automation_missing_fields(
+            &self.name.read(cx).value(),
+            trigger_from_editor(self, cx).is_ok(),
+            has_schedule,
+            &self.action(cx),
+            agent_exists,
+        )
+    }
 }
 
 fn schedule_from_values_for_rule(
@@ -822,7 +1113,7 @@ fn render_trigger_entries(
 fn render_add_trigger_button(entity: Entity<Workspace>) -> AnyElement {
     div()
         .w_full()
-        .h(px(44.))
+        .h(crate::ui_theme::height::xl())
         .rounded_full()
         .border_1()
         .border_dashed()
@@ -895,7 +1186,9 @@ fn render_trigger_entry(
             render_schedule_rule(index, &entry.schedule, false, entity, cx)
         }
     };
+    let row_key = entry.schedule.time.entity_id();
     automation_form_shell()
+        .id(("automation-trigger", row_key))
         .px_4()
         .py_3()
         .flex()
@@ -931,9 +1224,9 @@ fn render_trigger_entry(
                         }),
                 )
                 .child(
-                    compact_chip(format!("automation-remove-trigger-{index}"))
-                        .icon(IconName::Delete)
-                        .tooltip("删除触发器")
+                    compact_chip("automation-remove-trigger")
+                        .icon(crate::trash_icon())
+                        .icon_action("删除触发器")
                         .on_click(move |_, _, cx| {
                             remove_entity.update(cx, |workspace, cx| {
                                 workspace.remove_trigger_entry(index, cx);
@@ -981,16 +1274,19 @@ fn trigger_entry_title(entry: &TriggerEntryEditor, cx: &App) -> String {
 }
 
 fn interval_entry_title(entry: &TriggerEntryEditor, cx: &App) -> String {
-    match entry.schedule.interval_unit {
-        IntervalUnit::Hours => "每小时".to_string(),
-        IntervalUnit::Minutes => {
-            let value = entry.schedule.interval.read(cx).value();
-            if value.trim().is_empty() {
-                "间隔".to_string()
-            } else {
-                format!("每隔 {value} 分钟")
-            }
-        }
+    interval_title(
+        entry.schedule.interval_unit,
+        &entry.schedule.interval.read(cx).value(),
+    )
+}
+
+fn interval_title(unit: IntervalUnit, value: &str) -> String {
+    let value = value.trim();
+    match unit {
+        _ if value.is_empty() => "间隔".to_string(),
+        IntervalUnit::Hours if value == "1" => "每小时".to_string(),
+        IntervalUnit::Hours => format!("每隔 {value} 小时"),
+        IntervalUnit::Minutes => format!("每隔 {value} 分钟"),
     }
 }
 
@@ -1003,10 +1299,7 @@ fn trigger_entry_hint(entry: &TriggerEntryEditor) -> &'static str {
             ScheduleKind::Weekly => "每周在选定的一天",
             ScheduleKind::Interval => "按固定间隔执行",
         },
-        settings::AutomationTriggerKindId::Interval => match entry.schedule.interval_unit {
-            IntervalUnit::Hours => "按选定间隔每小时",
-            IntervalUnit::Minutes => "按固定间隔执行，可限制星期和时段",
-        },
+        settings::AutomationTriggerKindId::Interval => "按固定间隔执行，可限制星期和时段",
     }
 }
 
@@ -1042,33 +1335,49 @@ fn render_notification_field(
                 menu
             }),
     );
-    let mut field = div()
+    div()
         .flex()
         .flex_col()
         .gap_2()
         .child(automation_section_label("通知"))
-        .child(picker);
-    if selected.includes_feishu() {
-        field = field.child(
-            automation_form_row().child(
-                Input::new(&editor.feishu_chat)
-                    .appearance(false)
-                    .focus_bordered(false)
-                    .focus_ring(false)
-                    .w_full()
-                    .aria_label("飞书会话 ID"),
-            ),
-        );
+        .child(picker)
+        .into_any_element()
+}
+
+/// 权限说明。这里不能切换运行方式，所以不做成和通知一样的设置卡。
+fn render_automation_access_note(is_agent: bool) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .font_medium()
+                .text_color(rgb(crate::ui_theme::text_muted()))
+                .child("无人值守 · 完全访问"),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_muted()))
+                .child(automation_access_note(is_agent)),
+        )
+        .into_any_element()
+}
+
+fn automation_access_note(is_agent: bool) -> &'static str {
+    if is_agent {
+        "运行时不会停下来等你批准，可以读写本机文件、执行命令。在智能体自己的空间里运行，能读到它在对话里攒下的文件和绑定的目录；你的项目不会自动带上，要处理的仓库请在指令里写明路径。"
+    } else {
+        "运行时不会停下来等你批准，命令以你的身份执行，可以读写本机文件。每次都在这条自动化自己的目录里执行。"
     }
-    field.into_any_element()
 }
 
 fn notification_preset_icon(preset: settings::AutomationNotificationPreset) -> IconName {
     match preset {
         settings::AutomationNotificationPreset::Off => IconName::EyeOff,
         settings::AutomationNotificationPreset::App => IconName::Bell,
-        settings::AutomationNotificationPreset::Feishu
-        | settings::AutomationNotificationPreset::AppAndFeishu => IconName::Inbox,
     }
 }
 
@@ -1092,9 +1401,10 @@ fn render_webhook_entry(
     let paused = stored.is_some_and(|automation| !automation.enabled);
     let live_url = (!editor.is_new && !entry.webhook_secret.is_empty())
         .then(|| smelt_core::automation::webhook_url(&base, &entry.webhook_secret));
-    let copy_id = format!("automation-copy-webhook-{index}");
-    let curl_id = format!("automation-copy-webhook-curl-{index}");
-    let regen_id = format!("automation-regen-webhook-{index}");
+    let row_key = entry.schedule.time.entity_id();
+    let copy_id = format!("automation-copy-webhook-{row_key}");
+    let curl_id = format!("automation-copy-webhook-curl-{row_key}");
+    let regen_id = format!("automation-regen-webhook-{row_key}");
     div()
         .flex()
         .flex_col()
@@ -1142,7 +1452,7 @@ fn render_webhook_entry(
                             .child(url),
                     )
                     .child(
-                        compact_chip(copy_id.clone())
+                        compact_chip("automation-copy-webhook")
                             .label(settings::flash_btn_label(&copy_id, "复制", cx))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
@@ -1166,7 +1476,7 @@ fn render_webhook_entry(
                         let copy_curl = webhook_curl_example(&url);
                         let copy_entity = copy_entity.clone();
                         let curl_id_click = curl_id.clone();
-                        compact_chip(curl_id.clone())
+                        compact_chip("automation-copy-webhook-curl")
                             .label(settings::flash_btn_label(&curl_id, "复制示例", cx))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_curl.clone()));
@@ -1181,7 +1491,7 @@ fn render_webhook_entry(
                 .when(!editor.is_new, |actions| {
                     let entity = entity.clone();
                     actions.child(
-                        compact_chip(regen_id.clone())
+                        compact_chip("automation-regen-webhook")
                             .loading(editor.saving_revision.is_some() && editor.quiet_save)
                             .label(settings::flash_btn_label(&regen_id, "重新生成地址", cx))
                             .on_click(move |_, _, cx| {
@@ -1201,7 +1511,7 @@ fn webhook_curl_example(url: &str) -> String {
 
 fn automation_prompt_hint(is_webhook: bool) -> &'static str {
     if is_webhook {
-        "支持 {{payload}} 和请求字段变量（如 {{text}}）；留空时直接发送请求内容。长期指令请在智能体设置中配置。"
+        "收到的请求内容会附在指令后面；想放到指定位置，用 {{payload}} 或字段变量（如 {{text}}）。留空时直接发送请求内容。长期指令请在智能体设置中配置。"
     } else {
         "每次运行时发送给智能体。长期指令请在智能体设置中配置。"
     }
@@ -1215,21 +1525,19 @@ fn render_schedule_rule(
     cx: &App,
 ) -> AnyElement {
     let frequency = (!rule.kind.is_interval()).then(|| {
-        segmented_track(cx).children(ScheduleKind::clock_kinds().into_iter().enumerate().map(
-            |(kind_index, kind)| {
-                let selected = kind == rule.kind;
-                let frequency_entity = entity.clone();
-                compact_chip(format!("agent-trigger-frequency-{index}-{kind_index}"))
-                    .label(kind.label())
-                    .selected(selected)
-                    .toggled(selected)
-                    .on_click(move |_, _, cx| {
-                        frequency_entity.update(cx, |workspace, cx| {
-                            workspace.set_trigger_schedule_kind(index, kind, cx);
-                        });
-                    })
-            },
-        ))
+        segmented_track(cx).children(ScheduleKind::clock_kinds().into_iter().map(|kind| {
+            let selected = kind == rule.kind;
+            let frequency_entity = entity.clone();
+            compact_chip((ElementId::from("agent-trigger-frequency"), kind.id_name()))
+                .label(kind.label())
+                .selected(selected)
+                .toggled(selected)
+                .on_click(move |_, _, cx| {
+                    frequency_entity.update(cx, |workspace, cx| {
+                        workspace.set_trigger_schedule_kind(index, kind, cx);
+                    });
+                })
+        }))
     });
     let clock = |input: &Entity<InputState>, aria: &'static str| {
         framed_text_input(input, aria)
@@ -1242,12 +1550,12 @@ fn render_schedule_rule(
             .text_color(cx.theme().muted_foreground)
             .child(local_timezone_label())
     };
-    let weekday_picker = |id_prefix: &str| {
+    let weekday_picker = |id_prefix: &'static str| {
         segmented_track(cx).children((0..7).map(|day_index| {
             let bit = 1_u8 << day_index;
             let selected = rule.weekday_mask & bit != 0;
             let day_entity = entity.clone();
-            compact_chip(format!("{id_prefix}-{index}-{day_index}"))
+            compact_chip((id_prefix, day_index))
                 .w(px(32.))
                 .label(smelt_core::automation::SCHEDULE_DAY_LABELS[day_index])
                 .selected(selected)
@@ -1263,21 +1571,19 @@ fn render_schedule_rule(
     let schedule_control = match rule.kind {
         ScheduleKind::Interval => {
             let day_scope =
-                segmented_track(cx).children(IntervalDayScope::all().into_iter().enumerate().map(
-                    |(scope_index, scope)| {
-                        let selected = scope == rule.interval_day_scope;
-                        let scope_entity = entity.clone();
-                        compact_chip(format!("automation-interval-days-{index}-{scope_index}"))
-                            .label(scope.label())
-                            .selected(selected)
-                            .toggled(selected)
-                            .on_click(move |_, _, cx| {
-                                scope_entity.update(cx, |workspace, cx| {
-                                    workspace.set_interval_day_scope(index, scope, cx);
-                                });
-                            })
-                    },
-                ));
+                segmented_track(cx).children(IntervalDayScope::all().into_iter().map(|scope| {
+                    let selected = scope == rule.interval_day_scope;
+                    let scope_entity = entity.clone();
+                    compact_chip((ElementId::from("automation-interval-days"), scope.id_name()))
+                        .label(scope.label())
+                        .selected(selected)
+                        .toggled(selected)
+                        .on_click(move |_, _, cx| {
+                            scope_entity.update(cx, |workspace, cx| {
+                                workspace.set_interval_day_scope(index, scope, cx);
+                            });
+                        })
+                }));
             let mut interval_body = div()
                 .flex()
                 .flex_col()
@@ -1299,9 +1605,9 @@ fn render_schedule_rule(
                                     .map(|unit| {
                                         let selected = unit == interval_unit;
                                         let unit_entity = entity.clone();
-                                        compact_chip(format!(
-                                            "automation-interval-unit-{index}-{}",
-                                            unit.label()
+                                        compact_chip((
+                                            ElementId::from("automation-interval-unit"),
+                                            unit.id_name(),
                                         ))
                                         .label(unit.label())
                                         .selected(selected)
@@ -1345,7 +1651,7 @@ fn render_schedule_rule(
                         .child(clock(&rule.window_end, "结束时间"))
                         .child(timezone())
                         .child(
-                            compact_chip(format!("automation-interval-window-clear-{index}"))
+                            compact_chip("automation-interval-window-clear")
                                 .label("全天")
                                 .on_click(move |_, window, cx| {
                                     close_entity.update(cx, |workspace, cx| {
@@ -1358,7 +1664,7 @@ fn render_schedule_rule(
             } else {
                 let open_entity = entity.clone();
                 interval_body = interval_body.child(
-                    compact_chip(format!("automation-interval-window-open-{index}"))
+                    compact_chip("automation-interval-window-open")
                         .label("限制时段")
                         .on_click(move |_, window, cx| {
                             open_entity.update(cx, |workspace, cx| {
@@ -1400,9 +1706,9 @@ fn render_schedule_rule(
     };
     let remove = can_remove.then(|| {
         let remove_entity = entity.clone();
-        compact_chip(format!("automation-remove-schedule-{index}"))
-            .icon(IconName::Delete)
-            .tooltip("删除时间设置")
+        compact_chip("automation-remove-schedule")
+            .icon(crate::trash_icon())
+            .icon_action("删除时间设置")
             .on_click(move |_, _, cx| {
                 remove_entity.update(cx, |workspace, cx| {
                     workspace.remove_trigger_entry(index, cx);
@@ -1482,6 +1788,87 @@ fn format_next_run_cell(next_run_at: Option<i64>, enabled: bool, now: i64) -> St
     }
 }
 
+fn format_relative_since(ts: i64, now: i64) -> String {
+    let delta = now - ts;
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    if delta < MINUTE {
+        "刚刚".to_string()
+    } else if delta < HOUR {
+        format!("{} 分钟前", delta / MINUTE)
+    } else if delta < DAY {
+        format!("{} 小时前", delta / HOUR)
+    } else {
+        format!("{} 天前", delta / DAY)
+    }
+}
+
+fn format_last_run_cell(
+    last: Option<(smelt_core::automation::AutomationRunStatus, i64)>,
+    now: i64,
+) -> String {
+    match last {
+        Some((status, at)) => format!(
+            "{} · {}",
+            run_status_label(status),
+            format_relative_since(at, now)
+        ),
+        None => "—".to_string(),
+    }
+}
+
+/// 表单还差哪些才能保存。定时触发不带外部内容，所以只有它要求智能体指令；
+/// webhook / 事件会把收到的内容当指令。
+fn automation_missing_fields(
+    name: &str,
+    trigger_ready: bool,
+    has_schedule: bool,
+    action: &settings::AutomationAction,
+    agent_exists: bool,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if name.trim().is_empty() {
+        missing.push("名称");
+    }
+    if !trigger_ready {
+        missing.push("触发器");
+    }
+    match action {
+        settings::AutomationAction::Agent { prompt, .. } => {
+            if !agent_exists {
+                missing.push("智能体");
+            }
+            if has_schedule
+                && prompt
+                    .as_deref()
+                    .is_none_or(|prompt| prompt.trim().is_empty())
+            {
+                missing.push("指令");
+            }
+        }
+        settings::AutomationAction::Shell { command, .. } => {
+            if command.trim().is_empty() {
+                missing.push("命令");
+            }
+        }
+    }
+    missing
+}
+
+/// 页头上的保存状态。新建还没落盘，只说还差什么；已有的会在补齐后自动保存。
+fn automation_save_hint(missing: &[&str], is_new: bool) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let list = missing.join("、");
+    Some(if is_new {
+        format!("还差：{list}")
+    } else {
+        format!("还差：{list}，补齐后自动保存")
+    })
+}
+
 fn run_source_label(source: smelt_core::automation::AutomationRunSource) -> &'static str {
     source.label()
 }
@@ -1511,8 +1898,9 @@ fn agent_display_name(name: &str) -> String {
     }
 }
 
-fn agent_prompt_summary(prompt: &str) -> Option<String> {
-    let compact = compact_instructions(prompt);
+/// 卡片正文大约两行，窄窗口也不会把省略号裁掉。
+fn agent_card_prompt(prompt: &str) -> Option<String> {
+    let compact = excerpt_text(prompt, 64);
     if compact.is_empty() {
         None
     } else {
@@ -1569,9 +1957,29 @@ fn automation_row_status_label(status: AutomationRowStatus) -> &'static str {
         AutomationRowStatus::Unavailable => "不可用",
         AutomationRowStatus::AgentMissing => "智能体已删除",
         AutomationRowStatus::Running => "运行中",
-        AutomationRowStatus::Active => "已激活",
+        AutomationRowStatus::Active => "已启用",
         AutomationRowStatus::Paused => "已暂停",
     }
+}
+
+/// 「启用」不用 Play：同一个菜单里「运行一次」已经是 Play。
+fn automation_enabled_toggle_item(enabled: bool) -> PopupMenuItem {
+    if enabled {
+        PopupMenuItem::new("暂停").icon(IconName::Pause)
+    } else {
+        PopupMenuItem::new("启用").icon(IconName::CircleCheck)
+    }
+}
+
+fn automation_nav_needs_attention(config: &settings::AgentHostState) -> bool {
+    config.automations.iter().any(|automation| {
+        automation.enabled
+            && config
+                .latest_automation_run(&automation.id)
+                .is_some_and(|run| {
+                    run.status == smelt_core::automation::AutomationRunStatus::Failed
+                })
+    })
 }
 
 fn agent_usage_summary(conversations: usize, automations: usize) -> String {
@@ -1732,7 +2140,7 @@ fn render_agent_model_control(
 
 fn render_engine_chip(label: String, kind: Option<settings::ConversationAgentKind>) -> AnyElement {
     div()
-        .h(px(22.))
+        .h(crate::ui_theme::height::xxs())
         .px_2()
         .rounded_full()
         .bg(rgb(crate::ui_theme::bg_hover()))
@@ -1749,49 +2157,30 @@ fn render_engine_chip(label: String, kind: Option<settings::ConversationAgentKin
         .into_any_element()
 }
 
-/// 智能体页头的配置入口：直接开那扇只有模型和插件两页的独立窗口。
-///
-/// 不套一层「模型 / 插件」下拉：窗口左侧本来就列着这两页，多一层菜单只是让用户
-/// 多点一次，还得先猜自己要找的东西归在哪一页。
-fn render_agent_settings_entry(entity: Entity<Workspace>) -> AnyElement {
-    Button::new("agent-settings-entry")
-        .ghost()
-        .small()
-        .icon(IconName::Settings2)
-        .label("配置")
-        .tooltip("智能体的模型与插件")
-        .on_click(move |_, _, cx| {
-            entity.update(cx, |workspace, cx| {
-                workspace.open_scoped_settings_section(
-                    settings::SettingsScope::AgentSetup,
-                    settings::SettingsSection::PiModel,
-                    cx,
-                );
-            });
-        })
-        .into_any_element()
-}
-
 /// 页头前缘的返回。可见的只有符号，悬停提示是控件名。它只退一层，侧栏标题负责回根页。
 fn product_back_button(
     id: &'static str,
+    tooltip: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     Button::new(id)
         .ghost()
         .icon(IconName::ChevronLeft)
-        .tooltip("返回")
+        .icon_action(tooltip)
         .on_click(on_click)
 }
 
-/// 目录和编辑器的页头。这些面不画标题胶囊，标题住在交通灯那一条上。
-/// 左侧让开交通灯，右侧让开窗口开关，底边是发丝。空白处拖窗口，按钮自己拦住点击。
+/// 目录和编辑器的页头。这些面不画标题胶囊。
+///
+/// 最上 `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐。分段、标题和按钮放在这条下面，
+/// 不再塞进 34px 里贴着窗口顶。左侧让开交通灯，右侧让开窗口开关，底边是发丝。按钮自己拦住点击。
 fn product_page_chrome(left_guard: Pixels) -> Div {
     crate::workspace_frame::with_window_drag(
         div()
             .w_full()
             .flex_shrink_0()
-            .min_h(crate::workspace_frame::TOP_BAR_HEIGHT)
+            .pt(crate::workspace_frame::TOP_BAR_HEIGHT)
+            .pb(px(8.))
             .pl(left_guard + px(20.))
             .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
             .border_b_1()
@@ -1801,70 +2190,38 @@ fn product_page_chrome(left_guard: Pixels) -> Div {
     )
 }
 
+/// 目录页头：和自动化顶栏同一条高度。左边页名加个数，不写副标题；右边是同尺寸的新建按钮。
 fn product_page_header(
     title: &'static str,
-    subtitle: &'static str,
     count: usize,
     count_unit: &'static str,
     action: AnyElement,
     left_guard: Pixels,
 ) -> AnyElement {
     product_page_chrome(left_guard)
-        .py_2()
         .justify_between()
-        .gap_4()
+        .gap_3()
         .child(
             div()
+                .h(crate::ui_theme::height::sm())
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .gap_2()
                 .child(
                     div()
-                        .flex()
-                        .items_baseline()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_semibold()
-                                .text_color(rgb(crate::ui_theme::text_bright()))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(crate::ui_theme::text_muted()))
-                                .child(format!("{count} {count_unit}")),
-                        ),
+                        .text_sm()
+                        .font_medium()
+                        .text_color(rgb(crate::ui_theme::text_bright()))
+                        .child(title),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(rgb(crate::ui_theme::text_muted()))
-                        .child(subtitle),
+                        .child(format!("{count} {count_unit}")),
                 ),
         )
         .child(action)
-        .into_any_element()
-}
-
-fn automation_run_detail_section(
-    title: &'static str,
-    body: impl IntoElement,
-    cx: &App,
-) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .font_medium()
-                .text_color(cx.theme().muted_foreground)
-                .child(title),
-        )
-        .child(body)
         .into_any_element()
 }
 
@@ -1882,21 +2239,17 @@ fn render_agent_plugin_card(
     let refresh_entity = entity.clone();
     let refresh_button = compact_chip("agent-plugins-refresh")
         .icon(IconName::Redo)
-        .tooltip("重新扫描插件目录")
+        .icon_action("重新扫描插件目录")
         .on_click(move |_, _, cx| {
             refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));
         });
     let manage_entity = entity.clone();
     let manage_button = compact_chip("agent-plugins-manage")
         .label("管理")
-        .tooltip("去设置里导入或删除插件")
-        .on_click(move |_, _, cx| {
+        .tooltip("去能力库导入或删除插件")
+        .on_click(move |_, window, cx| {
             manage_entity.update(cx, |workspace, cx| {
-                workspace.open_scoped_settings_section(
-                    settings::SettingsScope::AgentSetup,
-                    settings::SettingsSection::PiPlugins,
-                    cx,
-                );
+                workspace.open_capabilities(CapabilitiesTab::Plugins, window, cx);
             });
         });
 
@@ -1906,6 +2259,7 @@ fn render_agent_plugin_card(
         .iter()
         .map(|plugin| {
             agent_plugin_row(
+                AgentPick::Plugin,
                 &agent.id,
                 &plugin.id,
                 &plugin.name,
@@ -1928,6 +2282,7 @@ fn render_agent_plugin_card(
             None => ("未知", id.clone()),
         };
         rows.push(agent_plugin_row(
+            AgentPick::Plugin,
             &agent.id,
             id,
             &name,
@@ -1982,7 +2337,7 @@ fn render_agent_plugin_card(
                                 .text_sm()
                                 .font_medium()
                                 .text_color(rgb(crate::ui_theme::text_bright()))
-                                .child("能力插件"),
+                                .child("技能"),
                         )
                         .child(
                             div()
@@ -2145,6 +2500,600 @@ fn render_agent_context_card(
         .into_any_element()
 }
 
+fn agent_memory_switch(
+    id: &'static str,
+    agent: &settings::AgentDefinition,
+    entity: Entity<Workspace>,
+) -> Switch {
+    let memory_enabled = agent.memory_enabled;
+    let agent_id = agent.id.clone();
+    Switch::new(id)
+        .checked(memory_enabled)
+        .accessibility_label("记忆")
+        .tooltip(if memory_enabled {
+            "关闭后不再注入和写入记忆，已有记忆保留"
+        } else {
+            "打开后在对话和自动化里使用记忆"
+        })
+        .on_click(move |checked, _, cx| {
+            let agent_id = agent_id.clone();
+            let enabled = *checked;
+            entity.update(cx, |workspace, cx| {
+                workspace.set_agent_memory_enabled(agent_id, enabled, cx)
+            });
+        })
+}
+
+fn memory_pending_count(memories: &AgentMemories) -> usize {
+    memories
+        .agent
+        .entries
+        .iter()
+        .chain(&memories.user.entries)
+        .filter(|entry| entry.pending_reason.is_some())
+        .count()
+}
+
+/// 编辑页页签名。待确认要用户处理，挂在页签上，在配置页也看得到。
+pub(super) fn agent_editor_tab_label(tab: AgentEditorTab, editor: &AgentEditor) -> String {
+    match tab {
+        AgentEditorTab::Config => "配置".to_string(),
+        AgentEditorTab::Memory => match memory_pending_count(&editor.memories) {
+            0 => "记忆".to_string(),
+            pending => format!("记忆 · {pending} 待确认"),
+        },
+    }
+}
+
+/// 配置页上的记忆只占一行：开关、条数、待确认、进记忆页签的入口。条目一律不在这里列，
+/// 记忆再多也不会把插件和 MCP 挤到后面。
+fn render_agent_memory_summary(
+    agent: &settings::AgentDefinition,
+    editor: &AgentEditor,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    let pending = memory_pending_count(&editor.memories);
+    let manage_entity = entity.clone();
+    let manage = compact_chip("agent-memory-manage")
+        .label("管理")
+        .icon(IconName::ChevronRight)
+        .tooltip("查看、搜索和删除记忆")
+        .on_click(move |_, _, cx| {
+            manage_entity.update(cx, |workspace, cx| {
+                workspace.select_agent_editor_tab(AgentEditorTab::Memory, cx)
+            });
+        });
+    agent_surface_card()
+        .px_5()
+        .py_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .font_medium()
+                .text_color(rgb(crate::ui_theme::text_bright()))
+                .child("记忆"),
+        )
+        .child(agent_memory_switch(
+            "agent-memory-enabled-summary",
+            agent,
+            entity,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(if agent.memory_enabled {
+                            memory_summary_text(
+                                editor.memories.agent.entries.len(),
+                                editor.memories.user.entries.len(),
+                            )
+                        } else {
+                            "已关闭：不注入、不写入，已有记忆保留".to_string()
+                        }),
+                )
+                .when(pending > 0, |row| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(crate::ui_theme::red()))
+                            .child(format!("{pending} 条待确认")),
+                    )
+                }),
+        )
+        .child(manage)
+        .into_any_element()
+}
+
+/// 记忆页签：智能体在对话和自动化里自己记下的长期信息。正文是 Markdown 文件，
+/// 这里搜索、筛选、展开看正文、打开和删除；写入规则见 `docs/agent-memory.md`。
+fn render_agent_memory_card(
+    agent: &settings::AgentDefinition,
+    editor: &AgentEditor,
+    entity: Entity<Workspace>,
+    cx: &App,
+) -> AnyElement {
+    let memory_enabled = agent.memory_enabled;
+    let refresh_entity = entity.clone();
+    let refresh_button = compact_chip("agent-memory-refresh")
+        .icon(IconName::Redo)
+        .icon_action("重新读取记忆")
+        .on_click(move |_, _, cx| {
+            refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_memories(cx));
+        });
+    let query = editor.memory_query.read(cx).value().to_string();
+    let filter = editor.memory_filter;
+    let narrowed = !query.trim().is_empty() || filter != MemoryFilter::All;
+    let filters = segmented_track(cx).children(MemoryFilter::ALL.into_iter().map(|option| {
+        let selected = option == filter;
+        let entity = entity.clone();
+        compact_chip(option.element_id())
+            .label(option.label())
+            .tooltip(option.tooltip())
+            .selected(selected)
+            .toggled(selected)
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |workspace, cx| {
+                    workspace.set_agent_memory_filter(option, cx)
+                });
+            })
+    }));
+    agent_surface_card()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_5()
+                .pt_4()
+                .pb_2()
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .child("记忆"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(crate::ui_theme::text_muted()))
+                                .child(if memory_enabled {
+                                    "智能体在对话和自动化里记下的长期信息。改动从下一轮对话起生效。"
+                                } else {
+                                    "记忆已关闭：不注入、不写入。下面的记忆保留着，重新打开后照常使用。"
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(refresh_button)
+                        .child(agent_memory_switch("agent-memory-enabled", agent, entity.clone())),
+                ),
+        )
+        .child(
+            div()
+                .px_5()
+                .pb_2()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(200.))
+                        .child(Input::new(&editor.memory_query).small().cleanable(true)),
+                )
+                .child(filters),
+        )
+        .child(agent_memory_section(
+            &agent.id,
+            AgentMemorySection {
+                layer: MemoryLayer::Agent,
+                title: "这个智能体",
+                empty_hint: "还没有记忆。用户纠正它或让它记住什么时，它会自己写下来。",
+                listing: &editor.memories.agent,
+                query: &query,
+                filter,
+                narrowed,
+            },
+            editor.expanded_memory.as_ref(),
+            entity.clone(),
+        ))
+        .child(agent_memory_section(
+            &agent.id,
+            AgentMemorySection {
+                layer: MemoryLayer::User,
+                title: "全局（所有智能体共享）",
+                empty_hint: "还没有全局记忆。这里只放你本人的情况和你纠正过的做法。",
+                listing: &editor.memories.user,
+                query: &query,
+                filter,
+                narrowed,
+            },
+            editor.expanded_memory.as_ref(),
+            entity,
+        ))
+        .into_any_element()
+}
+
+struct AgentMemorySection<'a> {
+    layer: MemoryLayer,
+    title: &'static str,
+    empty_hint: &'static str,
+    listing: &'a smelt_core::agent_memory::MemoryListing,
+    query: &'a str,
+    filter: MemoryFilter,
+    /// 有搜索词或筛选时，空列表要说「没有匹配」，不能说「还没有记忆」。
+    narrowed: bool,
+}
+
+fn agent_memory_section(
+    agent_id: &str,
+    section: AgentMemorySection<'_>,
+    expanded: Option<&(MemoryLayer, String)>,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    let AgentMemorySection {
+        layer,
+        title,
+        empty_hint,
+        listing,
+        query,
+        filter,
+        narrowed,
+    } = section;
+    let layer_key = match layer {
+        MemoryLayer::Agent => "agent",
+        MemoryLayer::User => "user",
+    };
+    let folder_agent = agent_id.to_string();
+    let folder_entity = entity.clone();
+    let open_folder = compact_chip(format!("agent-memory-folder-{layer_key}"))
+        .xsmall()
+        .icon(IconName::FolderOpen)
+        .icon_action("打开记忆文件夹")
+        .on_click(move |_, _, cx| {
+            let agent_id = folder_agent.clone();
+            folder_entity.update(cx, |workspace, cx| {
+                workspace.open_agent_memory_folder(agent_id, layer, cx)
+            });
+        });
+
+    let rows: Vec<AnyElement> = visible_memories(&listing.entries, query, filter)
+        .into_iter()
+        .map(|entry| {
+            let open = expanded.is_some_and(|(expanded_layer, file_name)| {
+                *expanded_layer == layer && *file_name == entry.file_name
+            });
+            agent_memory_row(agent_id, layer, layer_key, entry, open, entity.clone())
+        })
+        .collect();
+    let shown = rows.len();
+    let body = if rows.is_empty() {
+        div()
+            .px_3()
+            .py_1p5()
+            .text_xs()
+            .text_color(rgb(crate::ui_theme::text_faint()))
+            .child(if narrowed && !listing.entries.is_empty() {
+                "没有匹配的记忆"
+            } else {
+                empty_hint
+            })
+            .into_any_element()
+    } else {
+        div().flex().flex_col().children(rows).into_any_element()
+    };
+
+    div()
+        .px_2()
+        .pb_3()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_3()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .font_medium()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(memory_section_title(title, listing, narrowed.then_some(shown))),
+                )
+                .child(open_folder),
+        )
+        .when(listing.core_over_budget, |section| {
+            section.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(crate::ui_theme::red()))
+                    .child(format!(
+                        "规则类记忆正文超过 {}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。",
+                        smelt_core::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
+                    )),
+            )
+        })
+        .child(body)
+        .into_any_element()
+}
+
+fn memory_section_title(
+    title: &str,
+    listing: &smelt_core::agent_memory::MemoryListing,
+    shown: Option<usize>,
+) -> String {
+    let total = listing.entries.len();
+    let count = match shown {
+        Some(shown) => format!("{shown} / {total} 条"),
+        None => format!("{total} 条"),
+    };
+    let pending = listing
+        .entries
+        .iter()
+        .filter(|entry| entry.pending_reason.is_some())
+        .count();
+    if pending == 0 {
+        format!("{title} · {count}")
+    } else {
+        format!("{title} · {count}，{pending} 条待确认")
+    }
+}
+
+fn memory_kind_label(kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("user") => "关于你",
+        Some("feedback") => "做法",
+        Some("project") => "事实",
+        Some("reference") => "资源",
+        _ => "格式有误",
+    }
+}
+
+/// 行尾的状态：待确认和长期没用的标红，提示用户处理；用过的显示次数。
+fn memory_usage_label(entry: &smelt_core::agent_memory::MemoryEntry) -> Option<(String, bool)> {
+    if entry.pending_reason.is_some() {
+        return Some(("待确认".to_string(), true));
+    }
+    if entry.stale {
+        return Some(("长期未用".to_string(), true));
+    }
+    (entry.read_count > 0).then(|| (format!("用过 {} 次", entry.read_count), false))
+}
+
+fn agent_memory_row(
+    agent_id: &str,
+    layer: MemoryLayer,
+    layer_key: &str,
+    entry: &smelt_core::agent_memory::MemoryEntry,
+    expanded: bool,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    let open_path = entry.path.clone();
+    let toggle_file = entry.file_name.clone();
+    let toggle_entity = entity.clone();
+    let open_entity = entity.clone();
+    let remove_agent = agent_id.to_string();
+    let remove_file = entry.file_name.clone();
+    let remove_name = entry.name.clone();
+    let subtitle = match &entry.pending_reason {
+        // 待确认时把原因放在描述前面，用户采纳前能看到它为什么没生效。
+        Some(reason) => format!("{reason}：{}", entry.description),
+        None if entry.description.is_empty() => entry.file_name.clone(),
+        None => entry.description.clone(),
+    };
+    let approve_agent = agent_id.to_string();
+    let approve_file = entry.file_name.clone();
+    let approve_entity = entity.clone();
+    let body_id = format!("agent-memory-body-{layer_key}-{}", entry.file_name);
+    let header = div()
+        .px_3()
+        .py_1p5()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(44.))
+                .text_xs()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child(memory_kind_label(entry.kind.as_deref())),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "agent-memory-expand-{layer_key}-{}",
+                    entry.file_name
+                )))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    let file_name = toggle_file.clone();
+                    toggle_entity.update(cx, |workspace, cx| {
+                        workspace.toggle_agent_memory_expanded(layer, file_name, cx)
+                    });
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(px(12.))
+                            .flex_shrink_0()
+                            .text_color(rgb(crate::ui_theme::text_faint())),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .truncate()
+                                .child(entry.name.clone()),
+                        ),
+                )
+                .child(
+                    // 待确认时前面挂着原因，一行放不下就把描述挤没了；给两行再省略。
+                    div()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .text_ellipsis()
+                        .line_clamp(2)
+                        .child(subtitle),
+                ),
+        )
+        .when_some(memory_usage_label(entry), |row, (label, stale)| {
+            row.child(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(rgb(if stale {
+                        crate::ui_theme::red()
+                    } else {
+                        crate::ui_theme::text_faint()
+                    }))
+                    .child(label),
+            )
+        })
+        .child(
+            compact_chip(format!("agent-memory-open-{layer_key}-{}", entry.file_name))
+                .xsmall()
+                .icon(IconName::ExternalLink)
+                .icon_action("用文本编辑器打开")
+                .on_click(move |_, _, cx| {
+                    let path = open_path.clone();
+                    open_entity.update(cx, |workspace, cx| {
+                        workspace.open_agent_memory_file(path, cx)
+                    });
+                }),
+        )
+        .when(entry.pending_reason.is_some(), |row| {
+            row.child(
+                compact_chip(format!(
+                    "agent-memory-approve-{layer_key}-{}",
+                    entry.file_name
+                ))
+                .xsmall()
+                .icon(IconName::Check)
+                .accessibility_label("采纳")
+                .tooltip("采纳：之后的对话会用到这条记忆")
+                .on_click(move |_, _, cx| {
+                    let agent_id = approve_agent.clone();
+                    let file_name = approve_file.clone();
+                    approve_entity.update(cx, |workspace, cx| {
+                        workspace.approve_agent_memory(agent_id, layer, file_name, cx)
+                    });
+                }),
+            )
+        })
+        .child(
+            compact_chip(format!(
+                "agent-memory-remove-{layer_key}-{}",
+                entry.file_name
+            ))
+            .xsmall()
+            .icon(IconName::Close)
+            .icon_action("删除这条记忆")
+            .on_click(move |_, _, cx| {
+                let target = MemoryDeleteTarget {
+                    agent_id: remove_agent.clone(),
+                    layer,
+                    file_name: remove_file.clone(),
+                    name: remove_name.clone(),
+                };
+                entity.update(cx, |workspace, cx| {
+                    workspace.request_delete_agent_memory(target, cx)
+                });
+            }),
+        );
+    div()
+        .flex()
+        .flex_col()
+        .child(header)
+        .when(expanded, |row| {
+            row.child(agent_memory_body(body_id, &entry.body))
+        })
+        .into_any_element()
+}
+
+/// 展开的记忆正文：按原样分行显示，不渲染 Markdown，用户看到的就是模型读到的。
+fn agent_memory_body(id: String, body: &str) -> AnyElement {
+    let lines: Vec<AnyElement> = if body.is_empty() {
+        vec![
+            div()
+                .text_color(rgb(crate::ui_theme::text_faint()))
+                .child("（正文为空）")
+                .into_any_element(),
+        ]
+    } else {
+        body.lines()
+            .map(|line| {
+                // 空行也要占一行高度，不然段落会挤在一起。
+                div()
+                    .min_h(px(16.))
+                    .child(line.to_string())
+                    .into_any_element()
+            })
+            .collect()
+    };
+    div()
+        .id(SharedString::from(id))
+        .mx_3()
+        .mb_2()
+        .px_3()
+        .py_2()
+        .max_h(px(240.))
+        .overflow_y_scroll()
+        .rounded(px(6.))
+        .bg(rgb(crate::ui_theme::bg_column()))
+        .text_xs()
+        .text_color(rgb(crate::ui_theme::text_muted()))
+        .children(lines)
+        .into_any_element()
+}
+
 fn agent_context_row(
     agent_id: &str,
     value: &str,
@@ -2179,8 +3128,8 @@ fn agent_context_row(
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
                 .xsmall()
-                .icon(IconName::Close)
-                .tooltip(if is_folder {
+                .icon(crate::trash_icon())
+                .icon_action(if is_folder {
                     "解除这个目录的绑定"
                 } else {
                     "移除这个链接"
@@ -2201,7 +3150,162 @@ fn agent_context_row(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 编辑器打开、刷新时读一次 `mcp.json`。读不出来就当没有：错误在能力库「MCP」页签里看。
+fn load_mcp_servers_for_editor() -> Vec<smelt_core::pi_mcp::PiMcpServer> {
+    smelt_core::pi_mcp::load_pi_mcp_servers().unwrap_or_default()
+}
+
+/// 智能体的 MCP 勾选。服务器在能力库里配置，这里只决定这个智能体连哪几台。
+fn render_agent_mcp_card(
+    agent: &settings::AgentDefinition,
+    editor: &AgentEditor,
+    entity: Entity<Workspace>,
+    cx: &App,
+) -> AnyElement {
+    let selected = agent.mcp_servers.clone();
+    let selected_count = selected.len();
+
+    let refresh_entity = entity.clone();
+    let refresh_button = compact_chip("agent-mcp-refresh")
+        .icon(IconName::Redo)
+        .icon_action("重新读取 mcp.json")
+        .on_click(move |_, _, cx| {
+            refresh_entity.update(cx, |workspace, cx| workspace.refresh_agent_plugins(cx));
+        });
+    let manage_entity = entity.clone();
+    let manage_button = compact_chip("agent-mcp-manage")
+        .label("管理")
+        .tooltip("去能力库添加、登录或停用 MCP 服务器")
+        .on_click(move |_, window, cx| {
+            manage_entity.update(cx, |workspace, cx| {
+                workspace.open_capabilities(CapabilitiesTab::Mcp, window, cx);
+            });
+        });
+
+    let mut rows: Vec<AnyElement> = editor
+        .mcp_servers
+        .iter()
+        .map(|server| {
+            let (kind_label, detail) = match &server.transport {
+                smelt_core::pi_mcp::PiMcpTransport::Http { url } => ("远程", url.clone()),
+                smelt_core::pi_mcp::PiMcpTransport::Stdio { command, args } => {
+                    ("本地", format!("{command} {}", args.join(" ")))
+                }
+                smelt_core::pi_mcp::PiMcpTransport::Unknown => ("未知", String::new()),
+            };
+            // 能力库里停用的服务器勾了也不会连：Pi 读到 `enabled: false` 就跳过。
+            let broken = (!server.enabled).then(|| "已在能力库停用，勾选也不会连接".to_string());
+            agent_plugin_row(
+                AgentPick::McpServer,
+                &agent.id,
+                &server.name,
+                &server.name,
+                kind_label,
+                server.description.as_deref().unwrap_or(""),
+                &detail,
+                broken,
+                selected.contains(&server.name),
+                entity.clone(),
+                cx,
+            )
+        })
+        .collect();
+    // 已勾选但 mcp.json 里已经删掉的也要露出来，否则用户没法取消它。
+    for name in &selected {
+        if editor.mcp_servers.iter().any(|server| server.name == *name) {
+            continue;
+        }
+        rows.push(agent_plugin_row(
+            AgentPick::McpServer,
+            &agent.id,
+            name,
+            name,
+            "未知",
+            "",
+            "",
+            Some("mcp.json 里已经没有这台服务器".to_string()),
+            true,
+            entity.clone(),
+            cx,
+        ));
+    }
+
+    let body = if rows.is_empty() {
+        div()
+            .px_5()
+            .py_4()
+            .text_xs()
+            .text_color(rgb(crate::ui_theme::text_faint()))
+            .child("还没有配置 MCP 服务器。点「管理」去能力库添加。")
+            .into_any_element()
+    } else {
+        div()
+            .px_2()
+            .pb_2()
+            .flex()
+            .flex_col()
+            .children(rows)
+            .into_any_element()
+    };
+
+    agent_surface_card()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_5()
+                .pt_4()
+                .pb_2()
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(rgb(crate::ui_theme::text_bright()))
+                                .child("MCP"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(crate::ui_theme::text_muted()))
+                                .child(format!(
+                                    "已勾选 {selected_count} 个。对话只连勾选的服务器，没勾的不启动。改动对新开的对话生效。"
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(refresh_button)
+                        .child(manage_button),
+                ),
+        )
+        .child(body)
+        .into_any_element()
+}
+
+/// 编辑器里可勾选的两类能力：插件（技能 / 扩展）和 MCP 服务器。行的样子一样，
+/// 只是写回定义的字段不同。
+#[derive(Clone, Copy)]
+enum AgentPick {
+    Plugin,
+    McpServer,
+}
+
 fn agent_plugin_row(
+    pick: AgentPick,
     agent_id: &str,
     plugin_id: &str,
     name: &str,
@@ -2234,16 +3338,23 @@ fn agent_plugin_row(
         .items_center()
         .gap_3()
         .child(
-            Switch::new(format!("agent-plugin-{plugin_id}"))
-                .checked(checked)
-                .disabled(!usable && !checked)
-                .on_click(move |_, _, cx| {
-                    let agent_id = toggle_agent.clone();
-                    let plugin_id = toggle_plugin.clone();
-                    entity.update(cx, |workspace, cx| {
-                        workspace.toggle_agent_plugin(agent_id, plugin_id, cx)
-                    });
-                }),
+            Switch::new(match pick {
+                AgentPick::Plugin => format!("agent-plugin-{plugin_id}"),
+                AgentPick::McpServer => format!("agent-mcp-{plugin_id}"),
+            })
+            .checked(checked)
+            .disabled(!usable && !checked)
+            .accessibility_label(name.to_string())
+            .on_click(move |_, _, cx| {
+                let agent_id = toggle_agent.clone();
+                let plugin_id = toggle_plugin.clone();
+                entity.update(cx, |workspace, cx| match pick {
+                    AgentPick::Plugin => workspace.toggle_agent_plugin(agent_id, plugin_id, cx),
+                    AgentPick::McpServer => {
+                        workspace.toggle_agent_mcp_server(agent_id, plugin_id, cx)
+                    }
+                });
+            }),
         )
         .child(
             div()
@@ -2291,7 +3402,7 @@ fn editor_field_frame() -> Div {
         .flex()
         .items_center()
         .flex_none()
-        .h(px(28.))
+        .h(crate::ui_theme::height::sm())
         .overflow_hidden()
         .border_1()
         .border_color(rgb(crate::ui_theme::border_loud()))
@@ -2335,7 +3446,7 @@ fn framed_automation_textarea(textarea: Textarea) -> AnyElement {
     div()
         .w_full()
         .px_3()
-        .pt_3()
+        .py_3()
         .min_h(px(120.))
         .child(textarea.appearance(false))
         .into_any_element()
@@ -2384,7 +3495,7 @@ fn automation_run_lines(title: String, detail: String, error: Option<String>) ->
 
 fn automation_form_row() -> Div {
     automation_form_shell()
-        .h(px(44.))
+        .h(crate::ui_theme::height::xl())
         .px_3()
         .flex()
         .items_center()
@@ -2413,6 +3524,7 @@ fn segmented_track(_cx: &App) -> Div {
 }
 
 mod automation_catalog;
+mod automation_run_detail;
 mod automation_templates;
 mod automation_view;
 mod view;

@@ -1,5 +1,5 @@
 //! macOS 菜单栏右上角常驻图标（`NSStatusItem`）：显示待关注和运行中的会话数字，
-//! 点开是一个下拉菜单——按状态优先级列出所有会话（状态点 + 名字 + 状态文字），点某一项跳过去；
+//! 点开是一个下拉菜单——只列运行中、未读、或仍要处理的会话，点某一项跳过去；
 //! 菜单底部固定一项「打开 smelt 主窗口」，对应原来「点图标就唤出/前置窗口」的行为。
 //!
 //! GPUI 本身完全没有 status item 这个概念，得绕开它直接摸 AppKit。这里还有一道坎：
@@ -12,7 +12,8 @@
 /// 菜单栏与系统通知桥发回 GPUI 主循环的事件。
 pub enum StatusItemEvent {
     ActivateMain,
-    JumpToSession(usize),
+    /// 跳到某个会话。菜单项和系统通知都只带守护会话 id：主窗口可能已经关了、
+    /// 会话可能重排，到点击时再按 id 找当前位置。
     JumpToDaemonSession(String),
     JumpToAutomationRun {
         automation_id: String,
@@ -88,9 +89,11 @@ mod system_notifications;
 /// 把最新会话快照喂给 `update_menu`，本文件负责把它翻译成 AppKit 菜单项。
 #[derive(Clone, PartialEq)]
 pub struct SessionEntry {
-    /// 真实会话下标（`self.sessions` 里的位置）。菜单是按状态优先级排过序的，条目在菜单里
-    /// 的位置≠会话下标，所以点击要跳到的目标必须显式带上这个原始下标，不能用菜单位置当 tag。
-    pub session_ix: usize,
+    /// 点击要跳去的守护会话 id（终端会话是要露出来的那个 pane）。
+    ///
+    /// 不能存 `self.sessions` 的下标：主窗口关掉后点菜单会新开一个工作区，
+    /// 重新恢复出来的会话列表和旧下标对不上，只能丢掉跳转，打开的是上次停留的页面。
+    pub session_id: String,
     pub title: String,
     pub status_text: &'static str,
     pub color: (u8, u8, u8),
@@ -233,13 +236,23 @@ mod imp {
         }
     }
 
-    /// 会话菜单项的 action：菜单项的 `tag` 就是会话下标（`update_menu` 建条目时按序设的）。
+    /// 会话菜单项的 action：`representedObject` 是 `update_menu` 挂上的守护会话 id。
     extern "C" fn on_jump(_this: &Object, _cmd: Sel, sender: *mut Object) {
-        let tag: i64 = unsafe { msg_send![sender, tag] };
-        if tag >= 0
-            && let Some(tx) = EVENT_TX.get()
-        {
-            let _ = tx.try_send(StatusItemEvent::JumpToSession(tag as usize));
+        let session_id = unsafe {
+            let value: *mut Object = msg_send![sender, representedObject];
+            if value.is_null() {
+                return;
+            }
+            let bytes: *const std::os::raw::c_char = msg_send![value, UTF8String];
+            if bytes.is_null() {
+                return;
+            }
+            std::ffi::CStr::from_ptr(bytes)
+                .to_string_lossy()
+                .into_owned()
+        };
+        if let Some(tx) = EVENT_TX.get() {
+            let _ = tx.try_send(StatusItemEvent::JumpToDaemonSession(session_id));
         }
     }
 
@@ -422,9 +435,9 @@ mod imp {
         update_status_title();
     }
 
-    /// 按会话快照重建下拉菜单：先清空，逐个会话建一个由 agent logo（裸终端为方框终端
-    /// 图标）、标题和状态文字组成的菜单项（`tag` 记会话下标，点击经 `on_jump` 转发），最后加
-    /// 一条分隔线 + 固定的「打开 smelt 主窗口」项。
+    /// 按需要关心的会话快照重建下拉菜单：先清空，逐条建一个由 agent logo（裸终端为方框终端
+    /// 图标）、标题和状态文字组成的菜单项（挂着守护会话 id，点击经 `on_jump` 转发），最后加
+    /// 一条分隔线 + 固定的「打开 smelt 主窗口」项。没有此类会话时只留那一项。
     ///
     /// 只在会话快照真的变化时被调用（见 main.rs），不是每帧都建。
     pub fn update_menu(entries: &[SessionEntry]) {
@@ -443,8 +456,8 @@ mod imp {
                     initWithTitle: nsstring(&title)
                     action: sel!(smeltStatusItemJump:)
                     keyEquivalent: nsstring("")];
-                // tag 记真实会话下标（不是菜单位置——菜单排过序），点击经 on_jump 原样带回。
-                let _: () = msg_send![item, setTag: entry.session_ix as i64];
+                // 会话 id 挂在 representedObject 上（菜单项强引用它），点击经 on_jump 带回。
+                let _: () = msg_send![item, setRepresentedObject: nsstring(&entry.session_id)];
                 let _: () = msg_send![item, setTarget: target];
                 // 左侧图标：有 agent 身份用按状态着色的 logo，裸终端使用同一套
                 // SquareTerminal glyph；两者都占 SESSION_ICON_SIZE，确保文字对齐。

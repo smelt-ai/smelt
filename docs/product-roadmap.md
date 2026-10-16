@@ -13,7 +13,7 @@ JSONL RPC，不经 ACP。其它 CLI 可走 custom，不保证体验。）
 
 ## 产品级智能体基线
 
-产品模型固定为 `AgentDefinition → Conversation / Automation → AgentRun → Engine`：智能体是长期存在的产品对象，不是进程或对话；同一定义可以创建多段 Conversation，自动化也能在没有 Conversation 时创建 Run。定义只保存名称、长期指令和引擎；普通 Conversation 的工作目录来自会话上下文，Automation 则由 daemon 在 `~/.smelt/workspaces/automations` 下分配稳定工作区，账号/profile、模型与输入仍属于每次 Conversation/Run。Pi 是第一阶段唯一注册的执行引擎。左侧「智能体」负责定义管理，「自动化」独立管理触发条件、每次输入与运行状态；对话仍是普通 Session，并只引用智能体 ID。
+产品模型固定为 `AgentDefinition → Conversation / Automation → AgentRun → Engine`：智能体是长期存在的产品对象，不是进程或对话；同一定义可以创建多段 Conversation，自动化也能在没有 Conversation 时创建 Run。定义只保存名称、长期指令和引擎；普通 Conversation 的工作目录来自会话上下文，智能体 Automation 由 daemon 在智能体 space 下的 `automations/` 里分配稳定工作区（Shell 自动化在 `~/.smelt/workspaces/automations`），账号/profile、模型与输入仍属于每次 Conversation/Run。Pi 是第一阶段唯一注册的执行引擎。左侧「智能体」负责定义管理，「自动化」独立管理触发条件、每次输入与运行状态；对话仍是普通 Session，并只引用智能体 ID。
 
 股票数据、飞书 `chat watch` 和通知目标都属于 Smelt capability/plugin 与 source/trigger/sink 层。Pi 只负责理解目标、规划和调用宿主授予的能力，不直接拥有这些业务插件。定时是首个内置触发方式：由 `smeltd` 持续 claim 到期项并创建独立 Run，不要求先有对话或保持 GUI 打开。手动「运行一次」复用同一 Run 生命周期，但不推进定时游标。飞书监听应作为 daemon 托管的连接器/事件源，由自动化订阅其事件，而不是硬编码进智能体定义或 Pi 引擎。
 

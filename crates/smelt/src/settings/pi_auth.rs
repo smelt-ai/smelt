@@ -37,16 +37,6 @@ impl Workspace {
         .detach();
     }
 
-    /// 收起凭据面板。进行中的登录一并取消——留一个看不见的授权流程在后台占着
-    /// 回环端口，下一次登录会莫名其妙失败。
-    pub fn close_pi_auth_panel(&mut self, cx: &mut Context<Self>) {
-        self.cancel_pi_login(cx);
-        self.pi_auth_model_picker = None;
-        self.pi_auth_providers = None;
-        self.pi_auth_error = None;
-        cx.notify();
-    }
-
     /// 在「只看能订阅登录的」和「全部内置 provider」之间切换。
     pub fn toggle_pi_auth_show_all(&mut self, cx: &mut Context<Self>) {
         self.pi_auth_show_all = !self.pi_auth_show_all;
@@ -213,7 +203,7 @@ impl Workspace {
                 view.device_code = None;
                 view.outcome = Some(Ok(()));
                 let provider_id = view.provider_id.clone();
-                self.reload_pi_model_settings();
+                self.reload_pi_model_settings(cx);
                 self.refresh_pi_auth_providers(cx);
                 self.load_pi_models_for(provider_id, cx);
             }
@@ -351,7 +341,7 @@ impl Workspace {
         };
         match smelt_core::pi_model_settings::save_pi_default_model(&config, None) {
             Ok(()) => {
-                self.reload_pi_model_settings();
+                self.reload_pi_model_settings(cx);
                 self.pi_auth_model_picker = None;
                 crate::status_item::notify_success(format!(
                     "已设为默认模型：{} / {}",
@@ -380,7 +370,7 @@ impl Workspace {
                 if let Err(error) = outcome {
                     this.pi_auth_error = Some(error);
                 } else {
-                    this.reload_pi_model_settings();
+                    this.reload_pi_model_settings(cx);
                     // 凭据没了，它报过的模型也就不能选了。
                     if this
                         .pi_auth_model_picker

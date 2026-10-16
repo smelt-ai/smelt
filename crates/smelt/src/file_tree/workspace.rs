@@ -4,14 +4,17 @@
 
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use gpui::*;
 use gpui_component::input::InputEvent;
 
 use crate::Workspace;
 
-use super::view::{editor_language_for_path, is_previewable_image, walk_dir_cached};
+use super::view::{
+    FileTreeRow, collect_file_tree_rows, editor_language_for_path, is_previewable_image,
+};
 use super::*;
 
 // ===================== Workspace 方法 =====================
@@ -22,7 +25,41 @@ impl Workspace {
         if let Some(of) = self.open_file.as_mut() {
             of.preview = preview;
         }
+        if preview {
+            self.refresh_markdown_preview_source(cx);
+        }
         cx.notify();
+    }
+
+    fn refresh_markdown_preview_source(&mut self, cx: &App) {
+        let Some(open) = self.open_file.as_mut() else {
+            return;
+        };
+        if !open.preview {
+            return;
+        }
+        let next = open.editor.read(cx).value().to_string();
+        if open.preview_source.as_ref() != next {
+            open.preview_source = next.into();
+        }
+    }
+
+    fn schedule_markdown_preview_refresh(&mut self, cx: &mut Context<Self>) {
+        self.markdown_preview_epoch = self.markdown_preview_epoch.wrapping_add(1);
+        let epoch = self.markdown_preview_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(80))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.markdown_preview_epoch != epoch {
+                    return;
+                }
+                this.refresh_markdown_preview_source(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 文件树：展开/收起一个文件夹。
@@ -30,6 +67,7 @@ impl Workspace {
         if !self.expanded.remove(&path) {
             self.expanded.insert(path);
         }
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -41,6 +79,7 @@ impl Workspace {
             self.collapsed_roots.insert(path);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -54,6 +93,7 @@ impl Workspace {
             self.pinned_roots.push(cwd);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -114,6 +154,8 @@ impl Workspace {
         self.ensure_dir_listing(root, cx);
         self.file_tree_selected = Some(path.to_string());
         self.file_tree_pending_reveal = Some(path.to_string());
+        self.try_flush_file_tree_reveal(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -136,57 +178,78 @@ impl Workspace {
         let Some(path) = self.file_tree_pending_reveal.clone() else {
             return;
         };
-        let flat = self.file_tree_flat(cx);
-        if let Some(ix) = flat.iter().position(|(_, _, p)| p == &path) {
-            self.file_tree_scroll.scroll_to_item(ix);
+        let rows = self.file_tree_rows(cx);
+        if let Some(ix) = rows
+            .iter()
+            .position(|row| row.path() == Some(path.as_str()))
+        {
+            self.file_tree_scroll
+                .scroll_to_item(ix, ScrollStrategy::Nearest);
             self.file_tree_pending_reveal = None;
-            // 不 notify：本帧正在 render，scroll 在 prepaint 生效即可
         }
         let _ = cx;
     }
 
-    /// 当前扁平可见树条目：(is_dir, name, path)。
-    fn file_tree_flat(&self, cx: &App) -> Vec<(bool, String, String)> {
-        let Some(root) = self.active_project_root(cx) else {
-            return Vec::new();
-        };
-        let mut raw: Vec<(usize, String, bool, String, bool)> = Vec::new();
-        walk_dir_cached(&root, &self.dir_cache, &self.expanded, 0, &mut raw);
-        raw.into_iter()
-            .map(|(_, name, is_dir, path, _)| (is_dir, name, path))
-            .collect()
+    /// 当前可见树，下标和虚拟列表一致。
+    fn file_tree_rows(&self, cx: &App) -> Vec<super::view::FileTreeRow> {
+        collect_file_tree_rows(
+            &self.workspace_roots(cx),
+            &self.expanded,
+            &self.collapsed_roots,
+            &self.dir_cache,
+            &self.git_status,
+        )
     }
 
-    /// ↑↓ 移动键盘选中。
+    /// ↑↓ 移动键盘选中。跳过没有路径的加载占位行。
     pub fn file_tree_move_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let flat = self.file_tree_flat(cx);
-        if flat.is_empty() {
+        let rows = self.file_tree_rows(cx);
+        let selectable: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, row)| row.path().map(|_| ix))
+            .collect();
+        if selectable.is_empty() {
             return;
         }
-        let cur = self
-            .file_tree_selected
-            .as_ref()
-            .and_then(|p| flat.iter().position(|(_, _, path)| path == p));
-        let next = match cur {
-            Some(i) => (i as i32 + delta).clamp(0, flat.len() as i32 - 1) as usize,
+        let cur = self.file_tree_selected.as_ref().and_then(|path| {
+            selectable
+                .iter()
+                .position(|&ix| rows[ix].path() == Some(path.as_str()))
+        });
+        let next_sel = match cur {
+            Some(i) => (i as i32 + delta).clamp(0, selectable.len() as i32 - 1) as usize,
             None => {
                 if delta >= 0 {
                     0
                 } else {
-                    flat.len() - 1
+                    selectable.len() - 1
                 }
             }
         };
-        self.file_tree_selected = Some(flat[next].2.clone());
-        self.file_tree_scroll.scroll_to_item(next);
+        let ix = selectable[next_sel];
+        self.file_tree_selected = rows[ix].path().map(str::to_string);
+        self.file_tree_scroll
+            .scroll_to_item(ix, ScrollStrategy::Nearest);
         cx.notify();
     }
 
-    /// ←：目录已展开则收起；否则选中父目录。
+    /// ←：目录已展开则收起；否则选中父目录。根标题行走 collapsed_roots，不进 expanded。
     pub fn file_tree_key_left(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.file_tree_selected.clone() else {
             return;
         };
+        if matches!(
+            self.file_tree_rows(cx)
+                .iter()
+                .find(|row| row.path() == Some(path.as_str())),
+            Some(FileTreeRow::RootHeader { .. })
+        ) {
+            if !self.collapsed_roots.contains(&path) {
+                self.toggle_root_collapsed(path, cx);
+            }
+            return;
+        }
         if self.expanded.contains(&path) {
             self.expanded.remove(&path);
             cx.notify();
@@ -199,7 +262,7 @@ impl Workspace {
             let ps = parent.to_string_lossy().to_string();
             // 父目录在项目根之下（含根的直接子项的父 = root）
             if ps == root || (ps.starts_with(&root) && ps.len() > root.len()) {
-                // 根本身不在 flat 列表里时，选中第一项的兄弟无意义；只选非根父路径
+                // 根本身不在列表里时，选中它没有对应行；只选非根父路径
                 if ps != root {
                     self.file_tree_selected = Some(ps);
                     self.try_flush_file_tree_reveal_path(cx);
@@ -209,54 +272,66 @@ impl Workspace {
         }
     }
 
-    /// →：目录未展开则展开；已展开则进第一个子项；文件则打开。
+    /// →：目录未展开则展开；已展开则进下一个有路径的行；文件则打开。
     pub fn file_tree_key_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.file_tree_selected.clone() else {
             return;
         };
-        let flat = self.file_tree_flat(cx);
-        let Some((is_dir, _, _)) = flat.iter().find(|(_, _, p)| p == &path) else {
+        let rows = self.file_tree_rows(cx);
+        let Some(ix) = rows
+            .iter()
+            .position(|row| row.path() == Some(path.as_str()))
+        else {
             return;
         };
-        if *is_dir {
-            if !self.expanded.contains(&path) {
+        match &rows[ix] {
+            FileTreeRow::RootHeader { open: false, .. } => {
+                self.toggle_root_collapsed(path, cx);
+            }
+            FileTreeRow::Entry { is_dir: true, .. } if !self.expanded.contains(&path) => {
                 self.expanded.insert(path.clone());
                 self.ensure_dir_listing(path, cx);
                 cx.notify();
-            } else if let Some(ix) = flat.iter().position(|(_, _, p)| p == &path)
-                && let Some((_, _, child)) = flat.get(ix + 1)
-            {
-                // 下一行若是更深的子项才进去
-                self.file_tree_selected = Some(child.clone());
-                self.file_tree_scroll.scroll_to_item(ix + 1);
-                cx.notify();
             }
-        } else {
-            self.view_file(path, window, cx);
+            FileTreeRow::Entry { is_dir: false, .. } => self.view_file(path, window, cx),
+            FileTreeRow::RootHeader { open: true, .. } | FileTreeRow::Entry { .. } => {
+                if let Some(child) = rows.get(ix + 1).and_then(|row| row.path()) {
+                    self.file_tree_selected = Some(child.to_string());
+                    self.file_tree_scroll
+                        .scroll_to_item(ix + 1, ScrollStrategy::Nearest);
+                    cx.notify();
+                }
+            }
+            FileTreeRow::Loading { .. } => {}
         }
     }
 
-    /// Enter：目录切换展开；文件打开。
+    /// Enter：目录切换展开；文件打开。根标题行折叠/展开。
     pub fn file_tree_key_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.file_tree_selected.clone() else {
             return;
         };
-        let flat = self.file_tree_flat(cx);
-        let Some((is_dir, _, _)) = flat.iter().find(|(_, _, p)| p == &path) else {
+        let rows = self.file_tree_rows(cx);
+        let Some(row) = rows.iter().find(|row| row.path() == Some(path.as_str())) else {
             return;
         };
-        if *is_dir {
-            self.toggle_expand(path, cx);
-        } else {
-            self.view_file(path, window, cx);
+        match row {
+            FileTreeRow::RootHeader { .. } => self.toggle_root_collapsed(path, cx),
+            FileTreeRow::Entry { is_dir: true, .. } => self.toggle_expand(path, cx),
+            FileTreeRow::Entry { is_dir: false, .. } => self.view_file(path, window, cx),
+            FileTreeRow::Loading { .. } => {}
         }
     }
 
     fn try_flush_file_tree_reveal_path(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.file_tree_selected.clone() {
-            let flat = self.file_tree_flat(cx);
-            if let Some(ix) = flat.iter().position(|(_, _, p)| p == &path) {
-                self.file_tree_scroll.scroll_to_item(ix);
+            let rows = self.file_tree_rows(cx);
+            if let Some(ix) = rows
+                .iter()
+                .position(|row| row.path() == Some(path.as_str()))
+            {
+                self.file_tree_scroll
+                    .scroll_to_item(ix, ScrollStrategy::Nearest);
             }
         }
     }
@@ -299,6 +374,7 @@ impl Workspace {
         });
         if dirty {
             // 脏切换暂不带行号（确认后再 open 整文件即可）
+            self.begin_main_modal_focus(window, cx);
             self.pending_file_switch = Some(path);
             cx.notify();
             return;
@@ -359,12 +435,13 @@ impl Workspace {
             readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
             conflict_pending: false,
             preview: is_markdown,
+            preview_source: SharedString::default(),
         });
-        // InputState 自己会刷新编辑器，但预览和文件头属于 Workspace，必须订阅变更
-        // 才能在编辑时同步更新 Markdown 预览与未保存标记，而不依赖切换 tab 触发 render。
-        self._file_editor_sub = Some(cx.subscribe(&editor, |_, _, event: &InputEvent, cx| {
+        // 编辑器自己会刷新。预览和未保存标记属于 Workspace：按键先记下世代，
+        // 停手后再把正文交给 Markdown，避免每个字符都重解析。
+        self._file_editor_sub = Some(cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                cx.notify();
+                this.schedule_markdown_preview_refresh(cx);
             }
         }));
         cx.notify();
@@ -399,7 +476,8 @@ impl Workspace {
                                 state.set_cursor_position(Position::new(line0, 0), window, cx);
                             }
                         });
-                        of.saved_content = Rc::new(content);
+                        of.saved_content = Rc::new(content.clone());
+                        of.preview_source = content.into();
                         of.readable = true;
                     }
                     Err(_) => {
@@ -494,6 +572,9 @@ impl Workspace {
     /// 文件树搜索：按 query 匹配文件名 + 文件内容，后台遍历项目、命中写回 search_results。
     /// 与 view_file 同款「background_executor + 自增 gen 丢弃过期结果」模式，绝不阻塞 render。
     /// query 未变（已有对应结果或正在跑同一 query）就跳过，避免每帧重扫。
+    ///
+    /// 换查询时替换 `search_task`，并在遍历的每个文件边界看 `search_cancel`。
+    /// 只递增代次会让旧扫描继续占着 worker。
     pub fn ensure_search(&mut self, root: String, query: String, cx: &mut Context<Self>) {
         // 已有本 query 的结果、或正有一次针对本 query 的遍历在跑，就不重复触发。
         if self
@@ -503,8 +584,13 @@ impl Workspace {
         {
             return;
         }
+        self.cancel_file_search();
         self.search_gen = self.search_gen.wrapping_add(1);
-        let r#gen = self.search_gen;
+        let generation = self.search_gen;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_walk = Arc::clone(&cancel);
+        let cancel_for_apply = Arc::clone(&cancel);
+        self.search_cancel = Some(cancel);
         // 先占位：done=false 让列表顶部显示「搜索中…」，遍历完成后替换。
         self.search_results = Some(SearchState {
             query: query.clone(),
@@ -514,26 +600,38 @@ impl Workspace {
         });
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
-            let (r, q) = (root.clone(), query.clone());
-            let (hits, truncated) = cx
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            let (r, q) = (root, query.clone());
+            let walked = cx
                 .background_executor()
-                .spawn(async move { search_project(&r, &q) })
+                .spawn(async move { search_project(&r, &q, &cancel_for_walk) })
                 .await;
+            if cancel_for_apply.load(Ordering::Acquire) {
+                return;
+            }
+            let (hits, truncated) = walked;
             let _ = this.update(cx, |this, cx| {
                 // 只有仍是最新一次搜索才写入，丢弃期间被新查询取代的过期结果。
-                if this.search_gen == r#gen {
-                    this.search_results = Some(SearchState {
-                        query,
-                        done: true,
-                        hits,
-                        truncated,
-                    });
-                    cx.notify();
+                if this.search_gen != generation {
+                    return;
                 }
+                this.search_results = Some(SearchState {
+                    query,
+                    done: true,
+                    hits,
+                    truncated,
+                });
+                cx.notify();
             });
-        })
-        .detach();
+        }));
+    }
+
+    /// 停掉正在跑的文件搜索。清空输入和换查询都走这里。
+    pub(crate) fn cancel_file_search(&mut self) {
+        if let Some(cancel) = self.search_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.search_task.take();
     }
 
     /// 确保某目录的直接子项列表缓存新鲜（>2s 或缺失就后台刷新）。
@@ -547,6 +645,7 @@ impl Workspace {
         if fresh || self.dir_inflight.contains(&dir) {
             return;
         }
+        let request_generation = self.dir_generation.get(&dir).copied().unwrap_or(0);
         self.dir_inflight.insert(dir.clone());
         cx.spawn(async move |this, cx| {
             let d = dir.clone();
@@ -563,12 +662,25 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.dir_inflight.remove(&dir);
-                this.dir_cache
-                    .insert(dir, (Instant::now(), Rc::new(entries)));
+                let current_generation = this.dir_generation.get(&dir).copied().unwrap_or(0);
+                // 删除发生在列目录期间时，这一包是旧快照。不写回，再排一次刷新去读新代次。
+                if current_generation == request_generation {
+                    this.dir_cache
+                        .insert(dir, (Instant::now(), Rc::new(entries)));
+                } else {
+                    this.schedule_visible_refresh(cx);
+                }
+                this.try_flush_file_tree_reveal(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// 目录列表失效。在途的那一次读完后不得再把旧条目标成新鲜。
+    fn bump_dir_generation(&mut self, dir: &str) {
+        let generation = self.dir_generation.entry(dir.to_string()).or_default();
+        *generation = generation.wrapping_add(1);
     }
 
     /// 文件树右键「复制文件路径」：把绝对路径写入系统剪贴板。
@@ -636,16 +748,29 @@ impl Workspace {
             self.pending_file_switch = None;
         }
 
+        let mut stale_dirs: Vec<String> = Vec::new();
         if is_dir {
             self.expanded.retain(|p| !under(&path, p));
-            self.dir_cache.retain(|p, _| !under(&path, p));
+            stale_dirs.extend(
+                self.dir_cache
+                    .keys()
+                    .filter(|candidate| under(&path, candidate))
+                    .cloned(),
+            );
+            stale_dirs.push(path.clone());
         } else {
             self.expanded.remove(&path);
         }
-
         if let Some(parent) = Path::new(&path).parent().and_then(|p| p.to_str()) {
-            self.dir_cache.remove(parent);
+            stale_dirs.push(parent.to_string());
         }
+        stale_dirs.sort();
+        stale_dirs.dedup();
+        for dir in stale_dirs {
+            self.bump_dir_generation(&dir);
+            self.dir_cache.remove(&dir);
+        }
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 

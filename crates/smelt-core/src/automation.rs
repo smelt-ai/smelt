@@ -6,7 +6,8 @@ use chrono::{
 use serde::de::{Deserializer, Error as DeError};
 use serde::{Deserialize, Serialize};
 
-pub const AUTOMATION_FILE_SCHEMA_VERSION: u32 = 1;
+/// v2：删掉从未投递过的飞书 / Webhook 通知 sink，旧数据在载入时迁移。
+pub const AUTOMATION_FILE_SCHEMA_VERSION: u32 = 2;
 pub const MAX_RUNS_PER_AUTOMATION: usize = 50;
 pub const MAX_RUN_OUTPUT_BYTES: usize = 16 * 1024;
 pub const MAX_RUN_ERROR_BYTES: usize = 4 * 1024;
@@ -108,12 +109,6 @@ impl AutomationAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AutomationSink {
     Local,
-    Webhook {
-        url: String,
-    },
-    Feishu {
-        chat_id: String,
-    },
     /// 明确关闭通知。空 `sinks` 仍表示沿用应用通知（旧数据）。
     Off,
 }
@@ -125,16 +120,6 @@ impl AutomationSink {
 
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local)
-    }
-
-    pub fn feishu_chat_id(&self) -> Option<&str> {
-        match self {
-            Self::Feishu { chat_id } => {
-                let chat_id = chat_id.trim();
-                (!chat_id.is_empty()).then_some(chat_id)
-            }
-            Self::Local | Self::Webhook { .. } | Self::Off => None,
-        }
     }
 }
 
@@ -541,10 +526,6 @@ impl Automation {
         automation_notifies_app(&self.sinks)
     }
 
-    pub fn feishu_chat_id(&self) -> Option<&str> {
-        self.sinks.iter().find_map(AutomationSink::feishu_chat_id)
-    }
-
     pub fn is_ready(&self) -> bool {
         self.validate().is_ok()
     }
@@ -574,6 +555,22 @@ impl Automation {
             return Err(format!(
                 "自动化的 Smelt 工作区不存在或不是目录: {workspace_dir}"
             ));
+        }
+        Ok(())
+    }
+
+    /// 定时触发不带外部内容，智能体只能从指令里知道这次要做什么。只在保存时
+    /// 检查：放进 `validate` 会让一条旧数据拖垮整库载入，旧数据到点时由
+    /// [`AutomationRunContext::validate_input`] 记成失败。
+    fn validate_scheduled_instruction(&self) -> Result<(), String> {
+        let blank = match &self.action {
+            AutomationAction::Agent { prompt, .. } => prompt
+                .as_deref()
+                .is_none_or(|prompt| prompt.trim().is_empty()),
+            AutomationAction::Shell { .. } => false,
+        };
+        if blank && !self.trigger.schedules.is_empty() {
+            return Err("定时触发不会带入外部内容，请填写指令".to_string());
         }
         Ok(())
     }
@@ -1126,6 +1123,20 @@ impl AutomationRunContext {
             agent_instructions: None,
         }
     }
+
+    /// 智能体 Run 不投递空消息：指令和触发内容都为空时，这次运行无事可做。
+    fn validate_input(&self) -> Result<(), String> {
+        let empty = matches!(self.action, AutomationAction::Agent { .. })
+            && self
+                .prompt
+                .as_deref()
+                .is_none_or(|prompt| prompt.trim().is_empty());
+        if empty {
+            Err("这次运行没有可发送的内容，请在自动化里填写指令".to_string())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1453,6 +1464,7 @@ where
     match command {
         AutomationCommand::Upsert { automation } => {
             automation.validate_execution_context()?;
+            automation.validate_scheduled_instruction()?;
             let automation = *automation;
             let existing = file
                 .automations
@@ -1569,13 +1581,15 @@ where
         return Err("自动化不存在".to_string());
     };
     automation.validate_execution_context()?;
+    let context = AutomationRunContext::from_automation_with_payload(automation, payload);
+    context.validate_input()?;
     if let Some(run) = file.active_run_for(&automation_id) {
         return Err(format!("自动化已有运行中的 Run: {}", run.id));
     }
     let run = AutomationRun {
         id: uuid::Uuid::new_v4().to_string(),
         automation_id: automation_id.clone(),
-        context: AutomationRunContext::from_automation_with_payload(automation, payload),
+        context,
         source,
         scheduled_for: None,
         status: AutomationRunStatus::Starting,
@@ -1741,7 +1755,12 @@ where
             continue;
         }
         let overlapping = file.active_run_for(&automation.id).is_some();
-        let context_error = automation.validate_execution_context().err();
+        let context =
+            AutomationRunContext::from_automation_with_payload(&automation, payload.clone());
+        let context_error = automation
+            .validate_execution_context()
+            .and_then(|()| context.validate_input())
+            .err();
         let (status, error, finished_at, runtime_released_at) = if let Some(error) = context_error {
             (
                 AutomationRunStatus::Failed,
@@ -1762,10 +1781,7 @@ where
         let run = AutomationRun {
             id: run_id,
             automation_id: automation.id.clone(),
-            context: AutomationRunContext::from_automation_with_payload(
-                &automation,
-                payload.clone(),
-            ),
+            context,
             source: AutomationRunSource::Event,
             scheduled_for: None,
             status,
@@ -1820,32 +1836,39 @@ where
         if file.runs.iter().any(|run| run.id == run_id) {
             continue;
         }
-        let overlapping = file.active_run_for(&automation.id).is_some();
+        let context = AutomationRunContext::from_automation(&automation);
+        let (status, error) = if let Err(error) = context.validate_input() {
+            (AutomationRunStatus::Failed, Some(error))
+        } else if file.active_run_for(&automation.id).is_some() {
+            (
+                AutomationRunStatus::Skipped,
+                Some("上一条 Run 仍在执行，本次计划已跳过".to_string()),
+            )
+        } else {
+            (AutomationRunStatus::Starting, None)
+        };
+        let settled = status != AutomationRunStatus::Starting;
         let run = AutomationRun {
             id: run_id,
             automation_id: automation.id.clone(),
-            context: AutomationRunContext::from_automation(&automation),
+            context,
             source: AutomationRunSource::Scheduled,
             scheduled_for: Some(scheduled_for),
-            status: if overlapping {
-                AutomationRunStatus::Skipped
-            } else {
-                AutomationRunStatus::Starting
-            },
+            status,
             created_at: now.timestamp(),
             started_at: None,
             delivery_attempt_at: None,
             delivery_attempts: 0,
-            finished_at: overlapping.then_some(now.timestamp()),
+            finished_at: settled.then_some(now.timestamp()),
             session_id: None,
             provider_session_id: None,
             output: None,
-            error: overlapping.then(|| "上一条 Run 仍在执行，本次计划已跳过".to_string()),
-            runtime_released_at: overlapping.then_some(now.timestamp()),
+            error,
+            runtime_released_at: settled.then_some(now.timestamp()),
         };
         file.state_for_mut(&automation.id).unwrap().last_run_id = Some(run.id.clone());
         file.runs.push(run.clone());
-        if !overlapping {
+        if !settled {
             claimed.push(run);
         }
     }
@@ -1885,11 +1908,16 @@ pub fn resolve_prompt_with_payload(
     template: Option<&str>,
     payload: Option<&serde_json::Value>,
 ) -> Option<String> {
-    match (template, payload) {
+    let instruction = template.filter(|tmpl| !tmpl.trim().is_empty());
+    match (instruction, payload) {
         (Some(tmpl), Some(payload)) if tmpl.contains("{{") => Some(render_template(tmpl, payload)),
-        (Some(tmpl), _) if !tmpl.trim().is_empty() => Some(tmpl.to_string()),
-        (None | Some(_), Some(payload)) => Some(format_payload_prompt(payload)),
+        (Some(tmpl), Some(payload)) => Some(format!(
+            "{}\n\n收到的内容：\n{}",
+            tmpl.trim_end(),
+            format_payload_prompt(payload)
+        )),
         (Some(tmpl), None) => Some(tmpl.to_string()),
+        (None, Some(payload)) => Some(format_payload_prompt(payload)),
         (None, None) => None,
     }
 }

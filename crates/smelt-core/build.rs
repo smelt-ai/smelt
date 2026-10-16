@@ -37,7 +37,11 @@ fn main() {
 
     let mut ts_files = collect_files(&src, &is_runtime_ts);
     ts_files.sort();
-    let mut patch_files = collect_files(&patches, &|path| path.is_file());
+    let mut patch_files = if patches.is_dir() {
+        collect_files(&patches, &|path| path.is_file())
+    } else {
+        Vec::new()
+    };
     patch_files.sort();
     for path in ts_files.iter().chain(&patch_files) {
         println!("cargo:rerun-if-changed={}", path.display());

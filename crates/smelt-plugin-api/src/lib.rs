@@ -26,6 +26,9 @@ pub const CORE_TOPIC_REMOTE_SESSIONS_CHANGED: &str = "remote_sessions.changed";
 pub const CORE_TOPIC_WORKSPACE_MENU_CHANGED: &str = "workspace_menu.changed";
 pub const CORE_TOPIC_AUTOMATIONS_CHANGED: &str = "automations.changed";
 pub const CORE_TOPIC_AGENT_MESSAGE_DELIVERED: &str = "agent.message_delivered";
+/// 有人要看一段 daemon 里还没在跑的对话（典型是 daemon 冷重启后手机点开）。
+/// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
+pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requested";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_REMOTE_SESSIONS_READ: &str = "remote_sessions.read";
@@ -35,6 +38,9 @@ pub const CORE_CAPABILITY_PROJECT_READ: &str = "project.read";
 pub const CORE_CAPABILITY_WORKSPACE_CREATE: &str = "workspace.create";
 pub const CORE_CAPABILITY_WORKSPACE_RELEASE: &str = "workspace.release";
 pub const CORE_CAPABILITY_AGENT_MESSAGE_READ: &str = "agent.message.read";
+/// 接收对话唤醒请求。只有持有对话启动规格的一方（桌面端）该拿这项能力：
+/// daemon 靠「有没有人订阅」判断请求能不能被兑现。
+pub const CORE_CAPABILITY_CONVERSATION_WAKE: &str = "conversation.wake";
 pub const CORE_CAPABILITY_UI_CONTRIBUTE: &str = "ui.contribute";
 /// 允许插件注册产品级智能体及其会话控制器。ACP provider 仍只负责执行；这项
 /// capability 声明的是会话身份、生命周期和宿主 UI 的扩展所有权。
@@ -473,6 +479,12 @@ pub struct CoreProjectionEvent {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ConversationWakeRequested {
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentMessageDelivered {
     pub message_id: String,
     pub source_session_id: String,
@@ -542,6 +554,13 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_CAPABILITY_AGENT_MESSAGE_READ,
             None,
             16 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+            DeliveryClass::Ephemeral,
+            CORE_CAPABILITY_CONVERSATION_WAKE,
+            None,
+            4 * 1024,
         )?,
     ])
 }
@@ -1631,16 +1650,6 @@ fn validate_display_text(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct IgnoredManifestField;
-
-impl<'de> Deserialize<'de> for IgnoredManifestField {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        serde::de::IgnoredAny::deserialize(deserializer)?;
-        Ok(Self)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
@@ -1649,9 +1658,6 @@ pub struct PluginManifest {
     pub version: String,
     pub api_version: u16,
     pub entrypoint: String,
-    /// 已废弃。历史上用来区分 bun/wasm。解码时丢掉，不参与行为，也不写回。
-    #[serde(default, skip_serializing)]
-    runtime: IgnoredManifestField,
     #[serde(default)]
     pub subscriptions: Vec<SubscriptionDeclaration>,
     #[serde(default)]
@@ -2310,8 +2316,8 @@ mod tests {
     }
 
     #[test]
-    fn manifest_ignores_runtime_field() {
-        let manifest: PluginManifest = serde_json::from_value(json!({
+    fn manifest_rejects_runtime_field() {
+        let error = serde_json::from_value::<PluginManifest>(json!({
             "id": "com.example",
             "name": "Example",
             "version": "1.0.0",
@@ -2319,27 +2325,8 @@ mod tests {
             "runtime": "wasm",
             "entrypoint": "bin/example.ts"
         }))
-        .unwrap();
-        manifest.validate().unwrap();
-        assert!(
-            !serde_json::to_value(&manifest)
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .contains_key("runtime")
-        );
-
-        let error = serde_json::from_value::<PluginManifest>(json!({
-            "id": "com.example",
-            "name": "Example",
-            "version": "1.0.0",
-            "api_version": 1,
-            "runtime": "wasm",
-            "entrypoint": "module/example.wasm"
-        }))
-        .and_then(|manifest| manifest.validate().map_err(serde::de::Error::custom))
         .unwrap_err();
-        assert!(error.to_string().contains("bin"));
+        assert!(error.to_string().contains("runtime"));
     }
 
     #[test]
@@ -3095,6 +3082,12 @@ mod tests {
             (
                 CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
                 DeliveryClass::Durable,
+                None,
+                1,
+            ),
+            (
+                CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+                DeliveryClass::Ephemeral,
                 None,
                 1,
             ),

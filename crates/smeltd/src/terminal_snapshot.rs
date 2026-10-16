@@ -98,7 +98,8 @@ fn snapshot_mode_prefix<T: EventListener>(term: &Term<T>, clear_scrollback: bool
     let cols = term.columns().max(1);
     let screen_lines = term.screen_lines().max(1);
     let mut out = Vec::with_capacity(cols.saturating_mul(screen_lines).saturating_mul(8));
-    out.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+    reset_painting_modes(&mut out);
+    // 先切屏再恢复其余模式：kitty 栈按主/备用屏各存一份，必须落在当前屏上。
     if mode.contains(TermMode::ALT_SCREEN) {
         out.extend_from_slice(b"\x1b[?1049h");
     } else {
@@ -120,6 +121,7 @@ fn snapshot_mode_prefix<T: EventListener>(term: &Term<T>, clear_scrollback: bool
 fn snapshot_cursor_suffix<T: EventListener>(term: &Term<T>, out: &mut Vec<u8>) {
     let cols = term.columns().max(1);
     let screen_lines = term.screen_lines().max(1);
+    restore_painting_modes(out, *term.mode());
     let content = term.renderable_content();
     let cursor = content.cursor.point;
     let display_offset = term.grid().display_offset();
@@ -550,31 +552,89 @@ fn push_char(out: &mut Vec<u8>, ch: char) {
     out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 }
 
+/// keyframe 要还原的 DEC 私有模式（不影响画帧本身的那些）。
+///
+/// keyframe 是**绝对状态**：每一项都显式置位或复位，接收端不必是新建 Term。
+/// 新增协议模式时加在这里；`snapshot_round_trips_every_protocol_mode` 会拦住漏项。
+/// 鼠标上报三种、编码两种各自互斥，所以先统一复位、再置位。
+const DEC_PRIVATE_MODES: &[(TermMode, &[u8])] = &[
+    (TermMode::APP_CURSOR, b"1"),
+    (TermMode::MOUSE_REPORT_CLICK, b"1000"),
+    (TermMode::MOUSE_DRAG, b"1002"),
+    (TermMode::MOUSE_MOTION, b"1003"),
+    (TermMode::FOCUS_IN_OUT, b"1004"),
+    (TermMode::UTF8_MOUSE, b"1005"),
+    (TermMode::SGR_MOUSE, b"1006"),
+    (TermMode::ALTERNATE_SCROLL, b"1007"),
+    (TermMode::URGENCY_HINTS, b"1042"),
+    (TermMode::BRACKETED_PASTE, b"2004"),
+];
+
+/// alacritty 与手机端 xterm.dart 的 kitty 栈都是饱和弹出，弹这么多层即清空整栈
+/// （alacritty 栈深上限 4096）。
+const KITTY_POP_ALL: &[u8] = b"\x1b[<4096u";
+
+const KITTY_FLAG_BITS: &[(TermMode, u8)] = &[
+    (TermMode::DISAMBIGUATE_ESC_CODES, 1),
+    (TermMode::REPORT_EVENT_TYPES, 2),
+    (TermMode::REPORT_ALTERNATE_KEYS, 4),
+    (TermMode::REPORT_ALL_KEYS_AS_ESC, 8),
+    (TermMode::REPORT_ASSOCIATED_TEXT, 16),
+];
+
 fn append_mode_restores(out: &mut Vec<u8>, mode: TermMode) {
-    if mode.contains(TermMode::APP_CURSOR) {
-        out.extend_from_slice(b"\x1b[?1h");
-    }
-    if mode.contains(TermMode::BRACKETED_PASTE) {
-        out.extend_from_slice(b"\x1b[?2004h");
-    }
-    // 鼠标：按实际打开的子模式恢复（SGR 优先）
-    if mode.intersects(TermMode::MOUSE_MODE) {
-        if mode.contains(TermMode::SGR_MOUSE) {
-            out.extend_from_slice(b"\x1b[?1006h");
-        }
-        if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
-            out.extend_from_slice(b"\x1b[?1000h");
-        }
-        if mode.contains(TermMode::MOUSE_DRAG) {
-            out.extend_from_slice(b"\x1b[?1002h");
-        }
-        if mode.contains(TermMode::MOUSE_MOTION) {
-            out.extend_from_slice(b"\x1b[?1003h");
+    for (flag, param) in DEC_PRIVATE_MODES {
+        if !mode.contains(*flag) {
+            push_dec_mode(out, param, false);
         }
     }
-    if mode.contains(TermMode::FOCUS_IN_OUT) {
-        out.extend_from_slice(b"\x1b[?1004h");
+    for (flag, param) in DEC_PRIVATE_MODES {
+        if mode.contains(*flag) {
+            push_dec_mode(out, param, true);
+        }
     }
+    out.extend_from_slice(if mode.contains(TermMode::APP_KEYPAD) {
+        b"\x1b="
+    } else {
+        b"\x1b>"
+    });
+    // kitty 键盘协议只能还原当前屏的栈顶（栈本身是 Term 私有状态）。用 push 而不是
+    // `CSI = flags u`：后者只改模式不入栈，接收端对 `CSI ? u` 的应答会是 0；
+    // push 一层后，应用退出时那次 pop 也能正确回到无协议。
+    out.extend_from_slice(KITTY_POP_ALL);
+    let kitty_flags = KITTY_FLAG_BITS
+        .iter()
+        .filter(|(flag, _)| mode.contains(*flag))
+        .fold(0u8, |acc, (_, bit)| acc | bit);
+    if kitty_flags != 0 {
+        let _ = write!(out, "\x1b[>{kitty_flags}u");
+    }
+}
+
+/// 会改变画帧本身的模式：INSERT 会把 keyframe 字符插进行里、ORIGIN 会让 CUP
+/// 相对滚动区。画帧前一律复位，画完、定位光标之前再按源 Term 置位。
+fn reset_painting_modes(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\x1b[4l\x1b[20l\x1b[?6l");
+}
+
+fn restore_painting_modes(out: &mut Vec<u8>, mode: TermMode) {
+    if mode.contains(TermMode::INSERT) {
+        out.extend_from_slice(b"\x1b[4h");
+    }
+    if mode.contains(TermMode::LINE_FEED_NEW_LINE) {
+        out.extend_from_slice(b"\x1b[20h");
+    }
+    // DECOM 置位会把光标挑回原点，必须在最终 CUP 之前。滚动区（DECSTBM）是
+    // alacritty 私有状态、无法序列化，接收端是整屏，故此处相对坐标即绝对坐标。
+    if mode.contains(TermMode::ORIGIN) {
+        out.extend_from_slice(b"\x1b[?6h");
+    }
+}
+
+fn push_dec_mode(out: &mut Vec<u8>, param: &[u8], on: bool) {
+    out.extend_from_slice(b"\x1b[?");
+    out.extend_from_slice(param);
+    out.push(if on { b'h' } else { b'l' });
 }
 
 fn underline_kind(flags: Flags) -> u8 {

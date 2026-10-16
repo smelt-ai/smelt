@@ -4,8 +4,8 @@
 
 use super::*;
 
-/// 同 action_integration_tests::make_pipe_session 的构造，独立一份是为了让这
-/// 组测试不依赖那边的 Phase/管道语义——这里只关心几何。
+/// 同 `make_pipe_session` 的构造，独立一份是为了让这组测试不依赖那边的
+/// Phase/管道语义——这里只关心几何。读端故意忘掉，pid 也不是真子进程。
 fn make_session(rows: u16, cols: u16) -> Arc<Session> {
     let mut fds = [0i32; 2];
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() 失败");

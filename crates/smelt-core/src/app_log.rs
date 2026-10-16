@@ -58,7 +58,14 @@ pub fn log(level: &str, scope: &str, msg: &str) {
     {
         let _ = std::fs::rename(&path, rotated_path(&path));
     }
-    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    // 退出时线程局部存储按首次使用的反序销毁。`Local::now` 会读时区缓存那块
+    // 存储，存储没了就 panic。panic hook 里再 panic 会直接 abort，这次崩溃就
+    // 写不进日志。panic 进行中改用 `Utc`，它不碰那块存储。
+    let ts = if std::thread::panicking() {
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f")
+    } else {
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+    };
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

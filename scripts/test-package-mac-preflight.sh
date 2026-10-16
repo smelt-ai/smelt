@@ -17,6 +17,7 @@ mkdir -p "$FIXTURE/target/release"
 : >"$FIXTURE/target/release/smeltd"
 : >"$FIXTURE/target/release/smelt-notify"
 : >"$FIXTURE/target/release/smelt-agent-mcp"
+: >"$FIXTURE/target/release/smelt-installer"
 mkdir -p "$FIXTURE/plugins/example/bin"
 printf '%s\n' \
   '{"id":"com.example","entrypoint":"bin/example-plugin","bundled":true}' \

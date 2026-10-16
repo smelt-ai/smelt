@@ -926,6 +926,33 @@ impl RemoteSessionCatalog {
         Ok(changed)
     }
 
+    /// 按 smeltd 会话 id 改产品对话标题。只改标题，不改 cwd、启动参数或归属。
+    pub fn rename_acp_by_id(&mut self, id: &str, title: &str) -> Result<RemoteAcpSession, String> {
+        let title = title.trim();
+        if id.trim().is_empty() {
+            return Err("对话 id 不能为空".to_string());
+        }
+        if title.is_empty() {
+            return Err("对话标题不能为空".to_string());
+        }
+        let Some(index) = self
+            .acp_sessions
+            .iter()
+            .position(|session| session.id == id)
+        else {
+            return Err(format!("对话不存在: {id}"));
+        };
+        let mut updated = self.acp_sessions.clone();
+        updated[index].title = title.to_string();
+        let renamed = updated[index].clone();
+        if renamed.title != self.acp_sessions[index].title {
+            self.save_acp(&updated)?;
+            self.acp_sessions = updated;
+            self.bump_revision();
+        }
+        Ok(renamed)
+    }
+
     fn save_acp(&self, sessions: &[RemoteAcpSession]) -> Result<(), String> {
         persist_remote_catalog_parts(
             self.acp_path.as_ref(),
@@ -1251,6 +1278,115 @@ pub fn create_agent_conversation(
         agent_definition_id: agent_definition_id.to_string(),
         cwd: cwd.to_string_lossy().into_owned(),
     })
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AgentConversationSummary {
+    pub session_id: String,
+    pub title: String,
+    pub agent_definition_id: Option<String>,
+    pub cwd: String,
+}
+
+/// 列出侧栏「对话」栏里的产品对话。需要 smeltd。
+pub fn list_agent_conversations() -> Result<Vec<AgentConversationSummary>, String> {
+    let response = daemon_request(serde_json::json!({
+        "op": DaemonOperation::RemoteSessions,
+    }))?;
+    let snapshot: RemoteSessionSnapshot = response
+        .get("remote_sessions")
+        .cloned()
+        .ok_or_else(|| "smeltd 没有返回对话目录".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+    let mut conversations = snapshot
+        .sessions
+        .into_iter()
+        .filter(|session| session.kind == RemoteSessionKind::Acp && session.is_visible())
+        .filter(|session| !is_background_acp_session_id(&session.id))
+        .filter(|session| {
+            is_agent_conversation(
+                None,
+                agent_definition_id_from_option_id(
+                    session.agent_option_id.as_deref().unwrap_or(""),
+                ),
+                Some(&session.cwd),
+            )
+        })
+        .map(|session| AgentConversationSummary {
+            agent_definition_id: agent_definition_id_from_option_id(
+                session.agent_option_id.as_deref().unwrap_or(""),
+            )
+            .map(str::to_string),
+            session_id: session.id,
+            title: session.title,
+            cwd: session.cwd,
+        })
+        .collect::<Vec<_>>();
+    conversations.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    Ok(conversations)
+}
+
+/// 把已经写进工作区快照的对话标题改掉。GUI 没开时，下次冷启动靠这份标题，
+/// 而不是远程目录里的种子标题。没有这份快照或这场对话还没落盘时返回 false。
+pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Result<bool, String> {
+    let store = crate::sqlite_state::default_sqlite_store()?;
+    let Some(mut snapshot) = store
+        .get_workspace_snapshot()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    let encoded = serde_json::to_vec(title).map_err(|error| error.to_string())?;
+    let mut changed = false;
+    for session in &mut snapshot.sessions {
+        let Some(acp) = session.acp.as_mut() else {
+            continue;
+        };
+        if acp.sid.as_deref() != Some(session_id) {
+            continue;
+        }
+        if session.custom_title.as_deref() != Some(title) {
+            session.custom_title = Some(title.to_string());
+            changed = true;
+        }
+        if acp.session_title_json.as_deref() != Some(encoded.as_slice()) {
+            acp.session_title_json = Some(encoded.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        store
+            .put_workspace_snapshot(&snapshot)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(changed)
+}
+
+/// 重命名一场产品对话。目录、已保存的工作区标题和正在跑的 agent 会话名一起改。
+pub fn rename_agent_conversation(
+    session_id: &str,
+    title: &str,
+) -> Result<AgentConversationSummary, String> {
+    let session_id = session_id.trim();
+    let title = title.trim();
+    if session_id.is_empty() {
+        return Err("对话 id 不能为空".into());
+    }
+    if title.is_empty() {
+        return Err("对话标题不能为空".into());
+    }
+    let response = daemon_request(serde_json::json!({
+        "op": DaemonOperation::ConversationRename,
+        "id": session_id,
+        "title": title,
+    }))?;
+    serde_json::from_value(
+        response
+            .get("conversation")
+            .cloned()
+            .ok_or_else(|| "smeltd 没有返回改名结果".to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub fn create_remote_acp_session(session: &RemoteAcpSession) -> Result<(), String> {
@@ -1636,6 +1772,18 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let database = root.join(smelt_store::DATABASE_FILE_NAME);
         (root, database.clone(), database)
+    }
+
+    #[test]
+    fn rename_acp_by_id_changes_only_the_title() {
+        let mut catalog = RemoteSessionCatalog::in_memory();
+        catalog.upsert_acp(test_remote_acp("acp-1")).unwrap();
+        let renamed = catalog.rename_acp_by_id("acp-1", "  登录修复  ").unwrap();
+        assert_eq!(renamed.title, "登录修复");
+        assert_eq!(catalog.remote_acp("acp-1").unwrap().cwd, "/work/project");
+        let error = catalog.rename_acp_by_id("missing", "标题").unwrap_err();
+        assert!(error.contains("不存在"), "{error}");
+        assert!(catalog.rename_acp_by_id("acp-1", "   ").is_err());
     }
 
     fn test_remote_acp(id: &str) -> RemoteAcpSession {

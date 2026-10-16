@@ -1,38 +1,13 @@
 //! 设置页：模型 / DeepSeek Harness。
 
 use super::*;
+use smelt_ui::IconAction as _;
 
 pub(super) fn dsh_model_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
-    cx: &App,
+    _cx: &App,
 ) -> SettingPage {
-    let (fg, _muted, border, popover) = {
-        let t = cx.theme();
-        (t.foreground, t.muted_foreground, t.border, t.popover)
-    };
-    let btn_base = move |id: &'static str, label: String| {
-        div()
-            .id(id)
-            .h(px(26.))
-            .px_3()
-            .flex()
-            .flex_none()
-            .items_center()
-            .rounded_md()
-            .cursor_pointer()
-            .text_xs()
-            .text_color(fg)
-            .bg(popover)
-            .border_1()
-            .border_color(border)
-            .child(label)
-    };
-    let _btn = move |id: &'static str, label: String| btn_base(id, label).hover(|s| s.bg(border));
-    let _btn_hover = move |id: &'static str, label: String, hover_bg: Hsla| {
-        btn_base(id, label).hover(move |s| s.bg(hover_bg))
-    };
-
     // Native dsh owns providers, credentials and model settings. Keep the
     // removed editor out of compilation while the surrounding settings
     // layout remains stable.
@@ -649,8 +624,10 @@ pub(super) fn dsh_model_page(
                             let mut model_rows = v_flex().w_full().gap_2();
                             for (index, model) in editor.models.iter().enumerate() {
                                 let remove_entity = manage_entity.clone();
+                                let row_key = model.id.entity_id();
                                 model_rows = model_rows.child(
                                     v_flex()
+                                        .id(("dsh-custom-model", row_key))
                                         .w_full()
                                         .gap_2()
                                         .p_3()
@@ -671,13 +648,11 @@ pub(super) fn dsh_model_page(
                                                 )
                                                 .child(div().flex_1())
                                                 .child(
-                                                    Button::new(format!(
-                                                        "dsh-remove-custom-model-{index}"
-                                                    ))
+                                                    Button::new("dsh-remove-custom-model")
                                                     .ghost()
                                                     .small()
-                                                    .icon(IconName::Delete)
-                                                    .tooltip("移除此模型")
+                                                    .icon(crate::trash_icon())
+                                                    .icon_action("移除此模型")
                                                     .on_click(move |_, _, cx| {
                                                         remove_entity.update(
                                                             cx,

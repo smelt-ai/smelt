@@ -108,21 +108,6 @@ pub fn load_settings() -> WorktreeInheritSettings {
     }
 }
 
-pub fn save_settings(settings: &WorktreeInheritSettings) {
-    if let Ok(store) = crate::sqlite_state::default_sqlite_store() {
-        let _ = store.put_worktree_inherit_snapshot(&snapshot_from_settings(settings));
-    }
-}
-
-fn snapshot_from_settings(
-    settings: &WorktreeInheritSettings,
-) -> smelt_store::WorktreeInheritSnapshot {
-    smelt_store::WorktreeInheritSnapshot {
-        enabled: settings.enabled,
-        skip_patterns: settings.skip_patterns.clone(),
-    }
-}
-
 fn settings_from_snapshot(
     snapshot: smelt_store::WorktreeInheritSnapshot,
 ) -> WorktreeInheritSettings {
@@ -530,11 +515,10 @@ mod tests {
 
     #[test]
     fn explicit_empty_skip_patterns_survive_snapshot_roundtrip() {
-        let settings = WorktreeInheritSettings {
+        let restored = settings_from_snapshot(smelt_store::WorktreeInheritSnapshot {
             enabled: true,
             skip_patterns: Vec::new(),
-        };
-        let restored = settings_from_snapshot(snapshot_from_settings(&settings));
+        });
         assert!(restored.enabled);
         assert!(
             restored.skip_patterns.is_empty(),

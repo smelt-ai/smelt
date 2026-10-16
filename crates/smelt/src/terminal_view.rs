@@ -121,7 +121,7 @@ fn line_px() -> f32 {
 const CELL_W_RATIO: f32 = 0.6;
 /// 终端内容的每侧内边距（避免文字贴边被裁）。canvas 覆盖层保持满尺寸，
 /// 只把网格原点按此偏移，故鼠标/IME 坐标一致，网格可用区 = 尺寸 − 2×PAD。
-/// 顶边不按标题胶囊整行下移：状态行的字在左右两边，胶囊只盖住中间空档。
+/// 标题胶囊的顶带由舞台在终端外面让出（见 `CHROME_ISLAND_BAND_PX`），这里只管贴边留白。
 const PAD_X: f32 = 12.0;
 const PAD_Y: f32 = 8.0;
 /// Shift+PageUp/Down 每次滚动的行数。
@@ -476,8 +476,8 @@ impl TerminalView {
             self.refresh_search_highlights();
             cx.notify();
         }
-        // 纯 OSC 标题 / BEL 没有终端网格 damage：标题由 daemon 状态
-        // 订阅合并刷新侧栏，提醒由 AttentionGlobal 投递，都不应重画画布。
+        // 纯 OSC 标题 / BEL 没有终端网格 damage，不重画画布。
+        // 会话名来自 daemon 的 provider 标题或 prompt 兜底，不来自这里的 OSC。
     }
 
     fn invalidate_bell_timer(&mut self) {
@@ -697,11 +697,6 @@ impl TerminalView {
 
     pub fn mark_read(&mut self, cx: &mut Context<Self>) {
         self.clear_attention(cx);
-    }
-
-    /// agent 报告的终端标题（含任务名 + 状态符号）；供侧栏 / 总览显示。
-    pub fn agent_title(&self) -> Option<String> {
-        self.terminal.current_title()
     }
 
     pub fn title(&self) -> &str {
@@ -1191,6 +1186,7 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timing = smelt_ui::frame_stats::RenderTiming::start("TerminalView");
         if let Some(message) = self.write_error.take() {
             crate::status_item::notify_error(message);
         }
@@ -1328,6 +1324,7 @@ impl Render for TerminalView {
             bg_layer = bg_layer.child(crate::workspace_frame::background_image_layer(
                 path,
                 ap.bg_image_opacity,
+                cx,
             ));
         }
         // 整扇窗口的透明度由原生 NSWindow 统一处理，不能在这里重复叠加，
@@ -1380,13 +1377,9 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
                 let m = &ks.modifiers;
-                // 搜索条打开时：Esc 关闭；其它键留给输入框（不要灌进 PTY）。
-                if this.search_open {
-                    if ks.key == "escape" {
-                        this.close_search(window, cx);
-                    }
-                    // 搜索框属于终端；不能再让按键冒泡给工作区的文件树 / Git 快捷键。
-                    cx.stop_propagation();
+                // 只处理终端本身获焦时的按键；从子元素（搜索框）冒泡上来的按键由它自己处理，
+                // 不能灌进 PTY。搜索条开着与否不影响终端输入。
+                if !this.focus_handle.is_focused(window) {
                     return;
                 }
                 // IME 合成中：这些键归输入法（backspace 删拼音、enter/space/数字选词），
@@ -1397,7 +1390,8 @@ impl Render for TerminalView {
                     return;
                 }
                 // Cmd+F 打开搜索（action 也会绑，这里兜底）。
-                if m.platform && ks.key == "f" {
+                // 只认纯 Cmd+F：Cmd+Shift+F 是工作区的调试 HUD 开关，不能被这里截走。
+                if m.platform && !m.shift && !m.alt && !m.control && ks.key == "f" {
                     this.open_search(window, cx);
                     cx.stop_propagation();
                     return;
@@ -1795,6 +1789,14 @@ impl Render for TerminalView {
                     .border_1()
                     .border_color(rgb(crate::ui_theme::border_mid()))
                     .shadow_md()
+                    // 搜索框的按键在这里就地处理：Esc 关闭；其它键归输入框，
+                    // 不再冒泡给终端（会进 PTY）或工作区快捷键。
+                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                        if ev.keystroke.key == "escape" {
+                            this.close_search(window, cx);
+                        }
+                        cx.stop_propagation();
+                    }))
                     .child(
                         div()
                             .flex_1()

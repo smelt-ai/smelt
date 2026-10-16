@@ -1,8 +1,39 @@
 //! ACP 消息流虚拟列表。
 
 use super::*;
+use gpui_base::motion::MotionReveal;
 
-const USER_MESSAGE_ACTION_GROUP: &str = "acp-user-message-actions";
+fn owner_id(name: &'static str, owner: &gpui::SharedString) -> gpui::ElementId {
+    gpui::ElementId::from((gpui::ElementId::from(name), owner.clone()))
+}
+
+fn owner_part(name: &'static str, owner: &gpui::SharedString, part: usize) -> gpui::ElementId {
+    gpui::ElementId::from((gpui::ElementId::named_usize(name, part), owner.clone()))
+}
+
+fn user_message_context_menu(
+    menu: PopupMenu,
+    view: Entity<AcpView>,
+    cwd: Option<String>,
+    fork_index: Option<usize>,
+    fork_label: &'static str,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let menu = if let Some(index) = fork_index {
+        let fork_view = view.clone();
+        menu.item(
+            PopupMenuItem::new(fork_label)
+                .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
+                .on_click(move |_event, _window, cx| {
+                    fork_view.update(cx, |this, cx| this.fork_from_user_message(index, cx));
+                }),
+        )
+    } else {
+        menu
+    };
+    selected_text_context_menu(menu, view, cwd, window, cx)
+}
 
 /// 用户消息气泡。
 ///
@@ -22,6 +53,43 @@ fn user_message_bubble(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::D
         .text_sm()
 }
 
+/// 只包刚发送的那一条。nonce 进元素 id，虚拟列表把行卸掉再装上时，过了时钟就不再播。
+/// Div 没有 scale，用透明度和 6px 下落代替从 0.92 缩放进来。
+fn user_bubble_with_enter<E>(nonce: Option<u64>, index: usize, bubble: E) -> gpui::AnyElement
+where
+    E: gpui::Styled + gpui::IntoElement + 'static,
+{
+    let Some(nonce) = nonce else {
+        return bubble.into_any_element();
+    };
+    bubble
+        .with_animation(
+            format!("acp-user-enter-{nonce}-{index}"),
+            Animation::new(std::time::Duration::from_millis(ENTER_MS)).with_easing(ease_overshoot),
+            |bubble, delta| {
+                bubble
+                    .opacity(delta.clamp(0.0, 1.0))
+                    .relative()
+                    .top(px(enter_offset_px(delta)))
+            },
+        )
+        .into_any_element()
+}
+
+/// 回合中新出现的条目：淡入，同时从下方 4px 升到原位。只改绘制位置，不改行高，
+/// 虚拟列表不用为它重新测量。
+fn entry_with_enter(progress: Option<f32>, el: gpui::AnyElement) -> gpui::AnyElement {
+    let Some(progress) = progress else {
+        return el;
+    };
+    div()
+        .relative()
+        .top(px(4. * (1. - progress)))
+        .opacity(progress)
+        .child(el)
+        .into_any_element()
+}
+
 struct SubagentCard<'a> {
     index: usize,
     id: &'a str,
@@ -36,9 +104,60 @@ struct SubagentCard<'a> {
     animate_ambient: bool,
     muted: gpui::Hsla,
     border: gpui::Hsla,
+    live_elapsed: Option<u64>,
 }
 
 impl AcpView {
+    /// 消息列表里的 Markdown 正文。解析状态由视图按位置留着，不挂在元素上。
+    ///
+    /// 挂在元素上的状态，行一滚出虚拟列表的渲染范围就跟着丢。超过 4KB 的正文在后台
+    /// 解析，滚回来先以空内容量出一个很矮的高度，往回滚时会把整条回答跳过去，
+    /// 解析完又一下撑开。解析结果落地（含图片加载完重排）时请列表重新量这一行，
+    /// 还在视口外的行就能在滚到之前量对。
+    fn retained_markdown(
+        &self,
+        site: &'static str,
+        entry_ix: usize,
+        part: usize,
+        text: gpui::SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_component::text::TextView {
+        let global = self.loaded_entries_offset + entry_ix;
+        let mut retained = self.retained_text.borrow_mut();
+        let state = match retained.get_mut(&(site, global, part)) {
+            Some(slot) => {
+                if slot.text.as_ptr() != text.as_ptr() || slot.text.len() != text.len() {
+                    slot.state.update(cx, |state, cx| state.set_text(&text, cx));
+                    slot.text = text;
+                }
+                slot.state.clone()
+            }
+            None => {
+                let state = cx.new(|cx| gpui_component::text::TextViewState::markdown(&text, cx));
+                let remeasure = cx.observe(&state, move |this, _, cx| {
+                    let Some(ix) = global
+                        .checked_sub(this.loaded_entries_offset)
+                        .filter(|ix| *ix < this.entries.len())
+                    else {
+                        return;
+                    };
+                    this.list_state.remeasure_items(ix..ix + 1);
+                    cx.notify();
+                });
+                retained.insert(
+                    (site, global, part),
+                    super::super::RetainedText {
+                        state: state.clone(),
+                        text,
+                        _remeasure: remeasure,
+                    },
+                );
+                state
+            }
+        };
+        smelt_ui::markdown_mermaid::markdown_view_for_state(&state)
+    }
+
     pub(super) fn render_message_list(
         &self,
         animate_ambient: bool,
@@ -46,13 +165,13 @@ impl AcpView {
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let current_turn_active = self.has_active_turn();
-        let conversation_layout = std::rc::Rc::new(build_conversation_layout_with_timings(
-            &self.entries,
-            current_turn_active,
-            self.loaded_entries_offset,
-            &self.turn_timings,
-            live_elapsed_ms(self.turn_started_at_ms),
-        ));
+        let conversation_layout = self.conversation_layout();
+        // 虚拟列表把行高缓存到重新测量。高度还在变的思考详情和入场气泡，
+        // 不在布局前标脏的话，动画只改样式、行高不动。
+        let reveal_indices: Vec<usize> = self.thought_reveals.keys().copied().collect();
+        for ix in reveal_indices {
+            self.list_state.remeasure_items(ix..ix.saturating_add(1));
+        }
         // These values are stable for the whole render pass. Computing them once keeps the
         // virtual-list item builder from rescanning the full conversation for every row.
         let active_permission_tool_id = self
@@ -60,11 +179,19 @@ impl AcpView {
             .first()
             .map(|card| card.tool_call_id.clone());
         let latest_user_message_index = super::super::latest_user_message_index(&self.entries);
+        if self
+            .user_enter
+            .as_ref()
+            .is_some_and(|enter| enter.started.is_some())
+            && let Some(ix) = latest_user_message_index
+        {
+            self.list_state.remeasure_items(ix..ix.saturating_add(1));
+        }
         let view = cx.entity();
         let list = virtual_list(self.list_state.clone(), move |i, _window, app| {
             let conversation_layout = conversation_layout.clone();
             view.update(app, |this, cx| {
-                let t = cx.theme();
+                let t = cx.theme().colors;
                 let muted = t.muted_foreground;
                 let presentation = conversation_layout.get(i).copied().unwrap_or_default();
                 let final_answer = presentation.final_answer;
@@ -165,6 +292,21 @@ impl AcpView {
                         return div().into_any_element();
                     }
                 }
+                let elapsed_here = row_live_elapsed(
+                    current_turn_active,
+                    i,
+                    &this.entries,
+                    process_group,
+                    process_group
+                        .filter(|group| group.active)
+                        .and_then(|group| group.elapsed_ms)
+                        .or_else(|| live_elapsed_ms(this.turn_started_at_ms)),
+                    active_permission_tool_id.as_deref(),
+                );
+                let run_wraps_elapsed =
+                    tool_run.as_ref().is_some_and(|run| run.start == i) && elapsed_here.is_some();
+                let row_elapsed = elapsed_here.filter(|_| !run_wraps_elapsed);
+                let run_elapsed = elapsed_here.filter(|_| run_wraps_elapsed);
                 let entry = &this.entries[i];
                 let mut el: gpui::AnyElement = match entry {
                     // agent 回显的「中断」标记不是用户说的话，别套成气泡——
@@ -186,40 +328,18 @@ impl AcpView {
                         let can_edit = this.supports_rewind && !this.has_active_turn();
                         let show_edit = latest_user_message_index == Some(i) && can_edit;
                         let show_fork_edit = latest_user_message_index != Some(i) && can_edit;
+                        let fork_index = show_fork_edit.then_some(i);
                         h_flex()
-                            .group(USER_MESSAGE_ACTION_GROUP)
                             .w_full()
                             .justify_end()
                             .gap_2()
-                            .when(show_fork_edit, |row| {
-                                row.child(
-                                    Button::new(("acp-fork-edit-message", i))
-                                        .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
-                                        .ghost()
-                                        .xsmall()
-                                        .opacity(0.)
-                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                            style.opacity(1.)
-                                        })
-                                        .tooltip("保留原对话，从这条之前分叉并编辑重发")
-                                        .on_click(cx.listener(
-                                            move |this, _ev, _window, cx| {
-                                                this.fork_from_user_message(i, cx);
-                                            },
-                                        )),
-                                )
-                            })
                             .when(show_edit, |row| {
                                 row.child(
                                     Button::new(("acp-edit-message", i))
                                         .icon(Icon::new(IconName::Undo2))
                                         .ghost()
                                         .xsmall()
-                                        .opacity(0.)
-                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                            style.opacity(1.)
-                                        })
-                                        .tooltip("编辑并重发最后一条消息")
+                                        .icon_action("编辑并重发最后一条消息")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
                                                 this.rewind_to_message(i, cx);
@@ -227,27 +347,35 @@ impl AcpView {
                                         )),
                                 )
                             })
-                            .child(
+                            .child(user_bubble_with_enter(
+                                this.user_enter_nonce_for(i),
+                                i,
                                 user_message_bubble(("acp-user-message", i))
-                                    .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                        ("acp-user-md", i),
+                                    .debug_selector(move || format!("ACP_USER_MESSAGE_{i}"))
+                                    .child(this.retained_markdown(
+                                        "acp-user-md",
+                                        i,
+                                        0,
                                         cached_entry_markdown(
                                             &this.rendered_markdown,
                                             i,
                                             entry,
                                             this.cwd.as_deref(),
                                         ),
+                                        cx,
                                     ))
                                     .context_menu(move |menu, window, cx| {
-                                        selected_text_context_menu(
+                                        user_message_context_menu(
                                             menu,
                                             task_view.clone(),
                                             task_cwd.clone(),
+                                            fork_index,
+                                            "从这里分叉并编辑",
                                             window,
                                             cx,
                                         )
                                     }),
-                            )
+                            ))
                             .into_any_element()
                     }
                     AcpEntry::UserWithImages { text, images } => {
@@ -259,14 +387,17 @@ impl AcpView {
                         let mut content = v_flex().gap_2();
                         if !text.trim().is_empty() {
                             content = content.child(
-                                smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                    ("acp-user-images-md", i),
+                                this.retained_markdown(
+                                    "acp-user-images-md",
+                                    i,
+                                    0,
                                     cached_entry_markdown(
                                         &this.rendered_markdown,
                                         i,
                                         entry,
                                         this.cwd.as_deref(),
                                     ),
+                                    cx,
                                 ),
                             );
                         }
@@ -275,67 +406,48 @@ impl AcpView {
                             if let Some(image) = this.rendered_images.get(&(i, image_ix)).cloned() {
                                 image_strip = image_strip.child(render_clickable_image_thumb(
                                     image,
-                                    ("acp-sent-image", i * 1024 + image_ix),
+                                    ("acp-sent-image", image_ix),
                                     t.border,
                                     cx,
                                 ));
                             }
                         }
+                        let fork_index = show_fork_edit.then_some(i);
                         h_flex()
                             .w_full()
                             .justify_end()
                             .gap_2()
-                            .group(USER_MESSAGE_ACTION_GROUP)
-                            .when(show_fork_edit, |row| {
+                            .when(show_edit, |row| {
                                 row.child(
-                                    Button::new(("acp-fork-edit-message", i))
-                                        .icon(Icon::empty().path("smelt-icons/git-branch.svg"))
+                                    Button::new(("acp-edit-message", i))
+                                        .icon(Icon::new(IconName::Undo2))
                                         .ghost()
                                         .xsmall()
-                                        .opacity(0.)
-                                        .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                            style.opacity(1.)
-                                        })
-                                        .tooltip("保留原对话，从这条之前分叉并编辑重发（图片需重新添加）")
+                                        .icon_action("编辑并重发最后一条消息（图片需重新添加）")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
-                                                this.fork_from_user_message(i, cx);
+                                                this.rewind_to_message(i, cx);
                                             },
                                         )),
                                 )
                             })
-                            .when(show_edit, |row| {
-                                    row.child(
-                                        Button::new(("acp-edit-message", i))
-                                            .icon(Icon::new(IconName::Undo2))
-                                            .ghost()
-                                            .xsmall()
-                                            .opacity(0.)
-                                            .group_hover(USER_MESSAGE_ACTION_GROUP, |style| {
-                                                style.opacity(1.)
-                                            })
-                                            .tooltip("编辑并重发最后一条消息（图片需重新添加）")
-                                            .on_click(cx.listener(
-                                                move |this, _ev, _window, cx| {
-                                                    this.rewind_to_message(i, cx);
-                                                },
-                                            )),
-                                    )
-                                },
-                            )
-                            .child(
+                            .child(user_bubble_with_enter(
+                                this.user_enter_nonce_for(i),
+                                i,
                                 user_message_bubble(("acp-user-images-message", i))
                                     .child(content.child(image_strip))
                                     .context_menu(move |menu, window, cx| {
-                                        selected_text_context_menu(
+                                        user_message_context_menu(
                                             menu,
                                             task_view.clone(),
                                             task_cwd.clone(),
+                                            fork_index,
+                                            "从这里分叉并编辑（图片需重新添加）",
                                             window,
                                             cx,
                                         )
                                     }),
-                            )
+                            ))
                             .into_any_element()
                     }
                     // 过程组里的思考和中间正文都走进展行：一行摘要，长文可展开。
@@ -345,11 +457,29 @@ impl AcpView {
                         div().h(px(0.)).w_full().overflow_hidden().into_any_element()
                     }
                     AcpEntry::Assistant { text, .. } if process_group.is_some() => this
-                        .render_progress_entry(i, entry, text, true, muted, cx),
+                        .render_progress_entry(
+                            i,
+                            entry,
+                            text,
+                            true,
+                            muted,
+                            row_elapsed,
+                            animate_ambient,
+                            cx,
+                        ),
                     AcpEntry::Assistant {
                         text,
                         thought: true,
-                    } => this.render_progress_entry(i, entry, text, false, muted, cx),
+                    } => this.render_progress_entry(
+                        i,
+                        entry,
+                        text,
+                        false,
+                        muted,
+                        row_elapsed,
+                        animate_ambient,
+                        cx,
+                    ),
                     AcpEntry::Assistant {
                         text,
                         thought: false,
@@ -362,25 +492,29 @@ impl AcpView {
                             .min_w_0()
                             .text_sm()
                             .text_color(t.foreground)
-                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                ("acp-md", i),
+                            .child(this.retained_markdown(
+                                "acp-md",
+                                i,
+                                0,
                                 cached_entry_markdown(
                                     &this.rendered_markdown,
                                     i,
                                     entry,
                                     this.cwd.as_deref(),
                                 ),
+                                cx,
                             ))
                             .when(final_answer, |col| {
                                 col.child(
                                     h_flex()
                                         .pt_1()
                                         .gap_1()
-                                        .child(
-                                            Clipboard::new(("acp-copy-answer", i))
-                                                .value(text.clone())
-                                                .tooltip("复制回答"),
-                                        )
+                                        .child(this.render_copy_button(
+                                            CopySite::Answer(i),
+                                            text.clone(),
+                                            "复制回答",
+                                            cx,
+                                        ))
                                         .when(
                                             smelt_core::session_handoff::live_fork_is_available(
                                                 this.agent,
@@ -394,7 +528,7 @@ impl AcpView {
                                                         )
                                                         .ghost()
                                                         .xsmall()
-                                                        .tooltip("分叉对话")
+                                                        .icon_action("分叉对话")
                                                         .on_click(cx.listener(
                                                             move |this, _ev, _window, cx| {
                                                                 this.fork_from_answer(i, cx);
@@ -480,9 +614,12 @@ impl AcpView {
                                             .child(status_label),
                                     ),
                             )
-                            .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                ("acp-completion-md", i),
+                            .child(this.retained_markdown(
+                                "acp-completion-md",
+                                i,
+                                0,
                                 body_markdown,
+                                cx,
                             ))
                             .context_menu(move |menu, window, cx| {
                                 selected_text_context_menu(
@@ -498,11 +635,12 @@ impl AcpView {
                                 h_flex()
                                     .pt_1()
                                     .gap_1()
-                                    .child(
-                                        Clipboard::new(("acp-copy-completion", i))
-                                            .value(body)
-                                            .tooltip("复制完成摘要"),
-                                    ),
+                                    .child(this.render_copy_button(
+                                        CopySite::Completion(i),
+                                        body.clone(),
+                                        "复制完成摘要",
+                                        cx,
+                                    )),
                             );
                         }
                         answer.into_any_element()
@@ -515,6 +653,7 @@ impl AcpView {
                         output,
                         children,
                     } => {
+                        let owner = super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, id);
                         let failed = matches!(status, ToolCallStatus::Failed);
                         let status_label: &str = match status {
                             ToolCallStatus::Pending => "待执行",
@@ -554,6 +693,7 @@ impl AcpView {
                             div().w_full().into_any_element()
                         } else if compact_in_process {
                             let can_expand = has_expandable_content;
+                            let headline = compact_tool_headline(*kind, title);
                             let diff_stats = cached_diff_stats(
                                 this.rendered_diffs.get(id).map(|parts| parts.as_slice()),
                             )
@@ -565,7 +705,7 @@ impl AcpView {
                                 muted
                             };
                             let mut row = h_flex()
-                                .id(("acp-tool-compact", i))
+                                .id(owner_id("acp-tool-compact", &owner))
                                 .debug_selector(move || format!("ACP_TOOL_COMPACT_{i}"))
                                 .w_full()
                                 .min_h(px(22.))
@@ -597,7 +737,7 @@ impl AcpView {
                                                 s.text_color(gpui::rgb(ui_theme::text_bright()))
                                             })
                                         })
-                                        .child(compact_tool_headline(*kind, title)),
+                                        .child(headline.clone()),
                                 );
                             if failed {
                                 row = row.child(
@@ -620,15 +760,19 @@ impl AcpView {
                                         .child(summary),
                                 );
                             }
+                            if let Some(elapsed_ms) = row_elapsed {
+                                row = row.child(elapsed_suffix(elapsed_ms, muted));
+                            }
                             if can_expand {
                                 this.tool_output_popover(
                                     i,
                                     muted,
-                                    Button::new(("acp-tool-compact-trigger", i))
+                                    Button::new(owner_id("acp-tool-compact-trigger", &owner))
                                         .text()
                                         .w_full()
                                         .justify_start()
                                         .group(PEEK_ROW_GROUP)
+                                        .accessibility_label(headline)
                                         .child(row),
                                 )
                                 .into_any_element()
@@ -651,6 +795,7 @@ impl AcpView {
                                     animate_ambient,
                                     muted,
                                     border: t.border,
+                                    live_elapsed: row_elapsed,
                                 },
                                 cx,
                             )
@@ -671,7 +816,7 @@ impl AcpView {
                             ) {
                                 if animate_ambient {
                                     ambient_spinner(
-                                        ("acp-tool-status-spin", i),
+                                        "acp-tool-status-spin",
                                         muted,
                                         animate_ambient,
                                     )
@@ -711,7 +856,7 @@ impl AcpView {
 
                         let mut card = v_flex().w_full();
                         let mut header = h_flex()
-                            .id(("acp-tool-card-toggle", i))
+                            .id(owner_id("acp-tool-card-toggle", &owner))
                             .w_full()
                             .min_h(px(22.))
                             .gap_2()
@@ -754,7 +899,10 @@ impl AcpView {
                                     .text_color(ink)
                                     .child(compact_tool_headline(*kind, title)),
                             )
-                            .child(header_right);
+                            .child(header_right)
+                            .when_some(row_elapsed, |header, elapsed_ms| {
+                                header.child(elapsed_suffix(elapsed_ms, muted))
+                            });
                         card = card.child(header);
                         if card_expanded {
                             for (part_ix, part) in output.iter().enumerate() {
@@ -773,7 +921,7 @@ impl AcpView {
                                                 .gap_1()
                                                 .child(
                                                     selectable_plain_text(
-                                                        ("acp-diff-path", i * 100 + part_ix),
+                                                        owner_part("acp-diff-path", &owner, part_ix),
                                                         path,
                                                     )
                                                         .text_xs()
@@ -782,7 +930,7 @@ impl AcpView {
                                                 .children(cached.map(|diff| {
                                                     render_diff_lines(
                                                         &diff.lines,
-                                                        (i, part_ix),
+                                                        owner_part("acp-diff", &owner, part_ix),
                                                         t.border,
                                                         t.muted_foreground,
                                                     )
@@ -808,9 +956,12 @@ impl AcpView {
                                                 lines[..TOOL_OUTPUT_PREVIEW_LINES].join("\n")
                                             };
                                             let need_toggle = total > TOOL_OUTPUT_PREVIEW_LINES;
-                                            let body_el = smelt_ui::markdown_mermaid::markdown_view_clickable(
-                                                ("acp-tool-output-md", i * 100 + part_ix),
-                                                shown,
+                                            let body_el = this.retained_markdown(
+                                                "acp-tool-output-md",
+                                                i,
+                                                part_ix,
+                                                shown.into(),
+                                                cx,
                                             )
                                             .text_xs()
                                             .text_color(muted)
@@ -826,9 +977,10 @@ impl AcpView {
                                                         let key = key.clone();
                                                         d.child(
                                                             div()
-                                                                .id((
+                                                                .id(owner_part(
                                                                     "acp-tool-toggle",
-                                                                    i * 100 + part_ix,
+                                                                    &owner,
+                                                                    part_ix,
                                                                 ))
                                                                 .text_xs()
                                                                 .text_color(faint)
@@ -887,7 +1039,7 @@ impl AcpView {
                                                 div().pl_5().pt_1().pb_1().child(
                                                     render_clickable_image_thumb(
                                                         image,
-                                                        ("acp-tool-image", i * 100 + part_ix),
+                                                        owner_part("acp-tool-image", &owner, part_ix),
                                                         t.border,
                                                         cx,
                                                     ),
@@ -922,20 +1074,63 @@ impl AcpView {
                         }
                     }
                     AcpEntry::TaskNote(note) => {
-                        let mut block = v_flex().w_full().gap_1().py_1().child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(note.summary()),
-                        );
-                        if !note.output_tail.trim().is_empty() {
+                        let note_owner =
+                            super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, &note.id);
+                        // 后台任务和后台子智能体的结果：默认只占一行。输出可能很长，模型已经
+                        // 拿到完整内容，人要看时再点开，展开后限高滚动。展开状态和思考详情
+                        // 共用 `expanded_thoughts`（key 都是 entries 下标，互不冲突）。
+                        let has_output = !note.output_tail.trim().is_empty();
+                        let expanded = has_output && this.expanded_thoughts.contains(&i);
+                        let summary = h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1p5()
+                            .items_center()
+                            .py_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(div().min_w_0().truncate().child(note.summary()));
+                        let summary = if has_output {
+                            let hover = t.foreground;
+                            summary
+                                .id(owner_id("acp-task-note-row", &note_owner))
+                                .cursor_pointer()
+                                .hover(move |row| row.text_color(hover))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(if expanded { "▾" } else { "▸" }),
+                                )
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    if !this.expanded_thoughts.remove(&i) {
+                                        this.expanded_thoughts.insert(i);
+                                    }
+                                    this.list_state.remeasure_items(i..i.saturating_add(1));
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        } else {
+                            summary.into_any_element()
+                        };
+                        let mut block = v_flex().w_full().child(summary);
+                        if expanded {
                             block = block.child(
-                                div().w_full().child(
-                                    selectable_plain_text(("acp-task-note", i), &note.output_tail)
+                                div()
+                                    .id(owner_id("acp-task-note-output", &note_owner))
+                                    .w_full()
+                                    .max_h(px(320.))
+                                    .overflow_y_scroll()
+                                    .pl_3()
+                                    .pb_2()
+                                    .child(
+                                        selectable_plain_text(
+                                            owner_id("acp-task-note", &note_owner),
+                                            &note.output_tail,
+                                        )
                                         .text_xs()
                                         .text_color(muted)
                                         .font_family(smelt_core::font_config::font_family()),
-                                ),
+                                    ),
                             );
                         }
                         block.into_any_element()
@@ -974,7 +1169,7 @@ impl AcpView {
                     let mut col = v_flex()
                         .w_full()
                         .gap_1()
-                        .child(this.render_compact_tool_run(run, muted, cx));
+                        .child(this.render_compact_tool_run(run, muted, run_elapsed, cx));
                     if start_has_card {
                         col = col.child(el);
                     }
@@ -1006,13 +1201,6 @@ impl AcpView {
                         .child(el)
                         .into_any_element();
                 }
-                if let Some(group) = process_group
-                    && group.active
-                    && process_expanded
-                    && i + 1 == group.end
-                {
-                    el = this.with_live_elapsed_footer(el, group.elapsed_ms, animate_ambient);
-                }
                 if current_turn_active
                     && i + 1 == this.entries.len()
                     && is_user_entry(entry)
@@ -1024,22 +1212,10 @@ impl AcpView {
                         .child(el)
                         .child(this.render_working_status(
                             live_elapsed_ms(this.turn_started_at_ms),
-                            muted,
-                            animate_ambient,
                             i,
+                            animate_ambient,
                         ))
                         .into_any_element();
-                }
-                if current_turn_active
-                    && i + 1 == this.entries.len()
-                    && process_group.is_none()
-                    && !is_user_entry(entry)
-                {
-                    el = this.with_live_elapsed_footer(
-                        el,
-                        live_elapsed_ms(this.turn_started_at_ms),
-                        animate_ambient,
-                    );
                 }
                 // `gpui::list` 不像 flex 容器那样处理 `gap`；间距必须属于
                 // 虚拟项本身，否则测得的高度不包含消息间的留白。
@@ -1061,8 +1237,9 @@ impl AcpView {
                         _ => 16.,
                     }
                 };
-                // 没有顶栏时，第一条让开标题胶囊；滚上去仍会钻到它底下。
-                let top = if clear_capsule && i == 0 {
+                // 没有顶栏时，第一条和从胶囊跳回的那一问让开标题胶囊；滚上去
+                // 仍会钻到它底下。
+                let top = if clear_capsule && (i == 0 || this.revealed_prompt == Some(i)) {
                     ui_theme::CHROME_ISLAND_CLEARANCE_PX
                 } else {
                     0.
@@ -1078,67 +1255,45 @@ impl AcpView {
                         div()
                             .w_full()
                             .max_w(ui_theme::conversation_max_width())
-                            .child(el),
+                            .child(entry_with_enter(this.entry_enter_progress(i), el)),
                     )
                     .into_any_element()
             })
         })
-        .w_full()
-        .flex_1()
+        // 这条列表是缓存视图的根。GPUI 用 layout_as_root 单独排它，
+        // 不在外层 flex 里。flex_1 只对 flex 子项生效，根节点高度会塌成 0：
+        // 历史补进来之后欢迎语消失，舞台只剩一块黑。
+        .size_full()
         .min_h_0();
         list.into_any_element()
     }
 
+    /// 模型还没出字时的一行耗时。有动作之后，时间改挂在那一行后面。
     fn render_working_status(
         &self,
         elapsed_ms: Option<u64>,
-        muted: gpui::Hsla,
-        animate_ambient: bool,
         entry_ix: usize,
+        animate_ambient: bool,
     ) -> gpui::AnyElement {
-        let label = elapsed_ms
+        let elapsed = elapsed_ms
             .map(format_duration)
-            .map(|elapsed| format!("已用 {elapsed}"))
-            .unwrap_or_else(|| "已用 0s".to_string());
+            .unwrap_or_else(|| "0s".to_string());
+        let mark: gpui::Hsla = gpui::rgb(ui_theme::text_muted()).into();
         h_flex()
             .id(("acp-working", entry_ix))
             .debug_selector(move || format!("ACP_WORKING_{entry_ix}"))
-            .w_full()
-            .h(px(28.))
-            .flex_shrink_0()
+            .h(ui_theme::height::xxs())
             .gap_1p5()
             .items_center()
-            .child(ambient_spinner(
-                ("acp-working-spinner", entry_ix),
-                gpui::rgb(ui_theme::text_muted()).into(),
+            .text_xs()
+            .font_features(ui_theme::tabular_figures())
+            .text_color(gpui::rgb(ui_theme::text_muted()))
+            .child(quiet_dots(
+                ("acp-working-dots", entry_ix),
+                mark,
                 animate_ambient,
             ))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(label),
-            )
-            .into_any_element()
-    }
-
-    fn with_live_elapsed_footer(
-        &self,
-        el: gpui::AnyElement,
-        elapsed_ms: Option<u64>,
-        animate_ambient: bool,
-    ) -> gpui::AnyElement {
-        v_flex()
-            .w_full()
-            .gap_1()
-            .child(el)
-            .child(self.render_working_status(
-                elapsed_ms,
-                gpui::rgb(ui_theme::text_muted()).into(),
-                animate_ambient,
-                usize::MAX,
-            ))
+            .child(working_status_label(&elapsed))
             .into_any_element()
     }
 
@@ -1155,19 +1310,31 @@ impl AcpView {
         let group_label = process_group_header_label(&self.entries, group);
         let group_accent_u32 = ui_theme::text_muted();
         let group_accent = gpui::rgb(group_accent_u32);
+        // 有工具在跑仍用 spinner。只有思考、没有进行中的工具或子 agent 时换成安静的点。
+        let thinking = group.active
+            && group.active_tool_kind.is_none()
+            && group.agents == 0
+            && group.active_agents == 0;
         h_flex()
             .id(("acp-process-group", group.first))
             .debug_selector(move || format!("ACP_PROCESS_GROUP_{}", group.first))
             .w_full()
-            .h(px(28.))
+            .h(ui_theme::height::sm())
             .flex_shrink_0()
             .gap_1p5()
             .items_center()
             .cursor_pointer()
             .hover(|row| row.opacity(0.78))
-            .when(group.active, |row| {
+            .when(group.active && !thinking, |row| {
                 row.child(ambient_spinner(
                     ("acp-process-group-spinner", group.first),
+                    group_accent.into(),
+                    animate_ambient,
+                ))
+            })
+            .when(thinking, |row| {
+                row.child(quiet_dots(
+                    ("acp-process-think", group.first),
                     group_accent.into(),
                     animate_ambient,
                 ))
@@ -1203,22 +1370,30 @@ impl AcpView {
         &self,
         run: &CompactToolRun,
         muted: gpui::Hsla,
+        live_elapsed: Option<u64>,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let start = run.start;
         let open = self.tool_run_is_open(start);
         let count = run.indices.len();
         let faint = gpui::rgb(ui_theme::text_faint());
-        let items: Vec<(usize, String)> = run
+        let owner_cache = &self.layout_cache;
+        let run_owner = run
             .indices
             .iter()
-            .filter_map(|&ix| match self.entries.get(ix) {
-                Some(AcpEntry::ToolCall { title, .. }) => Some((ix, title.clone())),
+            .find_map(|&ix| match self.entries.get(ix) {
+                Some(AcpEntry::ToolCall { id, .. }) => Some(super::super::lookup_owner(
+                    &owner_cache.borrow().owner_ids,
+                    id,
+                )),
                 _ => None,
             })
-            .collect();
+            .unwrap_or_else(|| gpui::SharedString::from(start.to_string()));
+        let run_label = compact_tool_run_label(run.kind, count);
         let header = h_flex()
-            .id(("acp-tool-run", start))
+            .id(owner_id("acp-tool-run", &run_owner))
+            .role(gpui::Role::Button)
+            .aria_label(run_label.clone())
             .debug_selector(move || format!("ACP_TOOL_RUN_{start}"))
             .group(EXPAND_ICON_GROUP)
             .w_full()
@@ -1238,25 +1413,44 @@ impl AcpView {
                     .truncate()
                     .text_xs()
                     .text_color(muted)
-                    .child(compact_tool_run_label(run.kind, count)),
+                    .child(run_label),
             )
+            .when_some(live_elapsed, |header, elapsed_ms| {
+                header.child(elapsed_suffix(elapsed_ms, muted))
+            })
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.toggle_tool_run(start, cx);
             }));
         let mut col = v_flex()
-            .id(("acp-tool-run-box", start))
+            .id(owner_id("acp-tool-run-box", &run_owner))
             .w_full()
             .child(header);
         if open {
-            for (ix, title) in items {
-                let can_expand = match self.entries.get(ix) {
-                    Some(AcpEntry::ToolCall {
-                        output, children, ..
-                    }) => tool_output_has_content(output) || !children.is_empty(),
-                    _ => false,
+            for &ix in &run.indices {
+                let Some((tool_owner, can_expand, title)) =
+                    self.entries.get(ix).and_then(|entry| {
+                        let AcpEntry::ToolCall {
+                            id,
+                            title,
+                            output,
+                            children,
+                            ..
+                        } = entry
+                        else {
+                            return None;
+                        };
+                        Some((
+                            super::super::lookup_owner(&owner_cache.borrow().owner_ids, id),
+                            tool_output_has_content(output) || !children.is_empty(),
+                            title.clone(),
+                        ))
+                    })
+                else {
+                    continue;
                 };
+                let headline = compact_tool_headline(run.kind, &title);
                 let row = h_flex()
-                    .id(("acp-tool-run-item", ix))
+                    .id(owner_id("acp-tool-run-item", &tool_owner))
                     .debug_selector(move || format!("ACP_TOOL_RUN_ITEM_{ix}"))
                     .w_full()
                     .min_h(px(20.))
@@ -1287,17 +1481,18 @@ impl AcpView {
                                     s.text_color(gpui::rgb(ui_theme::text_bright()))
                                 })
                             })
-                            .child(compact_tool_headline(run.kind, &title)),
+                            .child(headline.clone()),
                     );
                 col = col.child(if can_expand {
                     self.tool_output_popover(
                         ix,
                         muted,
-                        Button::new(("acp-tool-run-item-trigger", ix))
+                        Button::new(owner_id("acp-tool-run-item-trigger", &tool_owner))
                             .text()
                             .w_full()
                             .justify_start()
                             .group(PEEK_ROW_GROUP)
+                            .accessibility_label(headline)
                             .child(row),
                     )
                     .into_any_element()
@@ -1328,25 +1523,34 @@ impl AcpView {
             animate_ambient,
             muted,
             border,
+            live_elapsed,
         } = card;
         let faint = gpui::rgb(ui_theme::text_faint());
         let red = gpui::rgb(ui_theme::red());
         let ink = if failed { red.into() } else { muted };
+        // 转后台的派发调用一启动就返回，调用本身是「完成」。子智能体还在不在跑，以宿主里
+        // 挂着这次调用的后台任务为准：Pi 没了任务也跟着结束，不会一直转。
+        let background_running = background_task_running_for(&self.background_tasks, id);
         let running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
-            || smelt_core::acp_chat::has_unfinished_tool_call(children);
+            || smelt_core::acp_chat::has_unfinished_tool_call(children)
+            || background_running;
         let roster = smelt_core::acp_chat::is_subagent_roster(children);
         let mut headline = smelt_core::acp_chat::subagent_card_title(title, children);
         if headline.is_empty() {
             headline = "子代理".to_string();
         }
-        let progress = smelt_core::acp_chat::subagent_progress_text(status, children);
+        let mut progress = smelt_core::acp_chat::subagent_progress_text(status, children);
+        if background_running && progress.is_empty() {
+            progress = "后台运行中".to_string();
+        }
         let progress_failed = failed || progress.contains("失败");
         let show_fail_label = failed && !progress.contains("失败");
         let show_header_spinner = running && !(card_expanded && roster);
         let show_check = !running && !progress_failed && progress.is_empty();
+        let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
         let id_for_toggle = id.to_string();
         let mut header = h_flex()
-            .id(("acp-subagent-toggle", i))
+            .id(owner_id("acp-subagent-toggle", &owner))
             .w_full()
             .min_h(px(24.))
             .gap_2()
@@ -1387,7 +1591,11 @@ impl AcpView {
         }
         let status_el: gpui::AnyElement = if show_header_spinner {
             if animate_ambient {
-                ambient_spinner(("acp-subagent-spin", i), muted, animate_ambient)
+                ambient_spinner(
+                    owner_id("acp-subagent-spin", &owner),
+                    muted,
+                    animate_ambient,
+                )
             } else {
                 Icon::new(IconName::Loader)
                     .size(px(13.))
@@ -1409,9 +1617,13 @@ impl AcpView {
         } else {
             div().into_any_element()
         };
-        header = header.child(status_el);
+        header = header
+            .child(status_el)
+            .when_some(live_elapsed, |header, elapsed_ms| {
+                header.child(elapsed_suffix(elapsed_ms, muted))
+            });
         let mut card = v_flex()
-            .id(("acp-subagent-card", i))
+            .id(owner_id("acp-subagent-card", &owner))
             .w_full()
             .rounded(ui_theme::card_radius())
             .border_1()
@@ -1462,7 +1674,7 @@ impl AcpView {
         let faint = gpui::rgb(ui_theme::text_faint());
         let red = gpui::rgb(ui_theme::red());
         let mut col = v_flex().w_full().gap_1();
-        for (child_ix, child) in children.iter().enumerate() {
+        for child in children {
             col = col.child(match child {
                 AcpEntry::Assistant { text, thought } => {
                     let line = text.lines().next().unwrap_or_default();
@@ -1500,8 +1712,10 @@ impl AcpView {
                     let has_nested = !nested.is_empty() || tool_output_has_content(output);
                     let expanded = self.tool_card_is_expanded(id, has_nested, false);
                     let spinning = matches!(status, ToolCallStatus::InProgress) || nested_running;
+                    let owner =
+                        super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
                     let glyph = subagent_child_status_glyph(
-                        ("acp-subagent-child-spin", parent_ix * 4096 + child_ix),
+                        owner_id("acp-subagent-child-spin", &owner),
                         spinning,
                         failed,
                         matches!(status, ToolCallStatus::Completed) && !spinning,
@@ -1510,7 +1724,7 @@ impl AcpView {
                         faint.into(),
                     );
                     let mut row = h_flex()
-                        .id(("acp-subagent-child", parent_ix * 4096 + child_ix))
+                        .id(owner_id("acp-subagent-child", &owner))
                         .w_full()
                         .min_h(px(22.))
                         .gap_2()
@@ -1576,7 +1790,7 @@ impl AcpView {
     }
 
     fn tool_output_popover(&self, entry_ix: usize, muted: gpui::Hsla, trigger: Button) -> Popover {
-        let (kind, output, children, diffs, images) = match self.entries.get(entry_ix) {
+        let (tool_id, kind, output, children, diffs, images) = match self.entries.get(entry_ix) {
             Some(AcpEntry::ToolCall {
                 id,
                 kind,
@@ -1584,6 +1798,7 @@ impl AcpView {
                 children,
                 ..
             }) => (
+                super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id),
                 *kind,
                 output.clone(),
                 children.clone(),
@@ -1599,14 +1814,14 @@ impl AcpView {
             }
         };
         let border: gpui::Hsla = ui_theme::card_stroke().into();
-        Popover::new(("acp-tool-output-pop", entry_ix))
+        Popover::new(owner_id("acp-tool-output-pop", &tool_id))
             .anchor(Anchor::BottomLeft)
             .appearance(false)
             .p_0()
             .trigger(trigger)
             .content(move |_, _, _| {
                 render_tool_output_popover_body(ToolOutputPopoverBody {
-                    entry_ix,
+                    tool_id: tool_id.clone(),
                     kind,
                     output: &output,
                     diffs: diffs.as_deref(),
@@ -1628,11 +1843,26 @@ impl AcpView {
         text: &str,
         in_process: bool,
         muted: gpui::Hsla,
-        cx: &Context<Self>,
+        live_elapsed: Option<u64>,
+        animate_ambient: bool,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_thoughts.contains(&entry_ix);
-        let preview = progress_summary(text);
+        let mut preview = progress_summary(text);
+        if !in_process && preview.is_empty() && live_elapsed.is_some() {
+            preview = "正在想".to_string();
+        }
         let has_details = progress_has_details(text);
+        let settled = if !in_process && live_elapsed.is_none() {
+            settled_thought_elapsed(
+                &self.entries,
+                entry_ix,
+                self.loaded_entries_offset,
+                &self.turn_timings,
+            )
+        } else {
+            None
+        };
         let mut row = h_flex()
             .id((
                 if in_process {
@@ -1654,7 +1884,9 @@ impl AcpView {
             })
             .child(if in_process {
                 let thought = matches!(entry, AcpEntry::Assistant { thought: true, .. });
-                if has_details && thought {
+                if thought && live_elapsed.is_some() {
+                    quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
+                } else if has_details && thought {
                     expandable_lead_icon(IconName::Asterisk, expanded, muted)
                 } else if thought {
                     Icon::new(IconName::Asterisk)
@@ -1681,6 +1913,8 @@ impl AcpView {
                         .border_color(muted)
                         .into_any_element()
                 }
+            } else if live_elapsed.is_some() {
+                quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
             } else {
                 div()
                     .flex_shrink_0()
@@ -1697,10 +1931,24 @@ impl AcpView {
                     .truncate()
                     .text_xs()
                     .text_color(muted)
-                    .child(preview),
-            );
+                    .child(preview.clone()),
+            )
+            .when_some(live_elapsed, |row, elapsed_ms| {
+                row.child(elapsed_suffix(elapsed_ms, muted))
+            })
+            .when_some(settled, |row, elapsed_ms| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(settled_thought_label(elapsed_ms)),
+                )
+            });
         if has_details {
             row = row
+                .role(gpui::Role::Button)
+                .aria_label(preview)
                 .cursor_pointer()
                 .when(!in_process, |row| {
                     row.hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
@@ -1713,47 +1961,63 @@ impl AcpView {
                         )
                 })
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
-                    if !this.expanded_thoughts.remove(&entry_ix) {
+                    let open = if this.expanded_thoughts.remove(&entry_ix) {
+                        false
+                    } else {
                         this.expanded_thoughts.insert(entry_ix);
-                    }
+                        true
+                    };
+                    this.thought_reveals.insert(
+                        entry_ix,
+                        ThoughtReveal {
+                            open,
+                            started: std::time::Instant::now(),
+                        },
+                    );
                     this.list_state
                         .remeasure_items(entry_ix..entry_ix.saturating_add(1));
                     cx.notify();
                 }));
         }
-        v_flex()
-            .w_full()
-            .min_w_0()
-            .child(row)
-            .when(expanded && has_details, |col| {
-                col.child(
-                    div()
-                        .min_w_0()
-                        .pl(px(if in_process { 24. } else { 8. }))
-                        .pr_2()
-                        .pt_2()
-                        .pb_2()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(smelt_ui::markdown_mermaid::markdown_view_clickable(
-                            (
-                                if in_process {
-                                    "acp-progress-md"
-                                } else {
-                                    "acp-analysis-md"
-                                },
-                                entry_ix,
-                            ),
-                            cached_entry_markdown(
-                                &self.rendered_markdown,
-                                entry_ix,
-                                entry,
-                                self.cwd.as_deref(),
-                            ),
-                        )),
-                )
-            })
-            .into_any_element()
+        let reveal = self.thought_reveal_progress(entry_ix);
+        let mut col = v_flex().w_full().min_w_0().child(row);
+        if has_details && (reveal.is_some() || expanded) {
+            let details = div()
+                .min_w_0()
+                .pl(px(if in_process { 24. } else { 8. }))
+                .pr_2()
+                .pt_2()
+                .pb_2()
+                .text_xs()
+                .text_color(muted)
+                .child(self.retained_markdown(
+                    if in_process {
+                        "acp-progress-md"
+                    } else {
+                        "acp-analysis-md"
+                    },
+                    entry_ix,
+                    0,
+                    cached_entry_markdown(
+                        &self.rendered_markdown,
+                        entry_ix,
+                        entry,
+                        self.cwd.as_deref(),
+                    ),
+                    cx,
+                ))
+                .into_any_element();
+            col = if let Some(progress) = reveal {
+                col.child(MotionReveal::new(
+                    ("acp-thought-reveal", entry_ix),
+                    progress,
+                    details,
+                ))
+            } else {
+                col.child(details)
+            };
+        }
+        col.into_any_element()
     }
 
     /// 控制台和文件内容。短的整段可选；长的默认前几行，展开后是固定高度的行视口。
@@ -1766,67 +2030,35 @@ impl AcpView {
             tool_id,
             muted,
         } = log;
+        let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, tool_id);
         let preview = tool_log_preview(body);
         let expanded = self.expanded_tools.contains(tool_id);
         let mode = tool_log_mode(preview.total, expanded);
         let font = smelt_core::font_config::font_family();
         let body_el = match mode {
             ToolLogMode::Inline => {
-                selectable_plain_text(format!("acp-tool-log-text-{tool_id}-{part_ix}"), body)
+                selectable_plain_text(owner_part("acp-tool-log-text", &owner, part_ix), body)
                     .text_xs()
                     .text_color(muted)
                     .font_family(font)
                     .into_any_element()
             }
             ToolLogMode::Preview => selectable_plain_text(
-                format!("acp-tool-log-text-{tool_id}-{part_ix}"),
+                owner_part("acp-tool-log-text", &owner, part_ix),
                 &preview.shown,
             )
             .text_xs()
             .text_color(muted)
             .font_family(font)
             .into_any_element(),
-            ToolLogMode::Viewport => {
-                let lines = std::rc::Rc::new(split_log_lines(body));
-                let widest = widest_log_line_index(&lines);
-                let height = tool_log_viewport_height(lines.len());
-                let row_lines = lines.clone();
-                let row_font = smelt_core::font_config::font_family();
-                let list = uniform_list(
-                    format!("acp-tool-log-{tool_id}-{part_ix}"),
-                    lines.len(),
-                    move |range, _window, _app| {
-                        let font = row_font.clone();
-                        range
-                            .map(|index| {
-                                div()
-                                    .h(px(TOOL_LOG_LINE_HEIGHT_PX))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(12.))
-                                    .line_height(px(TOOL_LOG_LINE_HEIGHT_PX))
-                                    .text_color(muted)
-                                    .font_family(font.clone())
-                                    .child(row_lines[index].clone())
-                            })
-                            .collect::<Vec<_>>()
-                    },
-                )
-                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                .with_width_from_item(Some(widest))
-                .size_full();
-                div()
-                    .id(format!("acp-tool-log-box-{tool_id}-{part_ix}"))
-                    .debug_selector({
-                        let marker = format!("ACP_TOOL_LOG_{tool_id}_{part_ix}");
-                        move || marker
-                    })
-                    .h(px(height))
-                    .w_full()
-                    .overflow_hidden()
-                    .child(list)
-                    .into_any_element()
-            }
+            ToolLogMode::Viewport => tool_log_viewport(ToolLogViewport {
+                list_id: owner_part("acp-tool-log", &owner, part_ix),
+                box_id: owner_part("acp-tool-log-box", &owner, part_ix),
+                debug_marker: format!("ACP_TOOL_LOG_{tool_id}_{part_ix}"),
+                line_marker_prefix: None,
+                body,
+                muted,
+            }),
         };
         let total = preview.total;
         let copy_text = body.to_string();
@@ -1840,22 +2072,27 @@ impl AcpView {
             .child(body_el)
             .when(mode != ToolLogMode::Inline, |block| {
                 let key = tool_id.to_string();
+                let toggle_label = if expanded {
+                    "收起".to_string()
+                } else {
+                    format!("展开全部 {total} 行")
+                };
+                let toggle_view = cx.entity().downgrade();
+                let toggle_key = key.clone();
                 block.child(
                     h_flex()
                         .gap_3()
                         .items_center()
                         .child(
                             div()
-                                .id(("acp-tool-toggle", entry_ix * 100 + part_ix))
+                                .id(owner_part("acp-tool-toggle", &owner, part_ix))
+                                .role(gpui::Role::Button)
+                                .aria_label(toggle_label.clone())
                                 .text_xs()
                                 .text_color(gpui::rgb(ui_theme::text_faint()))
                                 .cursor_pointer()
                                 .hover(|row| row.opacity(0.8))
-                                .child(if expanded {
-                                    "收起".to_string()
-                                } else {
-                                    format!("展开全部 {total} 行")
-                                })
+                                .child(toggle_label)
                                 .on_mouse_down(
                                     gpui::MouseButton::Left,
                                     cx.listener(move |this, _ev, _window, cx| {
@@ -1867,13 +2104,28 @@ impl AcpView {
                                         cx.stop_propagation();
                                         cx.notify();
                                     }),
-                                ),
+                                )
+                                .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                                    let _ = toggle_view.update(cx, |this, cx| {
+                                        if !this.expanded_tools.remove(&toggle_key) {
+                                            this.expanded_tools.insert(toggle_key.clone());
+                                        }
+                                        this.list_state.remeasure_items(
+                                            entry_ix..entry_ix.saturating_add(1),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
                         )
-                        .child(
-                            Clipboard::new(format!("acp-tool-log-copy-{tool_id}-{part_ix}"))
-                                .value(copy_text)
-                                .tooltip("复制全部"),
-                        ),
+                        .child(self.render_copy_button(
+                            CopySite::ToolLog {
+                                tool_id: tool_id.to_string(),
+                                part_ix,
+                            },
+                            copy_text,
+                            "复制全部",
+                            cx,
+                        )),
                 )
             })
             .into_any_element()
@@ -1889,10 +2141,68 @@ struct PlainToolLog<'a> {
     muted: gpui::Hsla,
 }
 
-/// hover 预览的渲染入参。工具输出的展示要素（原始 parts + 两份渲染缓存 + 配色）
-/// 一起传，散成八个位置参数既超 clippy 阈值也容易调错顺序。
+/// 长日志的行视口。高度封顶，滚轮在视口里走完全文，布局只保留看得到的行。
+struct ToolLogViewport<'a> {
+    list_id: gpui::ElementId,
+    box_id: gpui::ElementId,
+    debug_marker: String,
+    /// 行标记前缀。测试用来确认滚过预览范围后，后面的行真的画出来了。
+    line_marker_prefix: Option<String>,
+    body: &'a str,
+    muted: gpui::Hsla,
+}
+
+fn tool_log_viewport(viewport: ToolLogViewport<'_>) -> gpui::AnyElement {
+    let ToolLogViewport {
+        list_id,
+        box_id,
+        debug_marker,
+        line_marker_prefix,
+        body,
+        muted,
+    } = viewport;
+    let lines = std::rc::Rc::new(split_log_lines(body));
+    let widest = widest_log_line_index(&lines);
+    let height = tool_log_viewport_height(lines.len());
+    let row_lines = lines.clone();
+    let row_font = smelt_core::font_config::font_family();
+    let list = uniform_list(list_id, lines.len(), move |range, _window, _app| {
+        let font = row_font.clone();
+        let line_marker_prefix = line_marker_prefix.clone();
+        range
+            .map(|index| {
+                let mut row = div()
+                    .h(px(TOOL_LOG_LINE_HEIGHT_PX))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(12.))
+                    .line_height(px(TOOL_LOG_LINE_HEIGHT_PX))
+                    .text_color(muted)
+                    .font_family(font.clone());
+                if let Some(prefix) = line_marker_prefix.as_ref() {
+                    let marker = format!("{prefix}{index}");
+                    row = row.debug_selector(move || marker);
+                }
+                row.child(row_lines[index].clone())
+            })
+            .collect::<Vec<_>>()
+    })
+    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+    .with_width_from_item(Some(widest))
+    .size_full();
+    div()
+        .id(box_id)
+        .debug_selector(move || debug_marker)
+        .h(px(height))
+        .w_full()
+        .overflow_hidden()
+        .child(list)
+        .into_any_element()
+}
+
+/// 点开后的工具输出。长日志不铺全文，走固定高度的行视口，在卡片里滚动。
 struct ToolOutputPopoverBody<'a> {
-    entry_ix: usize,
+    tool_id: gpui::SharedString,
     kind: ToolKind,
     output: &'a [ToolOutputPart],
     diffs: Option<&'a [Option<super::super::CachedDiff>]>,
@@ -1904,7 +2214,7 @@ struct ToolOutputPopoverBody<'a> {
 
 fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::AnyElement {
     let ToolOutputPopoverBody {
-        entry_ix,
+        tool_id,
         kind,
         output,
         diffs,
@@ -1913,18 +2223,9 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
         muted,
         border,
     } = body;
-    let mut col = v_flex()
-        .id(("acp-tool-output-pop-body", entry_ix))
-        .min_w(px(280.))
-        .max_w(px(520.))
-        .max_h(px(360.))
-        .p_2()
-        .gap_1()
-        .overflow_y_scroll()
-        .bg(ui_theme::glass_floating())
-        .border_1()
-        .border_color(ui_theme::card_stroke())
-        .rounded(px(8.));
+    // 滚动容器必须是 block。v_flex 会把子项压进 max_h，content 高度等于视口，
+    // 滚轮加在 offset 上也会被钳回 0。卡片本身不滚时，长日志的行视口自己滚。
+    let mut col = v_flex().w_full().p_2().gap_1();
     for (part_ix, part) in output.iter().enumerate() {
         col = match part {
             ToolOutputPart::Diff { path, .. } => {
@@ -1936,50 +2237,25 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                         .gap_1()
                         .child(
                             selectable_plain_text(
-                                ("acp-tool-pop-diff-path", entry_ix * 100 + part_ix),
+                                owner_part("acp-tool-pop-diff-path", &tool_id, part_ix),
                                 path,
                             )
                             .text_xs()
                             .text_color(muted),
                         )
                         .children(cached.map(|diff| {
-                            render_diff_lines(&diff.lines, (entry_ix, part_ix), border, muted)
+                            render_diff_lines(
+                                &diff.lines,
+                                owner_part("acp-diff", &tool_id, part_ix),
+                                border,
+                                muted,
+                            )
                         })),
                 )
             }
             ToolOutputPart::Text(text) if !text.trim().is_empty() => {
                 let body = strip_code_fence(text);
-                let preview = tool_log_preview(body);
-                let total = preview.total;
-                let truncated = preview.truncated();
-                let shown = if truncated {
-                    preview.shown
-                } else {
-                    body.to_string()
-                };
-                let body_el: gpui::AnyElement = if matches!(kind, ToolKind::Other) {
-                    smelt_ui::markdown_mermaid::markdown_view_clickable(
-                        ("acp-tool-pop-md", entry_ix * 100 + part_ix),
-                        shown,
-                    )
-                    .text_xs()
-                    .text_color(muted)
-                    .into_any_element()
-                } else {
-                    selectable_plain_text(("acp-tool-pop-text", entry_ix * 100 + part_ix), &shown)
-                        .text_xs()
-                        .text_color(muted)
-                        .font_family(smelt_core::font_config::font_family())
-                        .into_any_element()
-                };
-                col.child(body_el).when(truncated, |col| {
-                    col.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("共 {total} 行")),
-                    )
-                })
+                col.child(popover_tool_text(&tool_id, part_ix, kind, body, muted))
             }
             ToolOutputPart::Image(_) => {
                 match images
@@ -1987,41 +2263,132 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                     .and_then(Option::as_ref)
                 {
                     // hover 预览没有 `Context<AcpView>`，只出缩略图，不接点击大图；
-                    // 解码交给展开卡片路径触发（缓存是内容寻址的，全局共享）。
+                    // 解码交给展开卡片路径触发（缓存按图片 id 全局共享）。
                     Some(image) => col.child(image_thumb_element(image)),
                     None => col,
                 }
             }
             ToolOutputPart::Text(_) => col,
-            ToolOutputPart::Terminal { output, .. } if !output.trim().is_empty() => {
-                let preview = tool_log_preview(output);
-                let total = preview.total;
-                let truncated = preview.truncated();
-                col.child(
-                    selectable_plain_text(
-                        ("acp-tool-pop-terminal", entry_ix * 100 + part_ix),
-                        &preview.shown,
-                    )
-                    .text_xs()
-                    .text_color(muted)
-                    .font_family(smelt_core::font_config::font_family()),
-                )
-                .when(truncated, |col| {
-                    col.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("共 {total} 行")),
-                    )
-                })
-            }
+            ToolOutputPart::Terminal { output, .. } if !output.trim().is_empty() => col.child(
+                popover_plain_log(&tool_id, part_ix, "terminal", output, muted),
+            ),
             ToolOutputPart::Terminal { .. } => col,
         };
     }
     if !children.is_empty() {
         col = col.child(render_nested_transcript(children, muted));
     }
-    col.into_any_element()
+    div()
+        .id(owner_id("acp-tool-output-pop-body", &tool_id))
+        .min_w(px(280.))
+        .max_w(px(520.))
+        .max_h(px(360.))
+        .overflow_y_scroll()
+        .bg(ui_theme::glass_floating())
+        .border_1()
+        .border_color(ui_theme::card_stroke())
+        .rounded(px(8.))
+        .child(col)
+        .into_any_element()
+}
+
+fn popover_tool_text(
+    tool_id: &gpui::SharedString,
+    part_ix: usize,
+    kind: ToolKind,
+    body: &str,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    if matches!(kind, ToolKind::Other) {
+        popover_markdown_log(tool_id, part_ix, body, muted)
+    } else {
+        popover_plain_log(tool_id, part_ix, "text", body, muted)
+    }
+}
+
+/// 短输出整段可选。超过预览行数后改走行视口，滚轮能走到最后一行。
+fn popover_plain_log(
+    tool_id: &gpui::SharedString,
+    part_ix: usize,
+    slot: &'static str,
+    body: &str,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    let preview = tool_log_preview(body);
+    let text_name = match slot {
+        "terminal" => "acp-tool-pop-terminal",
+        _ => "acp-tool-pop-text",
+    };
+    let box_name = match slot {
+        "terminal" => "acp-tool-pop-terminal-box",
+        _ => "acp-tool-pop-text-box",
+    };
+    let copy_name = match slot {
+        "terminal" => "acp-tool-pop-terminal-copy",
+        _ => "acp-tool-pop-text-copy",
+    };
+    if !preview.truncated() {
+        return selectable_plain_text(owner_part(text_name, tool_id, part_ix), body)
+            .text_xs()
+            .text_color(muted)
+            .font_family(smelt_core::font_config::font_family())
+            .into_any_element();
+    }
+    let total = preview.total;
+    let copy = body.to_string();
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(tool_log_viewport(ToolLogViewport {
+            list_id: owner_part(text_name, tool_id, part_ix),
+            box_id: owner_part(box_name, tool_id, part_ix),
+            debug_marker: format!("ACP_TOOL_POP_LOG_{slot}_{tool_id}_{part_ix}"),
+            line_marker_prefix: Some(format!("ACP_TOOL_POP_LINE_{tool_id}_{part_ix}_")),
+            body,
+            muted,
+        }))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui::rgb(ui_theme::text_faint()))
+                        .child(format!("共 {total} 行")),
+                )
+                .child(
+                    Clipboard::new(owner_part(copy_name, tool_id, part_ix))
+                        .value(copy)
+                        .icon_action("复制全部"),
+                ),
+        )
+        .into_any_element()
+}
+
+fn popover_markdown_log(
+    tool_id: &gpui::SharedString,
+    part_ix: usize,
+    body: &str,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    let preview = tool_log_preview(body);
+    let view = smelt_ui::markdown_mermaid::markdown_view_clickable(
+        owner_part("acp-tool-pop-md", tool_id, part_ix),
+        body.to_string(),
+    )
+    .text_xs()
+    .text_color(muted);
+    if !preview.truncated() {
+        return view.into_any_element();
+    }
+    div()
+        .id(owner_part("acp-tool-pop-md-scroll", tool_id, part_ix))
+        .w_full()
+        .max_h(px(tool_log_viewport_height(preview.total)))
+        .overflow_y_scroll()
+        .child(view)
+        .into_any_element()
 }
 
 fn subagent_output_summary(output: &[ToolOutputPart]) -> Option<String> {
@@ -2138,6 +2505,15 @@ fn nested_tool_row(
             )
             .into_any_element()
     }
+}
+
+fn elapsed_suffix(elapsed_ms: u64, color: gpui::Hsla) -> gpui::Div {
+    div()
+        .flex_shrink_0()
+        .text_xs()
+        .font_features(ui_theme::tabular_figures())
+        .text_color(color)
+        .child(format!("· {}", format_duration(elapsed_ms)))
 }
 
 fn status_lead(child: gpui::AnyElement) -> gpui::AnyElement {
@@ -2264,33 +2640,12 @@ fn hover_swap_lead(
         .into_any_element()
 }
 
-/// 缩略图元素：降采样 + 内容寻址缓存 + canvas contain 绘制。历史上大图/长截图
+/// 缩略图元素：降采样 + 按图片 id 缓存 + canvas contain 绘制。历史上大图/长截图
 /// 在调用点反复出 bug（撑破屏幕、只露顶部、撞 sprite atlas 上限），已发消息、
 /// 工具输出图片统一收敛到这一条路径，不再各写一份。
 fn image_thumb_element(image: &std::sync::Arc<gpui::Image>) -> gpui::AnyElement {
-    match smelt_ui::image::cached(image) {
-        Some(render) => smelt_ui::image::contain_canvas_at_height(render, px(160.), px(280.), 8.0)
-            .into_any_element(),
-        // SVG 或解码未完成：回退原 `img` 渲染（svg 走 gpui 全彩栅格化管线；
-        // 解码完成后切到 contain 路径）。
-        None => gpui::img(image.clone())
-            .h(px(160.))
-            .max_w(px(280.))
-            .into_any_element(),
-    }
-}
-
-/// 后台解码到 `smelt_ui::image` 缓存；解码完成后通知重绘切到 contain 路径。
-fn ensure_image_decoded(image: &std::sync::Arc<gpui::Image>, cx: &Context<AcpView>) {
-    if smelt_ui::image::cached(image).is_some() || image.format == gpui::ImageFormat::Svg {
-        return;
-    }
-    let fetch_image = image.clone();
-    cx.spawn(async move |this, cx| {
-        smelt_ui::image::fetch_async(fetch_image, cx.background_executor()).await;
-        let _ = this.update(cx, |_, cx| cx.notify());
-    })
-    .detach();
+    // 栅格图只画降采样预览。未完成时是占位，不把原图交给 `img()`。
+    smelt_ui::image::thumb_element(image, px(160.), px(280.), 8.0)
 }
 
 /// 可点开大图的缩略图卡片（已发消息里的图、工具返回的图共用）。
@@ -2300,7 +2655,8 @@ fn render_clickable_image_thumb(
     border: gpui::Hsla,
     cx: &Context<AcpView>,
 ) -> gpui::AnyElement {
-    ensure_image_decoded(&image, cx);
+    // 每帧调用是安全的：已在途、已完成或已失败时不会再启动任务。
+    smelt_ui::image::ensure_preview(&image, cx);
     let thumb = image_thumb_element(&image);
     let preview_image = image;
     div()

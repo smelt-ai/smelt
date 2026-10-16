@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_kind::ConversationAgentKind;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDefinition {
     pub id: String,
     pub name: String,
@@ -19,6 +19,11 @@ pub struct AgentDefinition {
     /// 的回退，否则用户勾掉最后一个反而会拿回全量。
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// 这个智能体要连接的 MCP 服务器名（`~/.pi/agent/mcp.json` 里 `mcpServers` 的键）。
+    /// 空表示不连任何 MCP 服务器；和插件一样不做「空则全量」的回退，否则用户
+    /// 勾掉最后一个反而会连上全部服务器。
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
     /// 绑定到这个智能体的本地目录。会话的工作目录是智能体自己的 space，业务
     /// 素材靠这里挂进来：Pi 只接受单个 cwd，没有 `--add-dir`，所以只能把绝对
     /// 路径写进 system prompt，让它用 read/bash 去访问。
@@ -34,6 +39,34 @@ pub struct AgentDefinition {
     /// 对应的模型 ID。必须和 `model_provider` 成对出现，否则视为未设置。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model_id: String,
+    /// 关掉后这个智能体不注入、不写入记忆，已有记忆文件保留。默认开。
+    #[serde(default = "memory_enabled_by_default")]
+    pub memory_enabled: bool,
+}
+
+fn memory_enabled_by_default() -> bool {
+    true
+}
+
+/// 手写而不是 derive：记忆默认开，derive 出来的 `false` 会让 `..Default::default()`
+/// 构造的新智能体悄悄关掉记忆。
+impl Default for AgentDefinition {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            description: String::new(),
+            engine_kind_id: String::new(),
+            prompt: String::new(),
+            plugins: Vec::new(),
+            mcp_servers: Vec::new(),
+            context_folders: Vec::new(),
+            context_links: Vec::new(),
+            model_provider: String::new(),
+            model_id: String::new(),
+            memory_enabled: memory_enabled_by_default(),
+        }
+    }
 }
 
 impl AgentDefinition {
@@ -85,6 +118,20 @@ pub fn agent_engine_kinds() -> Vec<ConversationAgentKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_is_on_unless_explicitly_turned_off() {
+        assert!(AgentDefinition::default().memory_enabled);
+        let old: AgentDefinition =
+            serde_json::from_str(r#"{"id":"a","name":"A","engine_kind":"pi","prompt":""}"#)
+                .unwrap();
+        assert!(old.memory_enabled, "旧存档没有这个字段，按开处理");
+        let off: AgentDefinition = serde_json::from_str(
+            r#"{"id":"a","name":"A","engine_kind":"pi","prompt":"","memory_enabled":false}"#,
+        )
+        .unwrap();
+        assert!(!off.memory_enabled);
+    }
 
     fn definition(engine: &str) -> AgentDefinition {
         AgentDefinition {

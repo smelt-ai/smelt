@@ -60,7 +60,7 @@ verifies most of them):
 | Android NDK | 28.2.13676358 |
 | Rust targets | `aarch64-linux-android` (plus `armv7-linux-androideabi`, `x86_64-linux-android`, `i686-linux-android` for other ABIs) |
 
-`./.ci/android/env-setup.sh` installs all of the above into
+`./ci/android/env-setup.sh` installs all of the above into
 `~/.smelt-ci/toolchains` without touching system directories, if you prefer not
 to set them up by hand.
 
@@ -85,7 +85,7 @@ keyPassword=...
 Without that file the release build falls back to the debug keystore, so
 `flutter run --release` still works on a development machine — but the resulting
 APK is not distributable. On CI, pass the same values through
-`SMELT_ANDROID_KEYSTORE` and friends and let `./.ci/android/ci.sh build` write
+`SMELT_ANDROID_KEYSTORE` and friends and let `./ci/android/ci.sh build` write
 the file; it is removed again when the build finishes.
 
 The production keystore and the final Play Store listing are intentionally not

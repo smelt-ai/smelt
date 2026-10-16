@@ -4,8 +4,8 @@
 //! 与恢复核心的接法（有意为之，不重写）：typed manifest 经 [`build_legacy_value`]
 //! 桥接成恢复核心吃的 legacy JSON 形状，再调 [`crate::resume_from_value`]。
 //! 恢复核心 400 行全是实战修出来的锁/fd 语义——事务要换的是传输与提交点，
-//! 不是它。bridge 的正确性由单测 + 端到端回环测试锁死；legacy 文件读端（一代
-//! 兼容）走同一恢复核心，旧单测原样证明无回归。
+//! 不是它。bridge 的正确性由单测 + 端到端回环测试锁死。生产不再读交接文件；
+//! 单测仍用同一恢复核心喂 JSON。
 //!
 //! 收养差异经 [`ResumeOptions`] 穿给恢复核心，只有两处：终端子进程 owner
 //! （waitpid→监控器）与 grid 字节侧通道（免 hex 膨胀）。ACP/menubar 对收养
@@ -19,14 +19,15 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 
-/// 恢复核心的 v2 选项。legacy 文件入口传 [`ResumeOptions::legacy`]，
-/// 行为与旧版逐行一致。
+/// 恢复核心的 v2 选项。生产交接用 [`ResumeOptions::adopted`]。
 pub(crate) struct ResumeOptions {
     adopted: Option<Arc<ChildMonitor>>,
     grids: HashMap<String, Vec<u8>>,
 }
 
 impl ResumeOptions {
+    /// 单测把交接 JSON 直接喂给恢复核心，没有收养监控器和 grid 侧通道。
+    #[cfg(test)]
     pub(crate) fn legacy() -> Self {
         Self {
             adopted: None,
@@ -149,10 +150,10 @@ fn acp_item(
             launch,
             agent_mcp,
             agent_token,
-            agent_needs_transcript_check,
             runtime_spec_fingerprint,
             conversation_binding,
             snapshot,
+            pending_host_bytes,
         } => {
             let host_fd = fd_number(&FdRole::AcpHost {
                 session_id: id.clone(),
@@ -168,10 +169,10 @@ fn acp_item(
                 "launch": to_value("acp.launch", launch)?,
                 "agent_mcp": agent_mcp,
                 "agent_token": agent_token,
-                "agent_needs_transcript_check": agent_needs_transcript_check,
                 "runtime_spec_fingerprint": runtime_spec_fingerprint,
                 "conversation_binding": to_value("acp.conversation_binding", conversation_binding)?,
                 "snapshot": to_value("acp.snapshot", snapshot)?,
+                "pending_host_bytes": pending_host_bytes,
             }))
         }
         AcpHandoff::Direct {
@@ -181,7 +182,6 @@ fn acp_item(
             launch,
             agent_mcp,
             agent_token,
-            agent_needs_transcript_check,
             runtime_spec_fingerprint,
             conversation_binding,
             snapshot,
@@ -202,7 +202,6 @@ fn acp_item(
                 "launch": to_value("acp.launch", launch)?,
                 "agent_mcp": agent_mcp,
                 "agent_token": agent_token,
-                "agent_needs_transcript_check": agent_needs_transcript_check,
                 "runtime_spec_fingerprint": runtime_spec_fingerprint,
                 "conversation_binding": to_value("acp.conversation_binding", conversation_binding)?,
                 "snapshot": to_value("acp.snapshot", snapshot)?,
@@ -459,10 +458,10 @@ mod tests {
                     launch: launch.clone(),
                     agent_mcp: true,
                     agent_token: "tok".to_string(),
-                    agent_needs_transcript_check: false,
                     runtime_spec_fingerprint: None,
                     conversation_binding: None,
                     snapshot: snapshot_fixture(),
+                    pending_host_bytes: Vec::new(),
                 },
                 AcpHandoff::Direct {
                     id: "a2".to_string(),
@@ -471,7 +470,6 @@ mod tests {
                     launch,
                     agent_mcp: false,
                     agent_token: String::new(),
-                    agent_needs_transcript_check: true,
                     runtime_spec_fingerprint: Some("fp".to_string()),
                     conversation_binding: None,
                     snapshot: snapshot_fixture(),
@@ -491,6 +489,12 @@ mod tests {
         assert_eq!(items[0]["host_pid"], 201);
         assert_eq!(items[0]["provider_pid"], 202);
         assert_eq!(items[0]["host_snapshot_revision"], 7);
+        assert!(
+            items[0]["pending_host_bytes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(items[0]["launch"]["command"], "agent --x");
         assert_eq!(
             items[0]["host_fd"].as_i64().unwrap(),

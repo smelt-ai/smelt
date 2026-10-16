@@ -3,17 +3,54 @@
 use super::*;
 use smelt_core::daemon_state::DaemonPhase;
 
+/// 排队条目用正文当身份。相同正文按出现次序分开，删掉前面一条时后面的格子跟着正文走。
+fn queue_row_id<'a>(
+    kind: &'static str,
+    text: &'a str,
+    seen: &mut std::collections::HashMap<&'a str, usize>,
+) -> gpui::ElementId {
+    let n = {
+        let slot = seen.entry(text).or_insert(0);
+        let n = *slot;
+        *slot += 1;
+        n
+    };
+    let key = if n == 0 {
+        text.to_string()
+    } else {
+        format!("{text}\u{0}{n}")
+    };
+    gpui::ElementId::from((gpui::ElementId::from(kind), key))
+}
+
 impl AcpView {
     pub(super) fn render_composer(
         &self,
-        focused: bool,
+        composer_focus: f32,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         if matches!(
             &self.conversation_binding,
             smelt_core::conversation::ConversationBinding::Automation { .. }
         ) {
-            return None;
+            // 自动化 Run 没有输入框；有进程在跑时，后台任务入口单独占底部一行。
+            let chip = self.render_background_task_chip(cx)?;
+            return Some(
+                v_flex()
+                    .relative()
+                    .w_full()
+                    .px_4()
+                    .py_2()
+                    .items_center()
+                    .children(self.render_background_task_popover(cx))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .max_w(ui_theme::conversation_max_width())
+                            .child(chip),
+                    )
+                    .into_any_element(),
+            );
         }
         let t = cx.theme();
         let muted = t.muted_foreground;
@@ -84,7 +121,10 @@ impl AcpView {
                 };
                 list = list.child(
                     h_flex()
-                        .id(("acp-completion-item", ix))
+                        .id((
+                            gpui::ElementId::from("acp-completion-item"),
+                            item.label.clone(),
+                        ))
                         .px_3()
                         .py_1p5()
                         .gap_2()
@@ -155,7 +195,7 @@ impl AcpView {
                 ui_theme::yellow()
             } else {
                 usage_pct
-                    .map(usage_meter_color)
+                    .map(usage_ring_color)
                     .unwrap_or(ui_theme::text_faint())
             };
             let extra_configs: Vec<_> = config_options
@@ -170,6 +210,8 @@ impl AcpView {
             .is_empty();
             let model_control = if has_menu {
                 let this = cx.entity();
+                // Provider 菜单项要按 agent 决定是否补额度括号，闭包里拿不到 self。
+                let agent = self.agent;
                 let current_provider_id = current_provider.as_ref().map(|p| p.id.clone());
                 let current_model_name = model_state
                     .as_ref()
@@ -213,7 +255,7 @@ impl AcpView {
                                     for provider in &provider_groups {
                                         let is_current = current_provider_id.as_deref()
                                             == Some(provider.id.as_str());
-                                        let name = provider.name.clone();
+                                        let name = provider_menu_label(agent, provider, cx);
                                         // 只有一个 provider 时没得切，如实列出当前项即可。
                                         let switch_to = if provider_groups.len() > 1 {
                                             provider_switch_value(provider, &current_model_name)
@@ -345,7 +387,7 @@ impl AcpView {
                     .into_any_element()
             } else {
                 div()
-                    .h(px(24.))
+                    .h(ui_theme::height::xs())
                     .px_2()
                     .rounded_full()
                     .flex()
@@ -356,10 +398,8 @@ impl AcpView {
                     .into_any_element()
             };
             let skills_control = (self.agent == ConversationAgentKind::Pi).then(|| {
-                let skills = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
-                    &self.launch,
-                    self.cwd.as_deref().map(std::path::Path::new),
-                );
+                // 缓存在 `ensure_loaded_skills`；这里再调 `loaded_skills_for_launch` 会把扫盘盘回每帧。
+                let skills = self.loaded_skills().to_vec();
                 let count = skills.len();
                 Button::new("acp-skills-pill")
                     .ghost()
@@ -399,11 +439,11 @@ impl AcpView {
                     )
                     .into_any_element()
             });
-            let composer_border = if focused {
-                ui_theme::tint(ui_theme::accent(), 0x66)
-            } else {
-                ui_theme::overlay(0x22)
-            };
+            let composer_border = mix_rgba(
+                ui_theme::overlay(0x22),
+                ui_theme::tint(ui_theme::accent(), 0x66),
+                composer_focus,
+            );
             let composer = v_flex()
                 .w_full()
                 .max_w(ui_theme::conversation_max_width())
@@ -411,7 +451,10 @@ impl AcpView {
                 .border_1()
                 .border_color(composer_border)
                 .bg(ui_theme::glass_input())
-                .shadow_sm()
+                .shadow(composer_shadows(
+                    composer_focus,
+                    gpui::rgb(ui_theme::accent()),
+                ))
                 .child(
                     div()
                         .id("acp-composer-input")
@@ -447,11 +490,27 @@ impl AcpView {
                         let immediate_action_available =
                             can_move_next && !self.immediate_cancel_pending;
                         let native_items = self.queued_steering.iter().map(|text| {
-                            (native_queue_item_kind_label(false), text.as_str())
+                            (false, text.as_str())
                         }).chain(self.queued_follow_up.iter().map(|text| {
-                            (native_queue_item_kind_label(true), text.as_str())
+                            (true, text.as_str())
                         }));
-                        for (ix, (kind, text)) in native_items.enumerate() {
+                        let mut seen_steer = std::collections::HashMap::new();
+                        let mut seen_follow = std::collections::HashMap::new();
+                        for (ix, (follow, text)) in native_items.enumerate() {
+                            let kind = native_queue_item_kind_label(follow);
+                            let row_id = queue_row_id(
+                                if follow {
+                                    "acp-native-queue-follow"
+                                } else {
+                                    "acp-native-queue-steer"
+                                },
+                                text,
+                                if follow {
+                                    &mut seen_follow
+                                } else {
+                                    &mut seen_steer
+                                },
+                            );
                             let preview: String = text.chars().take(60).collect();
                             let preview = if text.chars().count() > 60 {
                                 format!("{preview}…")
@@ -460,7 +519,7 @@ impl AcpView {
                             };
                             strip = strip.child(
                                 h_flex()
-                                    .id(("acp-native-queue-item", ix))
+                                    .id(row_id)
                                     .gap_2()
                                     .items_center()
                                     .px_2p5()
@@ -491,9 +550,16 @@ impl AcpView {
                                         )
                                     })
                                     .when(immediate_action_available, |row| {
+                                        let immediate_label = if immediate_cancels_turn {
+                                            "立即发送（停止当前回答）"
+                                        } else {
+                                            "立即发送"
+                                        };
                                         row.child(
                                             div()
-                                                .id(("acp-native-queue-immediate", ix))
+                                                .id("acp-native-queue-immediate")
+                                                .role(gpui::Role::Button)
+                                                .aria_label(immediate_label)
                                                 .text_xs()
                                                 .text_color(gpui::rgb(if immediate_cancels_turn {
                                                     ui_theme::yellow()
@@ -512,11 +578,7 @@ impl AcpView {
                                                     )
                                                     .build(window, cx)
                                                 })
-                                                .child(if immediate_cancels_turn {
-                                                    "立即发送（停止当前回答）"
-                                                } else {
-                                                    "立即发送"
-                                                })
+                                                .child(immediate_label)
                                                 .on_click(cx.listener(
                                                     move |this, _ev, _window, cx| {
                                                         this.send_native_queue_item_immediately(
@@ -532,6 +594,8 @@ impl AcpView {
                             strip = strip.child(
                                 div()
                                     .id("acp-native-queue-clear")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("撤回排队")
                                     .text_xs()
                                     .text_color(gpui::rgb(ui_theme::text_muted()))
                                     .cursor_pointer()
@@ -557,7 +621,9 @@ impl AcpView {
                     );
                     let immediate_action_available =
                         can_move_next && !self.immediate_cancel_pending;
+                    let mut seen_prompts = std::collections::HashMap::new();
                     for (ix, (text, images)) in self.queued_prompts.iter().enumerate() {
+                        let row_id = queue_row_id("acp-queued-prompt", text, &mut seen_prompts);
                         let preview: String = text.chars().take(60).collect();
                         let preview = if text.chars().count() > 60 {
                             format!("{preview}…")
@@ -571,7 +637,7 @@ impl AcpView {
                         };
                         strip = strip.child(
                             h_flex()
-                                .id(("acp-queued-prompt", ix))
+                                .id(row_id)
                                 .gap_2()
                                 .items_center()
                                 .px_2p5()
@@ -602,9 +668,16 @@ impl AcpView {
                                     )
                                 })
                                 .when(immediate_action_available, |row| {
+                                    let immediate_label = if immediate_cancels_turn {
+                                        "立即发送（停止当前回答）"
+                                    } else {
+                                        "立即发送"
+                                    };
                                     row.child(
                                         div()
-                                            .id(("acp-queued-prompt-immediate", ix))
+                                            .id("acp-queued-prompt-immediate")
+                                            .role(gpui::Role::Button)
+                                            .aria_label(immediate_label)
                                             .text_xs()
                                             .text_color(gpui::rgb(if immediate_cancels_turn {
                                                 ui_theme::yellow()
@@ -623,11 +696,7 @@ impl AcpView {
                                                 )
                                                 .build(window, cx)
                                             })
-                                            .child(if immediate_cancels_turn {
-                                                "立即发送（停止当前回答）"
-                                            } else {
-                                                "立即发送"
-                                            })
+                                            .child(immediate_label)
                                             .on_click(cx.listener(
                                                 move |this, _ev, _window, cx| {
                                                     this.send_queued_prompt_immediately(ix, cx);
@@ -640,7 +709,9 @@ impl AcpView {
                                     |row| {
                                         row.child(
                                             div()
-                                                .id(("acp-queued-prompt-send", ix))
+                                                .id("acp-queued-prompt-send")
+                                                .role(gpui::Role::Button)
+                                                .aria_label("下一条发送")
                                                 .text_xs()
                                                 .text_color(gpui::rgb(ui_theme::accent()))
                                                 .cursor_pointer()
@@ -662,7 +733,9 @@ impl AcpView {
                                 )
                                 .child(
                                     div()
-                                        .id(("acp-queued-prompt-remove", ix))
+                                        .id("acp-queued-prompt-remove")
+                                        .role(gpui::Role::Button)
+                                        .aria_label("撤回")
                                         .text_xs()
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .cursor_pointer()
@@ -683,28 +756,65 @@ impl AcpView {
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();
                     for (ix, im) in self.pending_images.iter().enumerate() {
+                        let awaiting_decode = smelt_ui::image::preview_pending(im);
+                        if awaiting_decode {
+                            smelt_ui::image::ensure_preview(im, cx);
+                        }
+                        // 地址而不是下标：删掉前面一张时，后面的缩略图不会重播挤入。
+                        let image_key = std::sync::Arc::as_ptr(im) as usize;
+                        let enter = self.pending_image_enter.get(&image_key).map(|started| {
+                            let t = (started.elapsed().as_secs_f32() / (ENTER_MS as f32 / 1000.0))
+                                .clamp(0.0, 1.0);
+                            ease_snap(t)
+                        });
+                        let thumb = if awaiting_decode {
+                            let image = im.clone();
+                            ambient_animation(
+                                ("acp-pending-img-pulse", image_key),
+                                std::time::Duration::from_millis(700),
+                                true,
+                                move |delta| {
+                                    let opacity = 1.0 - 0.4 * (delta * std::f32::consts::PI).sin();
+                                    div().opacity(opacity).child(smelt_ui::image::thumb_element(
+                                        &image,
+                                        px(56.),
+                                        px(96.),
+                                        8.0,
+                                    ))
+                                },
+                            )
+                            .into_any_element()
+                        } else {
+                            smelt_ui::image::thumb_element(im, px(56.), px(96.), 8.0)
+                        };
                         let preview_image = im.clone();
+                        let remove_image = cx.entity().downgrade();
                         strip = strip.child(
                             div()
-                                .id(("acp-pending-img", ix))
+                                .id(("acp-pending-img", image_key))
+                                .role(gpui::Role::Button)
+                                .aria_label("预览图片")
                                 .relative()
                                 .cursor_pointer()
                                 .hover(|d| d.opacity(0.88))
+                                .border_1()
+                                .border_color(t.border)
+                                .rounded_md()
+                                .overflow_hidden()
+                                .when_some(enter, |card, factor| {
+                                    card.max_w(px(96. * factor.max(0.15))).opacity(factor)
+                                })
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                                     let _ = this;
                                     cx.emit(AcpViewEvent::PreviewImage(preview_image.clone()));
                                 }))
-                                .child(
-                                    gpui::img(im.clone())
-                                        .h(px(56.))
-                                        .max_w(px(96.))
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(t.border),
-                                )
+                                .child(thumb)
                                 .child(
                                     // 右上角小 ×：点掉这张。
                                     div()
+                                        .id(("acp-pending-img-remove", image_key))
+                                        .role(gpui::Role::Button)
+                                        .aria_label("移除图片")
                                         .absolute()
                                         .top(px(-4.))
                                         .right(px(-4.))
@@ -728,6 +838,17 @@ impl AcpView {
                                                 cx.stop_propagation();
                                                 cx.notify();
                                             }),
+                                        )
+                                        .on_a11y_action(
+                                            gpui::AccessibleAction::Click,
+                                            move |_, _, cx| {
+                                                let _ = remove_image.update(cx, |this, cx| {
+                                                    if ix < this.pending_images.len() {
+                                                        this.pending_images.remove(ix);
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            },
                                         ),
                                 ),
                         );
@@ -759,6 +880,8 @@ impl AcpView {
                                 .child(
                                     div()
                                         .id("acp-trajectory")
+                                        .role(gpui::Role::Button)
+                                        .aria_label("会话追踪")
                                         .flex_shrink_0()
                                         .size(px(18.))
                                         .flex()
@@ -788,6 +911,12 @@ impl AcpView {
                                     let cached_read = self.usage_cached_read;
                                     let mut chip = div()
                                         .id("acp-usage")
+                                        .role(gpui::Role::Button)
+                                        .aria_label(if compacting {
+                                            "压缩中"
+                                        } else {
+                                            "上下文用量"
+                                        })
                                         .debug_selector(|| "ACP_USAGE_RING".into())
                                         .flex_shrink_0()
                                         .size(px(18.))
@@ -807,6 +936,7 @@ impl AcpView {
                                         })
                                         .on_click(cx.listener(|this, _ev, _window, cx| {
                                             this.usage_popover_open = !this.usage_popover_open;
+                                            this.background_tasks_open = false;
                                             cx.notify();
                                         }));
                                     if !popover_open {
@@ -829,6 +959,7 @@ impl AcpView {
                                     }
                                     row.child(chip)
                                 })
+                                .children(self.render_background_task_chip(cx))
                         )
                         .children(self.restart_error.as_ref().map(|err| {
                             div()
@@ -840,6 +971,8 @@ impl AcpView {
                         .child(
                             div()
                                 .id("acp-attach")
+                                .role(gpui::Role::Button)
+                                .aria_label("添加文件")
                                 .flex_shrink_0()
                                 .size(px(32.))
                                 .rounded_full()
@@ -879,6 +1012,8 @@ impl AcpView {
                             row.child(
                                 div()
                                     .id("acp-stop")
+                                    .role(gpui::Role::Button)
+                                    .aria_label(label)
                                     .flex_shrink_0()
                                     .size(px(32.))
                                     .rounded_full()
@@ -888,6 +1023,7 @@ impl AcpView {
                                     .justify_center()
                                     .cursor_pointer()
                                     .hover(|d| d.opacity(0.85))
+                                    .active(|d| d.opacity(PRESS_OPACITY))
                                     .tooltip(move |window, cx| {
                                         gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                                     })
@@ -909,6 +1045,8 @@ impl AcpView {
                                 // 圆钮 + 上箭头。有内容才是主操作色，空着是灰底。
                                 div()
                                     .id("acp-send")
+                                    .role(gpui::Role::Button)
+                                    .aria_label("发送")
                                     .flex_shrink_0()
                                     .size(px(32.))
                                     .rounded_full()
@@ -922,6 +1060,8 @@ impl AcpView {
                                             .text_color(gpui::rgb(ui_theme::action_on()))
                                             .cursor_pointer()
                                             .hover(|d| d.opacity(0.88))
+                                            // Div 没有 scale，按下用透明度代替缩到 0.96。
+                                            .active(|d| d.opacity(PRESS_OPACITY))
                                     })
                                     .when(!can_send, |d| {
                                         d.bg(ui_theme::overlay(0x18))
@@ -945,6 +1085,7 @@ impl AcpView {
                 .py_3()
                 .items_center()
                 .children(self.render_usage_popover(cx))
+                .children(self.render_background_task_popover(cx))
                 .children(completion_bar)
                 .child(composer)
         });
@@ -994,6 +1135,8 @@ impl AcpView {
                     .child(
                         div()
                             .id("acp-usage-close")
+                            .role(gpui::Role::Button)
+                            .aria_label("关闭")
                             .size(px(24.))
                             .rounded_md()
                             .flex()
@@ -1036,12 +1179,12 @@ impl AcpView {
             fill,
         );
         panel = panel.child(render_usage_stacked_bar(&legend, size));
-        for (i, row) in legend.into_iter().enumerate() {
+        for row in legend {
             panel = panel.child(
                 h_flex()
-                    .id(("acp-usage-row", i))
+                    .id((gpui::ElementId::from("acp-usage-row"), row.label))
                     .w_full()
-                    .h(px(32.))
+                    .h(ui_theme::height::md())
                     .px_2()
                     .gap_2()
                     .items_center()
@@ -1097,7 +1240,9 @@ impl AcpView {
                 h_flex().w_full().justify_end().child(
                     div()
                         .id("acp-usage-compact")
-                        .h(px(28.))
+                        .role(gpui::Role::Button)
+                        .aria_label("压缩上下文")
+                        .h(ui_theme::height::sm())
                         .px_3()
                         .rounded(ui_theme::row_radius())
                         .flex()
@@ -1119,6 +1264,195 @@ impl AcpView {
         Some(
             div()
                 .id("acp-usage-popover-layer")
+                .absolute()
+                .bottom(gpui::relative(1.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .pb_2()
+                .occlude()
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    /// 后台任务入口：只在有进程在跑时出现，点开看是哪几个。
+    fn render_background_task_chip(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let running = running_background_tasks(&self.background_tasks).len();
+        if running == 0 {
+            return None;
+        }
+        let summary = background_task_summary(running);
+        Some(
+            h_flex()
+                .id("acp-background-tasks")
+                .role(gpui::Role::Button)
+                .aria_label(summary.clone())
+                .flex_shrink_0()
+                .h(ui_theme::height::xxs())
+                .px_2()
+                .gap_1p5()
+                .items_center()
+                .rounded_full()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(gpui::rgb(ui_theme::text_mid()))
+                .when(self.background_tasks_open, |chip| {
+                    chip.bg(ui_theme::overlay(0x18))
+                })
+                .hover(|chip| chip.bg(ui_theme::overlay(0x22)))
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(gpui::rgb(ui_theme::blue())),
+                )
+                .child(summary)
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.background_tasks_open = !this.background_tasks_open;
+                    this.usage_popover_open = false;
+                    cx.notify();
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// 只列还在跑的进程；结束的记录留在对话正文里。
+    fn render_background_task_popover(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.background_tasks_open {
+            return None;
+        }
+        let running = running_background_tasks(&self.background_tasks);
+        if running.is_empty() {
+            return None;
+        }
+        let muted = cx.theme().muted_foreground;
+        let mono = smelt_core::font_config::font_family();
+        let mut rows = v_flex()
+            .id("acp-background-task-list")
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .gap_1();
+        for task in running {
+            let id = task.id.clone();
+            let title_line = background_task_one_line(&task.title);
+            let mut row = v_flex()
+                .id((gpui::ElementId::from("acp-background-task"), id.clone()))
+                .role(gpui::Role::Button)
+                .aria_label(title_line.clone())
+                .gap_1()
+                .px_2()
+                .py_1p5()
+                .rounded(ui_theme::row_radius())
+                .cursor_pointer()
+                .hover(|row| row.bg(ui_theme::overlay(0x14)))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if !this.expanded_background_tasks.remove(&id) {
+                        this.expanded_background_tasks.insert(id.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::blue()))
+                                .child(task.status.label()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_family(mono.clone())
+                                .text_color(gpui::rgb(ui_theme::text_faint()))
+                                .child(task.id.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(gpui::rgb(ui_theme::text_bright()))
+                                .child(title_line),
+                        ),
+                )
+                .child(
+                    div()
+                        .pl(px(4.))
+                        .text_xs()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .child(background_task_one_line(&task.command)),
+                );
+            if self.expanded_background_tasks.contains(&task.id) && !task.output.is_empty() {
+                let mut output = v_flex()
+                    .pl(px(4.))
+                    .font_family(mono.clone())
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::text_mid()));
+                for line in background_task_output_lines(&task.output) {
+                    output = output.child(div().truncate().child(line.to_string()));
+                }
+                row = row.child(output);
+            }
+            rows = rows.child(row);
+        }
+        let panel = v_flex()
+            .id("acp-background-task-popover")
+            .w_full()
+            .max_w(ui_theme::conversation_max_width())
+            .px_4()
+            .pt_3()
+            .pb_3()
+            .gap_2()
+            .rounded(ui_theme::card_radius())
+            .border_1()
+            .border_color(ui_theme::card_stroke())
+            .bg(ui_theme::glass_floating())
+            .shadow_lg()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .text_color(gpui::rgb(ui_theme::text_mid()))
+                            .child("后台任务"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("acp-background-task-close")
+                            .role(gpui::Role::Button)
+                            .aria_label("关闭")
+                            .size(px(24.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(ui_theme::overlay(0x20)))
+                            .child(Icon::new(IconName::Close).size(px(14.)))
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.background_tasks_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(rows);
+        Some(
+            div()
+                .id("acp-background-task-popover-layer")
                 .absolute()
                 .bottom(gpui::relative(1.))
                 .left_0()

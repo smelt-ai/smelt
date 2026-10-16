@@ -245,6 +245,8 @@ pub(crate) struct PluginSidebarAccountMenuPresentation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PluginEntityDecorationPresentation {
+    /// `plugin_id/contribution_id`。角标会增删重排，元素身份跟这项走。
+    pub key: String,
     pub icon_asset: Option<String>,
     pub badge: Option<String>,
     pub tone: EntityDecorationTone,
@@ -645,6 +647,7 @@ pub(crate) fn entity_decorations(
                     .iter()
                     .find(|item| item.resource_id == resource.resource_id)?;
                 Some(PluginEntityDecorationPresentation {
+                    key: decoration.key(),
                     icon_asset: decoration.icon_asset.clone(),
                     badge: item.badge.clone(),
                     tone: item.tone,

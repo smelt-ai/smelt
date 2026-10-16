@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,7 +8,14 @@ const packageRoot = join(import.meta.dir, "..");
 const stage = await mkdtemp(join(tmpdir(), "smelt-pi-production-smoke-"));
 
 try {
-	for (const path of ["package.json", "bun.lock", "src", "patches"]) {
+	const paths = ["package.json", "bun.lock", "src"];
+	try {
+		await access(join(packageRoot, "patches"));
+		paths.push("patches");
+	} catch {
+		// 没有上游补丁时不复制 patches。
+	}
+	for (const path of paths) {
 		await cp(join(packageRoot, path), join(stage, path), { recursive: true });
 	}
 
@@ -68,25 +75,15 @@ try {
 		throw new Error(`production RPC get_state failed: ${stdout.trim()} ${stderr.trim()}`);
 	}
 
-	const patchedRpcMode = await readFile(
+	const rpcMode = await readFile(
 		join(
 			stage,
 			"node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js",
 		),
 		"utf8",
 	);
-	for (const command of ["new_session", "switch_session", "fork", "clone"]) {
-		const marker = `case "${command}": {`;
-		const start = patchedRpcMode.indexOf(marker);
-		if (start < 0) {
-			throw new Error(`Pi RPC production install is missing ${command} handler`);
-		}
-		const afterMarker = patchedRpcMode.slice(start + marker.length);
-		const nextCase = afterMarker.indexOf('\n            case "');
-		const handler = nextCase < 0 ? afterMarker : afterMarker.slice(0, nextCase);
-		if (handler.includes("await rebindSession()")) {
-			throw new Error(`Pi RPC duplicate rebind remains in ${command} handler`);
-		}
+	if (rpcMode.includes('case "reload":')) {
+		throw new Error("Pi RPC must stay unpatched; /reload is an extension command");
 	}
 } finally {
 	await rm(stage, { recursive: true, force: true });

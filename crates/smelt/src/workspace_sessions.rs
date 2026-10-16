@@ -37,6 +37,47 @@ pub(crate) fn prepare_agent_definition_launch(
 }
 
 impl Workspace {
+    /// 手机要看一段 daemon 里没在跑的对话（典型是 daemon 冷重启后桌面只放了占位）。
+    /// 照「用户在桌面点开它」的语义拉起来，但不切舞台、不抢焦点。
+    /// 恢复还没把占位装回列表时先记下，装回后再兑现。
+    pub(crate) fn wake_conversation_for_remote(
+        &mut self,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self
+            .sessions
+            .iter()
+            .find_map(|session| match &session.kind {
+                SessionKind::Conversation(view) if view.read(cx).session_id() == session_id => {
+                    Some(view.clone())
+                }
+                _ => None,
+            });
+        match view {
+            // 一次性闸门在 maybe_auto_resume 里：桌面已经拉起过或拉失败过就不再重试，
+            // 和点开时的行为一致。
+            Some(view) => view.update(cx, |view, cx| view.maybe_auto_resume(window, cx)),
+            None if !self.sessions_restored
+                && !self.pending_conversation_wakes.contains(&session_id) =>
+            {
+                self.pending_conversation_wakes.push(session_id);
+            }
+            None => {}
+        }
+    }
+
+    pub(crate) fn consume_pending_conversation_wakes(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for session_id in std::mem::take(&mut self.pending_conversation_wakes) {
+            self.wake_conversation_for_remote(session_id, window, cx);
+        }
+    }
+
     /// 冷启动：专用 OS 线程里 **先 ensure managed 守护，再 reattach 全部会话**。
     /// 完成后才 `check_daemon_outdated`（不与 restore 并行 upgrade）。
     pub(crate) fn schedule_session_restore(
@@ -137,7 +178,6 @@ impl Workspace {
                             .and_then(settings::ConversationAgentKind::from_id)
                             .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
                         let refresh_launch_from_settings = saved.refresh_launch_from_settings();
-                        let fork_origin = saved.fork_origin.clone();
                         let conversation_binding = saved.conversation_binding.clone();
                         let agent_session = saved.agent_session.clone();
                         let config_values = if agent_session.is_some() {
@@ -162,12 +202,32 @@ impl Workspace {
                         }
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
+                        // 旧版重启会丢掉产品智能体的插件和 MCP 勾选，存下来的快照就成了裸 Pi。
+                        // 这样的快照按当前定义补全，完好的原样沿用。
+                        let definition = agent_definition_id.as_deref().and_then(|id| {
+                            cx.global::<settings::AgentHostState>()
+                                .agents
+                                .iter()
+                                .find(|definition| definition.id == id)
+                                .cloned()
+                        });
+                        let mut launch =
+                            smelt_core::agent_definition_store::repair_agent_definition_launch(
+                                saved.launch,
+                                definition.as_ref(),
+                            );
+                        // 记忆目录由智能体 id 决定，升级前保存的会话也能补上。开关由 Pi 每轮
+                        // 向 daemon 取，这里不判断。
+                        smelt_core::agent_definition_store::attach_agent_memory_dirs(
+                            &mut launch,
+                            agent_definition_id.as_deref(),
+                        );
                         let view = cx.new(|cx| {
                             acp_view::AcpView::placeholder(
                                 cx,
                                 acp_view::AcpViewOrigin {
                                     agent,
-                                    launch: saved.launch,
+                                    launch,
                                     refresh_launch_from_settings,
                                     profile_id: saved.profile_id,
                                     cwd: saved.cwd,
@@ -179,7 +239,6 @@ impl Workspace {
                             )
                         });
                         view.update(cx, |view, _cx| {
-                            view.set_fork_origin(fork_origin);
                             view.restore_conversation_binding(conversation_binding);
                             view.restore_agent_session(agent_session);
                             view.restore_config_values(config_values);
@@ -233,6 +292,7 @@ impl Workspace {
                         restored += 1;
                     }
                     this.consume_pending_notification_session_jump(window, cx);
+                    this.consume_pending_conversation_wakes(window, cx);
                     cx.notify();
                 })
                 .is_err()
@@ -343,7 +403,9 @@ impl Workspace {
                     this.active_session_revision != restore_active_revision,
                     this.active_session,
                 );
+                this.sync_session_ui(window, cx);
                 this.consume_pending_notification_session_jump(window, cx);
+                this.consume_pending_conversation_wakes(window, cx);
                 if let Some(Session {
                     kind: SessionKind::Conversation(view),
                     ..
@@ -357,7 +419,7 @@ impl Workspace {
                 if should_retry_failed_restore(failed, this.restore_retry_attempt) {
                     this.restore_retry_attempt += 1;
                     let delay = restore_retry_delay();
-                    this.background_error = Some(format!(
+                    this.report_background_error(format!(
                         "{failed} 个会话暂时没挂上（守护握手超时），{} 秒后自动重试…",
                         delay.as_secs()
                     ));
@@ -393,7 +455,7 @@ impl Workspace {
                     .detach();
                 } else {
                     if failed > 0 {
-                        this.background_error = Some(format!(
+                        this.report_background_error(format!(
                             "{failed} 个会话未能恢复，已保留在存档中。退出并重新打开 Smelt 会再试一次。"
                         ));
                         eprintln!(
@@ -425,6 +487,7 @@ impl Workspace {
                 // 真的没恢复成功的（比如终端 reattach 失败）得在这里被重新投影回来，
                 // 不能干等下一次目录推送。
                 this.reconcile_remote_catalog_projection(window, cx);
+                this.schedule_visible_refresh(cx);
                 cx.notify();
             });
         })
@@ -440,8 +503,12 @@ impl Workspace {
     /// 不依赖数组下标，所以拖拽排序、关闭前面的 session 都不会把快照串给别人。
     pub(crate) fn sync_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(new_id) = self.cur().map(|session| session.ui_id) else {
+            let changed = self.ui_session_id.is_some();
             self.park_active_project_ui();
             self.ui_session_id = None;
+            if changed {
+                self.schedule_visible_refresh(cx);
+            }
             return;
         };
         if self.ui_session_id == Some(new_id) {
@@ -475,6 +542,7 @@ impl Workspace {
         }
         self.ui_session_id = Some(new_id);
         self.apply_active_project_ui(window, cx);
+        self.schedule_visible_refresh(cx);
     }
 
     fn project_ui_key(&self, cx: &App) -> Option<String> {
@@ -510,6 +578,7 @@ impl Workspace {
         }
         self.park_active_project_ui();
         self.apply_active_project_ui(window, cx);
+        self.schedule_visible_refresh(cx);
     }
 
     pub(crate) fn restore_active_route_runtime(
@@ -666,6 +735,7 @@ impl Workspace {
         dragged: u64,
         target: u64,
         before: bool,
+        drop_top: Option<Pixels>,
         cx: &mut Context<Self>,
     ) {
         if dragged == target {
@@ -708,6 +778,8 @@ impl Workspace {
         }
         self.sess_drop_hint = None;
         self.sidebar_drag = None;
+        self.sidebar_reorder_generation += 1;
+        self.sidebar_drop_origin = drop_top.map(|top| (crate::SidebarDrag::Session(dragged), top));
         self.stop_sidebar_drag_scroll();
         self.save_state(cx);
         cx.notify();
@@ -721,6 +793,7 @@ impl Workspace {
         from_root: &str,
         to_root: &str,
         before: bool,
+        drop_top: Option<Pixels>,
         cx: &mut Context<Self>,
     ) {
         if !crate::sidebar_order::apply_pinned_project_drop(
@@ -735,6 +808,9 @@ impl Workspace {
         }
         self.proj_drop_hint = None;
         self.sidebar_drag = None;
+        self.sidebar_reorder_generation += 1;
+        self.sidebar_drop_origin =
+            drop_top.map(|top| (crate::SidebarDrag::Project(from_root.to_string()), top));
         self.stop_sidebar_drag_scroll();
         self.save_state(cx);
         cx.notify();
@@ -800,15 +876,8 @@ impl Workspace {
                 }
                 acp_view::AcpViewEvent::PreviewImage(image) => {
                     this.acp_image_preview = Some(image.clone());
-                    // 后台解码 + 内容寻址缓存（见 smelt_ui::image）：同一张图只解
-                    // 一次，迟到的旧图结果不会覆盖新图（渲染时按当前图查缓存）。
-                    let image_for_decode = image.clone();
-                    cx.spawn(async move |this, cx| {
-                        smelt_ui::image::fetch_async(image_for_decode, cx.background_executor())
-                            .await;
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    })
-                    .detach();
+                    // 解码进按图片 id 索引的缓存。完成时刷新窗口，渲染按当前这张图查缓存。
+                    smelt_ui::image::ensure_preview(image, cx);
                     cx.notify();
                 }
                 acp_view::AcpViewEvent::NewSession(request) => {
@@ -843,20 +912,6 @@ impl Workspace {
                 }
                 acp_view::AcpViewEvent::ForkConversation(request) => {
                     this.add_acp_handoff_session(request.as_ref().clone(), window, cx);
-                }
-                acp_view::AcpViewEvent::NavigateToSession(session_id) => {
-                    if let Some(ix) = this
-                        .sessions
-                        .iter()
-                        .position(|session| match &session.kind {
-                            SessionKind::Conversation(view) => {
-                                view.read(cx).session_id() == session_id
-                            }
-                            SessionKind::Term { .. } => false,
-                        })
-                    {
-                        this.activate(ix, window, cx);
-                    }
                 }
                 acp_view::AcpViewEvent::CompletedTurn { .. } => {
                     this.touch_acp_session(_view);
@@ -952,39 +1007,6 @@ impl Workspace {
         )
     }
 
-    /// 交接会话的侧栏标题。同一家 agent 沿用「继续：X」；跨 agent / 跨 workspace
-    /// 迁移则把两端写进标题（「Claude→Codex：X」）——会话列表里一眼看出这条对话
-    /// 换了主人，不然迁移过的会话和原会话长得一模一样。
-    pub(crate) fn handoff_session_title(request: &acp_view::AcpHandoffRequest) -> String {
-        let Some(source) = request.source.as_ref() else {
-            return "继续".to_string();
-        };
-        let source_name = source
-            .profile_label
-            .clone()
-            .or_else(|| {
-                source
-                    .agent
-                    .as_deref()
-                    .and_then(settings::ConversationAgentKind::from_id)
-                    .map(|k| k.short_label().to_string())
-            })
-            .unwrap_or_default();
-        let target_name = request
-            .profile_label
-            .clone()
-            .unwrap_or_else(|| request.agent.short_label().to_string());
-        // 源 agent 未知（旧存档没这个字段）时退回旧文案，不硬凑一个箭头。
-        if source_name.is_empty() || source_name == target_name {
-            return if source.from_history {
-                format!("继续：{}", source.title)
-            } else {
-                format!("分叉：{}", source.title)
-            };
-        }
-        format!("{source_name}→{target_name}：{}", source.title)
-    }
-
     pub(crate) fn add_acp_handoff_session(
         &mut self,
         mut request: acp_view::AcpHandoffRequest,
@@ -1032,10 +1054,7 @@ impl Workspace {
             request.config_values =
                 settings::initial_acp_config_for(request.agent, &request.config_values, cx);
         }
-        let title = Self::handoff_session_title(&request);
         let view = cx.new(|cx| acp_view::AcpView::start_with_handoff(window, cx, request));
-        // 交接名由系统推导，属于会话标题；不能占用只表示用户重命名的覆盖层。
-        view.update(cx, |view, _cx| view.restore_session_title(Some(title)));
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
@@ -1050,8 +1069,10 @@ impl Workspace {
         });
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         self.active_session = self.sessions.len() - 1;
+        self.sync_session_ui(window, cx);
         view.update(cx, |view, cx| view.focus_input(window, cx));
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1127,6 +1148,7 @@ impl Workspace {
             self.activate(ix, window, cx);
         } else {
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
             cx.notify();
         }
     }
@@ -1339,7 +1361,7 @@ impl Workspace {
                 Ok(r) => r,
                 Err(_) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.background_error = Some("新建会话内部通道断开，请重试".into());
+                        this.report_background_error("新建会话内部通道断开，请重试");
                         cx.notify();
                     });
                     return;
@@ -1351,7 +1373,7 @@ impl Workspace {
                     eprintln!("[workspace] 新建会话失败（{cwd:?}）：{e:#}");
                     let msg = format!("新建会话失败：{e:#}");
                     let _ = this.update(cx, |this, cx| {
-                        this.background_error = Some(msg);
+                        this.report_background_error(msg);
                         cx.notify();
                     });
                     return;
@@ -1372,6 +1394,7 @@ impl Workspace {
                 this.session_list_revision = this.session_list_revision.wrapping_add(1);
                 this.active_session = this.sessions.len() - 1;
                 this.save_state(cx);
+                this.schedule_visible_refresh(cx);
                 eprintln!(
                     "[workspace] 新建会话成功，当前共 {} 个",
                     this.sessions.len()
@@ -1661,6 +1684,7 @@ impl Workspace {
         // 打开项目 = 想看这个项目，收掉盖在舞台上的覆盖页。
         self.stage_cover = None;
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1732,6 +1756,7 @@ impl Workspace {
         }
         self.collapsed_projects.remove(&root);
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1754,6 +1779,7 @@ impl Workspace {
             self.sync_project_ui(window, cx);
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -1857,7 +1883,7 @@ impl Workspace {
                 Ok(v) => v,
                 Err(_) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.background_error = Some("打开路径内部通道断开".into());
+                        this.report_background_error("打开路径内部通道断开");
                         cx.notify();
                     });
                     return;
@@ -1866,7 +1892,7 @@ impl Workspace {
 
             let _ = this.update(cx, |this, cx| {
                 if dirs.is_empty() {
-                    this.background_error = Some("拖入的路径无法作为项目目录打开".into());
+                    this.report_background_error("拖入的路径无法作为项目目录打开");
                 } else {
                     for dir in dirs {
                         this.add_project(dir, cx);
@@ -1993,6 +2019,7 @@ impl Workspace {
             }
         }
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -2032,6 +2059,7 @@ impl Workspace {
         }
         remove_projects_under(&mut self.projects, &path);
         self.save_state(cx);
+        self.schedule_visible_refresh(cx);
         cx.notify();
     }
 
@@ -2127,6 +2155,7 @@ impl Workspace {
         if changed {
             // Esc / 返回条也走这里。只改内存不落盘的话，冷启动会按存档再进全屏。
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
         }
         cx.notify();
     }
@@ -2294,6 +2323,7 @@ impl Workspace {
                 window.focus(&self.focus_handle, cx);
             }
             self.save_state(cx);
+            self.schedule_visible_refresh(cx);
             cx.notify();
         }
     }
@@ -2379,6 +2409,8 @@ impl Workspace {
             RenameTarget::WorkspaceSurface(key) => self.workspace_surface_display_title(key),
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
+        self.begin_main_modal_focus(window, cx);
         input.update(cx, |s, cx| s.focus(window, cx));
         self._rename_sub = Some(cx.subscribe_in(
             &input,
@@ -2522,7 +2554,8 @@ impl Workspace {
     ///
     /// 改名走写穿，本地改完立即可见；这里只负责兜住不经过本窗口的写入（历史页、
     /// 移动端、另一扇窗口），因此 5 秒一次足够，且必须在后台线程读存储——侧栏
-    /// 渲染路径上不允许出现同步存储访问。
+    /// 渲染路径上不允许出现同步存储访问。内容变了由 `HistoryTitles` 的观察者重绘
+    /// 工作台，这里不再单独 notify。
     pub(crate) fn refresh_history_titles(&mut self, cx: &mut Context<Self>) {
         let fresh = self
             .history_titles_at
@@ -2573,8 +2606,8 @@ impl Workspace {
         );
 
         let key = session_history::session_list_key(agent, profile_id.as_deref(), &cwd);
-        if let Some((_, sessions)) = self.session_list.get_mut(&key) {
-            let mut updated = sessions.as_ref().clone();
+        if let Some((_, list)) = self.session_list.get_mut(&key) {
+            let mut updated = list.sessions.as_ref().clone();
             for session in &mut updated {
                 if session.resume_id == resume_id {
                     session.custom_title = custom_title.clone();
@@ -2583,7 +2616,7 @@ impl Workspace {
                         .unwrap_or_else(|| session.agent_title.clone());
                 }
             }
-            *sessions = Rc::new(updated);
+            *list = session_history::HistoryListSnapshot::new(updated);
         }
 
         for session in &mut self.sessions {

@@ -672,6 +672,14 @@ class ConnectionMetrics {
   });
 }
 
+/// 电脑接不上这段对话：没在跑，桌面端也没能把它拉起来。
+class SessionUnavailable {
+  final String sessionId;
+  final String reason;
+
+  const SessionUnavailable({required this.sessionId, required this.reason});
+}
+
 class MessageSendResult {
   final String requestId;
   final bool ok;
@@ -693,6 +701,9 @@ typedef IrohTunnelOpener =
 typedef IrohTunnelStopper = Future<void> Function();
 typedef IrohPathProbe = Future<IrohPathSample?> Function();
 
+/// 隧道距离上次收到桌面数据过了多久；没有证据时为 null。
+typedef IrohInboundIdleProbe = Future<Duration?> Function();
+
 /// Gateway WebSocket 服务
 class GatewayService {
   GatewayService({
@@ -705,9 +716,11 @@ class GatewayService {
     IrohTunnelOpener? irohTunnelOpener,
     IrohTunnelStopper? irohTunnelStopper,
     IrohPathProbe? irohPathProbe,
+    IrohInboundIdleProbe? irohInboundIdleProbe,
   }) : irohTunnelOpener = irohTunnelOpener ?? _irohUnavailable,
        irohTunnelStopper = irohTunnelStopper ?? _noopIrohStop,
-       irohPathProbe = irohPathProbe ?? _noIrohPath;
+       irohPathProbe = irohPathProbe ?? _noIrohPath,
+       irohInboundIdleProbe = irohInboundIdleProbe ?? _noInboundEvidence;
 
   /// 从发起连接到收到服务端 `connected` 的整体上限。
   final Duration connectTimeout;
@@ -720,6 +733,9 @@ class GatewayService {
   /// 手机切换 WiFi/蜂窝、或被系统冻结后恢复，TCP 常常处于半开：写得出去、
   /// 读不回来，且不触发 `onDone`/`onError`。没有这个上限的话状态会永远停在
   /// `connected`，而推送早已收不到——界面于是一直显示掉线那一刻的旧会话。
+  ///
+  /// pong 和业务数据排在同一条有序流里，大消息传输期间它会迟到。走 iroh
+  /// 时超时后还要看隧道：这段时间里还在收到字节，就只是慢，不是死。
   final Duration pongTimeout;
   final SessionCacheStore? cacheStore;
 
@@ -728,11 +744,13 @@ class GatewayService {
   IrohTunnelOpener irohTunnelOpener;
   IrohTunnelStopper irohTunnelStopper;
   IrohPathProbe irohPathProbe;
+  IrohInboundIdleProbe irohInboundIdleProbe;
 
   static Future<int> _irohUnavailable(String _, String _) =>
       Future.error(StateError('本版本未编入 iroh 隧道支持'));
   static Future<void> _noopIrohStop() async {}
   static Future<IrohPathSample?> _noIrohPath() async => null;
+  static Future<Duration?> _noInboundEvidence() async => null;
 
   WebSocketChannel? _channel;
   Uri? _activeGatewayWsUri;
@@ -756,6 +774,7 @@ class GatewayService {
   bool _pingSupported = true;
   bool _hasPongLatency = false;
   int? _pendingPingSentAt;
+  bool _judgingOverduePing = false;
 
   /// 旧桌面不认识 `listSessionSkills`，只会回一句 `invalid request`。碰一次就不再问，
   /// 也不把它当作会话错误弹给用户——该升级的是电脑端，不是这场对话出了问题。
@@ -775,6 +794,10 @@ class GatewayService {
   static const int _tailProbeOffset = 0x7fffffff;
   final LinkedHashMap<String, AcpSnapshot> _snapshotCache = LinkedHashMap();
   final Set<String> _historyLoads = {};
+
+  /// 点开大图时按引用取原图。同一张图并发点只发一次。
+  final Map<String, Completer<AcpImageData>> _imageLoads = {};
+  static const Duration _imageLoadTimeout = Duration(seconds: 60);
   final Set<String> _cachedSnapshotIds = {};
   final Map<String, Timer> _snapshotCacheTimers = {};
   String? _cacheNamespace;
@@ -801,6 +824,8 @@ class GatewayService {
   final _snapshotCacheController = StreamController<String>.broadcast();
   final _attentionController = StreamController<LifecycleAttention>.broadcast();
   final _attentionResolvedController = StreamController<String>.broadcast();
+  final _sessionUnavailableController =
+      StreamController<SessionUnavailable>.broadcast();
   final _errorController = StreamController<String>.broadcast();
   final _metricsController = StreamController<ConnectionMetrics>.broadcast();
   final _messageSendController =
@@ -853,6 +878,10 @@ class GatewayService {
   /// 任一客户端处理完行动项后，由同一 AttentionStore 发出的解决事件。
   Stream<String> get attentionResolvedStream =>
       _attentionResolvedController.stream;
+
+  /// 订阅的对话在电脑上接不上。会话页靠它停下加载圈、说清原因。
+  Stream<SessionUnavailable> get sessionUnavailableStream =>
+      _sessionUnavailableController.stream;
 
   /// 错误流
   Stream<String> get errorStream => _errorController.stream;
@@ -1281,6 +1310,44 @@ class GatewayService {
     return true;
   }
 
+  /// 取快照里大图的原图（快照只带缩略图）。连接断开或超时都会失败。
+  Future<AcpImageData> loadImage(String sessionId, AcpImageOriginal original) {
+    final key = _imageLoadKey(sessionId, original.entry, original.digest);
+    final pending = _imageLoads[key];
+    if (pending != null) return pending.future;
+    if (_state != WsState.connected) {
+      return Future.error(StateError('未连接桌面端'));
+    }
+    final completer = Completer<AcpImageData>();
+    _imageLoads[key] = completer;
+    _send({
+      'method': 'loadImage',
+      'params': {
+        'sessionId': sessionId,
+        'entry': original.entry,
+        'digest': original.digest,
+      },
+    });
+    return completer.future.timeout(
+      _imageLoadTimeout,
+      onTimeout: () {
+        _imageLoads.remove(key);
+        throw TimeoutException('图片加载超时');
+      },
+    );
+  }
+
+  static String _imageLoadKey(String sessionId, int entry, String digest) =>
+      '$sessionId\n$entry\n$digest';
+
+  void _failImageLoads(Object error) {
+    final pending = _imageLoads.values.toList();
+    _imageLoads.clear();
+    for (final completer in pending) {
+      completer.completeError(error);
+    }
+  }
+
   /// 取某个会话的待批详情，不占用订阅槽。
   ///
   /// 指挥台要在"不进会话"的前提下渲染审批卡，需要 pending permission 的选项和
@@ -1483,6 +1550,8 @@ class GatewayService {
       _metricsTimer?.cancel();
       _metricsTimer = null;
       _updateMetrics(const ConnectionMetrics());
+      // 旧连接上的请求不会再有回应。
+      _failImageLoads(StateError('与桌面端的连接已断开'));
     }
     _state = newState;
     _stateController.add(newState);
@@ -1502,16 +1571,14 @@ class GatewayService {
 
   void _sampleMetrics() {
     if (_state != WsState.connected) return;
-    // 上一个 ping 迟迟没有回应 = 连接已经死了，只是 TCP 还没告诉我们。
-    // 这里必须主动把它判死并重连，否则 `_pendingPingSentAt` 永远非空，
-    // 下面的分支再也不会发出新的 ping，心跳就此停摆。
+    // 上一个 ping 迟迟没有回应，可能是连接已经死了、只是 TCP 还没告诉我们，
+    // 也可能只是排在一条大消息后面。必须主动判一次，否则 `_pendingPingSentAt`
+    // 永远非空，下面的分支再也不会发出新的 ping，心跳就此停摆。
     final pendingSince = _pendingPingSentAt;
     if (pendingSince != null &&
         DateTime.now().millisecondsSinceEpoch - pendingSince >
             pongTimeout.inMilliseconds) {
-      _reportConnectionFailure('与桌面端失去响应');
-      _scheduleReconnect();
-      return;
+      unawaited(_judgeOverduePing(_connectionGeneration));
     }
     if (_pingSupported && _pendingPingSentAt == null) {
       final sentAt = DateTime.now().millisecondsSinceEpoch;
@@ -1538,6 +1605,43 @@ class GatewayService {
         latencyMs: _metrics.latencyMs,
       ),
     );
+  }
+
+  Future<void> _judgeOverduePing(int generation) async {
+    if (_judgingOverduePing) return;
+    _judgingOverduePing = true;
+    final bool receiving;
+    try {
+      receiving = await _tunnelStillReceiving();
+    } finally {
+      _judgingOverduePing = false;
+    }
+    if (receiving ||
+        generation != _connectionGeneration ||
+        _state != WsState.connected ||
+        _pendingPingSentAt == null) {
+      return;
+    }
+    _reportConnectionFailure('与桌面端失去响应');
+    _scheduleReconnect();
+  }
+
+  /// 隧道最近还在收到桌面数据。直连没有这个证据，只能按 pong 判。
+  /// 真断网时 QUIC 保活会在空闲超时后关连接，WebSocket 随之断开，不靠这里。
+  Future<bool> _tunnelStillReceiving() async {
+    final endpoint = _endpoint;
+    if (endpoint == null ||
+        Uri.tryParse(endpoint)?.scheme != PairingConfig.irohScheme) {
+      return false;
+    }
+    try {
+      final idle = await irohInboundIdleProbe().timeout(
+        const Duration(seconds: 2),
+      );
+      return idle != null && idle < pongTimeout;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _sampleIrohPath(int generation) async {
@@ -1750,6 +1854,19 @@ class GatewayService {
           // 订阅确认
           break;
 
+        case 'sessionUnavailable':
+          final sessionId = json['sessionId'] as String?;
+          if (sessionId != null && sessionId.isNotEmpty) {
+            _sessionUnavailableController.add(
+              SessionUnavailable(
+                sessionId: sessionId,
+                reason:
+                    json['reason'] as String? ??
+                    'This conversation is not running on the computer.',
+              ),
+            );
+          }
+
         case 'unsubscribed':
           // Local state is cleared when sending unsubscribe. A delayed ack for
           // session A must not erase a newer subscription to session B.
@@ -1761,6 +1878,28 @@ class GatewayService {
             AcpSnapshot.fromJson(json),
             sessionId: json['sessionId'] as String?,
           );
+
+        case 'image':
+          final key = _imageLoadKey(
+            json['sessionId'] as String? ?? '',
+            (json['entry'] as num?)?.toInt() ?? -1,
+            json['digest'] as String? ?? '',
+          );
+          final completer = _imageLoads.remove(key);
+          if (completer == null) break;
+          final data = json['data_b64'] as String?;
+          if (data == null || data.isEmpty) {
+            completer.completeError(
+              StateError(json['error'] as String? ?? '图片加载失败'),
+            );
+          } else {
+            completer.complete(
+              AcpImageData(
+                mimeType: json['mime'] as String? ?? 'image/png',
+                base64: data,
+              ),
+            );
+          }
 
         case 'attention':
           final item = json['item'];
@@ -1958,6 +2097,7 @@ class GatewayService {
     _snapshotController.close();
     _attentionController.close();
     _attentionResolvedController.close();
+    _sessionUnavailableController.close();
     _snapshotCacheController.close();
     _errorController.close();
     _metricsController.close();
@@ -2014,7 +2154,7 @@ int _estimateOutputBytes(ToolOutputPart part) => switch (part) {
     newText: final newText,
   ) =>
     (path.length + (oldText?.length ?? 0) + newText.length) * 2 + 64,
-  ToolOutputImage(base64: final base64) => base64.length + 64,
+  ToolOutputImage(image: final image) => image.base64.length + 64,
 };
 
 /// 全局单例

@@ -119,9 +119,7 @@
 **表面色也不交给 `ColorScheme.fromSeed`。** 起初只把状态色接了过来，表面色仍由 seed
 算法生成——真机上一看就露馅：浅色整屏泛淡紫，深色压到接近纯黑，跟设计稿完全不是
 一个东西。现在 `surface` / container 梯子 / 顶栏 / 底栏 / 描边全部取自 `ui_theme.rs`。
-注意**深色层级跟 Discord 那版相反**（舞台 `#070707` 最暗，顶栏底栏 `#111111`
-略抬起），这是 Grok Bot 那套「窗口底和舞台同色近黑、卡片上抬」，`ui_theme.rs` 里 `DARK`
-上方专门写了「别顺手改回去」。「顶栏和舞台错开一档」这层关系 Material 的 container
+桌面表面色现在跟着当前主题走，不再写死 sand。Default Dark 的舞台是 `#0a0a0a`（`neutral-950`），侧栏用主题的 `sidebar`。`ui_theme.rs` 里没有 `DARK` 常量。下面这段是当时按设计稿改移动端的记录：顶栏和舞台要能错开，Material 的 container
 梯子表达不了，所以顶栏/底部导航单独指定。
 
 **再上一次模拟器又抓到一层：容器梯子只保证「一级比一级亮」，保证不了「哪些东西该是
@@ -215,7 +213,7 @@ yellow / red），哈希是写死的 FNV-1a，只保证手机内部稳定。色�
   （连同 `THIRD_PARTY_NOTICES.md`，LobeHub Icons / MIT）。桌面换图标时这里要跟着换，
   pubspec 里写了提醒。
 - **匹配用「包含」而不是「相等」。** 服务端那边是 `c.contains(k.id())`
-  （`agent_kind.rs` 的 `from_command_loose`），自定义 agent 的 id 常常是
+  （`agent_kind` 的 `from_command_loose`），自定义 agent 的 id 常常是
   `claude-quant` 这种带后缀的形态。精确匹配会让它们全掉进兜底图标。
 - **认不出的 ACP 会话退到机器人图标，不退到终端图标。** 后者会把一个 ACP 会话画成
   终端——那不是「信息少了」，是「信息错了」。

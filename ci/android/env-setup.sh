@@ -2,14 +2,14 @@
 # Android 端（Flutter + Rust/NDK）的构建环境初始化。
 #
 # 检查各工具版本，不达标的就地安装，最后把这次运行需要的环境变量写进
-# .ci/.env/android.sh，交给 .ci/android/ci.sh source。
+# ci/.env/android.sh，交给 ci/android/ci.sh source。
 #
 # 构建机的三条硬规矩（不写系统目录 / 全局配置只留在当前上下文 / 不复用机器上
-# 已有的工具链目录）见 .ci/lib/common.sh 顶部。
+# 已有的工具链目录）见 ci/lib/common.sh 顶部。
 #
 # 用法：
-#   ./.ci/android/env-setup.sh              检查并按需安装
-#   ./.ci/android/env-setup.sh --check      只检查不安装（不达标则退出码非 0）
+#   ./ci/android/env-setup.sh              检查并按需安装
+#   ./ci/android/env-setup.sh --check      只检查不安装（不达标则退出码非 0）
 #
 # 可用环境变量覆盖（内网机器如果连不上外网，用这些指向镜像）：
 #   SMELT_CI_TOOLCHAIN_ROOT     工具链安装位置，默认 ~/.smelt-ci/toolchains
@@ -102,7 +102,7 @@ preflight() {
 }
 
 # ── Flutter ─────────────────────────────────────────────────────────────────
-# 与 .ci/ios/env-setup.sh 装到同一个 FLUTTER_DIR：两个平台共用一份 Flutter SDK，
+# 与 ci/ios/env-setup.sh 装到同一个 FLUTTER_DIR：两个平台共用一份 Flutter SDK，
 # 版本要求也来自同一处（mobile/pubspec.yaml）。
 setup_flutter() {
   local have=""
@@ -132,7 +132,7 @@ setup_flutter() {
 }
 
 # ── Rust ────────────────────────────────────────────────────────────────────
-# 和 .ci/mac/env-setup.sh 共用 CARGO_HOME / RUSTUP_HOME，区别只在多装几个
+# 和 ci/mac/env-setup.sh 共用 CARGO_HOME / RUSTUP_HOME，区别只在多装几个
 # Android target。
 setup_rust() {
   export CARGO_HOME="$CARGO_HOME_DIR" RUSTUP_HOME="$RUSTUP_HOME_DIR"
@@ -145,19 +145,24 @@ setup_rust() {
     [[ "$CHECK_ONLY" == 1 ]] && die "Rust 不满足要求（--check 模式不安装）"
 
     if [[ -x "$rustup_bin" ]]; then
-      info "升级 Rust 工具链"
-      "$rustup_bin" update stable || die "rustup update 失败"
-      "$rustup_bin" default stable >/dev/null
+      info "升级 Rust 到 $REQUIRED_RUST"
+      "$rustup_bin" toolchain install "$REQUIRED_RUST" --profile minimal || die "Rust 工具链安装失败"
+      "$rustup_bin" default "$REQUIRED_RUST" || die "切换默认工具链失败"
     else
       info "安装 rustup 到 $CARGO_HOME_DIR"
-      local update_root="${RUSTUP_UPDATE_ROOT:-https://static.rust-lang.org/rustup}"
-      curl -fsSL --retry 3 "$update_root/dist/$(uname -m)-apple-darwin/rustup-init" \
-        -o "$TOOLCHAIN_ROOT/rustup-init" \
-        || die "下载 rustup-init 失败。内网机器请设置 RUSTUP_UPDATE_ROOT 指向镜像。"
-      chmod +x "$TOOLCHAIN_ROOT/rustup-init"
-      "$TOOLCHAIN_ROOT/rustup-init" -y --no-modify-path --default-toolchain stable \
-        || die "安装 rustup 失败"
-      rm -f "$TOOLCHAIN_ROOT/rustup-init"
+      mkdir -p "$TOOLCHAIN_ROOT"
+      # 和 ci/mac/env-setup.sh 一样走架构无关的安装脚本。按 uname -m 自己拼
+      # dist/<arch>-apple-darwin/rustup-init 是错的：Apple Silicon 上 uname -m
+      # 返回 arm64，而 rustup 的分发路径用的是 Rust 三元组里的 aarch64，拼出来
+      # 的 URL 一定 404。
+      local init="$TOOLCHAIN_ROOT/rustup-init.sh"
+      curl -fsSL --retry 3 "${RUSTUP_UPDATE_ROOT:-https://sh.rustup.rs}" -o "$init" \
+        || die "下载 rustup 失败。内网机器请设置 RUSTUP_UPDATE_ROOT 指向镜像。"
+      # --no-modify-path 是关键：默认行为会往 ~/.profile、~/.bashrc 里塞 PATH，
+      # 那是对构建机的永久污染。PATH 由本脚本写进 ci/.env/android.sh。
+      sh "$init" -y --no-modify-path --default-toolchain "$REQUIRED_RUST" --profile minimal \
+        || die "rustup 安装失败"
+      rm -f "$init"
     fi
     ok "Rust $(tool_version "$rustc_bin" --version)"
   fi
@@ -311,8 +316,8 @@ main() {
 
   write_env_file
   echo
-  ok "环境就绪，已写入 .ci/.env/android.sh"
-  echo "  接下来执行构建：./.ci/android/ci.sh"
+  ok "环境就绪，已写入 ci/.env/android.sh"
+  echo "  接下来执行构建：./ci/android/ci.sh"
 }
 
 main "$@"

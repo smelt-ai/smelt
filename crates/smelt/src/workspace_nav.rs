@@ -1,15 +1,18 @@
 //! 工作台当前显示哪一个一级入口。
 //!
-//! 左侧「智能体 / 自动化」是分组标题，不是 iOS/长桥那种保活 Tab：点标题总是进
-//! 该面的根页。对话和运行现场是侧栏里的子行，只切当前面、不清根页。插件工作台
-//! 与这三个系统入口并列，不再把 `route` 写成 Session 再盖一层 surface。
+//! 左侧「智能体 / 自动化 / 能力库」是分组标题，不是 iOS/长桥那种保活 Tab：点标题总是进
+//! 该面的根页。能力库的模型、插件、MCP、记忆是面内平级页签，不是钻取。对话和运行现场
+//! 是侧栏里的子行，只切当前面、不清根页。插件工作台与这些系统入口并列，不再把
+//! `route` 写成 Session 再盖一层 surface。
 
-/// 左侧一级导航。智能体、自动化、会话与插件工作台并列。
+/// 左侧一级导航。智能体、自动化、能力库、会话与插件工作台并列。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkspaceRoute {
     Agents,
     Automations,
+    /// 能力库：智能体共用的模型、插件和记忆。
+    Capabilities,
     #[default]
     Session,
     Plugin {
@@ -47,7 +50,7 @@ impl WorkspaceRoute {
     }
 }
 
-/// 智能体面内页。定义列表是根；编辑器和对话是钻取，不落盘。
+/// 智能体面内页。定义列表是根；详情（设置）和对话是钻取，不落盘。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AgentsView {
     #[default]
@@ -85,6 +88,38 @@ impl AgentsView {
 
     pub(crate) fn pop_to_root(&mut self) {
         *self = Self::Catalog;
+    }
+}
+
+/// 能力库面内页签。各页平级，切换不算钻取：侧栏回根页时保持当前页签，不落盘。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CapabilitiesTab {
+    #[default]
+    Models,
+    Plugins,
+    Mcp,
+    Memory,
+}
+
+impl CapabilitiesTab {
+    pub(crate) const ALL: [Self; 4] = [Self::Models, Self::Plugins, Self::Mcp, Self::Memory];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Models => "模型",
+            Self::Plugins => "插件",
+            Self::Mcp => "MCP",
+            Self::Memory => "记忆",
+        }
+    }
+
+    pub(crate) fn element_id(self) -> &'static str {
+        match self {
+            Self::Models => "capabilities-tab-models",
+            Self::Plugins => "capabilities-tab-plugins",
+            Self::Mcp => "capabilities-tab-mcp",
+            Self::Memory => "capabilities-tab-memory",
+        }
     }
 }
 
@@ -130,6 +165,7 @@ pub(crate) struct WorkspaceNav {
     active: WorkspaceRoute,
     agents: AgentsView,
     automations: AutomationsView,
+    capabilities: CapabilitiesTab,
 }
 
 impl Default for WorkspaceNav {
@@ -138,6 +174,7 @@ impl Default for WorkspaceNav {
             active: WorkspaceRoute::Session,
             agents: AgentsView::Catalog,
             automations: AutomationsView::List,
+            capabilities: CapabilitiesTab::Models,
         }
     }
 }
@@ -158,6 +195,7 @@ impl WorkspaceNav {
             active,
             agents: AgentsView::Catalog,
             automations: AutomationsView::List,
+            capabilities: CapabilitiesTab::Models,
         }
     }
 
@@ -181,6 +219,14 @@ impl WorkspaceNav {
         &mut self.automations
     }
 
+    pub(crate) fn capabilities_tab(&self) -> CapabilitiesTab {
+        self.capabilities
+    }
+
+    pub(crate) fn set_capabilities_tab(&mut self, tab: CapabilitiesTab) {
+        self.capabilities = tab;
+    }
+
     pub(crate) fn set_active(&mut self, tab: WorkspaceRoute) {
         self.active = tab;
     }
@@ -189,7 +235,9 @@ impl WorkspaceNav {
         match self.active {
             WorkspaceRoute::Agents => self.agents.pop_to_root(),
             WorkspaceRoute::Automations => self.automations.pop_to_root(),
-            WorkspaceRoute::Session | WorkspaceRoute::Plugin { .. } => {}
+            WorkspaceRoute::Capabilities
+            | WorkspaceRoute::Session
+            | WorkspaceRoute::Plugin { .. } => {}
         }
     }
 
@@ -202,7 +250,7 @@ impl WorkspaceNav {
         }
     }
 
-    /// 落盘时拆回旧字段：plugin 仍写 `active_workspace_surface`，`route` 保持三态。
+    /// 落盘时拆回旧字段：plugin 仍写 `active_workspace_surface`，`route` 只写系统入口。
     pub(crate) fn persist(&self) -> (WorkspaceRoute, Option<String>) {
         match &self.active {
             WorkspaceRoute::Plugin { key } => (WorkspaceRoute::Session, Some(key.clone())),
@@ -279,6 +327,7 @@ mod tests {
         assert!(WorkspaceRoute::Session.releases_plugin_key());
         assert!(WorkspaceRoute::Agents.releases_plugin_key());
         assert!(WorkspaceRoute::Automations.releases_plugin_key());
+        assert!(WorkspaceRoute::Capabilities.releases_plugin_key());
     }
 
     #[test]
@@ -352,9 +401,25 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_tab_survives_returning_to_the_root() {
+        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Session, None);
+        assert_eq!(nav.capabilities_tab(), CapabilitiesTab::Models);
+        nav.set_capabilities_tab(CapabilitiesTab::Plugins);
+        nav.set_active(WorkspaceRoute::Capabilities);
+        nav.pop_active_to_root();
+        assert_eq!(
+            nav.capabilities_tab(),
+            CapabilitiesTab::Plugins,
+            "页签是平级切换，不是钻取，点侧栏标题不应把它重置"
+        );
+        assert_eq!(nav.persist(), (WorkspaceRoute::Capabilities, None));
+    }
+
+    #[test]
     fn sidebar_system_entries_open_root_plugin_does_not() {
         assert!(WorkspaceRoute::Agents.sidebar_opens_root());
         assert!(WorkspaceRoute::Automations.sidebar_opens_root());
+        assert!(WorkspaceRoute::Capabilities.sidebar_opens_root());
         assert!(WorkspaceRoute::Session.sidebar_opens_root());
         assert!(
             !WorkspaceRoute::Plugin {
@@ -373,6 +438,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&WorkspaceRoute::Automations).unwrap(),
             "\"automations\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkspaceRoute::Capabilities).unwrap(),
+            "\"capabilities\""
         );
         assert_eq!(
             serde_json::to_string(&WorkspaceRoute::Session).unwrap(),
