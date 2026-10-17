@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>运行时与界面分离</title>
+<style>
+  :root {
+    --bg: #14120e;
+    --paper: #1c1914;
+    --ink: #efe6d6;
+    --muted: #a39886;
+    --line: #3a342b;
+    --amber: #e0a15a;
+    --green: #7dba7a;
+    --blue: #7eb0d4;
+    --red: #d98473;
+    --root: #c4b5a0;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); color: var(--ink); }
+  body {
+    margin: 0 auto;
+    max-width: 960px;
+    padding: 48px 28px 96px;
+    font: 18px/1.7 "PingFang SC", "Iowan Old Style", "Songti SC", serif;
+  }
+  h1, h2, h3, .kicker, .label, table, .note, pre, .chip, .lane, .toc {
+    font-family: "Avenir Next", "PingFang SC", "Helvetica Neue", sans-serif;
+  }
+  h1 { font-size: 36px; line-height: 1.2; font-weight: 600; letter-spacing: -0.03em; margin: 0 0 14px; }
+  h2 { font-size: 22px; margin: 56px 0 12px; font-weight: 600; }
+  h3 { font-size: 17px; margin: 28px 0 8px; font-weight: 600; }
+  p { margin: 0 0 14px; }
+  a { color: var(--blue); }
+  .kicker { color: var(--amber); letter-spacing: 0.12em; font-size: 12px; margin-bottom: 10px; }
+  .lede { font-size: 20px; }
+  .meta { color: var(--muted); font-size: 14px; font-family: "Avenir Next", "PingFang SC", sans-serif; }
+  .toc { font-size: 14px; color: var(--muted); columns: 2; column-gap: 32px; margin: 24px 0 0; padding-left: 1.2em; }
+  .toc li { margin: 2px 0; }
+  .grid { display: grid; gap: 14px; }
+  .two { grid-template-columns: 1fr 1fr; }
+  .three { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 760px) {
+    .two, .three { grid-template-columns: 1fr; }
+    .toc { columns: 1; }
+    h1 { font-size: 30px; }
+    body { padding: 32px 16px 72px; }
+  }
+  .card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 16px 4px;
+  }
+  .card h3 { margin-top: 0; }
+  .label { font-size: 12px; letter-spacing: 0.08em; color: var(--muted); }
+  ul, ol { margin: 8px 0 14px; padding-left: 1.2em; }
+  li { margin: 4px 0; }
+  .table-wrap { overflow-x: auto; margin: 8px 0 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.5; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  code, pre { font-family: "SF Mono", ui-monospace, monospace; font-size: 0.86em; }
+  td code, li code, p code { color: var(--root); overflow-wrap: anywhere; }
+  pre {
+    background: #100e0b;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    line-height: 1.55;
+    margin: 0 0 16px;
+  }
+  .note {
+    font-size: 14.5px;
+    color: var(--muted);
+    border-left: 3px solid var(--amber);
+    padding: 2px 0 2px 12px;
+    margin: 8px 0 18px;
+  }
+  .decision {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--green);
+    background: var(--paper);
+    border-radius: 12px;
+    padding: 12px 16px 2px;
+    margin: 10px 0 18px;
+  }
+  .decision .label { color: var(--green); }
+  .open {
+    border-left-color: var(--amber);
+  }
+  .open .label { color: var(--amber); }
+  .chip {
+    display: inline-block;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    border-radius: 999px;
+    padding: 1px 8px;
+    vertical-align: 1px;
+    white-space: nowrap;
+  }
+  .chip-rt { color: var(--green); border: 1px solid #3f6d44; }
+  .chip-cl { color: var(--blue); border: 1px solid #3d5d78; }
+  .chip-split { color: var(--amber); border: 1px solid #6d5434; }
+  .chip-done { color: var(--green); border: 1px solid #3f6d44; }
+  .chip-todo { color: var(--red); border: 1px solid #6d3f36; }
+  .chip-na { color: var(--muted); border: 1px solid var(--line); }
+
+  /* 架构图 */
+  .arch { display: grid; gap: 10px; margin: 16px 0 22px; }
+  .lane {
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-size: 14px;
+  }
+  .lane .label { margin-bottom: 8px; }
+  .lane-client { border: 1px solid #3d5d78; background: #152028; }
+  .lane-transport { border: 1px dashed #6d5434; background: #1d1810; text-align: center; color: var(--amber); }
+  .lane-runtime { border: 1px solid #3f6d44; background: #172117; }
+  .boxes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .box {
+    flex: 1 1 180px;
+    border: 1px solid var(--line);
+    background: #100e0b;
+    border-radius: 10px;
+    padding: 8px 10px;
+  }
+  .box b { font-weight: 600; }
+  .box .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .runtimes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 760px) { .runtimes { grid-template-columns: 1fr; } }
+  .phase {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    gap: 14px;
+    border-bottom: 1px solid var(--line);
+    padding: 14px 0;
+  }
+  .phase .num {
+    font-family: "Avenir Next", sans-serif;
+    font-size: 26px;
+    font-weight: 600;
+    color: var(--amber);
+    line-height: 1.1;
+  }
+  .phase p, .phase ul { font-size: 16px; }
+  .exit { font-size: 14.5px; color: var(--muted); }
+  .exit b { color: var(--green); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div class="kicker">设计文档 · 草案</div>
+<h1>运行时与界面分离</h1>
+<p class="lede">把 smeltd 变成可以独立部署的「运行时」，可以跑在 Mac 上，也可以无头跑在 Linux 上。桌面 GUI 和手机 App 都只是客户端，一个桌面窗口可以同时挂上多台机器的运行时。</p>
+<p class="meta">2026-10-17 · 状态：待评审 · 相关：<a href="remote-ops-roadmap.md">remote-ops-roadmap.md</a>、<a href="control-api.md">control-api.md</a>、<a href="event-bus-architecture.md">event-bus-architecture.md</a>、<a href="local-storage.md">local-storage.md</a></p>
+
+<ol class="toc">
+  <li>目标与非目标</li>
+  <li>现状：拆了一半</li>
+  <li>目标架构</li>
+  <li>D1 运行时与客户端的边界</li>
+  <li>D2 一套协议，两种传输</li>
+  <li>D3 鉴权：按设备，不按共享 token</li>
+  <li>D4 运行时 API：只提供业务能力</li>
+  <li>D5 SQLite 一分为二</li>
+  <li>D6 RuntimeId 与多运行时</li>
+  <li>D7 生命周期与升级</li>
+  <li>D8 插件放在哪一侧</li>
+  <li>Linux 无头运行时清单</li>
+  <li>分期</li>
+  <li>风险与待定问题</li>
+</ol>
+
+<!-- ───────────────────────────────────────── -->
+<h2>1. 目标与非目标</h2>
+<div class="grid two">
+  <div class="card">
+    <h3>目标</h3>
+    <ul>
+      <li>smeltd 成为<b>运行时</b>：项目、会话、终端、ACP、git、文件、智能体、自动化都归它管。</li>
+      <li>运行时可以<b>无头跑在 Linux</b> 上（x86_64 / aarch64），不依赖 GUI 拉起。</li>
+      <li>桌面 GUI 和手机 App 都是<b>客户端</b>，说<b>同一套协议</b>。</li>
+      <li>一个桌面窗口可以<b>同时挂多个运行时</b>，例如本机 Mac 和一台 Linux 开发机。</li>
+      <li>本机和远程走<b>同一条代码路径</b>：本机运行时也只是一个恰好在本地的运行时。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>非目标</h3>
+    <ul>
+      <li>Linux 桌面 GUI。</li>
+      <li>任何跨运行时的操作：把会话拖到另一台机器、跨机 agent 互发消息、跨机搜索。</li>
+      <li>多人共用同一个运行时。模型仍然是「一个用户，多台设备」。</li>
+      <li>离线编辑：运行时掉线时，它名下的内容只读。</li>
+      <li>在远程路径上「用本机 IDE 打开」。以后另议，见第 14 节。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>2. 现状：拆了一半</h2>
+<p>smeltd 实际上已经是运行时了：它持有全部 PTY、ACP 会话（每个对话一个 session host 子进程）、自动化与 webhook、EventHub（落在 SQLite 的 outbox 与游标）、手机网关和 iroh 隧道。GUI 通过 <code>~/.smelt/smeltd.sock</code> 上的首帧 op 协议（<code>smelt-core/src/daemon_protocol.rs</code>，约 40 个 op）和版本化的 Control API（<code>control_api.rs</code>）和它通信。</p>
+<p>问题出在 GUI <b>在进程里直接做</b>的那些事。运行时一旦换到另一台机器，这些都会失效：</p>
+<div class="table-wrap"><table>
+  <tr><th>类别</th><th>GUI 现在怎么做</th><th>位置</th></tr>
+  <tr><td>SQLite</td><td>直接打开 <code>smelt.sqlite3</code>，读写工作区快照、项目、设置、智能体定义、记忆、额度缓存。项目列表由 GUI 维护，再通过 <code>workspace_menu</code> 推给 smeltd。</td><td><code>workspace_persist.rs</code>、<code>settings/mod.rs</code>、<code>smelt-store/src/snapshots.rs:32</code></td></tr>
+  <tr><td>Git</td><td>在本进程调用 <code>smelt_git</code> 跑 git 子进程（状态、diff、暂存、提交、推送、worktree、log），用 FSEvents 监听仓库变化，@ 补全时跑 <code>git ls-files</code>。</td><td><code>git_panel/*</code>、<code>git_log.rs</code>、<code>smelt-ui/src/acp_completion.rs</code></td></tr>
+  <tr><td>文件</td><td>文件树、编辑器的打开和保存、项目搜索、扫描各家 agent 的历史存档、存储清理、安装 agent hook（会改 provider 配置文件）。</td><td><code>file_tree/*</code>、<code>session_history.rs</code>、<code>settings/agent_hooks.rs</code></td></tr>
+  <tr><td>进程</td><td>拉起、升级、杀掉 smeltd，安装或检查 ACP CLI，Pi 登录和 MCP，读钥匙串查额度，打开 IDE。</td><td><code>terminal.rs</code>、<code>settings/workspace.rs</code>、<code>provider_quota.rs</code>、<code>ide.rs</code></td></tr>
+  <tr><td>插件</td><td>gpui-shell 插件从本地磁盘发现、加载；插件的 fs 模块直接访问本机 <code>$HOME</code>。</td><td><code>plugins/mod.rs</code>、<code>plugins/host_fs.rs</code></td></tr>
+</table></div>
+<p>另外三处结构性问题：</p>
+<ul>
+  <li><b>鉴权只适用于本机。</b>大多数 op 只靠 socket 文件权限 0600（<code>smeltd/src/main.rs</code> 的 <code>secure_daemon_socket</code>），也就是「同一个用户」；只有 <code>event_subscribe</code> 额外认对端进程身份：macOS 上是签名身份，Linux 上是 <code>SO_PEERCRED</code> 加「与 smeltd 同目录的二进制」（<code>smeltd/src/protocol/auth.rs</code>、<code>protocol/subscribe.rs</code>）。两者都要求对端在同一台机器上。</li>
+  <li><b>两套协议。</b>桌面直接说 op 协议；手机说 gateway 自定义的 JSON-WebSocket（<code>smelt-remote-gateway/src/lib.rs</code>），由 gateway 翻译成 op。同一件事维护两份。</li>
+  <li><b>生命周期归 GUI。</b>smeltd 由 GUI 拉起、升级，菜单栏只在 GUI 拉起时（<code>SMELT_MENUBAR</code>）才启用。没有 launchd 或 systemd 单元。</li>
+</ul>
+<div class="note">已经有雏形但没接上的接缝：<code>smelt_core::fs::FileSystem</code> 和 <code>smelt_core::subprocess::Subprocess</code>，注释里写明了是为「远程或沙箱执行环境」准备的。目前只有 smelt-git 和 session_history 用到它们。它们适合留作运行时<b>内部</b>的抽象，不适合直接搬上网络，原因见 D4。</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>3. 目标架构</h2>
+<div class="arch">
+  <div class="lane lane-client">
+    <div class="label">客户端</div>
+    <div class="boxes">
+      <div class="box"><b>桌面 GUI</b>（macOS）<div class="sub">RuntimeHub → N × RuntimeClient<br>客户端库 client.sqlite3：主题、布局、连接列表</div></div>
+      <div class="box"><b>手机 App</b>（iOS / Android）<div class="sub">Flutter 界面 + Rust 侧的同一个 RuntimeClient（经 FRB 调用）</div></div>
+      <div class="box"><b>CLI / MCP 适配器</b><div class="sub"><code>smelt agent</code>、<code>smelt-agent-mcp</code>，只走 Control API</div></div>
+    </div>
+  </div>
+  <div class="lane lane-transport">同一套运行时协议 · 一个操作一条连接<br>本机 unix socket · 远程 iroh QUIC stream</div>
+  <div class="runtimes">
+    <div class="lane lane-runtime">
+      <div class="label">运行时 · 本机 Mac</div>
+      <div class="boxes"><div class="box"><b>smeltd</b><div class="sub">runtime_id = A · smelt.sqlite3<br>菜单栏（mac 专属，可选）</div></div></div>
+    </div>
+    <div class="lane lane-runtime">
+      <div class="label">运行时 · Linux 开发机（无头）</div>
+      <div class="boxes"><div class="box"><b>smeltd</b><div class="sub">runtime_id = B · smelt.sqlite3<br>systemd --user 托管</div></div></div>
+    </div>
+  </div>
+</div>
+<p>一句话：<b>运行时拥有一切和机器相关的东西，客户端只拥有怎么看。</b></p>
+
+<!-- ───────────────────────────────────────── -->
+<h2>4. D1 运行时与客户端的边界</h2>
+<p>判断标准只有一条：<b>换一台设备来看，这份数据还应不应该一样？</b>应该一样的就属于运行时；每台设备可以不同的就属于客户端。</p>
+<div class="table-wrap"><table>
+  <tr><th>数据 / 能力</th><th>归属</th><th>说明</th></tr>
+  <tr><td>项目列表、会话分组（<code>project</code>、<code>session_group</code>）</td><td><span class="chip chip-rt">运行时</span></td><td>项目路径只在那台机器上存在。手机端的 <code>listWorkspace</code> 本来就需要它。</td></tr>
+  <tr><td>会话及其启动参数（<code>session</code>、<code>acp_detail</code>）</td><td><span class="chip chip-rt">运行时</span></td><td></td></tr>
+  <tr><td>分屏树与尺寸（<code>layout_node</code>）、当前标签、折叠、侧栏宽度</td><td><span class="chip chip-cl">客户端</span></td><td>手机没有分屏；两台桌面完全可以不同。存储键改为 <code>(runtime_id, group_id)</code>。</td></tr>
+  <tr><td>智能体定义、记忆、自动化、历史标题、EventHub 各表</td><td><span class="chip chip-rt">运行时</span></td><td></td></tr>
+  <tr><td>ACP 引擎配置：命令、环境变量、配置记忆、provider 档案</td><td><span class="chip chip-rt">运行时</span></td><td>这些命令在运行时那台机器上执行。</td></tr>
+  <tr><td>快捷启动项（<code>launch_entry</code>）</td><td><span class="chip chip-rt">运行时</span></td><td>命令在哪跑，配置就放在哪。</td></tr>
+  <tr><td>外观：主题、字体、背景、玻璃效果</td><td><span class="chip chip-cl">客户端</span></td><td>例外是终端主题：PTY 渲染在客户端，但手机现在要求 PC 下发主题。改成手机自己定，不再随运行时走。</td></tr>
+  <tr><td><code>AppearanceSnapshot</code></td><td><span class="chip chip-split">拆开</span></td><td>现在一个快照里同时装着字体、侧栏宽度、项目、会话和分屏树（<code>snapshots.rs:32</code>）。按本表逐个字段拆开。</td></tr>
+  <tr><td>额度缓存、模型发现结果</td><td><span class="chip chip-rt">运行时</span></td><td>凭据在运行时那台机器上。</td></tr>
+  <tr><td>更新设置与更新状态</td><td><span class="chip chip-split">两份</span></td><td>客户端管自己的更新，运行时管自己的，见 D7。</td></tr>
+  <tr><td>连过哪些运行时、怎么连</td><td><span class="chip chip-cl">客户端</span></td><td>新表 <code>runtime_connection</code>，见 D6。</td></tr>
+  <tr><td>系统通知、Dock 角标、状态栏图标</td><td><span class="chip chip-cl">客户端</span></td><td>运行时只负责产生「需要关注」事件；呈现由各客户端自己做，并汇总所有运行时。</td></tr>
+</table></div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>5. D2 一套协议，两种传输</h2>
+<p>协议分两层：<b>连接</b>和<b>消息</b>。</p>
+<h3>连接层</h3>
+<p>现有协议的本质是「一条连接 = 一个操作」：首帧 JSON 带 <code>op</code>，之后要么一问一答，要么变成长流（<code>open</code>/<code>watch</code> 是 PTY 字节，<code>acp_watch</code> 是快照流，<code>event_subscribe</code> 是事件投影流）。这个模型<b>保留不动</b>。两种传输都能原生提供「很多条独立连接」，所以<b>不需要自己做多路复用</b>：</p>
+<div class="table-wrap"><table>
+  <tr><th>传输</th><th>一条连接是</th><th>用于</th></tr>
+  <tr><td>unix socket</td><td>一条 socket 连接，和今天一样</td><td>本机：GUI、CLI、hook、MCP 适配器</td></tr>
+  <tr><td>iroh</td><td>一条 QUIC 双向流。运行时直接接收 iroh 流，交给和 unix socket 同一个分发器，不再经过回环 TCP 和 gateway 转一道</td><td>所有远程：桌面连 Linux、手机连任何运行时</td></tr>
+</table></div>
+<div class="decision">
+  <div class="label">决定</div>
+  <ul>
+    <li><b>远程只用 iroh，不用 SSH。</b>桌面和手机走同一条远程路径、同一套鉴权（D3），只维护、测试一种。iroh 隧道、配对、打洞、relay 回退都已经在用。</li>
+    <li>iroh 能穿过 NAT：同一局域网或有公网地址时直连，否则先打洞，失败再走 relay。家里或办公室里没有公网地址的 Linux 机器也能连上，这一点 SSH 做不到。</li>
+    <li>运行时<b>不新增 TCP 监听端口</b>，只有 iroh endpoint，符合 control-api.md 里「不轻易加网络服务」的约束。</li>
+    <li>每个操作开一条 QUIC 流，流之间互不阻塞，终端输出不会把文件读取堵在后面（队头阻塞）。</li>
+    <li><b>默认使用 n0 的公共 relay 和 DNS 地址发现</b>，即 iroh 的默认预设，替换现在的 <code>Minimal</code>（<code>smelt-iroh/src/lib.rs:165-172</code>）。这样跨网连接开箱可用，运行时 IP 变了也能重新找到它。数据端到端加密；n0 看得到的是元数据：DNS 发现会公布每个 endpoint id 当前的地址，relay 看得到哪两个 endpoint、什么时候、流量多大。设置里仍然可以换成自建 relay（<a href="iroh-relay-deployment.md">iroh-relay-deployment.md</a>）。</li>
+  </ul>
+</div>
+<h3>iroh 流怎么接进现有分发器</h3>
+<p>smeltd 现在是「每条连接一个线程」的同步模型：<code>listener.incoming()</code> 之后 <code>thread::spawn</code>（<code>smeltd/src/main.rs:2395-2407</code>），约十个处理函数直接拿 <code>UnixStream</code>，对端身份也是从这个 socket 上读出来的。iroh 是 tokio 上的异步 QUIC 流。</p>
+<p>做法：每接到一条 QUIC 流，就建一对 <code>UnixStream::pair()</code>，由一个 tokio 任务在 QUIC 流和其中一端之间搬数据；另一端交给现有分发器，同时<b>在进程内附上这条连接的 Principal</b>（D3），不再去读对端进程身份。现有处理函数一行都不用改；回压沿着 socketpair 自然传回 QUIC 的流控。</p>
+<div class="note">不选 SSH：它要求机器能被直接 SSH 到（或配好跳板），还要处理用户各自的密钥、<code>~/.ssh/config</code>、服务器是否允许转发，而且鉴权会多出一套（转发过来的对端是 sshd，过不了现有的进程身份检查）。SSH 只在首次安装时由用户手动用一次，见 D7。只能经跳板机进入、UDP 出不去的内网是唯一的例外，见第 14 节。</div>
+<h3>消息层</h3>
+<ul>
+  <li>继续沿用首帧 <code>op</code> 分流，加上 Control API 的 JSON-RPC 风格信封。短请求统一收进 Control API，长流保留各自的 op。这正是 control-api.md 已经定下的分工。</li>
+  <li><code>system.describe</code> 增加返回 <code>runtime_id</code>、运行时版本、平台、能力清单。客户端据此决定显示哪些功能，例如 Linux 上没有菜单栏、额度查询暂时不可用。</li>
+  <li>gateway 的 JSON-WS <b>废弃</b>。运行时直接接收 iroh 流（见上），gateway 的翻译层随之删除。</li>
+  <li>编码：控制和事件消息用 JSON，PTY 数据用现有的二进制帧 <code>[type][u32 len][payload]</code>，图片和大文件走分块。</li>
+  <li>不区分管理面：<code>remote_*</code>、<code>iroh_*</code>、<code>upgrade</code>、<code>shutdown</code>、设备管理和其它操作一样，本机连接和已配对设备都能调用（见 D3）。</li>
+</ul>
+
+<!-- ───────────────────────────────────────── -->
+<h3>协议客户端：桌面和手机共用一份 Rust 实现</h3>
+<div class="decision">
+  <div class="label">决定</div>
+  <ul>
+    <li>新建 <code>smelt-runtime-client</code> crate，桌面 GUI 和手机共用：连接器、带类型的调用、流的解码、断线重连都只写一份，协议改动只改一处。</li>
+    <li>手机侧，现有的 <code>smelt-mobile</code>（flutter_rust_bridge 外壳）改成包一层 <code>smelt-runtime-client</code>，把调用和流以 FRB 的 async 函数和 Stream 暴露给 Dart。今天「Rust 在 <code>127.0.0.1</code> 开端口、Dart 自己说 WebSocket」的做法删除，Dart 不再解析任何协议。</li>
+    <li>依赖约束：<code>smelt-runtime-client</code> 必须能编进 iOS / Android，所以不能依赖 GPUI、<code>smelt-store</code>（移动端不编 native SQLite），也不能依赖桌面专属的东西。unix socket 连接器放在桌面一侧的 cfg 或 feature 后面；iroh 连接器两边共用。</li>
+    <li>代价：Flutter 侧要把现有的 WebSocket 客户端（ACP 会话、终端流、工作区列表等页面的数据层）整体换成 FRB 接口，是 P4 的主要工作量。</li>
+  </ul>
+</div>
+
+<h2>6. D3 鉴权：按设备，不按共享 token</h2>
+<p><b>只认「是不是自己的设备」，不分权限。</b>连上的客户端拥有全部能力，和今天本机桌面一样。原因：能开终端或给 agent 发消息，就等于拿到了 shell，再细分「可写」「管理」挡不住一台被冒用的设备，只会多出一套开关和状态。真正的安全边界是配对本身，以及丢失后能立刻撤销。</p>
+<p>每种传输各自有一个鉴权器，产出同一种 <code>Principal { kind, device_id }</code>。<code>device_id</code> 只用于撤销、日志和「最近操作的客户端」这类区分（例如终端尺寸，见第 14 节），不参与授权判断。</p>
+<div class="table-wrap"><table>
+  <tr><th>传输</th><th>怎么认</th></tr>
+  <tr><td>unix socket</td><td>和今天一样：socket 文件 0600，<code>event_subscribe</code> 另认对端进程身份</td></tr>
+  <tr><td>iroh</td><td>配对时把对端的 endpoint id 记进运行时库的 <code>paired_device</code> 表，之后只认白名单。QUIC 握手本身证明了对端持有该 endpoint 的私钥</td></tr>
+</table></div>
+<div class="note">配对一台设备 = 给它这台机器上你这个用户的 shell 权限。设置页和 <code>smeltd pair</code> 的提示里都要这样写明。</div>
+<ul>
+  <li><b>配对串</b>：<code>smelt+iroh://&lt;endpoint_id&gt;/?code=&lt;一次性码&gt;[&amp;relay=…]</code>，在现有格式（<code>smelt-pairing</code>）上把长期 token 换成一次性码。默认用公共 relay 和地址发现，只有 endpoint id 就能找到运行时；只有用了自建 relay 时才带上 <code>relay</code> 参数。码用一次、或者过了几分钟，就作废。</li>
+  <li><b>配对流程</b>：新设备按 endpoint id 连上运行时，此时它还不在白名单里，<b>只能调用 <code>pair</code> 这一个操作</b>，提交一次性码；码对了，运行时把这台设备的 endpoint id 写进 <code>paired_device</code>，之后才放行其它操作。其余所有操作对未配对设备一律拒绝，连 <code>system.describe</code> 也不例外。</li>
+  <li><b>配对串从哪来</b>：本机 Mac 运行时在桌面设置页生成（二维码给手机扫）；Linux 无头运行时用 <code>smeltd pair</code> 在终端打印配对串和终端二维码，桌面粘贴、手机扫码。</li>
+  <li>现在 <code>~/.smelt/remote-token</code> 那个长期共享的 bearer token <b>删除</b>，架构评审里它本来就是 P0。全局的 <code>write_enabled</code> 只读开关也<b>删除</b>，连上即全部权限。</li>
+  <li>设置页（以及 <code>smeltd devices</code>）列出已配对设备和最近连接时间，可以单独撤销；撤销时立即断开该设备现有的全部连接。</li>
+</ul>
+
+<!-- ───────────────────────────────────────── -->
+<h2>7. D4 运行时 API：只提供业务能力</h2>
+<p>现在 GUI 在自己进程里直接读写磁盘、起子进程、开 SQLite（第 2 节）。运行时一旦在另一台机器上，这些都要改由运行时提供。这一节定的是<b>以什么形状提供</b>。</p>
+
+<h3>业界的两种做法</h3>
+<div class="table-wrap"><table>
+  <tr><th>做法</th><th>代表</th><th>接口长什么样</th><th>为什么这样选</th></tr>
+  <tr><td>通用文件系统接口</td><td>VS Code Remote / Codespaces、Theia、Jupyter</td><td>VS Code 服务端提供按 URI 读写的远程文件系统，搜索和文件监听在服务端，扩展整体跑在服务端。Jupyter 的 Contents API 是限定在根目录内的文件增删改查，保存时带 <code>last_modified</code> 判断冲突。</td><td>有开放的扩展生态。成千上万的第三方扩展都按「文件」编程，产品没法替它们一个个定义业务接口。</td></tr>
+  <tr><td>按项目和领域定义接口</td><td>Zed 远程开发、JetBrains Gateway</td><td>Zed 的服务端负责目录扫描、git、LSP、任务，协议里是项目级的消息：目录树增量更新、按路径打开 buffer、带版本号保存、项目搜索，没有 read / stat 这类调用。JetBrains 更进一步，后端连界面模型都同步过来，客户端只渲染。</td><td>功能都由自己掌控。粗粒度接口延迟低，规则只写一份，多端一致和协作都容易做。</td></tr>
+</table></div>
+<div class="decision">
+  <div class="label">决定</div>
+  <p>smelt 走第二种。功能基本都是自己写的，还有一个跑不了业务逻辑的手机客户端。唯一的开放生态是 gpui-shell 插件，单独处理，见 D8。</p>
+</div>
+
+<h3>协议原则</h3>
+<ol>
+  <li><b>只提供业务能力，不提供通用原语。</b>不暴露文件系统、执行任意命令、SQLite 访问。每个方法对应一个业务动作，业务规则在运行时里执行。例如 git 暴露 <code>git.status</code>、<code>git.commit</code>，不暴露 <code>run_git</code>。</li>
+  <li><b>计算放在数据旁边。</b>搜索、git、目录扫描、历史扫描都在运行时跑，客户端只拿结果。一个界面动作一次往返。</li>
+  <li><b>状态靠推送，不靠逐个请求。</b>先给一份快照，之后通过 <code>event_subscribe</code> 的主题推增量；断线重连后重新取快照对齐。客户端不轮询。</li>
+  <li><b>保存做乐观并发控制。</b>带上读取时的版本，文件在这期间被改过（多半是 agent）就拒绝写入，不悄悄覆盖。</li>
+  <li><b>路径以项目或会话为范围。</b>参数是「某个项目里的某个文件」，不是这台机器的任意路径。少数天然越界的场景逐个定规则，见下文。</li>
+  <li><b>版本和能力协商。</b><code>system.describe</code> 带方法清单；协议只做增量变更，手机版本会错位（D7），客户端按清单决定显示哪些功能。</li>
+</ol>
+<div class="note">不选通用文件系统接口，原因不是安全：连上的设备本来就拥有全部权限（D3）。原因有三个：
+  <ul>
+    <li><b>延迟</b>：把 <code>smelt_core::fs::FileSystem</code> 搬上网络，展开一层目录、做一次搜索就是上百次往返，走 relay 时每次约 100ms。</li>
+    <li><b>一致性</b>：ignore 规则、大小上限、保存冲突会散落在每个客户端里，桌面和手机各写一遍、各有偏差。</li>
+    <li><b>手机</b>：手机端只能做展示，必须拿到现成的业务结果。</li>
+  </ul>
+  代价：界面加功能时，协议往往也得加方法。方法按领域对象来定，不按控件来定，避免变成一个按钮一个接口。</div>
+
+<h3>能力清单</h3>
+<p>扫描 <code>crates/smelt</code> 里直接读写磁盘、起子进程、开 SQLite 的地方，以及它调用的 <code>smelt-core</code> 模块，凡是动到「这台机器」的能力如下。「P3 远程」一列是 Linux 运行时上线时是否必须可用；不是必须的，先只对本机运行时开放，连远程时界面显示不可用，并在能力清单里声明。</p>
+<div class="table-wrap"><table>
+  <tr><th>能力</th><th>现在在 GUI 哪里</th><th>方法（示意）</th><th>推送主题</th><th>P3 远程</th></tr>
+  <tr><td>工作区：项目、分组、会话目录</td><td><code>workspace_persist.rs</code>（直接写 SQLite）、<code>workspace_menu</code> op</td><td><code>workspace.*</code>：项目增删和排序，分组和会话的增删改，快照</td><td><code>workspace.changed</code></td><td>必须</td></tr>
+  <tr><td>项目文件：文件树、查看和编辑、删除、搜索</td><td><span class="chip chip-done">已完成</span></td><td><code>project.*</code>、<code>file.*</code>，见下一张表</td><td><code>project.changed</code>（按订阅的项目）</td><td>必须</td></tr>
+  <tr><td>git</td><td><span class="chip chip-done">已完成</span></td><td><code>git.*</code>，28 个方法</td><td><code>git.changed</code></td><td>必须</td></tr>
+  <tr><td>会话上的文件：<code>@</code> 补全</td><td><span class="chip chip-done">已完成</span></td><td><code>session.complete_files</code></td><td></td><td>必须</td></tr>
+  <tr><td>历史会话</td><td>列表、详情、删除、标题 <span class="chip chip-done">已完成</span>；会话恢复和新建流程里同步读写的归属与标题（<code>session_metadata</code>）随 workspace 一起改</td><td><code>history.list</code>、<code>history.detail</code>、<code>history.delete</code>、<code>history.titles</code>；改名沿用现有 <code>history_rename</code> op</td><td><code>history.changed</code></td><td>必须</td></tr>
+  <tr><td>设置、智能体定义、记忆、自动化</td><td>一部分已走 Control API；另一部分 GUI 直接写库（<code>settings/mod.rs</code>、<code>settings/memory.rs</code>、<code>agent_host_state.rs</code>）</td><td>现有的 <code>settings.*</code>、<code>agent.definition.*</code>、<code>automation.*</code>，补齐直接写库的那部分</td><td><code>settings.changed</code> 等</td><td>必须</td></tr>
+  <tr><td>agent 与 provider：CLI 检测和安装、hook 安装、Pi 登录、模型发现、MCP、插件目录</td><td><code>settings/*</code>、<code>agent_hooks.rs</code>；<code>smelt_core::agent_kind</code> / <code>pi_auth</code> / <code>pi_mcp</code> / <code>pi_model_*</code></td><td><code>provider.*</code></td><td><code>provider.changed</code></td><td>否</td></tr>
+  <tr><td>额度：keychain、Copilot、Cursor</td><td><code>provider_quota.rs</code></td><td><code>provider.quota</code></td><td><code>provider.quota_changed</code></td><td>否</td></tr>
+  <tr><td>存储清理、守护维护</td><td><code>storage_cleanup.rs</code>、设置页维护区</td><td><code>runtime.*</code></td><td></td><td>否</td></tr>
+  <tr><td>运行时身份与升级</td><td></td><td><code>system.describe</code>、<code>runtime.upgrade</code></td><td></td><td>必须</td></tr>
+</table></div>
+<p>对话里的图片不需要方法：它们以字节形式随 ACP 快照下发，客户端从不按路径读盘。</p>
+<p>留在客户端、不搬的：外观、字体、主题、布局（包括壁纸图片）；系统通知、Dock、角标；打开 IDE、Finder、浏览器；剪贴板；客户端自己的更新；往终端里拖本机文件、粘贴图片（已经是读成字节再发出去）；插件（D8）。</p>
+
+<h3>文件相关的业务方法</h3>
+<p>按今天文件树、编辑器、补全、图片实际做的事列出。以后文件树要支持重命名、新建文件，再各加一个方法。</p>
+<div class="table-wrap"><table>
+  <tr><th>界面上的动作</th><th>方法</th><th>运行时负责的规则</th></tr>
+  <tr><td>展开项目里的目录</td><td><code>project.tree(project, dir)</code></td><td>只限项目内；遵守 ignore 规则</td></tr>
+  <tr><td>打开文件查看或编辑</td><td><code>file.open(path)</code></td><td>大小上限（8 MB）、识别二进制，返回内容和版本</td></tr>
+  <tr><td>保存</td><td><code>file.save(path, text, base_version)</code></td><td>版本对不上就回 <code>conflict</code>，不写入；用户确认覆盖时不带版本。原来 GUI 自己先读再比对再写，比对挪到运行时，离磁盘最近</td></tr>
+  <tr><td>删除文件或目录</td><td><code>project.delete_entry(project, path)</code></td><td>只限项目内</td></tr>
+  <tr><td>项目搜索</td><td><code>project.search(project, query)</code></td><td>流式返回，有结果上限</td></tr>
+  <tr><td><code>@</code> 补全</td><td><code>session.complete_files(cwd)</code></td><td>以会话 cwd 为范围，优先 <code>git ls-files</code>；一次取全（上限 5 万条），客户端在本地过滤排序，打字不用等往返</td></tr>
+  <tr><td>查看器里预览图片</td><td><code>file.open(path)</code> 返回 <code>image</code></td><td>按扩展名识别（规则在协议 crate，两端共用），上限 20 MB，原始字节按 base64 传；降采样仍在客户端做</td></tr>
+  <tr><td>添加项目时选目录</td><td><code>workspace.browse_dirs(path)</code></td><td>只列目录，不返回文件内容</td></tr>
+</table></div>
+<p>天然越出项目范围的情况，各自的规则：</p>
+<ul>
+  <li><b>选项目目录</b>：项目还不存在，没法以项目为范围。<code>workspace.browse_dirs</code> 只列目录。</li>
+  <li><b>查看器打开的文件</b>：来源有文件树、终端里的 <code>smelt open</code>、对话中的链接、git diff 的「打开完整文件」，不一定在任何项目里。所以 <code>file.open</code> / <code>file.save</code> 按路径来；它们仍是业务方法（大小上限、二进制识别、带版本保存），协议里没有 stat、rename、mkdir 这类原语。</li>
+  <li><b>插件</b>：唯一真正需要通用文件能力的地方，见 D8。</li>
+</ul>
+<div class="decision">
+  <div class="label">决定：文件树和补全不做客户端副本</div>
+  <p>Zed 把整个项目的文件索引同步到客户端，展开目录、模糊查找文件都在本地完成，没有往返；代价是大仓库的内存和流量，以及一份副本的同步逻辑。我们先不做：展开目录时按需取一层，补全由运行时去查。手机不适合存整份索引；本机运行时往返是毫秒级；远程时展开一层多一次往返，可以接受。以后远程场景确实卡，再考虑做副本。</p>
+</div>
+<div class="note">实现方式：各领域的执行逻辑只给 smeltd 依赖，结果类型和只依赖这些类型的纯函数放进 <code>smelt-runtime-client::protocol</code>，手机端也能编。git 已经按这个方式完成：<code>smelt-git</code> 只保留执行 git 的部分，<code>crates/smelt</code> 不再依赖它，状态、diff、日志等类型和 diff 解析在 <code>protocol::git</code>。GUI 的调用都在事件里异步发起，结果缓存在视图状态上，render 只读缓存（见 AGENTS.md 的 render 规则），并显示加载中、离线等状态。</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>8. D5 SQLite 一分为二</h2>
+<div class="grid two">
+  <div class="card">
+    <div class="label">运行时库 · 运行时那台机器上</div>
+    <h3><code>~/.smelt/smelt.sqlite3</code></h3>
+    <p>保留现有文件，只移出客户端那部分。只有 smeltd 和它的子进程（session host）能打开。</p>
+  </div>
+  <div class="card">
+    <div class="label">客户端库 · 桌面上</div>
+    <h3><code>~/.smelt/client.sqlite3</code></h3>
+    <p>新建。存外观、布局（以 <code>(runtime_id, …)</code> 为键）、<code>runtime_connection</code>、客户端自己的更新状态。只有 GUI 能打开。</p>
+  </div>
+</div>
+<ul>
+  <li><b>GUI 不再打开运行时库，本机也不例外。</b>用依赖关系保证：<code>crates/smelt</code> 不再依赖 <code>smelt-store</code> 里运行时那部分表，也不再依赖 <code>smelt-git</code>。客户端库放进<b>单独的 crate</b>（例如 <code>smelt-client-store</code>）：只有拆成独立 crate，「GUI 不依赖运行时那部分表」才能由依赖关系保证，放在 <code>smelt-store</code> 里做不到。</li>
+  <li><code>smelt agent</code> CLI 改为走 Control API，不再绕过 smeltd 直接写库。</li>
+  <li>迁移：GUI 自己也不能为了迁移去打开运行时库，所以由运行时来做。smeltd 升级到新 schema 时，把客户端那部分字段挪进一张暂存表；新版 GUI 第一次连上本机运行时，通过一次性的 <code>migration.take_client_state</code> 取走，写进客户端库，运行时随即删除暂存表。照「不为兼容性妥协」的原则，迁移完旧字段直接删除，不保留双写。</li>
+</ul>
+
+<!-- ───────────────────────────────────────── -->
+<h2>9. D6 RuntimeId 与多运行时</h2>
+<ul>
+  <li><b><code>runtime_id</code></b>：运行时第一次启动时生成一个 UUID，存在运行时库里，之后永久不变。它和传输无关：socket 路径、iroh endpoint id 都只是「怎么到达它」。</li>
+  <li><b><code>runtime_connection</code></b>（客户端库）：<code>runtime_id</code>、显示名、排序、传输配置（<code>local { socket }</code> 或 <code>iroh { endpoint_id, relay? }</code>）。桌面自己的 iroh 身份密钥也存在客户端这一侧。</li>
+  <li>客户端里凡是指向运行时实体的键，都改成 <code>(runtime_id, entity_id)</code>：视图路由、焦点、布局、未读、通知跳转。</li>
+  <li><b>RuntimeHub</b>（GPUI Entity）：持有 N 个 RuntimeClient。每个客户端独立连接、独立退避重连、独立做版本协商，状态是 <code>connecting</code>、<code>online</code>、<code>offline</code>、<code>incompatible</code> 之一。所有 UI 都从 Hub 的缓存里读。</li>
+  <li><b>离线：</b>该运行时的项目灰掉并标「离线」，只保留内存里最后一次的快照，只读。重连后<b>重新拉快照、再重新订阅</b>，和今天桌面的做法一样：桌面的事件订阅是临时的，每次随机生成订阅 id，不带游标（<code>smelt-core/src/daemon_state.rs:560-580</code>）。「需要关注」是状态而不是事件流，拿到最新快照就够了，不需要按设备持久化游标。</li>
+  <li><b>界面：</b>侧栏在项目上面加一层运行时分组；只连本机时这一层不显示，单机用户看到的界面和今天一样。通知和角标汇总所有运行时，点击直接跳到对应运行时的会话上。</li>
+</ul>
+<div class="note">现在 GUI 里有二十来个 <code>impl Global</code>，例如 <code>RemoteSessionCatalogGlobal</code>、<code>AcpRuntimeState</code>、<code>DaemonStatesSubscription</code>。凡是跟具体运行时相关的，都要挪进 Hub 里按运行时管理；纯客户端的（外观、窗口句柄）继续保留为全局。</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>10. D7 生命周期与升级</h2>
+<ul>
+  <li><b>运行时独立存活。</b>在 Mac 上，GUI 仍然可以替用户安装、启动本机运行时，但要通过一个和远程共用的「运行时管理」接口，不再在 <code>terminal.rs</code> 里直接管理进程。</li>
+  <li><b>Linux 首次安装</b>（唯一需要用户自己 SSH 登录的一步）：运行安装脚本，它把二进制装到 <code>~/.smelt/bin</code>，写好 <code>systemd --user</code> 单元并启动，开启 iroh，最后执行 <code>smeltd pair</code> 打印配对串。脚本提示用户执行 <code>loginctl enable-linger</code>，这样退出登录后运行时也能继续跑。</li>
+  <li><b>升级：</b>运行时自己完成交接，复用现有的 <code>handoff_v2</code>。触发方式是 <code>runtime.upgrade</code>。</li>
+  <li><b>版本错位：桌面不会错位，手机会。</b>桌面每次连上就对齐版本（见下面的决定），所以桌面只依赖冻结契约。手机走应用商店，更新节奏不受控，它和运行时之间的错位是常态：运行时要接受上一个版本的手机客户端，手机也要能面对更新的运行时。办法是协议只做增量变更，新能力靠 <code>system.describe</code> 的能力清单探测；真不兼容时标成 <code>incompatible</code>，提示更新 App。</li>
+  <li><b><code>system.describe</code> 和 <code>runtime.upgrade</code> 是冻结契约</b>：永远不改形状，<code>incompatible</code> 状态下也必须能调用。否则版本一旦错开太多，就连升级都发不过去，只能让用户重新 SSH 上去手动装。</li>
+</ul>
+<div class="decision">
+  <div class="label">决定：桌面推送</div>
+  <ul>
+    <li>桌面连上运行时，发现运行时版本比自己旧，就通过 <code>runtime.upgrade</code> 把匹配平台的二进制分块传过去（带校验和），运行时校验后用 <code>handoff_v2</code> 交接。本机 Mac 运行时也走这条路，和今天「GUI 带着 smeltd 升级」是同一回事。</li>
+    <li>桌面安装包附带 linux x86_64 / aarch64 两份 smeltd。</li>
+    <li><b>只升不降</b>：运行时比桌面新时，桌面不推送，把该运行时标成 <code>incompatible</code> 并提示更新桌面。两台不同版本的桌面连同一个运行时时，运行时最终跟随较新的那台。</li>
+    <li>交接期间所有客户端都会断开一次，按普通断线重连处理。推送前在界面上提示，有 agent 正在跑时等用户确认。</li>
+    <li>不做运行时自更新（<code>updater.rs</code> 的发布渠道）。代价：只用手机、从不连桌面的运行时不会自动升级，只能重新运行安装脚本。</li>
+  </ul>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>11. D8 插件放在哪一侧</h2>
+<div class="table-wrap"><table>
+  <tr><th>部分</th><th>运行在</th><th>改动</th></tr>
+  <tr><td>插件（gpui-shell + QuickJS，跑在 UI 线程）</td><td><span class="chip chip-cl">客户端</span></td><td>脚本和界面都在客户端。插件 API 本来就是异步的（官方 <code>fs/promises</code>、<code>smelt-fs</code> 都返回 Promise），不存在同步改异步的问题。</td></tr>
+</table></div>
+<p>真正的问题是<b>插件操作的是哪台机器的磁盘</b>。技能插件用官方的 <code>fs/promises</code> 读写目录（<code>plugins/skills/core.js:10</code>），它直接读<b>客户端本机</b>的磁盘；<code>smelt-workspace.pick_directory</code> 弹的也是本机的选择框。而我们定了不 fork gpui-kit，没法把官方模块改道到运行时。可选做法：</p>
+<ul>
+  <li><b>B. 插件只作用于本机运行时</b>：当前选中的是远程运行时时，插件面板不可用并说明原因。改动很小。</li>
+  <li><b>A. 插件的文件操作全部走宿主模块</b>：<code>smelt-fs</code> 补齐读、写、列目录、建删目录，并按当前运行时转发到运行时给插件单独定的一组文件接口。这组接口限定在插件自己声明的目录内（例如技能插件的 <code>~/.claude/skills</code>），不是通用文件系统，也不给第一方界面用（D4 原则 1）；连远程运行时时用 Policy 拒绝官方 fs，避免误读本机；技能插件整体迁到 <code>smelt-fs</code>。<code>pick_directory</code> 改用运行时目录浏览器（见 P1）。</li>
+</ul>
+<div class="decision">
+  <div class="label">决定</div>
+  <p>P1 到 P3 先做 B，P3 之后再做 A。技能插件管理的 <code>~/.claude/skills</code> 等目录在运行时那台机器上，做 A 时指向运行时的 home 是对的。</p>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>12. Linux 无头运行时清单</h2>
+<div class="table-wrap"><table>
+  <tr><th>项目</th><th>现状</th><th>要做</th></tr>
+  <tr><td>smeltd 编译</td><td><span class="chip chip-na">未验证</span> 不依赖 GPUI，mac 专属依赖都已用 cfg 隔开</td><td>增加 <code>ci/linux</code>：lint、build、test；交叉编译出 x86_64 和 aarch64 两个版本</td></tr>
+  <tr><td>受管 Bun / Pi</td><td><span class="chip chip-todo">缺失</span> 只有 darwin 的下载地址和校验值（<code>managed_runtime.rs:30-49</code>），Linux 上直接报错，Pi 起不来；用 <code>bunx</code> 启动的 ACP 适配器也只能退回 PATH 上的 bun</td><td>补 linux-x64、linux-aarch64 两份</td></tr>
+  <tr><td>写死的 macOS 路径</td><td><span class="chip chip-todo">缺失</span> Claude 档案的 <code>CLAUDE_CONFIG_DIR=~/Library/Application Support/Claude…</code>（<code>agent_kind/mod.rs</code>、<code>acp_conn.rs</code>），Cursor、Copilot 额度读的凭据路径（<code>provider_quota.rs</code>、<code>copilot_quota.rs</code>）</td><td>逐个按平台给出 Linux 路径（通常是 <code>~/.config/…</code>）；各家历史存档的扫描路径一并核对</td></tr>
+  <tr><td>文件监听</td><td><span class="chip chip-na">待核实</span> Linux 上是 inotify，每个目录占一个 watch，受 <code>fs.inotify.max_user_watches</code> 限制</td><td>大仓库只监听项目根和 <code>.git</code> 的关键文件，其余按需；超限时在能力清单里报告并降级为手动刷新</td></tr>
+  <tr><td>对端身份鉴权</td><td><span class="chip chip-done">已有</span> <code>SO_PEERCRED</code> + <code>/proc/&lt;pid&gt;/exe</code></td><td>补测试</td></tr>
+  <tr><td>子进程监控</td><td><span class="chip chip-done">已有</span> pidfd</td><td></td></tr>
+  <tr><td>独立启动</td><td><span class="chip chip-todo">缺失</span> 依赖 GUI 拉起</td><td>systemd user 单元、<code>smeltd install</code> / <code>smeltd status</code></td></tr>
+  <tr><td>iroh 接入</td><td><span class="chip chip-split">部分</span> iroh 隧道已有，但远程访问默认关闭，iroh 流先转到回环 TCP 上的 gateway</td><td>无头安装时默认开启；运行时直接接收 iroh 流（D2）；默认用公共 relay 和地址发现，自建 relay 可选</td></tr>
+  <tr><td>配对与设备管理</td><td><span class="chip chip-todo">缺失</span> 只有长期共享 token</td><td><code>smeltd pair</code>（终端打印配对串和二维码）、<code>smeltd devices</code>（列出、撤销），见 D3</td></tr>
+  <tr><td>菜单栏、IOKit 防休眠</td><td><span class="chip chip-na">不适用</span> 已有桩实现</td><td>能力清单里如实报告没有</td></tr>
+  <tr><td>额度查询（钥匙串）</td><td><span class="chip chip-todo">缺失</span> 依赖 <code>security</code> 命令</td><td>先在能力清单里报告不可用；之后改读各家 CLI 的凭据文件</td></tr>
+  <tr><td>agent hook 安装</td><td><span class="chip chip-todo">在 GUI 里</span></td><td>搬进运行时（<code>provider.hooks.install</code>），在运行时那台机器上写配置</td></tr>
+  <tr><td>打包分发</td><td><span class="chip chip-todo">缺失</span></td><td>tar.gz + 安装脚本；按 D7 的桌面推送，同一份二进制也随桌面安装包附带</td></tr>
+</table></div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>13. 分期</h2>
+<p>每一期结束时，本机单运行时的体验都要和今天一致，可以单独发版。</p>
+
+<div class="phase">
+  <div class="num">P0</div>
+  <div>
+    <p><b>协议与客户端骨架</b></p>
+    <ul>
+      <li>连接器抽象：给定运行时，返回一条新连接（本机是 unix socket，远程是 iroh QUIC 流）。P0 只实现本机这一种。</li>
+      <li><code>system.describe</code> 返回 <code>runtime_id</code> 和能力清单。</li>
+      <li>新建 <code>smelt-runtime-client</code> crate；GUI 现有对 smeltd 的调用全部改走它。从第一天起就按「能编进 iOS / Android」的依赖约束来写（D2），CI 里加一个移动端目标的编译检查。</li>
+      <li>补上 GUI 到运行时的协议一致性测试（今天没有端到端测试）。</li>
+    </ul>
+    <p class="exit"><b>完成标准：</b><code>crates/smelt</code> 里不再出现直接打开 <code>smeltd.sock</code> 的代码。</p>
+  </div>
+</div>
+<div class="phase">
+  <div class="num">P1</div>
+  <div>
+    <p><b>GUI 变成纯客户端（只接本机）</b></p>
+    <p>按 D4 的能力清单逐个搬，每个领域都按「只提供业务能力」来定方法：git（<span class="chip chip-done">已完成</span>）→ 项目文件和会话文件 → history → 设置和智能体 → workspace → provider（hook、额度、CLI 安装，可以晚于 P3）。workspace 牵涉启动流程（今天 <code>Workspace::new</code> 在 UI 线程同步读 SQLite），放在后面单独做。同时拆开 SQLite。</p>
+    <p>同时清掉界面里「文件就在本机」的假设：</p>
+    <ul>
+      <li>添加项目用的本机文件夹选择框，换成基于 <code>workspace.browse_dirs</code> 的运行时目录浏览器；本机运行时也用它，保持同一条路径。</li>
+      <li>往终端里拖文件会粘贴本机路径：运行时不是本机时，改为拒绝并提示。</li>
+      <li>「在 Finder 中显示」、<code>cx.open_path</code>：只对本机运行时提供。</li>
+      <li>粘贴图片不用改：图片在后台读成字节再发出去（<code>smelt-acp-view/src/acp_view.rs:3346</code>）。</li>
+    </ul>
+    <p class="exit"><b>完成标准：</b>由依赖关系保证，不靠人工检查。<code>smelt-core</code> 拆成两半：GUI 用到的纯类型和纯函数（ACP 快照模型、OSC 解析、主题索引等）移到不做 IO 的 crate，wire 类型并入 <code>smelt-runtime-client::protocol</code>；<code>smelt-core</code> 只留执行逻辑，只有 smeltd 依赖。引导本机运行时要用的那一小块（拉起守护、校验映像指纹）属于客户端，随 GUI 走。<code>crates/smelt</code> 不再依赖 <code>smelt-core</code>、<code>smelt-git</code> 和运行时那部分表，漏搬的调用会直接编译不过。除了引导本机运行时、打开本机 IDE 和 Finder，GUI 不再启动任何子进程。</p>
+  </div>
+</div>
+<div class="phase">
+  <div class="num">P2</div>
+  <div>
+    <p><b>多运行时数据模型</b></p>
+    <ul>
+      <li>全面引入 <code>runtime_id</code>。</li>
+      <li>RuntimeHub、侧栏的运行时分组、汇总的通知和角标、离线状态。</li>
+      <li>用第二个本机运行时测试，<code>SMELT_HOME</code> 指向另一个目录。注意：<code>SMELT_HOME</code> 隔离不了各家 agent 在 <code>~</code> 下的 hook 配置。</li>
+    </ul>
+    <p class="exit"><b>完成标准：</b>一个窗口挂两个本机运行时，能同时看住两边的会话。</p>
+  </div>
+</div>
+<div class="phase">
+  <div class="num">P3</div>
+  <div>
+    <p><b>Linux 无头运行时 + 桌面经 iroh 连接</b></p>
+    <ul>
+      <li>完成第 12 节的清单和 <code>ci/linux</code>。</li>
+      <li>运行时直接接收 iroh 流（D2）；按设备配对和撤销（D3）；<code>smeltd pair</code> / <code>smeltd devices</code>。</li>
+      <li>桌面的 iroh 连接器、「添加运行时」（粘贴配对串）。</li>
+      <li>D7 的桌面推送升级：<code>runtime.upgrade</code> 分块传二进制、只升不降。</li>
+    </ul>
+    <p class="exit"><b>完成标准：</b>Mac 桌面连上一台不在同一网络的 Linux 运行时，除了能力清单里声明缺失的部分，其余功能都能用；本机运行时同时在线。</p>
+  </div>
+</div>
+<div class="phase">
+  <div class="num">P4</div>
+  <div>
+    <p><b>手机收敛</b></p>
+    <ul>
+      <li><code>smelt-mobile</code> 改为包 <code>smelt-runtime-client</code>，以 FRB 接口暴露给 Dart；Flutter 数据层从 WebSocket 换成 FRB。走 P3 的 iroh 流和设备配对。</li>
+      <li>删掉 gateway 的协议翻译层、JSON-WS、长期共享 token 和 <code>write_enabled</code> 只读开关。</li>
+      <li>手机可以连任何运行时，包括 Linux。</li>
+    </ul>
+    <p class="exit"><b>完成标准：</b><code>smelt-remote-gateway</code> 里不再有 <code>/acp/ws</code>、<code>/terminal/{id}/ws</code> 的处理代码，<code>~/.smelt/remote-token</code> 不再存在；<code>smelt-mobile</code> 不再开本地端口，Dart 里没有协议解析代码。</p>
+  </div>
+</div>
+<p class="note">顺序是严格的：P2 是 P3 的前提，否则连上 Linux 之后就看不到本机了；P4 依赖 P3 做好的 iroh 直连和设备配对。P3 到 P4 之间，手机暂时还走旧的 gateway 路径和旧 token，P4 完成时一并删掉。这是分期迁移的过渡，不是长期兼容。</p>
+
+<!-- ───────────────────────────────────────── -->
+<h2>14. 风险与待定问题</h2>
+<div class="table-wrap"><table>
+  <tr><th>问题</th><th>影响</th><th>倾向</th></tr>
+  <tr><td>远程延迟：文件树展开、编辑器打开、@ 补全</td><td>操作手感</td><td>不做客户端副本（D4）：目录按需取一层并缓存，<code>project.changed</code> 推来变化时再失效；补全由运行时去查。编辑器打开后在本地编辑，保存时带上版本号，检测冲突。终端回显延迟等于一次往返，走 relay 时更明显；不做本地回显预测。</td></tr>
+  <tr><td>Linux 上 agent CLI 的安装和登录（<code>claude login</code> 等）</td><td>首次使用</td><td>在远程终端里由用户自己完成；<code>provider.*</code> 只负责检查状态和给出提示。</td></tr>
+  <tr><td>「用 IDE 打开」远程路径</td><td>编辑体验</td><td>不在这次范围。本机 IDE 打不开远程路径；以后可以考虑生成 VS Code Remote 之类的链接，但那需要用户另外配好 SSH。</td></tr>
+  <tr><td>所有客户端都不在线时 agent 需要关注</td><td>漏掉提醒</td><td>已知限制：手机没有推送（没有接 APNs/FCM），没有人在线就没人收到提醒。运行时保存关注状态，客户端上线拉快照后立刻显示。以后可以用路线图里的飞书卡片补上这个缺口。</td></tr>
+  <tr><td>多个客户端同时看同一个终端</td><td>PTY 尺寸互相打架</td><td>现在手机连上会按自己的视口改共享 PTY 的尺寸。规则定为「最近一次有输入或聚焦的客户端说了算」，其他客户端按这个尺寸显示。</td></tr>
+  <tr><td>慢客户端拖住别人（走 relay 时大量终端输出）</td><td>其他客户端卡顿</td><td><span class="chip chip-na">待核实</span> 需要确认一个客户端回压时不会卡住 PTY 读取和其他订阅者；必要时对慢客户端丢弃中间输出，改用快照追平。</td></tr>
+  <tr><td>插件读写的是客户端本机磁盘（D8）</td><td>远程运行时上插件不可用</td><td>先只支持本机运行时，P3 之后让 <code>smelt-fs</code> 转发到运行时给插件单独定的、限定目录的文件接口（D8）。</td></tr>
+  <tr><td>默认依赖 n0 的公共 relay 和 DNS 发现</td><td>n0 服务不可用时跨网连不上；n0 能看到连接元数据</td><td>已接受：内容端到端加密。同网时仍然直连；在意元数据或要保证可用性的用户改用自建 relay。</td></tr>
+  <tr><td>公司内网封了 UDP 出口，或者机器只能经跳板机 SSH 进入</td><td>iroh 直连和公网 relay 都连不上</td><td>先在内网自建 relay。还不行，再评估把 SSH 加成第二种远程连接器；连接器接口（P0）留着这个口子，但现在不做。</td></tr>
+</table></div>
+
+</body>
+</html>
