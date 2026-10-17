@@ -231,20 +231,45 @@ impl Default for UpdateSettings {
 
 impl Global for UpdateSettings {}
 
-/// 更新设置归客户端（每台设备各自管自己的更新），存在客户端库。
-pub fn load_update_settings() -> UpdateSettings {
-    let (scope, key) = smelt_client_store::keys::UPDATE_SETTINGS;
-    smelt_client_store::client_store()
-        .and_then(|store| store.get::<UpdateSettings>(scope, key))
+/// 枚举在客户端库里存它的 serde 名（`dev`、`dark`、`session`……），和协议里的写法一致。
+pub(crate) fn enum_name<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
         .ok()
-        .flatten()
+        .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_default()
 }
 
+/// 认不出的名字（库是别的版本写的）返回 `None`，由调用方用出厂值。
+pub(crate) fn enum_from_name<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
+    serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
+}
+
+/// 更新设置归客户端（每台设备各自管自己的更新），存在客户端库。
+pub fn load_update_settings() -> UpdateSettings {
+    let record = match smelt_client_store::client_store().and_then(|store| store.update_settings())
+    {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("[storage] 读取更新设置失败，使用默认值: {error}");
+            None
+        }
+    };
+    let Some(record) = record else {
+        return UpdateSettings::default();
+    };
+    UpdateSettings {
+        channel: enum_from_name(&record.channel).unwrap_or_default(),
+        auto_install: record.auto_install,
+    }
+}
+
 pub fn save_update_settings(settings: &UpdateSettings) {
-    let (scope, key) = smelt_client_store::keys::UPDATE_SETTINGS;
+    let record = smelt_client_store::UpdateSettingsRecord {
+        channel: enum_name(&settings.channel),
+        auto_install: settings.auto_install,
+    };
     if let Err(error) =
-        smelt_client_store::client_store().and_then(|store| store.put(scope, key, settings))
+        smelt_client_store::client_store().and_then(|store| store.put_update_settings(&record))
     {
         eprintln!("[storage] 保存更新设置失败: {error}");
     }
@@ -403,9 +428,23 @@ fn current_terminal_theme() -> smelt_model::terminal_theme::TerminalThemeSnapsho
 
 /// 读取外观设置；缺失/损坏回退默认。外观归客户端，存在客户端库。
 pub fn load_appearance() -> Appearance {
-    let (scope, key) = smelt_client_store::keys::APPEARANCE;
-    match smelt_client_store::client_store().and_then(|store| store.get::<Appearance>(scope, key)) {
-        Ok(Some(appearance)) => appearance,
+    match smelt_client_store::client_store().and_then(|store| store.appearance()) {
+        Ok(Some(record)) => {
+            appearance_from_snapshot(smelt_model::appearance_settings::AppearanceSnapshot {
+                bg_color: record.bg_color,
+                bg_image: record.bg_image,
+                bg_image_opacity: record.bg_image_opacity,
+                opacity: record.opacity,
+                blur: record.blur,
+                glass_style: record.glass_style,
+                theme_mode: record.theme_mode,
+                theme_name: record.theme_name,
+                ui_font_px: record.ui_font_px,
+                ui_font_family: record.ui_font_family,
+                font_px: record.font_px,
+                font_family: record.font_family,
+            })
+        }
         Ok(None) => Appearance::default(),
         Err(error) => {
             eprintln!("[storage] 读取外观设置失败，使用默认值: {error}");
@@ -415,15 +454,31 @@ pub fn load_appearance() -> Appearance {
 }
 
 fn save_appearance(appearance: &Appearance) {
-    let (scope, key) = smelt_client_store::keys::APPEARANCE;
+    let snapshot = snapshot_from_appearance(appearance);
+    let record = smelt_client_store::AppearanceRecord {
+        bg_color: snapshot.bg_color,
+        bg_image: snapshot.bg_image,
+        bg_image_opacity: snapshot.bg_image_opacity,
+        opacity: snapshot.opacity,
+        blur: snapshot.blur,
+        glass_style: snapshot.glass_style,
+        theme_mode: snapshot.theme_mode,
+        theme_name: snapshot.theme_name,
+        ui_font_px: snapshot.ui_font_px,
+        ui_font_family: snapshot.ui_font_family,
+        font_px: snapshot.font_px,
+        font_family: snapshot.font_family,
+    };
     if let Err(error) =
-        smelt_client_store::client_store().and_then(|store| store.put(scope, key, appearance))
+        smelt_client_store::client_store().and_then(|store| store.put_appearance(&record))
     {
         eprintln!("[storage] 保存外观设置失败: {error}");
     }
 }
 
-fn snapshot_from_appearance(appearance: &Appearance) -> smelt_model::appearance_settings::AppearanceSnapshot {
+fn snapshot_from_appearance(
+    appearance: &Appearance,
+) -> smelt_model::appearance_settings::AppearanceSnapshot {
     smelt_model::appearance_settings::AppearanceSnapshot {
         bg_color: appearance.bg_color,
         bg_image: appearance.bg_image.clone(),
@@ -450,7 +505,9 @@ fn snapshot_from_appearance(appearance: &Appearance) -> smelt_model::appearance_
     }
 }
 
-fn appearance_from_snapshot(snapshot: smelt_model::appearance_settings::AppearanceSnapshot) -> Appearance {
+fn appearance_from_snapshot(
+    snapshot: smelt_model::appearance_settings::AppearanceSnapshot,
+) -> Appearance {
     Appearance {
         bg_color: snapshot.bg_color,
         bg_image: snapshot.bg_image,
@@ -578,7 +635,9 @@ pub fn start_launch_config_load(cx: &mut App) {
                 return;
             }
             cx.background_executor()
-                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
+                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
+                    attempt,
+                ))
                 .await;
             attempt = attempt.saturating_add(1);
         }

@@ -547,7 +547,7 @@ impl AgentHostState {
 }
 
 /// 通知怎么提醒是客户端自己的事（设计文档 D1），每台设备可以不同，不交给运行时。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NotifyPrefs {
     approval: bool,
     input: bool,
@@ -558,18 +558,33 @@ struct NotifyPrefs {
 
 /// 读客户端库里的通知偏好；没有时用出厂值。
 fn load_notify_prefs() -> NotifyPrefs {
-    let (scope, key) = smelt_client_store::keys::NOTIFY_PREFS;
-    smelt_client_store::client_store()
-        .and_then(|store| store.get::<NotifyPrefs>(scope, key))
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| AgentHostState::default().notify_prefs())
+    match smelt_client_store::client_store().and_then(|store| store.notify_prefs()) {
+        Ok(Some(record)) => NotifyPrefs {
+            approval: record.approval,
+            input: record.input,
+            success: record.success,
+            failure: record.failure,
+            terminal_bell: record.terminal_bell,
+        },
+        Ok(None) => AgentHostState::default().notify_prefs(),
+        Err(error) => {
+            eprintln!("[settings] 读取通知偏好失败，使用默认值：{error}");
+            AgentHostState::default().notify_prefs()
+        }
+    }
 }
 
 fn save_notify_prefs(prefs: NotifyPrefs) -> Result<(), String> {
-    let (scope, key) = smelt_client_store::keys::NOTIFY_PREFS;
     smelt_client_store::client_store()
-        .and_then(|store| store.put(scope, key, &prefs))
+        .and_then(|store| {
+            store.put_notify_prefs(&smelt_client_store::NotifyPrefsRecord {
+                approval: prefs.approval,
+                input: prefs.input,
+                success: prefs.success,
+                failure: prefs.failure,
+                terminal_bell: prefs.terminal_bell,
+            })
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -627,7 +642,9 @@ pub fn start_agent_host_load(cx: &mut App, on_first_load: impl FnOnce(&mut App) 
                 }
             }
             cx.background_executor()
-                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
+                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
+                    attempt,
+                ))
                 .await;
             attempt = attempt.saturating_add(1);
         }
@@ -1104,7 +1121,11 @@ mod tests {
     #[test]
     fn native_dsh_profile_keeps_credentials_owned_by_dsh() {
         let profile = AcpProfile {
-            native_launch: Some(smelt_model::agent_kind::ConversationLaunchSpec::from_command("dsh-acp-rich --profile team")),
+            native_launch: Some(
+                smelt_model::agent_kind::ConversationLaunchSpec::from_command(
+                    "dsh-acp-rich --profile team",
+                ),
+            ),
             id: "dsh-native-team".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · team".into(),
@@ -1126,7 +1147,11 @@ mod tests {
     #[test]
     fn default_dsh_launch_prefers_the_discovered_native_profile() {
         let native = AcpProfile {
-            native_launch: Some(smelt_model::agent_kind::ConversationLaunchSpec::from_command("dsh-acp-rich --profile web")),
+            native_launch: Some(
+                smelt_model::agent_kind::ConversationLaunchSpec::from_command(
+                    "dsh-acp-rich --profile web",
+                ),
+            ),
             id: "dsh-native-web".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · web".into(),

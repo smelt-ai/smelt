@@ -21,7 +21,6 @@ pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
 mod dir_picker;
-mod client_state;
 mod dock;
 mod file_tree;
 mod git_log;
@@ -2838,12 +2837,7 @@ impl Workspace {
         let git_log_resize = cx.new(|_| ResizableState::default());
         // 没有会话时右侧不继承全局偏好；新会话使用 SessionUiState 的默认收起状态。
         let initial_session_ui = SessionUiState::default();
-        let shell = workspace_shell::install(
-            cx.weak_entity(),
-            saved.as_ref().and_then(|state| state.shell_dock.clone()),
-            window,
-            cx,
-        );
+        let shell = workspace_shell::install(cx.weak_entity(), window, cx);
 
         let mut ws = Self {
             sessions,
@@ -4374,8 +4368,6 @@ fn main() {
 
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
-        // 升级后第一次启动：客户端数据还在运行时库里，先取回来再读。
-        client_state::migrate_client_state_once();
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         cx.set_global(appearance.clone());

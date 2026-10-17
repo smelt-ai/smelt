@@ -458,20 +458,6 @@ fn dispatch_control(
                 ),
             }
         }
-        ControlMethod::MigrationTakeClientState => {
-            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
-                Ok(params) => params,
-                Err(response) => return response,
-            };
-            match smelt_core::client_migration::take() {
-                Ok(state) => success_value(control_version, &request_id, state),
-                Err(error) => error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, error),
-                ),
-            }
-        }
         ControlMethod::ConversationCreateForAgent => {
             let params: AgentDefinitionIdParams =
                 match params_or_error(control_version, &request_id, params) {

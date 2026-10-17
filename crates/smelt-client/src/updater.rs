@@ -21,8 +21,6 @@ const DEV_MANIFEST_URL: &str =
 const PROD_MANIFEST_URL: &str =
     "https://oss-fx-int.nioint.com/fx/app-ios-smelt-mac/__fx_config__/update.prod.json";
 const BUNDLED_RELEASE_URL_FILE: &str = "Contents/Resources/SmeltUpdateURL";
-/// 更新事务状态存在客户端库里（和 installer 共用同一个文件）。
-const UPDATE_STATE_SCOPE: (&str, &str) = ("update", "state");
 const UPDATE_STATE_DIR: &str = ".smelt";
 const UPDATE_LOCK_FILE: &str = "update.lock";
 const APP_LAUNCH_GATE_FILE: &str = "app-launch-gate.lock";
@@ -317,10 +315,10 @@ fn release_label_from_url(download_url: &str) -> String {
         .unwrap_or_else(|| "更新包".to_string())
 }
 
-/// 已下载暂存、尚未应用到 App 的更新包。持久化到 SQLite `json/update-state.json`，
-/// 让用户在任何时刻退出（包括强杀）后，下次启动都能接上安装。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// 已下载暂存、尚未应用到 App 的更新包。存在客户端库（`update_state`、`staged_update`、
+/// `installer_attempt` 三张表），让用户在任何时刻退出（包括强杀）后，下次启动都能接上
+/// 安装。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum StagedUpdatePhase {
     Preparing,
     #[default]
@@ -328,30 +326,43 @@ enum StagedUpdatePhase {
     Applying,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+impl StagedUpdatePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Ready => "ready",
+            Self::Applying => "applying",
+        }
+    }
+
+    fn parse(name: &str) -> anyhow::Result<Self> {
+        Ok(match name {
+            "preparing" => Self::Preparing,
+            "ready" => Self::Ready,
+            "applying" => Self::Applying,
+            other => anyhow::bail!("认不出的更新阶段：{other}"),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StagedUpdate {
-    #[serde(default)]
     id: String,
     pub version: String,
     pub url: String,
     pub staged_app: PathBuf,
-    #[serde(default)]
     fingerprint: String,
-    #[serde(default)]
     phase: StagedUpdatePhase,
-    #[serde(default)]
     swap_app: Option<PathBuf>,
     /// 已启动、正等待 GUI 退出的一次性安装尝试。helper 只能凭作业 id + attempt id
     /// 取回它，不能从命令行指定候选或目标路径。
-    #[serde(default)]
     installer_attempt: Option<InstallerAttempt>,
     /// 进程外 helper 曾失败。恢复时只展示失败并等待用户显式重试；新 attempt 创建
     /// 成功时清除。只存状态，不持久化可能含路径或系统细节的错误正文。
-    #[serde(default)]
     installer_failed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct InstallerAttempt {
     id: String,
     target_app: PathBuf,
@@ -395,18 +406,72 @@ impl StagedUpdate {
     }
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 struct UpdateState {
     /// 最近一次成功安装的 manifest URL。
-    #[serde(default)]
     current_url: Option<String>,
     /// 上次下载暂存、还没应用成功的更新；启动时存在则自动补装。
-    #[serde(default)]
     staged: Option<StagedUpdate>,
     /// 原子交换成功后留下的旧 App。当前旧进程退出前保留完整 bundle；下次启动时
     /// 只清理由本次事务明确登记的目录。
-    #[serde(default)]
     cleanup_app: Option<PathBuf>,
+}
+
+impl UpdateState {
+    fn from_record(record: smelt_client_store::UpdateStateRecord) -> anyhow::Result<Self> {
+        let staged = match record.staged {
+            Some(staged) => Some(StagedUpdate {
+                id: staged.update_id,
+                version: staged.version,
+                url: staged.url,
+                staged_app: staged.staged_app,
+                fingerprint: staged.fingerprint,
+                phase: StagedUpdatePhase::parse(&staged.phase)?,
+                swap_app: staged.swap_app,
+                installer_attempt: staged.installer_attempt.map(|attempt| InstallerAttempt {
+                    id: attempt.attempt_id,
+                    target_app: attempt.target_app,
+                    relaunch: attempt.relaunch,
+                    helper_dir: attempt.helper_dir,
+                }),
+                installer_failed: staged.installer_failed,
+            }),
+            None => None,
+        };
+        Ok(Self {
+            current_url: record.current_url,
+            staged,
+            cleanup_app: record.cleanup_app,
+        })
+    }
+
+    fn to_record(&self) -> smelt_client_store::UpdateStateRecord {
+        smelt_client_store::UpdateStateRecord {
+            current_url: self.current_url.clone(),
+            cleanup_app: self.cleanup_app.clone(),
+            staged: self
+                .staged
+                .as_ref()
+                .map(|staged| smelt_client_store::StagedUpdateRecord {
+                    update_id: staged.id.clone(),
+                    version: staged.version.clone(),
+                    url: staged.url.clone(),
+                    staged_app: staged.staged_app.clone(),
+                    fingerprint: staged.fingerprint.clone(),
+                    phase: staged.phase.as_str().to_string(),
+                    swap_app: staged.swap_app.clone(),
+                    installer_attempt: staged.installer_attempt.as_ref().map(|attempt| {
+                        smelt_client_store::InstallerAttemptRecord {
+                            attempt_id: attempt.id.clone(),
+                            target_app: attempt.target_app.clone(),
+                            relaunch: attempt.relaunch,
+                            helper_dir: attempt.helper_dir.clone(),
+                        }
+                    }),
+                    installer_failed: staged.installer_failed,
+                }),
+        }
+    }
 }
 
 static UPDATE_GATE: Mutex<()> = Mutex::new(());
@@ -592,31 +657,20 @@ fn update_state_store(path: &Path) -> anyhow::Result<smelt_client_store::ClientS
 fn load_update_state_locked(path: &Path) -> anyhow::Result<UpdateState> {
     let store = update_state_store(path)
         .with_context(|| format!("读取更新状态失败：{}", path.display()))?;
-    let (scope, key) = UPDATE_STATE_SCOPE;
     store
-        .get::<UpdateState>(scope, key)
-        .map(Option::unwrap_or_default)
+        .update_state()
         .map_err(anyhow::Error::msg)
+        .and_then(UpdateState::from_record)
         .with_context(|| format!("读取更新状态失败：{}", path.display()))
 }
 
 fn save_update_state_locked(path: &Path, state: &UpdateState) -> anyhow::Result<()> {
     let store = update_state_store(path)
         .with_context(|| format!("保存更新状态失败：{}", path.display()))?;
-    let (scope, key) = UPDATE_STATE_SCOPE;
     store
-        .put(scope, key, state)
+        .put_update_state(&state.to_record())
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("保存更新状态失败：{}", path.display()))
-}
-
-/// 读不出来的更新状态挪进隔离区，保留 payload 供排障，活路径从空状态重新开始。
-fn quarantine_update_state(path: &Path) -> anyhow::Result<String> {
-    let (scope, key) = UPDATE_STATE_SCOPE;
-    update_state_store(path)?
-        .quarantine(scope, key)
-        .map_err(anyhow::Error::msg)?
-        .ok_or_else(|| anyhow::anyhow!("更新状态读取失败，但存储中没有可隔离的 payload"))
 }
 
 fn same_update(left: &StagedUpdate, right: &StagedUpdate) -> bool {
@@ -1664,13 +1718,11 @@ pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
     let state = match load_update_state_locked(&state_path) {
         Ok(state) => state,
         Err(error) => {
-            let quarantined = quarantine_update_state(&state_path)
-                .with_context(|| format!("更新状态损坏且无法隔离：{}", state_path.display()))?;
-            smelt_sys::app_log::error(
-                "updater",
-                &format!("更新状态损坏，已隔离到 {quarantined}：{error:#}"),
-            );
-            UpdateState::default()
+            // 读不出来（别的版本写的、库坏了）就从空状态重新开始，不让一份坏状态卡死更新。
+            smelt_sys::app_log::error("updater", &format!("更新状态读不出来，已清空：{error:#}"));
+            let state = UpdateState::default();
+            save_update_state_locked(&state_path, &state)?;
+            state
         }
     };
 
@@ -1953,14 +2005,14 @@ mod tests {
     use super::swap_app_bundles;
     use super::{
         ApplyingRecoveryState, BundleUseState, CheckOutcome, InstallerAttempt, StagedUpdate,
-        StagedUpdatePhase, UPDATE_STATE_SCOPE, UpdateCandidate, UpdateChannel, UpdateFailure,
-        UpdateManifest, UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
+        StagedUpdatePhase, UpdateCandidate, UpdateChannel, UpdateFailure, UpdateManifest,
+        UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
         acquire_installer_runtime_lease_at, app_fingerprint, begin_staged_update_in_state,
         classify_applying_recovery, classify_bundle_use_output, clear_installer_attempt_in_state,
         clear_preparing_update_in_state, decide_check_outcome, decide_failed_update_check,
         discard_failed_update_locked, failed_update_to_replace, installer_attempt_from_state,
         is_update_available, is_valid_update_id, load_update_state_locked, manifest_version_text,
-        promote_staged_update_in_state, quarantine_update_state, reconcile_update_state_locked,
+        promote_staged_update_in_state, reconcile_update_state_locked,
         record_installer_failure_in_state, release_label_from_url, safe_component, same_update,
         save_update_state_locked, validate_download_url,
     };
@@ -2377,31 +2429,30 @@ mod tests {
         assert!(!is_valid_update_id("../../other"));
     }
 
-    /// 暂存记录要能完整跨进程存活：版本、URL、暂存 .app 路径一个都不能丢。
+    /// 暂存记录要能完整跨进程存活：版本、URL、暂存 .app 路径、安装尝试一个都不能丢。
     #[test]
-    fn staged_update_serde_roundtrip() {
+    fn staged_update_survives_the_client_store() {
+        let root = test_root("staged-roundtrip");
+        let path = root.join(smelt_client_store::DATABASE_FILE_NAME);
         let mut staged = staged_update("job-a");
         staged.phase = StagedUpdatePhase::Applying;
         staged.swap_app = Some(PathBuf::from("/Applications/.Smelt.smelt-update-job-a.app"));
-        let json = serde_json::to_string(&staged).unwrap();
-        let back: StagedUpdate = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, staged);
-    }
-
-    #[test]
-    fn staged_update_from_previous_version_defaults_to_ready() {
-        let staged: StagedUpdate = serde_json::from_str(
-            r#"{
-                "version":"0.6.15",
-                "url":"https://example.test/releases/35039",
-                "staged_app":"/tmp/Smelt-0.6.15.app"
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(staged.phase, StagedUpdatePhase::Ready);
-        assert!(staged.id.is_empty());
-        assert!(staged.fingerprint.is_empty());
-        assert!(staged.swap_app.is_none());
+        staged.installer_attempt = Some(InstallerAttempt {
+            id: "attempt-1".to_string(),
+            target_app: PathBuf::from("/Applications/Smelt.app"),
+            relaunch: true,
+            helper_dir: PathBuf::from("/tmp/helper"),
+        });
+        let state = UpdateState {
+            current_url: Some("https://example.test/a.zip".to_string()),
+            staged: Some(staged.clone()),
+            cleanup_app: Some(PathBuf::from("/Applications/.Smelt.old.app")),
+        };
+        save_update_state_locked(&path, &state).unwrap();
+        let back = load_update_state_locked(&path).unwrap();
+        assert_eq!(back.staged, Some(staged));
+        assert_eq!(back.current_url, state.current_url);
+        assert_eq!(back.cleanup_app, state.cleanup_app);
     }
 
     #[test]
@@ -2549,26 +2600,27 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_update_state_is_reported_and_can_be_quarantined() {
+    fn unknown_phase_is_reported_instead_of_guessed() {
         let root = test_root("corrupt-state");
         let path = root.join(smelt_client_store::DATABASE_FILE_NAME);
-        let (scope, key) = UPDATE_STATE_SCOPE;
+        let mut staged = staged_update("odd");
+        staged.phase = StagedUpdatePhase::Ready;
+        let mut record = UpdateState {
+            current_url: None,
+            staged: Some(staged),
+            cleanup_app: None,
+        }
+        .to_record();
+        record.staged.as_mut().unwrap().phase = "half-installed".to_string();
         smelt_client_store::ClientStore::open(&path)
             .unwrap()
-            .put(
-                scope,
-                key,
-                &serde_json::json!({"staged": "not-a-staged-update"}),
-            )
+            .put_update_state(&record)
             .unwrap();
 
         let error = load_update_state_locked(&path)
             .err()
-            .expect("corrupt state must fail");
+            .expect("认不出的阶段必须报错");
         assert!(error.to_string().contains("读取更新状态失败"));
-
-        quarantine_update_state(&path).unwrap();
-        assert!(load_update_state_locked(&path).unwrap().staged.is_none());
     }
 
     #[test]
@@ -2845,24 +2897,5 @@ mod tests {
         assert!(current.join("new").is_file());
         assert!(candidate.join("old").is_file());
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    /// 老版本的状态文档没有 staged 字段，反序列化必须回退成"没有暂存更新"，
-    /// 不能因为新增字段把旧用户卡在启动补装流程里。
-    #[test]
-    fn update_state_deserializes_without_staged() {
-        let state: UpdateState =
-            serde_json::from_str(r#"{"current_url":"https://example.test/a.zip"}"#).unwrap();
-        assert_eq!(
-            state.current_url.as_deref(),
-            Some("https://example.test/a.zip")
-        );
-        assert!(state.staged.is_none());
-        assert!(state.cleanup_app.is_none());
-
-        let empty: UpdateState = serde_json::from_str("{}").unwrap();
-        assert!(empty.current_url.is_none());
-        assert!(empty.staged.is_none());
-        assert!(empty.cleanup_app.is_none());
     }
 }

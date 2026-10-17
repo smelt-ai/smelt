@@ -91,10 +91,6 @@ pub(crate) struct WsState {
     /// 侧栏是否隐藏无会话项目；旧存档默认显示全部。
     #[serde(default)]
     pub(crate) sidebar_hide_empty_projects: bool,
-    /// component Dock 的布局树。开合和宽度仍以 `sidebar_*` 和会话里的工具面板字段为准，
-    /// 这里记面板被拖到了哪一侧。旧存档没有这棵树，启动时按三栏摆。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) shell_dock: Option<gpui_component::dock::DockAreaState>,
     // --- 以下为旧存档兼容字段（读到就迁移，不再写出）---
     /// 旧格式：单棵分屏树。
     #[serde(default)]
@@ -376,32 +372,19 @@ fn collect_leaf_ids(pane: &Pane, out: &mut Vec<EntityId>) {
 }
 
 /// 客户端自己的界面状态。每台设备可以不同（设计文档 D1），不交给运行时。
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct WorkspaceUiState {
-    #[serde(default)]
     pub(crate) active_session: usize,
-    #[serde(default)]
     pub(crate) active_session_id: Option<String>,
-    #[serde(default)]
     pub(crate) route: WorkspaceRoute,
-    #[serde(default)]
     pub(crate) selected_agent_id: Option<String>,
-    #[serde(default)]
     pub(crate) sidebar_w: Option<f32>,
-    #[serde(default)]
     pub(crate) sidebar_open: Option<bool>,
-    #[serde(default)]
     pub(crate) collapsed_projects: Vec<String>,
-    #[serde(default)]
     pub(crate) collapsed_agents: Vec<String>,
-    #[serde(default)]
     pub(crate) sidebar_grouping: SidebarGrouping,
-    #[serde(default)]
     pub(crate) pinned_projects: Vec<String>,
-    #[serde(default)]
     pub(crate) sidebar_hide_empty_projects: bool,
-    #[serde(default)]
-    pub(crate) shell_dock: Option<gpui_component::dock::DockAreaState>,
 }
 
 impl WorkspaceUiState {
@@ -418,7 +401,6 @@ impl WorkspaceUiState {
             sidebar_grouping: state.sidebar_grouping,
             pinned_projects: state.pinned_projects.clone(),
             sidebar_hide_empty_projects: state.sidebar_hide_empty_projects,
-            shell_dock: state.shell_dock.clone(),
         }
     }
 
@@ -437,7 +419,6 @@ impl WorkspaceUiState {
             sidebar_grouping: self.sidebar_grouping,
             pinned_projects: self.pinned_projects,
             sidebar_hide_empty_projects: self.sidebar_hide_empty_projects,
-            shell_dock: self.shell_dock,
             ..Default::default()
         }
     }
@@ -457,26 +438,53 @@ fn catalog_document(mut state: WsState) -> WsState {
     state.sidebar_grouping = ui_defaults.sidebar_grouping;
     state.pinned_projects = Vec::new();
     state.sidebar_hide_empty_projects = false;
-    state.shell_dock = None;
     state
 }
 
 /// 启动时同步读界面状态（客户端库，本地，很快）。没有时用默认值。
 pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
-    let (scope, key) = smelt_client_store::keys::WORKSPACE_UI;
-    match smelt_client_store::client_store().and_then(|store| store.get(scope, key)) {
-        Ok(ui) => ui.unwrap_or_default(),
+    let record = match smelt_client_store::client_store().and_then(|store| store.workspace_ui()) {
+        Ok(record) => record,
         Err(error) => {
             eprintln!("[workspace] 读取界面状态失败，使用默认值：{error}");
-            WorkspaceUiState::default()
+            None
         }
+    };
+    let Some(record) = record else {
+        return WorkspaceUiState::default();
+    };
+    WorkspaceUiState {
+        active_session: record.active_session,
+        active_session_id: record.active_session_id,
+        route: crate::settings::enum_from_name(&record.route).unwrap_or_default(),
+        selected_agent_id: record.selected_agent_id,
+        sidebar_w: record.sidebar_w,
+        sidebar_open: record.sidebar_open,
+        collapsed_projects: record.collapsed_projects,
+        collapsed_agents: record.collapsed_agents,
+        sidebar_grouping: crate::settings::enum_from_name(&record.sidebar_grouping)
+            .unwrap_or_default(),
+        pinned_projects: record.pinned_projects,
+        sidebar_hide_empty_projects: record.sidebar_hide_empty_projects,
     }
 }
 
 fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
-    let (scope, key) = smelt_client_store::keys::WORKSPACE_UI;
+    let record = smelt_client_store::WorkspaceUiRecord {
+        active_session: ui.active_session,
+        active_session_id: ui.active_session_id.clone(),
+        route: crate::settings::enum_name(&ui.route),
+        selected_agent_id: ui.selected_agent_id.clone(),
+        sidebar_w: ui.sidebar_w,
+        sidebar_open: ui.sidebar_open,
+        collapsed_projects: ui.collapsed_projects.clone(),
+        collapsed_agents: ui.collapsed_agents.clone(),
+        sidebar_grouping: crate::settings::enum_name(&ui.sidebar_grouping),
+        pinned_projects: ui.pinned_projects.clone(),
+        sidebar_hide_empty_projects: ui.sidebar_hide_empty_projects,
+    };
     smelt_client_store::client_store()
-        .and_then(|store| store.put(scope, key, ui))
+        .and_then(|store| store.put_workspace_ui(&record))
         .map_err(|error| error.to_string())
 }
 
@@ -682,7 +690,9 @@ impl Workspace {
                     }
                 }
                 cx.background_executor()
-                    .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
+                    .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
+                        attempt,
+                    ))
                     .await;
                 attempt = attempt.saturating_add(1);
             }
@@ -887,7 +897,6 @@ impl Workspace {
             selected_agent_id: self.agent_surface.selected_id.clone(),
             sidebar_w: Some(self.sidebar_w),
             sidebar_open: Some(self.sidebar_open),
-            shell_dock: Some(self.shell_dock.read(cx).dump(cx)),
             collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
             collapsed_agents: self.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,

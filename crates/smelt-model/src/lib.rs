@@ -16,7 +16,6 @@ pub mod agent_status;
 pub mod appearance_settings;
 pub mod attention;
 pub mod automation;
-pub mod client_migration;
 pub mod control_api;
 pub mod conversation;
 pub mod copilot_quota;

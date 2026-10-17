@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(test)]
 mod appearance_tests {
-    use super::Appearance;
+    use super::{Appearance, ThemeMode, liquid_glass};
     use gpui::WindowBackgroundAppearance;
 
     #[test]
@@ -38,31 +38,26 @@ mod appearance_tests {
         );
     }
 
-    /// 升级时运行时交回的旧外观要能原样读成客户端的外观，字段名、枚举写法都对得上。
-    /// 运行时那边的字段名由 `client_migration` 的测试锁住，两边对的是同一份。
+    /// 外观存进客户端库再读回来，枚举字段按名字往返不丢。
     #[test]
-    fn appearance_handed_back_by_the_runtime_reads_as_the_client_appearance() {
-        let legacy = serde_json::json!({
-            "bg_color": 0x1a1b26,
-            "bg_image": "/tmp/bg.png",
-            "bg_image_opacity": 0.25,
-            "opacity": 0.95,
-            "blur": true,
-            "glass_style": "clear",
-            "theme_mode": "light",
-            "theme_name": "Ayu Light",
-            "ui_font_px": 18,
-            "ui_font_family": "",
-            "font_px": 13,
-            "font_family": "",
-        });
-        let appearance: Appearance = serde_json::from_value(legacy).unwrap();
+    fn appearance_survives_the_snapshot_round_trip() {
+        let appearance = Appearance {
+            glass_style: liquid_glass::GlassStyle::Clear,
+            theme_mode: ThemeMode::Light,
+            theme_name: "Ayu Light".to_string(),
+            ui_font_px: 18,
+            bg_image: Some("/tmp/bg.png".to_string()),
+            ..Appearance::default()
+        };
         let snapshot = super::snapshot_from_appearance(&appearance);
         assert_eq!(snapshot.glass_style, "clear");
         assert_eq!(snapshot.theme_mode, "light");
-        assert_eq!(snapshot.theme_name, "Ayu Light");
-        assert_eq!(snapshot.ui_font_px, 18);
-        assert_eq!(snapshot.bg_image.as_deref(), Some("/tmp/bg.png"));
+        let back = super::appearance_from_snapshot(snapshot);
+        assert_eq!(back.glass_style, liquid_glass::GlassStyle::Clear);
+        assert_eq!(back.theme_mode, ThemeMode::Light);
+        assert_eq!(back.theme_name, "Ayu Light");
+        assert_eq!(back.ui_font_px, 18);
+        assert_eq!(back.bg_image.as_deref(), Some("/tmp/bg.png"));
     }
 
     #[test]

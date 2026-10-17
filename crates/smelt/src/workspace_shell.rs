@@ -10,8 +10,8 @@ use gpui::{
     WeakEntity, Window, div, prelude::*, px, rgb,
 };
 use gpui_component::dock::{
-    BasePanel, DockArea, DockAreaState, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent,
-    panel_handle, register_panel,
+    BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelEvent, panel_handle,
+    register_panel,
 };
 
 use gpui_component::ActiveTheme as _;
@@ -34,10 +34,10 @@ pub(crate) struct InstalledShell {
     pub(crate) applied_tool: f32,
 }
 
-/// 建好 Dock，有存档就装回布局树，没有就摆成左栏 / 舞台 / 右栏。
+/// 建好 Dock，摆成左栏 / 舞台 / 右栏。每个停靠区只有一个面板、拖不走，布局固定，
+/// 不用存；开合和宽度每次渲染前由 `align_shell_dock` 从工作区状态写进来。
 pub(crate) fn install(
     workspace: WeakEntity<Workspace>,
-    saved: Option<DockAreaState>,
     window: &mut Window,
     cx: &mut App,
 ) -> InstalledShell {
@@ -46,10 +46,7 @@ pub(crate) fn install(
     skin.set_toggle_button_visible(false, cx);
     skin.set_close_button_visible(false, cx);
 
-    let loaded = saved
-        .filter(|state| state.version == Some(SHELL_VERSION))
-        .is_some_and(|state| area.update(cx, |area, cx| area.load(state, window, cx).is_ok()));
-    if !loaded {
+    {
         let sidebar = cx.new(|cx| ShellPanel::new(workspace.clone(), SIDEBAR_PANEL, "会话", cx));
         let stage = cx.new(|cx| ShellPanel::new(workspace.clone(), STAGE_PANEL, "舞台", cx));
         let tools = cx.new(|cx| ShellPanel::new(workspace.clone(), TOOL_PANEL, "工具", cx));

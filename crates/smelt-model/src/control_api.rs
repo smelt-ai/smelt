@@ -243,16 +243,6 @@ impl ControlCall for AgentHooksUninstall {
     const METHOD: ControlMethod = ControlMethod::AgentHooksUninstall;
 }
 
-/// 升级后桌面第一次启动时，取回以前存在运行时库里的客户端数据。
-pub enum MigrationTakeClientState {}
-
-impl ControlCall for MigrationTakeClientState {
-    type Params = EmptyParams;
-    type Result = crate::client_migration::LegacyClientState;
-
-    const METHOD: ControlMethod = ControlMethod::MigrationTakeClientState;
-}
-
 pub enum SessionList {}
 
 impl ControlCall for SessionList {
