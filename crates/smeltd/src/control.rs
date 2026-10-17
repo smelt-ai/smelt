@@ -253,6 +253,30 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
+        ControlMethod::SessionLaunchPrepare => {
+            let params: smelt_core::agent_definition_store::LaunchPrepareParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_definition_store::prepare_launch(params),
+            )
+        }
+        ControlMethod::SessionLoadedSkills => {
+            let params: smelt_core::agent_definition_store::LoadedSkillsParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_definition_store::loaded_skills(params),
+            )
+        }
         ControlMethod::TerminalThemePublish => {
             let theme: smelt_core::terminal_theme::TerminalThemeSnapshot =
                 match params_or_error(control_version, &request_id, params) {

@@ -1,36 +1,5 @@
 use super::{AcpSaved, acp_agent_from_cmd, cli_resume_command, command_matches_agent, shell_quote};
 use crate::settings::{ConversationAgentKind, HistorySourceKind, TerminalAgentKind};
-use crate::workspace_sessions::prepare_agent_definition_launch;
-use smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV;
-
-#[test]
-fn product_agent_instructions_are_pi_system_prompt_input_not_a_user_message() {
-    let definition = crate::settings::AgentDefinition {
-        id: "quant".into(),
-        name: "量化智能体".into(),
-        description: String::new(),
-        engine_kind_id: ConversationAgentKind::Pi.id().into(),
-        prompt: "  先验证行情时间\n再给出结论  ".into(),
-        plugins: Vec::new(),
-        context_folders: Vec::new(),
-        context_links: Vec::new(),
-        ..Default::default()
-    };
-    let launch = smelt_core::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent")
-        .with_env("EXISTING", "keep");
-
-    let launch = prepare_agent_definition_launch(launch, Some(&definition));
-
-    assert_eq!(launch.env.get("EXISTING").map(String::as_str), Some("keep"));
-    assert_eq!(
-        launch
-            .env
-            .get(SMELT_AGENT_INSTRUCTIONS_ENV)
-            .map(String::as_str),
-        Some("先验证行情时间\n再给出结论")
-    );
-    assert_eq!(launch.command, "smelt-pi-agent");
-}
 
 #[test]
 fn automation_run_does_not_require_an_existing_conversation() {

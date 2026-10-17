@@ -197,6 +197,74 @@ fn resolve_agent_execution_definition(
     })
 }
 
+/// 客户端打开一段对话前，要运行时替它把启动规格补齐成什么样。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPrep {
+    /// 产品智能体的定义 id；裸引擎为空。
+    pub agent_definition_id: Option<String>,
+    /// 恢复存档里的会话：完好的快照原样沿用创建时的内容（见
+    /// [`repair_agent_definition_launch`]），只补记忆目录。否则按当前定义重新组装。
+    #[serde(default)]
+    pub restore: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPrepareParams {
+    pub launch: ConversationLaunchSpec,
+    pub prep: LaunchPrep,
+    pub cwd: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPrepareResult {
+    pub launch: ConversationLaunchSpec,
+    /// 这场会话会加载的技能，供对话头部展示。
+    pub skills: Vec<crate::pi_plugin_catalog::PiPlugin>,
+}
+
+/// `session.launch.prepare`：注入智能体的长期指令、插件与 MCP 勾选、模型、记忆目录。
+/// 插件目录和记忆目录都在运行时那台机器上，所以由运行时来补。
+pub fn prepare_launch(params: LaunchPrepareParams) -> LaunchPrepareResult {
+    let LaunchPrepareParams { launch, prep, cwd } = params;
+    let definition = prep.agent_definition_id.as_deref().and_then(|id| {
+        load_agent_definitions()
+            .into_iter()
+            .find(|agent| agent.id == id)
+    });
+    let launch = if prep.restore {
+        let mut launch = repair_agent_definition_launch(launch, definition.as_ref());
+        // 记忆目录由智能体 id 决定，升级前保存的会话也能补上。
+        attach_agent_memory_dirs(&mut launch, prep.agent_definition_id.as_deref());
+        launch
+    } else {
+        prepare_agent_definition_launch(launch, definition.as_ref())
+    };
+    let skills =
+        crate::pi_plugin_catalog::loaded_skills_for_launch(&launch, cwd.as_deref().map(Path::new));
+    LaunchPrepareResult { launch, skills }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedSkillsParams {
+    pub launch: ConversationLaunchSpec,
+    pub cwd: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedSkillsResult {
+    pub skills: Vec<crate::pi_plugin_catalog::PiPlugin>,
+}
+
+/// `session.loaded_skills`：一场 Pi 会话按启动规格和工作目录会加载哪些技能。
+pub fn loaded_skills(params: LoadedSkillsParams) -> LoadedSkillsResult {
+    LoadedSkillsResult {
+        skills: crate::pi_plugin_catalog::loaded_skills_for_launch(
+            &params.launch,
+            params.cwd.as_deref().map(Path::new),
+        ),
+    }
+}
+
 pub fn prepare_agent_definition_launch(
     mut launch: ConversationLaunchSpec,
     definition: Option<&AgentDefinition>,
@@ -928,6 +996,36 @@ fn automations_using_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_agent_instructions_are_pi_system_prompt_input_not_a_user_message() {
+        let definition = AgentDefinition {
+            id: "quant".into(),
+            name: "量化智能体".into(),
+            description: String::new(),
+            engine_kind_id: crate::agent_kind::ConversationAgentKind::Pi.id().into(),
+            prompt: "  先验证行情时间\n再给出结论  ".into(),
+            plugins: Vec::new(),
+            context_folders: Vec::new(),
+            context_links: Vec::new(),
+            ..Default::default()
+        };
+        let launch = crate::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent")
+            .with_env("EXISTING", "keep");
+
+        let launch = prepare_agent_definition_launch(launch, Some(&definition));
+
+        assert_eq!(launch.env.get("EXISTING").map(String::as_str), Some("keep"));
+        assert_eq!(
+            launch
+                .env
+                .get(crate::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV)
+                .map(String::as_str),
+            Some("先验证行情时间\n再给出结论")
+        );
+        assert_eq!(launch.command, "smelt-pi-agent");
+    }
+
 
     /// GUI 拿着打开面板时的旧副本改了 prompt；在此期间 CLI / Control API 改了 name。
     /// GUI 保存只能落下它自己改过的字段，不能用旧副本把 CLI 的修改覆盖回去。

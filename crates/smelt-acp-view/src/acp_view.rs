@@ -1308,6 +1308,8 @@ pub struct AcpHandoffTarget {
 
 #[derive(Clone)]
 pub struct AcpHandoffRequest {
+    /// 见 [`AcpViewOrigin::launch_prep`]。
+    pub launch_prep: Option<LaunchPrep>,
     /// 交接来源。`None` = 不是从另一个会话 fork 的（任务开跑等无来源场景）。
     pub source: Option<AcpForkOrigin>,
     pub cwd: Option<String>,
@@ -1347,9 +1349,14 @@ pub struct AcpNewSessionRequest {
 
 /// 冷启动占位视图的初始状态：agent 身份、启动规格与恢复来源。把 `placeholder`
 /// 的参数收成一组，避免 10 个参数逐位传递。
+pub use smelt_core::agent_definition_store::LaunchPrep;
+
 pub struct AcpViewOrigin {
     pub agent: ConversationAgentKind,
     pub launch: ConversationLaunchSpec,
+    /// 第一次连上运行时之前，要运行时先把启动规格补齐成什么样。已经补好的（复制自
+    /// 另一场会话的）为空。
+    pub launch_prep: Option<LaunchPrep>,
     pub refresh_launch_from_settings: bool,
     pub profile_id: Option<String>,
     pub cwd: Option<String>,
@@ -1481,6 +1488,8 @@ pub struct AcpView {
     /// Pi 输入栏「技能 N」的发现结果。技能目录和祖先 `.git` 探测一次就要数毫秒
     /// 到几十毫秒，不能跟着消息流每帧重扫。
     loaded_skills: Option<LoadedSkillsSnapshot>,
+    /// 还没交给运行时补齐的启动规格要求；第一次连接前用掉。
+    launch_prep: Option<LaunchPrep>,
     /// 消息列表单独成视图再缓存。输入框是 `AcpView` 的子视图，每次按键都会把
     /// 祖先标脏；列表若留在同一棵树上，打字会重排全部可见 Markdown 和图片。
     transcript: Entity<ConversationTranscript>,
@@ -1711,11 +1720,13 @@ fn elicitation_input_shape(card: &PendingElicitation) -> Vec<(usize, bool)> {
 
 impl AcpView {
     /// 建视图并立即向 smeltd 发起 `acp_open`（非阻塞，握手结果以快照回来）。
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         window: &mut Window,
         cx: &mut Context<Self>,
         agent: ConversationAgentKind,
         launch: ConversationLaunchSpec,
+        launch_prep: Option<LaunchPrep>,
         profile_id: Option<String>,
         cwd: Option<String>,
         pending_agent_preset: Option<String>,
@@ -1725,6 +1736,7 @@ impl AcpView {
             AcpViewOrigin {
                 agent,
                 launch,
+                launch_prep,
                 refresh_launch_from_settings: profile_id.is_none(),
                 profile_id,
                 cwd,
@@ -1740,7 +1752,7 @@ impl AcpView {
         this.starting_since = Some(std::time::Instant::now());
         this.pending_agent_preset = pending_agent_preset;
         this.init_input(window, cx);
-        let handle = spawn_acp_client(ConversationClientLaunch {
+        let client = ConversationClientLaunch {
             id: this.sid.clone(),
             cwd: this.cwd.clone(),
             launch: this.launch.clone(),
@@ -1755,8 +1767,8 @@ impl AcpView {
             ),
             conversation_binding: this.conversation_binding.clone(),
             pending_agent_preset: this.pending_agent_preset.clone(),
-        });
-        this.attach_handle(handle, cx);
+        };
+        this.open_daemon_session(client, cx);
         this
     }
 
@@ -1782,6 +1794,7 @@ impl AcpView {
             AcpViewOrigin {
                 agent: request.agent,
                 launch: request.launch,
+                launch_prep: request.launch_prep,
                 refresh_launch_from_settings: request.profile_id.is_none(),
                 profile_id: request.profile_id,
                 cwd: request.cwd,
@@ -1816,7 +1829,7 @@ impl AcpView {
         this.pending_initial_config = request.config_values;
         this.ephemeral_env = request.ephemeral_env;
         this.conversation_binding = request.conversation_binding;
-        let handle = spawn_acp_client(ConversationClientLaunch {
+        let client = ConversationClientLaunch {
             id: this.sid.clone(),
             cwd: this.cwd.clone(),
             launch: this.launch.clone(),
@@ -1833,8 +1846,8 @@ impl AcpView {
             ),
             conversation_binding: this.conversation_binding.clone(),
             pending_agent_preset: None,
-        });
-        this.attach_handle(handle, cx);
+        };
+        this.open_daemon_session(client, cx);
         this
     }
 
@@ -1855,6 +1868,7 @@ impl AcpView {
         let AcpViewOrigin {
             agent,
             launch,
+            launch_prep,
             refresh_launch_from_settings,
             profile_id,
             cwd,
@@ -1943,6 +1957,7 @@ impl AcpView {
             retained_text: std::cell::RefCell::default(),
             layout_cache: std::cell::RefCell::default(),
             loaded_skills: None,
+            launch_prep,
             transcript,
             loaded_entries_offset: 0,
             entries_total: initial_entry_count,
@@ -2027,7 +2042,7 @@ impl AcpView {
             pi_catalog_revision: 0,
         };
         // 技能发现读磁盘，只在视图建好时做一次。绘制路径只允许读缓存。
-        this.ensure_loaded_skills();
+        this.ensure_loaded_skills(cx);
         this.pi_catalog_revision = ProviderStatus::pi_catalog_revision(cx);
         // provider 账户状态变化：额度只需重绘（菜单每次打开重建，读的就是新值），
         // 但模型目录是会话启动时问 agent 要的快照，必须显式重拉。
@@ -2098,7 +2113,7 @@ impl AcpView {
                 self.refresh_launch_from_settings,
             );
         }
-        self.ensure_loaded_skills();
+        self.ensure_loaded_skills(cx);
         self.permissions.clear();
         self.permission_submitting = None;
         self.elicitation = None;
@@ -2124,7 +2139,7 @@ impl AcpView {
         self.end_reason.clear();
         self.starting_since = Some(std::time::Instant::now());
         self.init_input(window, cx);
-        let handle = spawn_acp_client(ConversationClientLaunch {
+        let client = ConversationClientLaunch {
             id: self.sid.clone(),
             cwd: self.cwd.clone(),
             launch: self.launch.clone(),
@@ -2139,8 +2154,8 @@ impl AcpView {
             ),
             conversation_binding: self.conversation_binding.clone(),
             pending_agent_preset: self.pending_agent_preset.clone(),
-        });
-        self.attach_handle(handle, cx);
+        };
+        self.open_daemon_session(client, cx);
         cx.notify();
     }
 
@@ -2445,8 +2460,9 @@ impl AcpView {
         }
     }
 
-    /// 技能发现只跟启动规格和工作目录走。绘制路径只读 `loaded_skills()`。
-    fn ensure_loaded_skills(&mut self) {
+    /// 技能发现只跟启动规格和工作目录走，由运行时扫（插件目录在运行时那台机器上）。
+    /// 绘制路径只读 `loaded_skills()`；扫描回来之前按没有技能显示。
+    fn ensure_loaded_skills(&mut self, cx: &mut Context<Self>) {
         match loaded_skills_refresh(
             self.agent,
             &self.launch,
@@ -2456,17 +2472,96 @@ impl AcpView {
             LoadedSkillsRefresh::Keep => {}
             LoadedSkillsRefresh::Clear => self.loaded_skills = None,
             LoadedSkillsRefresh::Rescan => {
-                let skills = smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
-                    &self.launch,
-                    self.cwd.as_deref().map(std::path::Path::new),
-                );
+                // 先记下「这份启动规格已经在扫」，扫描期间不重复发。
                 self.loaded_skills = Some(LoadedSkillsSnapshot {
                     launch: self.launch.clone(),
                     cwd: self.cwd.clone(),
-                    skills,
+                    skills: Vec::new(),
                 });
+                let params = smelt_core::agent_definition_store::LoadedSkillsParams {
+                    launch: self.launch.clone(),
+                    cwd: self.cwd.clone(),
+                };
+                cx.spawn(async move |this, cx| {
+                    let scanned = cx
+                        .background_executor()
+                        .spawn(async move {
+                            smelt_core::daemon_state::local_runtime()
+                                .call::<smelt_core::control_api::SessionLoadedSkills>(
+                                    &params,
+                                    RUNTIME_PREPARE_TIMEOUT,
+                                )
+                                .map(|result| (params, result.skills))
+                        })
+                        .await;
+                    let Ok((params, skills)) = scanned else {
+                        return;
+                    };
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(cached) = this.loaded_skills.as_mut()
+                            && cached.launch == params.launch
+                            && cached.cwd == params.cwd
+                        {
+                            cached.skills = skills;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
             }
         }
+    }
+
+    /// 连上运行时的会话。带着补齐要求时先请运行时补齐启动规格（智能体指令、插件、
+    /// MCP、记忆目录），再用补好的规格连接；补不了就不连——按裸引擎起一个本该带着
+    /// 人设和插件的智能体，比明确失败更糟。
+    fn open_daemon_session(&mut self, mut client: ConversationClientLaunch, cx: &mut Context<Self>) {
+        let Some(prep) = self.launch_prep.take() else {
+            let handle = spawn_acp_client(client);
+            self.attach_handle(handle, cx);
+            return;
+        };
+        let params = smelt_core::agent_definition_store::LaunchPrepareParams {
+            launch: self.launch.clone(),
+            prep: prep.clone(),
+            cwd: self.cwd.clone(),
+        };
+        cx.spawn(async move |this, cx| {
+            let prepared = cx
+                .background_executor()
+                .spawn(async move {
+                    smelt_core::daemon_state::local_runtime()
+                        .call::<smelt_core::control_api::SessionLaunchPrepare>(
+                            &params,
+                            RUNTIME_PREPARE_TIMEOUT,
+                        )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match prepared {
+                    Ok(prepared) => {
+                        this.launch = prepared.launch.clone();
+                        this.loaded_skills = Some(LoadedSkillsSnapshot {
+                            launch: prepared.launch.clone(),
+                            cwd: this.cwd.clone(),
+                            skills: prepared.skills,
+                        });
+                        client.launch = prepared.launch;
+                        let handle = spawn_acp_client(client);
+                        this.attach_handle(handle, cx);
+                    }
+                    Err(error) => {
+                        // 留着要求，下次重连再补。
+                        this.launch_prep = Some(prep);
+                        this.phase = DaemonPhase::Dead;
+                        this.starting_since = None;
+                        this.end_reason = format!("准备启动参数失败：{error}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn loaded_skills(&self) -> &[smelt_core::pi_plugin_catalog::PiPlugin] {
@@ -3226,6 +3321,7 @@ impl AcpView {
             return None;
         }
         Some(AcpHandoffRequest {
+            launch_prep: None,
             source: Some(AcpForkOrigin {
                 session_id: self.sid.clone(),
                 from_history: false,
@@ -6075,6 +6171,9 @@ fn tool_running_label(kind: ToolKind) -> &'static str {
         ToolKind::Other => "正在处理",
     }
 }
+
+/// 补齐启动规格、扫技能都要遍历插件目录，给足余量。
+const RUNTIME_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct LoadedSkillsSnapshot {
     launch: ConversationLaunchSpec,

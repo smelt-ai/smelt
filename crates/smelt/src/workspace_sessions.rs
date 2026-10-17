@@ -26,16 +26,6 @@ pub(crate) struct NewAcpSessionRequest {
     pub activate: bool,
 }
 
-/// 当前产品 Agent 只注册 Pi：把定义中的长期指令放进 Pi 启动边界，随后由内置
-/// 启动器转换成原生 system prompt。这里绝不能再返回 `pending_agent_preset`，否则
-/// 指令会被拼进首条用户消息，Agent 也就无法脱离聊天用于自动任务。
-pub(crate) fn prepare_agent_definition_launch(
-    launch: smelt_core::agent_kind::ConversationLaunchSpec,
-    definition: Option<&settings::AgentDefinition>,
-) -> smelt_core::agent_kind::ConversationLaunchSpec {
-    smelt_core::agent_definition_store::prepare_agent_definition_launch(launch, definition)
-}
-
 impl Workspace {
     /// 手机要看一段 daemon 里没在跑的对话（典型是 daemon 冷重启后桌面只放了占位）。
     /// 照「用户在桌面点开它」的语义拉起来，但不切舞台、不抢焦点。
@@ -210,32 +200,19 @@ impl Workspace {
                         }
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
-                        // 旧版重启会丢掉产品智能体的插件和 MCP 勾选，存下来的快照就成了裸 Pi。
-                        // 这样的快照按当前定义补全，完好的原样沿用。
-                        let definition = agent_definition_id.as_deref().and_then(|id| {
-                            cx.global::<settings::AgentHostState>()
-                                .agents
-                                .iter()
-                                .find(|definition| definition.id == id)
-                                .cloned()
-                        });
-                        let mut launch =
-                            smelt_core::agent_definition_store::repair_agent_definition_launch(
-                                saved.launch,
-                                definition.as_ref(),
-                            );
-                        // 记忆目录由智能体 id 决定，升级前保存的会话也能补上。开关由 Pi 每轮
-                        // 向 daemon 取，这里不判断。
-                        smelt_core::agent_definition_store::attach_agent_memory_dirs(
-                            &mut launch,
-                            agent_definition_id.as_deref(),
-                        );
+                        // 第一次连上前由运行时补齐：旧版重启丢掉的插件和 MCP 勾选按当前定义
+                        // 补全，完好的快照原样沿用；记忆目录由智能体 id 决定，一并补上。
+                        let launch_prep = acp_view::LaunchPrep {
+                            agent_definition_id: agent_definition_id.clone(),
+                            restore: true,
+                        };
                         let view = cx.new(|cx| {
                             acp_view::AcpView::placeholder(
                                 cx,
                                 acp_view::AcpViewOrigin {
+                                    launch_prep: Some(launch_prep),
                                     agent,
-                                    launch,
+                                    launch: saved.launch,
                                     refresh_launch_from_settings,
                                     profile_id: saved.profile_id,
                                     cwd: saved.cwd,
@@ -1027,13 +1004,13 @@ impl Workspace {
                     .cloned()
             })
         });
-        if let Some(definition) = &agent_definition {
-            request.launch = smelt_core::agent_definition_store::prepare_agent_definition_launch(
-                request.launch,
-                Some(definition),
-            );
-        }
         let agent_definition_id = agent_definition.map(|definition| definition.id);
+        if agent_definition_id.is_some() {
+            request.launch_prep = Some(acp_view::LaunchPrep {
+                agent_definition_id: agent_definition_id.clone(),
+                restore: false,
+            });
+        }
         if !smelt_core::session_control::is_agent_conversation(
             None,
             agent_definition_id.as_deref(),
@@ -1096,10 +1073,7 @@ impl Workspace {
         // 工作目录属于这次对话/Run，而非 AgentDefinition；项目菜单或触发器传来
         // 的上下文就是本次执行上下文。
         let cwd = fallback_cwd;
-        let launch = prepare_agent_definition_launch(
-            launch_override.unwrap_or_else(|| settings::acp_launch_for(agent, cx)),
-            agent_definition.as_ref(),
-        );
+        let launch = launch_override.unwrap_or_else(|| settings::acp_launch_for(agent, cx));
         let agent_model = agent_definition
             .as_ref()
             .and_then(|definition| definition.model_config_value());
@@ -1121,8 +1095,23 @@ impl Workspace {
             initial_config.retain(|(id, _)| id != "model");
             initial_config.push(("model".to_string(), value));
         }
-        let view =
-            cx.new(|cx| acp_view::AcpView::start(window, cx, agent, launch, profile_id, cwd, None));
+        // 智能体的指令、插件、MCP、记忆目录由运行时在第一次连接前补齐。
+        let launch_prep = acp_view::LaunchPrep {
+            agent_definition_id: agent_definition_id.clone(),
+            restore: false,
+        };
+        let view = cx.new(|cx| {
+            acp_view::AcpView::start(
+                window,
+                cx,
+                agent,
+                launch,
+                Some(launch_prep),
+                profile_id,
+                cwd,
+                None,
+            )
+        });
         view.update(cx, |view, _cx| {
             view.restore_config_values(initial_config);
             view.restore_pending_prompt(pending_prompt, None);
@@ -1224,10 +1213,7 @@ impl Workspace {
                 .find(|agent| agent.id == id)
                 .cloned()
         });
-        let launch = prepare_agent_definition_launch(
-            launch_override.unwrap_or_else(|| settings::acp_launch_for(agent, cx)),
-            definition.as_ref(),
-        );
+        let launch = launch_override.unwrap_or_else(|| settings::acp_launch_for(agent, cx));
         let initial_config = if definition.is_some() {
             settings::initial_agent_conversation_config_for(agent, cx)
         } else {
@@ -1256,6 +1242,10 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
+                    launch_prep: Some(acp_view::LaunchPrep {
+                        agent_definition_id: agent_definition_id.clone(),
+                        restore: false,
+                    }),
                     agent,
                     launch,
                     refresh_launch_from_settings: view_profile_id.is_none(),

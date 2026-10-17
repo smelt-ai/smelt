@@ -1354,6 +1354,7 @@ fn build_history_handoff_request(
     let prompt = build_handoff_prompt(&context);
 
     acp_view::AcpHandoffRequest {
+        launch_prep: None,
         source: Some(acp_view::AcpForkOrigin {
             session_id: source.resume_id.clone(),
             // 源是磁盘上的历史存档，不是当前开着的某条 Smelt 会话。

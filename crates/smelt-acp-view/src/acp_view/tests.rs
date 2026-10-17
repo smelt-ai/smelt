@@ -3138,6 +3138,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3191,6 +3192,7 @@ fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext)
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3236,6 +3238,7 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3314,6 +3317,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3363,6 +3367,7 @@ fn snapshot_binding_becomes_the_views_persisted_binding(cx: &mut gpui::TestAppCo
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Codex,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3404,6 +3409,7 @@ fn stop_button_click_requests_cancel_then_force_restarts_on_second_click(
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3526,6 +3532,7 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3592,6 +3599,7 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3663,6 +3671,7 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3735,6 +3744,7 @@ fn revealing_the_pinned_prompt_parks_it_below_the_title_island(cx: &mut gpui::Te
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3801,6 +3811,7 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3921,6 +3932,7 @@ fn open_conversation<'a>(
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -4254,6 +4266,7 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                launch_prep: None,
                 agent: ConversationAgentKind::Codex,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,

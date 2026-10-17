@@ -3346,6 +3346,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
+                    launch_prep: None,
                     agent,
                     launch: record.launch,
                     refresh_launch_from_settings: false,
