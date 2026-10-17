@@ -712,7 +712,7 @@ impl Workspace {
     /// 侧栏「新对话」。有默认就直接开；没有可对话智能体就去创建；有人但没默认时
     /// 选择器自己处理，这里不猜。
     pub(super) fn begin_new_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let stored = stored_default_conversation_agent();
+        let stored = stored_default_conversation_agent(cx);
         let draft = self.agent_surface.conversation_draft_id.clone();
         let (intent, clear_stored, agents_empty) = {
             let agents = &cx.global::<settings::AgentHostState>().agents;
@@ -728,7 +728,7 @@ impl Workspace {
             )
         };
         if clear_stored {
-            clear_default_conversation_agent();
+            clear_default_conversation_agent(cx);
         }
         match intent {
             smelt_core::default_conversation::NewConversationIntent::Start { agent_id } => {
@@ -768,15 +768,15 @@ impl Workspace {
             .iter()
             .any(|agent| agent.id == id && agent.is_conversation_ready());
         if !ready {
-            if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
-                clear_default_conversation_agent();
+            if stored_default_conversation_agent(cx).as_deref() == Some(id.as_str()) {
+                clear_default_conversation_agent(cx);
             }
             self.agent_surface.error = Some("这个智能体不能用来开对话".to_string());
             cx.notify();
             return;
         }
         self.discard_uncommitted_draft(Some(&id), cx);
-        set_default_conversation_agent(&id);
+        set_default_conversation_agent(&id, cx);
         if start {
             self.start_agent_conversation(id, window, cx);
         } else {
@@ -804,7 +804,7 @@ impl Workspace {
         }
         self.agent_surface.conversation_draft_id = None;
         self.agent_surface.arm_conversation_on_create = false;
-        set_default_conversation_agent(&id);
+        set_default_conversation_agent(&id, cx);
         self.start_agent_conversation(id, window, cx);
     }
 
@@ -854,8 +854,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
-            clear_default_conversation_agent();
+        if stored_default_conversation_agent(cx).as_deref() == Some(id.as_str()) {
+            clear_default_conversation_agent(cx);
         }
         self.nav.agents_mut().pop_to_root();
         self.agent_surface.selected_id = None;
@@ -1083,8 +1083,8 @@ impl Workspace {
             self.agent_surface.conversation_draft_id = None;
             self.agent_surface.arm_conversation_on_create = false;
         }
-        if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
-            clear_default_conversation_agent();
+        if stored_default_conversation_agent(cx).as_deref() == Some(id.as_str()) {
+            clear_default_conversation_agent(cx);
         }
         if self
             .automation_surface

@@ -190,6 +190,9 @@ pub struct AgentHostState {
     pub webhook_base_url: Option<String>,
     #[serde(skip)]
     pub persistence_error: Option<String>,
+    /// 侧栏「新对话」默认用哪个智能体。
+    #[serde(skip)]
+    pub default_conversation_agent: Option<String>,
     /// 运行时那部分（命令、env、profile、定义、hook 开关）是否已从运行时加载。
     /// 没加载前是出厂值，不能拿去启动会话，也不接受修改。
     #[serde(skip)]
@@ -466,6 +469,7 @@ impl Default for AgentHostState {
             automation_store_error: None,
             webhook_base_url: None,
             persistence_error: None,
+            default_conversation_agent: None,
             runtime_loaded: false,
         }
     }
@@ -500,6 +504,7 @@ impl AgentHostState {
             profiles: self.profiles.clone(),
             native_dsh_profiles: self.native_dsh_profiles.clone(),
             agents: self.agents.clone(),
+            default_conversation_agent: self.default_conversation_agent.clone(),
         }
     }
 
@@ -518,6 +523,7 @@ impl AgentHostState {
         self.profiles = settings.profiles;
         self.native_dsh_profiles = settings.native_dsh_profiles;
         self.agents = settings.agents;
+        self.default_conversation_agent = settings.default_conversation_agent;
         self.runtime_loaded = true;
     }
 

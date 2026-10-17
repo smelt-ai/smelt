@@ -465,86 +465,34 @@ fn appearance_from_snapshot(snapshot: smelt_store::AppearanceSnapshot) -> Appear
 /// 定义在 `smelt-core`：桌面新建菜单和移动端读的是同一份启动项目录。
 pub use smelt_core::new_session::{LaunchEntry, default_launch_entries};
 
-/// 内置启动项由 provider 注册信息识别；旧配置缺少 provider 时，只把 Smelt
-/// 发布过的逐字默认命令视为内置，避免把用户自定义的 Agent 命令误锁定。
-fn launch_entry_matches_builtin(entry: &LaunchEntry, agent: TerminalAgentKind) -> bool {
-    entry.provider.as_deref() == Some(agent.id())
-        || (entry.provider.is_none()
-            && (entry.command.trim() == agent.quick_terminal_cmd()
-                || agent
-                    .upgrade_released_quick_terminal_command(&entry.command)
-                    .is_some()))
-}
-
-fn launch_entry_is_builtin(entry: &LaunchEntry) -> bool {
-    entry
-        .provider
-        .as_deref()
-        .and_then(TerminalAgentKind::from_id)
-        .is_some()
-}
-
-/// 固定内置启动项与注册表对齐，并给旧版无 provider 的逐字出厂项补上稳定标识。
-/// 返回 true 表示配置发生变化，需要持久化。
-fn ensure_builtin_launch_entries(config: &mut LaunchConfig) -> bool {
-    let mut changed = false;
-    for agent in TerminalAgentKind::ALL {
-        if let Some(entry) = config
-            .entries
-            .iter_mut()
-            .find(|entry| launch_entry_matches_builtin(entry, agent))
-        {
-            if entry.provider.is_none() {
-                entry.provider = Some(agent.id().to_string());
-                changed = true;
-            }
-            continue;
-        }
-        config.entries.push(LaunchEntry {
-            label: agent.quick_terminal_label().to_string(),
-            command: agent.quick_terminal_cmd().to_string(),
-            provider: Some(agent.id().to_string()),
-        });
-        changed = true;
-    }
-    changed
-}
-
 /// 删除自定义启动项。内置项是固定集合，数据层也拒绝删除，不能只依赖设置页
 /// 隐藏按钮。
 fn remove_launch_entry_at(config: &mut LaunchConfig, index: usize) -> bool {
     let Some(entry) = config.entries.get(index) else {
         return false;
     };
-    if launch_entry_is_builtin(entry) {
+    if smelt_core::launch_settings::launch_entry_is_builtin(entry) {
         return false;
     }
     config.entries.remove(index);
     true
 }
 
-/// 项目行「+」可配置启动项列表（全局单例，存 SQLite KV）。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// 项目行「+」可配置启动项：运行时那份清单的缓存（全局单例）。窗口先起来，后台
+/// 加载；没加载好之前显示出厂默认，不接受修改。
+#[derive(Clone)]
 pub struct LaunchConfig {
-    /// 启动项迁移版本。旧出厂命令与标签只在对应版本升级时改写；固定内置项则在
-    /// 每次加载时与注册表对齐。
-    #[serde(default = "current_launch_config_version")]
-    version: u32,
     /// 除固定的「新建终端」「新建 Worktree…」外，下拉菜单里的启动项。
     pub entries: Vec<LaunchEntry>,
-}
-
-const LAUNCH_CONFIG_VERSION: u32 = 14;
-
-fn current_launch_config_version() -> u32 {
-    LAUNCH_CONFIG_VERSION
+    /// 是否已从运行时加载。
+    pub loaded: bool,
 }
 
 impl Default for LaunchConfig {
     fn default() -> Self {
         Self {
-            version: LAUNCH_CONFIG_VERSION,
             entries: default_launch_entries(),
+            loaded: false,
         }
     }
 }
@@ -587,102 +535,108 @@ pub fn active_launch_entries(cx: &App) -> Vec<LaunchEntry> {
 
 impl Global for LaunchConfig {}
 
-fn launch_config_path() -> Option<std::path::PathBuf> {
-    smelt_paths::smelt_home().map(|h| h.join(smelt_store::DATABASE_FILE_NAME))
+fn fetch_launch_settings() -> Result<smelt_core::launch_settings::LaunchSettings, String> {
+    crate::runtime_call::call::<smelt_core::control_api::LaunchGet>(
+        smelt_runtime_client::protocol::control::EmptyParams::default(),
+        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+    )
+    .map_err(crate::runtime_call::error_text)
 }
 
-/// 持久化文档的原始形状：兼容旧版「全权限」三开关，也兼容新版 `entries` 列表。
-/// `entries: None` 表示文档里没写这个键（旧格式）→ 迁到出厂默认并回写；
-/// `Some([])` 表示用户清空了列表，照用。
-/// 读取启动配置；缺失则回退出厂默认。
-pub fn load_launch_config() -> LaunchConfig {
-    let Some(path) = launch_config_path() else {
-        return LaunchConfig::default();
-    };
-    load_launch_config_from_path(&path)
+fn set_launch_entries(entries: Vec<LaunchEntry>, cx: &mut App) {
+    cx.set_global(LaunchConfig {
+        entries,
+        loaded: true,
+    });
 }
 
-fn persist_launch_config_at(path: &std::path::Path, config: &LaunchConfig) {
-    if let Ok(store) = smelt_core::sqlite_state::open_sqlite_store(path) {
-        let snapshot = smelt_store::LaunchSnapshot {
-            version: config.version,
-            entries: config
-                .entries
-                .iter()
-                .map(|entry| smelt_store::LaunchEntryRecord {
-                    label: entry.label.clone(),
-                    command: entry.command.clone(),
-                    provider: entry.provider.clone(),
-                })
-                .collect(),
-        };
-        let _ = store.put_launch_snapshot(&snapshot);
-    }
+/// 后台从运行时加载启动项；运行时还没起来就按退避重试，直到拿到为止。
+pub fn start_launch_config_load(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut attempt = 0u32;
+        loop {
+            let fetched = cx
+                .background_executor()
+                .spawn(async { fetch_launch_settings() })
+                .await;
+            if let Ok(settings) = fetched {
+                cx.update(|cx| set_launch_entries(settings.entries, cx));
+                return;
+            }
+            cx.background_executor()
+                .timer(smelt_core::daemon_state::daemon_reconnect_backoff(attempt))
+                .await;
+            attempt = attempt.saturating_add(1);
+        }
+    })
+    .detach();
 }
 
-fn launch_from_snapshot(snapshot: smelt_store::LaunchSnapshot) -> LaunchConfig {
-    LaunchConfig {
-        version: snapshot.version,
-        entries: snapshot
-            .entries
-            .into_iter()
-            .map(|entry| LaunchEntry {
-                label: entry.label,
-                command: entry.command,
-                provider: entry.provider,
-            })
-            .collect(),
-    }
+/// 整表替换按提交顺序逐个发给运行时：每次的 `base` 都是上一次提交后的本地状态，
+/// 并发发出去就会互相判成冲突。
+struct LaunchEditQueue {
+    tx: smol::channel::Sender<(Vec<LaunchEntry>, Vec<LaunchEntry>)>,
 }
 
-fn load_launch_config_from_path(path: &std::path::Path) -> LaunchConfig {
-    if let Ok(store) = smelt_core::sqlite_state::open_sqlite_store(path)
-        && let Ok(Some(snapshot)) = store.get_launch_snapshot()
-    {
-        let mut config = launch_from_snapshot(snapshot);
-        let mut changed = config.version < LAUNCH_CONFIG_VERSION;
-        if changed {
-            for entry in &mut config.entries {
-                if let Some(command) = TerminalAgentKind::ALL
-                    .into_iter()
-                    .find_map(|agent| agent.upgrade_released_quick_terminal_command(&entry.command))
-                {
-                    entry.command = command.to_string();
-                }
-                if entry.label.trim() == "Copilot"
-                    && (entry.provider.as_deref() == Some(TerminalAgentKind::Copilot.id())
-                        || TerminalAgentKind::from_command_prefix(&entry.command)
-                            == Some(TerminalAgentKind::Copilot))
-                {
-                    entry.label = TerminalAgentKind::Copilot
-                        .quick_terminal_label()
-                        .to_string();
+impl Global for LaunchEditQueue {}
+
+fn submit_launch_entries(base: Vec<LaunchEntry>, entries: Vec<LaunchEntry>, cx: &mut App) {
+    if !cx.has_global::<LaunchEditQueue>() {
+        let (tx, rx) = smol::channel::unbounded::<(Vec<LaunchEntry>, Vec<LaunchEntry>)>();
+        cx.set_global(LaunchEditQueue { tx });
+        cx.spawn(async move |cx| {
+            while let Ok((base, entries)) = rx.recv().await {
+                let replaced = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::runtime_call::call::<smelt_core::control_api::LaunchReplace>(
+                            smelt_core::control_api::LaunchReplaceParams { base, entries },
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                    })
+                    .await;
+                match replaced {
+                    // 后面还有排着的修改时，这一包不是最终状态，先不覆盖本地。
+                    Ok(settings) => {
+                        if rx.is_empty() {
+                            cx.update(|cx| set_launch_entries(settings.entries, cx));
+                        }
+                    }
+                    Err(error) => {
+                        // 冲突或失败都以运行时为准：丢掉排着的修改（它们的 base 已经
+                        // 不成立），重新拉一份。
+                        while rx.try_recv().is_ok() {}
+                        crate::status_item::notify_error(crate::runtime_call::error_text(error));
+                        let fresh = cx
+                            .background_executor()
+                            .spawn(async { fetch_launch_settings() })
+                            .await;
+                        if let Ok(settings) = fresh {
+                            cx.update(|cx| set_launch_entries(settings.entries, cx));
+                        }
+                    }
                 }
             }
-        }
-        changed |= ensure_builtin_launch_entries(&mut config);
-        if changed {
-            config.version = LAUNCH_CONFIG_VERSION;
-            persist_launch_config_at(path, &config);
-        }
-        return config;
+        })
+        .detach();
     }
-    LaunchConfig::default()
+    let _ = cx.global::<LaunchEditQueue>().tx.try_send((base, entries));
 }
 
-/// 写回启动配置；失败由统一存储入口记录，界面主流程继续运行。
-fn save_launch_config(c: &LaunchConfig) {
-    if let Some(path) = launch_config_path() {
-        persist_launch_config_at(&path, c);
-    }
-}
-
-/// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
+/// 改启动项：本地立刻生效，整表按序提交给运行时。还没从运行时加载时不接受修改。
 fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
-    let mut c = cx.global::<LaunchConfig>().clone();
-    f(&mut c);
-    save_launch_config(&c);
-    cx.set_global(c);
+    let current = cx.global::<LaunchConfig>().clone();
+    if !current.loaded {
+        crate::status_item::notify_error("正在读取运行时的启动项，请稍后再改");
+        return;
+    }
+    let mut next = current.clone();
+    f(&mut next);
+    if next.entries == current.entries {
+        return;
+    }
+    cx.set_global(next.clone());
+    submit_launch_entries(current.entries, next.entries, cx);
 }
 
 // ===================== Agent 身份与宿主状态 =====================
@@ -697,9 +651,8 @@ pub use smelt_core::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
 pub use smelt_ui::agent_host_state::{
-    AgentDefinition, AgentHostState, agent_host_loaded, apply_agent_host,
-    initial_agent_host_state, reload_agent_definitions, start_agent_host_load,
-    try_apply_agent_host,
+    AgentDefinition, AgentHostState, agent_host_loaded, apply_agent_host, initial_agent_host_state,
+    reload_agent_definitions, start_agent_host_load, try_apply_agent_host,
 };
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,

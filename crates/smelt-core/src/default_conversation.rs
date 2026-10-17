@@ -45,44 +45,46 @@ pub struct NewConversationResolution {
     pub ready: Vec<ConversationAgentChoice>,
 }
 
-/// 读出侧栏默认智能体。库不可用或记录损坏时视为没设过，不阻塞界面。
-pub fn load_default_conversation_agent() -> Option<String> {
-    match crate::sqlite_state::load_sqlite_kv::<StoredDefaultConversationAgent>(
-        SQLITE_NAMESPACE,
-        SQLITE_KEY,
-    ) {
-        Ok(Some(stored)) => {
-            let id = stored.agent_id.trim();
-            if id.is_empty() {
-                None
-            } else {
-                Some(id.to_string())
-            }
-        }
-        Ok(None) => None,
+/// 读出侧栏默认智能体。记录损坏时视为没设过，不阻塞界面。由运行时调用，
+/// 随 `agent.host.*` 一起交给客户端。
+pub fn load_on(store: &smelt_store::Store) -> Option<String> {
+    let raw = match store.get_blob(SQLITE_NAMESPACE, SQLITE_KEY) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return None,
         Err(error) => {
             eprintln!("[default-conversation] 读取默认智能体失败，视为未设置: {error}");
+            return None;
+        }
+    };
+    match serde_json::from_slice::<StoredDefaultConversationAgent>(&raw) {
+        Ok(stored) => {
+            let id = stored.agent_id.trim();
+            (!id.is_empty()).then(|| id.to_string())
+        }
+        Err(error) => {
+            eprintln!("[default-conversation] 默认智能体记录损坏，视为未设置: {error}");
             None
         }
     }
 }
 
-pub fn save_default_conversation_agent(agent_id: &str) -> Result<(), String> {
-    let agent_id = agent_id.trim();
-    if agent_id.is_empty() {
-        return Err("默认智能体 id 为空".to_string());
+/// 设为 `Some` 记下默认智能体，`None` 清掉。
+pub fn store_on(store: &smelt_store::Store, agent_id: Option<&str>) -> Result<(), String> {
+    match agent_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(agent_id) => {
+            let raw = serde_json::to_vec(&StoredDefaultConversationAgent {
+                agent_id: agent_id.to_string(),
+            })
+            .map_err(|error| error.to_string())?;
+            store
+                .put_blob(SQLITE_NAMESPACE, SQLITE_KEY, &raw)
+                .map_err(|error| error.to_string())
+        }
+        None => store
+            .delete_blob(SQLITE_NAMESPACE, SQLITE_KEY)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
     }
-    crate::sqlite_state::save_sqlite_kv(
-        SQLITE_NAMESPACE,
-        SQLITE_KEY,
-        &StoredDefaultConversationAgent {
-            agent_id: agent_id.to_string(),
-        },
-    )
-}
-
-pub fn clear_default_conversation_agent() -> Result<(), String> {
-    crate::sqlite_state::delete_sqlite_kv(SQLITE_NAMESPACE, SQLITE_KEY)
 }
 
 /// 侧栏「新对话」的决议。

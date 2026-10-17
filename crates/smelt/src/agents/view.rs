@@ -187,7 +187,7 @@ impl Workspace {
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let stored = stored_default_conversation_agent();
+        let stored = stored_default_conversation_agent(cx);
         let resolution = smelt_core::default_conversation::resolve_new_conversation(
             &cx.global::<settings::AgentHostState>().agents,
             stored.as_deref(),
@@ -305,9 +305,9 @@ impl Workspace {
                     .accessibility_label(label.clone())
                     .child(new_conversation_row_body(label, None).w_full())
                     // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
-                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
                         if clear_stored {
-                            clear_default_conversation_agent();
+                            clear_default_conversation_agent(cx);
                         }
                         fill_conversation_agent_menu(
                             menu,

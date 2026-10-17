@@ -216,6 +216,60 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::LaunchGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::launch_settings::load() {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::LaunchReplace => {
+            let params: smelt_core::control_api::LaunchReplaceParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::launch_settings::replace_entries(&params.base, params.entries) {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => {
+                    let code = match error {
+                        smelt_core::launch_settings::LaunchError::Conflict => {
+                            ControlErrorCode::Conflict
+                        }
+                        smelt_core::launch_settings::LaunchError::Store(_) => {
+                            ControlErrorCode::OperationFailed
+                        }
+                    };
+                    error_value(
+                        control_version,
+                        request_id,
+                        ControlError::new(code, error.to_string()),
+                    )
+                }
+            }
+        }
+        ControlMethod::MemoryTestEmbedding => {
+            let params: smelt_core::control_api::MemoryTestParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match memory_test_embedding(params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
         ControlMethod::AgentHostGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,
@@ -534,6 +588,29 @@ fn dispatch_control(
             }
         }
     }
+}
+
+/// 用表单里的地址和模型真发一次 `/embeddings` 请求；没给密钥就用库里存的。
+fn memory_test_embedding(
+    params: smelt_core::control_api::MemoryTestParams,
+) -> Result<smelt_core::control_api::MemoryTestResult, String> {
+    let store = smelt_core::sqlite_state::default_sqlite_store()?;
+    let stored = smelt_core::memory_settings::load_on(&store).map_err(|error| error.to_string())?;
+    let settings = smelt_core::memory_settings::EmbeddingSettings {
+        base_url: params.base_url.trim().to_string(),
+        model: params.model.trim().to_string(),
+        api_key: params
+            .api_key
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .unwrap_or(stored.api_key),
+    };
+    let probe = smelt_core::block_on::block_on_tokio(smelt_core::memory_settings::probe(&settings))
+        .map_err(|error| error.to_string())??;
+    Ok(smelt_core::control_api::MemoryTestResult {
+        dimensions: probe.dimensions,
+        elapsed_ms: u64::try_from(probe.elapsed_ms).unwrap_or(u64::MAX),
+    })
 }
 
 fn definition_store() -> Result<smelt_store::Store, ControlError> {

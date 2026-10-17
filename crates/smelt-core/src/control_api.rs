@@ -8,11 +8,12 @@ use serde::{Deserialize, Serialize};
 use smelt_runtime_client::protocol::control::{ControlCall, ControlMethod, EmptyParams};
 
 use crate::agent_bus::AgentEndpoint;
-use crate::agent_host::{AgentHostEdit, AgentHostSettings};
 use crate::agent_definition::AgentDefinition;
 use crate::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
+use crate::agent_host::{AgentHostEdit, AgentHostSettings};
 use crate::appearance_settings::{SettingsPatch, SettingsResult};
 use crate::automation::{Automation, AutomationCommandResult};
+use crate::launch_settings::{LaunchEntry, LaunchSettings};
 
 /// 运行时的智能体宿主配置（各家 CLI 命令、环境变量、profile、开关、智能体定义）。
 pub enum AgentHostGet {}
@@ -32,6 +33,58 @@ impl ControlCall for AgentHostApplyEdit {
     type Result = AgentHostSettings;
 
     const METHOD: ControlMethod = ControlMethod::AgentHostApplyEdit;
+}
+
+/// 项目行「+」菜单的快捷启动项。
+pub enum LaunchGet {}
+
+impl ControlCall for LaunchGet {
+    type Params = EmptyParams;
+    type Result = LaunchSettings;
+
+    const METHOD: ControlMethod = ControlMethod::LaunchGet;
+}
+
+/// 整表替换启动项。库里已不是 `base` 时回 `conflict`。
+pub enum LaunchReplace {}
+
+impl ControlCall for LaunchReplace {
+    type Params = LaunchReplaceParams;
+    type Result = LaunchSettings;
+
+    const METHOD: ControlMethod = ControlMethod::LaunchReplace;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LaunchReplaceParams {
+    /// 客户端看到的那份。
+    pub base: Vec<LaunchEntry>,
+    pub entries: Vec<LaunchEntry>,
+}
+
+/// 在运行时那台机器上真发一次 `/embeddings` 请求。服务地址常是 `localhost`，说的
+/// 就是运行时那台机器，所以测试必须在那边跑。
+pub enum MemoryTestEmbedding {}
+
+impl ControlCall for MemoryTestEmbedding {
+    type Params = MemoryTestParams;
+    type Result = MemoryTestResult;
+
+    const METHOD: ControlMethod = ControlMethod::MemoryTestEmbedding;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryTestParams {
+    pub base_url: String,
+    pub model: String,
+    /// `None` 表示用已存的密钥。客户端看不到已存的密钥本身。
+    pub api_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryTestResult {
+    pub dimensions: usize,
+    pub elapsed_ms: u64,
 }
 
 pub enum SessionList {}

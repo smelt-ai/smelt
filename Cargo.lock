@@ -9814,7 +9814,9 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smelt-core",
+ "smelt-runtime-client",
  "smelt-store",
+ "smol",
 ]
 
 [[package]]

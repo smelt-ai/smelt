@@ -29,6 +29,8 @@ pub struct AgentHostSettings {
     /// 运行时那台机器上 `$DSH_HOME/profiles` 里发现的 profile。是事实不是设置，只读。
     pub native_dsh_profiles: Vec<AcpProfile>,
     pub agents: Vec<AgentDefinition>,
+    /// 侧栏「新对话」默认用哪个智能体。指向这台运行时上的定义，所以跟着运行时走。
+    pub default_conversation_agent: Option<String>,
 }
 
 impl AgentHostSettings {
@@ -46,6 +48,7 @@ impl AgentHostSettings {
             profiles: Vec::new(),
             native_dsh_profiles: Vec::new(),
             agents: Vec::new(),
+            default_conversation_agent: None,
         }
     }
 }
@@ -128,6 +131,7 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
             .collect(),
         native_dsh_profiles: Vec::new(),
         agents: Vec::new(),
+        default_conversation_agent: None,
     }
 }
 
@@ -234,6 +238,7 @@ fn load_on(store: &smelt_store::Store) -> Result<AgentHostSettings, String> {
     settings.agents = crate::agent_definition_store::list_agent_definitions_on(store)
         .map_err(|e| e.to_string())?;
     settings.native_dsh_profiles = crate::agent_kind::native_dsh_profiles();
+    settings.default_conversation_agent = crate::default_conversation::load_on(store);
     Ok(settings)
 }
 
@@ -322,6 +327,9 @@ fn apply_edit_on(
         .map_err(|e| e.to_string())?;
     crate::agent_definition_store::sync_agent_definitions_on(store, &before.agents, &after.agents)
         .map_err(|e| e.to_string())?;
+    if before.default_conversation_agent != after.default_conversation_agent {
+        crate::default_conversation::store_on(store, after.default_conversation_agent.as_deref())?;
+    }
     load_on(store)
 }
 

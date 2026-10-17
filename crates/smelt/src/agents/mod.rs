@@ -7,8 +7,6 @@
 //! 字段仍声明在 `main.rs` 的 `Workspace` 里。数据修改在 `workspace.rs`，
 //! 智能体页面在 `view.rs`，自动化页面在 `automation_view.rs`。
 
-use std::sync::Mutex;
-
 use chrono::{Local, TimeZone, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -490,55 +488,23 @@ fn new_conversation_row_label(agent_name: Option<&str>) -> String {
     }
 }
 
-struct DefaultConversationCache {
-    loaded: bool,
-    agent_id: Option<String>,
+/// 侧栏默认智能体。运行时配置的一部分，读缓存，不碰库。
+fn stored_default_conversation_agent(cx: &App) -> Option<String> {
+    cx.global::<settings::AgentHostState>()
+        .default_conversation_agent
+        .clone()
 }
 
-static DEFAULT_CONVERSATION_CACHE: Mutex<DefaultConversationCache> =
-    Mutex::new(DefaultConversationCache {
-        loaded: false,
-        agent_id: None,
-    });
-
-fn with_default_conversation_cache<T>(f: impl FnOnce(&mut DefaultConversationCache) -> T) -> T {
-    let mut guard = DEFAULT_CONVERSATION_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    f(&mut guard)
-}
-
-/// 侧栏默认智能体。第一次读取才碰 SQLite，之后只看这份缓存。
-fn stored_default_conversation_agent() -> Option<String> {
-    with_default_conversation_cache(|cache| {
-        if !cache.loaded {
-            cache.agent_id = smelt_core::default_conversation::load_default_conversation_agent();
-            cache.loaded = true;
-        }
-        cache.agent_id.clone()
-    })
-}
-
-fn set_default_conversation_agent(agent_id: &str) {
-    if let Err(error) = smelt_core::default_conversation::save_default_conversation_agent(agent_id)
-    {
-        eprintln!("[default-conversation] 保存默认智能体失败: {error}");
-    }
+fn set_default_conversation_agent(agent_id: &str, cx: &mut App) {
     let agent_id = agent_id.trim().to_string();
-    with_default_conversation_cache(|cache| {
-        cache.loaded = true;
-        cache.agent_id = Some(agent_id);
-    });
+    if agent_id.is_empty() {
+        return;
+    }
+    settings::apply_agent_host(move |c| c.default_conversation_agent = Some(agent_id), cx);
 }
 
-fn clear_default_conversation_agent() {
-    if let Err(error) = smelt_core::default_conversation::clear_default_conversation_agent() {
-        eprintln!("[default-conversation] 清除默认智能体失败: {error}");
-    }
-    with_default_conversation_cache(|cache| {
-        cache.loaded = true;
-        cache.agent_id = None;
-    });
+fn clear_default_conversation_agent(cx: &mut App) {
+    settings::apply_agent_host(|c| c.default_conversation_agent = None, cx);
 }
 
 /// 对话行图标色。只跟状态走：选中已经由行底色表达。

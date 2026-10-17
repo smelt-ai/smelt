@@ -40,6 +40,7 @@ pub mod fd_limit;
 pub mod font_config;
 pub mod fs;
 pub mod history_service;
+pub mod launch_settings;
 pub mod login_env;
 #[cfg(unix)]
 pub mod managed_runtime;

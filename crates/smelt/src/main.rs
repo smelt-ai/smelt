@@ -96,9 +96,7 @@ use git_panel::{
     BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, NewWorktreeState, RepoInfo,
     WorktreeListState,
 };
-use settings::{
-    Appearance, active_launch_entries, default_launch_entries, load_appearance, load_launch_config,
-};
+use settings::{Appearance, active_launch_entries, default_launch_entries, load_appearance};
 
 const MIN_SIDEBAR_WIDTH: f32 = 240.0;
 /// 左栏和右栏拖到这条以下松开就收起。停靠层最窄只到 100。
@@ -4405,7 +4403,8 @@ fn main() {
         settings::apply_named_theme(&appearance.theme_name, cx);
         // 用户自选终端底色要在首帧前生效，并连同主题一起发布给守护（移动端配色）。
         settings::apply_bg_color(&appearance);
-        cx.set_global(load_launch_config());
+        cx.set_global(settings::LaunchConfig::default());
+        settings::start_launch_config_load(cx);
         cx.set_global(settings::load_update_settings());
         cx.set_global(worktree_inherit::load_settings());
 

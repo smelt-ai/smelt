@@ -1521,7 +1521,11 @@ impl Workspace {
                     }
                 }),
             );
-            rows.push((label_input, command_input, !launch_entry_is_builtin(entry)));
+            rows.push((
+                label_input,
+                command_input,
+                !smelt_core::launch_settings::launch_entry_is_builtin(entry),
+            ));
         }
         self.launch_inputs = Some(LaunchInputs { rows, _subs: subs });
     }

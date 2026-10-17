@@ -113,6 +113,9 @@ define_control_methods! {
     HistoryTitles => (HISTORY_TITLES_METHOD, "history.titles"),
     AgentHostGet => (AGENT_HOST_GET_METHOD, "agent.host.get"),
     AgentHostApplyEdit => (AGENT_HOST_APPLY_EDIT_METHOD, "agent.host.apply_edit"),
+    LaunchGet => (LAUNCH_GET_METHOD, "launch.get"),
+    LaunchReplace => (LAUNCH_REPLACE_METHOD, "launch.replace"),
+    MemoryTestEmbedding => (MEMORY_TEST_EMBEDDING_METHOD, "memory.test_embedding"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -522,7 +525,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 60);
+        assert_eq!(names.len(), 63);
     }
 
     #[test]
