@@ -5,40 +5,13 @@
 //! 修改走这里的方法。模型设置的具体形状由桥决定（`dsh-model-settings --action read`
 //! 的输出），这里原样转交，客户端按桥的协议解析。
 
-use serde::{Deserialize, Serialize};
+pub use smelt_model::dsh_service::*;
+
+use serde::Deserialize;
 
 use crate::agent_kind::{
-    AcpProfile, DshDiscoveryReport, DshDiscoveryRequest, DshModelCapabilities, DshPlugin,
-    DshSettingsSummary, SMELT_HOST_VERSION,
+    DshDiscoveryReport, DshDiscoveryRequest, DshModelCapabilities, SMELT_HOST_VERSION,
 };
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DshConfig {
-    pub settings_summary: Result<DshSettingsSummary, String>,
-    /// 桥 `read` 的输出。
-    pub model_settings: Result<serde_json::Value, String>,
-    /// 装好了 Smelt Host、能用的 profile。
-    pub profiles: Vec<AcpProfile>,
-    /// 有目录但还没装好 Smelt Host 的 profile。
-    pub missing_profiles: Vec<DshMissingProfile>,
-    /// 模型目录由 Smelt 照端点维护的自定义 provider。
-    pub auto_provider_ids: Vec<String>,
-    pub paths: DshConfigPaths,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DshMissingProfile {
-    pub name: String,
-    /// 目录里有旧版或没注册的桥。
-    pub has_bridge: bool,
-}
-
-/// 运行时那台机器上的路径，给人看。定位不到 `DSH_HOME` 时为空。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DshConfigPaths {
-    pub settings: Option<String>,
-    pub credentials: Option<String>,
-}
 
 pub fn config() -> DshConfig {
     let profiles = crate::agent_kind::native_dsh_profiles();
@@ -119,30 +92,8 @@ fn run_save(action: &str, payload: &serde_json::Value) -> Result<(), String> {
         .ok_or_else(|| "DSH 模型管理器未确认保存".to_string())
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaveDefaultModelParams {
-    /// 桥 `save` 的载荷（`model`、`reasoningEffort`、`baseURL`、`apiKeyEnv`、`apiKey`）。
-    pub payload: serde_json::Value,
-}
-
 pub fn save_default_model(params: SaveDefaultModelParams) -> Result<(), String> {
     run_save("save", &params.payload)
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaveCustomProviderParams {
-    pub previous_id: Option<String>,
-    pub id: String,
-    pub display_name: String,
-    pub api: String,
-    pub base_url: String,
-    pub api_key_env: String,
-    /// 新的 API key；空表示保持已存的那份。
-    pub api_key: String,
-    /// 桥的模型行（`id`、`name`、`contextWindow`、`maxTokens`）。为空表示「照端点上的
-    /// 来」：先问端点，问到了才落盘，并标成自动维护。
-    pub models: Vec<serde_json::Value>,
-    pub set_default: bool,
 }
 
 /// 保存自定义 provider，连同「自动」标记一起改。返回模型目录是否自动维护。
@@ -197,17 +148,6 @@ pub fn save_custom_provider(params: SaveCustomProviderParams) -> Result<bool, St
     Ok(auto)
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnsureConfigFileParams {
-    /// `true`：凭据文件；否则设置文件。
-    pub credentials: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnsureConfigFileResult {
-    pub path: String,
-}
-
 /// 确保配置文件存在（新建的只给本人读写），返回路径，供用户用编辑器手改。
 pub fn ensure_config_file(
     params: EnsureConfigFileParams,
@@ -245,43 +185,10 @@ pub fn ensure_config_file(
     })
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileParams {
-    pub profile: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginsResult {
-    pub plugins: Result<Vec<DshPlugin>, String>,
-}
-
 pub fn plugins(params: ProfileParams) -> PluginsResult {
     PluginsResult {
         plugins: crate::agent_kind::dsh_profile_plugins(&params.profile),
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginAction {
-    Install,
-    Update,
-    Remove,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginActionParams {
-    pub profile: String,
-    pub action: PluginAction,
-    /// 安装时是包名加版本范围；更新、卸载时是包名。
-    pub target: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginActionResult {
-    /// pnpm 的结果。失败也可能已经改了一半依赖树，所以清单照样重读。
-    pub outcome: Result<(), String>,
-    pub plugins: Result<Vec<DshPlugin>, String>,
 }
 
 /// 安装、更新或卸载一个插件（pnpm，要走网络，几秒到几分钟），完了重读清单。

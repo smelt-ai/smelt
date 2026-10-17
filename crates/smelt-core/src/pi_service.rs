@@ -4,57 +4,22 @@
 //! 由运行时执行。客户端拿 [`PiConfig`] 快照显示，修改走这里的方法，每个修改返回新的
 //! 快照。已保存的凭据只留在运行时：客户端只知道配没配，问端点时由运行时自己补上。
 
+pub use smelt_model::pi_service::*;
+
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 
-use crate::pi_mcp::PiMcpServer;
 use crate::pi_model_settings::{
-    PiCustomModel, PiCustomProvider, PiDefaultModelConfig, PiModelChoiceGroup, PiModelSettings,
-    PiSettingsSummary,
+    PiCustomModel, PiDefaultModelConfig,
 };
-use crate::pi_plugin_catalog::{PiPlugin, PiPluginKind};
-use crate::provider_api::DiscoveredModel;
 
-/// 能力库里 Pi 相关的全部展示数据。读不出的部分各自带错误，不连累其它部分。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PiConfig {
-    pub model_settings: Result<PiModelSettings, String>,
-    pub settings_summary: Result<PiSettingsSummary, String>,
-    pub mcp_servers: Result<Vec<PiMcpServer>, String>,
-    pub plugins: Vec<PiPlugin>,
-    /// 智能体定义页、记忆重排模型下拉用的可选模型。
-    pub model_choice_groups: Vec<PiModelChoiceGroup>,
-    /// 模型目录由 Smelt 照端点维护的自定义 provider。
-    pub auto_provider_ids: Vec<String>,
-    pub paths: PiConfigPaths,
-}
-
-/// 各配置文件在运行时那台机器上的路径，给人看。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PiConfigPaths {
-    pub settings: String,
-    pub models: String,
-    pub auth: String,
-    pub mcp: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PiConfigFile {
-    Settings,
-    Models,
-    Credentials,
-    Mcp,
-}
-
-impl PiConfigFile {
-    fn path(self) -> PathBuf {
-        match self {
-            Self::Settings => crate::pi_model_settings::pi_settings_path(),
-            Self::Models => crate::pi_model_settings::pi_models_path(),
-            Self::Credentials => crate::pi_model_settings::pi_auth_path(),
-            Self::Mcp => crate::pi_mcp::pi_mcp_path(),
+fn config_file_path(file: PiConfigFile) -> PathBuf {
+    {
+        match file {
+            PiConfigFile::Settings => crate::pi_model_settings::pi_settings_path(),
+            PiConfigFile::Models => crate::pi_model_settings::pi_models_path(),
+            PiConfigFile::Credentials => crate::pi_model_settings::pi_auth_path(),
+            PiConfigFile::Mcp => crate::pi_mcp::pi_mcp_path(),
         }
     }
 }
@@ -69,17 +34,12 @@ pub fn config() -> PiConfig {
         model_choice_groups: crate::pi_model_settings::list_pi_model_choice_groups(),
         auto_provider_ids: crate::pi_auto_models::load().auto_providers(),
         paths: PiConfigPaths {
-            settings: text(PiConfigFile::Settings.path()),
-            models: text(PiConfigFile::Models.path()),
-            auth: text(PiConfigFile::Credentials.path()),
-            mcp: text(PiConfigFile::Mcp.path()),
+            settings: text(config_file_path(PiConfigFile::Settings)),
+            models: text(config_file_path(PiConfigFile::Models)),
+            auth: text(config_file_path(PiConfigFile::Credentials)),
+            mcp: text(config_file_path(PiConfigFile::Mcp)),
         },
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThinkingLevelParams {
-    pub level: String,
 }
 
 /// 只改默认模型的推理强度。用户还没选过默认模型时拒绝：写进去的 provider/model
@@ -103,38 +63,12 @@ pub fn set_thinking_level(params: ThinkingLevelParams) -> Result<(), String> {
     crate::pi_model_settings::save_pi_default_model(&config, None)
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaveDefaultModelParams {
-    pub config: PiDefaultModelConfig,
-    /// 新的 API key；`None` 表示保持已存的那份。
-    pub api_key: Option<String>,
-    /// 手动填写表单里地址留空 = 用官方端点：清掉以前写进 `models.json` 的地址覆盖。
-    /// 从菜单里挑模型时不能清，自定义 provider 的地址就存在那里。
-    #[serde(default)]
-    pub reset_base_url: bool,
-}
-
 pub fn save_default_model(params: SaveDefaultModelParams) -> Result<(), String> {
     crate::pi_model_settings::save_pi_default_model(&params.config, params.api_key.as_deref())?;
     if params.reset_base_url && params.config.base_url.is_empty() {
         crate::pi_model_settings::clear_pi_provider_base_url(&params.config.provider)?;
     }
     Ok(())
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoverModelsParams {
-    pub base_url: String,
-    pub api: String,
-    /// 表单里现填的 key。空时用 `saved_provider_id` 那份已存的。
-    pub api_key: String,
-    /// 正在编辑的已有 provider：没现填 key 时用它已存的凭据，客户端看不到这份凭据。
-    pub saved_provider_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoverModelsResult {
-    pub models: Vec<DiscoveredModel>,
 }
 
 /// 问端点它提供哪些模型（一次 `GET /models`）。
@@ -168,17 +102,6 @@ fn discovery_request(
         api: params.api,
         api_key,
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaveCustomProviderParams {
-    /// 编辑已有 provider 时它原来的 id（可能改名）。
-    pub previous_id: Option<String>,
-    /// `models` 为空表示「照端点上的来」：先问端点，问到了才落盘，并标成自动维护。
-    pub provider: PiCustomProvider,
-    /// 新的 API key；`None` 表示保持已存的那份。
-    pub api_key: Option<String>,
-    pub set_default: bool,
 }
 
 /// 保存自定义 provider，连同「自动」标记一起改：改名要把标记带过去，否则用户会得到
@@ -232,26 +155,10 @@ pub fn save_custom_provider(params: SaveCustomProviderParams) -> Result<bool, St
     Ok(auto)
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderIdParams {
-    pub provider_id: String,
-}
-
 pub fn remove_custom_provider(params: ProviderIdParams) -> Result<(), String> {
     crate::pi_model_settings::remove_pi_custom_provider(&params.provider_id)?;
     crate::pi_auto_models::update(|store| store.set_auto(&params.provider_id, false));
     Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnsureConfigFileParams {
-    pub file: PiConfigFile,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnsureConfigFileResult {
-    /// 运行时那台机器上的路径。
-    pub path: String,
 }
 
 /// 确保配置文件存在（不存在就建一个空对象；凭据文件只给本人读写），返回路径，
@@ -261,7 +168,7 @@ pub fn ensure_config_file(
 ) -> Result<EnsureConfigFileResult, String> {
     use std::io::Write as _;
 
-    let path = params.file.path();
+    let path = config_file_path(params.file);
     if !path.exists() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -290,24 +197,8 @@ pub fn ensure_config_file(
     })
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpPresetParams {
-    pub id: String,
-}
-
 pub fn add_mcp_preset(params: McpPresetParams) -> Result<(), String> {
     crate::pi_mcp::add_pi_mcp_preset(&params.id)
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpServerParams {
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpEnabledParams {
-    pub name: String,
-    pub enabled: bool,
 }
 
 pub fn set_mcp_enabled(params: McpEnabledParams) -> Result<(), String> {
@@ -324,11 +215,6 @@ pub fn login_mcp_server(params: McpServerParams) -> Result<(), String> {
     crate::pi_mcp::login_pi_mcp_server(&params.name, &|_| {}).map(|_| ())
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginIdParams {
-    pub id: String,
-}
-
 /// 删 `~/.pi` 下的插件实体。引用它的智能体勾选由调用方经智能体配置清掉。
 pub fn remove_plugin(params: PluginIdParams) -> Result<(), String> {
     let plugin = crate::pi_plugin_catalog::discover_plugins()
@@ -336,13 +222,6 @@ pub fn remove_plugin(params: PluginIdParams) -> Result<(), String> {
         .find(|plugin| plugin.id == params.id)
         .ok_or_else(|| format!("插件不存在：{}", params.id))?;
     crate::pi_plugin_catalog::remove_plugin(&plugin)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImportPluginParams {
-    pub kind: PiPluginKind,
-    /// 运行时那台机器上的路径。
-    pub source: String,
 }
 
 pub fn import_plugin(params: ImportPluginParams) -> Result<(), String> {
@@ -371,6 +250,9 @@ pub fn refresh_auto_models() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pi_mcp::PiMcpServer;
+    use crate::pi_model_settings::{PiCustomProvider, PiSettingsSummary};
+    use crate::pi_plugin_catalog::{PiPlugin, PiPluginKind};
 
     /// 快照里各块各自带错误：一块读不出，其余照常显示，传到客户端也还是这个样子。
     #[test]

@@ -8,63 +8,19 @@
 //! 客户端走掉不说一声（窗口关了、断线）时，登录不能一直挂着占回调端口：超过
 //! [`ABANDONED_AFTER`] 没人来取事件就杀掉。
 
+pub use smelt_model::pi_auth_service::*;
+
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 
-use crate::pi_auth::{PiAuthProvider, PiLoginEvent, PiLoginMethod, PiLoginSession};
-use crate::provider_api::DiscoveredModel;
+use crate::pi_auth::{PiLoginEvent, PiLoginSession};
 
 /// 长轮询最多等这么久就空手返回，客户端接着再来。比控制调用的超时短得多。
 const POLL_WAIT: Duration = Duration::from_secs(20);
 /// 这么久没人来取事件，就当客户端走了。
 const ABANDONED_AFTER: Duration = Duration::from_secs(120);
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProvidersResult {
-    pub providers: Vec<PiAuthProvider>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelsResult {
-    pub models: Vec<DiscoveredModel>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoginStartParams {
-    pub provider_id: String,
-    pub method: PiLoginMethod,
-    /// 关掉助手的提问代答，每一问都交回给用户。
-    pub ask_all: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoginIdParams {
-    pub login_id: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoginEventsParams {
-    pub login_id: String,
-    /// 已经拿到的事件数；返回从这之后的。
-    pub after: usize,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoginEventsResult {
-    pub events: Vec<PiLoginEvent>,
-    /// 登录已经结束，这批之后不会再有事件。
-    pub finished: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoginAnswerParams {
-    pub login_id: String,
-    pub prompt_id: String,
-    pub value: String,
-}
 
 pub fn providers() -> Result<ProvidersResult, String> {
     Ok(ProvidersResult {

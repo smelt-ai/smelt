@@ -3,6 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// 运行时自带 Bun 启动器（`~/.smelt/runtime/bin/bun`）的 `~/` 写法。写进外部配置（如 Pi
+/// `mcp.json` 的 `command`）的路径必须是这一条，Pi 会展开开头的 `~/`。
+pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun";
+
 /// 智能体自己的 space 根目录：`~/.smelt/agents/<id>`。
 ///
 /// 同一个智能体的所有会话共用它作为工作目录。以前每开一次对话就建一个随机

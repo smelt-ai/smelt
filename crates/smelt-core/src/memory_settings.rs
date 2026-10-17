@@ -3,23 +3,11 @@
 //!   没配或调用失败时，召回直接退回关键词 + 模型重排。
 //! - 重排模型：从 Pi 已登录的模型里选；不选就自动挑。选了但不可用时退回检索结果。
 
+pub use smelt_model::memory_settings::*;
+
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-
-pub const EMBEDDING_BASE_URL: &str = "memory.embedding_base_url";
-pub const EMBEDDING_MODEL: &str = "memory.embedding_model";
-pub const EMBEDDING_API_KEY: &str = "memory.embedding_api_key";
-/// 召回重排用的模型（Pi 的提供方 + 模型 id）。都空表示自动挑当前提供方里最便宜的。
-pub const RERANK_MODEL_PROVIDER: &str = "memory.rerank_model_provider";
-pub const RERANK_MODEL_ID: &str = "memory.rerank_model_id";
-pub const KEYS: [&str; 5] = [
-    EMBEDDING_BASE_URL,
-    EMBEDDING_MODEL,
-    EMBEDDING_API_KEY,
-    RERANK_MODEL_PROVIDER,
-    RERANK_MODEL_ID,
-];
 
 const NAMESPACE: &str = "memory";
 /// `settings get` 不回显密钥本身，只说明设没设。
@@ -43,13 +31,6 @@ fn storage_key(key: &str) -> &str {
     key.strip_prefix("memory.").unwrap_or(key)
 }
 
-/// 用户指定的重排模型；两项都填才算指定。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RerankModel {
-    pub provider: String,
-    pub id: String,
-}
-
 pub fn load_rerank_model_on(
     store: &smelt_store::Store,
 ) -> Result<Option<RerankModel>, smelt_store::StoreError> {
@@ -62,10 +43,6 @@ pub fn load_rerank_model_on(
     let provider = read(RERANK_MODEL_PROVIDER)?;
     let id = read(RERANK_MODEL_ID)?;
     Ok((!provider.is_empty() && !id.is_empty()).then_some(RerankModel { provider, id }))
-}
-
-pub fn is_memory_key(key: &str) -> bool {
-    KEYS.contains(&key)
 }
 
 pub fn load_on(store: &smelt_store::Store) -> Result<EmbeddingSettings, smelt_store::StoreError> {

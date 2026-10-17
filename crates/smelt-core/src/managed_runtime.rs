@@ -23,8 +23,7 @@ pub(crate) const BUN_VERSION: &str = "1.4.0";
 /// 写进外部配置（如 `mcp.json` 的 `command`）的路径必须是这一条。
 const BUN_LAUNCHER: &str = "bin/bun";
 
-/// [`BUN_LAUNCHER`] 的 `~/` 写法。Pi 会展开 `mcp.json` 里 `command` 开头的 `~/`。
-pub const MANAGED_BUN_LAUNCHER_HOME_PATH: &str = "~/.smelt/runtime/bin/bun";
+pub use smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH;
 pub(crate) const PI_BRIDGE_PROTOCOL: &str = "smelt-pi-rpc-v1";
 include!(concat!(env!("OUT_DIR"), "/pi_agent_runtime_files.rs"));
 

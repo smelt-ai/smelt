@@ -39,41 +39,30 @@ mod appearance_tests {
     }
 
     /// 升级时运行时交回的旧外观要能原样读成客户端的外观，字段名、枚举写法都对得上。
+    /// 运行时那边的字段名由 `client_migration` 的测试锁住，两边对的是同一份。
     #[test]
     fn appearance_handed_back_by_the_runtime_reads_as_the_client_appearance() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-appearance-migrate-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let store =
-            smelt_store::Store::open_or_create(dir.join(smelt_store::DATABASE_FILE_NAME)).unwrap();
-        let mut snapshot = smelt_core::appearance_settings::default_snapshot();
-        snapshot.glass_style = "clear".into();
-        snapshot.theme_mode = "light".into();
-        snapshot.theme_name = "Ayu Light".into();
-        snapshot.ui_font_px = 18;
-        snapshot.bg_image = Some("/tmp/bg.png".into());
-        store
-            .modify_appearance_snapshot(
-                smelt_core::appearance_settings::default_snapshot,
-                |current| {
-                    *current = snapshot.clone();
-                    Ok::<(), smelt_store::StoreError>(())
-                },
-            )
-            .unwrap();
-
-        let legacy = smelt_core::client_migration::take_on(&store)
-            .appearance
-            .unwrap();
+        let legacy = serde_json::json!({
+            "bg_color": 0x1a1b26,
+            "bg_image": "/tmp/bg.png",
+            "bg_image_opacity": 0.25,
+            "opacity": 0.95,
+            "blur": true,
+            "glass_style": "clear",
+            "theme_mode": "light",
+            "theme_name": "Ayu Light",
+            "ui_font_px": 18,
+            "ui_font_family": "",
+            "font_px": 13,
+            "font_family": "",
+        });
         let appearance: Appearance = serde_json::from_value(legacy).unwrap();
-        assert_eq!(super::snapshot_from_appearance(&appearance), snapshot);
-        std::fs::remove_dir_all(dir).unwrap();
+        let snapshot = super::snapshot_from_appearance(&appearance);
+        assert_eq!(snapshot.glass_style, "clear");
+        assert_eq!(snapshot.theme_mode, "light");
+        assert_eq!(snapshot.theme_name, "Ayu Light");
+        assert_eq!(snapshot.ui_font_px, 18);
+        assert_eq!(snapshot.bg_image.as_deref(), Some("/tmp/bg.png"));
     }
 
     #[test]

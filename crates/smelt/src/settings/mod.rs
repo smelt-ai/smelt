@@ -420,8 +420,8 @@ fn save_appearance(appearance: &Appearance) {
     }
 }
 
-fn snapshot_from_appearance(appearance: &Appearance) -> smelt_store::AppearanceSnapshot {
-    smelt_store::AppearanceSnapshot {
+fn snapshot_from_appearance(appearance: &Appearance) -> smelt_core::appearance_settings::AppearanceSnapshot {
+    smelt_core::appearance_settings::AppearanceSnapshot {
         bg_color: appearance.bg_color,
         bg_image: appearance.bg_image.clone(),
         bg_image_opacity: appearance.bg_image_opacity,
@@ -447,7 +447,7 @@ fn snapshot_from_appearance(appearance: &Appearance) -> smelt_store::AppearanceS
     }
 }
 
-fn appearance_from_snapshot(snapshot: smelt_store::AppearanceSnapshot) -> Appearance {
+fn appearance_from_snapshot(snapshot: smelt_core::appearance_settings::AppearanceSnapshot) -> Appearance {
     Appearance {
         bg_color: snapshot.bg_color,
         bg_image: snapshot.bg_image,

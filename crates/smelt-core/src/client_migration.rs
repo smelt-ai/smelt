@@ -82,18 +82,51 @@ mod tests {
         let store =
             smelt_store::Store::open_or_create(dir.path().join(smelt_store::DATABASE_FILE_NAME))
                 .unwrap();
-        let mut snapshot = crate::appearance_settings::default_snapshot();
-        snapshot.ui_font_px = 18;
+        let snapshot = smelt_store::AppearanceSnapshot {
+            bg_color: 0x1a1b26,
+            bg_image: Some("/tmp/bg.png".into()),
+            bg_image_opacity: 0.25,
+            opacity: 0.95,
+            blur: true,
+            glass_style: "clear".into(),
+            theme_mode: "light".into(),
+            theme_name: "Ayu Light".into(),
+            ui_font_px: 18,
+            ui_font_family: String::new(),
+            font_px: 13,
+            font_family: String::new(),
+        };
         store
-            .modify_appearance_snapshot(crate::appearance_settings::default_snapshot, |current| {
-                *current = snapshot.clone();
-                Ok::<(), smelt_store::StoreError>(())
-            })
+            .modify_appearance_snapshot(
+                || snapshot.clone(),
+                |_| Ok::<(), smelt_store::StoreError>(()),
+            )
             .unwrap();
 
         let appearance = take_on(&store).appearance.unwrap();
         assert_eq!(appearance["ui_font_px"], 18);
-        assert_eq!(appearance["theme_mode"], "dark");
+        assert_eq!(appearance["theme_mode"], "light");
+        assert_eq!(appearance["glass_style"], "clear");
+        // 客户端按这组字段名读外观（桌面 `Appearance` 的 serde 名），少一个就丢一项。
+        let mut keys: Vec<_> = appearance.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "bg_color",
+                "bg_image",
+                "bg_image_opacity",
+                "blur",
+                "font_family",
+                "font_px",
+                "glass_style",
+                "opacity",
+                "theme_mode",
+                "theme_name",
+                "ui_font_family",
+                "ui_font_px",
+            ]
+        );
     }
 
     /// 更早的版本把侧栏、当前页和工作区目录存在同一份快照里；客户端取回整份，
