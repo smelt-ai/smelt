@@ -2159,39 +2159,28 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 从本地目录 / 文件导入插件：运行时把它拷贝进全局插件目录，之后就能在智能体里
-    /// 勾选。选的是本机路径，只对本机运行时有意义。
+    /// 导入插件：在运行时那台机器上选目录（扩展也可以是单个文件），运行时把它拷贝进
+    /// 全局插件目录，之后就能在智能体里勾选。
     pub(super) fn import_pi_plugin(
         &mut self,
         kind: smelt_core::pi_plugin_catalog::PiPluginKind,
         cx: &mut Context<Self>,
     ) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: matches!(kind, smelt_core::pi_plugin_catalog::PiPluginKind::Extension),
-            directories: true,
-            multiple: false,
-            prompt: Some("导入".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(source) = paths.into_iter().next() else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.run_pi_mutation::<smelt_core::control_api::PiPluginsImport>(
-                    smelt_core::pi_service::ImportPluginParams {
-                        kind,
-                        source: source.to_string_lossy().into_owned(),
-                    },
-                    false,
-                    cx,
-                    |this, error, _| this.pi_plugin_error = Some(error),
-                );
-            });
-        })
-        .detach();
+        self.open_dir_picker(crate::dir_picker::DirPickerPurpose::PluginImport { kind }, cx);
+    }
+
+    pub(crate) fn import_pi_plugin_from(
+        &mut self,
+        kind: smelt_core::pi_plugin_catalog::PiPluginKind,
+        source: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_pi_mutation::<smelt_core::control_api::PiPluginsImport>(
+            smelt_core::pi_service::ImportPluginParams { kind, source },
+            false,
+            cx,
+            |this, error, _| this.pi_plugin_error = Some(error),
+        );
     }
 }
 

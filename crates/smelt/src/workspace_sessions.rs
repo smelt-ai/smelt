@@ -1719,24 +1719,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 「打开项目」：弹原生选择框选一个目录，加进项目列表。**不自动建会话**——
+    /// 「打开项目」：在运行时那台机器上选一个目录，加进项目列表。**不自动建会话**——
     /// 打开项目只是把它放上工作台，要开终端还是开对话由分组行的「+」决定。
     pub(crate) fn open_project(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("选择项目目录".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(dir) = paths.into_iter().next()
-                && let Some(dir) = dir.to_str().map(String::from)
-            {
-                this.update(cx, |this, cx| this.add_project(dir, cx)).ok();
-            }
-        })
-        .detach();
+        self.open_dir_picker(crate::dir_picker::DirPickerPurpose::OpenProject, cx);
     }
 
     /// 从 Finder 拖入的路径 = 打开项目：文件夹直接用，文件取其父目录，各加一条项目。

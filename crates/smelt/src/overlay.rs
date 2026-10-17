@@ -29,6 +29,7 @@ pub(crate) enum ModalLayer {
     UnsavedFile,
     SessionManager,
     DaemonRestart,
+    DirPicker,
 }
 
 impl ModalLayer {
@@ -52,6 +53,8 @@ impl ModalLayer {
             Self::UnsavedFile => 16,
             Self::SessionManager => 1,
             Self::DaemonRestart => 2,
+            // 选目录盖在所有主窗口确认框之上：它总是从一次明确的点击打开。
+            Self::DirPicker => 17,
         }
     }
 
@@ -79,6 +82,11 @@ impl Workspace {
             &mut rank,
             self.new_worktree.is_some(),
             ModalLayer::NewWorktree.rank(),
+        );
+        raise(
+            &mut rank,
+            self.dir_picker.is_some(),
+            ModalLayer::DirPicker.rank(),
         );
         raise(
             &mut rank,
@@ -283,6 +291,10 @@ impl Workspace {
             true
         } else if self.rename_target.is_some() {
             self.cancel_rename(cx);
+            true
+        } else if self.dir_picker.is_some() {
+            self.dir_picker = None;
+            cx.notify();
             true
         } else if self.show_quit_confirm {
             self.show_quit_confirm = false;
@@ -500,6 +512,11 @@ impl Workspace {
                 self.new_worktree
                     .is_some()
                     .then(|| self.render_new_worktree(cx)),
+            )
+            .children(
+                self.dir_picker
+                    .is_some()
+                    .then(|| self.render_dir_picker(cx)),
             )
             .children(
                 self.close_project_target

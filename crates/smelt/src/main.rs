@@ -20,6 +20,7 @@ pub(crate) use smelt_ui::ui_theme;
 pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
+mod dir_picker;
 mod client_state;
 mod dock;
 mod file_tree;
@@ -2588,6 +2589,8 @@ struct Workspace {
     worktree_list: Option<WorktreeListState>,
     /// 「新建 Worktree」弹窗状态（Some = 弹窗开着）。见 git_panel 模块。
     new_worktree: Option<NewWorktreeState>,
+    /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
+    dir_picker: Option<dir_picker::DirPickerState>,
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
     /// reflog，找不回来，所以必须过一道确认。
     discard_hunk_target: Option<(String, usize)>,
@@ -3042,6 +3045,7 @@ impl Workspace {
             delete_worktree_target: None,
             worktree_list: None,
             new_worktree: None,
+            dir_picker: None,
             discard_hunk_target: None,
             discard_file_target: None,
             discard_all_target: None,

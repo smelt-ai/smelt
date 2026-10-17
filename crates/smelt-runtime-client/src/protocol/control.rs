@@ -172,6 +172,7 @@ define_control_methods! {
     AgentMemoryEnsureDir => (AGENT_MEMORY_ENSURE_DIR_METHOD, "agent.memory.ensure_dir"),
     ProjectWatch => (PROJECT_WATCH_METHOD, "project.watch"),
     SkillsSyncControl => (SKILLS_SYNC_CONTROL_METHOD, "skills.sync_control"),
+    WorkspaceBrowseDirs => (WORKSPACE_BROWSE_DIRS_METHOD, "workspace.browse_dirs"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -581,7 +582,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 119);
+        assert_eq!(names.len(), 120);
     }
 
     #[test]

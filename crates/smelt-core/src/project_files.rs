@@ -341,9 +341,87 @@ fn walk(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut V
     }
 }
 
+
+/// `workspace.browse_dirs`：列出一个目录的子项，给客户端的目录选择器用。隐藏项不列。
+pub fn browse_dirs(
+    params: &smelt_runtime_client::protocol::workspace::BrowseDirsParams,
+) -> Result<smelt_runtime_client::protocol::workspace::BrowseDirsResult, ProjectFileError> {
+    use smelt_runtime_client::protocol::workspace::{BrowseDirsResult, BrowseEntry};
+
+    let home = dirs::home_dir().ok_or_else(|| ProjectFileError::Io("找不到用户主目录".into()))?;
+    let requested = params
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone());
+    let dir = std::fs::canonicalize(&requested)
+        .map_err(|error| ProjectFileError::Io(format!("打不开 {}：{error}", requested.display())))?;
+    if !dir.is_dir() {
+        return Err(ProjectFileError::Io(format!("不是目录：{}", dir.display())));
+    }
+    let mut entries = std::fs::read_dir(&dir)
+        .map_err(|error| ProjectFileError::Io(format!("读不了 {}：{error}", dir.display())))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                return None;
+            }
+            // 跟着软链走：链到目录的也当目录列出来。
+            let is_dir = std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir());
+            (is_dir || params.include_files).then(|| BrowseEntry {
+                path: entry.path().to_string_lossy().into_owned(),
+                name,
+                is_dir,
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(BrowseDirsResult {
+        parent: dir.parent().map(|parent| parent.to_string_lossy().into_owned()),
+        path: dir.to_string_lossy().into_owned(),
+        home: home.to_string_lossy().into_owned(),
+        entries,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browsing_lists_visible_dirs_first_and_files_only_on_request() {
+        use smelt_runtime_client::protocol::workspace::BrowseDirsParams;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("beta")).unwrap();
+        std::fs::create_dir(root.path().join("Alpha")).unwrap();
+        std::fs::create_dir(root.path().join(".hidden")).unwrap();
+        std::fs::write(root.path().join("notes.md"), "x").unwrap();
+
+        let dirs_only = browse_dirs(&BrowseDirsParams {
+            path: Some(root.path().to_string_lossy().into_owned()),
+            include_files: false,
+        })
+        .unwrap();
+        let names: Vec<_> = dirs_only.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "beta"]);
+        assert!(dirs_only.parent.is_some());
+
+        let with_files = browse_dirs(&BrowseDirsParams {
+            path: Some(root.path().to_string_lossy().into_owned()),
+            include_files: true,
+        })
+        .unwrap();
+        let last = with_files.entries.last().unwrap();
+        assert_eq!((last.name.as_str(), last.is_dir), ("notes.md", false));
+    }
 
     /// `@` 的候选源必须真能列出文件——列空了菜单就是个空壳，而且不会报错。
     #[test]

@@ -584,6 +584,21 @@ fn dispatch_control(
                 ),
             }
         }
+        ControlMethod::WorkspaceBrowseDirs => {
+            let params: smelt_runtime_client::protocol::workspace::BrowseDirsParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::project_files::browse_dirs(&params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
+            }
+        }
         ControlMethod::WorkspaceLoad => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

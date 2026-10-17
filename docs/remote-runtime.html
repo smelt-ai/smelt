@@ -513,7 +513,7 @@
     <p>按 D4 的能力清单逐个搬，每个领域都按「只提供业务能力」来定方法：git（<span class="chip chip-done">已完成</span>）→ 项目文件和会话文件 → history → 设置和智能体 → workspace → provider（hook、额度、CLI 安装，可以晚于 P3）。workspace 牵涉启动流程（今天 <code>Workspace::new</code> 在 UI 线程同步读 SQLite），放在后面单独做。同时拆开 SQLite。</p>
     <p>同时清掉界面里「文件就在本机」的假设：</p>
     <ul>
-      <li>添加项目用的本机文件夹选择框，换成基于 <code>workspace.browse_dirs</code> 的运行时目录浏览器；本机运行时也用它，保持同一条路径。</li>
+      <li>添加项目用的本机文件夹选择框，换成基于 <code>workspace.browse_dirs</code> 的运行时目录浏览器；本机运行时也用它，保持同一条路径。<span class="chip chip-done">已完成</span>（打开项目、智能体绑定目录、导入插件都改用它；背景图属于客户端，仍用系统选择框）</li>
       <li>往终端里拖文件会粘贴本机路径：运行时不是本机时，改为拒绝并提示。</li>
       <li>「在 Finder 中显示」、<code>cx.open_path</code>：只对本机运行时提供。</li>
       <li>粘贴图片不用改：图片在后台读成字节再发出去（<code>smelt-acp-view/src/acp_view.rs:3346</code>）。</li>

@@ -190,34 +190,16 @@ impl Workspace {
     }
 
     /// 挑一个或多个目录绑定到智能体。Pi 只认单个 cwd，所以这些目录不会变成
-    /// 工作目录，而是以绝对路径写进 system prompt 让它自己去读。
+    /// 工作目录，而是以绝对路径写进 system prompt 让它自己去读。目录在运行时那台
+    /// 机器上，用运行时目录选择器选。
     pub(super) fn pick_agent_context_folders(&mut self, agent_id: String, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: true,
-            prompt: Some("选择要绑定的目录".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let picked: Vec<String> = paths
-                .into_iter()
-                .filter_map(|path| path.to_str().map(String::from))
-                .collect();
-            if picked.is_empty() {
-                return;
-            }
-            this.update(cx, |this, cx| {
-                this.add_agent_context_folders(agent_id, picked, cx)
-            })
-            .ok();
-        })
-        .detach();
+        self.open_dir_picker(
+            crate::dir_picker::DirPickerPurpose::AgentContextFolders { agent_id },
+            cx,
+        );
     }
 
-    pub(super) fn add_agent_context_folders(
+    pub(crate) fn add_agent_context_folders(
         &mut self,
         agent_id: String,
         folders: Vec<String>,
