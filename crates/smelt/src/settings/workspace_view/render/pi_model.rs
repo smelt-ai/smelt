@@ -750,22 +750,20 @@ fn config_files_footer(
     paths: &smelt_core::pi_service::PiConfigPaths,
     palette: Palette,
 ) -> Div {
-    let file_button = |id: &'static str,
-                       label: &'static str,
-                       kind: PiConfigFileKind,
-                       path: &str| {
-        let entity = entity.clone();
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .label(label)
-            .tooltip(path.to_string())
-            .on_click(move |_, window, cx| {
-                entity.update(cx, |workspace, cx| {
-                    workspace.open_pi_config(kind, window, cx);
-                });
-            })
-    };
+    let file_button =
+        |id: &'static str, label: &'static str, kind: PiConfigFileKind, path: &str| {
+            let entity = entity.clone();
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .label(label)
+                .tooltip(path.to_string())
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.open_pi_config(kind, window, cx);
+                    });
+                })
+        };
     let refresh_entity = entity.clone();
     h_flex()
         .w_full()

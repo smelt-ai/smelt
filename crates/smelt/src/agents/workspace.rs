@@ -337,20 +337,21 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 match listed {
                     Ok(memories) => {
-                        if let Some(editor) = this
-                            .agent_surface
-                            .editor
-                            .as_mut()
-                            .filter(|editor| editor.id == agent_id)
+                        // 定时重取大多数时候什么都没变，没变就不重绘。
+                        if let Some(editor) =
+                            this.agent_surface.editor.as_mut().filter(|editor| {
+                                editor.id == agent_id && editor.memories != memories
+                            })
                         {
                             editor.memories = memories;
+                            cx.notify();
                         }
                     }
                     Err(error) => {
                         this.agent_surface.error = Some(format!("读取记忆失败：{error}"));
+                        cx.notify();
                     }
                 }
-                cx.notify();
             });
         })
         .detach();
@@ -434,45 +435,13 @@ impl Workspace {
         }
     }
 
-    /// 监听两层记忆目录。回调在 notify 的线程上，只发唤醒信号；一次写入会连着来好几个
-    /// 事件，稍等一下合并成一次重扫。返回的 watcher 一 drop，发送端跟着释放，任务就结束。
-    fn watch_agent_memories(
-        &mut self,
-        agent_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<notify::RecommendedWatcher> {
-        use notify::Watcher as _;
-
-        let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
-                let _ = wake_tx.try_send(());
-            }
-        })
-        .ok()?;
-        let mut watching = false;
-        for layer in [MemoryLayer::Agent, MemoryLayer::User] {
-            // 目录不存在就监听不了；先建好，智能体第一次写记忆时卡片也能刷新。
-            let Some(dir) = layer.dir(agent_id) else {
-                continue;
-            };
-            if std::fs::create_dir_all(&dir).is_ok()
-                && watcher
-                    .watch(&dir, notify::RecursiveMode::NonRecursive)
-                    .is_ok()
-            {
-                watching = true;
-            }
-        }
-        if !watching {
-            return None;
-        }
+    /// 编辑器开着时定时向运行时重取记忆：智能体在对话里写了新记忆、用户在编辑器里
+    /// 改了文件，卡片都能跟上。记忆目录在运行时那台机器上，桌面监听不到它。任务随
+    /// 编辑器一起丢弃。
+    fn poll_agent_memories(&mut self, cx: &mut Context<Self>) -> gpui::Task<()> {
         cx.spawn(async move |this, cx| {
-            while wake_rx.recv().await.is_ok() {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(200))
-                    .await;
-                while wake_rx.try_recv().is_ok() {}
+            loop {
+                cx.background_executor().timer(MEMORY_POLL_INTERVAL).await;
                 if this
                     .update(cx, |this, cx| this.refresh_agent_memories(cx))
                     .is_err()
@@ -481,8 +450,6 @@ impl Workspace {
                 }
             }
         })
-        .detach();
-        Some(watcher)
     }
 
     pub(super) fn open_agent_memory_file(
@@ -500,14 +467,31 @@ impl Workspace {
         layer: MemoryLayer,
         cx: &mut Context<Self>,
     ) {
-        self.agent_surface.error = match layer.dir(&agent_id) {
-            Some(dir) => std::fs::create_dir_all(&dir)
-                .map_err(|error| format!("无法创建记忆目录：{error}"))
-                .and_then(|()| crate::ide::open_in_file_manager(&dir))
-                .err(),
-            None => Some("找不到记忆目录".to_string()),
-        };
-        cx.notify();
+        // 目录在运行时那台机器上：让运行时建好并给出路径，只有本机运行时打得开。
+        cx.spawn(async move |this, cx| {
+            let ensured = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<smelt_core::control_api::AgentMemoryEnsureDir>(
+                        smelt_core::control_api::AgentMemoryDirParams {
+                            agent_id,
+                            layer: layer.wire(),
+                        },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_surface.error = ensured
+                    .and_then(|dir| {
+                        crate::ide::open_in_file_manager(std::path::Path::new(&dir.path))
+                    })
+                    .err();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 点删除只是弹确认；记忆删了就没了，全局记忆还会从所有智能体里消失。
@@ -695,7 +679,7 @@ impl Workspace {
         }));
 
         let memories = AgentMemories::default();
-        let memory_watcher = self.watch_agent_memories(&id, cx);
+        let memory_poll = self.poll_agent_memories(cx);
         self.agent_surface.editor = Some(AgentEditor {
             id,
             name,
@@ -717,7 +701,7 @@ impl Workspace {
             memory_query,
             memory_filter: MemoryFilter::default(),
             expanded_memory: None,
-            _memory_watcher: memory_watcher,
+            _memory_poll: memory_poll,
             _subscriptions: subscriptions,
         });
         self.refresh_agent_memories(cx);
@@ -2149,3 +2133,6 @@ impl Workspace {
         ) == Some(agent_id)
     }
 }
+
+/// 编辑器开着时多久向运行时重取一次记忆。
+const MEMORY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);

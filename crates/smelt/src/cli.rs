@@ -36,7 +36,8 @@ where
 }
 
 fn run(args: &[String]) -> i32 {
-    let _ = sync_control_skill();
+    // 技能写在运行时那台机器上；运行时没在跑时后面的命令也会报连不上，这里不另报。
+    let _ = control::<smelt_core::control_api::SkillsSyncControl>(EmptyParams::default());
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -558,25 +559,6 @@ fn print_ok(value: &impl serde::Serialize) -> i32 {
 
 fn json_id(id: &str) -> serde_json::Value {
     serde_json::json!({ "id": id })
-}
-
-pub(crate) fn sync_control_skill() -> std::io::Result<()> {
-    if cfg!(test) {
-        return Ok(());
-    }
-    let Some(home) = dirs::home_dir() else {
-        return Ok(());
-    };
-    let dir = home.join(".agents").join("skills").join("smelt");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("SKILL.md");
-    let contents = include_str!("control_skill.md");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(contents) {
-        let staged = dir.join("SKILL.md.next");
-        std::fs::write(&staged, contents)?;
-        std::fs::rename(staged, path)?;
-    }
-    Ok(())
 }
 
 fn parse_create(args: &[String]) -> Result<AgentDefinitionCreate, String> {

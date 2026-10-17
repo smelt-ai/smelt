@@ -57,7 +57,6 @@ smol = "2"  # 定时器：驱动终端网格的定时快照重绘
 # elicitation 已进稳定协议。unstable_plan_operations 仍是未定稿的计划增量更新。
 agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }
 # Git 状态改用文件监听而非轮询：macOS 走 FSEvents，仓库一有变化就标脏触发刷新。
-notify = "6"
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

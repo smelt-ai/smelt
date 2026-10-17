@@ -316,6 +316,8 @@ pub enum DaemonStateEvent {
     /// 有人要看一段 daemon 里没在跑的对话，请持有启动规格的桌面端把它拉起来。
     /// 一次性请求，不是投影：没有快照、不参与水位。
     ConversationWakeRequested { session_id: String },
+    /// 关注过的项目目录里有文件变了。
+    ProjectChanged { root: String },
     /// CLI / Control API 要改外观，已由运行时校验过。一次性请求，不是投影。
     AppearanceChangeRequested {
         settings: std::collections::BTreeMap<String, serde_json::Value>,
@@ -457,6 +459,7 @@ struct SubscriptionShape {
     automations: bool,
     conversation_wake: bool,
     appearance_requests: bool,
+    project_changes: bool,
 }
 
 #[derive(Default)]
@@ -534,6 +537,8 @@ impl DaemonStateEventClient {
                 CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
                 // 外观归桌面端，CLI 发来的外观改动由它来改。
                 smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+                // 桌面关注的项目里文件变了：重取 git 状态和文件树。
+                smelt_event_protocol::CORE_TOPIC_PROJECT_CHANGED,
             ],
             SubscriptionShape {
                 remote_sessions: true,
@@ -541,6 +546,7 @@ impl DaemonStateEventClient {
                 automations: true,
                 conversation_wake: true,
                 appearance_requests: true,
+                project_changes: true,
             },
         )
     }
@@ -564,6 +570,7 @@ impl DaemonStateEventClient {
                 automations: true,
                 conversation_wake: false,
                 appearance_requests: false,
+                project_changes: false,
             },
         )
     }
@@ -812,6 +819,12 @@ impl DaemonStateEventClient {
                 let request: ConversationWakeRequested = decode_payload(payload, topic)?;
                 Ok(Some(DaemonStateEvent::ConversationWakeRequested {
                     session_id: request.session_id,
+                }))
+            }
+            smelt_event_protocol::CORE_TOPIC_PROJECT_CHANGED if self.shape.project_changes => {
+                let changed: smelt_event_protocol::ProjectChanged = decode_payload(payload, topic)?;
+                Ok(Some(DaemonStateEvent::ProjectChanged {
+                    root: changed.root,
                 }))
             }
             smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED
@@ -1299,7 +1312,7 @@ mod tests {
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
-        assert_eq!(topics.len(), 7);
+        assert_eq!(topics.len(), 8);
         assert!(
             topics
                 .iter()

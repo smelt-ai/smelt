@@ -473,6 +473,26 @@ impl DaemonEventHub {
         Ok(true)
     }
 
+    /// 项目目录里的文件变了。没人订阅就不发。
+    pub(crate) fn publish_project_changed(&self, root: &str) -> Result<(), EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_PROJECT_CHANGED)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        let payload = smelt_event_protocol::ProjectChanged {
+            root: root.to_string(),
+        };
+        self.publish_core(
+            smelt_event_protocol::CORE_TOPIC_PROJECT_CHANGED,
+            serde_json::to_value(payload).map_err(|error| {
+                EventBusError::new(format!("serialize project change: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(())
+    }
+
     /// 有没有在线的桌面端能接外观改动。
     pub(crate) fn has_appearance_listener(&self) -> Result<bool, EventBusError> {
         let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED)

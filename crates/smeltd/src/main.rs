@@ -185,6 +185,7 @@ mod handoff_v2;
 mod dsh_control;
 mod history_control;
 mod pi_control;
+mod project_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod peer_messaging;

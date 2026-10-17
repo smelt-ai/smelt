@@ -124,6 +124,22 @@ pub struct AgentMemoryFileParams {
     pub file_name: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryDirParams {
+    pub agent_id: String,
+    pub layer: AgentMemoryLayer,
+}
+
+/// 确保某层记忆目录存在，返回它在运行时那台机器上的路径（给人在文件管理器里打开）。
+pub enum AgentMemoryEnsureDir {}
+
+impl ControlCall for AgentMemoryEnsureDir {
+    type Params = AgentMemoryDirParams;
+    type Result = AgentSpaceResult;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryEnsureDir;
+}
+
 /// 一次自动化运行的详情：归档的完整运行（实时投影里裁掉了大字段时才取）和对话记录。
 pub enum AutomationRunDetail {}
 
@@ -815,6 +831,8 @@ pi_calls! {
     /// OSC 11 查到的底色得和桌面实际底色一致。
     TerminalThemePublish => TerminalThemePublish(crate::terminal_theme::TerminalThemeSnapshot)
         -> EmptyParams;
+    /// 把教智能体用 `smelt` 命令行的技能写到运行时那台机器上（内容没变就不写）。
+    SkillsSyncControl => SkillsSyncControl(EmptyParams) -> EmptyParams;
     /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录），顺带给出
     /// 会加载的技能。
     SessionLaunchPrepare => SessionLaunchPrepare(crate::agent_definition_store::LaunchPrepareParams)

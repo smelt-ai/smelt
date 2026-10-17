@@ -55,7 +55,6 @@ mod workspace_shell;
 mod workspace_update;
 mod workspace_view;
 
-
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::{
@@ -87,7 +86,6 @@ use gpui_component::input::{
 use gpui_component::resizable::ResizableState;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
-use notify::RecommendedWatcher;
 use terminal_view::TerminalView;
 
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
@@ -2488,9 +2486,8 @@ struct Workspace {
     branches_generation: HashMap<String, u64>,
     /// 正在后台刷新分支列表的 root（防重复并发 spawn）。
     branches_inflight: HashSet<String>,
-    /// 每个 root 常驻的文件监听器（root → watcher）。watcher 必须存活才会继续收事件，
-    /// 故存在 Workspace 里跟应用同生命周期；只建一次，见 ensure_git_watch。
-    git_watchers: HashMap<String, RecommendedWatcher>,
+    /// 已经请运行时监听的项目根，见 ensure_git_watch。运行时重连后清空重新登记。
+    watched_projects: HashSet<String>,
     /// 每个 root 上次「进 Git 页自动 fetch」的时刻：进 Git 页会主动 fetch 一次刷新
     /// ahead/behind，但 render 每帧都满足「在 Git 页」，靠这个时间戳去抖（同一 root
     /// 60s 内不重复自动 fetch），避免每帧狂发网络请求。
@@ -2965,7 +2962,7 @@ impl Workspace {
             branches: HashMap::new(),
             branches_generation: HashMap::new(),
             branches_inflight: HashSet::new(),
-            git_watchers: HashMap::new(),
+            watched_projects: HashSet::new(),
             git_autofetch_at: HashMap::new(),
             session_list: HashMap::new(),
             session_list_inflight: HashSet::new(),
@@ -4449,9 +4446,6 @@ fn main() {
         if let Err(error) = settings::sync_bundled_smelt_agent_mcp() {
             eprintln!("[workspace] 同步 smelt-agent-mcp 失败：{error}");
         }
-        if let Err(error) = crate::cli::sync_control_skill() {
-            eprintln!("[workspace] 同步 smelt skill 失败：{error}");
-        }
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         settings::start_agent_host_load(cx, |cx| {
@@ -4465,6 +4459,12 @@ fn main() {
                 .spawn(async {
                     use smelt_runtime_client::protocol::control::EmptyParams;
                     let timeout = std::time::Duration::from_secs(300);
+                    if let Err(error) = runtime_call::call::<
+                        smelt_core::control_api::SkillsSyncControl,
+                    >(EmptyParams::default(), runtime_call::RUNTIME_CALL_TIMEOUT)
+                    {
+                        eprintln!("[workspace] 同步 smelt skill 失败：{}", runtime_call::error_text(error));
+                    }
                     if let Err(error) = runtime_call::call::<
                         smelt_core::control_api::PiProvidersRefreshAuto,
                     >(EmptyParams::default(), timeout)
@@ -4508,6 +4508,19 @@ fn main() {
                         let _ = ws.update_in(cx, |ws, window, cx| {
                             ws.wake_conversation_for_remote(session_id.clone(), window, cx);
                         });
+                    }
+                    continue;
+                }
+                // 运行时换了进程，它替我们建的项目监听也没了：清空，下次刷新重新登记。
+                if matches!(event, terminal::DaemonStateEvent::Disconnected)
+                    && let Some(ws) = current_workspace(&current_ws_for_menu_republish)
+                {
+                    let _ = ws.update(cx, |ws, _| ws.watched_projects.clear());
+                }
+                if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
+                    if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                        let root = root.clone();
+                        let _ = ws.update(cx, |ws, cx| ws.on_project_changed(root, cx));
                     }
                     continue;
                 }
@@ -4560,6 +4573,7 @@ fn main() {
                         terminal::DaemonStateEvent::WorkspaceMenu(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
+                        terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {}
                     }
                     match event {
@@ -4611,6 +4625,7 @@ fn main() {
                         terminal::DaemonStateEvent::Automations(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
+                        terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {
                             DaemonStates::mark_subscription_disconnected(cx);
                         }

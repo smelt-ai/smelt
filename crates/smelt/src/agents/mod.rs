@@ -140,7 +140,8 @@ pub(crate) struct AgentEditor {
     expanded_memory: Option<(MemoryLayer, String)>,
     /// 监听两层记忆目录，智能体或外部编辑器改了文件，卡片自己刷新。跟着编辑器走：
     /// 关掉或换一个智能体时 drop，监听随之停止。
-    _memory_watcher: Option<notify::RecommendedWatcher>,
+    /// 编辑器开着时定时重取记忆的任务。
+    _memory_poll: gpui::Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -170,14 +171,6 @@ impl MemoryLayer {
         match self {
             Self::Agent => smelt_core::control_api::AgentMemoryLayer::Agent,
             Self::User => smelt_core::control_api::AgentMemoryLayer::User,
-        }
-    }
-
-    /// 本机路径，只给「在访达中打开」用；运行时不在本机时没有意义。
-    pub(crate) fn dir(self, agent_id: &str) -> Option<std::path::PathBuf> {
-        match self {
-            Self::Agent => smelt_core::agent_definition_store::agent_memory_dir(agent_id),
-            Self::User => smelt_core::agent_definition_store::user_memory_dir(),
         }
     }
 }

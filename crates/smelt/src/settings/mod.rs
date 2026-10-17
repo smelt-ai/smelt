@@ -27,10 +27,10 @@ use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 mod agent_hooks;
 mod bundled_helpers;
 mod dsh_config;
-mod pi_config;
 mod memory;
 mod nav;
 mod pi_auth;
+mod pi_config;
 mod pi_mcp;
 mod remote;
 mod workspace;
@@ -367,8 +367,9 @@ pub fn publish_terminal_theme() {
                 }
                 if let Err(error) = crate::runtime_call::call::<
                     smelt_core::control_api::TerminalThemePublish,
-                >(theme, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
-                {
+                >(
+                    theme, crate::runtime_call::RUNTIME_CALL_TIMEOUT
+                ) {
                     eprintln!(
                         "[theme] 发布终端配色失败：{}",
                         crate::runtime_call::error_text(error)

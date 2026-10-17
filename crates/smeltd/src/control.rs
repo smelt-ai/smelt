@@ -465,6 +465,64 @@ fn dispatch_control(
                 ),
             }
         }
+        ControlMethod::SkillsSyncControl => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::control_skill::sync() {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
+            }
+        }
+        ControlMethod::ProjectWatch => {
+            let params: smelt_runtime_client::protocol::files::ProjectRootParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::project_watch::watch(&params.root, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentMemoryEnsureDir => {
+            let params: smelt_core::control_api::AgentMemoryDirParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let dir = match params.layer {
+                smelt_core::control_api::AgentMemoryLayer::Agent => {
+                    smelt_core::agent_definition_store::agent_memory_dir(&params.agent_id)
+                }
+                smelt_core::control_api::AgentMemoryLayer::User => {
+                    smelt_core::agent_definition_store::user_memory_dir()
+                }
+            };
+            match dir.filter(|dir| std::fs::create_dir_all(dir).is_ok()) {
+                Some(path) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AgentSpaceResult {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                ),
+                None => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, "无法创建记忆目录"),
+                ),
+            }
+        }
         ControlMethod::AutomationRunDetail => {
             let params: smelt_core::control_api::AutomationRunDetailParams =
                 match params_or_error(control_version, &request_id, params) {

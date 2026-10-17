@@ -18,7 +18,6 @@ use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::resizable::resizable_panel;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
-use notify::{RecursiveMode, Watcher};
 
 use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable, ui_theme};
 use smelt_runtime_client::protocol::control::ControlCall;
@@ -1186,19 +1185,6 @@ fn render_narrow_git_row(
 }
 
 // ===================== git 子进程调用 =====================
-
-/// 文件监听噪音路径：这些目录变化极频繁（构建产物/依赖），git status 结果
-/// 基本不受它们影响。
-fn is_git_noise_path(p: &std::path::Path) -> bool {
-    p.components().any(|c| {
-        c.as_os_str().to_str().is_some_and(|s| {
-            matches!(
-                s,
-                "target" | "node_modules" | "dist" | "build" | ".next" | ".cache"
-            )
-        })
-    })
-}
 
 /// 把「远端同步 + 本地救场」操作组加进一个下拉菜单。舞台 Git 视图的分支头下拉、
 /// Tool Panel 窄面板每个仓库行的操作按钮两处共用——别只在一处加，用户看的是

@@ -32,6 +32,7 @@ pub mod claude_paths;
 pub mod client_migration;
 pub mod codex_app_server;
 pub mod control_api;
+pub mod control_skill;
 pub mod conversation;
 pub mod copilot_quota;
 pub mod daemon_image;

@@ -24,6 +24,9 @@ pub const CORE_TOPIC_AGENT_MESSAGE_DELIVERED: &str = "agent.message_delivered";
 /// 有人要看一段 daemon 里还没在跑的对话（典型是 daemon 冷重启后手机点开）。
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
 pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requested";
+/// 项目目录里的文件变了（已滤掉构建产物、依赖目录）。只在客户端用 `project.watch`
+/// 关注过的项目上发；客户端据此重取 git 状态、文件树。
+pub const CORE_TOPIC_PROJECT_CHANGED: &str = "project.changed";
 /// CLI / Control API 要改外观。外观归客户端，运行时只校验后转给在线的桌面端。
 pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
 
@@ -431,6 +434,13 @@ pub struct ConversationWakeRequested {
     pub session_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectChanged {
+    /// 关注时传入的项目根目录（运行时那台机器上的路径）。
+    pub root: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppearanceChangeRequested {
@@ -521,6 +531,13 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
             DeliveryClass::Ephemeral,
             CORE_CAPABILITY_APPEARANCE_CONTROL,
+            None,
+            4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_PROJECT_CHANGED,
+            DeliveryClass::Ephemeral,
+            CORE_CAPABILITY_WORKSPACE_READ,
             None,
             4 * 1024,
         )?,
@@ -772,6 +789,12 @@ mod tests {
             ),
             (
                 CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+                DeliveryClass::Ephemeral,
+                None,
+                1,
+            ),
+            (
+                CORE_TOPIC_PROJECT_CHANGED,
                 DeliveryClass::Ephemeral,
                 None,
                 1,

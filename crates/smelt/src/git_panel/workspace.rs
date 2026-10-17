@@ -485,62 +485,54 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 给某个 root 建一次性的文件监听（notify crate，macOS 走 FSEvents）：文件系统
-    /// 回调通过有界通道唤醒 GPUI 任务，有真实文件事件才刷新 status。
-    ///
-    /// 递归监听整棵目录树（含 .git/ 内部），**但过滤高频噪音路径**（构建产物/依赖
-    /// 目录）——不滤的话，rust-analyzer/cargo 持续写 target/、node_modules 的每次
-    /// 触碰都会触发一次 git status + 整窗重绘，空闲 CPU 高、耗电的主要来源。
-    /// 每个 root 只建一次，活动项目被选中时就装上，不必等打开 Git 页；watcher 存进
-    /// git_watchers 常驻到应用退出（必须持有 watcher 不被 drop，否则会停止收事件）。
+    /// 请运行时监听某个项目（文件在运行时那台机器上）：之后有真实文件变化，运行时发
+    /// `project.changed`，见 [`Self::on_project_changed`]。每个 root 只登记一次；运行时
+    /// 重连后监听随旧进程没了，清空重新登记。活动项目被选中时就装上，不必等打开 Git 页。
     pub fn ensure_git_watch(&mut self, root: String, cx: &mut Context<Self>) {
-        if self.git_watchers.contains_key(&root) {
+        if !self.watched_projects.insert(root.clone()) {
             return;
         }
-        // 通道容量为 1：一批文件事件只需一次刷新唤醒，避免保存/构建产生的事件
-        // 在队列里无限堆积。GPUI 任务真正消费唤醒后再读取最新工作区状态。
-        let (dirty_tx, dirty_rx) = smol::channel::bounded::<()>(1);
-        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                // 噪音过滤：构建产物 / 依赖目录变化极频繁，监听它们只会让
-                // git status 反复空跑。只有真实源码/配置文件变化才标脏。
-                if event.paths.iter().any(|p| is_git_noise_path(p)) {
-                    return;
-                }
-                // 回调运行在 notify 的线程上，不能直接触碰 GPUI；只发一个唤醒信号。
-                let _ = dirty_tx.try_send(());
-            }
-        });
-        let Ok(mut watcher) = watcher else { return };
-        if watcher
-            .watch(Path::new(&root), RecursiveMode::Recursive)
-            .is_err()
-        {
-            return;
-        }
-        self.git_watchers.insert(root.clone(), watcher);
         // 立刻拉一次初值：之后纯靠文件事件驱动，但首帧得先有数据，
         // 否则文件一直不变时侧栏 GIT 角标永远出不来。
         self.ensure_git_status(root.clone(), cx);
-
         cx.spawn(async move |this, cx| {
-            while dirty_rx.recv().await.is_ok() {
-                // 文件变了：标脏并主动重拉 git_status，角标 / Git 页在任何页面都即时刷新，
-                // 不依赖「当前正停在 Files/Git 页、render 每帧才调 ensure_git_status」。
-                // ensure_git_status 内部有 inflight 去重，重复唤醒不会叠并发。
-                let r = this.update(cx, |this, cx| {
-                    // 监听是递归的，子仓里的改动也会到这里——所以要把该项目下**所有**
-                    // 仓库的 status 都标脏，只刷项目根会让子仓改动在面板里冻结。
-                    this.invalidate_project_git_status(&root, cx);
-                    this.ensure_git_repos(root.clone(), cx);
-                    cx.notify();
-                });
-                if r.is_err() {
-                    break; // Workspace 已销毁
-                }
+            let watch_root = root.clone();
+            let watched = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<
+                        smelt_runtime_client::protocol::files::ProjectWatchCall,
+                    >(
+                        smelt_runtime_client::protocol::files::ProjectRootParams {
+                            root: watch_root,
+                        },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                })
+                .await;
+            if let Err(error) = watched {
+                eprintln!(
+                    "[git] 请运行时监听 {root} 失败：{}",
+                    crate::runtime_call::error_text(error)
+                );
+                // 下次刷新再试。
+                let _ = this.update(cx, |this, _| this.watched_projects.remove(&root));
             }
         })
         .detach();
+    }
+
+    /// 运行时说项目里有文件变了：标脏并主动重拉 git status，角标 / Git 页在任何页面都
+    /// 即时刷新。监听是递归的，子仓里的改动也会到这里——所以要把该项目下**所有**仓库
+    /// 的 status 都标脏，只刷项目根会让子仓改动在面板里冻结。ensure_* 内部有 inflight
+    /// 去重，重复通知不会叠并发。
+    pub(crate) fn on_project_changed(&mut self, root: String, cx: &mut Context<Self>) {
+        if !self.watched_projects.contains(&root) {
+            return;
+        }
+        self.invalidate_project_git_status(&root, cx);
+        self.ensure_git_repos(root, cx);
+        cx.notify();
     }
 
     /// 确保某 cwd 的仓库身份缓存新鲜（>5s 或缺失就后台刷新）：探测它是不是 worktree

@@ -38,6 +38,14 @@ file_calls! {
     FileSaveCall => FileSave(FileSaveParams) -> FileSaveResult;
     /// 会话输入框 `@` 补全的候选。一次取全，客户端在本地按输入过滤排序，打字不用等往返。
     SessionCompleteFilesCall => SessionCompleteFiles(CompleteFilesParams) -> CompleteFilesResult;
+    /// 关注一个项目：之后它的文件有变化，运行时发 `project.changed` 事件。幂等。
+    ProjectWatchCall => ProjectWatch(ProjectRootParams) -> EmptyParams;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRootParams {
+    /// 项目根，绝对路径。
+    pub root: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

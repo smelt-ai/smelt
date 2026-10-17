@@ -224,7 +224,6 @@ mod daemon_info_tests {
         };
         assert!(daemon_info_line(&info).contains("已运行 0 秒"));
     }
-
 }
 
 #[cfg(test)]
@@ -293,7 +292,6 @@ mod antigravity_terminal_tests {
         assert!(remove_launch_entry_at(&mut config, builtin_count));
         assert_eq!(config.entries.len(), builtin_count);
     }
-
 }
 
 /// 下发给移动端的配色快照必须跟 PC 实际渲染色同源——这里锁住两件事：
