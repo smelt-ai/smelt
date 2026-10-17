@@ -5,7 +5,7 @@
 //! 定时或用户点击时请运行时 [`refresh`]。任何终端、ACP 或插件会话都不会因为额度
 //! 查询收到 prompt 或被改变状态。
 //!
-//! 结果缓存到运行时库的 `quota_cache` 作用域：缓存新鲜（`CACHE_STALE_AFTER` 内）且
+//! 结果缓存到运行时库的 `quota_cache*` 表：缓存新鲜（`CACHE_STALE_AFTER` 内）且
 //! 覆盖了当前全部账户时，客户端可以跳过启动首查。
 
 pub use smelt_model::quota_service::*;
@@ -16,7 +16,6 @@ use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
-use serde::{Deserialize, Serialize};
 
 use crate::agent_kind::ConversationAgentKind;
 use crate::copilot_quota::{CopilotQuotaStatus as CachedCopilotQuotaStatus, fetch_copilot_quota};
@@ -115,9 +114,8 @@ fn fetch_cursor_quota_data() -> QuotaFetchFuture {
     Box::pin(async { Ok(fetch_cursor_quota().await?.map(ProviderQuotaData::Windows)) })
 }
 
-/// 跨启动的额度缓存（序列化后存进主库 `quota_cache` 作用域）。
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// 跨启动的额度缓存（存进运行时库的 `quota_cache*` 表）。
+#[derive(Clone)]
 enum CachedQuotaStatus {
     Windows(CachedWindowQuotaStatus),
     Copilot(CachedCopilotQuotaStatus),
@@ -155,20 +153,17 @@ impl CachedQuotaStatus {
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default)]
 struct QuotaCache {
     /// 上次写入时间（Unix 毫秒），用于判断缓存是否还新鲜。
     pub saved_at_ms: u64,
     /// 格式版本只用于判断旧快照有没有覆盖当时的 provider。覆盖范围由
     /// `provider_ids` 决定，新增 provider 不再需要手工递增版本号。
-    #[serde(default)]
     pub schema_version: u32,
     /// 本次缓存生成时注册过的全部 provider，包括没有凭据、未拿到额度的项。
     /// 用 BTreeSet 保证持久化顺序稳定。
-    #[serde(default)]
     provider_ids: BTreeSet<String>,
     /// 真正拿到额度的项。键使用 `QuotaTarget::id()`。
-    #[serde(default)]
     providers: BTreeMap<String, CachedQuotaStatus>,
 }
 
@@ -288,21 +283,132 @@ fn save_quota_cache(cache: &QuotaCache) {
 }
 
 fn snapshot_from_cache(cache: &QuotaCache) -> Option<smelt_store::QuotaCacheSnapshot> {
+    let statuses = cache
+        .providers
+        .iter()
+        .filter_map(|(provider_id, status)| {
+            let (checked_at_ms, error, quota) = match status {
+                CachedQuotaStatus::Windows(status) => (
+                    status.checked_at_ms,
+                    status.error.clone(),
+                    smelt_store::QuotaCacheQuota::Windows(
+                        status
+                            .quota
+                            .as_ref()?
+                            .windows
+                            .iter()
+                            .map(|window| smelt_store::QuotaCacheWindowRecord {
+                                label: window.label.clone(),
+                                used_percent: window.used_percent,
+                                resets_at_ms: window
+                                    .resets_at_ms
+                                    .and_then(|ms| i64::try_from(ms).ok()),
+                                reset_after_seconds: window
+                                    .reset_after_seconds
+                                    .and_then(|seconds| i64::try_from(seconds).ok()),
+                            })
+                            .collect(),
+                    ),
+                ),
+                CachedQuotaStatus::Copilot(status) => {
+                    let quota = status.quota.as_ref()?;
+                    (
+                        status.checked_at_ms,
+                        status.error.clone(),
+                        smelt_store::QuotaCacheQuota::Copilot {
+                            unit: copilot_unit_name(quota.unit).to_string(),
+                            remaining: quota.remaining,
+                            limit: quota.limit,
+                            used: quota.used,
+                        },
+                    )
+                }
+            };
+            Some(smelt_store::QuotaCacheStatusRecord {
+                provider_id: provider_id.clone(),
+                checked_at_ms: i64::try_from(checked_at_ms).ok()?,
+                error,
+                quota,
+            })
+        })
+        .collect();
     Some(smelt_store::QuotaCacheSnapshot {
         saved_at_ms: i64::try_from(cache.saved_at_ms).ok()?,
         schema_version: cache.schema_version,
         provider_ids: cache.provider_ids.iter().cloned().collect(),
-        providers_json: serde_json::to_vec(&cache.providers).ok()?,
+        statuses,
     })
 }
 
 fn cache_from_snapshot(snapshot: smelt_store::QuotaCacheSnapshot) -> Option<QuotaCache> {
+    let providers = snapshot
+        .statuses
+        .into_iter()
+        .filter_map(|record| {
+            let checked_at_ms = u64::try_from(record.checked_at_ms.max(0)).ok()?;
+            let status = match record.quota {
+                smelt_store::QuotaCacheQuota::Windows(windows) => {
+                    CachedQuotaStatus::Windows(CachedWindowQuotaStatus {
+                        quota: Some(crate::provider_quota::ProviderQuota {
+                            windows: windows
+                                .into_iter()
+                                .map(|window| crate::provider_quota::ProviderQuotaWindow {
+                                    label: window.label,
+                                    used_percent: window.used_percent,
+                                    resets_at_ms: window
+                                        .resets_at_ms
+                                        .and_then(|ms| u64::try_from(ms).ok()),
+                                    reset_after_seconds: window
+                                        .reset_after_seconds
+                                        .and_then(|seconds| u64::try_from(seconds).ok()),
+                                })
+                                .collect(),
+                        }),
+                        checked_at_ms,
+                        error: record.error,
+                    })
+                }
+                smelt_store::QuotaCacheQuota::Copilot {
+                    unit,
+                    remaining,
+                    limit,
+                    used,
+                } => CachedQuotaStatus::Copilot(CachedCopilotQuotaStatus {
+                    quota: Some(crate::copilot_quota::CopilotQuota {
+                        unit: copilot_unit_from_name(&unit)?,
+                        remaining,
+                        limit,
+                        used,
+                    }),
+                    checked_at_ms,
+                    error: record.error,
+                }),
+            };
+            Some((record.provider_id, status))
+        })
+        .collect();
     Some(QuotaCache {
         saved_at_ms: u64::try_from(snapshot.saved_at_ms.max(0)).ok()?,
         schema_version: snapshot.schema_version,
         provider_ids: snapshot.provider_ids.into_iter().collect(),
-        providers: serde_json::from_slice(&snapshot.providers_json).ok()?,
+        providers,
     })
+}
+
+/// 库里 `copilot_unit` 列的取值。
+fn copilot_unit_name(unit: crate::copilot_quota::CopilotQuotaUnit) -> &'static str {
+    match unit {
+        crate::copilot_quota::CopilotQuotaUnit::AiCredits => "ai_credits",
+        crate::copilot_quota::CopilotQuotaUnit::PremiumRequests => "premium_requests",
+    }
+}
+
+fn copilot_unit_from_name(name: &str) -> Option<crate::copilot_quota::CopilotQuotaUnit> {
+    match name {
+        "ai_credits" => Some(crate::copilot_quota::CopilotQuotaUnit::AiCredits),
+        "premium_requests" => Some(crate::copilot_quota::CopilotQuotaUnit::PremiumRequests),
+        _ => None,
+    }
 }
 
 fn apply_quota_result(
@@ -409,45 +515,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_named_cache_fields_are_ignored() {
-        let cache: QuotaCache = serde_json::from_str(
-            r#"{
-              "saved_at_ms": 1,
-              "schema_version": 2,
-              "claude": {
-                "quota": {"windows": [{"label":"5h","used_percent":9.0,"resets_at_ms":null,"reset_after_seconds":null}]},
-                "checked_at_ms": 7
-              }
-            }"#,
-        )
-        .unwrap();
-        assert!(cache.statuses().is_empty());
-        assert!(!cache.can_skip_startup_fetch(&agent_targets()));
-    }
-
-    #[test]
-    fn old_quota_cache_without_grok_field_still_loads() {
-        let cache: QuotaCache = serde_json::from_str(
-            r#"{
-              "saved_at_ms": 1,
-              "copilot": null,
-              "codex": null,
-              "claude": {
-                "quota": {"windows": [{"label":"5h","used_percent":9.0,"resets_at_ms":null,"reset_after_seconds":null}]},
-                "checked_at_ms": 1
-              }
-            }"#,
-        )
-        .expect("缺字段不能让整份缓存作废");
-        assert!(cache.statuses().is_empty());
-        assert_eq!(cache.schema_version, 0);
-        assert!(
-            !cache.can_skip_startup_fetch(&agent_targets()),
-            "升级前的缓存即使时间新鲜也要再查一次，才能在左下角画出 Grok"
-        );
-    }
-
-    #[test]
     fn fresh_pre_grok_cache_still_triggers_startup_fetch() {
         let cache = QuotaCache {
             saved_at_ms: unix_time_ms(),
@@ -491,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_round_trips_through_the_provider_map() {
+    fn cache_round_trips_through_the_store_snapshot() {
         let claude = QuotaTarget::agent(ConversationAgentKind::Claude);
         let statuses = vec![(
             claude,
@@ -503,26 +570,24 @@ mod tests {
         )];
 
         let cache = QuotaCache::from_statuses(&agent_targets(), &statuses);
-        let json = serde_json::to_value(&cache).unwrap();
-        assert!(json["providers"].get("claude").is_some());
-        assert!(json.get("claude").is_none());
+        let snapshot = snapshot_from_cache(&cache).unwrap();
+        assert_eq!(snapshot.statuses.len(), 1);
+        assert_eq!(snapshot.statuses[0].provider_id, "claude");
         let expected_provider_ids = agent_targets()
             .into_iter()
             .map(QuotaTarget::id)
             .collect::<BTreeSet<_>>();
-        let actual_provider_ids = json["provider_ids"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_string)
-            .collect::<BTreeSet<_>>();
         assert_eq!(
-            actual_provider_ids, expected_provider_ids,
+            snapshot
+                .provider_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected_provider_ids,
             "缓存覆盖范围必须从 provider 注册表生成"
         );
 
-        let cache: QuotaCache = serde_json::from_value(json).unwrap();
+        let cache = cache_from_snapshot(snapshot).unwrap();
         assert_eq!(cache.statuses(), statuses);
     }
 

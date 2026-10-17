@@ -13,9 +13,11 @@ use std::sync::{Arc, Mutex};
 mod error;
 pub use error::{OpenSource, StoreError};
 
-// 这两个模块只服务桌面的 SQLite 实现（cfg 与下面的 `imp` 保持一致）。移动端不编
+// 这些模块只服务桌面的 SQLite 实现（cfg 与下面的 `imp` 保持一致）。移动端不编
 // native SQLite，rusqlite/serde_json 在 iOS/Android 上根本没进依赖树，无条件声明
 // 会让交叉编译直接挂在解析不到 crate 上。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod automation;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod catalog;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -23,22 +25,32 @@ mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod devices;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
-mod documents;
+mod history;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod launch;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod memory;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod migrate_v18;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
 mod snapshots;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod workspace;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod workspace_document;
 
 pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AutoModelSnapshot,
+    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AutoModelHarness,
     HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
-    MemoryMetaSnapshot, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
-    PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot,
+    MemoryMetaSnapshot, MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice,
+    PublishedSessionRecord, PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot,
+    QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
     RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
     RemoteTerminalSessionRecord, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceLayoutNode,
-    WorkspaceSessionRecord, WorkspaceSnapshot, WorktreeInheritSnapshot,
+    WorkspaceMenuProjectRecord, WorkspaceMenuSessionRecord, WorkspaceSessionRecord,
+    WorkspaceSnapshot, WorktreeInheritSnapshot,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -50,7 +62,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 17;
+pub const STORE_SCHEMA_VERSION: u32 = 18;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -252,31 +264,100 @@ impl Store {
         imp::read_user_version(path)
     }
 
-    /// 读取一个明确作用域的二进制状态值，不经过 JSON 文档映射或 legacy 路由。
-    pub fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::get_blob(&self.backend, namespace, key)
+    /// 运行时身份。只有 smeltd 第一次启动时写一次。
+    pub fn runtime_id(&self) -> Result<Option<String>, StoreError> {
+        imp::runtime_id(&self.backend)
     }
 
-    /// 写入一个明确作用域的二进制状态值，不生成或读取任何 JSON 文件。
-    pub fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<(), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::put_blob(&self.backend, namespace, key, value)
+    pub fn put_runtime_id(&self, runtime_id: &str) -> Result<(), StoreError> {
+        validate_name("runtime_id", runtime_id)?;
+        imp::put_runtime_id(&self.backend, runtime_id)
     }
 
-    /// 列出一个 blob 作用域下的全部 key。
-    pub fn blob_keys(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
-        validate_name("namespace", namespace)?;
-        imp::blob_keys(&self.backend, namespace)
+    /// 工作区目录的版本号，每次保存加一。从没保存过是 0。
+    pub fn workspace_catalog_revision(&self) -> Result<u64, StoreError> {
+        imp::workspace_catalog_revision(&self.backend)
     }
 
-    /// 删除一个 blob。
-    pub fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::delete_blob(&self.backend, namespace, key)
+    pub fn put_workspace_catalog_revision(&self, revision: u64) -> Result<(), StoreError> {
+        imp::put_workspace_catalog_revision(&self.backend, revision)
+    }
+
+    /// 某条历史会话由哪个智能体定义创建。`profile_id` 为空表示没有 profile。
+    pub fn history_agent_binding(
+        &self,
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        imp::history_agent_binding(&self.backend, agent, profile_id, resume_id)
+    }
+
+    /// 某引擎、某 profile 下全部历史会话的智能体绑定：`resume_id` → 智能体定义 id。
+    pub fn history_agent_bindings(
+        &self,
+        agent: &str,
+        profile_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        imp::history_agent_bindings(&self.backend, agent, profile_id)
+    }
+
+    pub fn put_history_agent_binding(
+        &self,
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+        agent_definition_id: &str,
+    ) -> Result<(), StoreError> {
+        validate_name("agent", agent)?;
+        validate_name("resume_id", resume_id)?;
+        validate_name("agent_definition_id", agent_definition_id)?;
+        imp::put_history_agent_binding(
+            &self.backend,
+            agent,
+            profile_id,
+            resume_id,
+            agent_definition_id,
+        )
+    }
+
+    /// 侧栏「新对话」默认用哪个智能体。
+    pub fn default_conversation_agent(&self) -> Result<Option<String>, StoreError> {
+        imp::default_conversation_agent(&self.backend)
+    }
+
+    /// `None` 清掉默认智能体。
+    pub fn put_default_conversation_agent(
+        &self,
+        agent_definition_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        if let Some(id) = agent_definition_id {
+            validate_name("agent_definition_id", id)?;
+        }
+        imp::put_default_conversation_agent(&self.backend, agent_definition_id)
+    }
+
+    /// 新建菜单里置顶的动作 key，按置顶顺序。
+    pub fn new_session_pins(&self) -> Result<Vec<String>, StoreError> {
+        imp::new_session_pins(&self.backend)
+    }
+
+    pub fn put_new_session_pins(&self, pins: &[String]) -> Result<(), StoreError> {
+        imp::put_new_session_pins(&self.backend, pins)
+    }
+
+    /// 记忆召回的配置；没设过时各项都是空字符串。
+    pub fn memory_settings(&self) -> Result<MemorySettingsRecord, StoreError> {
+        imp::memory_settings(&self.backend)
+    }
+
+    /// 在同一个 IMMEDIATE 事务里读-改-写记忆配置，返回提交后的值。CLI、Control API
+    /// 各改一项时不会拿旧整行把对方刚写的那项盖掉；`modify` 返回错误时整笔回滚。
+    pub fn modify_memory_settings<E: From<StoreError>>(
+        &self,
+        modify: impl FnOnce(&mut MemorySettingsRecord) -> Result<(), E>,
+    ) -> Result<MemorySettingsRecord, E> {
+        imp::modify_memory_settings(&self.backend, modify)
     }
 
     pub fn put_automation_run_transcript(
@@ -338,11 +419,10 @@ impl Store {
         imp::get_workspace_snapshot(&self.backend)
     }
 
-    /// 会话 id → 智能体定义 id。关系表已存在时返回 `Some`（可以是空表）；
-    /// 只有旧 JSON 工作区时返回 `None`，调用方再走快照回退。
+    /// 会话 id → 智能体定义 id。
     pub fn session_agent_definition_ids(
         &self,
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         imp::session_agent_definition_ids(&self.backend)
     }
 
@@ -377,11 +457,12 @@ impl Store {
         imp::clear_history_session_id(&self.backend, session_id)
     }
 
-    /// 残留 workspace JSON 文档导入成类型化快照。活路径不要再走 JSON 文档入口。
+    /// `workspace.save` 发来的工作区文档转成类型化快照。文档只是传输格式。
     pub fn workspace_snapshot_from_json(raw: &[u8]) -> Result<WorkspaceSnapshot, StoreError> {
         imp::workspace_snapshot_from_json(raw)
     }
 
+    /// 类型化快照转成 `workspace.load` 回给客户端的文档。
     pub fn workspace_snapshot_to_json(snapshot: &WorkspaceSnapshot) -> Result<Vec<u8>, StoreError> {
         imp::workspace_snapshot_to_json(snapshot)
     }
@@ -562,26 +643,20 @@ impl Store {
         imp::put_quota_cache_snapshot(&self.backend, snapshot)
     }
 
-    pub fn get_dsh_auto_model_snapshot(&self) -> Result<Option<AutoModelSnapshot>, StoreError> {
-        imp::get_dsh_auto_model_snapshot(&self.backend)
-    }
-
-    pub fn put_dsh_auto_model_snapshot(
+    /// 模型目录由 Smelt 维护的 provider，按 id 排序。
+    pub fn auto_model_providers(
         &self,
-        snapshot: &AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_dsh_auto_model_snapshot(&self.backend, snapshot)
+        harness: AutoModelHarness,
+    ) -> Result<Vec<String>, StoreError> {
+        imp::auto_model_providers(&self.backend, harness)
     }
 
-    pub fn get_pi_auto_model_snapshot(&self) -> Result<Option<AutoModelSnapshot>, StoreError> {
-        imp::get_pi_auto_model_snapshot(&self.backend)
-    }
-
-    pub fn put_pi_auto_model_snapshot(
+    pub fn put_auto_model_providers(
         &self,
-        snapshot: &AutoModelSnapshot,
+        harness: AutoModelHarness,
+        providers: &[String],
     ) -> Result<(), StoreError> {
-        imp::put_pi_auto_model_snapshot(&self.backend, snapshot)
+        imp::put_auto_model_providers(&self.backend, harness, providers)
     }
 
     pub fn get_workspace_menu_snapshot(
@@ -972,71 +1047,155 @@ mod imp {
             })
     }
 
-    pub(super) fn get_blob(
+    fn read<T>(
         backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
+        read: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let connection = lock_connection(backend)?;
-        connection
-            .query_row(
-                "SELECT value FROM kv
-                 WHERE scope = ?1 AND key = ?2 AND value_type = 'blob'",
-                params![namespace, key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
+        read(&connection)
     }
 
-    pub(super) fn put_blob(
+    fn write<T>(
         backend: &Backend,
-        namespace: &str,
-        key: &str,
-        value: &[u8],
+        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut connection = lock_connection(backend)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = write(&transaction)?;
+        transaction.commit()?;
+        secure_sidecar_permissions(&backend.path);
+        Ok(result)
+    }
+
+    pub(super) fn runtime_id(backend: &Backend) -> Result<Option<String>, StoreError> {
+        read(backend, crate::config::read_runtime_id)
+    }
+
+    pub(super) fn put_runtime_id(backend: &Backend, runtime_id: &str) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_runtime_id(transaction, runtime_id)
+        })
+    }
+
+    pub(super) fn workspace_catalog_revision(backend: &Backend) -> Result<u64, StoreError> {
+        read(backend, crate::config::read_workspace_catalog_revision)
+    }
+
+    pub(super) fn put_workspace_catalog_revision(
+        backend: &Backend,
+        revision: u64,
     ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES (?1, ?2, ?3, 'blob', ?4)
-                 ON CONFLICT(scope, key) DO UPDATE SET
-                   value = excluded.value,
-                   value_type = 'blob',
-                   updated_at_ms = excluded.updated_at_ms",
-            params![namespace, key, value, now_ms()],
-        )?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
+        write(backend, |transaction| {
+            crate::config::write_workspace_catalog_revision(transaction, revision)
+        })
     }
 
-    pub(super) fn blob_keys(backend: &Backend, namespace: &str) -> Result<Vec<String>, StoreError> {
-        let connection = lock_connection(backend)?;
-        let mut statement = connection.prepare(
-            "SELECT key FROM kv
-                 WHERE scope = ?1 AND value_type = 'blob'
-                 ORDER BY key",
-        )?;
-        let rows = statement.query_map(params![namespace], |row| row.get(0))?;
-        rows.collect::<Result<Vec<String>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    pub(super) fn delete_blob(
+    pub(super) fn history_agent_binding(
         backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        read(backend, |connection| {
+            crate::history::read_history_agent_binding(connection, agent, profile_id, resume_id)
+        })
+    }
+
+    pub(super) fn history_agent_bindings(
+        backend: &Backend,
+        agent: &str,
+        profile_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        read(backend, |connection| {
+            crate::history::read_history_agent_bindings(connection, agent, profile_id)
+        })
+    }
+
+    pub(super) fn put_history_agent_binding(
+        backend: &Backend,
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+        agent_definition_id: &str,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::history::write_history_agent_binding(
+                transaction,
+                agent,
+                profile_id,
+                resume_id,
+                agent_definition_id,
+            )
+        })
+    }
+
+    pub(super) fn default_conversation_agent(
+        backend: &Backend,
+    ) -> Result<Option<String>, StoreError> {
+        read(backend, crate::config::read_default_conversation_agent)
+    }
+
+    pub(super) fn put_default_conversation_agent(
+        backend: &Backend,
+        agent_definition_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_default_conversation_agent(transaction, agent_definition_id)
+        })
+    }
+
+    pub(super) fn new_session_pins(backend: &Backend) -> Result<Vec<String>, StoreError> {
+        read(backend, crate::config::read_new_session_pins)
+    }
+
+    pub(super) fn put_new_session_pins(
+        backend: &Backend,
+        pins: &[String],
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_new_session_pins(transaction, pins)
+        })
+    }
+
+    pub(super) fn memory_settings(
+        backend: &Backend,
+    ) -> Result<super::MemorySettingsRecord, StoreError> {
+        read(backend, crate::config::read_memory_settings)
+    }
+
+    pub(super) fn modify_memory_settings<E: From<StoreError>>(
+        backend: &Backend,
+        modify: impl FnOnce(&mut super::MemorySettingsRecord) -> Result<(), E>,
+    ) -> Result<super::MemorySettingsRecord, E> {
         let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "DELETE FROM kv WHERE scope = ?1 AND key = ?2 AND value_type = 'blob'",
-            params![namespace, key],
-        )?;
-        transaction.commit()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let mut record = crate::config::read_memory_settings(&transaction)?;
+        modify(&mut record)?;
+        crate::config::write_memory_settings(&transaction, &record)?;
+        transaction.commit().map_err(StoreError::from)?;
         secure_sidecar_permissions(&backend.path);
-        Ok(changed > 0)
+        Ok(record)
+    }
+
+    pub(super) fn auto_model_providers(
+        backend: &Backend,
+        harness: super::AutoModelHarness,
+    ) -> Result<Vec<String>, StoreError> {
+        read(backend, |connection| {
+            crate::config::read_auto_model_providers(connection, harness)
+        })
+    }
+
+    pub(super) fn put_auto_model_providers(
+        backend: &Backend,
+        harness: super::AutoModelHarness,
+        providers: &[String],
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_auto_model_providers(transaction, harness, providers)
+        })
     }
 
     pub(super) fn put_automation_run_transcript(
@@ -1078,7 +1237,7 @@ mod imp {
         backend: &Backend,
     ) -> Result<Option<super::AutomationSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_automation_snapshot(&connection)
+        crate::automation::read_automation_snapshot(&connection)
     }
 
     pub(super) fn put_automation_snapshot(
@@ -1087,7 +1246,7 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_automation_snapshot(&transaction, snapshot)?;
+        crate::automation::write_automation_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1097,7 +1256,7 @@ mod imp {
         backend: &Backend,
     ) -> Result<Option<super::LaunchSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_launch_snapshot(&connection)
+        crate::launch::read_launch_snapshot(&connection)
     }
 
     pub(super) fn put_launch_snapshot(
@@ -1106,7 +1265,7 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_launch_snapshot(&transaction, snapshot)?;
+        crate::launch::write_launch_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1116,7 +1275,7 @@ mod imp {
         backend: &Backend,
     ) -> Result<Option<super::HistoryTitleSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_history_title_snapshot(&connection)
+        crate::history::read_history_title_snapshot(&connection)
     }
 
     pub(super) fn put_history_title_snapshot(
@@ -1125,7 +1284,7 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_history_title_snapshot(&transaction, snapshot)?;
+        crate::history::write_history_title_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1135,14 +1294,14 @@ mod imp {
         backend: &Backend,
     ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_workspace_snapshot(&connection)
+        crate::workspace::read_workspace_snapshot(&connection)
     }
 
     pub(super) fn session_agent_definition_ids(
         backend: &Backend,
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_session_agent_definition_ids(&connection)
+        crate::workspace::read_session_agent_definition_ids(&connection)
     }
 
     pub(super) fn put_workspace_snapshot(
@@ -1151,7 +1310,7 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_workspace_snapshot(&transaction, snapshot)?;
+        crate::workspace::write_workspace_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1165,7 +1324,7 @@ mod imp {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let updated =
-            crate::documents::remember_history_session_id(&transaction, session_id, history_id)?;
+            crate::workspace::remember_history_session_id(&transaction, session_id, history_id)?;
         transaction.commit()?;
         Ok(updated)
     }
@@ -1175,7 +1334,7 @@ mod imp {
         session_id: &str,
     ) -> Result<Option<String>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::history_session_id(&connection, session_id)
+        crate::workspace::history_session_id(&connection, session_id)
     }
 
     pub(super) fn stored_history_identity(
@@ -1183,7 +1342,7 @@ mod imp {
         session_id: &str,
     ) -> Result<super::StoredHistoryIdentity, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::stored_history_identity(&connection, session_id)
+        crate::workspace::stored_history_identity(&connection, session_id)
     }
 
     pub(super) fn clear_history_session_id(
@@ -1192,7 +1351,7 @@ mod imp {
     ) -> Result<bool, StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let updated = crate::documents::clear_history_session_id(&transaction, session_id)?;
+        let updated = crate::workspace::clear_history_session_id(&transaction, session_id)?;
         transaction.commit()?;
         Ok(updated)
     }
@@ -1201,13 +1360,13 @@ mod imp {
         raw: &[u8],
     ) -> Result<super::WorkspaceSnapshot, StoreError> {
         let value: serde_json::Value = serde_json::from_slice(raw)?;
-        crate::documents::workspace_from_document(&value)
+        crate::workspace_document::workspace_from_document(&value)
     }
 
     pub(super) fn workspace_snapshot_to_json(
         snapshot: &super::WorkspaceSnapshot,
     ) -> Result<Vec<u8>, StoreError> {
-        let value = crate::documents::json_from_workspace_snapshot(snapshot)?;
+        let value = crate::workspace_document::json_from_workspace_snapshot(snapshot);
         serde_json::to_vec(&value).map_err(StoreError::from)
     }
 
@@ -1293,25 +1452,13 @@ mod imp {
         Ok(changed)
     }
 
-    fn write_memory<T>(
-        backend: &Backend,
-        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = write(&transaction)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(result)
-    }
-
     pub(super) fn record_memory_read(
         backend: &Backend,
         scope: &str,
         file_name: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::record_read(transaction, scope, file_name, now_ms)
         })
     }
@@ -1325,7 +1472,7 @@ mod imp {
         session_id: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::record_write(
                 transaction,
                 scope,
@@ -1343,7 +1490,7 @@ mod imp {
         scope: &str,
         file_name: &str,
     ) -> Result<bool, StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::approve(transaction, scope, file_name)
         })
     }
@@ -1353,7 +1500,7 @@ mod imp {
         scope: &str,
         file_name: &str,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::forget(transaction, scope, file_name)
         })
     }
@@ -1385,7 +1532,7 @@ mod imp {
         backend: &Backend,
         device: &super::PairedDevice,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::devices::put(transaction, device)
         })
     }
@@ -1394,7 +1541,7 @@ mod imp {
         backend: &Backend,
         endpoint_id: &str,
     ) -> Result<bool, StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::devices::delete(transaction, endpoint_id)
         })
     }
@@ -1404,7 +1551,7 @@ mod imp {
         endpoint_id: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::devices::touch(transaction, endpoint_id, now_ms)
         })
     }
@@ -1530,40 +1677,6 @@ mod imp {
         snapshot: &super::QuotaCacheSnapshot,
     ) -> Result<(), StoreError> {
         put_config(backend, snapshot, crate::config::write_quota_cache_snapshot)
-    }
-
-    pub(super) fn get_dsh_auto_model_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_dsh_auto_model_snapshot)
-    }
-
-    pub(super) fn put_dsh_auto_model_snapshot(
-        backend: &Backend,
-        snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_dsh_auto_model_snapshot,
-        )
-    }
-
-    pub(super) fn get_pi_auto_model_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_pi_auto_model_snapshot)
-    }
-
-    pub(super) fn put_pi_auto_model_snapshot(
-        backend: &Backend,
-        snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_pi_auto_model_snapshot,
-        )
     }
 
     pub(super) fn get_workspace_menu_snapshot(
@@ -2628,6 +2741,18 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 17 {
+            if !schema_matches_v17(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v18_runtime_tables(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 16 {
             if !schema_matches_v16(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -2765,8 +2890,7 @@ mod imp {
             |row| row.get(0),
         )?;
         if has_automation {
-            crate::documents::migrate_automations_from_kv_document(transaction)?;
-            crate::documents::rebuild_automation_run_transcript_fk(transaction)?;
+            crate::automation::rebuild_automation_run_transcript_fk(transaction)?;
         }
         apply_v10_catalog_domain(transaction)
     }
@@ -2783,8 +2907,7 @@ mod imp {
         if !has_agent_ui {
             transaction.execute_batch(crate::schema::MIGRATE_V9_TO_V10)?;
         }
-        apply_v11_engine_kind_columns(transaction)?;
-        crate::catalog::migrate_catalog_from_kv_documents(transaction)
+        apply_v11_engine_kind_columns(transaction)
     }
 
     fn apply_v11_engine_kind_columns(
@@ -2863,15 +2986,28 @@ mod imp {
     }
 
     fn apply_v17_paired_device(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
-        if table_names(transaction)?
+        if !table_names(transaction)?
             .iter()
             .any(|table| table == "paired_device")
         {
+            transaction.execute_batch(crate::schema::MIGRATE_V16_TO_V17)?;
+        }
+        apply_v18_runtime_tables(transaction)
+    }
+
+    /// v18 去掉通用 `kv`：先把运行时自己的数据读进内存，改完结构再写进新表。
+    /// 已经没有 `kv` 的库（新形状的夹具）跳过。
+    fn apply_v18_runtime_tables(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_names(transaction)?.iter().any(|table| table == "kv") {
             return Ok(());
         }
-        transaction
-            .execute_batch(crate::schema::MIGRATE_V16_TO_V17)
-            .map_err(StoreError::from)
+        // 只改认得的 v17 形状；前面哪一步没收敛到 v17，就按认不出的库拒绝，整笔回滚。
+        if !schema_matches_v17(transaction)? {
+            return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+        }
+        let state = crate::migrate_v18::read_v17_state(transaction)?;
+        transaction.execute_batch(crate::schema::MIGRATE_V17_TO_V18)?;
+        crate::migrate_v18::write_v18_state(transaction, state)
     }
 
     fn unrecognized_schema_error(version: u32) -> StoreError {
@@ -2883,87 +3019,121 @@ mod imp {
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(
+                    connection,
+                    &crate::schema::TABLES,
+                    false,
+                )?
                 && schema_objects(connection)?
                     == expected_schema_objects(SchemaGeneration::Current)?,
         )
     }
 
+    fn schema_matches_v17(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V17_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V17)?)
+    }
+
     fn schema_matches_v16(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V16)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V16)?)
     }
 
     fn schema_matches_v15(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V15)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V15)?)
     }
 
     fn schema_matches_v14(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V14)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V14)?)
     }
 
     fn schema_matches_v13(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V13)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V13)?)
     }
 
     fn schema_matches_v12(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V12)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V12_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V12)?)
     }
 
     fn schema_matches_v11(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V11)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V12_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V11)?)
     }
 
     fn schema_matches_v10(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V10)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V12_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V10)?)
     }
 
     /// v5 与 v6 只差 `acp_detail` 一张表，其余结构必须完全一致才允许就地重建。
     fn schema_matches_v5(connection: &Connection) -> Result<bool, StoreError> {
         Ok(
             table_columns(connection, "acp_detail")? == LEGACY_ACP_COLUMNS
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES)?
+                && schema_matches_shape_outside_acp_table(
+                    connection,
+                    &crate::schema::V7_TABLES,
+                    true,
+                )?
                 && schema_objects_without_acp_table(connection)?
                     == expected_schema_objects(SchemaGeneration::V7WithoutAcpTable)?,
         )
@@ -2972,47 +3142,43 @@ mod imp {
     /// v6 与 v7 同样只差 `acp_detail` 一张表。
     fn schema_matches_v6(connection: &Connection) -> Result<bool, StoreError> {
         Ok(table_columns(connection, "acp_detail")? == V6_ACP_COLUMNS
-            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES)?
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES, true)?
             && schema_objects_without_acp_table(connection)?
                 == expected_schema_objects(SchemaGeneration::V7WithoutAcpTable)?)
     }
 
     fn schema_matches_v7(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V7)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES, true)?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V7)?)
     }
 
     fn schema_matches_v9(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V9_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V9)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V9_TABLES, true)?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V9)?)
     }
 
     fn schema_matches_v8(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V8_TABLES)?
-                && schema_objects_excluding_transcript(connection)?
-                    == expected_schema_objects(SchemaGeneration::V8WithoutTranscript)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V8_TABLES, true)?
+            && schema_objects_excluding_transcript(connection)?
+                == expected_schema_objects(SchemaGeneration::V8WithoutTranscript)?)
     }
 
+    /// `legacy`：v17 及更早的形状，还有 `kv` 表和带 `collapsed` 列的 `project`。
     fn schema_matches_shape_outside_acp_table(
         connection: &Connection,
         expected_tables: &[&str],
+        legacy: bool,
     ) -> Result<bool, StoreError> {
         let tables = table_names(connection)?;
         Ok(tables == expected_tables
-            && schema_matches_shared_columns(connection)?
+            && schema_matches_shared_columns(connection, legacy)?
             && table_columns(connection, "event_log")?
                 == [
                     "sequence",
@@ -3091,12 +3257,29 @@ mod imp {
             // 三者都要放行，后续迁移会把它们收敛到同一形状。
             && (acp_columns == LEGACY_ACP_COLUMNS
                 || acp_columns == V6_ACP_COLUMNS
-                || acp_columns == CURRENT_ACP_COLUMNS)
-            && schema_matches_shared_columns(connection)?
+                || acp_columns == V17_ACP_COLUMNS)
+            && schema_matches_shared_columns(connection, true)?
             && v1_schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V1)?)
     }
 
-    const CURRENT_ACP_COLUMNS: [&str; 15] = [
+    const CURRENT_ACP_COLUMNS: [&str; 13] = [
+        "session_id",
+        "agent",
+        "profile_id",
+        "history_session_id",
+        "launch_command",
+        "refresh_launch_from_settings",
+        "pending_prompt",
+        "pending_delivery_id",
+        "agent_definition_id",
+        "automation_id",
+        "binding_automation_run_id",
+        "pending_agent_preset",
+        "session_title",
+    ];
+
+    /// v7..v17 的 `acp_detail` 形状：还带着分叉列，会话的其余字段散在 `kv` 里。
+    const V17_ACP_COLUMNS: [&str; 15] = [
         "session_id",
         "agent",
         "profile_id",
@@ -3154,7 +3337,18 @@ mod imp {
         "pending_delivery_id",
     ];
 
-    fn schema_matches_shared_columns(connection: &Connection) -> Result<bool, StoreError> {
+    fn schema_matches_shared_columns(
+        connection: &Connection,
+        legacy: bool,
+    ) -> Result<bool, StoreError> {
+        let (kv_columns, project_columns): (&[&str], &[&str]) = if legacy {
+            (
+                &["scope", "key", "value", "value_type", "updated_at_ms"],
+                &["root", "position", "collapsed"],
+            )
+        } else {
+            (&[], &["root", "position"])
+        };
         Ok(table_columns(connection, "history_title")?
             == [
                 "agent",
@@ -3163,8 +3357,7 @@ mod imp {
                 "custom_title",
                 "updated_at_ms",
             ]
-            && table_columns(connection, "kv")?
-                == ["scope", "key", "value", "value_type", "updated_at_ms"]
+            && table_columns(connection, "kv")? == kv_columns
             && table_columns(connection, "launch_entry")?
                 == ["position", "label", "command", "provider"]
             && table_columns(connection, "layout_node")?
@@ -3178,7 +3371,7 @@ mod imp {
                     "session_id",
                     "size_px",
                 ]
-            && table_columns(connection, "project")? == ["root", "position", "collapsed"]
+            && table_columns(connection, "project")? == project_columns
             && table_columns(connection, "session")?
                 == [
                     "id",
@@ -3285,6 +3478,7 @@ mod imp {
         V14,
         V15,
         V16,
+        V17,
         Current,
     }
 
@@ -3303,8 +3497,8 @@ mod imp {
         if let Some(objects) = slot.get() {
             return Ok(objects.clone());
         }
-        // 旧版本都没有 v17 的设备表，在各版本自己的差异之前统一去掉。
-        let objects = map(build_expected_schema_objects()?
+        // v16 及更早都没有 v17 的设备表，在各版本自己的差异之前统一去掉。
+        let objects = map(schema_objects_of(crate::schema::V17_SCHEMA)?
             .into_iter()
             .filter(|object| object.table_name != "paired_device")
             .collect());
@@ -3326,6 +3520,7 @@ mod imp {
         static V14_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V15_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V16_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V17_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3456,19 +3651,27 @@ mod imp {
                 objects
             }),
             SchemaGeneration::V16 => cached_schema_objects(&V16_OBJECTS, |objects| objects),
+            SchemaGeneration::V17 => frozen_schema_objects(&V17_OBJECTS, crate::schema::V17_SCHEMA),
             SchemaGeneration::Current => {
-                if let Some(objects) = CURRENT_OBJECTS.get() {
-                    return Ok(objects.clone());
-                }
-                let objects = build_expected_schema_objects()?;
-                Ok(CURRENT_OBJECTS.get_or_init(|| objects.clone()).clone())
+                frozen_schema_objects(&CURRENT_OBJECTS, crate::schema::CREATE_SCHEMA)
             }
         }
     }
 
-    fn build_expected_schema_objects() -> Result<Vec<SchemaObject>, StoreError> {
+    fn frozen_schema_objects(
+        slot: &OnceLock<Vec<SchemaObject>>,
+        schema: &str,
+    ) -> Result<Vec<SchemaObject>, StoreError> {
+        if let Some(objects) = slot.get() {
+            return Ok(objects.clone());
+        }
+        let objects = schema_objects_of(schema)?;
+        Ok(slot.get_or_init(|| objects.clone()).clone())
+    }
+
+    fn schema_objects_of(schema: &str) -> Result<Vec<SchemaObject>, StoreError> {
         let connection = Connection::open_in_memory()?;
-        connection.execute_batch(crate::schema::CREATE_SCHEMA)?;
+        connection.execute_batch(schema)?;
         schema_objects(&connection)
     }
 
@@ -3638,34 +3841,90 @@ mod imp {
         Err(StoreError::SqliteDisabledOnMobile)
     }
 
-    pub(super) fn get_blob(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
+    pub(super) fn runtime_id(_backend: &Backend) -> Result<Option<String>, StoreError> {
         unsupported()
     }
-    pub(super) fn put_blob(
+    pub(super) fn put_runtime_id(_backend: &Backend, _runtime_id: &str) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn workspace_catalog_revision(_backend: &Backend) -> Result<u64, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_workspace_catalog_revision(
         _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-        _value: &[u8],
+        _revision: u64,
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn blob_keys(
+    pub(super) fn history_agent_binding(
         _backend: &Backend,
-        _namespace: &str,
+        _agent: &str,
+        _profile_id: &str,
+        _resume_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn history_agent_bindings(
+        _backend: &Backend,
+        _agent: &str,
+        _profile_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_history_agent_binding(
+        _backend: &Backend,
+        _agent: &str,
+        _profile_id: &str,
+        _resume_id: &str,
+        _agent_definition_id: &str,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn default_conversation_agent(
+        _backend: &Backend,
+    ) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_default_conversation_agent(
+        _backend: &Backend,
+        _agent_definition_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn new_session_pins(_backend: &Backend) -> Result<Vec<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_new_session_pins(
+        _backend: &Backend,
+        _pins: &[String],
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn memory_settings(
+        _backend: &Backend,
+    ) -> Result<super::MemorySettingsRecord, StoreError> {
+        unsupported()
+    }
+    pub(super) fn modify_memory_settings<E: From<StoreError>>(
+        _backend: &Backend,
+        _modify: impl FnOnce(&mut super::MemorySettingsRecord) -> Result<(), E>,
+    ) -> Result<super::MemorySettingsRecord, E> {
+        Err(StoreError::SqliteDisabledOnMobile.into())
+    }
+    pub(super) fn auto_model_providers(
+        _backend: &Backend,
+        _harness: super::AutoModelHarness,
     ) -> Result<Vec<String>, StoreError> {
         unsupported()
     }
-    pub(super) fn delete_blob(
+    pub(super) fn put_auto_model_providers(
         _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
+        _harness: super::AutoModelHarness,
+        _providers: &[String],
+    ) -> Result<(), StoreError> {
         unsupported()
     }
+
     pub(super) fn put_automation_run_transcript(
         _backend: &Backend,
         _run_id: &str,
@@ -3719,7 +3978,7 @@ mod imp {
     }
     pub(super) fn session_agent_definition_ids(
         _backend: &Backend,
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         unsupported()
     }
     pub(super) fn put_workspace_snapshot(
@@ -3934,28 +4193,6 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn get_dsh_auto_model_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_dsh_auto_model_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_pi_auto_model_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_pi_auto_model_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
     pub(super) fn get_workspace_menu_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::PublishedWorkspaceMenuSnapshot>, StoreError> {
@@ -4150,11 +4387,14 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// v16 的完整结构：当前结构去掉 v17 的设备表。更早版本的夹具在它上面再改。
+    /// v17 的完整结构（冻结的 `V17_SCHEMA`）。
+    fn create_v17_schema(connection: &rusqlite::Connection) {
+        connection.execute_batch(crate::schema::V17_SCHEMA).unwrap();
+    }
+
+    /// v16 的完整结构：v17 去掉设备表。更早版本的夹具在它上面再改。
     fn create_v16_schema(connection: &rusqlite::Connection) {
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        connection.execute_batch(crate::schema::V17_SCHEMA).unwrap();
         connection
             .execute_batch("DROP TABLE paired_device;")
             .unwrap();
@@ -4164,7 +4404,7 @@ mod tests {
         static SCHEMA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         SCHEMA
             .get_or_init(|| {
-                let base = crate::schema::CREATE_SCHEMA
+                let base = crate::schema::V17_SCHEMA
                     .split("CREATE TABLE event_log")
                     .next()
                     .unwrap();
@@ -4235,10 +4475,10 @@ mod tests {
     }
 
     fn v9_schema() -> String {
-        let schema = crate::schema::CREATE_SCHEMA;
+        let schema = crate::schema::V17_SCHEMA;
         let cut = schema
             .find("CREATE TABLE agent_ui_pref")
-            .expect("v10 catalog tables follow automation tables in CREATE_SCHEMA");
+            .expect("v10 catalog tables follow automation tables in V17_SCHEMA");
         schema[..cut].to_string()
     }
 
@@ -4433,35 +4673,562 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// v16 的库：只多一张已配对设备表，原有数据不动。
+    /// v16 的库：v17 多一张已配对设备表，再到 v18 把偏好搬进按字段的表。
     #[test]
-    fn migrates_v16_by_adding_paired_device_table() {
+    fn migrates_v16_through_paired_devices_to_typed_preferences() {
         let dir = temp_dir("migrate-v16-paired-device");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
         create_v16_schema(&connection);
         connection
-            .execute_batch("INSERT INTO agent_ui_pref VALUES ('collapsed', 'yes');")
+            .execute_batch(
+                "INSERT INTO agent_ui_pref VALUES ('agent_hooks_enabled', '0');
+                 INSERT INTO agent_ui_pref VALUES ('notify_success', '0');",
+            )
             .unwrap();
         connection.pragma_update(None, "user_version", 16).unwrap();
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
         assert!(store.list_paired_devices().unwrap().is_empty());
+        let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
+        assert!(!prefs.agent_hooks_enabled);
+        assert!(prefs.cross_agent_enabled, "没存过的开关按默认打开");
         drop(store);
 
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        let pref: String = connection
-            .query_row(
-                "SELECT value FROM agent_ui_pref WHERE key = 'collapsed'",
-                [],
-                |row| row.get(0),
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 照开发者真实 v16/v17 库的 `kv` 形状（已脱敏）造一份旧库：运行时自己的数据要落进新表，
+    /// 客户端的界面状态和没人读的作用域随 `kv` 一起删掉。
+    fn create_owner_kv_database(path: &Path, version: u32) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        if version == 16 {
+            create_v16_schema(&connection);
+        } else {
+            create_v17_schema(&connection);
+        }
+        let kv = |scope: &str, key: &str, value_type: &str, value: Option<&str>| {
+            connection
+                .execute(
+                    "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, 1)",
+                    rusqlite::params![scope, key, value, value_type],
+                )
+                .unwrap();
+        };
+        let blob = |scope: &str, key: &str, value: &str| {
+            connection
+                .execute(
+                    "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
+                     VALUES (?1, ?2, ?3, 'blob', 1)",
+                    rusqlite::params![scope, key, value.as_bytes()],
+                )
+                .unwrap();
+        };
+        // 客户端的：外观、更新状态、侧栏、会话 route、旧客户端数据暂存、旧插件开关。
+        kv("appearance", "$", "object", Some(""));
+        kv("appearance", "theme_mode", "text", Some("dark"));
+        kv("appearance", "opacity", "real", Some("0.95"));
+        kv("update_state", "$", "object", Some(""));
+        kv("update_state", "staged", "null", None);
+        kv("workspace", "$", "object", Some(""));
+        kv("workspace", "route", "text", Some("session"));
+        kv("workspace", "sidebar_grouping", "text", Some("project"));
+        kv("session_group:group:0:term-1", "route", "object", Some(""));
+        kv(
+            "session_group:group:0:term-1",
+            "route/tool_panel_w",
+            "real",
+            Some("626.0"),
+        );
+        blob(
+            "client_migration",
+            "staged",
+            r#"{"appearance":{"theme_mode":"dark"}}"#,
+        );
+        blob(
+            "plugins",
+            "enablement",
+            r#"{"disabled":["com.example.browser"]}"#,
+        );
+
+        // 运行时的。
+        blob(
+            "runtime",
+            "runtime_id",
+            "4df5dd5c-434f-4c2c-b8da-38795277fb20",
+        );
+        blob("workspace_catalog", "revision", "174");
+        blob("history_agent", "pi\u{1f}\u{1f}resume-1", "agent-a");
+        blob("history_agent", "pi\u{1f}work\u{1f}resume-2", "agent-b");
+        blob(
+            "preferences",
+            "default_conversation_agent",
+            r#"{"agent_id":"agent-a"}"#,
+        );
+        blob(
+            "preferences",
+            "new_session_pins",
+            r#"{"pinned":["conversation:agent:agent-a","terminal:claude:claude"]}"#,
+        );
+        blob("memory", "embedding_base_url", "http://localhost:11434/v1");
+        blob("memory", "embedding_model", "bge-m3");
+        kv("collab", "$", "object", Some(""));
+        kv("collab", "enabled", "boolean", Some("1"));
+        kv(
+            "collab",
+            "iroh_relay",
+            "text",
+            Some("https://relay.example"),
+        );
+        kv("worktree_inherit", "$", "object", Some(""));
+        kv("worktree_inherit", "enabled", "boolean", Some("1"));
+        kv("worktree_inherit", "skip_patterns", "array", Some(""));
+        kv(
+            "worktree_inherit",
+            "skip_patterns/0",
+            "text",
+            Some("node_modules"),
+        );
+        kv("pi_auto_models", "$", "object", Some(""));
+        kv("pi_auto_models", "providers", "array", Some(""));
+        kv("pi_auto_models", "providers/0", "text", Some("deepseek"));
+        kv("pi_auto_models", "providers/1", "text", Some("token-x"));
+        kv("terminal_theme", "$", "object", Some(""));
+        kv("terminal_theme", "version", "integer", Some("1"));
+        kv("terminal_theme", "dark", "boolean", Some("1"));
+        kv("terminal_theme", "background", "integer", Some("657930"));
+        kv("terminal_theme", "foreground", "integer", Some("14211288"));
+        kv("terminal_theme", "cursor", "integer", Some("14211288"));
+        kv("terminal_theme", "selection", "integer", Some("802170"));
+        kv("terminal_theme", "search_hit", "integer", Some("8018976"));
+        kv(
+            "terminal_theme",
+            "search_hit_current",
+            "integer",
+            Some("13934615"),
+        );
+        kv("terminal_theme", "palette", "array", Some(""));
+        // key 按字符串排是 0、1、10、2：顺序必须按下标还原。
+        for index in 0..11 {
+            kv(
+                "terminal_theme",
+                &format!("palette/{index}"),
+                "integer",
+                Some(&(100 + index).to_string()),
+            );
+        }
+        kv("quota_cache", "$", "object", Some(""));
+        kv(
+            "quota_cache",
+            "saved_at_ms",
+            "integer",
+            Some("1792250484008"),
+        );
+        kv("quota_cache", "schema_version", "integer", Some("3"));
+        kv("quota_cache", "provider_ids", "array", Some(""));
+        kv("quota_cache", "provider_ids/0", "text", Some("claude"));
+        kv(
+            "quota_cache",
+            "provider_ids/1",
+            "text",
+            Some("pi:github-copilot"),
+        );
+        kv("quota_cache", "providers", "object", Some(""));
+        kv("quota_cache", "providers/claude", "object", Some(""));
+        kv(
+            "quota_cache",
+            "providers/claude/windows",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/checked_at_ms",
+            "integer",
+            Some("1792250484008"),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/error",
+            "null",
+            None,
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows",
+            "array",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/label",
+            "text",
+            Some("5h"),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/reset_after_seconds",
+            "null",
+            None,
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/resets_at_ms",
+            "integer",
+            Some("1792258200463"),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/used_percent",
+            "real",
+            Some("37.0"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/checked_at_ms",
+            "integer",
+            Some("1792250484008"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/error",
+            "null",
+            None,
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/limit",
+            "real",
+            Some("43000.0"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/remaining",
+            "real",
+            Some("11347.0"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/unit",
+            "text",
+            Some("AiCredits"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/used",
+            "real",
+            Some("31653.0"),
+        );
+        kv("workspace_menu", "$", "object", Some(""));
+        kv("workspace_menu", "version", "integer", Some("2"));
+        kv("workspace_menu", "revision", "integer", Some("12132"));
+        kv("workspace_menu", "source_id", "text", Some("c8acdab2"));
+        kv("workspace_menu", "source_revision", "integer", Some("133"));
+        kv("workspace_menu", "projects", "array", Some(""));
+        kv("workspace_menu", "projects/0", "object", Some(""));
+        kv("workspace_menu", "projects/0/order", "integer", Some("0"));
+        kv("workspace_menu", "projects/0/root", "text", Some("/repo"));
+        kv("workspace_menu", "projects/0/title", "text", Some("repo"));
+        kv("workspace_menu", "sessions", "array", Some(""));
+        kv("workspace_menu", "sessions/0", "object", Some(""));
+        kv("workspace_menu", "sessions/0/agent", "text", Some("claude"));
+        kv(
+            "workspace_menu",
+            "sessions/0/custom_title",
+            "boolean",
+            Some("0"),
+        );
+        kv("workspace_menu", "sessions/0/cwd", "text", Some("/repo"));
+        kv("workspace_menu", "sessions/0/id", "text", Some("term-1"));
+        kv(
+            "workspace_menu",
+            "sessions/0/kind",
+            "text",
+            Some("terminal"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/leaf_order",
+            "integer",
+            Some("0"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/project_order",
+            "integer",
+            Some("0"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/project_root",
+            "text",
+            Some("/repo"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/project_title",
+            "text",
+            Some("repo"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/session_order",
+            "integer",
+            Some("0"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/title",
+            "text",
+            Some("你知道 Godot 吗"),
+        );
+        kv("launch", "version", "integer", Some("14"));
+        // ACP 会话散在 `acp:<id>` 里的字段。
+        kv("acp:acp-1", "env", "object", Some(""));
+        kv(
+            "acp:acp-1",
+            "env/SMELT_AGENT_MEMORY_DIR",
+            "text",
+            Some("/home/me/memory"),
+        );
+        kv("acp:acp-1", "config_values", "array", Some(""));
+        kv("acp:acp-1", "config_values/0", "array", Some(""));
+        kv("acp:acp-1", "config_values/0/0", "text", Some("model"));
+        kv(
+            "acp:acp-1",
+            "config_values/0/1",
+            "text",
+            Some("deepseek/flash"),
+        );
+        kv("acp:acp-1", "config_values/1", "array", Some(""));
+        kv("acp:acp-1", "config_values/1/0", "text", Some("mode"));
+        kv(
+            "acp:acp-1",
+            "config_values/1/1",
+            "text",
+            Some("bypassPermissions"),
+        );
+        kv("acp:acp-1", "conversation_binding", "object", Some(""));
+        kv(
+            "acp:acp-1",
+            "conversation_binding/type",
+            "text",
+            Some("direct"),
+        );
+        kv("acp:acp-1", "session_title", "text", Some("季度复盘"));
+        kv(
+            "acp:gone",
+            "session_title",
+            "text",
+            Some("目录里已经没有的会话"),
+        );
+
+        connection
+            .execute_batch(
+                "BEGIN;
+                 INSERT INTO agent_ui_pref VALUES ('agent_hooks_enabled', '1');
+                 INSERT INTO agent_ui_pref VALUES ('cross_agent_enabled', '0');
+                 INSERT INTO agent_ui_pref VALUES ('notify_success', '0');
+                 INSERT INTO project(root, position, collapsed) VALUES ('/repo', 0, 1);
+                 INSERT INTO session_group(id, project_root, position, active_session_id)
+                 VALUES ('group:0:term-1', '/repo', 0, 'term-1'),
+                        ('group:1:acp-1', '/repo', 1, 'acp-1');
+                 INSERT INTO session(id, group_id, kind, cwd)
+                 VALUES ('term-1', 'group:0:term-1', 'terminal', '/repo'),
+                        ('acp-1', 'group:1:acp-1', 'acp', '/repo');
+                 INSERT INTO layout_node(id, group_id, parent_id, position, kind, session_id)
+                 VALUES ('group:0:term-1:node:0', 'group:0:term-1', NULL, 0, 'leaf', 'term-1'),
+                        ('group:1:acp-1:node:0', 'group:1:acp-1', NULL, 0, 'leaf', 'acp-1');
+                 INSERT INTO acp_detail(
+                   session_id, agent, history_session_id, launch_command,
+                   refresh_launch_from_settings, agent_definition_id
+                 ) VALUES ('acp-1', 'pi', 'pi-history-1', 'smelt-pi-agent', 1, 'agent-a');
+                 COMMIT;",
             )
             .unwrap();
-        assert_eq!(pref, "yes");
-        drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+    }
+
+    #[test]
+    fn migrates_owner_kv_data_into_typed_tables() {
+        for version in [16, 17] {
+            let dir = temp_dir(&format!("migrate-owner-v{version}"));
+            let path = dir.join(DATABASE_FILE_NAME);
+            create_owner_kv_database(&path, version);
+
+            let store = Store::open_or_create(&path).unwrap();
+            assert_eq!(
+                store.runtime_id().unwrap().as_deref(),
+                Some("4df5dd5c-434f-4c2c-b8da-38795277fb20")
+            );
+            assert_eq!(store.workspace_catalog_revision().unwrap(), 174);
+            assert_eq!(
+                store
+                    .history_agent_binding("pi", "", "resume-1")
+                    .unwrap()
+                    .as_deref(),
+                Some("agent-a")
+            );
+            assert_eq!(
+                store.history_agent_bindings("pi", "work").unwrap(),
+                std::collections::BTreeMap::from([("resume-2".to_string(), "agent-b".to_string())])
+            );
+            assert_eq!(
+                store.default_conversation_agent().unwrap().as_deref(),
+                Some("agent-a")
+            );
+            assert_eq!(
+                store.new_session_pins().unwrap(),
+                ["conversation:agent:agent-a", "terminal:claude:claude"]
+            );
+            let memory = store.memory_settings().unwrap();
+            assert_eq!(memory.embedding_base_url, "http://localhost:11434/v1");
+            assert_eq!(memory.embedding_model, "bge-m3");
+            assert_eq!(memory.embedding_api_key, "");
+            assert_eq!(
+                store.get_remote_config_snapshot().unwrap(),
+                Some(RemoteConfigSnapshot {
+                    enabled: true,
+                    iroh_relay: "https://relay.example".into(),
+                })
+            );
+            assert_eq!(
+                store.get_worktree_inherit_snapshot().unwrap(),
+                Some(WorktreeInheritSnapshot {
+                    enabled: true,
+                    skip_patterns: vec!["node_modules".into()],
+                })
+            );
+            assert_eq!(
+                store.auto_model_providers(AutoModelHarness::Pi).unwrap(),
+                ["deepseek", "token-x"]
+            );
+            let theme = store.get_terminal_theme_snapshot().unwrap().unwrap();
+            assert_eq!(theme.background, 657930);
+            assert_eq!(theme.search_hit_current, 13934615);
+            assert_eq!(theme.palette, (100..111).collect::<Vec<u32>>());
+            let quota = store.get_quota_cache_snapshot().unwrap().unwrap();
+            assert_eq!(quota.saved_at_ms, 1792250484008);
+            assert_eq!(quota.provider_ids, ["claude", "pi:github-copilot"]);
+            assert_eq!(
+                quota.statuses,
+                [
+                    QuotaCacheStatusRecord {
+                        provider_id: "claude".into(),
+                        checked_at_ms: 1792250484008,
+                        error: None,
+                        quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
+                            label: "5h".into(),
+                            used_percent: 37.0,
+                            resets_at_ms: Some(1792258200463),
+                            reset_after_seconds: None,
+                        }]),
+                    },
+                    QuotaCacheStatusRecord {
+                        provider_id: "pi:github-copilot".into(),
+                        checked_at_ms: 1792250484008,
+                        error: None,
+                        quota: QuotaCacheQuota::Copilot {
+                            unit: "ai_credits".into(),
+                            remaining: 11347.0,
+                            limit: Some(43000.0),
+                            used: Some(31653.0),
+                        },
+                    },
+                ]
+            );
+            let menu = store.get_workspace_menu_snapshot().unwrap().unwrap();
+            assert_eq!((menu.version, menu.revision), (2, 12132));
+            assert_eq!(menu.projects[0].root, "/repo");
+            assert_eq!(menu.sessions[0].title, "你知道 Godot 吗");
+            assert_eq!(menu.sessions[0].kind, "terminal");
+            assert_eq!(store.get_launch_snapshot().unwrap().unwrap().version, 14);
+            let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
+            assert!(prefs.agent_hooks_enabled);
+            assert!(!prefs.cross_agent_enabled);
+
+            let workspace = store.get_workspace_snapshot().unwrap().unwrap();
+            assert_eq!(workspace.projects, ["/repo"]);
+            let acp = workspace.sessions[1].acp.as_ref().unwrap();
+            assert_eq!(acp.sid.as_deref(), Some("acp-1"));
+            assert_eq!(acp.history_session_id.as_deref(), Some("pi-history-1"));
+            assert_eq!(acp.agent_definition_id.as_deref(), Some("agent-a"));
+            assert_eq!(
+                acp.launch_env,
+                [(
+                    "SMELT_AGENT_MEMORY_DIR".to_string(),
+                    "/home/me/memory".to_string()
+                )]
+            );
+            assert_eq!(
+                acp.config_values,
+                [
+                    ("model".to_string(), "deepseek/flash".to_string()),
+                    ("mode".to_string(), "bypassPermissions".to_string()),
+                ]
+            );
+            assert_eq!(acp.binding_automation_run_id, None);
+            assert_eq!(acp.session_title.as_deref(), Some("季度复盘"));
+            drop(store);
+
+            assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            for table in ["kv", "agent_ui_pref", "acp_detail_v17"] {
+                let exists: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                        [table],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(!exists, "v{version}: {table} 应该已经删掉");
+            }
+            let project_columns = connection
+                .prepare("PRAGMA table_info(project)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(project_columns, ["root", "position"], "折叠状态归客户端");
+            drop(connection);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
@@ -4601,7 +5368,7 @@ mod tests {
     }
 
     #[test]
-    fn new_database_contains_exactly_the_eight_state_tables() {
+    fn new_database_contains_exactly_the_current_tables() {
         let dir = temp_dir("minimal-schema");
         let path = dir.join(DATABASE_FILE_NAME);
         drop(Store::open_or_create(&path).unwrap());
@@ -4618,16 +5385,9 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(tables, crate::schema::TABLES);
-        let kv_columns = connection
-            .prepare("PRAGMA table_info(kv)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            kv_columns,
-            ["scope", "key", "value", "value_type", "updated_at_ms"]
+        assert!(
+            !tables.iter().any(|table| table == "kv"),
+            "运行时库不再有通用 kv 表"
         );
 
         drop(connection);
@@ -5221,81 +5981,43 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v7 的库一路迁到当前版本。v9 之前的自动化只存在 `kv` 文档里，那套导入已经删了
+    /// （产品没发布过，真实库都在 v16 之后），这里只保证结构收敛、`kv` 不留。
     #[test]
-    fn migrates_v7_schema_and_moves_kv_transcripts_into_the_table() {
-        let dir = temp_dir("migrate-v7-transcript");
+    fn migrates_v7_schema_to_current_without_kv() {
+        let dir = temp_dir("migrate-v7");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch(&v7_schema()).unwrap();
-        let snapshot = serde_json::to_vec(&json!({
-            "schema_version": 1,
-            "store_id": "s",
-            "revision": 1,
-            "timezone_fingerprint": "UTC",
-            "automations": [{
-                "id": "auto-1",
-                "name": "A",
-                "enabled": true,
-                "trigger": {},
-                "action": {"type": "shell", "command": "true", "args": []},
-                "sinks": []
-            }],
-            "states": [],
-            "runs": [{
-                "id": "run-1",
-                "automation_id": "auto-1",
-                "source": "manual",
-                "status": "completed",
-                "created_at": 1,
-                "delivery_attempts": 0,
-                "context": {
-                    "automation_name": "A",
-                    "cwd": "/",
-                    "permission_mode": "full_access",
-                    "action": {"type": "shell", "command": "true", "args": []}
-                }
-            }]
-        }))
-        .unwrap();
         connection
-            .execute(
+            .execute_batch(
                 "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:automations.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![snapshot],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('automation_run_transcript', 'run-1', X'5B5D', 'blob', 9)",
-                [],
+                 VALUES ('automation_run_transcript', 'run-1', X'5B5D', 'blob', 9);
+                 INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1);",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 7).unwrap();
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(kept_history_title(&store), "keep");
         assert_eq!(
             store.get_automation_run_transcript("run-1").unwrap(),
-            Some(b"[]".to_vec())
+            None,
+            "没有对应 Run 的对话记录随外键重建丢掉"
         );
         drop(store);
-
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
         let connection = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-                .unwrap(),
-            STORE_SCHEMA_VERSION
-        );
-        let leftover: i64 = connection
+        let kv_exists: bool = connection
             .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope = 'automation_run_transcript'",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'kv')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(leftover, 0);
+        assert!(!kv_exists);
         drop(connection);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -5441,9 +6163,7 @@ mod tests {
         let dir = temp_dir("migrate-v5-acp-detail");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        connection.execute_batch(crate::schema::V17_SCHEMA).unwrap();
         connection
             .execute_batch("ALTER TABLE acp_detail ADD COLUMN obsolete_context TEXT")
             .unwrap();
@@ -5586,7 +6306,7 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute(
-                "INSERT INTO project(root, position, collapsed) VALUES ('/keep-me', 0, 0)",
+                "INSERT INTO project(root, position) VALUES ('/keep-me', 0)",
                 [],
             )
             .unwrap();
@@ -5905,13 +6625,22 @@ mod tests {
         }
         let profile: String = connection
             .query_row(
-                "SELECT CAST(value AS TEXT) FROM kv
-                 WHERE scope = 'acp:acp-1' AND key = 'env/PROFILE'",
+                "SELECT value FROM acp_launch_env WHERE session_id = 'acp-1' AND name = 'PROFILE'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(profile, "work");
+        let (model, binding): (String, String) = connection
+            .query_row(
+                "SELECT c.value_id, d.binding_automation_run_id
+                 FROM acp_config_value c JOIN acp_detail d USING (session_id)
+                 WHERE c.session_id = 'acp-1' AND c.config_id = 'model'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((model.as_str(), binding.as_str()), ("sonnet", "run-1"));
         let old_payload_tables: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema
@@ -5962,15 +6691,13 @@ mod tests {
                 "history_session_id",
                 "launch_command",
                 "refresh_launch_from_settings",
-                "fork_session_id",
-                "fork_title",
-                "fork_agent",
-                "fork_profile_label",
-                "fork_from_history",
                 "pending_prompt",
                 "pending_delivery_id",
                 "agent_definition_id",
                 "automation_id",
+                "binding_automation_run_id",
+                "pending_agent_preset",
+                "session_title",
             ]
         );
         assert!(
@@ -6105,7 +6832,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_snapshots_round_trip_without_kv_documents() {
+    fn catalog_snapshots_round_trip_through_relational_tables() {
         let dir = temp_dir("catalog-snapshots");
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
@@ -6250,7 +6977,7 @@ mod tests {
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         for (table, expected) in [
-            ("agent_ui_pref", 2i64),
+            ("agent_host_pref", 1i64),
             ("agent_acp_command", 1),
             ("agent_acp_env", 1),
             ("agent_acp_config_memory", 1),
@@ -6267,192 +6994,38 @@ mod tests {
                 .unwrap();
             assert_eq!(count, expected, "{table}");
         }
-        let leftover: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope IN (
-                   'document:agent_ui.json',
-                   'document:remote_acp_sessions.json',
-                   'document:remote_terminal_sessions.json',
-                   'document:sessions.json'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0, "活路径不得再写 kv 文档");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v9 的库建出 v10 起的目录表，一路迁到当前版本；已有的关系表数据原样保留。
+    /// v9 之前放在 `kv` 文档里的目录不再导入（同 v7 的说明）。
     #[test]
-    fn migrates_v9_catalog_kv_documents_into_relational_tables() {
-        let dir = temp_dir("migrate-v9-catalog");
+    fn migrates_v9_schema_to_current_keeping_relational_rows() {
+        let dir = temp_dir("migrate-v9");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch(&v9_schema()).unwrap();
         connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:agent_ui.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "agent_hooks_enabled": true,
-                        "acp_cmd": "claude-custom --acp",
-                        "acp_env": {"claude": {"TOKEN": "secret"}},
-                        "agents": [{
-                            "id": "agent-1",
-                            "name": "助手",
-                            "description": "",
-                            "agent_id": "pi",
-                            "prompt": "hello",
-                            "plugins": [],
-                            "context_folders": [],
-                            "context_links": []
-                        }]
-                    }))
-                    .unwrap()
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:remote_acp_sessions.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "sessions": [{
-                            "id": "acp-1",
-                            "cwd": "/work",
-                            "title": "远程",
-                            "agent_option_id": "claude",
-                            "agent": "claude",
-                            "launch": {"command": "claude --acp", "env": {}},
-                            "created_at": 1,
-                            "lifecycle": "active",
-                            "hidden": false
-                        }]
-                    }))
-                    .unwrap()
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:remote_terminal_sessions.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "sessions": [{
-                            "id": "term-1",
-                            "cwd": "/work",
-                            "title": "终端",
-                            "created_at": 2,
-                            "lifecycle": "active"
-                        }]
-                    }))
-                    .unwrap()
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:sessions.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "version": 1,
-                        "sessions": [{
-                            "id": "s1",
-                            "phase": "idle",
-                            "phase_since": 0,
-                            "updated_at": 0,
-                            "structured_events": false,
-                            "turn_events": false,
-                            "dirty_files": []
-                        }]
-                    }))
-                    .unwrap()
-                ],
+            .execute_batch(
+                "INSERT INTO automation(
+                   id, name, enabled, workspace_dir, position, trigger_json, action_json, sinks_json
+                 ) VALUES ('auto-1', 'Morning', 1, NULL, 0, X'7B7D', X'7B7D', X'5B5D');
+                 INSERT INTO automation_meta(key, value) VALUES ('revision', '3');
+                 INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1);",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 9).unwrap();
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        let agent_ui = store.get_agent_ui_snapshot().unwrap().unwrap();
-        assert!(
-            agent_ui.agent_hooks_enabled,
-            "hooks={:?} commands={:?} agents={:?} env={:?}",
-            agent_ui.agent_hooks_enabled, agent_ui.commands, agent_ui.agents, agent_ui.env
-        );
-        assert_eq!(
-            agent_ui
-                .commands
-                .iter()
-                .map(|command| command.command.as_str())
-                .collect::<Vec<_>>(),
-            vec!["claude-custom --acp"],
-            "{agent_ui:#?}"
-        );
-        assert_eq!(
-            agent_ui
-                .agents
-                .iter()
-                .map(|agent| agent.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["agent-1"],
-            "{agent_ui:#?}"
-        );
-        let remote = store.get_remote_session_snapshot().unwrap().unwrap();
-        assert_eq!(
-            remote
-                .acp
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["acp-1"],
-            "{remote:#?}"
-        );
-        assert_eq!(
-            remote
-                .terminal
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["term-1"],
-            "{remote:#?}"
-        );
-        let published = store.get_published_session_snapshot().unwrap().unwrap();
-        assert_eq!(
-            published
-                .sessions
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["s1"],
-            "{published:#?}"
-        );
+        let automations = store.get_automation_snapshot().unwrap().unwrap();
+        assert_eq!(automations.revision, 3);
+        assert_eq!(automations.automations[0].name, "Morning");
+        assert_eq!(kept_history_title(&store), "keep");
+        assert!(store.get_agent_ui_snapshot().unwrap().is_none());
         drop(store);
-
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-                .unwrap(),
-            STORE_SCHEMA_VERSION
-        );
-        let leftover: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope IN (
-                   'document:agent_ui.json',
-                   'document:remote_acp_sessions.json',
-                   'document:remote_terminal_sessions.json',
-                   'document:sessions.json'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6544,43 +7117,170 @@ mod tests {
     }
 
     #[test]
-    fn config_snapshots_round_trip_without_kv_documents() {
-        let dir = temp_dir("config-snapshots");
+    fn runtime_settings_round_trip_through_typed_tables() {
+        let dir = temp_dir("runtime-settings");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+
+        assert_eq!(store.runtime_id().unwrap(), None);
+        store.put_runtime_id("runtime-1").unwrap();
+        assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
+
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 0);
+        store.put_workspace_catalog_revision(7).unwrap();
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 7);
+
         store
             .put_remote_config_snapshot(&RemoteConfigSnapshot {
                 enabled: true,
                 iroh_relay: "relay.example".into(),
             })
             .unwrap();
-        store
-            .put_dsh_auto_model_snapshot(&AutoModelSnapshot {
-                providers: vec!["sub2api".into()],
-            })
-            .unwrap();
         let loaded = store.get_remote_config_snapshot().unwrap().unwrap();
         assert!(loaded.enabled);
         assert_eq!(loaded.iroh_relay, "relay.example");
+
+        store
+            .put_auto_model_providers(AutoModelHarness::Dsh, &["sub2api".into(), "a".into()])
+            .unwrap();
+        assert_eq!(
+            store.auto_model_providers(AutoModelHarness::Dsh).unwrap(),
+            ["a", "sub2api"]
+        );
+        assert!(
+            store
+                .auto_model_providers(AutoModelHarness::Pi)
+                .unwrap()
+                .is_empty(),
+            "两家的名单互不串"
+        );
+
+        let worktree = WorktreeInheritSnapshot {
+            enabled: true,
+            skip_patterns: vec!["node_modules".into(), "target".into()],
+        };
+        store.put_worktree_inherit_snapshot(&worktree).unwrap();
+        assert_eq!(
+            store.get_worktree_inherit_snapshot().unwrap(),
+            Some(worktree)
+        );
+
+        let theme = TerminalThemeSnapshot {
+            version: 1,
+            dark: false,
+            background: 0xffffff,
+            foreground: 0x111111,
+            cursor: 0x222222,
+            selection: 0x333333,
+            palette: vec![1, 2, 3],
+            search_hit: 4,
+            search_hit_current: 5,
+        };
+        store.put_terminal_theme_snapshot(&theme).unwrap();
+        assert_eq!(store.get_terminal_theme_snapshot().unwrap(), Some(theme));
+
+        let quota = QuotaCacheSnapshot {
+            saved_at_ms: 1_000,
+            schema_version: 3,
+            provider_ids: vec!["claude".into(), "copilot".into()],
+            statuses: vec![
+                QuotaCacheStatusRecord {
+                    provider_id: "claude".into(),
+                    checked_at_ms: 900,
+                    error: None,
+                    quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
+                        label: "5h".into(),
+                        used_percent: 37.5,
+                        resets_at_ms: Some(2_000),
+                        reset_after_seconds: None,
+                    }]),
+                },
+                QuotaCacheStatusRecord {
+                    provider_id: "copilot".into(),
+                    checked_at_ms: 900,
+                    error: None,
+                    quota: QuotaCacheQuota::Copilot {
+                        unit: "ai_credits".into(),
+                        remaining: 11.0,
+                        limit: Some(43.0),
+                        used: None,
+                    },
+                },
+            ],
+        };
+        store.put_quota_cache_snapshot(&quota).unwrap();
+        assert_eq!(store.get_quota_cache_snapshot().unwrap(), Some(quota));
+
+        let menu = PublishedWorkspaceMenuSnapshot {
+            version: 2,
+            revision: 12,
+            source_id: "desktop".into(),
+            source_revision: 3,
+            projects: vec![WorkspaceMenuProjectRecord {
+                root: "/repo".into(),
+                title: "repo".into(),
+                order: 0,
+            }],
+            sessions: vec![WorkspaceMenuSessionRecord {
+                id: "s1".into(),
+                kind: "acp".into(),
+                title: "对话".into(),
+                custom_title: true,
+                cwd: Some("/repo".into()),
+                project_root: Some("/repo".into()),
+                project_title: Some("repo".into()),
+                project_order: 0,
+                session_order: 1,
+                leaf_order: 0,
+                agent: Some("pi".into()),
+            }],
+        };
+        store.put_workspace_menu_snapshot(&menu).unwrap();
+        assert_eq!(store.get_workspace_menu_snapshot().unwrap(), Some(menu));
+
+        assert_eq!(
+            store.memory_settings().unwrap(),
+            MemorySettingsRecord::default()
+        );
+        store
+            .modify_memory_settings::<StoreError>(|settings| {
+                settings.embedding_model = "bge-m3".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.memory_settings().unwrap().embedding_model, "bge-m3");
+
+        store
+            .put_default_conversation_agent(Some("writer"))
+            .unwrap();
+        assert_eq!(
+            store.default_conversation_agent().unwrap().as_deref(),
+            Some("writer")
+        );
+        store.put_default_conversation_agent(None).unwrap();
+        assert_eq!(store.default_conversation_agent().unwrap(), None);
+
+        store
+            .put_new_session_pins(&["b".into(), "a".into(), "b".into()])
+            .unwrap();
+        assert_eq!(store.new_session_pins().unwrap(), ["b", "a"]);
+
+        store
+            .put_history_agent_binding("pi", "", "resume-1", "writer")
+            .unwrap();
+        store
+            .put_history_agent_binding("pi", "work", "resume-2", "coder")
+            .unwrap();
         assert_eq!(
             store
-                .get_dsh_auto_model_snapshot()
+                .history_agent_binding("pi", "", "resume-1")
                 .unwrap()
-                .unwrap()
-                .providers,
-            vec!["sub2api".to_string()]
+                .as_deref(),
+            Some("writer")
         );
-        let leftover: i64 = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME))
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope IN (
-                   'document:collab.json',
-                   'document:dsh-auto-models.json'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0);
+        assert_eq!(
+            store.history_agent_bindings("pi", "work").unwrap(),
+            std::collections::BTreeMap::from([("resume-2".to_string(), "coder".to_string())])
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

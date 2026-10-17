@@ -857,7 +857,6 @@ pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Re
     else {
         return Ok(false);
     };
-    let encoded = serde_json::to_vec(title).map_err(|error| error.to_string())?;
     let mut changed = false;
     for session in &mut snapshot.sessions {
         let Some(acp) = session.acp.as_mut() else {
@@ -870,8 +869,8 @@ pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Re
             session.custom_title = Some(title.to_string());
             changed = true;
         }
-        if acp.session_title_json.as_deref() != Some(encoded.as_slice()) {
-            acp.session_title_json = Some(encoded.clone());
+        if acp.session_title.as_deref() != Some(title) {
+            acp.session_title = Some(title.to_string());
             changed = true;
         }
     }

@@ -62,7 +62,7 @@ pub enum WorkspaceLayoutNode {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceAcpRecord {
     pub cwd: Option<String>,
     pub sid: Option<String>,
@@ -70,21 +70,19 @@ pub struct WorkspaceAcpRecord {
     pub profile_id: Option<String>,
     pub history_session_id: Option<String>,
     pub launch_command: String,
-    pub launch_env_json: Option<Vec<u8>>,
+    /// 启动环境变量，按名字排序。
+    pub launch_env: Vec<(String, String)>,
     pub refresh_launch_from_settings: bool,
-    pub fork_session_id: Option<String>,
-    pub fork_title: Option<String>,
-    pub fork_agent: Option<String>,
-    pub fork_profile_label: Option<String>,
-    pub fork_from_history: bool,
     pub pending_prompt: Option<String>,
     pub pending_delivery_id: Option<String>,
     pub agent_definition_id: Option<String>,
     pub automation_id: Option<String>,
-    pub config_values_json: Option<Vec<u8>>,
-    pub conversation_binding_json: Option<Vec<u8>>,
-    pub pending_agent_preset_json: Option<Vec<u8>>,
-    pub session_title_json: Option<Vec<u8>>,
+    /// 最后生效的 provider 配置：`(config_id, value_id)`，按设置顺序。
+    pub config_values: Vec<(String, String)>,
+    /// 绑定到自动化 Run 时是它的 id；普通对话为 `None`。
+    pub binding_automation_run_id: Option<String>,
+    pub pending_agent_preset: Option<String>,
+    pub session_title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,27 +222,103 @@ pub struct TerminalThemeSnapshot {
     pub search_hit_current: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AutoModelSnapshot {
-    pub providers: Vec<String>,
+/// 哪一家的自定义 provider 名单（「这个 provider 的模型目录由 Smelt 维护」）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoModelHarness {
+    Dsh,
+    Pi,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl AutoModelHarness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dsh => "dsh",
+            Self::Pi => "pi",
+        }
+    }
+}
+
+/// 跨启动的额度缓存。只缓存真正拿到额度的项。
+#[derive(Clone, Debug, PartialEq)]
 pub struct QuotaCacheSnapshot {
     pub saved_at_ms: i64,
     pub schema_version: u32,
+    /// 生成这份缓存时注册过的全部 provider，包括没拿到额度的。
     pub provider_ids: Vec<String>,
-    pub providers_json: Vec<u8>,
+    pub statuses: Vec<QuotaCacheStatusRecord>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuotaCacheStatusRecord {
+    pub provider_id: String,
+    pub checked_at_ms: i64,
+    pub error: Option<String>,
+    pub quota: QuotaCacheQuota,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuotaCacheQuota {
+    /// 按时间窗口计的额度（Claude、Codex 等）。
+    Windows(Vec<QuotaCacheWindowRecord>),
+    /// Copilot 的剩余量。`unit` 是 `ai_credits` 或 `premium_requests`。
+    Copilot {
+        unit: String,
+        remaining: f64,
+        limit: Option<f64>,
+        used: Option<f64>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuotaCacheWindowRecord {
+    pub label: String,
+    pub used_percent: f64,
+    pub resets_at_ms: Option<i64>,
+    pub reset_after_seconds: Option<i64>,
+}
+
+/// 守护进程发布给移动端的侧栏菜单。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishedWorkspaceMenuSnapshot {
     pub version: u32,
     pub revision: u64,
     pub source_id: String,
     pub source_revision: u64,
-    pub projects_json: Vec<u8>,
-    pub sessions_json: Vec<u8>,
+    pub projects: Vec<WorkspaceMenuProjectRecord>,
+    pub sessions: Vec<WorkspaceMenuSessionRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceMenuProjectRecord {
+    pub root: String,
+    pub title: String,
+    pub order: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceMenuSessionRecord {
+    pub id: String,
+    /// `terminal` 或 `acp`。
+    pub kind: String,
+    pub title: String,
+    pub custom_title: bool,
+    pub cwd: Option<String>,
+    pub project_root: Option<String>,
+    pub project_title: Option<String>,
+    pub project_order: u32,
+    pub session_order: u32,
+    pub leaf_order: u32,
+    pub agent: Option<String>,
+}
+
+/// 记忆召回的配置。空字符串表示没设。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemorySettingsRecord {
+    pub embedding_base_url: String,
+    pub embedding_model: String,
+    pub embedding_api_key: String,
+    pub rerank_model_provider: String,
+    pub rerank_model_id: String,
 }
 
 /// 记忆的来源可信度。`pending`：读过外部内容的那一轮或无人值守的运行写的，不注入、不召回，

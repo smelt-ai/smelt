@@ -1,12 +1,9 @@
 //! 运行时身份：第一次启动时生成一个 UUID 存进运行时库，之后永久不变。
 //!
 //! 客户端按它区分运行时，和怎么连上无关（socket 路径、iroh endpoint id 都可能变）。
-//! 只有 smeltd 写这个键；GUI 不碰。
+//! 只有 smeltd 写这一行；GUI 不碰。
 
 use std::sync::{Arc, Mutex};
-
-const NAMESPACE: &str = "runtime";
-const KEY: &str = "runtime_id";
 
 /// 只缓存成功的结果。库暂时打不开时 describe 回 `None`，下一次再试，绝不发一个
 /// 没落盘的临时 id：那样运行时一重启，客户端就会把它当成另一台机器。
@@ -38,16 +35,14 @@ pub(crate) fn runtime_id() -> Option<Arc<str>> {
 }
 
 fn load_or_create(store: &smelt_store::Store) -> Result<String, String> {
-    if let Some(raw) = store.get_blob(NAMESPACE, KEY)? {
-        let id =
-            String::from_utf8(raw).map_err(|error| format!("运行时身份不是 UTF-8：{error}"))?;
+    if let Some(id) = store.runtime_id()? {
         if uuid::Uuid::parse_str(&id).is_err() {
             return Err(format!("运行时身份不是 UUID：{id:?}"));
         }
         return Ok(id);
     }
     let id = uuid::Uuid::new_v4().to_string();
-    store.put_blob(NAMESPACE, KEY, id.as_bytes())?;
+    store.put_runtime_id(&id)?;
     Ok(id)
 }
 
@@ -83,13 +78,10 @@ mod tests {
     #[test]
     fn corrupt_runtime_id_is_an_error_not_a_new_identity() {
         let (store, dir) = temp_store();
-        store.put_blob(NAMESPACE, KEY, b"not-a-uuid").unwrap();
+        store.put_runtime_id("not-a-uuid").unwrap();
 
         assert!(load_or_create(&store).is_err());
-        assert_eq!(
-            store.get_blob(NAMESPACE, KEY).unwrap().as_deref(),
-            Some(&b"not-a-uuid"[..])
-        );
+        assert_eq!(store.runtime_id().unwrap().as_deref(), Some("not-a-uuid"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

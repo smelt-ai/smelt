@@ -5,35 +5,15 @@
 
 pub use smelt_model::default_conversation::*;
 
-use serde::{Deserialize, Serialize};
-
-const SQLITE_NAMESPACE: &str = "preferences";
-const SQLITE_KEY: &str = "default_conversation_agent";
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredDefaultConversationAgent {
-    agent_id: String,
-}
-
-/// 读出侧栏默认智能体。记录损坏时视为没设过，不阻塞界面。由运行时调用，
+/// 读出侧栏默认智能体。读失败时视为没设过，不阻塞界面。由运行时调用，
 /// 随 `agent.host.*` 一起交给客户端。
 pub fn load_on(store: &smelt_store::Store) -> Option<String> {
-    let raw = match store.get_blob(SQLITE_NAMESPACE, SQLITE_KEY) {
-        Ok(Some(raw)) => raw,
-        Ok(None) => return None,
+    match store.default_conversation_agent() {
+        Ok(id) => id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty()),
         Err(error) => {
             eprintln!("[default-conversation] 读取默认智能体失败，视为未设置: {error}");
-            return None;
-        }
-    };
-    match serde_json::from_slice::<StoredDefaultConversationAgent>(&raw) {
-        Ok(stored) => {
-            let id = stored.agent_id.trim();
-            (!id.is_empty()).then(|| id.to_string())
-        }
-        Err(error) => {
-            eprintln!("[default-conversation] 默认智能体记录损坏，视为未设置: {error}");
             None
         }
     }
@@ -41,21 +21,9 @@ pub fn load_on(store: &smelt_store::Store) -> Option<String> {
 
 /// 设为 `Some` 记下默认智能体，`None` 清掉。
 pub fn store_on(store: &smelt_store::Store, agent_id: Option<&str>) -> Result<(), String> {
-    match agent_id.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(agent_id) => {
-            let raw = serde_json::to_vec(&StoredDefaultConversationAgent {
-                agent_id: agent_id.to_string(),
-            })
-            .map_err(|error| error.to_string())?;
-            store
-                .put_blob(SQLITE_NAMESPACE, SQLITE_KEY, &raw)
-                .map_err(|error| error.to_string())
-        }
-        None => store
-            .delete_blob(SQLITE_NAMESPACE, SQLITE_KEY)
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-    }
+    store
+        .put_default_conversation_agent(agent_id.map(str::trim).filter(|id| !id.is_empty()))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -130,19 +98,15 @@ mod tests {
     }
 
     #[test]
-    fn stored_default_round_trips_only_the_agent_id() {
-        let stored = StoredDefaultConversationAgent {
-            agent_id: "writer".to_string(),
-        };
-        let json = serde_json::to_value(&stored).unwrap();
-        assert_eq!(json, serde_json::json!({ "agent_id": "writer" }));
-        let restored: StoredDefaultConversationAgent = serde_json::from_value(json).unwrap();
-        assert_eq!(restored.agent_id, "writer");
-        assert!(
-            serde_json::from_value::<StoredDefaultConversationAgent>(
-                serde_json::json!({ "agent_id": "writer", "engine": "pi" })
-            )
-            .is_err()
-        );
+    fn stored_default_round_trips_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            smelt_store::Store::open_or_create(dir.path().join(smelt_store::DATABASE_FILE_NAME))
+                .unwrap();
+        assert_eq!(load_on(&store), None);
+        store_on(&store, Some(" writer ")).unwrap();
+        assert_eq!(load_on(&store).as_deref(), Some("writer"));
+        store_on(&store, None).unwrap();
+        assert_eq!(load_on(&store), None);
     }
 }

@@ -45,23 +45,81 @@ fn snapshot_from_menu(
         revision: menu.revision,
         source_id: menu.source_id.clone(),
         source_revision: menu.source_revision,
-        projects_json: serde_json::to_vec(&menu.projects).map_err(|error| error.to_string())?,
-        sessions_json: serde_json::to_vec(&menu.sessions).map_err(|error| error.to_string())?,
+        projects: menu
+            .projects
+            .iter()
+            .map(|project| smelt_store::WorkspaceMenuProjectRecord {
+                root: project.root.clone(),
+                title: project.title.clone(),
+                order: project.order,
+            })
+            .collect(),
+        sessions: menu
+            .sessions
+            .iter()
+            .map(|session| smelt_store::WorkspaceMenuSessionRecord {
+                id: session.id.clone(),
+                kind: match session.kind {
+                    WorkspaceMenuSessionKind::Terminal => "terminal",
+                    WorkspaceMenuSessionKind::Acp => "acp",
+                }
+                .to_string(),
+                title: session.title.clone(),
+                custom_title: session.custom_title,
+                cwd: session.cwd.clone(),
+                project_root: session.project_root.clone(),
+                project_title: session.project_title.clone(),
+                project_order: session.project_order,
+                session_order: session.session_order,
+                leaf_order: session.leaf_order,
+                agent: session.agent.clone(),
+            })
+            .collect(),
     })
 }
 
 fn menu_from_snapshot(
     snapshot: smelt_store::PublishedWorkspaceMenuSnapshot,
 ) -> Result<WorkspaceMenuSnapshot, String> {
+    let sessions = snapshot
+        .sessions
+        .into_iter()
+        .map(|session| {
+            let kind = match session.kind.as_str() {
+                "terminal" => WorkspaceMenuSessionKind::Terminal,
+                "acp" => WorkspaceMenuSessionKind::Acp,
+                other => return Err(format!("未知的会话类型：{other}")),
+            };
+            Ok(WorkspaceMenuSession {
+                id: session.id,
+                kind,
+                title: session.title,
+                custom_title: session.custom_title,
+                cwd: session.cwd,
+                project_root: session.project_root,
+                project_title: session.project_title,
+                project_order: session.project_order,
+                session_order: session.session_order,
+                leaf_order: session.leaf_order,
+                agent: session.agent,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(WorkspaceMenuSnapshot {
         version: snapshot.version,
         revision: snapshot.revision,
         source_id: snapshot.source_id,
         source_revision: snapshot.source_revision,
-        projects: serde_json::from_slice(&snapshot.projects_json)
-            .map_err(|error| error.to_string())?,
-        sessions: serde_json::from_slice(&snapshot.sessions_json)
-            .map_err(|error| error.to_string())?,
+        projects: snapshot
+            .projects
+            .into_iter()
+            .map(|project| WorkspaceMenuProject {
+                root: project.root,
+                title: project.title,
+                order: project.order,
+            })
+            .collect(),
+        sessions,
     })
 }
 

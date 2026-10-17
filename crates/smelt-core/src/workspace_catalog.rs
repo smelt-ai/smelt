@@ -1,14 +1,11 @@
 //! `workspace.load` / `workspace.save` 背后的运行时实现：工作区目录的持久化和版本。
 //!
-//! 版本号单独存在 kv 里，每次保存加一。保存必须基于当前版本，否则拒绝：两个客户端
+//! 版本号单独一行，每次保存加一。保存必须基于当前版本，否则拒绝：两个客户端
 //! 同时开着时，后到的那份不能悄悄盖掉先到的。
 
 use std::sync::Mutex;
 
 use smelt_runtime_client::protocol::workspace::WorkspaceLoadResult;
-
-const REVISION_NAMESPACE: &str = "workspace_catalog";
-const REVISION_KEY: &str = "revision";
 
 /// 读版本、比对、写快照、写版本必须连成一气。运行时里改工作区快照的其它入口
 /// （比如持久化对话标题）也拿这把锁。
@@ -36,16 +33,9 @@ impl std::fmt::Display for CatalogError {
 }
 
 fn revision_on(store: &smelt_store::Store) -> Result<u64, CatalogError> {
-    let raw = store
-        .get_blob(REVISION_NAMESPACE, REVISION_KEY)
-        .map_err(|e| CatalogError::Store(e.to_string()))?;
-    match raw {
-        None => Ok(0),
-        Some(raw) => String::from_utf8_lossy(&raw)
-            .trim()
-            .parse()
-            .map_err(|_| CatalogError::Store("工作区版本号损坏".into())),
-    }
+    store
+        .workspace_catalog_revision()
+        .map_err(|e| CatalogError::Store(e.to_string()))
 }
 
 pub fn load_on(store: &smelt_store::Store) -> Result<WorkspaceLoadResult, CatalogError> {
@@ -83,11 +73,7 @@ pub fn save_on(
         .map_err(|e| CatalogError::Store(e.to_string()))?;
     let next = current + 1;
     store
-        .put_blob(
-            REVISION_NAMESPACE,
-            REVISION_KEY,
-            next.to_string().as_bytes(),
-        )
+        .put_workspace_catalog_revision(next)
         .map_err(|e| CatalogError::Store(e.to_string()))?;
     Ok(next)
 }

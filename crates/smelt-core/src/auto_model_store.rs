@@ -46,69 +46,33 @@ impl AutoModelStore {
     }
 }
 
-pub fn load(file_name: &str) -> AutoModelStore {
+pub fn load(harness: smelt_store::AutoModelHarness) -> AutoModelStore {
     let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
         return AutoModelStore::default();
     };
-    match get_snapshot(&store, file_name) {
-        Ok(Some(snapshot)) => store_from_snapshot(snapshot),
-        Ok(None) | Err(_) => AutoModelStore::default(),
-    }
-}
-
-pub fn save(file_name: &str, store: &AutoModelStore) {
-    if let Ok(sqlite) = crate::sqlite_state::default_sqlite_store() {
-        let _ = put_snapshot(&sqlite, file_name, &snapshot_from_store(store));
-    }
-}
-
-fn get_snapshot(
-    store: &smelt_store::Store,
-    file_name: &str,
-) -> Result<Option<smelt_store::AutoModelSnapshot>, String> {
-    match file_name {
-        "dsh-auto-models.json" => store.get_dsh_auto_model_snapshot().map_err(Into::into),
-        "pi-auto-models.json" => store.get_pi_auto_model_snapshot().map_err(Into::into),
-        other => Err(format!("未知自动模型名单: {other}")),
-    }
-}
-
-fn put_snapshot(
-    store: &smelt_store::Store,
-    file_name: &str,
-    snapshot: &smelt_store::AutoModelSnapshot,
-) -> Result<(), String> {
-    match file_name {
-        "dsh-auto-models.json" => store
-            .put_dsh_auto_model_snapshot(snapshot)
-            .map_err(Into::into),
-        "pi-auto-models.json" => store
-            .put_pi_auto_model_snapshot(snapshot)
-            .map_err(Into::into),
-        other => Err(format!("未知自动模型名单: {other}")),
-    }
-}
-
-fn snapshot_from_store(store: &AutoModelStore) -> smelt_store::AutoModelSnapshot {
-    smelt_store::AutoModelSnapshot {
-        providers: store.auto_providers(),
-    }
-}
-
-fn store_from_snapshot(snapshot: smelt_store::AutoModelSnapshot) -> AutoModelStore {
     AutoModelStore {
-        providers: snapshot.providers.into_iter().collect(),
+        providers: store
+            .auto_model_providers(harness)
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+    }
+}
+
+pub fn save(harness: smelt_store::AutoModelHarness, store: &AutoModelStore) {
+    if let Ok(sqlite) = crate::sqlite_state::default_sqlite_store() {
+        let _ = sqlite.put_auto_model_providers(harness, &store.auto_providers());
     }
 }
 
 /// 读改写一次。调用点都是「翻一个标记」这种小改动，各自 load/save 容易漏掉其中一半。
 /// 没有实际变化就不落盘，免得每次启动都白写一遍。
-pub fn update(file_name: &str, mutate: impl FnOnce(&mut AutoModelStore)) {
-    let mut store = load(file_name);
+pub fn update(harness: smelt_store::AutoModelHarness, mutate: impl FnOnce(&mut AutoModelStore)) {
+    let mut store = load(harness);
     let before = store.clone();
     mutate(&mut store);
     if store != before {
-        save(file_name, &store);
+        save(harness, &store);
     }
 }
 

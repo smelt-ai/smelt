@@ -117,52 +117,21 @@ pub fn load_session_agent_definition_ids() -> BTreeMap<String, String> {
     let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
         return BTreeMap::new();
     };
-    match store.session_agent_definition_ids() {
-        Ok(Some(ids)) => ids,
-        Ok(None) => match store.get_workspace_snapshot() {
-            Ok(Some(snapshot)) => session_agent_definition_ids_from_snapshot(&snapshot),
-            Ok(None) | Err(_) => BTreeMap::new(),
-        },
-        Err(_) => BTreeMap::new(),
-    }
+    store.session_agent_definition_ids().unwrap_or_default()
 }
 
-/// 从工作区快照里挑出「这条会话属于哪个智能体」。
-fn session_agent_definition_ids_from_snapshot(
-    snapshot: &smelt_store::WorkspaceSnapshot,
-) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    for session in &snapshot.sessions {
-        let Some(acp) = &session.acp else {
-            continue;
-        };
-        let Some(sid) = acp
-            .sid
-            .as_deref()
-            .map(str::trim)
-            .filter(|sid| !sid.is_empty())
-        else {
-            continue;
-        };
-        let Some(id) = acp
-            .agent_definition_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            continue;
-        };
-        map.insert(sid.to_string(), id.to_string());
-    }
-    map
-}
-
+/// 测试用：工作区文档经运行时库落盘，再按库里的绑定读回来。
 #[cfg(test)]
 fn session_agent_definition_ids(workspace: &serde_json::Value) -> BTreeMap<String, String> {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store =
+        smelt_store::Store::open_or_create(dir.path().join(smelt_store::DATABASE_FILE_NAME))
+            .expect("测试库");
     let raw = serde_json::to_vec(workspace).expect("测试夹具应能序列化");
     let snapshot =
         smelt_store::Store::workspace_snapshot_from_json(&raw).expect("测试夹具应能转成工作区快照");
-    session_agent_definition_ids_from_snapshot(&snapshot)
+    store.put_workspace_snapshot(&snapshot).expect("写入工作区");
+    store.session_agent_definition_ids().expect("读回绑定")
 }
 
 fn resolve_agent_execution_definition(
@@ -1047,7 +1016,12 @@ mod tests {
             ]
         });
 
-        assert!(session_agent_definition_ids(&workspace).is_empty());
+        let map = session_agent_definition_ids(&workspace);
+        assert_eq!(map.get("acp-1"), None);
+        assert!(
+            !map.contains_key("   "),
+            "空白会话 id 不能作为键：库里会换成生成的 id"
+        );
     }
 
     /// 历史页、工具面板只拿得到一个 cwd，靠反解认出「现在在某个智能体的上下文

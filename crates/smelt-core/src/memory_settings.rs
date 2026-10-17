@@ -1,4 +1,4 @@
-//! 记忆召回的配置，存在主库 kv 的 `memory` 作用域下，设计见 `docs/agent-memory.md` 5.2：
+//! 记忆召回的配置，存在运行时库的 `memory_settings` 表里，设计见 `docs/agent-memory.md` 5.2：
 //! - 向量检索：用户手动填一个 OpenAI 兼容的 `/embeddings` 服务（含 Ollama 等本地服务）。
 //!   没配或调用失败时，召回直接退回关键词 + 模型重排。
 //! - 重排模型：从 Pi 已登录的模型里选；不选就自动挑。选了但不可用时退回检索结果。
@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-const NAMESPACE: &str = "memory";
 /// `settings get` 不回显密钥本身，只说明设没设。
 const API_KEY_SET: &str = "已设置";
 
@@ -27,35 +26,35 @@ impl EmbeddingSettings {
     }
 }
 
-fn storage_key(key: &str) -> &str {
-    key.strip_prefix("memory.").unwrap_or(key)
+/// 设置项 key 对应表里的哪一列。
+fn field<'a>(
+    record: &'a mut smelt_store::MemorySettingsRecord,
+    key: &str,
+) -> Option<&'a mut String> {
+    match key {
+        EMBEDDING_BASE_URL => Some(&mut record.embedding_base_url),
+        EMBEDDING_MODEL => Some(&mut record.embedding_model),
+        EMBEDDING_API_KEY => Some(&mut record.embedding_api_key),
+        RERANK_MODEL_PROVIDER => Some(&mut record.rerank_model_provider),
+        RERANK_MODEL_ID => Some(&mut record.rerank_model_id),
+        _ => None,
+    }
 }
 
 pub fn load_rerank_model_on(
     store: &smelt_store::Store,
 ) -> Result<Option<RerankModel>, smelt_store::StoreError> {
-    let read = |key: &str| -> Result<String, smelt_store::StoreError> {
-        Ok(store
-            .get_blob(NAMESPACE, storage_key(key))?
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default())
-    };
-    let provider = read(RERANK_MODEL_PROVIDER)?;
-    let id = read(RERANK_MODEL_ID)?;
+    let record = store.memory_settings()?;
+    let (provider, id) = (record.rerank_model_provider, record.rerank_model_id);
     Ok((!provider.is_empty() && !id.is_empty()).then_some(RerankModel { provider, id }))
 }
 
 pub fn load_on(store: &smelt_store::Store) -> Result<EmbeddingSettings, smelt_store::StoreError> {
-    let read = |key: &str| -> Result<String, smelt_store::StoreError> {
-        Ok(store
-            .get_blob(NAMESPACE, storage_key(key))?
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default())
-    };
+    let record = store.memory_settings()?;
     Ok(EmbeddingSettings {
-        base_url: read(EMBEDDING_BASE_URL)?,
-        model: read(EMBEDDING_MODEL)?,
-        api_key: read(EMBEDDING_API_KEY)?,
+        base_url: record.embedding_base_url,
+        model: record.embedding_model,
+        api_key: record.embedding_api_key,
     })
 }
 
@@ -72,13 +71,13 @@ pub fn apply_on(store: &smelt_store::Store, key: &str, value: &Value) -> Result<
     {
         return Err(format!("{key} 必须是 http:// 或 https:// 开头的地址"));
     }
-    let storage = storage_key(key);
-    let result = if text.is_empty() {
-        store.delete_blob(NAMESPACE, storage).map(|_| ())
-    } else {
-        store.put_blob(NAMESPACE, storage, text.as_bytes())
-    };
-    result.map_err(|error| error.to_string())
+    store
+        .modify_memory_settings(|record| {
+            let slot = field(record, key).ok_or_else(|| format!("未知的记忆设置：{key}"))?;
+            *slot = text;
+            Ok::<_, String>(())
+        })
+        .map(|_| ())
 }
 
 /// 给 `settings get` 和设置页看的形状：密钥只显示设没设。

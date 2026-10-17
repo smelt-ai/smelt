@@ -4,8 +4,6 @@
 //! [`default_sqlite_store`] / [`open_sqlite_store`] 读写 `~/.smelt/smelt.sqlite3`。
 //! 各领域都走类型化的表，不经 JSON 文档入口。
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,30 +23,6 @@ pub fn enable_sqlite_state() {
 /// 而不是把「测试进程默认不碰家目录」误报成业务错误。
 pub fn is_sqlite_state_enabled() -> bool {
     SQLITE_STATE_ENABLED.load(Ordering::Acquire)
-}
-
-/// 直接读写 SQLite 的作用域 blob，不经过 JSON 文档路由。
-///
-/// 这组接口给只存在于新版应用里的偏好使用：不会读取同名 `.json` 文件，也不会
-/// 写入/删除 legacy tombstone。值仅在 SQLite blob 内用 serde JSON 编码，物理存储始终
-/// 是 `~/.smelt/smelt.sqlite3`。
-pub fn load_sqlite_kv<T: DeserializeOwned>(
-    namespace: &str,
-    key: &str,
-) -> Result<Option<T>, String> {
-    let Some(raw) = default_sqlite_store()?.get_blob(namespace, key)? else {
-        return Ok(None);
-    };
-    serde_json::from_slice(&raw)
-        .map(Some)
-        .map_err(|error| format!("SQLite KV {namespace}/{key} 解析失败: {error}"))
-}
-
-/// 直接写入 SQLite KV；不会生成兼容用的 JSON 文件。
-pub fn save_sqlite_kv<T: Serialize>(namespace: &str, key: &str, value: &T) -> Result<(), String> {
-    let store = default_sqlite_store()?;
-    let raw = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    store.put_blob(namespace, key, &raw).map_err(Into::into)
 }
 
 /// 当前进程的默认 SQLite 库。桌面启动启用 SQLite 路由后才可用。

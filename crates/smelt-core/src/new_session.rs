@@ -12,9 +12,6 @@ pub use smelt_model::new_session::*;
 use crate::acp_conn::AcpRuntimeDiagnostics;
 use crate::session_control::AcpAgentOption;
 
-const NEW_SESSION_SQLITE_NAMESPACE: &str = "preferences";
-const NEW_SESSION_SQLITE_KEY: &str = "new_session_pins";
-
 /// 落盘的启动项（无 GUI 进程也能读）。库里没有这份快照时退回出厂默认，
 /// 否则守护侧会在用户第一次改设置之前把终端分组渲染成空的。
 pub fn stored_launch_entries() -> Vec<LaunchEntry> {
@@ -36,14 +33,12 @@ pub fn stored_launch_entries() -> Vec<LaunchEntry> {
 }
 
 pub fn load_preferences() -> NewSessionPreferences {
-    match crate::sqlite_state::load_sqlite_kv::<NewSessionPreferences>(
-        NEW_SESSION_SQLITE_NAMESPACE,
-        NEW_SESSION_SQLITE_KEY,
-    ) {
-        Ok(Some(preferences)) => preferences,
-        Ok(None) => NewSessionPreferences::default(),
+    match crate::sqlite_state::default_sqlite_store()
+        .and_then(|store| store.new_session_pins().map_err(|error| error.to_string()))
+    {
+        Ok(pinned) => NewSessionPreferences { pinned },
         Err(error) => {
-            eprintln!("[new-session] 读取 SQLite Pin 偏好失败，使用默认值: {error}");
+            eprintln!("[new-session] 读取 Pin 偏好失败，使用默认值: {error}");
             NewSessionPreferences::default()
         }
     }
@@ -59,12 +54,12 @@ pub fn toggle_pin(params: PinParams) -> NewSessionPreferences {
 }
 
 fn save_preferences(preferences: &NewSessionPreferences) {
-    if let Err(error) = crate::sqlite_state::save_sqlite_kv(
-        NEW_SESSION_SQLITE_NAMESPACE,
-        NEW_SESSION_SQLITE_KEY,
-        preferences,
-    ) {
-        eprintln!("[new-session] 保存 SQLite Pin 偏好失败: {error}");
+    if let Err(error) = crate::sqlite_state::default_sqlite_store().and_then(|store| {
+        store
+            .put_new_session_pins(&preferences.pinned)
+            .map_err(|error| error.to_string())
+    }) {
+        eprintln!("[new-session] 保存 Pin 偏好失败: {error}");
     }
 }
 
