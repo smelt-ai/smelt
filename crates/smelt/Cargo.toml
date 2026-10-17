@@ -62,7 +62,6 @@ notify = "6"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # 生成 agent hook 命令时按 shell 规则引用 smelt-notify 路径。
-shell-words = "1"
 # macOS：菜单栏 status item 需要直接操作 AppKit（GPUI 没有 status item 概念），
 # 用 objc crate 声明 Objective-C 类做 target-action。系统通知使用现代、带异步回执的
 # UserNotifications API；objc2 相关版本与现有依赖树对齐。

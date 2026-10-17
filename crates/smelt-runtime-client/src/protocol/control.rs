@@ -125,6 +125,9 @@ define_control_methods! {
     AgentSpaceEnsure => (AGENT_SPACE_ENSURE_METHOD, "agent.space.ensure"),
     HistoryRememberAgent => (HISTORY_REMEMBER_AGENT_METHOD, "history.remember_agent"),
     MigrationTakeClientState => (MIGRATION_TAKE_CLIENT_STATE_METHOD, "migration.take_client_state"),
+    AgentHooksStatus => (AGENT_HOOKS_STATUS_METHOD, "agent.hooks.status"),
+    AgentHooksInstall => (AGENT_HOOKS_INSTALL_METHOD, "agent.hooks.install"),
+    AgentHooksUninstall => (AGENT_HOOKS_UNINSTALL_METHOD, "agent.hooks.uninstall"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -534,7 +537,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 72);
+        assert_eq!(names.len(), 75);
     }
 
     #[test]

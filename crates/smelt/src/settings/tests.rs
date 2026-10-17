@@ -155,7 +155,7 @@ mod iroh_pairing_tests {
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{acp_cmd_setting_value, command_uses_smelt_notify, daemon_info_line, fmt_uptime};
+    use super::{acp_cmd_setting_value, daemon_info_line, fmt_uptime};
     use crate::terminal::DaemonInfo;
     use smelt_core::agent_kind::ConversationAgentKind;
 
@@ -225,132 +225,11 @@ mod daemon_info_tests {
         assert!(daemon_info_line(&info).contains("已运行 0 秒"));
     }
 
-    #[test]
-    fn hook_ownership_requires_smelt_notify_as_the_executable() {
-        assert!(command_uses_smelt_notify(
-            "SMELT_HOOK_PROVIDER=copilot /Users/test/.smelt/bin/smelt-notify"
-        ));
-        assert!(command_uses_smelt_notify(
-            "'/Applications/Smelt App/smelt-notify'"
-        ));
-        assert!(!command_uses_smelt_notify("echo smelt-notify"));
-        assert!(!command_uses_smelt_notify(
-            "if test -x /tmp/smelt-notify; then /tmp/other-hook; fi"
-        ));
-    }
-
-    #[test]
-    fn removing_smelt_hook_preserves_third_party_handlers() {
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-hook-remove-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("hooks.json");
-        std::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "hooks": {
-                    "PreToolUse": [{
-                        "matcher": "*",
-                        "hooks": [
-                            {"type":"command","command":"/tmp/smelt-notify"},
-                            {"type":"command","command":"/tmp/orca-hook"}
-                        ]
-                    }]
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        super::uninstall_hook_file(Some(path.clone()), &["PreToolUse"]).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let handlers = value["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
-        assert_eq!(handlers.len(), 1);
-        assert_eq!(handlers[0]["command"], "/tmp/orca-hook");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_json_write_keeps_dotfile_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-hook-symlink-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("managed-settings.json");
-        let link = dir.join("settings.json");
-        std::fs::write(&target, "{}").unwrap();
-        symlink(&target, &link).unwrap();
-
-        super::write_json_atomic(&link, &serde_json::json!({"hooks":{"Stop":[]}})).unwrap();
-        assert!(
-            std::fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
-        assert_eq!(value["hooks"]["Stop"], serde_json::json!([]));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }
 
 #[cfg(test)]
 mod antigravity_terminal_tests {
-    use super::{
-        ANTIGRAVITY_HOOK_EVENTS, ANTIGRAVITY_HOOK_NAME, LaunchConfig, LaunchEntry,
-        antigravity_event_installed, command_uses_smelt_notify, default_launch_entries,
-        merge_antigravity_hooks, remove_launch_entry_at, uninstall_antigravity_hooks_at,
-        write_json_atomic,
-    };
-
-    fn temp_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-{label}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn smelt_handler_count(definition: &serde_json::Value, event: &str) -> usize {
-        let Some(handlers) = definition.get(event).and_then(|value| value.as_array()) else {
-            return 0;
-        };
-        if event == "PostToolUse" {
-            handlers
-                .iter()
-                .filter_map(|group| group.get("hooks").and_then(|value| value.as_array()))
-                .flatten()
-                .filter(|handler| {
-                    handler
-                        .get("command")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(command_uses_smelt_notify)
-                })
-                .count()
-        } else {
-            handlers
-                .iter()
-                .filter(|handler| {
-                    handler
-                        .get("command")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(command_uses_smelt_notify)
-                })
-                .count()
-        }
-    }
+    use super::{LaunchConfig, LaunchEntry, default_launch_entries, remove_launch_entry_at};
 
     #[test]
     fn default_terminal_entries_include_registered_full_permission_launches() {
@@ -415,70 +294,6 @@ mod antigravity_terminal_tests {
         assert_eq!(config.entries.len(), builtin_count);
     }
 
-    #[test]
-    fn antigravity_hook_merge_is_idempotent_and_preserves_other_hooks() {
-        let mut root = serde_json::json!({
-            "third-party": {
-                "Stop": [{"type":"command","command":"/tmp/other-stop-hook"}]
-            },
-            "smelt-status-notifications": {
-                "PostInvocation": [
-                    {"type":"command","command":"/tmp/other-invocation-hook"}
-                ]
-            }
-        });
-        merge_antigravity_hooks(&mut root).unwrap();
-        merge_antigravity_hooks(&mut root).unwrap();
-
-        let definition = &root[ANTIGRAVITY_HOOK_NAME];
-        for event in ANTIGRAVITY_HOOK_EVENTS {
-            assert!(antigravity_event_installed(definition, event));
-            assert_eq!(smelt_handler_count(definition, event), 1);
-        }
-        assert_eq!(
-            definition["PostInvocation"][0]["command"],
-            "/tmp/other-invocation-hook"
-        );
-        assert_eq!(
-            root["third-party"]["Stop"][0]["command"],
-            "/tmp/other-stop-hook"
-        );
-    }
-
-    #[test]
-    fn antigravity_hook_uninstall_removes_only_smelt_handlers() {
-        let dir = temp_dir("antigravity-hook-uninstall");
-        let path = dir.join("hooks.json");
-        let mut root = serde_json::json!({
-            "third-party": {
-                "Stop": [{"type":"command","command":"/tmp/other-stop-hook"}]
-            },
-            "smelt-status-notifications": {
-                "PostInvocation": [
-                    {"type":"command","command":"/tmp/other-invocation-hook"}
-                ]
-            }
-        });
-        merge_antigravity_hooks(&mut root).unwrap();
-        write_json_atomic(&path, &root).unwrap();
-
-        uninstall_antigravity_hooks_at(&path).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let definition = &value[ANTIGRAVITY_HOOK_NAME];
-        for event in ANTIGRAVITY_HOOK_EVENTS {
-            assert_eq!(smelt_handler_count(definition, event), 0);
-        }
-        assert_eq!(
-            definition["PostInvocation"][0]["command"],
-            "/tmp/other-invocation-hook"
-        );
-        assert_eq!(
-            value["third-party"]["Stop"][0]["command"],
-            "/tmp/other-stop-hook"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }
 
 /// 下发给移动端的配色快照必须跟 PC 实际渲染色同源——这里锁住两件事：

@@ -782,9 +782,20 @@ fn agent_groups(
                 ),
             SettingGroup::new()
                 .item(SettingItem::render(move |_, _, cx: &mut App| {
-                    // render 路径不走实时读盘：hooks 状态 5s 缓存，装/卸后主动失效。
-                    let hook_status = hooks_installed_status();
-                    let installed = hook_status.iter().all(|provider| provider.installed);
+                    // 状态由运行时检测，这里只读设置窗口打开时取回的缓存。
+                    let (hook_status, notify_path, busy) = cx
+                        .try_global::<AgentHooksCache>()
+                        .map(|cache| {
+                            (
+                                cache.status.as_ref().map(|s| s.providers.clone()),
+                                cache.status.as_ref().map(|s| s.notify_path.clone()),
+                                cache.busy,
+                            )
+                        })
+                        .unwrap_or_default();
+                    let installed = hook_status
+                        .as_ref()
+                        .is_some_and(|providers| providers.iter().all(|provider| provider.installed));
                     let (fg, muted, border) = {
                         let t = cx.theme();
                         (t.foreground, t.muted_foreground, t.border)
@@ -792,9 +803,11 @@ fn agent_groups(
                     let success: Hsla = rgb(crate::ui_theme::green()).into();
                     v_flex()
                         .gap_2()
-                        .child(
-                            h_flex().gap_2().flex_wrap().children(
-                                hook_status.into_iter().map(|provider| {
+                        .child(match hook_status {
+                            Some(providers) => h_flex()
+                                .gap_2()
+                                .flex_wrap()
+                                .children(providers.into_iter().map(|provider| {
                                     div()
                                         .text_sm()
                                         .text_color(if provider.installed { success } else { muted })
@@ -807,18 +820,22 @@ fn agent_groups(
                                                 "未接入"
                                             }
                                         ))
-                                }),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
+                                }))
+                                .into_any_element(),
+                            None => div()
+                                .text_sm()
                                 .text_color(muted)
-                                .child(format!(
-                                    "路径：{}",
-                                    smelt_notify_path().display()
-                                )),
-                        )
+                                .child("正在读取接入状态…")
+                                .into_any_element(),
+                        })
+                        .when_some(notify_path, |this, path| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("路径：{path}")),
+                            )
+                        })
                         .child(
                             h_flex()
                                 .gap_2()
@@ -843,22 +860,13 @@ fn agent_groups(
                                         .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                                             // 先记用户意图：即使某个 provider 本次安装失败，
                                             // 下次启动也会继续校正，而不是悄悄退回关闭。
+                                            if busy {
+                                                return;
+                                            }
                                             apply_agent_host(|c| {
                                                 c.agent_hooks_enabled = true;
                                             }, cx);
-                                            let result = install_agent_hooks();
-                                            invalidate_hooks_cache();
-                                            match result {
-                                                Ok(()) => {
-                                                    crate::status_item::notify_success("Agent hooks 已安装");
-                                                    cx.refresh_windows();
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("[workspace] 安装 hooks 失败：{e}");
-                                                    crate::status_item::notify_error(format!("安装失败：{e}"));
-                                                    cx.refresh_windows();
-                                                }
-                                            }
+                                            install_agent_hooks(cx);
                                         }),
                                 )
                                 .child(
@@ -876,22 +884,13 @@ fn agent_groups(
                                         .child("移除 Smelt hooks")
                                         .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
                                             // 先关闭自动安装，避免部分移除失败后重启又被装回。
+                                            if busy {
+                                                return;
+                                            }
                                             apply_agent_host(|c| {
                                                 c.agent_hooks_enabled = false;
                                             }, cx);
-                                            let result = uninstall_agent_hooks();
-                                            invalidate_hooks_cache();
-                                            match result {
-                                                Ok(()) => {
-                                                    crate::status_item::notify_success("Smelt hooks 已移除");
-                                                    cx.refresh_windows();
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("[workspace] 移除 hooks 失败：{e}");
-                                                    crate::status_item::notify_error(format!("移除失败：{e}"));
-                                                    cx.refresh_windows();
-                                                }
-                                            }
+                                            uninstall_agent_hooks(cx);
                                         }),
                                 ),
                         )

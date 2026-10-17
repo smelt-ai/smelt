@@ -163,6 +163,36 @@ pub struct AgentSpaceResult {
     pub path: String,
 }
 
+/// 各家 agent 的 hooks 接入状态。
+pub enum AgentHooksStatus {}
+
+impl ControlCall for AgentHooksStatus {
+    type Params = EmptyParams;
+    type Result = crate::agent_hooks::AgentHooksStatus;
+
+    const METHOD: ControlMethod = ControlMethod::AgentHooksStatus;
+}
+
+/// 给各家 agent 装上 Smelt 的 hooks（幂等，也用来校正被改坏的配置）。返回装完后的状态。
+pub enum AgentHooksInstall {}
+
+impl ControlCall for AgentHooksInstall {
+    type Params = EmptyParams;
+    type Result = crate::agent_hooks::AgentHooksStatus;
+
+    const METHOD: ControlMethod = ControlMethod::AgentHooksInstall;
+}
+
+/// 移除各家 agent 配置里的 Smelt hooks，别人的条目原样保留。返回移除后的状态。
+pub enum AgentHooksUninstall {}
+
+impl ControlCall for AgentHooksUninstall {
+    type Params = EmptyParams;
+    type Result = crate::agent_hooks::AgentHooksStatus;
+
+    const METHOD: ControlMethod = ControlMethod::AgentHooksUninstall;
+}
+
 /// 升级后桌面第一次启动时，取回以前存在运行时库里的客户端数据。
 pub enum MigrationTakeClientState {}
 

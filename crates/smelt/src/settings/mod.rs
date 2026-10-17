@@ -25,6 +25,7 @@ use gpui_component::*;
 use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
 mod agent_hooks;
+mod bundled_helpers;
 mod memory;
 mod nav;
 mod pi_auth;
@@ -42,16 +43,10 @@ pub(super) use remote::*;
 pub(super) use remote::qr_png_for_url;
 
 pub(super) use agent_hooks::{
-    hooks_installed_status, install_agent_hooks, invalidate_hooks_cache, smelt_notify_path,
-    sync_bundled_smelt_agent_mcp, sync_bundled_smelt_notify, uninstall_agent_hooks,
+    AgentHooksCache, install_agent_hooks, reconcile_agent_hooks, refresh_agent_hooks_status,
+    uninstall_agent_hooks,
 };
-
-#[cfg(test)]
-pub(super) use agent_hooks::{
-    ANTIGRAVITY_HOOK_EVENTS, ANTIGRAVITY_HOOK_NAME, antigravity_event_installed,
-    command_uses_smelt_notify, merge_antigravity_hooks, uninstall_antigravity_hooks_at,
-    uninstall_hook_file, write_json_atomic,
-};
+pub(super) use bundled_helpers::{sync_bundled_smelt_agent_mcp, sync_bundled_smelt_notify};
 
 // ===================== 外观 / 启动 配置类型 =====================
 

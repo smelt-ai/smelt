@@ -24,6 +24,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 anyhow = "1"
 dirs = "5"
+shell-words = "1"
 reqwest = { version = "0.12", features = ["json"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 # ACP 对话共享模型（acp_chat）里的逐行 diff 计算，GPUI 和 smelt 都用同一个算法。

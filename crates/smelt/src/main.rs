@@ -4447,14 +4447,10 @@ fn main() {
             eprintln!("[workspace] 同步 smelt skill 失败：{error}");
         }
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
-        // 安装含 Codex app-server 信任握手和文件 IO，全部放后台，不能阻塞首帧。
+        // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         settings::start_agent_host_load(cx, |cx| {
             if cx.global::<settings::AgentHostState>().agent_hooks_enabled {
-                thread::spawn(|| {
-                    if let Err(error) = settings::install_agent_hooks() {
-                        eprintln!("[workspace] 自动安装 Agent hooks 失败：{error}");
-                    }
-                });
+                settings::reconcile_agent_hooks(cx);
             }
         });
         // 标记为「自动」的 dsh 自定义 provider：照端点上的模型刷新一遍目录。用户没

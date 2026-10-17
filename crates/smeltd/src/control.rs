@@ -217,6 +217,40 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::AgentHooksStatus => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_hooks::hooks_status(),
+            )
+        }
+        ControlMethod::AgentHooksInstall | ControlMethod::AgentHooksUninstall => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let result = if known_method == ControlMethod::AgentHooksInstall {
+                smelt_core::agent_hooks::install_agent_hooks()
+            } else {
+                smelt_core::agent_hooks::uninstall_agent_hooks()
+            };
+            match result {
+                Ok(()) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::agent_hooks::hooks_status(),
+                ),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
         ControlMethod::MigrationTakeClientState => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

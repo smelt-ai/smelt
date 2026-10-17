@@ -163,6 +163,7 @@ impl Workspace {
     /// 的重入保护直接 panic 崩溃（"cannot update ... while it is already being
     /// updated"）——这就是「点齿轮整个 app 崩溃」的真正原因。
     pub fn open_settings_window(&self, cx: &mut Context<Self>) {
+        super::refresh_agent_hooks_status(cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {
             if let Some(handle) = cx
