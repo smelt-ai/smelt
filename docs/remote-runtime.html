@@ -420,7 +420,7 @@
   <li>迁移：GUI 自己也不能为了迁移去打开运行时库，所以由运行时来做。新版 GUI 第一次启动时调一次 <code>migration.take_client_state</code>，运行时从自己库里读出外观、更新设置、通知开关、界面状态交回来；GUI 只填客户端库里还空着的条目，成功后记下 <code>meta/runtime_migrated</code>，之后的启动只读客户端库。失败就下次启动再试。运行时库里的旧行此后不再被任何人读写；下一个版本删掉这几张表和这个方法，不保留双写。</li>
   <li><b>外观归客户端。</b><code>smelt settings set appearance.*</code> 由运行时按可脚本目录校验，再以 <code>appearance.change_requested</code> 事件转给持有 <code>appearance.control</code> 能力的桌面端（只发给桌面，网关不订阅），桌面套用后存进客户端库、立即重绘。没有在线的桌面端时整单拒绝（<code>failed_precondition</code>），不会出现「记忆配置写了、外观没生效」的半截结果。<code>settings.get</code> 只返回运行时自己存的记忆配置。</li>
 </ul>
-<div class="note"><b>进度</b>：<span class="chip chip-cl">已完成</span> <code>smelt-client-store</code> crate、外观 / 更新设置 / 通知开关 / 界面状态迁到客户端库、一次性迁移、外观修改事件。<span class="chip chip-split">未完成</span> GUI 还依赖 <code>smelt-store</code>（Provider 领域的剩余直连，见 D4 能力清单），要等这些都走运行时后才能从依赖上拿掉。</div>
+<div class="note"><b>进度</b>：<span class="chip chip-cl">已完成</span> <code>smelt-client-store</code> crate、外观 / 更新设置 / 通知开关 / 界面状态迁到客户端库、一次性迁移、外观修改事件。<span class="chip chip-done">已完成</span> GUI 不再依赖 <code>smelt-store</code>（只剩测试里拿它校验工作区文档格式）；更新器的事务状态也挪进了客户端库。</div>
 
 <!-- ───────────────────────────────────────── -->
 <h2>9. D6 RuntimeId 与多运行时</h2>
@@ -518,7 +518,7 @@
       <li>「在 Finder 中显示」、<code>cx.open_path</code>：只对本机运行时提供。</li>
       <li>粘贴图片不用改：图片在后台读成字节再发出去（<code>smelt-acp-view/src/acp_view.rs:3346</code>）。</li>
     </ul>
-    <p class="exit"><b>完成标准：</b>由依赖关系保证，不靠人工检查。<code>smelt-core</code> 拆成两半：GUI 用到的纯类型和纯函数（ACP 快照模型、OSC 解析、主题索引等）移到不做 IO 的 crate，wire 类型并入 <code>smelt-runtime-client::protocol</code>；<code>smelt-core</code> 只留执行逻辑，只有 smeltd 依赖。引导本机运行时要用的那一小块（拉起守护、校验映像指纹）属于客户端，随 GUI 走。<code>crates/smelt</code> 不再依赖 <code>smelt-core</code>、<code>smelt-git</code> 和运行时那部分表，漏搬的调用会直接编译不过。除了引导本机运行时、打开本机 IDE 和 Finder，GUI 不再启动任何子进程。</p>
+    <p class="exit"><b>完成标准：</b>由依赖关系保证，不靠人工检查。<code>smelt-core</code> 拆成两半：GUI 用到的纯类型和纯函数（ACP 快照模型、OSC 解析、主题索引等）移到不做 IO 的 crate，wire 类型并入 <code>smelt-runtime-client::protocol</code>；<code>smelt-core</code> 只留执行逻辑，只有 smeltd 依赖。引导本机运行时要用的那一小块（拉起守护、校验映像指纹）属于客户端，随 GUI 走。<code>crates/smelt</code> 不再依赖 <code>smelt-core</code>、<code>smelt-git</code> 和运行时那部分表，漏搬的调用会直接编译不过。除了引导本机运行时、打开本机 IDE 和 Finder，GUI 不再启动任何子进程。<br><span class="chip chip-done">已完成</span> 拆出 <code>smelt-model</code>（纯类型和纯函数，可编进 Android；wire 类型暂随领域放在这里，<code>control_api</code> 也在其中）、<code>smelt-sys</code>（双方共用的底层工具）、<code>smelt-client</code>（订阅连接、ACP 会话客户端、守护操作、更新器）；本机运行时的连接入口进了 <code>smelt-runtime-client::local</code>。<code>crates/smelt</code>、<code>smelt-ui</code>、<code>smelt-acp-view</code> 的正式依赖里已没有 smelt-core、smelt-store、smelt-git（测试仍用它们造归约状态、校验存储格式）。GUI 剩下的子进程只有剪贴板、拉起本机守护和打开 IDE/访达。</p>
   </div>
 </div>
 <div class="phase">
