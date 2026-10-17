@@ -26,6 +26,7 @@ use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
 mod agent_hooks;
 mod bundled_helpers;
+mod dsh_config;
 mod pi_config;
 mod memory;
 mod nav;
@@ -1043,22 +1044,6 @@ impl PiLoginView {
     }
 }
 
-/// 保存自定义 provider 时，从各个输入框读出来的纯文本草稿。
-///
-/// 单独拎出来是因为「不填模型」那条路要先去端点问一遍模型，问完才能落盘，而
-/// `Entity<InputState>` 不能跨 await 带走，也不该在几秒之后再去读。
-#[derive(Clone)]
-pub struct NativeDshCustomProviderDraft {
-    pub previous_id: Option<String>,
-    pub id: String,
-    pub display_name: String,
-    pub api: String,
-    pub base_url: String,
-    pub api_key_env: String,
-    pub api_key: String,
-    pub set_default: bool,
-}
-
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeDshModelSettings {
@@ -1109,11 +1094,6 @@ struct NativeDshCustomModel {
     name: String,
     context_window: Option<u64>,
     max_tokens: Option<u64>,
-}
-
-#[derive(serde::Deserialize)]
-struct NativeDshModelSaveResponse {
-    ok: bool,
 }
 
 /// 画"推理强度"那一栏。
@@ -1479,6 +1459,9 @@ struct SettingsRenderSnapshot {
     dsh_model_choices_view: Option<DshModelChoicesView>,
     native_dsh_model_settings: Option<Result<NativeDshModelSettings, String>>,
     dsh_settings: Result<smelt_core::agent_kind::DshSettingsSummary, String>,
+    dsh_profiles: Vec<AcpProfile>,
+    dsh_missing_profiles: Vec<smelt_core::dsh_service::DshMissingProfile>,
+    dsh_paths: smelt_core::dsh_service::DshConfigPaths,
     pi_model_editor: Option<PiModelEditor>,
     pi_custom_provider_editor: Option<PiCustomProviderEditor>,
     /// Pi 内置 provider 的登录状态；`None` 表示这台机器上还没问过。

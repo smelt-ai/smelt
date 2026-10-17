@@ -39,42 +39,23 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// 找出能回答能力查询的 profile。
-    ///
-    /// 返回 profile 名而不只是路径：桥要用 `--profile` 把 dsh 装配成**那个**
-    /// profile，能力答案本来就是 profile 相关的。
-    fn native_dsh_capabilities_profile() -> Option<String> {
-        smelt_core::agent_kind::native_dsh_profiles()
-            .into_iter()
-            .find(|profile| {
-                smelt_core::agent_kind::dsh_model_capabilities_entry(&profile.workspace_dir)
-                    .is_some()
-            })
-            .map(|profile| profile.workspace_dir)
+    pub(super) fn reload_native_dsh_model_settings(&mut self, cx: &mut Context<Self>) {
+        self.refresh_dsh_config(cx);
     }
 
-    fn run_native_dsh_model_settings(
-        action: &str,
-        payload: Option<&serde_json::Value>,
-    ) -> Result<Vec<u8>, String> {
-        smelt_core::agent_kind::dsh_model_settings(action, payload)
-    }
-
-    fn load_native_dsh_model_settings() -> Result<NativeDshModelSettings, String> {
-        let output = Self::run_native_dsh_model_settings("read", None)?;
-        serde_json::from_slice(&output)
-            .map_err(|error| format!("读取 DSH 模型设置响应失败：{error}"))
-    }
-
-    pub(super) fn reload_native_dsh_model_settings(&mut self) {
-        self.dsh_native_model_settings = Some(Self::load_native_dsh_model_settings());
+    /// 缓存里的 DSH 模型设置；还没从运行时取到时给出原因。
+    fn native_dsh_model_settings_view(&self) -> Result<NativeDshModelSettings, String> {
+        match &self.dsh_native_model_settings {
+            Some(settings) => settings.clone(),
+            None => Err(self.dsh_config_pending_text()),
+        }
     }
 
     pub fn edit_native_dsh_model_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::InputState;
 
         self.dsh_model_editor_error = None;
-        let settings = match Self::load_native_dsh_model_settings() {
+        let settings = match self.native_dsh_model_settings_view() {
             Ok(settings) => settings,
             Err(error) => {
                 self.dsh_model_editor_error = Some(error.clone());
@@ -83,7 +64,6 @@ impl Workspace {
                 return;
             }
         };
-        self.dsh_native_model_settings = Some(Ok(settings.clone()));
         self.dsh_custom_provider_editor = None;
         if settings.default_model.provider != NATIVE_DSH_EDITABLE_PROVIDER {
             let error = format!(
@@ -145,16 +125,6 @@ impl Workspace {
         if matches!(editor.discovery, Some(ModelDiscoveryState::Loading)) {
             return;
         }
-        let Some(profile) = Self::native_dsh_capabilities_profile() else {
-            if let Some(editor) = self.dsh_custom_provider_editor.as_mut() {
-                editor.discovery = Some(ModelDiscoveryState::Failed(format!(
-                    "未找到模型发现器，请把 Smelt Host bundle 更新到 {}",
-                    smelt_core::agent_kind::SMELT_HOST_VERSION
-                )));
-            }
-            cx.notify();
-            return;
-        };
         let trimmed = |state: &Entity<gpui_component::input::InputState>| {
             let value = state.read(cx).value().trim().to_string();
             (!value.is_empty()).then_some(value)
@@ -178,14 +148,11 @@ impl Workspace {
             editor.discovery = Some(ModelDiscoveryState::Loading);
         }
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(
-                    async move { smelt_core::agent_kind::dsh_discover_models(&profile, &request) },
-                )
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        self.run_pi_call::<smelt_core::control_api::DshProvidersDiscoverModels>(
+            request,
+            super::dsh_config::DSH_CALL_TIMEOUT,
+            cx,
+            |this, outcome, cx| {
                 if let Some(editor) = this.dsh_custom_provider_editor.as_mut() {
                     editor.discovery = Some(match outcome {
                         Ok(report) => ModelDiscoveryState::Ready(report.models),
@@ -193,9 +160,8 @@ impl Workspace {
                     });
                 }
                 cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 把一条发现来的模型填进表单，优先复用空白行。
@@ -245,29 +211,19 @@ impl Workspace {
         ) {
             return;
         }
-        let Some(profile) = Self::native_dsh_capabilities_profile() else {
-            self.dsh_model_capabilities = Some(NativeDshCapabilityState::Failed(format!(
-                "未找到模型能力查询器，请把 Smelt Host bundle 更新到 {}",
-                smelt_core::agent_kind::SMELT_HOST_VERSION
-            )));
-            cx.notify();
-            return;
-        };
         self.dsh_model_capabilities = Some(NativeDshCapabilityState::Loading);
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { smelt_core::agent_kind::dsh_model_capabilities(&profile) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        self.run_pi_call::<smelt_core::control_api::DshModelsCapabilities>(
+            smelt_runtime_client::protocol::control::EmptyParams::default(),
+            super::dsh_config::DSH_CALL_TIMEOUT,
+            cx,
+            |this, outcome, cx| {
                 this.dsh_model_capabilities = Some(match outcome {
                     Ok(capabilities) => NativeDshCapabilityState::Ready(capabilities),
                     Err(error) => NativeDshCapabilityState::Failed(error),
                 });
                 cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 选中一档推理强度。
@@ -374,26 +330,26 @@ impl Workspace {
             "apiKeyEnv": api_key_env,
             "apiKey": (!api_key.is_empty()).then_some(api_key),
         });
-        let result = (|| -> Result<(), String> {
-            let output = Self::run_native_dsh_model_settings("save", Some(&payload))?;
-            let response: NativeDshModelSaveResponse = serde_json::from_slice(&output)
-                .map_err(|error| format!("读取 DSH 模型管理器响应失败：{error}"))?;
-            response
-                .ok
-                .then_some(())
-                .ok_or_else(|| "DSH 模型管理器未确认保存".to_string())
-        })();
-        if let Err(error) = result {
-            self.dsh_model_editor_error = Some(error.clone());
-            crate::status_item::notify_error(error);
-            cx.notify();
-            return;
-        }
-        self.dsh_model_editor = None;
-        self.dsh_model_editor_error = None;
-        self.reload_native_dsh_model_settings();
-        crate::status_item::notify_success("DeepSeek 模型配置已保存");
-        cx.notify();
+        self.run_pi_call::<smelt_core::control_api::DshModelsSaveDefault>(
+            smelt_core::dsh_service::SaveDefaultModelParams { payload },
+            super::dsh_config::DSH_CALL_TIMEOUT,
+            cx,
+            |this, result, cx| {
+                match result {
+                    Ok(config) => {
+                        this.dsh_model_editor = None;
+                        this.dsh_model_editor_error = None;
+                        this.adopt_dsh_config(config, cx);
+                        crate::status_item::notify_success("DeepSeek 模型配置已保存");
+                    }
+                    Err(error) => {
+                        this.dsh_model_editor_error = Some(error.clone());
+                        crate::status_item::notify_error(error);
+                    }
+                }
+                cx.notify();
+            },
+        );
     }
 
     /// 自定义模型的四个输入框。Pi 和 DSH 的字段、占位文案一样；两边的保存路径仍各自走。
@@ -470,7 +426,7 @@ impl Workspace {
     ) {
         use gpui_component::input::InputState;
 
-        let settings = match Self::load_native_dsh_model_settings() {
+        let settings = match self.native_dsh_model_settings_view() {
             Ok(settings) => settings,
             Err(error) => {
                 self.dsh_model_editor_error = Some(error.clone());
@@ -530,9 +486,11 @@ impl Workspace {
                 .placeholder("https://gateway.example/v1")
                 .default_value(base_url_value)
         });
-        let auto = previous_id
-            .as_deref()
-            .is_some_and(|id| smelt_core::dsh_auto_models::load().is_auto(id));
+        let auto = previous_id.as_deref().is_some_and(|id| {
+            self.dsh_config
+                .as_ref()
+                .is_some_and(|config| config.auto_provider_ids.iter().any(|auto| auto == id))
+        });
         let mut models = if auto {
             Vec::new()
         } else {
@@ -550,7 +508,6 @@ impl Workspace {
         if models.is_empty() && !auto {
             models.push(Self::dsh_custom_model_editor(None, window, cx));
         }
-        self.dsh_native_model_settings = Some(Ok(settings));
         self.dsh_model_editor = None;
         self.dsh_model_editor_error = None;
         self.dsh_custom_provider_editor = Some(DshCustomProviderEditor {
@@ -609,7 +566,7 @@ impl Workspace {
     pub fn save_native_dsh_custom_provider(
         &mut self,
         set_default: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = self.dsh_custom_provider_editor.clone() else {
@@ -709,7 +666,15 @@ impl Workspace {
                 "maxTokens": max_tokens,
             }));
         }
-        let draft = NativeDshCustomProviderDraft {
+        let from_endpoint = models.is_empty();
+        if from_endpoint {
+            if let Some(editor) = self.dsh_custom_provider_editor.as_mut() {
+                editor.discovery = Some(ModelDiscoveryState::Loading);
+            }
+            cx.notify();
+        }
+        let set_default_flag = set_default;
+        let params = smelt_core::dsh_service::SaveCustomProviderParams {
             previous_id: editor.previous_id.clone(),
             id,
             display_name: editor.display_name.read(cx).value().trim().to_string(),
@@ -717,85 +682,39 @@ impl Workspace {
             base_url,
             api_key_env,
             api_key,
+            models,
             set_default,
         };
-        if models.is_empty() {
-            self.save_native_dsh_custom_provider_from_endpoint(draft, cx);
-            return;
-        }
-        self.commit_native_dsh_custom_provider(draft, models, false, window, cx);
-    }
-
-    fn save_native_dsh_custom_provider_from_endpoint(
-        &mut self,
-        draft: NativeDshCustomProviderDraft,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(profile) = Self::native_dsh_capabilities_profile() else {
-            let error = format!(
-                "未找到模型发现器，请把 Smelt Host bundle 更新到 {}，或手动填写至少一个模型",
-                smelt_core::agent_kind::SMELT_HOST_VERSION
-            );
-            if let Some(editor) = self.dsh_custom_provider_editor.as_mut() {
-                editor.discovery = Some(ModelDiscoveryState::Failed(error));
-            }
-            cx.notify();
-            return;
-        };
-        let request = smelt_core::agent_kind::DshDiscoveryRequest {
-            provider: Some(draft.id.clone()),
-            base_url: Some(draft.base_url.clone()),
-            api: Some(draft.api.clone()),
-            api_key: (!draft.api_key.is_empty()).then(|| draft.api_key.clone()),
-        };
-        if let Some(editor) = self.dsh_custom_provider_editor.as_mut() {
-            editor.discovery = Some(ModelDiscoveryState::Loading);
-        }
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(
-                    async move { smelt_core::agent_kind::dsh_discover_models(&profile, &request) },
-                )
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if this.dsh_custom_provider_editor.is_none() {
-                    return;
-                }
-                let report = match outcome {
-                    Ok(report) if report.models.is_empty() => {
-                        this.fail_native_dsh_custom_provider_save(
-                            "该端点没有报告任何模型，请手动填写至少一个模型".to_string(),
-                            cx,
-                        );
-                        return;
+        self.run_pi_call::<smelt_core::control_api::DshProvidersSaveCustom>(
+            params,
+            super::dsh_config::DSH_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| {
+                match result {
+                    Ok(saved) => {
+                        this.dsh_custom_provider_editor = None;
+                        this.dsh_model_editor_error = None;
+                        this.adopt_dsh_config(saved.config, cx);
+                        crate::status_item::notify_success(match (saved.auto, set_default_flag) {
+                            (true, true) => {
+                                "自定义 Provider 已保存并设为默认；模型目录将在每次启动时刷新"
+                            }
+                            (true, false) => "自定义 Provider 已保存；模型目录将在每次启动时刷新",
+                            (false, true) => "自定义 Provider 已保存并设为默认",
+                            (false, false) => "自定义 Provider 已保存",
+                        });
                     }
-                    Ok(report) => report,
                     Err(error) => {
-                        this.fail_native_dsh_custom_provider_save(
-                            format!("{error}\n未能自动获取模型，请手动填写至少一个模型"),
-                            cx,
-                        );
-                        return;
+                        if !from_endpoint {
+                            this.dsh_model_editor_error = Some(error.clone());
+                            crate::status_item::notify_error(error.clone());
+                        }
+                        this.fail_native_dsh_custom_provider_save(error, cx);
                     }
-                };
-                let models = report
-                    .models
-                    .iter()
-                    .map(|model| {
-                        serde_json::json!({
-                            "id": model.id,
-                            "name": model.name,
-                            "contextWindow": model.context_window,
-                            "maxTokens": model.max_tokens,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                this.commit_native_dsh_custom_provider(draft, models, true, window, cx);
-            });
-        })
-        .detach();
+                }
+                cx.notify();
+            },
+        );
     }
 
     fn fail_native_dsh_custom_provider_save(&mut self, error: String, cx: &mut Context<Self>) {
@@ -805,130 +724,42 @@ impl Workspace {
         cx.notify();
     }
 
-    fn commit_native_dsh_custom_provider(
-        &mut self,
-        draft: NativeDshCustomProviderDraft,
-        models: Vec<serde_json::Value>,
-        auto: bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let payload = serde_json::json!({
-            "previousId": draft.previous_id,
-            "id": draft.id,
-            "displayName": draft.display_name,
-            "api": draft.api,
-            "baseURL": draft.base_url,
-            "apiKeyEnv": draft.api_key_env,
-            "apiKey": (!draft.api_key.is_empty()).then_some(draft.api_key.clone()),
-            "models": models,
-            "setDefault": draft.set_default,
-        });
-        let result =
-            Self::run_native_dsh_model_settings("save-custom", Some(&payload)).and_then(|output| {
-                let response: NativeDshModelSaveResponse = serde_json::from_slice(&output)
-                    .map_err(|error| format!("读取 DSH 模型管理器响应失败：{error}"))?;
-                response
-                    .ok
-                    .then_some(())
-                    .ok_or_else(|| "DSH 模型管理器未确认保存".to_string())
-            });
-        if let Err(error) = result {
-            self.dsh_model_editor_error = Some(error.clone());
-            self.fail_native_dsh_custom_provider_save(error.clone(), cx);
-            crate::status_item::notify_error(error);
-            return;
-        }
-        smelt_core::dsh_auto_models::update(|store| {
-            if let Some(previous) = draft.previous_id.as_deref() {
-                store.rename(previous, &draft.id);
-            }
-            store.set_auto(&draft.id, auto);
-        });
-        self.dsh_custom_provider_editor = None;
-        self.dsh_model_editor_error = None;
-        self.reload_native_dsh_model_settings();
-        crate::status_item::notify_success(match (auto, draft.set_default) {
-            (true, true) => "自定义 Provider 已保存并设为默认；模型目录将在每次启动时刷新",
-            (true, false) => "自定义 Provider 已保存；模型目录将在每次启动时刷新",
-            (false, true) => "自定义 Provider 已保存并设为默认",
-            (false, false) => "自定义 Provider 已保存",
-        });
-        cx.notify();
-    }
-
+    /// 让运行时确保配置文件存在，再用系统文本编辑器打开。只有本机运行时打得开。
     pub(super) fn open_native_dsh_config(
         &mut self,
         credentials: bool,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        let path = if credentials {
-            smelt_core::agent_kind::dsh_credentials_path()
-        } else {
-            smelt_core::agent_kind::dsh_settings_path()
-        };
-        let Some(path) = path else {
-            crate::status_item::notify_error("无法定位 DSH_HOME");
-            return;
-        };
-        if !path.exists() {
-            use std::io::Write as _;
-
-            if let Some(parent) = path.parent()
-                && let Err(error) = std::fs::create_dir_all(parent)
-            {
-                crate::status_item::notify_error(format!("创建 DSH 配置目录失败：{error}"));
-                return;
-            }
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    if let Err(error) = file.write_all(b"") {
-                        crate::status_item::notify_error(format!("创建 DSH 配置文件失败：{error}"));
+        self.run_pi_call::<smelt_core::control_api::DshConfigEnsureFile>(
+            smelt_core::dsh_service::EnsureConfigFileParams { credentials },
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            |_, result, _| {
+                let path = match result {
+                    Ok(result) => std::path::PathBuf::from(result.path),
+                    Err(error) => {
+                        crate::status_item::notify_error(error);
                         return;
                     }
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt as _;
-                        if let Err(error) =
-                            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                        {
-                            crate::status_item::notify_error(format!(
-                                "保护 DSH 配置文件失败：{error}"
-                            ));
-                            return;
-                        }
-                    }
+                };
+                match crate::ide::open_in_system_text_editor(&path) {
+                    Ok(()) => crate::status_item::notify_success(format!(
+                        "已在系统文本编辑器打开 {}",
+                        path.display()
+                    )),
+                    Err(error) => crate::status_item::notify_error(error),
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    crate::status_item::notify_error(format!("创建 DSH 配置文件失败：{error}"));
-                    return;
-                }
-            }
-        }
-        match crate::ide::open_in_system_text_editor(&path) {
-            Ok(()) => crate::status_item::notify_success(format!(
-                "已在系统文本编辑器打开 {}",
-                path.display()
-            )),
-            Err(error) => crate::status_item::notify_error(error),
-        }
+            },
+        );
     }
 
     pub(super) fn refresh_native_dsh_settings(&mut self, cx: &mut Context<Self>) {
-        self.reload_native_dsh_model_settings();
+        self.refresh_dsh_config(cx);
         cx.notify();
     }
 
-    /// 展开/收起某个 profile 的插件管理面板。
-    ///
-    /// 展开即同步读一次清单：数据来自本地文件，毫秒级完成，不值得为它做一次异步
-    /// 跳转和一个只闪一帧的 loading 态。真正慢的是 add/remove，那两个才走后台。
+    /// 展开/收起某个 profile 的插件管理面板。展开时请运行时读一次清单。
     pub fn toggle_native_dsh_plugin_manager(
         &mut self,
         profile: String,
@@ -967,12 +798,13 @@ impl Workspace {
             InputState::new(window, cx).placeholder("插件包名，如 @smelt-ai/dsh-acp-rich@0.1.3")
         });
         self.dsh_plugin_manager = Some(DshPluginManager {
-            plugins: Some(smelt_core::agent_kind::dsh_profile_plugins(&profile)),
+            plugins: None,
             profile,
             spec,
             busy: None,
             message: None,
         });
+        self.reload_native_dsh_plugins(cx);
     }
 
     /// 为还没装 Smelt Host 的 profile 安装它。
@@ -994,15 +826,28 @@ impl Workspace {
         self.run_native_dsh_plugin_action(DshPluginAction::Install, spec, window, cx);
     }
 
-    /// 重新读取当前面板的插件清单。
+    /// 请运行时重新读取当前面板的插件清单。回来时面板已切走就丢掉。
     pub fn reload_native_dsh_plugins(&mut self, cx: &mut Context<Self>) {
-        let Some(manager) = self.dsh_plugin_manager.as_mut() else {
+        let Some(profile) = self.dsh_plugin_manager.as_ref().map(|m| m.profile.clone()) else {
             return;
         };
-        manager.plugins = Some(smelt_core::agent_kind::dsh_profile_plugins(
-            &manager.profile,
-        ));
-        cx.notify();
+        self.run_pi_call::<smelt_core::control_api::DshPluginsList>(
+            smelt_core::dsh_service::ProfileParams {
+                profile: profile.clone(),
+            },
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| {
+                if let Some(manager) = this
+                    .dsh_plugin_manager
+                    .as_mut()
+                    .filter(|manager| manager.profile == profile)
+                {
+                    manager.plugins = Some(result.and_then(|listed| listed.plugins));
+                    cx.notify();
+                }
+            },
+        );
     }
 
     /// 在面板里执行安装、更新或卸载。
@@ -1050,28 +895,21 @@ impl Workspace {
         manager.message = None;
         cx.notify();
 
-        let action_profile = profile.clone();
-        let action_target = target.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move {
-                    match action {
-                        DshPluginAction::Install => {
-                            smelt_core::agent_kind::dsh_plugin_add(&action_profile, &action_target)
-                        }
-                        DshPluginAction::Update => smelt_core::agent_kind::dsh_plugin_update(
-                            &action_profile,
-                            &action_target,
-                        ),
-                        DshPluginAction::Remove => smelt_core::agent_kind::dsh_plugin_remove(
-                            &action_profile,
-                            &action_target,
-                        ),
-                    }
-                })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
+        let params = smelt_core::dsh_service::PluginActionParams {
+            profile: profile.clone(),
+            action: match action {
+                DshPluginAction::Install => smelt_core::dsh_service::PluginAction::Install,
+                DshPluginAction::Update => smelt_core::dsh_service::PluginAction::Update,
+                DshPluginAction::Remove => smelt_core::dsh_service::PluginAction::Remove,
+            },
+            target: target.clone(),
+        };
+        let window_handle = window.window_handle();
+        self.run_pi_call::<smelt_core::control_api::DshPluginsRun>(
+            params,
+            super::dsh_config::DSH_PLUGIN_TIMEOUT,
+            cx,
+            move |this, result, cx| {
                 // 面板可能在等待期间被收起或切到别的 profile；那时这次结果已经不属于
                 // 当前界面，直接丢弃，不要把它写到别人的面板上。
                 let Some(manager) = this
@@ -1082,32 +920,22 @@ impl Workspace {
                     return;
                 };
                 manager.busy = None;
-                // 先重读清单再写提示：成功文案要报**真正装上的版本**。pnpm 完全
+                let (outcome, plugins) = match result {
+                    Ok(done) => (done.outcome, Some(done.plugins)),
+                    Err(error) => (Err(error), None),
+                };
+                // 运行时已经重读了清单：成功文案要报**真正装上的版本**。pnpm 完全
                 // 可能什么都没做就退 0（范围已满足、或新版被供应链门槛挡在
                 // `latest` 之外），只说一句"已安装"会把这种空转说成成功。
-                manager.plugins = Some(smelt_core::agent_kind::dsh_profile_plugins(
-                    &manager.profile,
-                ));
-                // 桥里的助手每次调用都是新起的进程，所以换掉的那一版**立刻**就在
-                // 答话了——面板却还捧着上一次 read 的结果。同一个页面上半截说凭据
-                // 缺失、下半截说刚装好新版，是这次更新自己制造的矛盾。
-                //
-                // 重读要借整个 workspace，所以面板得放手再取一次——期间面板可能已被
-                // 收起或切走，取不到就把这次结果丢掉。
-                this.reload_native_dsh_model_settings();
-                let Some(manager) = this
-                    .dsh_plugin_manager
-                    .as_mut()
-                    .filter(|manager| manager.profile == profile)
-                else {
-                    return;
-                };
+                if let Some(plugins) = plugins {
+                    manager.plugins = Some(plugins);
+                }
                 manager.message = Some(match outcome {
                     Err(error) => (Self::condense_plugin_error(&error), false),
-                    Ok(_) if action == DshPluginAction::Remove => {
+                    Ok(()) if action == DshPluginAction::Remove => {
                         (format!("已卸载 {target}，新建会话后生效"), true)
                     }
-                    Ok(_) => {
+                    Ok(()) => {
                         let name = Self::plugin_name_of(&target);
                         let installed = manager
                             .plugins
@@ -1121,15 +949,18 @@ impl Workspace {
                         )
                     }
                 });
-                if action != DshPluginAction::Remove {
-                    manager
-                        .spec
-                        .update(cx, |state, cx| state.set_value("", window, cx));
+                let spec = (action != DshPluginAction::Remove).then(|| manager.spec.clone());
+                // 桥里的助手每次调用都是新起的进程，换掉的那一版**立刻**就在答话了；
+                // 模型设置跟着重读，免得同一页上半截说凭据缺失、下半截说刚装好新版。
+                this.refresh_dsh_config(cx);
+                if let Some(spec) = spec {
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        spec.update(cx, |state, cx| state.set_value("", window, cx));
+                    });
                 }
                 cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 安装/更新成功后的那句话。

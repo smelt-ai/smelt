@@ -38,6 +38,7 @@ pub mod daemon_image;
 pub mod daemon_state;
 pub mod default_conversation;
 pub mod dsh_auto_models;
+pub mod dsh_service;
 pub mod fd_limit;
 pub mod font_config;
 pub mod fs;

@@ -2386,6 +2386,11 @@ struct Workspace {
     dsh_custom_provider_editor: Option<settings::DshCustomProviderEditor>,
     /// 原生 DSH Provider 摘要缓存；仅在打开设置或显式修改后刷新。
     dsh_native_model_settings: Option<Result<settings::NativeDshModelSettings, String>>,
+    /// 运行时给的 DeepSeek Harness 配置快照。渲染只读它。
+    dsh_config: Option<smelt_core::dsh_service::DshConfig>,
+    dsh_config_error: Option<String>,
+    /// 读取的代数：晚回来的旧读取不能盖掉更新的快照。
+    dsh_config_generation: u64,
     /// 交互式原生 DSH 模型表单无法打开或保存时的持久可见错误。
     dsh_model_editor_error: Option<String>,
     /// 原生 Pi 模型设置表单。
@@ -2988,6 +2993,9 @@ impl Workspace {
             dsh_model_editor: None,
             dsh_custom_provider_editor: None,
             dsh_native_model_settings: None,
+            dsh_config: None,
+            dsh_config_error: None,
+            dsh_config_generation: 0,
             dsh_model_editor_error: None,
             dsh_model_capabilities: None,
             pi_model_editor: None,
@@ -4452,42 +4460,27 @@ fn main() {
             if cx.global::<settings::AgentHostState>().agent_hooks_enabled {
                 settings::reconcile_agent_hooks(cx);
             }
-            // 运行时已经连上：请它照端点刷新 Pi 自动维护的模型目录（只是问端点的 /models）。
+            // 运行时已经连上：请它照端点刷新 Pi、dsh 里标记为「自动」的自定义 provider
+            // 的模型目录。用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型
+            // 不该要他再来点一次。dsh 要起 Node 子进程，几秒级，都放后台。
             cx.background_executor()
                 .spawn(async {
+                    use smelt_runtime_client::protocol::control::EmptyParams;
+                    let timeout = std::time::Duration::from_secs(300);
                     if let Err(error) = runtime_call::call::<
                         smelt_core::control_api::PiProvidersRefreshAuto,
-                    >(
-                        smelt_runtime_client::protocol::control::EmptyParams::default(),
-                        runtime_call::RUNTIME_CALL_TIMEOUT,
-                    ) {
+                    >(EmptyParams::default(), timeout)
+                    {
                         eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
+                    }
+                    if let Err(error) = runtime_call::call::<
+                        smelt_core::control_api::DshProvidersRefreshAuto,
+                    >(EmptyParams::default(), timeout)
+                    {
+                        eprintln!("[dsh] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
                     }
                 })
                 .detach();
-        });
-        // 标记为「自动」的 dsh 自定义 provider：照端点上的模型刷新一遍目录。用户没
-        // 手填模型就是把这份目录交给我们维护，中转网关上下线模型不该要他再来点一次。
-        // 起 Node 子进程、几秒级，所以和 hooks 一样放后台；没标记任何 provider 时
-        // 这个函数立刻返回，不起进程。
-        thread::spawn(|| {
-            for outcome in smelt_core::dsh_auto_models::refresh_auto_model_catalogs() {
-                match outcome {
-                    smelt_core::dsh_auto_models::AutoRefreshOutcome::Refreshed {
-                        provider,
-                        models,
-                    } => {
-                        eprintln!("[dsh] {provider} 的模型目录已刷新：{models} 个模型");
-                    }
-                    // 沿用上次那份目录，会话照常可用，所以只记一行，不打扰用户。
-                    smelt_core::dsh_auto_models::AutoRefreshOutcome::Kept { provider, reason } => {
-                        eprintln!("[dsh] {provider} 的模型目录保持不变：{reason}");
-                    }
-                    smelt_core::dsh_auto_models::AutoRefreshOutcome::Forgotten { provider } => {
-                        eprintln!("[dsh] {provider} 已不在配置中，不再自动刷新其模型目录");
-                    }
-                }
-            }
         });
         let (daemon_state_tx, daemon_state_rx) =
             smol::channel::unbounded::<terminal::DaemonStateEvent>();

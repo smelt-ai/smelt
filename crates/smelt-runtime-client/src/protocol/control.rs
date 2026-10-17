@@ -151,6 +151,15 @@ define_control_methods! {
     PiAuthLoginEvents => (PI_AUTH_LOGIN_EVENTS_METHOD, "pi.auth.login_events"),
     PiAuthLoginAnswer => (PI_AUTH_LOGIN_ANSWER_METHOD, "pi.auth.login_answer"),
     PiAuthLoginCancel => (PI_AUTH_LOGIN_CANCEL_METHOD, "pi.auth.login_cancel"),
+    DshConfigGet => (DSH_CONFIG_GET_METHOD, "dsh.config.get"),
+    DshConfigEnsureFile => (DSH_CONFIG_ENSURE_FILE_METHOD, "dsh.config.ensure_file"),
+    DshModelsCapabilities => (DSH_MODELS_CAPABILITIES_METHOD, "dsh.models.capabilities"),
+    DshModelsSaveDefault => (DSH_MODELS_SAVE_DEFAULT_METHOD, "dsh.models.save_default"),
+    DshProvidersDiscoverModels => (DSH_PROVIDERS_DISCOVER_MODELS_METHOD, "dsh.providers.discover_models"),
+    DshProvidersSaveCustom => (DSH_PROVIDERS_SAVE_CUSTOM_METHOD, "dsh.providers.save_custom"),
+    DshProvidersRefreshAuto => (DSH_PROVIDERS_REFRESH_AUTO_METHOD, "dsh.providers.refresh_auto"),
+    DshPluginsList => (DSH_PLUGINS_LIST_METHOD, "dsh.plugins.list"),
+    DshPluginsRun => (DSH_PLUGINS_RUN_METHOD, "dsh.plugins.run"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -560,7 +569,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 98);
+        assert_eq!(names.len(), 107);
     }
 
     #[test]

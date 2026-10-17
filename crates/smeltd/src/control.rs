@@ -241,6 +241,18 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
+        dsh @ (ControlMethod::DshConfigGet
+        | ControlMethod::DshConfigEnsureFile
+        | ControlMethod::DshModelsCapabilities
+        | ControlMethod::DshModelsSaveDefault
+        | ControlMethod::DshProvidersDiscoverModels
+        | ControlMethod::DshProvidersSaveCustom
+        | ControlMethod::DshProvidersRefreshAuto
+        | ControlMethod::DshPluginsList
+        | ControlMethod::DshPluginsRun) => match super::dsh_control::dispatch(dsh, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
         ControlMethod::AgentCliInspect => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

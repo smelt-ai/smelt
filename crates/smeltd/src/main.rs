@@ -182,6 +182,7 @@ mod event_hub;
 mod files_control;
 mod git_control;
 mod handoff_v2;
+mod dsh_control;
 mod history_control;
 mod pi_control;
 #[cfg(target_os = "macos")]

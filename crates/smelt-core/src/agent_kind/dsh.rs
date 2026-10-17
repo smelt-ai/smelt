@@ -169,7 +169,7 @@ pub fn dsh_discover_models_entry(profile: &str) -> Option<std::path::PathBuf> {
 }
 
 /// 一档推理强度。`id` 发给 dsh，`name` 给人看。
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DshEffort {
     pub id: String,
     pub name: String,
@@ -180,7 +180,7 @@ pub struct DshEffort {
 /// `efforts` 为 `None` 表示这条路由**没有推理强度这个旋钮**——不是"暂时没读到"，
 /// 而是助手明确没有广告它。调用方必须据此完全不给选择：把它当成"那就用默认的
 /// 四档"，正是这套东西要消灭的老毛病——它会让用户选到一个发一次失败一次的档位。
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DshModelCapability {
     pub id: String,
@@ -201,7 +201,7 @@ impl DshModelCapability {
     }
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DshProviderCapability {
     pub id: String,
     pub name: Option<String>,
@@ -209,7 +209,7 @@ pub struct DshProviderCapability {
 }
 
 /// `dsh-model-capabilities` 的完整报告。
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DshModelCapabilities {
     pub providers: Vec<DshProviderCapability>,
 }
@@ -292,13 +292,13 @@ pub fn dsh_model_capabilities(profile: &str) -> Result<DshModelCapabilities, Str
 /// 否则设置页的「采纳这个模型」也得写两遍。
 pub use crate::provider_api::DiscoveredModel as DshDiscoveredModel;
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DshDiscoveryReport {
     pub models: Vec<DshDiscoveredModel>,
 }
 
 /// 要问哪个端点。字段全可选，但 `provider` 和 `base_url` 至少要有一个。
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DshDiscoveryRequest {
     /// 已存在的路由。dsh 自带目录的 provider 会直接从目录回答，不发网络请求。
@@ -439,7 +439,7 @@ pub fn dsh_profile_names() -> Vec<String> {
 /// 「声明」和「装上」是两件事，所以分开记：`requested` 是 manifest 里的版本范围，
 /// `installed` 是 node_modules 里真实躺着的版本。两者不一致（或 `installed` 为
 /// None）正是「add 过但没装成」的现场，界面必须能把它显示出来，而不是假装装好了。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DshPlugin {
     pub name: String,
     /// manifest 中的版本范围；内置 bundle 没有这一项。
@@ -1010,14 +1010,14 @@ pub(super) fn dsh_settings_path_at(home: &std::path::Path) -> std::path::PathBuf
         .unwrap_or_else(|| home.join("settings.yaml"))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DshDefaultModel {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DshSettingsSummary {
     pub path: std::path::PathBuf,
     pub default_model: Option<DshDefaultModel>,
