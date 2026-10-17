@@ -2110,9 +2110,8 @@ impl AcpView {
                                         if !this.expanded_tools.remove(&toggle_key) {
                                             this.expanded_tools.insert(toggle_key.clone());
                                         }
-                                        this.list_state.remeasure_items(
-                                            entry_ix..entry_ix.saturating_add(1),
-                                        );
+                                        this.list_state
+                                            .remeasure_items(entry_ix..entry_ix.saturating_add(1));
                                         cx.notify();
                                     });
                                 }),

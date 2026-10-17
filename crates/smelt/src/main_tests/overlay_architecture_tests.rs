@@ -20,23 +20,4 @@ fn workspace_overlays_stay_in_the_main_gpui_window() {
         "Workspace must not render the in-app notification layer"
     );
     assert!(main.contains("self.render_overlay_layers(window, cx)"));
-
-    let webview = concat!(
-        include_str!("../../../smelt-webview/src/lib.rs"),
-        include_str!("../../../smelt-webview/src/imp.rs")
-    );
-    for forbidden in [
-        "OverlayInputMode",
-        "OverlayWindowLevel",
-        "attach_overlay_window",
-        "sync_overlay_window",
-        "set_overlay_visible",
-        "set_overlay_input_mode",
-        "detach_overlay_window",
-    ] {
-        assert!(
-            !webview.contains(forbidden),
-            "smelt-webview must not expose native overlay bridge code: {forbidden}"
-        );
-    }
 }

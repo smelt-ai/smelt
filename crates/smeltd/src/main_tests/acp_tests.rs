@@ -2,7 +2,7 @@ use super::*;
 use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind};
 use smelt_core::acp_session::AcpSessionState;
 use smelt_core::daemon_state::DaemonPhase;
-use smelt_plugin_api::{DeliveryClass, PluginId, SubscriptionId, Topic};
+use smelt_event_protocol::{DeliveryClass, PluginId, SubscriptionId, Topic};
 use std::collections::BTreeSet;
 
 fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
@@ -215,12 +215,8 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
         supports_rewind: false,
     });
     *slot.value.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.current").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("current-input").unwrap(),
-                context: serde_json::json!({"thread_id": "current-thread"}),
-            },
+        Some(smelt_core::conversation::ConversationBinding::Automation {
+            run_id: "run-current".into(),
         });
 
     let (server, client) = UnixStream::pair().unwrap();
@@ -251,15 +247,14 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
     assert_eq!(response["snapshot"]["entries_total"], 5);
     assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 5);
     assert_eq!(
-        response["snapshot"]["conversation_state"]["binding"]["plugin_id"],
-        "com.example.current"
+        response["snapshot"]["conversation_state"]["binding"]["run_id"],
+        "run-current"
     );
     assert!(slot.value.handle.lock().unwrap().is_some());
     assert!(matches!(
         &*slot.value.conversation_binding.lock().unwrap(),
-        Some(smelt_core::conversation::ConversationBinding::Plugin { plugin_id, route })
-            if plugin_id.as_str() == "com.example.current"
-                && route.context["thread_id"] == "current-thread"
+        Some(smelt_core::conversation::ConversationBinding::Automation { run_id })
+            if run_id == "run-current"
     ));
 
     drop(reader);
@@ -268,7 +263,7 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
 }
 
 #[test]
-fn reopening_live_session_adopts_client_plugin_binding_when_unknown() {
+fn reopening_live_session_adopts_client_binding_when_unknown() {
     let mut reduced = AcpSessionState::default();
     reduced.phase = DaemonPhase::Idle;
 
@@ -302,12 +297,8 @@ fn reopening_live_session_adopts_client_plugin_binding_when_unknown() {
                 "id": "acp-unknown",
                 "launch": {"command": "/must/not-be-launched"},
                 "conversation_binding": {
-                    "type": "plugin",
-                    "plugin_id": "com.example.restored",
-                    "route": {
-                        "contribution_id": "issue-comment-input",
-                        "context": {"issue_id": "issue-1"}
-                    }
+                    "type": "automation",
+                    "run_id": "run-restored"
                 }
             }),
             new_sessions(),
@@ -321,14 +312,13 @@ fn reopening_live_session_adopts_client_plugin_binding_when_unknown() {
     reader.read_line(&mut line).unwrap();
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(
-        response["snapshot"]["conversation_state"]["binding"]["plugin_id"],
-        "com.example.restored"
+        response["snapshot"]["conversation_state"]["binding"]["run_id"],
+        "run-restored"
     );
     assert!(matches!(
         &*slot.value.conversation_binding.lock().unwrap(),
-        Some(smelt_core::conversation::ConversationBinding::Plugin { plugin_id, route })
-            if plugin_id.as_str() == "com.example.restored"
-                && route.context["issue_id"] == "issue-1"
+        Some(smelt_core::conversation::ConversationBinding::Automation { run_id })
+            if run_id == "run-restored"
     ));
 
     drop(reader);
@@ -786,52 +776,6 @@ fn automation_run_keeps_elicitation_actions() {
 }
 
 #[test]
-fn submitted_plugin_input_never_falls_back_to_local_acp() {
-    let session = make_acp_session("acp-plugin-route", AcpSessionState::default());
-    *session.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("conversation-input")
-                    .unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
-        });
-    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
-    let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
-        cmd_tx,
-        event_rx,
-        stdio: Arc::new(Mutex::new(None)),
-        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        supports_mid_turn_input: false,
-        supports_compaction: false,
-        supports_native_queue: false,
-        supports_rewind: false,
-    });
-
-    let result = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-1".into(),
-            text: "remote only".to_string(),
-            images: Vec::new(),
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            Err(smelt_core::conversation::ConversationSubmitError::rejected(
-                "remote rejected",
-            ))
-        },
-    );
-
-    assert_eq!(result.unwrap_err().message, "remote rejected");
-    assert!(cmd_rx.try_recv().is_err(), "失败时不能偷偷投递给本地 ACP");
-    assert!(session.reduced.lock().unwrap().entries().is_empty());
-}
-
-#[test]
 fn automation_run_rejects_freeform_conversation_input() {
     let session = make_acp_session("acp-automation", AcpSessionState::default());
     *session.conversation_binding.lock().unwrap() =
@@ -839,13 +783,10 @@ fn automation_run_rejects_freeform_conversation_input() {
             run_id: "run-1".into(),
         });
 
-    let result = dispatch_conversation_input_with(
+    let result = dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput::new("second prompt".into(), Vec::new()),
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("automation input must not invoke a plugin")
-        },
     );
 
     assert_eq!(
@@ -869,46 +810,6 @@ fn conversation_submit_response_preserves_rejected_and_unknown_errors() {
 }
 
 #[test]
-fn plugin_input_keeps_images_even_when_the_local_agent_does_not_support_them() {
-    let mut reduced = AcpSessionState::default();
-    reduced.supports_image = false;
-    let session = make_acp_session("acp-plugin-images", reduced);
-    *session.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("conversation-input")
-                    .unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
-        });
-    let image = smelt_core::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aW1hZ2U=".into(),
-    };
-
-    let route = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-2".into(),
-            text: "看图".into(),
-            images: vec![image.clone()],
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, input, _agent_preset, _agent_session| {
-            assert_eq!(input.images, vec![image]);
-            Ok(())
-        },
-    )
-    .unwrap();
-
-    assert_eq!(
-        route,
-        smelt_core::conversation::ConversationInputRoute::Plugin
-    );
-}
-
-#[test]
 fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
     let mut reduced = AcpSessionState::default();
     reduced.supports_image = false;
@@ -927,7 +828,7 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
         supports_rewind: false,
     });
 
-    dispatch_conversation_input_with(
+    dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput {
             submission_id: "submission-3".into(),
@@ -938,9 +839,6 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
             }],
         },
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("direct input must not invoke a plugin")
-        },
     )
     .unwrap();
 
@@ -949,64 +847,6 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
         smelt_core::acp_conn::ConversationCommand::Prompt { text, images }
             if text.contains("当前智能体不支持图片输入") && images.is_empty()
     ));
-}
-
-#[test]
-fn agent_preset_is_consumed_only_after_the_first_input_is_routed() {
-    let session = make_acp_session("acp-agent-preset", AcpSessionState::default());
-    *session.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("conversation-input")
-                    .unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
-        });
-    *session.pending_agent_preset.lock().unwrap() = Some("你是严谨的代码审查者".into());
-
-    let rejected = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-4".into(),
-            text: "检查这次改动".into(),
-            images: Vec::new(),
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, input, agent_preset, _agent_session| {
-            assert_eq!(input.text, "检查这次改动");
-            assert_eq!(agent_preset, Some("你是严谨的代码审查者"));
-            Err(smelt_core::conversation::ConversationSubmitError::rejected(
-                "remote rejected",
-            ))
-        },
-    );
-    assert_eq!(rejected.unwrap_err().message, "remote rejected");
-    assert_eq!(
-        session.pending_agent_preset.lock().unwrap().as_deref(),
-        Some("你是严谨的代码审查者"),
-        "路由失败不能消费预设"
-    );
-
-    let routed = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-5".into(),
-            text: "检查这次改动".into(),
-            images: Vec::new(),
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, input, agent_preset, _agent_session| {
-            assert_eq!(input.text, "检查这次改动");
-            assert_eq!(agent_preset, Some("你是严谨的代码审查者"));
-            Ok(())
-        },
-    );
-    assert_eq!(
-        routed.unwrap(),
-        smelt_core::conversation::ConversationInputRoute::Plugin
-    );
-    assert!(session.pending_agent_preset.lock().unwrap().is_none());
 }
 
 #[test]
@@ -1027,13 +867,10 @@ fn direct_agent_preset_remains_part_of_the_first_acp_prompt() {
         supports_rewind: false,
     });
 
-    dispatch_conversation_input_with(
+    dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput::new("分析组合风险".into(), Vec::new()),
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("direct input must not invoke a plugin")
-        },
     )
     .unwrap();
 
@@ -1046,7 +883,7 @@ fn direct_agent_preset_remains_part_of_the_first_acp_prompt() {
 }
 
 #[test]
-fn submitted_direct_input_delivers_to_acp_without_invoking_a_plugin() {
+fn submitted_direct_input_delivers_to_acp() {
     let session = make_acp_session("acp-direct-route", AcpSessionState::default());
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
@@ -1062,7 +899,7 @@ fn submitted_direct_input_delivers_to_acp_without_invoking_a_plugin() {
         supports_rewind: false,
     });
 
-    let route = dispatch_conversation_input_with(
+    dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput {
             submission_id: "submission-6".into(),
@@ -1070,16 +907,9 @@ fn submitted_direct_input_delivers_to_acp_without_invoking_a_plugin() {
             images: Vec::new(),
         },
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("direct input must not invoke a plugin")
-        },
     )
     .unwrap();
 
-    assert_eq!(
-        route,
-        smelt_core::conversation::ConversationInputRoute::Direct
-    );
     assert!(matches!(
         cmd_rx.try_recv().unwrap(),
         smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } if text == "local"
@@ -2430,12 +2260,13 @@ fn subscribe_conversation_wake(subscribers: &EventHubHandle) -> smelt_event_bus:
         .subscribe(
             PluginId::new("test.desktop").unwrap(),
             SubscriptionId::new("wake").unwrap(),
-            BTreeSet::from([
-                Topic::new(smelt_plugin_api::CORE_TOPIC_CONVERSATION_WAKE_REQUESTED).unwrap(),
-            ]),
+            BTreeSet::from([Topic::new(
+                smelt_event_protocol::CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+            )
+            .unwrap()]),
             DeliveryClass::Ephemeral,
-            &BTreeSet::from([smelt_plugin_api::Capability::new(
-                smelt_plugin_api::CORE_CAPABILITY_CONVERSATION_WAKE,
+            &BTreeSet::from([smelt_event_protocol::Capability::new(
+                smelt_event_protocol::CORE_CAPABILITY_CONVERSATION_WAKE,
             )
             .unwrap()]),
         )
@@ -3915,36 +3746,6 @@ fn acp_open_request_rejects_legacy_cmd() {
 }
 
 #[test]
-fn acp_open_request_keeps_agent_session_identity_separate_from_execution_provider() {
-    let req = parse_acp_open_request(&serde_json::json!({
-        "id": "acp-agent-session",
-        "launch": {"command": "codex"},
-        "agent": "codex",
-        "agent_session": {
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy-run",
-                "resource_id": "run-1"
-            }
-        }
-    }))
-    .unwrap();
-
-    assert_eq!(req.launch.command, "codex");
-    let binding = req.agent_session.unwrap();
-    assert_eq!(binding.agent.contribution_id.as_str(), "quant-agent");
-    assert_eq!(binding.controller.contribution_id.as_str(), "quant-session");
-}
-
-#[test]
 fn acp_open_invalid_request_still_returns_ended_snapshot() {
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
@@ -3981,191 +3782,9 @@ fn acp_open_rejects_malformed_conversation_state_instead_of_erasing_it() {
     let malformed_binding = parse_acp_open_request(&serde_json::json!({
         "id": "acp-malformed-binding",
         "launch": {"command": "codex"},
-        "conversation_binding": {"type": "plugin"}
+        "conversation_binding": {"type": "automation"}
     }));
     assert!(malformed_binding.is_none());
-
-    let malformed_agent = parse_acp_open_request(&serde_json::json!({
-        "id": "acp-malformed-agent",
-        "launch": {"command": "codex"},
-        "agent_session": {
-            "agent": {"plugin_id": "com.example.quant"}
-        }
-    }));
-    assert!(malformed_agent.is_none());
-}
-
-#[test]
-fn agent_session_without_plugin_binding_never_falls_through_to_local_acp() {
-    let session = make_acp_session("acp-agent-without-route", AcpSessionState::default());
-    *session.agent_session.lock().unwrap() = Some(
-        serde_json::from_value(serde_json::json!({
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy-run",
-                "resource_id": "run-1"
-            }
-        }))
-        .unwrap(),
-    );
-    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
-    let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
-        cmd_tx,
-        event_rx,
-        stdio: Arc::new(Mutex::new(None)),
-        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        supports_mid_turn_input: false,
-        supports_compaction: false,
-        supports_native_queue: false,
-        supports_rewind: false,
-    });
-
-    let result = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput::new("do not send locally".into(), Vec::new()),
-        &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("missing binding must not invent a plugin route")
-        },
-    );
-
-    assert!(result.is_err());
-    assert!(cmd_rx.try_recv().is_err());
-}
-
-#[test]
-fn restored_agent_session_must_match_the_declared_contribution_graph() {
-    use smelt_plugin_api::{
-        Contribution, ContributionId, InvocationOperation, PluginContributionSet, PluginId,
-    };
-
-    let plugin_id = PluginId::new("com.example.quant").unwrap();
-    let input_id = ContributionId::new("quant-input").unwrap();
-    let controller_id = ContributionId::new("quant-session").unwrap();
-    let agent_id = ContributionId::new("quant-agent").unwrap();
-    let set = PluginContributionSet {
-        plugin_id: plugin_id.clone(),
-        name: "Quant".into(),
-        version: "1.0.0".into(),
-        contributions: vec![
-            Contribution::InputRoute {
-                id: input_id.clone(),
-                operation: InvocationOperation::new("submit").unwrap(),
-            },
-            Contribution::SessionController {
-                id: controller_id.clone(),
-                input_route: input_id.clone(),
-            },
-            Contribution::Agent {
-                id: agent_id,
-                name: "Quant".into(),
-                icon: None,
-                controller: controller_id,
-            },
-        ],
-    };
-    let binding = smelt_core::conversation::ConversationBinding::Plugin {
-        plugin_id,
-        route: smelt_plugin_api::PluginInputRouteBinding {
-            contribution_id: input_id,
-            context: serde_json::json!({"strategy_id": "strategy-1"}),
-        },
-    };
-    let mut agent_session: smelt_plugin_api::AgentSessionBinding =
-        serde_json::from_value(serde_json::json!({
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy",
-                "resource_id": "strategy-1"
-            }
-        }))
-        .unwrap();
-
-    assert!(
-        validate_conversation_state(
-            Some(&binding),
-            Some(&agent_session),
-            std::slice::from_ref(&set)
-        )
-        .is_ok()
-    );
-    agent_session.controller.contribution_id = ContributionId::new("other-session").unwrap();
-    assert!(validate_conversation_state(Some(&binding), Some(&agent_session), &[set]).is_err());
-}
-
-#[test]
-fn direct_conversation_must_not_touch_plugin_runtime() {
-    use smelt_core::conversation::ConversationBinding;
-
-    assert!(!conversation_needs_plugin_contributions(None, None));
-    assert!(!conversation_needs_plugin_contributions(
-        Some(&ConversationBinding::Direct),
-        None
-    ));
-    assert!(!conversation_needs_plugin_contributions(
-        Some(&ConversationBinding::Automation {
-            run_id: "run-1".into()
-        }),
-        None
-    ));
-    assert!(validate_conversation_state(Some(&ConversationBinding::Direct), None, &[]).is_ok());
-}
-
-#[test]
-fn plugin_conversation_requires_contribution_identity() {
-    use smelt_core::conversation::ConversationBinding;
-    use smelt_plugin_api::{ContributionId, PluginId};
-
-    let binding = ConversationBinding::Plugin {
-        plugin_id: PluginId::new("com.example.quant").unwrap(),
-        route: smelt_plugin_api::PluginInputRouteBinding {
-            contribution_id: ContributionId::new("quant-input").unwrap(),
-            context: serde_json::json!({}),
-        },
-    };
-    assert!(conversation_needs_plugin_contributions(
-        Some(&binding),
-        None
-    ));
-    assert!(conversation_needs_plugin_contributions(
-        Some(&ConversationBinding::Direct),
-        Some(
-            &serde_json::from_value(serde_json::json!({
-                "agent": {
-                    "plugin_id": "com.example.quant",
-                    "contribution_id": "quant-agent"
-                },
-                "controller": {
-                    "plugin_id": "com.example.quant",
-                    "contribution_id": "quant-session"
-                },
-                "instance": {
-                    "plugin_id": "com.example.quant",
-                    "resource_type": "strategy",
-                    "resource_id": "strategy-1"
-                }
-            }))
-            .unwrap()
-        )
-    ));
 }
 
 #[test]

@@ -67,9 +67,6 @@ pub struct ConversationClientLaunch {
     /// 新 daemon 会话的交互输入路由。已有会话 attach 时 daemon 自己的状态优先，
     /// 因此客户端存档不会覆盖一个热会话的当前 binding。
     pub conversation_binding: crate::conversation::ConversationBinding,
-    /// 产品级智能体会话身份。它与执行 ACP 的 provider 分离；已有会话 attach
-    /// 时同样以 daemon 的实时状态为准，只用于 daemon 丢失后的冷恢复。
-    pub agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
     /// 只在新 daemon 会话创建时登记。热 attach 不会用客户端的旧存档覆盖 daemon
     /// 已消费的状态。
     pub pending_agent_preset: Option<String>,
@@ -90,10 +87,6 @@ fn acp_open_request(launch: &ConversationClientLaunch) -> serde_json::Value {
         "omit_history": true,
         "conversation_binding": &launch.conversation_binding,
     });
-    if let Some(agent_session) = &launch.agent_session {
-        req["agent_session"] =
-            serde_json::to_value(agent_session).expect("AgentSessionBinding must serialize");
-    }
     if let Some(prompt) = &launch.pending_agent_preset {
         req["pending_agent_preset"] = serde_json::Value::String(prompt.clone());
     }
@@ -573,7 +566,7 @@ mod tests {
             launch: ConversationLaunchSpec::from_command("claude --print")
                 .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
             engine_kind: ConversationAgentKind::Claude,
-            ephemeral_env: [("PLUGIN_TOKEN".into(), "transient".into())]
+            ephemeral_env: [("SESSION_TOKEN".into(), "transient".into())]
                 .into_iter()
                 .collect(),
             resume_id: Some("resume-1".into()),
@@ -581,7 +574,6 @@ mod tests {
             fork_cut: None,
             retained_entries_end: 0,
             conversation_binding: crate::conversation::ConversationBinding::Direct,
-            agent_session: None,
             pending_agent_preset: None,
         });
 
@@ -594,7 +586,7 @@ mod tests {
             req["launch"]["env"]["CLAUDE_CONFIG_DIR"],
             "~/Claude Workspaces/quant"
         );
-        assert_eq!(req["ephemeral_env"]["PLUGIN_TOKEN"], "transient");
+        assert_eq!(req["ephemeral_env"]["SESSION_TOKEN"], "transient");
         assert!(req.get("cmd").is_none(), "新协议不该再发旧 cmd 字段");
     }
 
@@ -611,88 +603,11 @@ mod tests {
             fork_cut: None,
             retained_entries_end: 0,
             conversation_binding: crate::conversation::ConversationBinding::Direct,
-            agent_session: None,
             pending_agent_preset: None,
         });
 
         assert_eq!(req["launch"]["command"], "claude --print");
         assert!(req.get("cmd").is_none(), "新协议不该再发旧 cmd 字段");
-    }
-
-    #[test]
-    fn acp_open_request_serializes_a_generic_plugin_conversation_binding() {
-        let req = acp_open_request(&ConversationClientLaunch {
-            id: "acp-plugin".into(),
-            cwd: Some("/repo".into()),
-            launch: ConversationLaunchSpec::from_command("codex"),
-            engine_kind: ConversationAgentKind::Codex,
-            ephemeral_env: BTreeMap::new(),
-            resume_id: None,
-            fork_id: None,
-            fork_cut: None,
-            retained_entries_end: 0,
-            conversation_binding: crate::conversation::ConversationBinding::Plugin {
-                plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-                route: smelt_plugin_api::PluginInputRouteBinding {
-                    contribution_id: smelt_plugin_api::ContributionId::new("thread-input").unwrap(),
-                    context: serde_json::json!({"thread_id": "thread-1"}),
-                },
-            },
-            agent_session: None,
-            pending_agent_preset: None,
-        });
-
-        assert_eq!(req["conversation_binding"]["type"], "plugin");
-        assert_eq!(req["conversation_binding"]["plugin_id"], "com.example.chat");
-        assert_eq!(
-            req["conversation_binding"]["route"]["context"]["thread_id"],
-            "thread-1"
-        );
-    }
-
-    #[test]
-    fn acp_open_request_keeps_product_agent_separate_from_execution_provider() {
-        let agent_session: smelt_plugin_api::AgentSessionBinding =
-            serde_json::from_value(serde_json::json!({
-                "agent": {
-                    "plugin_id": "com.example.quant",
-                    "contribution_id": "quant-agent"
-                },
-                "controller": {
-                    "plugin_id": "com.example.quant",
-                    "contribution_id": "quant-session"
-                },
-                "instance": {
-                    "plugin_id": "com.example.quant",
-                    "resource_type": "strategy",
-                    "resource_id": "strategy-1"
-                }
-            }))
-            .unwrap();
-        let req = acp_open_request(&ConversationClientLaunch {
-            id: "acp-quant".into(),
-            cwd: Some("/repo".into()),
-            launch: ConversationLaunchSpec::from_command("codex"),
-            engine_kind: ConversationAgentKind::Codex,
-            ephemeral_env: BTreeMap::new(),
-            resume_id: None,
-            fork_id: None,
-            fork_cut: None,
-            retained_entries_end: 0,
-            conversation_binding: crate::conversation::ConversationBinding::Direct,
-            agent_session: Some(agent_session),
-            pending_agent_preset: None,
-        });
-
-        assert_eq!(req["agent"], "codex");
-        assert_eq!(
-            req["agent_session"]["agent"]["plugin_id"],
-            "com.example.quant"
-        );
-        assert_eq!(
-            req["agent_session"]["agent"]["contribution_id"],
-            "quant-agent"
-        );
     }
 
     #[test]

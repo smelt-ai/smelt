@@ -14,7 +14,7 @@ use crate::automation::AutomationFile;
 use crate::daemon_protocol::DaemonOperation;
 use crate::session_control::RemoteSessionSnapshot;
 use crate::workspace_menu::WorkspaceMenuSnapshot;
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
     CORE_SNAPSHOT_WORKSPACE_MENU, CORE_TOPIC_AUTOMATIONS_CHANGED,
@@ -1021,7 +1021,7 @@ mod tests {
         sessions: Vec<SessionStateChanged>,
     ) -> SubscribeMessage<serde_json::Value> {
         SubscribeMessage::Snapshot {
-            kind: smelt_plugin_api::SnapshotKind(CORE_SNAPSHOT_SESSIONS.to_string()),
+            kind: smelt_event_protocol::SnapshotKind(CORE_SNAPSHOT_SESSIONS.to_string()),
             watermark: 1,
             revision,
             payload: serde_json::to_value(SessionStatesSnapshot {
@@ -1039,7 +1039,7 @@ mod tests {
         data: serde_json::Value,
     ) -> SubscribeMessage<serde_json::Value> {
         SubscribeMessage::Snapshot {
-            kind: smelt_plugin_api::SnapshotKind(kind.to_string()),
+            kind: smelt_event_protocol::SnapshotKind(kind.to_string()),
             watermark: 1,
             revision,
             payload: serde_json::to_value(CoreProjectionEvent {
@@ -1057,15 +1057,15 @@ mod tests {
     ) -> SubscribeMessage<serde_json::Value> {
         SubscribeMessage::Event {
             sequence: Some(1),
-            envelope: smelt_plugin_api::EventEnvelope {
-                event_id: smelt_plugin_api::EventId::new("event-1").unwrap(),
+            envelope: smelt_event_protocol::EventEnvelope {
+                event_id: smelt_event_protocol::EventId::new("event-1").unwrap(),
                 topic: Topic::new(topic).unwrap(),
                 schema_version: 1,
                 occurred_at_ms: 1,
                 aggregate: None,
                 aggregate_revision: None,
                 source: EventSource::Core,
-                correlation_id: smelt_plugin_api::CorrelationId::new("correlation-1").unwrap(),
+                correlation_id: smelt_event_protocol::CorrelationId::new("correlation-1").unwrap(),
                 causation_id: None,
                 hop_count: 0,
                 payload,

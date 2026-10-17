@@ -1,6 +1,6 @@
 use super::*;
 use smelt_event_bus::Delivery;
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
     CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, Capability, CoreProjectionEvent, DeliveryClass, PluginId,

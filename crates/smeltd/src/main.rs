@@ -97,11 +97,11 @@
 //!    vs BEST-EFFORT（grid 各自校验，坏只丢画面不丢会话）；**画面恢复只认 grid**；
 //! 4. spawn successor（暂存 `.next` 先扶正），传 manifest → fd（dup，原件保持
 //!    CLOEXEC 全程不动）→ grid；successor 恢复会话后报 READY；
-//! 5. predecessor 刷 EventHub → 发 COMMIT → 停 sidecars/插件 → 回 {"ok":true}
-//!    → exit(0)。successor 收到 COMMIT 后开始服务（accept/插件/网关自启）。
+//! 5. predecessor 刷 EventHub → 发 COMMIT → 停 sidecars → 回 {"ok":true}
+//!    → exit(0)。successor 收到 COMMIT 后开始服务（accept/网关自启）。
 //!
 //! 回滚（COMMIT 发出前）：杀 successor，drop guards 恢复服务，回 {"ok":false}，
-//! 插件/sidecar 全程没动过。客户端连接随老进程退出断开，GUI 按会话 id 重连即
+//! sidecar 全程没动过。客户端连接随老进程退出断开，GUI 按会话 id 重连即
 //! 恢复——跟 GUI 自己重启走的是同一条 reattach 路。
 //! fork-exec 后子进程重定父到 launchd：终端子进程经 ChildMonitor（kqueue/pidfd）
 //! 收养观察退出（退出码本来就不存）；ACP/menubar 对收养天然免疫（kill+ECHILD 容忍）。
@@ -183,7 +183,6 @@ mod handoff_v2;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod peer_messaging;
-mod plugin_runtime;
 mod protocol;
 mod remote;
 mod session_catalog;
@@ -400,14 +399,14 @@ fn same_device_inode(left: &std::path::Path, right: &std::path::Path) -> bool {
 /// 进程指纹钉死（启动时调一次）：env 传过来的优先（handoff successor 的候选
 /// 指纹 / GUI 拉起时对 spawn 目标的哈希，与本进程映像一致）；否则对启动时刻
 /// 的 current_exe 文件哈希。None 只在文件已消失且无 env 时出现（.app 被删后
-/// 的孤儿进程），此时插件/版本判断一律按“未知”等待，不猜。
+/// 的孤儿进程），此时版本判断一律按“未知”等待，不猜。
 fn pinned_daemon_fingerprint(env: Option<String>) -> Option<String> {
     if let Some(fingerprint) = env.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
         return Some(fingerprint);
     }
     daemon_executable_path()
         .ok()
-        .and_then(|exe| smelt_plugin_host::executable_fingerprint(&exe).ok())
+        .and_then(|exe| smelt_core::daemon_image::content_fingerprint(&exe).ok())
 }
 
 /// 串行化“检查现有实例 → 清理僵尸 socket → bind”整段启动流程。
@@ -2058,18 +2057,18 @@ fn main() {
     let import_sock = std::env::var("SMELTD_HANDOFF_SOCK")
         .ok()
         .and_then(|fd| fd.parse::<RawFd>().ok());
-    let handoff_plugin_daemon_fingerprint = std::env::var("SMELTD_PLUGIN_DAEMON_FINGERPRINT").ok();
+    let env_daemon_fingerprint = std::env::var("SMELTD_DAEMON_FINGERPRINT").ok();
     // Edition 2024：`remove_var` 标为 unsafe（多线程改 env 非同步）。此时只有不访问
     // 环境变量的 stderr tee 读线程，尚未启动任何会并发读环境的业务线程。
     unsafe {
         std::env::remove_var("SMELTD_HANDOFF");
         std::env::remove_var("SMELTD_HANDOFF_SOCK");
-        std::env::remove_var("SMELTD_PLUGIN_DAEMON_FINGERPRINT");
+        std::env::remove_var("SMELTD_DAEMON_FINGERPRINT");
     }
     // 进程指纹启动时钉死：env（handoff successor / GUI 拉起传入）优先，否则对
     // current_exe 文件哈希一次。此后进程生命期内不再重哈希磁盘——StageDiskOnly
-    // 后磁盘是新的、进程还是老的，重哈希会拿错插件集（与 -67034 同一类耦合）。
-    let daemon_fingerprint = pinned_daemon_fingerprint(handoff_plugin_daemon_fingerprint);
+    // 后磁盘是新的、进程还是老的，重哈希会把自己误判成新版本。
+    let daemon_fingerprint = pinned_daemon_fingerprint(env_daemon_fingerprint);
     if let Some(sock_fd) = import_sock {
         import_main(sock_fd, daemon_fingerprint);
         return;
@@ -2151,14 +2150,13 @@ fn main() {
         automations,
         event_hub,
         daemon_fingerprint,
-        None,
     );
 }
 
 /// 交接 v2 import 模式：经 socketpair 收齐→恢复→READY→COMMIT 后直接服务。
 /// 任何失败都 exit(2)——predecessor 见 EOF/ABORT 回滚，老进程原地继续服务。
 /// 注意与正常 main 的差异：不 bind（认领 fd）、不读落盘身份（全新空目录，
-/// 与成功 resume 一致）、插件/sidecar/menubar 全推迟到 COMMIT 之后。
+/// 与成功 resume 一致）、sidecar/menubar 全推迟到 COMMIT 之后。
 fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
     if unsafe { libc::fcntl(sock_fd, libc::F_GETFD) } < 0 {
         dlog("handoff: SMELTD_HANDOFF_SOCK 无效，import 退出");
@@ -2222,8 +2220,8 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
                 /* came_from_handoff */ true,
             );
             webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
-            // 交接 sock 移给 serve loop：插件启动推迟到 predecessor EOF（=老插件
-            // 已停 + 老进程已退）之后，避免新旧两套 user 插件同时在线。
+            // 前任 COMMIT 后自己关掉它那一端，这边不用再等它。
+            drop(sock);
             run_serve_loop(
                 listener,
                 sessions,
@@ -2233,36 +2231,11 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
                 automations,
                 event_hub,
                 daemon_fingerprint,
-                Some(sock),
             );
         }
         handoff_v2::successor::ImportOutcome::Aborted { reason } => {
             dlog(&format!("handoff: import ABORT，退出：{reason}"));
             std::process::exit(2);
-        }
-    }
-}
-
-/// 交接后等 predecessor 退出：它 COMMIT 后先停插件/sidecar 再 drop socket 退出，
-/// EOF 即“老插件已停”。10s 兜底（stop 最多 2s grace + KILL，10s 慷慨上限），
-/// 超时也起——不能让插件无限等一个 hung 住的老进程。
-fn wait_for_predecessor_exit(sock: &UnixStream, timeout: Duration) {
-    let _ = sock.set_read_timeout(Some(timeout));
-    let mut buf = [0u8; 64];
-    let mut sock_ref = sock;
-    loop {
-        match sock_ref.read(&mut buf) {
-            Ok(0) => return,
-            Ok(_) => continue,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::TimedOut
-                    || error.kind() == std::io::ErrorKind::WouldBlock =>
-            {
-                dlog("handoff: 等 predecessor 退出超时（10s），插件先起");
-                return;
-            }
-            // 对端已死/通道坏：效果等同 EOF（老进程没了，老插件随它去了）。
-            Err(_) => return,
         }
     }
 }
@@ -2298,7 +2271,7 @@ fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
                 let Some(target) = staged_successor_executable(&current) else {
                     continue;
                 };
-                let disk = match smelt_plugin_host::executable_fingerprint(&target) {
+                let disk = match smelt_core::daemon_image::content_fingerprint(&target) {
                     Ok(fingerprint) => fingerprint,
                     Err(_) => continue,
                 };
@@ -2370,10 +2343,8 @@ fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
     classify_self_upgrade_reply(&reply)
 }
 
-/// 服务主循环：远端自愈→bun→插件→accept（+macOS 菜单栏主线程编排）。
+/// 服务主循环：远端自愈→accept（+macOS 菜单栏主线程编排）。
 /// 正常启动与 v2 import 共用；import 在 COMMIT 之后调这里。
-/// `handoff_sock`：Some=刚交接过来，插件启动推迟到 predecessor EOF 之后；
-/// None=正常启动，插件立即起。
 #[allow(clippy::too_many_arguments)]
 fn run_serve_loop(
     listener: UnixListener,
@@ -2384,7 +2355,6 @@ fn run_serve_loop(
     automations: AutomationStore,
     event_hub: EventHubHandle,
     daemon_fingerprint: Option<String>,
-    handoff_sock: Option<UnixStream>,
 ) {
     let listen_fd = listener.as_raw_fd();
     let exe_mtime = exe_mtime_secs();
@@ -2411,39 +2381,6 @@ fn run_serve_loop(
         Arc::clone(&iroh_state),
         Arc::clone(&iroh_connections),
     );
-
-    // 先钉死插件集身份，再异步准备受管 Bun。插件 supervisor 只消费同步成功
-    // 返回的 runtime + lease，不再通过全局 current 指针猜测可用性。同步失败使用
-    // 有上限退避持续重试，不会把一次瞬时错误变成守护进程生命周期内的永久故障。
-    // handoff 时 Bun 就绪后仍需等 predecessor EOF，避免两套用户插件并存。
-    plugin_runtime::prepare(daemon_fingerprint.clone());
-    std::thread::spawn(move || {
-        let mut attempt = 0_u32;
-        let runtime = loop {
-            match smelt_core::managed_runtime::sync_managed_bun(&|message| {
-                smelt_core::app_log::info("bun", message)
-            }) {
-                Ok(runtime) => break runtime,
-                Err(error) => {
-                    attempt = attempt.saturating_add(1);
-                    let delay = plugin_runtime::bootstrap_retry_delay(attempt);
-                    smelt_core::app_log::warn(
-                        "bun",
-                        &format!("同步受管 bun 失败：{error}；{} 秒后重试", delay.as_secs()),
-                    );
-                    thread::sleep(delay);
-                }
-            }
-        };
-        smelt_core::app_log::info(
-            "bun",
-            &format!("受管 bun 已就绪：{}", runtime.path.display()),
-        );
-        if let Some(sock) = handoff_sock {
-            wait_for_predecessor_exit(&sock, Duration::from_secs(10));
-        }
-        plugin_runtime::start(runtime);
-    });
 
     // headless 空闲自升级：没有观看连接时磁盘新了没人触发 upgrade，这里兜底。
     // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
@@ -2487,7 +2424,6 @@ fn run_serve_loop(
                 )
             });
         }
-        plugin_runtime::stop();
     };
 
     // 只有被 GUI 拉起时（SMELT_MENUBAR=1，说明继承了登录会话、连得上 WindowServer）
@@ -2960,10 +2896,6 @@ fn resume_hosted_acp_handoff_item(
         .conversation_state
         .as_ref()
         .and_then(|state| state.pending_agent_preset.clone());
-    let agent_session = snapshot
-        .conversation_state
-        .as_ref()
-        .and_then(|state| state.agent_session.clone());
     let mut reduced = smelt_core::acp_session::AcpSessionState::default();
     if let Err(error) = reduced.merge_hosted_snapshot(snapshot) {
         dlog(&format!("handoff: ACP 宿主镜像 {id} 无效：{error}"));
@@ -3019,7 +2951,6 @@ fn resume_hosted_acp_handoff_item(
         restore_state: Mutex::new(AcpRestoreState::Fresh),
         ephemeral_env: Mutex::new(BTreeMap::new()),
         conversation_binding: Mutex::new(conversation_binding),
-        agent_session: Mutex::new(agent_session),
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
         durable_history_session_id: Mutex::new(None),
@@ -3526,10 +3457,6 @@ pub(crate) fn resume_from_value(
             .conversation_state
             .as_ref()
             .and_then(|state| state.pending_agent_preset.clone());
-        let agent_session = snapshot
-            .conversation_state
-            .as_ref()
-            .and_then(|state| state.agent_session.clone());
         let reload_history = snapshot.history_omitted;
         let open_turn = if snapshot.history_omitted {
             snapshot.entries.clone()
@@ -3599,7 +3526,6 @@ pub(crate) fn resume_from_value(
             // potentially secret 的网页变量写入 handoff 文件。
             ephemeral_env: Mutex::new(BTreeMap::new()),
             conversation_binding: Mutex::new(conversation_binding),
-            agent_session: Mutex::new(agent_session),
             conversation_submit: Mutex::new(()),
             pending_agent_preset: Mutex::new(pending_agent_preset),
             durable_history_session_id: Mutex::new(None),

@@ -2,10 +2,9 @@
 //!
 //! 左侧「智能体 / 自动化 / 能力库」是分组标题，不是 iOS/长桥那种保活 Tab：点标题总是进
 //! 该面的根页。能力库的模型、插件、MCP、记忆是面内平级页签，不是钻取。对话和运行现场
-//! 是侧栏里的子行，只切当前面、不清根页。插件工作台与这些系统入口并列，不再把
-//! `route` 写成 Session 再盖一层 surface。
+//! 是侧栏里的子行，只切当前面、不清根页。
 
-/// 左侧一级导航。智能体、自动化、能力库、会话与插件工作台并列。
+/// 左侧一级导航。智能体、自动化、能力库与会话并列。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkspaceRoute {
@@ -15,38 +14,11 @@ pub(crate) enum WorkspaceRoute {
     Capabilities,
     #[default]
     Session,
-    Plugin {
-        key: String,
-    },
 }
 
 impl WorkspaceRoute {
-    pub(crate) fn plugin_key(&self) -> Option<&str> {
-        match self {
-            Self::Plugin { key } => Some(key.as_str()),
-            _ => None,
-        }
-    }
-
     pub(crate) fn is_session(&self) -> bool {
         matches!(self, Self::Session)
-    }
-
-    pub(crate) fn is_plugin(&self) -> bool {
-        matches!(self, Self::Plugin { .. })
-    }
-
-    /// 切到这个面时，要不要把插件 WebView 的 key window 交还给 GPUI。
-    ///
-    /// 插件面本身就是 WebView：侧栏点击落在 GPUI 上，若立刻 `release_focus`，
-    /// 子窗口要再点一次才成为 key，表现就是「必须点两次才能进入」。
-    pub(crate) fn releases_plugin_key(&self) -> bool {
-        !self.is_plugin()
-    }
-
-    /// 侧栏分组标题要点的面：应回到根页。插件工作台没有面内钻取。
-    pub(crate) fn sidebar_opens_root(&self) -> bool {
-        !self.is_plugin()
     }
 }
 
@@ -180,19 +152,9 @@ impl Default for WorkspaceNav {
 }
 
 impl WorkspaceNav {
-    pub(crate) fn from_persisted(route: WorkspaceRoute, surface: Option<String>) -> Self {
-        let active = match surface.filter(|key| !key.trim().is_empty()) {
-            Some(key) => WorkspaceRoute::Plugin { key },
-            None => match route {
-                WorkspaceRoute::Plugin { key } if !key.trim().is_empty() => {
-                    WorkspaceRoute::Plugin { key }
-                }
-                WorkspaceRoute::Plugin { .. } => WorkspaceRoute::Session,
-                other => other,
-            },
-        };
+    pub(crate) fn from_persisted(route: WorkspaceRoute) -> Self {
         Self {
-            active,
+            active: route,
             agents: AgentsView::Catalog,
             automations: AutomationsView::List,
             capabilities: CapabilitiesTab::Models,
@@ -235,37 +197,18 @@ impl WorkspaceNav {
         match self.active {
             WorkspaceRoute::Agents => self.agents.pop_to_root(),
             WorkspaceRoute::Automations => self.automations.pop_to_root(),
-            WorkspaceRoute::Capabilities
-            | WorkspaceRoute::Session
-            | WorkspaceRoute::Plugin { .. } => {}
+            WorkspaceRoute::Capabilities | WorkspaceRoute::Session => {}
         }
     }
 
-    pub(crate) fn close_plugin(&mut self) -> bool {
-        if self.active.is_plugin() {
-            self.active = WorkspaceRoute::Session;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// 落盘时拆回旧字段：plugin 仍写 `active_workspace_surface`，`route` 只写系统入口。
-    pub(crate) fn persist(&self) -> (WorkspaceRoute, Option<String>) {
-        match &self.active {
-            WorkspaceRoute::Plugin { key } => (WorkspaceRoute::Session, Some(key.clone())),
-            other => (other.clone(), None),
-        }
+    pub(crate) fn persist(&self) -> WorkspaceRoute {
+        self.active.clone()
     }
 }
 
 impl crate::Workspace {
     pub(crate) fn active_tab(&self) -> &WorkspaceRoute {
         self.nav.active()
-    }
-
-    pub(crate) fn plugin_surface_key(&self) -> Option<&str> {
-        self.nav.active().plugin_key()
     }
 }
 
@@ -274,76 +217,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn persisted_surface_wins_over_session_route() {
-        let nav =
-            WorkspaceNav::from_persisted(WorkspaceRoute::Session, Some("com.example/board".into()));
-        assert_eq!(
-            nav.active(),
-            &WorkspaceRoute::Plugin {
-                key: "com.example/board".into()
-            }
-        );
-        assert_eq!(
-            nav.persist(),
-            (WorkspaceRoute::Session, Some("com.example/board".into()))
-        );
-    }
-
-    #[test]
-    fn empty_or_missing_surface_keeps_system_tab() {
-        let nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents, None);
+    fn persisted_route_is_restored_as_is() {
+        let nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents);
         assert_eq!(nav.active(), &WorkspaceRoute::Agents);
-        assert_eq!(nav.persist(), (WorkspaceRoute::Agents, None));
-
-        let nav = WorkspaceNav::from_persisted(WorkspaceRoute::Automations, Some("  ".into()));
-        assert_eq!(nav.active(), &WorkspaceRoute::Automations);
-    }
-
-    #[test]
-    fn persisted_surface_still_wins_when_route_is_agents() {
-        let nav =
-            WorkspaceNav::from_persisted(WorkspaceRoute::Agents, Some("com.example/board".into()));
-        assert_eq!(nav.active().plugin_key(), Some("com.example/board"));
+        assert_eq!(nav.persist(), WorkspaceRoute::Agents);
     }
 
     #[test]
     fn set_active_only_changes_the_current_tab() {
-        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents, None);
+        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents);
         nav.set_active(WorkspaceRoute::Automations);
         assert_eq!(nav.active(), &WorkspaceRoute::Automations);
         nav.set_active(WorkspaceRoute::Agents);
         assert_eq!(nav.active(), &WorkspaceRoute::Agents);
-    }
-
-    #[test]
-    fn opening_a_plugin_route_must_not_steal_webview_key() {
-        assert!(
-            !WorkspaceRoute::Plugin {
-                key: "com.example.board/board".into()
-            }
-            .releases_plugin_key(),
-            "切到插件工作台时不能 release_focus，否则还要再点一次页面"
-        );
-        assert!(WorkspaceRoute::Session.releases_plugin_key());
-        assert!(WorkspaceRoute::Agents.releases_plugin_key());
-        assert!(WorkspaceRoute::Automations.releases_plugin_key());
-        assert!(WorkspaceRoute::Capabilities.releases_plugin_key());
-    }
-
-    #[test]
-    fn plugin_tabs_are_distinct_and_close_back_to_session() {
-        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Session, None);
-        nav.set_active(WorkspaceRoute::Plugin {
-            key: "a/board".into(),
-        });
-        assert_eq!(nav.active().plugin_key(), Some("a/board"));
-        nav.set_active(WorkspaceRoute::Plugin {
-            key: "b/other".into(),
-        });
-        assert_eq!(nav.active().plugin_key(), Some("b/other"));
-        assert!(nav.close_plugin());
-        assert!(nav.active().is_session());
-        assert!(!nav.close_plugin());
     }
 
     #[test]
@@ -386,7 +272,7 @@ mod tests {
 
     #[test]
     fn sidebar_pop_to_root_clears_drill_in_on_the_active_face_only() {
-        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents, None);
+        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents);
         nav.agents_mut().open_editor("agent-1".into());
         nav.automations_mut().open_editor("auto-1".into());
 
@@ -402,7 +288,7 @@ mod tests {
 
     #[test]
     fn capabilities_tab_survives_returning_to_the_root() {
-        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Session, None);
+        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Session);
         assert_eq!(nav.capabilities_tab(), CapabilitiesTab::Models);
         nav.set_capabilities_tab(CapabilitiesTab::Plugins);
         nav.set_active(WorkspaceRoute::Capabilities);
@@ -412,21 +298,7 @@ mod tests {
             CapabilitiesTab::Plugins,
             "页签是平级切换，不是钻取，点侧栏标题不应把它重置"
         );
-        assert_eq!(nav.persist(), (WorkspaceRoute::Capabilities, None));
-    }
-
-    #[test]
-    fn sidebar_system_entries_open_root_plugin_does_not() {
-        assert!(WorkspaceRoute::Agents.sidebar_opens_root());
-        assert!(WorkspaceRoute::Automations.sidebar_opens_root());
-        assert!(WorkspaceRoute::Capabilities.sidebar_opens_root());
-        assert!(WorkspaceRoute::Session.sidebar_opens_root());
-        assert!(
-            !WorkspaceRoute::Plugin {
-                key: "a/board".into()
-            }
-            .sidebar_opens_root()
-        );
+        assert_eq!(nav.persist(), WorkspaceRoute::Capabilities);
     }
 
     #[test]

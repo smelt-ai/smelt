@@ -129,23 +129,6 @@ fn old_acp_archive_without_agent_field_still_loads() {
 
 #[test]
 fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
-    let agent_session: smelt_plugin_api::AgentSessionBinding =
-        serde_json::from_value(serde_json::json!({
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy",
-                "resource_id": "strategy-1"
-            }
-        }))
-        .unwrap();
     let saved = AcpSaved {
         cwd: Some("/repo".into()),
         launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude")
@@ -158,14 +141,9 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
         )),
         sid: Some("acp-1".into()),
         refresh_launch_from_settings: false,
-        conversation_binding: smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("thread-input").unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
+        conversation_binding: smelt_core::conversation::ConversationBinding::Automation {
+            run_id: "run-1".into(),
         },
-        agent_session: Some(agent_session.clone()),
         config_values: vec![
             ("model".into(), "claude-sonnet-4-6".into()),
             ("effort".into(), "high".into()),
@@ -221,15 +199,10 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
     );
     assert_eq!(
         restored.conversation_binding,
-        smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("thread-input").unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
+        smelt_core::conversation::ConversationBinding::Automation {
+            run_id: "run-1".into()
         }
     );
-    assert_eq!(restored.agent_session, Some(agent_session));
 }
 
 #[test]

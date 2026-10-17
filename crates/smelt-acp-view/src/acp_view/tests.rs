@@ -3353,33 +3353,12 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
 }
 
 #[gpui::test]
-fn snapshot_agent_session_becomes_the_views_persisted_product_identity(
-    cx: &mut gpui::TestAppContext,
-) {
+fn snapshot_binding_becomes_the_views_persisted_binding(cx: &mut gpui::TestAppContext) {
     use gpui::VisualTestContext;
     use smelt_core::acp_session::AcpSessionState;
-    use smelt_core::conversation::ConversationStateSnapshot;
-    use smelt_plugin_api::{
-        AgentSessionBinding, ContributionId, PluginContributionRef, PluginId, PluginResourceId,
-        PluginResourceRef, PluginResourceType,
-    };
+    use smelt_core::conversation::{ConversationBinding, ConversationStateSnapshot};
 
     cx.update(gpui_component::init);
-    let binding = AgentSessionBinding {
-        agent: PluginContributionRef {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            contribution_id: ContributionId::new("quant-agent").unwrap(),
-        },
-        controller: PluginContributionRef {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            contribution_id: ContributionId::new("quant-session").unwrap(),
-        },
-        instance: PluginResourceRef {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            resource_type: PluginResourceType::new("strategy").unwrap(),
-            resource_id: PluginResourceId::new("strategy-1").unwrap(),
-        },
-    };
     let (view, cx) = cx.add_window_view(|_window, cx| {
         super::AcpView::placeholder(
             cx,
@@ -3392,37 +3371,27 @@ fn snapshot_agent_session_becomes_the_views_persisted_product_identity(
                 reason: "test placeholder".into(),
                 entries: Vec::new(),
                 resume_session_id: None,
-                saved_sid: Some("acp-agent-session-test".into()),
+                saved_sid: Some("acp-binding-test".into()),
             },
         )
     });
     let cx: &mut VisualTestContext = cx;
     let mut snapshot = AcpSessionState::default().to_snapshot(false);
     snapshot.snapshot_revision = 1;
+    let binding = ConversationBinding::Automation {
+        run_id: "run-1".into(),
+    };
     snapshot.conversation_state = Some(ConversationStateSnapshot {
-        binding: Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: ContributionId::new("quant-input").unwrap(),
-                context: serde_json::json!({"strategy_id": "strategy-1"}),
-            },
-        }),
-        agent_session: Some(binding.clone()),
-        pending_agent_preset: None,
+        binding: Some(binding.clone()),
+        ..Default::default()
     });
     cx.update(|_window, cx| {
         view.update(cx, |view, cx| view.apply_snapshot(snapshot, cx));
     });
 
     assert_eq!(
-        view.read_with(cx, |view, _| view.agent_session_for_save()),
-        Some(binding)
-    );
-    assert_eq!(
-        view.read_with(cx, |view, _| view.session_action_payload())
-            .unwrap()
-            .context["strategy_id"],
-        "strategy-1"
+        view.read_with(cx, |view, _| view.conversation_binding_for_save()),
+        binding
     );
 }
 

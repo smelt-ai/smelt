@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use smelt_core::control_api::{
     AgentList, AgentListParams, AgentSend, AgentSendParams, ControlClientError,
 };
-use smelt_plugin_api::CommandId;
+use smelt_event_protocol::CommandId;
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 const SMELT_LIST_AGENTS: &str = "smelt_list_agents";

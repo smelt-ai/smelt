@@ -321,7 +321,7 @@ pub struct AgentListResult {
 pub struct AgentSendParams {
     pub source_session_id: String,
     pub source_token: String,
-    pub command_id: smelt_plugin_api::CommandId,
+    pub command_id: smelt_event_protocol::CommandId,
     pub target: String,
     pub message: String,
 }

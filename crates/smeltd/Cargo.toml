@@ -13,8 +13,7 @@ workspace = true
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
 smelt-core = { path = "../smelt-core" }
-smelt-plugin-api = { path = "../smelt-plugin-api" }
-smelt-plugin-host = { path = "../smelt-plugin-host" }
+smelt-event-protocol = { path = "../smelt-event-protocol" }
 smelt-event-bus = { path = "../smelt-event-bus" }
 smelt-store = { path = "../smelt-store" }
 smelt-remote-gateway = { path = "../smelt-remote-gateway" }

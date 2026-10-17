@@ -451,7 +451,6 @@ impl Workspace {
         let heading = match self.rename_target {
             Some(RenameTarget::Pane(_)) => "重命名终端",
             Some(RenameTarget::History { .. }) => "重命名历史会话",
-            Some(RenameTarget::WorkspaceSurface(_)) => "重命名",
             _ => "重命名会话",
         };
 

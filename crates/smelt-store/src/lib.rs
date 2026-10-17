@@ -151,14 +151,14 @@ pub struct AutomationRunRecord {
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutboxEvent {
     pub outbox_id: u64,
-    pub envelope: smelt_plugin_api::EventEnvelope<serde_json::Value>,
+    pub envelope: smelt_event_protocol::EventEnvelope<serde_json::Value>,
     pub created_at_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerMessageCommandResult {
     pub source_session_id: String,
-    pub command_id: smelt_plugin_api::CommandId,
+    pub command_id: smelt_event_protocol::CommandId,
     pub request_fingerprint: String,
     pub completed_at_ms: u64,
     pub message_id: String,
@@ -223,7 +223,7 @@ impl StoreTransaction<'_> {
 
     pub fn append_outbox_batch(
         &mut self,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         imp::transaction_append_outbox(self, events)
     }
@@ -771,7 +771,7 @@ impl Store {
     /// Adds durable events to the domain transaction's outbox in one commit.
     pub fn append_outbox_batch(
         &self,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         imp::append_outbox_batch(&self.backend, events)?;
         if !events.is_empty() {
@@ -799,8 +799,8 @@ impl Store {
 
     pub fn bind_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         declaration_fingerprint: &str,
     ) -> Result<CursorDeclaration, StoreError> {
         validate_name("declaration fingerprint", declaration_fingerprint)?;
@@ -814,8 +814,8 @@ impl Store {
 
     pub fn load_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<CursorDeclaration>, StoreError> {
         imp::load_cursor_declaration(&self.backend, plugin_id, subscription_id)
     }
@@ -823,7 +823,7 @@ impl Store {
     pub fn get_peer_message_command_result(
         &self,
         source_session_id: &str,
-        command_id: &smelt_plugin_api::CommandId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<PeerMessageCommandResult>, StoreError> {
         validate_name("source session id", source_session_id)?;
         imp::get_peer_message_command_result(&self.backend, source_session_id, command_id)
@@ -833,7 +833,7 @@ impl Store {
     pub fn commit_peer_message_delivery(
         &self,
         result: &PeerMessageCommandResult,
-        event: &smelt_plugin_api::EventEnvelope<serde_json::Value>,
+        event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
     ) -> Result<PeerMessageCommitOutcome, StoreError> {
         validate_name("source session id", &result.source_session_id)?;
         validate_name("request fingerprint", &result.request_fingerprint)?;
@@ -866,7 +866,7 @@ impl smelt_event_bus::EventStore for Store {
     fn load_after_topics(
         &self,
         sequence: u64,
-        topics: &std::collections::BTreeSet<smelt_plugin_api::Topic>,
+        topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::StoredEvent>, smelt_event_bus::EventBusError> {
         imp::load_events_after_topics(&self.backend, sequence, topics, limit)
@@ -879,8 +879,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn bind_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         declaration_fingerprint: &str,
     ) -> Result<smelt_event_bus::CursorDeclaration, smelt_event_bus::EventBusError> {
         self.bind_cursor_declaration(plugin_id, subscription_id, declaration_fingerprint)
@@ -893,8 +893,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn load_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::CursorDeclaration>, smelt_event_bus::EventBusError> {
         self.load_cursor_declaration(plugin_id, subscription_id)
             .map(|declaration| {
@@ -909,8 +909,8 @@ impl smelt_event_bus::EventStore for Store {
     fn store_cursors(
         &self,
         cursors: &[(
-            smelt_plugin_api::PluginId,
-            smelt_plugin_api::SubscriptionId,
+            smelt_event_protocol::PluginId,
+            smelt_event_protocol::SubscriptionId,
             u64,
         )],
     ) -> Result<(), smelt_event_bus::EventBusError> {
@@ -927,8 +927,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn load_dead_letters(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::DeadLetter>, smelt_event_bus::EventBusError> {
         imp::load_dead_letters(&self.backend, plugin_id, subscription_id, limit)
@@ -937,8 +937,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn load_retry(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::DeliveryRetry>, smelt_event_bus::EventBusError> {
         imp::load_retry(&self.backend, plugin_id, subscription_id)
             .map_err(smelt_event_bus::EventBusError::new)
@@ -953,8 +953,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn delete_retry(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<(), smelt_event_bus::EventBusError> {
         imp::delete_retry(&self.backend, plugin_id, subscription_id)
             .map_err(smelt_event_bus::EventBusError::new)
@@ -962,8 +962,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn get_command_result(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        command_id: &smelt_plugin_api::CommandId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<smelt_event_bus::CommandResult>, smelt_event_bus::EventBusError> {
         imp::get_command_result(&self.backend, plugin_id, command_id)
             .map_err(smelt_event_bus::EventBusError::new)
@@ -1201,7 +1201,7 @@ mod imp {
 
     pub(super) fn transaction_append_outbox(
         transaction: &mut super::StoreTransaction<'_>,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         insert_outbox_events(transaction.transaction, events)
     }
@@ -2254,7 +2254,7 @@ mod imp {
     pub(super) fn load_events_after_topics(
         backend: &Backend,
         sequence: u64,
-        topics: &std::collections::BTreeSet<smelt_plugin_api::Topic>,
+        topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
         if topics.is_empty() || limit == 0 {
@@ -2307,7 +2307,7 @@ mod imp {
 
     pub(super) fn append_outbox_batch(
         backend: &Backend,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         if events.is_empty() {
             return Ok(());
@@ -2322,7 +2322,7 @@ mod imp {
 
     fn insert_outbox_events(
         transaction: &rusqlite::Transaction<'_>,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         let mut statement = transaction.prepare_cached(
             "INSERT INTO event_outbox(event_id, envelope_json, created_at_ms)
@@ -2338,7 +2338,7 @@ mod imp {
     pub(super) fn get_peer_message_command_result(
         backend: &Backend,
         source_session_id: &str,
-        command_id: &smelt_plugin_api::CommandId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<super::PeerMessageCommandResult>, StoreError> {
         let connection = lock_connection(backend)?;
         connection
@@ -2365,7 +2365,7 @@ mod imp {
     pub(super) fn commit_peer_message_delivery(
         backend: &Backend,
         result: &super::PeerMessageCommandResult,
-        event: &smelt_plugin_api::EventEnvelope<serde_json::Value>,
+        event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
     ) -> Result<super::PeerMessageCommitOutcome, StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2496,7 +2496,7 @@ mod imp {
         };
         let mut dispatched = Vec::with_capacity(pending.len());
         for (outbox_id, wire_bytes) in pending {
-            let envelope: smelt_plugin_api::EventEnvelope<serde_json::Value> =
+            let envelope: smelt_event_protocol::EventEnvelope<serde_json::Value> =
                 serde_json::from_slice(&wire_bytes)?;
             let existing = transaction
                 .query_row(
@@ -2542,8 +2542,8 @@ mod imp {
 
     pub(super) fn bind_cursor_declaration(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         declaration_fingerprint: &str,
     ) -> Result<super::CursorDeclaration, StoreError> {
         let mut connection = lock_connection(backend)?;
@@ -2615,8 +2615,8 @@ mod imp {
 
     pub(super) fn load_cursor_declaration(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<super::CursorDeclaration>, StoreError> {
         let connection = lock_connection(backend)?;
         connection
@@ -2639,8 +2639,8 @@ mod imp {
     pub(super) fn store_cursors(
         backend: &Backend,
         cursors: &[(
-            smelt_plugin_api::PluginId,
-            smelt_plugin_api::SubscriptionId,
+            smelt_event_protocol::PluginId,
+            smelt_event_protocol::SubscriptionId,
             u64,
         )],
     ) -> Result<(), StoreError> {
@@ -2721,8 +2721,8 @@ mod imp {
 
     pub(super) fn load_dead_letters(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::DeadLetter>, StoreError> {
         let connection = lock_connection(backend)?;
@@ -2750,7 +2750,7 @@ mod imp {
                 plugin_id: plugin_id.clone(),
                 subscription_id: subscription_id.clone(),
                 sequence: sequence as u64,
-                event_id: smelt_plugin_api::EventId::new(event_id)?,
+                event_id: smelt_event_protocol::EventId::new(event_id)?,
                 attempts: attempts as u32,
                 reason,
                 failed_at_ms: failed_at_ms as u64,
@@ -2761,8 +2761,8 @@ mod imp {
 
     pub(super) fn load_retry(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::DeliveryRetry>, StoreError> {
         let connection = lock_connection(backend)?;
         let row = connection
@@ -2788,7 +2788,7 @@ mod imp {
                     plugin_id: plugin_id.clone(),
                     subscription_id: subscription_id.clone(),
                     sequence: sequence as u64,
-                    event_id: smelt_plugin_api::EventId::new(event_id)?,
+                    event_id: smelt_event_protocol::EventId::new(event_id)?,
                     attempts: attempts as u32,
                     next_attempt_at_ms: next_attempt_at_ms as u64,
                     reason,
@@ -2829,8 +2829,8 @@ mod imp {
 
     pub(super) fn delete_retry(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<(), StoreError> {
         let connection = lock_connection(backend)?;
         connection.execute(
@@ -2843,8 +2843,8 @@ mod imp {
 
     pub(super) fn get_command_result(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        command_id: &smelt_plugin_api::CommandId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<smelt_event_bus::CommandResult>, StoreError> {
         let connection = lock_connection(backend)?;
         let row = connection
@@ -4154,7 +4154,7 @@ mod imp {
     }
     pub(super) fn transaction_append_outbox(
         _transaction: &mut super::StoreTransaction<'_>,
-        _events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        _events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -4584,7 +4584,7 @@ mod imp {
     pub(super) fn load_events_after_topics(
         _backend: &Backend,
         _sequence: u64,
-        _topics: &std::collections::BTreeSet<smelt_plugin_api::Topic>,
+        _topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
         _limit: usize,
     ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
         unsupported()
@@ -4594,7 +4594,7 @@ mod imp {
     }
     pub(super) fn append_outbox_batch(
         _backend: &Backend,
-        _events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        _events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -4619,37 +4619,37 @@ mod imp {
     pub(super) fn get_peer_message_command_result(
         _backend: &Backend,
         _source_session_id: &str,
-        _command_id: &smelt_plugin_api::CommandId,
+        _command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<super::PeerMessageCommandResult>, StoreError> {
         unsupported()
     }
     pub(super) fn commit_peer_message_delivery(
         _backend: &Backend,
         _result: &super::PeerMessageCommandResult,
-        _event: &smelt_plugin_api::EventEnvelope<serde_json::Value>,
+        _event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
     ) -> Result<super::PeerMessageCommitOutcome, StoreError> {
         unsupported()
     }
     pub(super) fn bind_cursor_declaration(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
         _declaration_fingerprint: &str,
     ) -> Result<super::CursorDeclaration, StoreError> {
         unsupported()
     }
     pub(super) fn load_cursor_declaration(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<super::CursorDeclaration>, StoreError> {
         unsupported()
     }
     pub(super) fn store_cursors(
         _backend: &Backend,
         _cursors: &[(
-            smelt_plugin_api::PluginId,
-            smelt_plugin_api::SubscriptionId,
+            smelt_event_protocol::PluginId,
+            smelt_event_protocol::SubscriptionId,
             u64,
         )],
     ) -> Result<(), StoreError> {
@@ -4663,16 +4663,16 @@ mod imp {
     }
     pub(super) fn load_dead_letters(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
         _limit: usize,
     ) -> Result<Vec<smelt_event_bus::DeadLetter>, StoreError> {
         unsupported()
     }
     pub(super) fn load_retry(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::DeliveryRetry>, StoreError> {
         unsupported()
     }
@@ -4684,15 +4684,15 @@ mod imp {
     }
     pub(super) fn delete_retry(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<(), StoreError> {
         unsupported()
     }
     pub(super) fn get_command_result(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _command_id: &smelt_plugin_api::CommandId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<smelt_event_bus::CommandResult>, StoreError> {
         unsupported()
     }
@@ -4709,7 +4709,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use smelt_event_bus::EventStore;
-    use smelt_plugin_api::{
+    use smelt_event_protocol::{
         AggregateRef, CommandId, CorrelationId, EventEnvelope, EventId, EventSource, PluginId,
         SubscriptionId, Topic,
     };
@@ -5330,7 +5330,7 @@ mod tests {
         let command = store
             .get_peer_message_command_result(
                 "source",
-                &smelt_plugin_api::CommandId::new("command-1").unwrap(),
+                &smelt_event_protocol::CommandId::new("command-1").unwrap(),
             )
             .unwrap()
             .unwrap();
@@ -5519,7 +5519,7 @@ mod tests {
 
         let result = smelt_event_bus::CommandResult {
             plugin_id: plugin.clone(),
-            command_id: smelt_plugin_api::CommandId::new("command-1").unwrap(),
+            command_id: smelt_event_protocol::CommandId::new("command-1").unwrap(),
             completed_at_ms: 30,
             result: json!({"created": true}),
         };
@@ -6551,27 +6551,8 @@ mod tests {
                         "config_values": [["model", "sonnet"]],
                         "pending_agent_preset": "先检查正确性和回归风险",
                         "conversation_binding": {
-                            "type": "plugin",
-                            "plugin_id": "com.example.quant",
-                            "route": {
-                                "contribution_id": "strategy-input",
-                                "context": {"strategy_id": "strategy-1"}
-                            }
-                        },
-                        "agent_session": {
-                            "agent": {
-                                "plugin_id": "com.example.quant",
-                                "contribution_id": "quant-agent"
-                            },
-                            "controller": {
-                                "plugin_id": "com.example.quant",
-                                "contribution_id": "quant-session"
-                            },
-                            "instance": {
-                                "plugin_id": "com.example.quant",
-                                "resource_type": "strategy",
-                                "resource_id": "strategy-1"
-                            }
+                            "type": "automation",
+                            "run_id": "run-1"
                         }
                     },
                     "route": null
@@ -6634,12 +6615,8 @@ mod tests {
             "先检查正确性和回归风险"
         );
         assert_eq!(
-            restored["sessions"][1]["acp"]["conversation_binding"]["route"]["context"]["strategy_id"],
-            "strategy-1"
-        );
-        assert_eq!(
-            restored["sessions"][1]["acp"]["agent_session"]["controller"]["contribution_id"],
-            "quant-session"
+            restored["sessions"][1]["acp"]["conversation_binding"]["run_id"],
+            "run-1"
         );
         // 智能体归属必须活过落盘：丢了这一列，重启后对话会退化成按 cwd 成组的项目。
         assert_eq!(
@@ -6928,11 +6905,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store
-                .get_appearance_snapshot()
-                .unwrap()
-                .unwrap()
-                .theme_name,
+            store.get_appearance_snapshot().unwrap().unwrap().theme_name,
             "Default Dark"
         );
         store
@@ -6943,11 +6916,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store
-                .get_appearance_snapshot()
-                .unwrap()
-                .unwrap()
-                .theme_name,
+            store.get_appearance_snapshot().unwrap().unwrap().theme_name,
             "Default Light"
         );
         store
@@ -6958,11 +6927,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store
-                .get_appearance_snapshot()
-                .unwrap()
-                .unwrap()
-                .theme_name,
+            store.get_appearance_snapshot().unwrap().unwrap().theme_name,
             "Ayu Light"
         );
         std::fs::remove_dir_all(dir).unwrap();

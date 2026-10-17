@@ -12,18 +12,6 @@ fn scratch(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn content_fingerprint_matches_plugin_host() {
-    let root = scratch("fingerprint");
-    let path = root.join("image");
-    std::fs::write(&path, b"same-bytes").unwrap();
-    assert_eq!(
-        smelt_core::daemon_image::content_fingerprint(&path).unwrap(),
-        smelt_plugin_host::executable_fingerprint(&path).unwrap()
-    );
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn symlink_launch_name_pins_the_image_file() {
     let root = scratch("pin-symlink");
     let src = root.join("src");

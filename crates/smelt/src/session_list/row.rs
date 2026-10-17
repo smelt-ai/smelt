@@ -20,24 +20,6 @@ pub(super) fn acp_provider_icon(agent: ConversationAgentKind) -> Icon {
     Icon::empty().path(agent.icon_asset())
 }
 
-pub(super) fn plugin_agent_icon(agent: &crate::plugin_ui::PluginAgentPresentation) -> Icon {
-    agent
-        .icon_asset
-        .as_ref()
-        .map(|path| Icon::empty().path(path.clone()))
-        .unwrap_or_else(|| Icon::new(IconName::Bot))
-}
-
-pub(super) fn plugin_session_action_icon(
-    icon: Option<smelt_plugin_api::SessionActionIcon>,
-) -> Option<IconName> {
-    match icon {
-        Some(smelt_plugin_api::SessionActionIcon::Check) => Some(IconName::Check),
-        Some(smelt_plugin_api::SessionActionIcon::ExternalLink) => Some(IconName::ExternalLink),
-        None => None,
-    }
-}
-
 /// 任务页会保留上次活动会话，方便返回时恢复；但它不是任务页中的选中项。
 pub(super) fn session_row_is_selected(
     session_route_active: bool,

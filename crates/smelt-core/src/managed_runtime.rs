@@ -314,40 +314,6 @@ fn install_bun_generation(
     validate_bun(&bun)
 }
 
-pub fn try_current_managed_bun() -> Option<ManagedBunRuntime> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let store = GenerationStore::managed().ok()?;
-        let manager = store.try_lock_manager().ok()??;
-        let expected = bun_manifest();
-        let current = store.current_locked(GenerationKind::Bun)?;
-        if current != expected.generation_id {
-            return None;
-        }
-        let root = store.generation_root(GenerationKind::Bun, &current);
-        if !bun_tree_matches(&root, &expected) {
-            return None;
-        }
-        let lease = store
-            .acquire_shared_locked(GenerationKind::Bun, &current)
-            .ok()?;
-        drop(manager);
-        Some(ManagedBunRuntime {
-            path: root.join("bun"),
-            generation_id: current,
-            lease,
-        })
-    }
-}
-
-pub fn managed_bun_path_if_ready() -> Option<PathBuf> {
-    try_current_managed_bun().map(|runtime| runtime.path)
-}
-
 /// Return the expected Pi entry and whether the exact Bun+Pi generation pair is currently
 /// published. This never downloads, installs, hashes the Bun executable, or waits for a manager
 /// transaction; it is safe for diagnostics and availability UI.

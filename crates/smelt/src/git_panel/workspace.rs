@@ -5,9 +5,11 @@
 
 use super::*;
 
-fn apply_collapsed_files(
+/// 「全部更改」默认收起，只展开点开过的文件；单文件 diff 总是展开。
+pub(super) fn apply_expanded_files(
     state: &mut gpui_component::diff::DiffState,
-    collapsed: &HashSet<String>,
+    aggregate: bool,
+    expanded: &HashSet<String>,
     cx: &mut Context<gpui_component::diff::DiffState>,
 ) {
     let paths: Vec<String> = state
@@ -16,7 +18,8 @@ fn apply_collapsed_files(
         .map(|file| file.path().to_string())
         .collect();
     for path in paths {
-        state.set_file_collapsed(&path, collapsed.contains(&path), cx);
+        let collapsed = aggregate && !expanded.contains(&path);
+        state.set_file_collapsed(&path, collapsed, cx);
     }
 }
 
@@ -1280,10 +1283,10 @@ impl Workspace {
         // 会把右侧文件列表整列重排。
         self._diff_view_sub = Some(cx.subscribe(view, |this, _, event, _cx| match event {
             gpui_component::diff::DiffEvent::FileCollapsed(path) => {
-                this.git_collapsed_diff_files.insert(path.to_string());
+                this.git_expanded_diff_files.remove(path.as_ref());
             }
             gpui_component::diff::DiffEvent::FileExpanded(path) => {
-                this.git_collapsed_diff_files.remove(path.as_ref());
+                this.git_expanded_diff_files.insert(path.to_string());
             }
             _ => {}
         }));
@@ -1328,16 +1331,19 @@ impl Workspace {
         };
         self.diff_parse_error = None;
         let mode = self.current_diff_mode();
-        let collapsed = self.git_collapsed_diff_files.clone();
+        let aggregate = self.git_diff.as_ref().is_some_and(|diff| diff.aggregate);
+        let expanded = self.git_expanded_diff_files.clone();
         if let Some(view) = self.diff_view.clone() {
             view.update(cx, |state, cx| {
                 state.set_files(files, cx);
                 state.set_mode(mode, cx);
-                apply_collapsed_files(state, &collapsed, cx);
+                apply_expanded_files(state, aggregate, &expanded, cx);
             });
         } else {
             let view = cx.new(|cx| gpui_component::diff::DiffState::new(files, cx).with_mode(mode));
-            view.update(cx, |state, cx| apply_collapsed_files(state, &collapsed, cx));
+            view.update(cx, |state, cx| {
+                apply_expanded_files(state, aggregate, &expanded, cx)
+            });
             self.subscribe_diff_view(&view, cx);
             self.diff_view = Some(view);
         }
@@ -1676,8 +1682,7 @@ impl Workspace {
             state.scroll_to_file(&target, cx);
             target
         });
-        self.git_collapsed_diff_files.remove(&target);
-        self.git_collapsed_diff_files.remove(&path);
+        self.git_expanded_diff_files.insert(target);
         self.pending_diff_file = None;
     }
 
@@ -2034,22 +2039,20 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
-        let collapse = !paths
+        let collapse = paths
             .iter()
-            .all(|path| self.git_collapsed_diff_files.contains(path));
+            .any(|path| self.git_expanded_diff_files.contains(path));
         view.update(cx, |state, cx| {
             for path in &paths {
                 state.set_file_collapsed(path, collapse, cx);
             }
         });
         if collapse {
-            for path in paths {
-                self.git_collapsed_diff_files.insert(path);
+            for path in &paths {
+                self.git_expanded_diff_files.remove(path);
             }
         } else {
-            for path in &paths {
-                self.git_collapsed_diff_files.remove(path);
-            }
+            self.git_expanded_diff_files.extend(paths);
         }
     }
 }

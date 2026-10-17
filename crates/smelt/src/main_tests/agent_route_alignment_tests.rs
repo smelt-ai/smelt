@@ -46,13 +46,7 @@ fn restore_alignment_waits_for_sessions_and_stays_off_other_routes() {
     ));
 
     // 恢复出来的路由在别处，用户看的就是别处，不许抢。
-    for route in [
-        WorkspaceRoute::Automations,
-        WorkspaceRoute::Session,
-        WorkspaceRoute::Plugin {
-            key: "com.example/board".into(),
-        },
-    ] {
+    for route in [WorkspaceRoute::Automations, WorkspaceRoute::Session] {
         assert!(
             !should_open_restored_agent_conversation(true, false, true, &route),
             "{route:?}"

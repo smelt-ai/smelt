@@ -198,12 +198,6 @@ impl Workspace {
                         workspace.ensure_launch_inputs(window, cx);
                         workspace.ensure_profile_inputs(window, cx);
                         workspace.reload_native_dsh_model_settings();
-                        let mut plugins = cx
-                            .try_global::<PluginEnablementState>()
-                            .cloned()
-                            .unwrap_or_else(PluginEnablementState::load);
-                        plugins.refresh_catalog();
-                        cx.set_global(plugins);
                         if cx
                             .try_global::<AcpRuntimeState>()
                             .is_some_and(|state| state.diagnostics.is_none() && !state.refreshing)

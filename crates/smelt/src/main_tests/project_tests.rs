@@ -183,7 +183,6 @@ fn acp_archive_cwd_comes_from_acp_meta() {
             sid: None,
             refresh_launch_from_settings: false,
             conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-            agent_session: None,
             config_values: Vec::new(),
             pending_prompt: None,
             pending_delivery_id: None,

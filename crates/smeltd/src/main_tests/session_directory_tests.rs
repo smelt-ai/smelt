@@ -251,7 +251,6 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
                 None,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
                 None,
-                None,
             )
         });
         {

@@ -71,89 +71,6 @@ fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
     }
 }
 
-fn shared_project_action_payload(
-    payloads: &[smelt_plugin_api::SessionActionInvocationPayload],
-) -> Option<smelt_plugin_api::SessionActionInvocationPayload> {
-    payloads
-        .first()
-        .cloned()
-        .filter(|first| payloads.iter().all(|candidate| candidate == first))
-}
-
-fn entity_decoration_color(tone: smelt_plugin_api::EntityDecorationTone, cx: &App) -> Hsla {
-    match tone {
-        smelt_plugin_api::EntityDecorationTone::Neutral => cx.theme().muted_foreground,
-        smelt_plugin_api::EntityDecorationTone::Accent => rgb(ui_theme::accent()).into(),
-        smelt_plugin_api::EntityDecorationTone::Positive => rgb(ui_theme::green()).into(),
-        smelt_plugin_api::EntityDecorationTone::Warning => cx.theme().warning,
-        smelt_plugin_api::EntityDecorationTone::Negative => cx.theme().danger,
-    }
-}
-
-pub(crate) fn entity_decoration_chip(
-    id: impl Into<ElementId>,
-    decoration: &crate::plugin_ui::PluginEntityDecorationPresentation,
-    show_icon: bool,
-    cx: &App,
-) -> Stateful<Div> {
-    let color = entity_decoration_color(decoration.tone, cx);
-    let icon = show_icon
-        .then(|| {
-            decoration
-                .icon_asset
-                .as_ref()
-                .map(|path| Icon::empty().path(path.clone()))
-                .or_else(|| {
-                    decoration
-                        .external_url
-                        .as_ref()
-                        .map(|_| Icon::new(IconName::ExternalLink))
-                })
-        })
-        .flatten();
-    let tooltip = decoration.tooltip.clone();
-    let external_url = decoration.external_url.clone().filter(|url| {
-        url::Url::parse(url)
-            .ok()
-            .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
-    });
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_color(color)
-        .children(icon.map(|icon| icon.size(px(12.))))
-        .children(decoration.badge.as_ref().map(|badge| {
-            div()
-                .max_w(px(72.))
-                .truncate()
-                .px_1()
-                .py(px(1.))
-                .rounded(px(3.))
-                .border_1()
-                .border_color(color.opacity(0.45))
-                .bg(color.opacity(0.08))
-                .text_xs()
-                .child(badge.clone())
-        }))
-        .when_some(tooltip, |chip, tooltip| {
-            chip.tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-            })
-        })
-        .when_some(external_url, |chip, url| {
-            chip.cursor_pointer()
-                .hover(|d| d.opacity(0.8))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    cx.open_url(&url);
-                })
-        })
-}
-
 mod drag;
 mod new_session;
 
@@ -166,9 +83,9 @@ pub(crate) mod row;
 
 use new_session::new_session_picker;
 use row::{
-    acp_provider_icon, effective_pane_updated_at, plugin_agent_icon, plugin_session_action_icon,
-    project_header_is_selected, provider_icon, provider_quota_row, session_row_is_selected,
-    session_row_status_label, session_updated_at_text, status_text,
+    acp_provider_icon, effective_pane_updated_at, project_header_is_selected, provider_icon,
+    provider_quota_row, session_row_is_selected, session_row_status_label, session_updated_at_text,
+    status_text,
 };
 
 /// 工具面板（文件树 / 变更 / 历史 / 技能 / 插件）绑定的上下文根。
@@ -473,39 +390,6 @@ impl Workspace {
                 .unwrap_or_default();
             // 分支名：worktree / 普通仓库都显示，跟项目名并排（淡色）。
             let branch_label = repo_info_here.as_ref().map(|i| i.branch.clone());
-            let plugin_agent = if is_project_group {
-                ixs.iter()
-                    .find_map(|&session_ix| self.sessions[session_ix].plugin_agent_presentation(cx))
-            } else {
-                None
-            };
-            let project_action_payload = if is_project_group {
-                let payloads = ixs
-                    .iter()
-                    .filter_map(|&session_ix| match &self.sessions[session_ix].kind {
-                        SessionKind::Conversation(view) => view.read(cx).session_action_payload(),
-                        SessionKind::Term { .. } => None,
-                    })
-                    .collect::<Vec<_>>();
-                shared_project_action_payload(&payloads)
-            } else {
-                None
-            };
-            let project_session_actions = project_action_payload
-                .as_ref()
-                .map(|payload| {
-                    crate::plugin_ui::session_actions(
-                        &payload.agent_session,
-                        smelt_plugin_api::SessionActionLocation::ProjectMenu,
-                    )
-                })
-                .unwrap_or_default();
-            let project_decorations = project_action_payload
-                .as_ref()
-                .map(|payload| {
-                    crate::plugin_ui::entity_decorations(&payload.agent_session.instance, cx)
-                })
-                .unwrap_or_default();
 
             let e_toggle = this.clone();
             let toggle_root = cwd.clone();
@@ -620,35 +504,6 @@ impl Workspace {
                                             .bg(ui_theme::session_dot_color(agg)),
                                     )
                                 })
-                                .children(plugin_agent.as_ref().map(|agent| {
-                                    let agent_name = agent.name.clone();
-                                    div()
-                                        .id(project_element_id("proj-plugin-agent-logo", cwd))
-                                        .flex_shrink_0()
-                                        .size(px(15.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(gpui::rgb(ui_theme::text_muted()))
-                                        .child(plugin_agent_icon(agent).size(px(14.)))
-                                        .tooltip(move |window, cx| {
-                                            gpui_component::tooltip::Tooltip::new(
-                                                agent_name.clone(),
-                                            )
-                                            .build(window, cx)
-                                        })
-                                }))
-                                .children(project_decorations.iter().take(2).map(|decoration| {
-                                    entity_decoration_chip(
-                                        (
-                                            ElementId::from("proj-entity-decoration"),
-                                            decoration.key.clone(),
-                                        ),
-                                        decoration,
-                                        plugin_agent.is_none(),
-                                        cx,
-                                    )
-                                }))
                                 .children(branch_label.as_ref().map(|b| {
                                     div()
                                         .min_w_0()
@@ -725,7 +580,6 @@ impl Workspace {
                                         .as_ref()
                                         .map(|branch| SharedString::from(branch.clone())),
                                     agg,
-                                    plugin_agent: plugin_agent.clone(),
                                     session_count: ixs.len(),
                                     grab: Point::default(),
                                 },
@@ -755,9 +609,6 @@ impl Workspace {
                             let e_pin = e_menu.clone();
                             let e_sidebar_pin = e_menu.clone();
                             let e_close_proj = e_menu.clone();
-                            let e_plugin_action = e_menu.clone();
-                            let project_action_payload = project_action_payload.clone();
-                            let project_session_actions = project_session_actions.clone();
                             let path = cwd.clone();
                             let close_root = cwd.clone();
                             let sess_n = ixs.len();
@@ -778,9 +629,6 @@ impl Workspace {
                                 let e_pin = e_pin.clone();
                                 let e_sidebar_pin = e_sidebar_pin.clone();
                                 let e_close_proj = e_close_proj.clone();
-                                let e_plugin_action = e_plugin_action.clone();
-                                let project_action_payload = project_action_payload.clone();
-                                let project_session_actions = project_session_actions.clone();
                                 let close_root = close_root.clone();
                                 let del_main_root = del_main_root.clone();
                                 let del_branch = del_branch.clone();
@@ -808,32 +656,6 @@ impl Workspace {
                                 // 按「复制 / Worktree / 项目 / 离开」分段；Worktree 是较少用
                                 // 的高级操作，收进二级菜单，避免把常用项目操作挤成一长列。
                                 let mut menu = menu;
-                                if let Some(payload) = project_action_payload {
-                                    let has_actions = !project_session_actions.is_empty();
-                                    for action in project_session_actions {
-                                        let e_action = e_plugin_action.clone();
-                                        let payload = payload.clone();
-                                        let action_for_click = action.clone();
-                                        let mut item = PopupMenuItem::new(action.title.clone());
-                                        if let Some(icon) = plugin_session_action_icon(action.icon) {
-                                            item = item.icon(icon);
-                                        }
-                                        menu = menu.item(item.on_click(move |_ev, window, cx| {
-                                            e_action.update(cx, |ws, cx| {
-                                                ws.run_plugin_session_action(
-                                                    action_for_click.clone(),
-                                                    payload.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        }));
-                                    }
-                                    if has_actions {
-                                        menu = menu.separator();
-                                    }
-                                }
-
                                 let open_root = copy_path.clone();
                                 let e_open = e_menu.clone();
                                 menu = menu
@@ -1048,35 +870,12 @@ impl Workspace {
                     .map(|agent| agent.label())
                     .or_else(|| provider.map(|agent| agent.label()))
                     .unwrap_or("终端");
-                let plugin_agent = self.sessions[ix].plugin_agent_presentation(cx);
                 let agent_mark = crate::agents::bound_agent_mark(
                     self.sessions[ix].agent_definition_id.as_deref(),
                     self.sessions[ix].automation_id.as_deref(),
                     &cx.global::<AgentHostState>().agents,
                 );
-                let identity_label = plugin_agent
-                    .as_ref()
-                    .map(|agent| agent.name.clone())
-                    .unwrap_or_else(|| provider_label.to_string());
-                let session_action_payload = match &self.sessions[ix].kind {
-                    SessionKind::Conversation(view) => view.read(cx).session_action_payload(),
-                    SessionKind::Term { .. } => None,
-                };
-                let session_actions = session_action_payload
-                    .as_ref()
-                    .map(|payload| {
-                        crate::plugin_ui::session_actions(
-                            &payload.agent_session,
-                            smelt_plugin_api::SessionActionLocation::SessionMenu,
-                        )
-                    })
-                    .unwrap_or_default();
-                let session_decorations = session_action_payload
-                    .as_ref()
-                    .map(|payload| {
-                        crate::plugin_ui::entity_decorations(&payload.agent_session.instance, cx)
-                    })
-                    .unwrap_or_default();
+                let identity_label = provider_label.to_string();
                 let project_context_matches = !is_project_group || is_active_group;
                 let is_active = session_row_is_selected(
                     session_route_active,
@@ -1149,7 +948,6 @@ impl Workspace {
                         })
                         .into_any_element()
                 } else if animate_running && status == AgentStatus::Running {
-                    let plugin_agent = plugin_agent.clone();
                     ambient_animation(
                         ("sess-provider-glow", ui_id),
                         SESSION_GLOW_PERIOD,
@@ -1165,14 +963,9 @@ impl Workspace {
                                 .justify_center()
                                 .text_color(Self::session_icon_color(status, Some(phase)))
                                 .child(
-                                    plugin_agent
-                                        .as_ref()
-                                        .map(plugin_agent_icon)
-                                        .unwrap_or_else(|| {
-                                            acp_provider
-                                                .map(acp_provider_icon)
-                                                .unwrap_or_else(|| provider_icon(provider))
-                                        })
+                                    acp_provider
+                                        .map(acp_provider_icon)
+                                        .unwrap_or_else(|| provider_icon(provider))
                                         .size(px(SESSION_AGENT_ICON_SIZE)),
                                 )
                                 .tooltip(move |window, cx| {
@@ -1192,14 +985,9 @@ impl Workspace {
                         .justify_center()
                         .text_color(Self::session_icon_color(status, None))
                         .child(
-                            plugin_agent
-                                .as_ref()
-                                .map(plugin_agent_icon)
-                                .unwrap_or_else(|| {
-                                    acp_provider
-                                        .map(acp_provider_icon)
-                                        .unwrap_or_else(|| provider_icon(provider))
-                                })
+                            acp_provider
+                                .map(acp_provider_icon)
+                                .unwrap_or_else(|| provider_icon(provider))
                                 .size(px(SESSION_AGENT_ICON_SIZE)),
                         )
                         .tooltip(move |window, cx| {
@@ -1266,17 +1054,6 @@ impl Workspace {
                                     .child(updated_text),
                             ),
                     )
-                    .children(session_decorations.iter().take(2).map(|decoration| {
-                        entity_decoration_chip(
-                            (
-                                ElementId::from("sess-entity-decoration"),
-                                decoration.key.clone(),
-                            ),
-                            decoration,
-                            plugin_agent.is_none(),
-                            cx,
-                        )
-                    }))
                     // 分屏数继续用行尾小角标；第二行固定留给跨会话可比较的时间。
                     .children(subtitle.as_ref().map(|s| {
                         div()
@@ -1345,7 +1122,6 @@ impl Workspace {
                                 acp: acp_provider,
                                 terminal: provider,
                                 status,
-                                plugin_agent: plugin_agent.clone(),
                                 subtitle: subtitle.as_deref().map(SharedString::from),
                                 status_label: status_label.map(SharedString::from),
                                 grab: Point::default(),
@@ -1359,10 +1135,7 @@ impl Workspace {
                     .context_menu(move |menu, _window, _cx| {
                         let e_rename = e_rename.clone();
                         let e_restart = e_restart.clone();
-                        let e_plugin_action = e_rename.clone();
                         let copy_session_id = session_id.clone();
-                        let session_action_payload = session_action_payload.clone();
-                        let session_actions = session_actions.clone();
                         let sess_ix = ix;
                         let mut menu = menu
                             .item(
@@ -1395,30 +1168,6 @@ impl Workspace {
                                         });
                                     }),
                             );
-                        }
-                        if let Some(payload) = session_action_payload {
-                            if !session_actions.is_empty() {
-                                menu = menu.separator();
-                            }
-                            for action in session_actions {
-                                let e_action = e_plugin_action.clone();
-                                let payload = payload.clone();
-                                let action_for_click = action.clone();
-                                let mut item = PopupMenuItem::new(action.title.clone());
-                                if let Some(icon) = plugin_session_action_icon(action.icon) {
-                                    item = item.icon(icon);
-                                }
-                                menu = menu.item(item.on_click(move |_ev, window, cx| {
-                                    e_action.update(cx, |ws, cx| {
-                                        ws.run_plugin_session_action(
-                                            action_for_click.clone(),
-                                            payload.clone(),
-                                            window,
-                                            cx,
-                                        )
-                                    });
-                                }));
-                            }
                         }
                         menu
                     })
@@ -1609,7 +1358,6 @@ impl Workspace {
                                             acp: acp_provider,
                                             terminal: provider,
                                             status,
-                                            plugin_agent: plugin_agent.clone(),
                                             subtitle: subtitle.as_deref().map(SharedString::from),
                                             status_label: status_label.map(SharedString::from),
                                             grab: Point::default(),
@@ -1745,7 +1493,6 @@ impl Workspace {
         let e_settings = this.clone();
         let settings_needs_attention =
             self.update_available() || self.daemon_outdated == Some(true);
-        let account_menu_entries = crate::settings::sidebar_account_menu_entries(cx);
 
         // ---- 底部额度条：provider 账户额度（Codex / Claude / Copilot / Grok / Cursor）----
         // 从舞台头栏迁到这里（底部操作条上方）。只显示「检测到额度」的 provider，
@@ -1902,11 +1649,7 @@ impl Workspace {
                                 move |menu, _window, _cx| {
                                     let e_settings = e_settings.clone();
                                     let e_check_update = e_settings.clone();
-                                    let e_account_settings = e_settings.clone();
-                                    let accounts = account_menu_entries.clone();
-                                    let multiple_accounts = accounts.len() > 1;
-                                    let has_accounts = !accounts.is_empty();
-                                    let mut menu = menu
+                                    let menu = menu
                                         .item(
                                             PopupMenuItem::new("帮助文档")
                                                 .icon(IconName::BookOpen)
@@ -1941,61 +1684,6 @@ impl Workspace {
                                                 }),
                                         )
                                         .separator();
-
-                                    for account in accounts {
-                                        for action in
-                                            account.actions.iter().filter(|action| !action.disabled).cloned()
-                                        {
-                                            let label = if multiple_accounts {
-                                                format!(
-                                                    "{}：{}",
-                                                    account.settings_title, action.label
-                                                )
-                                            } else {
-                                                action.label.clone()
-                                            };
-                                            let plugin_id = account.plugin_id.clone();
-                                            let section_id = account.settings_section_id.clone();
-                                            menu = menu.item(
-                                                PopupMenuItem::new(label)
-                                                    .icon(IconName::User)
-                                                    .on_click(move |_ev, _window, cx| {
-                                                        crate::plugin_ui::run_settings_action(
-                                                            plugin_id.clone(),
-                                                            section_id.clone(),
-                                                            action.clone(),
-                                                            None,
-                                                            cx,
-                                                        );
-                                                    }),
-                                            );
-                                        }
-
-                                        let title = if account.settings_title.trim().is_empty() {
-                                            "插件设置".to_string()
-                                        } else {
-                                            format!("{} 设置", account.settings_title)
-                                        };
-                                        let plugin_id = account.plugin_id;
-                                        let settings_entity = e_account_settings.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new(title)
-                                                .icon(IconName::Settings)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    settings_entity.update(cx, |ws, cx| {
-                                                        ws.open_settings_section(
-                                                            crate::settings::SettingsSection::Plugin {
-                                                                id: plugin_id.clone(),
-                                                            },
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        );
-                                    }
-                                    if has_accounts {
-                                        menu = menu.separator();
-                                    }
 
                                     menu.item(
                                         PopupMenuItem::new("设置...")
@@ -2034,14 +1722,13 @@ impl Workspace {
             // 外层工作区负责玻璃表面、描边与裁切；列表自身保持透明，才能让
             // vibrancy / 半透明底贯穿整个面板而不是只透出四角。
             .bg(gpui::transparent_black())
-            // 工作台（含智能体对话）、插件、项目是三个并列分组。
+            // 工作台（含智能体对话）与项目是两个并列分组。
             .child(self.render_automation_navigation(
-                this.clone(),
+                this,
                 statuses,
                 animate_running,
                 cx,
             ))
-            .children(self.render_workspace_surface_rows(this, cx))
             .child(
                 div()
                     .id("project-section-header")
@@ -2111,107 +1798,6 @@ impl Workspace {
             .children(quota_footer)
             .child(footer)
     }
-
-    fn render_workspace_surface_rows(&self, entity: Entity<Workspace>, _cx: &App) -> Option<Div> {
-        let surfaces = crate::plugin_ui::workspace_surfaces();
-        if surfaces.is_empty() {
-            return None;
-        }
-        let active = self.plugin_surface_key().map(str::to_string);
-        Some(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .px_2()
-                .pt_1()
-                .pb_1()
-                .gap_1()
-                .child(
-                    div()
-                        .px_2()
-                        .pb_1()
-                        .text_sm()
-                        .font_medium()
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .child("插件"),
-                )
-                .children(surfaces.into_iter().map(|tab| {
-                    let key = tab.key();
-                    let selected = active.as_deref() == Some(key.as_str());
-                    let title = self.workspace_surface_display_title(&key);
-                    let entity_click = entity.clone();
-                    let entity_rename = entity.clone();
-                    let open_key = key.clone();
-                    let rename_key = key.clone();
-                    div()
-                        .id(SharedString::from(format!("workspace-surface-{key}")))
-                        .h(ui_theme::height::md())
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(ui_theme::row_radius())
-                        .cursor_pointer()
-                        .map(|d| {
-                            if selected {
-                                d.bg(rgb(ui_theme::bg_selected()))
-                            } else {
-                                d.hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                            }
-                        })
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .size(px(18.))
-                                .rounded(px(4.))
-                                .bg(rgb(0x167c80))
-                                .text_color(gpui::white())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(
-                                    title
-                                        .chars()
-                                        .next()
-                                        .unwrap_or('P')
-                                        .to_uppercase()
-                                        .to_string(),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .text_color(rgb(if selected {
-                                    ui_theme::text_bright()
-                                } else {
-                                    ui_theme::text_mid()
-                                }))
-                                .truncate()
-                                .child(title),
-                        )
-                        .on_click(move |ev, window, cx| {
-                            if ev.click_count() >= 2 {
-                                entity_rename.update(cx, |ws, cx| {
-                                    ws.start_rename(
-                                        RenameTarget::WorkspaceSurface(rename_key.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                                return;
-                            }
-                            entity_click.update(cx, |ws, cx| {
-                                ws.open_workspace_surface(open_key.clone(), window, cx);
-                            });
-                        })
-                })),
-        )
-    }
 }
 
 #[cfg(test)]
@@ -2220,8 +1806,7 @@ mod tests {
         PROJECT_ACTION_SLOT_HEIGHT, PROJECT_DISCLOSURE_ICON_SIZE, PROJECT_GUIDE_LEFT,
         PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT, SESSION_AGENT_ICON_BOX_SIZE,
         SESSION_AGENT_ICON_SIZE, project_disclosure_icon, project_header_is_selected,
-        session_row_is_selected, session_row_status_label, shared_project_action_payload,
-        status_text,
+        session_row_is_selected, session_row_status_label, status_text,
     };
     use crate::AgentStatus;
     use gpui_component::IconName;
@@ -2300,32 +1885,5 @@ mod tests {
             session_row_status_label(AgentStatus::NeedsYou),
             Some("需要你")
         );
-    }
-
-    #[test]
-    fn project_action_requires_every_session_to_target_the_same_context() {
-        let payload = |issue_id: &str| {
-            serde_json::from_value(serde_json::json!({
-                "agent_session": {
-                    "agent": {
-                        "plugin_id": "com.example.issues",
-                        "contribution_id": "issue-agent"
-                    },
-                    "controller": {
-                        "plugin_id": "com.example.issues",
-                        "contribution_id": "issue-session"
-                    },
-                    "instance": {
-                        "plugin_id": "com.example.issues",
-                        "resource_type": "issue",
-                        "resource_id": "shared-instance"
-                    }
-                },
-                "context": {"issue_id": issue_id}
-            }))
-            .unwrap()
-        };
-
-        assert!(shared_project_action_payload(&[payload("issue-1"), payload("issue-2")]).is_none());
     }
 }

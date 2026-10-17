@@ -233,9 +233,8 @@ fn apply_key(
                 .map(str::trim)
                 .filter(|name| !name.is_empty() && name.len() <= 80)
                 .ok_or_else(|| SettingsError::Invalid("appearance.theme 必须是主题名".into()))?;
-            let entry = crate::theme_index::find(name).ok_or_else(|| {
-                SettingsError::Invalid(format!("未知主题: {name}"))
-            })?;
+            let entry = crate::theme_index::find(name)
+                .ok_or_else(|| SettingsError::Invalid(format!("未知主题: {name}")))?;
             snapshot.theme_name = entry.name.clone();
             snapshot.theme_mode = entry.mode.clone();
         }

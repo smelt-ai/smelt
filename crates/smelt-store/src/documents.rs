@@ -719,7 +719,10 @@ fn appearance_from_object(object: &Map<String, Value>) -> AppearanceSnapshot {
             .to_string(),
         theme_mode: theme_mode.clone(),
         theme_name: migrated_theme_name(
-            object.get("theme_name").and_then(Value::as_str).unwrap_or(""),
+            object
+                .get("theme_name")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
             &theme_mode,
         ),
         ui_font_px: object
@@ -1570,14 +1573,6 @@ fn workspace_meta_object(snapshot: &WorkspaceSnapshot) -> Map<String, Value> {
     if let Some(id) = &snapshot.selected_agent_id {
         meta.insert("selected_agent_id".into(), json!(id));
     }
-    if let Some(surface) = &snapshot.active_workspace_surface {
-        meta.insert("active_workspace_surface".into(), json!(surface));
-    }
-    if let Some(raw) = &snapshot.workspace_surface_titles_json
-        && let Ok(value) = serde_json::from_slice(raw)
-    {
-        meta.insert("workspace_surface_titles".into(), value);
-    }
     if let Some(width) = snapshot.sidebar_w {
         meta.insert("sidebar_w".into(), json!(width));
     }
@@ -1680,8 +1675,6 @@ pub(crate) fn workspace_from_document(value: &Value) -> Result<WorkspaceSnapshot
         active_session_id: as_str(meta.get("active_session_id")).map(str::to_string),
         route_json: optional_json_bytes(meta.get("route")),
         selected_agent_id: as_str(meta.get("selected_agent_id")).map(str::to_string),
-        active_workspace_surface: as_str(meta.get("active_workspace_surface")).map(str::to_string),
-        workspace_surface_titles_json: optional_json_bytes(meta.get("workspace_surface_titles")),
         sidebar_w: meta.get("sidebar_w").and_then(Value::as_f64),
         sidebar_open: meta.get("sidebar_open").and_then(Value::as_bool),
         sidebar_grouping: as_str(meta.get("sidebar_grouping")).map(str::to_string),
@@ -1796,7 +1789,6 @@ fn acp_from_value(value: &Value) -> WorkspaceAcpRecord {
         automation_id: as_str(value.get("automation_id")).map(str::to_string),
         config_values_json: optional_json_bytes(value.get("config_values")),
         conversation_binding_json: optional_json_bytes(value.get("conversation_binding")),
-        agent_session_json: optional_json_bytes(value.get("agent_session")),
         pending_agent_preset_json: optional_json_bytes(value.get("pending_agent_preset")),
         session_title_json: optional_json_bytes(value.get("session_title")),
     }
@@ -2068,12 +2060,6 @@ fn write_acp_record(
     write_optional_json_tree(
         transaction,
         &scope,
-        "agent_session",
-        acp.agent_session_json.as_deref(),
-    )?;
-    write_optional_json_tree(
-        transaction,
-        &scope,
         "session_title",
         acp.session_title_json.as_deref(),
     )?;
@@ -2258,8 +2244,6 @@ pub(crate) fn read_workspace_snapshot(
         active_session_id: as_str(state.get("active_session_id")).map(str::to_string),
         route_json: optional_json_bytes(state.get("route")),
         selected_agent_id: as_str(state.get("selected_agent_id")).map(str::to_string),
-        active_workspace_surface: as_str(state.get("active_workspace_surface")).map(str::to_string),
-        workspace_surface_titles_json: optional_json_bytes(state.get("workspace_surface_titles")),
         sidebar_w: state.get("sidebar_w").and_then(Value::as_f64),
         sidebar_open: state.get("sidebar_open").and_then(Value::as_bool),
         sidebar_grouping: as_str(state.get("sidebar_grouping")).map(str::to_string),
@@ -2380,7 +2364,6 @@ fn acp_to_value(acp: &WorkspaceAcpRecord) -> Value {
             "conversation_binding",
             acp.conversation_binding_json.as_deref(),
         ),
-        ("agent_session", acp.agent_session_json.as_deref()),
         (
             "pending_agent_preset",
             acp.pending_agent_preset_json.as_deref(),
@@ -2711,7 +2694,6 @@ fn read_acp_detail(cache: &WorkspaceReadCache, session_id: &str) -> Result<Value
     let config_values = cached_json(cache, &scope, "config_values")?.unwrap_or_else(|| json!([]));
     let conversation_binding = cached_json(cache, &scope, "conversation_binding")?
         .unwrap_or_else(|| json!({"type": "direct"}));
-    let agent_session = cached_json(cache, &scope, "agent_session")?.unwrap_or(Value::Null);
     let pending_agent_preset =
         cached_json(cache, &scope, "pending_agent_preset")?.unwrap_or(Value::Null);
     let session_title = cached_json(cache, &scope, "session_title")?.unwrap_or(Value::Null);
@@ -2724,7 +2706,6 @@ fn read_acp_detail(cache: &WorkspaceReadCache, session_id: &str) -> Result<Value
         "sid": session_id,
         "refresh_launch_from_settings": row.refresh_launch_from_settings,
         "conversation_binding": conversation_binding,
-        "agent_session": agent_session,
         "config_values": config_values,
         "pending_prompt": row.pending_prompt,
         "pending_delivery_id": row.pending_delivery_id,

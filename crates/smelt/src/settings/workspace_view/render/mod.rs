@@ -20,7 +20,6 @@ mod pi_mcp;
 mod pi_memory;
 mod pi_model;
 mod pi_plugin;
-mod plugins;
 mod shortcuts;
 
 /// 设置页里 26px 的小按钮。悬停色由各页自己挂：多数跟边框色走，维护页有的按钮要单独指定。
@@ -106,19 +105,9 @@ impl RenderOnce for SettingsShell {
             InputState::new(window, cx).placeholder("搜索设置、功能或命令")
         });
         let query = search.read(cx).value().to_string();
-        let plugins = cx
-            .try_global::<PluginEnablementState>()
-            .map(|state| state.catalog.clone())
-            .unwrap_or_default();
-        let full_nav = settings_nav(&plugins);
-        let nav = filter_settings_nav(&full_nav, &query);
-        // 选中的插件页可能已经被卸载；侧栏没有对应项时回到首页，别画一页侧栏里找不到的内容。
-        let selected = if nav_contains(&full_nav, &self.snapshot.settings_section) {
-            self.snapshot.settings_section.clone()
-        } else {
-            SettingsSection::default()
-        };
-        let page = section_page(self.entity.clone(), &self.snapshot, &selected, &plugins, cx);
+        let nav = filter_settings_nav(&settings_nav(), &query);
+        let selected = self.snapshot.settings_section.clone();
+        let page = section_page(self.entity.clone(), &self.snapshot, &selected, cx);
 
         h_flex()
             .size_full()
@@ -262,7 +251,6 @@ fn section_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     selected: &SettingsSection,
-    plugins: &[InstalledPlugin],
     cx: &App,
 ) -> SettingPage {
     match selected {
@@ -276,7 +264,6 @@ fn section_page(
         SettingsSection::AgentNotify => agent::notify_page(entity, snapshot, cx),
         SettingsSection::AgentHooks => agent::hooks_page(entity, snapshot, cx),
         SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
-        SettingsSection::Plugin { id } => plugins::plugin_page(entity, snapshot, id, plugins, cx),
         SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),
         SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
         SettingsSection::MaintenanceStorage => maintenance::storage_page(entity, snapshot, cx),

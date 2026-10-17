@@ -1335,9 +1335,6 @@ pub struct AcpHandoffRequest {
     pub fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
     /// 目标会话的交互输入路由。与 agent/profile 正交；Direct 是普通本地对话。
     pub conversation_binding: smelt_core::conversation::ConversationBinding,
-    /// 产品级智能体会话身份。它决定插件提供的名称、图标和生命周期 UI，
-    /// 与执行这条会话的 ACP provider 相互独立。
-    pub agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
 }
 
 #[derive(Clone)]
@@ -1647,12 +1644,8 @@ pub struct AcpView {
     /// 用户选择也需要在重启后恢复，因此不能在 `pending_initial_config` 被消费后
     /// 丢掉。
     restart_config_values: Vec<(String, String)>,
-    /// daemon 拥有的通用交互输入路由镜像。插件上下文只存在 route.context 中，
-    /// ACP view 不认识任何具体远端平台的字段。
+    /// daemon 拥有的交互输入路由镜像。
     conversation_binding: smelt_core::conversation::ConversationBinding,
-    /// 产品级智能体与其 session controller 的通用身份。侧栏和未来的会话 UI
-    /// contribution 只读这份事实，不从输入路由或平台上下文反推。
-    agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
     /// 独立 `acp_submit_input` 请求尚未回执。保留原始草稿和图片，拒绝或网络
     /// 结果不明时恢复到 composer，绝不自动换路由重发。
     pending_conversation_input: Option<PendingConversationInput>,
@@ -1761,7 +1754,6 @@ impl AcpView {
                 this.entries.len(),
             ),
             conversation_binding: this.conversation_binding.clone(),
-            agent_session: this.agent_session.clone(),
             pending_agent_preset: this.pending_agent_preset.clone(),
         });
         this.attach_handle(handle, cx);
@@ -1824,7 +1816,6 @@ impl AcpView {
         this.pending_initial_config = request.config_values;
         this.ephemeral_env = request.ephemeral_env;
         this.conversation_binding = request.conversation_binding;
-        this.agent_session = request.agent_session;
         let handle = spawn_acp_client(ConversationClientLaunch {
             id: this.sid.clone(),
             cwd: this.cwd.clone(),
@@ -1841,7 +1832,6 @@ impl AcpView {
                 this.entries.len(),
             ),
             conversation_binding: this.conversation_binding.clone(),
-            agent_session: this.agent_session.clone(),
             pending_agent_preset: None,
         });
         this.attach_handle(handle, cx);
@@ -2028,7 +2018,6 @@ impl AcpView {
             pending_initial_config: Vec::new(),
             restart_config_values: Vec::new(),
             conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-            agent_session: None,
             pending_conversation_input: None,
             uncertain_conversation_input: None,
             pending_agent_preset: None,
@@ -2149,7 +2138,6 @@ impl AcpView {
                 self.entries.len(),
             ),
             conversation_binding: self.conversation_binding.clone(),
-            agent_session: self.agent_session.clone(),
             pending_agent_preset: self.pending_agent_preset.clone(),
         });
         self.attach_handle(handle, cx);
@@ -2725,35 +2713,6 @@ impl AcpView {
         self.conversation_binding.clone()
     }
 
-    /// 当前产品级智能体会话身份。ACP provider 只描述执行器，不能替代它。
-    pub fn agent_session(&self) -> Option<smelt_plugin_api::AgentSessionBinding> {
-        self.agent_session.clone()
-    }
-
-    pub fn agent_session_for_save(&self) -> Option<smelt_plugin_api::AgentSessionBinding> {
-        self.agent_session.clone()
-    }
-
-    /// 标准 SessionAction 的调用目标。实例身份来自 daemon 已认证的 binding；
-    /// 只有同一插件的输入路由上下文才会透传，避免把别家路由数据交叉泄露。
-    pub fn session_action_payload(
-        &self,
-    ) -> Option<smelt_plugin_api::SessionActionInvocationPayload> {
-        let agent_session = self.agent_session.clone()?;
-        let context = match &self.conversation_binding {
-            smelt_core::conversation::ConversationBinding::Plugin { plugin_id, route }
-                if plugin_id == &agent_session.controller.plugin_id =>
-            {
-                route.context.clone()
-            }
-            _ => serde_json::Value::Null,
-        };
-        Some(smelt_plugin_api::SessionActionInvocationPayload {
-            agent_session,
-            context,
-        })
-    }
-
     /// daemon 不存在时由 workspace 重建首轮预设；热 attach 时 daemon 会保留自己
     /// 的消费事实，不会被这里的旧镜像重新写入。
     pub fn restore_pending_agent_preset(&mut self, prompt: Option<String>) {
@@ -2797,15 +2756,6 @@ impl AcpView {
         binding: smelt_core::conversation::ConversationBinding,
     ) {
         self.conversation_binding = binding;
-    }
-
-    /// daemon 不存在时用 workspace 的最后镜像恢复产品身份；热 attach 后快照会
-    /// 以 daemon 当前绑定覆盖它。
-    pub fn restore_agent_session(
-        &mut self,
-        agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
-    ) {
-        self.agent_session = agent_session;
     }
 
     /// 当前会话最后一次生效的 ACP 配置，写进 `AcpSaved` 供 GUI 重启后恢复。
@@ -3136,10 +3086,7 @@ impl AcpView {
 
     fn finish_conversation_input(
         &mut self,
-        result: Result<
-            smelt_core::conversation::ConversationInputRoute,
-            smelt_core::conversation::ConversationSubmitError,
-        >,
+        result: Result<(), smelt_core::conversation::ConversationSubmitError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3147,16 +3094,13 @@ impl AcpView {
             return;
         };
         match result {
-            Ok(smelt_core::conversation::ConversationInputRoute::Direct) => {
+            Ok(()) => {
                 self.uncertain_conversation_input = None;
                 // 只有提交后尚未见过任何新快照时才补本地派发态。Running 快照
                 // 可能先于短请求回执到达，不能在它之后重新把 pending 置回 true。
                 if self.last_snapshot_revision == pending.snapshot_revision {
                     self.prompt_dispatch_pending = true;
                 }
-            }
-            Ok(smelt_core::conversation::ConversationInputRoute::Plugin) => {
-                self.uncertain_conversation_input = None;
             }
             Err(error) => {
                 if let Some(input) = self.input.clone() {
@@ -3288,7 +3232,6 @@ impl AcpView {
             fork_session_id: Some(fork_session_id),
             fork_cut,
             conversation_binding: self.conversation_binding.clone(),
-            agent_session: None,
         })
     }
 
@@ -3783,9 +3726,7 @@ impl AcpView {
             if let Some(binding) = conversation_state.binding {
                 self.conversation_binding = binding;
             }
-            let agent_session_changed = self.agent_session != conversation_state.agent_session;
-            self.agent_session = conversation_state.agent_session;
-            should_persist |= pending_changed || binding_changed || agent_session_changed;
+            should_persist |= pending_changed || binding_changed;
         }
         let previous_history_session_id = self.history_session_id.clone();
         let old_entries_len = self.entries.len();

@@ -864,7 +864,6 @@ pub(crate) fn run_session_host() {
             &req.id,
             req.cwd.clone(),
             req.conversation_binding.clone(),
-            req.agent_session.clone(),
             req.pending_agent_preset.clone(),
         );
         if let Some(seed) = seed {

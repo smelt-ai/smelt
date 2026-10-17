@@ -15,7 +15,7 @@ use smelt_event_bus::{
     Delivery, EventBusError, EventHub, MemoryEventStore, Snapshot, SnapshotProvider, StoredEvent,
     TopicRegistry,
 };
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     AgentMessageDelivered, AggregateRef, CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION,
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
     CORE_SNAPSHOT_WORKSPACE_MENU, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
@@ -132,7 +132,7 @@ pub(crate) struct DaemonEventHub {
     store: Option<Arc<smelt_store::Store>>,
     dispatcher: Option<DurableDispatcher>,
     peer_messages:
-        Arc<Mutex<BTreeMap<(String, smelt_plugin_api::CommandId), PeerMessageLedgerEntry>>>,
+        Arc<Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>>,
     allow_in_memory_peer_messages: bool,
 }
 
@@ -173,7 +173,7 @@ impl DaemonEventHub {
 
     pub(crate) fn in_memory() -> EventHubHandle {
         let mut registry = TopicRegistry::default();
-        for descriptor in smelt_plugin_api::core_topic_descriptors().unwrap() {
+        for descriptor in smelt_event_protocol::core_topic_descriptors().unwrap() {
             registry.register(descriptor).unwrap();
         }
         let projection = Arc::new(Mutex::new(ProjectionState::default()));
@@ -192,7 +192,7 @@ impl DaemonEventHub {
 
     fn build(store: Option<Arc<smelt_store::Store>>) -> Result<EventHubHandle, String> {
         let mut registry = TopicRegistry::default();
-        for descriptor in smelt_plugin_api::core_topic_descriptors()
+        for descriptor in smelt_event_protocol::core_topic_descriptors()
             .map_err(|error| format!("invalid core topic descriptor: {error}"))?
         {
             registry
@@ -527,7 +527,7 @@ impl DaemonEventHub {
     pub(crate) fn peer_message_result(
         &self,
         source_session_id: &str,
-        command_id: &smelt_plugin_api::CommandId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<PeerMessageCommandResult>, EventBusError> {
         let key = (source_session_id.to_string(), command_id.clone());
         if self.peer_messages.lock().unwrap().contains_key(&key) {
@@ -702,7 +702,7 @@ fn core_envelope(
     EventEnvelope {
         event_id,
         topic: Topic::new(topic).expect("registered core topic is valid"),
-        schema_version: smelt_plugin_api::core_topic_schema_version(topic),
+        schema_version: smelt_event_protocol::core_topic_schema_version(topic),
         occurred_at_ms,
         aggregate,
         aggregate_revision,
@@ -745,8 +745,8 @@ fn agent_message_delivered_envelope(
 fn persist_peer_message(
     store: Option<&smelt_store::Store>,
     hub: &EventHub,
-    ledger: &Mutex<BTreeMap<(String, smelt_plugin_api::CommandId), PeerMessageLedgerEntry>>,
-    key: &(String, smelt_plugin_api::CommandId),
+    ledger: &Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>,
+    key: &(String, smelt_event_protocol::CommandId),
     allow_in_memory: bool,
 ) -> Result<(), String> {
     let mut ledger = ledger
@@ -781,7 +781,7 @@ fn persist_peer_message(
 fn persist_pending_peer_messages(
     store: Option<&smelt_store::Store>,
     hub: &EventHub,
-    ledger: &Mutex<BTreeMap<(String, smelt_plugin_api::CommandId), PeerMessageLedgerEntry>>,
+    ledger: &Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>,
     allow_in_memory: bool,
 ) -> Result<(), String> {
     let keys = ledger
@@ -864,7 +864,7 @@ fn durable_dispatch_loop(
     store: Arc<smelt_store::Store>,
     hub: Arc<EventHub>,
     peer_messages: Arc<
-        Mutex<BTreeMap<(String, smelt_plugin_api::CommandId), PeerMessageLedgerEntry>>,
+        Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>,
     >,
 ) {
     let mut backoff = DISPATCH_BACKOFF_START;
@@ -1034,22 +1034,22 @@ pub(crate) fn now_ms() -> u64 {
 
 pub(crate) fn delivery_to_subscribe_message(
     delivery: Delivery,
-) -> smelt_plugin_api::SubscribeMessage {
+) -> smelt_event_protocol::SubscribeMessage {
     match delivery {
-        Delivery::Snapshot(snapshot) => smelt_plugin_api::SubscribeMessage::Snapshot {
+        Delivery::Snapshot(snapshot) => smelt_event_protocol::SubscribeMessage::Snapshot {
             kind: snapshot.kind,
             watermark: snapshot.watermark,
             revision: snapshot.revision,
             payload: snapshot.payload,
         },
-        Delivery::Event(event) => smelt_plugin_api::SubscribeMessage::Event {
+        Delivery::Event(event) => smelt_event_protocol::SubscribeMessage::Event {
             sequence: (event.sequence != 0).then_some(event.sequence),
             envelope: event.envelope.clone(),
         },
         Delivery::Lag {
             dropped,
             resume_after,
-        } => smelt_plugin_api::SubscribeMessage::Lag {
+        } => smelt_event_protocol::SubscribeMessage::Lag {
             dropped,
             resume_after,
         },
@@ -1193,7 +1193,7 @@ mod tests {
                 BTreeSet::from([Topic::new(CORE_TOPIC_AGENT_MESSAGE_DELIVERED).unwrap()]),
                 DeliveryClass::Durable,
                 &BTreeSet::from([Capability::new(
-                    smelt_plugin_api::CORE_CAPABILITY_AGENT_MESSAGE_READ,
+                    smelt_event_protocol::CORE_CAPABILITY_AGENT_MESSAGE_READ,
                 )
                 .unwrap()]),
             )
@@ -1213,7 +1213,7 @@ mod tests {
             .runtime()
             .ack(
                 &plugin_id,
-                &smelt_plugin_api::Ack {
+                &smelt_event_protocol::Ack {
                     subscription_id,
                     sequence: startup.sequence,
                     event_id: startup.envelope.event_id.clone(),

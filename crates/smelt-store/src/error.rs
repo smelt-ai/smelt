@@ -126,7 +126,7 @@ pub enum StoreError {
     UninitializedDatabase,
 
     #[error(transparent)]
-    PluginApi(#[from] smelt_plugin_api::ValidationError),
+    EventProtocol(#[from] smelt_event_protocol::ValidationError),
 
     #[error("事务已中止")]
     TransactionAborted,

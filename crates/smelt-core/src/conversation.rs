@@ -1,11 +1,9 @@
 //! 会话输入的宿主级路由契约。
 //!
-//! ACP 是执行通道；插件路由是用户输入先送往远端系统的渠道。两者不能复用同一
-//! `AcpUserAction::Prompt` 语义，否则后台 Task delivery 也会被再次路由。daemon
-//! 自动化绑定则保留审批/问答 action，但拒绝普通 composer 输入。
+//! 普通会话的用户输入直接进 ACP；daemon 自动化绑定保留审批/问答 action，
+//! 但拒绝普通 composer 输入。
 
 use crate::acp_chat::AcpImage;
-use smelt_plugin_api::{PluginId, PluginInputRouteBinding};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -15,17 +13,12 @@ pub enum ConversationBinding {
     /// A daemon-owned automation Run. Approval and elicitation actions still use the ACP action
     /// channel, but ordinary composer prompts must not enter this single-turn execution slot.
     Automation { run_id: String },
-    Plugin {
-        plugin_id: PluginId,
-        route: PluginInputRouteBinding,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationInput {
-    /// 一次用户提交跨 daemon 与插件边界保持不变的身份。旧客户端缺失时 daemon
-    /// 会补齐；未来远端接口支持幂等键后可直接继续向下传递。
+    /// 一次用户提交跨 daemon 边界保持不变的身份。旧客户端缺失时 daemon 会补齐。
     #[serde(default)]
     pub submission_id: String,
     pub text: String,
@@ -56,10 +49,6 @@ impl ConversationInput {
 pub struct ConversationStateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<ConversationBinding>,
-    /// 产品级智能体/控制器身份。它不参与 ACP 协议执行，也不替代输入 binding；
-    /// 客户端据此选择插件提供的会话 UI 和生命周期操作。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_agent_preset: Option<String>,
 }
@@ -75,13 +64,6 @@ pub fn merge_agent_preset(preset: Option<&str>, input: &str) -> String {
     } else {
         format!("{preset}\n\n{input}")
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationInputRoute {
-    Direct,
-    Plugin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -126,7 +108,7 @@ impl std::error::Error for ConversationSubmitError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversationStateSnapshot, merge_agent_preset};
+    use super::{ConversationBinding, ConversationStateSnapshot, merge_agent_preset};
 
     #[test]
     fn agent_preset_and_first_input_share_one_prompt() {
@@ -149,5 +131,23 @@ mod tests {
         .unwrap();
 
         assert!(state.binding.is_none());
+    }
+
+    #[test]
+    fn unknown_binding_fields_are_rejected() {
+        // 内部标签枚举的单元变体（Direct）不受 deny_unknown_fields 约束，这是 serde 的
+        // 已知限制；带字段的变体会拒绝多余字段。
+        assert!(
+            serde_json::from_value::<ConversationBinding>(serde_json::json!({
+                "type": "automation",
+                "run_id": "run-1",
+                "extra": 1
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ConversationBinding>(serde_json::json!({"type": "plugin"}))
+                .is_err()
+        );
     }
 }

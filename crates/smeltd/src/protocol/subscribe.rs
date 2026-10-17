@@ -1,14 +1,14 @@
-//! 事件订阅与桌面插件 UI op。
+//! 事件订阅 op。
 
 use super::super::session_catalog::published_session_states;
 use super::super::*;
 use super::{
     AuthenticatedEventClient, SystemPeerIdentityProvider, ViewerLease,
-    authenticate_event_connection, require_desktop_identity,
+    authenticate_event_connection,
 };
 use smelt_event_bus::Delivery;
-use smelt_plugin_api::{
-    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, InvocationRequest,
+use smelt_event_protocol::{
+    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID,
     SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
 };
 use std::collections::BTreeSet;
@@ -48,112 +48,6 @@ pub(crate) fn collect_subscription_snapshot(
         workspace_menu: Some(workspace_menu_snapshot(workspace_menu)),
         automations: Some(automations),
     }
-}
-
-pub(super) fn handle_plugin_contributions(
-    mut conn: UnixStream,
-    identity: Result<AuthenticatedEventClient, String>,
-) {
-    let response = match identity.and_then(require_desktop_identity) {
-        Ok(_) => serde_json::json!({
-            "ok": true,
-            "plugins": crate::plugin_runtime::contributions(),
-        }),
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    };
-    let _ = writeln!(conn, "{response}");
-}
-
-pub(super) fn handle_plugin_statuses(
-    mut conn: UnixStream,
-    identity: Result<AuthenticatedEventClient, String>,
-) {
-    let response = match identity.and_then(require_desktop_identity) {
-        Ok(_) => serde_json::json!({
-            "ok": true,
-            "statuses": crate::plugin_runtime::statuses(),
-        }),
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    };
-    let _ = writeln!(conn, "{response}");
-}
-
-/// 单次 invoke 上限。浏览器 SSO 在插件后台线程跑，不再占用这条路径。
-pub(super) const MAX_PLUGIN_INVOKE_MS: u64 = 30_000;
-
-pub(super) fn plugin_invoke_timeout(remaining_ms: u64) -> std::time::Duration {
-    std::time::Duration::from_millis(remaining_ms.min(MAX_PLUGIN_INVOKE_MS))
-}
-
-pub(super) fn handle_plugin_invoke(
-    mut conn: UnixStream,
-    value: &serde_json::Value,
-    identity: Result<AuthenticatedEventClient, String>,
-) {
-    let result = (|| -> Result<smelt_plugin_api::InvocationResponse, String> {
-        require_desktop_identity(identity?)?;
-        let plugin_id = value
-            .get("plugin_id")
-            .cloned()
-            .ok_or_else(|| "missing plugin_id".to_string())
-            .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-        let request: InvocationRequest = value
-            .get("request")
-            .cloned()
-            .ok_or_else(|| "missing invocation request".to_string())
-            .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-        let remaining_ms = request
-            .deadline_ms
-            .saturating_sub(crate::event_hub::now_ms());
-        if remaining_ms == 0 {
-            return Err("plugin invocation deadline has expired".to_string());
-        }
-        crate::plugin_runtime::invoke(plugin_id, request, plugin_invoke_timeout(remaining_ms))
-    })();
-    let response = match result {
-        Ok(response) => serde_json::json!({ "ok": true, "response": response }),
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    };
-    let _ = writeln!(conn, "{response}");
-}
-
-pub(super) fn handle_plugin_set_enabled(
-    mut conn: UnixStream,
-    value: &serde_json::Value,
-    identity: Result<AuthenticatedEventClient, String>,
-) {
-    let result = (|| -> Result<(), String> {
-        require_desktop_identity(identity?)?;
-        let plugin_id = value
-            .get("plugin_id")
-            .cloned()
-            .ok_or_else(|| "missing plugin_id".to_string())
-            .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-        let enabled = value
-            .get("enabled")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| "missing enabled".to_string())?;
-        crate::plugin_runtime::set_enabled(plugin_id, enabled)
-    })();
-    let response = match result {
-        Ok(()) => serde_json::json!({ "ok": true }),
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    };
-    let _ = writeln!(conn, "{response}");
-}
-
-pub(super) fn handle_plugin_reload(
-    mut conn: UnixStream,
-    identity: Result<AuthenticatedEventClient, String>,
-) {
-    let response = match identity.and_then(require_desktop_identity) {
-        Ok(_) => {
-            super::plugin_runtime::reload_for_package_change();
-            serde_json::json!({ "ok": true })
-        }
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    };
-    let _ = writeln!(conn, "{response}");
 }
 
 pub(super) fn write_event_protocol_value(

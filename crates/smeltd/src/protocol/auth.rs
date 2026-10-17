@@ -1,4 +1,4 @@
-//! 事件订阅与插件 UI 的连接身份校验。
+//! 事件订阅的连接身份校验。
 //!
 //! 身份原语只问内核，不问磁盘：team + signing-id 经 `csops_audittoken` 从
 //! 进程的代码目录读（audit token 绑定，无 TOCTOU），自更新把磁盘文件换掉后
@@ -29,7 +29,7 @@
 //!   我们只认"谁签的"，这是身份问题不是有效性问题（同 Apple team 要求的口径）。
 
 use super::super::*;
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
     CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
     CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth, FIRST_PARTY_DESKTOP_PLUGIN_ID,
@@ -597,31 +597,6 @@ pub(crate) fn viewer_is_present() -> bool {
     LIVE_VIEWERS.load(std::sync::atomic::Ordering::SeqCst) > 0
 }
 
-pub(super) fn authenticate_desktop_connection(
-    value: &serde_json::Value,
-    conn: &UnixStream,
-) -> Result<AuthenticatedEventClient, String> {
-    let executable = daemon_executable_path()
-        .map_err(|error| format!("cannot determine smeltd executable: {error}"))?;
-    let identity = authenticate_event_connection(
-        value,
-        conn,
-        &SystemPeerIdentityProvider,
-        std::process::id(),
-        &executable,
-    )?;
-    require_desktop_identity(identity)
-}
-
-pub(super) fn require_desktop_identity(
-    identity: AuthenticatedEventClient,
-) -> Result<AuthenticatedEventClient, String> {
-    if identity.plugin_id.as_str() != FIRST_PARTY_DESKTOP_PLUGIN_ID {
-        return Err("plugin UI operation requires authenticated desktop".to_string());
-    }
-    Ok(identity)
-}
-
 #[cfg(all(target_os = "macos", test))]
 pub(super) fn authenticate_event_connection_with_verifier(
     value: &serde_json::Value,
@@ -855,40 +830,6 @@ pub(super) fn trusted_macos_executable(
             )),
         _ => Ok(false),
     }
-}
-
-pub(crate) fn verify_plugin_process(
-    _package: &smelt_plugin_host::PluginPackage,
-    program: &std::path::Path,
-    plugin_pid: u32,
-) -> Result<(), smelt_plugin_host::HostError> {
-    let running_executable =
-        process_executable(plugin_pid).map_err(smelt_plugin_host::HostError::new)?;
-    let expected = program
-        .canonicalize()
-        .map_err(|error| smelt_plugin_host::HostError::new(error.to_string()))?;
-    let running = running_executable
-        .canonicalize()
-        .map_err(|error| smelt_plugin_host::HostError::new(error.to_string()))?;
-    if running != expected {
-        return Err(smelt_plugin_host::HostError::new(format!(
-            "plugin pid {plugin_pid} runs {}, expected {}",
-            running.display(),
-            expected.display()
-        )));
-    }
-    let managed = smelt_core::managed_runtime::managed_bun_path_if_ready()
-        .and_then(|path| path.canonicalize().ok())
-        .ok_or_else(|| {
-            smelt_plugin_host::HostError::new("managed script runtime is unavailable")
-        })?;
-    if expected != managed {
-        return Err(smelt_plugin_host::HostError::new(format!(
-            "plugin pid {plugin_pid} runs an unmanaged script runtime {}",
-            expected.display()
-        )));
-    }
-    Ok(())
 }
 
 pub(super) fn first_party_event_client(kind: FirstPartyClientKind) -> AuthenticatedEventClient {

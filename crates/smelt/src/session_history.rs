@@ -1340,7 +1340,6 @@ fn build_history_handoff_request(
         fork_session_id: None,
         fork_cut: None,
         conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-        agent_session: None,
     }
 }
 

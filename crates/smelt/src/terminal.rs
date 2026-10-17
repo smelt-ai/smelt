@@ -715,7 +715,7 @@ fn daemon_ready_timeout() -> Duration {
     }
 }
 
-/// 查找分发物（smeltd、bundled 插件包）时应当参照的可执行文件位置。
+/// 查找分发物（smeltd 等）时应当参照的可执行文件位置。
 ///
 /// cargo 把测试二进制放在 `target/<profile>/deps/`，而分发物都在上一级的 profile
 /// 目录。不抹掉 `deps` 这一层，用例就只能去捞开发者真实安装的 `~/.smelt`，既污染
@@ -735,336 +735,6 @@ fn bundled_daemon_path() -> Option<std::path::PathBuf> {
     distribution_exe()
         .map(|e| e.with_file_name("smeltd"))
         .filter(|p| p.is_file())
-}
-
-fn bundled_plugin_root() -> Option<std::path::PathBuf> {
-    bundled_plugin_root_for(&distribution_exe()?)
-}
-
-/// 已安装或不存在则现场 stage 一份 bundled 插件包，供设置页列出开关。
-pub fn ensure_bundled_plugin_packages() -> Option<std::path::PathBuf> {
-    bundled_plugin_root()
-}
-
-fn bundled_plugin_root_for(executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    if let Some(root) = app_bundle_plugin_root(executable) {
-        return Some(root);
-    }
-    stage_workspace_plugins(executable.parent()?).ok()
-}
-
-/// 已安装 bundled 插件包的根目录，只发现不重新 stage。
-pub fn bundled_plugin_package_root() -> Option<std::path::PathBuf> {
-    bundled_plugin_package_root_for(&distribution_exe()?)
-}
-
-/// GUI 侧统一发现应用自带与用户安装的插件。tab 注册表、设置页清单必须走同一条，
-/// 否则会出现“设置里装上了，但 tab 看不见”这种双真相。
-pub fn discover_installed_plugin_packages()
--> Vec<Result<smelt_plugin_host::PluginPackage, smelt_plugin_host::HostError>> {
-    let Some(root) = smelt_paths::smelt_home() else {
-        return vec![Err(smelt_plugin_host::HostError::new(
-            "cannot determine home directory",
-        ))];
-    };
-    let bundled = bundled_plugin_package_root().or_else(ensure_bundled_plugin_packages);
-    smelt_plugin_host::discover_all_plugins(bundled.as_deref(), &root)
-}
-
-fn bundled_plugin_package_root_for(executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    if let Some(root) = app_bundle_plugin_root(executable) {
-        return root.is_dir().then_some(root);
-    }
-    let packages = executable.parent()?.join("plugin-packages");
-    packages.is_dir().then_some(packages)
-}
-
-/// 把设置页的插件开关同步给守护：关掉则停进程，打开则拉起。
-pub fn plugin_set_enabled(plugin_id: &str, enabled: bool) -> Result<(), String> {
-    let Ok(mut stream) = connect_daemon_control() else {
-        return Ok(());
-    };
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginSetEnabled,
-            "plugin_id": plugin_id,
-            "enabled": enabled,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(response.trim()).unwrap_or_default();
-    if value["ok"].as_bool() == Some(true) {
-        Ok(())
-    } else {
-        Err(value["error"]
-            .as_str()
-            .unwrap_or("设置插件开关失败")
-            .to_string())
-    }
-}
-
-/// 通知守护重新发现磁盘上的插件包。安装/卸载本身由 GUI 做，进程生命周期仍只归
-/// 守护管理，避免同一个插件跑出两个实例。
-pub fn plugin_reload() -> Result<(), String> {
-    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginReload,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
-    if value["ok"].as_bool() == Some(true) {
-        Ok(())
-    } else {
-        Err(value["error"]
-            .as_str()
-            .unwrap_or("重新加载插件失败")
-            .to_string())
-    }
-}
-
-/// 查询守护里各插件的运行状态。阻塞 IO，调用方放后台执行器。
-pub fn plugin_statuses() -> Result<Vec<smelt_plugin_host::PluginStatus>, String> {
-    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginStatuses,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
-    if value["ok"].as_bool() != Some(true) {
-        return Err(value["error"]
-            .as_str()
-            .unwrap_or("查询插件状态失败")
-            .to_string());
-    }
-    serde_json::from_value(value["statuses"].clone()).map_err(|error| error.to_string())
-}
-
-/// 把一次面板 invocation 转给守护里的插件进程。
-///
-/// GUI 不自己拉起插件进程：那会和守护各管一份，同一个插件跑出两个实例。
-/// 这是阻塞 IO，调用方必须放在后台执行器上。
-pub fn plugin_invoke(
-    plugin_id: &str,
-    request: &smelt_plugin_api::InvocationRequest,
-) -> Result<serde_json::Value, String> {
-    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginInvoke,
-            "plugin_id": plugin_id,
-            "request": request,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
-    if value["ok"].as_bool() != Some(true) {
-        return Err(value["error"]
-            .as_str()
-            .unwrap_or("插件调用失败")
-            .to_string());
-    }
-    // 守护把插件的应答原样回传：Success 取 result，Error 转成 Err。
-    match &value["response"] {
-        serde_json::Value::Object(map) if map.contains_key("result") => Ok(map["result"].clone()),
-        serde_json::Value::Object(map) if map.contains_key("message") => Err(map["message"]
-            .as_str()
-            .unwrap_or("插件拒绝了这次调用")
-            .to_string()),
-        other => Err(format!("插件应答无法识别: {other}")),
-    }
-}
-
-/// `.app` 内 first-party 插件包目录，相对 Contents。
-///
-/// 不能用 `PlugIns`：codesign 把那里的子目录当成嵌套 bundle，没有 Info.plist
-/// 会直接 "bundle format unrecognized"。
-const APP_BUNDLE_PLUGIN_PACKAGES: &str = "Resources/plugin-packages";
-
-fn app_bundle_plugin_root(executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    let macos = executable.parent()?;
-    if macos.file_name()? != "MacOS" {
-        return None;
-    }
-    let contents = macos.parent()?;
-    if contents.file_name()? != "Contents" {
-        return None;
-    }
-    Some(contents.join(APP_BUNDLE_PLUGIN_PACKAGES))
-}
-
-/// 开发模式下把 workspace 里的插件源码目录 stage 成插件包。
-///
-/// 扫盘而不是写死名单：新增一个插件只要在 `plugins/<name>/` 放好
-/// `plugin.json` 与它声明的入口，就会自动出现在应用里——宿主不需要为此改任何代码。
-/// Shared Bun 入口直接取 package 数据。
-fn stage_workspace_plugins(bin_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let dest = bin_dir.join("plugin-packages");
-    // target/debug -> target -> workspace root
-    let Some(sources) = bin_dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(|root| root.join("plugins"))
-        .filter(|path| path.is_dir())
-    else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "找不到 workspace 的 plugins 目录",
-        ));
-    };
-
-    let mut staged = 0usize;
-    for entry in std::fs::read_dir(&sources)? {
-        let source = entry?.path();
-        let manifest_path = source.join("plugin.json");
-        if !manifest_path.is_file() {
-            continue;
-        }
-        let manifest_json = std::fs::read_to_string(&manifest_path)?;
-        let Ok(manifest) = serde_json::from_str::<smelt_plugin_api::PluginManifest>(&manifest_json)
-        else {
-            eprintln!(
-                "[plugin] 跳过无法解析的 manifest：{}",
-                manifest_path.display()
-            );
-            continue;
-        };
-        if !manifest.bundled {
-            // 只为测试存在的 package 不进产物，也不在开发期占一个运行时槽位。
-            continue;
-        }
-        let entrypoint = source.join(&manifest.entrypoint);
-        if !entrypoint.is_file() {
-            continue;
-        }
-        // sidecar 和 web 目录都一并装进包里，声明与资源缺一不可。
-        let web = source.join("web");
-        let package_assets = source.join("assets");
-        let ui_manifest = source.join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE);
-        let input_manifest = source.join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE);
-        let agent_manifest = source.join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE);
-        let mut assets: Vec<(&str, &std::path::Path)> = Vec::new();
-        if web.is_dir() {
-            assets.push(("web", web.as_path()));
-        }
-        if package_assets.is_dir() {
-            assets.push(("assets", package_assets.as_path()));
-        }
-        if ui_manifest.is_file() {
-            assets.push((
-                smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE,
-                ui_manifest.as_path(),
-            ));
-        }
-        if input_manifest.is_file() {
-            assets.push((
-                smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE,
-                input_manifest.as_path(),
-            ));
-        }
-        if agent_manifest.is_file() {
-            assets.push((
-                smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE,
-                agent_manifest.as_path(),
-            ));
-        }
-        match smelt_plugin_host::stage_plugin_package_with_assets(
-            &dest,
-            &manifest_json,
-            &entrypoint,
-            &assets,
-        ) {
-            Ok(_) => staged += 1,
-            Err(error) => eprintln!("[plugin] stage {} 失败：{error}", manifest.id),
-        }
-    }
-
-    if staged == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "没有可用的插件包（package entrypoint 缺失）",
-        ));
-    }
-    Ok(dest)
-}
-
-fn sync_bundled_plugins(daemon: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let smelt_root = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
-    let source = bundled_plugin_root().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "找不到 bundled 插件包；请先构建 bundled plugins",
-        )
-    })?;
-    if !source.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("bundled 插件目录不存在：{}", source.display()),
-        ));
-    }
-    let dest = smelt_plugin_host::sync_bundled_plugin_set(Some(&source), &smelt_root, daemon)
-        .map_err(std::io::Error::other)?;
-    // 只对齐磁盘。这里绝不能 plugin_reload：冷启动 restore 紧接着 Open 终端，
-    // 而 reload 会杀掉并重启 shared bun，控制通道只有 5s 超时，失败还被忽略。
-    // 会话挂上之后由 workspace 再发 reload。
-    Ok(dest)
-}
-
-fn prepare_bundled_release(
-    app: &std::path::Path,
-    smelt_root: &std::path::Path,
-) -> std::io::Result<std::path::PathBuf> {
-    let daemon = app.join("Contents/MacOS/smeltd");
-    if !daemon.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("候选 App 缺少守护程序：{}", daemon.display()),
-        ));
-    }
-    let plugin_root = app.join("Contents").join(APP_BUNDLE_PLUGIN_PACKAGES);
-    if !plugin_root.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("候选 App 缺少插件目录：{}", plugin_root.display()),
-        ));
-    }
-    smelt_plugin_host::sync_bundled_plugin_set(Some(&plugin_root), smelt_root, &daemon)
-        .map_err(std::io::Error::other)?;
-    Ok(daemon)
 }
 
 fn file_mtime_secs(p: &std::path::Path) -> Option<u64> {
@@ -1417,8 +1087,6 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
         };
     };
 
-    sync_bundled_plugins(&bundled)?;
-
     match probe_daemon_detail() {
         DaemonProbe::NotRunning => {
             install_managed_daemon_from(&bundled)?;
@@ -1530,7 +1198,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
             let fallback = exe.with_file_name("smeltd");
             if fallback.is_file() {
                 eprintln!(
-                    "[plugin-host] managed daemon sync failed ({e}); falling back to {}",
+                    "[daemon] managed daemon sync failed ({e}); falling back to {}",
                     fallback.display()
                 );
                 fallback
@@ -1565,9 +1233,9 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         }
         // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘——
         // 关闭“spawn 与守护启动哈希之间磁盘被替换”的竞态窗口（与 handoff 经
-        // SMELTD_PLUGIN_DAEMON_FINGERPRINT 传指纹同一机制）。
-        if let Ok(fingerprint) = smelt_plugin_host::executable_fingerprint(&spawn_at) {
-            cmd.env("SMELTD_PLUGIN_DAEMON_FINGERPRINT", fingerprint);
+        // SMELTD_DAEMON_FINGERPRINT 传指纹同一机制）。
+        if let Ok(fingerprint) = smelt_core::daemon_image::content_fingerprint(&spawn_at) {
+            cmd.env("SMELTD_DAEMON_FINGERPRINT", fingerprint);
         }
         match cmd.spawn() {
             Ok(child) => {
@@ -1778,7 +1446,7 @@ fn outdated_by_fingerprint(pinned: &str, expected: Option<&std::path::Path>) -> 
     let Some(path) = expected else {
         return false;
     };
-    match smelt_plugin_host::executable_fingerprint(path) {
+    match smelt_core::daemon_image::content_fingerprint(path) {
         Ok(disk) => disk != pinned,
         Err(_) => false,
     }
@@ -1914,13 +1582,13 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     }
 }
 
-/// 候选 `.app` 安装的公共前半段：先把 bundled 插件目录绑到该 smeltd 指纹，
-/// 再把守护交到 `~/.smelt/bin`。在线更新、DMG 后的 GUI ensure、`make install`
-/// 都必须是这个顺序；先 exec 再写映射会让插件永远起不来。
-/// 拷贝不跑当前版插件 schema：新字段由新守护 load。
+/// 候选 `.app` 安装的公共前半段：取出候选包里的守护程序，再交到 `~/.smelt/bin`。
 fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    let smelt_root = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
-    prepare_bundled_release(candidate_app, &smelt_root).map_err(anyhow::Error::from)
+    let daemon = candidate_app.join("Contents/MacOS/smeltd");
+    if !daemon.is_file() {
+        anyhow::bail!("候选 App 缺少守护程序：{}", daemon.display());
+    }
+    Ok(daemon)
 }
 
 /// 安装时对运行中守护的处置决策。
@@ -4506,7 +4174,7 @@ mod outdated_fingerprint_tests {
     fn staged_disk_with_old_process_is_outdated() {
         let disk_new = fixture(b"new-binary-bytes");
         let disk_old = fixture(b"old-binary-bytes");
-        let pinned_old = smelt_plugin_host::executable_fingerprint(&disk_old).unwrap();
+        let pinned_old = smelt_core::daemon_image::content_fingerprint(&disk_old).unwrap();
         assert!(
             outdated_by_fingerprint(&pinned_old, Some(&disk_new)),
             "磁盘新了、进程还是老的，必须判旧"
@@ -4519,7 +4187,7 @@ mod outdated_fingerprint_tests {
     #[test]
     fn same_content_is_not_outdated() {
         let disk = fixture(b"same-binary-bytes");
-        let pinned = smelt_plugin_host::executable_fingerprint(&disk).unwrap();
+        let pinned = smelt_core::daemon_image::content_fingerprint(&disk).unwrap();
         assert!(!outdated_by_fingerprint(&pinned, Some(&disk)));
         std::fs::remove_file(disk).ok();
     }
@@ -4762,223 +4430,11 @@ mod managed_daemon_ensure_tests {
     }
 
     #[test]
-    fn app_bundle_plugins_are_not_in_codesign_nested_bundle_dirs() {
-        let root = app_bundle_plugin_root(std::path::Path::new(
-            "/Applications/Smelt.app/Contents/MacOS/smelt",
-        ))
-        .expect("GUI 在 .app/Contents/MacOS 下必须能定位 bundled 插件");
-        assert_eq!(
-            root,
-            std::path::PathBuf::from("/Applications/Smelt.app/Contents/Resources/plugin-packages")
-        );
-        assert!(
-            !root.components().any(|c| c.as_os_str() == "PlugIns"),
-            "Contents/PlugIns 会被 codesign 当成嵌套 bundle：{root:?}"
-        );
-    }
-
-    #[test]
-    fn candidate_release_selects_its_plugin_set_before_handoff() {
-        let root = managed_test_file("candidate-release");
-        let candidate = root.join("Smelt.app");
-        let daemon = candidate.join("Contents/MacOS/smeltd");
-        let package = candidate
-            .join("Contents")
-            .join(APP_BUNDLE_PLUGIN_PACKAGES)
-            .join("com.example");
-        let entrypoint = package.join("bin/main.ts");
-        let smelt_root = root.join("state");
-        std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
-        std::fs::write(&daemon, b"candidate-daemon").unwrap();
-        std::fs::write(&entrypoint, b"export default {};\n").unwrap();
-        std::fs::write(
-            package.join("plugin.json"),
-            serde_json::json!({
-                "id": "com.example",
-                "name": "Example",
-                "version": "1.0.0",
-                "api_version": 1,
-                "entrypoint": "bin/main.ts",
-                "capabilities": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let prepared_daemon = prepare_bundled_release(&candidate, &smelt_root).unwrap();
-
-        assert_eq!(prepared_daemon, daemon);
-        let selected = smelt_plugin_host::active_plugin_set_root(&smelt_root, &prepared_daemon)
-            .unwrap()
-            .expect("handoff 前必须已经选中插件集合");
-        assert!(selected.join("com.example/plugin.json").is_file());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn install_app_cli_is_opt_in() {
         assert!(maybe_run_install_app(["smelt"]).is_none());
         assert!(maybe_run_install_app(["smelt", "--help"]).is_none());
         assert_eq!(crate::cli::maybe_run(["smelt", "--help"]), Some(0));
         assert_eq!(maybe_run_install_app(["smelt", "--install-app"]), Some(2));
-    }
-
-    #[test]
-    fn cargo_layout_stages_every_bundled_plugin_it_finds() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // 复刻 cargo 的布局：<root>/plugins 是插件源，<root>/target/debug 是产物。
-        let root = managed_test_file("dev-plugins");
-        let bin_dir = root.join("target/debug");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let gui = bin_dir.join("smelt");
-        std::fs::write(&gui, b"gui").unwrap();
-
-        let write_manifest = |name: &str, id: &str, entrypoint: &str, bundled: bool| {
-            let dir = root.join("plugins").join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("plugin.json"),
-                serde_json::json!({
-                    "id": id,
-                    "name": name,
-                    "version": "1.0.0",
-                    "api_version": 1,
-                    "entrypoint": format!("bin/{entrypoint}"),
-                    "capabilities": [],
-                    "bundled": bundled,
-                })
-                .to_string(),
-            )
-            .unwrap();
-            dir
-        };
-        let write_entrypoint = |dir: &std::path::Path, name: &str| {
-            let path = dir.join("bin").join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"export default {};\n").unwrap();
-        };
-
-        // 有入口、带 web 的插件：整包（含网页）都要被装进去。
-        let alpha = write_manifest("alpha", "com.example.alpha", "alpha-bin", true);
-        std::fs::create_dir_all(alpha.join("web")).unwrap();
-        std::fs::write(alpha.join("web/index.html"), b"<!doctype html>").unwrap();
-        std::fs::write(
-            alpha.join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE),
-            serde_json::json!({ "contributions": [] }).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            alpha.join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE),
-            serde_json::json!({ "contributions": [] }).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            alpha.join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE),
-            serde_json::json!({ "contributions": [] }).to_string(),
-        )
-        .unwrap();
-        std::fs::create_dir_all(alpha.join("assets")).unwrap();
-        std::fs::write(alpha.join("assets/icon.svg"), b"<svg/>").unwrap();
-        write_entrypoint(&alpha, "alpha-bin");
-        // 测试用插件：不进产物。
-        let beta = write_manifest("beta", "com.example.beta", "beta-bin", false);
-        write_entrypoint(&beta, "beta-bin");
-        // 缺入口的插件：跳过而不是让整个启动失败。
-        write_manifest("gamma", "com.example.gamma", "gamma-bin", true);
-        // Shared Bun 的入口是包内数据，不能要求 target/debug 里存在同名二进制。
-        let bun = root.join("plugins/bun");
-        std::fs::create_dir_all(bun.join("bin")).unwrap();
-        std::fs::write(
-            bun.join("plugin.json"),
-            serde_json::json!({
-                "id": "com.example.bun",
-                "name": "Bun",
-                "version": "1.0.0",
-                "api_version": 1,
-                "entrypoint": "bin/main.ts",
-                "capabilities": [],
-                "contributions": [],
-                "bundled": true,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            bun.join("bin/main.ts"),
-            "export { default } from './api.ts';",
-        )
-        .unwrap();
-        std::fs::write(
-            bun.join("bin/api.ts"),
-            "export default { invoke() { return null; } };",
-        )
-        .unwrap();
-        std::fs::write(bun.join("bin/api.test.ts"), "throw new Error('test');").unwrap();
-
-        let staged = bundled_plugin_root_for(&gui).expect("开发态必须能组装插件包");
-        assert!(staged.join("com.example.alpha/plugin.json").is_file());
-        assert!(staged.join("com.example.alpha/bin/alpha-bin").is_file());
-        assert!(
-            staged
-                .join("com.example.alpha")
-                .join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE)
-                .is_file(),
-            "UI sidecar 必须跟包一起 stage"
-        );
-        assert!(
-            staged
-                .join("com.example.alpha")
-                .join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE)
-                .is_file(),
-            "输入路由 sidecar 必须跟包一起 stage"
-        );
-        assert!(
-            staged
-                .join("com.example.alpha")
-                .join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE)
-                .is_file(),
-            "智能体 sidecar 必须跟包一起 stage"
-        );
-        assert!(
-            staged.join("com.example.alpha/assets/icon.svg").is_file(),
-            "智能体等 contribution 的包内资源必须跟包一起 stage"
-        );
-        assert!(
-            staged.join("com.example.alpha/web/index.html").is_file(),
-            "面板资源必须跟包一起 stage，否则装了也打不开"
-        );
-        assert!(
-            !staged.join("com.example.beta").exists(),
-            "bundled=false 的插件不该进产物"
-        );
-        assert!(
-            !staged.join("com.example.gamma").exists(),
-            "缺少 package entrypoint 的插件应当跳过"
-        );
-        assert!(
-            staged.join("com.example.bun/bin/main.ts").is_file(),
-            "Shared Bun 入口必须从 package 源目录 stage"
-        );
-        assert!(
-            staged.join("com.example.bun/bin/api.ts").is_file(),
-            "Bun 入口旁边的模块必须一起 stage，否则运行时 import 会失败"
-        );
-        assert!(
-            !staged.join("com.example.bun/bin/api.test.ts").exists(),
-            "测试文件不能进运行时插件包"
-        );
-        assert_eq!(
-            std::fs::metadata(staged.join("com.example.bun/bin/main.ts"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o111,
-            0,
-            "Shared Bun module must stay non-executable package data"
-        );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

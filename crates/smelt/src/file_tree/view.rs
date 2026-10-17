@@ -902,7 +902,11 @@ pub fn file_content_parts(
                         ),
                 )
                 .when(is_md, |el| {
-                    let markdown_label = if preview { "查看原始码" } else { "查看预览" };
+                    let markdown_label = if preview {
+                        "查看原始码"
+                    } else {
+                        "查看预览"
+                    };
                     el.child(
                         div()
                             .id("markdown-view-toggle")

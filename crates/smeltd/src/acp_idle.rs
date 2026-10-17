@@ -137,10 +137,7 @@ pub(crate) fn acp_suspend_blocker(
     }
     if matches!(
         &*sess.conversation_binding.lock().unwrap(),
-        Some(
-            smelt_core::conversation::ConversationBinding::Automation { .. }
-                | smelt_core::conversation::ConversationBinding::Plugin { .. }
-        )
+        Some(smelt_core::conversation::ConversationBinding::Automation { .. })
     ) {
         return Some("daemon-owned binding");
     }

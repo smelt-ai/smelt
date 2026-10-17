@@ -529,9 +529,6 @@ mod imp {
     pub fn notify_success(message: impl AsRef<str>) {
         deliver_app_notification("完成", message.as_ref());
     }
-    pub fn notify_info(message: impl AsRef<str>) {
-        deliver_app_notification("提示", message.as_ref());
-    }
     pub fn deliver_automation_notification(
         _automation_id: &str,
         _run_id: &str,
@@ -564,16 +561,16 @@ pub use imp::{activate_app, is_app_active, set_attention_count, set_counts, setu
 
 #[cfg(target_os = "macos")]
 pub use system_notifications::{
-    deliver_automation_notification, deliver_notification, notify_error, notify_info,
-    notify_success, refresh_system_notification_authorization, remove_automation_notification,
+    deliver_automation_notification, deliver_notification, notify_error, notify_success,
+    refresh_system_notification_authorization, remove_automation_notification,
     remove_system_notification, retain_automation_notifications, retain_system_notifications,
     sync_system_notifications, system_notification_status, take_system_notification_errors,
 };
 
 #[cfg(not(target_os = "macos"))]
 pub use imp::{
-    deliver_automation_notification, deliver_notification, notify_error, notify_info,
-    notify_success, refresh_system_notification_authorization, remove_automation_notification,
+    deliver_automation_notification, deliver_notification, notify_error, notify_success,
+    refresh_system_notification_authorization, remove_automation_notification,
     remove_system_notification, retain_automation_notifications, retain_system_notifications,
     sync_system_notifications, system_notification_status, take_system_notification_errors,
 };

@@ -1,5 +1,5 @@
 //! Tool Panel：面板内横向 tabs + 右侧面板（默认 320px，可整体隐藏）。
-//! Files / Git / History 三个内置 tab 加插件贡献的 tab，点击切换或收合；面板头的
+//! Files / Git / History 三个内置 tab 加插件的 tab，点击切换或收合；面板头的
 //! 全屏按钮只切换 Tool Panel 容器的展示状态，内容选择始终由当前 tab 决定。
 //!
 //! 从 main.rs 拆出的 `impl Workspace` 方法，字段仍在 main.rs。
@@ -15,15 +15,10 @@ pub(crate) const MIN_FILE_TREE_WIDTH: f32 = 190.0;
 /// 宽度，也能保证编辑器至少保有可读空间。该值只在恢复或拖树自身分隔条时变化。
 pub(crate) const MAX_FILE_TREE_WIDTH: f32 = 320.0;
 
-/// 「技能」曾经是内置 tab，现在由 skills 插件贡献。旧存档里的 `"skills"`
-/// 一次性映射到这个 key；插件不在（被停用/卸载）就按常规降级成 Files。
-const MIGRATED_SKILLS_TAB_KEY: &str = "com.smelt.skills/skills";
-/// 旧存档里「技能」内置 tab 用过的 key。
-const LEGACY_SKILLS_PANEL_KEY: &str = "skills";
 /// 任何无法解析的 tab 都降级到它。
 const DEFAULT_PANEL_KEY: &str = "files";
 
-/// Tool Panel 的 tab。前三个是内置的；`Plugin` 是插件贡献的，
+/// Tool Panel 的 tab。前三个是内置的；`Plugin` 是插件（见 `plugins`），
 /// 数量和标题都来自已安装插件的 manifest，宿主不认识它们的具体身份。
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub(crate) enum ToolPanelTab {
@@ -31,9 +26,7 @@ pub(crate) enum ToolPanelTab {
     Files,
     Git,
     History,
-    Plugin(crate::plugin_ui::PluginTabSlot),
-    /// gpui-shell 插件（可行性原型，见 `shell_plugins`），与 `Plugin` 互不相干。
-    Shell(crate::shell_plugins::ShellTabSlot),
+    Plugin(crate::plugins::PluginTabSlot),
 }
 
 impl serde::Serialize for ToolPanelTab {
@@ -44,20 +37,11 @@ impl serde::Serialize for ToolPanelTab {
         match self {
             // 存插件自己的稳定身份，不存槽位下标：下标会随插件增删平移。
             // 查不到 key（注册表还没建好）时降级成 files，不写坏存档。
-            Self::Plugin(slot) => match crate::plugin_ui::key_for(*slot) {
+            Self::Plugin(slot) => match crate::plugins::key_for(*slot) {
                 Some(key) => {
                     use serde::ser::SerializeMap;
                     let mut map = serializer.serialize_map(Some(1))?;
                     map.serialize_entry("plugin", &key)?;
-                    map.end()
-                }
-                None => serializer.serialize_str(DEFAULT_PANEL_KEY),
-            },
-            Self::Shell(slot) => match crate::shell_plugins::key_for(*slot) {
-                Some(key) => {
-                    use serde::ser::SerializeMap;
-                    let mut map = serializer.serialize_map(Some(1))?;
-                    map.serialize_entry("shell", &key)?;
                     map.end()
                 }
                 None => serializer.serialize_str(DEFAULT_PANEL_KEY),
@@ -74,25 +58,19 @@ impl<'de> serde::Deserialize<'de> for ToolPanelTab {
     where
         D: serde::Deserializer<'de>,
     {
-        // 旧存档可能存了已迁走的内置 tab（"skills"）或已删除的名字：
-        // 反序列化时归一化，避免整个 UI 存档因未知变体反序列化失败被静默丢弃。
         // 不用 enum：内置面板的 key 住在注册表里，再拄一份就成了第二份真相。
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum Wire {
             Builtin(String),
             Plugin { plugin: String },
-            Shell { shell: String },
         }
         Ok(
             match <Wire as serde::Deserialize>::deserialize(deserializer)? {
                 Wire::Builtin(key) => Self::from_key(&key),
-                // 插件被卸载或停用后，存档里指向它的 tab 自动降级——
+                // 插件被卸载后，存档里指向它的 tab 自动降级——
                 // 这是"可拔插"在持久化层该有的样子，不是错误。
                 Wire::Plugin { plugin } => Self::plugin_or_files(&plugin),
-                Wire::Shell { shell } => {
-                    crate::shell_plugins::slot_for_key(&shell).map_or(Self::Files, Self::Shell)
-                }
             },
         )
     }
@@ -101,9 +79,6 @@ impl<'de> serde::Deserialize<'de> for ToolPanelTab {
 impl ToolPanelTab {
     /// 存档里的内置 key → tab。未知 key 降级成默认面板。
     fn from_key(key: &str) -> Self {
-        if key == LEGACY_SKILLS_PANEL_KEY {
-            return Self::migrated_skills();
-        }
         BUILTIN_PANELS
             .iter()
             .find(|panel| panel.key == key)
@@ -112,22 +87,14 @@ impl ToolPanelTab {
 
     /// 解析插件 tab 的稳定 key；插件不可用时降级成 Files。
     fn plugin_or_files(key: &str) -> Self {
-        crate::plugin_ui::slot_for_key(key).map_or(Self::Files, Self::Plugin)
-    }
-
-    /// 旧存档里的「技能」tab 现在指向 skills 插件。
-    pub(crate) fn migrated_skills() -> Self {
-        Self::plugin_or_files(MIGRATED_SKILLS_TAB_KEY)
+        crate::plugins::slot_for_key(key).map_or(Self::Files, Self::Plugin)
     }
 
     /// 页签元素身份。插件增删会平移槽位下标，key 不会。
     fn element_key(self) -> String {
         match self {
             Self::Plugin(slot) => {
-                crate::plugin_ui::key_for(slot).unwrap_or_else(|| format!("plugin:{}", slot.0))
-            }
-            Self::Shell(slot) => {
-                crate::shell_plugins::key_for(slot).unwrap_or_else(|| format!("shell:{}", slot.0))
+                crate::plugins::key_for(slot).unwrap_or_else(|| format!("plugin:{}", slot.0))
             }
             builtin => builtin_panel(builtin)
                 .map(|panel| panel.key.to_string())
@@ -138,8 +105,7 @@ impl ToolPanelTab {
     fn label(self) -> String {
         match self {
             // 插件面板的标题来自 manifest，只有运行时才知道。
-            Self::Plugin(slot) => crate::plugin_ui::title(slot),
-            Self::Shell(slot) => crate::shell_plugins::title(slot),
+            Self::Plugin(slot) => crate::plugins::title(slot),
             builtin => builtin_panel(builtin).map_or_else(String::new, |p| p.title.to_string()),
         }
     }
@@ -327,10 +293,9 @@ impl Workspace {
         self.active_stage_tool_panel_tab() == Some(tab)
     }
 
-    /// 唯一改 `tool_panel_open` 的入口：持久状态与可复用过渡状态同步更新。
+    /// 唯一改 `tool_panel_open` 的入口。
     pub(crate) fn set_tool_panel_open(&mut self, open: bool, cx: &mut Context<Self>) {
         let changed = self.tool_panel_open != open;
-        self.tool_panel_transition.set_open(open);
         self.tool_panel_open = open;
         if changed {
             self.schedule_visible_refresh(cx);
@@ -403,14 +368,9 @@ impl Workspace {
         // 内置面板来自注册表，插件面板追在后面；两者在这一层同等。
         let mut tabs: Vec<ToolPanelTab> = BUILTIN_PANELS.iter().map(|panel| panel.tab).collect();
         tabs.extend(
-            crate::plugin_ui::slots()
+            crate::plugins::slots()
                 .into_iter()
                 .map(ToolPanelTab::Plugin),
-        );
-        tabs.extend(
-            crate::shell_plugins::slots()
-                .into_iter()
-                .map(ToolPanelTab::Shell),
         );
         // 停靠 rail 收起期间不保留高亮；全屏 rail 始终高亮当前 Tool Panel tab。
         let selected_index = (stage_rail || self.tool_panel_open)
@@ -439,11 +399,16 @@ impl Workspace {
                 selected_index == Some(ix),
                 cx,
             )
-            // 页签拦住自己的点击。这一行其余空白走下面的拖窗口。
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |ws, _, _window, cx| {
-                ws.toggle_tool_panel_tab(entry, cx);
-            }))
+            // 字格默认 20px，下划线画在轨道底、格的外面。铺满轨道后，点字和下划线都落在这一格上。
+            .h_full()
+            // 按下就切换。这一行在标题栏里，松手经常到不了，不能等 click。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ws, _, _, cx| {
+                    cx.stop_propagation();
+                    ws.toggle_tool_panel_tab(entry, cx);
+                }),
+            )
             .when(badge > 0, |tab| {
                 tab.child(
                     div()
@@ -458,60 +423,51 @@ impl Workspace {
             });
             track = track.child(tab);
         }
-        // 页签多到放不下时横向滚动，底下那条分隔线和原来的页签栏一致。
+        // 页签按内容宽，放不下再缩。空白留给后面的拖动手柄，不要把整行都包进拖窗口。
+        let bar_h = crate::workspace_frame::TOP_BAR_HEIGHT;
         let tab_bar = div()
             .id(if stage_rail {
                 "stage-tool-panel-tabs"
             } else {
                 "tool-panel-tabs"
             })
-            .flex_1()
+            .flex_initial()
             .min_w_0()
+            .h(bar_h)
             .flex()
             .items_center()
             .overflow_x_scroll()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(track);
-
-        crate::workspace_frame::with_window_drag(
-            div()
-                .w_full()
-                .h(crate::workspace_frame::TOP_BAR_HEIGHT)
-                .flex_none()
-                .flex()
-                .items_center()
+        // 分隔线铺满这一行。页签条自己不再画一条，否则缩成内容宽后线会断开。
+        div()
+            .w_full()
+            .h(bar_h)
+            .flex_none()
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(ui_theme::hairline())
+            .child(crate::workspace_frame::with_window_drag(
                 // 铺满舞台且侧栏收起时，页签从交通灯右边开始。停靠右栏时 left_guard 是 0。
-                .pl(left_guard + px(16.))
-                // 窗口开关浮在这一行右上角，tab 收到开关左边。
-                .pr(px(crate::stage::CHROME_TOGGLE_RESERVE))
-                .border_b_1()
-                .border_color(ui_theme::hairline())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .child(tab_bar),
-                ),
-        )
+                div().w(left_guard + px(16.)).h(bar_h).flex_none(),
+            ))
+            .child(tab_bar)
+            .child(crate::workspace_frame::with_window_drag(
+                div().flex_1().min_w_0().h(bar_h),
+            ))
+            // 窗口开关浮在这一行右上角，tab 收到开关左边。
+            .child(crate::workspace_frame::with_window_drag(
+                div()
+                    .w(px(crate::stage::CHROME_TOGGLE_RESERVE))
+                    .h(bar_h)
+                    .flex_none(),
+            ))
     }
 
     /// 停靠右栏：tab 在抽屉顶，内容在下面。窗口顶栏不放这些 tab。
     pub(crate) fn render_tool_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        // 打开动画期间面板宽度逐帧变化，整个 body 每帧重建；Git 等内容构建
-        // 成本高（改动树、diff），动画那 ~180ms 里逐帧全量重建会掉帧。打开
-        // 动画期间先渲染轻量骨架占位，动画结束帧再挂真实内容；关闭动画保留
-        // 真实内容，避免面板滑出前内容提前消失。
         let tabs = self.render_tool_panel_tabs(self.tool_panel_tab, false, px(0.), cx);
-        let opening = self.tool_panel_transition.is_opening();
-        let body: AnyElement = if opening {
-            div().flex_1().min_h_0().into_any_element()
-        } else {
-            self.render_tool_panel_content(self.tool_panel_tab, window, cx)
-        };
+        let body = self.render_tool_panel_content(self.tool_panel_tab, window, cx);
         div()
             .w_full()
             .flex_shrink_0()
@@ -550,11 +506,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match tab {
-            ToolPanelTab::Plugin(slot) => self.render_plugin_tab(slot, window, cx),
-            ToolPanelTab::Shell(slot) => {
+            ToolPanelTab::Plugin(slot) => {
                 // 插件经 smelt-workspace.context() 读当前项目；这里只写内存。
-                crate::shell_plugins::set_project_root(self.active_project_root(cx));
-                crate::shell_plugins::render(slot, cx)
+                crate::plugins::set_project_root(self.active_project_root(cx));
+                crate::plugins::render(slot, cx)
             }
             builtin => match builtin_panel(builtin) {
                 Some(panel) => (panel.render)(self, window, cx),
@@ -655,14 +610,7 @@ impl Workspace {
                         .overflow_hidden()
                         .flex()
                         .bg(rgb(ui_theme::bg_stage()))
-                        .child(
-                            div()
-                                .size_full()
-                                .min_h_0()
-                                .flex()
-                                .flex_col()
-                                .child(tree),
-                        ),
+                        .child(div().size_full().min_h_0().flex().flex_col().child(tree)),
                 )
                 .into_any_element()
         });
@@ -742,9 +690,8 @@ mod tests {
         assert_eq!(tab, ToolPanelTab::Git);
         let tab: ToolPanelTab = serde_json::from_str("\"history\"").unwrap();
         assert_eq!(tab, ToolPanelTab::History);
-        // 「技能」已迁成插件 tab：插件不可用（这里注册表为空）时降级成 Files，
-        // 而不是让整份 UI 存档反序列化失败。
-        let tab: ToolPanelTab = serde_json::from_str("\"skills\"").unwrap();
+        // 插件不在（这里注册表为空）时降级成 Files。
+        let tab: ToolPanelTab = serde_json::from_str(r#"{"plugin":"com.smelt.skills"}"#).unwrap();
         assert_eq!(tab, ToolPanelTab::Files);
     }
 

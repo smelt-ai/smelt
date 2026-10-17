@@ -179,12 +179,8 @@ impl Workspace {
                             .unwrap_or_else(|| acp_agent_from_cmd(&saved.launch.command));
                         let refresh_launch_from_settings = saved.refresh_launch_from_settings();
                         let conversation_binding = saved.conversation_binding.clone();
-                        let agent_session = saved.agent_session.clone();
-                        let config_values = if agent_session.is_some() {
-                            saved.config_values.clone()
-                        } else {
-                            settings::initial_acp_config_for(agent, &saved.config_values, cx)
-                        };
+                        let config_values =
+                            settings::initial_acp_config_for(agent, &saved.config_values, cx);
                         let pending_prompt = saved.pending_prompt.clone();
                         let pending_delivery_id = saved.pending_delivery_id.clone();
                         let pending_agent_preset = saved.pending_agent_preset.clone();
@@ -240,7 +236,6 @@ impl Workspace {
                         });
                         view.update(cx, |view, _cx| {
                             view.restore_conversation_binding(conversation_binding);
-                            view.restore_agent_session(agent_session);
                             view.restore_config_values(config_values);
                             view.restore_pending_prompt(pending_prompt, pending_delivery_id);
                             view.restore_pending_agent_preset(pending_agent_preset);
@@ -463,14 +458,7 @@ impl Workspace {
                         );
                     }
                     // restore 完成后再查/升级守护，避免与 reattach / 重试并行 handoff。
-                    // 插件 reload 也放在会话挂上之后：它会重启 bun，不能跟 Open 抢守护。
                     this.check_daemon_outdated(cx);
-                    std::thread::Builder::new()
-                        .name("smelt-plugin-reload".into())
-                        .spawn(|| {
-                            let _ = terminal::plugin_reload();
-                        })
-                        .ok();
                     // 恢复完成后刷新会话管理器，但不要在启动时自动删除未连接会话。
                     // 未连接并不等于用户想删除：守护重启、网络短暂中断和恢复竞态都会
                     // 产生这种状态；删除应由用户在会话管理器中明确操作。
@@ -587,10 +575,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.active_session_ui.restored_from_archive = false;
-        self.tool_panel_transition.set_open(self.tool_panel_open);
-        self.stage_tool_panel_resize.update(cx, |state, cx| {
-            state.resize_panel(1, px(self.tool_panel_w), window, cx);
-        });
         self.file_tree_drag_start = None;
         if let Some(path) = self.pending_restore_file.take() {
             self.view_file(path, window, cx);
@@ -607,7 +591,7 @@ impl Workspace {
     /// 顺手删了项目。
     ///
     /// 已落在某个已打开项目之下时不新增子项目；只有完全无主的 cwd 才成为项目根。
-    /// **git worktree 检出除外**：插件任务等独立工作区即使落在 home/dev 等已打开
+    /// **git worktree 检出除外**：独立工作区即使落在 home/dev 等已打开
     /// 项目之下，也必须保留为独立项目——否则关闭它最后一个会话后，worktree
     /// 分组会随会话一起消失（`project_root_for_cwd` 会把它的 cwd 吸进父项目，
     /// 骨架里没有它，组就没了）。
@@ -616,9 +600,6 @@ impl Workspace {
             return;
         };
         let root = cwd.trim_end_matches('/');
-        if smelt_core::isolated_workspace::is_managed_workspace_dir(std::path::Path::new(root)) {
-            return;
-        }
         let is_worktree = self
             .repo_info
             .get(root)
@@ -1041,16 +1022,14 @@ impl Workspace {
             );
         }
         let agent_definition_id = agent_definition.map(|definition| definition.id);
-        if request.agent_session.is_none()
-            && !smelt_core::session_control::is_agent_conversation(
-                None,
-                agent_definition_id.as_deref(),
-                request.cwd.as_deref(),
-            )
-        {
+        if !smelt_core::session_control::is_agent_conversation(
+            None,
+            agent_definition_id.as_deref(),
+            request.cwd.as_deref(),
+        ) {
             self.remember_session_project(request.cwd.as_deref());
         }
-        if request.agent_session.is_none() && agent_definition_id.is_none() {
+        if agent_definition_id.is_none() {
             request.config_values =
                 settings::initial_acp_config_for(request.agent, &request.config_values, cx);
         }
@@ -1567,98 +1546,9 @@ impl Workspace {
         self.add_session(cwd, cx);
     }
 
-    /// 左侧栏使用固定像素布局；分隔条只负责修改 `sidebar_w`，不把窗口宽度变化
-    /// 混进偏好。8px 命中区跨在边界两侧，中间只画 1px 发丝。
-    pub(crate) fn sidebar_resize_handle(
-        &self,
-        rendered_width: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id("sidebar-width-resize")
-            .absolute()
-            .top_0()
-            .left(px(rendered_width - 4.0))
-            .w(px(8.))
-            .h_full()
-            .cursor_col_resize()
-            .group("sidebar-width-resize")
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(4.))
-                    .w(px(1.))
-                    .h_full()
-                    .bg(rgb(ui_theme::border_dim()))
-                    .group_hover("sidebar-width-resize", |line| {
-                        line.bg(rgb(ui_theme::text_faint()))
-                    }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.sidebar_drag_start = Some((
-                        f32::from(event.position.x),
-                        rendered_width.max(MIN_SIDEBAR_WIDTH),
-                    ));
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
-    }
-
-    /// 窗口级监听保证鼠标离开 8px 分隔条后仍能继续拖动；只在松手时落盘，避免
-    /// 每个 mouse-move 都提交 SQLite。窗口自身缩放不会经过这里，因此侧栏保持定宽。
-    pub(crate) fn sidebar_resize_listener(&self, cx: &mut Context<Self>) -> AnyElement {
-        let view = cx.entity();
-        canvas(
-            |_, _, _| {},
-            move |_bounds, _, window, _cx| {
-                let move_view = view.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                    if !phase.bubble() || event.pressed_button != Some(MouseButton::Left) {
-                        return;
-                    }
-                    move_view.update(cx, |this, cx| {
-                        let Some((start_x, start_w)) = this.sidebar_drag_start else {
-                            return;
-                        };
-                        let preferred = start_w + f32::from(event.position.x) - start_x;
-                        let width =
-                            sidebar_width_for_viewport(preferred, window.viewport_size().width);
-                        if (this.sidebar_w - width).abs() > 0.5 {
-                            this.sidebar_w = width;
-                            cx.notify();
-                        }
-                    });
-                });
-
-                let up_view = view;
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, cx| {
-                    if !phase.bubble() {
-                        return;
-                    }
-                    up_view.update(cx, |this, cx| {
-                        if this.sidebar_drag_start.take().is_some() {
-                            this.save_state(cx);
-                            cx.notify();
-                        }
-                    });
-                });
-            },
-        )
-        .absolute()
-        .inset_0()
-        .into_any_element()
-    }
-
-    /// 切换左侧栏（会话列表与工作区）开合状态。
+    /// 切换左侧栏（会话列表与工作区）开合状态。宽度由 Dock 的左栏记住。
     pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_drag_start = None;
         self.sidebar_open = !self.sidebar_open;
-        self.sidebar_transition.set_open(self.sidebar_open);
         if !self.sidebar_open {
             self.focus_active_stage(window, cx);
         }
@@ -2162,10 +2052,6 @@ impl Workspace {
 
     /// 焦点还给活动会话：Term → 活动 pane；ACP → 消息流输入框。
     pub(crate) fn focus_active_stage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 焦点要回舞台，就先把 AppKit 的 first responder 从插件面板的 WebView
-        // 收回来——GPUI 建窗后从不重设 first responder，不显式收回的话，后面
-        // 的 window.focus() 只改了 GPUI 内部焦点，输入法仍认着 WebView。
-        smelt_webview::release_focus(window);
         if let Some(Session {
             kind: SessionKind::Conversation(view),
             ..
@@ -2179,7 +2065,6 @@ impl Workspace {
     }
 
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut App) {
-        smelt_webview::release_focus(window);
         if let Some(active) = self.cur().and_then(|s| s.active_term()) {
             let h = active.read(cx).focus_handle();
             window.focus(&h, cx);
@@ -2406,7 +2291,6 @@ impl Workspace {
             }
             RenameTarget::Pane(view) => pane_title(view, cx),
             RenameTarget::History { current_title, .. } => current_title.clone(),
-            RenameTarget::WorkspaceSurface(key) => self.workspace_surface_display_title(key),
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
@@ -2438,15 +2322,6 @@ impl Workspace {
         let text = input.read(cx).value().trim().to_string();
         let custom_title = (!text.is_empty()).then_some(text);
         match target {
-            RenameTarget::WorkspaceSurface(key) => {
-                if let Some(title) = custom_title {
-                    self.workspace_surface_titles.insert(key, title);
-                } else {
-                    self.workspace_surface_titles.remove(&key);
-                }
-                self.save_state(cx);
-                cx.notify();
-            }
             RenameTarget::Session(ix) => {
                 let mut history_identity = None;
                 let mut pending_ui_id = None;

@@ -10,19 +10,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if tab.releases_plugin_key() {
-            smelt_webview::release_focus(window);
-        }
         if tab != WorkspaceRoute::Agents {
             self.abandon_new_conversation_create(cx);
         } else if self.agent_surface.conversation_draft_id.is_some() {
             // 侧栏「智能体」回根页。草稿还没提交，离开编辑器就等于取消。
             self.cancel_conversation_draft(cx);
         }
-        self.nav.set_active(tab.clone());
-        if tab.sidebar_opens_root() {
-            self.pop_active_tab_to_root();
-        }
+        self.nav.set_active(tab);
+        self.pop_active_tab_to_root();
         if !self.active_tab().is_session() {
             self.stage_cover = None;
         }

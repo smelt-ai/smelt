@@ -56,9 +56,7 @@ pub(super) fn handle_shutdown(conn: UnixStream, event_hub: &EventHubHandle) {
             return;
         }
     };
-    crate::plugin_runtime::stop();
     if let Err(error) = event_hub.flush_for_shutdown() {
-        crate::plugin_runtime::restart_after_failed_exec();
         let _ = writeln!(
             c,
             "{}",

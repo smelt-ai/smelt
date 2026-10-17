@@ -1,6 +1,6 @@
 use super::*;
 use smelt_event_bus::Delivery;
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, DeliveryClass, PluginId,
     SessionStateChanged, SubscriptionId, Topic,
 };
@@ -276,7 +276,7 @@ fn send_event_broadcasts_to_subscribers() {
     let state: SessionStateChanged =
         serde_json::from_value(event.envelope.payload.clone()).unwrap();
     assert_eq!(state.session_id, "t");
-    assert_eq!(state.phase, smelt_plugin_api::CoreSessionPhase::Idle);
+    assert_eq!(state.phase, smelt_event_protocol::CoreSessionPhase::Idle);
     assert_eq!(state.title, None);
     assert!(state.updated_at_unix_seconds > 0);
 }
@@ -337,7 +337,10 @@ fn broadcast_rejects_an_older_revision_after_a_newer_one() {
     let event = next_session_event(&events);
     let state: SessionStateChanged =
         serde_json::from_value(event.envelope.payload.clone()).unwrap();
-    assert_eq!(state.phase, smelt_plugin_api::CoreSessionPhase::Succeeded);
+    assert_eq!(
+        state.phase,
+        smelt_event_protocol::CoreSessionPhase::Succeeded
+    );
     assert!(
         matches!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
         "旧 revision 不应再广播"

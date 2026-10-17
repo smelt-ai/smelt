@@ -151,7 +151,6 @@ mod tests {
                 None,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
                 None,
-                None,
             )
         });
         {

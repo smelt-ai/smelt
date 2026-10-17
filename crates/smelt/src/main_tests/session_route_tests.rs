@@ -1,6 +1,6 @@
 use super::{
     AcpSaved, GitTab, MIN_TOOL_PANEL_WIDTH, PaneState, SessionRouteArchive, SessionState,
-    SessionUiState, StageCover, WorkspaceNav, WorkspaceRoute, WsState, agents::agent_engine_kinds,
+    SessionUiState, StageCover, WorkspaceRoute, WsState, agents::agent_engine_kinds,
     normalize_saved_sessions, resync_session_with_project_ui, settings::ConversationAgentKind,
     swap_session_ui_state, tool_panel,
 };
@@ -347,26 +347,6 @@ fn product_and_session_routes_are_independent_top_level_routes() {
 }
 
 #[test]
-fn legacy_plugin_surface_field_becomes_a_first_class_tab() {
-    let state: WsState = serde_json::from_value(serde_json::json!({
-        "route": "agents",
-        "active_workspace_surface": "com.example/board"
-    }))
-    .unwrap();
-    let nav = WorkspaceNav::from_persisted(state.route, state.active_workspace_surface);
-    assert_eq!(
-        nav.active(),
-        &WorkspaceRoute::Plugin {
-            key: "com.example/board".into()
-        }
-    );
-    assert_eq!(
-        nav.persist(),
-        (WorkspaceRoute::Session, Some("com.example/board".into()))
-    );
-}
-
-#[test]
 fn agent_creation_engines_come_from_the_provider_registry() {
     let actual = agent_engine_kinds();
 
@@ -394,7 +374,6 @@ fn agent_conversation_binding_round_trips_with_the_conversation() {
         sid: Some("acp-agent-1".into()),
         refresh_launch_from_settings: true,
         conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-        agent_session: None,
         config_values: Vec::new(),
         pending_prompt: None,
         pending_delivery_id: None,

@@ -40,7 +40,6 @@ pub mod dsh_auto_models;
 pub mod fd_limit;
 pub mod font_config;
 pub mod fs;
-pub mod isolated_workspace;
 pub mod login_env;
 #[cfg(unix)]
 pub mod managed_runtime;
@@ -55,7 +54,6 @@ pub mod pi_model_settings;
 pub mod pi_plugin_catalog;
 pub mod pi_quota;
 pub mod pi_rpc;
-pub mod plugin_enablement;
 pub mod process_wait;
 pub mod project_catalog;
 pub mod provider_api;

@@ -174,7 +174,6 @@ mod restore_order_tests {
                 sid: Some(format!("sid-{name}")),
                 refresh_launch_from_settings: false,
                 conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-                agent_session: None,
                 config_values: Vec::new(),
                 pending_prompt: None,
                 pending_delivery_id: None,

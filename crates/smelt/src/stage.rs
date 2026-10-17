@@ -8,8 +8,8 @@
 //!
 //! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
-use gpui::prelude::FluentBuilder;
 use gpui::StatefulInteractiveElement;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
@@ -60,7 +60,7 @@ pub(crate) fn stage_has_page_header(
     match route {
         WorkspaceRoute::Agents => !agent_conversation_open,
         WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => true,
-        WorkspaceRoute::Session | WorkspaceRoute::Plugin { .. } => false,
+        WorkspaceRoute::Session => false,
     }
 }
 
@@ -98,7 +98,6 @@ pub(crate) fn chrome_title_for_stage(
     route: &WorkspaceRoute,
     agent_conversation: Option<ChromeSessionTitle>,
     project_session: Option<ChromeSessionTitle>,
-    plugin_title: Option<String>,
     tool_panel_fills_stage: bool,
 ) -> ChromeTitle {
     // 右栏铺满舞台时，页签就是标题。会话胶囊会压在那条页签上。
@@ -109,14 +108,6 @@ pub(crate) fn chrome_title_for_stage(
         WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
         WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
         WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => ChromeTitle::Hidden,
-        WorkspaceRoute::Plugin { .. } => match plugin_title {
-            Some(title) if !title.trim().is_empty() => ChromeTitle::Visible {
-                title,
-                model: None,
-                conversation: None,
-            },
-            _ => ChromeTitle::Hidden,
-        },
     }
 }
 
@@ -439,15 +430,10 @@ impl Workspace {
                 conversation,
             })
         });
-        let plugin_title = match self.active_tab() {
-            WorkspaceRoute::Plugin { key } => Some(self.workspace_surface_display_title(key)),
-            _ => None,
-        };
         chrome_title_for_stage(
             self.active_tab(),
             agent_conversation,
             project_session,
-            plugin_title,
             self.tool_panel_promoted(),
         )
     }
@@ -635,8 +621,8 @@ impl Workspace {
                         }),
                     )
                     .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
-                        let _ = panel_toggle
-                            .update(cx, |this, cx| this.toggle_tool_panel(window, cx));
+                        let _ =
+                            panel_toggle.update(cx, |this, cx| this.toggle_tool_panel(window, cx));
                     }),
             )
     }
@@ -670,7 +656,7 @@ mod tests {
     #[test]
     fn leaving_a_session_for_the_agent_catalog_clears_the_chrome_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None, false),
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), false),
             ChromeTitle::Hidden,
         );
     }
@@ -678,13 +664,7 @@ mod tests {
     #[test]
     fn automations_do_not_keep_the_previous_session() {
         assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Automations,
-                None,
-                Some(grok()),
-                None,
-                false
-            ),
+            chrome_title_for_stage(&WorkspaceRoute::Automations, None, Some(grok()), false),
             ChromeTitle::Hidden,
         );
     }
@@ -696,7 +676,6 @@ mod tests {
                 &WorkspaceRoute::Agents,
                 Some(agent_chat()),
                 Some(grok()),
-                None,
                 false,
             ),
             ChromeTitle::Visible {
@@ -710,7 +689,7 @@ mod tests {
     #[test]
     fn project_stage_still_shows_the_session_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None, false),
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), false),
             ChromeTitle::Visible {
                 title: grok().title,
                 model: None,
@@ -718,45 +697,7 @@ mod tests {
             },
         );
         assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Session,
-                Some(agent_chat()),
-                None,
-                None,
-                false
-            ),
-            ChromeTitle::Hidden,
-        );
-    }
-
-    #[test]
-    fn plugin_surface_does_not_fall_back_to_the_previous_session() {
-        assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Plugin {
-                    key: "com.example/board".into(),
-                },
-                None,
-                Some(grok()),
-                Some("看板".into()),
-                false,
-            ),
-            ChromeTitle::Visible {
-                title: "看板".into(),
-                model: None,
-                conversation: None,
-            },
-        );
-        assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Plugin {
-                    key: "com.example/board".into(),
-                },
-                None,
-                Some(grok()),
-                None,
-                false,
-            ),
+            chrome_title_for_stage(&WorkspaceRoute::Session, Some(agent_chat()), None, false),
             ChromeTitle::Hidden,
         );
     }
@@ -772,7 +713,6 @@ mod tests {
                     model: None,
                     conversation: None,
                 }),
-                None,
                 false,
             ),
             ChromeTitle::Hidden,
@@ -782,11 +722,11 @@ mod tests {
     #[test]
     fn promoted_tool_panel_hides_the_session_capsule() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None, true),
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), true),
             ChromeTitle::Hidden,
         );
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None, true),
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), true),
             ChromeTitle::Hidden,
         );
     }
@@ -829,12 +769,5 @@ mod tests {
             false
         ));
         assert!(stage_has_page_header(&WorkspaceRoute::Session, false, true));
-        assert!(!stage_has_page_header(
-            &WorkspaceRoute::Plugin {
-                key: "files".into()
-            },
-            false,
-            false
-        ));
     }
 }

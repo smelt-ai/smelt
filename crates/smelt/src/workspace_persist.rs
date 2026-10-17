@@ -42,12 +42,6 @@ pub(crate) struct WsState {
     pub(crate) legacy_agent_runs: Vec<LegacyAgentRunState>,
     #[serde(default, rename = "agent_runtime_visible", skip_serializing)]
     pub(crate) _legacy_agent_runtime_visible: bool,
-    /// 当前打开的插件工作台；None 表示舞台仍显示当前会话。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) active_workspace_surface: Option<String>,
-    /// 用户给工作台改过的名字。
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub(crate) workspace_surface_titles: std::collections::HashMap<String, String>,
     /// 会话侧栏拖出的宽度（px）；None = 用默认值。
     #[serde(default)]
     pub(crate) sidebar_w: Option<f32>,
@@ -90,6 +84,10 @@ pub(crate) struct WsState {
     /// 侧栏是否隐藏无会话项目；旧存档默认显示全部。
     #[serde(default)]
     pub(crate) sidebar_hide_empty_projects: bool,
+    /// component Dock 的布局树。开合和宽度仍以 `sidebar_*` 和会话里的工具面板字段为准，
+    /// 这里记面板被拖到了哪一侧。旧存档没有这棵树，启动时按三栏摆。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shell_dock: Option<gpui_component::dock::DockAreaState>,
     // --- 以下为旧存档兼容字段（读到就迁移，不再写出）---
     /// 旧格式：单棵分屏树。
     #[serde(default)]
@@ -569,7 +567,6 @@ fn snapshot_acp_view(
         sid: Some(view.session_id().to_string()),
         refresh_launch_from_settings: view.refresh_launch_from_settings(),
         conversation_binding: view.conversation_binding_for_save(),
-        agent_session: view.agent_session_for_save(),
         config_values: view.config_values_for_save(),
         pending_prompt: view.pending_prompt_for_save(),
         pending_delivery_id: view.pending_delivery_id_for_save(),
@@ -743,18 +740,11 @@ impl Workspace {
                 .filter(|id| !id.is_empty())
                 .or_else(|| self.saved_active_session_id.clone())
                 .filter(|id| !id.is_empty()),
-            route: {
-                let (route, _) = self.nav.persist();
-                route
-            },
+            route: self.nav.persist(),
             selected_agent_id: self.agent_surface.selected_id.clone(),
-            active_workspace_surface: {
-                let (_, surface) = self.nav.persist();
-                surface.filter(|key| crate::plugin_ui::workspace_surface_by_key(key).is_some())
-            },
-            workspace_surface_titles: self.workspace_surface_titles.clone(),
             sidebar_w: Some(self.sidebar_w),
             sidebar_open: Some(self.sidebar_open),
+            shell_dock: Some(self.shell_dock.read(cx).dump(cx)),
             collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
             collapsed_agents: self.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,

@@ -26,7 +26,6 @@ mod handoff_v2_tests;
 mod history_rename_tests;
 mod input_integration_tests;
 mod input_payload_tests;
-mod plugin_handoff_tests;
 mod remote_catalog_recovery_tests;
 mod remote_reattach_tests;
 mod resize_bounds_tests;
@@ -85,7 +84,6 @@ fn make_acp_session_value(
         conversation_binding: Mutex::new(Some(
             smelt_core::conversation::ConversationBinding::Direct,
         )),
-        agent_session: Mutex::new(None),
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(None),
         durable_history_session_id: Mutex::new(None),
@@ -145,17 +143,17 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
 }
 
 /// core 投影的四个只读能力。测试专用，且不碰任何 daemon 私有状态——只是把
-/// `smelt_plugin_api` 的公开常量拼成集合，所以放在测试侧而不是 `event_hub`。
-fn core_read_capabilities() -> std::collections::BTreeSet<smelt_plugin_api::Capability> {
+/// `smelt_event_protocol` 的公开常量拼成集合，所以放在测试侧而不是 `event_hub`。
+fn core_read_capabilities() -> std::collections::BTreeSet<smelt_event_protocol::Capability> {
     [
-        smelt_plugin_api::CORE_CAPABILITY_SESSION_READ,
-        smelt_plugin_api::CORE_CAPABILITY_REMOTE_SESSIONS_READ,
-        smelt_plugin_api::CORE_CAPABILITY_WORKSPACE_READ,
-        smelt_plugin_api::CORE_CAPABILITY_AUTOMATION_READ,
+        smelt_event_protocol::CORE_CAPABILITY_SESSION_READ,
+        smelt_event_protocol::CORE_CAPABILITY_REMOTE_SESSIONS_READ,
+        smelt_event_protocol::CORE_CAPABILITY_WORKSPACE_READ,
+        smelt_event_protocol::CORE_CAPABILITY_AUTOMATION_READ,
     ]
     .into_iter()
     .map(|capability| {
-        smelt_plugin_api::Capability::new(capability).expect("core capability is valid")
+        smelt_event_protocol::Capability::new(capability).expect("core capability is valid")
     })
     .collect()
 }

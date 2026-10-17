@@ -1,6 +1,6 @@
 use super::*;
 use smelt_event_bus::Delivery;
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     CORE_TOPIC_WORKSPACE_MENU_CHANGED, DeliveryClass, PluginId, SubscriptionId, Topic,
 };
 use std::collections::BTreeSet;

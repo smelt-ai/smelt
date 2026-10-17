@@ -5,7 +5,7 @@ use super::auth::{
     authenticate_event_connection_with_verifier, self_audit_token,
 };
 use super::*;
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_CAPABILITY_AUTOMATION_READ,
     CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
     CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ,
@@ -124,7 +124,7 @@ fn request(
         },
         subscription: SubscriptionDeclaration {
             id: SubscriptionId::new(id).unwrap(),
-            topics: vec![smelt_plugin_api::Topic::new(topic).unwrap()],
+            topics: vec![smelt_event_protocol::Topic::new(topic).unwrap()],
             delivery,
         },
         cursor,
@@ -182,7 +182,9 @@ fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
     client.shutdown(Shutdown::Both).unwrap();
     worker.join().unwrap();
     let topics =
-        BTreeSet::from([smelt_plugin_api::Topic::new(CORE_TOPIC_SESSION_STATE_CHANGED).unwrap()]);
+        BTreeSet::from([
+            smelt_event_protocol::Topic::new(CORE_TOPIC_SESSION_STATE_CHANGED).unwrap(),
+        ]);
     let replacement = event_hub
         .subscribe(
             PluginId::new("test.protocol").unwrap(),
@@ -1225,7 +1227,7 @@ fn invalid_ack_closes_socket_and_reclaims_reader_worker() {
         ack: Ack {
             subscription_id: SubscriptionId::new("wrong-subscription").unwrap(),
             sequence: 1,
-            event_id: smelt_plugin_api::EventId::new("event-1").unwrap(),
+            event_id: smelt_event_protocol::EventId::new("event-1").unwrap(),
         },
     };
     writeln!(client, "{}", serde_json::to_string(&invalid).unwrap()).unwrap();
@@ -1238,102 +1240,4 @@ fn invalid_ack_closes_socket_and_reclaims_reader_worker() {
     worker
         .join()
         .expect("subscription and reader workers must exit");
-}
-
-#[test]
-fn plugin_invoke_timeout_caps_at_thirty_seconds() {
-    assert_eq!(
-        plugin_invoke_timeout(10_000),
-        std::time::Duration::from_secs(10)
-    );
-    assert_eq!(
-        plugin_invoke_timeout(300_000),
-        std::time::Duration::from_millis(MAX_PLUGIN_INVOKE_MS)
-    );
-}
-
-#[test]
-fn plugin_ui_operations_require_authenticated_desktop() {
-    let remote_gateway = first_party_event_client(FirstPartyClientKind::RemoteGateway);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_contributions(server, Ok(remote_gateway.clone()));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_invoke(server, &serde_json::json!({}), Ok(remote_gateway));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_contributions(server, Err("missing auth".to_string()));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["error"], "missing auth");
-
-    let desktop = first_party_event_client(FirstPartyClientKind::Desktop);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_contributions(server, Ok(desktop));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], true);
-}
-
-#[test]
-fn plugin_set_enabled_requires_authenticated_desktop() {
-    let remote_gateway = first_party_event_client(FirstPartyClientKind::RemoteGateway);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_set_enabled(
-        server,
-        &serde_json::json!({
-            "plugin_id": "com.example.plugin",
-            "enabled": false
-        }),
-        Ok(remote_gateway),
-    );
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let desktop = first_party_event_client(FirstPartyClientKind::Desktop);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_set_enabled(
-        server,
-        &serde_json::json!({
-            "plugin_id": "com.example.plugin",
-            "enabled": false
-        }),
-        Ok(desktop),
-    );
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], true);
-}
-
-#[test]
-fn plugin_reload_requires_authenticated_desktop() {
-    let remote_gateway = first_party_event_client(FirstPartyClientKind::RemoteGateway);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_reload(server, Ok(remote_gateway));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let desktop = first_party_event_client(FirstPartyClientKind::Desktop);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_reload(server, Ok(desktop));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], true);
 }

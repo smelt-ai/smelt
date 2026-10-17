@@ -16,8 +16,7 @@ test-support = []
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
 smelt-store = { path = "../smelt-store" }
-smelt-plugin-api = { path = "../smelt-plugin-api" }
-smelt-process-wait = { path = "../smelt-process-wait" }
+smelt-event-protocol = { path = "../smelt-event-protocol" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

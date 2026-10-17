@@ -51,8 +51,6 @@ pub struct WorkspaceSnapshot {
     pub active_session_id: Option<String>,
     pub route_json: Option<Vec<u8>>,
     pub selected_agent_id: Option<String>,
-    pub active_workspace_surface: Option<String>,
-    pub workspace_surface_titles_json: Option<Vec<u8>>,
     pub sidebar_w: Option<f64>,
     pub sidebar_open: Option<bool>,
     pub sidebar_grouping: Option<String>,
@@ -116,7 +114,6 @@ pub struct WorkspaceAcpRecord {
     pub automation_id: Option<String>,
     pub config_values_json: Option<Vec<u8>>,
     pub conversation_binding_json: Option<Vec<u8>>,
-    pub agent_session_json: Option<Vec<u8>>,
     pub pending_agent_preset_json: Option<Vec<u8>>,
     pub session_title_json: Option<Vec<u8>>,
 }

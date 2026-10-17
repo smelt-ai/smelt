@@ -16,8 +16,8 @@ pub const LAUNCH_NAME: &str = "smeltd";
 pub const PENDING_NAME: &str = "smeltd.pending";
 const IMAGE_PREFIX: &str = "smeltd-";
 
-/// 与 `smelt_plugin_host::executable_fingerprint` 同一算法：SHA-256、128 KiB 一块。
-/// 文件名里的指纹必须和插件宿主算出来的一致，否则待升级映像会对不上。
+/// 守护映像的内容指纹：SHA-256、128 KiB 一块。映像文件名、进程启动时钉住的
+/// 指纹、GUI 判断守护是否过期，都用这同一个值。
 pub fn content_fingerprint(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();

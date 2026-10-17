@@ -188,11 +188,7 @@ pub(crate) struct AcpSession {
     /// 不能当成 Direct；第一次 attach 才采用客户端值。Task Runtime delivery
     /// 不读取它，只由 `acp_submit_input` 使用。
     pub(crate) conversation_binding: Mutex<Option<smelt_core::conversation::ConversationBinding>>,
-    /// 产品级智能体会话身份。ACP 仍只负责执行；该绑定供快照/UI/lifecycle registry
-    /// 选择插件 controller，缺失表示普通 ACP 会话或旧 handoff。
-    pub(crate) agent_session: Mutex<Option<smelt_plugin_api::AgentSessionBinding>>,
-    /// 串行化所有交互式输入路由。插件调用可能阻塞；没有这把门时两个客户端会
-    /// 同时把同一个首轮预设各带一次。
+    /// 串行化所有交互式输入。没有这把门时两个客户端会同时把同一个首轮预设各带一次。
     pub(crate) conversation_submit: Mutex<()>,
     /// 只装饰下一条成功路由的交互输入。Task/Peer delivery 不读取也不消费它。
     pub(crate) pending_agent_preset: Mutex<Option<String>>,
@@ -260,8 +256,6 @@ pub(crate) struct AcpOpenRequest {
     pub(crate) fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
     /// `None` 表示客户端未指定。已有会话仅在 daemon 自己仍未知时采用该值。
     pub(crate) conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
-    /// 与 conversation binding 正交的产品级智能体/controller 实例绑定。
-    pub(crate) agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
     /// 仅在创建新的 daemon 会话时采用；热 attach 不得用客户端旧存档覆盖已消费值。
     pub(crate) pending_agent_preset: Option<String>,
     /// 窗口只要活状态。会话宿主和守护之间的镜像必须带历史，否则分页没有正文。
@@ -283,10 +277,6 @@ pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenReq
         None | Some(serde_json::Value::Null) => None,
         Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
     };
-    let agent_session = match v.get("agent_session") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
-    };
     Some(AcpOpenRequest {
         id,
         cwd: v["cwd"].as_str().map(String::from),
@@ -304,7 +294,6 @@ pub(crate) fn parse_acp_open_request(v: &serde_json::Value) -> Option<AcpOpenReq
             .and_then(|value| serde_json::from_value(value.clone()).ok()),
         // 开会话不读 tail_limit。旧客户端仍会发；历史分页在另一处按页取。
         conversation_binding,
-        agent_session,
         pending_agent_preset: v["pending_agent_preset"]
             .as_str()
             .map(str::trim)
@@ -1254,12 +1243,11 @@ pub(crate) fn set_conversation_snapshot(
 ) {
     snapshot.conversation_state = Some(smelt_core::conversation::ConversationStateSnapshot {
         binding: sess.conversation_binding.lock().unwrap().clone(),
-        agent_session: sess.agent_session.lock().unwrap().clone(),
         pending_agent_preset: sess.pending_agent_preset.lock().unwrap().clone(),
     });
 }
 
-/// 只在 daemon 自己还不知道路由时采用客户端值。已确认的 Direct/Plugin 不能被
+/// 只在 daemon 自己还不知道路由时采用客户端值。已确认的绑定不能被
 /// 客户端存档覆盖，否则热 attach 会把 Task Runtime 刚写上的绑定打回旧快照。
 fn adopt_unknown_conversation_binding(
     sess: &AcpSession,
@@ -1269,112 +1257,6 @@ fn adopt_unknown_conversation_binding(
     if current.is_none() {
         *current = client;
     }
-}
-
-/// 与输入 binding 相同，只允许在 daemon 尚未知时采用调用方值；热 attach 不能
-/// 用旧客户端存档覆盖 Task Runtime 已登记的 controller 实例。
-fn adopt_unknown_agent_session(
-    sess: &AcpSession,
-    client: Option<smelt_plugin_api::AgentSessionBinding>,
-) {
-    let mut current = sess.agent_session.lock().unwrap();
-    if current.is_none() {
-        *current = client;
-    }
-}
-
-/// Direct / 自动化会话不声明插件路由，打开时不必读贡献快照。
-/// 产品级会话只读启停时发布的缓存，不能去抢 Bun 控制锁。
-pub(crate) fn conversation_needs_plugin_contributions(
-    binding: Option<&smelt_core::conversation::ConversationBinding>,
-    agent_session: Option<&smelt_plugin_api::AgentSessionBinding>,
-) -> bool {
-    agent_session.is_some()
-        || matches!(
-            binding,
-            Some(smelt_core::conversation::ConversationBinding::Plugin { .. })
-        )
-}
-
-fn contribution_sets_for_conversation(
-    binding: Option<&smelt_core::conversation::ConversationBinding>,
-    agent_session: Option<&smelt_plugin_api::AgentSessionBinding>,
-) -> Vec<smelt_plugin_api::PluginContributionSet> {
-    if conversation_needs_plugin_contributions(binding, agent_session) {
-        crate::plugin_runtime::contributions()
-    } else {
-        Vec::new()
-    }
-}
-
-pub(crate) fn validate_conversation_state(
-    binding: Option<&smelt_core::conversation::ConversationBinding>,
-    agent_session: Option<&smelt_plugin_api::AgentSessionBinding>,
-    contribution_sets: &[smelt_plugin_api::PluginContributionSet],
-) -> Result<(), String> {
-    use smelt_core::conversation::ConversationBinding;
-    use smelt_plugin_api::Contribution;
-
-    let Some(ConversationBinding::Plugin { plugin_id, route }) = binding else {
-        return if agent_session.is_none() {
-            Ok(())
-        } else {
-            Err("agent session has no plugin input route".to_string())
-        };
-    };
-    if let Some(agent_session) = agent_session
-        && (&agent_session.agent.plugin_id != plugin_id
-            || &agent_session.controller.plugin_id != plugin_id
-            || &agent_session.instance.plugin_id != plugin_id)
-    {
-        return Err("agent session and input route belong to different plugins".to_string());
-    }
-    // 会话历史在插件暂不可用/停用时仍应可打开。活动声明不存在时只保留经过
-    // 命名空间一致性校验的身份；真正产生副作用的 invocation 会再次调用本函数，
-    // 随后由路由查找明确拒绝 unavailable contribution。
-    let Some(set) = contribution_sets
-        .iter()
-        .find(|set| &set.plugin_id == plugin_id)
-    else {
-        return Ok(());
-    };
-    if !set.contributions.iter().any(|contribution| {
-        matches!(contribution, Contribution::InputRoute { id, .. } if id == &route.contribution_id)
-    }) {
-        return Err("conversation input route is not declared by the plugin".to_string());
-    }
-    let Some(agent_session) = agent_session else {
-        return Ok(());
-    };
-    let declared_controller =
-        set.contributions
-            .iter()
-            .find_map(|contribution| match contribution {
-                Contribution::Agent { id, controller, .. }
-                    if id == &agent_session.agent.contribution_id =>
-                {
-                    Some(controller)
-                }
-                _ => None,
-            });
-    if declared_controller != Some(&agent_session.controller.contribution_id) {
-        return Err("agent does not declare the bound session controller".to_string());
-    }
-    let declared_input_route =
-        set.contributions
-            .iter()
-            .find_map(|contribution| match contribution {
-                Contribution::SessionController { id, input_route }
-                    if id == &agent_session.controller.contribution_id =>
-                {
-                    Some(input_route)
-                }
-                _ => None,
-            });
-    if declared_input_route != Some(&route.contribution_id) {
-        return Err("session controller does not declare the bound input route".to_string());
-    }
-    Ok(())
 }
 
 fn session_uses_pi_admission(sess: &AcpSession) -> bool {
@@ -1976,7 +1858,6 @@ pub(crate) fn acp_relaunch(
             "fork_id": fork_id,
             "fork_cut": &fork_cut,
             "conversation_binding": sess.conversation_binding.lock().unwrap().clone(),
-            "agent_session": sess.agent_session.lock().unwrap().clone(),
             "host_agent_token": agent_token,
             "host_seed_snapshot": seed_snapshot,
         });
@@ -2106,7 +1987,6 @@ pub(crate) fn make_acp_session(
     id: &str,
     cwd: Option<String>,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
-    agent_session: Option<smelt_plugin_api::AgentSessionBinding>,
     pending_agent_preset: Option<String>,
 ) -> AcpSession {
     let instance = next_session_instance();
@@ -2161,7 +2041,6 @@ pub(crate) fn make_acp_session(
         restore_state: Mutex::new(AcpRestoreState::Fresh),
         ephemeral_env: Mutex::new(BTreeMap::new()),
         conversation_binding: Mutex::new(conversation_binding),
-        agent_session: Mutex::new(agent_session),
         conversation_submit: Mutex::new(()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
         durable_history_session_id: Mutex::new(None),
@@ -3104,192 +2983,64 @@ pub(crate) fn submit_acp_elicitation(
     Ok(())
 }
 
-/// 用户输入与 Task/Peer/Automation delivery 的分界。Direct 绑定进入 ACP；插件
-/// 绑定只调用 contribution；自动化 Run 拒绝额外 composer 输入。插件失败原样返回，
-/// 绝不补发本地 ACP。
-pub(crate) fn dispatch_conversation_input_with<F>(
+/// 用户输入与 Task/Peer/Automation delivery 的分界。Direct 绑定进入 ACP；
+/// 自动化 Run 拒绝额外 composer 输入。
+pub(crate) fn dispatch_conversation_input(
     sess: &AcpSession,
     mut input: smelt_core::conversation::ConversationInput,
     subscribers: &EventHubHandle,
-    invoke_plugin: F,
-) -> Result<
-    smelt_core::conversation::ConversationInputRoute,
-    smelt_core::conversation::ConversationSubmitError,
->
-where
-    F: FnOnce(
-        &smelt_plugin_api::PluginId,
-        &smelt_plugin_api::PluginInputRouteBinding,
-        &smelt_core::conversation::ConversationInput,
-        Option<&str>,
-        Option<&smelt_plugin_api::AgentSessionBinding>,
-    ) -> Result<(), smelt_core::conversation::ConversationSubmitError>,
-{
-    use smelt_core::conversation::{ConversationBinding, ConversationInputRoute};
+) -> Result<(), smelt_core::conversation::ConversationSubmitError> {
+    use smelt_core::conversation::ConversationBinding;
 
     let _submit = sess.conversation_submit.lock().unwrap();
     let pending_preset = sess.pending_agent_preset.lock().unwrap().clone();
     let binding = sess.conversation_binding.lock().unwrap().clone();
-    let agent_session = sess.agent_session.lock().unwrap().clone();
-    if agent_session.is_some() && !matches!(binding, Some(ConversationBinding::Plugin { .. })) {
-        return Err(smelt_core::conversation::ConversationSubmitError::rejected(
-            "agent session has no plugin input route",
-        ));
-    }
-    if let (Some(ConversationBinding::Plugin { plugin_id, .. }), Some(agent_session)) =
-        (&binding, &agent_session)
-        && (&agent_session.agent.plugin_id != plugin_id
-            || &agent_session.controller.plugin_id != plugin_id
-            || &agent_session.instance.plugin_id != plugin_id)
-    {
-        return Err(smelt_core::conversation::ConversationSubmitError::rejected(
-            "agent session and input route belong to different plugins",
-        ));
-    }
-    let binding = binding.unwrap_or_default();
-    let route = match binding {
-        ConversationBinding::Direct => {
-            input.text = smelt_core::conversation::merge_agent_preset(
-                pending_preset.as_deref(),
-                &input.text,
-            );
-            if !sess.reduced.lock().unwrap().supports_image && !input.images.is_empty() {
-                let note = format!(
-                    "[该任务附带 {} 张图片，但当前智能体不支持图片输入，图片未转发。]",
-                    input.images.len()
-                );
-                input.text = if input.text.trim().is_empty() {
-                    note
-                } else {
-                    format!("{}\n\n{note}", input.text)
-                };
-                input.images.clear();
-            }
-            apply_acp_user_action(
-                sess,
-                smelt_core::acp_session::AcpUserAction::Prompt {
-                    text: input.text,
-                    images: input.images,
-                    delivery_id: None,
-                },
-                subscribers,
-            )
-            .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
-            ConversationInputRoute::Direct
-        }
+    match binding.unwrap_or_default() {
+        ConversationBinding::Direct => {}
         ConversationBinding::Automation { .. } => {
             return Err(smelt_core::conversation::ConversationSubmitError::rejected(
                 "automation Run input is daemon-owned",
             ));
         }
-        ConversationBinding::Plugin { plugin_id, route } => {
-            invoke_plugin(
-                &plugin_id,
-                &route,
-                &input,
-                pending_preset.as_deref(),
-                agent_session.as_ref(),
-            )?;
-            ConversationInputRoute::Plugin
-        }
-    };
+    }
+    input.text =
+        smelt_core::conversation::merge_agent_preset(pending_preset.as_deref(), &input.text);
+    if !sess.reduced.lock().unwrap().supports_image && !input.images.is_empty() {
+        let note = format!(
+            "[该任务附带 {} 张图片，但当前智能体不支持图片输入，图片未转发。]",
+            input.images.len()
+        );
+        input.text = if input.text.trim().is_empty() {
+            note
+        } else {
+            format!("{}\n\n{note}", input.text)
+        };
+        input.images.clear();
+    }
+    apply_acp_user_action(
+        sess,
+        smelt_core::acp_session::AcpUserAction::Prompt {
+            text: input.text,
+            images: input.images,
+            delivery_id: None,
+        },
+        subscribers,
+    )
+    .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
     if pending_preset.is_some() {
         *sess.pending_agent_preset.lock().unwrap() = None;
-        // 插件路由不会产生 ACP 事件；显式发布消费状态，确保所有客户端同步，
-        // 并让 workspace 在进程退出前清掉已使用的预设。
+        // 显式发布消费状态，确保所有客户端同步，并让 workspace 在进程退出前清掉
+        // 已使用的预设。
         push_acp_snapshot_since(sess, true, None);
     }
-    Ok(route)
-}
-
-fn invoke_plugin_input_route(
-    plugin_id: &smelt_plugin_api::PluginId,
-    route: &smelt_plugin_api::PluginInputRouteBinding,
-    input: &smelt_core::conversation::ConversationInput,
-    agent_preset: Option<&str>,
-    agent_session: Option<&smelt_plugin_api::AgentSessionBinding>,
-) -> Result<(), smelt_core::conversation::ConversationSubmitError> {
-    use smelt_core::conversation::ConversationSubmitError;
-    use smelt_plugin_api::{
-        ConversationInputImage, InputRouteInvocationPayload, InvocationId, InvocationOperation,
-        InvocationRequest, InvocationResponse,
-    };
-
-    let binding = smelt_core::conversation::ConversationBinding::Plugin {
-        plugin_id: plugin_id.clone(),
-        route: route.clone(),
-    };
-    let contribution_sets = crate::plugin_runtime::contributions();
-    validate_conversation_state(Some(&binding), agent_session, &contribution_sets)
-        .map_err(ConversationSubmitError::rejected)?;
-
-    let contribution = contribution_sets
-        .into_iter()
-        .find(|set| &set.plugin_id == plugin_id)
-        .and_then(|set| {
-            set.contributions.into_iter().find(|contribution| {
-                contribution.id() == &route.contribution_id
-                    && matches!(
-                        contribution,
-                        smelt_plugin_api::Contribution::InputRoute { .. }
-                    )
-            })
-        })
-        .ok_or_else(|| {
-            ConversationSubmitError::rejected("conversation input route is unavailable")
-        })?;
-    let smelt_plugin_api::Contribution::InputRoute { operation, .. } = contribution else {
-        unreachable!("filtered above")
-    };
-    let invocation_id = InvocationId::new(format!("input-{}", uuid::Uuid::new_v4().simple()))
-        .map_err(|error| ConversationSubmitError::rejected(error.to_string()))?;
-    let request = InvocationRequest {
-        invocation_id,
-        contribution_id: route.contribution_id.clone(),
-        operation: InvocationOperation::new(operation.as_str())
-            .map_err(|error| ConversationSubmitError::rejected(error.to_string()))?,
-        payload: serde_json::to_value(InputRouteInvocationPayload {
-            submission_id: input.submission_id.clone(),
-            context: route.context.clone(),
-            agent_preset: agent_preset.map(String::from),
-            text: input.text.clone(),
-            images: input
-                .images
-                .iter()
-                .map(|image| ConversationInputImage {
-                    mime: image.mime.clone(),
-                    data_base64: image.data_b64.clone(),
-                })
-                .collect(),
-        })
-        .map_err(|error| ConversationSubmitError::rejected(error.to_string()))?,
-        deadline_ms: crate::event_hub::now_ms().saturating_add(30_000),
-    };
-    match crate::plugin_runtime::invoke(plugin_id.clone(), request, Duration::from_secs(30))
-        .map_err(ConversationSubmitError::unknown)?
-    {
-        InvocationResponse::Success { .. } => Ok(()),
-        InvocationResponse::Error { code, message, .. } => Err(match code {
-            smelt_plugin_api::InvocationErrorCode::InvalidRequest
-            | smelt_plugin_api::InvocationErrorCode::Rejected
-            | smelt_plugin_api::InvocationErrorCode::Conflict => {
-                ConversationSubmitError::rejected(message)
-            }
-            smelt_plugin_api::InvocationErrorCode::Internal => {
-                ConversationSubmitError::unknown(message)
-            }
-        }),
-    }
+    Ok(())
 }
 
 pub(crate) fn conversation_submit_response(
-    result: Result<
-        smelt_core::conversation::ConversationInputRoute,
-        smelt_core::conversation::ConversationSubmitError,
-    >,
+    result: Result<(), smelt_core::conversation::ConversationSubmitError>,
 ) -> serde_json::Value {
     match result {
-        Ok(route) => serde_json::json!({"ok": true, "route": route}),
+        Ok(()) => serde_json::json!({"ok": true}),
         Err(error) => serde_json::json!({"ok": false, "error": error}),
     }
 }
@@ -3371,12 +3122,7 @@ pub(crate) fn handle_acp_submit_input(
         acp_sessions
             .with_current(id, &slot, |session| {
                 apply_submit_config_values(session, &config_values, subscribers)?;
-                dispatch_conversation_input_with(
-                    session,
-                    input,
-                    subscribers,
-                    invoke_plugin_input_route,
-                )
+                dispatch_conversation_input(session, input, subscribers)
             })
             .ok_or_else(|| {
                 smelt_core::conversation::ConversationSubmitError::rejected(
@@ -3440,15 +3186,6 @@ pub(crate) fn handle_acp_action(
     let managed_binding = acp_sessions
         .with_current(id, &slot, |session| {
             match &*session.conversation_binding.lock().unwrap() {
-                Some(smelt_core::conversation::ConversationBinding::Plugin { .. })
-                    if matches!(
-                        &action,
-                        smelt_core::acp_session::AcpUserAction::Prompt { .. }
-                            | smelt_core::acp_session::AcpUserAction::FollowUp { .. }
-                    ) =>
-                {
-                    Some("interactive prompt must use acp_submit_input")
-                }
                 Some(smelt_core::conversation::ConversationBinding::Automation { .. })
                     if matches!(
                         &action,
@@ -3742,33 +3479,17 @@ pub(crate) fn ensure_acp_session(
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
 ) -> Result<Arc<AcpSlot<AcpSession>>, String> {
-    if let Err(error) = validate_conversation_state(
-        req.conversation_binding.as_ref(),
-        req.agent_session.as_ref(),
-        &contribution_sets_for_conversation(
-            req.conversation_binding.as_ref(),
-            req.agent_session.as_ref(),
-        ),
-    ) {
-        eprintln!(
-            "[acp] 拒绝会话 {} 的无效 conversation state：{error}",
-            req.id
-        );
-        return Err(error);
-    }
     loop {
         let (slot, created) = acp_sessions.reserve_with(&req.id, || {
             make_acp_session(
                 &req.id,
                 req.cwd.clone(),
                 req.conversation_binding.clone(),
-                req.agent_session.clone(),
                 req.pending_agent_preset.clone(),
             )
         });
         if !created {
             adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
-            adopt_unknown_agent_session(&slot.value, req.agent_session.clone());
         }
         if let Some(error) =
             runtime_id_taken_by_other_kind(&req.id, sessions, acp_sessions, RemoteSessionKind::Acp)
@@ -4808,7 +4529,7 @@ mod snapshot_link_tests {
     fn burst_while_writer_is_blocked_coalesces_and_stays_connected() {
         let slot = Arc::new(AcpSlot {
             lifecycle: Mutex::new(()),
-            value: make_acp_session("acp-burst", None, None, None, None),
+            value: make_acp_session("acp-burst", None, None, None),
         });
         let (mut server, mut client) = UnixStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();

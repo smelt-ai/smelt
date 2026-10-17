@@ -1,5 +1,8 @@
 # Smelt 事件总线与插件事件架构
 
+> 2026-10 更新：Bun 插件宿主、插件 SDK 已删除，`smelt-plugin-api` 裁掉插件部分后改名
+> `smelt-event-protocol`。下文涉及插件进程、插件发布者的部分是当时的设计，现已不存在。
+
 ## 状态
 
 EventHub、稳定 wire DTO、`event_subscribe`、桌面端和 Remote Gateway 一等客户端已实现。
@@ -80,7 +83,7 @@ attention.created
 最佳依赖结构拆成两个新 crate，而不是把协议与运行时放在同一个包中：
 
 ```text
-smelt-plugin-api          # 稳定公共协议，低依赖
+smelt-event-protocol      # 稳定公共协议，低依赖
         ^
         |
 smelt-event-bus           # 通用事件运行时
@@ -88,12 +91,11 @@ smelt-event-bus           # 通用事件运行时
         |
 smeltd                    # 领域适配、插件管理、权限决策
 
-smelt-core --------------> smelt-plugin-api
-GUI / Mobile / MCP ------> smelt-plugin-api
-Plugin SDK --------------> smelt-plugin-api
+smelt-core --------------> smelt-event-protocol
+GUI / Mobile / MCP ------> smelt-event-protocol
 ```
 
-### `smelt-plugin-api`
+### `smelt-event-protocol`
 
 该 crate 是插件与 Smelt 共享的稳定协议层，只依赖 `serde` 等基础库，不能依赖 Tokio、
 GPUI、SQLite 或 `smelt-core`。
@@ -641,7 +643,7 @@ provider hook 归一化仍保留。`AgentEvent` 是输入协议；smeltd reducer
 
 本设计不采用长期双轨迁移。实现分支内完成以下协调切换后再合入：
 
-- 新增 `smelt-plugin-api` 与 `smelt-event-bus`。
+- 新增 `smelt-event-protocol` 与 `smelt-event-bus`。
 - EventHub、SQLite EventStore、outbox、cursor 和 dead-letter 完整可用。
 - smeltd 所有领域提交出口接入 EventHub。
 - `DaemonStateBus` 删除。
@@ -677,7 +679,7 @@ provider hook 归一化仍保留。`AgentEvent` 是输入协议；smeltd reducer
 
 Smelt 使用两个新 crate 建立插件化基础：
 
-- `smelt-plugin-api` 定义稳定、低依赖的插件公共协议。
+- `smelt-event-protocol` 定义稳定、低依赖的插件公共协议。
 - `smelt-event-bus` 实现与领域无关的可靠事件运行时。
 
 smeltd 作为唯一组合根，负责领域提交、事件发布、插件隔离和 capability 决策。领域事实通过

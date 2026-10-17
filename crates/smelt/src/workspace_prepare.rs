@@ -153,12 +153,13 @@ impl Workspace {
                 use gpui_component::input::{InputEvent, InputState};
                 let state =
                     cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
-                self._file_filter_sub = Some(cx.subscribe(&state, |this, _, ev: &InputEvent, cx| {
-                    if matches!(ev, InputEvent::Change) {
-                        this.schedule_visible_refresh(cx);
-                        cx.notify();
-                    }
-                }));
+                self._file_filter_sub =
+                    Some(cx.subscribe(&state, |this, _, ev: &InputEvent, cx| {
+                        if matches!(ev, InputEvent::Change) {
+                            this.schedule_visible_refresh(cx);
+                            cx.notify();
+                        }
+                    }));
                 self.file_filter = Some(state);
             }
             let query = self

@@ -15,9 +15,9 @@ use gpui::{
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use smelt_ui::IconAction as _;
 use gpui_component::popover::{Popover, PopoverState};
 use gpui_component::{Icon, IconName, IndexPath, Sizable as _, StyledExt as _};
+use smelt_ui::IconAction as _;
 
 use crate::settings::{
     AcpRuntimeState, AgentDefinition, LaunchEntry, active_launch_entries, icon_for_launch_command,

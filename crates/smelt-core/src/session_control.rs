@@ -1422,10 +1422,8 @@ pub fn submit_conversation_input(
     id: &str,
     input: &crate::conversation::ConversationInput,
     config_values: &[(String, String)],
-) -> Result<crate::conversation::ConversationInputRoute, crate::conversation::ConversationSubmitError>
-{
-    // 插件路由可能包含上传与一次远端 HTTP 请求，必须覆盖 daemon 侧 30s
-    // invocation deadline；超时后结果不明，调用方会恢复草稿但不会改路由重发。
+) -> Result<(), crate::conversation::ConversationSubmitError> {
+    // 超时后结果不明，调用方会恢复草稿并提示可能重复，但不会自动重发。
     let mut request = serde_json::json!({
         "op": DaemonOperation::AcpSubmitInput,
         "id": id,
@@ -1442,31 +1440,25 @@ pub fn submit_conversation_input(
 
 pub fn parse_conversation_submit_response(
     response: Value,
-) -> Result<crate::conversation::ConversationInputRoute, crate::conversation::ConversationSubmitError>
-{
+) -> Result<(), crate::conversation::ConversationSubmitError> {
     use crate::conversation::ConversationSubmitError;
 
-    if response.get("ok").and_then(Value::as_bool) == Some(false) {
-        let error = response.get("error").cloned().unwrap_or(Value::Null);
-        return Err(serde_json::from_value(error.clone()).unwrap_or_else(|_| {
-            ConversationSubmitError::unknown(
-                error
-                    .as_str()
-                    .unwrap_or("smeltd returned an invalid conversation submit error"),
-            )
-        }));
+    match response.get("ok").and_then(Value::as_bool) {
+        Some(true) => Ok(()),
+        Some(false) => {
+            let error = response.get("error").cloned().unwrap_or(Value::Null);
+            Err(serde_json::from_value(error.clone()).unwrap_or_else(|_| {
+                ConversationSubmitError::unknown(
+                    error
+                        .as_str()
+                        .unwrap_or("smeltd returned an invalid conversation submit error"),
+                )
+            }))
+        }
+        None => Err(ConversationSubmitError::unknown(
+            "smeltd returned no conversation submit result",
+        )),
     }
-    response
-        .get("route")
-        .cloned()
-        .ok_or_else(|| ConversationSubmitError::unknown("smeltd returned no input route"))
-        .and_then(|value| {
-            serde_json::from_value(value).map_err(|error| {
-                ConversationSubmitError::unknown(format!(
-                    "smeltd returned an invalid input route: {error}"
-                ))
-            })
-        })
 }
 
 /// 新建一个终端 PTY 会话。走 smeltd 的 `open` op：会话在守护里落地（进程已

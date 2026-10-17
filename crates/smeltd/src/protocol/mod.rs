@@ -1,7 +1,7 @@
 //! Unix socket 协议分发：`handle_conn` 以及 open/watch/subscribe。
 //!
 //! 从 `main.rs` 整块搬出；ACP 相关 op 转给 `acp_host`。
-//! 身份校验、终端流、远程/iroh、订阅与插件 UI 分文件，这里只做首帧分流。
+//! 身份校验、终端流、远程/iroh、订阅分文件，这里只做首帧分流。
 
 use super::*;
 use smelt_core::daemon_protocol::{DaemonOperation, DaemonRequest};
@@ -86,26 +86,6 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         ),
         DaemonOperation::Watch => handle_watch(conn, reader, &v, sessions),
         DaemonOperation::EventSubscribe => handle_event_subscribe_op(conn, &v, &event_hub),
-        DaemonOperation::PluginContributions => {
-            let identity = authenticate_desktop_connection(&v, &conn);
-            handle_plugin_contributions(conn, identity);
-        }
-        DaemonOperation::PluginStatuses => {
-            let identity = authenticate_desktop_connection(&v, &conn);
-            handle_plugin_statuses(conn, identity);
-        }
-        DaemonOperation::PluginInvoke => {
-            let identity = authenticate_desktop_connection(&v, &conn);
-            handle_plugin_invoke(conn, &v, identity);
-        }
-        DaemonOperation::PluginSetEnabled => {
-            let identity = authenticate_desktop_connection(&v, &conn);
-            handle_plugin_set_enabled(conn, &v, identity);
-        }
-        DaemonOperation::PluginReload => {
-            let identity = authenticate_desktop_connection(&v, &conn);
-            handle_plugin_reload(conn, identity);
-        }
         DaemonOperation::AcpOpen => {
             handle_acp_open(conn, reader, &v, sessions, acp_sessions, event_hub)
         }

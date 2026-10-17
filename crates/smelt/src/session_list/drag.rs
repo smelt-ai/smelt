@@ -30,7 +30,6 @@ pub(super) struct SessionDrag {
     pub(super) acp: Option<ConversationAgentKind>,
     pub(super) terminal: Option<TerminalAgentKind>,
     pub(super) status: AgentStatus,
-    pub(super) plugin_agent: Option<crate::plugin_ui::PluginAgentPresentation>,
     pub(super) subtitle: Option<SharedString>,
     pub(super) status_label: Option<SharedString>,
     pub(super) grab: Point<Pixels>,
@@ -51,7 +50,6 @@ pub(super) struct ProjectDrag {
     pub(super) empty: bool,
     pub(super) branch: Option<SharedString>,
     pub(super) agg: AgentStatus,
-    pub(super) plugin_agent: Option<crate::plugin_ui::PluginAgentPresentation>,
     pub(super) session_count: usize,
     pub(super) grab: Point<Pixels>,
 }
@@ -109,14 +107,9 @@ fn session_drag_preview(drag: &SessionDrag) -> Div {
                 .justify_center()
                 .text_color(ui_theme::session_dot_color(drag.status))
                 .child(
-                    drag.plugin_agent
-                        .as_ref()
-                        .map(plugin_agent_icon)
-                        .unwrap_or_else(|| {
-                            drag.acp
-                                .map(acp_provider_icon)
-                                .unwrap_or_else(|| provider_icon(drag.terminal))
-                        })
+                    drag.acp
+                        .map(acp_provider_icon)
+                        .unwrap_or_else(|| provider_icon(drag.terminal))
                         .size(px(SESSION_AGENT_ICON_SIZE)),
                 ),
         )
@@ -200,16 +193,6 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                     .bg(ui_theme::session_dot_color(drag.agg)),
                             )
                         })
-                        .children(drag.plugin_agent.as_ref().map(|agent| {
-                            div()
-                                .flex_shrink_0()
-                                .size(px(15.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgb(ui_theme::text_muted()))
-                                .child(plugin_agent_icon(agent).size(px(14.)))
-                        }))
                         .children(drag.branch.clone().map(|branch| {
                             div()
                                 .min_w_0()

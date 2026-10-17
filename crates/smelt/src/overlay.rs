@@ -1,14 +1,9 @@
 //! Workspace-owned layers rendered in the main GPUI window.
-//!
-//! Plugin panels remain native AppKit child windows. Whenever a GPUI modal,
-//! popover, or drag preview must be visible, the host temporarily hides
-//! those WebViews instead of creating another GPUI window above them.
 
 use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
     Window, canvas, div,
 };
-use gpui_component::WindowExt;
 
 use super::*;
 
@@ -66,62 +61,6 @@ impl ModalLayer {
 }
 
 impl Workspace {
-    /// Mark a library ContextMenu as active. ContextMenu stores its open bit in
-    /// element-local state, so it cannot be observed through GlobalState.
-    pub(crate) fn begin_context_menu_suppression(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu_suppressed = true;
-        self.context_menu_generation = self.context_menu_generation.wrapping_add(1);
-        let generation = self.context_menu_generation;
-        cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                // ContextMenu does not emit a host-visible state transition. Keep the
-                // lease long enough for a user to choose an item; input events and
-                // Escape release it immediately, while this is only a lost-event guard.
-                .timer(std::time::Duration::from_secs(30))
-                .await;
-            let _ = this.update_in(cx, |workspace, _window, cx| {
-                if workspace.context_menu_generation == generation {
-                    workspace.context_menu_suppressed = false;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// A click outside or a handled Escape is enough to release the bounded
-    /// ContextMenu lease immediately. The timeout above is only a lost-event guard.
-    pub(crate) fn end_context_menu_suppression(&mut self, cx: &mut Context<Self>) {
-        if self.context_menu_suppressed {
-            self.context_menu_suppressed = false;
-            self.context_menu_generation = self.context_menu_generation.wrapping_add(1);
-            cx.notify();
-        }
-    }
-
-    /// Schedule one post-event pass after deferred popovers and context menus have
-    /// updated their element state. The boolean keeps high-frequency pointer events
-    /// from installing an unbounded callback list.
-    pub(crate) fn schedule_plugin_surface_sync(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.plugin_surface_sync_scheduled {
-            return;
-        }
-        self.plugin_surface_sync_scheduled = true;
-        cx.on_next_frame(window, |workspace, window, cx| {
-            workspace.plugin_surface_sync_scheduled = false;
-            workspace.sync_plugin_panels(window, cx);
-        });
-    }
-
     /// 当前最上层主窗口确认框。数字大的盖住数字小的。
     /// Worktree 列表是底，新建在其上，删除再在其上。
     pub(crate) fn main_modal_rank(&self) -> Option<u8> {
@@ -327,27 +266,6 @@ impl Workspace {
         if let Some(handle) = previous.and_then(|handle| handle.upgrade()) {
             handle.focus(window, cx);
         }
-    }
-
-    fn has_workspace_overlay(&self) -> bool {
-        self.palette.is_some()
-            || self.show_quit_confirm
-            || self.rename_target.is_some()
-            || self.delete_worktree_target.is_some()
-            || self.worktree_list.is_some()
-            || self.new_worktree.is_some()
-            || self.close_project_target.is_some()
-            || self.discard_hunk_target.is_some()
-            || self.discard_file_target.is_some()
-            || self.discard_all_target.is_some()
-            || self.delete_branch_target.is_some()
-            || self.delete_file_target.is_some()
-            || self.delete_history_target.is_some()
-            || self.agent_surface.pending_delete.is_some()
-            || self.agent_surface.pending_memory_delete.is_some()
-            || self.automation_surface.pending_delete.is_some()
-            || self.pending_file_switch.is_some()
-            || self.acp_image_preview.is_some()
     }
 
     /// Dismiss the topmost Workspace-owned surface on Escape. Returns whether the
@@ -657,30 +575,4 @@ pub(crate) fn debug_hud(window: &mut Window, cx: &mut App) -> Div {
         .right_0()
         .bottom_0()
         .child(gpui_fps::fps_monitor(window, cx))
-}
-
-/// Whether GPUI content currently needs plugin WebViews removed from the native
-/// child-window stack. The policy never examines a plugin identity.
-pub(crate) fn should_suppress_plugin_content(
-    workspace: &Workspace,
-    window: &mut Window,
-    cx: &mut App,
-) -> bool {
-    let workspace_overlay = workspace.has_workspace_overlay();
-    let root_overlay = window.has_active_sheet(cx) || window.has_active_dialog(cx);
-    let deferred_popup = cx.has_global::<gpui_component::GlobalState>()
-        && gpui_component::GlobalState::is_in_deferred_context(cx);
-    let stage_cover = workspace.stage_cover.is_some();
-    let drag = cx.has_active_drag();
-    let context_menu = workspace.context_menu_suppressed;
-
-    // WebViews are AppKit child windows and therefore outrank the parent's Metal
-    // surface. Hide them while any GPUI layer must paint or receive input above them.
-    workspace_overlay
-        || workspace.debug_hud
-        || root_overlay
-        || deferred_popup
-        || stage_cover
-        || drag
-        || context_menu
 }
