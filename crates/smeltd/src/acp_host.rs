@@ -3137,7 +3137,7 @@ pub(crate) fn handle_acp_submit_input(
         "acp submit id={id} 派发用时 {:?}",
         submit_started.elapsed()
     ));
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 /// Apply one protocol action without attaching a control client. Prompt here always means
@@ -3166,10 +3166,9 @@ pub(crate) fn handle_acp_action(
             if unknown.newer_peer {
                 eprintln!("[acp] 会话 {id} 收到本版不认识的动作：{message}");
             }
-            let _ = writeln!(
-                conn,
-                "{}",
-                serde_json::json!({ "ok": false, "error": message })
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut conn,
+                &serde_json::json!({ "ok": false, "error": message }),
             );
             return;
         }
@@ -3214,13 +3213,12 @@ pub(crate) fn handle_acp_action(
         })
         .flatten();
     if let Some(error) = managed_binding {
-        let _ = writeln!(
-            conn,
-            "{}",
-            serde_json::json!({
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut conn,
+            &serde_json::json!({
                 "ok": false,
                 "error": error
-            })
+            }),
         );
         return;
     }
@@ -3229,10 +3227,9 @@ pub(crate) fn handle_acp_action(
         && let Err(error) =
             crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
     {
-        let _ = writeln!(
-            conn,
-            "{}",
-            serde_json::json!({ "ok": false, "error": error })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut conn,
+            &serde_json::json!({ "ok": false, "error": error }),
         );
         return;
     }
@@ -3247,7 +3244,7 @@ pub(crate) fn handle_acp_action(
         Ok(()) => serde_json::json!({"ok": true}),
         Err(error) => serde_json::json!({"ok": false, "error": error}),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 pub(crate) fn handle_acp_open(
@@ -3438,7 +3435,10 @@ fn write_rejected_acp_snapshot(mut conn: UnixStream, reason: &str) {
     state.end_reason = reason.to_string();
     state.end_kind = smelt_core::acp_session::AcpEndKind::ProviderFailed;
     let snapshot = state.to_snapshot(true);
-    let _ = writeln!(conn, "{}", serde_json::json!({ "snapshot": snapshot }));
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut conn,
+        &serde_json::json!({ "snapshot": snapshot }),
+    );
 }
 
 /// 父镜像裁过前缀时，向还活着的宿主要回全文，供下一次 `to_snapshot` 当种子。
@@ -3632,7 +3632,7 @@ pub(crate) fn handle_acp_create(
         Ok(()) => serde_json::json!({"ok": true}),
         Err(error) => serde_json::json!({"ok": false, "error": error}),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 /// 创建一个无需 GUI 控制连接也能存活的 ACP 会话。移动端 `acp_create` 与 daemon
@@ -3735,10 +3735,9 @@ pub(crate) fn handle_acp_watch(
         ) {
             Ok(slot) => slot,
             Err(reason) => {
-                let _ = writeln!(
-                    conn,
-                    "{}",
-                    serde_json::json!({ "unavailable": { "reason": reason } })
+                let _ = smelt_runtime_client::protocol::write_json_line(
+                    &mut conn,
+                    &serde_json::json!({ "unavailable": { "reason": reason } }),
                 );
                 return;
             }
@@ -3893,10 +3892,9 @@ pub(crate) fn handle_acp_snapshot(
 ) {
     let id = v["id"].as_str().unwrap_or_default();
     let Some(slot) = acp_sessions.get(id) else {
-        let _ = writeln!(
-            conn,
-            "{}",
-            serde_json::json!({ "ok": false, "error": "ACP 会话不存在" })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut conn,
+            &serde_json::json!({ "ok": false, "error": "ACP 会话不存在" }),
         );
         return;
     };
@@ -3922,10 +3920,9 @@ pub(crate) fn handle_acp_snapshot(
         && let Err(error) =
             crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
     {
-        let _ = writeln!(
-            conn,
-            "{}",
-            serde_json::json!({ "ok": false, "error": error })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut conn,
+            &serde_json::json!({ "ok": false, "error": error }),
         );
         return;
     }
@@ -3950,10 +3947,9 @@ pub(crate) fn handle_acp_snapshot(
         HistoryRead::Ready(Box::new(snapshot))
     });
     let Some(page) = page else {
-        let _ = writeln!(
-            conn,
-            "{}",
-            serde_json::json!({ "ok": false, "error": "ACP 会话不存在" })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut conn,
+            &serde_json::json!({ "ok": false, "error": "ACP 会话不存在" }),
         );
         return;
     };
@@ -3967,16 +3963,18 @@ pub(crate) fn handle_acp_snapshot(
                 snapshot
             }
             Err(error) => {
-                let _ = writeln!(
-                    conn,
-                    "{}",
-                    serde_json::json!({ "ok": false, "error": error })
+                let _ = smelt_runtime_client::protocol::write_json_line(
+                    &mut conn,
+                    &serde_json::json!({ "ok": false, "error": error }),
                 );
                 return;
             }
         },
     };
-    let _ = writeln!(conn, "{}", serde_json::json!({ "snapshot": snapshot }));
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut conn,
+        &serde_json::json!({ "snapshot": snapshot }),
+    );
 }
 
 enum HistoryRead {
@@ -4009,10 +4007,9 @@ pub(crate) fn handle_acp_skills(
     let Some((Some(launch), cwd)) = launch else {
         // 会话没在运行（已结束 / 仅历史）就没有「这场对话加载了什么」可言。这不是错误，
         // 回 supported=false 让客户端收起入口，而不是弹一个用户无法处理的报错。
-        let _ = writeln!(
-            conn,
-            "{}",
-            serde_json::json!({ "ok": true, "supported": false, "skills": [] })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut conn,
+            &serde_json::json!({ "ok": true, "supported": false, "skills": [] }),
         );
         return;
     };
@@ -4037,15 +4034,14 @@ pub(crate) fn handle_acp_skills(
             })
         })
         .collect();
-    let _ = writeln!(
-        conn,
-        "{}",
-        serde_json::json!({
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut conn,
+        &serde_json::json!({
             "ok": true,
             "agent": agent.map(|kind| kind.id()),
             "supported": supported,
             "skills": skills,
-        })
+        }),
     );
 }
 
@@ -4066,7 +4062,7 @@ pub(crate) fn handle_acp_kill(
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(c, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
 pub(crate) fn kill_acp_session(

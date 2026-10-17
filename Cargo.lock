@@ -9930,6 +9930,7 @@ dependencies = [
  "clap",
  "core-foundation 0.10.0",
  "core-foundation-sys",
+ "dirs",
  "libc",
  "notify 6.1.1",
  "objc",

@@ -12,7 +12,6 @@ use smelt_event_protocol::{
     SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
 };
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::os::unix::net::UnixStream;
 
 pub(super) fn handle_event_subscribe_op(
@@ -55,7 +54,7 @@ pub(super) fn write_event_protocol_value(
     value: impl serde::Serialize,
 ) -> Result<(), String> {
     let value = serde_json::to_value(value).map_err(|error| error.to_string())?;
-    writeln!(conn, "{value}").map_err(|error| error.to_string())
+    smelt_runtime_client::protocol::write_json_line(conn, &value).map_err(|error| error.to_string())
 }
 
 pub(super) fn write_event_protocol_error(conn: &mut UnixStream, error: impl std::fmt::Display) {

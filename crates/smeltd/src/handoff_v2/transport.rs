@@ -156,7 +156,8 @@ fn send_fds_one_message(
     header.msg_iov = &mut iov;
     header.msg_iovlen = 1;
     header.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    header.msg_controllen = cmsg_buf.len() as libc::socklen_t;
+    // 字段类型各平台不同（Linux 是 usize，macOS 是 socklen_t），按目标推断。
+    header.msg_controllen = cmsg_buf.len() as _;
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&header);
         if cmsg.is_null() {
@@ -167,14 +168,13 @@ fn send_fds_one_message(
         }
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len =
-            libc::CMSG_LEN(std::mem::size_of_val(fds) as libc::c_uint) as libc::socklen_t;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(fds) as libc::c_uint) as _;
         std::ptr::copy_nonoverlapping(
             fds.as_ptr(),
             libc::CMSG_DATA(cmsg) as *mut std::os::fd::RawFd,
             fds.len(),
         );
-        header.msg_controllen = (*cmsg).cmsg_len as libc::socklen_t;
+        header.msg_controllen = (*cmsg).cmsg_len as _;
         let sent = libc::sendmsg(sock_fd, &header, 0);
         if sent < 0 {
             return Err(std::io::Error::last_os_error());
@@ -225,7 +225,8 @@ fn recv_fds_one_message(sock_fd: std::os::fd::RawFd) -> std::io::Result<Vec<Owne
     header.msg_iov = &mut iov;
     header.msg_iovlen = 1;
     header.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    header.msg_controllen = cmsg_buf.len() as libc::socklen_t;
+    // 字段类型各平台不同（Linux 是 usize，macOS 是 socklen_t），按目标推断。
+    header.msg_controllen = cmsg_buf.len() as _;
     let received = unsafe { libc::recvmsg(sock_fd, &mut header, 0) };
     if received < 0 {
         return Err(std::io::Error::last_os_error());
@@ -369,25 +370,23 @@ pub struct ReadyInfo {
 
 pub fn send_ready(sock: &UnixStream, info: &ReadyInfo) -> std::io::Result<()> {
     let mut sock = sock;
-    writeln!(
-        sock,
-        "{}",
-        serde_json::json!({
+    smelt_runtime_client::protocol::write_json_line(
+        &mut sock,
+        &serde_json::json!({
             "status": "ready",
             "restored_terminals": info.restored_terminals,
             "restored_acp": info.restored_acp,
             "dropped_grids": info.dropped_grids,
-        })
+        }),
     )?;
     sock.flush()
 }
 
 pub fn send_abort(sock: &UnixStream, reason: &str) -> std::io::Result<()> {
     let mut sock = sock;
-    writeln!(
-        sock,
-        "{}",
-        serde_json::json!({ "status": "abort", "reason": reason })
+    smelt_runtime_client::protocol::write_json_line(
+        &mut sock,
+        &serde_json::json!({ "status": "abort", "reason": reason }),
     )?;
     sock.flush()
 }
@@ -470,13 +469,19 @@ fn await_ready_with_timeout(
 
 pub fn send_commit(sock: &UnixStream) -> std::io::Result<()> {
     let mut sock = sock;
-    writeln!(sock, "{}", serde_json::json!({ "decision": "commit" }))?;
+    smelt_runtime_client::protocol::write_json_line(
+        &mut sock,
+        &serde_json::json!({ "decision": "commit" }),
+    )?;
     sock.flush()
 }
 
 pub fn send_abandon(sock: &UnixStream) -> std::io::Result<()> {
     let mut sock = sock;
-    writeln!(sock, "{}", serde_json::json!({ "decision": "abandon" }))?;
+    smelt_runtime_client::protocol::write_json_line(
+        &mut sock,
+        &serde_json::json!({ "decision": "abandon" }),
+    )?;
     sock.flush()
 }
 

@@ -15,9 +15,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::daemon_state::DaemonPhase;
 use smelt_model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
-use crate::daemon_state::DaemonPhase;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 pub const ACP_INITIAL_TAIL_LIMIT: usize = 100;
@@ -261,9 +261,9 @@ fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
         .get("live")
         .and_then(|live| smelt_model::acp_session::SessionLive::from_json(live).ok())
         .or_else(|| {
-            value
-                .get("snapshot")
-                .and_then(|snapshot| smelt_model::acp_session::SessionLive::from_json(snapshot).ok())
+            value.get("snapshot").and_then(|snapshot| {
+                smelt_model::acp_session::SessionLive::from_json(snapshot).ok()
+            })
         });
     if let Some(snapshot) = value.get("snapshot") {
         return match serde_json::from_value::<ConversationSnapshot>(snapshot.clone()) {
@@ -348,8 +348,11 @@ pub fn load_acp_history(
     limit: usize,
 ) -> Result<ConversationSnapshot, String> {
     let mut stream = connect_acp_control()?;
-    writeln!(stream, "{}", acp_snapshot_request(id, before, limit))
-        .map_err(|e| format!("读取历史请求发送失败：{e}"))?;
+    smelt_runtime_client::protocol::write_json_line(
+        &mut stream,
+        &acp_snapshot_request(id, before, limit),
+    )
+    .map_err(|e| format!("读取历史请求发送失败：{e}"))?;
     let mut response = String::new();
     BufReader::new(stream)
         .read_line(&mut response)
@@ -399,7 +402,7 @@ pub fn spawn_acp_client(launch: ConversationClientLaunch) -> ConversationClientH
             // 停止读 action 后无限占住线程并让动作队列持续增长。
             let _ = writer.set_write_timeout(Some(ACP_CONTROL_TIMEOUT));
             let req = acp_open_request(&launch);
-            if writeln!(writer, "{req}").is_err() {
+            if smelt_runtime_client::protocol::write_json_line(&mut writer, &req).is_err() {
                 let _ = snapshot_tx.try_send(fallback_snapshot(
                     "向 smeltd 发起会话失败",
                     known_entries_end,
@@ -481,10 +484,9 @@ pub fn kill_acp_session(id: &str) {
     let Ok(mut s) = connect_acp_control() else {
         return;
     };
-    let _ = writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::AcpKill, "id": id })
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut s,
+        &serde_json::json!({ "op": DaemonOperation::AcpKill, "id": id }),
     );
     let mut resp = String::new();
     let _ = BufReader::new(s).read_line(&mut resp);
@@ -520,10 +522,9 @@ pub fn kill_acp_session_in_background(id: String) {
 /// 一个确定的成功/失败结果，不想留下"到底发出去没有"的悬念。
 pub fn restart_acp_session(id: &str) -> Result<(), String> {
     let mut s = connect_acp_control()?;
-    writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::AcpRestart, "id": id })
+    smelt_runtime_client::protocol::write_json_line(
+        &mut s,
+        &serde_json::json!({ "op": DaemonOperation::AcpRestart, "id": id }),
     )
     .map_err(|e| format!("写请求失败：{e}"))?;
     let mut resp = String::new();

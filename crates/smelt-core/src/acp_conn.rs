@@ -879,25 +879,65 @@ fn process_start_time_inner(pid: i32) -> Option<std::time::SystemTime> {
     ))
 }
 
+/// 启动时刻：开机时刻 + 启动 tick。精度是一个 tick（通常 10ms）。
+///
+/// 开机时刻不用 `/proc/stat` 的 `btime`：它只到整秒，会把所有进程的启动时刻往前挪
+/// 最多一秒，快照之后才复用这个 pid 的进程就可能被当成快照前出生的原进程杀掉。
+/// 改用 `CLOCK_REALTIME - CLOCK_BOOTTIME`，进程内只算一次。
 #[cfg(target_os = "linux")]
 fn process_start_time_inner(pid: i32) -> Option<std::time::SystemTime> {
-    // /proc/<pid>/stat 第 22 字段：启动时刻（clock tick，自 boot 起）。
+    static BOOTED_AT: std::sync::OnceLock<Option<std::time::SystemTime>> =
+        std::sync::OnceLock::new();
+    let booted_at = (*BOOTED_AT.get_or_init(|| {
+        let mut boottime: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut boottime) } != 0 {
+            return None;
+        }
+        let since_boot = std::time::Duration::new(boottime.tv_sec as u64, boottime.tv_nsec as u32);
+        std::time::SystemTime::now().checked_sub(since_boot)
+    }))?;
+    let ticks_per_sec = linux_ticks_per_sec()?;
+    let start_ticks = linux_start_ticks(pid)?;
+    booted_at.checked_add(std::time::Duration::from_nanos(
+        (u128::from(start_ticks) * 1_000_000_000 / u128::from(ticks_per_sec)) as u64,
+    ))
+}
+
+/// `/proc/<pid>/stat` 第 22 字段：自开机起的启动 tick。同一次开机内对一个进程恒定。
+#[cfg(target_os = "linux")]
+fn linux_start_ticks(pid: i32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = stat.rsplit_once(')')?.1;
-    let start_ticks: u64 = after_comm.split_whitespace().nth(20)?.parse().ok()?;
-    let btime: u64 = std::fs::read_to_string("/proc/stat")
-        .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix("btime ")?.parse().ok())?;
-    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
-    if ticks_per_sec == 0 {
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ticks_per_sec() -> Option<u64> {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (ticks > 0).then_some(ticks as u64)
+}
+
+/// 进程的出生标识：同一个进程任何时候、任何进程读都一样，pid 被复用后一定不同。
+/// 跨进程记下来以后比对身份用；要和墙钟比先后用 [`process_start_time`]。
+pub fn process_birth(pid: i32) -> Option<String> {
+    if pid <= 1 {
         return None;
     }
-    std::time::UNIX_EPOCH
-        .checked_add(std::time::Duration::from_secs(btime))
-        .and_then(|boot| {
-            boot.checked_add(std::time::Duration::from_secs(start_ticks / ticks_per_sec))
-        })
+    process_birth_inner(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_birth_inner(pid: i32) -> Option<String> {
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(format!("{}:{}", boot_id.trim(), linux_start_ticks(pid)?))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_birth_inner(pid: i32) -> Option<String> {
+    let started = process_start_time_inner(pid)?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!("{}.{:09}", started.as_secs(), started.subsec_nanos()))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -6444,7 +6484,7 @@ mod model_tests {
 #[cfg(test)]
 mod process_reap_tests {
     use super::{
-        Waitpid, kill_and_reap_process_group, process_start_time, prove_process_group_dead,
+        Waitpid, kill_and_reap_process_group, process_birth, process_start_time, prove_process_group_dead,
         waitpid_child,
     };
     use std::os::unix::process::CommandExt as _;
@@ -6684,6 +6724,29 @@ mod process_reap_tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         let status = child.wait().expect("原来的 wait 必须还能收走这个僵尸");
         assert!(status.success());
+    }
+
+    /// 出生标识：同一进程反复读不变，不同进程不同，死进程读不出。
+    #[test]
+    fn process_birth_is_stable_per_process_and_distinct_across_processes() {
+        let (_a, a) = spawn_sleep();
+        std::thread::sleep(Duration::from_millis(50));
+        let (_b, b) = spawn_sleep();
+        let first = process_birth(a).expect("活进程应读得出");
+        assert_eq!(process_birth(a).as_deref(), Some(first.as_str()));
+        assert_ne!(process_birth(b), Some(first));
+        assert_eq!(process_birth(i32::MAX), None);
+    }
+
+    /// 启动时刻贴着墙钟：刚 spawn 的进程，启动时刻离现在不超过一个 tick 量级。
+    #[test]
+    fn process_start_time_tracks_the_wall_clock() {
+        let before = std::time::SystemTime::now();
+        let (_a, a) = spawn_sleep();
+        let started = process_start_time(a).unwrap();
+        let slack = Duration::from_millis(50);
+        assert!(started + slack >= before, "{started:?} 早于 spawn 前的 {before:?}");
+        assert!(started <= std::time::SystemTime::now() + slack);
     }
 
     /// 启动时间单调：后 spawn 的更大；死进程读不出。

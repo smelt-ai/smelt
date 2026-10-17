@@ -11,7 +11,7 @@ pub(super) fn handle_remote_sessions_op(conn: UnixStream, remote_sessions: &Remo
         Ok(snapshot) => serde_json::json!({ "ok": true, "remote_sessions": snapshot }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(c, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
 pub(super) fn handle_conversation_rename(
@@ -57,7 +57,7 @@ pub(super) fn handle_conversation_rename(
         Ok(conversation) => serde_json::json!({ "ok": true, "conversation": conversation }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(c, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
 pub(super) fn handle_remote_rename_resume(
@@ -86,7 +86,7 @@ pub(super) fn handle_remote_rename_resume(
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(c, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
 pub(super) fn handle_remote_start(
@@ -100,19 +100,17 @@ pub(super) fn handle_remote_start(
     let mut c = conn;
     match start_remote_gateway(remote_state, &bind, port, write) {
         Ok((token, addr, write)) => {
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({
                     "ok": true, "token": token, "addr": addr.to_string(), "write": write
-                })
+                }),
             );
         }
         Err(error) => {
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({ "ok": false, "err": error.to_string() })
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": error.to_string() }),
             );
         }
     }
@@ -121,7 +119,8 @@ pub(super) fn handle_remote_start(
 pub(super) fn handle_remote_stop(conn: UnixStream, remote_state: &RemoteState) {
     stop_remote_gateway(remote_state);
     let mut c = conn;
-    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+    let _ =
+        smelt_runtime_client::protocol::write_json_line(&mut c, &serde_json::json!({ "ok": true }));
 }
 
 pub(super) fn handle_remote_set_write(
@@ -133,10 +132,16 @@ pub(super) fn handle_remote_set_write(
     let mut c = conn;
     match set_remote_gateway_write(remote_state, write) {
         Ok(()) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true, "write": write }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": true, "write": write }),
+            );
         }
         Err(error) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": error }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": error }),
+            );
         }
     }
 }
@@ -152,10 +157,16 @@ pub(super) fn handle_remote_rotate_token(
     let mut c = conn;
     match rotate_remote_token(remote_state) {
         Ok(_) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": true }),
+            );
         }
         Err(error) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": error }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": error }),
+            );
         }
     }
 }
@@ -192,18 +203,20 @@ pub(super) fn handle_iroh_start(
         Ok((endpoint_id, token, addr, write, relay)) => {
             // token 一并回：配对码 = endpoint_id + token，缺一不可
             // （隧道只负责把字节送到，鉴权仍归网关）。
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({
                     "ok": true, "endpoint_id": endpoint_id, "token": token,
                     "addr": addr.to_string(), "write": write,
                     "relay": relay
-                })
+                }),
             );
         }
         Err(e) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": e }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": e }),
+            );
         }
     }
 }
@@ -215,7 +228,8 @@ pub(super) fn handle_iroh_stop(
 ) {
     stop_iroh(iroh_state, remote_state);
     let mut c = conn;
-    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+    let _ =
+        smelt_runtime_client::protocol::write_json_line(&mut c, &serde_json::json!({ "ok": true }));
 }
 
 pub(super) fn handle_iroh_status(
@@ -247,5 +261,8 @@ pub(super) fn handle_iroh_status(
 pub(super) fn handle_iroh_connections(conn: UnixStream, iroh_state: &IrohState) {
     let mut c = conn;
     let connections = get_iroh_connections(iroh_state);
-    let _ = writeln!(c, "{}", serde_json::json!({ "connections": connections }));
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut c,
+        &serde_json::json!({ "connections": connections }),
+    );
 }

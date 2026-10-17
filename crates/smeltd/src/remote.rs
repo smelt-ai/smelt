@@ -16,12 +16,16 @@ pub(crate) struct RemoteGateway {
 }
 
 /// 远程网关持有的空闲防睡眠断言名称。合盖仍走 Clamshell Sleep。
+#[cfg(target_os = "macos")]
 pub(crate) const SLEEP_ASSERTION_NAME: &str = "Smelt remote access is enabled";
+#[cfg(target_os = "macos")]
 pub(crate) const SLEEP_ASSERTION_TYPE: &str = "PreventUserIdleSystemSleep";
 
 /// 当前供电方式。只把明确的电池供电当 Battery；桌面、UPS、读失败都当插电，
 /// 避免误判导致插电时手机连不上。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// 只有 macOS 读得到电源状态；别的平台一律当插电。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum PowerKind {
     Ac,
     Battery,

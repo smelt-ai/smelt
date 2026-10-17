@@ -2,7 +2,6 @@
 //!
 //! 领域逻辑留在各自模块；这里仅负责 wire 解码、能力发现、类型转换和统一错误。
 
-use std::io::Write;
 use std::os::unix::net::UnixStream;
 
 use serde::Serialize;
@@ -1239,7 +1238,7 @@ pub(crate) fn handle_control(
         ),
         Err(failure) => error_value(failure.response_version, failure.request_id, failure.error),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 #[cfg(test)]

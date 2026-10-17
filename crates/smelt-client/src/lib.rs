@@ -4,4 +4,7 @@
 pub mod acp_client;
 pub mod daemon_state;
 pub mod session_ops;
+// 更新器替换的是 macOS 的 .app 包（codesign、Info.plist、原子交换目录），桌面也只有
+// macOS 版。
+#[cfg(target_os = "macos")]
 pub mod updater;

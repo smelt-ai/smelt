@@ -10,9 +10,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 
-use smelt_model::automation::AutomationFile;
-use smelt_model::session_control::RemoteSessionSnapshot;
-use smelt_model::workspace_menu::WorkspaceMenuSnapshot;
 use smelt_event_protocol::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
@@ -25,6 +22,9 @@ use smelt_event_protocol::{
     SessionStateRemoved, SessionStatesSnapshot, SubscribeErrorCode, SubscribeMessage,
     SubscribeRequest, SubscriptionDeclaration, SubscriptionId, Topic,
 };
+use smelt_model::automation::AutomationFile;
+use smelt_model::session_control::RemoteSessionSnapshot;
+use smelt_model::workspace_menu::WorkspaceMenuSnapshot;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 #[derive(Clone, Copy)]
@@ -1338,10 +1338,25 @@ mod tests {
 
     #[test]
     fn reconnect_backoff_grows_exponentially_and_is_capped() {
-        assert_eq!(daemon_reconnect_backoff(0), std::time::Duration::from_millis(250));
-        assert_eq!(daemon_reconnect_backoff(1), std::time::Duration::from_millis(500));
-        assert_eq!(daemon_reconnect_backoff(4), std::time::Duration::from_secs(4));
-        assert_eq!(daemon_reconnect_backoff(5), std::time::Duration::from_secs(8));
-        assert_eq!(daemon_reconnect_backoff(u32::MAX), std::time::Duration::from_secs(8));
+        assert_eq!(
+            daemon_reconnect_backoff(0),
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(1),
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(4),
+            std::time::Duration::from_secs(4)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(5),
+            std::time::Duration::from_secs(8)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(u32::MAX),
+            std::time::Duration::from_secs(8)
+        );
     }
 }

@@ -32,10 +32,9 @@ pub(super) fn handle_list(conn: UnixStream, sessions: &Sessions, acp_sessions: &
         states.push(v);
     }
     let mut c = conn;
-    let _ = writeln!(
-        c,
-        "{}",
-        serde_json::json!({ "sessions": ids, "states": states })
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut c,
+        &serde_json::json!({ "sessions": ids, "states": states }),
     );
 }
 pub(super) fn handle_kill(
@@ -69,17 +68,18 @@ pub(super) fn handle_kill(
                     Ok(true) => {}
                     Ok(false) => {
                         let mut c = conn;
-                        let _ = writeln!(
-                            c,
-                            "{}",
-                            serde_json::json!({ "ok": false, "error": "remote session disappeared" })
+                        let _ = smelt_runtime_client::protocol::write_json_line(
+                            &mut c,
+                            &serde_json::json!({ "ok": false, "error": "remote session disappeared" }),
                         );
                         return;
                     }
                     Err(error) => {
                         let mut c = conn;
-                        let _ =
-                            writeln!(c, "{}", serde_json::json!({ "ok": false, "error": error }));
+                        let _ = smelt_runtime_client::protocol::write_json_line(
+                            &mut c,
+                            &serde_json::json!({ "ok": false, "error": error }),
+                        );
                         return;
                     }
                 }
@@ -144,7 +144,10 @@ pub(super) fn handle_kill(
                 Ok(false) => {}
                 Err(error) => {
                     let mut c = conn;
-                    let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "error": error }));
+                    let _ = smelt_runtime_client::protocol::write_json_line(
+                        &mut c,
+                        &serde_json::json!({ "ok": false, "error": error }),
+                    );
                     return;
                 }
             }
@@ -155,7 +158,10 @@ pub(super) fn handle_kill(
                 id,
             ) {
                 let mut c = conn;
-                let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "error": error }));
+                let _ = smelt_runtime_client::protocol::write_json_line(
+                    &mut c,
+                    &serde_json::json!({ "ok": false, "error": error }),
+                );
                 return;
             }
         }
@@ -170,7 +176,7 @@ pub(super) fn handle_kill(
         Some(error) => serde_json::json!({ "ok": false, "error": error }),
         None => serde_json::json!({ "ok": true }),
     };
-    let _ = writeln!(c, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
 pub(super) fn handle_action(conn: UnixStream, v: &serde_json::Value, sessions: &Sessions) {
@@ -179,7 +185,10 @@ pub(super) fn handle_action(conn: UnixStream, v: &serde_json::Value, sessions: &
     let payload = match action_payload(v["kind"].as_str(), v["text"].as_str()) {
         Ok(p) => p,
         Err(err) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": err }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": err }),
+            );
             return;
         }
     };
@@ -195,10 +204,16 @@ pub(super) fn handle_action(conn: UnixStream, v: &serde_json::Value, sessions: &
         .unwrap_or_else(|| Err("会话不存在".to_string()));
     match write_result {
         Ok(()) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": true }),
+            );
         }
         Err(error) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": error }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": error }),
+            );
         }
     }
 }
@@ -209,10 +224,9 @@ pub(super) fn handle_raw_input(conn: UnixStream, v: &serde_json::Value, sessions
     let id = v["id"].as_str().unwrap_or_default();
     let mut c = conn;
     let Some(payload) = input_payload(v) else {
-        let _ = writeln!(
-            c,
-            "{}",
-            serde_json::json!({ "ok": false, "err": "需要非空 data" })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut c,
+            &serde_json::json!({ "ok": false, "err": "需要非空 data" }),
         );
         return;
     };
@@ -223,10 +237,16 @@ pub(super) fn handle_raw_input(conn: UnixStream, v: &serde_json::Value, sessions
         .unwrap_or_else(|| Err("会话不存在".to_string()));
     match write_result {
         Ok(()) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": true }),
+            );
         }
         Err(error) => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": error }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": error }),
+            );
         }
     }
 }
@@ -241,10 +261,9 @@ pub(super) fn handle_resize(conn: UnixStream, v: &serde_json::Value, sessions: &
     let cell_h = v["cell_h"].as_u64().unwrap_or(0) as u16;
     let mut c = conn;
     if cols == 0 || rows == 0 {
-        let _ = writeln!(
-            c,
-            "{}",
-            serde_json::json!({ "ok": false, "err": "cols/rows 必须 > 0" })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut c,
+            &serde_json::json!({ "ok": false, "err": "cols/rows 必须 > 0" }),
         );
         return;
     }
@@ -253,17 +272,15 @@ pub(super) fn handle_resize(conn: UnixStream, v: &serde_json::Value, sessions: &
         resize_session(sess, cols, rows, cell_w, cell_h);
     });
     if resized.is_none() {
-        let _ = writeln!(
-            c,
-            "{}",
-            serde_json::json!({ "ok": false, "err": "会话不存在" })
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut c,
+            &serde_json::json!({ "ok": false, "err": "会话不存在" }),
         );
         return;
     }
-    let _ = writeln!(
-        c,
-        "{}",
-        serde_json::json!({ "ok": true, "cols": cols, "rows": rows })
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut c,
+        &serde_json::json!({ "ok": true, "cols": cols, "rows": rows }),
     );
 }
 pub(crate) fn terminal_error_reply(reason: &str, rows: u16, cols: u16) -> Vec<u8> {

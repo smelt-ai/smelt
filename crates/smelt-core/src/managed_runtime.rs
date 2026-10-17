@@ -18,7 +18,7 @@ use std::{
 
 pub(crate) const BUN_VERSION: &str = "1.4.0";
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 /// 当前受管 Bun 的固定入口，相对 runtime 根目录。generation 目录名带哈希、随版本变，
 /// 写进外部配置（如 `mcp.json` 的 `command`）的路径必须是这一条。
 const BUN_LAUNCHER: &str = "bin/bun";
@@ -47,6 +47,27 @@ const BUN_ZIP_DIR: &str = "bun-darwin-x64";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
     "ca8a18d0116d7b6b19f53bb0d8c48e487c0757cab4dc3f4f8cc5e43a44cd75d8";
+// Linux x64 用 baseline 版：不要求 AVX2，云主机的老 CPU 也能跑。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const BUN_DOWNLOAD: (&str, &str) = (
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip",
+    "184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f",
+);
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const BUN_ZIP_DIR: &str = "bun-linux-x64-baseline";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) const BUN_EXECUTABLE_SHA256: &str =
+    "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const BUN_DOWNLOAD: (&str, &str) = (
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip",
+    "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e",
+);
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const BUN_ZIP_DIR: &str = "bun-linux-aarch64";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub(crate) const BUN_EXECUTABLE_SHA256: &str =
+    "086c4121c8738a8e0f5ed730e8a461bc3973b4444e372ddb77aef9a747fa2ae9";
 
 #[derive(Clone, Debug)]
 pub struct ManagedBunRuntime {
@@ -190,12 +211,12 @@ fn pi_tree_matches(root: &Path, expected: &PiGenerationManifest) -> bool {
             == Some(expected)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn sync_managed_bun(_status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
-    Err("受管 Bun 运行时只在 macOS 上提供".to_string())
+    Err("受管 Bun 运行时只在 macOS 和 Linux 上提供".to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn sync_managed_bun(status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
     let store = GenerationStore::managed()?;
     let manager = store.lock_manager()?;
@@ -204,7 +225,7 @@ pub fn sync_managed_bun(status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, Stri
     Ok(runtime)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn sync_managed_bun_locked(
     store: &GenerationStore,
     status: &dyn Fn(&str),
@@ -237,7 +258,7 @@ fn sync_managed_bun_locked(
     })
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 /// 把 `<runtime>/bin/bun` 原子地指向 `bun`：先建临时符号链接再 rename 覆盖，
 /// 正在通过旧链接启动的进程不会撞上「文件不存在」。
 fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
@@ -261,7 +282,7 @@ fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
     result
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn install_bun_generation(
     staging: &Path,
     status: &dyn Fn(&str),
@@ -317,11 +338,11 @@ fn install_bun_generation(
 /// published. This never downloads, installs, hashes the Bun executable, or waits for a manager
 /// transaction; it is safe for diagnostics and availability UI.
 pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Err("此平台没有 Smelt 受管 Bun".to_string())
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let store = GenerationStore::managed()?;
         let bun = bun_manifest();
@@ -343,18 +364,18 @@ pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
 }
 
 pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRuntime, String> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        return Err("受管 Pi 运行时只在 macOS 上提供".to_string());
+        return Err("受管 Pi 运行时只在 macOS 和 Linux 上提供".to_string());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let store = GenerationStore::managed()?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let manager = store.lock_manager()?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let bun_runtime = sync_managed_bun_locked(&store, status, &manager)
         .map_err(|error| format!("无法准备 Smelt Pi 运行时：{error}"))?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let manifest = pi_manifest(&bun_runtime.generation_id);
     store.remove_stale_staging_locked();
     let root = store.generation_root(GenerationKind::Pi, &manifest.generation_id);
@@ -469,7 +490,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("读取 {} 失败：{error}", path.display()))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_bun(bun: &Path) -> Result<(), String> {
     let metadata =
         fs::symlink_metadata(bun).map_err(|error| format!("读取受管 Bun 元数据失败：{error}"))?;
@@ -590,7 +611,7 @@ mod tests {
         assert!(main.contains("registerBunOAuthFlows()"));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn bun_manifest_pins_the_release_and_executable() {
         let manifest = bun_manifest();

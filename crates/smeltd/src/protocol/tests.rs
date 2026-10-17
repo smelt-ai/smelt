@@ -1,18 +1,19 @@
-use super::auth::first_party_event_client;
 #[cfg(target_os = "macos")]
 use super::auth::{
     KernelCodeIdentity, PeerAuditToken, PeerCodeIdentity, SystemPeerCodeIdentity,
-    authenticate_event_connection_with_verifier, self_audit_token,
+    authenticate_event_connection_with_verifier, first_party_event_client, self_audit_token,
 };
 use super::*;
+#[cfg(target_os = "macos")]
+use smelt_event_protocol::FirstPartyClientKind;
 use smelt_event_protocol::{
     Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_CAPABILITY_AUTOMATION_READ,
     CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
     CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ,
     CORE_TOPIC_AGENT_MESSAGE_DELIVERED, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
     DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID,
-    FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind, Nack, NackDisposition, PluginId,
-    ProtocolRange, SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
+    FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, Nack, NackDisposition, PluginId, ProtocolRange,
+    SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
     SubscriptionDeclaration, SubscriptionId,
 };
 #[cfg(target_os = "macos")]

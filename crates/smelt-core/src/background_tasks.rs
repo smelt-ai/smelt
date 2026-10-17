@@ -1743,16 +1743,10 @@ fn record_task_group(root: &Path, pgid: i32) {
     if pgid <= 1 {
         return;
     }
-    let Some(started) = crate::acp_conn::process_start_time(pgid) else {
+    let Some(birth) = crate::acp_conn::process_birth(pgid) else {
         return;
     };
-    let Ok(elapsed) = started.duration_since(UNIX_EPOCH) else {
-        return;
-    };
-    let _ = fs::write(
-        root.join(format!("group-{pgid}")),
-        format!("{} {}\n", elapsed.as_secs(), elapsed.subsec_nanos()),
-    );
+    let _ = fs::write(root.join(format!("group-{pgid}")), format!("{birth}\n"));
 }
 
 fn forget_task_group(root: &Path, pgid: i32) {
@@ -1813,20 +1807,7 @@ fn group_record_matches(path: &Path, pgid: i32) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
-    let mut parts = text.split_whitespace();
-    let (Some(secs), Some(nanos)) = (
-        parts.next().and_then(|part| part.parse::<u64>().ok()),
-        parts.next().and_then(|part| part.parse::<u32>().ok()),
-    ) else {
-        return false;
-    };
-    let Some(live) = crate::acp_conn::process_start_time(pgid) else {
-        return false;
-    };
-    let Ok(elapsed) = live.duration_since(UNIX_EPOCH) else {
-        return false;
-    };
-    elapsed.as_secs() == secs && elapsed.subsec_nanos() == nanos
+    crate::acp_conn::process_birth(pgid).is_some_and(|live| live == text.trim())
 }
 
 /// 叫一个任务停下。宿主自己起的命令给整个进程组发信号；挂接任务叫醒它的看管线程，

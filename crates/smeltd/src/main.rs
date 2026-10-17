@@ -178,20 +178,21 @@ mod acp_runtime_host;
 mod agent_memory_control;
 mod automation_runtime;
 mod control;
+mod dsh_control;
 mod event_hub;
 mod files_control;
 mod git_control;
 mod handoff_v2;
-mod dsh_control;
 mod history_control;
-mod pi_control;
-mod project_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod peer_messaging;
+mod pi_control;
+mod project_watch;
 mod protocol;
 mod remote;
 mod runtime_identity;
+mod service;
 mod session_catalog;
 mod session_directory;
 mod session_state;
@@ -1162,7 +1163,7 @@ fn handle_history_rename(
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 fn handle_workspace_menu(
@@ -1187,7 +1188,7 @@ fn handle_workspace_menu(
         Ok(menu) => serde_json::json!({ "ok": true, "revision": menu.revision }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 pub(crate) fn recover_locked_automations(
@@ -1210,10 +1211,9 @@ fn handle_automations_snapshot(
 ) {
     recover_locked_automations(automations, event_hub);
     let snapshot = webhook::annotate_snapshot(automations.lock().unwrap().snapshot());
-    let _ = writeln!(
-        conn,
-        "{}",
-        serde_json::json!({ "ok": true, "automations": snapshot })
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut conn,
+        &serde_json::json!({ "ok": true, "automations": snapshot }),
     );
 }
 
@@ -1260,7 +1260,7 @@ fn handle_automation_command(
         }
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 fn handle_event_publish(
@@ -1310,7 +1310,7 @@ fn handle_event_publish(
         }
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 /// 落盘记录不能证明进程还在。handoff 重建 runtime 之后、对外服务之前，按
@@ -2020,6 +2020,10 @@ fn main() {
     // 会话宿主和主进程都要钉住自己映射的那份文件。钉晚了，启动名若已被拨走，
     // 再去解析 `current_exe()` 就会拿到下一份映像。
     pin_running_daemon_image();
+    // `smeltd install` / `status` 这类子命令跑完就退出，不起守护。
+    if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
     if acp_runtime_host::is_session_host_process() {
         acp_runtime_host::run_session_host();
         return;
@@ -2341,10 +2345,9 @@ fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
     let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = sock.set_read_timeout(Some(Duration::from_secs(30)));
     let mut sock = sock;
-    if let Err(error) = writeln!(
-        sock,
-        "{}",
-        serde_json::json!({ "op": "upgrade", "exe": target.to_string_lossy() })
+    if let Err(error) = smelt_runtime_client::protocol::write_json_line(
+        &mut sock,
+        &serde_json::json!({ "op": "upgrade", "exe": target.to_string_lossy() }),
     ) {
         return SelfUpgradeOutcome::Failed(format!("发 upgrade 失败：{error}"));
     }
@@ -3740,15 +3743,14 @@ fn handle_upgrade(
     let _peer_messaging_upgrade = match peer_messaging::begin_upgrade() {
         Ok(guard) => guard,
         Err(active_operations) => {
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({
                     "ok": false,
                     "busy": true,
                     "err": "cross-agent 请求仍在进行，请等待其完成后重试升级",
                     "peer_messaging_operations": active_operations,
-                })
+                }),
             );
             return;
         }
@@ -3759,15 +3761,14 @@ fn handle_upgrade(
     // host 的 direct-fd 连接；它们静默接管后会立即完成一次性迁移。
     let blockers = acp_upgrade_blockers(acp_sessions);
     if !blockers.is_empty() {
-        let _ = writeln!(
-            c,
-            "{}",
-            serde_json::json!({
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut c,
+            &serde_json::json!({
                 "ok": false,
                 "busy": true,
                 "err": "ACP 会话仍有未完成请求，请在当前回合结束后重试",
                 "sessions": blockers,
-            })
+            }),
         );
         return;
     }
@@ -3778,10 +3779,9 @@ fn handle_upgrade(
     let exe = if let Some(p) = req["exe"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         let path = std::path::PathBuf::from(p);
         if !path.is_file() {
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) })
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": format!("exe 不存在：{}", path.display()) }),
             );
             return;
         }
@@ -3790,10 +3790,9 @@ fn handle_upgrade(
         match daemon_executable_path() {
             Ok(p) => p,
             Err(error) => {
-                let _ = writeln!(
-                    c,
-                    "{}",
-                    serde_json::json!({ "ok": false, "err": format!("找不到当前守护映像：{error}") })
+                let _ = smelt_runtime_client::protocol::write_json_line(
+                    &mut c,
+                    &serde_json::json!({ "ok": false, "err": format!("找不到当前守护映像：{error}") }),
                 );
                 return;
             }
@@ -3810,23 +3809,28 @@ fn handle_upgrade(
         });
     match outcome {
         handoff_v2::predecessor::TransactionOutcome::Committed => {
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": true }),
+            );
             std::process::exit(0);
         }
         handoff_v2::predecessor::TransactionOutcome::RolledBack { reason } => {
             acp_host::resume_acp_after_handoff_rollback(acp_sessions);
             if handoff_v2::predecessor::store_migrated_since(pre_schema) {
-                let _ = writeln!(
-                    c,
-                    "{}",
-                    serde_json::json!({ "ok": false, "err": "store 已被 successor 迁移，守护退出交由拉起逻辑重开新版" })
+                let _ = smelt_runtime_client::protocol::write_json_line(
+                    &mut c,
+                    &serde_json::json!({ "ok": false, "err": "store 已被 successor 迁移，守护退出交由拉起逻辑重开新版" }),
                 );
                 dlog(
                     "upgrade: 回滚时发现 store 已迁移，退出（结局=旧版 exec 失败路径，会话丢但守护新）",
                 );
                 std::process::exit(2);
             }
-            let _ = writeln!(c, "{}", serde_json::json!({ "ok": false, "err": reason }));
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({ "ok": false, "err": reason }),
+            );
         }
     }
 }

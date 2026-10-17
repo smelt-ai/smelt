@@ -6,7 +6,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -437,7 +436,6 @@ fn open_app_lock_at(dir: &Path, name: &str) -> anyhow::Result<File> {
         .with_context(|| format!("打开 App 锁失败：{name}"))
 }
 
-#[cfg(unix)]
 fn try_flock(file: &File, operation: libc::c_int, context: &str) -> anyhow::Result<bool> {
     if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
         return Ok(true);
@@ -449,7 +447,6 @@ fn try_flock(file: &File, operation: libc::c_int, context: &str) -> anyhow::Resu
     Err(error).with_context(|| context.to_string())
 }
 
-#[cfg(unix)]
 fn acquire_app_runtime_lease_at(dir: &Path) -> anyhow::Result<AppRuntimeLease> {
     let launch_gate = open_app_lock_at(dir, APP_LAUNCH_GATE_FILE)?;
     if !try_flock(&launch_gate, libc::LOCK_SH, "获取 App launch gate 失败")? {
@@ -467,17 +464,10 @@ fn acquire_app_runtime_lease_at(dir: &Path) -> anyhow::Result<AppRuntimeLease> {
     })
 }
 
-#[cfg(unix)]
 pub fn acquire_app_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
     acquire_app_runtime_lease_at(&update_dir()?)
 }
 
-#[cfg(not(unix))]
-pub fn acquire_app_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
-    anyhow::bail!("当前平台不支持 App runtime 锁")
-}
-
-#[cfg(unix)]
 enum ExclusiveLockWait {
     TimedOut,
     Failed(anyhow::Error),
@@ -485,7 +475,6 @@ enum ExclusiveLockWait {
 
 /// 在拥有这个文件的线程上阻塞 `flock`。到点只丢掉接收端：锁由那条线程在
 /// `flock` 返回后自己放开，别的线程不能关这个 fd。
-#[cfg(unix)]
 fn wait_exclusive_flock(
     file: File,
     timeout: Duration,
@@ -527,7 +516,6 @@ fn wait_exclusive_flock(
     }
 }
 
-#[cfg(unix)]
 fn acquire_installer_runtime_lease_at(
     dir: &Path,
     timeout: Duration,
@@ -560,14 +548,8 @@ fn acquire_installer_runtime_lease_at(
     }
 }
 
-#[cfg(unix)]
 fn acquire_installer_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
     acquire_installer_runtime_lease_at(&update_dir()?, INSTALLER_PARENT_WAIT_TIMEOUT)
-}
-
-#[cfg(not(unix))]
-fn acquire_installer_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
-    anyhow::bail!("当前平台不支持 App runtime 锁")
 }
 
 fn update_dir() -> anyhow::Result<PathBuf> {
@@ -592,7 +574,6 @@ fn acquire_update_lock() -> anyhow::Result<UpdateFileLock> {
         .write(true)
         .truncate(false)
         .open(dir.join(UPDATE_LOCK_FILE))?;
-    #[cfg(unix)]
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -811,14 +792,12 @@ fn copy_installer_helper(source: &Path, destination: &Path) -> anyhow::Result<()
         .ok_or_else(|| anyhow::anyhow!("安装 helper 目标缺少父目录"))?;
     std::fs::create_dir(parent)
         .with_context(|| format!("创建安装 helper 目录失败：{}", parent.display()))?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
     std::fs::copy(source, destination)
         .with_context(|| format!("复制安装 helper 失败：{}", destination.display()))?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o700))?;
@@ -1232,7 +1211,6 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
         if !executable.is_file() {
             anyhow::bail!("更新包缺少必要程序：{}", executable.display());
         }
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             if std::fs::metadata(&executable)?.permissions().mode() & 0o111 == 0 {
@@ -1245,7 +1223,6 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
         anyhow::bail!("更新包缺少 Info.plist：{}", info_plist.display());
     }
 
-    #[cfg(target_os = "macos")]
     {
         let bundle_id = std::process::Command::new("/usr/bin/plutil")
             .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"])
@@ -1280,7 +1257,6 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
     app_fingerprint(app)
 }
 
-#[cfg(target_os = "macos")]
 fn designated_requirement(app: &Path) -> anyhow::Result<String> {
     let output = std::process::Command::new("/usr/bin/codesign")
         .args(["-d", "-r-"])
@@ -1354,7 +1330,6 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
         } else if file_type.is_file() {
             hasher.update(b"f");
             hasher.update(metadata.len().to_le_bytes());
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
                 hasher.update((metadata.permissions().mode() & 0o111).to_le_bytes());
@@ -1500,7 +1475,6 @@ fn copy_app_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn swap_app_bundles(left: &Path, right: &Path) -> anyhow::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -1511,33 +1485,6 @@ fn swap_app_bundles(left: &Path, right: &Path) -> anyhow::Result<()> {
         return Err(std::io::Error::last_os_error()).context("原子交换新旧 App 失败");
     }
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn swap_app_bundles(left: &Path, right: &Path) -> anyhow::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let left = CString::new(left.as_os_str().as_bytes())?;
-    let right = CString::new(right.as_os_str().as_bytes())?;
-    if unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            left.as_ptr(),
-            libc::AT_FDCWD,
-            right.as_ptr(),
-            libc::RENAME_EXCHANGE,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error()).context("原子交换新旧 App 失败");
-    }
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn swap_app_bundles(_left: &Path, _right: &Path) -> anyhow::Result<()> {
-    anyhow::bail!("当前平台不支持原子交换 App 目录")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2003,20 +1950,19 @@ fn finalize_pending_update_at(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     use super::swap_app_bundles;
     use super::{
         ApplyingRecoveryState, BundleUseState, CheckOutcome, InstallerAttempt, StagedUpdate,
-        StagedUpdatePhase, UpdateCandidate, UpdateChannel, UpdateFailure, UpdateManifest,
-        UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
+        StagedUpdatePhase, UPDATE_STATE_SCOPE, UpdateCandidate, UpdateChannel, UpdateFailure,
+        UpdateManifest, UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
         acquire_installer_runtime_lease_at, app_fingerprint, begin_staged_update_in_state,
         classify_applying_recovery, classify_bundle_use_output, clear_installer_attempt_in_state,
         clear_preparing_update_in_state, decide_check_outcome, decide_failed_update_check,
         discard_failed_update_locked, failed_update_to_replace, installer_attempt_from_state,
         is_update_available, is_valid_update_id, load_update_state_locked, manifest_version_text,
-        promote_staged_update_in_state, reconcile_update_state_locked,
+        promote_staged_update_in_state, quarantine_update_state, reconcile_update_state_locked,
         record_installer_failure_in_state, release_label_from_url, safe_component, same_update,
-        UPDATE_STATE_SCOPE, quarantine_update_state, save_update_state_locked, validate_download_url,
+        save_update_state_locked, validate_download_url,
     };
     use std::path::PathBuf;
 
@@ -2052,7 +1998,6 @@ mod tests {
         fake_app(root.join("Smelt.app"), executable)
     }
 
-    #[cfg(target_os = "macos")]
     fn signed_test_app(root: &std::path::Path, bundle_id: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -2098,7 +2043,6 @@ mod tests {
         app
     }
 
-    #[cfg(unix)]
     #[test]
     fn installer_gate_blocks_new_gui_before_waiting_for_existing_gui() {
         const TEST_NAME: &str =
@@ -2611,10 +2555,16 @@ mod tests {
         let (scope, key) = UPDATE_STATE_SCOPE;
         smelt_client_store::ClientStore::open(&path)
             .unwrap()
-            .put(scope, key, &serde_json::json!({"staged": "not-a-staged-update"}))
+            .put(
+                scope,
+                key,
+                &serde_json::json!({"staged": "not-a-staged-update"}),
+            )
             .unwrap();
 
-        let error = load_update_state_locked(&path).err().expect("corrupt state must fail");
+        let error = load_update_state_locked(&path)
+            .err()
+            .expect("corrupt state must fail");
         assert!(error.to_string().contains("读取更新状态失败"));
 
         quarantine_update_state(&path).unwrap();
@@ -2655,7 +2605,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_bundle_validation_checks_identity_and_signed_resources() {
         let root = test_root("signed-bundle");
@@ -2753,7 +2702,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn applying_recovery_tracks_the_atomic_exchange_boundary() {
         let root = test_root("classify-atomic-swap");
@@ -2879,7 +2827,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn app_directories_are_exchanged_atomically() {
         let root = std::env::temp_dir().join(format!(
