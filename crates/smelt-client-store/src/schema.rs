@@ -63,6 +63,30 @@ CREATE TABLE pinned_project (
   position INTEGER NOT NULL,
   PRIMARY KEY (runtime_id, root)
 ) WITHOUT ROWID;
+CREATE TABLE session_route (
+  runtime_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  stage_cover TEXT,
+  tool_panel_tab TEXT NOT NULL,
+  tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
+  tool_panel_w REAL NOT NULL,
+  file_tree_selected TEXT,
+  open_file_path TEXT,
+  file_tree_w REAL NOT NULL,
+  file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+  git_tab TEXT NOT NULL,
+  diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+  diff_scope TEXT NOT NULL,
+  PRIMARY KEY (runtime_id, session_id)
+) WITHOUT ROWID;
+CREATE TABLE session_route_path (
+  runtime_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
+  path TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, session_id, kind, path)
+) WITHOUT ROWID;
 CREATE TABLE update_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   current_url TEXT,
@@ -100,8 +124,34 @@ CREATE TABLE runtime_connection (
 ) WITHOUT ROWID;
 ";
 
-/// v1 → v2：折叠、置顶的项目加上所在运行时。v1 时只有本机运行时（空串）。
-const PROJECTS_BY_RUNTIME: &str = "
+/// v1 → v2：折叠、置顶的项目加上所在运行时（v1 时只有本机运行时，空串）；会话的界面
+/// 路由从运行时搬回客户端，新建表。
+const MIGRATE_V1_TO_V2: &str = "
+CREATE TABLE session_route (
+  runtime_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  stage_cover TEXT,
+  tool_panel_tab TEXT NOT NULL,
+  tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
+  tool_panel_w REAL NOT NULL,
+  file_tree_selected TEXT,
+  open_file_path TEXT,
+  file_tree_w REAL NOT NULL,
+  file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+  git_tab TEXT NOT NULL,
+  diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+  diff_scope TEXT NOT NULL,
+  PRIMARY KEY (runtime_id, session_id)
+) WITHOUT ROWID;
+CREATE TABLE session_route_path (
+  runtime_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
+  path TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, session_id, kind, path)
+) WITHOUT ROWID;
+
 CREATE TABLE collapsed_project_v2 (
   runtime_id TEXT NOT NULL,
   root TEXT NOT NULL,
@@ -144,7 +194,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<(), String> {
             }
         }
         1 => transaction
-            .execute_batch(PROJECTS_BY_RUNTIME)
+            .execute_batch(MIGRATE_V1_TO_V2)
             .map_err(|error| error.to_string())?,
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }

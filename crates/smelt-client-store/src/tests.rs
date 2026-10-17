@@ -106,6 +106,55 @@ fn records_round_trip_and_start_empty() {
     cleanup(&path);
 }
 
+fn route(runtime_id: Option<&str>, session_id: &str) -> SessionRouteRecord {
+    SessionRouteRecord {
+        runtime_id: runtime_id.map(str::to_string),
+        session_id: session_id.to_string(),
+        stage_cover: Some("inspector".to_string()),
+        tool_panel_tab: "git".to_string(),
+        tool_panel_open: true,
+        tool_panel_w: 420.0,
+        expanded: vec!["/repo/src".to_string(), "/repo/docs".to_string()],
+        file_tree_selected: Some("/repo/src/main.rs".to_string()),
+        open_file_path: None,
+        file_tree_w: 240.0,
+        file_tree_open: false,
+        pinned_roots: vec!["/repo".to_string()],
+        collapsed_roots: Vec::new(),
+        git_tab: "log".to_string(),
+        diff_split: true,
+        git_tree_collapsed: vec!["src".to_string()],
+        diff_scope: "unstaged".to_string(),
+    }
+}
+
+/// 会话路由整份换：关掉的会话不留；两个运行时上同一个会话 id 各算各的。
+#[test]
+fn session_routes_are_replaced_as_a_whole() {
+    let (store, path) = temp_store();
+    assert!(store.session_routes().unwrap().is_empty());
+
+    let routes = vec![
+        route(None, "s-1"),
+        route(Some("rt-linux"), "s-1"),
+        SessionRouteRecord {
+            stage_cover: None,
+            expanded: Vec::new(),
+            ..route(None, "s-2")
+        },
+    ];
+    store.put_session_routes(&routes).unwrap();
+    let mut read = store.session_routes().unwrap();
+    read.sort_by(|a, b| (&a.runtime_id, &a.session_id).cmp(&(&b.runtime_id, &b.session_id)));
+    let mut expected = routes.clone();
+    expected.sort_by(|a, b| (&a.runtime_id, &a.session_id).cmp(&(&b.runtime_id, &b.session_id)));
+    assert_eq!(read, expected);
+
+    store.put_session_routes(&routes[1..2]).unwrap();
+    assert_eq!(store.session_routes().unwrap(), routes[1..2].to_vec());
+    cleanup(&path);
+}
+
 #[test]
 fn update_state_keeps_the_staged_job_and_its_attempt() {
     let (store, path) = temp_store();
@@ -250,6 +299,8 @@ fn v1_projects_become_local_projects() {
     v1.execute_batch(
         "DROP TABLE collapsed_project;
          DROP TABLE pinned_project;
+         DROP TABLE session_route;
+         DROP TABLE session_route_path;
          CREATE TABLE collapsed_project (root TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
          CREATE TABLE pinned_project (root TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
          INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);

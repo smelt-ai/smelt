@@ -2245,6 +2245,9 @@ struct Workspace {
     active_session: usize,
     /// 冷启动要恢复的活动会话稳定 id。恢复完成前 `active_session` 还不是活列表下标。
     saved_active_session_id: Option<String>,
+    /// 客户端库里记着、还没认领的会话界面路由。运行时的目录到了，按会话 id 填回待恢复
+    /// 的会话；目录还没到的运行时，保存时原样写回。
+    saved_session_routes: HashMap<workspace_persist::SessionRouteKey, SessionRouteArchive>,
     /// 一级 Tab：智能体 / 自动化 / 任务 / 会话。
     nav: WorkspaceNav,
     /// 智能体 / 自动化各自持有编辑器和瞬时错误；Workspace 只组合，不理解控件。
@@ -3084,6 +3087,7 @@ impl Workspace {
             session_manager_tombstones: HashSet::new(),
             workspace_window_active: false,
             saved_active_session_id,
+            saved_session_routes: workspace_persist::load_session_routes(),
             _remote_sessions_sub: None,
             _runtime_hub_sub: None,
             _agent_host_sub: None,

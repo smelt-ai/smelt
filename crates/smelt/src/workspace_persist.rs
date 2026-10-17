@@ -11,7 +11,9 @@ use smelt_runtime_client::protocol::workspace::{
     WorkspaceLoadCall, WorkspaceLoadResult, WorkspaceSaveCall, WorkspaceSaveParams,
 };
 
-use smelt_client_store::ProjectKey;
+use std::collections::HashMap;
+
+use smelt_client_store::{ProjectKey, SessionRouteRecord};
 
 use crate::runtimes::Runtime;
 use crate::{
@@ -446,8 +448,83 @@ impl WorkspaceUiState {
     }
 }
 
-/// 交给运行时的那部分：去掉客户端界面状态。
+/// 会话路由在客户端库里的身份：哪个运行时上的哪个会话。
+pub(crate) type SessionRouteKey = (RuntimeKey, String);
+
+fn sorted_paths(paths: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut paths: Vec<String> = paths.iter().cloned().collect();
+    paths.sort();
+    paths
+}
+
+fn route_record(key: &SessionRouteKey, route: &SessionRouteArchive) -> SessionRouteRecord {
+    use crate::settings::enum_name;
+    SessionRouteRecord {
+        runtime_id: project_key(&key.0, "").runtime_id,
+        session_id: key.1.clone(),
+        stage_cover: route.stage_cover.as_ref().map(enum_name),
+        tool_panel_tab: enum_name(&route.tool_panel_tab),
+        tool_panel_open: route.tool_panel_open,
+        tool_panel_w: route.tool_panel_w,
+        expanded: sorted_paths(&route.expanded),
+        file_tree_selected: route.file_tree_selected.clone(),
+        open_file_path: route.open_file_path.clone(),
+        file_tree_w: route.file_tree_w,
+        file_tree_open: route.file_tree_open,
+        pinned_roots: route.pinned_roots.clone(),
+        collapsed_roots: sorted_paths(&route.collapsed_roots),
+        git_tab: enum_name(&route.git_tab),
+        diff_split: route.diff_split,
+        git_tree_collapsed: sorted_paths(&route.git_tree_collapsed),
+        diff_scope: enum_name(&route.diff_scope),
+    }
+}
+
+/// 认不出的枚举名（别的版本写的）用出厂值。
+fn route_from_record(record: SessionRouteRecord) -> (SessionRouteKey, SessionRouteArchive) {
+    use crate::settings::enum_from_name;
+    let defaults = SessionRouteArchive::default();
+    let runtime = record
+        .runtime_id
+        .map(RuntimeKey::Remote)
+        .unwrap_or(RuntimeKey::Local);
+    let route = SessionRouteArchive {
+        stage_cover: record.stage_cover.as_deref().and_then(enum_from_name),
+        tool_panel_tab: enum_from_name(&record.tool_panel_tab).unwrap_or(defaults.tool_panel_tab),
+        tool_panel_open: record.tool_panel_open,
+        tool_panel_w: record.tool_panel_w,
+        expanded: record.expanded.into_iter().collect(),
+        file_tree_selected: record.file_tree_selected,
+        open_file_path: record.open_file_path,
+        file_tree_w: record.file_tree_w,
+        file_tree_open: record.file_tree_open,
+        pinned_roots: record.pinned_roots,
+        collapsed_roots: record.collapsed_roots.into_iter().collect(),
+        git_tab: enum_from_name(&record.git_tab).unwrap_or(defaults.git_tab),
+        diff_split: record.diff_split,
+        git_tree_collapsed: record.git_tree_collapsed.into_iter().collect(),
+        diff_scope: enum_from_name(&record.diff_scope).unwrap_or(defaults.diff_scope),
+        ..defaults
+    };
+    ((runtime, record.session_id), route)
+}
+
+/// 启动时同步读各会话的界面路由（客户端库，本地，很快）。
+pub(crate) fn load_session_routes() -> HashMap<SessionRouteKey, SessionRouteArchive> {
+    match smelt_client_store::client_store().and_then(|store| store.session_routes()) {
+        Ok(records) => records.into_iter().map(route_from_record).collect(),
+        Err(error) => {
+            eprintln!("[workspace] 读取会话界面状态失败，使用默认值：{error}");
+            HashMap::new()
+        }
+    }
+}
+
+/// 交给运行时的那部分：去掉客户端界面状态（含各会话的路由）。
 fn catalog_document(mut state: WsState) -> WsState {
+    for session in &mut state.sessions {
+        session.route = None;
+    }
     let ui_defaults = WorkspaceUiState::default().into_state();
     state.active_session = ui_defaults.active_session;
     state.active_session_id = None;
@@ -522,8 +599,8 @@ pub(crate) struct WorkspaceCatalogSync {
 /// 一个运行时那份目录的一次提交。主线程构建（纯内存），后台线程提交。
 struct SnapshotJob {
     runtime: Runtime,
-    /// 客户端界面状态只有一份，跟本机那份目录一起写。
-    ui: Option<WorkspaceUiState>,
+    /// 客户端界面状态只有一份，跟本机那份目录一起写；各会话的路由同。
+    ui: Option<(WorkspaceUiState, Vec<SessionRouteRecord>)>,
     document: serde_json::Value,
     catalog: WorkspaceCatalogSync,
     /// 同步发给 smeltd 的侧栏菜单。网关只消费 daemon 订阅，不读工作区快照。
@@ -578,10 +655,15 @@ impl WorkspaceSnapshotWriteQueue {
 ///
 /// 返回 `Some(提示)` 表示目录被别的客户端改过、这边以后不再提交。
 fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
-    if let Some(ui) = &job.ui
-        && let Err(error) = save_workspace_ui(ui)
-    {
-        eprintln!("[workspace] 保存界面状态失败：{error}");
+    if let Some((ui, routes)) = &job.ui {
+        if let Err(error) = save_workspace_ui(ui) {
+            eprintln!("[workspace] 保存界面状态失败：{error}");
+        }
+        if let Err(error) =
+            smelt_client_store::client_store().and_then(|store| store.put_session_routes(routes))
+        {
+            eprintln!("[workspace] 保存会话界面状态失败：{error}");
+        }
     }
     let mut notice = None;
     if !job.catalog.blocked.load(Ordering::Acquire) {
@@ -796,7 +878,18 @@ impl Workspace {
             state.active_session = self.startup_active_session;
             state.active_session_id = self.saved_active_session_id.clone();
         }
-        let (pending, active) = normalize_saved_sessions(&state);
+        let (mut pending, active) = normalize_saved_sessions(&state);
+        // 会话的界面路由存在客户端：按会话 id 填回来。这个运行时剩下没认领的是关掉的
+        // 会话留下的，丢掉。
+        for session in &mut pending {
+            if let Some(id) = crate::session_state_persist_id(session)
+                && let Some(route) = self.saved_session_routes.remove(&(key.clone(), id))
+            {
+                session.route = Some(route);
+            }
+        }
+        self.saved_session_routes
+            .retain(|(runtime, _), _| runtime != key);
         let saved_active_session_id = if is_local {
             state
                 .active_session_id
@@ -1010,25 +1103,10 @@ impl Workspace {
             ..Default::default()
         };
         let ui = (*key == RuntimeKey::Local).then(|| {
-            let mut ui = WorkspaceUiState::from_state(&state);
-            for space_key in self.space_keys() {
-                let Some(space) = self.space(&space_key) else {
-                    continue;
-                };
-                ui.collapsed_projects.extend(
-                    space
-                        .collapsed_projects
-                        .iter()
-                        .map(|root| project_key(&space_key, root)),
-                );
-                ui.pinned_projects.extend(
-                    space
-                        .pinned_projects
-                        .iter()
-                        .map(|root| project_key(&space_key, root)),
-                );
-            }
-            ui
+            (
+                self.workspace_ui_state(&state),
+                self.session_route_records(cx),
+            )
         });
         let document = serde_json::to_value(catalog_document(state)).ok()?;
         Some(SnapshotJob {
@@ -1038,6 +1116,65 @@ impl Workspace {
             catalog: space.catalog.clone(),
             menu,
         })
+    }
+
+    /// 客户端界面状态：折叠、置顶按运行时收齐。
+    fn workspace_ui_state(&self, state: &WsState) -> WorkspaceUiState {
+        let mut ui = WorkspaceUiState::from_state(state);
+        for space_key in self.space_keys() {
+            let Some(space) = self.space(&space_key) else {
+                continue;
+            };
+            ui.collapsed_projects.extend(
+                space
+                    .collapsed_projects
+                    .iter()
+                    .map(|root| project_key(&space_key, root)),
+            );
+            ui.pinned_projects.extend(
+                space
+                    .pinned_projects
+                    .iter()
+                    .map(|root| project_key(&space_key, root)),
+            );
+        }
+        ui
+    }
+
+    /// 各会话的界面路由：开着的会话、还没恢复上来的会话，以及目录还没读到的运行时上
+    /// 记着的那些（不能因为它离线就把路由冲掉）。
+    fn session_route_records(&self, cx: &App) -> Vec<SessionRouteRecord> {
+        let mut records: HashMap<SessionRouteKey, SessionRouteRecord> = HashMap::new();
+        for (key, route) in &self.saved_session_routes {
+            records.insert(key.clone(), route_record(key, route));
+        }
+        for space_key in self.space_keys() {
+            let Some(space) = self.space(&space_key) else {
+                continue;
+            };
+            for (_, session) in &space.restore_pending {
+                if let (Some(id), Some(route)) =
+                    (crate::session_state_persist_id(session), &session.route)
+                {
+                    let key = (space_key.clone(), id);
+                    records.insert(key.clone(), route_record(&key, route));
+                }
+            }
+        }
+        for session in &self.sessions {
+            let Some(id) = crate::live_session_persist_id(session, cx).filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let route = if self.ui_session_id == Some(session.ui_id) {
+                self.active_session_ui.archive()
+            } else {
+                session.ui_state.archive()
+            };
+            let key = (session.runtime(cx).key().clone(), id);
+            records.insert(key.clone(), route_record(&key, &route));
+        }
+        records.into_values().collect()
     }
 
     /// 退出阶段强制构建一份最新快照，并等待现有写盘循环自然清空。不能把 pending
@@ -1103,7 +1240,8 @@ mod workspace_snapshot_write_queue_tests {
 mod agent_conversation_persist_tests {
     use super::{
         RuntimeKey, WorkspaceUiState, WsState, catalog_document, persist_in_workspace_snapshot,
-        project_key, project_roots_of, unproject_acp_when_remote_catalog_drops,
+        project_key, project_roots_of, route_from_record, route_record,
+        unproject_acp_when_remote_catalog_drops,
     };
     use std::path::PathBuf;
 
@@ -1220,6 +1358,53 @@ mod agent_conversation_persist_tests {
         let restored = ui.into_state();
         assert_eq!(restored.sidebar_w, Some(320.0));
         assert_eq!(restored.active_session_id.as_deref(), Some("acp-1"));
+    }
+
+    /// 会话路由存进客户端库再读回来一样不少；交给运行时的文档里不带路由。
+    #[test]
+    fn session_routes_live_in_the_client_store() {
+        let mut route = crate::SessionRouteArchive {
+            stage_cover: Some(crate::StageCover::ToolPanel),
+            tool_panel_tab: crate::tool_panel::ToolPanelTab::Git,
+            tool_panel_open: true,
+            tool_panel_w: 420.0,
+            file_tree_selected: Some("/srv/app/main.rs".into()),
+            file_tree_open: false,
+            pinned_roots: vec!["/srv/app".into(), "/srv/lib".into()],
+            git_tab: crate::GitTab::Log,
+            diff_split: true,
+            diff_scope: crate::git_panel::DiffScope::Staged,
+            ..Default::default()
+        };
+        route.expanded.insert("/srv/app/src".into());
+        route.git_tree_collapsed.insert("src".into());
+        let key = (RuntimeKey::Remote("rt-linux".into()), "acp-1".to_string());
+
+        let (back_key, back) = route_from_record(route_record(&key, &route));
+        assert_eq!(back_key, key);
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(&route).unwrap()
+        );
+
+        let state = WsState {
+            sessions: vec![crate::SessionState {
+                layout: crate::PaneState::Leaf {
+                    cwd: Some("/srv/app".into()),
+                    id: Some("t-1".into()),
+                    custom_title: None,
+                    launch_label: None,
+                    launch_cmd: None,
+                },
+                active: 0,
+                last_updated_at: 0,
+                custom_title: None,
+                acp: None,
+                route: Some(route),
+            }],
+            ..Default::default()
+        };
+        assert!(catalog_document(state).sessions[0].route.is_none());
     }
 
     /// 折叠、置顶的项目按运行时存：同一个路径在两台机器上是两个项目。
