@@ -216,6 +216,35 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::AgentHostGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::agent_host::load() {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentHostApplyEdit => {
+            let edit: smelt_core::agent_host::AgentHostEdit =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::agent_host::apply_edit(&edit) {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
         ControlMethod::SessionList => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

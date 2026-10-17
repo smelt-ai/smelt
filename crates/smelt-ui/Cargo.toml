@@ -13,6 +13,9 @@ workspace = true
 [dependencies]
 smelt-core = { path = "../smelt-core" }
 smelt-store = { path = "../smelt-store" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+# 智能体配置的修改按顺序排队提交给运行时（agent_host_state）。
+smol = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui = { package = "gpui-pre", version = "=0.3.9" }

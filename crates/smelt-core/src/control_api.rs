@@ -8,10 +8,31 @@ use serde::{Deserialize, Serialize};
 use smelt_runtime_client::protocol::control::{ControlCall, ControlMethod, EmptyParams};
 
 use crate::agent_bus::AgentEndpoint;
+use crate::agent_host::{AgentHostEdit, AgentHostSettings};
 use crate::agent_definition::AgentDefinition;
 use crate::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
 use crate::appearance_settings::{SettingsPatch, SettingsResult};
 use crate::automation::{Automation, AutomationCommandResult};
+
+/// 运行时的智能体宿主配置（各家 CLI 命令、环境变量、profile、开关、智能体定义）。
+pub enum AgentHostGet {}
+
+impl ControlCall for AgentHostGet {
+    type Params = EmptyParams;
+    type Result = AgentHostSettings;
+
+    const METHOD: ControlMethod = ControlMethod::AgentHostGet;
+}
+
+/// 把客户端的一次修改合并进运行时配置，返回合并后的整份。
+pub enum AgentHostApplyEdit {}
+
+impl ControlCall for AgentHostApplyEdit {
+    type Params = AgentHostEdit;
+    type Result = AgentHostSettings;
+
+    const METHOD: ControlMethod = ControlMethod::AgentHostApplyEdit;
+}
 
 pub enum SessionList {}
 

@@ -697,8 +697,9 @@ pub use smelt_core::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
 pub use smelt_ui::agent_host_state::{
-    AgentDefinition, AgentHostState, apply_agent_host, load_agent_host_state,
-    reload_agent_definitions, try_apply_agent_host,
+    AgentDefinition, AgentHostState, agent_host_loaded, apply_agent_host,
+    initial_agent_host_state, reload_agent_definitions, start_agent_host_load,
+    try_apply_agent_host,
 };
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,

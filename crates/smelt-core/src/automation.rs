@@ -402,17 +402,33 @@ impl AutomationTrigger {
     }
 }
 
+/// 投影里代替 webhook 令牌的占位。
+const REDACTED_WEBHOOK_ENDPOINT: &str = "<redacted>";
+
 /// 列表/CLI 投影用：去掉 webhook 令牌，只保留「有外部触发」这个事实。
 pub fn redact_automation_credentials(mut file: AutomationFile) -> AutomationFile {
     for automation in &mut file.automations {
         for webhook in &mut automation.trigger.webhooks {
             if webhook_ingress_token(webhook).is_some() {
-                webhook.endpoint = "<redacted>".into();
+                webhook.endpoint = REDACTED_WEBHOOK_ENDPOINT.into();
                 webhook.secret = None;
             }
         }
     }
     file
+}
+
+/// 客户端拿到的是去掉令牌的投影，改完提交回来时令牌位还是占位。按位置换回库里
+/// 那份真令牌，否则一次改名就会把 webhook 地址改坏。
+fn restore_redacted_webhooks(incoming: &mut Automation, stored: &Automation) {
+    for (index, webhook) in incoming.trigger.webhooks.iter_mut().enumerate() {
+        if webhook.endpoint == REDACTED_WEBHOOK_ENDPOINT
+            && webhook.secret.is_none()
+            && let Some(original) = stored.trigger.webhooks.get(index)
+        {
+            *webhook = original.clone();
+        }
+    }
 }
 
 fn webhook_ingress_token(webhook: &WebhookIngress) -> Option<&str> {
@@ -1465,11 +1481,14 @@ where
         AutomationCommand::Upsert { automation } => {
             automation.validate_execution_context()?;
             automation.validate_scheduled_instruction()?;
-            let automation = *automation;
+            let mut automation = *automation;
             let existing = file
                 .automations
                 .iter()
                 .position(|candidate| candidate.id == automation.id);
+            if let Some(index) = existing {
+                restore_redacted_webhooks(&mut automation, &file.automations[index]);
+            }
             let changed = existing
                 .map(|index| file.automations[index] != automation)
                 .unwrap_or(true);
@@ -1999,4 +2018,45 @@ fn new_store_id() -> String {
 
 const fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    fn webhook_automation() -> Automation {
+        Automation {
+            id: "automation-1".into(),
+            name: "Report".into(),
+            enabled: true,
+            workspace_dir: Some("/tmp".into()),
+            trigger: AutomationTrigger::webhook_with_secret("secret-token"),
+            action: AutomationAction::Agent {
+                agent_definition_id: "agent-1".into(),
+                prompt: Some("Run".into()),
+            },
+            sinks: Vec::new(),
+        }
+    }
+
+    /// 客户端只见过去掉令牌的投影；拿它改个名字提交回来，令牌不能被占位冲掉。
+    #[test]
+    fn editing_a_redacted_projection_keeps_the_stored_webhook_token() {
+        let stored = webhook_automation();
+        let projection = redact_automation_credentials(AutomationFile {
+            automations: vec![stored.clone()],
+            ..Default::default()
+        });
+        let mut edited = projection.automations[0].clone();
+        edited.name = "Renamed".into();
+        assert_eq!(
+            edited.trigger.webhooks[0].endpoint,
+            REDACTED_WEBHOOK_ENDPOINT
+        );
+
+        restore_redacted_webhooks(&mut edited, &stored);
+
+        assert_eq!(edited.name, "Renamed");
+        assert_eq!(edited.trigger.webhooks, stored.trigger.webhooks);
+    }
 }

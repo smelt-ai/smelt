@@ -159,6 +159,20 @@ impl Workspace {
             if daemon_ready_rx.recv().await.is_err() {
                 return;
             }
+            // ACP 会话的启动命令、profile、智能体定义来自运行时的配置；没读到之前
+            // 拼出来的是出厂命令，用户配的命令和环境变量会全部失效。守护已经就绪，
+            // 正常一次往返就到。
+            loop {
+                match this.update(cx, |_, cx| settings::agent_host_loaded(cx)) {
+                    Ok(true) => break,
+                    Ok(false) => {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(50))
+                            .await
+                    }
+                    Err(_) => return,
+                }
+            }
             if this
                 .update_in(cx, |this, window, cx| {
                     for (original_index, ss) in acp_saved {
@@ -1065,6 +1079,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 启动命令、profile、智能体定义都来自运行时的配置。还没读到就不起会话：
+        // 按出厂命令启动的话，用户配的命令和环境变量全不生效。
+        if !settings::agent_host_loaded(cx) {
+            crate::status_item::notify_error("正在读取运行时的智能体配置，请稍后再试");
+            return;
+        }
         let NewAcpSessionRequest {
             agent,
             launch_override,

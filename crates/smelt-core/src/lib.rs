@@ -13,6 +13,7 @@ pub mod agent_bus;
 pub mod agent_definition;
 pub mod agent_definition_store;
 pub mod agent_event;
+pub mod agent_host;
 pub mod agent_kind;
 pub mod agent_memory;
 pub mod agent_status;

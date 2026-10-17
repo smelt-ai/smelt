@@ -1445,7 +1445,7 @@ pub fn format_env_lines(env: &BTreeMap<String, String>) -> String {
 /// （比如 Claude 的 `CLAUDE_CONFIG_DIR`）。命令不用手填——按 `kind` 的出厂命令
 /// 加一段 `ENV=workspace_dir` 前缀自动拼出来（见 `command()`），用户只需要选
 /// agent 类型 + 填目录，不用记环境变量名和 shell 语法。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AcpProfile {
     /// 稳定 id（新建时生成，不随 label/kind 改变），历史会话页拿它当 tab key、
     /// 区分"同一个 kind 下的哪一个 workspace"。
