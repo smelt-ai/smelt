@@ -4,20 +4,8 @@
 //! 运行时执行；客户端只拿状态、发安装 / 卸载请求。`smelt-notify` 由安装运行时的
 //! 那一步放到 `~/.smelt/bin`，这里只引用它。
 
-use serde::{Deserialize, Serialize};
+pub use smelt_model::agent_hooks::*;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HookProviderStatus {
-    pub label: String,
-    pub installed: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentHooksStatus {
-    pub providers: Vec<HookProviderStatus>,
-    /// hooks 调用的 `smelt-notify` 在运行时那台机器上的路径。
-    pub notify_path: String,
-}
 
 type HookOperation = fn() -> Result<(), String>;
 

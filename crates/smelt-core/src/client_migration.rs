@@ -4,20 +4,9 @@
 //! 自己的 `client.sqlite3`。升级后第一次启动时客户端库是空的，桌面经这个方法取一次
 //! 旧值。旧行留在运行时库里不再被读写，不影响任何功能。
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+pub use smelt_model::client_migration::*;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct LegacyClientState {
-    /// 字段名和桌面的外观结构一致（`bg_color`、`theme_name`……）。
-    pub appearance: Option<Value>,
-    /// `{channel, auto_install}`。
-    pub update_settings: Option<Value>,
-    /// `{approval, input, success, failure, terminal_bell}`。
-    pub notify_prefs: Option<Value>,
-    /// 侧栏、当前页、Dock 布局等。可能是整份旧工作区文档，客户端只取它认得的字段。
-    pub workspace_ui: Option<Value>,
-}
+use serde_json::{Value, json};
 
 fn kv_json(store: &smelt_store::Store, namespace: &str, key: &str) -> Option<Value> {
     let raw = store.get_blob(namespace, key).ok()??;
