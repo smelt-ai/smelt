@@ -1814,7 +1814,20 @@ impl Workspace {
     /// 「打开项目」：在运行时那台机器上选一个目录，加进项目列表。**不自动建会话**——
     /// 打开项目只是把它放上工作台，要开终端还是开对话由分组行的「+」决定。
     pub(crate) fn open_project(&mut self, cx: &mut Context<Self>) {
-        self.open_dir_picker(crate::dir_picker::DirPickerPurpose::OpenProject, cx);
+        self.open_project_on(crate::runtimes::Runtime::local(), cx);
+    }
+
+    /// 在某个运行时上打开项目（侧栏运行时标题行的「+」）。
+    pub(crate) fn open_project_on(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_dir_picker(
+            runtime,
+            crate::dir_picker::DirPickerPurpose::OpenProject,
+            cx,
+        );
     }
 
     /// 从 Finder 拖入的路径 = 打开项目：文件夹直接用，文件取其父目录，各加一条项目。

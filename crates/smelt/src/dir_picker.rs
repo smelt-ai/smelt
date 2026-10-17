@@ -55,6 +55,8 @@ impl DirPickerPurpose {
 }
 
 pub(crate) struct DirPickerState {
+    /// 在哪个运行时那台机器上选。
+    runtime: crate::runtimes::Runtime,
     purpose: DirPickerPurpose,
     /// 当前列出的目录。`None` 表示还没列过（从主目录开始）。
     listing: Option<Result<BrowseDirsResult, String>>,
@@ -66,8 +68,14 @@ pub(crate) struct DirPickerState {
 }
 
 impl Workspace {
-    pub(crate) fn open_dir_picker(&mut self, purpose: DirPickerPurpose, cx: &mut Context<Self>) {
+    pub(crate) fn open_dir_picker(
+        &mut self,
+        runtime: crate::runtimes::Runtime,
+        purpose: DirPickerPurpose,
+        cx: &mut Context<Self>,
+    ) {
         self.dir_picker = Some(DirPickerState {
+            runtime,
             purpose,
             listing: None,
             loading: false,
@@ -93,6 +101,7 @@ impl Workspace {
             picker.selected.clear();
         }
         let generation = picker.generation;
+        let client = picker.runtime.client().clone();
         let params = BrowseDirsParams {
             path,
             include_files: picker.purpose.include_files(),
@@ -102,11 +111,12 @@ impl Workspace {
             let listed = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::runtime_call::call::<WorkspaceBrowseDirsCall>(
-                        params,
-                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                    )
-                    .map_err(crate::runtime_call::error_text)
+                    client
+                        .call::<WorkspaceBrowseDirsCall>(
+                            &params,
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .map_err(crate::runtime_call::error_text)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -168,7 +178,7 @@ impl Workspace {
         match picker.purpose {
             DirPickerPurpose::OpenProject => {
                 if let Some(dir) = chosen.into_iter().next() {
-                    self.add_project(crate::RuntimeKey::Local, dir, cx);
+                    self.add_project(picker.runtime.key().clone(), dir, cx);
                 }
             }
             DirPickerPurpose::AgentContextFolders { agent_id } => {
@@ -336,7 +346,18 @@ impl Workspace {
             (DirPickerPurpose::OpenProject, _) => "打开当前目录",
         };
         let content = v_flex()
-            .child(Self::modal_title(fg, picker.purpose.title()))
+            .child(Self::modal_title(
+                fg,
+                if picker.runtime.is_local() {
+                    picker.purpose.title().to_string()
+                } else {
+                    format!(
+                        "{}（{}）",
+                        picker.purpose.title(),
+                        crate::runtimes::runtime_name(picker.runtime.key(), cx)
+                    )
+                },
+            ))
             .child(toolbar)
             .child(body)
             .when(multiple && !picker.selected.is_empty(), |content| {

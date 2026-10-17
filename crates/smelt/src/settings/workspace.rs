@@ -2167,7 +2167,11 @@ impl Workspace {
         kind: smelt_model::pi_plugin_catalog::PiPluginKind,
         cx: &mut Context<Self>,
     ) {
-        self.open_dir_picker(crate::dir_picker::DirPickerPurpose::PluginImport { kind }, cx);
+        self.open_dir_picker(
+            crate::runtimes::Runtime::local(),
+            crate::dir_picker::DirPickerPurpose::PluginImport { kind },
+            cx,
+        );
     }
 
     pub(crate) fn import_pi_plugin_from(

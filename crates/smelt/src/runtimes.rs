@@ -22,6 +22,37 @@ pub(crate) fn connect_terminal(
     }
 }
 
+/// 给人看的运行时名字：本机就叫本机，远程用配对时记下的主机名。
+pub(crate) fn runtime_name(key: &RuntimeKey, cx: &gpui::App) -> String {
+    match key {
+        RuntimeKey::Local => "本机".to_string(),
+        RuntimeKey::Remote(id) => cx
+            .try_global::<RuntimeHub>()
+            .and_then(|hub| {
+                hub.remotes
+                    .iter()
+                    .find(|remote| remote.runtime.key() == key)
+            })
+            .map(|remote| remote.connection.name.clone())
+            .unwrap_or_else(|| id.clone()),
+    }
+}
+
+/// 远程运行时现在连得上吗（按最近一次探测）。本机总算在线。
+pub(crate) fn runtime_online(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    match key {
+        RuntimeKey::Local => true,
+        RuntimeKey::Remote(_) => cx
+            .try_global::<RuntimeHub>()
+            .and_then(|hub| {
+                hub.remotes
+                    .iter()
+                    .find(|remote| remote.runtime.key() == key)
+            })
+            .is_some_and(|remote| matches!(remote.status, RuntimeStatus::Online { .. })),
+    }
+}
+
 fn remote_runtime(runtime_id: &str, client: RuntimeClient) -> Runtime {
     Runtime::new(RuntimeKey::Remote(runtime_id.to_string()), client)
 }

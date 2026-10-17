@@ -194,6 +194,7 @@ impl Workspace {
     /// 机器上，用运行时目录选择器选。
     pub(super) fn pick_agent_context_folders(&mut self, agent_id: String, cx: &mut Context<Self>) {
         self.open_dir_picker(
+            crate::runtimes::Runtime::local(),
             crate::dir_picker::DirPickerPurpose::AgentContextFolders { agent_id },
             cx,
         );

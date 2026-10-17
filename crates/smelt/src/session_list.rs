@@ -69,26 +69,19 @@ fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
     (ElementId::from(name), key).into()
 }
 
-/// 侧栏里一段运行时的标题：名字和在线状态。
-fn runtime_section_header(runtime: &RuntimeKey, cx: &App) -> Div {
-    let (name, online) = match runtime {
-        RuntimeKey::Local => ("本机".to_string(), true),
-        RuntimeKey::Remote(id) => cx
-            .try_global::<crate::runtimes::RuntimeHub>()
-            .and_then(|hub| {
-                hub.remotes
-                    .iter()
-                    .find(|remote| remote.runtime.key() == runtime)
-            })
-            .map(|remote| {
-                (
-                    remote.connection.name.clone(),
-                    matches!(remote.status, crate::runtimes::RuntimeStatus::Online { .. }),
-                )
-            })
-            .unwrap_or_else(|| (id.clone(), false)),
-    };
+/// 侧栏里一段运行时的标题：名字、在线状态，hover 出「在这台机器上打开项目」。
+fn runtime_section_header(
+    runtime: crate::runtimes::Runtime,
+    workspace: Entity<Workspace>,
+    cx: &App,
+) -> Stateful<Div> {
+    let key = runtime.key().clone();
+    let name = crate::runtimes::runtime_name(&key, cx);
+    let online = crate::runtimes::runtime_online(&key, cx);
+    let group = SharedString::from(format!("runtime-header-{key:?}"));
     div()
+        .id(ElementId::from(group.clone()))
+        .group(group.clone())
         .mx_2()
         .mt_3()
         .px_3()
@@ -104,6 +97,22 @@ fn runtime_section_header(runtime: &RuntimeKey, cx: &App) -> Div {
         })))
         .child(name)
         .when(!online, |d| d.child("· 离线"))
+        .child(div().flex_1())
+        .child(
+            Button::new(ElementId::from(SharedString::from(format!(
+                "runtime-open-project-{key:?}"
+            ))))
+            .ghost()
+            .xsmall()
+            .icon(IconName::Plus)
+            .icon_action("打开项目")
+            .opacity(0.0)
+            .group_hover(group, |style| style.opacity(1.0))
+            .on_click(move |_ev, _window, cx| {
+                let runtime = runtime.clone();
+                workspace.update(cx, |ws, cx| ws.open_project_on(runtime, cx));
+            }),
+        )
 }
 
 /// 远程项目的右键菜单：复制路径、置顶、关闭。
@@ -453,16 +462,33 @@ impl Workspace {
         };
         let mut hidden_empty = 0usize;
         let mut visible_ix = 0usize;
-        let show_runtime_headers = !self.remote_spaces.is_empty();
-        let mut section_runtime: Option<RuntimeKey> = None;
+        // ---- 运行时标题行：挂了远程运行时才分段 ----
+        // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
+        // 「打开项目」就在上面。
+        let mut headers_left: std::collections::VecDeque<crate::runtimes::Runtime> =
+            if self.remote_spaces.is_empty() {
+                Default::default()
+            } else {
+                self.space_keys()
+                    .iter()
+                    .filter_map(|key| self.space(key).map(|space| space.runtime.clone()))
+                    .collect()
+            };
         for group in groups.iter() {
             let Some(space) = self.space(&group.runtime) else {
                 continue;
             };
-            // ---- 运行时标题行：挂了远程运行时才分段 ----
-            if show_runtime_headers && section_runtime.as_ref() != Some(&group.runtime) {
-                section_runtime = Some(group.runtime.clone());
-                rows = rows.child(runtime_section_header(&group.runtime, cx));
+            if headers_left
+                .iter()
+                .any(|runtime| runtime.key() == &group.runtime)
+            {
+                while let Some(runtime) = headers_left.pop_front() {
+                    let reached = runtime.key() == &group.runtime;
+                    rows = rows.child(runtime_section_header(runtime, this.clone(), cx));
+                    if reached {
+                        break;
+                    }
+                }
             }
             let is_project_group = grouping == SidebarGrouping::Project;
             // ---- 项目分组标题行 ----
@@ -1608,6 +1634,10 @@ impl Workspace {
                 )
                 .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
             );
+        }
+
+        for runtime in headers_left {
+            rows = rows.child(runtime_section_header(runtime, this.clone(), cx));
         }
 
         if hidden_empty > 0 {
