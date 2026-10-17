@@ -16,6 +16,7 @@ test-support = []
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
 smelt-sys = { path = "../smelt-sys" }
+smelt-model = { path = "../smelt-model" }
 smelt-store = { path = "../smelt-store" }
 smelt-event-protocol = { path = "../smelt-event-protocol" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }

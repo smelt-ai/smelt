@@ -9703,6 +9703,7 @@ dependencies = [
  "shell-words",
  "similar",
  "smelt-event-protocol",
+ "smelt-model",
  "smelt-paths",
  "smelt-runtime-client",
  "smelt-store",
@@ -9756,6 +9757,24 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "smelt-model"
+version = "0.9.0"
+dependencies = [
+ "agent-client-protocol",
+ "alacritty_terminal",
+ "base64",
+ "chrono",
+ "chrono-tz",
+ "dirs",
+ "semver",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
