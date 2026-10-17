@@ -91,8 +91,8 @@ pub fn stored_new_session_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_kind::{ConversationAgentKind, TerminalAgentKind};
     use crate::agent_kind::ConversationLaunchSpec;
+    use crate::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 
     fn option(id: &str, kind: ConversationAgentKind, label: &str) -> AcpAgentOption {
         AcpAgentOption {

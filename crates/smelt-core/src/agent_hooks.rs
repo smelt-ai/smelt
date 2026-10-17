@@ -6,7 +6,6 @@
 
 pub use smelt_model::agent_hooks::*;
 
-
 type HookOperation = fn() -> Result<(), String>;
 
 struct HookIntegration {

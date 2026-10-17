@@ -7,7 +7,6 @@ pub use smelt_model::appearance_settings::*;
 
 use std::collections::BTreeMap;
 
-
 use crate::sqlite_state;
 
 /// 运行时这边能直接回答的设置：记忆的向量检索配置。外观归客户端（设计文档 D1），

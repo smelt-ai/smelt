@@ -110,7 +110,10 @@ fn ensure_remote_running() -> Result<(), String> {
     use smelt_runtime_client::protocol::control::EmptyParams;
 
     let mut state = call::<RemoteStatus>(&EmptyParams::default())?;
-    if matches!(state, RemoteAccessState::Off | RemoteAccessState::Failed { .. }) {
+    if matches!(
+        state,
+        RemoteAccessState::Off | RemoteAccessState::Failed { .. }
+    ) {
         let mut config = call::<RemoteConfigGet>(&EmptyParams::default())?;
         if !config.enabled {
             config.enabled = true;
@@ -218,9 +221,10 @@ fn unit_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-/// 单元文件内容。`ExecStart` 用解析过软链的绝对路径：升级时 smeltd 在原进程里 exec
-/// 新映像，systemd 只管这一个进程。`KillMode=process`：停服务只停守护本身，会话里的
-/// agent 子进程由守护自己收拾，避免 systemd 连同终端里的进程一起杀掉。
+/// 单元文件内容。`ExecStart` 是启动名 `~/.smelt/bin/smeltd` 本身（指向当前不可变映像
+/// 的软链），不解析：升级时 smeltd 在原进程里 exec 新映像、交接提交后拨启动名，
+/// 之后 systemd 重启拉起的就是新版本。`KillMode=process`：停服务只停守护本身，会话里
+/// 的 agent 子进程由守护自己收拾，避免 systemd 连同终端里的进程一起杀掉。
 fn unit_contents(exe: &Path) -> String {
     format!(
         "[Unit]
@@ -230,6 +234,8 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart={exe}
+# 升级时 smeltd 拉起 successor 再退出，退出前用 MAINPID= 把主进程交过去。
+NotifyAccess=main
 Restart=on-failure
 RestartSec=2
 KillMode=process
@@ -259,11 +265,65 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// 把正在执行的这份 smeltd 装进 `~/.smelt/bin`，用和桌面同一套受管布局：发布成不可变
+/// 映像 `smeltd-<指纹>`，启动名 `smeltd` 是指向它的软链。运行时已经在跑就请它交接到
+/// 新映像（会话保留），正忙就挂在 `smeltd.pending`，空闲时它自己换。
+#[cfg(target_os = "linux")]
+fn install_image() -> Result<PathBuf, String> {
+    use smelt_core::daemon_image;
+
+    let exe =
+        std::env::current_exe().map_err(|error| format!("找不到 smeltd 自身路径：{error}"))?;
+    let dir = smelt_paths::smelt_home()
+        .ok_or_else(|| "找不到 $HOME".to_string())?
+        .join("bin");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+    let launch = dir.join("smeltd");
+    let image = daemon_image::publish_image(&dir, &exe)
+        .map_err(|error| format!("发布 smeltd 映像失败：{error}"))?;
+    let installed = std::fs::canonicalize(&launch).ok() == std::fs::canonicalize(&image).ok();
+    let running = smelt_runtime_client::local::local_runtime()
+        .describe()
+        .is_ok();
+    if installed {
+        println!("这个版本已经装好了");
+    } else if running {
+        daemon_image::retarget_pending_symlink(&dir, &image)
+            .map_err(|error| format!("挂上 smeltd.pending 失败：{error}"))?;
+        match crate::request_self_upgrade(&image) {
+            crate::SelfUpgradeOutcome::Upgraded => println!("运行时已换到新版本，会话都保留着"),
+            crate::SelfUpgradeOutcome::Busy(reason) => {
+                println!("运行时正忙（{reason}），空闲时会自己换到新版本")
+            }
+            crate::SelfUpgradeOutcome::Failed(error) => {
+                return Err(format!("运行时换到新版本失败：{error}"));
+            }
+        }
+    } else {
+        daemon_image::retarget_launch_after_commit(&image)
+            .map_err(|error| format!("设置启动名失败：{error}"))?;
+    }
+    if let Err(error) = daemon_image::reap_unused_images(&dir) {
+        eprintln!("回收旧映像失败：{error}");
+    }
+    Ok(launch)
+}
+
 #[cfg(target_os = "linux")]
 fn install() -> Result<(), String> {
-    let exe = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|error| format!("找不到 smeltd 自身路径：{error}"))?;
+    // 已经在跑、却不归 systemd 管（手动起的）：收编不进来，装上去也只是两个实例抢锁。
+    if smelt_runtime_client::local::local_runtime()
+        .describe()
+        .is_ok()
+        && !unit_active()
+    {
+        return Err(
+            "运行时正在 systemd 之外运行（smeltd status 看 pid）。先停掉它再装；它的会话会随之结束"
+                .to_string(),
+        );
+    }
+    let exe = install_image()?;
     let unit = unit_path()?;
     if let Some(dir) = unit.parent() {
         std::fs::create_dir_all(dir)
@@ -299,6 +359,14 @@ fn uninstall() -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+fn unit_active() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", UNIT_NAME])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "linux")]
 fn whoami() -> String {
     std::env::var("USER").unwrap_or_else(|_| "$USER".to_string())
 }
@@ -318,6 +386,34 @@ fn uninstall() -> Result<(), String> {
     Err("只有 Linux 上才有 systemd 服务可移除".to_string())
 }
 
+/// 告诉 systemd 主进程换成了 `pid`。不是 systemd 拉起的（没有 `NOTIFY_SOCKET`）就什么都
+/// 不做。协议见 sd_notify(3)：往这个 datagram socket 发 `MAINPID=<pid>`。
+#[cfg(target_os = "linux")]
+pub(crate) fn notify_main_pid(pid: u32) {
+    use std::os::linux::net::SocketAddrExt as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+
+    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    let message = format!("MAINPID={pid}");
+    let sent = UnixDatagram::unbound().and_then(|socket| {
+        let bytes = path.as_bytes();
+        let addr = match bytes.strip_prefix(b"@") {
+            Some(name) => SocketAddr::from_abstract_name(name)?,
+            None => SocketAddr::from_pathname(&path)?,
+        };
+        socket.send_to_addr(message.as_bytes(), &addr)
+    });
+    if let Err(error) = sent {
+        crate::dlog(&format!("通知 systemd 主进程换成 {pid} 失败：{error}"));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn notify_main_pid(_pid: u32) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +423,7 @@ mod tests {
         let unit = unit_contents(Path::new("/home/me/.smelt/bin/smeltd"));
         assert!(unit.contains("ExecStart=/home/me/.smelt/bin/smeltd\n"));
         assert!(unit.contains("KillMode=process"));
+        assert!(unit.contains("NotifyAccess=main"));
         assert!(unit.contains("WantedBy=default.target"));
     }
 

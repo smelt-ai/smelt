@@ -1,8 +1,8 @@
 //! `pi.auth.*` 的线上数据。登录会话在运行时。
 
-use serde::{Deserialize, Serialize};
 use crate::pi_auth::{PiAuthProvider, PiLoginEvent, PiLoginMethod};
 use crate::provider_api::DiscoveredModel;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvidersResult {

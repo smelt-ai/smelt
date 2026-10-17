@@ -19,9 +19,9 @@ pub struct AppearanceSnapshot {
     pub font_family: String,
 }
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 pub const THEME_MODE: &str = "appearance.theme_mode";
 

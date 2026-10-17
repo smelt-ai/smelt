@@ -1162,10 +1162,6 @@ impl SessionLive {
         }
     }
 
-
-
-
-
     /// 从 `live` 对象或快照对象里取出活状态。相位只认当前 snake_case。
     pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
         let phase_value = value.get("phase").ok_or_else(|| "缺少相位".to_string())?;

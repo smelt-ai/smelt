@@ -1,6 +1,5 @@
 //! 能查额度的 Pi 订阅 provider 白名单。读凭据、查询在运行时。
 
-
 /// `auth.json` 里哪个字段才是额度接口要的令牌。
 ///
 /// 这个区分不是风格问题：Pi 的 `github-copilot` 把 GitHub OAuth 令牌存在

@@ -148,6 +148,7 @@ mod acp_runtime_host;
 mod agent_memory_control;
 mod automation_runtime;
 mod control;
+mod devices;
 mod dsh_control;
 mod event_hub;
 mod files_control;
@@ -158,7 +159,6 @@ mod history_control;
 mod menubar;
 mod peer_messaging;
 mod pi_control;
-mod devices;
 use devices::Principal;
 mod project_watch;
 mod protocol;
@@ -2281,7 +2281,7 @@ fn spawn_headless_self_upgrade(daemon_fingerprint: Option<String>) {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum SelfUpgradeOutcome {
+pub(crate) enum SelfUpgradeOutcome {
     Upgraded,
     Busy(String),
     Failed(String),
@@ -2308,7 +2308,7 @@ fn classify_self_upgrade_reply(reply: &str) -> SelfUpgradeOutcome {
     }
 }
 
-fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
+pub(crate) fn request_self_upgrade(target: &std::path::Path) -> SelfUpgradeOutcome {
     let sock = match UnixStream::connect(sock_path()) {
         Ok(sock) => sock,
         Err(error) => return SelfUpgradeOutcome::Failed(format!("连自己失败：{error}")),

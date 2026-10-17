@@ -1,9 +1,9 @@
 //! 智能体配置（命令、环境变量、profile、定义、开关）的数据。存取和合并在运行时。
 
-use std::collections::BTreeMap;
-use serde::{Deserialize, Serialize};
 use crate::agent_definition::AgentDefinition;
 use crate::agent_kind::{AcpProfile, CONVERSATION_AGENTS};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHostSettings {

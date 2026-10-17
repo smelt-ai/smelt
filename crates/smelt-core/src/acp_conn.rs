@@ -937,7 +937,11 @@ fn process_birth_inner(pid: i32) -> Option<String> {
     let started = process_start_time_inner(pid)?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?;
-    Some(format!("{}.{:09}", started.as_secs(), started.subsec_nanos()))
+    Some(format!(
+        "{}.{:09}",
+        started.as_secs(),
+        started.subsec_nanos()
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -6484,8 +6488,8 @@ mod model_tests {
 #[cfg(test)]
 mod process_reap_tests {
     use super::{
-        Waitpid, kill_and_reap_process_group, process_birth, process_start_time, prove_process_group_dead,
-        waitpid_child,
+        Waitpid, kill_and_reap_process_group, process_birth, process_start_time,
+        prove_process_group_dead, waitpid_child,
     };
     use std::os::unix::process::CommandExt as _;
     use std::process::Command;
@@ -6745,7 +6749,10 @@ mod process_reap_tests {
         let (_a, a) = spawn_sleep();
         let started = process_start_time(a).unwrap();
         let slack = Duration::from_millis(50);
-        assert!(started + slack >= before, "{started:?} 早于 spawn 前的 {before:?}");
+        assert!(
+            started + slack >= before,
+            "{started:?} 早于 spawn 前的 {before:?}"
+        );
         assert!(started <= std::time::SystemTime::now() + slack);
     }
 

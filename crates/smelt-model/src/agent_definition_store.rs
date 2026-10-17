@@ -1,7 +1,7 @@
 //! 智能体定义的增改请求，以及对话启动前请运行时补齐启动规格的线上数据。
 
-use serde::{Deserialize, Serialize};
 use crate::agent_kind::ConversationLaunchSpec;
+use serde::{Deserialize, Serialize};
 
 /// 客户端打开一段对话前，要运行时替它把启动规格补齐成什么样。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

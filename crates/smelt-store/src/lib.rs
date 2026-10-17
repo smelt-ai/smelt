@@ -3911,12 +3911,10 @@ mod imp {
             return Ok(objects.clone());
         }
         // 旧版本都没有 v17 的设备表，在各版本自己的差异之前统一去掉。
-        let objects = map(
-            build_expected_schema_objects()?
-                .into_iter()
-                .filter(|object| object.table_name != "paired_device")
-                .collect(),
-        );
+        let objects = map(build_expected_schema_objects()?
+            .into_iter()
+            .filter(|object| object.table_name != "paired_device")
+            .collect());
         Ok(slot.get_or_init(|| objects.clone()).clone())
     }
 
@@ -4896,7 +4894,9 @@ mod tests {
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
-        connection.execute_batch("DROP TABLE paired_device;").unwrap();
+        connection
+            .execute_batch("DROP TABLE paired_device;")
+            .unwrap();
     }
 
     fn v1_schema() -> &'static str {

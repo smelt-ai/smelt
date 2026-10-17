@@ -11,11 +11,11 @@ use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use smelt_core::control_api::{DeviceList as DeviceListCall, DevicePair, DeviceRevoke};
 use smelt_core::remote_config::{
     DeviceIdParams, DeviceInfo, DeviceList, PairParams, PairingOffer, RemoteAccessState,
     RevokeResult,
 };
-use smelt_core::control_api::{DeviceList as DeviceListCall, DevicePair, DeviceRevoke};
 use smelt_runtime_client::protocol::control::{
     ControlCall, ControlError, ControlErrorCode, ControlMethod, EmptyParams, decode_params,
 };
@@ -181,7 +181,10 @@ fn pair_begin() -> Result<PairingOffer, ControlError> {
         ));
     };
     let (code, expires_at) = issue_code();
-    let expires_at_ms = now_ms() + expires_at.saturating_duration_since(Instant::now()).as_millis() as i64;
+    let expires_at_ms = now_ms()
+        + expires_at
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i64;
     Ok(PairingOffer {
         pairing_uri: smelt_pairing::pairing_uri(&endpoint_id, &code, relay.as_deref()),
         expires_at_ms,

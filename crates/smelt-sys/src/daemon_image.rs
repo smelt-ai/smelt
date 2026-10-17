@@ -303,6 +303,80 @@ fn reap_unused_images_with(
     }
 }
 
+/// Linux：直接扫 `/proc/*/maps`，按设备号和 inode 找映射了这份文件的进程，不依赖
+/// lsof（很多机器不装）。同一用户的进程读不到 maps 就证明不了，按未知处理；别的用户
+/// 的进程碰不到 `~/.smelt` 里的映像，跳过。
+#[cfg(target_os = "linux")]
+fn probe_image_mapped(path: &Path) -> MappedState {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(meta) = fs::metadata(path) else {
+        return MappedState::Unknown;
+    };
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return MappedState::Unknown;
+    };
+    // SAFETY: getuid 无参数、不失败。
+    let uid = unsafe { libc::getuid() };
+    for process in processes.flatten() {
+        if !process
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        let maps = match fs::read_to_string(process.path().join("maps")) {
+            Ok(maps) => maps,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                let ours = fs::metadata(process.path()).is_ok_and(|meta| meta.uid() == uid);
+                if ours {
+                    return MappedState::Unknown;
+                }
+                continue;
+            }
+        };
+        if maps_reference(&maps, meta.dev(), meta.ino()) {
+            return MappedState::InUse;
+        }
+    }
+    MappedState::Unused
+}
+
+/// `/proc/<pid>/maps` 一行：`地址 权限 偏移 主:次设备号(十六进制) inode 路径`。
+#[cfg(any(target_os = "linux", test))]
+fn maps_reference(maps: &str, dev: u64, ino: u64) -> bool {
+    maps.lines().any(|line| {
+        let mut fields = line.split_whitespace().skip(3);
+        let (Some(device), Some(inode)) = (fields.next(), fields.next()) else {
+            return false;
+        };
+        let Some((major, minor)) = device.split_once(':') else {
+            return false;
+        };
+        let (Ok(major), Ok(minor), Ok(inode)) = (
+            u32::from_str_radix(major, 16),
+            u32::from_str_radix(minor, 16),
+            inode.parse::<u64>(),
+        ) else {
+            return false;
+        };
+        inode == ino && linux_makedev(major, minor) == dev
+    })
+}
+
+/// glibc `makedev` 的编码：高位的主次号拆开放，`stat` 的 `st_dev` 用的就是它。
+#[cfg(any(target_os = "linux", test))]
+fn linux_makedev(major: u32, minor: u32) -> u64 {
+    let (major, minor) = (u64::from(major), u64::from(minor));
+    ((major & 0xffff_f000) << 32)
+        | ((major & 0x0000_0fff) << 8)
+        | ((minor & 0xffff_ff00) << 12)
+        | (minor & 0x0000_00ff)
+}
+
+#[cfg(not(target_os = "linux"))]
 fn probe_image_mapped(path: &Path) -> MappedState {
     let output = match std::process::Command::new("/usr/sbin/lsof")
         .arg("-Fn")
@@ -533,6 +607,31 @@ mod tests {
             classify_lsof_probe(false, None, b"", b""),
             MappedState::Unknown
         );
+    }
+
+    #[test]
+    fn proc_maps_match_on_device_and_inode() {
+        let maps = "\
+55d0c0a00000-55d0c0a20000 r--p 00000000 fd:01 1048602 /root/.smelt/bin/smeltd-ab
+7f1c2e000000-7f1c2e021000 rw-p 00000000 00:00 0
+";
+        assert!(maps_reference(maps, linux_makedev(0xfd, 1), 1048602));
+        assert!(!maps_reference(maps, linux_makedev(0xfd, 1), 1048603));
+        assert!(!maps_reference(maps, linux_makedev(8, 1), 1048602));
+        assert_eq!(linux_makedev(8, 1), 0x801);
+    }
+
+    /// 自己正在执行的程序一定被映射着；刚写出来没人执行的文件一定没有。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_probe_sees_the_running_test_binary() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(probe_image_mapped(&exe), MappedState::InUse);
+        let dir = scratch("probe");
+        let idle = dir.join("idle");
+        fs::write(&idle, b"idle").unwrap();
+        assert_eq!(probe_image_mapped(&idle), MappedState::Unused);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -8,10 +8,7 @@ pub use smelt_model::pi_service::*;
 
 use std::path::PathBuf;
 
-
-use crate::pi_model_settings::{
-    PiCustomModel, PiDefaultModelConfig,
-};
+use crate::pi_model_settings::{PiCustomModel, PiDefaultModelConfig};
 
 fn config_file_path(file: PiConfigFile) -> PathBuf {
     {

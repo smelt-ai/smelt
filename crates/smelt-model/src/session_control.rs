@@ -9,7 +9,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::agent_kind::ConversationLaunchSpec;
-use crate::workspace_menu::{WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot};
+use crate::workspace_menu::{
+    WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
+};
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

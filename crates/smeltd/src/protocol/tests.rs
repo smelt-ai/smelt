@@ -11,10 +11,9 @@ use smelt_event_protocol::{
     CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
     CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ,
     CORE_TOPIC_AGENT_MESSAGE_DELIVERED, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
-    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID,
-    Nack, NackDisposition, PluginId, ProtocolRange,
-    SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
-    SubscriptionDeclaration, SubscriptionId,
+    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, Nack,
+    NackDisposition, PluginId, ProtocolRange, SubscribeControlMessage, SubscribeErrorCode,
+    SubscribeMessage, SubscribeRequest, SubscriptionDeclaration, SubscriptionId,
 };
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
@@ -336,7 +335,10 @@ fn first_party_auth_rejects_kind_spoofing_and_untrusted_peers() {
         &daemon_executable,
     )
     .unwrap_err();
-    assert!(error.contains("smeltd itself is not an event client"), "{error}");
+    assert!(
+        error.contains("smeltd itself is not an event client"),
+        "{error}"
+    );
 
     #[cfg(target_os = "macos")]
     let error = authenticate_event_client_with_verifier(
@@ -397,24 +399,23 @@ fn macos_auth_accepts_the_signed_app_desktop_but_not_basename_alone() {
         ]),
         certs: BTreeMap::new(),
     };
-    for (kind, pid, executable) in [(FirstPartyClientKind::Desktop, 7, desktop)] {
-        let authenticated = authenticate_event_client_with_verifier(
-            &serde_json::json!({
-                "auth": {
-                    "type": "first_party",
-                    "kind": match kind {
-                        FirstPartyClientKind::Desktop => "desktop",
-                    }
-                }
-            }),
-            &peer(pid, Some(executable)),
-            42,
-            &daemon,
-            &verifier,
-        )
-        .unwrap();
-        assert_eq!(authenticated, first_party_event_client(kind));
-    }
+    let authenticated = authenticate_event_client_with_verifier(
+        &serde_json::json!({
+            "auth": {
+                "type": "first_party",
+                "kind": "desktop"
+            }
+        }),
+        &peer(7, Some(desktop)),
+        42,
+        &daemon,
+        &verifier,
+    )
+    .unwrap();
+    assert_eq!(
+        authenticated,
+        first_party_event_client(FirstPartyClientKind::Desktop)
+    );
 
     let error = authenticate_event_client_with_verifier(
         &serde_json::json!({
@@ -457,24 +458,23 @@ fn macos_auth_classifies_by_kernel_identity_when_path_is_unavailable() {
         ]),
         certs: BTreeMap::new(),
     };
-    for (kind, pid) in [(FirstPartyClientKind::Desktop, 7)] {
-        let authenticated = authenticate_event_client_with_verifier(
-            &serde_json::json!({
-                "auth": {
-                    "type": "first_party",
-                    "kind": match kind {
-                        FirstPartyClientKind::Desktop => "desktop",
-                    }
-                }
-            }),
-            &peer(pid, None),
-            42,
-            &daemon,
-            &verifier,
-        )
-        .unwrap();
-        assert_eq!(authenticated, first_party_event_client(kind));
-    }
+    let authenticated = authenticate_event_client_with_verifier(
+        &serde_json::json!({
+            "auth": {
+                "type": "first_party",
+                "kind": "desktop"
+            }
+        }),
+        &peer(7, None),
+        42,
+        &daemon,
+        &verifier,
+    )
+    .unwrap();
+    assert_eq!(
+        authenticated,
+        first_party_event_client(FirstPartyClientKind::Desktop)
+    );
 
     // 无 token 且无路径 → 无从判定身份，拒绝。
     let no_identity = PeerIdentity {

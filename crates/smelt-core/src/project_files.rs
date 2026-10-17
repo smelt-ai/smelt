@@ -341,7 +341,6 @@ fn walk(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut V
     }
 }
 
-
 /// `workspace.browse_dirs`：列出一个目录的子项，给客户端的目录选择器用。隐藏项不列。
 pub fn browse_dirs(
     params: &smelt_runtime_client::protocol::workspace::BrowseDirsParams,
@@ -356,8 +355,9 @@ pub fn browse_dirs(
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| home.clone());
-    let dir = std::fs::canonicalize(&requested)
-        .map_err(|error| ProjectFileError::Io(format!("打不开 {}：{error}", requested.display())))?;
+    let dir = std::fs::canonicalize(&requested).map_err(|error| {
+        ProjectFileError::Io(format!("打不开 {}：{error}", requested.display()))
+    })?;
     if !dir.is_dir() {
         return Err(ProjectFileError::Io(format!("不是目录：{}", dir.display())));
     }
@@ -384,7 +384,9 @@ pub fn browse_dirs(
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(BrowseDirsResult {
-        parent: dir.parent().map(|parent| parent.to_string_lossy().into_owned()),
+        parent: dir
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned()),
         path: dir.to_string_lossy().into_owned(),
         home: home.to_string_lossy().into_owned(),
         entries,

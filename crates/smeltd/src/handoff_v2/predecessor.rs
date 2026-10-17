@@ -272,6 +272,9 @@ pub(crate) fn run_transaction(
     if let Err(error) = smelt_core::daemon_image::retarget_launch_after_commit(exe) {
         crate::dlog(&format!("handoff: COMMIT 后改写启动名失败：{error}"));
     }
+    // systemd 拉起的话，赶在自己退出之前把主进程交给 successor，否则 systemd 当服务
+    // 已停，successor 成了没人管的残留进程。
+    crate::service::notify_main_pid(child.id());
 
     // 先停 sidecars（让出端口），调用方随后回 ok + exit。自启若发现端口仍被占用且前任还是父进程，会等前任退出
     // 后再绑一次。此处失败也不回滚（已无可回滚之处），只留痕。

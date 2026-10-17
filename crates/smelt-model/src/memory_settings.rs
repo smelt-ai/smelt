@@ -1,6 +1,5 @@
 //! 记忆向量检索配置的键名和重排模型。存取、连接测试在运行时。
 
-
 pub const EMBEDDING_BASE_URL: &str = "memory.embedding_base_url";
 
 pub const EMBEDDING_MODEL: &str = "memory.embedding_model";

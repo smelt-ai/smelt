@@ -115,6 +115,12 @@ require_macos() {
     || die "只支持 macOS，当前是 $(uname -s)"
 }
 
+# Linux 版运行时只在 Linux 上原生构建，不交叉编译。
+require_linux() {
+  [[ "$(uname -s)" == "Linux" ]] \
+    || die "只支持 Linux，当前是 $(uname -s)。Linux 版运行时在对应架构的 Linux 机器上原生构建"
+}
+
 # 检查 Xcode Command Line Tools。编译要链接系统框架，没有 CLT 会在编译到一半才
 # 炸，且报错很难懂。装它需要管理员权限，我们装不了，只能报清楚。
 require_xcode_clt() {

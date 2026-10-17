@@ -222,14 +222,19 @@ pub struct RuntimeConnector {
 
 impl RuntimeConnector {
     /// `secret` 是这台客户端自己的身份，运行时按它的公钥认设备，所以必须持久。
-    pub fn new(secret: SecretKey, target: EndpointId, relay: Option<RelaySettings>) -> Result<Self> {
+    pub fn new(
+        secret: SecretKey,
+        target: EndpointId,
+        relay: Option<RelaySettings>,
+    ) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("smelt-iroh-client")
             .enable_all()
             .build()
             .context("起不了 iroh 客户端的 tokio 运行时")?;
-        let endpoint = runtime.block_on(bind_runtime_endpoint(secret, Vec::new(), relay.as_ref()))?;
+        let endpoint =
+            runtime.block_on(bind_runtime_endpoint(secret, Vec::new(), relay.as_ref()))?;
         let mut addr = EndpointAddr::new(target);
         if let Some(relay) = relay {
             addr = addr.with_relay_url(relay.url);

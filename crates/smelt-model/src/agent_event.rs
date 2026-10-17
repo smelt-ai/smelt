@@ -1,6 +1,5 @@
 //! agent hook 上报的事件格式和 `smelt-notify` 的位置。
 
-
 /// daemon 当前理解的最高事件版本。既有生命周期事件继续按 v1 发送，保证新版
 /// helper 遇到尚未升级的 daemon 时仍能被归约；v2 只用于新增的纯标题事件。
 pub const AGENT_EVENT_VERSION: u32 = 2;

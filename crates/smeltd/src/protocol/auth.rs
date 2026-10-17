@@ -33,8 +33,7 @@ use smelt_event_protocol::{
     CORE_CAPABILITY_APPEARANCE_CONTROL, CORE_CAPABILITY_AUTOMATION_READ,
     CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
     CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth,
-    FIRST_PARTY_DESKTOP_PLUGIN_ID, FirstPartyClientKind,
-    PluginId,
+    FIRST_PARTY_DESKTOP_PLUGIN_ID, FirstPartyClientKind, PluginId,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -706,13 +705,11 @@ struct FirstPartyExecutable {
     signing_id: &'static str,
 }
 
-const FIRST_PARTY_EXECUTABLES: &[FirstPartyExecutable] = &[
-    FirstPartyExecutable {
-        kind: FirstPartyClientKind::Desktop,
-        basename: "smelt",
-        signing_id: "com.zzfn.smelt",
-    },
-];
+const FIRST_PARTY_EXECUTABLES: &[FirstPartyExecutable] = &[FirstPartyExecutable {
+    kind: FirstPartyClientKind::Desktop,
+    basename: "smelt",
+    signing_id: "com.zzfn.smelt",
+}];
 
 pub(super) fn executable_kind(executable: &Path) -> Option<FirstPartyClientKind> {
     let basename = executable.file_name()?.to_str()?;

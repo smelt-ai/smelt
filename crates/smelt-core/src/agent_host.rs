@@ -9,7 +9,6 @@ pub use smelt_model::agent_host::*;
 
 use std::collections::BTreeMap;
 
-
 use crate::agent_kind::{AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind};
 
 /// 库里存下的通知开关。它们属于客户端，运行时写偏好表时原样保留，不改。

@@ -191,14 +191,15 @@ fn reject_unpaired(mut conn: UnixStream, operation: DaemonOperation, payload: &s
         .and_then(serde_json::Value::as_u64)
         .and_then(|version| u16::try_from(version).ok())
         .unwrap_or(smelt_runtime_client::protocol::control::CONTROL_API_VERSION);
-    let response = smelt_runtime_client::protocol::control::ControlResponse::<()>::error_with_version(
-        version,
-        request_id,
-        smelt_runtime_client::protocol::control::ControlError::new(
-            smelt_runtime_client::protocol::control::ControlErrorCode::PermissionDenied,
-            "这台设备还没有配对",
-        ),
-    );
+    let response =
+        smelt_runtime_client::protocol::control::ControlResponse::<()>::error_with_version(
+            version,
+            request_id,
+            smelt_runtime_client::protocol::control::ControlError::new(
+                smelt_runtime_client::protocol::control::ControlErrorCode::PermissionDenied,
+                "这台设备还没有配对",
+            ),
+        );
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 

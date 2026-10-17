@@ -8,7 +8,6 @@ use super::*;
 use smelt_core::remote_config::{RemoteAccessState, RemoteConfig};
 use smelt_iroh::runtime::ConnectionRegistry;
 
-
 /// 远程访问开着时持有的空闲防睡眠断言名称。合盖仍走 Clamshell Sleep。
 #[cfg(target_os = "macos")]
 pub(crate) const SLEEP_ASSERTION_NAME: &str = "Smelt remote access is enabled";
@@ -248,7 +247,6 @@ fn read_power_kind() -> PowerKind {
     PowerKind::Ac
 }
 
-
 /// 按供电方式拿起或放下空闲防睡眠断言。电池上即使有设备连着也不握。
 pub(crate) fn sync_remote_sleep_assertion(state: &RemoteState) {
     let mut guard = state.lock().unwrap();
@@ -448,7 +446,10 @@ fn bind_with_backoff(
                 return;
             }
             Err(error) => {
-                dlog(&format!("远程访问启动失败（第 {} 次）：{error}", attempt + 1));
+                dlog(&format!(
+                    "远程访问启动失败（第 {} 次）：{error}",
+                    attempt + 1
+                ));
                 let mut guard = state.lock().unwrap();
                 if guard.generation == generation {
                     guard.phase = Phase::Failed(error);
@@ -506,15 +507,14 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
                     status.rtt.as_millis()
                 ));
             });
-            let conn_observer: smelt_iroh::ConnectionObserver =
-                Arc::new(|event| match event {
-                    smelt_iroh::ConnectionEvent::Connected { remote_id, .. } => {
-                        dlog(&format!("iroh 设备已连接：{remote_id}"))
-                    }
-                    smelt_iroh::ConnectionEvent::Disconnected { remote_id, .. } => {
-                        dlog(&format!("iroh 设备已断开：{remote_id}"))
-                    }
-                });
+            let conn_observer: smelt_iroh::ConnectionObserver = Arc::new(|event| match event {
+                smelt_iroh::ConnectionEvent::Connected { remote_id, .. } => {
+                    dlog(&format!("iroh 设备已连接：{remote_id}"))
+                }
+                smelt_iroh::ConnectionEvent::Disconnected { remote_id, .. } => {
+                    dlog(&format!("iroh 设备已断开：{remote_id}"))
+                }
+            });
             smelt_iroh::runtime::serve_runtime(
                 endpoint,
                 Arc::new(crate::devices::RemoteStreams),

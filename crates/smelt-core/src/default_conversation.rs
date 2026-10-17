@@ -7,7 +7,6 @@ pub use smelt_model::default_conversation::*;
 
 use serde::{Deserialize, Serialize};
 
-
 const SQLITE_NAMESPACE: &str = "preferences";
 const SQLITE_KEY: &str = "default_conversation_agent";
 

@@ -30,10 +30,16 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         super::sync_at(home.path()).unwrap();
         let path = home.path().join(".agents/skills/smelt/SKILL.md");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), super::CONTROL_SKILL);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            super::CONTROL_SKILL
+        );
 
         std::fs::write(&path, "旧版本").unwrap();
         super::sync_at(home.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), super::CONTROL_SKILL);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            super::CONTROL_SKILL
+        );
     }
 }

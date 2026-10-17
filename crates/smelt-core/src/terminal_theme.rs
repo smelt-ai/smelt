@@ -16,7 +16,6 @@
 
 pub use smelt_model::terminal_theme::*;
 
-
 /// 读当前快照；文档缺失/损坏回退 PC 默认深色。
 pub fn load() -> TerminalThemeSnapshot {
     let Ok(store) = crate::sqlite_state::default_sqlite_store() else {

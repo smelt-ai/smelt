@@ -1,10 +1,7 @@
 //! `dsh.*` 的线上数据。业务执行在运行时。
 
+use crate::agent_kind::{AcpProfile, DshPlugin, DshSettingsSummary};
 use serde::{Deserialize, Serialize};
-use crate::agent_kind::{
-    AcpProfile, DshPlugin,
-    DshSettingsSummary,
-};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DshConfig {

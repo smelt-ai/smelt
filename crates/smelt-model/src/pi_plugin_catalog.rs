@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 /// 插件类别。决定注入时用哪个 Pi 启动参数。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum PiPluginKind {
     Skill,

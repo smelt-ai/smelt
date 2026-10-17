@@ -65,7 +65,11 @@ mod tests {
 
     #[test]
     fn round_trips_with_and_without_a_relay() {
-        let uri = pairing_uri("abc123", "K7QX-M2PD", Some("https://relay.example.test:8443"));
+        let uri = pairing_uri(
+            "abc123",
+            "K7QX-M2PD",
+            Some("https://relay.example.test:8443"),
+        );
         assert!(uri.starts_with("smelt+iroh://abc123/?"), "{uri}");
         let parsed = parse_pairing_uri(&uri).unwrap();
         assert_eq!(parsed.endpoint_id, "abc123");

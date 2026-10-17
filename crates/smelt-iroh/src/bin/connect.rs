@@ -56,7 +56,9 @@ fn client(peer: EndpointId, relay: Option<&str>) -> Result<RuntimeClient> {
     let relay = relay.map(RelaySettings::parse).transpose()?;
     let secret = smelt_iroh::load_or_create_secret(&smelt_iroh::default_client_secret_path()?)?;
     eprintln!("本机设备身份：{}", secret.public());
-    Ok(RuntimeClient::new(RuntimeConnector::new(secret, peer, relay)?))
+    Ok(RuntimeClient::new(RuntimeConnector::new(
+        secret, peer, relay,
+    )?))
 }
 
 fn main() -> Result<()> {

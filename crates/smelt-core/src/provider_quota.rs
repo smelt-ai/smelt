@@ -13,7 +13,6 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-
 #[derive(Debug, Deserialize)]
 struct CodexUsageResponse {
     #[serde(default)]

@@ -474,10 +474,10 @@
 <h2>12. Linux 无头运行时清单</h2>
 <div class="table-wrap"><table>
   <tr><th>项目</th><th>现状</th><th>要做</th></tr>
-  <tr><td>smeltd 编译</td><td><span class="chip chip-done">已完成</span> x86_64 Linux 上原生编译通过，运行时这边的测试全过（修了 Linux 才暴露的问题：进程启动时间读错字段且只到整秒、JSON 回包分片写卡死 socketpair、<code>msghdr</code> 字段类型）</td><td>增加 <code>ci/linux</code>：lint、build、test。x86_64 和 aarch64 各在对应架构的 Linux 机器上原生构建，不交叉编译</td></tr>
+  <tr><td>smeltd 编译</td><td><span class="chip chip-done">已完成</span> x86_64 Linux 上原生编译通过，运行时这边的测试全过（修了 Linux 才暴露的问题：进程启动时间读错字段且只到整秒、JSON 回包分片写卡死 socketpair、<code>msghdr</code> 字段类型）</td><td><code>ci/linux</code> <span class="chip chip-done">已完成</span>：lint、build、test、package。x86_64 和 aarch64 各在对应架构的 Linux 机器上原生构建，不交叉编译（aarch64 还缺一台构建机）</td></tr>
   <tr><td>受管 Bun / Pi</td><td><span class="chip chip-done">已完成</span> 补了 linux-x64（baseline，不要求 AVX2）和 linux-aarch64 的下载地址与校验值</td><td></td></tr>
   <tr><td>写死的 macOS 路径</td><td><span class="chip chip-done">已核对</span> 正式代码里没有：<code>~/Library/Application Support/Claude…</code> 只出现在测试数据里；Cursor、Copilot 的凭据路径本来就同时列了 <code>~/.config/…</code> 和 <code>XDG_CONFIG_HOME</code></td><td></td></tr>
-  <tr><td>文件监听</td><td><span class="chip chip-na">待核实</span> Linux 上是 inotify，每个目录占一个 watch，受 <code>fs.inotify.max_user_watches</code> 限制</td><td>大仓库只监听项目根和 <code>.git</code> 的关键文件，其余按需；超限时在能力清单里报告并降级为手动刷新</td></tr>
+  <tr><td>文件监听</td><td><span class="chip chip-done">已完成</span> macOS 照旧 FSEvents 递归；其它平台自己遍历，只给非噪音目录加非递归 watch（<code>target</code>、<code>node_modules</code> 等不占 watch），<code>.git</code> 只看它本身和 <code>refs</code>，新建目录在事件里补上；<code>max_user_watches</code> 用完就只监听已加上的部分并记日志</td><td>能力清单里报告降级</td></tr>
   <tr><td>对端身份鉴权</td><td><span class="chip chip-done">已有</span> <code>SO_PEERCRED</code> + <code>/proc/&lt;pid&gt;/exe</code></td><td>补测试</td></tr>
   <tr><td>子进程监控</td><td><span class="chip chip-done">已有</span> pidfd</td><td></td></tr>
   <tr><td>独立启动</td><td><span class="chip chip-done">已完成</span> <code>smeltd install</code> 写 systemd 用户单元并启动（<code>KillMode=process</code>，会话进程由守护自己收拾），没开 linger 时提示；<code>smeltd uninstall</code> / <code>status</code> / <code>--version</code></td><td></td></tr>
@@ -486,7 +486,7 @@
   <tr><td>菜单栏、IOKit 防休眠</td><td><span class="chip chip-na">不适用</span> 已有桩实现</td><td>能力清单里如实报告没有</td></tr>
   <tr><td>额度查询（钥匙串）</td><td><span class="chip chip-split">部分</span> 非 macOS 跳过钥匙串，只读环境变量和各家 CLI 的凭据文件</td><td>能力清单里如实报告哪些查不了</td></tr>
   <tr><td>agent hook 安装</td><td><span class="chip chip-done">已完成</span></td><td>运行时执行 <code>agent.hooks.*</code>，在自己那台机器上写配置；<code>smelt-notify</code> 由运行时安装包放进 <code>~/.smelt/bin</code>（本机仍由桌面从 App 包同步）</td></tr>
-  <tr><td>打包分发</td><td><span class="chip chip-todo">缺失</span></td><td>tar.gz + 安装脚本；按 D7 的桌面推送，同一份二进制也随桌面安装包附带</td></tr>
+  <tr><td>打包分发</td><td><span class="chip chip-done">已完成</span> <code>ci/linux/ci.sh package</code> 出 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，解包执行 <code>./install.sh</code>：<code>smeltd install</code> 用和桌面同一套受管布局（不可变映像 + 启动名软链），已在跑就交接到新版本、会话保留，再注册 systemd 用户服务，最后 <code>smeltd pair</code></td><td>按 D7 的桌面推送，同一份二进制也随桌面安装包附带</td></tr>
 </table></div>
 
 <!-- ───────────────────────────────────────── -->

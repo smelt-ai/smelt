@@ -6,7 +6,6 @@
 
 pub use smelt_model::launch_settings::*;
 
-
 use crate::agent_kind::TerminalAgentKind;
 pub use crate::new_session::{LaunchEntry, default_launch_entries};
 

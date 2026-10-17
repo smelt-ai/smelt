@@ -1,6 +1,5 @@
 //! Pi 登录流程的数据：provider 现状、登录方式、助手推来的事件。跑凭据助手在运行时。
 
-
 /// 一个 provider 当前的凭据状态。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

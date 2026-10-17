@@ -1,8 +1,8 @@
 //! 快捷启动项的数据和内置项规则。存取在运行时。
 
-use serde::{Deserialize, Serialize};
 use crate::agent_kind::TerminalAgentKind;
 pub use crate::new_session::{LaunchEntry, default_launch_entries};
+use serde::{Deserialize, Serialize};
 
 /// 启动项迁移版本。旧出厂命令与标签只在对应版本升级时改写；固定内置项则在
 /// 每次加载时与注册表对齐。

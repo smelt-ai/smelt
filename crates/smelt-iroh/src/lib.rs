@@ -179,7 +179,11 @@ pub async fn bind_endpoint(
     Ok(endpoint)
 }
 
-pub(crate) fn observe_selected_paths(conn: Connection, remote: String, observer: Option<PathObserver>) {
+pub(crate) fn observe_selected_paths(
+    conn: Connection,
+    remote: String,
+    observer: Option<PathObserver>,
+) {
     tokio::spawn(async move {
         let mut events = conn.path_events();
         let mut last_address = None;

@@ -1,13 +1,12 @@
 //! `pi.*` 的线上数据。业务执行在运行时。
 
-use serde::{Deserialize, Serialize};
 use crate::pi_mcp::PiMcpServer;
 use crate::pi_model_settings::{
-    PiCustomProvider, PiDefaultModelConfig, PiModelChoiceGroup, PiModelSettings,
-    PiSettingsSummary,
+    PiCustomProvider, PiDefaultModelConfig, PiModelChoiceGroup, PiModelSettings, PiSettingsSummary,
 };
 use crate::pi_plugin_catalog::{PiPlugin, PiPluginKind};
 use crate::provider_api::DiscoveredModel;
+use serde::{Deserialize, Serialize};
 
 /// 能力库里 Pi 相关的全部展示数据。读不出的部分各自带错误，不连累其它部分。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

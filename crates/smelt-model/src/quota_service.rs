@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider_quota::ProviderQuotaData;
 use crate::agent_kind::ConversationAgentKind;
+use crate::provider_quota::ProviderQuotaData;
 
 /// 一份额度对应的账户。
 ///
