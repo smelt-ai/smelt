@@ -8,13 +8,12 @@
 // ACP 连接层已经搬进 smelt_core::acp_conn（给 smeltd 未来托管 ACP 会话铺路），
 // 这里不再 mod acp;，用的地方直接引 smelt_core::acp_conn。
 //
-// acp_completion / acp_view / markdown_mermaid / ui_theme / sqlite_state 同理都已
+// acp_completion / acp_view / markdown_mermaid / ui_theme 同理都已
 // 搬出主 crate（acp_view.rs 独立成 smelt-acp-view，其余几个是它和主 GUI 共用的
 // UI 基建，搬进 smelt-ui / smelt-core，见各自文件头注释）。这里用同名 `use`
 // 重新导出成原来的模块路径，全库既有的 `crate::ui_theme::x()` 之类写法不用
 // 逐处改——跟 session_history.rs 对 claude_paths 的重导出是同一个套路。
 pub(crate) use smelt_acp_view::acp_view;
-pub(crate) use smelt_core::sqlite_state;
 pub(crate) use smelt_ui::markdown_mermaid;
 pub(crate) use smelt_ui::ui_theme;
 
@@ -56,7 +55,6 @@ mod workspace_shell;
 mod workspace_update;
 mod workspace_view;
 
-mod worktree_inherit;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
@@ -4389,7 +4387,6 @@ fn main() {
         cx.set_global(settings::LaunchConfig::default());
         settings::start_launch_config_load(cx);
         cx.set_global(settings::load_update_settings());
-        cx.set_global(worktree_inherit::load_settings());
 
         // 原生通知/菜单栏桥必须先于任何 Attention producer 就绪。daemon 快照可能在
         // 首帧前到达；若先启动观察器再 setup，应用级消费者会正确 drain 事件，但

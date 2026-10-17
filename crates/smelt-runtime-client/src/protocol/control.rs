@@ -160,6 +160,8 @@ define_control_methods! {
     DshProvidersRefreshAuto => (DSH_PROVIDERS_REFRESH_AUTO_METHOD, "dsh.providers.refresh_auto"),
     DshPluginsList => (DSH_PLUGINS_LIST_METHOD, "dsh.plugins.list"),
     DshPluginsRun => (DSH_PLUGINS_RUN_METHOD, "dsh.plugins.run"),
+    QuotaGet => (QUOTA_GET_METHOD, "quota.get"),
+    QuotaRefresh => (QUOTA_REFRESH_METHOD, "quota.refresh"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -569,7 +571,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 107);
+        assert_eq!(names.len(), 109);
     }
 
     #[test]

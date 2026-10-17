@@ -799,6 +799,11 @@ pi_calls! {
     /// 安装、更新或卸载一个插件（pnpm，可能要几分钟），完了回带清单。
     DshPluginsRun => DshPluginsRun(crate::dsh_service::PluginActionParams)
         -> crate::dsh_service::PluginActionResult;
+    /// 当前全部账户和缓存里的额度。
+    QuotaGet => QuotaGet(EmptyParams) -> crate::quota_service::QuotaSnapshot;
+    /// 查一轮额度（全部或一家）并更新缓存。每家一次网络往返。
+    QuotaRefresh => QuotaRefresh(crate::quota_service::QuotaRefreshParams)
+        -> crate::quota_service::QuotaRefreshResult;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

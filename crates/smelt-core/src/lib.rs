@@ -65,6 +65,7 @@ pub mod project_catalog;
 pub mod project_files;
 pub mod provider_api;
 pub mod provider_quota;
+pub mod quota_service;
 pub mod remote_config;
 #[cfg(unix)]
 pub mod runtime_generation;

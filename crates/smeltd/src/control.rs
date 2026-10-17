@@ -253,6 +253,29 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
+        ControlMethod::QuotaGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::quota_service::snapshot(),
+            )
+        }
+        ControlMethod::QuotaRefresh => {
+            let params: smelt_core::quota_service::QuotaRefreshParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::quota_service::refresh(params),
+            )
+        }
         ControlMethod::AgentCliInspect => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,
