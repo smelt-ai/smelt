@@ -32,13 +32,12 @@ mod snapshots;
 
 pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AppearanceSnapshot,
-    AutoModelSnapshot, HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
+    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AutoModelSnapshot,
+    HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
     MemoryMetaSnapshot, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
     PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot,
     RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
-    RemoteTerminalSessionRecord, TerminalThemeSnapshot, UpdateSettingsSnapshot,
-    UpdateStateSnapshot, WorkspaceAcpRecord, WorkspaceLayoutNode, WorkspaceProjectRecord,
+    RemoteTerminalSessionRecord, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceLayoutNode,
     WorkspaceSessionRecord, WorkspaceSnapshot, WorktreeInheritSnapshot,
 };
 
@@ -180,13 +179,6 @@ pub struct CursorDeclaration {
     pub declaration_fingerprint: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LegacyState {
-    Pending,
-    Imported,
-    Deleted,
-}
-
 #[derive(Clone)]
 pub struct Store {
     backend: imp::Backend,
@@ -197,37 +189,6 @@ fn store_from_backend(backend: imp::Backend) -> Store {
     Store {
         backend,
         durable_notify: Arc::new(Mutex::new(None)),
-    }
-}
-
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-pub struct StoreTransaction<'a> {
-    transaction: &'a rusqlite::Transaction<'a>,
-}
-
-#[cfg(any(target_os = "ios", target_os = "android"))]
-pub struct StoreTransaction<'a> {
-    marker: std::marker::PhantomData<&'a ()>,
-}
-
-impl StoreTransaction<'_> {
-    pub fn put(&mut self, namespace: &str, key: &str, value: &[u8]) -> Result<(), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::transaction_put(self, namespace, key, value)
-    }
-
-    pub fn delete(&mut self, namespace: &str, key: &str) -> Result<bool, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::transaction_delete(self, namespace, key)
-    }
-
-    pub fn append_outbox_batch(
-        &mut self,
-        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        imp::transaction_append_outbox(self, events)
     }
 }
 
@@ -291,18 +252,6 @@ impl Store {
         imp::read_user_version(path)
     }
 
-    pub fn get(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::get(&self.backend, namespace, key)
-    }
-
-    pub fn put(&self, namespace: &str, key: &str, value: &[u8]) -> Result<(), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::put(&self.backend, namespace, key, value)
-    }
-
     /// 读取一个明确作用域的二进制状态值，不经过 JSON 文档映射或 legacy 路由。
     pub fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         validate_name("namespace", namespace)?;
@@ -317,13 +266,13 @@ impl Store {
         imp::put_blob(&self.backend, namespace, key, value)
     }
 
-    /// 列出一个 blob 作用域下的全部 key。与 [`Self::keys`] 不同：后者走 JSON 文档目录。
+    /// 列出一个 blob 作用域下的全部 key。
     pub fn blob_keys(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
         validate_name("namespace", namespace)?;
         imp::blob_keys(&self.backend, namespace)
     }
 
-    /// 删除一个 blob。与 [`Self::delete`] 不同：后者会走 JSON 文档删除语义。
+    /// 删除一个 blob。
     pub fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool, StoreError> {
         validate_name("namespace", namespace)?;
         validate_name("key", key)?;
@@ -383,23 +332,6 @@ impl Store {
         snapshot: &HistoryTitleSnapshot,
     ) -> Result<(), StoreError> {
         imp::put_history_title_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn get_appearance_snapshot(&self) -> Result<Option<AppearanceSnapshot>, StoreError> {
-        imp::get_appearance_snapshot(&self.backend)
-    }
-
-    /// 在同一个 IMMEDIATE 事务里读-改-写外观快照，返回提交后的值。
-    ///
-    /// GUI、smeltd（Control API）和 `smelt settings` CLI 是三个进程、三条连接，都会改
-    /// 外观。读和写不在同一把写锁里，后写的一方就会拿旧值把别人刚提交的修改覆盖掉。
-    /// `modify` 返回错误时整笔回滚。
-    pub fn modify_appearance_snapshot<E: From<StoreError>>(
-        &self,
-        missing: impl FnOnce() -> AppearanceSnapshot,
-        modify: impl FnOnce(&mut AppearanceSnapshot) -> Result<(), E>,
-    ) -> Result<AppearanceSnapshot, E> {
-        imp::modify_appearance_snapshot(&self.backend, missing, modify)
     }
 
     pub fn get_workspace_snapshot(&self) -> Result<Option<WorkspaceSnapshot>, StoreError> {
@@ -584,12 +516,6 @@ impl Store {
         imp::put_published_session_snapshot(&self.backend, snapshot)
     }
 
-    pub fn agent_ui_snapshot_from_json(
-        value: &serde_json::Value,
-    ) -> Result<AgentUiSnapshot, StoreError> {
-        imp::agent_ui_snapshot_from_json(value)
-    }
-
     pub fn get_remote_config_snapshot(&self) -> Result<Option<RemoteConfigSnapshot>, StoreError> {
         imp::get_remote_config_snapshot(&self.backend)
     }
@@ -599,30 +525,6 @@ impl Store {
         snapshot: &RemoteConfigSnapshot,
     ) -> Result<(), StoreError> {
         imp::put_remote_config_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn get_update_settings_snapshot(
-        &self,
-    ) -> Result<Option<UpdateSettingsSnapshot>, StoreError> {
-        imp::get_update_settings_snapshot(&self.backend)
-    }
-
-    pub fn put_update_settings_snapshot(
-        &self,
-        snapshot: &UpdateSettingsSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_update_settings_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn get_update_state_snapshot(&self) -> Result<Option<UpdateStateSnapshot>, StoreError> {
-        imp::get_update_state_snapshot(&self.backend)
-    }
-
-    pub fn put_update_state_snapshot(
-        &self,
-        snapshot: &UpdateStateSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_update_state_snapshot(&self.backend, snapshot)
     }
 
     pub fn get_worktree_inherit_snapshot(
@@ -693,103 +595,6 @@ impl Store {
         snapshot: &PublishedWorkspaceMenuSnapshot,
     ) -> Result<(), StoreError> {
         imp::put_workspace_menu_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn delete(&self, namespace: &str, key: &str) -> Result<bool, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::delete(&self.backend, namespace, key)
-    }
-
-    pub fn keys(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
-        validate_name("namespace", namespace)?;
-        imp::keys(&self.backend, namespace)
-    }
-
-    /// Runs document mutations and outbox insertion in one database transaction.
-    ///
-    /// The transaction exposes only typed store operations, never arbitrary SQL.
-    pub fn transaction<R>(
-        &self,
-        operation: impl FnOnce(&mut StoreTransaction<'_>) -> Result<R, StoreError>,
-    ) -> Result<R, StoreError> {
-        let result = imp::store_transaction(&self.backend, operation)?;
-        self.notify_durable();
-        Ok(result)
-    }
-
-    pub fn legacy_state(&self, source: &str) -> Result<LegacyState, StoreError> {
-        validate_legacy_source(source)?;
-        imp::legacy_state(&self.backend, source)
-    }
-
-    /// 在同一个 SQLite 快照中读取 KV 和对应 legacy source 的处理状态。
-    pub fn get_with_legacy_state(
-        &self,
-        namespace: &str,
-        key: &str,
-        source: &str,
-    ) -> Result<(Option<Vec<u8>>, LegacyState), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        validate_legacy_source(source)?;
-        imp::get_with_legacy_state(&self.backend, namespace, key, source)
-    }
-
-    /// 删除 KV，并在同一事务中记录该 legacy source 已被明确删除。
-    pub fn delete_with_legacy_tombstone(
-        &self,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        validate_legacy_source(source)?;
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::delete_with_legacy_tombstone(&self.backend, source, namespace, key)
-    }
-
-    /// 只记录 legacy source 已被明确处理，不删除当前 KV。
-    ///
-    /// 用于文件系统 payload 已成功移入隔离区后的第二阶段提交；期间并发写入的新值
-    /// 必须保留。
-    pub fn mark_legacy_deleted(
-        &self,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        validate_legacy_source(source)?;
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::mark_legacy_deleted(&self.backend, source, namespace, key)
-    }
-
-    /// 把 KV 原样移入隔离 namespace，并在同一事务中写入 legacy 删除墓碑。
-    pub fn quarantine_with_legacy_tombstone(
-        &self,
-        source: &str,
-        namespace: &str,
-        key: &str,
-        quarantine_namespace: &str,
-        quarantine_key: &str,
-    ) -> Result<bool, StoreError> {
-        validate_legacy_source(source)?;
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        validate_name("quarantine namespace", quarantine_namespace)?;
-        validate_name("quarantine key", quarantine_key)?;
-        if namespace == quarantine_namespace && key == quarantine_key {
-            return Err(StoreError::QuarantineSameKey);
-        }
-        imp::quarantine_with_legacy_tombstone(
-            &self.backend,
-            source,
-            namespace,
-            key,
-            quarantine_namespace,
-            quarantine_key,
-        )
     }
 
     /// Adds durable events to the domain transaction's outbox in one commit.
@@ -1001,16 +806,6 @@ impl smelt_event_bus::EventStore for Store {
     }
 }
 
-fn validate_legacy_source(source: &str) -> Result<(), StoreError> {
-    if source.trim().is_empty() {
-        Err(StoreError::EmptyLegacySource)
-    } else if source.as_bytes().contains(&0) {
-        Err(StoreError::LegacySourceContainsNul)
-    } else {
-        Ok(())
-    }
-}
-
 fn validate_name(label: &str, value: &str) -> Result<(), StoreError> {
     if value.trim().is_empty() {
         Err(StoreError::empty_name(label))
@@ -1050,7 +845,7 @@ fn validate_automation_snapshot(snapshot: &AutomationSnapshot) -> Result<(), Sto
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod imp {
-    use super::{HashSet, LegacyState, OpenSource, STORE_SCHEMA_VERSION, StoreError};
+    use super::{HashSet, OpenSource, STORE_SCHEMA_VERSION, StoreError};
     use rusqlite::{
         Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params,
     };
@@ -1060,8 +855,6 @@ mod imp {
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
     const BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
-    const QUARANTINE_SCOPE: &str = "quarantine";
-    const LEGACY_SCOPE_PREFIX: &str = "legacy:";
     const LEGACY_V3_FINGERPRINT: &str = "legacy-v3-unbound";
 
     const OPEN_EXISTING_FLAGS: OpenFlags =
@@ -1179,96 +972,6 @@ mod imp {
             })
     }
 
-    pub(super) fn store_transaction<R>(
-        backend: &Backend,
-        operation: impl FnOnce(&mut super::StoreTransaction<'_>) -> Result<R, StoreError>,
-    ) -> Result<R, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = operation(&mut super::StoreTransaction {
-            transaction: &transaction,
-        })?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(result)
-    }
-
-    pub(super) fn transaction_put(
-        transaction: &mut super::StoreTransaction<'_>,
-        namespace: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), StoreError> {
-        match namespace {
-            "quarantine" => upsert_kv_blob(transaction.transaction, QUARANTINE_SCOPE, key, value),
-            _ => crate::documents::write_document(transaction.transaction, key, value),
-        }
-    }
-
-    pub(super) fn transaction_delete(
-        transaction: &mut super::StoreTransaction<'_>,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        match namespace {
-            "quarantine" => transaction
-                .transaction
-                .execute(
-                    "DELETE FROM kv WHERE scope = ?1 AND key = ?2",
-                    params![QUARANTINE_SCOPE, key],
-                )
-                .map(|changed| changed > 0)
-                .map_err(StoreError::from),
-            _ => crate::documents::delete_document(transaction.transaction, key),
-        }
-    }
-
-    pub(super) fn transaction_append_outbox(
-        transaction: &mut super::StoreTransaction<'_>,
-        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        insert_outbox_events(transaction.transaction, events)
-    }
-
-    pub(super) fn get(
-        backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
-        let connection = lock_connection(backend)?;
-        match namespace {
-            "quarantine" => connection
-                .query_row(
-                    "SELECT value FROM kv
-                     WHERE scope = ?1 AND key = ?2 AND value_type = 'blob'",
-                    params![QUARANTINE_SCOPE, key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(StoreError::from),
-            _ => crate::documents::read_document(&connection, key),
-        }
-    }
-
-    pub(super) fn put(
-        backend: &Backend,
-        namespace: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match namespace {
-            "quarantine" => {
-                upsert_kv_blob(&transaction, QUARANTINE_SCOPE, key, value)?;
-            }
-            _ => crate::documents::write_document(&transaction, key, value)?,
-        }
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
     pub(super) fn get_blob(
         backend: &Backend,
         namespace: &str,
@@ -1294,7 +997,15 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        upsert_kv_blob(&transaction, namespace, key, value)?;
+        transaction.execute(
+            "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
+                 VALUES (?1, ?2, ?3, 'blob', ?4)
+                 ON CONFLICT(scope, key) DO UPDATE SET
+                   value = excluded.value,
+                   value_type = 'blob',
+                   updated_at_ms = excluded.updated_at_ms",
+            params![namespace, key, value, now_ms()],
+        )?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1418,31 +1129,6 @@ mod imp {
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
-    }
-
-    pub(super) fn get_appearance_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::AppearanceSnapshot>, StoreError> {
-        let connection = lock_connection(backend)?;
-        crate::documents::read_appearance_snapshot(&connection)
-    }
-
-    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
-        backend: &Backend,
-        missing: impl FnOnce() -> super::AppearanceSnapshot,
-        modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
-    ) -> Result<super::AppearanceSnapshot, E> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StoreError::from)?;
-        let mut snapshot =
-            crate::documents::read_appearance_snapshot(&transaction)?.unwrap_or_else(missing);
-        modify(&mut snapshot)?;
-        crate::documents::write_appearance_snapshot(&transaction, &snapshot)?;
-        transaction.commit().map_err(StoreError::from)?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(snapshot)
     }
 
     pub(super) fn get_workspace_snapshot(
@@ -1749,12 +1435,6 @@ mod imp {
         crate::catalog::read_published_session_snapshot(&connection)
     }
 
-    pub(super) fn agent_ui_snapshot_from_json(
-        value: &serde_json::Value,
-    ) -> Result<super::AgentUiSnapshot, StoreError> {
-        crate::catalog::agent_ui_from_document(value)
-    }
-
     pub(super) fn put_published_session_snapshot(
         backend: &Backend,
         snapshot: &super::PublishedSessionSnapshot,
@@ -1802,40 +1482,6 @@ mod imp {
             backend,
             snapshot,
             crate::config::write_remote_config_snapshot,
-        )
-    }
-
-    pub(super) fn get_update_settings_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::UpdateSettingsSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_update_settings_snapshot)
-    }
-
-    pub(super) fn put_update_settings_snapshot(
-        backend: &Backend,
-        snapshot: &super::UpdateSettingsSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_update_settings_snapshot,
-        )
-    }
-
-    pub(super) fn get_update_state_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::UpdateStateSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_update_state_snapshot)
-    }
-
-    pub(super) fn put_update_state_snapshot(
-        backend: &Backend,
-        snapshot: &super::UpdateStateSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_update_state_snapshot,
         )
     }
 
@@ -1960,259 +1606,6 @@ mod imp {
         }
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
-    pub(super) fn delete(
-        backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = match namespace {
-            "quarantine" => {
-                transaction.execute(
-                    "DELETE FROM kv WHERE scope = ?1 AND key = ?2",
-                    params![QUARANTINE_SCOPE, key],
-                )? > 0
-            }
-            _ => crate::documents::delete_document(&transaction, key)?,
-        };
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(changed)
-    }
-
-    pub(super) fn keys(backend: &Backend, namespace: &str) -> Result<Vec<String>, StoreError> {
-        let connection = lock_connection(backend)?;
-        if namespace == "quarantine" {
-            let mut statement =
-                connection.prepare("SELECT key FROM kv WHERE scope = ?1 ORDER BY key")?;
-            let rows = statement.query_map([QUARANTINE_SCOPE], |row| row.get(0))?;
-            return rows
-                .collect::<Result<Vec<String>, _>>()
-                .map_err(StoreError::from);
-        }
-        crate::documents::list_document_keys(&connection)
-    }
-
-    pub(super) fn legacy_state(backend: &Backend, source: &str) -> Result<LegacyState, StoreError> {
-        let connection = lock_connection(backend)?;
-        let status = read_legacy_record(&connection, source)?.map(|(_, _, status)| status);
-        match status.as_deref() {
-            None => Ok(LegacyState::Pending),
-            Some("imported") => Ok(LegacyState::Imported),
-            Some("deleted") => Ok(LegacyState::Deleted),
-            Some(other) => Err(StoreError::UnknownLegacyStatus {
-                status: other.to_string(),
-            }),
-        }
-    }
-
-    pub(super) fn get_with_legacy_state(
-        backend: &Backend,
-        namespace: &str,
-        key: &str,
-        source: &str,
-    ) -> Result<(Option<Vec<u8>>, LegacyState), StoreError> {
-        let connection = lock_connection(backend)?;
-        let value = crate::documents::read_document(&connection, key)?;
-        let state = match read_legacy_record(&connection, source)? {
-            None => LegacyState::Pending,
-            Some((mapped_namespace, mapped_key, status)) => {
-                if mapped_namespace != namespace || mapped_key != key {
-                    return Err(StoreError::legacy_mapping_mismatch(
-                        source,
-                        mapped_namespace,
-                        mapped_key,
-                        namespace,
-                        key,
-                        "读取",
-                    ));
-                }
-                match status.as_str() {
-                    "imported" => LegacyState::Imported,
-                    "deleted" => LegacyState::Deleted,
-                    other => {
-                        return Err(StoreError::UnknownLegacyStatus {
-                            status: other.to_string(),
-                        });
-                    }
-                }
-            }
-        };
-        Ok((value, state))
-    }
-
-    pub(super) fn delete_with_legacy_tombstone(
-        backend: &Backend,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_legacy_mapping(&transaction, source, namespace, key)?;
-        upsert_deleted_tombstone(&transaction, source, namespace, key)?;
-        let changed = crate::documents::delete_document(&transaction, key)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(changed)
-    }
-
-    pub(super) fn quarantine_with_legacy_tombstone(
-        backend: &Backend,
-        source: &str,
-        namespace: &str,
-        key: &str,
-        quarantine_namespace: &str,
-        quarantine_key: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_legacy_mapping(&transaction, source, namespace, key)?;
-        let _ = quarantine_namespace;
-        let payload = crate::documents::read_document(&transaction, key)?;
-        let moved = if let Some(payload) = payload {
-            upsert_kv_blob(&transaction, QUARANTINE_SCOPE, quarantine_key, &payload)?;
-            crate::documents::delete_document(&transaction, key)?;
-            upsert_deleted_tombstone(&transaction, source, namespace, key)?;
-            true
-        } else {
-            false
-        };
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(moved)
-    }
-
-    pub(super) fn mark_legacy_deleted(
-        backend: &Backend,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_legacy_mapping(&transaction, source, namespace, key)?;
-        upsert_deleted_tombstone(&transaction, source, namespace, key)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
-    fn validate_legacy_mapping(
-        transaction: &rusqlite::Transaction<'_>,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        let mapped = read_legacy_record(transaction, source)?;
-        if let Some((existing_namespace, existing_key, _)) = mapped
-            && (existing_namespace != namespace || existing_key != key)
-        {
-            return Err(StoreError::legacy_mapping_mismatch(
-                source,
-                existing_namespace,
-                existing_key,
-                namespace,
-                key,
-                "改写",
-            ));
-        }
-        Ok(())
-    }
-
-    fn upsert_deleted_tombstone(
-        transaction: &rusqlite::Transaction<'_>,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        upsert_legacy_record(transaction, source, namespace, key, "deleted")
-    }
-
-    fn legacy_scope(source: &str) -> String {
-        format!("{LEGACY_SCOPE_PREFIX}{source}")
-    }
-
-    fn read_legacy_record(
-        connection: &Connection,
-        source: &str,
-    ) -> Result<Option<(String, String, String)>, StoreError> {
-        let scope = legacy_scope(source);
-        let row = connection.query_row(
-            "SELECT
-                   MAX(CASE WHEN key = 'namespace' THEN CAST(value AS TEXT) END),
-                   MAX(CASE WHEN key = 'key' THEN CAST(value AS TEXT) END),
-                   MAX(CASE WHEN key = 'status' THEN CAST(value AS TEXT) END)
-                 FROM kv WHERE scope = ?1",
-            [&scope],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )?;
-        match row {
-            (None, None, None) => Ok(None),
-            (Some(namespace), Some(key), Some(status)) => Ok(Some((namespace, key, status))),
-            _ => Err(StoreError::IncompleteLegacyMetadata {
-                legacy_source: source.to_string(),
-            }),
-        }
-    }
-
-    fn upsert_legacy_record(
-        transaction: &rusqlite::Transaction<'_>,
-        source: &str,
-        namespace: &str,
-        key: &str,
-        status: &str,
-    ) -> Result<(), StoreError> {
-        let scope = legacy_scope(source);
-        for (field, value) in [("namespace", namespace), ("key", key), ("status", status)] {
-            upsert_kv_text(transaction, &scope, field, value)?;
-        }
-        Ok(())
-    }
-
-    fn upsert_kv_text(
-        transaction: &rusqlite::Transaction<'_>,
-        scope: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), StoreError> {
-        transaction.execute(
-            "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES (?1, ?2, ?3, 'text', ?4)
-                 ON CONFLICT(scope, key) DO UPDATE SET
-                   value = excluded.value,
-                   value_type = 'text',
-                   updated_at_ms = excluded.updated_at_ms",
-            params![scope, key, value, now_ms()],
-        )?;
-        Ok(())
-    }
-
-    fn upsert_kv_blob(
-        transaction: &rusqlite::Transaction<'_>,
-        scope: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), StoreError> {
-        transaction.execute(
-            "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES (?1, ?2, ?3, 'blob', ?4)
-                 ON CONFLICT(scope, key) DO UPDATE SET
-                   value = excluded.value,
-                   value_type = 'blob',
-                   updated_at_ms = excluded.updated_at_ms",
-            params![scope, key, value, now_ms()],
-        )?;
         Ok(())
     }
 
@@ -4217,7 +3610,7 @@ mod imp {
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
 mod imp {
-    use super::{HashSet, LegacyState, StoreError};
+    use super::{HashSet, StoreError};
     use std::path::Path;
 
     #[derive(Clone)]
@@ -4245,49 +3638,6 @@ mod imp {
         Err(StoreError::SqliteDisabledOnMobile)
     }
 
-    pub(super) fn store_transaction<R>(
-        _backend: &Backend,
-        _operation: impl FnOnce(&mut super::StoreTransaction<'_>) -> Result<R, StoreError>,
-    ) -> Result<R, StoreError> {
-        unsupported()
-    }
-    pub(super) fn transaction_put(
-        _transaction: &mut super::StoreTransaction<'_>,
-        _namespace: &str,
-        _key: &str,
-        _value: &[u8],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn transaction_delete(
-        _transaction: &mut super::StoreTransaction<'_>,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
-    pub(super) fn transaction_append_outbox(
-        _transaction: &mut super::StoreTransaction<'_>,
-        _events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-
-    pub(super) fn get(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-        _value: &[u8],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
     pub(super) fn get_blob(
         _backend: &Backend,
         _namespace: &str,
@@ -4361,18 +3711,6 @@ mod imp {
         _snapshot: &super::HistoryTitleSnapshot,
     ) -> Result<(), StoreError> {
         unsupported()
-    }
-    pub(super) fn get_appearance_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::AppearanceSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
-        _backend: &Backend,
-        _missing: impl FnOnce() -> super::AppearanceSnapshot,
-        _modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
-    ) -> Result<super::AppearanceSnapshot, E> {
-        Err(StoreError::SqliteDisabledOnMobile.into())
     }
     pub(super) fn get_workspace_snapshot(
         _backend: &Backend,
@@ -4552,11 +3890,6 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn agent_ui_snapshot_from_json(
-        _value: &serde_json::Value,
-    ) -> Result<super::AgentUiSnapshot, StoreError> {
-        unsupported()
-    }
     pub(super) fn get_remote_config_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::RemoteConfigSnapshot>, StoreError> {
@@ -4565,28 +3898,6 @@ mod imp {
     pub(super) fn put_remote_config_snapshot(
         _backend: &Backend,
         _snapshot: &super::RemoteConfigSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_update_settings_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::UpdateSettingsSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_update_settings_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::UpdateSettingsSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_update_state_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::UpdateStateSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_update_state_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::UpdateStateSnapshot,
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -4660,56 +3971,6 @@ mod imp {
         _backend: &Backend,
         _keep: &HashSet<String>,
     ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn delete(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
-    pub(super) fn keys(_backend: &Backend, _namespace: &str) -> Result<Vec<String>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn legacy_state(
-        _backend: &Backend,
-        _source: &str,
-    ) -> Result<LegacyState, StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_with_legacy_state(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-        _source: &str,
-    ) -> Result<(Option<Vec<u8>>, LegacyState), StoreError> {
-        unsupported()
-    }
-    pub(super) fn delete_with_legacy_tombstone(
-        _backend: &Backend,
-        _source: &str,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
-    pub(super) fn mark_legacy_deleted(
-        _backend: &Backend,
-        _source: &str,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn quarantine_with_legacy_tombstone(
-        _backend: &Backend,
-        _source: &str,
-        _namespace: &str,
-        _key: &str,
-        _quarantine_namespace: &str,
-        _quarantine_key: &str,
-    ) -> Result<bool, StoreError> {
         unsupported()
     }
 
@@ -5332,81 +4593,10 @@ mod tests {
 
         let store = Store::open_or_create(&path).unwrap();
         let workspace = store.get_workspace_snapshot().unwrap().unwrap();
-        assert_eq!(workspace.projects[0].root, "/repo");
+        assert_eq!(workspace.projects[0], "/repo");
         store.record_memory_read("user", "a.md", 1).unwrap();
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn kv_round_trip_scan_and_delete() {
-        let dir = temp_dir("kv");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        assert_eq!(store.get("json", "appearance.json").unwrap(), None);
-        store
-            .put("json", "appearance.json", br#"{"dark":true}"#)
-            .unwrap();
-        store
-            .put("json", "appearance.json", br#"{"dark":false}"#)
-            .unwrap();
-        assert_eq!(
-            store.get("json", "appearance.json").unwrap().unwrap(),
-            br#"{"dark":false}"#
-        );
-        assert_eq!(store.keys("json").unwrap(), vec!["appearance.json"]);
-        assert!(store.delete("json", "appearance.json").unwrap());
-        assert!(!store.delete("json", "appearance.json").unwrap());
-        assert!(store.get("json", "appearance.json").unwrap().is_none());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn scoped_blob_is_independent_from_json_documents_and_other_scopes() {
-        let dir = temp_dir("scoped-blob");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-
-        store
-            .put_blob("preferences", "new_session_pins", b"{\"pinned\":[]}")
-            .unwrap();
-        store
-            .put_blob("other", "new_session_pins", b"other-value")
-            .unwrap();
-
-        assert_eq!(
-            store.get_blob("preferences", "new_session_pins").unwrap(),
-            Some(br#"{"pinned":[]}"#.to_vec())
-        );
-        assert_eq!(
-            store.get_blob("other", "new_session_pins").unwrap(),
-            Some(b"other-value".to_vec())
-        );
-        let mut keys = store.blob_keys("preferences").unwrap();
-        keys.sort();
-        assert_eq!(keys, ["new_session_pins"]);
-        assert!(
-            store
-                .delete_blob("preferences", "new_session_pins")
-                .unwrap()
-        );
-        assert!(
-            store
-                .get_blob("preferences", "new_session_pins")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            store
-                .get_blob("other", "new_session_pins")
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(
-            store.get("json", "new_session_pins").unwrap(),
-            None,
-            "作用域 blob 不应通过 JSON 文档入口可见"
-        );
-
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -5831,33 +5021,6 @@ mod tests {
     }
 
     #[test]
-    fn store_transaction_commits_domain_write_and_outbox_together() {
-        let dir = temp_dir("domain-outbox-transaction");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let failed: Result<(), StoreError> = store.transaction(|transaction| {
-            transaction.put("json", "test.json", br#"{"value":1}"#)?;
-            transaction.append_outbox_batch(&[event("rolled-back")])?;
-            Err(StoreError::TransactionAborted)
-        });
-        assert!(failed.is_err());
-        assert_eq!(store.get("json", "test.json").unwrap(), None);
-        assert!(store.load_pending_outbox(10).unwrap().is_empty());
-
-        store
-            .transaction(|transaction| {
-                transaction.put("json", "test.json", br#"{"value":2}"#)?;
-                transaction.append_outbox_batch(&[event("committed")])
-            })
-            .unwrap();
-        assert_eq!(
-            store.get("json", "test.json").unwrap(),
-            Some(br#"{"value":2}"#.to_vec())
-        );
-        assert_eq!(store.load_pending_outbox(10).unwrap().len(), 1);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn durable_revision_survives_restart_and_serializes_publishers() {
         let dir = temp_dir("durable-revision");
         let path = dir.join(DATABASE_FILE_NAME);
@@ -5932,6 +5095,17 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// 迁移前后都在的一行数据：旧版本就有的历史标题表。
+    fn kept_history_title(store: &Store) -> String {
+        store
+            .get_history_title_snapshot()
+            .unwrap()
+            .expect("迁移不能丢掉历史标题")
+            .sessions
+            .remove(0)
+            .custom_title
+    }
+
     #[test]
     fn migrates_released_v5_schema_dropping_multica_columns() {
         let dir = temp_dir("migrate-v5-release");
@@ -5945,18 +5119,15 @@ mod tests {
                  INSERT INTO acp_detail(
                    session_id, agent, launch_command, multica_issue_id, multica_workspace_id
                  ) VALUES ('s1', 'codex', 'codex acp', 'issue-1', 'ws-1');
-                 INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:test.json', '$', X'6B656570', 'blob', 1);",
+                 INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1);",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 5).unwrap();
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        assert_eq!(
-            store.get("json", "test.json").unwrap(),
-            Some(b"keep".to_vec())
-        );
+        assert_eq!(kept_history_title(&store), "keep");
         drop(store);
 
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -5996,8 +5167,8 @@ mod tests {
         connection.execute_batch(v1_schema()).unwrap();
         connection
             .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:test.json', '$', X'6B656570', 'blob', 1)",
+                "INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1)",
                 [],
             )
             .unwrap();
@@ -6005,10 +5176,7 @@ mod tests {
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        assert_eq!(
-            store.get("json", "test.json").unwrap(),
-            Some(b"keep".to_vec())
-        );
+        assert_eq!(kept_history_title(&store), "keep");
         assert_eq!(store.high_watermark().unwrap(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -6306,44 +5474,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_source_validation_is_consistent() {
-        let dir = temp_dir("legacy-source-validation");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        assert!(store.legacy_state("").is_err());
-        assert!(store.legacy_state("bad\0source").is_err());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn kv_and_legacy_state_are_read_from_one_snapshot() {
-        let dir = temp_dir("legacy-lookup");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        assert_eq!(
-            store
-                .get_with_legacy_state("json", "appearance.json", "json:appearance.json")
-                .unwrap(),
-            (None, LegacyState::Pending)
-        );
-        store.put("json", "appearance.json", b"legacy").unwrap();
-        assert_eq!(
-            store
-                .get_with_legacy_state("json", "appearance.json", "json:appearance.json")
-                .unwrap(),
-            (Some(b"legacy".to_vec()), LegacyState::Pending)
-        );
-        store
-            .delete_with_legacy_tombstone("json:appearance.json", "json", "appearance.json")
-            .unwrap();
-        assert_eq!(
-            store
-                .get_with_legacy_state("json", "appearance.json", "json:appearance.json")
-                .unwrap(),
-            (None, LegacyState::Deleted)
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn concurrent_first_open_initializes_once() {
         let dir = temp_dir("concurrent-open");
         let path = dir.join(DATABASE_FILE_NAME);
@@ -6356,7 +5486,12 @@ mod tests {
                     barrier.wait();
                     let store = Store::open_or_create(path).unwrap();
                     store
-                        .put("json", &format!("worker-{index}.json"), b"ready")
+                        .put_paired_device(&PairedDevice {
+                            endpoint_id: format!("worker-{index}"),
+                            name: "ready".into(),
+                            paired_at_ms: 1,
+                            last_seen_at_ms: None,
+                        })
                         .unwrap();
                 })
             })
@@ -6365,7 +5500,7 @@ mod tests {
             thread.join().unwrap();
         }
         let store = Store::open_or_create(path).unwrap();
-        assert_eq!(store.keys("json").unwrap().len(), 8);
+        assert_eq!(store.list_paired_devices().unwrap().len(), 8);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6648,18 +5783,20 @@ mod tests {
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
         store
-            .put(
-                "json",
-                "launch.json",
-                br#"{"version":7,"entries":[{"label":"Claude","command":"claude","provider":"claude"}]}"#,
-            )
+            .put_launch_snapshot(&LaunchSnapshot {
+                version: 7,
+                entries: vec![LaunchEntryRecord {
+                    label: "Claude".into(),
+                    command: "claude".into(),
+                    provider: Some("claude".into()),
+                }],
+            })
             .unwrap();
         drop(store);
 
         let store = Store::open_or_create(&path).unwrap();
-        let raw = store.get("json", "launch.json").unwrap().unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(value["entries"][0]["label"], "Claude");
+        let launch = store.get_launch_snapshot().unwrap().unwrap();
+        assert_eq!(launch.entries[0].label, "Claude");
         drop(store);
 
         let mut connection = rusqlite::Connection::open(&path).unwrap();
@@ -6687,30 +5824,6 @@ mod tests {
             .unwrap();
         assert_eq!(note, "");
         transaction.commit().unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn appearance_theme_mode_is_a_kv_row() {
-        let dir = temp_dir("appearance-kv");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"dark","opacity":0.95}"#,
-            )
-            .unwrap();
-        let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let mode: String = connection
-            .query_row(
-                "SELECT CAST(value AS TEXT) FROM kv
-                 WHERE scope = 'appearance' AND key = 'theme_mode'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(mode, "dark");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6773,13 +5886,7 @@ mod tests {
                 }
             ]
         });
-        store
-            .put(
-                "json",
-                "workspace.json",
-                &serde_json::to_vec(&workspace).unwrap(),
-            )
-            .unwrap();
+        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         for (table, expected) in [
@@ -6815,8 +5922,7 @@ mod tests {
             .unwrap();
         assert_eq!(old_payload_tables, 0);
 
-        let restored: serde_json::Value =
-            serde_json::from_slice(&store.get("json", "workspace.json").unwrap().unwrap()).unwrap();
+        let restored: serde_json::Value = workspace_json(&store);
         assert_eq!(restored["sessions"][0]["layout"]["Split"]["axis"], "H");
         assert_eq!(restored["sessions"][0]["active"], 1);
         assert_eq!(restored["sessions"][1]["acp"]["sid"], "acp-1");
@@ -6867,19 +5973,13 @@ mod tests {
                 "automation_id",
             ]
         );
-        assert_eq!(restored["collapsed_projects"], serde_json::json!(["/repo"]));
-        assert_eq!(
-            restored["collapsed_agents"],
-            serde_json::json!(["agent-def-1"])
+        assert!(
+            restored.get("collapsed_projects").is_none() && restored.get("sidebar_w").is_none(),
+            "界面状态归客户端，运行时不存"
         );
+        assert!(restored["sessions"][0].get("route").is_none());
         drop(connection);
-        store
-            .put(
-                "json",
-                "workspace.json",
-                &serde_json::to_vec(&workspace).unwrap(),
-            )
-            .unwrap();
+        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(
             connection
@@ -6891,6 +5991,17 @@ mod tests {
             "重复快照应原子替换，不能累积旧 session"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn put_workspace_json(store: &Store, raw: &[u8]) {
+        store
+            .put_workspace_snapshot(&Store::workspace_snapshot_from_json(raw).unwrap())
+            .unwrap();
+    }
+
+    fn workspace_json(store: &Store) -> serde_json::Value {
+        let snapshot = store.get_workspace_snapshot().unwrap().unwrap();
+        serde_json::from_slice(&Store::workspace_snapshot_to_json(&snapshot).unwrap()).unwrap()
     }
 
     fn acp_workspace(history_session_id: Option<&str>) -> Vec<u8> {
@@ -6914,9 +6025,7 @@ mod tests {
     }
 
     fn stored_history_id(store: &Store) -> Option<String> {
-        let raw = store.get("json", "workspace.json").unwrap().unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        value["sessions"][0]["acp"]["history_session_id"]
+        workspace_json(store)["sessions"][0]["acp"]["history_session_id"]
             .as_str()
             .map(str::to_string)
     }
@@ -6934,9 +6043,7 @@ mod tests {
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::NoRow
         );
-        store
-            .put("json", "workspace.json", &acp_workspace(Some("from-gui")))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(Some("from-gui")));
         assert_eq!(
             stored_history_id(&store),
             None,
@@ -6957,17 +6064,13 @@ mod tests {
         );
         assert!(!store.remember_history_session_id("acp-1", "  ").unwrap());
 
-        store
-            .put("json", "workspace.json", &acp_workspace(None))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(None));
         assert_eq!(
             stored_history_id(&store).as_deref(),
             Some("pi-confirmed"),
             "窗口存档没带恢复身份时，不能把守护进程已经确认的 id 写成空"
         );
-        store
-            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
         assert_eq!(
             stored_history_id(&store).as_deref(),
             Some("pi-confirmed"),
@@ -6979,15 +6082,11 @@ mod tests {
                 .remember_history_session_id("acp-1", "pi-next")
                 .unwrap()
         );
-        store
-            .put("json", "workspace.json", &acp_workspace(None))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(None));
         assert_eq!(stored_history_id(&store).as_deref(), Some("pi-next"));
 
         assert!(store.clear_history_session_id("acp-1").unwrap());
-        store
-            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
         assert_eq!(
             stored_history_id(&store),
             None,
@@ -7006,159 +6105,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_snapshot_keeps_live_sidebar_fields() {
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "active_session": 1,
-            "active_session_id": "sid-1",
-            "collapsed_agents": ["research", "quant"],
-            "pinned_projects": ["/repo/smelt", "/repo/pulse"],
-            "sidebar_hide_empty_projects": true,
-            "projects": ["/repo/smelt"],
-            "sessions": []
-        }))
-        .unwrap();
-        let snapshot = Store::workspace_snapshot_from_json(&raw).unwrap();
-        assert_eq!(snapshot.active_session, 1);
-        assert_eq!(snapshot.active_session_id.as_deref(), Some("sid-1"));
-        assert_eq!(
-            snapshot.collapsed_agents,
-            vec!["research".to_string(), "quant".to_string()]
-        );
-        assert_eq!(
-            snapshot.pinned_projects,
-            vec!["/repo/smelt".to_string(), "/repo/pulse".to_string()]
-        );
-        assert!(snapshot.sidebar_hide_empty_projects);
-
-        let dir = temp_dir("workspace-live-fields");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store.put_workspace_snapshot(&snapshot).unwrap();
-        let restored = store.get_workspace_snapshot().unwrap().unwrap();
-        assert_eq!(restored.active_session_id.as_deref(), Some("sid-1"));
-        assert_eq!(restored.collapsed_agents, snapshot.collapsed_agents);
-        assert_eq!(restored.pinned_projects, snapshot.pinned_projects);
-        assert!(restored.sidebar_hide_empty_projects);
-        let json: serde_json::Value =
-            serde_json::from_slice(&Store::workspace_snapshot_to_json(&restored).unwrap()).unwrap();
-        assert_eq!(json["active_session_id"], "sid-1");
-        assert_eq!(json["collapsed_agents"][1], "quant");
-        assert_eq!(json["pinned_projects"][1], "/repo/pulse");
-        assert_eq!(json["sidebar_hide_empty_projects"], true);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn workspace_snapshot_reads_leftover_generic_document() {
-        let dir = temp_dir("workspace-generic-doc");
-        let path = dir.join(DATABASE_FILE_NAME);
-        drop(Store::open_or_create(&path).unwrap());
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "active_session_id": "sid-legacy",
-            "projects": ["/repo"],
-            "sessions": [{
-                "layout": {"Leaf": {"cwd": "/repo", "id": "sid-legacy"}},
-                "active": 0
-            }]
-        }))
-        .unwrap();
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:workspace.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![raw],
-            )
-            .unwrap();
-        drop(connection);
-
-        let store = Store::open_or_create(&path).unwrap();
-        let snapshot = store
-            .get_workspace_snapshot()
-            .unwrap()
-            .expect("旧 json 文档应回退读出工作区");
-        assert_eq!(snapshot.active_session_id.as_deref(), Some("sid-legacy"));
-        assert_eq!(snapshot.projects[0].root, "/repo");
-        assert_eq!(snapshot.sessions.len(), 1);
-
-        store.put_workspace_snapshot(&snapshot).unwrap();
-        let leftover: i64 = rusqlite::Connection::open(&path)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope = 'document:workspace.json'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0, "写入类型化快照后应删掉旧 json 文档");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn appearance_snapshot_uses_domain_defaults_for_missing_fields() {
-        let dir = temp_dir("appearance-defaults");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .put("json", "appearance.json", br#"{"theme_mode":"light"}"#)
-            .unwrap();
-        let snapshot = store.get_appearance_snapshot().unwrap().unwrap();
-        assert!(
-            (snapshot.bg_image_opacity - 0.25).abs() < f32::EPSILON,
-            "bg_image_opacity={}",
-            snapshot.bg_image_opacity
-        );
-        assert_eq!(snapshot.ui_font_px, 16);
-        assert_eq!(snapshot.font_px, 13);
-        assert_eq!(snapshot.theme_mode, "light");
-        assert_eq!(snapshot.theme_name, "Default Light");
-
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"dark","theme_name":"Sand Dark"}"#,
-            )
-            .unwrap();
-        assert_eq!(
-            store.get_appearance_snapshot().unwrap().unwrap().theme_name,
-            "Default Dark"
-        );
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"light","theme_name":"Sand Dark"}"#,
-            )
-            .unwrap();
-        assert_eq!(
-            store.get_appearance_snapshot().unwrap().unwrap().theme_name,
-            "Default Light"
-        );
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"light","theme_name":"Ayu Light"}"#,
-            )
-            .unwrap();
-        assert_eq!(
-            store.get_appearance_snapshot().unwrap().unwrap().theme_name,
-            "Ayu Light"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn agent_ui_missing_hooks_key_defaults_to_enabled() {
-        let snapshot = Store::agent_ui_snapshot_from_json(&serde_json::json!({})).unwrap();
-        assert!(snapshot.agent_hooks_enabled);
-        let explicit = Store::agent_ui_snapshot_from_json(&serde_json::json!({
-            "agent_hooks_enabled": false
-        }))
-        .unwrap();
-        assert!(!explicit.agent_hooks_enabled);
-    }
-
-    #[test]
     fn catalog_snapshots_round_trip_without_kv_documents() {
         let dir = temp_dir("catalog-snapshots");
         let path = dir.join(DATABASE_FILE_NAME);
@@ -7166,11 +6112,6 @@ mod tests {
         let agent_ui = AgentUiSnapshot {
             agent_hooks_enabled: true,
             cross_agent_enabled: false,
-            notify_approval: false,
-            notify_input: true,
-            notify_success: false,
-            notify_failure: true,
-            notify_terminal_bell: false,
             commands: vec![AgentConversationCommandRecord {
                 command_key: "acp_cmd".into(),
                 command: "claude --acp".into(),
@@ -7309,7 +6250,7 @@ mod tests {
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         for (table, expected) in [
-            ("agent_ui_pref", 7i64),
+            ("agent_ui_pref", 2i64),
             ("agent_acp_command", 1),
             ("agent_acp_env", 1),
             ("agent_acp_config_memory", 1),
@@ -7567,7 +6508,7 @@ mod tests {
             .get_workspace_snapshot()
             .unwrap()
             .expect("v10→v11 不得丢掉已有项目");
-        assert_eq!(workspace.projects[0].root, "/repo");
+        assert_eq!(workspace.projects[0], "/repo");
         let snapshot = store.get_agent_ui_snapshot().unwrap().unwrap();
         assert_eq!(snapshot.env[0].engine_kind_id, "pi");
         assert_eq!(snapshot.config_memory[0].engine_kind_id, "pi");
@@ -7640,67 +6581,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(leftover, 0);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn leftover_config_kv_documents_are_visible_to_typed_snapshots() {
-        let dir = temp_dir("config-leftover");
-        let path = dir.join(DATABASE_FILE_NAME);
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
-        connection
-            .pragma_update(None, "user_version", STORE_SCHEMA_VERSION)
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:collab.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![br#"{"enabled":true,"iroh_relay":"old"}"#],
-            )
-            .unwrap();
-        drop(connection);
-
-        let store = Store::open_or_create(&path).unwrap();
-        let loaded = store.get_remote_config_snapshot().unwrap().unwrap();
-        assert!(loaded.enabled);
-        assert_eq!(loaded.iroh_relay, "old");
-        store.put_remote_config_snapshot(&loaded).unwrap();
-        let leftover: i64 = rusqlite::Connection::open(&path)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope = 'document:collab.json'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn launch_lands_in_relational_tables() {
-        let dir = temp_dir("relational-docs");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .put(
-                "json",
-                "launch.json",
-                br#"{"version":7,"entries":[{"label":"Claude","command":"claude","provider":"claude"}]}"#,
-            )
-            .unwrap();
-
-        let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let label: String = connection
-            .query_row(
-                "SELECT label FROM launch_entry WHERE position = 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(label, "Claude");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

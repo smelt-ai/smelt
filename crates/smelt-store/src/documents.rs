@@ -1,216 +1,21 @@
 use crate::{
-    AppearanceSnapshot, AutomationRecord, AutomationRunRecord, AutomationSnapshot,
-    AutomationStateRecord, HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord,
-    LaunchSnapshot, StoreError, WorkspaceAcpRecord, WorkspaceLayoutNode, WorkspaceProjectRecord,
-    WorkspaceSessionRecord, WorkspaceSnapshot,
+    AutomationRecord, AutomationRunRecord, AutomationSnapshot, AutomationStateRecord,
+    HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, StoreError,
+    WorkspaceAcpRecord, WorkspaceLayoutNode, WorkspaceSessionRecord, WorkspaceSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde_json::{Map, Number, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-const APPEARANCE_SCOPE: &str = "appearance";
 const LAUNCH_SCOPE: &str = "launch";
 const WORKSPACE_SCOPE: &str = "workspace";
 const DOCUMENT_SCOPE_PREFIX: &str = "document:";
-const GROUP_SCOPE_PREFIX: &str = "session_group:";
 const ACP_SCOPE_PREFIX: &str = "acp:";
 
 #[derive(Clone)]
 struct KvNode {
     value_type: String,
     value: Option<String>,
-}
-
-pub fn document_exists(connection: &Connection, key: &str) -> Result<bool, StoreError> {
-    Ok(read_document(connection, key)?.is_some())
-}
-
-pub fn read_document(connection: &Connection, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-    match key {
-        "launch.json" => read_launch(connection),
-        "session_metadata.json" => read_history_titles(connection),
-        "workspace.json" => read_workspace(connection),
-        "appearance.json" => read_appearance(connection),
-        "automations.json" => read_automations(connection),
-        "agent_ui.json" => match crate::catalog::read_agent_ui_snapshot(connection)? {
-            Some(snapshot) => to_vec(&crate::catalog::json_from_agent_ui(&snapshot)?),
-            None => read_generic_document(connection, key),
-        },
-        "remote_acp_sessions.json" => {
-            match crate::catalog::read_remote_session_snapshot(connection)? {
-                Some(snapshot) => to_vec(&json!({ "sessions": remote_acp_json(&snapshot) })),
-                None => read_generic_document(connection, key),
-            }
-        }
-        "remote_terminal_sessions.json" => {
-            match crate::catalog::read_remote_session_snapshot(connection)? {
-                Some(snapshot) => to_vec(&json!({ "sessions": remote_terminal_json(&snapshot) })),
-                None => read_generic_document(connection, key),
-            }
-        }
-        "sessions.json" => match crate::catalog::read_published_session_snapshot(connection)? {
-            Some(snapshot) => to_vec(&published_json(&snapshot)),
-            None => read_generic_document(connection, key),
-        },
-        key if crate::config::CONFIG_DOCUMENTS.contains(&key) => {
-            crate::config::read_config_document(connection, key)
-        }
-        _ => read_generic_document(connection, key),
-    }
-}
-
-pub fn write_document(
-    transaction: &Transaction<'_>,
-    key: &str,
-    value: &[u8],
-) -> Result<(), StoreError> {
-    match key {
-        "launch.json"
-        | "session_metadata.json"
-        | "workspace.json"
-        | "automations.json"
-        | "agent_ui.json"
-        | "remote_acp_sessions.json"
-        | "remote_terminal_sessions.json"
-        | "sessions.json" => {
-            let parsed: Value = serde_json::from_slice(value)?;
-            match key {
-                "launch.json" => write_launch(transaction, &parsed),
-                "session_metadata.json" => write_history_titles(transaction, &parsed),
-                "automations.json" => write_automations(transaction, &parsed),
-                "agent_ui.json" => crate::catalog::write_agent_ui_snapshot(
-                    transaction,
-                    &crate::catalog::agent_ui_from_document(&parsed)?,
-                ),
-                "remote_acp_sessions.json" => write_remote_acp_document(transaction, &parsed),
-                "remote_terminal_sessions.json" => {
-                    write_remote_terminal_document(transaction, &parsed)
-                }
-                "sessions.json" => crate::catalog::write_published_session_snapshot(
-                    transaction,
-                    &crate::catalog::published_from_document(&parsed)?,
-                ),
-                _ => write_workspace(transaction, &parsed),
-            }
-        }
-        "appearance.json" => match serde_json::from_slice::<Value>(value) {
-            Ok(Value::Object(object)) => write_appearance(transaction, &object),
-            _ => write_generic_document(transaction, key, value),
-        },
-        key if crate::config::CONFIG_DOCUMENTS.contains(&key) => {
-            match serde_json::from_slice::<Value>(value) {
-                Ok(parsed) => {
-                    crate::config::write_config_document(transaction, key, &parsed)?;
-                    Ok(())
-                }
-                Err(_) => write_generic_document(transaction, key, value),
-            }
-        }
-        _ => write_generic_document(transaction, key, value),
-    }
-}
-
-pub fn delete_document(transaction: &Transaction<'_>, key: &str) -> Result<bool, StoreError> {
-    let existed = read_document(transaction, key)?.is_some();
-    match key {
-        "launch.json" => {
-            transaction.execute("DELETE FROM launch_entry", [])?;
-            delete_scope(transaction, LAUNCH_SCOPE)?;
-        }
-        "session_metadata.json" => {
-            transaction.execute("DELETE FROM history_title", [])?;
-        }
-        "workspace.json" => delete_workspace(transaction)?,
-        "automations.json" => delete_automations(transaction)?,
-        "agent_ui.json" => crate::catalog::write_agent_ui_snapshot(
-            transaction,
-            &crate::AgentUiSnapshot {
-                agent_hooks_enabled: true,
-                cross_agent_enabled: true,
-                notify_approval: true,
-                notify_input: true,
-                notify_success: true,
-                notify_failure: true,
-                notify_terminal_bell: true,
-                commands: Vec::new(),
-                env: Vec::new(),
-                config_memory: Vec::new(),
-                agents: Vec::new(),
-                profiles: Vec::new(),
-            },
-        )?,
-        "remote_acp_sessions.json" | "remote_terminal_sessions.json" => {
-            let mut snapshot = crate::catalog::read_remote_session_snapshot(transaction)?
-                .unwrap_or(crate::RemoteSessionCatalogSnapshot {
-                    acp: Vec::new(),
-                    terminal: Vec::new(),
-                });
-            if key == "remote_acp_sessions.json" {
-                snapshot.acp.clear();
-            } else {
-                snapshot.terminal.clear();
-            }
-            crate::catalog::write_remote_session_snapshot(transaction, &snapshot)?;
-        }
-        "sessions.json" => crate::catalog::write_published_session_snapshot(
-            transaction,
-            &crate::PublishedSessionSnapshot {
-                version: 1,
-                sessions: Vec::new(),
-            },
-        )?,
-        "appearance.json" => {
-            delete_scope(transaction, APPEARANCE_SCOPE)?;
-            delete_scope(transaction, &document_scope(key))?;
-        }
-        key if crate::config::CONFIG_DOCUMENTS.contains(&key) => {
-            crate::config::delete_config_document(transaction, key)?;
-        }
-        _ => delete_scope(transaction, &document_scope(key))?,
-    }
-    Ok(existed)
-}
-
-pub fn list_document_keys(connection: &Connection) -> Result<Vec<String>, StoreError> {
-    let mut keys = Vec::new();
-    for key in [
-        "agent_ui.json",
-        "appearance.json",
-        "automations.json",
-        "collab.json",
-        "dsh-auto-models.json",
-        "launch.json",
-        "pi-auto-models.json",
-        "quota-cache.json",
-        "remote_acp_sessions.json",
-        "remote_terminal_sessions.json",
-        "session_metadata.json",
-        "sessions.json",
-        "terminal-theme.json",
-        "update-settings.json",
-        "update-state.json",
-        "worktree-inherit.json",
-        "workspace.json",
-        "workspace_menu.json",
-    ] {
-        if document_exists(connection, key)? {
-            keys.push(key.to_string());
-        }
-    }
-    let mut statement = connection
-        .prepare("SELECT DISTINCT scope FROM kv WHERE scope LIKE 'document:%' ORDER BY scope")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    for row in rows {
-        let scope = row?;
-        let Some(key) = scope.strip_prefix(DOCUMENT_SCOPE_PREFIX) else {
-            continue;
-        };
-        if !keys.iter().any(|existing| existing == key) {
-            keys.push(key.to_string());
-        }
-    }
-    keys.sort();
-    Ok(keys)
 }
 
 fn document_scope(key: &str) -> String {
@@ -231,115 +36,8 @@ pub(crate) fn read_generic_document_bytes(
     read_generic_document(connection, key)
 }
 
-fn write_remote_acp_document(
-    transaction: &Transaction<'_>,
-    value: &Value,
-) -> Result<(), StoreError> {
-    let mut snapshot = crate::catalog::read_remote_session_snapshot(transaction)?.unwrap_or(
-        crate::RemoteSessionCatalogSnapshot {
-            acp: Vec::new(),
-            terminal: Vec::new(),
-        },
-    );
-    snapshot.acp = crate::catalog::remote_acp_from_document(value)?;
-    crate::catalog::write_remote_session_snapshot(transaction, &snapshot)
-}
-
-fn write_remote_terminal_document(
-    transaction: &Transaction<'_>,
-    value: &Value,
-) -> Result<(), StoreError> {
-    let mut snapshot = crate::catalog::read_remote_session_snapshot(transaction)?.unwrap_or(
-        crate::RemoteSessionCatalogSnapshot {
-            acp: Vec::new(),
-            terminal: Vec::new(),
-        },
-    );
-    snapshot.terminal = crate::catalog::remote_terminal_from_document(value)?;
-    crate::catalog::write_remote_session_snapshot(transaction, &snapshot)
-}
-
-fn remote_acp_json(snapshot: &crate::RemoteSessionCatalogSnapshot) -> Vec<Value> {
-    snapshot
-        .acp
-        .iter()
-        .map(|session| {
-            json!({
-                "id": session.id,
-                "cwd": session.cwd,
-                "title": session.title,
-                "agent_option_id": session.agent_option_id,
-                "agent": session.agent,
-                "launch": {
-                    "command": session.launch_command,
-                    "env": serde_json::from_slice::<Value>(&session.launch_env_json)
-                        .unwrap_or_else(|_| json!({})),
-                },
-                "resume_id": session.resume_id,
-                "created_at": session.created_at,
-                "lifecycle": session.lifecycle,
-                "hidden": session.hidden,
-            })
-        })
-        .collect()
-}
-
-fn remote_terminal_json(snapshot: &crate::RemoteSessionCatalogSnapshot) -> Vec<Value> {
-    snapshot
-        .terminal
-        .iter()
-        .map(|session| {
-            json!({
-                "id": session.id,
-                "cwd": session.cwd,
-                "title": session.title,
-                "created_at": session.created_at,
-                "lifecycle": session.lifecycle,
-            })
-        })
-        .collect()
-}
-
-fn published_json(snapshot: &crate::PublishedSessionSnapshot) -> Value {
-    json!({
-        "version": snapshot.version,
-        "sessions": snapshot.sessions.iter().map(|session| json!({
-            "id": session.id,
-            "cwd": session.cwd,
-            "launch": session.launch,
-            "provider": session.provider,
-            "conversation_id": session.conversation_id,
-            "title": session.title,
-            "phase": session.phase,
-            "phase_since": session.phase_since,
-            "updated_at": session.updated_at,
-            "structured_events": session.structured_events,
-            "turn_events": session.turn_events,
-            "agent_event_version": session.agent_event_version,
-            "tokens_used": session.tokens_used,
-            "branch": session.branch,
-            "dirty_files": serde_json::from_slice::<Value>(&session.dirty_files_json)
-                .unwrap_or_else(|_| json!([])),
-        })).collect::<Vec<_>>(),
-    })
-}
-
-fn group_scope(group_id: &str) -> String {
-    format!("{GROUP_SCOPE_PREFIX}{group_id}")
-}
-
 fn acp_scope(session_id: &str) -> String {
     format!("{ACP_SCOPE_PREFIX}{session_id}")
-}
-
-fn scope_exists(connection: &Connection, scope: &str) -> Result<bool, StoreError> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM kv WHERE scope = ?1)",
-            [scope],
-            |row| row.get(0),
-        )
-        .map_err(StoreError::from)
 }
 
 pub(crate) fn delete_scope(transaction: &Transaction<'_>, scope: &str) -> Result<(), StoreError> {
@@ -362,24 +60,6 @@ fn upsert_kv_text(
                value_type = excluded.value_type,
                updated_at_ms = excluded.updated_at_ms",
         params![scope, key, value, value_type, now_ms()],
-    )?;
-    Ok(())
-}
-
-fn upsert_kv_blob(
-    transaction: &Transaction<'_>,
-    scope: &str,
-    key: &str,
-    value: &[u8],
-) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-             VALUES (?1, ?2, ?3, 'blob', ?4)
-             ON CONFLICT(scope, key) DO UPDATE SET
-               value = excluded.value,
-               value_type = 'blob',
-               updated_at_ms = excluded.updated_at_ms",
-        params![scope, key, value, now_ms()],
     )?;
     Ok(())
 }
@@ -632,148 +312,6 @@ fn read_generic_document(
     }
 }
 
-fn write_generic_document(
-    transaction: &Transaction<'_>,
-    key: &str,
-    value: &[u8],
-) -> Result<(), StoreError> {
-    let scope = document_scope(key);
-    delete_scope(transaction, &scope)?;
-    match serde_json::from_slice::<Value>(value) {
-        Ok(value) => write_json_tree(transaction, &scope, "$", &value),
-        Err(_) => upsert_kv_blob(transaction, &scope, "$", value),
-    }
-}
-
-fn read_appearance(connection: &Connection) -> Result<Option<Vec<u8>>, StoreError> {
-    if let Some(object) = read_scoped_object(connection, APPEARANCE_SCOPE)? {
-        return serde_json::to_vec(&Value::Object(object))
-            .map(Some)
-            .map_err(StoreError::from);
-    }
-    read_generic_document(connection, "appearance.json")
-}
-
-pub(crate) fn read_appearance_snapshot(
-    connection: &Connection,
-) -> Result<Option<AppearanceSnapshot>, StoreError> {
-    let Some(object) = read_scoped_object(connection, APPEARANCE_SCOPE)? else {
-        return Ok(None);
-    };
-    Ok(Some(appearance_from_object(&object)))
-}
-
-fn write_appearance(
-    transaction: &Transaction<'_>,
-    object: &Map<String, Value>,
-) -> Result<(), StoreError> {
-    delete_scope(transaction, APPEARANCE_SCOPE)?;
-    delete_scope(transaction, &document_scope("appearance.json"))?;
-    write_scoped_object(transaction, APPEARANCE_SCOPE, object)
-}
-
-pub(crate) fn write_appearance_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &AppearanceSnapshot,
-) -> Result<(), StoreError> {
-    delete_scope(transaction, APPEARANCE_SCOPE)?;
-    delete_scope(transaction, &document_scope("appearance.json"))?;
-    write_scoped_object(transaction, APPEARANCE_SCOPE, &appearance_object(snapshot))
-}
-
-/// 已删掉的 Sand 主题，以及缺名字的旧记录，按当时的明暗落到库自带的 Default。
-fn migrated_theme_name(raw: &str, theme_mode: &str) -> String {
-    if raw.is_empty() || raw == "Sand Dark" || raw == "Sand Light" {
-        if theme_mode == "light" {
-            "Default Light".to_string()
-        } else {
-            "Default Dark".to_string()
-        }
-    } else {
-        raw.to_string()
-    }
-}
-
-fn appearance_from_object(object: &Map<String, Value>) -> AppearanceSnapshot {
-    let theme_mode = object
-        .get("theme_mode")
-        .and_then(Value::as_str)
-        .unwrap_or("dark")
-        .to_string();
-    AppearanceSnapshot {
-        bg_color: object.get("bg_color").and_then(Value::as_u64).unwrap_or(0) as u32,
-        bg_image: object
-            .get("bg_image")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        bg_image_opacity: object
-            .get("bg_image_opacity")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.25) as f32,
-        opacity: object.get("opacity").and_then(Value::as_f64).unwrap_or(1.0) as f32,
-        blur: object.get("blur").and_then(Value::as_bool).unwrap_or(false),
-        glass_style: object
-            .get("glass_style")
-            .and_then(Value::as_str)
-            .unwrap_or("regular")
-            .to_string(),
-        theme_mode: theme_mode.clone(),
-        theme_name: migrated_theme_name(
-            object
-                .get("theme_name")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-            &theme_mode,
-        ),
-        ui_font_px: object
-            .get("ui_font_px")
-            .and_then(Value::as_u64)
-            .unwrap_or(16) as u32,
-        ui_font_family: object
-            .get("ui_font_family")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        font_px: object.get("font_px").and_then(Value::as_u64).unwrap_or(13) as u32,
-        font_family: object
-            .get("font_family")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-    }
-}
-
-fn appearance_object(snapshot: &AppearanceSnapshot) -> Map<String, Value> {
-    let mut object = Map::new();
-    object.insert("bg_color".into(), json!(snapshot.bg_color));
-    object.insert("bg_image".into(), json!(snapshot.bg_image));
-    object.insert("bg_image_opacity".into(), json!(snapshot.bg_image_opacity));
-    object.insert("opacity".into(), json!(snapshot.opacity));
-    object.insert("blur".into(), json!(snapshot.blur));
-    object.insert("glass_style".into(), json!(snapshot.glass_style));
-    object.insert("theme_mode".into(), json!(snapshot.theme_mode));
-    object.insert("theme_name".into(), json!(snapshot.theme_name));
-    object.insert("ui_font_px".into(), json!(snapshot.ui_font_px));
-    object.insert("ui_font_family".into(), json!(snapshot.ui_font_family));
-    object.insert("font_px".into(), json!(snapshot.font_px));
-    object.insert("font_family".into(), json!(snapshot.font_family));
-    object
-}
-
-fn read_launch(connection: &Connection) -> Result<Option<Vec<u8>>, StoreError> {
-    let Some(snapshot) = read_launch_snapshot(connection)? else {
-        return Ok(None);
-    };
-    to_vec(&json!({
-        "version": snapshot.version,
-        "entries": snapshot.entries.iter().map(|entry| json!({
-            "label": entry.label,
-            "command": entry.command,
-            "provider": entry.provider,
-        })).collect::<Vec<_>>(),
-    }))
-}
-
 pub(crate) fn read_launch_snapshot(
     connection: &Connection,
 ) -> Result<Option<LaunchSnapshot>, StoreError> {
@@ -794,10 +332,6 @@ pub(crate) fn read_launch_snapshot(
         version: version.as_u64().unwrap_or(1) as u32,
         entries,
     }))
-}
-
-fn write_launch(transaction: &Transaction<'_>, value: &Value) -> Result<(), StoreError> {
-    write_launch_snapshot(transaction, &launch_from_document(value))
 }
 
 pub(crate) fn write_launch_snapshot(
@@ -827,43 +361,6 @@ pub(crate) fn write_launch_snapshot(
     Ok(())
 }
 
-fn launch_from_document(value: &Value) -> LaunchSnapshot {
-    LaunchSnapshot {
-        version: as_i64(value.get("version")).unwrap_or(1) as u32,
-        entries: value
-            .get("entries")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|entry| LaunchEntryRecord {
-                label: as_str(entry.get("label")).unwrap_or_default().to_string(),
-                command: as_str(entry.get("command")).unwrap_or_default().to_string(),
-                provider: as_str(entry.get("provider")).map(str::to_string),
-            })
-            .collect(),
-    }
-}
-
-fn read_history_titles(connection: &Connection) -> Result<Option<Vec<u8>>, StoreError> {
-    let Some(snapshot) = read_history_title_snapshot(connection)? else {
-        return Ok(None);
-    };
-    to_vec(&json!({
-        "schema_version": snapshot.schema_version,
-        "sessions": snapshot.sessions.iter().map(|session| json!({
-            "agent": session.agent,
-            "profile_id": if session.profile_id.is_empty() {
-                Value::Null
-            } else {
-                Value::String(session.profile_id.clone())
-            },
-            "resume_id": session.resume_id,
-            "custom_title": session.custom_title,
-            "updated_at_ms": session.updated_at_ms,
-        })).collect::<Vec<_>>(),
-    }))
-}
-
 pub(crate) fn read_history_title_snapshot(
     connection: &Connection,
 ) -> Result<Option<HistoryTitleSnapshot>, StoreError> {
@@ -890,10 +387,6 @@ pub(crate) fn read_history_title_snapshot(
     }))
 }
 
-fn write_history_titles(transaction: &Transaction<'_>, value: &Value) -> Result<(), StoreError> {
-    write_history_title_snapshot(transaction, &history_from_document(value))
-}
-
 pub(crate) fn write_history_title_snapshot(
     transaction: &Transaction<'_>,
     snapshot: &HistoryTitleSnapshot,
@@ -916,31 +409,6 @@ pub(crate) fn write_history_title_snapshot(
     Ok(())
 }
 
-fn history_from_document(value: &Value) -> HistoryTitleSnapshot {
-    HistoryTitleSnapshot {
-        schema_version: as_i64(value.get("schema_version")).unwrap_or(1) as u32,
-        sessions: value
-            .get("sessions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|session| HistoryTitleRecord {
-                agent: as_str(session.get("agent")).unwrap_or_default().to_string(),
-                profile_id: as_str(session.get("profile_id"))
-                    .unwrap_or_default()
-                    .to_string(),
-                resume_id: as_str(session.get("resume_id"))
-                    .unwrap_or_default()
-                    .to_string(),
-                custom_title: as_str(session.get("custom_title"))
-                    .unwrap_or_default()
-                    .to_string(),
-                updated_at_ms: as_i64(session.get("updated_at_ms")).unwrap_or(0),
-            })
-            .collect(),
-    }
-}
-
 const AUTOMATION_DOCUMENT: &str = "automations.json";
 
 fn automation_domain_exists(connection: &Connection) -> Result<bool, StoreError> {
@@ -956,13 +424,6 @@ fn automation_domain_exists(connection: &Connection) -> Result<bool, StoreError>
             row.get(0)
         })
         .map_err(StoreError::from)
-}
-
-fn read_automations(connection: &Connection) -> Result<Option<Vec<u8>>, StoreError> {
-    match read_automation_snapshot(connection)? {
-        Some(snapshot) => to_vec(&json_from_snapshot(&snapshot)?),
-        None => read_generic_document(connection, AUTOMATION_DOCUMENT),
-    }
 }
 
 pub(crate) fn read_automation_snapshot(
@@ -1256,91 +717,6 @@ fn snapshot_from_document(value: &Value) -> Result<AutomationSnapshot, StoreErro
     })
 }
 
-fn json_from_snapshot(snapshot: &AutomationSnapshot) -> Result<Value, StoreError> {
-    let automations = snapshot
-        .automations
-        .iter()
-        .map(|automation| {
-            Ok(json!({
-                "id": automation.id,
-                "name": automation.name,
-                "enabled": automation.enabled,
-                "workspace_dir": automation.workspace_dir,
-                "trigger": blob_json(&automation.trigger_json)?,
-                "action": blob_json(&automation.action_json)?,
-                "sinks": blob_json(&automation.sinks_json)?,
-            }))
-        })
-        .collect::<Result<Vec<_>, StoreError>>()?;
-    let states = snapshot
-        .states
-        .iter()
-        .map(|state| {
-            json!({
-                "automation_id": state.automation_id,
-                "next_run_at": state.next_run_at,
-                "last_run_id": state.last_run_id,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut runs = Vec::new();
-    for run in &snapshot.runs {
-        let mut value = json!({
-            "id": run.id,
-            "automation_id": run.automation_id,
-            "source": run.source,
-            "status": run.status,
-            "created_at": run.created_at,
-            "delivery_attempts": run.delivery_attempts,
-            "context": blob_json(&run.context_json)?,
-        });
-        let object = value.as_object_mut().expect("run object");
-        if let Some(scheduled_for) = run.scheduled_for {
-            object.insert("scheduled_for".into(), json!(scheduled_for));
-        }
-        if let Some(started_at) = run.started_at {
-            object.insert("started_at".into(), json!(started_at));
-        }
-        if let Some(delivery_attempt_at) = run.delivery_attempt_at {
-            object.insert("delivery_attempt_at".into(), json!(delivery_attempt_at));
-        }
-        if let Some(finished_at) = run.finished_at {
-            object.insert("finished_at".into(), json!(finished_at));
-        }
-        if let Some(session_id) = &run.session_id {
-            object.insert("session_id".into(), json!(session_id));
-        }
-        if let Some(provider_session_id) = &run.provider_session_id {
-            object.insert("provider_session_id".into(), json!(provider_session_id));
-        }
-        if let Some(output) = &run.output {
-            object.insert("output".into(), json!(output));
-        }
-        if let Some(error) = &run.error {
-            object.insert("error".into(), json!(error));
-        }
-        if let Some(runtime_released_at) = run.runtime_released_at {
-            object.insert("runtime_released_at".into(), json!(runtime_released_at));
-        }
-        runs.push(value);
-    }
-    Ok(json!({
-        "schema_version": snapshot.schema_version,
-        "store_id": snapshot.store_id,
-        "revision": snapshot.revision,
-        "timezone_fingerprint": snapshot.timezone_fingerprint,
-        "automations": automations,
-        "states": states,
-        "runs": runs,
-    }))
-}
-
-fn delete_automations(transaction: &Transaction<'_>) -> Result<(), StoreError> {
-    transaction.execute("DELETE FROM automation", [])?;
-    transaction.execute("DELETE FROM automation_meta", [])?;
-    delete_scope(transaction, &document_scope(AUTOMATION_DOCUMENT))
-}
-
 pub(crate) fn migrate_automations_from_kv_document(
     transaction: &Transaction<'_>,
 ) -> Result<(), StoreError> {
@@ -1443,10 +819,6 @@ fn json_blob(value: Option<&Value>) -> Result<Vec<u8>, StoreError> {
     serde_json::to_vec(value.unwrap_or(&Value::Null)).map_err(StoreError::from)
 }
 
-fn blob_json(raw: &[u8]) -> Result<Value, StoreError> {
-    serde_json::from_slice(raw).map_err(StoreError::from)
-}
-
 fn delete_workspace(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let mut scopes = transaction
         .prepare(
@@ -1462,10 +834,6 @@ fn delete_workspace(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     transaction.execute("DELETE FROM session_group", [])?;
     transaction.execute("DELETE FROM project", [])?;
     Ok(())
-}
-
-fn write_workspace(transaction: &Transaction<'_>, value: &Value) -> Result<(), StoreError> {
-    write_workspace_snapshot(transaction, &workspace_from_document(value)?)
 }
 
 /// 行已经存在时，恢复身份以库里的值为准。窗口快照可以在第一次插入时填上，
@@ -1510,23 +878,18 @@ pub(crate) fn write_workspace_snapshot(
     let preserved_history = preserved_history_session_ids(transaction)?;
     delete_workspace(transaction)?;
     delete_document_scope(transaction, "workspace.json")?;
-    write_scoped_object(
-        transaction,
-        WORKSPACE_SCOPE,
-        &workspace_meta_object(snapshot),
-    )?;
 
     let mut project_roots = Vec::new();
     let mut seen_projects = HashSet::new();
-    for project in &snapshot.projects {
-        let root = project.root.trim();
+    for root in &snapshot.projects {
+        let root = root.trim();
         if root.is_empty() || !seen_projects.insert(root.to_string()) {
             continue;
         }
         let position = project_roots.len() as i64;
         transaction.execute(
-            "INSERT INTO project(root, position, collapsed) VALUES (?1, ?2, ?3)",
-            params![root, position, i64::from(project.collapsed)],
+            "INSERT INTO project(root, position) VALUES (?1, ?2)",
+            params![root, position],
         )?;
         project_roots.push(root.to_string());
     }
@@ -1547,146 +910,21 @@ pub(crate) fn write_workspace_snapshot(
     Ok(())
 }
 
-fn workspace_meta_object(snapshot: &WorkspaceSnapshot) -> Map<String, Value> {
-    let mut meta = Map::new();
-    meta.insert("active_session".into(), json!(snapshot.active_session));
-    if let Some(id) = &snapshot.active_session_id {
-        meta.insert("active_session_id".into(), json!(id));
-    }
-    meta.insert(
-        "pinned_projects".into(),
-        json!(snapshot.pinned_projects.clone()),
-    );
-    meta.insert(
-        "collapsed_agents".into(),
-        json!(snapshot.collapsed_agents.clone()),
-    );
-    meta.insert(
-        "sidebar_hide_empty_projects".into(),
-        json!(snapshot.sidebar_hide_empty_projects),
-    );
-    if let Some(raw) = &snapshot.route_json
-        && let Ok(value) = serde_json::from_slice(raw)
-    {
-        meta.insert("route".into(), value);
-    }
-    if let Some(id) = &snapshot.selected_agent_id {
-        meta.insert("selected_agent_id".into(), json!(id));
-    }
-    if let Some(width) = snapshot.sidebar_w {
-        meta.insert("sidebar_w".into(), json!(width));
-    }
-    if let Some(open) = snapshot.sidebar_open {
-        meta.insert("sidebar_open".into(), json!(open));
-    }
-    if let Some(grouping) = &snapshot.sidebar_grouping {
-        meta.insert("sidebar_grouping".into(), json!(grouping));
-    }
-    meta
-}
-
 pub(crate) fn workspace_from_document(value: &Value) -> Result<WorkspaceSnapshot, StoreError> {
-    let mut meta = value.as_object().cloned().unwrap_or_default();
-    let mut sessions = meta
-        .remove("sessions")
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    let projects = meta
-        .remove("projects")
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    let collapsed_projects = meta
-        .remove("collapsed_projects")
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    meta.remove("menu");
-
-    if sessions.is_empty() {
-        if let Some(layout) = meta.remove("layout").filter(|value| !value.is_null()) {
-            let active = meta
-                .remove("active")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            sessions.push(json!({
-                "layout": layout,
-                "active": active,
-                "last_updated_at": 0,
-                "custom_title": null,
-                "acp": null,
-                "route": null,
-            }));
-            meta.insert("active_session".into(), json!(0));
-        } else if let Some(tabs) = meta
-            .remove("tabs")
-            .and_then(|value| value.as_array().cloned())
-        {
-            let active = meta
-                .remove("active")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            sessions.extend(tabs.into_iter().map(|cwd| {
-                json!({
-                    "layout": {"Leaf": {
-                        "cwd": cwd,
-                        "id": null,
-                        "custom_title": null,
-                        "launch_label": null,
-                        "launch_cmd": null
-                    }},
-                    "active": 0,
-                    "last_updated_at": 0,
-                    "custom_title": null,
-                    "acp": null,
-                    "route": null,
-                })
-            }));
-            meta.insert("active_session".into(), json!(active));
-        }
-    }
-    meta.remove("layout");
-    meta.remove("tabs");
-    meta.remove("active");
-
-    let collapsed: HashSet<String> = collapsed_projects
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect();
-    let mut project_records = Vec::new();
+    let mut projects = Vec::new();
     let mut seen = HashSet::new();
-    for project in projects {
-        let Some(root) = project.as_str().filter(|root| !root.trim().is_empty()) else {
-            continue;
-        };
-        if !seen.insert(root.to_string()) {
-            continue;
+    for root in string_list(value.get("projects")) {
+        if !root.trim().is_empty() && seen.insert(root.clone()) {
+            projects.push(root);
         }
-        project_records.push(WorkspaceProjectRecord {
-            root: root.to_string(),
-            collapsed: collapsed.contains(root),
-        });
     }
-
     Ok(WorkspaceSnapshot {
-        active_session: meta
-            .get("active_session")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        active_session_id: as_str(meta.get("active_session_id")).map(str::to_string),
-        route_json: optional_json_bytes(meta.get("route")),
-        selected_agent_id: as_str(meta.get("selected_agent_id")).map(str::to_string),
-        sidebar_w: meta.get("sidebar_w").and_then(Value::as_f64),
-        sidebar_open: meta.get("sidebar_open").and_then(Value::as_bool),
-        sidebar_grouping: as_str(meta.get("sidebar_grouping")).map(str::to_string),
-        collapsed_agents: string_list(meta.get("collapsed_agents")),
-        pinned_projects: string_list(meta.get("pinned_projects")),
-        sidebar_hide_empty_projects: meta
-            .get("sidebar_hide_empty_projects")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        projects: project_records,
-        sessions: sessions
-            .iter()
+        projects,
+        sessions: value
+            .get("sessions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
             .map(session_from_value)
             .collect::<Result<Vec<_>, _>>()?,
     })
@@ -1711,7 +949,6 @@ fn session_from_value(value: &Value) -> Result<WorkspaceSessionRecord, StoreErro
             .get("acp")
             .filter(|value| value.is_object())
             .map(acp_from_value),
-        route_json: optional_json_bytes(value.get("route")),
     })
 }
 
@@ -1887,15 +1124,6 @@ fn write_session_record(
         "UPDATE session_group SET active_session_id = ?1 WHERE id = ?2",
         params![active_session_id, group_id],
     )?;
-
-    if let Some(route) = saved
-        .route_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
-        .filter(|value| !value.is_null())
-    {
-        write_json_tree(transaction, &group_scope(&group_id), "route", &route)?;
-    }
     Ok(())
 }
 
@@ -2150,55 +1378,23 @@ fn write_optional_json_tree(
     write_json_tree(transaction, scope, key, &value)
 }
 
-fn read_workspace(connection: &Connection) -> Result<Option<Vec<u8>>, StoreError> {
-    let Some(snapshot) = read_workspace_snapshot(connection)? else {
-        return Ok(None);
-    };
-    to_vec(&json_from_workspace_snapshot(&snapshot)?)
-}
-
-fn read_workspace_snapshot_from_generic_document(
-    connection: &Connection,
-) -> Result<Option<WorkspaceSnapshot>, StoreError> {
-    let Some(raw) = read_generic_document(connection, "workspace.json")? else {
-        return Ok(None);
-    };
-    let value: Value = serde_json::from_slice(&raw)?;
-    workspace_from_document(&value).map(Some)
-}
-
 pub(crate) fn read_workspace_snapshot(
     connection: &Connection,
 ) -> Result<Option<WorkspaceSnapshot>, StoreError> {
-    let has_meta = scope_exists(connection, WORKSPACE_SCOPE)?;
     let has_projects: bool =
         connection.query_row("SELECT EXISTS(SELECT 1 FROM project)", [], |row| row.get(0))?;
     let has_groups: bool =
         connection.query_row("SELECT EXISTS(SELECT 1 FROM session_group)", [], |row| {
             row.get(0)
         })?;
-    if !has_meta && !has_projects && !has_groups {
-        // 关系表尚未落盘时，仍可能只存在旧的 `document:workspace.json` kv 树。
-        // appearance 已经有这条回退；workspace 漏了会把「库在、会话在 json 文档里」
-        // 读成空工作区，首屏像新装的 App。
-        return read_workspace_snapshot_from_generic_document(connection);
+    if !has_projects && !has_groups {
+        return Ok(None);
     }
 
-    let state = read_scoped_object(connection, WORKSPACE_SCOPE)?.unwrap_or_default();
-    let mut project_statement =
-        connection.prepare("SELECT root, collapsed FROM project ORDER BY position")?;
-    let project_rows = project_statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    let mut projects = Vec::new();
-    let mut collapsed_projects = Vec::new();
-    for row in project_rows {
-        let (root, collapsed) = row?;
-        if collapsed != 0 {
-            collapsed_projects.push(Value::String(root.clone()));
-        }
-        projects.push(Value::String(root));
-    }
+    let mut project_statement = connection.prepare("SELECT root FROM project ORDER BY position")?;
+    let projects = project_statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut group_statement = connection.prepare(
         "SELECT id, active_session_id, custom_title, last_updated_at
@@ -2224,65 +1420,12 @@ pub(crate) fn read_workspace_snapshot(
             last_updated_at,
         )?)?);
     }
-    let mut project_records = Vec::new();
-    for project in projects {
-        let Some(root) = project.as_str() else {
-            continue;
-        };
-        project_records.push(WorkspaceProjectRecord {
-            root: root.to_string(),
-            collapsed: collapsed_projects
-                .iter()
-                .any(|value| value.as_str() == Some(root)),
-        });
-    }
-    Ok(Some(WorkspaceSnapshot {
-        active_session: state
-            .get("active_session")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        active_session_id: as_str(state.get("active_session_id")).map(str::to_string),
-        route_json: optional_json_bytes(state.get("route")),
-        selected_agent_id: as_str(state.get("selected_agent_id")).map(str::to_string),
-        sidebar_w: state.get("sidebar_w").and_then(Value::as_f64),
-        sidebar_open: state.get("sidebar_open").and_then(Value::as_bool),
-        sidebar_grouping: as_str(state.get("sidebar_grouping")).map(str::to_string),
-        collapsed_agents: string_list(state.get("collapsed_agents")),
-        pinned_projects: string_list(state.get("pinned_projects")),
-        sidebar_hide_empty_projects: state
-            .get("sidebar_hide_empty_projects")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        projects: project_records,
-        sessions,
-    }))
+    Ok(Some(WorkspaceSnapshot { projects, sessions }))
 }
 
 pub(crate) fn json_from_workspace_snapshot(
     snapshot: &WorkspaceSnapshot,
 ) -> Result<Value, StoreError> {
-    let mut state = workspace_meta_object(snapshot);
-    state.insert(
-        "projects".into(),
-        json!(
-            snapshot
-                .projects
-                .iter()
-                .map(|project| project.root.clone())
-                .collect::<Vec<_>>()
-        ),
-    );
-    state.insert(
-        "collapsed_projects".into(),
-        json!(
-            snapshot
-                .projects
-                .iter()
-                .filter(|project| project.collapsed)
-                .map(|project| project.root.clone())
-                .collect::<Vec<_>>()
-        ),
-    );
     let sessions = snapshot
         .sessions
         .iter()
@@ -2293,16 +1436,13 @@ pub(crate) fn json_from_workspace_snapshot(
                 "active": session.active,
                 "layout": layout_to_value(&session.layout),
                 "acp": session.acp.as_ref().map(acp_to_value),
-                "route": session
-                    .route_json
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
-                    .unwrap_or(Value::Null),
             })
         })
         .collect::<Vec<_>>();
-    state.insert("sessions".into(), Value::Array(sessions));
-    Ok(Value::Object(state))
+    Ok(json!({
+        "projects": snapshot.projects,
+        "sessions": sessions,
+    }))
 }
 
 fn layout_to_value(layout: &WorkspaceLayoutNode) -> Value {
@@ -2502,7 +1642,7 @@ fn load_workspace_read_cache(connection: &Connection) -> Result<WorkspaceReadCac
         "SELECT scope, key, value_type,
                 CASE WHEN value_type = 'blob' THEN NULL ELSE CAST(value AS TEXT) END
          FROM kv
-         WHERE scope LIKE 'acp:%' OR scope LIKE 'session_group:%'
+         WHERE scope LIKE 'acp:%'
          ORDER BY scope, key",
     )?;
     let kv_rows = kv_statement.query_map([], |row| {
@@ -2595,14 +1735,12 @@ fn read_session_group(
         .map(|session_id| read_acp_detail(cache, session_id))
         .transpose()?
         .unwrap_or(Value::Null);
-    let route = cached_json(cache, &group_scope(group_id), "route")?.unwrap_or(Value::Null);
     Ok(json!({
         "layout": layout,
         "active": active,
         "last_updated_at": last_updated_at.max(0),
         "custom_title": custom_title,
         "acp": acp,
-        "route": route,
     }))
 }
 
@@ -2789,10 +1927,4 @@ fn as_usize(value: Option<&Value>) -> Option<usize> {
     value
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
-}
-
-fn to_vec(value: &Value) -> Result<Option<Vec<u8>>, StoreError> {
-    serde_json::to_vec(value)
-        .map(Some)
-        .map_err(StoreError::from)
 }

@@ -1208,11 +1208,6 @@ mod tests {
         let snapshot = smelt_store::AgentUiSnapshot {
             agent_hooks_enabled: true,
             cross_agent_enabled: true,
-            notify_approval: true,
-            notify_input: true,
-            notify_success: true,
-            notify_failure: true,
-            notify_terminal_bell: true,
             commands: vec![smelt_store::AgentConversationCommandRecord {
                 command_key: ConversationAgentKind::Pi
                     .descriptor()

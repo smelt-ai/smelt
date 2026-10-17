@@ -1344,14 +1344,19 @@ mod tests {
             Some(r#"{"permission":"allow"}"#)
         );
 
-        let snapshot = smelt_store::Store::agent_ui_snapshot_from_json(&serde_json::json!({
-            "acp_env": {
-                "opencode": {
-                    "OPENCODE_CONFIG_CONTENT": "{\"permission\":\"ask\"}"
-                }
-            }
-        }))
-        .unwrap();
+        let snapshot = smelt_store::AgentUiSnapshot {
+            agent_hooks_enabled: true,
+            cross_agent_enabled: true,
+            commands: Vec::new(),
+            env: vec![smelt_store::AgentAcpEnvRecord {
+                engine_kind_id: "opencode".into(),
+                name: "OPENCODE_CONFIG_CONTENT".into(),
+                value: r#"{"permission":"ask"}"#.into(),
+            }],
+            config_memory: Vec::new(),
+            agents: Vec::new(),
+            profiles: Vec::new(),
+        };
         let configured = configured_launch(Some(&snapshot), ConversationAgentKind::OpenCode);
         assert_eq!(
             configured

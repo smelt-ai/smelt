@@ -40,11 +40,6 @@ pub(crate) fn read_agent_ui_snapshot(
     Ok(Some(AgentUiSnapshot {
         agent_hooks_enabled: pref_bool(connection, "agent_hooks_enabled")?.unwrap_or(true),
         cross_agent_enabled: pref_bool(connection, "cross_agent_enabled")?.unwrap_or(true),
-        notify_approval: pref_bool(connection, "notify_approval")?.unwrap_or(true),
-        notify_input: pref_bool(connection, "notify_input")?.unwrap_or(true),
-        notify_success: pref_bool(connection, "notify_success")?.unwrap_or(true),
-        notify_failure: pref_bool(connection, "notify_failure")?.unwrap_or(true),
-        notify_terminal_bell: pref_bool(connection, "notify_terminal_bell")?.unwrap_or(true),
         commands: query_commands(connection)?,
         env: query_env(connection)?,
         config_memory: query_config_memory(connection)?,
@@ -62,9 +57,9 @@ pub(crate) fn write_agent_ui_snapshot(
     Ok(())
 }
 
-/// 写智能体界面偏好、启动命令和 profile，不动 `agent_definition`。
+/// 写智能体宿主偏好、启动命令和 profile，不动 `agent_definition`。
 ///
-/// GUI 改通知开关时不能整表重写定义：否则并发的单行 create 会被内存里的旧清单盖掉。
+/// 改偏好时不能整表重写定义：否则并发的单行 create 会被内存里的旧清单盖掉。
 pub(crate) fn write_agent_ui_prefs(
     transaction: &Transaction<'_>,
     snapshot: &AgentUiSnapshot,
@@ -85,15 +80,6 @@ pub(crate) fn write_agent_ui_prefs(
         transaction,
         "cross_agent_enabled",
         snapshot.cross_agent_enabled,
-    )?;
-    upsert_pref(transaction, "notify_approval", snapshot.notify_approval)?;
-    upsert_pref(transaction, "notify_input", snapshot.notify_input)?;
-    upsert_pref(transaction, "notify_success", snapshot.notify_success)?;
-    upsert_pref(transaction, "notify_failure", snapshot.notify_failure)?;
-    upsert_pref(
-        transaction,
-        "notify_terminal_bell",
-        snapshot.notify_terminal_bell,
     )?;
     for command in &snapshot.commands {
         transaction.execute(
@@ -386,116 +372,12 @@ pub(crate) fn agent_ui_from_document(value: &Value) -> Result<AgentUiSnapshot, S
             .get("cross_agent_enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true),
-        notify_approval: value
-            .get("notify_approval")
-            .or_else(|| value.get("notify_awaiting"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_input: value
-            .get("notify_input")
-            .or_else(|| value.get("notify_awaiting"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_success: value
-            .get("notify_success")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_failure: value
-            .get("notify_failure")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_terminal_bell: value
-            .get("notify_terminal_bell")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
         commands,
         env,
         config_memory,
         agents,
         profiles,
     })
-}
-
-pub(crate) fn json_from_agent_ui(snapshot: &AgentUiSnapshot) -> Result<Value, StoreError> {
-    let mut object = serde_json::Map::new();
-    object.insert(
-        "agent_hooks_enabled".into(),
-        json!(snapshot.agent_hooks_enabled),
-    );
-    object.insert(
-        "cross_agent_enabled".into(),
-        json!(snapshot.cross_agent_enabled),
-    );
-    object.insert("notify_approval".into(), json!(snapshot.notify_approval));
-    object.insert("notify_input".into(), json!(snapshot.notify_input));
-    object.insert("notify_success".into(), json!(snapshot.notify_success));
-    object.insert("notify_failure".into(), json!(snapshot.notify_failure));
-    object.insert(
-        "notify_terminal_bell".into(),
-        json!(snapshot.notify_terminal_bell),
-    );
-    for command in &snapshot.commands {
-        object.insert(command.command_key.clone(), json!(command.command));
-    }
-    let mut env = serde_json::Map::new();
-    for record in &snapshot.env {
-        env.entry(record.engine_kind_id.clone())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .expect("env object")
-            .insert(record.name.clone(), json!(record.value));
-    }
-    object.insert("acp_env".into(), Value::Object(env));
-    let mut memory = serde_json::Map::new();
-    for record in &snapshot.config_memory {
-        memory
-            .entry(record.engine_kind_id.clone())
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("memory array")
-            .push(json!([record.config_id, record.value_id]));
-    }
-    object.insert("acp_config_memory".into(), Value::Object(memory));
-    object.insert(
-        "agents".into(),
-        json!(snapshot
-            .agents
-            .iter()
-            .map(|agent| {
-                json!({
-                    "id": agent.id,
-                    "name": agent.name,
-                    "description": agent.description,
-                    "engine_kind": agent.engine_kind_id,
-                    "prompt": agent.prompt,
-                    "plugins": serde_json::from_slice::<Value>(&agent.plugins_json)
-                        .unwrap_or_else(|_| json!([])),
-                    "mcp_servers": serde_json::from_slice::<Value>(&agent.mcp_servers_json)
-                        .unwrap_or_else(|_| json!([])),
-                    "context_folders": serde_json::from_slice::<Value>(&agent.context_folders_json)
-                        .unwrap_or_else(|_| json!([])),
-                    "context_links": serde_json::from_slice::<Value>(&agent.context_links_json)
-                        .unwrap_or_else(|_| json!([])),
-                })
-            })
-            .collect::<Vec<_>>()),
-    );
-    object.insert(
-        "profiles".into(),
-        json!(
-            snapshot
-                .profiles
-                .iter()
-                .map(|profile| json!({
-                    "id": profile.id,
-                    "kind_id": profile.kind_id,
-                    "label": profile.label,
-                    "workspace_dir": profile.workspace_dir,
-                }))
-                .collect::<Vec<_>>()
-        ),
-    );
-    Ok(Value::Object(object))
 }
 
 pub(crate) fn read_remote_session_snapshot(

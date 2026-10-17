@@ -128,8 +128,22 @@ mod tests {
     fn seed_launch(dir: &std::path::Path, value: serde_json::Value) -> std::path::PathBuf {
         let database = dir.join(smelt_store::DATABASE_FILE_NAME);
         let store = smelt_store::Store::open_or_create(&database).unwrap();
+        // 夹具沿用存档的 JSON 写法，便于对照；入库走类型化快照。
+        let entries = value["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| smelt_store::LaunchEntryRecord {
+                label: entry["label"].as_str().unwrap_or_default().to_string(),
+                command: entry["command"].as_str().unwrap_or_default().to_string(),
+                provider: entry["provider"].as_str().map(str::to_string),
+            })
+            .collect();
         store
-            .put("json", "launch.json", &serde_json::to_vec(&value).unwrap())
+            .put_launch_snapshot(&smelt_store::LaunchSnapshot {
+                version: value["version"].as_u64().unwrap_or(1) as u32,
+                entries,
+            })
             .unwrap();
         database
     }

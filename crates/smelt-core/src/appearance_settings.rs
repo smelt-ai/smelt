@@ -114,7 +114,6 @@ mod tests {
         assert_eq!(update.appearance[THEME_MODE], "light");
         assert_eq!(update.appearance[UI_FONT_PX], 18);
         assert!(!update.result.settings.contains_key(THEME_MODE));
-        assert!(store.get_appearance_snapshot().unwrap().is_none());
     }
 
     #[test]

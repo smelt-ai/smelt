@@ -11,36 +11,6 @@ use std::collections::BTreeMap;
 
 use crate::agent_kind::{AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind};
 
-/// 库里存下的通知开关。它们属于客户端，运行时写偏好表时原样保留，不改。
-struct StoredNotify {
-    approval: bool,
-    input: bool,
-    success: bool,
-    failure: bool,
-    terminal_bell: bool,
-}
-
-impl StoredNotify {
-    fn from_snapshot(snapshot: Option<&smelt_store::AgentUiSnapshot>) -> Self {
-        match snapshot {
-            Some(s) => Self {
-                approval: s.notify_approval,
-                input: s.notify_input,
-                success: s.notify_success,
-                failure: s.notify_failure,
-                terminal_bell: s.notify_terminal_bell,
-            },
-            None => Self {
-                approval: true,
-                input: true,
-                success: true,
-                failure: true,
-                terminal_bell: true,
-            },
-        }
-    }
-}
-
 fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
     let mut commands = BTreeMap::new();
     for command in snapshot.commands {
@@ -88,18 +58,10 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
 }
 
 /// 偏好表的整份内容。智能体定义另走字段级合并，不在这里写。
-fn prefs_snapshot(
-    settings: &AgentHostSettings,
-    notify: &StoredNotify,
-) -> smelt_store::AgentUiSnapshot {
+fn prefs_snapshot(settings: &AgentHostSettings) -> smelt_store::AgentUiSnapshot {
     smelt_store::AgentUiSnapshot {
         agent_hooks_enabled: settings.hooks_enabled,
         cross_agent_enabled: settings.cross_agent_enabled,
-        notify_approval: notify.approval,
-        notify_input: notify.input,
-        notify_success: notify.success,
-        notify_failure: notify.failure,
-        notify_terminal_bell: notify.terminal_bell,
         commands: CONVERSATION_AGENTS
             .iter()
             .filter_map(|descriptor| {
@@ -178,13 +140,12 @@ pub fn load() -> Result<AgentHostSettings, String> {
 
 fn load_on(store: &smelt_store::Store) -> Result<AgentHostSettings, String> {
     let snapshot = store.get_agent_ui_snapshot().map_err(|e| e.to_string())?;
-    let notify = StoredNotify::from_snapshot(snapshot.as_ref());
     let mut settings = snapshot
         .map(from_snapshot)
         .unwrap_or_else(AgentHostSettings::fresh);
     if migrate_released_adapter_defaults(&mut settings) {
         store
-            .put_agent_ui_prefs(&prefs_snapshot(&settings, &notify))
+            .put_agent_ui_prefs(&prefs_snapshot(&settings))
             .map_err(|e| e.to_string())?;
     }
     settings.agents = crate::agent_definition_store::list_agent_definitions_on(store)
@@ -252,7 +213,6 @@ fn apply_edit_on(
 ) -> Result<AgentHostSettings, String> {
     let (before, after) = (&edit.before, &edit.after);
     let snapshot = store.get_agent_ui_snapshot().map_err(|e| e.to_string())?;
-    let notify = StoredNotify::from_snapshot(snapshot.as_ref());
     let mut current = snapshot
         .map(from_snapshot)
         .unwrap_or_else(AgentHostSettings::fresh);
@@ -275,7 +235,7 @@ fn apply_edit_on(
     );
     merge_profiles(&mut current.profiles, &before.profiles, &after.profiles);
     store
-        .put_agent_ui_prefs(&prefs_snapshot(&current, &notify))
+        .put_agent_ui_prefs(&prefs_snapshot(&current))
         .map_err(|e| e.to_string())?;
     crate::agent_definition_store::sync_agent_definitions_on(store, &before.agents, &after.agents)
         .map_err(|e| e.to_string())?;
@@ -312,15 +272,12 @@ mod tests {
         (store, dir)
     }
 
-    /// 端到端：客户端改一条命令，库里只变这一条；客户端的通知开关原样留着。
+    /// 端到端：客户端改一条命令，库里只变这一条，别的偏好原样留着。
     #[test]
-    fn apply_edit_persists_the_change_and_keeps_client_notify_prefs() {
+    fn apply_edit_persists_only_the_changed_field() {
         let (store, dir) = temp_store();
-        let mut seeded = prefs_snapshot(
-            &AgentHostSettings::fresh(),
-            &StoredNotify::from_snapshot(None),
-        );
-        seeded.notify_success = false;
+        let mut seeded = prefs_snapshot(&AgentHostSettings::fresh());
+        seeded.cross_agent_enabled = false;
         store.put_agent_ui_prefs(&seeded).unwrap();
 
         let before = load_on(&store).unwrap();
@@ -332,7 +289,7 @@ mod tests {
 
         assert_eq!(merged.commands["claude"], "claude --edited");
         let stored = store.get_agent_ui_snapshot().unwrap().unwrap();
-        assert!(!stored.notify_success, "通知开关属于客户端，运行时不能改");
+        assert!(!stored.cross_agent_enabled, "没改的开关不能被这次提交改掉");
         assert_eq!(load_on(&store).unwrap(), merged);
         let _ = std::fs::remove_dir_all(dir);
     }

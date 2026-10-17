@@ -28,43 +28,13 @@ pub struct HistoryTitleRecord {
     pub updated_at_ms: i64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct AppearanceSnapshot {
-    pub bg_color: u32,
-    pub bg_image: Option<String>,
-    pub bg_image_opacity: f32,
-    pub opacity: f32,
-    pub blur: bool,
-    pub glass_style: String,
-    pub theme_mode: String,
-    /// 主题注册名，例如 `Default Dark`、`Ayu Light`。旧库没有这一项、或仍是已删除的 Sand 时，按 `theme_mode` 落到 Default。
-    pub theme_name: String,
-    pub ui_font_px: u32,
-    pub ui_font_family: String,
-    pub font_px: u32,
-    pub font_family: String,
-}
-
+/// 运行时持有的工作区目录：打开的项目和会话。侧栏宽度、当前页、折叠/固定这些
+/// 界面状态归客户端，不在这里。
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceSnapshot {
-    pub active_session: u64,
-    pub active_session_id: Option<String>,
-    pub route_json: Option<Vec<u8>>,
-    pub selected_agent_id: Option<String>,
-    pub sidebar_w: Option<f64>,
-    pub sidebar_open: Option<bool>,
-    pub sidebar_grouping: Option<String>,
-    pub collapsed_agents: Vec<String>,
-    pub pinned_projects: Vec<String>,
-    pub sidebar_hide_empty_projects: bool,
-    pub projects: Vec<WorkspaceProjectRecord>,
+    /// 项目根目录，按侧栏顺序。
+    pub projects: Vec<String>,
     pub sessions: Vec<WorkspaceSessionRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceProjectRecord {
-    pub root: String,
-    pub collapsed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,7 +44,6 @@ pub struct WorkspaceSessionRecord {
     pub active: usize,
     pub layout: WorkspaceLayoutNode,
     pub acp: Option<WorkspaceAcpRecord>,
-    pub route_json: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,11 +91,6 @@ pub struct WorkspaceAcpRecord {
 pub struct AgentUiSnapshot {
     pub agent_hooks_enabled: bool,
     pub cross_agent_enabled: bool,
-    pub notify_approval: bool,
-    pub notify_input: bool,
-    pub notify_success: bool,
-    pub notify_failure: bool,
-    pub notify_terminal_bell: bool,
     pub commands: Vec<AgentConversationCommandRecord>,
     pub env: Vec<AgentAcpEnvRecord>,
     pub config_memory: Vec<AgentAcpConfigMemoryRecord>,
@@ -239,19 +203,6 @@ pub struct PublishedSessionRecord {
 pub struct RemoteConfigSnapshot {
     pub enabled: bool,
     pub iroh_relay: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UpdateSettingsSnapshot {
-    pub channel: String,
-    pub auto_install: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UpdateStateSnapshot {
-    pub current_url: Option<String>,
-    pub staged_json: Option<Vec<u8>>,
-    pub cleanup_app: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

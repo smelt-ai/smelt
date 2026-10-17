@@ -460,26 +460,3 @@ fn pinned_projects_and_hide_empty_roundtrip() {
     assert_eq!(restored.pinned_projects, state.pinned_projects);
     assert!(restored.sidebar_hide_empty_projects);
 }
-
-#[test]
-fn sqlite_workspace_snapshot_keeps_live_sidebar_fields() {
-    let json = serde_json::json!({
-        "active_session": 1,
-        "active_session_id": "sid-1",
-        "collapsed_agents": ["research"],
-        "pinned_projects": ["/repo/smelt"],
-        "sidebar_hide_empty_projects": true,
-        "projects": ["/repo/smelt"],
-        "sessions": []
-    });
-    let snapshot =
-        smelt_store::Store::workspace_snapshot_from_json(&serde_json::to_vec(&json).unwrap())
-            .unwrap();
-    let restored: WsState =
-        serde_json::from_slice(&smelt_store::Store::workspace_snapshot_to_json(&snapshot).unwrap())
-            .unwrap();
-    assert_eq!(restored.active_session_id.as_deref(), Some("sid-1"));
-    assert_eq!(restored.collapsed_agents, vec!["research".to_string()]);
-    assert_eq!(restored.pinned_projects, vec!["/repo/smelt".to_string()]);
-    assert!(restored.sidebar_hide_empty_projects);
-}

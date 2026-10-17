@@ -2,18 +2,13 @@
 
 use crate::{
     AutoModelSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot, RemoteConfigSnapshot,
-    StoreError, TerminalThemeSnapshot, UpdateSettingsSnapshot, UpdateStateSnapshot,
-    WorktreeInheritSnapshot,
+    StoreError, TerminalThemeSnapshot, WorktreeInheritSnapshot,
 };
 use rusqlite::{Connection, Transaction};
 use serde_json::{Map, Value, json};
 
 const COLLAB_SCOPE: &str = "collab";
 const COLLAB_DOCUMENT: &str = "collab.json";
-const UPDATE_SETTINGS_SCOPE: &str = "update_settings";
-const UPDATE_SETTINGS_DOCUMENT: &str = "update-settings.json";
-const UPDATE_STATE_SCOPE: &str = "update_state";
-const UPDATE_STATE_DOCUMENT: &str = "update-state.json";
 const WORKTREE_SCOPE: &str = "worktree_inherit";
 const WORKTREE_DOCUMENT: &str = "worktree-inherit.json";
 const TERMINAL_THEME_SCOPE: &str = "terminal_theme";
@@ -140,147 +135,6 @@ pub(crate) fn write_remote_config_snapshot(
     )
 }
 
-pub(crate) fn json_from_remote_config(snapshot: &RemoteConfigSnapshot) -> Value {
-    json!({
-        "enabled": snapshot.enabled,
-        "iroh_relay": snapshot.iroh_relay,
-    })
-}
-
-pub(crate) fn remote_config_from_document(
-    value: &Value,
-) -> Result<RemoteConfigSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(RemoteConfigSnapshot {
-        enabled: bool_field(&object, "enabled", false),
-        iroh_relay: string_field(&object, "iroh_relay"),
-    })
-}
-
-pub(crate) fn read_update_settings_snapshot(
-    connection: &Connection,
-) -> Result<Option<UpdateSettingsSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, UPDATE_SETTINGS_SCOPE, UPDATE_SETTINGS_DOCUMENT)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(UpdateSettingsSnapshot {
-        channel: string_field(&object, "channel"),
-        auto_install: bool_field(&object, "auto_install", true),
-    }))
-}
-
-pub(crate) fn write_update_settings_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &UpdateSettingsSnapshot,
-) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        UPDATE_SETTINGS_SCOPE,
-        UPDATE_SETTINGS_DOCUMENT,
-        &json!({
-            "channel": snapshot.channel,
-            "auto_install": snapshot.auto_install,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    )
-}
-
-pub(crate) fn json_from_update_settings(snapshot: &UpdateSettingsSnapshot) -> Value {
-    json!({
-        "channel": snapshot.channel,
-        "auto_install": snapshot.auto_install,
-    })
-}
-
-pub(crate) fn update_settings_from_document(
-    value: &Value,
-) -> Result<UpdateSettingsSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(UpdateSettingsSnapshot {
-        channel: string_field(&object, "channel"),
-        auto_install: bool_field(&object, "auto_install", true),
-    })
-}
-
-pub(crate) fn read_update_state_snapshot(
-    connection: &Connection,
-) -> Result<Option<UpdateStateSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, UPDATE_STATE_SCOPE, UPDATE_STATE_DOCUMENT)? else {
-        return Ok(None);
-    };
-    Ok(Some(UpdateStateSnapshot {
-        current_url: object
-            .get("current_url")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        staged_json: object
-            .get("staged")
-            .filter(|value| !value.is_null())
-            .map(|value| serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec())),
-        cleanup_app: object
-            .get("cleanup_app")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    }))
-}
-
-pub(crate) fn write_update_state_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &UpdateStateSnapshot,
-) -> Result<(), StoreError> {
-    let staged = snapshot
-        .staged_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
-        .unwrap_or(Value::Null);
-    write_object(
-        transaction,
-        UPDATE_STATE_SCOPE,
-        UPDATE_STATE_DOCUMENT,
-        &json!({
-            "current_url": snapshot.current_url,
-            "staged": staged,
-            "cleanup_app": snapshot.cleanup_app,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    )
-}
-
-pub(crate) fn json_from_update_state(snapshot: &UpdateStateSnapshot) -> Result<Value, StoreError> {
-    let staged = match snapshot.staged_json.as_deref() {
-        Some(raw) => serde_json::from_slice(raw)?,
-        None => Value::Null,
-    };
-    Ok(json!({
-        "current_url": snapshot.current_url,
-        "staged": staged,
-        "cleanup_app": snapshot.cleanup_app,
-    }))
-}
-
-pub(crate) fn update_state_from_document(value: &Value) -> Result<UpdateStateSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(UpdateStateSnapshot {
-        current_url: object
-            .get("current_url")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        staged_json: object
-            .get("staged")
-            .filter(|value| !value.is_null())
-            .map(|value| serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec())),
-        cleanup_app: object
-            .get("cleanup_app")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    })
-}
-
 pub(crate) fn read_worktree_inherit_snapshot(
     connection: &Connection,
 ) -> Result<Option<WorktreeInheritSnapshot>, StoreError> {
@@ -311,23 +165,6 @@ pub(crate) fn write_worktree_inherit_snapshot(
     )
 }
 
-pub(crate) fn json_from_worktree_inherit(snapshot: &WorktreeInheritSnapshot) -> Value {
-    json!({
-        "enabled": snapshot.enabled,
-        "skip_patterns": snapshot.skip_patterns,
-    })
-}
-
-pub(crate) fn worktree_inherit_from_document(
-    value: &Value,
-) -> Result<WorktreeInheritSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(WorktreeInheritSnapshot {
-        enabled: bool_field(&object, "enabled", false),
-        skip_patterns: string_list(object.get("skip_patterns")),
-    })
-}
-
 pub(crate) fn read_terminal_theme_snapshot(
     connection: &Connection,
 ) -> Result<Option<TerminalThemeSnapshot>, StoreError> {
@@ -348,18 +185,6 @@ pub(crate) fn write_terminal_theme_snapshot(
         TERMINAL_THEME_DOCUMENT,
         &terminal_theme_object(snapshot),
     )
-}
-
-pub(crate) fn json_from_terminal_theme(snapshot: &TerminalThemeSnapshot) -> Value {
-    Value::Object(terminal_theme_object(snapshot))
-}
-
-pub(crate) fn terminal_theme_from_document(
-    value: &Value,
-) -> Result<TerminalThemeSnapshot, StoreError> {
-    Ok(terminal_theme_from_object(
-        &value.as_object().cloned().unwrap_or_default(),
-    ))
 }
 
 fn terminal_theme_from_object(object: &Map<String, Value>) -> TerminalThemeSnapshot {
@@ -419,16 +244,6 @@ pub(crate) fn write_quota_cache_snapshot(
         QUOTA_CACHE_DOCUMENT,
         &quota_object(snapshot)?,
     )
-}
-
-pub(crate) fn json_from_quota_cache(snapshot: &QuotaCacheSnapshot) -> Result<Value, StoreError> {
-    Ok(Value::Object(quota_object(snapshot)?))
-}
-
-pub(crate) fn quota_cache_from_document(value: &Value) -> Result<QuotaCacheSnapshot, StoreError> {
-    Ok(quota_from_object(
-        &value.as_object().cloned().unwrap_or_default(),
-    ))
 }
 
 fn quota_from_object(object: &Map<String, Value>) -> QuotaCacheSnapshot {
@@ -509,16 +324,6 @@ fn write_auto_model(
     )
 }
 
-pub(crate) fn json_from_auto_model(snapshot: &AutoModelSnapshot) -> Value {
-    json!({ "providers": snapshot.providers })
-}
-
-pub(crate) fn auto_model_from_document(value: &Value) -> Result<AutoModelSnapshot, StoreError> {
-    Ok(AutoModelSnapshot {
-        providers: string_list(value.get("providers")),
-    })
-}
-
 pub(crate) fn read_workspace_menu_snapshot(
     connection: &Connection,
 ) -> Result<Option<PublishedWorkspaceMenuSnapshot>, StoreError> {
@@ -551,29 +356,6 @@ pub(crate) fn write_workspace_menu_snapshot(
     )
 }
 
-pub(crate) fn json_from_workspace_menu(
-    snapshot: &PublishedWorkspaceMenuSnapshot,
-) -> Result<Value, StoreError> {
-    Ok(Value::Object(workspace_menu_object(snapshot)?))
-}
-
-pub(crate) fn workspace_menu_from_document(
-    value: &Value,
-) -> Result<PublishedWorkspaceMenuSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(PublishedWorkspaceMenuSnapshot {
-        version: u32_field(&object, "version", 0),
-        revision: object.get("revision").and_then(Value::as_u64).unwrap_or(0),
-        source_id: string_field(&object, "source_id"),
-        source_revision: object
-            .get("source_revision")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        projects_json: json_bytes(object.get("projects"), json!([])),
-        sessions_json: json_bytes(object.get("sessions"), json!([])),
-    })
-}
-
 fn workspace_menu_object(
     snapshot: &PublishedWorkspaceMenuSnapshot,
 ) -> Result<Map<String, Value>, StoreError> {
@@ -590,112 +372,4 @@ fn workspace_menu_object(
     .as_object()
     .cloned()
     .unwrap_or_default())
-}
-
-pub(crate) const CONFIG_DOCUMENTS: &[&str] = &[
-    COLLAB_DOCUMENT,
-    UPDATE_SETTINGS_DOCUMENT,
-    UPDATE_STATE_DOCUMENT,
-    WORKTREE_DOCUMENT,
-    TERMINAL_THEME_DOCUMENT,
-    QUOTA_CACHE_DOCUMENT,
-    DSH_AUTO_DOCUMENT,
-    PI_AUTO_DOCUMENT,
-    WORKSPACE_MENU_DOCUMENT,
-];
-
-pub(crate) fn read_config_document(
-    connection: &Connection,
-    key: &str,
-) -> Result<Option<Vec<u8>>, StoreError> {
-    let value = match key {
-        COLLAB_DOCUMENT => read_remote_config_snapshot(connection)?
-            .map(|snapshot| json_from_remote_config(&snapshot)),
-        UPDATE_SETTINGS_DOCUMENT => read_update_settings_snapshot(connection)?
-            .map(|snapshot| json_from_update_settings(&snapshot)),
-        UPDATE_STATE_DOCUMENT => read_update_state_snapshot(connection)?
-            .map(|snapshot| json_from_update_state(&snapshot))
-            .transpose()?,
-        WORKTREE_DOCUMENT => read_worktree_inherit_snapshot(connection)?
-            .map(|snapshot| json_from_worktree_inherit(&snapshot)),
-        TERMINAL_THEME_DOCUMENT => read_terminal_theme_snapshot(connection)?
-            .map(|snapshot| json_from_terminal_theme(&snapshot)),
-        QUOTA_CACHE_DOCUMENT => read_quota_cache_snapshot(connection)?
-            .map(|snapshot| json_from_quota_cache(&snapshot))
-            .transpose()?,
-        DSH_AUTO_DOCUMENT => read_dsh_auto_model_snapshot(connection)?
-            .map(|snapshot| json_from_auto_model(&snapshot)),
-        PI_AUTO_DOCUMENT => {
-            read_pi_auto_model_snapshot(connection)?.map(|snapshot| json_from_auto_model(&snapshot))
-        }
-        WORKSPACE_MENU_DOCUMENT => read_workspace_menu_snapshot(connection)?
-            .map(|snapshot| json_from_workspace_menu(&snapshot))
-            .transpose()?,
-        _ => return Ok(None),
-    };
-    match value {
-        Some(value) => serde_json::to_vec(&value)
-            .map(Some)
-            .map_err(StoreError::from),
-        None => crate::documents::read_generic_document_bytes(connection, key),
-    }
-}
-
-pub(crate) fn write_config_document(
-    transaction: &Transaction<'_>,
-    key: &str,
-    value: &Value,
-) -> Result<bool, StoreError> {
-    match key {
-        COLLAB_DOCUMENT => {
-            write_remote_config_snapshot(transaction, &remote_config_from_document(value)?)?
-        }
-        UPDATE_SETTINGS_DOCUMENT => {
-            write_update_settings_snapshot(transaction, &update_settings_from_document(value)?)?
-        }
-        UPDATE_STATE_DOCUMENT => {
-            write_update_state_snapshot(transaction, &update_state_from_document(value)?)?
-        }
-        WORKTREE_DOCUMENT => {
-            write_worktree_inherit_snapshot(transaction, &worktree_inherit_from_document(value)?)?
-        }
-        TERMINAL_THEME_DOCUMENT => {
-            write_terminal_theme_snapshot(transaction, &terminal_theme_from_document(value)?)?
-        }
-        QUOTA_CACHE_DOCUMENT => {
-            write_quota_cache_snapshot(transaction, &quota_cache_from_document(value)?)?
-        }
-        DSH_AUTO_DOCUMENT => {
-            write_dsh_auto_model_snapshot(transaction, &auto_model_from_document(value)?)?
-        }
-        PI_AUTO_DOCUMENT => {
-            write_pi_auto_model_snapshot(transaction, &auto_model_from_document(value)?)?
-        }
-        WORKSPACE_MENU_DOCUMENT => {
-            write_workspace_menu_snapshot(transaction, &workspace_menu_from_document(value)?)?
-        }
-        _ => return Ok(false),
-    }
-    Ok(true)
-}
-
-pub(crate) fn delete_config_document(
-    transaction: &Transaction<'_>,
-    key: &str,
-) -> Result<bool, StoreError> {
-    let (scope, leftover) = match key {
-        COLLAB_DOCUMENT => (COLLAB_SCOPE, COLLAB_DOCUMENT),
-        UPDATE_SETTINGS_DOCUMENT => (UPDATE_SETTINGS_SCOPE, UPDATE_SETTINGS_DOCUMENT),
-        UPDATE_STATE_DOCUMENT => (UPDATE_STATE_SCOPE, UPDATE_STATE_DOCUMENT),
-        WORKTREE_DOCUMENT => (WORKTREE_SCOPE, WORKTREE_DOCUMENT),
-        TERMINAL_THEME_DOCUMENT => (TERMINAL_THEME_SCOPE, TERMINAL_THEME_DOCUMENT),
-        QUOTA_CACHE_DOCUMENT => (QUOTA_CACHE_SCOPE, QUOTA_CACHE_DOCUMENT),
-        DSH_AUTO_DOCUMENT => (DSH_AUTO_SCOPE, DSH_AUTO_DOCUMENT),
-        PI_AUTO_DOCUMENT => (PI_AUTO_SCOPE, PI_AUTO_DOCUMENT),
-        WORKSPACE_MENU_DOCUMENT => (WORKSPACE_MENU_SCOPE, WORKSPACE_MENU_DOCUMENT),
-        _ => return Ok(false),
-    };
-    crate::documents::delete_scope(transaction, scope)?;
-    crate::documents::delete_document_scope(transaction, leftover)?;
-    Ok(true)
 }
