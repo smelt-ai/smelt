@@ -168,7 +168,7 @@ impl Workspace {
         match picker.purpose {
             DirPickerPurpose::OpenProject => {
                 if let Some(dir) = chosen.into_iter().next() {
-                    self.add_project(dir, cx);
+                    self.add_project(crate::RuntimeKey::Local, dir, cx);
                 }
             }
             DirPickerPurpose::AgentContextFolders { agent_id } => {

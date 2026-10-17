@@ -14,6 +14,7 @@
 //!
 //! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
+use crate::{ProjectRef, RuntimeKey};
 use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -55,12 +56,97 @@ const SESSION_AGENT_ICON_SIZE: f32 = 17.;
 pub(crate) const SESSION_GLOW_PERIOD: Duration = Duration::from_secs(2);
 
 /// 项目组的重排过渡跟着根路径走。行 id 也用根路径，重排后不会把 hover 留在旧槽位。
-fn project_flip_id(root: &str) -> ElementId {
-    project_element_id("sidebar-flip-project", root)
+fn project_flip_id(project: &ProjectRef) -> ElementId {
+    project_element_id("sidebar-flip-project", project)
 }
 
-fn project_element_id(name: &'static str, root: &str) -> ElementId {
-    (ElementId::from(name), root.to_string()).into()
+/// 两个运行时上可以有同一个路径，元素身份要带上运行时。
+fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
+    let key = match &project.runtime {
+        RuntimeKey::Local => project.root.clone(),
+        RuntimeKey::Remote(id) => format!("{id}:{}", project.root),
+    };
+    (ElementId::from(name), key).into()
+}
+
+/// 侧栏里一段运行时的标题：名字和在线状态。
+fn runtime_section_header(runtime: &RuntimeKey, cx: &App) -> Div {
+    let (name, online) = match runtime {
+        RuntimeKey::Local => ("本机".to_string(), true),
+        RuntimeKey::Remote(id) => cx
+            .try_global::<crate::runtimes::RuntimeHub>()
+            .and_then(|hub| {
+                hub.remotes
+                    .iter()
+                    .find(|remote| remote.runtime.key() == runtime)
+            })
+            .map(|remote| {
+                (
+                    remote.connection.name.clone(),
+                    matches!(remote.status, crate::runtimes::RuntimeStatus::Online { .. }),
+                )
+            })
+            .unwrap_or_else(|| (id.clone(), false)),
+    };
+    div()
+        .mx_2()
+        .mt_3()
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .text_xs()
+        .text_color(rgb(ui_theme::text_faint()))
+        .child(div().size(px(6.)).rounded_full().bg(rgb(if online {
+            ui_theme::session_dot_color(AgentStatus::Idle).into()
+        } else {
+            ui_theme::text_faint()
+        })))
+        .child(name)
+        .when(!online, |d| d.child("· 离线"))
+}
+
+/// 远程项目的右键菜单：复制路径、置顶、关闭。
+fn remote_project_menu(
+    menu: PopupMenu,
+    project: ProjectRef,
+    session_count: usize,
+    workspace: Entity<Workspace>,
+    cx: &App,
+) -> PopupMenu {
+    let pinned = workspace.read(cx).is_project_pinned(&project);
+    let copy_path = project.root.clone();
+    let pin_project = project.clone();
+    let pin_workspace = workspace.clone();
+    menu.item(
+        PopupMenuItem::new("复制项目路径")
+            .icon(IconName::Copy)
+            .on_click(move |_ev, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
+            .icon(IconName::Star)
+            .on_click(move |_ev, _window, cx| {
+                let project = pin_project.clone();
+                pin_workspace.update(cx, |ws, cx| ws.toggle_project_pinned(project, cx));
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(if session_count > 0 {
+            format!("关闭项目（含 {session_count} 个会话）")
+        } else {
+            "关闭项目".to_string()
+        })
+        .icon(IconName::Close)
+        .on_click(move |_ev, _window, cx| {
+            let project = project.clone();
+            workspace.update(cx, |ws, cx| ws.start_close_project(project, cx));
+        }),
+    )
 }
 
 fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
@@ -117,14 +203,24 @@ pub(crate) fn tool_panel_context_root(
 }
 
 impl Workspace {
-    /// 当前活动上下文的 **root 路径**：优先用用户点选的 `active_project`，该项目
-    /// 已被关掉则回退到活动会话所在组，再回退第一组。
+    /// 当前活动的项目：优先用用户点选的 `active_project`，该项目已被关掉则回退到活动
+    /// 会话所在组，再回退第一组，都在选中项目（没有就是活动会话）所在的运行时里找。
     ///
     /// 打开智能体对话时会把它的工作目录写进 `active_project`，于是「点项目行」
     /// 与「开对话」共用同一个上下文变量，后操作的那个生效。
-    pub(crate) fn active_project_root(&self, cx: &App) -> Option<String> {
-        let groups = self.project_groups(cx);
-        let selected = self.active_project.as_deref();
+    pub(crate) fn active_project_ref(&self, cx: &App) -> Option<ProjectRef> {
+        let runtime = self
+            .active_project
+            .as_ref()
+            .map(|project| project.runtime.clone())
+            .or_else(|| self.cur().map(|session| session.runtime(cx).key().clone()))
+            .unwrap_or(RuntimeKey::Local);
+        let groups = self.project_groups(&runtime, cx);
+        let selected = self
+            .active_project
+            .as_ref()
+            .filter(|project| project.runtime == runtime)
+            .map(|project| project.root.as_str());
         let selected_group_root = selected.and_then(|root| {
             groups
                 .iter()
@@ -145,6 +241,15 @@ impl Workspace {
                 .map(|g| g.root.as_str()),
             groups.first().map(|g| g.root.as_str()),
         )
+        .map(|root| ProjectRef { runtime, root })
+    }
+
+    /// 工具面板（文件树、变更、历史……）绑定的本机项目根。面板目前只读本机文件，活动
+    /// 项目在远程运行时上就没有。
+    pub(crate) fn active_project_root(&self, cx: &App) -> Option<String> {
+        self.active_project_ref(cx)
+            .filter(|project| project.runtime == RuntimeKey::Local)
+            .map(|project| project.root)
     }
 
     /// `root` 是否是某段仍然开着的智能体对话的工作目录。
@@ -182,8 +287,7 @@ impl Workspace {
         let active = self.active_session;
         // 注：项目实体化后允许关到一个会话都不剩（侧栏还有项目行撑着，舞台落到引导页），
         // 所以关闭键不再有「最后一个不许关」那道门槛，全都常显。
-        let project_groups = self.project_groups(cx);
-        let active_root = self.active_project_root(cx);
+        let active_project = self.active_project_ref(cx);
 
         let titles: Vec<(usize, String)> = self
             .sessions
@@ -200,29 +304,42 @@ impl Workspace {
         // 非项目分组会拿掉项目标题，因此把每个会话所属项目的标签摊到行内展示，
         // 否则同名会话按状态混在一起后完全看不出来自哪个项目。
         let mut session_projects = vec![None; self.sessions.len()];
-        for group in &project_groups {
-            let branch = self
-                .repo_info
-                .get(group.root.as_str())
-                .and_then(|(_, info)| info.as_ref())
-                .map(|info| info.branch.clone());
-            for &ix in &group.sessions {
-                session_projects[ix] = Some((group.label.clone(), branch.clone()));
+        // 各运行时依次铺开，每段内按当前分组方式分组。
+        let mut groups = Vec::new();
+        for key in self.space_keys() {
+            let Some(space) = self.space(&key) else {
+                continue;
+            };
+            let project_groups = self.project_groups(&key, cx);
+            for group in &project_groups {
+                // 仓库信息目前只有本机项目有。
+                let branch = self
+                    .repo_info
+                    .get(group.root.as_str())
+                    .filter(|_| key == RuntimeKey::Local)
+                    .and_then(|(_, info)| info.as_ref())
+                    .map(|info| info.branch.clone());
+                for &ix in &group.sessions {
+                    session_projects[ix] = Some((group.label.clone(), branch.clone()));
+                }
             }
-        }
-        let mut groups = crate::sidebar_groups(
-            self.sidebar_grouping,
-            project_groups,
-            statuses,
-            &last_updated_at,
-            self.sessions.len(),
-        );
-        if self.sidebar_grouping == SidebarGrouping::Project {
-            groups = crate::sidebar_order::pinned_projects_first(
-                groups,
-                &self.pinned_projects,
-                |group| group.root.as_str(),
+            let members = self.space_members(&key, cx);
+            let mut space_groups = crate::sidebar_groups(
+                &key,
+                self.sidebar_grouping,
+                project_groups,
+                statuses,
+                &last_updated_at,
+                &members,
             );
+            if self.sidebar_grouping == SidebarGrouping::Project {
+                space_groups = crate::sidebar_order::pinned_projects_first(
+                    space_groups,
+                    &space.pinned_projects,
+                    |group| group.root.as_str(),
+                );
+            }
+            groups.extend(space_groups);
         }
         let session_route_active = self.active_tab().is_session();
 
@@ -240,7 +357,7 @@ impl Workspace {
             _ => None,
         };
         let dragging_project = match &self.sidebar_drag {
-            Some(crate::SidebarDrag::Project(root)) => Some(root.clone()),
+            Some(crate::SidebarDrag::Project(project)) => Some(project.clone()),
             _ => None,
         };
         // 筛选 / 分组收进「项目」行右侧的滑块菜单，参考 Copilot Repositories 头。
@@ -336,20 +453,36 @@ impl Workspace {
         };
         let mut hidden_empty = 0usize;
         let mut visible_ix = 0usize;
+        let show_runtime_headers = !self.remote_spaces.is_empty();
+        let mut section_runtime: Option<RuntimeKey> = None;
         for group in groups.iter() {
+            let Some(space) = self.space(&group.runtime) else {
+                continue;
+            };
+            // ---- 运行时标题行：挂了远程运行时才分段 ----
+            if show_runtime_headers && section_runtime.as_ref() != Some(&group.runtime) {
+                section_runtime = Some(group.runtime.clone());
+                rows = rows.child(runtime_section_header(&group.runtime, cx));
+            }
             let is_project_group = grouping == SidebarGrouping::Project;
             // ---- 项目分组标题行 ----
-            // 分组身份一律用 root 路径（末段同名的两个目录是两个项目，见 ProjectGroup）；
-            // name 只是显示用的。
+            // 分组身份一律用运行时加 root 路径（末段同名的两个目录是两个项目，见
+            // ProjectGroup）；name 只是显示用的。
             let cwd = &group.root;
+            let project = ProjectRef {
+                runtime: group.runtime.clone(),
+                root: group.root.clone(),
+            };
+            let is_local_group = group.runtime == RuntimeKey::Local;
             let name = &group.label;
             let ixs = &group.sessions;
-            let collapsed = self.collapsed_projects.contains(cwd);
-            let is_active_group = active_root
-                .as_deref()
-                .is_some_and(|root| crate::sidebar_order::same_project_root(cwd, root));
+            let collapsed = space.collapsed_projects.contains(cwd);
+            let is_active_group = active_project.as_ref().is_some_and(|active| {
+                active.runtime == group.runtime
+                    && crate::sidebar_order::same_project_root(cwd, &active.root)
+            });
             let empty_group = ixs.is_empty();
-            let is_pinned = is_project_group && self.is_project_pinned(cwd);
+            let is_pinned = is_project_group && self.is_project_pinned(&project);
             if is_project_group
                 && !crate::sidebar_order::sidebar_empty_project_visible(
                     hide_empty,
@@ -378,6 +511,7 @@ impl Workspace {
             let repo_info_here = self
                 .repo_info
                 .get(cwd.as_str())
+                .filter(|_| is_local_group)
                 .and_then(|(_, i)| i.clone());
             let is_worktree_group = repo_info_here.as_ref().is_some_and(|i| i.is_worktree());
             let worktree_main_root = repo_info_here
@@ -392,27 +526,32 @@ impl Workspace {
             let branch_label = repo_info_here.as_ref().map(|i| i.branch.clone());
 
             let e_toggle = this.clone();
-            let toggle_root = cwd.clone();
+            let toggle_project = project.clone();
             let e_menu = this.clone();
+            let menu_runtime = space.runtime.clone();
             let menu_cwd = if is_project_group {
                 cwd.clone()
             } else {
-                active_root.clone().unwrap_or_default()
+                active_project
+                    .as_ref()
+                    .filter(|active| active.runtime == group.runtime)
+                    .map(|active| active.root.clone())
+                    .unwrap_or_default()
             };
             let group_name: SharedString = name.clone().into();
-            let drag_root: SharedString = cwd.clone().into();
-            let is_drag_source_project = dragging_project.as_ref().is_some_and(|root| {
-                crate::sidebar_order::normalize_project_root(root)
-                    == crate::sidebar_order::normalize_project_root(cwd)
+            let is_drag_source_project = dragging_project.as_ref().is_some_and(|dragged| {
+                dragged.runtime == project.runtime
+                    && crate::sidebar_order::normalize_project_root(&dragged.root)
+                        == crate::sidebar_order::normalize_project_root(cwd)
             });
             let proj_hint_before = can_drag
                 && !is_drag_source_project
-                && self.proj_drop_hint.as_ref() == Some(&(cwd.clone(), true));
+                && self.proj_drop_hint.as_ref() == Some(&(project.clone(), true));
             let proj_hint_after = can_drag
                 && !is_drag_source_project
-                && self.proj_drop_hint.as_ref() == Some(&(cwd.clone(), false));
+                && self.proj_drop_hint.as_ref() == Some(&(project.clone(), false));
             let mut group_rows = div()
-                .id(project_element_id("proj-group-rows", cwd))
+                .id(project_element_id("proj-group-rows", &project))
                 .flex()
                 .flex_col()
                 .when(is_drag_source_project, |d| d.opacity(0.4))
@@ -423,7 +562,7 @@ impl Workspace {
             if grouping != SidebarGrouping::None {
                 group_rows = group_rows.child(
                     div()
-                        .id(project_element_id("proj-group", cwd))
+                        .id(project_element_id("proj-group", &project))
                         // relative：右端的 + 浮层靠 absolute 定位到这行内。
                         .relative()
                         .flex()
@@ -442,7 +581,7 @@ impl Workspace {
                         })
                         .child(
                             div()
-                                .id(project_element_id("proj-disclosure", cwd))
+                                .id(project_element_id("proj-disclosure", &project))
                                 .w(px(14.))
                                 .flex_shrink_0()
                                 .flex()
@@ -488,7 +627,7 @@ impl Workspace {
                                 .when(is_pinned, |row| {
                                     row.child(
                                         div()
-                                            .id(project_element_id("proj-pin", cwd))
+                                            .id(project_element_id("proj-pin", &project))
                                             .flex_shrink_0()
                                             .text_color(rgb(ui_theme::text_faint()))
                                             .child(Icon::new(IconName::Star).size(px(11.))),
@@ -497,7 +636,7 @@ impl Workspace {
                                 .when(agg != AgentStatus::Idle, |row| {
                                     row.child(
                                         div()
-                                            .id(project_element_id("proj-status-dot", cwd))
+                                            .id(project_element_id("proj-status-dot", &project))
                                             .flex_shrink_0()
                                             .size(px(6.))
                                             .rounded_full()
@@ -562,6 +701,7 @@ impl Workspace {
                                             })
                                             .child(new_session_picker(
                                                 e_menu.clone(),
+                                                menu_runtime.clone(),
                                                 menu_cwd.clone(),
                                                 cx,
                                             )),
@@ -572,7 +712,7 @@ impl Workspace {
                             with_project_drag(
                                 header,
                                 ProjectDrag {
-                                    root: drag_root.clone(),
+                                    project: project.clone(),
                                     label: group_name.clone(),
                                     collapsed,
                                     empty: empty_group,
@@ -587,17 +727,17 @@ impl Workspace {
                             )
                         })
                         .on_mouse_up(MouseButton::Left, move |_ev, window, cx| {
-                            let root = toggle_root.clone();
+                            let project = toggle_project.clone();
                             e_toggle.update(cx, |ws, cx| {
                                 // 整行也挂了 on_drag：超过阈值起拖后不要再当成点选。
                                 if ws.sidebar_drag.is_some() {
                                     return;
                                 }
-                                ws.select_project(root.clone(), window, cx);
+                                ws.select_project(project.clone(), window, cx);
                                 if crate::sidebar_order::project_header_click_toggles_collapse(
                                     !empty_group,
                                 ) {
-                                    ws.toggle_project_collapsed(&root, cx);
+                                    ws.toggle_project_collapsed(&project, cx);
                                 }
                             });
                         })
@@ -610,7 +750,8 @@ impl Workspace {
                             let e_sidebar_pin = e_menu.clone();
                             let e_close_proj = e_menu.clone();
                             let path = cwd.clone();
-                            let close_root = cwd.clone();
+                            let close_project = project.clone();
+                            let menu_project = project.clone();
                             let sess_n = ixs.len();
                             let del_main_root = worktree_main_root.clone();
                             let del_branch = worktree_branch.clone();
@@ -619,17 +760,28 @@ impl Workspace {
                                 if !is_project_group {
                                     return menu;
                                 }
+                                // 远程项目的文件不在这台机器上：打开方式、文件树、worktree
+                                // 都还做不了，只给通用的几项。
+                                if !is_local_group {
+                                    return remote_project_menu(
+                                        menu,
+                                        menu_project.clone(),
+                                        sess_n,
+                                        e_close_proj.clone(),
+                                        cx,
+                                    );
+                                }
                                 let copy_path = path.clone();
                                 let del_path = path.clone();
                                 let pin_path = path.clone();
-                                let sidebar_pin_path = path.clone();
+                                let sidebar_pin_project = close_project.clone();
                                 let wt_root = path.clone();
                                 let e_wt = e_menu.clone();
                                 let e_del = e_del.clone();
                                 let e_pin = e_pin.clone();
                                 let e_sidebar_pin = e_sidebar_pin.clone();
                                 let e_close_proj = e_close_proj.clone();
-                                let close_root = close_root.clone();
+                                let close_project = close_project.clone();
                                 let del_main_root = del_main_root.clone();
                                 let del_branch = del_branch.clone();
                                 let copy_branch = copy_branch.clone();
@@ -647,7 +799,7 @@ impl Workspace {
                                     "加到文件树"
                                 };
                                 let sidebar_pinned =
-                                    e_sidebar_pin.read(cx).is_project_pinned(&sidebar_pin_path);
+                                    e_sidebar_pin.read(cx).is_project_pinned(&sidebar_pin_project);
                                 let sidebar_pin_label = if sidebar_pinned {
                                     "取消置顶"
                                 } else {
@@ -744,12 +896,9 @@ impl Workspace {
                                         PopupMenuItem::new(sidebar_pin_label)
                                             .icon(IconName::Star)
                                             .on_click(move |_ev, _window, cx| {
-                                                let sidebar_pin_path = sidebar_pin_path.clone();
+                                                let project = sidebar_pin_project.clone();
                                                 e_sidebar_pin.update(cx, |ws, cx| {
-                                                    ws.toggle_project_pinned(
-                                                        sidebar_pin_path,
-                                                        cx,
-                                                    )
+                                                    ws.toggle_project_pinned(project, cx)
                                                 });
                                             }),
                                     )
@@ -775,9 +924,9 @@ impl Workspace {
                                         .icon(IconName::Close)
                                         .on_click(
                                             move |_ev, _window, cx| {
-                                                let root = close_root.clone();
+                                                let project = close_project.clone();
                                                 e_close_proj.update(cx, |ws, cx| {
-                                                    ws.start_close_project(root, cx)
+                                                    ws.start_close_project(project, cx)
                                                 });
                                             },
                                         ),
@@ -807,7 +956,7 @@ impl Workspace {
                         .when(can_drag && dragging, |header| {
                             attach_project_drop_layers(
                                 header,
-                                drag_root.clone(),
+                                project.clone(),
                                 proj_hint_before,
                                 proj_hint_after,
                                 this.clone(),
@@ -819,8 +968,8 @@ impl Workspace {
             if collapsed {
                 if grouping != SidebarGrouping::None {
                     rows = rows.child(
-                        flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
-                            .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                        flip_slot(project_flip_id(&project), reorder_generation, group_rows)
+                            .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
                     );
                 }
                 continue;
@@ -829,8 +978,8 @@ impl Workspace {
             if ixs.is_empty() {
                 // 空项目不占一行说明。Grok 的空分组就是没有条目，新建走标题上的 +。
                 rows = rows.child(
-                    flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
-                        .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                    flip_slot(project_flip_id(&project), reorder_generation, group_rows)
+                        .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
                 );
                 continue;
             }
@@ -1453,11 +1602,11 @@ impl Workspace {
             }
             rows = rows.child(
                 flip_slot(
-                    project_flip_id(cwd),
+                    project_flip_id(&project),
                     reorder_generation,
                     group_rows.child(group_body),
                 )
-                .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
             );
         }
 

@@ -154,7 +154,7 @@ impl Workspace {
                             this.refresh_worktree_list(cx);
                         }
                         // 建完直接在新目录开一个终端会话。
-                        this.add_session(Some(created), cx);
+                        this.add_session(crate::runtimes::Runtime::local(), Some(created), cx);
                     }
                     Err(err) => state.error = Some(err),
                 }

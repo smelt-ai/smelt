@@ -413,6 +413,11 @@ impl TerminalView {
     }
 
     /// 守护里的会话 id（关 pane 时用它让守护真正杀掉 shell）。
+    /// 会话所在的运行时。
+    pub(crate) fn runtime(&self) -> &crate::runtimes::Runtime {
+        &self.runtime
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -620,10 +625,12 @@ impl TerminalView {
                 let sid3 = sid.clone();
                 let cwd3 = cwd.clone();
                 let runtime3 = runtime.clone();
-                let term = cx
-                    .background_executor()
-                    .spawn(async move { Terminal::reattach(&runtime3, 24, 80, cwd3.as_deref(), &sid3) })
-                    .await;
+                let term =
+                    cx.background_executor()
+                        .spawn(async move {
+                            Terminal::reattach(&runtime3, 24, 80, cwd3.as_deref(), &sid3)
+                        })
+                        .await;
                 match term {
                     Ok(t) => {
                         // 主线程挂回：adopt_terminal 换 Terminal、清 attention、

@@ -47,10 +47,11 @@ fn shared_workspace_menu_roundtrips() {
 
 #[cfg(test)]
 mod sidebar_group_tests {
-    use crate::{AgentStatus, ProjectGroup, SidebarGrouping, sidebar_groups};
+    use crate::{AgentStatus, ProjectGroup, RuntimeKey, SidebarGrouping, sidebar_groups};
 
     fn group(root: &str, sessions: &[usize]) -> ProjectGroup {
         ProjectGroup {
+            runtime: RuntimeKey::Local,
             root: root.into(),
             label: root.into(),
             sessions: sessions.to_vec(),
@@ -67,7 +68,14 @@ mod sidebar_group_tests {
             AgentStatus::Idle,
         ];
 
-        let groups = sidebar_groups(SidebarGrouping::Status, projects, &statuses, &[0; 4], 4);
+        let groups = sidebar_groups(
+            &RuntimeKey::Local,
+            SidebarGrouping::Status,
+            projects,
+            &statuses,
+            &[0; 4],
+            &[0, 1, 2, 3],
+        );
         let order = groups
             .iter()
             .flat_map(|group| group.sessions.iter().copied())
@@ -76,16 +84,47 @@ mod sidebar_group_tests {
         assert_eq!(order, vec![2, 1, 0, 3]);
     }
 
+    /// 按状态分组时一个运行时那段只收自己的会话，别的运行时的会话不混进来。
+    #[test]
+    fn status_grouping_only_takes_the_runtime_members() {
+        let remote = RuntimeKey::Remote("rt-linux".to_string());
+        let statuses = vec![
+            AgentStatus::Idle,
+            AgentStatus::Running,
+            AgentStatus::NeedsYou,
+            AgentStatus::Idle,
+        ];
+
+        let groups = sidebar_groups(
+            &remote,
+            SidebarGrouping::Status,
+            Vec::new(),
+            &statuses,
+            &[0; 4],
+            &[1, 3],
+        );
+
+        assert!(groups.iter().all(|group| group.runtime == remote));
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.sessions.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![1], vec![3]]
+        );
+    }
+
     #[test]
     fn project_grouping_keeps_project_order() {
         let projects = vec![group("a", &[2, 0]), group("b", &[1])];
 
         let groups = sidebar_groups(
+            &RuntimeKey::Local,
             SidebarGrouping::Project,
             projects,
             &[AgentStatus::Idle; 3],
             &[0; 3],
-            3,
+            &[0, 1, 2],
         );
 
         assert_eq!(groups[0].sessions, vec![2, 0]);
@@ -115,11 +154,12 @@ mod sidebar_group_tests {
         ];
 
         let groups = sidebar_groups(
+            &RuntimeKey::Local,
             SidebarGrouping::LastUpdated,
             projects,
             &statuses,
             &last_updated_at,
-            4,
+            &[0, 1, 2, 3],
         );
 
         assert_eq!(

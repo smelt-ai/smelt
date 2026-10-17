@@ -709,7 +709,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace_catalog
+        self.local
+            .catalog
             .revision
             .store(result.revision, Ordering::Release);
         let parsed = result
@@ -720,9 +721,7 @@ impl Workspace {
             Ok(state) => state.unwrap_or_default(),
             Err(error) => {
                 // 读不懂的文档不能当成空工作区，否则下一次保存就把它冲掉了。
-                self.workspace_catalog
-                    .blocked
-                    .store(true, Ordering::Release);
+                self.local.catalog.blocked.store(true, Ordering::Release);
                 self.report_background_error(format!(
                     "工作区目录无法读取，已停止保存以免覆盖原会话：{error}"
                 ));
@@ -754,17 +753,17 @@ impl Workspace {
         } else {
             std::mem::take(&mut state.projects)
         };
-        for existing in &self.projects {
+        for existing in &self.local.projects {
             if !projects.contains(existing) {
                 projects.push(existing.clone());
             }
         }
-        self.projects = projects;
+        self.local.projects = projects;
         self.saved_active_session_id = saved_active_session_id.clone();
-        self.restore_pending = pending.iter().cloned().enumerate().collect();
-        self.workspace_catalog_loaded = true;
+        self.local.restore_pending = pending.iter().cloned().enumerate().collect();
+        self.local.catalog_loaded = true;
         if pending.is_empty() {
-            self.sessions_restored = true;
+            self.local.sessions_restored = true;
             self.check_daemon_outdated(cx);
         } else {
             eprintln!("[workspace] 后台恢复 {} 个会话（不堵 UI）…", pending.len());
@@ -785,14 +784,14 @@ impl Workspace {
         // 解封只能由「写入真正成功」触发，不能由「内存里有会话」触发：损坏窗口期
         // 新建的会话同样是非空快照，旧逻辑会立刻解除封锁，等库被别的进程修好后
         // 用这份残缺状态覆盖掉完整存档。
-        if !self.ws_write_queue.enqueue(job) {
+        if !self.local.write_queue.enqueue(job) {
             return;
         }
         cx.spawn(async move |workspace, cx| {
             let executor = cx.background_executor().clone();
             loop {
                 let next =
-                    workspace.update(cx, |this, _| this.ws_write_queue.take_next_or_finish());
+                    workspace.update(cx, |this, _| this.local.write_queue.take_next_or_finish());
                 let Ok((job, waiters)) = next else {
                     break;
                 };
@@ -816,13 +815,15 @@ impl Workspace {
     /// 主线程构建待写快照（纯内存，不碰磁盘）。返回 None 表示本次无需写。
     fn build_ws_snapshot(&self, cx: &mut Context<Self>) -> Option<SnapshotJob> {
         // 目录还没从运行时读到：内存里的空列表不代表「用户关光了会话」，不能提交。
-        if !self.workspace_catalog_loaded {
+        if !self.local.catalog_loaded {
             return None;
         }
-        let menu = self.workspace_menu_snapshot(cx);
+        // 目前只写本机运行时那份目录，远程运行时上的会话不混进来。
+        let menu = self.workspace_menu_snapshot(&crate::RuntimeKey::Local, cx);
         let mut sessions: Vec<SessionState> = self
             .sessions
             .iter()
+            .filter(|session| session.runtime(cx).is_local())
             .filter(|session| {
                 persist_in_workspace_snapshot(
                     matches!(session.kind, SessionKind::Conversation(_)),
@@ -877,16 +878,16 @@ impl Workspace {
             })
             .collect();
         // 启动时恢复失败的会话按原位置写回，下次冷启动重试。
-        sessions = merge_restore_pending(sessions, &self.restore_pending);
+        sessions = merge_restore_pending(sessions, &self.local.restore_pending);
 
         let state = WsState {
             sessions,
-            projects: self.projects.clone(),
+            projects: self.local.projects.clone(),
             menu: menu.clone(),
             active_session: persisted_active_position(
                 self.active_session,
-                &self.restore_pending,
-                self.sessions_restored,
+                &self.local.restore_pending,
+                self.local.sessions_restored,
             ),
             active_session_id: self
                 .sessions
@@ -899,10 +900,10 @@ impl Workspace {
             selected_agent_id: self.agent_surface.selected_id.clone(),
             sidebar_w: Some(self.sidebar_w),
             sidebar_open: Some(self.sidebar_open),
-            collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
+            collapsed_projects: self.local.collapsed_projects.iter().cloned().collect(),
             collapsed_agents: self.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,
-            pinned_projects: self.pinned_projects.iter().cloned().collect(),
+            pinned_projects: self.local.pinned_projects.iter().cloned().collect(),
             sidebar_hide_empty_projects: self.sidebar_hide_empty_projects,
             ..Default::default()
         };
@@ -911,7 +912,7 @@ impl Workspace {
         Some(SnapshotJob {
             ui,
             document,
-            catalog: self.workspace_catalog.clone(),
+            catalog: self.local.catalog.clone(),
             menu,
         })
     }
@@ -928,7 +929,7 @@ impl Workspace {
         if let Some(job) = self.build_ws_snapshot(cx) {
             self.enqueue_ws_snapshot(job, epoch, cx);
         }
-        self.ws_write_queue.wait_for_drain()
+        self.local.write_queue.wait_for_drain()
     }
 }
 

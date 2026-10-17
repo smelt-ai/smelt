@@ -132,10 +132,12 @@ fn picker_item_icon(target: &NewSessionTarget) -> Icon {
 /// 桌面这一侧的「有哪些对话入口」：产品智能体在前，裸引擎与 profile 在后。
 /// 只产出身份与显示名，启动规格在真正创建时由 [`conversation_launch`] 解析，
 /// 免得同一份配置被读成两种命令。
-fn conversation_options(cx: &App) -> Vec<AcpAgentOption> {
+/// `local`：项目在本机运行时上。智能体定义和 profile 目前只读本机运行时的配置，远程
+/// 运行时上的项目只给裸引擎，免得拿本机的定义去另一台机器上起。
+fn conversation_options(local: bool, cx: &App) -> Vec<AcpAgentOption> {
     let config = cx.global::<crate::settings::AgentHostState>();
     let mut options = Vec::new();
-    for definition in &config.agents {
+    for definition in config.agents.iter().filter(|_| local) {
         if !definition.is_conversation_ready() {
             continue;
         }
@@ -166,7 +168,7 @@ fn conversation_options(cx: &App) -> Vec<AcpAgentOption> {
             history_dir: None,
         });
     }
-    for profile in config.all_profiles() {
+    for profile in config.all_profiles().filter(|_| local) {
         let Some(kind) = profile.kind() else {
             continue;
         };
@@ -220,12 +222,13 @@ fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchCh
 }
 
 /// 探测只在 Popover 打开时执行，避免每次侧栏重绘都重建动态候选集。
-fn available_new_session_actions(cx: &App) -> Vec<NewSessionAction> {
+fn available_new_session_actions(local: bool, cx: &App) -> Vec<NewSessionAction> {
     let diagnostics = cx
         .try_global::<AcpRuntimeState>()
-        .and_then(|state| state.diagnostics.clone());
+        .and_then(|state| state.diagnostics.clone())
+        .filter(|_| local);
     smelt_model::new_session::new_session_actions(
-        &conversation_options(cx),
+        &conversation_options(local, cx),
         active_launch_entries(cx).as_slice(),
         diagnostics.as_ref(),
     )
@@ -239,6 +242,7 @@ fn available_new_session_actions(cx: &App) -> Vec<NewSessionAction> {
 /// 共用同一棵布局树。
 struct NewSessionPickerState {
     workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
     cwd: Option<String>,
     source_actions: Vec<NewSessionAction>,
     sections: [Vec<NewSessionAction>; 3],
@@ -248,9 +252,15 @@ struct NewSessionPickerState {
 }
 
 impl NewSessionPickerState {
-    fn new(workspace: Entity<Workspace>, cwd: Option<String>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        workspace: Entity<Workspace>,
+        runtime: crate::runtimes::Runtime,
+        cwd: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             workspace,
+            runtime,
             cwd,
             source_actions: Vec::new(),
             sections: [Vec::new(), Vec::new(), Vec::new()],
@@ -352,6 +362,7 @@ impl NewSessionPickerState {
             return;
         };
         let cwd = self.cwd.clone();
+        let runtime = self.runtime.clone();
         let conversation = match &target {
             NewSessionTarget::Conversation {
                 agent_option_id, ..
@@ -374,6 +385,7 @@ impl NewSessionPickerState {
                 };
                 workspace.add_acp_session(
                     NewAcpSessionRequest {
+                        runtime,
                         agent,
                         launch_override,
                         profile_id,
@@ -388,6 +400,7 @@ impl NewSessionPickerState {
                 )
             }
             NewSessionTarget::Terminal { command, provider } => workspace.add_session_with_launch(
+                runtime,
                 cwd,
                 Some(LaunchEntry {
                     label: String::new(),
@@ -396,7 +409,7 @@ impl NewSessionPickerState {
                 }),
                 cx,
             ),
-            NewSessionTarget::BlankTerminal => workspace.add_session(cwd, cx),
+            NewSessionTarget::BlankTerminal => workspace.add_session(runtime, cwd, cx),
         });
         self.dismiss(window, cx);
     }
@@ -585,6 +598,7 @@ impl Render for NewSessionPickerState {
 #[derive(IntoElement)]
 pub(super) struct NewSessionPicker {
     workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
     cwd: Option<String>,
     trigger: Button,
 }
@@ -594,12 +608,14 @@ pub(super) struct NewSessionPicker {
 /// 按钮 id 跟项目路径走。下标会在拖动排序后指到别的项目。
 pub(super) fn new_session_picker(
     workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
     cwd: String,
     cx: &App,
 ) -> NewSessionPicker {
     let trigger_id = ElementId::from((ElementId::from("proj-new"), cwd.clone()));
     NewSessionPicker {
         workspace,
+        runtime,
         cwd: (!cwd.is_empty()).then_some(cwd),
         trigger: Button::new(trigger_id)
             .custom(ButtonCustomVariant::new(cx))
@@ -616,15 +632,21 @@ impl RenderOnce for NewSessionPicker {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let workspace = self.workspace;
         let cwd = self.cwd;
-        // 项目排序会改变下标。状态以项目路径为主键，拖动后同一个列表位置
-        // 不能把新会话建到旧项目。
-        let picker_root = cwd.as_deref().unwrap_or("default").to_string();
+        let runtime = self.runtime;
+        let local = runtime.is_local();
+        // 项目排序会改变下标。状态以运行时加项目路径为主键，拖动后同一个列表位置不能
+        // 把新会话建到旧项目，两个运行时上的同名路径也不能共用一份。
+        let picker_root = format!(
+            "{:?}:{}",
+            runtime.key(),
+            cwd.as_deref().unwrap_or("default")
+        );
         let picker_key =
             ElementId::from((ElementId::from("new-session-picker"), picker_root.clone()));
         let picker_state_key =
             ElementId::from((ElementId::from("new-session-picker-state"), picker_root));
         let picker = window.use_keyed_state(picker_state_key, cx, {
-            move |_, cx| NewSessionPickerState::new(workspace, cwd, cx)
+            move |_, cx| NewSessionPickerState::new(workspace, runtime, cwd, cx)
         });
         let focus_handle = picker.read(cx).focus_handle(cx);
 
@@ -635,7 +657,7 @@ impl RenderOnce for NewSessionPicker {
             .trigger(self.trigger)
             .track_focus(&focus_handle)
             .content(move |_, _window, cx| {
-                let actions = available_new_session_actions(cx);
+                let actions = available_new_session_actions(local, cx);
                 let popover = cx.entity();
                 picker.update(cx, |state, cx| {
                     sync_picker_state(state, &actions, popover.downgrade(), cx)

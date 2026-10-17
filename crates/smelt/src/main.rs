@@ -35,7 +35,10 @@ use smelt_model::osc;
 mod provider_quota;
 mod resizable_split;
 mod runtime_call;
+mod runtime_space;
 mod runtimes;
+pub(crate) use runtime_space::ProjectRef;
+pub(crate) use runtimes::RuntimeKey;
 mod session_history;
 mod session_list;
 mod settings;
@@ -58,12 +61,12 @@ mod workspace_view;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
-pub(crate) use workspace_persist::{
-    WorkspaceCatalogSync, WorkspaceSnapshotWriteQueue, load_workspace_ui, normalize_saved_sessions,
-    pending_restore_session_ids, unproject_acp_when_remote_catalog_drops,
-};
 #[cfg(test)]
 pub(crate) use workspace_persist::{WsState, merge_restore_pending, persisted_active_position};
+pub(crate) use workspace_persist::{
+    load_workspace_ui, normalize_saved_sessions, pending_restore_session_ids,
+    unproject_acp_when_remote_catalog_drops,
+};
 
 mod updater;
 
@@ -1258,6 +1261,14 @@ impl Session {
         }
     }
 
+    /// 会话所属的运行时：从它的视图读（终端叶子、ACP 视图各自记着），不另存一份。
+    fn runtime(&self, cx: &App) -> crate::runtimes::Runtime {
+        match &self.kind {
+            SessionKind::Term { active, .. } => active.read(cx).runtime().clone(),
+            SessionKind::Conversation(view) => view.read(cx).runtime().clone(),
+        }
+    }
+
     /// 会话工作目录：活动终端的 cwd（侧栏分组用）。
     fn cwd(&self, cx: &App) -> Option<String> {
         match &self.kind {
@@ -1493,11 +1504,11 @@ pub(crate) enum SidebarGrouping {
     Project,
 }
 
-/// 侧栏正在拖哪一类。身份跟 drop payload 一致：会话用 ui_id，项目用 root。
+/// 侧栏正在拖哪一类。身份跟 drop payload 一致：会话用 ui_id，项目用运行时加 root。
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SidebarDrag {
     Session(u64),
-    Project(String),
+    Project(ProjectRef),
 }
 
 /// 单个会话的持久化镜像：分屏树 + 会话内活动叶子（遍历序）+ 用户重命名过的会话名。
@@ -1694,7 +1705,10 @@ pub(crate) enum PaneState {
 /// 可能一模一样（`~/a/smelt` 和 `~/b/smelt`），拿显示名当 key 会把它们认成同一个项目：
 /// 第二个连行都不显示、会话挂错组、关一个连带关掉另一个的会话。
 pub(crate) struct ProjectGroup {
-    /// 项目根目录：唯一标识。active_project / collapsed_projects / close_project 全用它。
+    /// 项目所在的运行时。根路径只在一个运行时里唯一。
+    pub runtime: crate::runtimes::RuntimeKey,
+    /// 项目根目录：在所属运行时里唯一。active_project / collapsed_projects / close_project
+    /// 全用它（连同运行时）。
     pub root: String,
     /// 侧栏显示名。末段重名时往前补父目录段区分（`a · smelt` / `b · smelt`）。
     pub label: String,
@@ -1702,12 +1716,15 @@ pub(crate) struct ProjectGroup {
     pub sessions: Vec<usize>,
 }
 
+/// 一个运行时那段侧栏的分组。`members` 是属于这个运行时的会话下标（升序）；按状态、
+/// 时间、不分组时只在它们里面排。
 pub(crate) fn sidebar_groups(
+    runtime: &crate::runtimes::RuntimeKey,
     grouping: SidebarGrouping,
     project_groups: Vec<ProjectGroup>,
     statuses: &[AgentStatus],
     last_updated_at: &[u64],
-    session_count: usize,
+    members: &[usize],
 ) -> Vec<ProjectGroup> {
     match grouping {
         SidebarGrouping::Project => project_groups,
@@ -1718,12 +1735,13 @@ pub(crate) fn sidebar_groups(
         ]
         .into_iter()
         .filter_map(|(status, label)| {
-            let sessions = statuses
+            let sessions = members
                 .iter()
-                .enumerate()
-                .filter_map(|(ix, value)| (*value == status).then_some(ix))
+                .copied()
+                .filter(|ix| statuses.get(*ix) == Some(&status))
                 .collect::<Vec<_>>();
             (!sessions.is_empty()).then(|| ProjectGroup {
+                runtime: runtime.clone(),
                 root: format!("__status_{}", status.rank()),
                 label: label.to_string(),
                 sessions,
@@ -1733,7 +1751,7 @@ pub(crate) fn sidebar_groups(
         SidebarGrouping::LastUpdated => {
             let now = Local::now();
             let mut buckets: [Vec<usize>; 4] = std::array::from_fn(|_| Vec::new());
-            for ix in 0..session_count {
+            for &ix in members {
                 let bucket =
                     last_updated_bucket(last_updated_at.get(ix).copied().unwrap_or_default(), now);
                 buckets[bucket].push(ix);
@@ -1755,6 +1773,7 @@ pub(crate) fn sidebar_groups(
                             .then_with(|| a.cmp(b))
                     });
                     Some(ProjectGroup {
+                        runtime: runtime.clone(),
                         root: format!("__last_updated_{bucket}"),
                         label: labels[bucket].to_string(),
                         sessions,
@@ -1763,9 +1782,10 @@ pub(crate) fn sidebar_groups(
                 .collect()
         }
         SidebarGrouping::None => vec![ProjectGroup {
+            runtime: runtime.clone(),
             root: "__all_sessions".into(),
             label: String::new(),
-            sessions: (0..session_count).collect(),
+            sessions: members.to_vec(),
         }],
     }
 }
@@ -2122,12 +2142,18 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
             launch_cmd,
         } => {
             let sid = id.clone().unwrap_or_else(new_sid);
-            let terminal =
-                terminal::Terminal::spawn(&crate::runtimes::Runtime::local(), 24, 80, cwd.as_deref(), &sid, launch_cmd.as_deref())
-                    .map_err(|e| {
-                        eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
-                        e.to_string()
-                    })?;
+            let terminal = terminal::Terminal::spawn(
+                &crate::runtimes::Runtime::local(),
+                24,
+                80,
+                cwd.as_deref(),
+                &sid,
+                launch_cmd.as_deref(),
+            )
+            .map_err(|e| {
+                eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
+                e.to_string()
+            })?;
             out.push(SpawnedLeaf {
                 terminal,
                 sid,
@@ -2305,23 +2331,18 @@ struct Workspace {
     commit_errors: HashMap<String, String>,
     /// 「关闭项目」二次确认弹窗：(显示名, root 路径, 会连带关掉的会话数)。Some = 弹窗开着。
     /// 显示名只用来写文案，真正关哪个项目认 root。空项目不走确认（无损），会话数恒 > 0。
-    close_project_target: Option<(String, String, usize)>,
+    close_project_target: Option<(String, ProjectRef, usize)>,
     /// 已打开的项目根目录（有序，就是侧栏分组的骨架）。项目是**独立于会话**的实体：
-    /// 「打开项目」只往这里加一条、不建会话；项目下最后一个会话关掉了，这一条也还在
-    /// （侧栏显示 0 个会话的空项目）。要它消失只能显式「关闭项目」。
-    /// 会话按 cwd 挂到项目下（见 project_root_for_cwd）；挂不上的（比如 Finder 拖进来
-    /// 之前的旧会话）仍按自己的 cwd 自建隐式分组，不污染这份列表。
-    projects: Vec<String>,
     /// 活动项目的 **root 路径**（不是显示名——同名目录是两个项目，见 ProjectGroup）：
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
     /// 已消失时回退到活动会话所在组（见 active_project_root）。
-    active_project: Option<String>,
-    /// 会话列表里被折叠起来的项目（存 root 路径，同上）。
-    collapsed_projects: HashSet<String>,
+    active_project: Option<ProjectRef>,
+    /// 本机运行时在侧栏里的那一份：项目、置顶、折叠、目录同步、冷启动恢复。
+    local: crate::runtime_space::RuntimeSpace,
+    /// 添加过的远程运行时各一份，顺序同运行时登记表。
+    remote_spaces: Vec<crate::runtime_space::RuntimeSpace>,
     /// 侧栏「对话」里被折叠起来的智能体（存定义 id）。
     collapsed_agents: HashSet<String>,
-    /// 侧栏被固定的项目根。固定后即使开了「隐藏无会话」也留在列表里。
-    pinned_projects: HashSet<String>,
     /// 会话列表分组方式（默认按项目）。
     sidebar_grouping: SidebarGrouping,
     /// 按项目分组时是否把无会话的项目从侧栏藏起来（固定的 / 当前项目除外）。
@@ -2329,7 +2350,7 @@ struct Workspace {
     /// 会话拖拽悬停中的插入位置：(目标会话 ui_id, 插它前面?)。
     sess_drop_hint: Option<(u64, bool)>,
     /// 项目拖拽悬停中的插入位置：(目标项目 root, 插它前面?)。
-    proj_drop_hint: Option<(String, bool)>,
+    proj_drop_hint: Option<(ProjectRef, bool)>,
     /// 当前正在拖的侧栏项。用来压暗原位、以及只在「我们自己的拖」时改抓握光标。
     sidebar_drag: Option<SidebarDrag>,
     /// 侧栏拖拽排序生效一次就加一。各行据此在下一帧从旧位置滑到新位置，见 `flip_slot`。
@@ -2635,14 +2656,6 @@ struct Workspace {
     session_manager_tombstones: HashSet<String>,
     /// 上一帧工作区窗口是否在前台。上升沿用来清正在看的会话未读。
     workspace_window_active: bool,
-    /// 启动时从存档恢复失败的会话（守护未就绪等）。仍写回 SQLite
-    /// 工作区快照，避免「恢复失败 → 写空盘 → 会话永久蒸发」。侧栏本帧
-    /// 看不到它们；当前进程会自动重试，用尽次数后下次冷启动再试。
-    restore_pending: Vec<(usize, SessionState)>,
-    /// 已经完成的失败恢复轮次。用来限制握手超时后的自动重试。
-    restore_retry_attempt: u32,
-    /// 用户在后台恢复期间删除的项目路径；尚未交货的恢复结果命中这些路径时直接丢弃。
-    cancelled_restore_paths: Vec<String>,
     /// 远程目录来自 app 级唯一 daemon 订阅；随 Workspace 释放，避免创建第二条 socket
     /// 订阅或后台轮询线程。
     _remote_sessions_sub: Option<Subscription>,
@@ -2689,9 +2702,6 @@ struct Workspace {
     settings_modal_guard: bool,
     settings_modal_restore: Option<WeakFocusHandle>,
     settings_modal_rank: Option<u8>,
-    /// 冷启动的会话恢复流程是否已经跑完（没有待恢复会话时启动即为 true）。
-    /// save_state 的抹盘安全阀靠它区分「还没恢复上来的空」和「用户真把会话全关了」。
-    sessions_restored: bool,
     /// 主窗口关闭期间点击系统通知时，会话还在异步恢复。先保留稳定 sid，目标装回
     /// 列表后再消费，不能退化成只打开一扇空窗口。
     pending_notification_session_id: Option<String>,
@@ -2703,15 +2713,8 @@ struct Workspace {
     /// 一次性闸门。智能体面的子页不落盘，补位只该在恢复完成后做一次；持续做会把
     /// 用户返回智能体目录的操作顶回对话页。
     restored_agent_conversation_route: bool,
-    /// 运行时那份工作区目录（项目、会话组）是否已经读到。读到之前不保存：内存里
-    /// 的空列表不代表用户关光了会话。
-    workspace_catalog_loaded: bool,
-    /// 和运行时目录的版本同步，保存在后台线程推进。
-    workspace_catalog: WorkspaceCatalogSync,
     /// 客户端记下的上次活动会话位置。目录到了以后，按 id 找不到时用它兜底。
     startup_active_session: usize,
-    /// workspace 文档的唯一写入队列。退出也必须排到这里，不能旁路另起写者。
-    ws_write_queue: WorkspaceSnapshotWriteQueue,
     /// deferred 保存携带的代际。退出 flush 切换代际，已排队但尚未进入写队列的旧快照
     /// 会被淘汰，不能在最终快照之后反向覆盖。
     ws_snapshot_epoch: u64,
@@ -2887,39 +2890,41 @@ impl Workspace {
             diff_body: None,
             commit_msg_inputs: HashMap::new(),
             commit_errors: HashMap::new(),
-            // 目录到了才知道有没有要恢复的会话，见 apply_workspace_catalog。
-            sessions_restored: false,
             pending_notification_session_id: None,
             pending_conversation_wakes: Vec::new(),
             restored_agent_conversation_route: false,
-            workspace_catalog_loaded: false,
-            workspace_catalog: WorkspaceCatalogSync::default(),
             startup_active_session,
-            ws_write_queue: WorkspaceSnapshotWriteQueue::default(),
             ws_snapshot_epoch: 0,
             ws_snapshot_finalizing: false,
             workspace_menu_source_id: uuid::Uuid::new_v4().to_string(),
             next_workspace_menu_source_revision: AtomicU64::new(1),
             close_project_target: None,
-            projects,
+            local: {
+                let mut space =
+                    crate::runtime_space::RuntimeSpace::new(crate::runtimes::Runtime::local());
+                space.projects = projects;
+                space.restore_pending = restore_pending;
+                space.collapsed_projects = saved
+                    .as_ref()
+                    .map(|s| s.collapsed_projects.iter().cloned().collect())
+                    .unwrap_or_default();
+                space.pinned_projects = saved
+                    .as_ref()
+                    .map(|s| {
+                        s.pinned_projects
+                            .iter()
+                            .map(|root| crate::sidebar_order::normalize_project_root(root))
+                            .filter(|root| !root.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                space
+            },
+            remote_spaces: Vec::new(),
             active_project: None,
-            collapsed_projects: saved
-                .as_ref()
-                .map(|s| s.collapsed_projects.iter().cloned().collect())
-                .unwrap_or_default(),
             collapsed_agents: saved
                 .as_ref()
                 .map(|s| s.collapsed_agents.iter().cloned().collect())
-                .unwrap_or_default(),
-            pinned_projects: saved
-                .as_ref()
-                .map(|s| {
-                    s.pinned_projects
-                        .iter()
-                        .map(|root| crate::sidebar_order::normalize_project_root(root))
-                        .filter(|root| !root.is_empty())
-                        .collect()
-                })
                 .unwrap_or_default(),
             sidebar_grouping: saved
                 .as_ref()
@@ -3058,10 +3063,7 @@ impl Workspace {
             session_manager_list: None,
             session_manager_tombstones: HashSet::new(),
             workspace_window_active: false,
-            restore_pending,
-            restore_retry_attempt: 0,
             saved_active_session_id,
-            cancelled_restore_paths: Vec::new(),
             _remote_sessions_sub: None,
             _agent_host_sub: None,
             _provider_status_sub: None,
@@ -3148,7 +3150,7 @@ impl Workspace {
     fn reconcile_remote_catalog_projection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 工作区目录还没到时不知道哪些会话会被恢复，这时投影远程目录会把同一场会话
         // 再投一份。目录到了以后会补做一次。
-        if !self.workspace_catalog_loaded {
+        if !self.local.catalog_loaded {
             return;
         }
         let Some(global) = cx.try_global::<RemoteSessionCatalogGlobal>() else {
@@ -3275,7 +3277,7 @@ impl Workspace {
             .collect::<HashSet<_>>();
         // 正在恢复的存档会话已经拿了这些 id，只是还没插进 `sessions`。不计进来就会
         // 把同一场对话再投影一份，两个视图抢同一个 smeltd 会话。
-        let pending = crate::pending_restore_session_ids(&self.restore_pending);
+        let pending = crate::pending_restore_session_ids(&self.local.restore_pending);
         let mut changed = false;
         let titled = records
             .iter()
@@ -3337,7 +3339,7 @@ impl Workspace {
             agent_definition_id.as_deref(),
             cwd.as_deref(),
         ) {
-            self.remember_session_project(cwd.as_deref());
+            self.remember_session_project(&RuntimeKey::Local, cwd.as_deref());
         }
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
@@ -3435,7 +3437,7 @@ impl Workspace {
             })
             .collect::<HashSet<_>>();
         // 和 ACP 那边同理：存档里还在排队恢复的终端也已经报了这些 id。
-        let pending_restore = crate::pending_restore_session_ids(&self.restore_pending);
+        let pending_restore = crate::pending_restore_session_ids(&self.local.restore_pending);
         for record in records {
             if existing.contains(&record.id) || pending_restore.contains(&record.id) {
                 continue;
@@ -3452,14 +3454,20 @@ impl Workspace {
             {
                 continue;
             }
-            self.remember_session_project(Some(record.cwd.as_str()));
+            self.remember_session_project(&RuntimeKey::Local, Some(record.cwd.as_str()));
             let (tx, rx) = smol::channel::bounded(1);
             let cwd_bg = record.cwd.clone();
             let sid_bg = record.id.clone();
             std::thread::Builder::new()
                 .name("smelt-remote-term-reattach".into())
                 .spawn(move || {
-                    let r = terminal::Terminal::reattach(&crate::runtimes::Runtime::local(), 24, 80, Some(&cwd_bg), &sid_bg);
+                    let r = terminal::Terminal::reattach(
+                        &crate::runtimes::Runtime::local(),
+                        24,
+                        80,
+                        Some(&cwd_bg),
+                        &sid_bg,
+                    );
                     let _ = tx.send_blocking(r);
                 })
                 .expect("spawn smelt-remote-term-reattach 线程");
@@ -3506,7 +3514,15 @@ impl Workspace {
                         return;
                     }
                     let view = cx.new(|cx| {
-                        TerminalView::from_terminal(cx, crate::runtimes::Runtime::local(), terminal, Some(cwd), sid, None, None)
+                        TerminalView::from_terminal(
+                            cx,
+                            crate::runtimes::Runtime::local(),
+                            terminal,
+                            Some(cwd),
+                            sid,
+                            None,
+                            None,
+                        )
                     });
                     let mut session = Session::single(view);
                     session.remote_owned = true;
@@ -3790,11 +3806,7 @@ impl Render for Workspace {
                     // 分组依次铺平）数，所见即所得；超出会话数就什么都不做。
                     "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
                         let n = (ks.key.as_bytes()[0] - b'1') as usize;
-                        let visible: Vec<usize> = this
-                            .project_groups(cx)
-                            .into_iter()
-                            .flat_map(|g| g.sessions)
-                            .collect();
+                        let visible = this.sidebar_session_order(cx);
                         if let Some(&ix) = visible.get(n) {
                             this.activate(ix, window, cx);
                         }

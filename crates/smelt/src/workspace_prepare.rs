@@ -205,7 +205,7 @@ impl Workspace {
             self.applied_ui_font_px = Some(ui_font_px);
         }
 
-        if should_auto_resume_active_acp(self.sessions_restored)
+        if should_auto_resume_active_acp(self.local.sessions_restored)
             && let Some(SessionKind::Conversation(view)) =
                 self.sessions.get(self.active_session).map(|s| &s.kind)
         {
@@ -226,19 +226,19 @@ impl Workspace {
             .get(self.active_session)
             .is_some_and(|session| session.is_agent_conversation(cx));
         if crate::should_open_restored_agent_conversation(
-            self.sessions_restored,
+            self.local.sessions_restored,
             self.restored_agent_conversation_route,
             active_is_agent_conversation,
             self.active_tab(),
         ) {
             self.restored_agent_conversation_route = true;
             self.activate(self.active_session, window, cx);
-        } else if self.sessions_restored {
+        } else if self.local.sessions_restored {
             self.restored_agent_conversation_route = true;
         }
 
         if crate::should_correct_agent_conversation_on_project_stage(
-            self.sessions_restored,
+            self.local.sessions_restored,
             self.active_tab(),
             active_is_agent_conversation,
         ) {

@@ -5,6 +5,7 @@ use super::{
 
 fn group(root: &str, label: &str) -> ProjectGroup {
     ProjectGroup {
+        runtime: crate::RuntimeKey::Local,
         root: root.into(),
         label: label.into(),
         sessions: Vec::new(),

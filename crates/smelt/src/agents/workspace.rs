@@ -743,6 +743,7 @@ impl Workspace {
             let _ = this.update_in(cx, |this, window, cx| match space {
                 Ok(space) => this.add_acp_session(
                     NewAcpSessionRequest {
+                        runtime: crate::runtimes::Runtime::local(),
                         agent: kind,
                         launch_override: Some(launch),
                         profile_id: None,
@@ -955,7 +956,10 @@ impl Workspace {
             .and_then(|session| session.cwd(cx))
             .filter(|cwd| !cwd.is_empty())
         {
-            self.active_project = Some(cwd.trim_end_matches('/').to_string());
+            self.active_project = Some(crate::ProjectRef {
+                runtime: self.sessions[session_ix].runtime(cx).key().clone(),
+                root: cwd.trim_end_matches('/').to_string(),
+            });
         }
         self.nav.agents_mut().open_conversation(sid);
         self.agent_surface.editor = None;
