@@ -2031,6 +2031,11 @@ fn main() {
     smelt_core::app_log::install_panic_hook("smeltd");
     smelt_core::app_log::tee_stderr("smeltd");
     smelt_core::app_log::info("smeltd", "守护启动");
+    // 先于任何请求：新版第一次启动时把旧的客户端数据抄进暂存，再开始服务
+    // （保存工作区目录会去掉界面字段）。
+    if let Err(error) = smelt_core::client_migration::stage() {
+        smelt_core::app_log::error("smeltd", &format!("暂存旧的客户端数据失败：{error}"));
+    }
     // 启动瞬间打一行自身内核身份（team/signing-id 进程生命期内恒定）。
     // 鉴权排障锚点：磁盘被换后框架查询会撒谎（-67034），内核不会。
     #[cfg(target_os = "macos")]

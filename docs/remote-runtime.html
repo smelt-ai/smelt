@@ -417,7 +417,7 @@
 <ul>
   <li><b>GUI 不再打开运行时库，本机也不例外。</b>用依赖关系保证：<code>crates/smelt</code> 不再依赖 <code>smelt-store</code> 里运行时那部分表，也不再依赖 <code>smelt-git</code>。客户端库放进<b>单独的 crate</b>（例如 <code>smelt-client-store</code>）：只有拆成独立 crate，「GUI 不依赖运行时那部分表」才能由依赖关系保证，放在 <code>smelt-store</code> 里做不到。</li>
   <li><code>smelt agent</code> CLI 改为走 Control API，不再绕过 smeltd 直接写库。</li>
-  <li>迁移：GUI 自己也不能为了迁移去打开运行时库，所以由运行时来做。新版 GUI 第一次启动时调一次 <code>migration.take_client_state</code>，运行时从自己库里读出外观、更新设置、通知开关、界面状态交回来；GUI 只填客户端库里还空着的条目，成功后记下 <code>meta/runtime_migrated</code>，之后的启动只读客户端库。失败就下次启动再试。运行时库里的旧行此后不再被任何人读写；下一个版本删掉这几张表和这个方法，不保留双写。</li>
+  <li>迁移：GUI 自己也不能为了迁移去打开运行时库，所以由运行时来做。新版 smeltd 第一次启动时、开始服务之前，先把外观、更新设置、通知开关、界面状态抄进暂存（之后保存工作区目录会去掉界面字段）；新版 GUI 第一次启动时调 <code>migration.take_client_state</code> 取暂存，遇到还没升级的旧守护就先无缝升级守护再取；迁移完成前客户端库里的条目以交回的旧值为准，成功后记下 <code>meta/runtime_migrated</code>，之后的启动只读客户端库。失败就下次启动再试。运行时库里的旧行此后不再被任何人读写；下一个版本删掉这几张表和这个方法，不保留双写。</li>
   <li><b>外观归客户端。</b><code>smelt settings set appearance.*</code> 由运行时按可脚本目录校验，再以 <code>appearance.change_requested</code> 事件转给持有 <code>appearance.control</code> 能力的桌面端（只发给桌面，网关不订阅），桌面套用后存进客户端库、立即重绘。没有在线的桌面端时整单拒绝（<code>failed_precondition</code>），不会出现「记忆配置写了、外观没生效」的半截结果。<code>settings.get</code> 只返回运行时自己存的记忆配置。</li>
 </ul>
 <div class="note"><b>进度</b>：<span class="chip chip-cl">已完成</span> <code>smelt-client-store</code> crate、外观 / 更新设置 / 通知开关 / 界面状态迁到客户端库、一次性迁移、外观修改事件。<span class="chip chip-done">已完成</span> GUI 不再依赖 <code>smelt-store</code>（只剩测试里拿它校验工作区文档格式）；更新器的事务状态也挪进了客户端库。</div>

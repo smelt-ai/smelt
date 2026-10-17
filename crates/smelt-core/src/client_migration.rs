@@ -1,8 +1,9 @@
 //! `migration.take_client_state`：把以前存在运行时库里的客户端数据交还给桌面。
 //!
 //! 外观、更新设置、通知开关、侧栏和布局归客户端（设计文档 D1/D5），现在存在桌面
-//! 自己的 `client.sqlite3`。升级后第一次启动时客户端库是空的，桌面经这个方法取一次
-//! 旧值。旧行留在运行时库里不再被读写，不影响任何功能。
+//! 自己的 `client.sqlite3`。新版 smeltd 第一次启动时先把这些旧值抄进暂存（[`stage`]），
+//! 之后运行时保存工作区目录会去掉界面字段，不能等桌面来取时再从活数据里读。桌面经
+//! 这个方法取暂存。旧行和暂存留在运行时库里不再被读写，不影响任何功能。
 
 pub use smelt_model::client_migration::*;
 
@@ -13,7 +14,41 @@ fn kv_json(store: &smelt_store::Store, namespace: &str, key: &str) -> Option<Val
     serde_json::from_slice(&raw).ok()
 }
 
+const STAGED: (&str, &str) = ("client_migration", "staged");
+
+/// 新版 smeltd 启动时调一次：把旧的客户端数据抄进暂存。已经抄过就不动。
+pub fn stage_on(store: &smelt_store::Store) -> Result<(), String> {
+    let (namespace, key) = STAGED;
+    if store
+        .get_blob(namespace, key)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let legacy = collect_on(store);
+    let raw = serde_json::to_vec(&legacy).map_err(|error| error.to_string())?;
+    store
+        .put_blob(namespace, key, &raw)
+        .map_err(|error| error.to_string())
+}
+
+pub fn stage() -> Result<(), String> {
+    stage_on(&crate::sqlite_state::default_sqlite_store()?)
+}
+
+/// 桌面来取时给暂存；没有暂存（测试、老库没跑过新版 smeltd）就现读。
 pub fn take_on(store: &smelt_store::Store) -> LegacyClientState {
+    let (namespace, key) = STAGED;
+    store
+        .get_blob(namespace, key)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_else(|| collect_on(store))
+}
+
+fn collect_on(store: &smelt_store::Store) -> LegacyClientState {
     let appearance = store.get_appearance_snapshot().ok().flatten().map(|s| {
         json!({
             "bg_color": s.bg_color,
@@ -127,6 +162,29 @@ mod tests {
                 "ui_font_px",
             ]
         );
+    }
+
+    /// 暂存之后运行时会去掉工作区快照里的界面字段；桌面晚来取，拿到的还是原样。
+    #[test]
+    fn staged_state_survives_later_rewrites_of_the_workspace_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            smelt_store::Store::open_or_create(dir.path().join(smelt_store::DATABASE_FILE_NAME))
+                .unwrap();
+        let with_ui = smelt_store::Store::workspace_snapshot_from_json(
+            br#"{"pinned_projects":["/repo"],"sessions":[]}"#,
+        )
+        .unwrap();
+        store.put_workspace_snapshot(&with_ui).unwrap();
+        stage_on(&store).unwrap();
+
+        let stripped =
+            smelt_store::Store::workspace_snapshot_from_json(br#"{"sessions":[]}"#).unwrap();
+        store.put_workspace_snapshot(&stripped).unwrap();
+        stage_on(&store).unwrap();
+
+        let ui = take_on(&store).workspace_ui.unwrap();
+        assert_eq!(ui["pinned_projects"], json!(["/repo"]));
     }
 
     /// 更早的版本把侧栏、当前页和工作区目录存在同一份快照里；客户端取回整份，
