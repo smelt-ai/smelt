@@ -47,7 +47,6 @@ pub const CORE_SNAPSHOT_WORKSPACE_MENU: &str = "core.workspace_menu.v1";
 pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
-pub const FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID: &str = "core.remote-gateway";
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -556,7 +555,6 @@ pub fn core_topic_schema_version(topic: &str) -> u16 {
 #[serde(rename_all = "snake_case")]
 pub enum FirstPartyClientKind {
     Desktop,
-    RemoteGateway,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,13 +836,13 @@ mod tests {
     fn event_client_auth_is_a_strict_stable_wire_contract() {
         let auth: EventClientAuth = serde_json::from_value(json!({
             "type": "first_party",
-            "kind": "remote_gateway"
+            "kind": "desktop"
         }))
         .unwrap();
         assert_eq!(
             auth,
             EventClientAuth::FirstParty {
-                kind: FirstPartyClientKind::RemoteGateway
+                kind: FirstPartyClientKind::Desktop
             }
         );
         assert!(

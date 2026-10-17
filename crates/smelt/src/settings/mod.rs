@@ -41,6 +41,9 @@ pub(crate) use nav::{
 };
 pub(super) use remote::*;
 
+/// 「反馈问题」入口统一跳转的链接。应用菜单 / 侧栏用户菜单 / 设置页三处共用。
+pub const FEEDBACK_URL: &str = "https://github.com/smelt-ai/smelt/issues/new/choose";
+
 #[cfg(test)]
 pub(super) use remote::qr_png_for_url;
 
@@ -1578,9 +1581,7 @@ impl SettingsContentView {
                 Self::observe_settings_global::<CleanupState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
-                Self::observe_settings_global::<RemoteRuntimeState>(window, cx),
-                Self::observe_settings_global::<IrohRuntimeState>(window, cx),
-                Self::observe_settings_global::<IrohConnectionsState>(window, cx),
+                Self::observe_settings_global::<RemoteSettingsState>(window, cx),
             ],
             // 初始快照已经同步取好；避免刚打开就被第一条后台流式通知立即打穿缓存。
             last_refresh: Some(Instant::now()),

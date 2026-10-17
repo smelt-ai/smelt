@@ -24,7 +24,7 @@ mod shortcuts;
 
 /// 设置页里 26px 的小按钮。悬停色由各页自己挂：多数跟边框色走，维护页有的按钮要单独指定。
 fn settings_chip_button(
-    id: &'static str,
+    id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     fg: Hsla,
     popover: Hsla,

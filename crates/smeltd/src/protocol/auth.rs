@@ -33,7 +33,7 @@ use smelt_event_protocol::{
     CORE_CAPABILITY_APPEARANCE_CONTROL, CORE_CAPABILITY_AUTOMATION_READ,
     CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
     CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth,
-    FIRST_PARTY_DESKTOP_PLUGIN_ID, FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind,
+    FIRST_PARTY_DESKTOP_PLUGIN_ID, FirstPartyClientKind,
     PluginId,
 };
 use std::collections::BTreeSet;
@@ -619,9 +619,10 @@ pub(super) fn authenticate_first_party_macos(
     daemon_executable: &Path,
     verifier: &dyn PeerCodeIdentity,
 ) -> Result<AuthenticatedEventClient, String> {
-    let actual = if peer.pid == daemon_pid {
-        FirstPartyClientKind::RemoteGateway
-    } else {
+    if peer.pid == daemon_pid {
+        return Err("smeltd itself is not an event client".to_string());
+    }
+    let actual = {
         // 分类问内核：signing identifier 是身份，不受磁盘替换影响。
         // 内核签名身份在场即是唯一分类依据——命中表内签名 id → kind；
         // 有签名 id 但不在表内 → 明确非第一方，直接拒绝，basename 无权翻案
@@ -670,9 +671,10 @@ pub(super) fn authenticate_first_party_sibling(
     daemon_pid: u32,
     daemon_executable: &Path,
 ) -> Result<AuthenticatedEventClient, String> {
-    let actual = if peer.pid == daemon_pid {
-        FirstPartyClientKind::RemoteGateway
-    } else {
+    if peer.pid == daemon_pid {
+        return Err("smeltd itself is not an event client".to_string());
+    }
+    let actual = {
         let executable = peer
             .executable
             .as_deref()
@@ -709,11 +711,6 @@ const FIRST_PARTY_EXECUTABLES: &[FirstPartyExecutable] = &[
         kind: FirstPartyClientKind::Desktop,
         basename: "smelt",
         signing_id: "com.zzfn.smelt",
-    },
-    FirstPartyExecutable {
-        kind: FirstPartyClientKind::RemoteGateway,
-        basename: "gateway",
-        signing_id: "gateway",
     },
 ];
 
@@ -846,17 +843,6 @@ pub(super) fn first_party_event_client(kind: FirstPartyClientKind) -> Authentica
                 CORE_CAPABILITY_CONVERSATION_WAKE,
                 // 外观归桌面端，CLI 发来的外观改动只能交给它。
                 CORE_CAPABILITY_APPEARANCE_CONTROL,
-            ],
-        ),
-        FirstPartyClientKind::RemoteGateway => (
-            FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID,
-            &[
-                CORE_CAPABILITY_SESSION_READ,
-                CORE_CAPABILITY_REMOTE_SESSIONS_READ,
-                CORE_CAPABILITY_WORKSPACE_READ,
-                // 自动化 Run 停下来等审批时，手机往往是唯一在场的客户端：没有这条
-                // 读能力，那一刻在移动端根本不存在。
-                CORE_CAPABILITY_AUTOMATION_READ,
             ],
         ),
     };

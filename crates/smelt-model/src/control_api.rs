@@ -820,9 +820,20 @@ pi_calls! {
     /// 查一轮额度（全部或一家）并更新缓存。每家一次网络往返。
     QuotaRefresh => QuotaRefresh(crate::quota_service::QuotaRefreshParams)
         -> crate::quota_service::QuotaRefreshResult;
-    /// 远程访问的开关、relay、写权限。存在运行时库，守护按它自愈。
+    /// 远程访问的开关和自建 relay。存在运行时库，守护按它自愈。
     RemoteConfigGet => RemoteConfigGet(EmptyParams) -> crate::remote_config::RemoteConfig;
-    RemoteConfigSet => RemoteConfigSet(crate::remote_config::RemoteConfig) -> EmptyParams;
+    /// 保存并照着开关 endpoint；绑定在后台进行，回的是保存后的状态。
+    RemoteConfigSet => RemoteConfigSet(crate::remote_config::RemoteConfig)
+        -> crate::remote_config::RemoteAccessState;
+    RemoteStatus => RemoteStatus(EmptyParams) -> crate::remote_config::RemoteAccessState;
+    /// 生成一次性配对串。远程访问要先开着。
+    DevicePairBegin => DevicePairBegin(EmptyParams) -> crate::remote_config::PairingOffer;
+    /// 新设备提交配对码，通过后这台设备进白名单。
+    DevicePair => DevicePair(crate::remote_config::PairParams) -> EmptyParams;
+    DeviceList => DeviceList(EmptyParams) -> crate::remote_config::DeviceList;
+    /// 撤销并立即断开这台设备现有的全部连接。
+    DeviceRevoke => DeviceRevoke(crate::remote_config::DeviceIdParams)
+        -> crate::remote_config::RevokeResult;
     /// 新建菜单里用户标为「常用」的动作。桌面和手机共用这一份。
     NewSessionPinsGet => NewSessionPinsGet(EmptyParams) -> crate::new_session::NewSessionPreferences;
     NewSessionPinsToggle => NewSessionPinsToggle(crate::new_session::PinParams)

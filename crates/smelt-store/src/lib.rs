@@ -21,6 +21,8 @@ mod catalog;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod devices;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod documents;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod memory;
@@ -32,7 +34,7 @@ pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AppearanceSnapshot,
     AutoModelSnapshot, HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
-    MemoryMetaSnapshot, MemoryTrust, MemoryUsageRecord, PublishedSessionRecord,
+    MemoryMetaSnapshot, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
     PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot,
     RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
     RemoteTerminalSessionRecord, TerminalThemeSnapshot, UpdateSettingsSnapshot,
@@ -49,7 +51,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 16;
+pub const STORE_SCHEMA_VERSION: u32 = 17;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -532,6 +534,28 @@ impl Store {
 
     pub fn memory_meta(&self, scope: &str) -> Result<MemoryMetaSnapshot, StoreError> {
         imp::memory_meta(&self.backend, scope)
+    }
+
+    pub fn list_paired_devices(&self) -> Result<Vec<PairedDevice>, StoreError> {
+        imp::list_paired_devices(&self.backend)
+    }
+
+    pub fn paired_device(&self, endpoint_id: &str) -> Result<Option<PairedDevice>, StoreError> {
+        imp::paired_device(&self.backend, endpoint_id)
+    }
+
+    /// 配对成功：记进白名单。同一台设备重新配对就覆盖。
+    pub fn put_paired_device(&self, device: &PairedDevice) -> Result<(), StoreError> {
+        imp::put_paired_device(&self.backend, device)
+    }
+
+    /// 撤销。返回是否真有这台设备。
+    pub fn delete_paired_device(&self, endpoint_id: &str) -> Result<bool, StoreError> {
+        imp::delete_paired_device(&self.backend, endpoint_id)
+    }
+
+    pub fn touch_paired_device(&self, endpoint_id: &str, now_ms: i64) -> Result<(), StoreError> {
+        imp::touch_paired_device(&self.backend, endpoint_id, now_ms)
     }
 
     pub fn get_remote_session_snapshot(
@@ -1654,6 +1678,49 @@ mod imp {
     ) -> Result<super::MemoryMetaSnapshot, StoreError> {
         let connection = lock_connection(backend)?;
         crate::memory::read_meta(&connection, scope)
+    }
+
+    pub(super) fn list_paired_devices(
+        backend: &Backend,
+    ) -> Result<Vec<super::PairedDevice>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::devices::list(&connection)
+    }
+
+    pub(super) fn paired_device(
+        backend: &Backend,
+        endpoint_id: &str,
+    ) -> Result<Option<super::PairedDevice>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::devices::get(&connection, endpoint_id)
+    }
+
+    pub(super) fn put_paired_device(
+        backend: &Backend,
+        device: &super::PairedDevice,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::devices::put(transaction, device)
+        })
+    }
+
+    pub(super) fn delete_paired_device(
+        backend: &Backend,
+        endpoint_id: &str,
+    ) -> Result<bool, StoreError> {
+        write_memory(backend, |transaction| {
+            crate::devices::delete(transaction, endpoint_id)
+        })
+    }
+
+    pub(super) fn touch_paired_device(
+        backend: &Backend,
+        endpoint_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write_memory(backend, |transaction| {
+            crate::devices::touch(transaction, endpoint_id, now_ms)
+        })
     }
 
     pub(super) fn get_remote_session_snapshot(
@@ -3168,6 +3235,18 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 16 {
+            if !schema_matches_v16(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v17_paired_device(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 15 {
             if !schema_matches_v15(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -3387,7 +3466,19 @@ mod imp {
         if default.as_deref() == Some("'[]'") {
             transaction.execute_batch(crate::schema::MIGRATE_V15_TO_V16)?;
         }
-        Ok(())
+        apply_v17_paired_device(transaction)
+    }
+
+    fn apply_v17_paired_device(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if table_names(transaction)?
+            .iter()
+            .any(|table| table == "paired_device")
+        {
+            return Ok(());
+        }
+        transaction
+            .execute_batch(crate::schema::MIGRATE_V16_TO_V17)
+            .map_err(StoreError::from)
     }
 
     fn unrecognized_schema_error(version: u32) -> StoreError {
@@ -3405,12 +3496,22 @@ mod imp {
         )
     }
 
+    fn schema_matches_v16(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(
+            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
+                && table_columns(connection, "automation_run_transcript")?
+                    == ["run_id", "entries_json", "updated_at_ms"]
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
+                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V16)?,
+        )
+    }
+
     fn schema_matches_v15(connection: &Connection) -> Result<bool, StoreError> {
         Ok(
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
                 && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V15)?,
         )
     }
@@ -3420,7 +3521,7 @@ mod imp {
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
                 && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V14)?,
         )
     }
@@ -3430,7 +3531,7 @@ mod imp {
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V16_TABLES)?
                 && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V13)?,
         )
     }
@@ -3790,6 +3891,7 @@ mod imp {
         V13,
         V14,
         V15,
+        V16,
         Current,
     }
 
@@ -3808,7 +3910,13 @@ mod imp {
         if let Some(objects) = slot.get() {
             return Ok(objects.clone());
         }
-        let objects = map(build_expected_schema_objects()?);
+        // 旧版本都没有 v17 的设备表，在各版本自己的差异之前统一去掉。
+        let objects = map(
+            build_expected_schema_objects()?
+                .into_iter()
+                .filter(|object| object.table_name != "paired_device")
+                .collect(),
+        );
         Ok(slot.get_or_init(|| objects.clone()).clone())
     }
 
@@ -3826,6 +3934,7 @@ mod imp {
         static V13_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V14_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V15_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V16_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3955,7 +4064,14 @@ mod imp {
                 }
                 objects
             }),
-            SchemaGeneration::Current => cached_schema_objects(&CURRENT_OBJECTS, |objects| objects),
+            SchemaGeneration::V16 => cached_schema_objects(&V16_OBJECTS, |objects| objects),
+            SchemaGeneration::Current => {
+                if let Some(objects) = CURRENT_OBJECTS.get() {
+                    return Ok(objects.clone());
+                }
+                let objects = build_expected_schema_objects()?;
+                Ok(CURRENT_OBJECTS.get_or_init(|| objects.clone()).clone())
+            }
         }
     }
 
@@ -4386,6 +4502,36 @@ mod imp {
     ) -> Result<super::MemoryMetaSnapshot, StoreError> {
         unsupported()
     }
+    pub(super) fn list_paired_devices(
+        _backend: &Backend,
+    ) -> Result<Vec<super::PairedDevice>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn paired_device(
+        _backend: &Backend,
+        _endpoint_id: &str,
+    ) -> Result<Option<super::PairedDevice>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_paired_device(
+        _backend: &Backend,
+        _device: &super::PairedDevice,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn delete_paired_device(
+        _backend: &Backend,
+        _endpoint_id: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn touch_paired_device(
+        _backend: &Backend,
+        _endpoint_id: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
     pub(super) fn get_remote_session_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::RemoteSessionCatalogSnapshot>, StoreError> {
@@ -4745,6 +4891,14 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v16 的完整结构：当前结构去掉 v17 的设备表。更早版本的夹具在它上面再改。
+    fn create_v16_schema(connection: &rusqlite::Connection) {
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        connection.execute_batch("DROP TABLE paired_device;").unwrap();
+    }
+
     fn v1_schema() -> &'static str {
         static SCHEMA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         SCHEMA
@@ -4918,9 +5072,7 @@ mod tests {
         let dir = temp_dir("migrate-v13-memory-switch");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE agent_definition RENAME TO agent_definition_v14;
@@ -4970,9 +5122,7 @@ mod tests {
         let dir = temp_dir("migrate-v14-mcp-servers");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE agent_definition RENAME TO agent_definition_v15;
@@ -5022,6 +5172,74 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v16 的库：只多一张已配对设备表，原有数据不动。
+    #[test]
+    fn migrates_v16_by_adding_paired_device_table() {
+        let dir = temp_dir("migrate-v16-paired-device");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        create_v16_schema(&connection);
+        connection
+            .execute_batch("INSERT INTO agent_ui_pref VALUES ('collapsed', 'yes');")
+            .unwrap();
+        connection.pragma_update(None, "user_version", 16).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert!(store.list_paired_devices().unwrap().is_empty());
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let pref: String = connection
+            .query_row(
+                "SELECT value FROM agent_ui_pref WHERE key = 'collapsed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pref, "yes");
+        drop(connection);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn paired_devices_round_trip_and_repairing_resets_last_seen() {
+        let dir = temp_dir("paired-devices");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let laptop = PairedDevice {
+            endpoint_id: "aa".to_string(),
+            name: "MacBook".to_string(),
+            paired_at_ms: 10,
+            last_seen_at_ms: None,
+        };
+        store.put_paired_device(&laptop).unwrap();
+        store.touch_paired_device("aa", 20).unwrap();
+        assert_eq!(
+            store.paired_device("aa").unwrap().unwrap().last_seen_at_ms,
+            Some(20)
+        );
+
+        store
+            .put_paired_device(&PairedDevice {
+                name: "MacBook Pro".to_string(),
+                paired_at_ms: 30,
+                ..laptop
+            })
+            .unwrap();
+        let devices = store.list_paired_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].name, "MacBook Pro");
+        assert_eq!(devices[0].last_seen_at_ms, None);
+
+        assert!(store.delete_paired_device("aa").unwrap());
+        assert!(!store.delete_paired_device("aa").unwrap());
+        assert!(store.paired_device("aa").unwrap().is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// v15 发出去的库：`mcp_servers_json` 默认值是文本 `'[]'`。升到 v16 后默认值改成 BLOB，
     /// 已勾选的 MCP 服务器和其余字段原样保留。
     #[test]
@@ -5029,9 +5247,7 @@ mod tests {
         let dir = temp_dir("migrate-v15-mcp-default");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "DROP TABLE agent_definition;
@@ -5085,9 +5301,7 @@ mod tests {
         let dir = temp_dir("migrate-v12-memory");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "DROP TABLE agent_memory_usage; DROP TABLE agent_memory_provenance;
@@ -7396,7 +7610,6 @@ mod tests {
             .put_remote_config_snapshot(&RemoteConfigSnapshot {
                 enabled: true,
                 iroh_relay: "relay.example".into(),
-                write_enabled: true,
             })
             .unwrap();
         store
@@ -7445,7 +7658,7 @@ mod tests {
             .execute(
                 "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
                  VALUES ('document:collab.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![br#"{"enabled":true,"iroh_relay":"old","write_enabled":true}"#],
+                rusqlite::params![br#"{"enabled":true,"iroh_relay":"old"}"#],
             )
             .unwrap();
         drop(connection);

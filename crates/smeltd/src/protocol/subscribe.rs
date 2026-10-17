@@ -17,8 +17,18 @@ use std::os::unix::net::UnixStream;
 pub(super) fn handle_event_subscribe_op(
     conn: UnixStream,
     v: &serde_json::Value,
+    principal: &crate::devices::Principal,
     event_hub: &EventHubHandle,
 ) {
+    // 已配对的远程设备就是另一台桌面（D3：配对即全部能力）。它的流经 socketpair
+    // 接进来，对端进程是 smeltd 自己，查进程身份没有意义。
+    if principal.is_remote() {
+        let identity = Ok(super::auth::first_party_event_client(
+            smelt_event_protocol::FirstPartyClientKind::Desktop,
+        ));
+        handle_event_subscribe(conn, v.get("request"), identity, event_hub);
+        return;
+    }
     let identity = daemon_executable_path()
         .map_err(|error| format!("cannot determine smeltd executable: {error}"))
         .and_then(|daemon_executable| {

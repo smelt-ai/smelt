@@ -4638,23 +4638,15 @@ fn main() {
         })
         .detach();
 
-        // 远程操作网关：只记「用户上次希望它开着」这个开关；真去问/让守护开的部分
-        // 扔进后台任务——涉及连 unix socket、可能要等守护自己起来（最坏几秒），
-        // 不能卡首帧渲染。settings/remote.rs 的「远程」设置页读 RemoteRuntimeState 展示。
-        //
-        // 网关和隧道**串在同一条后台任务**里对齐：先问守护现状（幂等 hydrate），
-        // 没有再 start。以前两条 spawn 并行时，隧道可能先回 URL、token 还是空的，
-        // UI 会拼出 `?token=` 的死链。
+        // 远程访问由运行时自己按配置开关；这里只取回配置给设置页显示，后台取，
+        // 不卡首帧。
         cx.set_global(settings::RemoteConfig::default());
-        cx.set_global(settings::RemoteRuntimeState::default());
+        cx.set_global(settings::RemoteSettingsState::default());
         // ACP 会话不需要在退出时做任何事：agent 子进程现在是 smeltd 托管的
         // （见 smelt_client::acp_client），GUI 这边只是个薄客户端，Cmd+Q 直接杀
         // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题。
-        // iroh 隧道同理跑在 smeltd 里，GUI 退出不影响手机端连接。
+        // 远程访问同理跑在 smeltd 里，GUI 退出不影响远程设备。
         settings::start_remote_config_load(cx);
-        // 之后由看门狗兜底：守护若被单独重启/升级过，远程会自动恢复，UI 也不会
-        // 继续挂着一个早已失效的配对码。
-        settings::spawn_remote_watchdog(cx);
         // 首启主窗口，记入 current_ws（reopen 回调 / URL 投递循环都靠它判断当前主窗口）。
         *current_ws.borrow_mut() = Some(open_workspace_window(cx, window_bg));
 

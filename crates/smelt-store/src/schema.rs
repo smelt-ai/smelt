@@ -10,7 +10,43 @@
 //! 也和 `CREATE_SCHEMA` 一致。改约束、改默认值、删列、调列序这些 ALTER 做不到的，才整表重建。
 //! 默认值要和列类型一致：BLOB 列用 `X'…'`，不要写文本字面量。
 
-pub const TABLES: [&str; 31] = [
+pub const TABLES: [&str; 32] = [
+    "acp_detail",
+    "agent_acp_command",
+    "agent_acp_config_memory",
+    "agent_acp_env",
+    "agent_definition",
+    "agent_memory_provenance",
+    "agent_memory_usage",
+    "agent_profile",
+    "agent_ui_pref",
+    "automation",
+    "automation_meta",
+    "automation_run",
+    "automation_run_transcript",
+    "automation_state",
+    "command_dedupe",
+    "event_dead_letter",
+    "event_delivery_retry",
+    "event_log",
+    "event_outbox",
+    "history_title",
+    "kv",
+    "launch_entry",
+    "layout_node",
+    "paired_device",
+    "peer_message_command",
+    "project",
+    "published_session",
+    "remote_acp_session",
+    "remote_terminal_session",
+    "session",
+    "session_group",
+    "subscription_cursor",
+];
+
+/// v16 的表清单。v17 加了已配对设备表。
+pub const V16_TABLES: [&str; 31] = [
     "acp_detail",
     "agent_acp_command",
     "agent_acp_config_memory",
@@ -462,6 +498,12 @@ CREATE TABLE published_session (
   branch TEXT,
   dirty_files_json BLOB NOT NULL
 );
+CREATE TABLE paired_device (
+  endpoint_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  paired_at_ms INTEGER NOT NULL,
+  last_seen_at_ms INTEGER
+) WITHOUT ROWID;
 ";
 
 pub const MIGRATE_V1_TO_V2: &str = "
@@ -944,4 +986,14 @@ SELECT
   context_folders_json, context_links_json, model_provider, model_id, memory_enabled, position
 FROM agent_definition_v15;
 DROP TABLE agent_definition_v15;
+";
+
+/// v16 → v17：已配对设备。远程客户端按 iroh endpoint id 进白名单（设计文档 D3）。
+pub const MIGRATE_V16_TO_V17: &str = "
+CREATE TABLE paired_device (
+  endpoint_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  paired_at_ms INTEGER NOT NULL,
+  last_seen_at_ms INTEGER
+) WITHOUT ROWID;
 ";

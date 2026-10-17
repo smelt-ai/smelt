@@ -3,8 +3,8 @@ name = "smeltd"
 version.workspace = true
 edition.workspace = true
 
-# 守护侧三个无 GUI 二进制：smeltd（终端持久化守护，src/main.rs）、gateway（远程
-# 网关独立进程）、smelt-notify（Claude Code hook → smeltd state op 的翻译小工具）。
+# 守护侧无 GUI 二进制：smeltd（运行时守护，src/main.rs）、smelt-notify（agent hook →
+# smeltd 的翻译小工具）、smelt-agent-mcp（给 agent 的 MCP 适配器）。
 # 独立成 crate 的意义：依赖树彻底脱离 GPUI，改守护不用等 GUI 依赖编译。
 
 [lints]
@@ -20,10 +20,11 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-git = { path = "../smelt-git" }
 smelt-event-bus = { path = "../smelt-event-bus" }
 smelt-store = { path = "../smelt-store" }
-smelt-remote-gateway = { path = "../smelt-remote-gateway" }
-# iroh P2P 隧道（iroh_start/iroh_stop op）。放这儿而不是 smelt-core：
-# smelt-core 是 GUI 与守护共用的地基，不该被只有守护用得上的重依赖拖慢。
+# 远程访问：iroh endpoint 直接接收运行时协议的流。
 smelt-iroh = { path = "../smelt-iroh" }
+smelt-pairing = { path = "../smelt-pairing" }
+# `smeltd pair` 在终端里打印配对二维码。
+qrcode = { version = "0.14", default-features = false }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

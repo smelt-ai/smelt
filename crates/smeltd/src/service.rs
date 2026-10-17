@@ -1,4 +1,4 @@
-//! smeltd 自己的命令行：`install`、`uninstall`、`status`、`--version`。
+//! smeltd 自己的命令行：`install`、`uninstall`、`status`、`pair`、`devices`、`--version`。
 //!
 //! 无头机器上没有桌面来拉起守护，运行时要能自己装成常驻服务（设计文档 D7）。Linux 用
 //! systemd 用户单元：跟着这个用户的登录会话走，`loginctl enable-linger` 之后退出登录
@@ -25,6 +25,8 @@ pub(crate) fn maybe_run(args: &[String]) -> Option<i32> {
         "status" => status(),
         "install" => report(install()),
         "uninstall" => report(uninstall()),
+        "pair" => report(pair()),
+        "devices" => report(devices(&args[2..])),
         "help" | "--help" | "-h" => {
             print_help();
             0
@@ -44,6 +46,10 @@ fn print_help() {
   smeltd install     装成 systemd 用户服务并立即启动（Linux）
   smeltd uninstall   停止并移除 systemd 用户服务（Linux）
   smeltd status      查看本机运行时是否在跑
+  smeltd pair        开启远程访问，打印一次性配对串和二维码
+  smeltd devices     列出已配对设备
+  smeltd devices revoke <endpoint-id>
+                     撤销一台设备，立即断开它
   smeltd --version   打印版本"
     );
 }
@@ -82,6 +88,123 @@ fn status() -> i32 {
             println!("没有在跑（{error}）");
             3
         }
+    }
+}
+
+fn local() -> smelt_runtime_client::RuntimeClient {
+    smelt_runtime_client::local::local_runtime()
+}
+
+fn call<C: smelt_runtime_client::protocol::control::ControlCall>(
+    params: &C::Params,
+) -> Result<C::Result, String> {
+    local()
+        .call::<C>(params, smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT)
+        .map_err(|error| format!("调用本机运行时失败：{error}"))
+}
+
+/// 远程访问没开就打开（保留已配的自建 relay），等它真正跑起来。
+fn ensure_remote_running() -> Result<(), String> {
+    use smelt_core::control_api::{RemoteConfigGet, RemoteConfigSet, RemoteStatus};
+    use smelt_core::remote_config::RemoteAccessState;
+    use smelt_runtime_client::protocol::control::EmptyParams;
+
+    let mut state = call::<RemoteStatus>(&EmptyParams::default())?;
+    if matches!(state, RemoteAccessState::Off | RemoteAccessState::Failed { .. }) {
+        let mut config = call::<RemoteConfigGet>(&EmptyParams::default())?;
+        if !config.enabled {
+            config.enabled = true;
+            println!("正在开启远程访问…");
+            state = call::<RemoteConfigSet>(&config)?;
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match state {
+            RemoteAccessState::Running { .. } => return Ok(()),
+            RemoteAccessState::Failed { error } if std::time::Instant::now() >= deadline => {
+                return Err(format!("远程访问起不来：{error}"));
+            }
+            _ if std::time::Instant::now() >= deadline => {
+                return Err("等远程访问启动超时（60s），稍后再试".to_string());
+            }
+            _ => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        state = call::<RemoteStatus>(&EmptyParams::default())?;
+    }
+}
+
+fn pair() -> Result<(), String> {
+    use smelt_core::control_api::DevicePairBegin;
+    use smelt_runtime_client::protocol::control::EmptyParams;
+
+    ensure_remote_running()?;
+    let offer = call::<DevicePairBegin>(&EmptyParams::default())?;
+    println!();
+    println!("在 Smelt 桌面「添加运行时」里粘贴下面的配对串，或用手机扫码：");
+    println!();
+    println!("{}", offer.pairing_uri);
+    println!();
+    if let Ok(code) = qrcode::QrCode::new(offer.pairing_uri.as_bytes()) {
+        use qrcode::render::unicode::Dense1x2;
+        // 终端多是深色底，反色后扫码更稳。
+        let image = code
+            .render::<Dense1x2>()
+            .dark_color(Dense1x2::Light)
+            .light_color(Dense1x2::Dark)
+            .quiet_zone(true)
+            .build();
+        println!("{image}");
+    }
+    println!("配对串只能用一次，10 分钟内有效。");
+    println!("配对一台设备，就是把这台机器上你这个用户的 shell 权限交给它。");
+    Ok(())
+}
+
+fn devices(args: &[String]) -> Result<(), String> {
+    use smelt_core::control_api::{DeviceList, DeviceRevoke};
+    use smelt_core::remote_config::DeviceIdParams;
+    use smelt_runtime_client::protocol::control::EmptyParams;
+
+    match args {
+        [] => {
+            let list = call::<DeviceList>(&EmptyParams::default())?;
+            if list.devices.is_empty() {
+                println!("还没有配对过设备。用 smeltd pair 配对一台。");
+                return Ok(());
+            }
+            for device in list.devices {
+                let seen = if device.connected {
+                    "在线".to_string()
+                } else {
+                    device
+                        .last_seen_at_ms
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|at| {
+                            format!(
+                                "最近连接 {}",
+                                at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                            )
+                        })
+                        .unwrap_or_else(|| "还没连过".to_string())
+                };
+                println!("{}  {}  {}", device.endpoint_id, device.name, seen);
+            }
+            Ok(())
+        }
+        [command, endpoint_id] if command == "revoke" => {
+            let result = call::<DeviceRevoke>(&DeviceIdParams {
+                endpoint_id: endpoint_id.clone(),
+            })?;
+            if result.revoked {
+                println!("已撤销 {endpoint_id}");
+                Ok(())
+            } else {
+                Err(format!("没有这台设备：{endpoint_id}"))
+            }
+        }
+        _ => Err("用法：smeltd devices [revoke <endpoint-id>]".to_string()),
     }
 }
 

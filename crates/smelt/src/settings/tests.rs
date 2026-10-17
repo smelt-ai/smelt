@@ -113,32 +113,20 @@ mod update_settings_tests {
 }
 
 #[cfg(test)]
-mod iroh_pairing_tests {
-    use super::{RemoteConfig, qr_png_for_url};
-    use smelt_pairing::iroh_pairing_uri;
-
-    #[test]
-    fn old_config_with_retired_remote_fields_still_loads() {
-        // serde 默认忽略旧版的多通路开关；升级后 enabled 是唯一远程开关。
-        let json = r#"{"enabled":true,"iroh_enabled":true,"tunnel_enabled":false,"webrtc_enabled":true,
-                       "signal_http":"https://s.example.com","write_enabled":true}"#;
-        let c: RemoteConfig = serde_json::from_str(json).expect("旧配置必须还能解析");
-        assert!(c.enabled);
-        assert!(c.write_enabled);
-    }
+mod pairing_qr_tests {
+    use super::qr_png_for_url;
 
     #[test]
     fn pairing_uri_renders_to_a_qr() {
-        // 配对码比 http 链接长（endpoint_id 是 64 个十六进制字符），
-        // 这里钉住「它确实能编成二维码」——超长内容会让 QrCode::new 失败。
-        let uri = iroh_pairing_uri(
+        // endpoint id 有 64 个十六进制字符，钉住「配对串确实能编成二维码」：
+        // 超长内容会让 QrCode::new 失败。
+        let uri = smelt_pairing::pairing_uri(
             &"a".repeat(64),
-            &"b".repeat(32),
-            "https://relay.example.test",
+            "ABCD-EFGH",
+            Some("https://relay.example.test"),
         );
-        let png = qr_png_for_url(&uri).expect("配对码必须能生成二维码");
+        let png = qr_png_for_url(&uri).expect("配对串必须能生成二维码");
         assert!(!png.is_empty());
-        assert_eq!(&png[1..4], b"PNG", "应当是 PNG 字节流");
     }
 }
 

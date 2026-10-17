@@ -4186,7 +4186,7 @@ pub(crate) fn handle_acp_restart(
         Err(error) => serde_json::json!({"ok": false, "error": error}),
     };
     let mut c = conn;
-    let _ = writeln!(c, "{}", response);
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
 /// ACP runtime 的进程级重启原语。socket handler 和 daemon Task Runtime 共用，

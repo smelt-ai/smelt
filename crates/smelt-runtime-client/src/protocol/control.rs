@@ -164,6 +164,11 @@ define_control_methods! {
     QuotaRefresh => (QUOTA_REFRESH_METHOD, "quota.refresh"),
     RemoteConfigGet => (REMOTE_CONFIG_GET_METHOD, "remote.config.get"),
     RemoteConfigSet => (REMOTE_CONFIG_SET_METHOD, "remote.config.set"),
+    RemoteStatus => (REMOTE_STATUS_METHOD, "remote.status"),
+    DevicePairBegin => (DEVICE_PAIR_BEGIN_METHOD, "device.pair_begin"),
+    DevicePair => (DEVICE_PAIR_METHOD, "device.pair"),
+    DeviceList => (DEVICE_LIST_METHOD, "device.list"),
+    DeviceRevoke => (DEVICE_REVOKE_METHOD, "device.revoke"),
     NewSessionPinsGet => (NEW_SESSION_PINS_GET_METHOD, "new_session.pins.get"),
     NewSessionPinsToggle => (NEW_SESSION_PINS_TOGGLE_METHOD, "new_session.pins.toggle"),
     TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
@@ -583,7 +588,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 121);
+        assert_eq!(names.len(), 126);
     }
 
     #[test]

@@ -9784,10 +9784,13 @@ dependencies = [
  "futures-util",
  "iroh",
  "iroh-relay",
+ "serde_json",
+ "smelt-model",
+ "smelt-pairing",
  "smelt-paths",
+ "smelt-runtime-client",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -9823,25 +9826,6 @@ name = "smelt-paths"
 version = "0.9.0"
 dependencies = [
  "dirs",
-]
-
-[[package]]
-name = "smelt-remote-gateway"
-version = "0.9.0"
-dependencies = [
- "axum",
- "base64",
- "futures",
- "image",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "smelt-client",
- "smelt-core",
- "smelt-paths",
- "smelt-runtime-client",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -9935,6 +9919,7 @@ dependencies = [
  "notify 6.1.1",
  "objc",
  "portable-pty",
+ "qrcode",
  "security-framework-sys",
  "serde",
  "serde_json",
@@ -9944,8 +9929,8 @@ dependencies = [
  "smelt-event-protocol",
  "smelt-git",
  "smelt-iroh",
+ "smelt-pairing",
  "smelt-paths",
- "smelt-remote-gateway",
  "smelt-runtime-client",
  "smelt-store",
  "smol",

@@ -39,7 +39,7 @@ fn workspace_menu_op_persists() {
     .unwrap();
     handle_conn(
         server,
-        ServerContext {
+        ServerShared {
             sessions: new_sessions(),
             acp_sessions: new_test_acp_sessions(),
             remote_sessions: new_test_remote_sessions(),
@@ -48,11 +48,9 @@ fn workspace_menu_op_persists() {
             exe_mtime: 0,
             daemon_fingerprint: None,
             listen_fd: -1,
-            remote_state: new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string())),
-            iroh_state: Arc::new(Mutex::new(None)),
-            iroh_connections: new_iroh_connections(),
             event_hub: Arc::clone(&subscribers),
-        },
+        }
+        .context(Principal::Local),
     );
     let mut resp = String::new();
     BufReader::new(client).read_line(&mut resp).unwrap();

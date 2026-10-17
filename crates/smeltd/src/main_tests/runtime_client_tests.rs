@@ -16,34 +16,68 @@ use smelt_runtime_client::{DEFAULT_REQUEST_TIMEOUT, RequestError, RuntimeClient}
 const TEST_EXE_MTIME: u64 = 4242;
 
 fn in_process_runtime() -> RuntimeClient {
-    let sessions = new_sessions();
-    let acp_sessions = new_test_acp_sessions();
-    let remote_sessions = new_test_remote_sessions();
-    let workspace_menu = new_test_workspace_menu();
-    let automations = new_test_automation_store();
-    let remote_state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
-    let iroh_state = Arc::new(Mutex::new(None));
-    let iroh_connections = new_iroh_connections();
-    let event_hub = new_event_hub();
+    in_process_runtime_as(Principal::Local)
+}
+
+/// 每条连接都按 `principal` 分发：iroh 流进来时就是这样带上对端身份的。
+fn in_process_runtime_as(principal: Principal) -> RuntimeClient {
+    let server = ServerShared {
+        sessions: new_sessions(),
+        acp_sessions: new_test_acp_sessions(),
+        remote_sessions: new_test_remote_sessions(),
+        workspace_menu: new_test_workspace_menu(),
+        automations: new_test_automation_store(),
+        exe_mtime: TEST_EXE_MTIME,
+        daemon_fingerprint: None,
+        listen_fd: -1,
+        event_hub: new_event_hub(),
+    };
     RuntimeClient::new(move || {
-        let (client, server) = UnixStream::pair()?;
-        let context = ServerContext {
-            sessions: Arc::clone(&sessions),
-            acp_sessions: Arc::clone(&acp_sessions),
-            remote_sessions: Arc::clone(&remote_sessions),
-            workspace_menu: Arc::clone(&workspace_menu),
-            automations: Arc::clone(&automations),
-            exe_mtime: TEST_EXE_MTIME,
-            daemon_fingerprint: None,
-            listen_fd: -1,
-            remote_state: Arc::clone(&remote_state),
-            iroh_state: Arc::clone(&iroh_state),
-            iroh_connections: Arc::clone(&iroh_connections),
-            event_hub: Arc::clone(&event_hub),
-        };
-        thread::spawn(move || handle_conn(server, context));
+        let (client, server_end) = UnixStream::pair()?;
+        let context = server.context(principal.clone());
+        thread::spawn(move || handle_conn(server_end, context));
         Ok(client)
     })
+}
+
+/// 未配对的远程设备只能提交配对码：连 describe 都拒绝，码不对也拒绝。
+#[test]
+fn unpaired_devices_can_only_submit_a_pairing_code() {
+    let stranger = in_process_runtime_as(Principal::Unpaired("stranger".to_string()));
+    let ControlClientError::Protocol(error) = stranger.describe().unwrap_err() else {
+        panic!("未配对设备调 describe 应收到运行时的拒绝");
+    };
+    assert_eq!(error.code, ControlErrorCode::PermissionDenied);
+
+    let error = stranger
+        .call::<smelt_core::control_api::DevicePair>(
+            &smelt_core::remote_config::PairParams {
+                code: "NOPE-NOPE".to_string(),
+                name: "phone".to_string(),
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap_err();
+    let ControlClientError::Protocol(error) = error else {
+        panic!("错误的配对码应收到运行时的拒绝：{error:?}");
+    };
+    assert_eq!(error.code, ControlErrorCode::PermissionDenied);
+
+    let open = stranger.request(
+        &serde_json::json!({ "op": DaemonOperation::List }),
+        DEFAULT_REQUEST_TIMEOUT,
+    );
+    assert!(
+        matches!(open, Err(RequestError::Closed)),
+        "未配对设备的非控制请求直接断开：{open:?}"
+    );
+}
+
+/// 配对过的设备和本机一样拥有全部能力。
+#[test]
+fn paired_devices_get_the_full_api() {
+    let device = in_process_runtime_as(Principal::Device("laptop".to_string()));
+    assert_eq!(device.describe().unwrap().daemon.exe_mtime, TEST_EXE_MTIME);
 }
 
 #[test]

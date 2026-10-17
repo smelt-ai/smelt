@@ -474,17 +474,17 @@
 <h2>12. Linux 无头运行时清单</h2>
 <div class="table-wrap"><table>
   <tr><th>项目</th><th>现状</th><th>要做</th></tr>
-  <tr><td>smeltd 编译</td><td><span class="chip chip-na">未验证</span> 不依赖 GPUI，mac 专属依赖都已用 cfg 隔开</td><td>增加 <code>ci/linux</code>：lint、build、test；交叉编译出 x86_64 和 aarch64 两个版本</td></tr>
-  <tr><td>受管 Bun / Pi</td><td><span class="chip chip-todo">缺失</span> 只有 darwin 的下载地址和校验值（<code>managed_runtime.rs:30-49</code>），Linux 上直接报错，Pi 起不来；用 <code>bunx</code> 启动的 ACP 适配器也只能退回 PATH 上的 bun</td><td>补 linux-x64、linux-aarch64 两份</td></tr>
-  <tr><td>写死的 macOS 路径</td><td><span class="chip chip-todo">缺失</span> Claude 档案的 <code>CLAUDE_CONFIG_DIR=~/Library/Application Support/Claude…</code>（<code>agent_kind/mod.rs</code>、<code>acp_conn.rs</code>），Cursor、Copilot 额度读的凭据路径（<code>provider_quota.rs</code>、<code>copilot_quota.rs</code>）</td><td>逐个按平台给出 Linux 路径（通常是 <code>~/.config/…</code>）；各家历史存档的扫描路径一并核对</td></tr>
+  <tr><td>smeltd 编译</td><td><span class="chip chip-done">已完成</span> x86_64 Linux 上原生编译通过，运行时这边的测试全过（修了 Linux 才暴露的问题：进程启动时间读错字段且只到整秒、JSON 回包分片写卡死 socketpair、<code>msghdr</code> 字段类型）</td><td>增加 <code>ci/linux</code>：lint、build、test。x86_64 和 aarch64 各在对应架构的 Linux 机器上原生构建，不交叉编译</td></tr>
+  <tr><td>受管 Bun / Pi</td><td><span class="chip chip-done">已完成</span> 补了 linux-x64（baseline，不要求 AVX2）和 linux-aarch64 的下载地址与校验值</td><td></td></tr>
+  <tr><td>写死的 macOS 路径</td><td><span class="chip chip-done">已核对</span> 正式代码里没有：<code>~/Library/Application Support/Claude…</code> 只出现在测试数据里；Cursor、Copilot 的凭据路径本来就同时列了 <code>~/.config/…</code> 和 <code>XDG_CONFIG_HOME</code></td><td></td></tr>
   <tr><td>文件监听</td><td><span class="chip chip-na">待核实</span> Linux 上是 inotify，每个目录占一个 watch，受 <code>fs.inotify.max_user_watches</code> 限制</td><td>大仓库只监听项目根和 <code>.git</code> 的关键文件，其余按需；超限时在能力清单里报告并降级为手动刷新</td></tr>
   <tr><td>对端身份鉴权</td><td><span class="chip chip-done">已有</span> <code>SO_PEERCRED</code> + <code>/proc/&lt;pid&gt;/exe</code></td><td>补测试</td></tr>
   <tr><td>子进程监控</td><td><span class="chip chip-done">已有</span> pidfd</td><td></td></tr>
-  <tr><td>独立启动</td><td><span class="chip chip-todo">缺失</span> 依赖 GUI 拉起</td><td>systemd user 单元、<code>smeltd install</code> / <code>smeltd status</code></td></tr>
-  <tr><td>iroh 接入</td><td><span class="chip chip-split">部分</span> iroh 隧道已有，但远程访问默认关闭，iroh 流先转到回环 TCP 上的 gateway</td><td>无头安装时默认开启；运行时直接接收 iroh 流（D2）；默认用公共 relay 和地址发现，自建 relay 可选</td></tr>
-  <tr><td>配对与设备管理</td><td><span class="chip chip-todo">缺失</span> 只有长期共享 token</td><td><code>smeltd pair</code>（终端打印配对串和二维码）、<code>smeltd devices</code>（列出、撤销），见 D3</td></tr>
+  <tr><td>独立启动</td><td><span class="chip chip-done">已完成</span> <code>smeltd install</code> 写 systemd 用户单元并启动（<code>KillMode=process</code>，会话进程由守护自己收拾），没开 linger 时提示；<code>smeltd uninstall</code> / <code>status</code> / <code>--version</code></td><td></td></tr>
+  <tr><td>iroh 接入</td><td><span class="chip chip-done">已完成</span> 运行时直接接收 <code>smelt/runtime/1</code> 的流，每条流桥接成 socketpair 交给同一个分发器；没配自建 relay 就用 n0 公共 relay 和地址发现。开关归运行时（<code>remote.config.set</code> / <code>remote.status</code>），启动按配置自愈、绑定失败一直退避重试。无头机器上 <code>smeltd pair</code> 顺手把远程访问打开</td><td></td></tr>
+  <tr><td>配对与设备管理</td><td><span class="chip chip-done">已完成</span> 库结构 v17 的 <code>paired_device</code> 表；一次性配对码（10 分钟、猜错 5 次全部作废）；未配对设备只能调 <code>device.pair</code>；<code>smeltd pair</code> 打印配对串和终端二维码，<code>smeltd devices [revoke]</code>；撤销立即断开该设备的全部连接。长期 token、网关、<code>write_enabled</code> 已删除</td><td></td></tr>
   <tr><td>菜单栏、IOKit 防休眠</td><td><span class="chip chip-na">不适用</span> 已有桩实现</td><td>能力清单里如实报告没有</td></tr>
-  <tr><td>额度查询（钥匙串）</td><td><span class="chip chip-todo">缺失</span> 依赖 <code>security</code> 命令</td><td>先在能力清单里报告不可用；之后改读各家 CLI 的凭据文件</td></tr>
+  <tr><td>额度查询（钥匙串）</td><td><span class="chip chip-split">部分</span> 非 macOS 跳过钥匙串，只读环境变量和各家 CLI 的凭据文件</td><td>能力清单里如实报告哪些查不了</td></tr>
   <tr><td>agent hook 安装</td><td><span class="chip chip-done">已完成</span></td><td>运行时执行 <code>agent.hooks.*</code>，在自己那台机器上写配置；<code>smelt-notify</code> 由运行时安装包放进 <code>~/.smelt/bin</code>（本机仍由桌面从 App 包同步）</td></tr>
   <tr><td>打包分发</td><td><span class="chip chip-todo">缺失</span></td><td>tar.gz + 安装脚本；按 D7 的桌面推送，同一份二进制也随桌面安装包附带</td></tr>
 </table></div>
@@ -538,9 +538,9 @@
   <div>
     <p><b>Linux 无头运行时 + 桌面经 iroh 连接</b></p>
     <ul>
-      <li>完成第 12 节的清单和 <code>ci/linux</code>。</li>
-      <li>运行时直接接收 iroh 流（D2）；按设备配对和撤销（D3）；<code>smeltd pair</code> / <code>smeltd devices</code>。</li>
-      <li>桌面的 iroh 连接器、「添加运行时」（粘贴配对串）。</li>
+      <li>完成第 12 节的清单和 <code>ci/linux</code>。（清单大部分 <span class="chip chip-done">已完成</span>；<code>ci/linux</code>、文件监听上限、打包分发未做）</li>
+      <li>运行时直接接收 iroh 流（D2）；按设备配对和撤销（D3）；<code>smeltd pair</code> / <code>smeltd devices</code>。<span class="chip chip-done">已完成</span>：桌面设置页「远程访问」改成开关、自建 relay 和设备（生成一次性配对串、列出、撤销）</li>
+      <li>桌面的 iroh 连接器、「添加运行时」（粘贴配对串）。连接器 <span class="chip chip-done">已完成</span>（<code>smelt_iroh::runtime::RuntimeConnector</code>，桌面和手机共用；<code>smelt-iroh-connect</code> 是用它的命令行验证工具）；「添加运行时」等 P2 的多运行时</li>
       <li>D7 的桌面推送升级：<code>runtime.upgrade</code> 分块传二进制、只升不降。</li>
     </ul>
     <p class="exit"><b>完成标准：</b>Mac 桌面连上一台不在同一网络的 Linux 运行时，除了能力清单里声明缺失的部分，其余功能都能用；本机运行时同时在线。</p>
@@ -552,13 +552,13 @@
     <p><b>手机收敛</b></p>
     <ul>
       <li><code>smelt-mobile</code> 改为包 <code>smelt-runtime-client</code>，以 FRB 接口暴露给 Dart；Flutter 数据层从 WebSocket 换成 FRB。走 P3 的 iroh 流和设备配对。</li>
-      <li>删掉 gateway 的协议翻译层、JSON-WS、长期共享 token 和 <code>write_enabled</code> 只读开关。</li>
+      <li>删掉 gateway 的协议翻译层、JSON-WS、长期共享 token 和 <code>write_enabled</code> 只读开关。<span class="chip chip-done">已完成</span>（随 P3 的 iroh 直连提前删掉：没发版，不留过渡路径）</li>
       <li>手机可以连任何运行时，包括 Linux。</li>
     </ul>
     <p class="exit"><b>完成标准：</b><code>smelt-remote-gateway</code> 里不再有 <code>/acp/ws</code>、<code>/terminal/{id}/ws</code> 的处理代码，<code>~/.smelt/remote-token</code> 不再存在；<code>smelt-mobile</code> 不再开本地端口，Dart 里没有协议解析代码。</p>
   </div>
 </div>
-<p class="note">顺序是严格的：P2 是 P3 的前提，否则连上 Linux 之后就看不到本机了；P4 依赖 P3 做好的 iroh 直连和设备配对。P3 到 P4 之间，手机暂时还走旧的 gateway 路径和旧 token，P4 完成时一并删掉。这是分期迁移的过渡，不是长期兼容。</p>
+<p class="note">顺序是严格的：P2 是 P3 的前提，否则连上 Linux 之后就看不到本机了；P4 依赖 P3 做好的 iroh 直连和设备配对。还没发版，不做过渡：gateway、长期 token 已随 iroh 直连一起删掉，手机在 P4 改走新协议之前连不上远程运行时。</p>
 
 <!-- ───────────────────────────────────────── -->
 <h2>14. 风险与待定问题</h2>

@@ -1,77 +1,61 @@
-//! 配对码格式：桌面生成、手机解析。
+//! 配对串格式：运行时生成，桌面和手机解析。
 //!
-//! 这个 crate 刻意不依赖 `smelt-iroh` 或桌面端连接实现：生成方（桌面设置页）
-//! 和解析方（Flutter app）分属两套代码，格式必须有唯一一份轻量权威定义可引用。
+//! 刻意不依赖 `smelt-iroh`：生成方（运行时）和解析方（桌面、Flutter 手机端）分属几套
+//! 代码，格式要有唯一一份轻量的权威定义。
+//!
+//! `smelt+iroh://<endpoint_id>/?code=<一次性码>[&relay=<自建 relay>]`
+//!
+//! `endpoint_id` 放在 host 位：它就是「连谁」。默认用公共 relay 和地址发现，只凭
+//! endpoint id 就能找到运行时；只有运行时用了自建 relay 时才带 `relay`。
 
-/// iroh 配对码：携带宿主、网关鉴权和用户选择的 relay 配置。
-///
-/// 刻意沿用 query string 带 token 的写法，跟现有 `http(s)://host/?token=` 的配对
-/// 链接保持一致——手机侧解析器只要多认一个 scheme，不用改结构。
-///
-/// `endpoint_id` 放在 host 位而不是 path，因为它就是「连谁」，语义等价于主机名。
-///
-/// 注意两半缺一不可：`endpoint_id` 只让人连得上网关，能不能操作由 token 决定。
-pub fn iroh_pairing_uri(endpoint_id: &str, token: &str, relay_url: &str) -> String {
+/// 配对串的 scheme，解析方用来分流。
+pub const PAIRING_SCHEME: &str = "smelt+iroh";
+
+pub fn pairing_uri(endpoint_id: &str, code: &str, relay_url: Option<&str>) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
-    query.append_pair("token", token);
-    query.append_pair("relay", relay_url);
-    format!("smelt+iroh://{endpoint_id}/?{}", query.finish())
+    query.append_pair("code", code);
+    if let Some(relay) = relay_url {
+        query.append_pair("relay", relay);
+    }
+    format!("{PAIRING_SCHEME}://{endpoint_id}/?{}", query.finish())
 }
 
-/// iroh 配对码的 scheme，解析方用来分流。
-pub const IROH_PAIRING_SCHEME: &str = "smelt+iroh";
-
-/// 解析结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IrohPairing {
+pub struct Pairing {
     pub endpoint_id: String,
-    pub token: String,
-    pub relay_url: String,
+    pub code: String,
+    pub relay_url: Option<String>,
 }
 
-/// 解析 `smelt+iroh://` 配对码。relay 是必填项；没有它就不得使用任何默认服务。
+/// 解析配对串。
 ///
-/// 和 [`iroh_pairing_uri`] 放在一起，是为了让「怎么生成」和「怎么解析」
-/// 改的时候必然被同一次编辑覆盖到。
-///
-/// 不用 `url::Url` 整体解析 URI：`smelt+iroh` 是自定义 scheme，通用 URL 解析器对
-/// 非标准 scheme 的 host/authority 处理各家不一（有的直接当 opaque path）；这里
-/// 手动剥离 scheme 与 host，query 字符串则使用 `url::form_urlencoded` 标准解析。
-pub fn parse_iroh_pairing_uri(uri: &str) -> Result<IrohPairing, String> {
-    let prefix = format!("{IROH_PAIRING_SCHEME}://");
+/// 不用 `url::Url` 整体解析：`smelt+iroh` 是自定义 scheme，通用 URL 解析器对非标准
+/// scheme 的 authority 处理各家不一。这里手动剥 scheme 和 host，query 用标准解析。
+pub fn parse_pairing_uri(uri: &str) -> Result<Pairing, String> {
+    let prefix = format!("{PAIRING_SCHEME}://");
     let rest = uri
         .trim()
         .strip_prefix(&prefix)
-        .ok_or_else(|| format!("不是 {IROH_PAIRING_SCHEME} 配对码"))?;
-
-    let (host, query) = match rest.split_once('?') {
-        Some((h, q)) => (h, q),
-        None => (rest, ""),
-    };
-    // host 后面允许有 `/`（我们自己就生成 `/?token=`），去掉即可。
+        .ok_or_else(|| format!("不是 {PAIRING_SCHEME} 配对串"))?;
+    let (host, query) = rest.split_once('?').unwrap_or((rest, ""));
     let endpoint_id = host.trim_end_matches('/');
     if endpoint_id.is_empty() {
-        return Err("配对码缺少 endpoint id".to_string());
+        return Err("配对串缺少 endpoint id".to_string());
     }
-
-    let fields = url::form_urlencoded::parse(query.as_bytes())
-        .into_owned()
-        .collect::<std::collections::HashMap<_, _>>();
-    let token = fields.get("token").map(String::as_str).unwrap_or("");
-    if token.is_empty() {
-        // 没有 token 的码连上也什么都干不了，与其让用户在连接页看到一个
-        // 莫名其妙的 401，不如在扫码这一步就说清楚。
-        return Err("配对码缺少 token".to_string());
+    let mut code = None;
+    let mut relay_url = None;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "code" if !value.is_empty() => code = Some(value.into_owned()),
+            "relay" if !value.is_empty() => relay_url = Some(value.into_owned()),
+            _ => {}
+        }
     }
-    let relay_url = fields.get("relay").map(String::as_str).unwrap_or("");
-    if relay_url.is_empty() {
-        return Err("配对码缺少 relay 地址，请在 Mac 上重新生成".to_string());
-    }
-
-    Ok(IrohPairing {
+    let code = code.ok_or_else(|| "配对串缺少配对码".to_string())?;
+    Ok(Pairing {
         endpoint_id: endpoint_id.to_string(),
-        token: token.to_string(),
-        relay_url: relay_url.to_string(),
+        code,
+        relay_url,
     })
 }
 
@@ -80,53 +64,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn carries_both_halves() {
-        let uri = iroh_pairing_uri("abc123", "tok456", "https://relay.example.test");
-        assert!(uri.starts_with("smelt+iroh://"), "{uri}");
-        assert!(uri.contains("abc123"), "{uri}");
-        assert!(uri.contains("token=tok456"), "{uri}");
-        assert!(
-            uri.contains("relay=https%3A%2F%2Frelay.example.test"),
-            "{uri}"
-        );
-        assert!(!uri.contains("relay_token"), "{uri}");
-    }
-
-    #[test]
-    fn scheme_matches_generated_uri() {
-        // 两个常量各写各的迟早对不上，这里钉住。
-        let uri = iroh_pairing_uri("id", "t", "https://relay.test");
-        assert!(uri.starts_with(&format!("{IROH_PAIRING_SCHEME}://")));
-    }
-
-    #[test]
-    fn parse_round_trips_generated_uri() {
-        // 生成与解析必须互逆，否则桌面出的码手机认不出来。
-        let uri = iroh_pairing_uri("abc123", "tok456", "https://relay.example.test:8443");
-        let parsed = parse_iroh_pairing_uri(&uri).expect("应能解析自己生成的码");
+    fn round_trips_with_and_without_a_relay() {
+        let uri = pairing_uri("abc123", "K7QX-M2PD", Some("https://relay.example.test:8443"));
+        assert!(uri.starts_with("smelt+iroh://abc123/?"), "{uri}");
+        let parsed = parse_pairing_uri(&uri).unwrap();
         assert_eq!(parsed.endpoint_id, "abc123");
-        assert_eq!(parsed.token, "tok456");
-        assert_eq!(parsed.relay_url, "https://relay.example.test:8443");
+        assert_eq!(parsed.code, "K7QX-M2PD");
+        assert_eq!(
+            parsed.relay_url.as_deref(),
+            Some("https://relay.example.test:8443")
+        );
+
+        let uri = pairing_uri("abc123", "K7QX-M2PD", None);
+        assert!(!uri.contains("relay"), "{uri}");
+        assert_eq!(parse_pairing_uri(&uri).unwrap().relay_url, None);
     }
 
     #[test]
-    fn parse_rejects_other_schemes() {
-        // http 配对码走的是另一条分支，不能被 iroh 解析器吞掉。
-        assert!(parse_iroh_pairing_uri("https://example.com/?token=t").is_err());
+    fn rejects_other_schemes_and_missing_parts() {
+        assert!(parse_pairing_uri("https://example.com/?code=c").is_err());
+        assert!(parse_pairing_uri("smelt+iroh://abc123/").is_err());
+        assert!(parse_pairing_uri("smelt+iroh:///?code=c").is_err());
     }
 
     #[test]
-    fn parse_rejects_missing_token() {
-        assert!(parse_iroh_pairing_uri("smelt+iroh://abc123/?relay=https%3A%2F%2Fr").is_err());
-    }
-
-    #[test]
-    fn parse_rejects_missing_endpoint() {
-        assert!(parse_iroh_pairing_uri("smelt+iroh:///?token=t&relay=https%3A%2F%2Fr").is_err());
-    }
-
-    #[test]
-    fn parse_rejects_missing_relay_without_falling_back() {
-        assert!(parse_iroh_pairing_uri("smelt+iroh://abc123/?token=t").is_err());
+    fn trims_surrounding_whitespace() {
+        let parsed = parse_pairing_uri("  smelt+iroh://abc/?code=x \n").unwrap();
+        assert_eq!(parsed.endpoint_id, "abc");
+        assert_eq!(parsed.code, "x");
     }
 }

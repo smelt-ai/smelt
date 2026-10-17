@@ -251,30 +251,6 @@ impl DaemonStateEventClient {
         )
     }
 
-    pub fn remote_gateway() -> Self {
-        Self::first_party(
-            FirstPartyClientKind::RemoteGateway,
-            "remote-gateway",
-            &[
-                CORE_TOPIC_SESSION_STATE_CHANGED,
-                CORE_TOPIC_SESSION_REMOVED,
-                CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
-                CORE_TOPIC_WORKSPACE_MENU_CHANGED,
-                // 自动化 Run 停下来等审批时，手机是唯一在场的客户端，所以网关订阅
-                // 自动化投影。
-                CORE_TOPIC_AUTOMATIONS_CHANGED,
-            ],
-            SubscriptionShape {
-                remote_sessions: true,
-                workspace_menu: true,
-                automations: true,
-                conversation_wake: false,
-                appearance_requests: false,
-                project_changes: false,
-            },
-        )
-    }
-
     fn first_party(
         kind: FirstPartyClientKind,
         subscription_prefix: &str,

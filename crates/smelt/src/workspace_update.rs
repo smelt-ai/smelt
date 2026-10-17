@@ -468,13 +468,6 @@ impl Workspace {
                 this.daemon_upgrading = false;
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                // exec 出来的新进程同样丢了网关和隧道（运行态不参与交接），理由与
-                // 硬重启那条路径一样，见 confirm_restart_daemon 里的注释。
-                if outcome == terminal::UpgradeOutcome::Upgraded
-                    || outcome == terminal::UpgradeOutcome::Failed
-                {
-                    settings::spawn_remote_bootstrap(cx);
-                }
                 this.daemon_upgrade_msg = Some(match outcome {
                     terminal::UpgradeOutcome::Upgraded => {
                         this.reconnect_all_terminals(cx);
@@ -642,11 +635,6 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                // 新守护进程里网关和隧道都是空的（运行态不参与交接）。守护自己会按
-                // 配置自愈，但老版本守护不会，且 UI 手里的配对码此刻已经过期——这里
-                // 幂等地补一发并刷新二维码。不补的话就是「重启守护后手机连不上，
-                // 必须去设置页把远程关掉再打开」那个 bug。
-                settings::spawn_remote_bootstrap(cx);
                 let mut failed = 0usize;
                 for (entity, term) in built {
                     match term {

@@ -201,6 +201,7 @@ impl Workspace {
     /// updated"）——这就是「点齿轮整个 app 崩溃」的真正原因。
     pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
         super::refresh_agent_hooks_status(cx);
+        super::refresh_remote(cx);
         self.refresh_pi_config(cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {

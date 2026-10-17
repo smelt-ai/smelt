@@ -107,8 +107,10 @@ fn operation_error(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_control(
     envelope: ControlRequestEnvelope,
+    principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
@@ -327,7 +329,33 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             smelt_core::remote_config::save(&config);
-            success_value(control_version, &request_id, EmptyParams::default())
+            let status = match super::remote::lifecycle_remote() {
+                Some(state) => {
+                    super::remote::apply_remote_config(state, &config);
+                    super::remote::remote_status(state)
+                }
+                None => smelt_core::remote_config::RemoteAccessState::Off,
+            };
+            success_value(control_version, &request_id, status)
+        }
+        ControlMethod::RemoteStatus => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let status = super::remote::lifecycle_remote()
+                .map(super::remote::remote_status)
+                .unwrap_or_default();
+            success_value(control_version, &request_id, status)
+        }
+        device @ (ControlMethod::DevicePairBegin
+        | ControlMethod::DevicePair
+        | ControlMethod::DeviceList
+        | ControlMethod::DeviceRevoke) => {
+            match super::devices::dispatch(device, params, principal) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
         }
         ControlMethod::QuotaGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
@@ -1216,9 +1244,11 @@ fn create_agent_conversation(
     Ok(created)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_control(
     mut conn: UnixStream,
     payload: serde_json::Value,
+    principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
@@ -1229,6 +1259,7 @@ pub(crate) fn handle_control(
     let response = match decode_request_envelope(payload) {
         Ok(envelope) => dispatch_control(
             envelope,
+            principal,
             sessions,
             acp_sessions,
             remote_sessions,
@@ -1273,6 +1304,7 @@ mod tests {
         handle_control(
             server,
             serde_json::Value::Object(payload),
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
@@ -1320,6 +1352,7 @@ mod tests {
 
         let response = dispatch_control(
             envelope,
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
@@ -1349,6 +1382,7 @@ mod tests {
                 "method": "system.describe",
                 "params": {},
             }),
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
@@ -1383,6 +1417,7 @@ mod tests {
                 "method": "plugin.guess",
                 "params": {},
             }),
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),

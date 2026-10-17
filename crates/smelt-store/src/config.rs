@@ -119,7 +119,6 @@ pub(crate) fn read_remote_config_snapshot(
     Ok(Some(RemoteConfigSnapshot {
         enabled: bool_field(&object, "enabled", false),
         iroh_relay: string_field(&object, "iroh_relay"),
-        write_enabled: bool_field(&object, "write_enabled", false),
     }))
 }
 
@@ -134,7 +133,6 @@ pub(crate) fn write_remote_config_snapshot(
         &json!({
             "enabled": snapshot.enabled,
             "iroh_relay": snapshot.iroh_relay,
-            "write_enabled": snapshot.write_enabled,
         })
         .as_object()
         .cloned()
@@ -146,7 +144,6 @@ pub(crate) fn json_from_remote_config(snapshot: &RemoteConfigSnapshot) -> Value 
     json!({
         "enabled": snapshot.enabled,
         "iroh_relay": snapshot.iroh_relay,
-        "write_enabled": snapshot.write_enabled,
     })
 }
 
@@ -157,7 +154,6 @@ pub(crate) fn remote_config_from_document(
     Ok(RemoteConfigSnapshot {
         enabled: bool_field(&object, "enabled", false),
         iroh_relay: string_field(&object, "iroh_relay"),
-        write_enabled: bool_field(&object, "write_enabled", false),
     })
 }
 

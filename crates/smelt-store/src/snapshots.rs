@@ -239,7 +239,6 @@ pub struct PublishedSessionRecord {
 pub struct RemoteConfigSnapshot {
     pub enabled: bool,
     pub iroh_relay: String,
-    pub write_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,6 +311,16 @@ impl MemoryTrust {
             Self::Pending => "pending",
         }
     }
+}
+
+/// 一台已配对的远程设备。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairedDevice {
+    /// 设备的 iroh endpoint id（公钥），白名单按它认。
+    pub endpoint_id: String,
+    pub name: String,
+    pub paired_at_ms: i64,
+    pub last_seen_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -108,47 +108,17 @@
 //! 回滚 tripwire：successor 若已迁移 store sqlite schema，老进程不可再服务，
 //! 此时 exit 交由拉起逻辑重开新版（结局=旧版最坏情况，显式可观测）。
 //!
-//! ## 内嵌远程网关（`remote_start`/`remote_stop`/`remote_status`）
+//! ## 远程访问（`remote.*` / `device.*` 控制方法，见 `remote.rs`、`devices.rs`）
 //!
-//! 路由/handler 全在 `smelt_remote_gateway` crate（跟独立进程版 `gateway.rs` 共用一份，
-//! 见该 crate 文档）——这里只是按需把它跑起来。守护本身是同步/阻塞线程模型，**不**把
-//! `main()` 整个改成 async；`remote_start` 只是另起一条 OS 线程，在那条线程里私自建
-//! 一个 tokio runtime 跑 axum server，跟守护主循环完全隔离，互不影响。
+//! 远程只走 iroh：endpoint 直接接收运行时协议的流，每条 QUIC 双向流桥接成一条
+//! socketpair，交给和 unix socket 同一个 `handle_conn`。`endpoint_id` 由
+//! `~/.smelt/iroh-secret` 的私钥决定，重启不变。鉴权按设备：已配对设备的 endpoint id
+//! 记在 `paired_device` 表里，没配对的只能提交一次性配对码。
 //!
-//! 幂等：已经开着时 `remote_start` 直接回现有的 token/addr，不重启、不换 token。
-//! token 单独保存在 `~/.smelt/remote-token`（0600），冷启动和无缝升级都复用；只有
-//! `remote_rotate_token` 会轮换并让旧配对失效。网关运行态本身**不**参与无缝升级交接：
-//! `upgrade` 之后旧进程里的网关随之关闭，新进程内存里是空的——但新进程启动时会读
-//! 主库远程配置快照，用户之前开着远程就自动拉回来（见
-//! `autostart_remote_from_config`）。这条自愈路径不能少：守护重启（硬重启 / 升级 exec /
-//! 崩溃后被拉起）之后若没人重新 `remote_start`，手机侧就会静默失联，只能靠用户去设置页
-//! 把远程「关掉再打开」。安全默认跟 `watch` 一致：没配置过就是关闭、绑回环，
-//! 见 collaboration.md 的安全底线。
-//!
-//! 网关在 macOS 上按供电决定是否持有 `PreventUserIdleSystemSleep`：插电时远程开着
-//! 就握着（旧行为），屏幕可灭但整机不因空闲睡眠把网关和 iroh 挂起；电池上绝不握
-//! 断言，不阻止任何休眠，远程只能在电脑醒着、正在用的时候连。合盖仍走 Clamshell
-//! Sleep。机器一旦睡着，手机连不上。`exec()` 不跑 `Drop`，IOKit 断言却跟着 PID
-//! 活过映像替换；升级前必须先禁止 autostart 再释放，新进程启动时再清掉本 PID 上
-//! 同名残留。关掉远程之后只许剩 0 条。
-//!
-//! ## iroh 隧道（`iroh_start`/`iroh_stop`/`iroh_status`）
-//!
-//! 解决「内嵌远程网关默认绑回环，手机切到蜂窝网络就连不上」这个问题：iroh 优先
-//! 打洞直连，打不通才回退到中继。
-//!
-//! 这是**唯一**的公网通路。早先还有 Cloudflare quick tunnel 和自建信令 + WebRTC
-//! 两条，都已经删掉：前者的 URL 每次重开都变，手机上存的配对必然失效；后者要自建
-//! 信令 + coturn，且只对浏览器有意义。iroh 的 `endpoint_id` 由 `~/.smelt/iroh-secret`
-//! 里的私钥决定，重启不变，于是二维码可以一次扫、长期用——这是留下它的主要理由。
-//!
-//! 实现上没有子进程，因此没有孤儿进程那套；跟远程网关一样另起一条 OS 线程跑自己的
-//! tokio runtime。转发逻辑在 `smelt-iroh` crate，与命令行
-//! 版 `smelt-iroh-host` 共用一份（一条 iroh 双向流 ⟷ 一条到网关的 TCP 连接，逐字节转发，
-//! 上层 HTTP/WebSocket/token 鉴权完全不变）。
-//!
-//! 注意 `endpoint_id` **不是**授权凭证：拿到它的人只是能连上网关，能不能操作仍由网关的
-//! token 决定，所以配对码必须 endpoint_id + token 一起给。
+//! 开关归运行时：`remote.config.set` 存配置并照着开关；守护每次启动按落盘配置自愈，
+//! 不等客户端。macOS 上远程开着、插着电时持有 `PreventUserIdleSystemSleep`，电池上
+//! 不握。`exec()` 不跑 `Drop`，升级前先禁止再拉起并释放断言，新进程启动时清掉本 PID
+//! 上同名残留。
 //!
 //! ## 远程操控（`action` + `input` op）
 //!
@@ -188,6 +158,8 @@ mod history_control;
 mod menubar;
 mod peer_messaging;
 mod pi_control;
+mod devices;
+use devices::Principal;
 mod project_watch;
 mod protocol;
 mod remote;
@@ -227,7 +199,6 @@ use smelt_core::session_control::{
 use smelt_core::workspace_menu::{
     WorkspaceMenuSnapshot, load_published_workspace_menu, persist_published_workspace_menu,
 };
-use smelt_remote_gateway as remote_gateway;
 use terminal_output::{OutputAttachment, enqueue_session_streams};
 use terminal_registry::{TerminalRegistry, TerminalSlot};
 use terminal_snapshot::{
@@ -2375,71 +2346,48 @@ fn run_serve_loop(
     let exe_mtime = exe_mtime_secs();
     // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
     let _ = runtime_identity::runtime_id();
-    // 不参与无缝升级交接：每次进程启动（含 upgrade 后的新进程）都是全新的 None，
-    // 见 RemoteGateway / IrohTunnel 定义处注释。运行态丢了不等于用户意愿丢了——
-    // 下面的 autostart_remote_from_config 会按远程配置快照把它们拉回来。
-    let remote_state = new_remote_state(None);
-    let iroh_state: IrohState = Arc::new(Mutex::new(None));
-    // 全局连接池，由 iroh 隧道回调更新，供 iroh_connections op 查询。
-    let iroh_connections = new_iroh_connections();
-    // acp_sessions 现在参与无缝升级交接了（见上面 resume_handoff 的返回值）：
-    // 正常冷启动时是空表，upgrade 交接恢复时带着接过来的会话。
-    // 菜单栏 quit / 任何路径 cleanup 都要够得着这两份状态。
-    register_lifecycle(Arc::clone(&remote_state), Arc::clone(&iroh_state));
+    // 远程访问不参与无缝升级交接：每次进程启动都是空的，按落盘配置重新拉起。
+    // 菜单栏 quit / 任何路径 cleanup 都要够得着它。
+    let remote_state = new_remote_state();
+    register_lifecycle(Arc::clone(&remote_state));
 
     // exec 活下来的同名断言没有 Rust 对象可 Drop，必须在自愈拉起之前清掉。
     #[cfg(target_os = "macos")]
     SystemSleepAssertion::release_orphans();
 
-    // 远程访问自愈：见 autostart_remote_from_config 的注释。必须在 accept 循环之前
-    // 挂起（它自己起线程，不阻塞），否则守护重启后手机要一直等到用户下次开 GUI。
-    autostart_remote_from_config(
-        Arc::clone(&remote_state),
-        Arc::clone(&iroh_state),
-        Arc::clone(&iroh_connections),
-    );
+    let server = ServerShared {
+        sessions,
+        acp_sessions,
+        remote_sessions,
+        workspace_menu,
+        automations,
+        exe_mtime,
+        daemon_fingerprint,
+        listen_fd,
+        event_hub,
+    };
+    // 先登记再拉起远程访问：iroh 流一进来就要从这里取服务状态。
+    let _ = SERVER.set(server.clone());
+    // 自己起线程，不阻塞 accept 循环。
+    autostart_remote_from_config(&remote_state);
 
     // headless 空闲自升级：没有观看连接时磁盘新了没人触发 upgrade，这里兜底。
     // GUI 连着时它 60s 探一次、有空闲门控，让它拥有升级时机（见函数注释）。
-    spawn_headless_self_upgrade(daemon_fingerprint.clone());
+    spawn_headless_self_upgrade(server.daemon_fingerprint.clone());
 
     // 闲置会话挂起（见 acp_idle）。冷启动和升级交接都走到这里；会话宿主进程不走。
-    acp_idle::spawn_acp_idle_reaper(Arc::clone(&acp_sessions), Arc::clone(&remote_sessions));
+    acp_idle::spawn_acp_idle_reaper(
+        Arc::clone(&server.acp_sessions),
+        Arc::clone(&server.remote_sessions),
+    );
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。
     let accept_loop = move || {
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
-            let sessions = Arc::clone(&sessions);
-            let acp_sessions = Arc::clone(&acp_sessions);
-            let remote_state = Arc::clone(&remote_state);
-            let iroh_state = Arc::clone(&iroh_state);
-            let iroh_connections = Arc::clone(&iroh_connections);
-            let event_hub = Arc::clone(&event_hub);
-            let remote_sessions = Arc::clone(&remote_sessions);
-            let workspace_menu = Arc::clone(&workspace_menu);
-            let automations = Arc::clone(&automations);
-            let daemon_fingerprint = daemon_fingerprint.clone();
-            thread::spawn(move || {
-                handle_conn(
-                    conn,
-                    ServerContext {
-                        sessions,
-                        acp_sessions,
-                        exe_mtime,
-                        daemon_fingerprint,
-                        listen_fd,
-                        remote_state,
-                        iroh_state,
-                        iroh_connections,
-                        event_hub,
-                        remote_sessions,
-                        workspace_menu,
-                        automations,
-                    },
-                )
-            });
+            let context = server.context(Principal::Local);
+            thread::spawn(move || handle_conn(conn, context));
         }
     };
 
