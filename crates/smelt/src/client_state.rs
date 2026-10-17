@@ -5,7 +5,7 @@
 //! 客户端库里已经有的条目不覆盖。取成功才记下「已迁移」，失败下次启动再试。
 
 use smelt_client_store::{ClientStore, keys};
-use smelt_core::control_api::MigrationTakeClientState;
+use smelt_model::control_api::MigrationTakeClientState;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 pub(crate) fn migrate_client_state_once() {

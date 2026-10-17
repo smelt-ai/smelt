@@ -224,7 +224,7 @@ impl Workspace {
             now,
         );
         let last_run_failed = latest_run
-            .is_some_and(|run| run.status == smelt_core::automation::AutomationRunStatus::Failed);
+            .is_some_and(|run| run.status == smelt_model::automation::AutomationRunStatus::Failed);
         let action_summary = match &automation.action {
             settings::AutomationAction::Agent { .. } => agent
                 .as_ref()
@@ -355,7 +355,7 @@ impl Workspace {
 
     fn render_catalog_run_row(
         &self,
-        run: &smelt_core::automation::AutomationRun,
+        run: &smelt_model::automation::AutomationRun,
         entity: Entity<Workspace>,
         _cx: &App,
     ) -> AnyElement {
@@ -370,7 +370,7 @@ impl Workspace {
         let error = run
             .error
             .as_deref()
-            .filter(|_| run.status == smelt_core::automation::AutomationRunStatus::Failed)
+            .filter(|_| run.status == smelt_model::automation::AutomationRunStatus::Failed)
             .map(compact_instructions);
         let open_entity = entity;
         let run_id = run.id.clone();

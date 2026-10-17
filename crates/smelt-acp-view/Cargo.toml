@@ -11,8 +11,9 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+smelt-sys = { path = "../smelt-sys" }
+smelt-model = { path = "../smelt-model" }
 smelt-client = { path = "../smelt-client" }
-smelt-core = { path = "../smelt-core" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-ui = { path = "../smelt-ui" }
 gpui = { package = "gpui-pre", version = "=0.3.9" }
@@ -30,4 +31,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+# 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
+smelt-core = { path = "../smelt-core" }
 gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }

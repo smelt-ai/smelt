@@ -12,7 +12,7 @@ use crate::ui_theme;
 
 /// 设置页下拉的 (值, 标签)。值是主题文件里的 `name`，例如 `Ayu Light`。
 pub fn options() -> Vec<(SharedString, SharedString)> {
-    smelt_core::theme_index::entries()
+    smelt_model::theme_index::entries()
         .iter()
         .map(|entry| {
             (

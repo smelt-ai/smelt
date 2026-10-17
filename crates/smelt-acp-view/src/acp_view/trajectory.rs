@@ -326,7 +326,7 @@ impl Render for TrajectoryWindow {
                     session
                         .turn_timings
                         .iter()
-                        .filter_map(smelt_core::acp_session::TurnTiming::completed_elapsed_ms)
+                        .filter_map(smelt_model::acp_session::TurnTiming::completed_elapsed_ms)
                         .sum::<u64>(),
                 )
             });
@@ -696,7 +696,7 @@ fn render_ledger_row(
                 .flex_shrink_0()
                 .text_right()
                 .text_xs()
-                .font_family(smelt_core::font_config::font_family())
+                .font_family(smelt_model::font_config::font_family())
                 .text_color(muted)
                 .child(format!("{:03}", event.seq + 1)),
         )
@@ -867,7 +867,7 @@ fn render_inspector(
                         .text_color(gpui::rgb(ui_theme::text_mid()))
                         .when(!preview, |source| {
                             source
-                                .font_family(smelt_core::font_config::font_family())
+                                .font_family(smelt_model::font_config::font_family())
                                 .text_xs()
                         })
                         .child(body),

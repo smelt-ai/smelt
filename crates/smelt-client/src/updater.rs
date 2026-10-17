@@ -22,7 +22,8 @@ const DEV_MANIFEST_URL: &str =
 const PROD_MANIFEST_URL: &str =
     "https://oss-fx-int.nioint.com/fx/app-ios-smelt-mac/__fx_config__/update.prod.json";
 const BUNDLED_RELEASE_URL_FILE: &str = "Contents/Resources/SmeltUpdateURL";
-const UPDATE_STATE_FILE: &str = "update-state.json";
+/// 更新事务状态存在客户端库里（和 installer 共用同一个文件）。
+const UPDATE_STATE_SCOPE: (&str, &str) = ("update", "state");
 const UPDATE_STATE_DIR: &str = ".smelt";
 const UPDATE_LOCK_FILE: &str = "update.lock";
 const APP_LAUNCH_GATE_FILE: &str = "app-launch-gate.lock";
@@ -576,7 +577,7 @@ fn update_dir() -> anyhow::Result<PathBuf> {
 }
 
 fn update_state_path() -> anyhow::Result<PathBuf> {
-    Ok(update_dir()?.join(UPDATE_STATE_FILE))
+    Ok(update_dir()?.join(smelt_client_store::DATABASE_FILE_NAME))
 }
 
 fn acquire_update_lock() -> anyhow::Result<UpdateFileLock> {
@@ -601,68 +602,40 @@ fn acquire_update_lock() -> anyhow::Result<UpdateFileLock> {
     })
 }
 
-fn update_state_store(path: &Path) -> anyhow::Result<smelt_store::Store> {
-    let database = if path.file_name().and_then(|name| name.to_str())
-        == Some(smelt_store::DATABASE_FILE_NAME)
-    {
-        path.to_path_buf()
-    } else {
-        path.parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(smelt_store::DATABASE_FILE_NAME)
-    };
-    crate::sqlite_state::open_sqlite_store(&database)
+fn update_state_store(path: &Path) -> anyhow::Result<smelt_client_store::ClientStore> {
+    smelt_client_store::ClientStore::open(path)
         .map_err(anyhow::Error::msg)
-        .with_context(|| format!("打开更新状态库失败：{}", database.display()))
+        .with_context(|| format!("打开更新状态库失败：{}", path.display()))
 }
 
 fn load_update_state_locked(path: &Path) -> anyhow::Result<UpdateState> {
     let store = update_state_store(path)
         .with_context(|| format!("读取更新状态失败：{}", path.display()))?;
-    match store.get_update_state_snapshot() {
-        Ok(Some(snapshot)) => state_from_snapshot(snapshot),
-        Ok(None) => Ok(UpdateState::default()),
-        Err(error) => Err(anyhow::Error::msg(error))
-            .with_context(|| format!("读取更新状态失败：{}", path.display())),
-    }
+    let (scope, key) = UPDATE_STATE_SCOPE;
+    store
+        .get::<UpdateState>(scope, key)
+        .map(Option::unwrap_or_default)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("读取更新状态失败：{}", path.display()))
 }
 
 fn save_update_state_locked(path: &Path, state: &UpdateState) -> anyhow::Result<()> {
     let store = update_state_store(path)
         .with_context(|| format!("保存更新状态失败：{}", path.display()))?;
+    let (scope, key) = UPDATE_STATE_SCOPE;
     store
-        .put_update_state_snapshot(&snapshot_from_state(state)?)
+        .put(scope, key, state)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("保存更新状态失败：{}", path.display()))
 }
 
-fn snapshot_from_state(state: &UpdateState) -> anyhow::Result<smelt_store::UpdateStateSnapshot> {
-    Ok(smelt_store::UpdateStateSnapshot {
-        current_url: state.current_url.clone(),
-        staged_json: state
-            .staged
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("序列化暂存更新失败")?,
-        cleanup_app: state
-            .cleanup_app
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned()),
-    })
-}
-
-fn state_from_snapshot(snapshot: smelt_store::UpdateStateSnapshot) -> anyhow::Result<UpdateState> {
-    Ok(UpdateState {
-        current_url: snapshot.current_url,
-        staged: snapshot
-            .staged_json
-            .as_deref()
-            .map(serde_json::from_slice)
-            .transpose()
-            .context("解析暂存更新失败")?,
-        cleanup_app: snapshot.cleanup_app.map(PathBuf::from),
-    })
+/// 读不出来的更新状态挪进隔离区，保留 payload 供排障，活路径从空状态重新开始。
+fn quarantine_update_state(path: &Path) -> anyhow::Result<String> {
+    let (scope, key) = UPDATE_STATE_SCOPE;
+    update_state_store(path)?
+        .quarantine(scope, key)
+        .map_err(anyhow::Error::msg)?
+        .ok_or_else(|| anyhow::anyhow!("更新状态读取失败，但存储中没有可隔离的 payload"))
 }
 
 fn same_update(left: &StagedUpdate, right: &StagedUpdate) -> bool {
@@ -1706,7 +1679,7 @@ fn finish_recovered_update_locked(
     if let Err(error) = cleanup_registered_app_locked(state_path, state, app_bundle) {
         // 提交已经完成，清理失败不能把一次成功安装重新报告成失败；登记路径仍在
         // update-state.json 中，下次启动会继续收敛。
-        crate::app_log::error(
+        smelt_sys::app_log::error(
             "updater",
             &format!("更新事务已恢复，旧 App 将留到下次启动清理：{error:#}"),
         );
@@ -1726,7 +1699,7 @@ fn abandon_pending_update_locked(
     save_update_state_locked(state_path, state)?;
     discard_update_artifacts(pending);
     if let Err(error) = cleanup_registered_app_locked(state_path, state, app_bundle) {
-        crate::app_log::error(
+        smelt_sys::app_log::error(
             "updater",
             &format!("作废更新作业后清理交换目录失败，将在下次启动重试：{error:#}"),
         );
@@ -1744,14 +1717,9 @@ pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
     let state = match load_update_state_locked(&state_path) {
         Ok(state) => state,
         Err(error) => {
-            let quarantined = crate::sqlite_state::quarantine_json(
-                Some(state_path.clone()),
-                "update-state.corrupt",
-            )
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("更新状态损坏且无法隔离：{}", state_path.display()))?
-            .ok_or_else(|| anyhow::anyhow!("更新状态读取失败，但存储中没有可隔离的 payload"))?;
-            crate::app_log::error(
+            let quarantined = quarantine_update_state(&state_path)
+                .with_context(|| format!("更新状态损坏且无法隔离：{}", state_path.display()))?;
+            smelt_sys::app_log::error(
                 "updater",
                 &format!("更新状态损坏，已隔离到 {quarantined}：{error:#}"),
             );
@@ -1771,12 +1739,12 @@ fn reconcile_update_state_locked(
     match cleanup_registered_app_locked(state_path, &mut state, app_bundle) {
         Ok(true) => {}
         Ok(false) => {
-            crate::app_log::info(
+            smelt_sys::app_log::info(
                 "updater",
                 "旧 App 仍被使用；允许暂存更新，但提交下一次交换前必须先回收",
             );
         }
-        Err(error) => crate::app_log::error(
+        Err(error) => smelt_sys::app_log::error(
             "updater",
             &format!("旧 App 暂未清理；允许恢复暂存作业，但提交交换前会拒绝：{error:#}"),
         ),
@@ -1791,7 +1759,7 @@ fn reconcile_update_state_locked(
         if pending.phase == StagedUpdatePhase::Applying {
             return Err(error).context("Applying 更新元数据无效，保留交换现场等待人工确认");
         }
-        crate::app_log::error(
+        smelt_sys::app_log::error(
             "updater",
             &format!("待安装更新元数据无效，已作废：{error:#}"),
         );
@@ -1817,7 +1785,7 @@ fn reconcile_update_state_locked(
             if pending.phase == StagedUpdatePhase::Applying {
                 if applying_recovery == Some(ApplyingRecoveryState::NotSwapped) {
                     let verified_swap = pending.swap_app.clone();
-                    crate::app_log::error(
+                    smelt_sys::app_log::error(
                         "updater",
                         &format!(
                             "未交换的候选包 {} 无法通过恢复校验，已安全作废：{error:#}",
@@ -1836,7 +1804,7 @@ fn reconcile_update_state_locked(
                 return Err(error)
                     .context("Applying 更新缺少可验证的暂存包，保留交换现场以避免误删旧版本");
             }
-            crate::app_log::error(
+            smelt_sys::app_log::error(
                 "updater",
                 &format!(
                     "待安装更新 {} 无法通过恢复校验，已作废并允许重新下载：{error:#}",
@@ -1933,7 +1901,7 @@ fn finalize_pending_update_at(
     let fingerprint = match validate_staged_update(&pending, app_bundle) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
-            crate::app_log::error(
+            smelt_sys::app_log::error(
                 "updater",
                 &format!("待安装更新校验已失效，作废后重新下载：{error:#}"),
             );
@@ -2048,7 +2016,7 @@ mod tests {
         is_update_available, is_valid_update_id, load_update_state_locked, manifest_version_text,
         promote_staged_update_in_state, reconcile_update_state_locked,
         record_installer_failure_in_state, release_label_from_url, safe_component, same_update,
-        save_update_state_locked, state_from_snapshot, validate_download_url,
+        UPDATE_STATE_SCOPE, quarantine_update_state, save_update_state_locked, validate_download_url,
     };
     use std::path::PathBuf;
 
@@ -2637,16 +2605,20 @@ mod tests {
     }
 
     #[test]
-    fn critical_update_state_read_rejects_corrupt_snapshot() {
-        let error = state_from_snapshot(smelt_store::UpdateStateSnapshot {
-            current_url: None,
-            staged_json: Some(b"{not-json".to_vec()),
-            cleanup_app: None,
-        })
-        .err()
-        .expect("corrupt snapshot must fail");
+    fn corrupt_update_state_is_reported_and_can_be_quarantined() {
+        let root = test_root("corrupt-state");
+        let path = root.join(smelt_client_store::DATABASE_FILE_NAME);
+        let (scope, key) = UPDATE_STATE_SCOPE;
+        smelt_client_store::ClientStore::open(&path)
+            .unwrap()
+            .put(scope, key, &serde_json::json!({"staged": "not-a-staged-update"}))
+            .unwrap();
 
-        assert!(error.to_string().contains("解析暂存更新失败"));
+        let error = load_update_state_locked(&path).err().expect("corrupt state must fail");
+        assert!(error.to_string().contains("读取更新状态失败"));
+
+        quarantine_update_state(&path).unwrap();
+        assert!(load_update_state_locked(&path).unwrap().staged.is_none());
     }
 
     #[test]

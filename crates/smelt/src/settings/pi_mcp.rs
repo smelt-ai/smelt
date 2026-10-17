@@ -3,8 +3,8 @@
 //! 都由运行时执行（`pi.mcp.*`），每次修改回带新的 Pi 配置快照；这里只管视图状态。
 
 use super::*;
-use smelt_core::control_api::{PiMcpAddPreset, PiMcpLogin, PiMcpRemove, PiMcpSetEnabled};
-use smelt_core::pi_service::{McpEnabledParams, McpPresetParams, McpServerParams};
+use smelt_model::control_api::{PiMcpAddPreset, PiMcpLogin, PiMcpRemove, PiMcpSetEnabled};
+use smelt_model::pi_service::{McpEnabledParams, McpPresetParams, McpServerParams};
 
 /// 登录要等用户在浏览器里授权。
 const MCP_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);

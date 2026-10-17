@@ -9637,10 +9637,12 @@ dependencies = [
  "smelt-client",
  "smelt-client-store",
  "smelt-core",
+ "smelt-model",
  "smelt-pairing",
  "smelt-paths",
  "smelt-runtime-client",
  "smelt-store",
+ "smelt-sys",
  "smelt-ui",
  "smol",
  "tokio",
@@ -9661,7 +9663,9 @@ dependencies = [
  "serde_json",
  "smelt-client",
  "smelt-core",
+ "smelt-model",
  "smelt-runtime-client",
+ "smelt-sys",
  "smelt-ui",
  "smol",
  "url",
@@ -9672,15 +9676,24 @@ dependencies = [
 name = "smelt-client"
 version = "0.9.0"
 dependencies = [
+ "anyhow",
+ "dirs",
+ "libc",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "smelt-client-store",
  "smelt-core",
  "smelt-event-protocol",
  "smelt-model",
  "smelt-paths",
  "smelt-runtime-client",
+ "smelt-sys",
  "smol",
  "tempfile",
+ "tokio",
+ "url",
  "uuid",
 ]
 
@@ -9884,8 +9897,10 @@ dependencies = [
  "smelt-client",
  "smelt-client-store",
  "smelt-core",
+ "smelt-model",
  "smelt-runtime-client",
  "smelt-store",
+ "smelt-sys",
  "smol",
 ]
 

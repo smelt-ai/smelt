@@ -49,7 +49,7 @@ fn link_fg() -> u32 {
 
 // 终端字体族配置：搬进 smelt-core（跟 markdown_mermaid 的代码块渲染共用同一份，
 // 见 font_config.rs），这里重导出成原来的裸名字。
-pub(crate) use smelt_core::font_config::{DEFAULT_FONT_FAMILY, font_family, set_font_family};
+pub(crate) use smelt_model::font_config::{DEFAULT_FONT_FAMILY, font_family, set_font_family};
 
 /// 兜底等宽字体：macOS 系统自带，必定存在。放在 fallback 链末尾做最后防线，
 /// 保证 cell_w 与实际字形宽度同源——否则测量和渲染各自 fallback 到不同字体，
@@ -2768,7 +2768,7 @@ mod tests {
     use crate::terminal;
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
-    use smelt_core::attention::AttentionKind;
+    use smelt_model::attention::AttentionKind;
     use std::time::{Duration, Instant};
 
     /// 默认样式：bg = None 表示「终端默认底色」（不画底色矩形）。

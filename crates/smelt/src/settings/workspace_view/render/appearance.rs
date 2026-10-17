@@ -20,7 +20,7 @@ pub(super) fn theme_page(
                         |cx: &App| cx.global::<Appearance>().theme_name.clone().into(),
                         |name: SharedString, cx: &mut App| {
                             let name = name.to_string();
-                            let Some(entry) = smelt_core::theme_index::find(&name) else {
+                            let Some(entry) = smelt_model::theme_index::find(&name) else {
                                 return;
                             };
                             let mode = if entry.mode == "light" {

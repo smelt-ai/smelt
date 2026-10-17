@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 use gpui::{App, BorrowAppContext, Global};
 
 #[cfg(test)]
-use smelt_core::agent_kind::ConversationAgentKind;
-use smelt_core::pi_quota::pi_quota_provider;
-use smelt_core::provider_quota::ProviderQuotaData;
-pub use smelt_core::quota_service::{QuotaStatus, QuotaTarget};
+use smelt_model::agent_kind::ConversationAgentKind;
+use smelt_model::pi_quota::pi_quota_provider;
+use smelt_model::provider_quota::ProviderQuotaData;
+pub use smelt_model::quota_service::{QuotaStatus, QuotaTarget};
 
 #[derive(Default)]
 struct ProviderStatusData {

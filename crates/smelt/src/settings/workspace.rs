@@ -129,7 +129,7 @@ impl Workspace {
             let value = state.read(cx).value().trim().to_string();
             (!value.is_empty()).then_some(value)
         };
-        let request = smelt_core::agent_kind::DshDiscoveryRequest {
+        let request = smelt_model::agent_kind::DshDiscoveryRequest {
             provider: trimmed(&editor.id),
             base_url: trimmed(&editor.base_url),
             api: Some(editor.api.clone()),
@@ -148,7 +148,7 @@ impl Workspace {
             editor.discovery = Some(ModelDiscoveryState::Loading);
         }
         cx.notify();
-        self.run_pi_call::<smelt_core::control_api::DshProvidersDiscoverModels>(
+        self.run_pi_call::<smelt_model::control_api::DshProvidersDiscoverModels>(
             request,
             super::dsh_config::DSH_CALL_TIMEOUT,
             cx,
@@ -167,7 +167,7 @@ impl Workspace {
     /// 把一条发现来的模型填进表单，优先复用空白行。
     pub fn adopt_native_dsh_discovered_model(
         &mut self,
-        model: smelt_core::provider_api::DiscoveredModel,
+        model: smelt_model::provider_api::DiscoveredModel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -212,7 +212,7 @@ impl Workspace {
             return;
         }
         self.dsh_model_capabilities = Some(NativeDshCapabilityState::Loading);
-        self.run_pi_call::<smelt_core::control_api::DshModelsCapabilities>(
+        self.run_pi_call::<smelt_model::control_api::DshModelsCapabilities>(
             smelt_runtime_client::protocol::control::EmptyParams::default(),
             super::dsh_config::DSH_CALL_TIMEOUT,
             cx,
@@ -330,8 +330,8 @@ impl Workspace {
             "apiKeyEnv": api_key_env,
             "apiKey": (!api_key.is_empty()).then_some(api_key),
         });
-        self.run_pi_call::<smelt_core::control_api::DshModelsSaveDefault>(
-            smelt_core::dsh_service::SaveDefaultModelParams { payload },
+        self.run_pi_call::<smelt_model::control_api::DshModelsSaveDefault>(
+            smelt_model::dsh_service::SaveDefaultModelParams { payload },
             super::dsh_config::DSH_CALL_TIMEOUT,
             cx,
             |this, result, cx| {
@@ -535,7 +535,7 @@ impl Workspace {
         let Some(editor) = &mut self.dsh_custom_provider_editor else {
             return;
         };
-        editor.api = smelt_core::provider_api::normalize_provider_api(api).to_string();
+        editor.api = smelt_model::provider_api::normalize_provider_api(api).to_string();
         cx.notify();
     }
 
@@ -674,7 +674,7 @@ impl Workspace {
             cx.notify();
         }
         let set_default_flag = set_default;
-        let params = smelt_core::dsh_service::SaveCustomProviderParams {
+        let params = smelt_model::dsh_service::SaveCustomProviderParams {
             previous_id: editor.previous_id.clone(),
             id,
             display_name: editor.display_name.read(cx).value().trim().to_string(),
@@ -685,7 +685,7 @@ impl Workspace {
             models,
             set_default,
         };
-        self.run_pi_call::<smelt_core::control_api::DshProvidersSaveCustom>(
+        self.run_pi_call::<smelt_model::control_api::DshProvidersSaveCustom>(
             params,
             super::dsh_config::DSH_CALL_TIMEOUT,
             cx,
@@ -731,8 +731,8 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.run_pi_call::<smelt_core::control_api::DshConfigEnsureFile>(
-            smelt_core::dsh_service::EnsureConfigFileParams { credentials },
+        self.run_pi_call::<smelt_model::control_api::DshConfigEnsureFile>(
+            smelt_model::dsh_service::EnsureConfigFileParams { credentials },
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
             |_, result, _| {
@@ -820,8 +820,8 @@ impl Workspace {
         self.ensure_native_dsh_plugin_manager(profile, window, cx);
         let spec = format!(
             "{}@{}",
-            smelt_core::agent_kind::SMELT_HOST_PACKAGE,
-            smelt_core::agent_kind::SMELT_HOST_VERSION
+            smelt_model::agent_kind::SMELT_HOST_PACKAGE,
+            smelt_model::agent_kind::SMELT_HOST_VERSION
         );
         self.run_native_dsh_plugin_action(DshPluginAction::Install, spec, window, cx);
     }
@@ -831,8 +831,8 @@ impl Workspace {
         let Some(profile) = self.dsh_plugin_manager.as_ref().map(|m| m.profile.clone()) else {
             return;
         };
-        self.run_pi_call::<smelt_core::control_api::DshPluginsList>(
-            smelt_core::dsh_service::ProfileParams {
+        self.run_pi_call::<smelt_model::control_api::DshPluginsList>(
+            smelt_model::dsh_service::ProfileParams {
                 profile: profile.clone(),
             },
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
@@ -895,17 +895,17 @@ impl Workspace {
         manager.message = None;
         cx.notify();
 
-        let params = smelt_core::dsh_service::PluginActionParams {
+        let params = smelt_model::dsh_service::PluginActionParams {
             profile: profile.clone(),
             action: match action {
-                DshPluginAction::Install => smelt_core::dsh_service::PluginAction::Install,
-                DshPluginAction::Update => smelt_core::dsh_service::PluginAction::Update,
-                DshPluginAction::Remove => smelt_core::dsh_service::PluginAction::Remove,
+                DshPluginAction::Install => smelt_model::dsh_service::PluginAction::Install,
+                DshPluginAction::Update => smelt_model::dsh_service::PluginAction::Update,
+                DshPluginAction::Remove => smelt_model::dsh_service::PluginAction::Remove,
             },
             target: target.clone(),
         };
         let window_handle = window.window_handle();
-        self.run_pi_call::<smelt_core::control_api::DshPluginsRun>(
+        self.run_pi_call::<smelt_model::control_api::DshPluginsRun>(
             params,
             super::dsh_config::DSH_PLUGIN_TIMEOUT,
             cx,
@@ -972,12 +972,12 @@ impl Workspace {
         let Some(version) = installed else {
             return format!("已安装 {name}，新建会话后生效");
         };
-        if name == smelt_core::agent_kind::SMELT_HOST_PACKAGE
-            && !smelt_core::agent_kind::smelt_host_version_is_supported(version)
+        if name == smelt_model::agent_kind::SMELT_HOST_PACKAGE
+            && !smelt_model::agent_kind::smelt_host_version_is_supported(version)
         {
             return format!(
                 "已安装 {name} v{version}，但它超出本版 Smelt 验证过的范围（{}）；如遇异常请更新 Smelt",
-                smelt_core::agent_kind::SMELT_HOST_VERSION
+                smelt_model::agent_kind::SMELT_HOST_VERSION
             );
         }
         format!("已安装 {name} v{version}，新建会话后生效")
@@ -1034,7 +1034,7 @@ impl Workspace {
     /// `SMELT_HOST_VERSION` 当目标：那是编译进本版 Smelt 的常量，用它就等于要求
     /// 用户为了升桥先升 Smelt。桥的补丁版发得比 Smelt 勤，这个顺序是反的。
     ///
-    /// [`dsh_plugin_update`]: smelt_core::agent_kind::dsh_plugin_update
+    /// [`dsh_plugin_update`]: smelt_model::agent_kind::dsh_plugin_update
     pub fn reinstall_native_dsh_plugin(
         &mut self,
         name: String,
@@ -1245,8 +1245,8 @@ impl Workspace {
             let (result, diagnostics) = cx
                 .background_executor()
                 .spawn(async move {
-                    match crate::runtime_call::call::<smelt_core::control_api::AgentCliInstall>(
-                        smelt_core::control_api::AgentCliInstallParams {
+                    match crate::runtime_call::call::<smelt_model::control_api::AgentCliInstall>(
+                        smelt_model::control_api::AgentCliInstallParams {
                             agent: agent.id().to_string(),
                         },
                         CLI_INSTALL_TIMEOUT,
@@ -1370,7 +1370,7 @@ impl Workspace {
             rows.push((
                 label_input,
                 command_input,
-                !smelt_core::launch_settings::launch_entry_is_builtin(entry),
+                !smelt_model::launch_settings::launch_entry_is_builtin(entry),
             ));
         }
         self.launch_inputs = Some(LaunchInputs { rows, _subs: subs });
@@ -1529,7 +1529,7 @@ impl Workspace {
     /// 缓存里的 Pi 模型设置；还没从运行时取到时给出原因。
     pub(super) fn pi_model_settings_view(
         &self,
-    ) -> Result<smelt_core::pi_model_settings::PiModelSettings, String> {
+    ) -> Result<smelt_model::pi_model_settings::PiModelSettings, String> {
         match &self.pi_config {
             Some(config) => config.model_settings.clone(),
             None => Err(self
@@ -1608,8 +1608,8 @@ impl Workspace {
         if let Some(editor) = &mut self.pi_model_editor {
             editor.thinking_level = level.clone();
         }
-        self.run_pi_mutation::<smelt_core::control_api::PiModelsSetThinkingLevel>(
-            smelt_core::pi_service::ThinkingLevelParams { level },
+        self.run_pi_mutation::<smelt_model::control_api::PiModelsSetThinkingLevel>(
+            smelt_model::pi_service::ThinkingLevelParams { level },
             true,
             cx,
             |_, error, _| crate::status_item::notify_error(&error),
@@ -1647,8 +1647,8 @@ impl Workspace {
             return;
         }
 
-        let params = smelt_core::pi_service::SaveDefaultModelParams {
-            config: smelt_core::pi_model_settings::PiDefaultModelConfig {
+        let params = smelt_model::pi_service::SaveDefaultModelParams {
+            config: smelt_model::pi_model_settings::PiDefaultModelConfig {
                 provider,
                 model,
                 base_url,
@@ -1657,7 +1657,7 @@ impl Workspace {
             api_key: (!api_key.is_empty()).then_some(api_key),
             reset_base_url: true,
         };
-        self.run_pi_call::<smelt_core::control_api::PiModelsSaveDefault>(
+        self.run_pi_call::<smelt_model::control_api::PiModelsSaveDefault>(
             params,
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
@@ -1674,7 +1674,7 @@ impl Workspace {
     }
 
     fn pi_custom_model_editor(
-        model: Option<&smelt_core::pi_model_settings::PiCustomModel>,
+        model: Option<&smelt_model::pi_model_settings::PiCustomModel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PiCustomModelEditor {
@@ -1822,13 +1822,13 @@ impl Workspace {
             return;
         }
         // 编辑器里没填 key 时，运行时用这个 provider 已存的那份（占位符写的就是「已配置」）。
-        let params = smelt_core::pi_service::DiscoverModelsParams {
+        let params = smelt_model::pi_service::DiscoverModelsParams {
             base_url: editor.base_url.read(cx).value().trim().to_string(),
             api: editor.api.clone(),
             api_key: editor.api_key.read(cx).value().trim().to_string(),
             saved_provider_id: editor.previous_id.clone(),
         };
-        if let Err(error) = smelt_core::pi_model_discovery::models_endpoint(&params.base_url) {
+        if let Err(error) = smelt_model::pi_model_discovery::models_endpoint(&params.base_url) {
             self.fail_pi_discovery(error, cx);
             return;
         }
@@ -1836,7 +1836,7 @@ impl Workspace {
             editor.discovery = Some(ModelDiscoveryState::Loading);
         }
         cx.notify();
-        self.run_pi_call::<smelt_core::control_api::PiProvidersDiscoverModels>(
+        self.run_pi_call::<smelt_model::control_api::PiProvidersDiscoverModels>(
             params,
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
@@ -1863,7 +1863,7 @@ impl Workspace {
     /// 就在末尾留一行空白。
     pub fn adopt_pi_discovered_model(
         &mut self,
-        model: smelt_core::provider_api::DiscoveredModel,
+        model: smelt_model::provider_api::DiscoveredModel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1882,7 +1882,7 @@ impl Workspace {
             .iter()
             .position(|row| row.id.read(cx).value().trim().is_empty());
         let row = Self::pi_custom_model_editor(
-            Some(&smelt_core::pi_model_settings::PiCustomModel {
+            Some(&smelt_model::pi_model_settings::PiCustomModel {
                 id: model.id.clone(),
                 name: model.name.clone().unwrap_or_default(),
                 context_window: model.context_window,
@@ -1904,7 +1904,7 @@ impl Workspace {
         let Some(editor) = &mut self.pi_custom_provider_editor else {
             return;
         };
-        editor.api = smelt_core::provider_api::normalize_provider_api(api).to_string();
+        editor.api = smelt_model::provider_api::normalize_provider_api(api).to_string();
         cx.notify();
     }
 
@@ -1950,7 +1950,7 @@ impl Workspace {
             return;
         };
         let id = editor.id.read(cx).value().trim().to_string();
-        if let Err(error) = smelt_core::pi_model_settings::validate_custom_provider_id(&id) {
+        if let Err(error) = smelt_model::pi_model_settings::validate_custom_provider_id(&id) {
             self.reject_pi_model_edit(error, cx);
             return;
         }
@@ -1987,7 +1987,7 @@ impl Workspace {
                 .parse::<u64>()
                 .ok();
             let max_tokens = row.max_tokens.read(cx).value().trim().parse::<u64>().ok();
-            models.push(smelt_core::pi_model_settings::PiCustomModel {
+            models.push(smelt_model::pi_model_settings::PiCustomModel {
                 id: model_id.clone(),
                 name: if name.is_empty() { model_id } else { name },
                 context_window,
@@ -2004,7 +2004,7 @@ impl Workspace {
         // 问到了才落盘，并标成自动维护。
         let from_endpoint = models.is_empty();
         if from_endpoint {
-            if let Err(error) = smelt_core::pi_model_discovery::models_endpoint(&base_url) {
+            if let Err(error) = smelt_model::pi_model_discovery::models_endpoint(&base_url) {
                 self.fail_pi_discovery(format!("{error}；或手动填写至少一个模型"), cx);
                 return;
             }
@@ -2013,9 +2013,9 @@ impl Workspace {
             }
             cx.notify();
         }
-        let params = smelt_core::pi_service::SaveCustomProviderParams {
+        let params = smelt_model::pi_service::SaveCustomProviderParams {
             previous_id: editor.previous_id.clone(),
-            provider: smelt_core::pi_model_settings::PiCustomProvider {
+            provider: smelt_model::pi_model_settings::PiCustomProvider {
                 id: id.clone(),
                 display_name,
                 api: editor.api,
@@ -2026,7 +2026,7 @@ impl Workspace {
             api_key: (!api_key.is_empty()).then_some(api_key),
             set_default,
         };
-        self.run_pi_call::<smelt_core::control_api::PiProvidersSaveCustom>(
+        self.run_pi_call::<smelt_model::control_api::PiProvidersSaveCustom>(
             params,
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
@@ -2053,8 +2053,8 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.run_pi_call::<smelt_core::control_api::PiProvidersRemoveCustom>(
-            smelt_core::pi_service::ProviderIdParams {
+        self.run_pi_call::<smelt_model::control_api::PiProvidersRemoveCustom>(
+            smelt_model::pi_service::ProviderIdParams {
                 provider_id: provider_id.clone(),
             },
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
@@ -2080,13 +2080,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let file = match file_kind {
-            PiConfigFileKind::Settings => smelt_core::pi_service::PiConfigFile::Settings,
-            PiConfigFileKind::Models => smelt_core::pi_service::PiConfigFile::Models,
-            PiConfigFileKind::Credentials => smelt_core::pi_service::PiConfigFile::Credentials,
-            PiConfigFileKind::Mcp => smelt_core::pi_service::PiConfigFile::Mcp,
+            PiConfigFileKind::Settings => smelt_model::pi_service::PiConfigFile::Settings,
+            PiConfigFileKind::Models => smelt_model::pi_service::PiConfigFile::Models,
+            PiConfigFileKind::Credentials => smelt_model::pi_service::PiConfigFile::Credentials,
+            PiConfigFileKind::Mcp => smelt_model::pi_service::PiConfigFile::Mcp,
         };
-        self.run_pi_call::<smelt_core::control_api::PiConfigEnsureFile>(
-            smelt_core::pi_service::EnsureConfigFileParams { file },
+        self.run_pi_call::<smelt_model::control_api::PiConfigEnsureFile>(
+            smelt_model::pi_service::EnsureConfigFileParams { file },
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
             |_, result, _| {
@@ -2134,8 +2134,8 @@ impl Workspace {
     /// 真删 `~/.pi` 下的实体，并把所有引用它的智能体的勾选一并清掉。
     pub(super) fn confirm_pi_plugin_delete(&mut self, id: String, cx: &mut Context<Self>) {
         self.pi_plugin_pending_delete = None;
-        self.run_pi_call::<smelt_core::control_api::PiPluginsRemove>(
-            smelt_core::pi_service::PluginIdParams { id: id.clone() },
+        self.run_pi_call::<smelt_model::control_api::PiPluginsRemove>(
+            smelt_model::pi_service::PluginIdParams { id: id.clone() },
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,
             move |this, result, cx| match result {
@@ -2164,7 +2164,7 @@ impl Workspace {
     /// 全局插件目录，之后就能在智能体里勾选。
     pub(super) fn import_pi_plugin(
         &mut self,
-        kind: smelt_core::pi_plugin_catalog::PiPluginKind,
+        kind: smelt_model::pi_plugin_catalog::PiPluginKind,
         cx: &mut Context<Self>,
     ) {
         self.open_dir_picker(crate::dir_picker::DirPickerPurpose::PluginImport { kind }, cx);
@@ -2172,12 +2172,12 @@ impl Workspace {
 
     pub(crate) fn import_pi_plugin_from(
         &mut self,
-        kind: smelt_core::pi_plugin_catalog::PiPluginKind,
+        kind: smelt_model::pi_plugin_catalog::PiPluginKind,
         source: String,
         cx: &mut Context<Self>,
     ) {
-        self.run_pi_mutation::<smelt_core::control_api::PiPluginsImport>(
-            smelt_core::pi_service::ImportPluginParams { kind, source },
+        self.run_pi_mutation::<smelt_model::control_api::PiPluginsImport>(
+            smelt_model::pi_service::ImportPluginParams { kind, source },
             false,
             cx,
             |this, error, _| this.pi_plugin_error = Some(error),
@@ -2227,8 +2227,8 @@ impl Workspace {
 const CLI_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// 请运行时探测各家 agent CLI。连不上运行时返回 `None`，调用方保留上一次的结果。
-fn inspect_agent_clis() -> Option<smelt_core::acp_conn::AcpRuntimeDiagnostics> {
-    crate::runtime_call::call::<smelt_core::control_api::AgentCliInspect>(
+fn inspect_agent_clis() -> Option<smelt_model::acp_conn::AcpRuntimeDiagnostics> {
+    crate::runtime_call::call::<smelt_model::control_api::AgentCliInspect>(
         smelt_runtime_client::protocol::control::EmptyParams::default(),
         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
     )

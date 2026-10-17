@@ -3,7 +3,7 @@
 //! 目录页只消费 [`AutomationTemplate`]，不关心来源。内置模板是产品预填，
 //! 方便从空白编辑器起步；后续若插件要注册模板，往同一份结构靠即可。
 
-use smelt_core::automation::{
+use smelt_model::automation::{
     AutomationSchedule, SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_DAY_WED,
 };
 

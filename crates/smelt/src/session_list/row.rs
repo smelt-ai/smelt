@@ -3,7 +3,7 @@
 use chrono::{DateTime, Datelike, Local, TimeZone};
 
 use super::*;
-use smelt_core::agent_kind::TerminalAgentKind;
+use smelt_model::agent_kind::TerminalAgentKind;
 
 /// agent 身份图标统一走本地单色 SVG，颜色由会话状态驱动：图标同时回答
 /// 「这是哪家的会话」和「当前处于什么状态」。
@@ -122,7 +122,7 @@ pub(super) fn quota_until_text(seconds: i64) -> Option<String> {
 
 /// 窗口重置时间文本：绝对时间带相对剩余（如「重置 08-09 14:00（还有 2天5小时）」），
 /// 没有绝对时间时退回相对秒数。
-pub(super) fn quota_reset_text(window: &smelt_core::provider_quota::ProviderQuotaWindow) -> String {
+pub(super) fn quota_reset_text(window: &smelt_model::provider_quota::ProviderQuotaWindow) -> String {
     if let Some(millis) = window.resets_at_ms
         && let Some(date) = Local.timestamp_millis_opt(millis as i64).single()
     {
@@ -179,15 +179,15 @@ pub(super) fn provider_quota_row(
                 let used = copilot.used.unwrap_or((limit - copilot.remaining).max(0.0));
                 format!(
                     "{label} 本周期已用 {} / {} {}（{}%）。",
-                    smelt_core::copilot_quota::format_amount(used),
-                    smelt_core::copilot_quota::format_amount(limit),
+                    smelt_model::copilot_quota::format_amount(used),
+                    smelt_model::copilot_quota::format_amount(limit),
                     copilot.unit.label(),
                     quota.used_percent().round() as u32
                 )
             }
             None => format!(
                 "{label} 本周期剩余 {} {}。",
-                smelt_core::copilot_quota::format_amount(copilot.remaining),
+                smelt_model::copilot_quota::format_amount(copilot.remaining),
                 copilot.unit.label()
             ),
         },
@@ -202,8 +202,8 @@ mod tests {
     use crate::settings::ConversationAgentKind;
     use crate::ui_theme;
     use chrono::{Local, TimeZone};
-    use smelt_core::copilot_quota::{CopilotQuota, CopilotQuotaUnit};
-    use smelt_core::provider_quota::{ProviderQuota, ProviderQuotaWindow};
+    use smelt_model::copilot_quota::{CopilotQuota, CopilotQuotaUnit};
+    use smelt_model::provider_quota::{ProviderQuota, ProviderQuotaWindow};
 
     #[test]
     fn window_quota_row_keeps_the_worst_window_summary() {

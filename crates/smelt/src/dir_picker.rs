@@ -27,7 +27,7 @@ pub(crate) enum DirPickerPurpose {
     AgentContextFolders { agent_id: String },
     /// 导入插件：技能是目录，扩展可以是单个文件。
     PluginImport {
-        kind: smelt_core::pi_plugin_catalog::PiPluginKind,
+        kind: smelt_model::pi_plugin_catalog::PiPluginKind,
     },
 }
 
@@ -48,7 +48,7 @@ impl DirPickerPurpose {
         matches!(
             self,
             Self::PluginImport {
-                kind: smelt_core::pi_plugin_catalog::PiPluginKind::Extension
+                kind: smelt_model::pi_plugin_catalog::PiPluginKind::Extension
             }
         )
     }

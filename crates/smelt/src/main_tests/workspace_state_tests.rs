@@ -1,5 +1,5 @@
 use super::{SidebarGrouping, WsState};
-use smelt_core::workspace_menu::{
+use smelt_model::workspace_menu::{
     WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
 };
 
@@ -166,14 +166,14 @@ mod restore_order_tests {
             custom_title: Some(name.into()),
             acp: acp.then(|| AcpSaved {
                 cwd: Some(format!("/{name}")),
-                launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude"),
+                launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude"),
                 profile_id: None,
                 agent: Some("claude".into()),
                 agent_definition_id: None,
                 history_session_id: None,
                 sid: Some(format!("sid-{name}")),
                 refresh_launch_from_settings: false,
-                conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
+                conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
                 config_values: Vec::new(),
                 pending_prompt: None,
                 pending_delivery_id: None,

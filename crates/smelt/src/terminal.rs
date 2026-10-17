@@ -318,7 +318,7 @@ struct TermMetrics {
 #[derive(Default)]
 struct DaemonGeometrySignal {
     generation: u64,
-    geometry: Option<smelt_core::osc::TerminalGeometryOsc>,
+    geometry: Option<smelt_model::osc::TerminalGeometryOsc>,
 }
 
 /// smeltd 对单帧的硬上限；大输入由 writer 线程按这个值流式切分后再写 socket。
@@ -664,7 +664,7 @@ fn managed_daemon_dir() -> std::path::PathBuf {
 }
 
 pub fn managed_daemon_path() -> std::path::PathBuf {
-    managed_daemon_dir().join(smelt_core::daemon_image::LAUNCH_NAME)
+    managed_daemon_dir().join(smelt_sys::daemon_image::LAUNCH_NAME)
 }
 
 /// 路径是否落在某个 `.app` 包内（装 DMG 会被覆盖/删除）。
@@ -847,7 +847,7 @@ unsafe extern "C" {
 }
 
 fn reap_managed_daemon_images(dir: &std::path::Path) {
-    if let Err(error) = smelt_core::daemon_image::reap_unused_images(dir) {
+    if let Err(error) = smelt_sys::daemon_image::reap_unused_images(dir) {
         eprintln!("[workspace] 回收旧守护映像失败：{error}");
     }
 }
@@ -860,9 +860,9 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     let managed = managed_daemon_path();
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
-        let image = smelt_core::daemon_image::publish_image(&dir, src)?;
+        let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
         if managed.is_file() && path_is_live_executable(&managed) {
-            smelt_core::daemon_image::retarget_pending_symlink(&dir, &image)?;
+            smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image)?;
             eprintln!(
                 "[workspace] {} 仍被进程映射，不改启动名，已挂上 smeltd.pending",
                 managed.display()
@@ -870,7 +870,7 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
             reap_managed_daemon_images(&dir);
             return Ok(managed);
         }
-        smelt_core::daemon_image::retarget_launch_after_commit(&image)?;
+        smelt_sys::daemon_image::retarget_launch_after_commit(&image)?;
         eprintln!(
             "[workspace] 已同步守护 {} → {}",
             src.display(),
@@ -901,8 +901,8 @@ fn stage_daemon_update_in(
     src: &std::path::Path,
 ) -> std::io::Result<std::path::PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let image = smelt_core::daemon_image::publish_image(dir, src)?;
-    smelt_core::daemon_image::retarget_pending_symlink(dir, &image)?;
+    let image = smelt_sys::daemon_image::publish_image(dir, src)?;
+    smelt_sys::daemon_image::retarget_pending_symlink(dir, &image)?;
     reap_managed_daemon_images(dir);
     eprintln!(
         "[workspace] 已暂存守护更新 {} → {}",
@@ -913,7 +913,7 @@ fn stage_daemon_update_in(
 }
 
 fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
-    smelt_core::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
+    smelt_sys::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
 }
 
 fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
@@ -939,7 +939,7 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
         return UpgradeOutcome::Failed;
     }
 
-    let image = match smelt_core::daemon_image::publish_image(&dir, src) {
+    let image = match smelt_sys::daemon_image::publish_image(&dir, src) {
         Ok(image) => image,
         Err(e) => {
             eprintln!("[workspace] 发布守护映像失败：{e}");
@@ -947,7 +947,7 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
             return UpgradeOutcome::Failed;
         }
     };
-    if let Err(e) = smelt_core::daemon_image::retarget_pending_symlink(&dir, &image) {
+    if let Err(e) = smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image) {
         eprintln!("[workspace] 挂上 smeltd.pending 失败：{e}");
         reap_managed_daemon_images(&dir);
         return UpgradeOutcome::Failed;
@@ -956,7 +956,7 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
     let outcome = upgrade_daemon_exe(Some(&image));
     match outcome {
         UpgradeOutcome::Upgraded => {
-            if let Err(e) = smelt_core::daemon_image::retarget_launch_after_commit(&image) {
+            if let Err(e) = smelt_sys::daemon_image::retarget_launch_after_commit(&image) {
                 eprintln!(
                     "[workspace] 完成 managed 安装失败：{e}（目标：{}）",
                     managed.display()
@@ -1229,7 +1229,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         let spawn_at = std::fs::canonicalize(&daemon).unwrap_or_else(|_| daemon.clone());
         let mut cmd = std::process::Command::new(&spawn_at);
         smelt_paths::export_to(&mut cmd);
-        smelt_core::tty_color::clear_command(&mut cmd);
+        smelt_sys::tty_color::clear_command(&mut cmd);
         cmd.process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1240,7 +1240,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘——
         // 关闭“spawn 与守护启动哈希之间磁盘被替换”的竞态窗口（与 handoff 经
         // SMELTD_DAEMON_FINGERPRINT 传指纹同一机制）。
-        if let Ok(fingerprint) = smelt_core::daemon_image::content_fingerprint(&spawn_at) {
+        if let Ok(fingerprint) = smelt_sys::daemon_image::content_fingerprint(&spawn_at) {
             cmd.env("SMELTD_DAEMON_FINGERPRINT", fingerprint);
         }
         match cmd.spawn() {
@@ -1449,7 +1449,7 @@ fn outdated_by_fingerprint(pinned: &str, expected: Option<&std::path::Path>) -> 
     let Some(path) = expected else {
         return false;
     };
-    match smelt_core::daemon_image::content_fingerprint(path) {
+    match smelt_sys::daemon_image::content_fingerprint(path) {
         Ok(disk) => disk != pinned,
         Err(_) => false,
     }
@@ -1719,11 +1719,11 @@ where
     match install_local_app_bundle(&source, &target) {
         Ok(AppInstallOutcome::Installed) => {
             let dir = managed_daemon_dir();
-            if let Some(pending) = smelt_core::daemon_image::pending_image(&dir) {
+            if let Some(pending) = smelt_sys::daemon_image::pending_image(&dir) {
                 match upgrade_daemon_exe(Some(&pending)) {
                     UpgradeOutcome::Upgraded => {
                         if let Err(error) =
-                            smelt_core::daemon_image::retarget_launch_after_commit(&pending)
+                            smelt_sys::daemon_image::retarget_launch_after_commit(&pending)
                         {
                             eprintln!("[workspace] 升级后改写启动名失败：{error}");
                         }
@@ -1746,7 +1746,7 @@ where
                     match upgrade_daemon_exe(Some(&image)) {
                         UpgradeOutcome::Upgraded => {
                             if let Err(error) =
-                                smelt_core::daemon_image::retarget_launch_after_commit(&image)
+                                smelt_sys::daemon_image::retarget_launch_after_commit(&image)
                             {
                                 eprintln!("[workspace] 升级后改写启动名失败：{error}");
                             }
@@ -1932,7 +1932,7 @@ fn force_kill_socket_owner(path: &std::path::Path) {
         }
     };
     if let Ok(Some(output)) =
-        smelt_core::process_wait::wait_child_stdout(child, Duration::from_secs(2))
+        smelt_sys::process_wait::wait_child_stdout(child, Duration::from_secs(2))
     {
         for pid in String::from_utf8_lossy(&output).split_whitespace() {
             let _ = std::process::Command::new("kill")
@@ -2255,7 +2255,7 @@ pub(crate) use smelt_client::daemon_state::{
 };
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
-/// - 解析语义（kitty_keyboard 等）来自 `smelt_core::term_config`，与 smeltd 的权威
+/// - 解析语义（kitty_keyboard 等）来自 `smelt_model::term_config`，与 smeltd 的权威
 ///   Term 同源；GUI 不得在这里单独改解析语义。
 /// - semantic_escape_chars：双击选词的断词字符。默认集合只有半角标点，中文场景下
 ///   全角标点也该断词（双击「数据层：字段」不该整段连选），追加常用全角标点。
@@ -2264,7 +2264,7 @@ fn term_config() -> Config {
         semantic_escape_chars: format!(
             "{SEMANTIC_ESCAPE_CHARS}：，。；！？、（）「」『』【】《》“”‘’"
         ),
-        ..smelt_core::term_config::emulation_config()
+        ..smelt_model::term_config::emulation_config()
     }
 }
 
@@ -2677,7 +2677,7 @@ impl Terminal {
             let mut parser: Processor = Processor::new();
             let mut osc = crate::osc::OscScan::default();
             let mut geometry_osc = geometry_token
-                .map(smelt_core::osc::TerminalGeometryOscScan::new)
+                .map(smelt_model::osc::TerminalGeometryOscScan::new)
                 .unwrap_or_default();
             let mut buf = [0u8; 4096];
             let mut bytes_seen: usize = 0;
@@ -4140,7 +4140,7 @@ mod install_commit_tests {
         assert_eq!(std::fs::metadata(&launch).unwrap().ino(), launch_inode);
         assert_eq!(std::fs::read(&dest).unwrap(), b"pending-image");
         assert_eq!(
-            smelt_core::daemon_image::pending_image(&dir).as_deref(),
+            smelt_sys::daemon_image::pending_image(&dir).as_deref(),
             Some(std::fs::canonicalize(&dest).unwrap().as_path()),
             "空闲升级必须 exec 新映像，不能再 exec 正在跑的旧文件"
         );
@@ -4174,7 +4174,7 @@ mod outdated_fingerprint_tests {
     fn staged_disk_with_old_process_is_outdated() {
         let disk_new = fixture(b"new-binary-bytes");
         let disk_old = fixture(b"old-binary-bytes");
-        let pinned_old = smelt_core::daemon_image::content_fingerprint(&disk_old).unwrap();
+        let pinned_old = smelt_sys::daemon_image::content_fingerprint(&disk_old).unwrap();
         assert!(
             outdated_by_fingerprint(&pinned_old, Some(&disk_new)),
             "磁盘新了、进程还是老的，必须判旧"
@@ -4187,7 +4187,7 @@ mod outdated_fingerprint_tests {
     #[test]
     fn same_content_is_not_outdated() {
         let disk = fixture(b"same-binary-bytes");
-        let pinned = smelt_core::daemon_image::content_fingerprint(&disk).unwrap();
+        let pinned = smelt_sys::daemon_image::content_fingerprint(&disk).unwrap();
         assert!(!outdated_by_fingerprint(&pinned, Some(&disk)));
         std::fs::remove_file(disk).ok();
     }
@@ -4443,7 +4443,7 @@ mod managed_daemon_ensure_tests {
         cmd.env("NO_COLOR", "1");
         cmd.env("FORCE_COLOR", "0");
         smelt_paths::export_to(&mut cmd);
-        smelt_core::tty_color::clear_command(&mut cmd);
+        smelt_sys::tty_color::clear_command(&mut cmd);
         let present: Vec<String> = cmd
             .get_envs()
             .filter_map(|(key, value)| {
@@ -4451,7 +4451,7 @@ mod managed_daemon_ensure_tests {
                 key.to_str().map(str::to_string)
             })
             .collect();
-        for key in smelt_core::tty_color::SUPPRESSION_VARS {
+        for key in smelt_sys::tty_color::SUPPRESSION_VARS {
             assert!(
                 !present.iter().any(|k| k == key),
                 "拉起 smeltd 不得带上 {key}，实际: {present:?}"
@@ -4933,7 +4933,7 @@ mod search_resync_tests {
         {
             let mut signal = terminal.daemon_geometry.lock().unwrap();
             signal.generation = 1;
-            signal.geometry = Some(smelt_core::osc::TerminalGeometryOsc {
+            signal.geometry = Some(smelt_model::osc::TerminalGeometryOsc {
                 cols: 49,
                 rows: 47,
                 cell_width: 8,

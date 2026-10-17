@@ -1,6 +1,6 @@
 //! 设置页：Pi 内置 provider 的登录与注销。
 //!
-//! 凭据助手跑在运行时那台机器上（`pi.auth.*`，见 [`smelt_core::pi_auth_service`]）。
+//! 凭据助手跑在运行时那台机器上（`pi.auth.*`，见 [`smelt_model::pi_auth_service`]）。
 //! 本文件只做两件事：把登录事件搬进 `Workspace` 的状态，以及把用户在面板上的动作
 //! 发回运行时。
 //!
@@ -9,14 +9,14 @@
 //! 粘贴还会互相抢跑。所以这里拿着登录 id 长轮询事件，边取边 fold 进视图状态。
 
 use super::*;
-use smelt_core::control_api::{
+use smelt_model::control_api::{
     PiAuthLoginAnswer, PiAuthLoginCancel, PiAuthLoginEvents, PiAuthLoginStart, PiAuthLogout,
     PiAuthModels, PiAuthProviders,
 };
-use smelt_core::pi_auth_service::{
+use smelt_model::pi_auth_service::{
     LoginAnswerParams, LoginEventsParams, LoginIdParams, LoginStartParams,
 };
-use smelt_core::pi_service::ProviderIdParams;
+use smelt_model::pi_service::ProviderIdParams;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 /// 凭据助手首次使用可能要装运行时，给得宽一些。
@@ -58,7 +58,7 @@ impl Workspace {
         &mut self,
         provider_id: String,
         provider_name: String,
-        method: smelt_core::pi_auth::PiLoginMethod,
+        method: smelt_model::pi_auth::PiLoginMethod,
         ask_all: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -160,8 +160,8 @@ impl Workspace {
                     .await;
                 let batch = match polled {
                     Ok(batch) => batch,
-                    Err(error) => smelt_core::pi_auth_service::LoginEventsResult {
-                        events: vec![smelt_core::pi_auth::PiLoginEvent::Error { message: error }],
+                    Err(error) => smelt_model::pi_auth_service::LoginEventsResult {
+                        events: vec![smelt_model::pi_auth::PiLoginEvent::Error { message: error }],
                         finished: true,
                     },
                 };
@@ -189,10 +189,10 @@ impl Workspace {
     fn apply_pi_login_event(
         &mut self,
         login_id: &str,
-        event: smelt_core::pi_auth::PiLoginEvent,
+        event: smelt_model::pi_auth::PiLoginEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        use smelt_core::pi_auth::PiLoginEvent;
+        use smelt_model::pi_auth::PiLoginEvent;
 
         let Some(view) = self.pi_login.as_mut() else {
             return false;
@@ -409,8 +409,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let label = format!("{provider_id} / {model_id}");
-        let params = smelt_core::pi_service::SaveDefaultModelParams {
-            config: smelt_core::pi_model_settings::PiDefaultModelConfig {
+        let params = smelt_model::pi_service::SaveDefaultModelParams {
+            config: smelt_model::pi_model_settings::PiDefaultModelConfig {
                 provider: provider_id,
                 model: model_id,
                 base_url: String::new(),
@@ -419,7 +419,7 @@ impl Workspace {
             api_key: None,
             reset_base_url: false,
         };
-        self.run_pi_call::<smelt_core::control_api::PiModelsSaveDefault>(
+        self.run_pi_call::<smelt_model::control_api::PiModelsSaveDefault>(
             params,
             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
             cx,

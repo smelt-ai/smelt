@@ -366,14 +366,14 @@ fn agent_conversation_binding_round_trips_with_the_conversation() {
     let mut conversation = session_state_with_route(None);
     conversation.acp = Some(AcpSaved {
         cwd: Some("/repo".into()),
-        launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent"),
+        launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent"),
         profile_id: None,
         agent: Some("pi".into()),
         agent_definition_id: Some("quant".into()),
         history_session_id: None,
         sid: Some("acp-agent-1".into()),
         refresh_launch_from_settings: true,
-        conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
+        conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
         config_values: Vec::new(),
         pending_prompt: None,
         pending_delivery_id: None,

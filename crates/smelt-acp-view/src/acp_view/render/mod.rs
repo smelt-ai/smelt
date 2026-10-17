@@ -193,7 +193,7 @@ impl AcpView {
                                 .pl_6()
                                 .text_xs()
                                 .text_color(muted)
-                                .font_family(smelt_core::font_config::font_family())
+                                .font_family(smelt_model::font_config::font_family())
                                 .child(self.end_reason.clone()),
                         )
                     })
@@ -344,7 +344,7 @@ impl AcpView {
         let empty_conversation_state = show_empty_conversation_state.then(|| {
             let workspace_label = self.cwd.as_deref().and_then(|cwd| {
                 let path = std::path::Path::new(cwd);
-                if smelt_core::agent_definition_store::is_workbench_conversation_workspace(path) {
+                if smelt_model::agent_paths::is_workbench_conversation_workspace(path) {
                     return Some("工作台".to_string());
                 }
                 path.file_name()

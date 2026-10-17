@@ -11,13 +11,13 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::automation::{Automation, AutomationRun, AutomationState};
-pub use smelt_core::agent_definition::AgentDefinition;
-use smelt_core::agent_host::{AgentHostEdit, AgentHostSettings};
-use smelt_core::agent_kind::{
+pub use smelt_model::agent_definition::AgentDefinition;
+use smelt_model::agent_host::{AgentHostEdit, AgentHostSettings};
+use smelt_model::agent_kind::{
     AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind, ConversationLaunchSpec,
 };
-use smelt_core::automation::AutomationFile;
-use smelt_core::control_api::{AgentHostApplyEdit, AgentHostGet};
+use smelt_model::automation::AutomationFile;
+use smelt_model::control_api::{AgentHostApplyEdit, AgentHostGet};
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 /// 读写运行时配置的上限。一次合并写库，正常是毫秒级。
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn native_dsh_profile_keeps_credentials_owned_by_dsh() {
         let profile = AcpProfile {
-            native_launch: Some(smelt_core::agent_kind::dsh_profile_launch_spec("team")),
+            native_launch: Some(smelt_model::agent_kind::ConversationLaunchSpec::from_command("dsh-acp-rich --profile team")),
             id: "dsh-native-team".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · team".into(),
@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn default_dsh_launch_prefers_the_discovered_native_profile() {
         let native = AcpProfile {
-            native_launch: Some(smelt_core::agent_kind::dsh_profile_launch_spec("web")),
+            native_launch: Some(smelt_model::agent_kind::ConversationLaunchSpec::from_command("dsh-acp-rich --profile web")),
             id: "dsh-native-web".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · web".into(),

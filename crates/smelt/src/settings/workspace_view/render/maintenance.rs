@@ -367,7 +367,7 @@ fn maintenance_groups(
                     .on_mouse_down(MouseButton::Left, |_, _window, _cx| {
                         // 反馈问题时手动带上这份日志：GitHub issue 附件靠拖拽，
                         // 没有 API 能替用户自动上传，所以帮用户直接定位到文件。
-                        if let Some(path) = smelt_core::app_log::log_path() {
+                        if let Some(path) = smelt_sys::app_log::log_path() {
                             #[cfg(target_os = "macos")]
                             {
                                 let _ = std::process::Command::new("open")
@@ -394,7 +394,7 @@ fn maintenance_groups(
                     .child("反馈问题 ↗")
                     .on_mouse_down(MouseButton::Left, |_, _window, cx| {
                         // 先把日志在 Finder 里选出来，用户点开 issue 页面后可以直接把它拖进去。
-                        if let Some(path) = smelt_core::app_log::log_path() {
+                        if let Some(path) = smelt_sys::app_log::log_path() {
                             #[cfg(target_os = "macos")]
                             {
                                 let _ = std::process::Command::new("open")

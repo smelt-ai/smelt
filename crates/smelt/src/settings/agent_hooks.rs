@@ -2,8 +2,8 @@
 //! agent 的配置文件在运行时那台机器上。这里只缓存最近一次结果给 render 读。
 
 use gpui::{App, Global};
-use smelt_core::agent_hooks::AgentHooksStatus;
-use smelt_core::control_api::{AgentHooksInstall, AgentHooksUninstall};
+use smelt_model::agent_hooks::AgentHooksStatus;
+use smelt_model::control_api::{AgentHooksInstall, AgentHooksUninstall};
 use smelt_runtime_client::protocol::control::{ControlCall, EmptyParams};
 
 use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
@@ -20,7 +20,7 @@ impl Global for AgentHooksCache {}
 
 /// 重新取一次状态。打开设置窗口时调；外部手改了配置，重开设置就能看到。
 pub fn refresh_agent_hooks_status(cx: &mut App) {
-    run::<smelt_core::control_api::AgentHooksStatus>(None, cx);
+    run::<smelt_model::control_api::AgentHooksStatus>(None, cx);
 }
 
 pub fn install_agent_hooks(cx: &mut App) {

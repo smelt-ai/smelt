@@ -5,7 +5,7 @@ use super::{
 };
 use crate::AgentStatus;
 use gpui::rgb;
-use smelt_core::agent_memory::MemoryEntry;
+use smelt_model::agent_memory::MemoryEntry;
 use std::time::{Duration, SystemTime};
 
 #[test]
@@ -200,7 +200,7 @@ mod schedule_editor_tests {
         webhook_curl_example,
     };
     use crate::settings;
-    use smelt_core::automation::{SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK};
+    use smelt_model::automation::{SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK};
 
     #[test]
     fn clock_editor_accepts_partial_valid_values_without_accepting_impossible_times() {
@@ -477,7 +477,7 @@ mod agent_definition_ui_tests {
     };
     use crate::settings::{AgentDefinition, ConversationAgentKind};
     use gpui_component::input::InputEvent;
-    use smelt_core::automation::AutomationRunStatus;
+    use smelt_model::automation::AutomationRunStatus;
 
     fn definition(name: &str, prompt: &str, engine_kind_id: &str) -> AgentDefinition {
         AgentDefinition {

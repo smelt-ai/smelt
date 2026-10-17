@@ -172,7 +172,6 @@ pub fn store_beside_json(path: &Path) -> Result<smelt_store::Store, String> {
 
 #[track_caller]
 pub fn open_sqlite_store(database: &Path) -> Result<smelt_store::Store, String> {
-    render_guard::check_store_access();
     let default_database =
         default_smelt_root().map(|root| root.join(smelt_store::DATABASE_FILE_NAME));
     if default_database.as_deref() != Some(database) {
@@ -450,82 +449,3 @@ mod tests {
     }
 }
 
-/// 渲染期间不读写 SQLite。
-///
-/// GPUI 是立即模式：视图每次重绘都整段重跑 render，侧栏一个 spinner 就能让工作台
-/// 每秒重绘好几次。render 里查库，代价就随帧率放大，页面越开越卡。读库放在选中、
-/// 数据变化这类事件里（最好在后台），render 只读内存。
-///
-/// 视图在 render 开头持有一个 [`RenderScope`]；debug 构建下，scope 内打开库会
-/// 在 stderr 报出调用位置和调用栈，每个位置只报一次。
-pub mod render_guard {
-    use std::cell::Cell;
-
-    thread_local! {
-        static DEPTH: Cell<u32> = const { Cell::new(0) };
-    }
-
-    /// 当前线程正在执行视图 render。随作用域结束自动退出。
-    #[must_use = "scope 一 drop 就退出渲染标记"]
-    pub struct RenderScope(());
-
-    impl RenderScope {
-        pub fn enter() -> Self {
-            DEPTH.with(|depth| depth.set(depth.get() + 1));
-            Self(())
-        }
-    }
-
-    impl Drop for RenderScope {
-        fn drop(&mut self) {
-            DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-
-    pub fn in_render() -> bool {
-        DEPTH.with(Cell::get) > 0
-    }
-
-    #[track_caller]
-    pub(super) fn check_store_access() {
-        if cfg!(debug_assertions) && in_render() {
-            report(std::panic::Location::caller());
-        }
-    }
-
-    fn report(location: &'static std::panic::Location<'static>) {
-        use std::collections::HashSet;
-        use std::sync::{Mutex, OnceLock};
-
-        static SEEN: OnceLock<Mutex<HashSet<(&'static str, u32)>>> = OnceLock::new();
-        let first = SEEN
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap()
-            .insert((location.file(), location.line()));
-        if first {
-            eprintln!(
-                "[smelt] render 里访问了 SQLite（{location}），每次重绘都会重复读库：\n{}",
-                std::backtrace::Backtrace::force_capture()
-            );
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn scope_marks_render_until_dropped_and_nests() {
-            assert!(!in_render());
-            let outer = RenderScope::enter();
-            {
-                let _inner = RenderScope::enter();
-                assert!(in_render());
-            }
-            assert!(in_render());
-            drop(outer);
-            assert!(!in_render());
-        }
-    }
-}

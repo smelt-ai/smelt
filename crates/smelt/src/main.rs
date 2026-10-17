@@ -5,8 +5,8 @@
 //!
 //! 运行： cargo run --bin smelt
 
-// ACP 连接层已经搬进 smelt_core::acp_conn（给 smeltd 未来托管 ACP 会话铺路），
-// 这里不再 mod acp;，用的地方直接引 smelt_core::acp_conn。
+// ACP 连接层已经搬进 smelt_model::acp_conn（给 smeltd 未来托管 ACP 会话铺路），
+// 这里不再 mod acp;，用的地方直接引 smelt_model::acp_conn。
 //
 // acp_completion / acp_view / markdown_mermaid / ui_theme 同理都已
 // 搬出主 crate（acp_view.rs 独立成 smelt-acp-view，其余几个是它和主 GUI 共用的
@@ -32,7 +32,7 @@ mod liquid_glass;
 mod overlay;
 mod plugins;
 mod tool_panel;
-use smelt_core::osc;
+use smelt_model::osc;
 mod provider_quota;
 mod resizable_split;
 mod runtime_call;
@@ -163,15 +163,15 @@ impl Global for MainWindowClosedSubscription {}
 /// 各个 Workspace 只观察并渲染，不能重新读写历史 JSON 文件或自行建第二条订阅连接。
 #[derive(Clone, Default)]
 struct RemoteSessionCatalogGlobal {
-    snapshot: Arc<Mutex<Option<smelt_core::session_control::RemoteSessionSnapshot>>>,
+    snapshot: Arc<Mutex<Option<smelt_model::session_control::RemoteSessionSnapshot>>>,
     generation: u64,
 }
 
 impl Global for RemoteSessionCatalogGlobal {}
 
 fn accepts_remote_catalog_incremental(
-    current: Option<&smelt_core::session_control::RemoteSessionSnapshot>,
-    incoming: &smelt_core::session_control::RemoteSessionSnapshot,
+    current: Option<&smelt_model::session_control::RemoteSessionSnapshot>,
+    incoming: &smelt_model::session_control::RemoteSessionSnapshot,
 ) -> bool {
     // `revision = 0` 表示尚未建立投影水位：不能因首帧也是 0 就把后续完整替换
     // 永久丢掉。
@@ -179,9 +179,9 @@ fn accepts_remote_catalog_incremental(
 }
 
 fn recognized_remote_acp_sessions(
-    records: Vec<smelt_core::session_control::RemoteAcpSession>,
+    records: Vec<smelt_model::session_control::RemoteAcpSession>,
 ) -> Vec<(
-    smelt_core::session_control::RemoteAcpSession,
+    smelt_model::session_control::RemoteAcpSession,
     settings::ConversationAgentKind,
 )> {
     records
@@ -194,7 +194,7 @@ fn recognized_remote_acp_sessions(
 
 impl RemoteSessionCatalogGlobal {
     fn reset_from_subscription(
-        snapshot: Option<smelt_core::session_control::RemoteSessionSnapshot>,
+        snapshot: Option<smelt_model::session_control::RemoteSessionSnapshot>,
         cx: &mut App,
     ) {
         let state = cx.global::<Self>().snapshot.clone();
@@ -205,7 +205,7 @@ impl RemoteSessionCatalogGlobal {
     }
 
     fn apply_incremental(
-        snapshot: smelt_core::session_control::RemoteSessionSnapshot,
+        snapshot: smelt_model::session_control::RemoteSessionSnapshot,
         cx: &mut App,
     ) {
         let state = cx.global::<Self>().snapshot.clone();
@@ -363,7 +363,7 @@ fn ensure_main_window(current: &Rc<RefCell<Option<MainWindow>>>, cx: &mut App) -
 }
 
 fn apply_automation_projection(
-    snapshot: smelt_core::automation::AutomationFile,
+    snapshot: smelt_model::automation::AutomationFile,
     origin: automation_notifications::AutomationProjectionOrigin,
     current_ws: &Rc<RefCell<Option<MainWindow>>>,
     cx: &mut gpui::App,
@@ -860,7 +860,7 @@ enum GitTab {
 // 会话里 agent 的状态（总览页状态徽章 / 侧栏状态点）：搬进 smelt-core（跟
 // ui_theme 共用同一份判断，见 agent_status.rs），这里重导出成原来的裸名字，
 // 全库既有的 `AgentStatus::x` 写法不用逐处改。
-pub(crate) use smelt_core::agent_status::AgentStatus;
+pub(crate) use smelt_model::agent_status::AgentStatus;
 
 // DaemonStates（守护上报的会话状态镜像）/ AttentionGlobal（统一关注事件 store）：
 // ACP 视图独立成 smelt-acp-view 后要跨
@@ -994,16 +994,16 @@ fn dispatch_pending_attention(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: 
             .map(|session| format!("{} · {session}", notification.title))
             .unwrap_or_else(|| notification.title.clone());
         let enabled = agent_notification_enabled(&notify_config, notification.kind);
-        match smelt_core::attention::delivery_channel(
+        match smelt_model::attention::delivery_channel(
             enabled,
             app_active,
             workspace_window_active,
             is_current_view,
         ) {
-            smelt_core::attention::DeliveryChannel::Suppress => {
+            smelt_model::attention::DeliveryChannel::Suppress => {
                 status_item::remove_system_notification(&notification.session_id);
             }
-            smelt_core::attention::DeliveryChannel::System => {
+            smelt_model::attention::DeliveryChannel::System => {
                 status_item::deliver_notification(
                     &notification.session_id,
                     &display_title,
@@ -1118,7 +1118,7 @@ impl Session {
         let acp_session_id = self
             .active_acp()
             .map(|view| view.read(cx).session_id().to_string());
-        smelt_core::session_control::is_product_conversation(
+        smelt_model::session_control::is_product_conversation(
             self.automation_id.as_deref(),
             self.agent_definition_id.as_deref(),
             acp_session_id.as_deref(),
@@ -1127,7 +1127,7 @@ impl Session {
     }
 
     fn is_agent_conversation(&self, cx: &App) -> bool {
-        smelt_core::session_control::is_agent_conversation(
+        smelt_model::session_control::is_agent_conversation(
             self.automation_id.as_deref(),
             self.agent_definition_id.as_deref(),
             self.cwd(cx).as_deref(),
@@ -1248,7 +1248,7 @@ impl Session {
                         .unwrap_or(fallback)
                         .to_string()
                 } else {
-                    smelt_core::session_title::acp_display_title(
+                    smelt_model::session_title::acp_display_title(
                         title.as_deref(),
                         fallback,
                         cwd.as_deref(),
@@ -1323,7 +1323,7 @@ enum RenameTarget {
 fn pane_auto_title(view: &Entity<TerminalView>, cx: &App) -> String {
     let t = view.read(cx);
     let session_title = daemon_state_for(view, cx).and_then(|state| state.title);
-    smelt_core::session_title::display_title(
+    smelt_model::session_title::display_title(
         None,
         session_title.as_deref(),
         t.launch_label(),
@@ -1420,7 +1420,7 @@ fn pane_title(view: &Entity<TerminalView>, cx: &App) -> String {
 /// （Session::status 是取会话内所有 pane 的最高态）。
 fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
     let daemon_state = daemon_state_for(view, cx);
-    smelt_core::agent_status::terminal_agent_status(daemon_state.as_ref())
+    smelt_model::agent_status::terminal_agent_status(daemon_state.as_ref())
 }
 
 /// 收集布局树里所有叶子终端（clone 句柄，顺序 = 深度优先遍历序）。
@@ -1525,7 +1525,7 @@ pub(crate) struct SessionState {
 #[derive(Clone, serde::Serialize)]
 struct AcpSaved {
     cwd: Option<String>,
-    launch: smelt_core::agent_kind::ConversationLaunchSpec,
+    launch: smelt_model::agent_kind::ConversationLaunchSpec,
     #[serde(default)]
     profile_id: Option<String>,
     /// agent 种类标识（`ConversationAgentKind::id()`）。旧存档没有这个字段 → None，恢复时
@@ -1551,7 +1551,7 @@ struct AcpSaved {
     refresh_launch_from_settings: bool,
     /// 通用交互输入路由。agent/profile 只决定 ACP 执行器，不决定用户消息送往哪里。
     #[serde(default)]
-    conversation_binding: smelt_core::conversation::ConversationBinding,
+    conversation_binding: smelt_model::conversation::ConversationBinding,
     /// 当前 ACP 会话最后生效的 provider 配置（模型、推理、快速模式、权限等）。
     /// 不含 custom_env/token 等凭据；旧存档缺失时沿用 provider 默认值。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1580,7 +1580,7 @@ struct AcpSaved {
 struct AcpSavedWire {
     cwd: Option<String>,
     #[serde(default)]
-    launch: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
+    launch: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
     #[serde(default)]
     cmd: Option<String>,
     #[serde(default)]
@@ -1596,7 +1596,7 @@ struct AcpSavedWire {
     #[serde(default)]
     refresh_launch_from_settings: Option<bool>,
     #[serde(default)]
-    conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
+    conversation_binding: Option<smelt_model::conversation::ConversationBinding>,
     #[serde(default)]
     config_values: Vec<(String, String)>,
     #[serde(default)]
@@ -1621,7 +1621,7 @@ impl<'de> serde::Deserialize<'de> for AcpSaved {
             .refresh_launch_from_settings
             .unwrap_or_else(|| wire.launch.is_some() && wire.profile_id.is_none());
         let launch = wire.launch.unwrap_or_else(|| {
-            smelt_core::agent_kind::ConversationLaunchSpec::from_command(
+            smelt_model::agent_kind::ConversationLaunchSpec::from_command(
                 wire.cmd.unwrap_or_default(),
             )
         });
@@ -2384,7 +2384,7 @@ struct Workspace {
     /// 原生 DSH Provider 摘要缓存；仅在打开设置或显式修改后刷新。
     dsh_native_model_settings: Option<Result<settings::NativeDshModelSettings, String>>,
     /// 运行时给的 DeepSeek Harness 配置快照。渲染只读它。
-    dsh_config: Option<smelt_core::dsh_service::DshConfig>,
+    dsh_config: Option<smelt_model::dsh_service::DshConfig>,
     dsh_config_error: Option<String>,
     /// 读取的代数：晚回来的旧读取不能盖掉更新的快照。
     dsh_config_generation: u64,
@@ -2412,7 +2412,7 @@ struct Workspace {
     pi_mcp_error: Option<String>,
     /// 运行时给的 Pi 配置快照（模型、MCP、插件……）。渲染只读它；打开设置窗口、进
     /// 能力库、开智能体编辑器时刷新，修改由运行时回带新快照。
-    pi_config: Option<smelt_core::pi_service::PiConfig>,
+    pi_config: Option<smelt_model::pi_service::PiConfig>,
     /// 最近一次读取失败的原因。
     pi_config_error: Option<String>,
     /// 读取的代数：晚回来的旧读取不能盖掉更新的快照。
@@ -3175,13 +3175,13 @@ impl Workspace {
         let acp_records = snapshot
             .sessions
             .iter()
-            .filter_map(smelt_core::session_control::RemoteSessionRecord::as_acp)
+            .filter_map(smelt_model::session_control::RemoteSessionRecord::as_acp)
             .collect::<Vec<_>>();
         let term_records = snapshot
             .sessions
             .iter()
             .filter(|record| record.is_visible())
-            .filter_map(smelt_core::session_control::RemoteSessionRecord::as_terminal)
+            .filter_map(smelt_model::session_control::RemoteSessionRecord::as_terminal)
             .collect::<Vec<_>>();
         self.reconcile_remote_sessions(acp_records, window, cx);
         self.reconcile_remote_terminal_sessions(term_records, window, cx);
@@ -3193,7 +3193,7 @@ impl Workspace {
     /// 控制面改名，这时才替换。
     fn apply_remote_conversation_titles(
         &mut self,
-        records: &[smelt_core::session_control::RemoteAcpSession],
+        records: &[smelt_model::session_control::RemoteAcpSession],
         cx: &mut Context<Self>,
     ) -> bool {
         let mut changed = false;
@@ -3239,7 +3239,7 @@ impl Workspace {
 
     fn reconcile_remote_sessions(
         &mut self,
-        records: Vec<smelt_core::session_control::RemoteAcpSession>,
+        records: Vec<smelt_model::session_control::RemoteAcpSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3257,7 +3257,7 @@ impl Workspace {
                 };
                 let session_id = view.read(cx).session_id();
                 let auto_projected_background = session.automation_id.is_none()
-                    && smelt_core::session_control::is_background_acp_session_id(session_id);
+                    && smelt_model::session_control::is_background_acp_session_id(session_id);
                 unproject_acp_when_remote_catalog_drops(
                     session.remote_owned,
                     auto_projected_background,
@@ -3290,11 +3290,11 @@ impl Workspace {
                 continue;
             }
             if !record.is_visible()
-                || smelt_core::session_control::is_background_acp_session_id(&record.id)
+                || smelt_model::session_control::is_background_acp_session_id(&record.id)
             {
                 continue;
             }
-            if record.lifecycle != smelt_core::session_control::RemoteSessionLifecycle::Active {
+            if record.lifecycle != smelt_model::session_control::RemoteSessionLifecycle::Active {
                 continue;
             }
             self.project_remote_acp_session(record, agent, window, cx);
@@ -3312,7 +3312,7 @@ impl Workspace {
 
     fn project_remote_acp_session(
         &mut self,
-        record: smelt_core::session_control::RemoteAcpSession,
+        record: smelt_model::session_control::RemoteAcpSession,
         agent: settings::ConversationAgentKind,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3336,7 +3336,7 @@ impl Workspace {
             .resume_id
             .map(agent_client_protocol::schema::v1::SessionId::new);
         let cwd = Some(record.cwd.clone());
-        if !smelt_core::session_control::is_agent_conversation(
+        if !smelt_model::session_control::is_agent_conversation(
             None,
             agent_definition_id.as_deref(),
             cwd.as_deref(),
@@ -3379,7 +3379,7 @@ impl Workspace {
         &self,
         session_id: &str,
         cx: &App,
-    ) -> Option<smelt_core::session_control::RemoteAcpSession> {
+    ) -> Option<smelt_model::session_control::RemoteAcpSession> {
         let global = cx.try_global::<RemoteSessionCatalogGlobal>()?;
         let snapshot = global
             .snapshot
@@ -3389,7 +3389,7 @@ impl Workspace {
         snapshot
             .sessions
             .iter()
-            .filter_map(smelt_core::session_control::RemoteSessionRecord::as_acp)
+            .filter_map(smelt_model::session_control::RemoteSessionRecord::as_acp)
             .find(|record| record.is_present() && record.id == session_id)
     }
 
@@ -3398,7 +3398,7 @@ impl Workspace {
     /// 投影，把它 reattach 成 PC 侧栏里能看/能操作的一个真实 `Session`。
     fn reconcile_remote_terminal_sessions(
         &mut self,
-        records: Vec<smelt_core::session_control::RemoteTerminalSession>,
+        records: Vec<smelt_model::session_control::RemoteTerminalSession>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3443,7 +3443,7 @@ impl Workspace {
             if existing.contains(&record.id) || pending_restore.contains(&record.id) {
                 continue;
             }
-            if record.lifecycle != smelt_core::session_control::RemoteSessionLifecycle::Active {
+            if record.lifecycle != smelt_model::session_control::RemoteSessionLifecycle::Active {
                 continue;
             }
             // 目录更新可能在一次 reattach 还没完成前再次到达；不去重会对同一 id
@@ -3501,7 +3501,7 @@ impl Workspace {
                             SessionKind::Conversation(_) => None,
                         })
                         .collect::<HashSet<_>>();
-                    if !smelt_core::session_control::accept_remote_terminal_projection(
+                    if !smelt_model::session_control::accept_remote_terminal_projection(
                         &sid,
                         &this.remote_projected_terminal_ids,
                         &local_ids,
@@ -3552,7 +3552,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 工作台每帧都会重跑这里：debug 构建下，期间读写 SQLite 会被报出来。
-        let _render_scope = smelt_core::sqlite_state::render_guard::RenderScope::enter();
+        let _render_scope = smelt_client_store::render_guard::RenderScope::enter();
         let _timing = smelt_ui::frame_stats::RenderTiming::start("Workspace");
         // 帧上只清拖拽、认前台。目录、git、历史和窗口材质在选中与数据变化时刷新。
         self.prepare_frame(window, cx);
@@ -3980,7 +3980,7 @@ fn acp_agent_from_cmd(cmd: &str) -> settings::ConversationAgentKind {
 fn command_program(command: &str) -> Option<&str> {
     let mut tokens = command.split_whitespace();
     for token in tokens.by_ref() {
-        if smelt_core::workspace_override::split_env_assignment(token).is_some() || token == "env" {
+        if smelt_model::workspace_override::split_env_assignment(token).is_some() || token == "env" {
             continue;
         }
         return std::path::Path::new(token)
@@ -4253,7 +4253,6 @@ fn main() {
     if let Some(code) = cli::maybe_run(std::env::args()) {
         std::process::exit(code);
     }
-    smelt_core::sqlite_state::enable_sqlite_state();
     // 整个 GUI 生命周期持共享 lease。installer 只有等所有 GUI 退出并拿到独占 lease
     // 后才可交换 Bundle；若交换已经开始，新 GUI fail-fast，避免从旧 vnode 启动。
     let _app_runtime_lease = match updater::acquire_app_runtime_lease() {
@@ -4265,12 +4264,12 @@ fn main() {
     };
     // GUI 启动失败时用户通常看不到终端输出；把原始 panic 先落到统一日志，
     // 尤其能保留 GPUI 清理阶段二次 panic 之前的第一条错误。
-    smelt_core::app_log::install_panic_hook("smelt");
-    smelt_core::app_log::tee_stderr("smelt");
+    smelt_sys::app_log::install_panic_hook("smelt");
+    smelt_sys::app_log::tee_stderr("smelt");
     schedule_obsolete_file_cleanup();
     // Finder / launchd 启动的 GUI 默认软上限常是 256；在创建窗口、socket 和终端
     // 线程之前先抬高，避免正常多会话也让更新检查等新连接触发 EMFILE。
-    smelt_core::fd_limit::raise_fd_limit();
+    smelt_sys::fd_limit::raise_fd_limit();
     // with_assets 注册图标资源，Sidebar 的 IconName svg 才能渲染；见上面 SmeltAssets。
     let app = gpui_platform::application().with_assets(SmeltAssets);
     // Dock / Finder「打开」投递的 file:// URL（拖文件夹到 Dock 图标、右键用 Smelt 打开）。
@@ -4464,19 +4463,19 @@ fn main() {
                     use smelt_runtime_client::protocol::control::EmptyParams;
                     let timeout = std::time::Duration::from_secs(300);
                     if let Err(error) = runtime_call::call::<
-                        smelt_core::control_api::SkillsSyncControl,
+                        smelt_model::control_api::SkillsSyncControl,
                     >(EmptyParams::default(), runtime_call::RUNTIME_CALL_TIMEOUT)
                     {
                         eprintln!("[workspace] 同步 smelt skill 失败：{}", runtime_call::error_text(error));
                     }
                     if let Err(error) = runtime_call::call::<
-                        smelt_core::control_api::PiProvidersRefreshAuto,
+                        smelt_model::control_api::PiProvidersRefreshAuto,
                     >(EmptyParams::default(), timeout)
                     {
                         eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
                     }
                     if let Err(error) = runtime_call::call::<
-                        smelt_core::control_api::DshProvidersRefreshAuto,
+                        smelt_model::control_api::DshProvidersRefreshAuto,
                     >(EmptyParams::default(), timeout)
                     {
                         eprintln!("[dsh] 刷新自动模型目录失败：{}", runtime_call::error_text(error));

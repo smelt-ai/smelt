@@ -4,7 +4,7 @@
 //! 「终端 / 对话」是动作的属性，不再额外占一层模式切换。Pin 绑定到动作本身，
 //! 所以同一个 Agent 的对话和终端可以分别置顶。
 //!
-//! 「有哪些动作、叫什么、怎么分组、Pin 存哪」全部在 `smelt_core::new_session`，
+//! 「有哪些动作、叫什么、怎么分组、Pin 存哪」全部在 `smelt_model::new_session`，
 //! 移动端读的是同一份；这里只负责画出来，以及把动作接到桌面的会话工作区上。
 
 use gpui::prelude::FluentBuilder;
@@ -24,12 +24,12 @@ use crate::settings::{
 };
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{Workspace, ui_theme};
-use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind};
-use smelt_core::new_session::{
+use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind};
+use smelt_model::new_session::{
     NewSessionAction, NewSessionPreferences, NewSessionTarget, PinParams, SECTION_LABELS,
     build_sections,
 };
-use smelt_core::session_control::AcpAgentOption;
+use smelt_model::session_control::AcpAgentOption;
 
 use super::row::{acp_provider_icon, provider_icon};
 
@@ -60,7 +60,7 @@ fn current_new_session_preferences(cx: &mut App) -> NewSessionPreferences {
             let fetched = cx
                 .background_executor()
                 .spawn(async {
-                    crate::runtime_call::call::<smelt_core::control_api::NewSessionPinsGet>(
+                    crate::runtime_call::call::<smelt_model::control_api::NewSessionPinsGet>(
                         smelt_runtime_client::protocol::control::EmptyParams::default(),
                         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                     )
@@ -92,7 +92,7 @@ fn toggle_new_session_pin(key: &str, cx: &mut App) {
         let toggled = cx
             .background_executor()
             .spawn(async move {
-                crate::runtime_call::call::<smelt_core::control_api::NewSessionPinsToggle>(
+                crate::runtime_call::call::<smelt_model::control_api::NewSessionPinsToggle>(
                     params,
                     crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                 )
@@ -198,7 +198,7 @@ type ConversationLaunchChoice = (
 fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchChoice> {
     let config = cx.global::<crate::settings::AgentHostState>();
     if let Some(definition_id) =
-        smelt_core::session_control::agent_definition_id_from_option_id(option_id)
+        smelt_model::session_control::agent_definition_id_from_option_id(option_id)
     {
         let definition = config
             .agents
@@ -224,7 +224,7 @@ fn available_new_session_actions(cx: &App) -> Vec<NewSessionAction> {
     let diagnostics = cx
         .try_global::<AcpRuntimeState>()
         .and_then(|state| state.diagnostics.clone());
-    smelt_core::new_session::new_session_actions(
+    smelt_model::new_session::new_session_actions(
         &conversation_options(cx),
         active_launch_entries(cx).as_slice(),
         diagnostics.as_ref(),

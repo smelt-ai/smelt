@@ -3,7 +3,7 @@
 //! Scheduling and Run state belong to `smelt-core` so the daemon can be their sole owner. This
 //! module only keeps the trigger / action catalogs used by the product UI.
 
-pub use smelt_core::automation::{
+pub use smelt_model::automation::{
     Automation, AutomationAction, AutomationRun, AutomationRunSource, AutomationRunStatus,
     AutomationSchedule, AutomationSink, AutomationState, AutomationTrigger, EventIngress,
     WebhookIngress, automation_notifies_app,
@@ -135,7 +135,7 @@ impl AutomationTriggerPresetId {
             Self::Hourly => Some(AutomationSchedule::EveryHours { hours: 1 }),
             Self::Daily => Some(AutomationSchedule::Daily { hour: 9, minute: 0 }),
             Self::Weekly => Some(AutomationSchedule::Weekly {
-                days: smelt_core::automation::SCHEDULE_DAY_MON,
+                days: smelt_model::automation::SCHEDULE_DAY_MON,
                 hour: 9,
                 minute: 0,
             }),
@@ -261,7 +261,7 @@ mod tests {
     fn simple_schedule_labels_remain_stable() {
         assert_eq!(
             AutomationSchedule::Weekly {
-                days: smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+                days: smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
                 hour: 9,
                 minute: 35,
             }
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(
             AutomationSchedule::During {
                 minutes: 15,
-                days: smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+                days: smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
                 start_hour: 9,
                 start_minute: 30,
                 end_hour: 15,
@@ -294,9 +294,9 @@ mod tests {
         );
         assert_eq!(
             AutomationSchedule::Weekly {
-                days: smelt_core::automation::SCHEDULE_DAY_MON
-                    | smelt_core::automation::SCHEDULE_DAY_WED
-                    | smelt_core::automation::SCHEDULE_DAY_FRI,
+                days: smelt_model::automation::SCHEDULE_DAY_MON
+                    | smelt_model::automation::SCHEDULE_DAY_WED
+                    | smelt_model::automation::SCHEDULE_DAY_FRI,
                 hour: 9,
                 minute: 35,
             }
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(
             loaded,
             AutomationSchedule::Weekly {
-                days: smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+                days: smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
                 hour: 9,
                 minute: 35,
             }
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn weekday_schedule_skips_the_weekend() {
         let schedule = AutomationSchedule::Weekly {
-            days: smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+            days: smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
             hour: 9,
             minute: 35,
         };
@@ -342,8 +342,8 @@ mod tests {
     #[test]
     fn weekly_schedule_honors_selected_days() {
         let schedule = AutomationSchedule::Weekly {
-            days: smelt_core::automation::SCHEDULE_DAY_MON
-                | smelt_core::automation::SCHEDULE_DAY_WED,
+            days: smelt_model::automation::SCHEDULE_DAY_MON
+                | smelt_model::automation::SCHEDULE_DAY_WED,
             hour: 9,
             minute: 35,
         };

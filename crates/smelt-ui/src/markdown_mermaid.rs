@@ -267,7 +267,7 @@ fn mermaid_result_element(
             )
             .child(
                 div()
-                    .font_family(smelt_core::font_config::font_family())
+                    .font_family(smelt_model::font_config::font_family())
                     .text_color(cx.theme().foreground)
                     .child(source.to_string()),
             )

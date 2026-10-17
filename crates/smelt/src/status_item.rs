@@ -590,7 +590,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn every_agent_has_a_status_menu_logo() {
-        use smelt_core::agent_kind::{ConversationAgentKind, TerminalAgentKind};
+        use smelt_model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
         let ids: Vec<&str> = super::imp::AGENT_LOGO_PNG
             .iter()
             .map(|(id, _)| *id)

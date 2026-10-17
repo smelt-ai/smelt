@@ -4,3 +4,4 @@
 pub mod acp_client;
 pub mod daemon_state;
 pub mod session_ops;
+pub mod updater;

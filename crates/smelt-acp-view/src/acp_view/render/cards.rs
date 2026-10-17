@@ -123,7 +123,7 @@ impl AcpView {
                             .overflow_hidden()
                             .whitespace_normal()
                             .text_sm()
-                            .font_family(smelt_core::font_config::font_family())
+                            .font_family(smelt_model::font_config::font_family())
                             .text_color(gpui::rgb(ui_theme::text_mid()))
                             .child(command.clone()),
                     )
@@ -135,7 +135,7 @@ impl AcpView {
                     .children(cwd.as_ref().map(|cwd| {
                         div()
                             .text_xs()
-                            .font_family(smelt_core::font_config::font_family())
+                            .font_family(smelt_model::font_config::font_family())
                             .text_color(muted)
                             .child(format!("工作目录：{cwd}"))
                     }))
@@ -151,7 +151,7 @@ impl AcpView {
                     .children(grant_root.as_ref().map(|root| {
                         div()
                             .text_xs()
-                            .font_family(smelt_core::font_config::font_family())
+                            .font_family(smelt_model::font_config::font_family())
                             .text_color(muted)
                             .child(format!("授权目录：{root}"))
                     }))
@@ -265,7 +265,7 @@ impl AcpView {
             let show_footer = requires_explicit_submit
                 && !matches!(
                     card.fields.as_slice(),
-                    [smelt_core::acp_session::ElicitFieldView {
+                    [smelt_model::acp_session::ElicitFieldView {
                         kind: ElicitFieldKindView::ExternalUrl(_),
                         ..
                     }]

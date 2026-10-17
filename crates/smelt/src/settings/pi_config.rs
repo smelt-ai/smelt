@@ -1,13 +1,13 @@
 //! Pi 配置的客户端缓存。
 //!
-//! 配置文件在运行时那台机器上，读写都走 `pi.*`（[`smelt_core::pi_service`]）。这里
+//! 配置文件在运行时那台机器上，读写都走 `pi.*`（[`smelt_model::pi_service`]）。这里
 //! 缓存最近一次快照给渲染读；打开设置窗口、进能力库、开智能体编辑器时刷新，每次
 //! 修改由运行时回带新快照。
 
 use super::*;
-use smelt_core::control_api::PiConfigGet;
-use smelt_core::pi_model_settings::PiModelChoiceGroup;
-use smelt_core::pi_service::PiConfig;
+use smelt_model::control_api::PiConfigGet;
+use smelt_model::pi_model_settings::PiModelChoiceGroup;
+use smelt_model::pi_service::PiConfig;
 use smelt_runtime_client::protocol::control::{ControlCall, EmptyParams};
 
 /// 可选模型的全局副本：记忆设置页、智能体定义页的下拉菜单拿不到 `Workspace`。

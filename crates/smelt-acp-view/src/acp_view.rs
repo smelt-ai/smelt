@@ -1,6 +1,6 @@
 //! ACP 会话的消息流视图：第二种会话类型的 GPUI 皮肤。
 //!
-//! **薄客户端**：agent 子进程由 smeltd 托管（`smelt_core::acp_session` 里的
+//! **薄客户端**：agent 子进程由 smeltd 托管（`smelt_model::acp_session` 里的
 //! `apply_event` 归约、`ConversationEvent::Permission`/`Elicitation` 的 responder 也
 //! 都在那边——responder 绑在连接线程上没法跨进程传，这里没有资格直接持有
 //! 它们）。这层只做两件事：把 `smelt_client::acp_client` 收到的 `ConversationSnapshot`
@@ -32,15 +32,15 @@ use smelt_client::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientHandle, ConversationClientLaunch, load_acp_history,
     spawn_acp_client,
 };
-use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
-use smelt_core::acp_session::{
+use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
+use smelt_model::acp_session::{
     AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, BackgroundTaskStatus,
     BackgroundTaskView, ConversationSnapshot, ElicitFieldKindView, PendingElicitation,
     PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView, RuntimeDebug,
     ToolCallDebug,
 };
-use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
-use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
+use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_client::daemon_state::DaemonPhase;
 use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
@@ -53,11 +53,11 @@ use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
 
 /// 消息流数据模型（AcpEntry/ToolOutputPart/ToolKind/ToolCallStatus）与 diff/
-/// markdown 围栏这批纯逻辑现在都活在 `smelt_core::acp_chat`——不依赖 GPUI 也不
+/// markdown 围栏这批纯逻辑现在都活在 `smelt_model::acp_chat`——不依赖 GPUI 也不
 /// 依赖 agent_client_protocol，未来 web/mobile 端渲染同一份对话时不用重新实现
 /// 一遍「怎么把协议事件变成可展示内容」。这里整段 re-export，文件里大量既有的
 /// 裸 `AcpEntry::...` 用法不用逐处改路径。
-pub use smelt_core::acp_chat::{
+pub use smelt_model::acp_chat::{
     AcpEntry, AcpImage, DiffLine, DiffLineTag, ToolCallStatus, ToolKind, ToolOutputPart,
     compact_diff_lines, completion_summary_text, diff_line_stats, diff_lines, is_interrupt_marker,
     is_task_completion_tool_title, strip_code_fence,
@@ -116,7 +116,7 @@ fn settled_thought_elapsed(
     entries: &[AcpEntry],
     entry_ix: usize,
     entries_offset: usize,
-    timings: &[smelt_core::acp_session::TurnTiming],
+    timings: &[smelt_model::acp_session::TurnTiming],
 ) -> Option<u64> {
     if !matches!(
         entries.get(entry_ix),
@@ -131,7 +131,7 @@ fn settled_thought_elapsed(
     timings
         .iter()
         .find(|timing| timing.user_index == global_index)
-        .and_then(smelt_core::acp_session::TurnTiming::completed_elapsed_ms)
+        .and_then(smelt_model::acp_session::TurnTiming::completed_elapsed_ms)
 }
 
 fn shift_copy_site(site: CopySite, page_len: usize) -> CopySite {
@@ -215,7 +215,7 @@ fn composer_usage_breakdown(
     used: u64,
     size: u64,
     cached_read: Option<u64>,
-    breakdown: Option<&smelt_core::acp_conn::ContextUsageBreakdown>,
+    breakdown: Option<&smelt_model::acp_conn::ContextUsageBreakdown>,
     conversation_color: u32,
 ) -> Vec<UsageBreakdownRow> {
     let _ = cached_read;
@@ -1180,7 +1180,7 @@ struct CompletionPopup {
 }
 
 struct PendingConversationInput {
-    input: smelt_core::conversation::ConversationInput,
+    input: smelt_model::conversation::ConversationInput,
     text: String,
     images: Vec<std::sync::Arc<gpui::Image>>,
     snapshot_revision: u64,
@@ -1258,12 +1258,12 @@ fn merge_rejected_prompt(current: &str, rejected: &str) -> String {
 fn conversation_input_for_submit(
     text: String,
     images: Vec<AcpImage>,
-    uncertain: Option<&smelt_core::conversation::ConversationInput>,
-) -> smelt_core::conversation::ConversationInput {
+    uncertain: Option<&smelt_model::conversation::ConversationInput>,
+) -> smelt_model::conversation::ConversationInput {
     uncertain
         .filter(|previous| previous.text == text && previous.images == images)
         .cloned()
-        .unwrap_or_else(|| smelt_core::conversation::ConversationInput::new(text, images))
+        .unwrap_or_else(|| smelt_model::conversation::ConversationInput::new(text, images))
 }
 
 fn selected_text_context_menu(
@@ -1324,7 +1324,7 @@ pub struct AcpHandoffRequest {
     /// 新会话首包；Pi fork 请求携带时只预填输入框，供编辑后手动重发。
     pub prompt: String,
     /// 随首包一起发出去的图片。空 = 纯文本首包。
-    pub images: Vec<smelt_core::acp_chat::AcpImage>,
+    pub images: Vec<smelt_model::acp_chat::AcpImage>,
     /// 前次 provider 会话 id（controller 续跑上下文）：非空时 ACP 连接用
     /// `session/load` 恢复历史，而不是开全新会话。
     pub resume_session_id: Option<String>,
@@ -1334,9 +1334,9 @@ pub struct AcpHandoffRequest {
     /// 与 `fork_session_id` 搭配的分叉切点：副本打开后、重放前切到该用户消息
     /// 之前（不含它），新会话恰好包含到被点击的那条回答为止。`None` = 整份
     /// 拷贝（点的是最后一回合，无需切）。
-    pub fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
+    pub fork_cut: Option<smelt_model::acp_conn::AcpForkCut>,
     /// 目标会话的交互输入路由。与 agent/profile 正交；Direct 是普通本地对话。
-    pub conversation_binding: smelt_core::conversation::ConversationBinding,
+    pub conversation_binding: smelt_model::conversation::ConversationBinding,
 }
 
 #[derive(Clone)]
@@ -1349,7 +1349,7 @@ pub struct AcpNewSessionRequest {
 
 /// 冷启动占位视图的初始状态：agent 身份、启动规格与恢复来源。把 `placeholder`
 /// 的参数收成一组，避免 10 个参数逐位传递。
-pub use smelt_core::agent_definition_store::LaunchPrep;
+pub use smelt_model::agent_definition_store::LaunchPrep;
 
 pub struct AcpViewOrigin {
     pub agent: ConversationAgentKind,
@@ -1532,7 +1532,7 @@ pub struct AcpView {
     usage: Option<(u64, u64)>,
     usage_cached_read: Option<u64>,
     usage_cost: Option<f64>,
-    usage_breakdown: Option<smelt_core::acp_conn::ContextUsageBreakdown>,
+    usage_breakdown: Option<smelt_model::acp_conn::ContextUsageBreakdown>,
     /// 底栏用量圆环点开的 Context Usage 面板。只属于本地浏览状态。
     usage_popover_open: bool,
     /// 独立 Trajectory 窗口。已打开则前置，不重复开。
@@ -1602,7 +1602,7 @@ pub struct AcpView {
     pending_config_values: Vec<(String, String)>,
     /// 当前回合开始时间，由 smeltd 计时后随快照同步。None = 没有运行中的回合。
     turn_started_at_ms: Option<u64>,
-    turn_timings: Vec<smelt_core::acp_session::TurnTiming>,
+    turn_timings: Vec<smelt_model::acp_session::TurnTiming>,
     /// 运行中每秒重绘「已用 Ns」；回合结束后关掉。
     running_tick: bool,
     /// 最近一轮的真实终结结果；Idle 只表示当前没有运行中的回合。
@@ -1654,13 +1654,13 @@ pub struct AcpView {
     /// 丢掉。
     restart_config_values: Vec<(String, String)>,
     /// daemon 拥有的交互输入路由镜像。
-    conversation_binding: smelt_core::conversation::ConversationBinding,
+    conversation_binding: smelt_model::conversation::ConversationBinding,
     /// 独立 `acp_submit_input` 请求尚未回执。保留原始草稿和图片，拒绝或网络
     /// 结果不明时恢复到 composer，绝不自动换路由重发。
     pending_conversation_input: Option<PendingConversationInput>,
     /// 上次提交越过远端副作用边界后结果未知。用户原样重试时复用 submission id，
     /// 由插件持久化账本阻止重复；内容有任何修改则视为一条新的明确提交。
-    uncertain_conversation_input: Option<smelt_core::conversation::ConversationInput>,
+    uncertain_conversation_input: Option<smelt_model::conversation::ConversationInput>,
     /// daemon 持有的“下一条交互输入”预设镜像。这里只用于 workspace 恢复；
     /// 真正合并和成功后消费都在 daemon，保证桌面与移动端一致。
     pending_agent_preset: Option<String>,
@@ -1693,7 +1693,7 @@ pub(crate) fn resolve_restart_launch(
     // Product-agent instructions and memory directories are launch identity, not mutable provider
     // preferences. A settings refresh may replace command/env defaults, but it must not turn the
     // session into a plain provider conversation when a fresh runtime is required.
-    for name in smelt_core::agent_kind::SMELT_AGENT_LAUNCH_IDENTITY_ENVS {
+    for name in smelt_model::agent_kind::SMELT_AGENT_LAUNCH_IDENTITY_ENVS {
         if let Some(value) = current_launch.env.get(name) {
             launch.env.insert(name.to_string(), value.clone());
         }
@@ -2032,7 +2032,7 @@ impl AcpView {
             pending_initial_prompt: None,
             pending_initial_config: Vec::new(),
             restart_config_values: Vec::new(),
-            conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
+            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
             pending_conversation_input: None,
             uncertain_conversation_input: None,
             pending_agent_preset: None,
@@ -2312,7 +2312,7 @@ impl AcpView {
                 || self.pending_conversation_input.is_some(),
             immediate_cancel_pending: self.immediate_cancel_pending,
             fresh_start_pending: self.has_pending_fresh_start_prompt(),
-            has_unfinished_tool: smelt_core::acp_chat::has_unfinished_tool_call(&self.entries),
+            has_unfinished_tool: smelt_model::acp_chat::has_unfinished_tool_call(&self.entries),
         }
     }
 
@@ -2478,7 +2478,7 @@ impl AcpView {
                     cwd: self.cwd.clone(),
                     skills: Vec::new(),
                 });
-                let params = smelt_core::agent_definition_store::LoadedSkillsParams {
+                let params = smelt_model::agent_definition_store::LoadedSkillsParams {
                     launch: self.launch.clone(),
                     cwd: self.cwd.clone(),
                 };
@@ -2487,7 +2487,7 @@ impl AcpView {
                         .background_executor()
                         .spawn(async move {
                             smelt_client::daemon_state::local_runtime()
-                                .call::<smelt_core::control_api::SessionLoadedSkills>(
+                                .call::<smelt_model::control_api::SessionLoadedSkills>(
                                     &params,
                                     RUNTIME_PREPARE_TIMEOUT,
                                 )
@@ -2521,7 +2521,7 @@ impl AcpView {
             self.attach_handle(handle, cx);
             return;
         };
-        let params = smelt_core::agent_definition_store::LaunchPrepareParams {
+        let params = smelt_model::agent_definition_store::LaunchPrepareParams {
             launch: self.launch.clone(),
             prep: prep.clone(),
             cwd: self.cwd.clone(),
@@ -2531,7 +2531,7 @@ impl AcpView {
                 .background_executor()
                 .spawn(async move {
                     smelt_client::daemon_state::local_runtime()
-                        .call::<smelt_core::control_api::SessionLaunchPrepare>(
+                        .call::<smelt_model::control_api::SessionLaunchPrepare>(
                             &params,
                             RUNTIME_PREPARE_TIMEOUT,
                         )
@@ -2564,7 +2564,7 @@ impl AcpView {
         .detach();
     }
 
-    fn loaded_skills(&self) -> &[smelt_core::pi_plugin_catalog::PiPlugin] {
+    fn loaded_skills(&self) -> &[smelt_model::pi_plugin_catalog::PiPlugin] {
         self.loaded_skills
             .as_ref()
             .map(|cached| cached.skills.as_slice())
@@ -2693,7 +2693,7 @@ impl AcpView {
         self.entries_total = self.entries_total.max(snapshot.entries_total);
         // 省略或空白不是清空。
         if let Some(title) =
-            smelt_core::session_title::provider_session_title(snapshot.session_title.as_deref())
+            smelt_model::session_title::provider_session_title(snapshot.session_title.as_deref())
         {
             self.session_title = Some(title.to_string());
         }
@@ -2771,8 +2771,8 @@ impl AcpView {
     /// 通用 ACP `session_info_update` 的 Agent 标题优先；Agent 尚未上报时由
     /// smeltd 从首条用户消息生成稳定兜底。侧栏和完成通知共用这个结果。
     pub fn auto_title(&self) -> Option<String> {
-        let fallback = smelt_core::acp_chat::auto_title(&self.entries);
-        smelt_core::session_title::session_name(self.session_title.as_deref(), fallback.as_deref())
+        let fallback = smelt_model::acp_chat::auto_title(&self.entries);
+        smelt_model::session_title::session_name(self.session_title.as_deref(), fallback.as_deref())
     }
 
     /// 存档快照：写进 AcpSaved.history_session_id，GUI 重开后「重新开始」
@@ -2804,7 +2804,7 @@ impl AcpView {
         self.pending_agent_preset.clone()
     }
 
-    pub fn conversation_binding_for_save(&self) -> smelt_core::conversation::ConversationBinding {
+    pub fn conversation_binding_for_save(&self) -> smelt_model::conversation::ConversationBinding {
         self.conversation_binding.clone()
     }
 
@@ -2848,7 +2848,7 @@ impl AcpView {
     /// daemon 当前 binding 覆盖它。
     pub fn restore_conversation_binding(
         &mut self,
-        binding: smelt_core::conversation::ConversationBinding,
+        binding: smelt_model::conversation::ConversationBinding,
     ) {
         self.conversation_binding = binding;
     }
@@ -3192,7 +3192,7 @@ impl AcpView {
 
     fn finish_conversation_input(
         &mut self,
-        result: Result<(), smelt_core::conversation::ConversationSubmitError>,
+        result: Result<(), smelt_model::conversation::ConversationSubmitError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3222,16 +3222,16 @@ impl AcpView {
                 self.pending_images = restored_images;
                 self.input_has_draft = true;
                 self.uncertain_conversation_input = match error.kind {
-                    smelt_core::conversation::ConversationSubmitErrorKind::Rejected => None,
-                    smelt_core::conversation::ConversationSubmitErrorKind::Unknown => {
+                    smelt_model::conversation::ConversationSubmitErrorKind::Rejected => None,
+                    smelt_model::conversation::ConversationSubmitErrorKind::Unknown => {
                         Some(pending.input)
                     }
                 };
                 self.paste_hint = Some(match error.kind {
-                    smelt_core::conversation::ConversationSubmitErrorKind::Rejected => {
+                    smelt_model::conversation::ConversationSubmitErrorKind::Rejected => {
                         format!("未发送：{}", error.message)
                     }
-                    smelt_core::conversation::ConversationSubmitErrorKind::Unknown => {
+                    smelt_model::conversation::ConversationSubmitErrorKind::Unknown => {
                         format!("发送结果未知：{}；再次发送可能重复。", error.message)
                     }
                 });
@@ -3289,11 +3289,11 @@ impl AcpView {
             return;
         }
         let Some((prompt, occurrence)) =
-            smelt_core::acp_chat::fork_cut_before(&self.entries, user_index)
+            smelt_model::acp_chat::fork_cut_before(&self.entries, user_index)
         else {
             return;
         };
-        let fork_cut = smelt_core::acp_conn::AcpForkCut {
+        let fork_cut = smelt_model::acp_conn::AcpForkCut {
             text: prompt.clone(),
             occurrence,
         };
@@ -3303,17 +3303,17 @@ impl AcpView {
     }
 
     fn build_pi_fork_request(&self, through_index: usize) -> Option<AcpHandoffRequest> {
-        let fork_cut = smelt_core::acp_chat::fork_cut_after(&self.entries, through_index)
-            .map(|(text, occurrence)| smelt_core::acp_conn::AcpForkCut { text, occurrence });
+        let fork_cut = smelt_model::acp_chat::fork_cut_after(&self.entries, through_index)
+            .map(|(text, occurrence)| smelt_model::acp_conn::AcpForkCut { text, occurrence });
         self.build_pi_fork_request_with_cut(fork_cut, String::new())
     }
 
     fn build_pi_fork_request_with_cut(
         &self,
-        fork_cut: Option<smelt_core::acp_conn::AcpForkCut>,
+        fork_cut: Option<smelt_model::acp_conn::AcpForkCut>,
         prompt: String,
     ) -> Option<AcpHandoffRequest> {
-        if !smelt_core::session_handoff::live_fork_is_available(self.agent) {
+        if !smelt_model::session_handoff::live_fork_is_available(self.agent) {
             return None;
         }
         let fork_session_id = self.provider_session_id()?.to_string();
@@ -3597,7 +3597,7 @@ impl AcpView {
     pub fn shutdown(&mut self, _cx: &mut App) {
         let kill_sid = (!matches!(
             &self.conversation_binding,
-            smelt_core::conversation::ConversationBinding::Automation { .. }
+            smelt_model::conversation::ConversationBinding::Automation { .. }
         ))
         .then(|| self.sid.clone());
 
@@ -3949,7 +3949,7 @@ impl AcpView {
                 self.pending_config_values.clear();
             }
             if let Some(title) =
-                smelt_core::session_title::provider_session_title(snap.session_title.as_deref())
+                smelt_model::session_title::provider_session_title(snap.session_title.as_deref())
             {
                 self.session_title = Some(title.to_string());
             }
@@ -4155,7 +4155,7 @@ impl AcpView {
     /// 的工具展开状态同步裁剪掉，避免长会话来回续接后集合无限长。
     fn prune_tool_ui_state(&mut self) {
         let mut live_ids = std::collections::HashSet::new();
-        smelt_core::acp_chat::for_each_tool_id(&self.entries, |id| {
+        smelt_model::acp_chat::for_each_tool_id(&self.entries, |id| {
             live_ids.insert(id.to_string());
         });
         self.rendered_diffs.retain(|id, _| live_ids.contains(id));
@@ -4443,7 +4443,7 @@ impl AcpView {
     }
 
     /// 选择题点选：动作发给 smeltd（真正的选中/提交状态机在服务端跑，见
-    /// `smelt_core::acp_session::choose_elicitation`），下一份快照回来就带着
+    /// `smelt_model::acp_session::choose_elicitation`），下一份快照回来就带着
     /// 更新后的 `chosen`——本地 socket 往返够快，不用做乐观本地更新，免得
     /// 跟服务端真相分叉。单字段单选点了自动追发一条 Submit，跟服务端那边
     /// 「整卡只有一个单选字段，点了就是答案」的判断保持一致。
@@ -4787,7 +4787,7 @@ impl AcpView {
                             div()
                                 .flex_shrink_0()
                                 .text_xs()
-                                .font_family(smelt_core::font_config::font_family())
+                                .font_family(smelt_model::font_config::font_family())
                                 .text_color(summary_color)
                                 .child(summary),
                         )
@@ -5409,7 +5409,7 @@ fn tool_has_live_children(children: &[AcpEntry]) -> bool {
                 status: ToolCallStatus::Pending | ToolCallStatus::InProgress,
                 ..
             }
-        ) || smelt_core::acp_chat::has_unfinished_tool_call(std::slice::from_ref(child))
+        ) || smelt_model::acp_chat::has_unfinished_tool_call(std::slice::from_ref(child))
     })
 }
 
@@ -6004,7 +6004,7 @@ fn search_summary_text(output: &[ToolOutputPart]) -> Option<String> {
         let ToolOutputPart::Text(text) = part else {
             continue;
         };
-        let body = smelt_core::acp_chat::strip_code_fence(text);
+        let body = smelt_model::acp_chat::strip_code_fence(text);
         for line in body.lines() {
             let t = line.trim();
             if is_match_count_line(t) {
@@ -6038,14 +6038,14 @@ fn render_compact_diff_stats(added: usize, removed: usize) -> gpui::AnyElement {
         .child(
             div()
                 .text_xs()
-                .font_family(smelt_core::font_config::font_family())
+                .font_family(smelt_model::font_config::font_family())
                 .text_color(gpui::rgb(ui_theme::green()))
                 .child(format!("+{added}")),
         )
         .child(
             div()
                 .text_xs()
-                .font_family(smelt_core::font_config::font_family())
+                .font_family(smelt_model::font_config::font_family())
                 .text_color(gpui::rgb(ui_theme::red()))
                 .child(format!("-{removed}")),
         )
@@ -6178,7 +6178,7 @@ const RUNTIME_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 struct LoadedSkillsSnapshot {
     launch: ConversationLaunchSpec,
     cwd: Option<String>,
-    skills: Vec<smelt_core::pi_plugin_catalog::PiPlugin>,
+    skills: Vec<smelt_model::pi_plugin_catalog::PiPlugin>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6226,7 +6226,7 @@ fn build_conversation_layout_with_timings(
     entries: &[AcpEntry],
     current_turn_active: bool,
     entries_offset: usize,
-    turn_timings: &[smelt_core::acp_session::TurnTiming],
+    turn_timings: &[smelt_model::acp_session::TurnTiming],
     live_elapsed_ms: Option<u64>,
 ) -> Vec<EntryPresentation> {
     let mut layout = vec![EntryPresentation::default(); entries.len()];
@@ -6249,7 +6249,7 @@ fn refresh_conversation_layout_from(
     from: usize,
     current_turn_active: bool,
     entries_offset: usize,
-    turn_timings: &[smelt_core::acp_session::TurnTiming],
+    turn_timings: &[smelt_model::acp_session::TurnTiming],
     live_elapsed_ms: Option<u64>,
 ) {
     let from = from.min(entries.len());
@@ -6277,7 +6277,7 @@ fn fill_conversation_layout(
     mut start: usize,
     current_turn_active: bool,
     entries_offset: usize,
-    turn_timings: &[smelt_core::acp_session::TurnTiming],
+    turn_timings: &[smelt_model::acp_session::TurnTiming],
     live_elapsed_ms: Option<u64>,
 ) {
     while start < entries.len() {
@@ -6345,7 +6345,7 @@ fn fill_conversation_layout(
                         status,
                         children,
                         ..
-                    } => smelt_core::acp_chat::is_active_agent_tool(*kind, *status, children),
+                    } => smelt_model::acp_chat::is_active_agent_tool(*kind, *status, children),
                     _ => false,
                 })
                 .count();
@@ -6365,7 +6365,7 @@ fn fill_conversation_layout(
                             turn_timings
                                 .iter()
                                 .find(|timing| timing.user_index == global_index)
-                                .and_then(smelt_core::acp_session::TurnTiming::completed_elapsed_ms)
+                                .and_then(smelt_model::acp_session::TurnTiming::completed_elapsed_ms)
                         })
                 } else {
                     live_elapsed_ms
@@ -6947,7 +6947,7 @@ pub fn process_timeline_icon(kind: &ToolKind) -> IconName {
 /// 渲染一份 diff：逐行红（删）/绿（增）/灰（不变），等宽字体，滚动限高——大改动
 /// 不能把整个消息流撑爆，超出部分滚动查看。`id` 是这块 diff 的身份，每一行再挂
 /// 行号，同一条消息里的多块 diff 不会抢同一个元素。行数据来自
-/// `smelt_core::acp_chat::diff_lines`——跟头部「+N -M」摘要（`diff_line_stats`）
+/// `smelt_model::acp_chat::diff_lines`——跟头部「+N -M」摘要（`diff_line_stats`）
 /// 共用同一次计算结果，数字不会对不上。
 fn render_diff_lines(
     lines: &[DiffLine],
@@ -6962,7 +6962,7 @@ fn render_diff_lines(
         .rounded_md()
         .border_1()
         .border_color(border_color)
-        .font_family(smelt_core::font_config::font_family())
+        .font_family(smelt_model::font_config::font_family())
         .text_xs();
     for (line_ix, line) in lines.iter().enumerate() {
         let (bg, prefix, fg): (Option<gpui::Hsla>, &str, gpui::Hsla) = match line.tag {
@@ -6989,7 +6989,7 @@ fn render_diff_lines(
                     .flex_1()
                     .min_w_0()
                     .text_xs()
-                    .font_family(smelt_core::font_config::font_family())
+                    .font_family(smelt_model::font_config::font_family())
                     .text_color(fg),
             ),
         );
@@ -6998,4 +6998,4 @@ fn render_diff_lines(
 }
 
 // strip_code_fence / is_interrupt_marker 的单测随实现一起搬进了
-// smelt_core::acp_chat（见该模块的 #[cfg(test)]），这里不再重复。
+// smelt_model::acp_chat（见该模块的 #[cfg(test)]），这里不再重复。

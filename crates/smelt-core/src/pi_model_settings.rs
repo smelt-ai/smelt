@@ -1638,3 +1638,74 @@ mod tests {
         assert!(validate_custom_provider_id("token x").is_err());
     }
 }
+
+#[cfg(test)]
+mod pi_model_settings_integration_tests {
+    use crate::pi_model_settings::{
+        PiCustomModel, PiCustomProvider, PiDefaultModelConfig, load_pi_model_settings_at,
+        pi_settings_summary_at, remove_pi_custom_provider_at, save_pi_custom_provider_at,
+        save_pi_default_model_at,
+    };
+
+    #[test]
+    fn pi_model_settings_lifecycle_in_isolated_dir() {
+        let temp_dir = std::env::temp_dir().join(format!("smelt-pi-test-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let temp = temp_dir.as_path();
+        let initial = load_pi_model_settings_at(temp).expect("load initial");
+        assert_eq!(initial.default_model.provider, "deepseek");
+        assert_eq!(initial.default_model.model, "deepseek-chat");
+        assert_eq!(initial.default_model.thinking_level, "medium");
+        let environment_credential_configured =
+            std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+        assert_eq!(
+            initial.credential_configured,
+            environment_credential_configured
+        );
+        assert!(initial.custom_providers.is_empty());
+
+        let default_config = PiDefaultModelConfig {
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
+            thinking_level: "low".to_string(),
+        };
+        save_pi_default_model_at(temp, &default_config, Some("sk-official-key"))
+            .expect("save default");
+
+        let custom_provider = PiCustomProvider {
+            id: "local-vllm".to_string(),
+            display_name: "Local vLLM".to_string(),
+            api: "openai-completions".to_string(),
+            base_url: "http://localhost:8000/v1".to_string(),
+            credential_configured: false,
+            models: vec![PiCustomModel {
+                id: "qwen-2.5-coder".to_string(),
+                name: "Qwen 2.5 Coder 32B".to_string(),
+                context_window: Some(65536),
+                max_tokens: Some(4096),
+            }],
+        };
+        save_pi_custom_provider_at(temp, &custom_provider, None, false).expect("save custom");
+
+        let reloaded = load_pi_model_settings_at(temp).expect("reload");
+        assert_eq!(reloaded.default_model.provider, "deepseek");
+        assert_eq!(reloaded.default_model.base_url, "https://api.deepseek.com");
+        assert_eq!(reloaded.default_model.thinking_level, "low");
+        assert!(reloaded.credential_configured);
+        assert_eq!(reloaded.custom_providers.len(), 1);
+        assert_eq!(reloaded.custom_providers[0].id, "local-vllm");
+        assert_eq!(reloaded.custom_providers[0].models[0].id, "qwen-2.5-coder");
+
+        let summary = pi_settings_summary_at(temp).expect("summary");
+        let dm = summary.default_model.expect("default model in summary");
+        assert_eq!(dm.provider.as_deref(), Some("deepseek"));
+        assert_eq!(dm.model.as_deref(), Some("deepseek-chat"));
+        assert_eq!(dm.thinking_level.as_deref(), Some("low"));
+
+        remove_pi_custom_provider_at(temp, "local-vllm").expect("remove custom");
+        let after_removal = load_pi_model_settings_at(temp).expect("after remove");
+        assert!(after_removal.custom_providers.is_empty());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

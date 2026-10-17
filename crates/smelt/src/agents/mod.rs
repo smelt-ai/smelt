@@ -21,7 +21,7 @@ use gpui_component::{
 
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
-use smelt_core::pi_plugin_catalog::PiPlugin;
+use smelt_model::pi_plugin_catalog::PiPlugin;
 use smelt_ui::IconAction as _;
 
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
@@ -127,7 +127,7 @@ pub(crate) struct AgentEditor {
     /// 运行时扫出的插件目录，取自 Workspace 的 Pi 配置快照；快照更新时跟着换。
     plugins: Vec<PiPlugin>,
     /// 运行时那台机器上 `~/.pi/agent/mcp.json` 里的服务器，同上。
-    mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
+    mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
     /// 同理，记忆不在渲染里扫：打开编辑器、记忆目录有变化、有对话停下来、
     /// 点刷新或删除后才重扫。
     memories: AgentMemories,
@@ -150,7 +150,7 @@ impl AgentEditor {
     pub(crate) fn set_pi_catalog(
         &mut self,
         plugins: Vec<PiPlugin>,
-        mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
+        mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
     ) {
         self.plugins = plugins;
         self.mcp_servers = mcp_servers;
@@ -158,7 +158,7 @@ impl AgentEditor {
 }
 
 /// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。由运行时列出。
-pub(crate) use smelt_core::agent_memory::AgentMemories;
+pub(crate) use smelt_model::agent_memory::AgentMemories;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryLayer {
@@ -167,10 +167,10 @@ pub(crate) enum MemoryLayer {
 }
 
 impl MemoryLayer {
-    pub(crate) fn wire(self) -> smelt_core::control_api::AgentMemoryLayer {
+    pub(crate) fn wire(self) -> smelt_model::control_api::AgentMemoryLayer {
         match self {
-            Self::Agent => smelt_core::control_api::AgentMemoryLayer::Agent,
-            Self::User => smelt_core::control_api::AgentMemoryLayer::User,
+            Self::Agent => smelt_model::control_api::AgentMemoryLayer::Agent,
+            Self::User => smelt_model::control_api::AgentMemoryLayer::User,
         }
     }
 }
@@ -233,8 +233,8 @@ impl MemoryFilter {
         }
     }
 
-    fn matches(self, entry: &smelt_core::agent_memory::MemoryEntry) -> bool {
-        let rule = smelt_core::agent_memory::is_rule_memory_kind(entry.kind.as_deref());
+    fn matches(self, entry: &smelt_model::agent_memory::MemoryEntry) -> bool {
+        let rule = smelt_model::agent_memory::is_rule_memory_kind(entry.kind.as_deref());
         match self {
             Self::All => true,
             Self::Pending => entry.pending_reason.is_some(),
@@ -247,10 +247,10 @@ impl MemoryFilter {
 /// 记忆页签里一层要显示的记忆。搜索不分大小写，名字、描述、文件名、正文任一命中即可。
 /// 待确认要用户处理，排最前；其余按最近用过排，没用过的垫底，同档按名字。
 pub(crate) fn visible_memories<'a>(
-    entries: &'a [smelt_core::agent_memory::MemoryEntry],
+    entries: &'a [smelt_model::agent_memory::MemoryEntry],
     query: &str,
     filter: MemoryFilter,
-) -> Vec<&'a smelt_core::agent_memory::MemoryEntry> {
+) -> Vec<&'a smelt_model::agent_memory::MemoryEntry> {
     let query = query.trim().to_lowercase();
     let mut visible: Vec<_> = entries
         .iter()
@@ -373,10 +373,10 @@ impl IntervalDayScope {
     }
 
     fn from_days(days: u8) -> Self {
-        let days = days & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
-        if days == 0 || days == smelt_core::automation::SCHEDULE_ALL_DAYS_MASK {
+        let days = days & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
+        if days == 0 || days == smelt_model::automation::SCHEDULE_ALL_DAYS_MASK {
             Self::Everyday
-        } else if days == smelt_core::automation::SCHEDULE_WEEKDAYS_MASK {
+        } else if days == smelt_model::automation::SCHEDULE_WEEKDAYS_MASK {
             Self::Weekdays
         } else {
             Self::Weekly
@@ -603,7 +603,7 @@ fn excerpt_text(value: &str, limit: usize) -> String {
 
 /// 产品智能体的执行引擎注册点在 `smelt_core`：移动端网关也要照同一份名单产出
 /// 新建对话选项，注册表留在 GUI crate 里两边就会各注册各的。
-pub(crate) use smelt_core::agent_definition::agent_engine_kinds;
+pub(crate) use smelt_model::agent_definition::agent_engine_kinds;
 
 fn clock_input_is_editable(value: &str) -> bool {
     if value.len() > 5
@@ -657,7 +657,7 @@ fn schedule_from_values(
             let (hour, minute) =
                 parse_clock(time).ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
             settings::AutomationSchedule::Weekly {
-                days: smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+                days: smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
                 hour,
                 minute,
             }
@@ -665,11 +665,11 @@ fn schedule_from_values(
         ScheduleKind::Weekly => {
             let (hour, minute) =
                 parse_clock(time).ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
-            let days = weekday_mask & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+            let days = weekday_mask & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
             if days == 0 {
                 return Err("请至少选择一天".to_string());
             }
-            if days == smelt_core::automation::SCHEDULE_ALL_DAYS_MASK {
+            if days == smelt_model::automation::SCHEDULE_ALL_DAYS_MASK {
                 settings::AutomationSchedule::Daily { hour, minute }
             } else {
                 settings::AutomationSchedule::Weekly { days, hour, minute }
@@ -689,9 +689,9 @@ fn schedule_from_values(
                 }
                 _ => return Err("请同时填写开始和结束时间".to_string()),
             };
-            let days = weekday_mask & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+            let days = weekday_mask & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
             let constrained = window.is_some()
-                || (days != 0 && days != smelt_core::automation::SCHEDULE_ALL_DAYS_MASK);
+                || (days != 0 && days != smelt_model::automation::SCHEDULE_ALL_DAYS_MASK);
             match interval_unit {
                 IntervalUnit::Minutes => {
                     let minutes = interval
@@ -708,7 +708,7 @@ fn schedule_from_values(
                         settings::AutomationSchedule::During {
                             minutes,
                             days: if days == 0 {
-                                smelt_core::automation::SCHEDULE_ALL_DAYS_MASK
+                                smelt_model::automation::SCHEDULE_ALL_DAYS_MASK
                             } else {
                                 days
                             },
@@ -734,7 +734,7 @@ fn schedule_from_values(
                         settings::AutomationSchedule::During {
                             minutes: hours.saturating_mul(60),
                             days: if days == 0 {
-                                smelt_core::automation::SCHEDULE_ALL_DAYS_MASK
+                                smelt_model::automation::SCHEDULE_ALL_DAYS_MASK
                             } else {
                                 days
                             },
@@ -771,7 +771,7 @@ fn trigger_from_editor(
             settings::AutomationTriggerKindId::Webhook => {
                 let secret = entry.webhook_secret.trim();
                 let secret = if secret.is_empty() {
-                    smelt_core::automation::new_webhook_secret()
+                    smelt_model::automation::new_webhook_secret()
                 } else {
                     secret.to_string()
                 };
@@ -830,10 +830,10 @@ fn schedule_from_values_for_rule(
 ) -> Result<settings::AutomationSchedule, String> {
     let weekday_mask = if rule.kind == ScheduleKind::Interval {
         match rule.interval_day_scope {
-            IntervalDayScope::Everyday => smelt_core::automation::SCHEDULE_ALL_DAYS_MASK,
-            IntervalDayScope::Weekdays => smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+            IntervalDayScope::Everyday => smelt_model::automation::SCHEDULE_ALL_DAYS_MASK,
+            IntervalDayScope::Weekdays => smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
             IntervalDayScope::Weekly => {
-                let days = rule.weekday_mask & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+                let days = rule.weekday_mask & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
                 if days == 0 {
                     return Err("请至少选择一天".to_string());
                 }
@@ -864,7 +864,7 @@ fn new_schedule_rule(
     let mut interval = 15_u32;
     let mut kind = ScheduleKind::Daily;
     let mut interval_unit = IntervalUnit::Minutes;
-    let mut weekday_mask = smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+    let mut weekday_mask = smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
     let mut interval_day_scope = IntervalDayScope::Everyday;
     let mut window_start_value = String::new();
     let mut window_end_value = String::new();
@@ -876,7 +876,7 @@ fn new_schedule_rule(
         }) => {
             hour = *start_hour;
             minute = *start_minute;
-            kind = if *days == smelt_core::automation::SCHEDULE_WEEKDAYS_MASK {
+            kind = if *days == smelt_model::automation::SCHEDULE_WEEKDAYS_MASK {
                 ScheduleKind::Weekdays
             } else {
                 ScheduleKind::Weekly
@@ -919,7 +919,7 @@ fn new_schedule_rule(
             }
             kind = ScheduleKind::Interval;
             weekday_mask = if *days == 0 {
-                smelt_core::automation::SCHEDULE_ALL_DAYS_MASK
+                smelt_model::automation::SCHEDULE_ALL_DAYS_MASK
             } else {
                 *days
             };
@@ -984,7 +984,7 @@ fn webhook_ingress_secret(webhook: &settings::WebhookIngress) -> String {
             let endpoint = webhook.endpoint.trim();
             (!endpoint.is_empty()).then(|| endpoint.to_string())
         })
-        .unwrap_or_else(smelt_core::automation::new_webhook_secret)
+        .unwrap_or_else(smelt_model::automation::new_webhook_secret)
 }
 
 fn new_trigger_entry(
@@ -1014,7 +1014,7 @@ fn new_trigger_entry(
         schedule,
         webhook_secret: webhook_secret
             .filter(|secret| !secret.trim().is_empty())
-            .unwrap_or_else(smelt_core::automation::new_webhook_secret),
+            .unwrap_or_else(smelt_model::automation::new_webhook_secret),
     }
 }
 
@@ -1340,7 +1340,7 @@ fn render_webhook_entry(
         .global::<settings::AgentHostState>()
         .webhook_base_url
         .clone()
-        .unwrap_or_else(|| smelt_core::automation::DEFAULT_WEBHOOK_BASE_URL.to_string());
+        .unwrap_or_else(|| smelt_model::automation::DEFAULT_WEBHOOK_BASE_URL.to_string());
     let stored = cx
         .global::<settings::AgentHostState>()
         .automations
@@ -1348,7 +1348,7 @@ fn render_webhook_entry(
         .find(|automation| automation.id == editor.automation_id);
     let paused = stored.is_some_and(|automation| !automation.enabled);
     let live_url = (!editor.is_new && !entry.webhook_secret.is_empty())
-        .then(|| smelt_core::automation::webhook_url(&base, &entry.webhook_secret));
+        .then(|| smelt_model::automation::webhook_url(&base, &entry.webhook_secret));
     let row_key = entry.schedule.time.entity_id();
     let copy_id = format!("automation-copy-webhook-{row_key}");
     let curl_id = format!("automation-copy-webhook-curl-{row_key}");
@@ -1505,7 +1505,7 @@ fn render_schedule_rule(
             let day_entity = entity.clone();
             compact_chip((id_prefix, day_index))
                 .w(px(32.))
-                .label(smelt_core::automation::SCHEDULE_DAY_LABELS[day_index])
+                .label(smelt_model::automation::SCHEDULE_DAY_LABELS[day_index])
                 .selected(selected)
                 .toggled(selected)
                 .on_click(move |_, _, cx| {
@@ -1753,7 +1753,7 @@ fn format_relative_since(ts: i64, now: i64) -> String {
 }
 
 fn format_last_run_cell(
-    last: Option<(smelt_core::automation::AutomationRunStatus, i64)>,
+    last: Option<(smelt_model::automation::AutomationRunStatus, i64)>,
     now: i64,
 ) -> String {
     match last {
@@ -1817,12 +1817,12 @@ fn automation_save_hint(missing: &[&str], is_new: bool) -> Option<String> {
     })
 }
 
-fn run_source_label(source: smelt_core::automation::AutomationRunSource) -> &'static str {
+fn run_source_label(source: smelt_model::automation::AutomationRunSource) -> &'static str {
     source.label()
 }
 
-fn run_status_label(status: smelt_core::automation::AutomationRunStatus) -> &'static str {
-    use smelt_core::automation::AutomationRunStatus;
+fn run_status_label(status: smelt_model::automation::AutomationRunStatus) -> &'static str {
+    use smelt_model::automation::AutomationRunStatus;
     match status {
         AutomationRunStatus::Starting => "启动中",
         AutomationRunStatus::Queued => "等待投递",
@@ -1925,7 +1925,7 @@ fn automation_nav_needs_attention(config: &settings::AgentHostState) -> bool {
             && config
                 .latest_automation_run(&automation.id)
                 .is_some_and(|run| {
-                    run.status == smelt_core::automation::AutomationRunStatus::Failed
+                    run.status == smelt_model::automation::AutomationRunStatus::Failed
                 })
     })
 }
@@ -2225,7 +2225,7 @@ fn render_agent_plugin_card(
         if editor.plugins.iter().any(|plugin| plugin.id == *id) {
             continue;
         }
-        let (kind_label, name) = match smelt_core::pi_plugin_catalog::split_plugin_id(id) {
+        let (kind_label, name) = match smelt_model::pi_plugin_catalog::split_plugin_id(id) {
             Some((kind, name)) => (kind.label(), name.to_string()),
             None => ("未知", id.clone()),
         };
@@ -2318,7 +2318,7 @@ fn render_agent_context_card(
     editor: &AgentEditor,
     entity: Entity<Workspace>,
 ) -> AnyElement {
-    let space_root = smelt_core::agent_definition_store::agent_space_root(&agent.id)
+    let space_root = smelt_model::agent_paths::agent_space_root(&agent.id)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
 
@@ -2442,7 +2442,7 @@ fn render_agent_context_card(
                 .text_color(rgb(crate::ui_theme::text_faint()))
                 .child(format!(
                     "工作目录 {space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
-                    smelt_core::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
+                    smelt_model::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
                 )),
         )
         .into_any_element()
@@ -2695,7 +2695,7 @@ struct AgentMemorySection<'a> {
     layer: MemoryLayer,
     title: &'static str,
     empty_hint: &'static str,
-    listing: &'a smelt_core::agent_memory::MemoryListing,
+    listing: &'a smelt_model::agent_memory::MemoryListing,
     query: &'a str,
     filter: MemoryFilter,
     /// 有搜索词或筛选时，空列表要说「没有匹配」，不能说「还没有记忆」。
@@ -2791,7 +2791,7 @@ fn agent_memory_section(
                     .text_color(rgb(crate::ui_theme::red()))
                     .child(format!(
                         "规则类记忆正文超过 {}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。",
-                        smelt_core::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
+                        smelt_model::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
                     )),
             )
         })
@@ -2801,7 +2801,7 @@ fn agent_memory_section(
 
 fn memory_section_title(
     title: &str,
-    listing: &smelt_core::agent_memory::MemoryListing,
+    listing: &smelt_model::agent_memory::MemoryListing,
     shown: Option<usize>,
 ) -> String {
     let total = listing.entries.len();
@@ -2832,7 +2832,7 @@ fn memory_kind_label(kind: Option<&str>) -> &'static str {
 }
 
 /// 行尾的状态：待确认和长期没用的标红，提示用户处理；用过的显示次数。
-fn memory_usage_label(entry: &smelt_core::agent_memory::MemoryEntry) -> Option<(String, bool)> {
+fn memory_usage_label(entry: &smelt_model::agent_memory::MemoryEntry) -> Option<(String, bool)> {
     if entry.pending_reason.is_some() {
         return Some(("待确认".to_string(), true));
     }
@@ -2846,7 +2846,7 @@ fn agent_memory_row(
     agent_id: &str,
     layer: MemoryLayer,
     layer_key: &str,
-    entry: &smelt_core::agent_memory::MemoryEntry,
+    entry: &smelt_model::agent_memory::MemoryEntry,
     expanded: bool,
     entity: Entity<Workspace>,
 ) -> AnyElement {
@@ -3129,11 +3129,11 @@ fn render_agent_mcp_card(
         .iter()
         .map(|server| {
             let (kind_label, detail) = match &server.transport {
-                smelt_core::pi_mcp::PiMcpTransport::Http { url } => ("远程", url.clone()),
-                smelt_core::pi_mcp::PiMcpTransport::Stdio { command, args } => {
+                smelt_model::pi_mcp::PiMcpTransport::Http { url } => ("远程", url.clone()),
+                smelt_model::pi_mcp::PiMcpTransport::Stdio { command, args } => {
                     ("本地", format!("{command} {}", args.join(" ")))
                 }
-                smelt_core::pi_mcp::PiMcpTransport::Unknown => ("未知", String::new()),
+                smelt_model::pi_mcp::PiMcpTransport::Unknown => ("未知", String::new()),
             };
             // 能力库里停用的服务器勾了也不会连：Pi 读到 `enabled: false` 就跳过。
             let broken = (!server.enabled).then(|| "已在能力库停用，勾选也不会连接".to_string());

@@ -4,7 +4,7 @@ use super::*;
 
 pub(crate) struct AcpResumeRequest {
     pub agent: settings::ConversationAgentKind,
-    pub launch_override: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
+    pub launch_override: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
     pub profile_id: Option<String>,
     pub cwd: String,
     pub resume_id: String,
@@ -14,7 +14,7 @@ pub(crate) struct AcpResumeRequest {
 /// 智能体对话留在工作台对话区，定时 Run 默认无界面，都不进入项目会话列表。
 pub(crate) struct NewAcpSessionRequest {
     pub agent: settings::ConversationAgentKind,
-    pub launch_override: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
+    pub launch_override: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
     pub profile_id: Option<String>,
     pub agent_definition: Option<settings::AgentDefinition>,
     pub fallback_cwd: Option<String>,
@@ -1011,7 +1011,7 @@ impl Workspace {
                 restore: false,
             });
         }
-        if !smelt_core::session_control::is_agent_conversation(
+        if !smelt_model::session_control::is_agent_conversation(
             None,
             agent_definition_id.as_deref(),
             request.cwd.as_deref(),
@@ -1078,7 +1078,7 @@ impl Workspace {
             .as_ref()
             .and_then(|definition| definition.model_config_value());
         let agent_definition_id = agent_definition.map(|definition| definition.id);
-        let is_agent_conversation = smelt_core::session_control::is_agent_conversation(
+        let is_agent_conversation = smelt_model::session_control::is_agent_conversation(
             automation_id.as_deref(),
             agent_definition_id.as_deref(),
             cwd.as_deref(),
@@ -1193,7 +1193,7 @@ impl Workspace {
 
         // 续接必须按原来的智能体定义启动：space 目录或历史绑定都能认出主人。
         // 只认 space 的话，项目里开的智能体对话会退化成裸引擎，插件和人设全丢。
-        let definition = smelt_core::agent_definition_store::agent_definition_id_for_space(
+        let definition = smelt_model::agent_paths::agent_definition_id_for_space(
             std::path::Path::new(&cwd),
         )
         .or_else(|| {
@@ -1285,7 +1285,7 @@ impl Workspace {
     pub fn resume_cli_session(
         &mut self,
         agent: settings::HistorySourceKind,
-        launch_override: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
+        launch_override: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
         cwd: String,
         resume_id: String,
         cx: &mut Context<Self>,
@@ -1298,7 +1298,7 @@ impl Workspace {
         };
         if let Some(launch) = launch_override {
             for (name, value) in launch.env.iter().rev() {
-                let value = smelt_core::workspace_override::expand_tilde(value);
+                let value = smelt_model::workspace_override::expand_tilde(value);
                 command = format!("{name}={} {command}", shell_quote(&value));
             }
         }
@@ -1460,8 +1460,8 @@ impl Workspace {
     pub(crate) fn workspace_menu_snapshot(
         &self,
         cx: &App,
-    ) -> smelt_core::workspace_menu::WorkspaceMenuSnapshot {
-        use smelt_core::workspace_menu::{
+    ) -> smelt_model::workspace_menu::WorkspaceMenuSnapshot {
+        use smelt_model::workspace_menu::{
             WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind,
             WorkspaceMenuSnapshot,
         };

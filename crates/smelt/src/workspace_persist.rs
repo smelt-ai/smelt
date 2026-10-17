@@ -30,7 +30,7 @@ pub(crate) struct WsState {
     pub(crate) projects: Vec<String>,
     /// PC 侧栏的跨端纯数据投影。移动端直接消费并过滤 ACP，不再重新推导菜单。
     #[serde(default)]
-    pub(crate) menu: smelt_core::workspace_menu::WorkspaceMenuSnapshot,
+    pub(crate) menu: smelt_model::workspace_menu::WorkspaceMenuSnapshot,
     /// 当前活动会话的存档下标。只作旧档回退；认人用 `active_session_id`。
     #[serde(default)]
     pub(crate) active_session: usize,
@@ -495,7 +495,7 @@ struct SnapshotJob {
     document: serde_json::Value,
     catalog: WorkspaceCatalogSync,
     /// 同步发给 smeltd 的侧栏菜单。网关只消费 daemon 订阅，不读工作区快照。
-    menu: smelt_core::workspace_menu::WorkspaceMenuSnapshot,
+    menu: smelt_model::workspace_menu::WorkspaceMenuSnapshot,
 }
 
 /// workspace 状态的单消费者写入队列。它不直接做 I/O，只负责把所有生产者（普通保存、

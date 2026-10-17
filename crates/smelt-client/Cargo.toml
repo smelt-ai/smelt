@@ -10,6 +10,15 @@ workspace = true
 # 的守护操作。只走协议，不依赖 smelt-core 和运行时的库（设计文档 P1）。
 
 [dependencies]
+smelt-client-store = { path = "../smelt-client-store" }
+smelt-sys = { path = "../smelt-sys" }
+anyhow = "1"
+dirs = "5"
+libc = "0.2"
+reqwest = { version = "0.12", features = ["json"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+url = "2"
 smelt-event-protocol = { path = "../smelt-event-protocol" }
 smelt-model = { path = "../smelt-model" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }

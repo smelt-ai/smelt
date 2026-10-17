@@ -516,7 +516,7 @@ impl AcpView {
                                             cx,
                                         ))
                                         .when(
-                                            smelt_core::session_handoff::live_fork_is_available(
+                                            smelt_model::session_handoff::live_fork_is_available(
                                                 this.agent,
                                             ) && this.acp_session_id.is_some(),
                                             |row| {
@@ -1129,7 +1129,7 @@ impl AcpView {
                                         )
                                         .text_xs()
                                         .text_color(muted)
-                                        .font_family(smelt_core::font_config::font_family()),
+                                        .font_family(smelt_model::font_config::font_family()),
                                     ),
                             );
                         }
@@ -1532,14 +1532,14 @@ impl AcpView {
         // 挂着这次调用的后台任务为准：Pi 没了任务也跟着结束，不会一直转。
         let background_running = background_task_running_for(&self.background_tasks, id);
         let running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
-            || smelt_core::acp_chat::has_unfinished_tool_call(children)
+            || smelt_model::acp_chat::has_unfinished_tool_call(children)
             || background_running;
-        let roster = smelt_core::acp_chat::is_subagent_roster(children);
-        let mut headline = smelt_core::acp_chat::subagent_card_title(title, children);
+        let roster = smelt_model::acp_chat::is_subagent_roster(children);
+        let mut headline = smelt_model::acp_chat::subagent_card_title(title, children);
         if headline.is_empty() {
             headline = "子代理".to_string();
         }
-        let mut progress = smelt_core::acp_chat::subagent_progress_text(status, children);
+        let mut progress = smelt_model::acp_chat::subagent_progress_text(status, children);
         if background_running && progress.is_empty() {
             progress = "后台运行中".to_string();
         }
@@ -1703,9 +1703,9 @@ impl AcpView {
                     children: nested,
                 } => {
                     let failed = matches!(status, ToolCallStatus::Failed);
-                    let nested_running = smelt_core::acp_chat::has_unfinished_tool_call(nested);
+                    let nested_running = smelt_model::acp_chat::has_unfinished_tool_call(nested);
                     let ink = if failed { red.into() } else { muted };
-                    let mut name = smelt_core::acp_chat::subagent_visible_title(title);
+                    let mut name = smelt_model::acp_chat::subagent_visible_title(title);
                     if name.is_empty() {
                         name = "子代理".to_string();
                     }
@@ -2034,7 +2034,7 @@ impl AcpView {
         let preview = tool_log_preview(body);
         let expanded = self.expanded_tools.contains(tool_id);
         let mode = tool_log_mode(preview.total, expanded);
-        let font = smelt_core::font_config::font_family();
+        let font = smelt_model::font_config::font_family();
         let body_el = match mode {
             ToolLogMode::Inline => {
                 selectable_plain_text(owner_part("acp-tool-log-text", &owner, part_ix), body)
@@ -2164,7 +2164,7 @@ fn tool_log_viewport(viewport: ToolLogViewport<'_>) -> gpui::AnyElement {
     let widest = widest_log_line_index(&lines);
     let height = tool_log_viewport_height(lines.len());
     let row_lines = lines.clone();
-    let row_font = smelt_core::font_config::font_family();
+    let row_font = smelt_model::font_config::font_family();
     let list = uniform_list(list_id, lines.len(), move |range, _window, _app| {
         let font = row_font.clone();
         let line_marker_prefix = line_marker_prefix.clone();
@@ -2330,7 +2330,7 @@ fn popover_plain_log(
         return selectable_plain_text(owner_part(text_name, tool_id, part_ix), body)
             .text_xs()
             .text_color(muted)
-            .font_family(smelt_core::font_config::font_family())
+            .font_family(smelt_model::font_config::font_family())
             .into_any_element();
     }
     let total = preview.total;
@@ -2452,7 +2452,7 @@ fn nested_tool_row(
         muted
     };
     let headline = if matches!(kind, ToolKind::Collaborate) {
-        let visible = smelt_core::acp_chat::subagent_visible_title(title);
+        let visible = smelt_model::acp_chat::subagent_visible_title(title);
         if visible.is_empty() {
             "子代理".to_string()
         } else {

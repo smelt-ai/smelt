@@ -4,7 +4,7 @@ use crate::settings::{ConversationAgentKind, HistorySourceKind, TerminalAgentKin
 #[test]
 fn automation_run_does_not_require_an_existing_conversation() {
     use crate::settings::{Automation, AutomationSchedule, AutomationTrigger};
-    use smelt_core::automation::{AutomationCommand, AutomationFile, apply_automation_command};
+    use smelt_model::automation::{AutomationCommand, AutomationFile, apply_automation_command};
 
     let automation = Automation {
         id: "open-scan".into(),
@@ -12,7 +12,7 @@ fn automation_run_does_not_require_an_existing_conversation() {
         enabled: true,
         workspace_dir: Some("/tmp".into()),
         trigger: AutomationTrigger::schedule(AutomationSchedule::daily_morning()),
-        action: smelt_core::automation::AutomationAction::Agent {
+        action: smelt_model::automation::AutomationAction::Agent {
             agent_definition_id: "quant".into(),
             prompt: Some("拉取行情并输出".into()),
         },
@@ -66,7 +66,7 @@ fn automation_definition_does_not_require_a_user_selected_workspace() {
         enabled: true,
         workspace_dir: None,
         trigger: AutomationTrigger::schedule(AutomationSchedule::daily_morning()),
-        action: smelt_core::automation::AutomationAction::Agent {
+        action: smelt_model::automation::AutomationAction::Agent {
             agent_definition_id: "quant".into(),
             prompt: Some("拉取行情并输出".into()),
         },
@@ -100,7 +100,7 @@ fn old_acp_archive_without_agent_field_still_loads() {
 fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
     let saved = AcpSaved {
         cwd: Some("/repo".into()),
-        launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude")
+        launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude")
             .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
         profile_id: Some("quant".into()),
         agent: Some("claude".into()),
@@ -110,7 +110,7 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
         )),
         sid: Some("acp-1".into()),
         refresh_launch_from_settings: false,
-        conversation_binding: smelt_core::conversation::ConversationBinding::Automation {
+        conversation_binding: smelt_model::conversation::ConversationBinding::Automation {
             run_id: "run-1".into(),
         },
         config_values: vec![
@@ -168,7 +168,7 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
     );
     assert_eq!(
         restored.conversation_binding,
-        smelt_core::conversation::ConversationBinding::Automation {
+        smelt_model::conversation::ConversationBinding::Automation {
             run_id: "run-1".into()
         }
     );

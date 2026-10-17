@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::settings::workspace::PiConfigFileKind;
-use smelt_core::pi_auth::PiAuthProvider;
-use smelt_core::pi_model_settings::{PiCustomProvider, PiModelSettings};
+use smelt_model::pi_auth::PiAuthProvider;
+use smelt_model::pi_model_settings::{PiCustomProvider, PiModelSettings};
 use smelt_ui::IconAction as _;
 
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
@@ -230,7 +230,7 @@ fn default_model_section(
 /// `settings.json` 里用户真的选过的默认模型；没选过返回 `None`。
 fn explicit_default(
     snapshot: &SettingsRenderSnapshot,
-) -> Option<&smelt_core::pi_model_settings::PiDefaultModelSummary> {
+) -> Option<&smelt_model::pi_model_settings::PiDefaultModelSummary> {
     snapshot
         .pi_settings
         .as_ref()
@@ -747,7 +747,7 @@ fn custom_provider_row(
 /// 直接改 Pi 原生文件的逃生口。平时用不到，压成一行放在页底。
 fn config_files_footer(
     entity: &Entity<Workspace>,
-    paths: &smelt_core::pi_service::PiConfigPaths,
+    paths: &smelt_model::pi_service::PiConfigPaths,
     palette: Palette,
 ) -> Div {
     let file_button =
@@ -1183,7 +1183,7 @@ fn custom_provider_form(
                                 .small()
                                 .label(editor.api.clone())
                                 .dropdown_menu(move |mut menu, _window, _cx| {
-                                    for api in smelt_core::provider_api::PROVIDER_API_PROTOCOLS {
+                                    for api in smelt_model::provider_api::PROVIDER_API_PROTOCOLS {
                                         let api_entity = api_entity.clone();
                                         menu = menu.item(PopupMenuItem::new(*api).on_click(
                                             move |_ev, _window, cx| {
@@ -1324,8 +1324,8 @@ mod tests {
     // 不用 `super::*`：那条 glob 链会带进 `gpui::*` 里的 `test` 属性宏，把这里的
     // `#[test]` 换成 gpui 的版本，展开时撞上递归上限。
     use super::{ProviderEntry, merge_providers};
-    use smelt_core::pi_auth::{PiAuthProvider, PiAuthStatus};
-    use smelt_core::pi_model_settings::PiCustomProvider;
+    use smelt_model::pi_auth::{PiAuthProvider, PiAuthStatus};
+    use smelt_model::pi_model_settings::PiCustomProvider;
 
     fn builtin(id: &str, oauth: bool, status: PiAuthStatus) -> PiAuthProvider {
         PiAuthProvider {

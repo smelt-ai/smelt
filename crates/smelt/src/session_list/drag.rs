@@ -2,7 +2,7 @@
 
 use super::*;
 use gpui_component::scroll::AutoScroll;
-use smelt_core::agent_kind::TerminalAgentKind;
+use smelt_model::agent_kind::TerminalAgentKind;
 
 /// 指针在侧栏视口顶/底边缘时的滚动量。正数往下，负数往上。
 /// 横向上离开侧栏太远就停，避免拖到舞台区还在滚列表。

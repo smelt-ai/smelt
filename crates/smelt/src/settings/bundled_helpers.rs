@@ -6,7 +6,7 @@
 
 /// smelt-notify 安装路径（与 package/安装脚本约定一致）。
 fn smelt_notify_path() -> std::path::PathBuf {
-    smelt_core::agent_event::notify_executable_path()
+    smelt_model::agent_event::notify_executable_path()
 }
 
 /// cross-agent MCP helper 的稳定安装路径。managed smeltd 与它同目录，ACP/PTY

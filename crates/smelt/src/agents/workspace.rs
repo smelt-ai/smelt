@@ -309,8 +309,8 @@ impl Workspace {
             let listed = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::runtime_call::call::<smelt_core::control_api::AgentMemoryList>(
-                        smelt_core::control_api::AgentDefinitionIdParams { id },
+                    crate::runtime_call::call::<smelt_model::control_api::AgentMemoryList>(
+                        smelt_model::control_api::AgentDefinitionIdParams { id },
                         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                     )
                     .map_err(crate::runtime_call::error_text)
@@ -454,8 +454,8 @@ impl Workspace {
             let ensured = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::runtime_call::call::<smelt_core::control_api::AgentMemoryEnsureDir>(
-                        smelt_core::control_api::AgentMemoryDirParams {
+                    crate::runtime_call::call::<smelt_model::control_api::AgentMemoryEnsureDir>(
+                        smelt_model::control_api::AgentMemoryDirParams {
                             agent_id,
                             layer: layer.wire(),
                         },
@@ -501,8 +501,8 @@ impl Workspace {
             file_name,
             ..
         } = target;
-        self.submit_memory_change::<smelt_core::control_api::AgentMemoryDelete>(
-            smelt_core::control_api::AgentMemoryFileParams {
+        self.submit_memory_change::<smelt_model::control_api::AgentMemoryDelete>(
+            smelt_model::control_api::AgentMemoryFileParams {
                 agent_id,
                 layer: layer.wire(),
                 file_name,
@@ -519,8 +519,8 @@ impl Workspace {
         file_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.submit_memory_change::<smelt_core::control_api::AgentMemoryApprove>(
-            smelt_core::control_api::AgentMemoryFileParams {
+        self.submit_memory_change::<smelt_model::control_api::AgentMemoryApprove>(
+            smelt_model::control_api::AgentMemoryFileParams {
                 agent_id,
                 layer: layer.wire(),
                 file_name,
@@ -733,8 +733,8 @@ impl Workspace {
             let space = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::runtime_call::call::<smelt_core::control_api::AgentSpaceEnsure>(
-                        smelt_core::control_api::AgentDefinitionIdParams { id: agent_id },
+                    crate::runtime_call::call::<smelt_model::control_api::AgentSpaceEnsure>(
+                        smelt_model::control_api::AgentDefinitionIdParams { id: agent_id },
                         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                     )
                     .map_err(crate::runtime_call::error_text)
@@ -771,7 +771,7 @@ impl Workspace {
         let draft = self.agent_surface.conversation_draft_id.clone();
         let (intent, clear_stored, agents_empty) = {
             let agents = &cx.global::<settings::AgentHostState>().agents;
-            let resolution = smelt_core::default_conversation::resolve_new_conversation(
+            let resolution = smelt_model::default_conversation::resolve_new_conversation(
                 agents,
                 stored.as_deref(),
                 draft.as_deref(),
@@ -786,12 +786,12 @@ impl Workspace {
             clear_default_conversation_agent(cx);
         }
         match intent {
-            smelt_core::default_conversation::NewConversationIntent::Start { agent_id } => {
+            smelt_model::default_conversation::NewConversationIntent::Start { agent_id } => {
                 self.discard_uncommitted_draft(Some(&agent_id), cx);
                 self.start_agent_conversation(agent_id, window, cx);
             }
-            smelt_core::default_conversation::NewConversationIntent::PickAgent => {}
-            smelt_core::default_conversation::NewConversationIntent::CreateAgent => {
+            smelt_model::default_conversation::NewConversationIntent::PickAgent => {}
+            smelt_model::default_conversation::NewConversationIntent::CreateAgent => {
                 if self.agent_surface.conversation_draft_id.is_some() {
                     self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
                     window.focus(&self.focus_handle, cx);
@@ -1158,7 +1158,7 @@ impl Workspace {
 
     pub(super) fn automation_snapshot_is_current_store(
         &self,
-        snapshot: &smelt_core::automation::AutomationFile,
+        snapshot: &smelt_model::automation::AutomationFile,
         cx: &App,
     ) -> bool {
         let config = cx.global::<settings::AgentHostState>();
@@ -1169,7 +1169,7 @@ impl Workspace {
 
     pub(super) fn submit_automation_command(
         &mut self,
-        command: smelt_core::automation::AutomationCommand,
+        command: smelt_model::automation::AutomationCommand,
         cx: &mut Context<Self>,
     ) {
         self.automation_surface.error = None;
@@ -1196,14 +1196,14 @@ impl Workspace {
 
     pub(super) fn run_automation_once(&mut self, automation_id: String, cx: &mut Context<Self>) {
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::RunOnce { automation_id },
+            smelt_model::automation::AutomationCommand::RunOnce { automation_id },
             cx,
         );
     }
 
     pub(super) fn cancel_automation_run(&mut self, run_id: String, cx: &mut Context<Self>) {
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::CancelRun { run_id },
+            smelt_model::automation::AutomationCommand::CancelRun { run_id },
             cx,
         );
     }
@@ -1273,7 +1273,7 @@ impl Workspace {
         });
         view.update(cx, |view, cx| {
             view.restore_conversation_binding(
-                smelt_core::conversation::ConversationBinding::Automation { run_id: run.id },
+                smelt_model::conversation::ConversationBinding::Automation { run_id: run.id },
             );
             view.maybe_auto_resume(window, cx);
         });
@@ -1515,7 +1515,7 @@ impl Workspace {
             self.automation_surface.live_sub = None;
         }
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::Delete { automation_id },
+            smelt_model::automation::AutomationCommand::Delete { automation_id },
             cx,
         );
     }
@@ -1527,7 +1527,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::SetEnabled {
+            smelt_model::automation::AutomationCommand::SetEnabled {
                 automation_id,
                 enabled,
             },
@@ -1733,15 +1733,15 @@ impl Workspace {
         {
             rule.kind = kind;
             if kind == ScheduleKind::Weekdays {
-                rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                 rule.interval_day_scope = IntervalDayScope::Weekdays;
             } else if kind == ScheduleKind::Weekly {
                 if rule.weekday_mask == 0 {
-                    rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                    rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                 }
                 rule.interval_day_scope = IntervalDayScope::Weekly;
             } else if kind == ScheduleKind::Daily {
-                rule.weekday_mask = smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+                rule.weekday_mask = smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
                 rule.interval_day_scope = IntervalDayScope::Everyday;
             } else {
                 rule.interval_day_scope = IntervalDayScope::from_days(rule.weekday_mask);
@@ -1784,14 +1784,14 @@ impl Workspace {
             rule.interval_day_scope = scope;
             match scope {
                 IntervalDayScope::Everyday => {
-                    rule.weekday_mask = smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+                    rule.weekday_mask = smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
                 }
                 IntervalDayScope::Weekdays => {
-                    rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                    rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                 }
                 IntervalDayScope::Weekly => {
                     if rule.weekday_mask == 0 {
-                        rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                        rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                     }
                 }
             }
@@ -1928,7 +1928,7 @@ impl Workspace {
                     "automation-regen-webhook-{}",
                     entry.schedule.time.entity_id()
                 );
-                entry.webhook_secret = smelt_core::automation::new_webhook_secret();
+                entry.webhook_secret = smelt_model::automation::new_webhook_secret();
                 flash_id
             });
         if should_save {
@@ -2034,7 +2034,7 @@ impl Workspace {
         self.automation_surface.error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let command = smelt_core::automation::AutomationCommand::Upsert {
+            let command = smelt_model::automation::AutomationCommand::Upsert {
                 automation: Box::new(automation),
             };
             let result = cx

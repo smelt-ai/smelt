@@ -1,7 +1,7 @@
 //! 历史会话的 GPUI 状态、渲染与 Workspace 集成。各家 agent 的数据模型与
-//! 解析器位于 `smelt_core::session_history`，这里 re-export 保持消费者兼容。
+//! 解析器位于 运行时（smelt-core 的 `session_history`）；展示数据在 `smelt_model::session_history`，这里 re-export 保持消费者兼容。
 
-pub use smelt_core::session_history::*;
+pub use smelt_model::session_history::*;
 
 use smelt_runtime_client::protocol::history::{
     HistoryDeleteCall, HistoryDeleteParams, HistoryDetailCall, HistoryDetailParams,
@@ -142,7 +142,7 @@ pub(crate) struct HistorySourceTab {
 /// 取决于本机有没有落盘 transcript，与有没有 ACP 无关。
 pub(crate) fn history_source_tabs(
     restrict_to_kind: Option<ConversationAgentKind>,
-    profiles: impl IntoIterator<Item = smelt_core::agent_kind::AcpProfile>,
+    profiles: impl IntoIterator<Item = smelt_model::agent_kind::AcpProfile>,
 ) -> Vec<HistorySourceTab> {
     let mut tabs = Vec::new();
     for kind in HistorySourceKind::ALL {
@@ -188,7 +188,7 @@ pub(crate) struct HistoryViewParams<'a> {
     /// 顶部来源 tab，由 [`history_source_tabs`] 在 Workspace 里算好。
     pub source_tabs: Vec<HistorySourceTab>,
     /// 当前 tab 若是手动 profile，续接要用它的启动规格。
-    pub launch_override: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
+    pub launch_override: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
     /// 当前 tab 的 profile 显示名；迁移文案用。
     pub profile_label: Option<String>,
     /// `resume_id` → 产品智能体定义 id。项目历史里靠它认出「这不是裸引擎会话」。
@@ -906,8 +906,8 @@ pub(crate) fn session_list_key(
 
 fn current_profile_launch(
     config: &crate::settings::AgentHostState,
-    profile: &smelt_core::agent_kind::AcpProfile,
-) -> Result<smelt_core::agent_kind::ConversationLaunchSpec, String> {
+    profile: &smelt_model::agent_kind::AcpProfile,
+) -> Result<smelt_model::agent_kind::ConversationLaunchSpec, String> {
     config.profile_launch_spec(profile)
 }
 
@@ -1273,7 +1273,7 @@ fn migration_menu(
         }
         let target = acp_view::AcpHandoffTarget {
             agent: target_agent,
-            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command(
+            launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command(
                 config.acp_cmd_for(target_agent),
             ),
             profile_id: None,
@@ -1341,7 +1341,7 @@ fn build_history_handoff_request(
     detail: &SessionDetail,
     target: acp_view::AcpHandoffTarget,
 ) -> acp_view::AcpHandoffRequest {
-    use smelt_core::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
+    use smelt_model::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
 
     let context = HandoffContext {
         turns: handoff_turns_from_history(detail),
@@ -1375,7 +1375,7 @@ fn build_history_handoff_request(
         resume_session_id: None,
         fork_session_id: None,
         fork_cut: None,
-        conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
+        conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
     }
 }
 
@@ -1391,8 +1391,8 @@ mod tests {
         history_source_tabs,
     };
     use crate::settings::AgentHostState;
-    use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind};
-    use smelt_core::session_handoff::HandoffTurn;
+    use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind};
+    use smelt_model::session_handoff::HandoffTurn;
 
     fn summary(title: &str, custom: Option<&str>, agent_title: &str) -> SessionSummary {
         SessionSummary {
@@ -1541,7 +1541,7 @@ mod tests {
         };
         let target = crate::acp_view::AcpHandoffTarget {
             agent: ConversationAgentKind::Claude,
-            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude"),
+            launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude"),
             profile_id: None,
             profile_label: None,
         };

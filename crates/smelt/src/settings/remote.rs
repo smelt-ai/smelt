@@ -14,16 +14,16 @@ use crate::terminal;
 
 /// 远程操作网关的持久化配置（全局单例，存 SQLite KV）。
 ///
-/// 结构体本体在 `smelt_core::remote_config`——守护也要读同一份文件来自愈
+/// 结构体本体在 `smelt_model::remote_config`——守护也要读同一份文件来自愈
 /// （见那边的模块注释）。这里只是给它套一层 newtype，好实现 GPUI 的 `Global`
 /// （孤儿规则不允许给外部类型实现外部 trait）。`#[serde(transparent)]` 保证
 /// 落盘格式与守护读到的一模一样。
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct RemoteConfig(pub smelt_core::remote_config::RemoteConfig);
+pub struct RemoteConfig(pub smelt_model::remote_config::RemoteConfig);
 
 impl std::ops::Deref for RemoteConfig {
-    type Target = smelt_core::remote_config::RemoteConfig;
+    type Target = smelt_model::remote_config::RemoteConfig;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -83,7 +83,7 @@ fn remote_config_writer() -> &'static smol::channel::Sender<RemoteConfig> {
         std::thread::spawn(move || {
             while let Ok(config) = rx.recv_blocking() {
                 if let Err(error) = crate::runtime_call::call::<
-                    smelt_core::control_api::RemoteConfigSet,
+                    smelt_model::control_api::RemoteConfigSet,
                 >(
                     config.0, crate::runtime_call::RUNTIME_CALL_TIMEOUT
                 ) {
@@ -107,7 +107,7 @@ pub fn start_remote_config_load(cx: &mut App) {
             let fetched = cx
                 .background_executor()
                 .spawn(async {
-                    crate::runtime_call::call::<smelt_core::control_api::RemoteConfigGet>(
+                    crate::runtime_call::call::<smelt_model::control_api::RemoteConfigGet>(
                         smelt_runtime_client::protocol::control::EmptyParams::default(),
                         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                     )

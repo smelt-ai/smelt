@@ -1,18 +1,18 @@
 //! 应用级 provider 额度：定时请运行时刷新，结果写进 [`ProviderStatus`]。
 //!
 //! 额度是账户状态，不属于 ACP 会话。凭据在运行时那台机器上，查询和跨启动缓存都由
-//! 运行时做（`quota.*`，见 [`smelt_core::quota_service`]）。这里只管节奏：启动先显示
+//! 运行时做（`quota.*`，见 [`smelt_model::quota_service`]）。这里只管节奏：启动先显示
 //! 运行时缓存里的结果，缓存不新鲜才立即查；之后每 [`REFRESH_INTERVAL`] 全量查一次，
 //! 用户点哪家就单查哪家。侧栏和对话模型菜单都从 `ProviderStatus` 读，并靠
 //! `observe_global` 收到更新。
 
 use std::time::Duration;
 
-use smelt_core::control_api::{QuotaGet, QuotaRefresh};
-use smelt_core::quota_service::QuotaRefreshParams;
+use smelt_model::control_api::{QuotaGet, QuotaRefresh};
+use smelt_model::quota_service::QuotaRefreshParams;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
-pub(crate) use smelt_core::provider_quota::ProviderQuotaData;
+pub(crate) use smelt_model::provider_quota::ProviderQuotaData;
 pub(crate) use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 
 use crate::Workspace;

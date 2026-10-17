@@ -58,7 +58,7 @@ fn default_theme_mode() -> ThemeMode {
 }
 
 fn default_theme_name() -> String {
-    smelt_core::theme_index::DEFAULT_DARK.to_string()
+    smelt_model::theme_index::DEFAULT_DARK.to_string()
 }
 
 /// 界面字号（基准 rem，px）默认值与取值范围。
@@ -270,7 +270,7 @@ pub fn apply_requested_appearance(
 ) {
     let current = cx.global::<Appearance>().clone();
     let mut snapshot = snapshot_from_appearance(&current);
-    if let Err(error) = smelt_core::appearance_settings::apply_patch(&mut snapshot, settings) {
+    if let Err(error) = smelt_model::appearance_settings::apply_patch(&mut snapshot, settings) {
         crate::status_item::notify_error(format!("外观修改未生效：{error}"));
         return;
     }
@@ -354,11 +354,11 @@ fn sync_theme_fonts(cx: &mut App) {
 /// 交给运行时落盘，在后台按顺序发：主题切换时会连着调好几次，只有最后一份要紧。
 pub fn publish_terminal_theme() {
     static PUBLISHER: std::sync::OnceLock<
-        smol::channel::Sender<smelt_core::terminal_theme::TerminalThemeSnapshot>,
+        smol::channel::Sender<smelt_model::terminal_theme::TerminalThemeSnapshot>,
     > = std::sync::OnceLock::new();
     let publisher = PUBLISHER.get_or_init(|| {
         let (tx, rx) =
-            smol::channel::unbounded::<smelt_core::terminal_theme::TerminalThemeSnapshot>();
+            smol::channel::unbounded::<smelt_model::terminal_theme::TerminalThemeSnapshot>();
         std::thread::spawn(move || {
             while let Ok(mut theme) = rx.recv_blocking() {
                 // 积压的旧配色直接跳过。
@@ -366,7 +366,7 @@ pub fn publish_terminal_theme() {
                     theme = newer;
                 }
                 if let Err(error) = crate::runtime_call::call::<
-                    smelt_core::control_api::TerminalThemePublish,
+                    smelt_model::control_api::TerminalThemePublish,
                 >(
                     theme, crate::runtime_call::RUNTIME_CALL_TIMEOUT
                 ) {
@@ -383,9 +383,9 @@ pub fn publish_terminal_theme() {
 }
 
 /// 按当前主题 + 外观设置组装配色快照。
-fn current_terminal_theme() -> smelt_core::terminal_theme::TerminalThemeSnapshot {
-    smelt_core::terminal_theme::TerminalThemeSnapshot {
-        version: smelt_core::terminal_theme::TERMINAL_THEME_VERSION,
+fn current_terminal_theme() -> smelt_model::terminal_theme::TerminalThemeSnapshot {
+    smelt_model::terminal_theme::TerminalThemeSnapshot {
+        version: smelt_model::terminal_theme::TERMINAL_THEME_VERSION,
         dark: terminal::is_dark(),
         background: terminal::default_bg(),
         foreground: terminal::default_fg(),
@@ -420,8 +420,8 @@ fn save_appearance(appearance: &Appearance) {
     }
 }
 
-fn snapshot_from_appearance(appearance: &Appearance) -> smelt_core::appearance_settings::AppearanceSnapshot {
-    smelt_core::appearance_settings::AppearanceSnapshot {
+fn snapshot_from_appearance(appearance: &Appearance) -> smelt_model::appearance_settings::AppearanceSnapshot {
+    smelt_model::appearance_settings::AppearanceSnapshot {
         bg_color: appearance.bg_color,
         bg_image: appearance.bg_image.clone(),
         bg_image_opacity: appearance.bg_image_opacity,
@@ -447,7 +447,7 @@ fn snapshot_from_appearance(appearance: &Appearance) -> smelt_core::appearance_s
     }
 }
 
-fn appearance_from_snapshot(snapshot: smelt_core::appearance_settings::AppearanceSnapshot) -> Appearance {
+fn appearance_from_snapshot(snapshot: smelt_model::appearance_settings::AppearanceSnapshot) -> Appearance {
     Appearance {
         bg_color: snapshot.bg_color,
         bg_image: snapshot.bg_image,
@@ -474,7 +474,7 @@ fn appearance_from_snapshot(snapshot: smelt_core::appearance_settings::Appearanc
 
 /// 项目行「+」下拉菜单里的一条可配置启动项，以及它的出厂默认集合。
 /// 定义在 `smelt-core`：桌面新建菜单和移动端读的是同一份启动项目录。
-pub use smelt_core::new_session::{LaunchEntry, default_launch_entries};
+pub use smelt_model::new_session::{LaunchEntry, default_launch_entries};
 
 /// 删除自定义启动项。内置项是固定集合，数据层也拒绝删除，不能只依赖设置页
 /// 隐藏按钮。
@@ -482,7 +482,7 @@ fn remove_launch_entry_at(config: &mut LaunchConfig, index: usize) -> bool {
     let Some(entry) = config.entries.get(index) else {
         return false;
     };
-    if smelt_core::launch_settings::launch_entry_is_builtin(entry) {
+    if smelt_model::launch_settings::launch_entry_is_builtin(entry) {
         return false;
     }
     config.entries.remove(index);
@@ -546,8 +546,8 @@ pub fn active_launch_entries(cx: &App) -> Vec<LaunchEntry> {
 
 impl Global for LaunchConfig {}
 
-fn fetch_launch_settings() -> Result<smelt_core::launch_settings::LaunchSettings, String> {
-    crate::runtime_call::call::<smelt_core::control_api::LaunchGet>(
+fn fetch_launch_settings() -> Result<smelt_model::launch_settings::LaunchSettings, String> {
+    crate::runtime_call::call::<smelt_model::control_api::LaunchGet>(
         smelt_runtime_client::protocol::control::EmptyParams::default(),
         crate::runtime_call::RUNTIME_CALL_TIMEOUT,
     )
@@ -600,8 +600,8 @@ fn submit_launch_entries(base: Vec<LaunchEntry>, entries: Vec<LaunchEntry>, cx: 
                 let replaced = cx
                     .background_executor()
                     .spawn(async move {
-                        crate::runtime_call::call::<smelt_core::control_api::LaunchReplace>(
-                            smelt_core::control_api::LaunchReplaceParams { base, entries },
+                        crate::runtime_call::call::<smelt_model::control_api::LaunchReplace>(
+                            smelt_model::control_api::LaunchReplaceParams { base, entries },
                             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                         )
                     })
@@ -657,8 +657,8 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // crate 之后要跨 crate 共用的数据模型。这里重导出成原来的裸名字，本文件剩下
 // 的 UI 渲染代码（acp_cmd_setting_item、手动添加 workspace 的编辑器等）不用
 // 逐处改路径。
-use smelt_core::agent_kind::ConversationLaunchSpec;
-pub use smelt_core::agent_kind::{
+use smelt_model::agent_kind::ConversationLaunchSpec;
+pub use smelt_model::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
 pub use smelt_ui::agent_host_state::{
@@ -775,7 +775,7 @@ impl Global for CleanupState {}
 /// 避免打开设置时被多个 `--version` 子进程卡住。
 #[derive(Clone, Default)]
 pub struct AcpRuntimeState {
-    pub diagnostics: Option<smelt_core::acp_conn::AcpRuntimeDiagnostics>,
+    pub diagnostics: Option<smelt_model::acp_conn::AcpRuntimeDiagnostics>,
     pub refreshing: bool,
     pub checked_at: Option<Instant>,
     pub installing: Option<ConversationAgentKind>,
@@ -917,7 +917,7 @@ pub struct DshPluginManager {
     /// 包名输入框，供安装/升级使用。
     pub spec: Entity<gpui_component::input::InputState>,
     /// 已加载的清单；None 表示还没读过。
-    pub plugins: Option<Result<Vec<smelt_core::agent_kind::DshPlugin>, String>>,
+    pub plugins: Option<Result<Vec<smelt_model::agent_kind::DshPlugin>, String>>,
     /// 正在执行的动作描述，非 None 时禁用所有按钮。
     pub busy: Option<String>,
     /// 上一次动作的结果。
@@ -995,7 +995,7 @@ pub struct DshCustomProviderEditor {
 pub enum ModelDiscoveryState {
     Loading,
     /// 端点答了。空列表也是答案——它说"我一个都不提供"。
-    Ready(Vec<smelt_core::provider_api::DiscoveredModel>),
+    Ready(Vec<smelt_model::provider_api::DiscoveredModel>),
     /// 问不到。协议不支持列举、端点拒绝、凭据不对都落在这里，理由必须原样带出来。
     Failed(String),
 }
@@ -1007,7 +1007,7 @@ pub enum ModelDiscoveryState {
 #[derive(Clone)]
 pub enum PiAuthProvidersState {
     Loading,
-    Ready(Vec<smelt_core::pi_auth::PiAuthProvider>),
+    Ready(Vec<smelt_model::pi_auth::PiAuthProvider>),
     Failed(String),
 }
 
@@ -1020,17 +1020,17 @@ pub struct PiAuthModelPicker {
     pub provider_id: String,
     pub provider_name: String,
     /// `None` 表示还在问。
-    pub models: Option<Result<Vec<smelt_core::provider_api::DiscoveredModel>, String>>,
+    pub models: Option<Result<Vec<smelt_model::provider_api::DiscoveredModel>, String>>,
 }
 
 /// 登录流程当前在等用户回答的那个提问。
 #[derive(Clone)]
 pub struct PiLoginPrompt {
     pub id: String,
-    pub kind: smelt_core::pi_auth::PiPromptKind,
+    pub kind: smelt_model::pi_auth::PiPromptKind,
     pub message: String,
     pub placeholder: Option<String>,
-    pub options: Vec<smelt_core::pi_auth::PiPromptOption>,
+    pub options: Vec<smelt_model::pi_auth::PiPromptOption>,
 }
 
 /// 一次进行中的（或刚结束的）登录。登录本身跑在运行时那边，这里只拿着它的 id。
@@ -1058,15 +1058,15 @@ pub struct PiLoginView {
     /// `None` 表示还在跑。
     pub outcome: Option<Result<(), String>>,
     /// 登录成功后可选的模型目录，用来一键设默认。
-    pub models: Option<Result<Vec<smelt_core::provider_api::DiscoveredModel>, String>>,
+    pub models: Option<Result<Vec<smelt_model::provider_api::DiscoveredModel>, String>>,
 }
 
 impl PiLoginView {
     /// 当前提问该用哪个输入框。
     pub fn active_input(&self) -> Option<&Entity<gpui_component::input::InputState>> {
         match self.prompt.as_ref()?.kind {
-            smelt_core::pi_auth::PiPromptKind::Select => None,
-            smelt_core::pi_auth::PiPromptKind::Secret => Some(&self.secret_input),
+            smelt_model::pi_auth::PiPromptKind::Select => None,
+            smelt_model::pi_auth::PiPromptKind::Secret => Some(&self.secret_input),
             _ => Some(&self.input),
         }
     }
@@ -1218,7 +1218,7 @@ const NATIVE_DSH_EDITABLE_PROVIDER: &str = "deepseek-official";
 #[derive(Clone)]
 pub enum NativeDshCapabilityState {
     Loading,
-    Ready(smelt_core::agent_kind::DshModelCapabilities),
+    Ready(smelt_model::agent_kind::DshModelCapabilities),
     Failed(String),
 }
 
@@ -1235,7 +1235,7 @@ enum DshEffortView {
     /// 问失败了。和 `Unavailable` 分开：一个是答案，一个是没有答案。
     Unknown(String),
     Choices {
-        efforts: Vec<smelt_core::agent_kind::DshEffort>,
+        efforts: Vec<smelt_model::agent_kind::DshEffort>,
         default_effort: Option<String>,
     },
 }
@@ -1251,7 +1251,7 @@ enum DshModelChoicesView {
     /// 问到了，但这条 provider 一个模型都没有。
     Unavailable,
     Unknown(String),
-    Choices(Vec<smelt_core::agent_kind::DshModelCapability>),
+    Choices(Vec<smelt_model::agent_kind::DshModelCapability>),
 }
 
 /// 画「可选模型」那一排。
@@ -1337,7 +1337,7 @@ fn render_model_discovery_section(
     workspace: Entity<Workspace>,
     adopt: fn(
         &mut Workspace,
-        smelt_core::provider_api::DiscoveredModel,
+        smelt_model::provider_api::DiscoveredModel,
         &mut Window,
         &mut Context<Workspace>,
     ),
@@ -1486,10 +1486,10 @@ struct SettingsRenderSnapshot {
     /// 可选模型栏该画什么；`None` 表示表单没打开。
     dsh_model_choices_view: Option<DshModelChoicesView>,
     native_dsh_model_settings: Option<Result<NativeDshModelSettings, String>>,
-    dsh_settings: Result<smelt_core::agent_kind::DshSettingsSummary, String>,
+    dsh_settings: Result<smelt_model::agent_kind::DshSettingsSummary, String>,
     dsh_profiles: Vec<AcpProfile>,
-    dsh_missing_profiles: Vec<smelt_core::dsh_service::DshMissingProfile>,
-    dsh_paths: smelt_core::dsh_service::DshConfigPaths,
+    dsh_missing_profiles: Vec<smelt_model::dsh_service::DshMissingProfile>,
+    dsh_paths: smelt_model::dsh_service::DshConfigPaths,
     pi_model_editor: Option<PiModelEditor>,
     pi_custom_provider_editor: Option<PiCustomProviderEditor>,
     /// Pi 内置 provider 的登录状态；`None` 表示这台机器上还没问过。
@@ -1500,15 +1500,15 @@ struct SettingsRenderSnapshot {
     pi_auth_error: Option<String>,
     pi_auth_show_all: bool,
     /// `~/.pi/agent/mcp.json` 里的服务器。文件很小，每次刷新快照时重读，外部改动也能跟上。
-    pi_mcp_servers: Result<Vec<smelt_core::pi_mcp::PiMcpServer>, String>,
+    pi_mcp_servers: Result<Vec<smelt_model::pi_mcp::PiMcpServer>, String>,
     pi_mcp_login: Option<String>,
     pi_mcp_pending_remove: Option<String>,
     pi_mcp_error: Option<String>,
     pi_model_editor_error: Option<String>,
-    pi_model_settings: Result<smelt_core::pi_model_settings::PiModelSettings, String>,
-    pi_settings: Result<smelt_core::pi_model_settings::PiSettingsSummary, String>,
-    pi_plugins: Vec<smelt_core::pi_plugin_catalog::PiPlugin>,
-    pi_paths: smelt_core::pi_service::PiConfigPaths,
+    pi_model_settings: Result<smelt_model::pi_model_settings::PiModelSettings, String>,
+    pi_settings: Result<smelt_model::pi_model_settings::PiSettingsSummary, String>,
+    pi_plugins: Vec<smelt_model::pi_plugin_catalog::PiPlugin>,
+    pi_paths: smelt_model::pi_service::PiConfigPaths,
     pi_plugin_pending_delete: Option<String>,
     pi_plugin_error: Option<String>,
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。

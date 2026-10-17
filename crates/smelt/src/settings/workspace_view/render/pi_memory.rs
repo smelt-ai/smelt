@@ -3,7 +3,7 @@
 use super::*;
 use crate::settings::memory::{MemorySettingsForm, rerank_model_label};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use smelt_core::memory_settings::RerankModel;
+use smelt_model::memory_settings::RerankModel;
 
 const DESCRIPTION: &str = "按问题把相关的记忆附到对话里。关键词检索总是开着；重排模型和向量检索都可选，不可用时自动退回。";
 

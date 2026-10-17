@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{FontFeatures, Hsla, Pixels, Rgba, px, rgb, rgba};
 
-use smelt_core::agent_status::AgentStatus;
+use smelt_model::agent_status::AgentStatus;
 
 /// 一套完整语义色板。字段即语义位，深浅两套必须一一对应填满。
 #[derive(Clone, Copy)]

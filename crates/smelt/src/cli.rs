@@ -3,13 +3,13 @@
 //! 无子命令时仍启动 GUI。这里只拦截明确的控制命令，一律经 smeltd 的 Control API
 //! 读写：库只有运行时一个写入者，CLI 不绕过它。smeltd 没在跑时直接报错。
 
-use smelt_core::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
-use smelt_core::appearance_settings::SettingsPatch;
-use smelt_core::automation::{
+use smelt_model::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
+use smelt_model::appearance_settings::SettingsPatch;
+use smelt_model::automation::{
     Automation, AutomationAction, AutomationCommand, AutomationSchedule, AutomationTrigger,
     redact_automation_credentials,
 };
-use smelt_core::control_api::{
+use smelt_model::control_api::{
     AgentDefinitionCreateCall, AgentDefinitionDelete, AgentDefinitionGet, AgentDefinitionIdParams,
     AgentDefinitionList, AgentDefinitionUpdateCall, AgentDefinitionUpdateParams, AutomationGet,
     AutomationList, SettingsGet, SettingsUpdate,
@@ -36,7 +36,7 @@ where
 
 fn run(args: &[String]) -> i32 {
     // 技能写在运行时那台机器上；运行时没在跑时后面的命令也会报连不上，这里不另报。
-    let _ = control::<smelt_core::control_api::SkillsSyncControl>(EmptyParams::default());
+    let _ = control::<smelt_model::control_api::SkillsSyncControl>(EmptyParams::default());
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -140,7 +140,7 @@ fn run_agent(args: &[String]) -> i32 {
             let Some(id) = args.get(1).map(String::as_str).filter(|id| !id.is_empty()) else {
                 return usage("smelt agent chat <id>");
             };
-            match control::<smelt_core::control_api::ConversationCreateForAgent>(
+            match control::<smelt_model::control_api::ConversationCreateForAgent>(
                 AgentDefinitionIdParams { id: id.to_string() },
             ) {
                 Ok(created) => print_ok(&created),
@@ -502,7 +502,7 @@ fn load_automation_raw(id: &str) -> Result<Automation, String> {
 
 /// 插件在运行时那台机器上，由运行时扫描。
 fn plugin_catalog() -> Result<serde_json::Value, String> {
-    let config = control::<smelt_core::control_api::PiConfigGet>(EmptyParams::default())?;
+    let config = control::<smelt_model::control_api::PiConfigGet>(EmptyParams::default())?;
     let plugins: Vec<serde_json::Value> = config
         .plugins
         .into_iter()

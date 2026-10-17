@@ -709,7 +709,7 @@ impl Workspace {
         cwd: Option<&str>,
         cx: &App,
     ) -> Option<crate::settings::ConversationAgentKind> {
-        let id = smelt_core::agent_definition_store::agent_definition_id_for_space(
+        let id = smelt_model::agent_paths::agent_definition_id_for_space(
             std::path::Path::new(cwd?),
         )?;
         cx.global::<crate::settings::AgentHostState>()

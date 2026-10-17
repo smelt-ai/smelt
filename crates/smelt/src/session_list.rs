@@ -149,7 +149,7 @@ impl Workspace {
 
     /// `root` 是否是某段仍然开着的智能体对话的工作目录。
     fn agent_conversation_workspace_is_open(&self, root: &str, cx: &App) -> bool {
-        smelt_core::session_control::is_agent_conversation_cwd(root)
+        smelt_model::session_control::is_agent_conversation_cwd(root)
             && self.sessions.iter().any(|session| {
                 session.is_agent_conversation(cx)
                     && session

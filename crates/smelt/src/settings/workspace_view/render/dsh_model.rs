@@ -846,7 +846,7 @@ pub(super) fn dsh_model_page(
                                                         .small()
                                                         .label(editor.api.clone())
                                                         .dropdown_menu(move |mut menu, _window, _cx| {
-                                                            for api in smelt_core::provider_api::PROVIDER_API_PROTOCOLS {
+                                                            for api in smelt_model::provider_api::PROVIDER_API_PROTOCOLS {
                                                                 let api_entity = api_entity.clone();
                                                                 menu = menu.item(
                                                                     PopupMenuItem::new(*api).on_click(

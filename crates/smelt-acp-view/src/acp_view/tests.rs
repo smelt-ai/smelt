@@ -36,15 +36,15 @@ use super::{
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
-use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
-use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
-use smelt_core::acp_session::{
+use smelt_model::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
+use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
+use smelt_model::acp_session::{
     AcpTurnOutcome, ApprovalDetailsView, BackgroundTaskStatus, BackgroundTaskView,
     ElicitFieldKindView, ElicitFieldView, ElicitOptionView, PendingElicitation, PendingPermission,
     PermissionOptionKindView, PermissionOptionView, PlanEntryStatusView, PlanEntryView, PlanView,
     RuntimeDebug, RuntimeDebugModel, RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
 };
-use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
+use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_client::daemon_state::DaemonPhase;
 use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
@@ -438,7 +438,7 @@ fn composer_restore_keeps_only_a_newer_revision() {
     assert_eq!(stale.last_revision, 1);
     assert_eq!(stale.restore_texts, None);
 
-    let image = smelt_core::acp_chat::AcpImage {
+    let image = smelt_model::acp_chat::AcpImage {
         mime: "image/png".into(),
         data_b64: "aGk=".into(),
     };
@@ -497,7 +497,7 @@ fn composer_usage_is_readonly_and_only_warns_when_high() {
     assert_eq!(conversation[0].label, "Conversation");
     assert_eq!(conversation[0].tokens, 12_400);
     assert_eq!(conversation.len(), 1);
-    let buckets = smelt_core::acp_conn::ContextUsageBreakdown {
+    let buckets = smelt_model::acp_conn::ContextUsageBreakdown {
         system_prompt: 1_200,
         tools_definition: 11_800,
         rules: 302,
@@ -593,10 +593,10 @@ fn provider_group(id: &str) -> ModelProviderGroup {
     }
 }
 
-fn published_quota(used_percent: f64) -> smelt_core::provider_quota::ProviderQuotaData {
-    smelt_core::provider_quota::ProviderQuotaData::Windows(
-        smelt_core::provider_quota::ProviderQuota {
-            windows: vec![smelt_core::provider_quota::ProviderQuotaWindow {
+fn published_quota(used_percent: f64) -> smelt_model::provider_quota::ProviderQuotaData {
+    smelt_model::provider_quota::ProviderQuotaData::Windows(
+        smelt_model::provider_quota::ProviderQuota {
+            windows: vec![smelt_model::provider_quota::ProviderQuotaWindow {
                 label: "5h".to_string(),
                 used_percent,
                 resets_at_ms: None,
@@ -1179,7 +1179,7 @@ fn rejected_submission_restores_without_erasing_new_draft_text() {
 
 #[test]
 fn unknown_plugin_submission_reuses_its_id_only_for_the_unchanged_draft() {
-    let previous = smelt_core::conversation::ConversationInput {
+    let previous = smelt_model::conversation::ConversationInput {
         submission_id: "stable-submission".into(),
         text: "继续处理".into(),
         images: Vec::new(),
@@ -2250,7 +2250,7 @@ fn restart_refreshes_ordinary_session_from_current_agent_command() {
 #[test]
 fn restart_refresh_preserves_product_agent_instructions() {
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent --stale").with_env(
-        smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV,
+        smelt_model::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV,
         "Review every change carefully",
     );
     let config =
@@ -2262,7 +2262,7 @@ fn restart_refresh_preserves_product_agent_instructions() {
     assert_eq!(
         resolved
             .env
-            .get(smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV)
+            .get(smelt_model::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV)
             .map(String::as_str),
         Some("Review every change carefully")
     );
@@ -2270,7 +2270,7 @@ fn restart_refresh_preserves_product_agent_instructions() {
 
 #[test]
 fn restart_refresh_preserves_product_agent_plugin_and_mcp_selection() {
-    use smelt_core::agent_kind::{SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV};
+    use smelt_model::agent_kind::{SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV};
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent --stale")
         .with_env(SMELT_AGENT_PLUGIN_ARGS_ENV, "[\"--no-extensions\"]")
         .with_env(SMELT_AGENT_MCP_SERVERS_ENV, "[\"rea\"]");
@@ -2299,7 +2299,7 @@ fn restart_refresh_preserves_product_agent_plugin_and_mcp_selection() {
 
 #[test]
 fn restart_refresh_preserves_product_agent_memory_directories() {
-    use smelt_core::agent_kind::{SMELT_AGENT_MEMORY_DIR_ENV, SMELT_USER_MEMORY_DIR_ENV};
+    use smelt_model::agent_kind::{SMELT_AGENT_MEMORY_DIR_ENV, SMELT_USER_MEMORY_DIR_ENV};
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent")
         .with_env(
             SMELT_AGENT_MEMORY_DIR_ENV,
@@ -2407,7 +2407,7 @@ fn runtime_debug_contexts_show_request_config_and_multiple_turn_linked_calls() {
                 api: Some("responses".into()),
                 thinking_level: Some("high".into()),
             },
-            request_config: smelt_core::acp_session::RuntimeDebugRequestConfig {
+            request_config: smelt_model::acp_session::RuntimeDebugRequestConfig {
                 system_prompt: "prompt for call #3".into(),
                 tools: vec![RuntimeDebugTool {
                     name: "bash".into(),
@@ -2479,7 +2479,7 @@ fn compaction_traces_show_the_observed_boundary_without_joining_the_fake_timelin
     let contexts = runtime_debug_contexts(&RuntimeDebug {
         version: 3,
         source: "pi_runtime_debug".into(),
-        compactions: vec![smelt_core::acp_session::RuntimeDebugCompaction {
+        compactions: vec![smelt_model::acp_session::RuntimeDebugCompaction {
             sequence: 1,
             turn: Some(3),
             status: "completed".into(),
@@ -2490,7 +2490,7 @@ fn compaction_traces_show_the_observed_boundary_without_joining_the_fake_timelin
             first_kept_entry_id: Some("entry-20".into()),
             tokens_before: Some(90_000),
             summarized_message_count: Some(12),
-            source_messages: vec![smelt_core::acp_session::RuntimeDebugCompactionMessage {
+            source_messages: vec![smelt_model::acp_session::RuntimeDebugCompactionMessage {
                 segment: "summarized".into(),
                 role: "user".into(),
                 preview: "retain the auth constraint".into(),
@@ -2573,7 +2573,7 @@ fn nested_subagent_entries_are_independent_trajectory_events() {
     ];
     let tool_debug = std::collections::BTreeMap::from([(
         "sa-1-child-1".to_string(),
-        smelt_core::acp_session::ToolCallDebug {
+        smelt_model::acp_session::ToolCallDebug {
             name: Some("read".into()),
             raw_input: Some(serde_json::json!({"path": "config.rs"})),
         },
@@ -2625,7 +2625,7 @@ fn session_trajectory_events_keep_debug_sources_and_model_thinking() {
     }];
     let tool_debug = std::collections::BTreeMap::from([(
         "s1".to_string(),
-        smelt_core::acp_session::ToolCallDebug {
+        smelt_model::acp_session::ToolCallDebug {
             name: Some("grep".into()),
             raw_input: Some(serde_json::json!({"pattern": "IconName", "path": "src"})),
         },
@@ -2887,14 +2887,14 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
 #[test]
 fn subagent_headline_strips_spawn_prefixes() {
     assert_eq!(
-        smelt_core::acp_chat::subagent_visible_title("Start subagent explorer"),
+        smelt_model::acp_chat::subagent_visible_title("Start subagent explorer"),
         "explorer"
     );
-    assert_eq!(smelt_core::acp_chat::subagent_visible_title("Task"), "");
-    assert_eq!(smelt_core::acp_chat::subagent_visible_title("subagent"), "");
-    assert_eq!(smelt_core::acp_chat::subagent_visible_title(""), "");
+    assert_eq!(smelt_model::acp_chat::subagent_visible_title("Task"), "");
+    assert_eq!(smelt_model::acp_chat::subagent_visible_title("subagent"), "");
+    assert_eq!(smelt_model::acp_chat::subagent_visible_title(""), "");
     assert_eq!(
-        smelt_core::acp_chat::subagent_visible_title("查登录"),
+        smelt_model::acp_chat::subagent_visible_title("查登录"),
         "查登录"
     );
 }
@@ -2986,7 +2986,7 @@ fn empty_tool_output_does_not_offer_expandable_content() {
 #[test]
 fn tool_image_output_is_expandable_and_decodes_once() {
     // 1x1 PNG
-    let image = smelt_core::acp_chat::AcpImage {
+    let image = smelt_model::acp_chat::AcpImage {
         mime: "image/png".into(),
         data_b64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".into(),
     };
@@ -3362,7 +3362,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
 fn snapshot_binding_becomes_the_views_persisted_binding(cx: &mut gpui::TestAppContext) {
     use gpui::VisualTestContext;
     use smelt_core::acp_session::AcpSessionState;
-    use smelt_core::conversation::{ConversationBinding, ConversationStateSnapshot};
+    use smelt_model::conversation::{ConversationBinding, ConversationStateSnapshot};
 
     cx.update(gpui_component::init);
     let (view, cx) = cx.add_window_view(|_window, cx| {
@@ -3958,7 +3958,7 @@ fn tail_snapshot(
     entries_offset: usize,
     entries: Vec<AcpEntry>,
     phase: DaemonPhase,
-) -> smelt_core::acp_session::ConversationSnapshot {
+) -> smelt_model::acp_session::ConversationSnapshot {
     let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
     snapshot.snapshot_revision = revision;
     snapshot.entries_total = entries_offset + entries.len();

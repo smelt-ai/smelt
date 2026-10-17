@@ -188,7 +188,7 @@ impl Workspace {
         cx: &App,
     ) -> AnyElement {
         let stored = stored_default_conversation_agent(cx);
-        let resolution = smelt_core::default_conversation::resolve_new_conversation(
+        let resolution = smelt_model::default_conversation::resolve_new_conversation(
             &cx.global::<settings::AgentHostState>().agents,
             stored.as_deref(),
             self.agent_surface.conversation_draft_id.as_deref(),
@@ -199,7 +199,7 @@ impl Workspace {
             .as_deref()
             .map(|name| conversation_agent_mark(Some(name)));
         match resolution.intent {
-            smelt_core::default_conversation::NewConversationIntent::PickAgent => self
+            smelt_model::default_conversation::NewConversationIntent::PickAgent => self
                 .render_new_conversation_picker(
                     entity,
                     label,
@@ -207,14 +207,14 @@ impl Workspace {
                     resolution.clear_stored_default,
                     cx,
                 ),
-            smelt_core::default_conversation::NewConversationIntent::Start { agent_id } => self
+            smelt_model::default_conversation::NewConversationIntent::Start { agent_id } => self
                 .render_new_conversation_action(
                     entity,
                     label,
                     mark,
                     Some((agent_id, resolution.ready)),
                 ),
-            smelt_core::default_conversation::NewConversationIntent::CreateAgent => {
+            smelt_model::default_conversation::NewConversationIntent::CreateAgent => {
                 self.render_new_conversation_action(entity, label, mark, None)
             }
         }
@@ -227,7 +227,7 @@ impl Workspace {
         mark: Option<String>,
         switch: Option<(
             String,
-            Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+            Vec<smelt_model::default_conversation::ConversationAgentChoice>,
         )>,
     ) -> AnyElement {
         let click_entity = entity.clone();
@@ -285,7 +285,7 @@ impl Workspace {
         &self,
         entity: Entity<Workspace>,
         label: String,
-        ready: Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+        ready: Vec<smelt_model::default_conversation::ConversationAgentChoice>,
         clear_stored: bool,
         cx: &App,
     ) -> AnyElement {
@@ -1297,7 +1297,7 @@ fn new_conversation_row_body(label: String, mark: Option<String>) -> Div {
 
 fn fill_conversation_agent_menu(
     mut menu: PopupMenu,
-    ready: Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+    ready: Vec<smelt_model::default_conversation::ConversationAgentChoice>,
     current_id: Option<String>,
     start: bool,
     entity: Entity<Workspace>,

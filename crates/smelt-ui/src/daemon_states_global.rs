@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use gpui::{App, BorrowAppContext, Global};
 
-pub use smelt_core::attention::{AttentionItem, AttentionKind, AttentionStore};
+pub use smelt_model::attention::{AttentionItem, AttentionKind, AttentionStore};
 use smelt_client::daemon_state::DaemonSessionState;
 
 /// 守护上报的会话状态镜像（全局单例，跨窗口共享）。key = smeltd session id
@@ -176,7 +176,7 @@ impl AttentionGlobal {
             let mut store = store.lock().unwrap();
             let badge_before = store.badge_count();
             let item =
-                smelt_core::attention::apply_daemon_transition(&mut store, previous, state, now);
+                smelt_model::attention::apply_daemon_transition(&mut store, previous, state, now);
             let changed = item.is_some() || store.badge_count() != badge_before;
             (item, changed)
         };
@@ -194,7 +194,7 @@ impl AttentionGlobal {
         let (item, changed) = {
             let mut store = store.lock().unwrap();
             let badge_before = store.badge_count();
-            let item = smelt_core::attention::apply_daemon_baseline(&mut store, state);
+            let item = smelt_model::attention::apply_daemon_baseline(&mut store, state);
             (item, store.badge_count() != badge_before)
         };
         if changed {

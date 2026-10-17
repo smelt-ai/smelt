@@ -42,6 +42,7 @@ pub mod quota_service;
 pub mod remote_config;
 pub mod session_control;
 pub mod session_handoff;
+pub mod session_history;
 pub mod session_title;
 pub mod term_config;
 pub mod terminal_theme;

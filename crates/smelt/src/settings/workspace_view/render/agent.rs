@@ -321,7 +321,7 @@ fn agent_groups(
                         };
 
                         let runtime_row = |agent: ConversationAgentKind,
-                                           executable: &smelt_core::acp_conn::RuntimeExecutable| {
+                                           executable: &smelt_model::acp_conn::RuntimeExecutable| {
                             let (status, color): (String, Hsla) = if !executable.is_available() {
                                 ("未安装".to_string(), rgb(crate::ui_theme::red()).into())
                             } else if let Some(error) = &executable.error {

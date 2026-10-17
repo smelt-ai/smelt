@@ -31,7 +31,7 @@ impl AcpView {
     ) -> Option<gpui::AnyElement> {
         if matches!(
             &self.conversation_binding,
-            smelt_core::conversation::ConversationBinding::Automation { .. }
+            smelt_model::conversation::ConversationBinding::Automation { .. }
         ) {
             // 自动化 Run 没有输入框；有进程在跑时，后台任务入口单独占底部一行。
             let chip = self.render_background_task_chip(cx)?;
@@ -99,7 +99,7 @@ impl AcpView {
                     h_flex()
                         .flex_shrink_0()
                         .text_xs()
-                        .font_family(smelt_core::font_config::font_family())
+                        .font_family(smelt_model::font_config::font_family())
                         .text_color(label_color)
                         .child(item.label[..range.start].to_string())
                         .child(
@@ -114,7 +114,7 @@ impl AcpView {
                     div()
                         .flex_shrink_0()
                         .text_xs()
-                        .font_family(smelt_core::font_config::font_family())
+                        .font_family(smelt_model::font_config::font_family())
                         .text_color(label_color)
                         .child(item.label.clone())
                         .into_any_element()
@@ -1328,7 +1328,7 @@ impl AcpView {
             return None;
         }
         let muted = cx.theme().muted_foreground;
-        let mono = smelt_core::font_config::font_family();
+        let mono = smelt_model::font_config::font_family();
         let mut rows = v_flex()
             .id("acp-background-task-list")
             .max_h(px(320.))

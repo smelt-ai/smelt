@@ -1,11 +1,11 @@
 //! DeepSeek Harness 配置的客户端缓存。
 //!
-//! 配置、Node 桥、pnpm 都在运行时那台机器上（`dsh.*`，见 [`smelt_core::dsh_service`]）。
+//! 配置、Node 桥、pnpm 都在运行时那台机器上（`dsh.*`，见 [`smelt_model::dsh_service`]）。
 //! 这里缓存最近一次快照给渲染读；打开设置窗口时刷新，修改由运行时回带新快照。
 
 use super::*;
-use smelt_core::control_api::DshConfigGet;
-use smelt_core::dsh_service::DshConfig;
+use smelt_model::control_api::DshConfigGet;
+use smelt_model::dsh_service::DshConfig;
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 impl Workspace {

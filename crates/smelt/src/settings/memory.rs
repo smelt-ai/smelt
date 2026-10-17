@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::InputState;
 use serde_json::Value;
-use smelt_core::appearance_settings::{SettingsPatch, SettingsResult};
-use smelt_core::control_api::{MemoryTestEmbedding, MemoryTestParams, SettingsGet, SettingsUpdate};
-use smelt_core::memory_settings::{
+use smelt_model::appearance_settings::{SettingsPatch, SettingsResult};
+use smelt_model::control_api::{MemoryTestEmbedding, MemoryTestParams, SettingsGet, SettingsUpdate};
+use smelt_model::memory_settings::{
     EMBEDDING_API_KEY, EMBEDDING_BASE_URL, EMBEDDING_MODEL, RERANK_MODEL_ID, RERANK_MODEL_PROVIDER,
     RerankModel,
 };

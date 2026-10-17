@@ -85,11 +85,13 @@ impl ClientStore {
     }
 
     /// 读一个值。没有这个键返回 `None`；值解析不了视为错误，不悄悄当成没有。
+    #[track_caller]
     pub fn get<T: DeserializeOwned>(
         &self,
         scope: &str,
         key: &str,
     ) -> Result<Option<T>, ClientStoreError> {
+        render_guard::check_store_access();
         let connection = self.connection.lock().unwrap_or_else(|e| e.into_inner());
         let raw: Option<String> = connection
             .query_row(
@@ -105,12 +107,47 @@ impl ClientStore {
         .transpose()
     }
 
+    /// 把解析不了的值挪到 `quarantine` 作用域（键带上原位置和时间），返回新键。原位置
+    /// 清空，调用方从默认值重新开始。没有这个键返回 `None`。
+    pub fn quarantine(&self, scope: &str, key: &str) -> Result<Option<String>, ClientStoreError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        let mut connection = self.connection.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = connection.transaction()?;
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT value FROM client_pref WHERE scope = ?1 AND key = ?2",
+                params![scope, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let moved = format!("{scope}/{key}@{now}");
+        tx.execute(
+            "INSERT OR REPLACE INTO client_pref (scope, key, value, updated_at_ms)
+             VALUES ('quarantine', ?1, ?2, ?3)",
+            params![moved, raw, now],
+        )?;
+        tx.execute(
+            "DELETE FROM client_pref WHERE scope = ?1 AND key = ?2",
+            params![scope, key],
+        )?;
+        tx.commit()?;
+        Ok(Some(moved))
+    }
+
+    #[track_caller]
     pub fn put<T: Serialize>(
         &self,
         scope: &str,
         key: &str,
         value: &T,
     ) -> Result<(), ClientStoreError> {
+        render_guard::check_store_access();
         let raw = serde_json::to_string(value)
             .map_err(|error| ClientStoreError(format!("{scope}/{key} 编码失败：{error}")))?;
         let now = std::time::SystemTime::now()
@@ -166,5 +203,79 @@ mod tests {
         store.put("ui", "width", &"wide").unwrap();
         assert!(store.get::<u32>("ui", "width").is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 界面 render 期间访问客户端库的检查。GPUI 每次重绘都整段重跑 render，在里面读写
+/// SQLite 会把每一帧都拖慢；debug 构建下发现就在 stderr 报一次调用栈（AGENTS.md）。
+pub mod render_guard {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// 当前线程正在执行视图 render。随作用域结束自动退出。
+    #[must_use = "scope 一 drop 就退出渲染标记"]
+    pub struct RenderScope(());
+
+    impl RenderScope {
+        pub fn enter() -> Self {
+            DEPTH.with(|depth| depth.set(depth.get() + 1));
+            Self(())
+        }
+    }
+
+    impl Drop for RenderScope {
+        fn drop(&mut self) {
+            DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    pub fn in_render() -> bool {
+        DEPTH.with(Cell::get) > 0
+    }
+
+    #[track_caller]
+    pub(crate) fn check_store_access() {
+        if cfg!(debug_assertions) && in_render() {
+            report(std::panic::Location::caller());
+        }
+    }
+
+    fn report(location: &'static std::panic::Location<'static>) {
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock};
+
+        static SEEN: OnceLock<Mutex<HashSet<(&'static str, u32)>>> = OnceLock::new();
+        let first = SEEN
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert((location.file(), location.line()));
+        if first {
+            eprintln!(
+                "[smelt] render 里访问了客户端库（{location}），每次重绘都会重复读库：\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn scope_marks_render_until_dropped_and_nests() {
+            assert!(!in_render());
+            let outer = RenderScope::enter();
+            {
+                let _inner = RenderScope::enter();
+                assert!(in_render());
+            }
+            assert!(in_render());
+            drop(outer);
+            assert!(!in_render());
+        }
     }
 }

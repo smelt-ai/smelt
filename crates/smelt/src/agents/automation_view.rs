@@ -250,7 +250,7 @@ impl Workspace {
     /// 编辑器左侧的运行列表。任务行回到表单，运行行在右侧打开详情。
     fn render_automation_run_column(
         &self,
-        runs: &[smelt_core::automation::AutomationRun],
+        runs: &[smelt_model::automation::AutomationRun],
         show_task: bool,
         entity: Entity<Workspace>,
         _cx: &App,
@@ -267,7 +267,7 @@ impl Workspace {
                 let error = run
                     .error
                     .as_deref()
-                    .filter(|_| run.status == smelt_core::automation::AutomationRunStatus::Failed)
+                    .filter(|_| run.status == smelt_model::automation::AutomationRunStatus::Failed)
                     .map(compact_instructions);
                 let open_entity = entity.clone();
                 let run_id = run.id.clone();
@@ -532,7 +532,7 @@ impl Workspace {
     /// 选中运行的右侧详情。有现场时这里就是对话，否则是这次运行的记录。
     fn render_automation_run_pane(
         &self,
-        run: smelt_core::automation::AutomationRun,
+        run: smelt_model::automation::AutomationRun,
         live_view: Option<Entity<acp_view::AcpView>>,
         entity: Entity<Workspace>,
         cx: &App,
