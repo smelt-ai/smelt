@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use crate::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
 use crate::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
-use crate::daemon_protocol::DaemonOperation;
 use crate::daemon_state::DaemonPhase;
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 pub const ACP_INITIAL_TAIL_LIMIT: usize = 100;
 pub const ACP_HISTORY_PAGE_LIMIT: usize = 100;
@@ -29,15 +29,9 @@ const ACP_ACTION_QUEUE_CAPACITY: usize = 256;
 const ACP_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn connect_acp_control() -> Result<UnixStream, String> {
-    let stream = UnixStream::connect(crate::daemon_state::smeltd_sock_path())
-        .map_err(|e| format!("连不上 smeltd：{e}"))?;
-    stream
-        .set_read_timeout(Some(ACP_CONTROL_TIMEOUT))
-        .map_err(|e| format!("设置读取超时失败：{e}"))?;
-    stream
-        .set_write_timeout(Some(ACP_CONTROL_TIMEOUT))
-        .map_err(|e| format!("设置写入超时失败：{e}"))?;
-    Ok(stream)
+    crate::daemon_state::local_runtime()
+        .connect_with_timeout(ACP_CONTROL_TIMEOUT)
+        .map_err(|e| format!("连不上 smeltd：{e}"))
 }
 
 /// 一次 `acp_open` 的启动参数。执行引擎仍以 `ConversationAgentKind::id()` 那串小写标识
@@ -384,8 +378,7 @@ pub fn spawn_acp_client(launch: ConversationClientLaunch) -> ConversationClientH
             let mut known_entries_end = launch.retained_entries_end;
             let mut known_session_title = None;
             let mut last_phase = None;
-            let sock_path = crate::daemon_state::smeltd_sock_path();
-            let conn = match UnixStream::connect(&sock_path) {
+            let conn = match crate::daemon_state::local_runtime().connect() {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = snapshot_tx.try_send(fallback_snapshot(

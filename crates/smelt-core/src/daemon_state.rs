@@ -6,12 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::automation::AutomationFile;
-use crate::daemon_protocol::DaemonOperation;
 use crate::session_control::RemoteSessionSnapshot;
 use crate::workspace_menu::WorkspaceMenuSnapshot;
 use smelt_event_protocol::{
@@ -26,6 +24,8 @@ use smelt_event_protocol::{
     SessionStateRemoved, SessionStatesSnapshot, SubscribeErrorCode, SubscribeMessage,
     SubscribeRequest, SubscriptionDeclaration, SubscriptionId, Topic,
 };
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
+use smelt_runtime_client::{LocalConnector, RuntimeClient};
 
 /// 断线后快速首试、连续失败逐步退让，避免 daemon 正在升级/尚未启动时 GUI 和网关
 /// 同步地每两秒撞一次 socket。上限保证守护恢复后不会长期不可见。
@@ -42,10 +42,18 @@ pub fn daemon_reconnect_backoff(attempt: u32) -> Duration {
 }
 
 /// smeltd 的 unix socket 路径（`~/.smelt/smeltd.sock`），用时顺手建好父目录。
+///
+/// 只给本机运行时的生命周期管理用（拉起、清理残留 socket、交给 agent 子进程）。
+/// 连运行时一律走 [`local_runtime`]。
 pub fn smeltd_sock_path() -> PathBuf {
     let dir = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
     let _ = std::fs::create_dir_all(&dir);
     dir.join("smeltd.sock")
+}
+
+/// 本机运行时的协议客户端。桌面连 smeltd 的唯一入口；多运行时之前只有这一个。
+pub fn local_runtime() -> RuntimeClient {
+    RuntimeClient::new(LocalConnector::new(smeltd_sock_path()))
 }
 
 /// GUI 侧订阅状态通道的镜像（serde 反序列化；多出来的 JSON 字段自动忽略）。
@@ -951,7 +959,7 @@ fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
 /// 阻塞：连接正式 `event_subscribe`，逐行解析稳定 DTO，直到连接断开或协议错误。
 /// Ephemeral 订阅不发送 ack；Lag 后只等待 daemon 的恢复 snapshots。
 pub fn subscribe_daemon_states_blocking(tx: &smol::channel::Sender<DaemonStateEvent>) {
-    let Ok(mut s) = UnixStream::connect(smeltd_sock_path()) else {
+    let Ok(mut s) = local_runtime().connect() else {
         return;
     };
     let mut client = DaemonStateEventClient::desktop();

@@ -11,9 +11,7 @@
 //! 自带读文件的工具，给一段路径它们一定会用；ResourceLink 各家支持程度没实测过，
 //! 赌不起「引了没反应」。等有实测再升级。
 
-use std::collections::BTreeSet;
 use std::ops::Range;
-use std::rc::Rc;
 
 /// 一条补全候选。
 pub struct Candidate {
@@ -203,111 +201,9 @@ fn file_rank(path: &str, needle: &str) -> (u8, u8, usize, u8, usize, String) {
     )
 }
 
-/// 列一个目录下的文件（相对路径）。优先 `git ls-files`：它天然尊重
-/// `.gitignore`，不会把 `target/` 里几万个构建产物灌进补全菜单；非 git 目录
-/// 退回浅层遍历，只走两层，够用且不会在大目录上卡住。
-pub fn list_files(cwd: &str) -> Rc<Vec<String>> {
-    if let Some(files) = git_ls_files(cwd) {
-        return Rc::new(with_parent_directories(files));
-    }
-    let mut out = Vec::new();
-    walk(
-        std::path::Path::new(cwd),
-        std::path::Path::new(cwd),
-        0,
-        &mut out,
-    );
-    Rc::new(with_parent_directories(out))
-}
-
-fn with_parent_directories(files: Vec<String>) -> Vec<String> {
-    let mut entries = BTreeSet::new();
-    for file in files {
-        let mut parent = std::path::Path::new(&file).parent();
-        while let Some(path) = parent {
-            if path.as_os_str().is_empty() {
-                break;
-            }
-            if let Some(path_text) = path.to_str() {
-                entries.insert(format!("{path_text}/"));
-            }
-            parent = path.parent();
-        }
-        entries.insert(file);
-    }
-    entries.into_iter().collect()
-}
-
-fn git_ls_files(cwd: &str) -> Option<Vec<String>> {
-    let out = std::process::Command::new("git")
-        .args([
-            "-C",
-            cwd,
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let list: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect();
-    (!list.is_empty()).then_some(list)
-}
-
-fn walk(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut Vec<String>) {
-    if depth > 2 || out.len() > 2000 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let path = e.path();
-        let name = e.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
-            continue;
-        }
-        if path.is_dir() {
-            walk(root, &path, depth + 1, out);
-        } else if let Some(rel) = path.strip_prefix(root).ok().and_then(|p| p.to_str()) {
-            out.push(rel.to_string());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `@` 的候选源必须真能列出文件——列空了菜单就是个空壳，而且不会报错。
-    #[test]
-    fn lists_files_under_cwd() {
-        let cwd = env!("CARGO_MANIFEST_DIR");
-        let files = list_files(cwd);
-        assert!(!files.is_empty(), "本 crate 目录下不该一个文件都列不出来");
-        assert!(
-            files.iter().any(|f| f.ends_with("acp_completion.rs")),
-            "应当列出本文件，实际前几条：{:?}",
-            &files[..files.len().min(5)]
-        );
-        assert!(
-            files.iter().any(|entry| entry.ends_with('/')),
-            "文件补全也应包含可继续下钻的目录"
-        );
-        // git ls-files 尊重 .gitignore：构建产物不该混进补全菜单。
-        assert!(
-            !files.iter().any(|f| f.starts_with("target/")),
-            "target/ 不该出现"
-        );
-    }
 
     #[test]
     fn detects_at_and_slash_at_word_start() {

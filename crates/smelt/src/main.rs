@@ -34,6 +34,7 @@ mod tool_panel;
 use smelt_core::osc;
 mod provider_quota;
 mod resizable_split;
+mod runtime_call;
 mod session_history;
 mod session_list;
 mod settings;

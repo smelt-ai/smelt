@@ -21,21 +21,13 @@ use gpui_component::*;
 use notify::{RecursiveMode, Watcher};
 
 use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable, ui_theme};
-use smelt_core::fs::{FileSystem, LocalFs};
-pub use smelt_git::{
-    BranchList, DiffLine, DiffScope, GitDiff, GitStatusData, GitTreeRow, RepoInfo, WorktreeEntry,
-    build_git_tree, full_file_path, list_worktrees, main_repo_root_from_common_dir, parse_diff,
-    remove_worktree, repo_label_from_common_dir, run_git,
+use smelt_runtime_client::protocol::control::ControlCall;
+use smelt_runtime_client::protocol::git::*;
+pub use smelt_runtime_client::protocol::git::{
+    BranchList, DiffLine, DiffScope, GitStatusData, GitTreeRow, RepoInfo, WorktreeEntry,
+    build_git_tree, full_file_path, main_repo_root_from_common_dir, parse_diff,
+    repo_label_from_common_dir,
 };
-use smelt_git::{
-    apply_patch as apply_git_patch, checkout_branch as checkout_git_branch, commit_and_maybe_push,
-    delete_branch as delete_git_branch, discard_all, fetch_remote, git_err, hunk_patch,
-    load_branches, load_git_status, load_repo_info, merge_branch as merge_git_branch,
-    parse_diff_with_file_headers, pull_rebase, push_current, stage_file as stage_git_file,
-    stash_pop, stash_push, unstage_file as unstage_git_file,
-};
-#[cfg(test)]
-use smelt_git::{parse_worktree_list, run_git_stdin};
 
 mod diff;
 pub(crate) use diff::*;
@@ -44,7 +36,46 @@ mod tests;
 mod view;
 mod workspace;
 
+// ===================== 运行时调用 =====================
+
+/// 推送、拉取、提交（可能跑 hook、可能顺带推送）这类可能等网络的操作。
+const GIT_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// git 由运行时执行，面板只发请求。必须在后台线程调用。失败给人看的原因：git 的
+/// stderr 原样带回来，连不上运行时则是传输错误。
+pub(crate) fn git_call<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
+    crate::runtime_call::call::<C>(params, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
+        .map_err(crate::runtime_call::error_text)
+}
+
+pub(crate) fn git_network_call<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
+    crate::runtime_call::call::<C>(params, GIT_NETWORK_TIMEOUT)
+        .map_err(crate::runtime_call::error_text)
+}
+
+fn root_params(root: &str) -> GitRootParams {
+    GitRootParams {
+        root: root.to_string(),
+    }
+}
+
 // ===================== 类型 =====================
+
+/// diff 预览的视图状态。
+pub struct GitDiff {
+    pub root: String,
+    pub path: String,
+    pub aggregate: bool,
+    pub worktree_file: Option<String>,
+    pub lines: Rc<Vec<DiffLine>>,
+    pub header: String,
+    pub hunks: Rc<Vec<DiffHunk>>,
+    pub patchable: bool,
+    pub scope: DiffScope,
+    pub has_staged: bool,
+    /// 原始补丁。`None` 还在读取；`Some("")` 是已经读完的空差异。
+    pub patch: Option<String>,
+}
 
 /// 一个项目里发现到的仓库集合。
 ///
@@ -52,7 +83,7 @@ mod workspace;
 /// 那个 bug 的根治办法：文件天生属于某个仓库，不再靠路径反推。
 #[derive(Clone, Default)]
 pub struct RepoSet {
-    pub repos: Vec<smelt_git::discovery::DiscoveredRepo>,
+    pub repos: Vec<DiscoveredRepo>,
     /// 发现数量超上限被截断。UI 要明说，不能假装列全了。
     pub truncated: bool,
 }
@@ -107,11 +138,6 @@ pub struct NewWorktreeState {
     pub _subs: Vec<Subscription>,
 }
 
-fn is_regular_worktree_file(path: &Path) -> bool {
-    // 使用 fs 接缝：本地面板和将来的远程 worktree 用同一套判断逻辑。
-    smelt_core::fs::is_regular_file(&smelt_core::fs::LocalFs, path)
-}
-
 /// 当前视图下 hunk 该给哪些按钮。
 fn git_diff_hunk_ops(diff: &GitDiff) -> HunkOps {
     if !diff.patchable {
@@ -147,7 +173,7 @@ enum NarrowGitRow {
         root: Rc<str>,
         label: String,
         branch: String,
-        kind: smelt_git::discovery::RepoKind,
+        kind: RepoKind,
         active: bool,
         collapsed: bool,
         ahead: u32,
@@ -228,8 +254,7 @@ fn narrow_git_row_height(row: &NarrowGitRow) -> f32 {
 
 /// 仓库分组标题前的身份标记。用字符而不是图标：变更栏行高 24px，
 /// 再塞图标会把本就窄的一行挤成堆砌。
-fn repo_kind_glyph(kind: smelt_git::discovery::RepoKind) -> &'static str {
-    use smelt_git::discovery::RepoKind;
+fn repo_kind_glyph(kind: RepoKind) -> &'static str {
     match kind {
         RepoKind::Root => "◆",
         RepoKind::Submodule => "◇",
@@ -1059,7 +1084,7 @@ fn render_narrow_git_row(
                                     .text_xs()
                                     .text_color(rgb(ui_theme::text_faint()))
                                     .child(repo_kind_glyph(
-                                        smelt_git::discovery::RepoKind::Submodule,
+                                        RepoKind::Submodule,
                                     )),
                             )
                         })
@@ -1173,38 +1198,6 @@ fn is_git_noise_path(p: &std::path::Path) -> bool {
             )
         })
     })
-}
-
-/// Core 只负责 git worktree add；Smelt 的未跟踪配置继承是 app 特有副作用。
-pub fn create_worktree(
-    main_root: &str,
-    branch: Option<&str>,
-    path: &str,
-) -> Result<String, String> {
-    let created = smelt_git::create_worktree(main_root, branch, path)?;
-    inherit_untracked_into(main_root, path);
-    Ok(created)
-}
-
-fn inherit_untracked_into(main_root: &str, worktree_dir: &str) {
-    let root = std::path::Path::new(main_root);
-    let resolved = smelt_git::resolve_worktree_path(main_root, worktree_dir);
-    let report = crate::worktree_inherit::inherit_if_enabled(root, &resolved);
-    if !report.linked.is_empty() {
-        eprintln!(
-            "[worktree] 继承未跟踪条目 {} 个 -> {}",
-            report.linked.len(),
-            resolved.display()
-        );
-    }
-    for warning in &report.warnings {
-        eprintln!("[worktree] {warning}");
-    }
-}
-
-/// Core 完成 git prune。
-pub fn prune_stale_worktrees(main_root: &str) -> Result<(), String> {
-    smelt_git::prune_stale_worktrees(main_root)
 }
 
 /// 把「远端同步 + 本地救场」操作组加进一个下拉菜单。舞台 Git 视图的分支头下拉、

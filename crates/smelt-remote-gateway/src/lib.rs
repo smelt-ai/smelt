@@ -41,7 +41,6 @@ use smelt_core::automation::{
     AutomationAction, AutomationCommand, AutomationFile, AutomationRun, AutomationRunSource,
     AutomationRunStatus, AutomationSchedule,
 };
-use smelt_core::daemon_protocol::DaemonOperation;
 use smelt_core::daemon_state::{
     DaemonPhase, DaemonSessionState, DaemonStateEvent, DaemonStateEventClient,
 };
@@ -51,6 +50,7 @@ use smelt_core::session_control::{RemoteSessionLifecycle, RemoteSessionRecord};
 use smelt_core::workspace_menu::{
     WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
 };
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 /// 找到（或按 cwd 现造一个）`menu.projects` 里的项目，返回其下标。给"手机远程
 /// 建的会话没有对应 PC 项目"兜底——终端和 ACP 会话共用同一份兜底逻辑。

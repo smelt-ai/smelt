@@ -135,7 +135,14 @@ impl Workspace {
         self.spawn_git(
             &main_root,
             GitWrite::CreateWorktree,
-            move || create_worktree(&git_root, branch_opt.as_deref(), &path),
+            move || {
+                git_call::<GitWorktreeCreateCall>(GitWorktreeCreateParams {
+                    root: git_root,
+                    branch: branch_opt,
+                    path,
+                })
+                .map(|created| created.path)
+            },
             |this, result, cx| {
                 let Some(state) = this.new_worktree.as_mut() else {
                     return;
@@ -195,7 +202,7 @@ impl Workspace {
             let probe_root = root.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { list_worktrees(&probe_root) })
+                .spawn(async move { git_call::<GitWorktreeListCall>(root_params(&probe_root)) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let Some(state) = this.worktree_list.as_mut() else {
@@ -235,7 +242,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { prune_stale_worktrees(&main_root) })
+                .spawn(async move {
+                    git_call::<GitWorktreePruneCall>(root_params(&main_root)).map(drop)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let Some(state) = this.worktree_list.as_mut() else {
@@ -278,9 +287,7 @@ impl Workspace {
             let dirty = cx
                 .background_executor()
                 .spawn(async move {
-                    run_git(&p, &["status", "--porcelain"])
-                        .ok()
-                        .is_some_and(|o| o.success() && !o.stdout.is_empty())
+                    git_call::<GitIsDirtyCall>(root_params(&p)).is_ok_and(|result| result.dirty)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -324,7 +331,14 @@ impl Workspace {
         let started = self.spawn_git(
             &repo,
             GitWrite::DeleteWorktree,
-            move || remove_worktree(&git_root, &path, force),
+            move || {
+                git_call::<GitWorktreeRemoveCall>(GitWorktreeRemoveParams {
+                    root: git_root,
+                    path,
+                    force,
+                })
+                .map(drop)
+            },
             |this, result, cx| match result {
                 Err(err) => this.report_background_error(err),
                 Ok(()) => {
@@ -390,24 +404,14 @@ impl Workspace {
         let started = self.spawn_git(
             &root,
             GitWrite::DiscardFile,
+            // 行自带仓库根，直接在它自己的仓库里丢弃。
             move || {
-                if untracked {
-                    let full = Path::new(&git_root).join(&git_path);
-                    return LocalFs
-                        .remove_file(&full)
-                        .map_err(|e| format!("删除 {git_path} 失败：{e}"));
-                }
-                // 行自带仓库根，直接在它自己的仓库里丢弃。
-                let out = run_git(
-                    &git_root,
-                    &["restore", "--staged", "--worktree", "--", &git_path],
-                )
-                .map_err(|e| e.to_string())?;
-                if out.success() {
-                    Ok(())
-                } else {
-                    Err(git_err(&out, "git restore 失败"))
-                }
+                git_call::<GitDiscardFileCall>(GitDiscardFileParams {
+                    root: git_root,
+                    path: git_path,
+                    untracked,
+                })
+                .map(drop)
             },
             move |this, result, cx| match result {
                 Ok(()) => {
@@ -562,7 +566,11 @@ impl Workspace {
             let c = cwd.clone();
             let info = cx
                 .background_executor()
-                .spawn(async move { load_repo_info(&c) })
+                .spawn(async move {
+                    git_call::<GitRepoInfoCall>(root_params(&c))
+                        .ok()
+                        .and_then(|result| result.info)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.repo_info_inflight.remove(&cwd);
@@ -645,12 +653,7 @@ impl Workspace {
                 let found = cx
                     .background_executor()
                     .spawn(async move {
-                        smelt_git::discovery::discover(
-                            &LocalFs,
-                            &smelt_git::LocalSubprocess,
-                            Path::new(&r),
-                            &smelt_git::discovery::DiscoveryOptions::default(),
-                        )
+                        git_call::<GitDiscoverCall>(root_params(&r)).unwrap_or_default()
                     })
                     .await;
                 let _ = this.update(cx, |this, cx| {
@@ -761,7 +764,9 @@ impl Workspace {
             let r = root.clone();
             let data = cx
                 .background_executor()
-                .spawn(async move { load_git_status(&r) })
+                .spawn(
+                    async move { git_call::<GitStatusCall>(root_params(&r)).unwrap_or_default() },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let current_generation = this
@@ -856,7 +861,9 @@ impl Workspace {
             let r = root.clone();
             let list = cx
                 .background_executor()
-                .spawn(async move { load_branches(&r) })
+                .spawn(
+                    async move { git_call::<GitBranchesCall>(root_params(&r)).unwrap_or_default() },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.branches_inflight.remove(&root);
@@ -971,7 +978,7 @@ impl Workspace {
         self.spawn_git(
             &key,
             GitWrite::Checkout,
-            move || checkout_git_branch(&root, &branch),
+            move || git_call::<GitCheckoutCall>(GitBranchParams { root, branch }).map(drop),
             move |this, result, cx| match result {
                 // 切分支后文件列表、ahead/behind 都变了，标脏再刷新；
                 // 分支列表本身（有哪些分支）不受切换影响，不用跟着失效。
@@ -1031,7 +1038,14 @@ impl Workspace {
         let started = self.spawn_git(
             &root,
             op,
-            move || delete_git_branch(&git_root, &git_branch, remote),
+            move || {
+                git_network_call::<GitBranchDeleteCall>(GitBranchDeleteParams {
+                    root: git_root,
+                    branch: git_branch,
+                    remote,
+                })
+                .map(drop)
+            },
             move |this, result, cx| match result {
                 Ok(()) => {
                     this.invalidate_git_status(&done_root, cx);
@@ -1059,7 +1073,7 @@ impl Workspace {
         self.spawn_git(
             &key,
             GitWrite::Merge,
-            move || merge_git_branch(&root, &branch),
+            move || git_call::<GitMergeCall>(GitBranchParams { root, branch }).map(drop),
             move |this, result, cx| match result {
                 Ok(()) => {
                     this.invalidate_git_status(&done_root, cx);
@@ -1075,13 +1089,13 @@ impl Workspace {
     /// 删除都适用）。纯本地索引改动、可逆，不像 commit/push 那样需要走"发到终端让人
     /// 确认"那一套，直接执行。成功后清 git_status 缓存并刷新状态。
     pub fn stage_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
-        self.run_git_index_op(root, path, stage_git_file, cx);
+        self.run_git_index_op(root, path, true, cx);
     }
 
     /// 文件列表取消勾选：把已暂存的改动移出暂存区（`git reset --`），不影响工作区
     /// 内容本身，随时能重新勾选加回去。
     pub fn unstage_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
-        self.run_git_index_op(root, path, unstage_git_file, cx);
+        self.run_git_index_op(root, path, false, cx);
     }
 
     /// 整组批量暂存/撤出。一次 git 调用带上全部路径，不是逐个文件发命令——
@@ -1107,26 +1121,7 @@ impl Workspace {
         self.spawn_git(
             &key,
             op,
-            move || {
-                let args: Vec<&str> = if stage {
-                    std::iter::once("add")
-                        .chain(std::iter::once("--"))
-                        .collect()
-                } else {
-                    ["reset", "--"].into_iter().collect()
-                };
-                let mut full: Vec<&str> = args;
-                full.extend(paths.iter().map(String::as_str));
-                run_git(&root, &full)
-                    .map_err(|error| error.to_string())
-                    .and_then(|out| {
-                        if out.success() {
-                            Ok(())
-                        } else {
-                            Err(git_err(&out, "git 操作失败"))
-                        }
-                    })
-            },
+            move || stage_or_unstage(root, paths, stage),
             move |this, result, cx| {
                 if let Err(err) = result {
                     this.report_background_error(format!("{failure}失败：{err}"));
@@ -1142,24 +1137,24 @@ impl Workspace {
         );
     }
 
-    /// stage_file/unstage_file 共用的后台执行 + 缓存失效逻辑：`git <args.. > -- <path>`。
+    /// stage_file/unstage_file 共用的后台执行 + 缓存失效逻辑。
     fn run_git_index_op(
         &mut self,
         root: String,
         path: String,
-        op: fn(&str, &str) -> Result<(), String>,
+        stage: bool,
         cx: &mut Context<Self>,
     ) {
         // 勾选框的乐观标记在占用成功之后才写。占用失败时格子保持原样，用户可再点。
         let key = root.clone();
         let pending_key = (root.clone(), path.clone());
-        let git_path = path.clone();
+        let git_path = path;
         let done_key = pending_key.clone();
         let done_root = root.clone();
         let started = self.spawn_git(
             &key,
             GitWrite::IndexFile,
-            move || op(&root, &git_path),
+            move || stage_or_unstage(root, vec![git_path], stage),
             move |this, result, cx| match result {
                 Ok(()) => {
                     this.mark_git_status_dirty(&done_root);
@@ -1357,13 +1352,7 @@ impl Workspace {
     /// 只暂存一块、其余留在工作区，是 agent 写的代码「对一半」时最需要的动作：挑出
     /// 对的先存下来，剩下的继续让它改。
     pub fn stage_hunk(&mut self, root: String, idx: usize, cx: &mut Context<Self>) {
-        self.apply_hunk(
-            root,
-            idx,
-            &["apply", "--cached", "-"],
-            GitWrite::StageHunk,
-            cx,
-        );
+        self.apply_hunk(root, idx, GitPatchAction::Stage, GitWrite::StageHunk, cx);
     }
 
     /// 把第 `idx` 个 hunk 撤出暂存区（`git apply --cached --reverse`）。
@@ -1374,7 +1363,7 @@ impl Workspace {
         self.apply_hunk(
             root,
             idx,
-            &["apply", "--cached", "--reverse", "-"],
+            GitPatchAction::Unstage,
             GitWrite::UnstageHunk,
             cx,
         );
@@ -1389,7 +1378,7 @@ impl Workspace {
         self.apply_hunk(
             root,
             idx,
-            &["apply", "--reverse", "-"],
+            GitPatchAction::Discard,
             GitWrite::DiscardHunk,
             cx,
         )
@@ -1403,7 +1392,7 @@ impl Workspace {
         &mut self,
         root: String,
         idx: usize,
-        args: &'static [&'static str],
+        action: GitPatchAction,
         op: GitWrite,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1429,7 +1418,11 @@ impl Workspace {
             &key,
             op,
             move || {
-                let Err(raw) = apply_git_patch(&root, args, &patch) else {
+                let Err(raw) = git_call::<GitApplyPatchCall>(GitApplyPatchParams {
+                    root,
+                    action,
+                    patch,
+                }) else {
                     return Ok(());
                 };
                 // apply 失败最常见的原因是这个文件已经部分暂存过：当前 diff 是
@@ -1495,27 +1488,21 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     // 文件已经带着自己的仓库根进来，不用再按路径猜它属于哪个仓库。
-                    let (cwd, rel) = (r.clone(), p.clone());
-                    let has_staged = !untracked
-                        && run_git(&cwd, &["diff", "--staged", "--quiet", "--", &rel])
-                            .map(|o| !o.success())
-                            .unwrap_or(false);
-                    let text = if untracked {
-                        match run_git(&r, &["diff", "--no-index", "--", "/dev/null", &p]) {
-                            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
-                            Err(err) => format!("无法执行 git diff：{err}"),
-                        }
-                    } else {
-                        let mut args: Vec<&str> = scope.args().to_vec();
-                        args.push(&rel);
-                        match run_git(&cwd, &args) {
-                            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
-                            Err(err) => format!("无法执行 git diff：{err}"),
-                        }
-                    };
-                    let is_gitlink = text.lines().any(|l| l.starts_with("Submodule "));
-                    let worktree_file = full_file_path(&r, &p, false)
-                        .filter(|full_path| is_regular_worktree_file(Path::new(full_path)));
+                    let GitFileDiffResult {
+                        text,
+                        has_staged,
+                        is_gitlink,
+                        worktree_file,
+                    } = git_call::<GitFileDiffCall>(GitFileDiffParams {
+                        root: r,
+                        path: p,
+                        untracked,
+                        scope,
+                    })
+                    .unwrap_or_else(|err| GitFileDiffResult {
+                        text: format!("无法执行 git diff：{err}"),
+                        ..Default::default()
+                    });
                     let files = parse_diff_files(&text);
                     let parsed = parse_diff(&text);
                     (
@@ -1603,26 +1590,13 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut text = run_git(&r, scope.args())
-                        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
-                        .unwrap_or_else(|err| format!("无法执行 git diff：{err}"));
-                    // 不再把子仓的文件 diff 拼进父仓：子仓有自己的分组和自己的提交入口。
-                    // 父仓这边只展示 gitlink 指针变化（它确实是父仓待提交的改动）。
-                    // 旧行为把子仓里**已提交**的内容也摊成几十个文件，与变更列表对不上。
-                    for path in untracked_paths {
-                        let chunk = run_git(&r, &["diff", "--no-index", "--", "/dev/null", &path])
-                            .ok()
-                            .filter(|out| !out.stdout.is_empty())
-                            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-                            .unwrap_or_else(|| smelt_git::untracked_entry_diff(&path));
-                        if chunk.is_empty() {
-                            continue;
-                        }
-                        if !text.is_empty() && !text.ends_with('\n') {
-                            text.push('\n');
-                        }
-                        text.push_str(&chunk);
-                    }
+                    let text = git_call::<GitAllDiffCall>(GitAllDiffParams {
+                        root: r,
+                        scope,
+                        untracked_paths,
+                    })
+                    .map(|result| result.text)
+                    .unwrap_or_else(|err| format!("无法执行 git diff：{err}"));
                     let parsed = parse_diff_with_file_headers(&text);
                     let files = parse_diff_files(&text);
                     (text, parsed, files)
@@ -1832,7 +1806,7 @@ impl Workspace {
         if self.spawn_git(
             &key,
             GitWrite::Push,
-            move || push_current(&root, &branch),
+            move || git_network_call::<GitPushCall>(GitBranchParams { root, branch }).map(drop),
             move |this, result, cx| match result {
                 Ok(()) => this.invalidate_git_status(&done_root, cx),
                 Err(err) => {
@@ -1942,7 +1916,7 @@ impl Workspace {
         let started = self.spawn_git(
             &key,
             GitWrite::DiscardChanges,
-            move || discard_all(&git_root),
+            move || git_call::<GitDiscardAllCall>(root_params(&git_root)).map(drop),
             move |this, result, cx| match result {
                 Ok(()) => {
                     this.invalidate_git_status(&done_root, cx);
@@ -1998,7 +1972,15 @@ impl Workspace {
             &key,
             op,
             window,
-            move || commit_and_maybe_push(&root, &message, push, &branch),
+            move || {
+                git_network_call::<GitCommitCall>(GitCommitParams {
+                    root,
+                    message,
+                    push,
+                    branch,
+                })
+                .map(drop)
+            },
             move |this, result, window, cx| match result {
                 Ok(()) => {
                     this.invalidate_git_status(&done_root, cx);
@@ -2055,4 +2037,29 @@ impl Workspace {
             self.git_expanded_diff_files.extend(paths);
         }
     }
+}
+
+fn stage_or_unstage(root: String, paths: Vec<String>, stage: bool) -> Result<(), String> {
+    let params = GitPathsParams { root, paths };
+    if stage {
+        git_call::<GitStageCall>(params).map(drop)
+    } else {
+        git_call::<GitUnstageCall>(params).map(drop)
+    }
+}
+
+fn fetch_remote(root: &str) -> Result<(), String> {
+    git_network_call::<GitFetchCall>(root_params(root)).map(drop)
+}
+
+fn pull_rebase(root: &str) -> Result<(), String> {
+    git_network_call::<GitPullCall>(root_params(root)).map(drop)
+}
+
+fn stash_push(root: &str) -> Result<(), String> {
+    git_call::<GitStashPushCall>(root_params(root)).map(drop)
+}
+
+fn stash_pop(root: &str) -> Result<(), String> {
+    git_call::<GitStashPopCall>(root_params(root)).map(drop)
 }

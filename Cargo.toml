@@ -1,6 +1,7 @@
 # 虚拟 workspace：所有代码住 crates/ 下，根不再有 package。
 # - crates/smelt-store  —— 桌面 SQLite/KV 与 legacy 导入事务原语（移动端不编 native SQLite）
 # - crates/smelt-pairing —— 桌面/移动端共用的配对码格式
+# - crates/smelt-runtime-client —— smeltd wire 契约与协议客户端（桌面/移动端共用，能编进移动端）
 # - crates/smelt-remote-gateway —— 移动端远程 ACP/终端网关（不含 GPUI）
 # - crates/smelt-core   —— GUI 与守护共用的无 UI 逻辑（不许引 GPUI）
 # - crates/smelt-git    —— Git 领域层（仓库发现/状态/diff/写操作，不含 UI）
@@ -13,6 +14,7 @@ members = [
     "crates/smelt-event-bus",
     "crates/smelt-store",
     "crates/smelt-pairing",
+    "crates/smelt-runtime-client",
     "crates/smelt-remote-gateway",
     "crates/smelt-core",
     "crates/smelt-git",

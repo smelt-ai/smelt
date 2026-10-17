@@ -30,6 +30,7 @@ mod remote_catalog_recovery_tests;
 mod remote_reattach_tests;
 mod resize_bounds_tests;
 mod resume_handoff_tests;
+mod runtime_client_tests;
 mod self_upgrade_tests;
 mod session_directory_tests;
 mod single_instance_tests;

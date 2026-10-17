@@ -179,12 +179,16 @@ mod agent_memory_control;
 mod automation_runtime;
 mod control;
 mod event_hub;
+mod files_control;
+mod git_control;
 mod handoff_v2;
+mod history_control;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod peer_messaging;
 mod protocol;
 mod remote;
+mod runtime_identity;
 mod session_catalog;
 mod session_directory;
 mod session_state;
@@ -2358,6 +2362,8 @@ fn run_serve_loop(
 ) {
     let listen_fd = listener.as_raw_fd();
     let exe_mtime = exe_mtime_secs();
+    // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
+    let _ = runtime_identity::runtime_id();
     // 不参与无缝升级交接：每次进程启动（含 upgrade 后的新进程）都是全新的 None，
     // 见 RemoteGateway / IrohTunnel 定义处注释。运行态丢了不等于用户意愿丢了——
     // 下面的 autostart_remote_from_config 会按远程配置快照把它们拉回来。

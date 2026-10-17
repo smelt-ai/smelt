@@ -15,10 +15,7 @@ use gpui_component::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange
 /// 块操作挂在哪一行。优先新文件侧的行号，纯删除才退回旧文件侧。
 ///
 /// 返回 `(true, 行号)` 表示 Modified，`(false, 行号)` 表示 Original。行号从 1 起。
-pub(crate) fn hunk_line_anchor(
-    lines: &[DiffLine],
-    hunk: &smelt_git::DiffHunk,
-) -> Option<(bool, usize)> {
+pub(crate) fn hunk_line_anchor(lines: &[DiffLine], hunk: &DiffHunk) -> Option<(bool, usize)> {
     let slice = lines.get(hunk.range.clone())?;
     for line in slice {
         if let Some(n) = line.new_ln.filter(|n| *n > 0) {
@@ -94,7 +91,7 @@ struct DiffChrome {
     path: String,
     worktree_file: Option<String>,
     lines: Rc<Vec<DiffLine>>,
-    hunks: Rc<Vec<smelt_git::DiffHunk>>,
+    hunks: Rc<Vec<DiffHunk>>,
     ops: HunkOps,
     split: bool,
     comment_range: Option<DiffLineRange>,
@@ -483,7 +480,7 @@ fn comment_range_label(range: &DiffLineRange) -> String {
 
 fn diff_annotations(
     lines: &[DiffLine],
-    hunks: &[smelt_git::DiffHunk],
+    hunks: &[DiffHunk],
     show_hunks: bool,
     file_path: Option<&str>,
     comment: Option<&DiffLineRange>,

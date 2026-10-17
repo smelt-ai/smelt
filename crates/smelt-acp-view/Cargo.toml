@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 smelt-core = { path = "../smelt-core" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-ui = { path = "../smelt-ui" }
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9" }

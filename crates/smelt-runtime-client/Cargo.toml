@@ -1,0 +1,20 @@
+[package]
+name = "smelt-runtime-client"
+version.workspace = true
+edition.workspace = true
+description = "Smelt runtime (smeltd) wire protocol and client, shared by desktop and mobile"
+
+[lints]
+workspace = true
+
+# 桌面和手机共用这一份协议客户端，必须能编进 iOS / Android：不许依赖 GPUI、
+# smelt-store（原生 SQLite）或 smelt-core。CI 在 ci/android/ci.sh 里按移动端
+# target 单独检查。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+# diff 行内词级高亮（protocol::git 的 mark_inline），跟 ACP 对话的逐行 diff 同一个算法库。
+similar = "2"
+# 文件查看器的图片等二进制内容在 JSON 里按 base64 传。
+base64 = "0.22"

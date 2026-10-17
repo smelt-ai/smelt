@@ -9621,7 +9621,6 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "gpui-shell",
- "ignore",
  "image",
  "libc",
  "notify 6.1.1",
@@ -9638,9 +9637,9 @@ dependencies = [
  "shell-words",
  "smelt-acp-view",
  "smelt-core",
- "smelt-git",
  "smelt-pairing",
  "smelt-paths",
+ "smelt-runtime-client",
  "smelt-store",
  "smelt-ui",
  "smol",
@@ -9661,6 +9660,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-core",
+ "smelt-runtime-client",
  "smelt-ui",
  "smol",
  "url",
@@ -9681,6 +9681,7 @@ dependencies = [
  "dirs",
  "futures",
  "iana-time-zone",
+ "ignore",
  "libc",
  "reqwest 0.12.28",
  "rusqlite",
@@ -9692,6 +9693,7 @@ dependencies = [
  "similar",
  "smelt-event-protocol",
  "smelt-paths",
+ "smelt-runtime-client",
  "smelt-store",
  "smol",
  "tempfile",
@@ -9723,9 +9725,8 @@ dependencies = [
 name = "smelt-git"
 version = "0.9.0"
 dependencies = [
- "serde",
- "similar",
  "smelt-core",
+ "smelt-runtime-client",
  "tempfile",
 ]
 
@@ -9772,7 +9773,19 @@ dependencies = [
  "sha2 0.10.9",
  "smelt-core",
  "smelt-paths",
+ "smelt-runtime-client",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "smelt-runtime-client"
+version = "0.9.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "similar",
  "uuid",
 ]
 
@@ -9840,9 +9853,11 @@ dependencies = [
  "smelt-core",
  "smelt-event-bus",
  "smelt-event-protocol",
+ "smelt-git",
  "smelt-iroh",
  "smelt-paths",
  "smelt-remote-gateway",
+ "smelt-runtime-client",
  "smelt-store",
  "smol",
  "tokio",

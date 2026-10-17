@@ -1,8 +1,6 @@
-//! Worktree 继承算法由 GUI 与 smeltd 共用；这里只保留 GPUI Global 包装。
+//! Worktree 继承由运行时在建 worktree 时执行；这里只保留设置页用的 GPUI Global 包装。
 
 use std::ops::{Deref, DerefMut};
-
-pub use smelt_core::worktree_inherit::inherit_if_enabled;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]

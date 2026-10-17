@@ -2442,12 +2442,33 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let titles = cx
                 .background_executor()
-                .spawn(async move { smelt_core::session_metadata::all_custom_titles() })
+                .spawn(async move {
+                    use smelt_runtime_client::protocol::control::EmptyParams;
+                    use smelt_runtime_client::protocol::history::HistoryTitlesCall;
+                    crate::runtime_call::call::<HistoryTitlesCall>(
+                        EmptyParams::default(),
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map(|result| {
+                        result
+                            .titles
+                            .into_iter()
+                            .map(|t| ((t.agent, t.profile_id, t.resume_id), t.title))
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.history_titles_inflight = false;
                 this.history_titles_at = Some(Instant::now());
-                crate::HistoryTitles::replace_all(titles, cx);
+                // 取不到时保留上一份，5 秒后再试；空表会把侧栏标题全打回原始值。
+                match titles {
+                    Ok(titles) => crate::HistoryTitles::replace_all(titles, cx),
+                    Err(error) => eprintln!(
+                        "[history] 读取会话标题失败：{}",
+                        crate::runtime_call::error_text(error)
+                    ),
+                }
             });
         })
         .detach();

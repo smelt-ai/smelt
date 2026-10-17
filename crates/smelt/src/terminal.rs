@@ -23,7 +23,7 @@ use alacritty_terminal::term::{
     Config, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport, viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
-use smelt_core::daemon_protocol::DaemonOperation;
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 type SearchMatch = (Point, Point);
 type SearchResult = (u64, String, i32, Vec<SearchMatch>);
@@ -641,8 +641,14 @@ fn os_clipboard_read() -> String {
 
 // ===================== smeltd 守护连接层 =====================
 
+/// 本机运行时 socket 的路径。只用于生命周期管理：拉起后的错误提示、按 socket 反查
+/// 守护进程、清理残留文件。连守护一律走 [`local_runtime`]。
 fn sock_path() -> std::path::PathBuf {
     smelt_core::daemon_state::smeltd_sock_path()
+}
+
+fn local_runtime() -> smelt_runtime_client::RuntimeClient {
+    smelt_core::daemon_state::local_runtime()
 }
 
 /// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
@@ -1172,7 +1178,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     let path = sock_path();
 
     // 已有守护：进程内只 ensure 一次。
-    if UnixStream::connect(&path).is_ok() {
+    if local_runtime().connect().is_ok() {
         if !CONNECT_MANAGED_ENSURED.load(Ordering::Relaxed) {
             let _ = ensure_managed_daemon_for_connect(
                 &CONNECT_MANAGED_ENSURED,
@@ -1180,7 +1186,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
                 ensure_managed_daemon_current,
             );
         }
-        if let Ok(s) = UnixStream::connect(&path) {
+        if let Ok(s) = local_runtime().connect() {
             return Ok(s);
         }
         // handoff 后短暂窗口：下面走拉起/轮询
@@ -1209,7 +1215,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     };
 
     // 二次确认：若 sock 已因 handoff 起来，直接连
-    if let Ok(s) = UnixStream::connect(&path) {
+    if let Ok(s) = local_runtime().connect() {
         return Ok(s);
     }
 
@@ -1255,7 +1261,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         thread::sleep(Duration::from_millis(100));
-        if let Ok(s) = UnixStream::connect(&path) {
+        if let Ok(s) = local_runtime().connect() {
             return Ok(s);
         }
     }
@@ -1297,10 +1303,7 @@ fn probe_daemon() -> DaemonProbe {
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn connect_daemon_control() -> std::io::Result<UnixStream> {
-    let s = UnixStream::connect(sock_path())?;
-    s.set_read_timeout(Some(DAEMON_CONTROL_TIMEOUT))?;
-    s.set_write_timeout(Some(DAEMON_CONTROL_TIMEOUT))?;
-    Ok(s)
+    local_runtime().connect_with_timeout(DAEMON_CONTROL_TIMEOUT)
 }
 
 fn probe_daemon_detail() -> DaemonProbe {
@@ -1522,7 +1525,7 @@ pub fn upgrade_daemon() -> UpgradeOutcome {
 /// 暂存包里的 smeltd，会话不丢，再替换 .app）；`None` 则 exec `current_exe`。
 pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     let predecessor = daemon_info();
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = local_runtime().connect() else {
         // 守护没跑：拉起磁盘上最新的等于升级完成，但要探测确认它真的起来了再报
         // 成功——ensure_daemon_running 的失败是静默的，不确认就报 Upgraded 会让
         // UI 显示"已升级"而守护其实没起来。
@@ -1836,14 +1839,11 @@ fn sync_managed_helpers_from_app(app: &std::path::Path) -> std::io::Result<()> {
 /// 监听 socket 的进程直接 SIGKILL，这条路径不依赖守护认不认识任何协议。
 pub fn restart_daemon() {
     let path = sock_path();
-    let daemon_pid = daemon_pid_with_timeout(&path);
+    let daemon_pid = daemon_pid_with_timeout();
     // 硬重启后必须重新验证托管文件；此前的成功缓存不能跨 daemon 生命周期。
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
-    if let Ok(s) = UnixStream::connect(&path) {
-        // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
-        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-        let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
-        let mut s = s;
+    // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
+    if let Ok(mut s) = local_runtime().connect_with_timeout(Duration::from_secs(2)) {
         let _ = writeln!(
             s,
             "{}",
@@ -1854,7 +1854,7 @@ pub fn restart_daemon() {
     }
     // 等守护退出（最多 ~1s）；socket 仍能连上再强杀，**不要**提前 return 漏掉残留 sock。
     for _ in 0..10 {
-        if UnixStream::connect(&path).is_err() {
+        if local_runtime().connect().is_err() {
             break;
         }
         thread::sleep(Duration::from_millis(100));
@@ -1873,22 +1873,22 @@ pub fn restart_daemon() {
                 thread::sleep(Duration::from_millis(50));
             }
         }
-    } else if UnixStream::connect(&path).is_ok() {
+    } else if local_runtime().connect().is_ok() {
         // 老守护的 version 响应没有 pid，只能保留按 socket 反查的兼容兜底。
         force_kill_socket_owner(&path);
         thread::sleep(Duration::from_millis(150));
     }
     // 残留 sock 文件会让下一次 connect 误判/卡住；尽量清掉。
-    if UnixStream::connect(&path).is_err() {
+    if local_runtime().connect().is_err() {
         let _ = std::fs::remove_file(&path);
     }
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
 }
 
-fn daemon_pid_with_timeout(path: &std::path::Path) -> Option<u32> {
-    let mut s = UnixStream::connect(path).ok()?;
-    s.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
-    s.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
+fn daemon_pid_with_timeout() -> Option<u32> {
+    let mut s = local_runtime()
+        .connect_with_timeout(Duration::from_millis(500))
+        .ok()?;
     writeln!(
         s,
         "{}",

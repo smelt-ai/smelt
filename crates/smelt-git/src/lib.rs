@@ -5,10 +5,15 @@
 
 pub mod discovery;
 
+use smelt_core::fs::FileSystem as _;
 pub use smelt_core::subprocess::{LocalSubprocess, Output, Subprocess};
-use std::collections::HashSet;
+pub use smelt_runtime_client::protocol::git::{
+    BranchList, CommitNode, DiffHunk, DiffKind, DiffLine, DiffScope, GitFileDiffResult,
+    GitPatchAction, GitStatusData, LOG_FORMAT, LogScope, ParsedDiff, RepoInfo, WorktreeEntry,
+    WorktreeListData, main_repo_root_from_common_dir, parse_diff, parse_diff_with_file_headers,
+    parse_log, parse_name_status,
+};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 pub type GitOutput = Output;
 
@@ -44,242 +49,6 @@ pub fn git_err(out: &GitOutput, fallback: &str) -> String {
     } else {
         stderr
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct WorktreeEntry {
-    pub path: String,
-    pub branch: Option<String>,
-    pub is_main: bool,
-    pub prunable: bool,
-    pub locked: bool,
-}
-
-pub struct WorktreeListData {
-    pub entries: Vec<WorktreeEntry>,
-    pub main_root: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiffKind {
-    Add,
-    Del,
-    Context,
-    Meta,
-}
-
-#[derive(Clone, Debug)]
-pub struct DiffLine {
-    pub old_ln: Option<u32>,
-    pub new_ln: Option<u32>,
-    pub kind: DiffKind,
-    pub text: String,
-    pub segments: Option<Vec<(String, bool)>>,
-    pub file_header: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct DiffHunk {
-    pub range: std::ops::Range<usize>,
-    pub raw: String,
-}
-
-pub struct GitDiff {
-    pub root: String,
-    pub path: String,
-    pub aggregate: bool,
-    pub worktree_file: Option<String>,
-    pub lines: Rc<Vec<DiffLine>>,
-    pub header: String,
-    pub hunks: Rc<Vec<DiffHunk>>,
-    pub patchable: bool,
-    pub scope: DiffScope,
-    pub has_staged: bool,
-    /// 原始补丁。`None` 还在读取；`Some("")` 是已经读完的空差异。
-    pub patch: Option<String>,
-}
-
-pub struct ParsedDiff {
-    pub lines: Vec<DiffLine>,
-    pub header: String,
-    pub hunks: Vec<DiffHunk>,
-}
-
-#[derive(Clone, Default)]
-pub struct GitStatusData {
-    pub ok: bool,
-    pub branch: String,
-    pub upstream: Option<String>,
-    pub ahead: u32,
-    pub behind: u32,
-    pub files: Vec<(String, String)>,
-    pub stash_count: u32,
-    pub insertions: u32,
-    pub deletions: u32,
-}
-
-impl GitStatusData {
-    pub fn branch_name(&self) -> &str {
-        &self.branch
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct BranchList {
-    pub local: Vec<String>,
-    pub remote: Vec<String>,
-}
-
-impl BranchList {
-    pub fn local_names(&self) -> &[String] {
-        &self.local
-    }
-
-    pub fn remote_names(&self) -> &[String] {
-        &self.remote
-    }
-}
-
-#[derive(Clone)]
-pub struct RepoInfo {
-    pub git_dir: String,
-    pub common_dir: String,
-    pub branch: String,
-}
-
-impl RepoInfo {
-    pub fn is_worktree(&self) -> bool {
-        self.git_dir != self.common_dir
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffScope {
-    All,
-    Staged,
-    Unstaged,
-}
-
-impl DiffScope {
-    pub fn args(self) -> &'static [&'static str] {
-        match self {
-            // 同 `load_git_status`：不强制 `--ignore-submodules`，跟随仓库配置。
-            // diff 与 status 必须用同一套口径，否则列表里有的条目点开是空的。
-            Self::All => &["diff", "HEAD", "--"],
-            Self::Staged => &["diff", "--staged", "--"],
-            Self::Unstaged => &["diff", "--"],
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "全部",
-            Self::Staged => "已暂存",
-            Self::Unstaged => "未暂存",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GitTreeRow {
-    pub depth: usize,
-    pub name: String,
-    pub path: String,
-    pub status: Option<String>,
-}
-
-pub fn build_git_tree(files: &[(String, String)], collapsed: &HashSet<String>) -> Vec<GitTreeRow> {
-    use std::collections::BTreeMap;
-
-    #[derive(Default)]
-    struct Node {
-        dirs: BTreeMap<String, Node>,
-        files: Vec<(String, String)>,
-    }
-
-    fn walk(
-        node: &Node,
-        prefix: &str,
-        depth: usize,
-        collapsed: &HashSet<String>,
-        out: &mut Vec<GitTreeRow>,
-    ) {
-        for (name, child) in &node.dirs {
-            let mut label = name.clone();
-            let mut path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            let mut node = child;
-            while node.files.is_empty() && node.dirs.len() == 1 {
-                let (next_name, next_node) = node.dirs.iter().next().unwrap();
-                label = format!("{label}/{next_name}");
-                path = format!("{path}/{next_name}");
-                node = next_node;
-            }
-            let is_collapsed = collapsed.contains(&path);
-            out.push(GitTreeRow {
-                depth,
-                name: label,
-                path: path.clone(),
-                status: None,
-            });
-            if !is_collapsed {
-                walk(node, &path, depth + 1, collapsed, out);
-            }
-        }
-        for (name, status) in &node.files {
-            out.push(GitTreeRow {
-                depth,
-                name: name.clone(),
-                path: if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{prefix}/{name}")
-                },
-                status: Some(status.clone()),
-            });
-        }
-    }
-
-    let mut root = Node::default();
-    for (status, path) in files {
-        let mut parts = path.split('/').collect::<Vec<_>>();
-        let Some(name) = parts.pop() else { continue };
-        let mut node = &mut root;
-        for part in parts {
-            node = node.dirs.entry(part.to_string()).or_default();
-        }
-        if !name.is_empty() {
-            node.files.push((name.to_string(), status.clone()));
-        }
-    }
-
-    let mut rows = Vec::new();
-    walk(&root, "", 0, collapsed, &mut rows);
-    rows
-}
-
-pub fn full_file_path(root: &str, path: &str, aggregate: bool) -> Option<String> {
-    (!aggregate).then(|| Path::new(root).join(path).to_string_lossy().into_owned())
-}
-
-pub fn hunk_patch(header: &str, hunk: &DiffHunk) -> String {
-    format!("{header}{}", hunk.raw)
-}
-
-pub fn repo_label_from_common_dir(common_dir: &str) -> Option<String> {
-    Path::new(common_dir)
-        .parent()?
-        .file_name()?
-        .to_str()
-        .map(String::from)
-}
-
-pub fn main_repo_root_from_common_dir(common_dir: &str) -> Option<String> {
-    Path::new(common_dir).parent()?.to_str().map(String::from)
 }
 
 pub fn parse_branch_status_line(b: &str) -> (String, Option<String>, u32, u32) {
@@ -861,26 +630,8 @@ pub fn merge_branch(root: &str, branch: &str) -> Result<(), String> {
     }
 }
 
-/// `path` 是相对 `root` 这个仓库的路径。调用方拿到文件时就知道它属于哪个仓库，
-/// 这里不再按路径反推——反推正是暂存落到子仓、提交却回到父仓的根源。
-pub fn stage_file(root: &str, path: &str) -> Result<(), String> {
-    checked(run_git(root, &["add", "--", path]), "git add 失败")
-}
-
-pub fn unstage_file(root: &str, path: &str) -> Result<(), String> {
-    checked(run_git(root, &["reset", "--", path]), "git reset 失败")
-}
-
 pub fn apply_patch(root: &str, args: &[&str], patch: &str) -> Result<(), String> {
     checked(run_git_stdin(root, args, patch), "git apply 失败")
-}
-
-pub fn parse_diff(text: &str) -> ParsedDiff {
-    parse_diff_inner(text, false)
-}
-
-pub fn parse_diff_with_file_headers(text: &str) -> ParsedDiff {
-    parse_diff_inner(text, true)
 }
 
 /// 未跟踪目录 / 嵌套 git 仓库没法走 `diff --no-index`（对目录会失败），
@@ -893,205 +644,171 @@ pub fn untracked_entry_diff(path: &str) -> String {
     format!("diff --git a/{path} b/{path}\nnew file mode 000000\n--- /dev/null\n+++ b/{path}\n")
 }
 
-fn parse_diff_inner(text: &str, show_file_headers: bool) -> ParsedDiff {
-    let make = |old_ln, new_ln, kind, text: &str| DiffLine {
-        old_ln,
-        new_ln,
-        kind,
-        text: text.to_string(),
-        segments: None,
-        file_header: false,
+/// `git add -- <paths>`。`paths` 相对 `root` 这个仓库；调用方拿到文件时就知道它属于
+/// 哪个仓库，这里不再按路径反推——反推正是暂存落到子仓、提交却回到父仓的根源。
+/// 批量一条命令：几十个文件逐个跑就是几十个进程。
+pub fn stage_paths(root: &str, paths: &[String]) -> Result<(), String> {
+    index_paths(root, "add", paths, "git add 失败")
+}
+
+/// `git reset -- <paths>`。
+pub fn unstage_paths(root: &str, paths: &[String]) -> Result<(), String> {
+    index_paths(root, "reset", paths, "git reset 失败")
+}
+
+fn index_paths(root: &str, verb: &str, paths: &[String], fallback: &str) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![verb, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    checked(run_git(root, &args), fallback)
+}
+
+/// 丢弃一个文件的全部改动。已跟踪走 `git restore --staged --worktree`（暂存区和
+/// 工作区一起还原，省得用户为「已 add 过」的文件再点一次）；未跟踪的 git 管不着，
+/// 直接删盘。
+pub fn discard_file(root: &str, path: &str, untracked: bool) -> Result<(), String> {
+    if untracked {
+        let full = Path::new(root).join(path);
+        return smelt_core::fs::LocalFs
+            .remove_file(&full)
+            .map_err(|e| format!("删除 {path} 失败：{e}"));
+    }
+    checked(
+        run_git(root, &["restore", "--staged", "--worktree", "--", path]),
+        "git restore 失败",
+    )
+}
+
+/// 工作区有没有未提交改动。探测失败按「干净」算：这只用来决定提醒文案。
+pub fn is_dirty(root: &str) -> bool {
+    run_git(root, &["status", "--porcelain"])
+        .ok()
+        .is_some_and(|o| o.success() && !o.stdout.is_empty())
+}
+
+pub fn apply_patch_action(root: &str, action: GitPatchAction, patch: &str) -> Result<(), String> {
+    apply_patch(root, action.args(), patch)
+}
+
+/// 单个文件的 diff。git 跑不起来时把原因当正文返回，界面照样显示。
+pub fn file_diff(root: &str, path: &str, untracked: bool, scope: DiffScope) -> GitFileDiffResult {
+    let has_staged = !untracked
+        && run_git(root, &["diff", "--staged", "--quiet", "--", path])
+            .map(|o| !o.success())
+            .unwrap_or(false);
+    let text = if untracked {
+        match run_git(root, &["diff", "--no-index", "--", "/dev/null", path]) {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(err) => format!("无法执行 git diff：{err}"),
+        }
+    } else {
+        let mut args: Vec<&str> = scope.args().to_vec();
+        args.push(path);
+        match run_git(root, &args) {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+            Err(err) => format!("无法执行 git diff：{err}"),
+        }
     };
-    if text.trim().is_empty() {
-        return ParsedDiff {
-            lines: vec![make(None, None, DiffKind::Meta, "（无差异）")],
-            header: String::new(),
-            hunks: Vec::new(),
-        };
-    }
-
-    let mut old_ln = 0;
-    let mut new_ln = 0;
-    let mut lines = Vec::new();
-    let mut header = String::new();
-    let mut hunks: Vec<DiffHunk> = Vec::new();
-    for line in text.lines() {
-        if let Some(hunk) = hunks.last_mut()
-            && hunk.range.end == usize::MAX
-        {
-            if line.starts_with("@@") || line.starts_with("diff ") || line.starts_with("Submodule ")
-            {
-                hunk.range.end = lines.len();
-            } else {
-                hunk.raw.push_str(line);
-                hunk.raw.push('\n');
-            }
-        }
-        if line.starts_with("@@") {
-            (old_ln, new_ln) = parse_hunk(line);
-            hunks.push(DiffHunk {
-                range: lines.len()..usize::MAX,
-                raw: format!("{line}\n"),
-            });
-        } else if let Some(path) = submodule_diff_path(line) {
-            if show_file_headers {
-                let mut title = make(None, None, DiffKind::Meta, path);
-                title.file_header = true;
-                lines.push(title);
-            }
-            lines.push(make(None, None, DiffKind::Meta, line));
-        } else if line.starts_with("+++")
-            || line.starts_with("---")
-            || line.starts_with("diff ")
-            || line.starts_with("index ")
-            || line.starts_with("new file")
-            || line.starts_with("deleted file")
-            || line.starts_with("similarity")
-            || line.starts_with("rename ")
-        {
-            if hunks.is_empty() {
-                header.push_str(line);
-                header.push('\n');
-            }
-            if show_file_headers && line.starts_with("diff --git ") {
-                let path = line
-                    .split_whitespace()
-                    .nth(3)
-                    .and_then(|path| path.strip_prefix("b/"))
-                    .unwrap_or(line);
-                let mut title = make(None, None, DiffKind::Meta, path);
-                title.file_header = true;
-                lines.push(title);
-            }
-            let noise = line.starts_with("diff ")
-                || line.starts_with("index ")
-                || line.starts_with("--- ")
-                || line.starts_with("+++ ")
-                || line == "--- /dev/null"
-                || line == "+++ /dev/null";
-            if !noise {
-                lines.push(make(None, None, DiffKind::Meta, line));
-            }
-        } else if let Some(text) = line.strip_prefix('+') {
-            lines.push(make(None, Some(new_ln), DiffKind::Add, text));
-            new_ln += 1;
-        } else if let Some(text) = line.strip_prefix('-') {
-            lines.push(make(Some(old_ln), None, DiffKind::Del, text));
-            old_ln += 1;
-        } else {
-            let text = line.strip_prefix(' ').unwrap_or(line);
-            lines.push(make(Some(old_ln), Some(new_ln), DiffKind::Context, text));
-            old_ln += 1;
-            new_ln += 1;
-        }
-    }
-    if let Some(hunk) = hunks.last_mut()
-        && hunk.range.end == usize::MAX
-    {
-        hunk.range.end = lines.len();
-    }
-    mark_inline(&mut lines);
-    ParsedDiff {
-        lines,
-        header,
-        hunks,
+    let is_gitlink = text.lines().any(|l| l.starts_with("Submodule "));
+    let worktree_file = Some(Path::new(root).join(path))
+        .filter(|full| smelt_core::fs::is_regular_file(&smelt_core::fs::LocalFs, full));
+    GitFileDiffResult {
+        text,
+        has_staged,
+        is_gitlink,
+        worktree_file: worktree_file.map(|full| full.to_string_lossy().into_owned()),
     }
 }
 
-/// `git diff --submodule` 短格式：`Submodule path abc..def:` 或
-/// `Submodule path contains modified content`。没有 `diff --git` 头，
-/// 全部改动列表必须单独认，否则子模块改动在聚合视图里会消失。
-fn submodule_diff_path(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("Submodule ")?;
-    if let Some((path, _)) = rest.split_once(" contains ") {
-        let path = path.trim();
-        return (!path.is_empty()).then_some(path);
-    }
-    let (path, tail) = rest.rsplit_once(' ')?;
-    let tail = tail.trim_end_matches(':');
-    let looks_like_sha_range = tail.contains("..") || tail.chars().all(|ch| ch.is_ascii_hexdigit());
-    looks_like_sha_range
-        .then_some(path.trim())
-        .filter(|path| !path.is_empty())
-}
-
-fn parse_hunk(line: &str) -> (u32, u32) {
-    let mut old = 0;
-    let mut new = 0;
-    for token in line.split_whitespace() {
-        if let Some(value) = token.strip_prefix('-') {
-            old = value
-                .split(',')
-                .next()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0);
-        } else if let Some(value) = token.strip_prefix('+') {
-            new = value
-                .split(',')
-                .next()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0);
-        }
-    }
-    (old, new)
-}
-
-fn mark_inline(lines: &mut [DiffLine]) {
-    let mut index = 0;
-    while index < lines.len() {
-        if lines[index].kind != DiffKind::Del {
-            index += 1;
+/// 一个仓库在 `scope` 里的全部改动，`untracked_paths` 逐个拼在后面。
+///
+/// 不把子仓的文件 diff 拼进父仓：子仓有自己的分组和自己的提交入口。父仓这边只展示
+/// gitlink 指针变化（它确实是父仓待提交的改动）。
+pub fn all_diff(root: &str, scope: DiffScope, untracked_paths: &[String]) -> String {
+    let mut text = run_git(root, scope.args())
+        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+        .unwrap_or_else(|err| format!("无法执行 git diff：{err}"));
+    for path in untracked_paths {
+        let chunk = run_git(root, &["diff", "--no-index", "--", "/dev/null", path])
+            .ok()
+            .filter(|out| !out.stdout.is_empty())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+            .unwrap_or_else(|| untracked_entry_diff(path));
+        if chunk.is_empty() {
             continue;
         }
-        let deleted = index;
-        while index < lines.len() && lines[index].kind == DiffKind::Del {
-            index += 1;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
         }
-        let added = index;
-        while index < lines.len() && lines[index].kind == DiffKind::Add {
-            index += 1;
-        }
-        for offset in 0..(added - deleted).min(index - added) {
-            let (delete_index, add_index) = (deleted + offset, added + offset);
-            let (old, new) = (
-                lines[delete_index].text.clone(),
-                lines[add_index].text.clone(),
-            );
-            if old.len() + new.len() <= 4000 {
-                let (old_segments, new_segments) = inline_segments(&old, &new);
-                lines[delete_index].segments = Some(old_segments);
-                lines[add_index].segments = Some(new_segments);
-            }
-        }
+        text.push_str(&chunk);
     }
+    text
 }
 
-type InlineSegments = Vec<(String, bool)>;
-
-fn inline_segments(old: &str, new: &str) -> (InlineSegments, InlineSegments) {
-    let diff = similar::TextDiff::from_chars(old, new);
-    let mut old_segments = InlineSegments::new();
-    let mut new_segments = InlineSegments::new();
-    let push = |segments: &mut InlineSegments, value: &str, changed: bool| {
-        if let Some(last) = segments.last_mut()
-            && last.1 == changed
-        {
-            last.0.push_str(value);
-            return;
-        }
-        segments.push((value.to_string(), changed));
-    };
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            similar::ChangeTag::Equal => {
-                push(&mut old_segments, change.value(), false);
-                push(&mut new_segments, change.value(), false);
-            }
-            similar::ChangeTag::Delete => push(&mut old_segments, change.value(), true),
-            similar::ChangeTag::Insert => push(&mut new_segments, change.value(), true),
-        }
+pub fn log_args(scope: &LogScope, limit: usize) -> Vec<String> {
+    let mut a = vec![
+        "log".to_string(),
+        LOG_FORMAT.to_string(),
+        format!("--max-count={limit}"),
+    ];
+    match scope {
+        // 不带 ref = HEAD，也就是当前分支。
+        LogScope::Head => {}
+        LogScope::All => a.push("--all".to_string()),
+        LogScope::Branch(b) => a.push(b.clone()),
     }
-    (old_segments, new_segments)
+    a
+}
+
+pub fn log(root: &str, scope: &LogScope, limit: usize) -> Result<Vec<CommitNode>, String> {
+    let args = log_args(scope, limit);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_git(root, &argv).map_err(|error| error.to_string())?;
+    if !out.success() {
+        return Err(git_err(&out, "git log 失败"));
+    }
+    Ok(parse_log(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// 一个提交改了哪些文件。只要清单，diff 内容等点了具体文件再拉——一个大提交的
+/// 完整 diff 可能上万行。
+pub fn commit_files(root: &str, hash: &str) -> Result<Vec<(String, String)>, String> {
+    let out = run_git(
+        root,
+        &[
+            "show",
+            "--name-status",
+            "--pretty=format:",
+            "--no-color",
+            hash,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(parse_name_status(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// 单个文件在某个提交里的改动。`--format=` 去掉提交头，只留 diff 本体。
+pub fn commit_file_diff(root: &str, hash: &str, path: &str) -> String {
+    match run_git(root, &["show", "--format=", "--no-color", hash, "--", path]) {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            // `git show` 失败时正文在 stderr，stdout 是空的。空成功才是无差异。
+            if stdout.trim().is_empty() && !out.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let err = err.trim();
+                if err.is_empty() {
+                    stdout
+                } else {
+                    format!("无法执行 git show：{err}")
+                }
+            } else {
+                stdout
+            }
+        }
+        Err(err) => format!("无法执行 git show：{err}"),
+    }
 }
 
 pub fn resolve_worktree_path(main_root: &str, worktree_dir: &str) -> PathBuf {
@@ -1108,6 +825,8 @@ pub fn resolve_worktree_path(main_root: &str, worktree_dir: &str) -> PathBuf {
 mod tests {
     use super::*;
     use smelt_core::subprocess::{MockSubprocess, Output};
+    use smelt_runtime_client::protocol::git::build_git_tree;
+    use std::collections::HashSet;
 
     /// pre-commit hook 失败时，必须把 git 的诊断原样回传，而不是吞成一句
     /// 「git commit 失败」——用户要靠这段文字才知道是 hook 里的 npm 没找到。
@@ -1213,40 +932,6 @@ husky - pre-commit hook exited with code 127 (error)"
     }
 
     #[test]
-    fn submodule_short_diff_gets_a_file_header() {
-        let parsed = parse_diff_with_file_headers(
-            "Submodule vendor/lib 1234567..89abcde:\n  > Fix the bug\n",
-        );
-        assert!(
-            parsed
-                .lines
-                .iter()
-                .any(|line| line.file_header && line.text == "vendor/lib"),
-            "子模块 SHA 变化必须出现在全部改动里：{:?}",
-            parsed
-                .lines
-                .iter()
-                .map(|line| (line.file_header, line.text.as_str()))
-                .collect::<Vec<_>>()
-        );
-        let parsed =
-            parse_diff_with_file_headers("Submodule skills/fx-deploy contains modified content\n");
-        assert!(
-            parsed
-                .lines
-                .iter()
-                .any(|line| line.file_header && line.text == "skills/fx-deploy")
-        );
-        let parsed = parse_diff_with_file_headers(&untracked_entry_diff("skills/fx-deploy"));
-        assert!(
-            parsed
-                .lines
-                .iter()
-                .any(|line| line.file_header && line.text == "skills/fx-deploy")
-        );
-    }
-
-    #[test]
     fn provider_aware_status_uses_subprocess_seam() {
         let status_args = [
             "-C",
@@ -1272,17 +957,6 @@ husky - pre-commit hook exited with code 127 (error)"
         assert!(status.ok);
         assert_eq!(status.branch, "main");
         assert_eq!(status.files, vec![(" M".into(), "src/lib.rs".into())]);
-    }
-
-    #[test]
-    fn diff_parser_keeps_patch_material() {
-        let parsed = parse_diff(
-            "diff --git a/f b/f\nindex 111..222 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n",
-        );
-        assert_eq!(parsed.lines.len(), 2);
-        assert_eq!(parsed.hunks.len(), 1);
-        assert!(parsed.header.starts_with("diff --git"));
-        assert!(hunk_patch(&parsed.header, &parsed.hunks[0]).contains("@@ -1 +1 @@"));
     }
 
     fn init_repo(dir: &Path) -> String {

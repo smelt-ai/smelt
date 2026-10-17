@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use gpui::*;
@@ -38,6 +37,10 @@ pub struct OpenFile {
     /// 磁盘上（或最近一次保存后）的内容快照，跟编辑器当前内容一比就知道是否有未保存
     /// 改动——不用额外订阅 InputEvent::Change 维护一个脏标记，render 时比一下字符串就行。
     pub(super) saved_content: Rc<String>,
+    /// 运行时给的内容版本，跟 `saved_content` 同步更新；保存时带回去做冲突检测。
+    pub(super) saved_version: Option<String>,
+    /// 可预览图片的字节（运行时给的）。读完之前、读失败或不是图片时为 `None`。
+    pub(super) image: Option<std::sync::Arc<gpui::Image>>,
     /// 最近一次保存失败 / 不允许保存的原因；成功保存或重新打开文件后清空。
     pub(super) save_error: Option<String>,
     /// 文件是否按文本成功读取过。读取完成前 / 读取失败（比如二进制文件）时为 false，
@@ -53,9 +56,9 @@ pub struct OpenFile {
     pub(super) preview_source: SharedString,
 }
 
-/// 保存一次的结果：分 Saved / 检测到外部改动的 Conflict / 其它 IO 错误。
+/// 保存一次的结果：分 Saved（带新版本）/ 检测到外部改动的 Conflict / 其它错误。
 enum SaveOutcome {
-    Saved,
+    Saved(String),
     Conflict,
     Error(String),
 }
@@ -82,138 +85,7 @@ pub struct SearchState {
     truncated: bool,
 }
 
-/// 搜索命中数上限：触顶即停并标记截断，避免超大仓遍历/渲染失控。
-const SEARCH_HIT_LIMIT: usize = 200;
-/// 内容搜索跳过的单文件大小上限（512KB）：更大的多半是数据/构建产物，逐行扫不划算。
-const SEARCH_MAX_FILE_BYTES: u64 = 512 * 1024;
-
 // ===================== 搜索 =====================
-
-/// 后台遍历项目搜索 query（大小写不敏感）：文件名命中或文件内容逐行命中。
-/// 使用 `ignore` crate 遵循 `.gitignore`、`.git/info/exclude`、全局 gitignore 与隐藏文件规则，
-/// 兜底跳过 .git/node_modules/target/.DS_Store，并采用流式行读取避免大文件占用过多内存。
-/// 返回 (命中列表, 是否因触顶截断)；文件名命中排在内容命中前。绝不在此之外做 UI 调用。
-///
-/// `cancel` 在每个文件边界检查。遍历本身是一次同步调用，丢掉外层 Task
-/// 停不掉已经在跑的这一轮，所以取消必须发生在这里。
-fn search_project(root: &str, query: &str, cancel: &AtomicBool) -> (Vec<SearchHit>, bool) {
-    if cancel.load(Ordering::Acquire) {
-        return (Vec::new(), false);
-    }
-    let needle = query.to_lowercase();
-    let mut name_hits: Vec<SearchHit> = Vec::new();
-    let mut content_hits: Vec<SearchHit> = Vec::new();
-    let root_path = std::path::Path::new(root);
-    let mut truncated = false;
-
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .require_git(false)
-        .ignore(true)
-        .parents(true)
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            if matches!(
-                name.as_ref(),
-                ".git" | "node_modules" | "target" | ".DS_Store"
-            ) {
-                return false;
-            }
-            true
-        })
-        .build();
-
-    for entry in walker.flatten() {
-        if cancel.load(Ordering::Acquire) {
-            return (Vec::new(), false);
-        }
-        let Some(ft) = entry.file_type() else {
-            continue;
-        };
-        if !ft.is_file() {
-            continue;
-        }
-
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy();
-        let rel = path
-            .strip_prefix(root_path)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-        let abs = path.to_string_lossy().to_string();
-
-        // 1. 文件名命中：直接记一条（不再看内容），命中行留空
-        if name.to_lowercase().contains(&needle) {
-            name_hits.push(SearchHit {
-                path: abs,
-                rel,
-                line: None,
-            });
-            if name_hits.len() + content_hits.len() >= SEARCH_HIT_LIMIT {
-                truncated = true;
-                break;
-            }
-            continue;
-        }
-
-        // 2. 内容命中：跳过大文件
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.len() > SEARCH_MAX_FILE_BYTES {
-            continue;
-        }
-
-        // 流式逐行扫描，避免将大文件全部读入内存；含 NUL 视为二进制并中断
-        let Ok(file) = std::fs::File::open(path) else {
-            continue;
-        };
-        let mut reader = std::io::BufReader::new(file);
-        let mut line_buf = String::new();
-        let mut line_no = 0usize;
-
-        use std::io::BufRead as _;
-        while let Ok(n) = reader.read_line(&mut line_buf) {
-            if n == 0 {
-                break;
-            }
-            line_no += 1;
-            // 含 NUL 视为二进制，不逐行扫
-            if line_buf.as_bytes().contains(&0) {
-                break;
-            }
-            if line_buf.to_lowercase().contains(&needle) {
-                // 预览行去掉首尾空白并截断，避免超长行撑爆列表
-                let preview: String = line_buf.trim().chars().take(200).collect();
-                content_hits.push(SearchHit {
-                    path: abs,
-                    rel,
-                    line: Some((line_no, preview)),
-                });
-                if name_hits.len() + content_hits.len() >= SEARCH_HIT_LIMIT {
-                    truncated = true;
-                }
-                break;
-            }
-            line_buf.clear();
-        }
-
-        if truncated {
-            break;
-        }
-    }
-
-    // 保持相对路径顺序稳定
-    name_hits.sort_by(|a, b| a.rel.cmp(&b.rel));
-    content_hits.sort_by(|a, b| a.rel.cmp(&b.rel));
-
-    name_hits.extend(content_hits);
-    (name_hits, truncated)
-}
 
 /// 搜索结果的临时目录树。只含命中文件和它们的祖先目录，不触碰磁盘；索引指向
 /// `SearchState::hits`，因此仍能保留内容命中对应的跳转行号。

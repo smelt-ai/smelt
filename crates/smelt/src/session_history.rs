@@ -3,8 +3,13 @@
 
 pub use smelt_core::session_history::*;
 
-use smelt_core::fs::{FileSystem, LocalFs};
+use smelt_runtime_client::protocol::history::{
+    HistoryDeleteCall, HistoryDeleteParams, HistoryDetailCall, HistoryDetailParams,
+    HistoryListCall, HistoryListParams,
+};
 use std::path::{Path, PathBuf};
+
+use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
 
 // ===================== GPUI 面板 =====================
 //
@@ -899,14 +904,6 @@ pub(crate) fn session_list_key(
     format!("{}:{}:{cwd}", agent.id(), profile_id.unwrap_or("default"))
 }
 
-pub(crate) fn normalized_profile_override_dir(
-    profile: &smelt_core::agent_kind::AcpProfile,
-) -> Option<String> {
-    let launch = profile.launch_spec().ok()?;
-    let env_var = profile.env_var().ok()?;
-    smelt_core::workspace_override::env_override_from_launch(&launch, env_var)
-}
-
 fn current_profile_launch(
     config: &crate::settings::AgentHostState,
     profile: &smelt_core::agent_kind::AcpProfile,
@@ -914,51 +911,76 @@ fn current_profile_launch(
     config.profile_launch_spec(profile)
 }
 
-fn list_sessions_for(
+/// 向运行时要历史列表。读不到（运行时没起、版本旧）就当没有历史，原因打到日志里。
+fn load_history_list(
     agent: HistorySourceKind,
-    profile_id: Option<&str>,
-    override_dir: Option<&str>,
-    cwd: &str,
-) -> Vec<SessionSummary> {
-    // 自定义名称的覆盖已经在 smelt-core 那层贴好（移动端读的是同一份），这里只做
-    // 结构转换。
-    smelt_core::session_control::list_history_for(agent, profile_id, cwd, override_dir)
-        .into_iter()
-        .map(|session| SessionSummary {
-            title: session.display_title().to_string(),
-            path: session.path,
-            agent_title: session.title,
-            custom_title: session.custom_title,
-            resume_id: session.resume_id,
-            started_at: session.started_at,
-            last_active_at: session.last_active_at,
-            message_count: session.message_count,
-            total_tokens: session.total_tokens,
-        })
-        .collect()
+    profile_id: Option<String>,
+    cwd: String,
+) -> (Vec<SessionSummary>, HashMap<String, String>) {
+    let params = HistoryListParams {
+        agent: agent.id().to_string(),
+        profile_id,
+        cwd,
+    };
+    match call::<HistoryListCall>(params, RUNTIME_CALL_TIMEOUT) {
+        Ok(result) => (
+            result
+                .sessions
+                .into_iter()
+                .map(|session| SessionSummary {
+                    title: session
+                        .custom_title
+                        .clone()
+                        .unwrap_or_else(|| session.title.clone()),
+                    path: PathBuf::from(session.path),
+                    agent_title: session.title,
+                    custom_title: session.custom_title,
+                    resume_id: session.resume_id,
+                    started_at: session
+                        .started_at_ms
+                        .and_then(chrono::DateTime::from_timestamp_millis),
+                    last_active_at: session
+                        .last_active_at_ms
+                        .and_then(chrono::DateTime::from_timestamp_millis),
+                    message_count: session.message_count,
+                    total_tokens: session.total_tokens,
+                })
+                .collect(),
+            result.agent_definition_ids.into_iter().collect(),
+        ),
+        Err(error) => {
+            eprintln!("[history] 读取历史会话失败：{}", error_text(error));
+            (Vec::new(), HashMap::new())
+        }
+    }
 }
 
-/// 删除一份已经由历史列表发现的存档。拒绝符号链接和没有文件名的路径，避免右键
-/// 菜单状态过期后误删到更高层目录。
-fn delete_history_path(path: &Path) -> Result<(), String> {
-    if path.file_name().is_none() || path.parent().is_none() {
-        return Err("历史会话路径无效".into());
-    }
-    let metadata = LocalFs
-        .symlink_metadata(path)
-        .ok_or_else(|| "历史会话已不存在".to_string())?;
-    if metadata.is_symlink {
-        return Err("拒绝删除符号链接形式的历史会话".into());
-    }
-    if metadata.is_dir {
-        LocalFs
-            .remove_dir_all(path)
-            .map_err(|error| format!("删除会话目录失败：{error}"))
-    } else {
-        LocalFs
-            .remove_file(path)
-            .map_err(|error| format!("删除会话文件失败：{error}"))
-    }
+/// 向运行时要一份历史会话的对话内容。存档被删、格式认不出、或运行时连不上都是 `None`。
+fn load_history_detail(agent: HistorySourceKind, path: &Path) -> Option<SessionDetail> {
+    let params = HistoryDetailParams {
+        agent: agent.id().to_string(),
+        path: path.to_string_lossy().into_owned(),
+    };
+    let detail = call::<HistoryDetailCall>(params, RUNTIME_CALL_TIMEOUT)
+        .map_err(|error| eprintln!("[history] 读取会话内容失败：{}", error_text(error)))
+        .ok()?
+        .detail?;
+    Some(SessionDetail {
+        turns: detail
+            .turns
+            .into_iter()
+            .map(|turn| Turn {
+                is_user: turn.is_user,
+                timestamp: turn
+                    .timestamp_ms
+                    .and_then(chrono::DateTime::from_timestamp_millis),
+                text: turn.text,
+                tools: turn.tools,
+                tool_paths: turn.tool_paths,
+            })
+            .collect(),
+        model: detail.model,
+    })
 }
 
 impl Workspace {
@@ -973,11 +995,6 @@ impl Workspace {
         cwd: String,
         cx: &mut Context<Self>,
     ) {
-        let override_dir = profile_id.as_deref().and_then(|id| {
-            cx.global::<crate::settings::AgentHostState>()
-                .find_profile(id)
-                .and_then(normalized_profile_override_dir)
-        });
         let key = session_list_key(agent, profile_id.as_deref(), &cwd);
         let fresh = self
             .session_list
@@ -989,16 +1006,10 @@ impl Workspace {
         self.session_list_inflight.insert(key.clone());
         cx.spawn(async move |this, cx| {
             let c = cwd.clone();
-            let od = override_dir.clone();
             let pid = profile_id.clone();
             let (sessions, bindings) = cx
                 .background_executor()
-                .spawn(async move {
-                    let sessions = list_sessions_for(agent, pid.as_deref(), od.as_deref(), &c);
-                    let bindings =
-                        smelt_core::session_metadata::agent_definition_ids(agent, pid.as_deref());
-                    (sessions, bindings)
-                })
+                .spawn(async move { load_history_list(agent, pid, c) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_list_inflight.remove(&key);
@@ -1036,7 +1047,7 @@ impl Workspace {
             let p = path.clone();
             let detail = cx
                 .background_executor()
-                .spawn(async move { load_agent_session_detail(agent, &p) })
+                .spawn(async move { load_history_detail(agent, &p) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.session_detail_gen != r#gen {
@@ -1090,24 +1101,21 @@ impl Workspace {
         let resume_id = target.resume_id.clone();
         let path = target.path.clone();
         let title = target.title;
-        let delete_profile_id = profile_id.clone();
+        // 运行时确认存档在这个项目的历史列表里才删，并同步清掉自定义标题。
+        let params = HistoryDeleteParams {
+            agent: agent.id().to_string(),
+            profile_id: profile_id.clone(),
+            cwd: cwd.clone(),
+            resume_id,
+            path: path.to_string_lossy().into_owned(),
+        };
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = delete_history_path(&path);
-                    if result.is_ok() {
-                        // 标题仓库独立于 agent 的原始存档，删除存档时同步清理，
-                        // 否则同一个 resume id 被复用时会继承旧标题。
-                        let _ = smelt_core::session_control::rename_history_title(
-                            agent,
-                            delete_profile_id.as_deref(),
-                            &resume_id,
-                            None,
-                            None,
-                        );
-                    }
-                    result
+                    call::<HistoryDeleteCall>(params, RUNTIME_CALL_TIMEOUT)
+                        .map(drop)
+                        .map_err(error_text)
                 })
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
@@ -1198,7 +1206,7 @@ impl Workspace {
             let p = path.clone();
             let detail = cx
                 .background_executor()
-                .spawn(async move { load_agent_session_detail(source_agent.into(), &p) })
+                .spawn(async move { load_history_detail(source_agent.into(), &p) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let Some(detail) = detail else {
@@ -1352,12 +1360,11 @@ mod tests {
         HistoryListSnapshot, HistoryMigrationSource, HistorySourceTab, SessionDetail,
         SessionSummary, Turn, build_history_handoff_request, current_profile_launch,
         handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
-        history_source_tabs, list_sessions_for, normalized_profile_override_dir, project_dir,
+        history_source_tabs,
     };
     use crate::settings::AgentHostState;
     use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind};
     use smelt_core::session_handoff::HandoffTurn;
-    use std::path::Path;
 
     fn summary(title: &str, custom: Option<&str>, agent_title: &str) -> SessionSummary {
         SessionSummary {
@@ -1409,69 +1416,6 @@ mod tests {
         );
     }
 
-    fn write(dir: &Path, name: &str, lines: &[&str]) {
-        std::fs::write(dir.join(name), lines.join("\n")).unwrap();
-    }
-
-    fn test_sandbox(name: &str) -> std::path::PathBuf {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/test-artifacts/session-history")
-            .join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn history_profile_override_dir_preserves_spaces() {
-        let home = test_sandbox("ovh");
-        let workspace_dir = home.join("Claude Workspaces").join("quant");
-        let profile = AcpProfile {
-            id: "quant".into(),
-            kind_id: "claude".into(),
-            label: "Quant".into(),
-            workspace_dir: workspace_dir.display().to_string(),
-        };
-
-        let override_dir = normalized_profile_override_dir(&profile).unwrap();
-
-        assert_eq!(override_dir, workspace_dir.display().to_string());
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    #[test]
-    fn history_reader_finds_workspace_override_with_spaces() {
-        let home = test_sandbox("ovr");
-        let workspace_dir = home.join("Claude Workspaces").join("quant");
-        let profile = AcpProfile {
-            id: "quant".into(),
-            kind_id: "claude".into(),
-            label: "Quant".into(),
-            workspace_dir: workspace_dir.display().to_string(),
-        };
-        let project_root = workspace_dir.join("projects").join(project_dir("/x/y"));
-        std::fs::create_dir_all(&project_root).unwrap();
-        write(
-            &project_root,
-            "quant.jsonl",
-            &[
-                r#"{"type":"user","timestamp":"2026-07-05T00:00:00Z","message":{"content":"with spaces in override path"}}"#,
-            ],
-        );
-
-        let override_dir = normalized_profile_override_dir(&profile).unwrap();
-        let sessions = list_sessions_for(
-            ConversationAgentKind::Claude.into(),
-            None,
-            Some(&override_dir),
-            "/x/y",
-        );
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].title, "with spaces in override path");
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
     #[test]
     fn history_resume_profile_launch_uses_current_agent_command() {
         let profile = AcpProfile {
@@ -1490,18 +1434,6 @@ mod tests {
             launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("~/Claude Workspaces/quant")
         );
-    }
-
-    #[test]
-    fn unknown_profile_has_no_history_override() {
-        let profile = AcpProfile {
-            id: "future-profile".into(),
-            kind_id: "future-agent".into(),
-            label: "Future Agent".into(),
-            workspace_dir: "~/.future-agent".into(),
-        };
-
-        assert_eq!(normalized_profile_override_dir(&profile), None);
     }
 
     #[test]

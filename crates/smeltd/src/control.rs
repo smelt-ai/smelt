@@ -15,11 +15,13 @@ use smelt_core::control_api::{
     AgentDefinitionGetResult, AgentDefinitionIdParams, AgentDefinitionListResult,
     AgentDefinitionUpdateParams, AgentListParams, AgentMemoryRecordReadParams,
     AgentMemoryRecordWriteParams, AgentMemorySessionParams, AgentSendParams, AutomationGetResult,
-    AutomationListResult, AutomationRunOnceResult, AutomationSetEnabledParams,
+    AutomationListResult, AutomationRunOnceResult, AutomationSetEnabledParams, SessionListResult,
+};
+use smelt_runtime_client::protocol::control::{
     CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlError, ControlErrorCode,
     ControlMethod, ControlProtocolDescription, ControlRequestEnvelope, ControlResponse,
-    DaemonRuntimeInfo, EmptyParams, SUPPORTED_CONTROL_METHODS, SessionListResult,
-    SystemDescribeResult, decode_params, decode_request_envelope,
+    DaemonRuntimeInfo, EmptyParams, SUPPORTED_CONTROL_METHODS, SystemDescribeResult, decode_params,
+    decode_request_envelope,
 };
 
 use super::session_catalog::published_session_states;
@@ -156,9 +158,63 @@ fn dispatch_control(
                     started_at: super::started_at(),
                     session_count: published_session_states(sessions, acp_sessions).len(),
                     agent_event_version: AGENT_EVENT_VERSION,
+                    runtime_id: super::runtime_identity::runtime_id().map(|id| id.to_string()),
+                    os: Some(std::env::consts::OS.to_string()),
+                    arch: Some(std::env::consts::ARCH.to_string()),
                 },
             };
             success_value(control_version, &request_id, result)
+        }
+        git @ (ControlMethod::GitDiscover
+        | ControlMethod::GitRepoInfo
+        | ControlMethod::GitStatus
+        | ControlMethod::GitBranches
+        | ControlMethod::GitIsDirty
+        | ControlMethod::GitCheckout
+        | ControlMethod::GitBranchDelete
+        | ControlMethod::GitMerge
+        | ControlMethod::GitStage
+        | ControlMethod::GitUnstage
+        | ControlMethod::GitDiscardFile
+        | ControlMethod::GitApplyPatch
+        | ControlMethod::GitDiscardAll
+        | ControlMethod::GitCommit
+        | ControlMethod::GitPush
+        | ControlMethod::GitFetch
+        | ControlMethod::GitPull
+        | ControlMethod::GitStashPush
+        | ControlMethod::GitStashPop
+        | ControlMethod::GitWorktreeList
+        | ControlMethod::GitWorktreeCreate
+        | ControlMethod::GitWorktreeRemove
+        | ControlMethod::GitWorktreePrune
+        | ControlMethod::GitFileDiff
+        | ControlMethod::GitAllDiff
+        | ControlMethod::GitLog
+        | ControlMethod::GitCommitFiles
+        | ControlMethod::GitCommitFileDiff) => match super::git_control::dispatch(git, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
+        files @ (ControlMethod::ProjectTree
+        | ControlMethod::ProjectSearch
+        | ControlMethod::ProjectDeleteEntry
+        | ControlMethod::FileOpen
+        | ControlMethod::FileSave
+        | ControlMethod::SessionCompleteFiles) => {
+            match super::files_control::dispatch(files, params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        history @ (ControlMethod::HistoryList
+        | ControlMethod::HistoryDetail
+        | ControlMethod::HistoryDelete
+        | ControlMethod::HistoryTitles) => {
+            match super::history_control::dispatch(history, params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
         }
         ControlMethod::SessionList => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
@@ -572,7 +628,7 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
 
-    use smelt_core::control_api::{
+    use smelt_runtime_client::protocol::control::{
         CONTROL_API_VERSION, ControlErrorCode, ControlOutcome, ControlResponse, EmptyParams,
         SystemDescribe, SystemDescribeResult, decode_request_envelope_in_range, encode_request,
     };

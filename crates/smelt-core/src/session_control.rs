@@ -7,16 +7,15 @@
 use crate::agent_kind::{
     AcpProfile, ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind,
 };
-use crate::control_api::{EmptyParams, SessionList};
-use crate::daemon_protocol::DaemonOperation;
+use crate::control_api::SessionList;
 use crate::workspace_menu::{
     WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
 };
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
+use smelt_runtime_client::protocol::control::EmptyParams;
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use std::collections::{BTreeMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1102,7 +1101,9 @@ fn remote_lifecycle_from_name(name: &str) -> Result<RemoteSessionLifecycle, Stri
 pub fn list_sessions() -> Result<Vec<String>, String> {
     // 只读探测可以安全回退：老守护不认识 `control` 会关闭第一条连接，第二条连接仍走
     // 稳定的 legacy `list`。有副作用的调用绝不能使用这种“失败后换协议重试”。
-    if let Ok(result) = crate::control_client::call::<SessionList>(&EmptyParams::default()) {
+    if let Ok(result) = crate::daemon_state::local_runtime()
+        .call::<SessionList>(&EmptyParams::default(), DAEMON_REQUEST_TIMEOUT)
+    {
         return Ok(result.sessions);
     }
     let response = daemon_request(json!({ "op": DaemonOperation::List }))?;
@@ -1139,24 +1140,9 @@ fn daemon_request_with_timeout(request: Value, timeout: Duration) -> Result<Valu
 }
 
 fn daemon_response_with_timeout(request: Value, timeout: Duration) -> Result<Value, String> {
-    let mut stream = UnixStream::connect(crate::daemon_state::smeltd_sock_path())
-        .map_err(|error| format!("smeltd unavailable: {error}"))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| format!("configure smeltd write timeout: {error}"))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| format!("configure smeltd read timeout: {error}"))?;
-    writeln!(stream, "{request}").map_err(|error| error.to_string())?;
-    let mut line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut line)
-        .map_err(|error| error.to_string())?;
-    if line.trim().is_empty() {
-        return Err("smeltd returned no response".into());
-    }
-    let response: Value = serde_json::from_str(line.trim()).map_err(|error| error.to_string())?;
-    Ok(response)
+    crate::daemon_state::local_runtime()
+        .request(&request, timeout)
+        .map_err(|error| error.to_string())
 }
 
 /// 延迟 reattach 完成时是否还该插入桌面投影。目录已经撤回，或本地已有同 id，都丢弃。

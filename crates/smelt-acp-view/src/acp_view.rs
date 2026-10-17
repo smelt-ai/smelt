@@ -2896,14 +2896,25 @@ impl AcpView {
         let Some(cwd) = self.cwd.clone() else {
             return std::rc::Rc::new(Vec::new());
         };
-        // 首次：git ls-files / 目录遍历挪后台（大仓库可能跑几百 ms），
-        // 完成后重算当前补全；期间 At 补全先给空，等任务回来自动弹出。
+        // 首次：向运行时要候选（它在那台机器上跑 git ls-files / 目录遍历，大仓库可能
+        // 几百 ms），完成后重算当前补全；期间 At 补全先给空，等任务回来自动弹出。
+        // 取不到（运行时没起、版本旧）就当没有候选，不打断输入。
         self.file_list_loading = true;
         cx.spawn(async move |this, cx| {
-            // list_files 返回 Rc（非 Send），后台只产出 Vec，回主线程再包 Rc。
             let list = cx
                 .background_executor()
-                .spawn(async move { smelt_ui::acp_completion::list_files(&cwd).as_ref().clone() })
+                .spawn(async move {
+                    use smelt_runtime_client::protocol::files::{
+                        CompleteFilesParams, SessionCompleteFilesCall,
+                    };
+                    smelt_core::daemon_state::local_runtime()
+                        .call::<SessionCompleteFilesCall>(
+                            &CompleteFilesParams { cwd },
+                            smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+                        )
+                        .map(|result| result.entries)
+                        .unwrap_or_default()
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.file_list_loading = false;

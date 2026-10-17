@@ -707,18 +707,18 @@ impl Workspace {
         let tab_view = cx.entity();
         // 仓库集合要在头部之前算好：历史页的仓库选择器和改动页的分组都用它。
         let repo_set = self.git_repos.get(&root).map(|(_, set)| set.clone());
-        let repos: Vec<smelt_git::discovery::DiscoveredRepo> = match &repo_set {
+        let repos: Vec<DiscoveredRepo> = match &repo_set {
             Some(set) if !set.repos.is_empty() => set.repos.clone(),
             // 发现还没回来：先当单仓渲染，首帧不至于空白。
-            _ => vec![smelt_git::discovery::DiscoveredRepo {
+            _ => vec![DiscoveredRepo {
                 root: std::path::PathBuf::from(&root),
                 rel_path: String::new(),
-                kind: smelt_git::discovery::RepoKind::Root,
+                kind: RepoKind::Root,
             }],
         };
         let show_repo_headers = repos.len() > 1;
         // 仓库选择器的选项：(显示名, 仓库根)。
-        let repo_label_of = |repo: &smelt_git::discovery::DiscoveredRepo| -> String {
+        let repo_label_of = |repo: &DiscoveredRepo| -> String {
             if repo.rel_path.is_empty() {
                 std::path::Path::new(&root)
                     .file_name()
@@ -903,7 +903,7 @@ impl Workspace {
         // 只能用来标注项目根自己的 status；拿去匹配子仓内的文件会张冠李戴。
         let root_gitlinks: HashSet<String> = repos
             .iter()
-            .filter(|r| matches!(r.kind, smelt_git::discovery::RepoKind::Submodule))
+            .filter(|r| matches!(r.kind, RepoKind::Submodule))
             .map(|r| r.rel_path.clone())
             .collect();
         let no_gitlinks: HashSet<String> = HashSet::new();

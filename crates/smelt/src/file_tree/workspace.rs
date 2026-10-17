@@ -9,13 +9,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use gpui_component::input::InputEvent;
+use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode};
+use smelt_runtime_client::protocol::files::{
+    FileContent, FileOpenCall, FileOpenResult, FilePathParams, FileSaveCall, FileSaveParams,
+    ProjectDeleteEntryCall, ProjectDirParams, ProjectPathParams, ProjectSearchCall,
+    ProjectSearchParams, ProjectTreeCall,
+};
 
 use crate::Workspace;
+use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
 
-use super::view::{
-    FileTreeRow, collect_file_tree_rows, editor_language_for_path, is_previewable_image,
-};
+use super::view::{FileTreeRow, collect_file_tree_rows, editor_language_for_path};
 use super::*;
+use smelt_runtime_client::protocol::files::is_previewable_image;
 
 // ===================== Workspace 方法 =====================
 
@@ -431,6 +437,8 @@ impl Workspace {
             path: path.clone(),
             editor: editor.clone(),
             saved_content: Rc::new(String::new()),
+            saved_version: None,
+            image: None,
             save_error: None,
             readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
             conflict_pending: false,
@@ -446,17 +454,13 @@ impl Workspace {
         }));
         cx.notify();
 
-        // 图片由 GPUI 的 img 元素直接从路径异步解码；不要再走 read_to_string，
-        // 否则会短暂或永久显示“可能是二进制文件”的错误占位。
-        if is_previewable_image(&path) {
-            return;
-        }
-
         cx.spawn(async move |this, cx| {
             let p = path.clone();
             let read = cx
                 .background_executor()
-                .spawn(async move { std::fs::read_to_string(&p) })
+                .spawn(async move {
+                    call::<FileOpenCall>(FilePathParams { path: p }, RUNTIME_CALL_TIMEOUT)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 // 只有当前仍是这次打开的文件才写入，避免旧任务覆盖新文件。
@@ -466,8 +470,14 @@ impl Workspace {
                 let Some(of) = this.open_file.as_mut() else {
                     return;
                 };
-                match read {
-                    Ok(content) => {
+                let unreadable = match read {
+                    Ok(FileOpenResult {
+                        content:
+                            FileContent::Text {
+                                text: content,
+                                version,
+                            },
+                    }) => {
                         editor.update(cx, |state, cx| {
                             state.set_value(content.clone(), window, cx);
                             if let Some(line) = goto_line {
@@ -477,15 +487,35 @@ impl Workspace {
                             }
                         });
                         of.saved_content = Rc::new(content.clone());
+                        of.saved_version = Some(version);
                         of.preview_source = content.into();
                         of.readable = true;
+                        None
                     }
-                    Err(_) => {
-                        editor.update(cx, |state, cx| {
-                            state.set_value("（无法以文本方式读取：可能是二进制文件）", window, cx);
-                        });
-                        of.readable = false;
-                    }
+                    Ok(FileOpenResult {
+                        content: FileContent::Image { data },
+                    }) => match smelt_ui::image::format_for_path(Path::new(&of.path)) {
+                        Some(format) => {
+                            of.image = Some(Arc::new(gpui::Image::from_bytes(format, data.0)));
+                            None
+                        }
+                        None => Some("（无法预览这种图片格式）".to_string()),
+                    },
+                    Ok(FileOpenResult {
+                        content: FileContent::Binary,
+                    }) => Some("（无法以文本方式读取：可能是二进制文件）".to_string()),
+                    Ok(FileOpenResult {
+                        content: FileContent::TooLarge { size, limit },
+                    }) => Some(format!(
+                        "（文件过大：{:.1} MB，查看上限 {} MB）",
+                        size as f64 / (1024.0 * 1024.0),
+                        limit / (1024 * 1024)
+                    )),
+                    Err(error) => Some(format!("（无法读取：{}）", error_text(error))),
+                };
+                if let Some(placeholder) = unreadable {
+                    editor.update(cx, |state, cx| state.set_value(placeholder, window, cx));
+                    of.readable = false;
                 }
                 cx.notify();
             });
@@ -493,10 +523,10 @@ impl Workspace {
         .detach();
     }
 
-    /// Cmd+S：把当前打开文件的编辑器内容写回磁盘（仅 Files 页触发，见 on_key_down）。
-    /// 写之前先读一次磁盘现状跟 saved_content 比对——不一样说明文件被外部改过，
-    /// 这次先不写、把 conflict_pending 置位提示用户；用户再按一次 Cmd+S 就当作
-    /// 已确认覆盖，跳过这次检查直接写。写文件本身放后台线程；成功后把
+    /// Cmd+S：把当前打开文件的编辑器内容交给运行时写回（仅 Files 页触发，见 on_key_down）。
+    /// 带上打开时的版本：运行时发现磁盘内容已经不是那一版（文件被外部改过），就不写、
+    /// 回冲突，这里把 conflict_pending 置位提示用户；用户再按一次 Cmd+S 就当作已确认
+    /// 覆盖，不带版本直接写。写文件本身放后台线程；成功后把
     /// saved_content 同步成刚写的内容（清掉"未保存"标记 + 错误提示），并且如果这
     /// 次保存是「保存并切换」触发的，顺带打开 pending_switch_after_save 里存的目标
     /// 文件；保存失败或起冲突则放弃这次切换，留在当前文件上让用户处理。
@@ -515,9 +545,12 @@ impl Workspace {
         }
         let path = of.path.clone();
         let content = of.editor.read(cx).value().to_string();
-        // Rc<String> 不是 Send，进不了 background_executor；克隆成普通 String 再带过去。
-        let expected_on_disk = (*of.saved_content).clone();
         let force = of.conflict_pending;
+        let base_version = if force {
+            None
+        } else {
+            of.saved_version.clone()
+        };
         let r#gen = self.file_gen;
 
         cx.spawn(async move |this, cx| {
@@ -526,15 +559,19 @@ impl Workspace {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    if !force
-                        && let Ok(current) = std::fs::read_to_string(&check_path)
-                        && current != expected_on_disk
-                    {
-                        return SaveOutcome::Conflict;
-                    }
-                    match std::fs::write(&check_path, write_content) {
-                        Ok(()) => SaveOutcome::Saved,
-                        Err(e) => SaveOutcome::Error(e.to_string()),
+                    let params = FileSaveParams {
+                        path: check_path,
+                        text: write_content,
+                        base_version,
+                    };
+                    match call::<FileSaveCall>(params, RUNTIME_CALL_TIMEOUT) {
+                        Ok(saved) => SaveOutcome::Saved(saved.version),
+                        Err(ControlClientError::Protocol(error))
+                            if error.code == ControlErrorCode::Conflict =>
+                        {
+                            SaveOutcome::Conflict
+                        }
+                        Err(error) => SaveOutcome::Error(error_text(error)),
                     }
                 })
                 .await;
@@ -547,8 +584,9 @@ impl Workspace {
                     return;
                 };
                 match outcome {
-                    SaveOutcome::Saved => {
+                    SaveOutcome::Saved(version) => {
                         of.saved_content = Rc::new(content);
+                        of.saved_version = Some(version);
                         of.save_error = None;
                         of.conflict_pending = false;
                         if let Some(target) = switch_target {
@@ -588,7 +626,6 @@ impl Workspace {
         self.search_gen = self.search_gen.wrapping_add(1);
         let generation = self.search_gen;
         let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_for_walk = Arc::clone(&cancel);
         let cancel_for_apply = Arc::clone(&cancel);
         self.search_cancel = Some(cancel);
         // 先占位：done=false 让列表顶部显示「搜索中…」，遍历完成后替换。
@@ -604,12 +641,27 @@ impl Workspace {
             let (r, q) = (root, query.clone());
             let walked = cx
                 .background_executor()
-                .spawn(async move { search_project(&r, &q, &cancel_for_walk) })
+                .spawn(async move {
+                    call::<ProjectSearchCall>(
+                        ProjectSearchParams { root: r, query: q },
+                        RUNTIME_CALL_TIMEOUT,
+                    )
+                    .unwrap_or_default()
+                })
                 .await;
             if cancel_for_apply.load(Ordering::Acquire) {
                 return;
             }
-            let (hits, truncated) = walked;
+            let truncated = walked.truncated;
+            let hits = walked
+                .hits
+                .into_iter()
+                .map(|hit| SearchHit {
+                    path: hit.path,
+                    rel: hit.rel,
+                    line: hit.line,
+                })
+                .collect();
             let _ = this.update(cx, |this, cx| {
                 // 只有仍是最新一次搜索才写入，丢弃期间被新查询取代的过期结果。
                 if this.search_gen != generation {
@@ -647,17 +699,24 @@ impl Workspace {
         }
         let request_generation = self.dir_generation.get(&dir).copied().unwrap_or(0);
         self.dir_inflight.insert(dir.clone());
+        // 根之外的目录（面包屑点到项目外）以它自己为范围。
+        let root = self
+            .file_tree_root_for(&dir, cx)
+            .unwrap_or_else(|| dir.clone());
         cx.spawn(async move |this, cx| {
             let d = dir.clone();
             let entries = cx
                 .background_executor()
                 .spawn(async move {
-                    // 排序与噪音目录过滤住在 fs 接缝的 Consumer 里，本地面板
-                    // 与将来的远程 worktree 共用同一份规则，不会各自漂移。
-                    smelt_core::fs::list_dir(&smelt_core::fs::LocalFs, std::path::Path::new(&d))
-                        .into_iter()
-                        .map(|entry| (entry.name, entry.is_dir))
-                        .collect::<Vec<_>>()
+                    // 排序与噪音目录过滤由运行时做，桌面和手机看到的是同一份规则。
+                    call::<ProjectTreeCall>(ProjectDirParams { root, dir: d }, RUNTIME_CALL_TIMEOUT)
+                        .map(|tree| {
+                            tree.entries
+                                .into_iter()
+                                .map(|entry| (entry.name, entry.is_dir))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -675,6 +734,14 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// `path` 归哪个文件树根：取包含它的最长根。运行时按这个根限定范围。
+    fn file_tree_root_for(&self, path: &str, cx: &App) -> Option<String> {
+        self.workspace_roots(cx)
+            .into_iter()
+            .filter(|root| Path::new(path).starts_with(root))
+            .max_by_key(String::len)
     }
 
     /// 目录列表失效。在途的那一次读完后不得再把旧条目标成新鲜。
@@ -718,17 +785,40 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 真正删除磁盘上的文件或目录，并刷新文件树缓存。
+    /// 交给运行时删除文件或目录，成功后刷新文件树缓存。
     fn perform_delete_file(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
-        let ok = if is_dir {
-            std::fs::remove_dir_all(&path).is_ok()
-        } else {
-            std::fs::remove_file(&path).is_ok()
-        };
-        if !ok {
+        let Some(root) = self.file_tree_root_for(&path, cx).or_else(|| {
+            Path::new(&path)
+                .parent()
+                .and_then(|parent| parent.to_str())
+                .map(str::to_string)
+        }) else {
             return;
-        }
+        };
+        cx.spawn(async move |this, cx| {
+            let target = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    call::<ProjectDeleteEntryCall>(
+                        ProjectPathParams { root, path: target },
+                        RUNTIME_CALL_TIMEOUT,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(_) => this.forget_deleted_entry(path, is_dir, cx),
+                Err(error) => {
+                    this.report_background_error(format!("删除失败：{}", error_text(error)));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
 
+    /// 删除成功后清掉指向它的打开文件、展开状态和目录缓存。
+    fn forget_deleted_entry(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
         let under = |base: &str, candidate: &str| {
             candidate == base || candidate.starts_with(&format!("{base}/"))
         };

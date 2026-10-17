@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
 smelt-core = { path = "../smelt-core" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
 axum = { version = "0.8.9", features = ["ws"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

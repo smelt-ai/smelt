@@ -785,19 +785,6 @@ pub(super) fn editor_language_for_path(path: &str) -> String {
     }
 }
 
-/// 内置文件查看器可以直接预览的图片格式。ICNS 不在 GPUI 的图片解码格式里，
-/// 仍按二进制文件处理，避免显示一个加载失败的空白画布。
-pub(super) fn is_previewable_image(path: &str) -> bool {
-    matches!(
-        Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "svg")
-    )
-}
-
 /// 打开的文件内容拆成路径栏和内容体，供 Tool Panel 把路径栏放在文件树分栏上方。
 pub struct FileContentParts {
     pub header: Option<AnyElement>,
@@ -825,7 +812,7 @@ pub fn file_content_parts(
             // 面包屑：项目名（根目录名）> 中间目录 > 文件名，参考 Codex App——
             // 光看文件名分不清「这是哪个项目/哪层目录下的文件」，尤其多根工作区。
             let breadcrumb_segs = breadcrumb_segments(&of.path, roots);
-            let is_image = is_previewable_image(&of.path);
+            let is_image = smelt_runtime_client::protocol::files::is_previewable_image(&of.path);
             let dirty = of.readable
                 && !is_image
                 && of.editor.read(cx).value().as_ref() != of.saved_content.as_str();
@@ -961,7 +948,8 @@ pub fn file_content_parts(
                             ws.toggle_file_tree(cx);
                         })),
                 );
-            let body: AnyElement = if is_image {
+            // 图片过大、读不出来时没有字节，落到编辑器分支显示原因。
+            let body: AnyElement = if let Some(image) = of.image.as_ref() {
                 div()
                     .id("image-file-preview")
                     .flex_1()
@@ -973,10 +961,9 @@ pub fn file_content_parts(
                     .justify_center()
                     .bg(rgb(crate::ui_theme::bg_stage()))
                     .child({
-                        let path = std::path::Path::new(&of.path);
                         // 栅格图只画降采样预览。未完成时是空盒子，不把原图交给 `img()`。
-                        smelt_ui::image::ensure_file_preview(path, cx);
-                        smelt_ui::image::file_surface(path, smelt_ui::image::FileFit::Contain)
+                        smelt_ui::image::ensure_preview(image, cx);
+                        smelt_ui::image::image_surface(image)
                     })
                     .into_any_element()
             } else if preview {

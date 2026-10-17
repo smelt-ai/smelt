@@ -12,9 +12,9 @@ workspace = true
 smelt-paths = { path = "../smelt-paths" }
 # GUI/守护共用的无 UI 逻辑（终端文本、OSC 扫描、权限菜单解析、远程网关）。
 smelt-core = { path = "../smelt-core" }
-smelt-git = { path = "../smelt-git" }
 smelt-store = { path = "../smelt-store" }
 smelt-pairing = { path = "../smelt-pairing" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
 # 共享 GPUI UI 基建（色板/markdown+mermaid/@补全/ACP agent UI 偏好数据模型）与
 # ACP 会话消息流渲染层，均已独立成 crate（见各自 Cargo.toml 文件头注释）。
 smelt-ui = { path = "../smelt-ui" }
@@ -57,8 +57,6 @@ smol = "2"  # 定时器：驱动终端网格的定时快照重绘
 agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }
 # Git 状态改用文件监听而非轮询：macOS 走 FSEvents，仓库一有变化就标脏触发刷新。
 notify = "6"
-# 遵循 .gitignore 的高性能文件遍历与搜索
-ignore = "0.4"
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

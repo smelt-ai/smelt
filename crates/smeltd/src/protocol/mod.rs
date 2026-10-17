@@ -4,7 +4,7 @@
 //! 身份校验、终端流、远程/iroh、订阅分文件，这里只做首帧分流。
 
 use super::*;
-use smelt_core::daemon_protocol::{DaemonOperation, DaemonRequest};
+use smelt_runtime_client::protocol::daemon::{DaemonOperation, DaemonRequest};
 
 mod auth;
 mod lifecycle;

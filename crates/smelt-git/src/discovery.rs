@@ -15,31 +15,9 @@
 
 use smelt_core::fs::FileSystem;
 use smelt_core::subprocess::Subprocess;
+pub use smelt_runtime_client::protocol::git::{DiscoveredRepo, Discovery, RepoKind};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-
-/// 仓库在工作区里的身份。UI 用它区分图标与分组标题，写操作不看它——
-/// 任何 kind 的仓库都是独立的提交单位。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RepoKind {
-    /// 项目根自己。
-    Root,
-    /// 父仓 `.gitmodules` 声明的 submodule。
-    Submodule,
-    /// 落在项目根内、但不是 submodule 的独立仓库（含被 `.gitignore` 忽略的，
-    /// 以及检出在项目根内的 worktree）。
-    Nested,
-}
-
-/// 一个已确认的仓库。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DiscoveredRepo {
-    /// 仓库真实根（`git rev-parse --show-toplevel` 的结果，已 canonicalize）。
-    pub root: PathBuf,
-    /// 相对项目根的路径。项目根自己是空串。仅用于展示与排序。
-    pub rel_path: String,
-    pub kind: RepoKind,
-}
 
 /// 发现候选：来源产出的原始条目，还没做真根解析和去重。
 #[derive(Clone, Debug)]
@@ -59,7 +37,7 @@ pub struct DiscoveryOptions {
     /// 扫描时跳过的目录名。默认值是依赖/产物目录——它们里面的 git 仓库
     /// （npm 包自带的 `.git`、cargo 缓存）不是用户的工作对象。
     pub ignored_dirs: Vec<String>,
-    /// 最多返回多少个仓库。超出后截断并置位 [`Discovery::truncated`]，
+    /// 最多返回多少个仓库。超出后截断并置位 `Discovery::truncated`，
     /// 而不是继续扫下去把 UI 和磁盘一起拖垮。
     pub max_repos: usize,
 }
@@ -106,15 +84,6 @@ pub trait DiscoverySource {
     fn name(&self) -> &'static str;
 
     fn candidates(&self, ctx: &DiscoveryContext<'_>) -> Vec<Candidate>;
-}
-
-/// 发现结果。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Discovery {
-    /// 项目根排第一，其余按相对路径字典序。
-    pub repos: Vec<DiscoveredRepo>,
-    /// 是否因为 `max_repos` 截断过。UI 要据此提示用户，而不是假装列全了。
-    pub truncated: bool,
 }
 
 // ===================== 内置来源 =====================
