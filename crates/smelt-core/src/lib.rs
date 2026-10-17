@@ -57,6 +57,7 @@ pub mod pi_model_settings;
 pub mod pi_plugin_catalog;
 pub mod pi_quota;
 pub mod pi_rpc;
+pub mod pi_service;
 pub mod process_wait;
 pub mod project_catalog;
 pub mod project_files;

@@ -60,7 +60,7 @@ pub(super) fn pi_model_page(
                 .gap_8()
                 .child(default_model_section(&entity, snapshot, palette))
                 .child(provider_section(&entity, snapshot, palette, cx))
-                .child(config_files_footer(&entity, palette)),
+                .child(config_files_footer(&entity, &snapshot.pi_paths, palette)),
         )
         .into_any_element()
 }
@@ -258,7 +258,7 @@ fn change_model_button(
         .label("更换模型")
         .disabled(editing)
         .dropdown_menu(move |mut menu, window, cx| {
-            let groups = smelt_core::pi_model_settings::list_pi_model_choice_groups();
+            let groups = crate::settings::pi_model_choice_groups(cx);
             if groups.is_empty() {
                 menu = menu.item(
                     PopupMenuItem::new("还没有可选的模型：先在下面登录或添加 Provider")
@@ -745,17 +745,21 @@ fn custom_provider_row(
 }
 
 /// 直接改 Pi 原生文件的逃生口。平时用不到，压成一行放在页底。
-fn config_files_footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
+fn config_files_footer(
+    entity: &Entity<Workspace>,
+    paths: &smelt_core::pi_service::PiConfigPaths,
+    palette: Palette,
+) -> Div {
     let file_button = |id: &'static str,
                        label: &'static str,
                        kind: PiConfigFileKind,
-                       path: std::path::PathBuf| {
+                       path: &str| {
         let entity = entity.clone();
         Button::new(id)
             .ghost()
             .xsmall()
             .label(label)
-            .tooltip(path.display().to_string())
+            .tooltip(path.to_string())
             .on_click(move |_, window, cx| {
                 entity.update(cx, |workspace, cx| {
                     workspace.open_pi_config(kind, window, cx);
@@ -782,19 +786,19 @@ fn config_files_footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
             "pi-edit-settings-file",
             "settings.json",
             PiConfigFileKind::Settings,
-            smelt_core::pi_model_settings::pi_settings_path(),
+            &paths.settings,
         ))
         .child(file_button(
             "pi-edit-models-file",
             "models.json",
             PiConfigFileKind::Models,
-            smelt_core::pi_model_settings::pi_models_path(),
+            &paths.models,
         ))
         .child(file_button(
             "pi-edit-credentials-file",
             "auth.json",
             PiConfigFileKind::Credentials,
-            smelt_core::pi_model_settings::pi_auth_path(),
+            &paths.auth,
         ))
         .child(div().flex_1())
         .child(

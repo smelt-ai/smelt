@@ -183,6 +183,7 @@ mod files_control;
 mod git_control;
 mod handoff_v2;
 mod history_control;
+mod pi_control;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod peer_messaging;

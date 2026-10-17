@@ -217,6 +217,23 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        pi @ (ControlMethod::PiConfigGet
+        | ControlMethod::PiConfigEnsureFile
+        | ControlMethod::PiModelsSetThinkingLevel
+        | ControlMethod::PiModelsSaveDefault
+        | ControlMethod::PiProvidersDiscoverModels
+        | ControlMethod::PiProvidersSaveCustom
+        | ControlMethod::PiProvidersRemoveCustom
+        | ControlMethod::PiProvidersRefreshAuto
+        | ControlMethod::PiMcpAddPreset
+        | ControlMethod::PiMcpSetEnabled
+        | ControlMethod::PiMcpRemove
+        | ControlMethod::PiMcpLogin
+        | ControlMethod::PiPluginsRemove
+        | ControlMethod::PiPluginsImport) => match super::pi_control::dispatch(pi, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
         ControlMethod::AgentCliInspect => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use crate::agent_kind::{ConversationLaunchSpec, SMELT_AGENT_PLUGIN_ARGS_ENV};
 
 /// 插件类别。决定注入时用哪个 Pi 启动参数。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PiPluginKind {
     Skill,
     Extension,
@@ -62,7 +63,7 @@ impl PiPluginKind {
 }
 
 /// 一个可勾选的插件。`id` 是写进智能体配置的稳定标识。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiPlugin {
     pub id: String,
     pub kind: PiPluginKind,

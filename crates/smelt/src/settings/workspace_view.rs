@@ -62,14 +62,31 @@ impl Workspace {
             pi_auth_model_picker: self.pi_auth_model_picker.clone(),
             pi_auth_error: self.pi_auth_error.clone(),
             pi_auth_show_all: self.pi_auth_show_all,
-            pi_mcp_servers: smelt_core::pi_mcp::load_pi_mcp_servers(),
+            pi_mcp_servers: self
+                .pi_config
+                .as_ref()
+                .map(|config| config.mcp_servers.clone())
+                .unwrap_or_else(|| Err(self.pi_config_pending_text())),
             pi_mcp_login: self.pi_mcp_login.clone(),
             pi_mcp_pending_remove: self.pi_mcp_pending_remove.clone(),
             pi_mcp_error: self.pi_mcp_error.clone(),
             pi_model_editor_error: self.pi_model_editor_error.clone(),
-            pi_model_settings: self.pi_model_settings_cached().clone(),
-            pi_settings: smelt_core::pi_model_settings::pi_settings_summary(),
-            pi_plugins: self.pi_plugins_cached().to_vec(),
+            pi_model_settings: self.pi_model_settings_view(),
+            pi_settings: self
+                .pi_config
+                .as_ref()
+                .map(|config| config.settings_summary.clone())
+                .unwrap_or_else(|| Err(self.pi_config_pending_text())),
+            pi_plugins: self
+                .pi_config
+                .as_ref()
+                .map(|config| config.plugins.clone())
+                .unwrap_or_default(),
+            pi_paths: self
+                .pi_config
+                .as_ref()
+                .map(|config| config.paths.clone())
+                .unwrap_or_default(),
             pi_plugin_pending_delete: self.pi_plugin_pending_delete.clone(),
             pi_plugin_error: self.pi_plugin_error.clone(),
             agent_names_using_plugin: {
@@ -140,6 +157,7 @@ impl Workspace {
         if self.capabilities_view.is_some() {
             return;
         }
+        self.refresh_pi_config(cx);
         let snapshot = self.settings_render_snapshot(cx);
         let workspace = cx.entity();
         self.capabilities_view = Some(cx.new(|cx| {
@@ -162,8 +180,9 @@ impl Workspace {
     /// 马上又对同一个 `Workspace` entity 调 `update`，两层嵌套 update 撞上 GPUI
     /// 的重入保护直接 panic 崩溃（"cannot update ... while it is already being
     /// updated"）——这就是「点齿轮整个 app 崩溃」的真正原因。
-    pub fn open_settings_window(&self, cx: &mut Context<Self>) {
+    pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
         super::refresh_agent_hooks_status(cx);
+        self.refresh_pi_config(cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {
             if let Some(handle) = cx

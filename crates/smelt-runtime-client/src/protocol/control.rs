@@ -130,6 +130,20 @@ define_control_methods! {
     AgentHooksUninstall => (AGENT_HOOKS_UNINSTALL_METHOD, "agent.hooks.uninstall"),
     AgentCliInspect => (AGENT_CLI_INSPECT_METHOD, "agent.cli.inspect"),
     AgentCliInstall => (AGENT_CLI_INSTALL_METHOD, "agent.cli.install"),
+    PiConfigGet => (PI_CONFIG_GET_METHOD, "pi.config.get"),
+    PiConfigEnsureFile => (PI_CONFIG_ENSURE_FILE_METHOD, "pi.config.ensure_file"),
+    PiModelsSetThinkingLevel => (PI_MODELS_SET_THINKING_LEVEL_METHOD, "pi.models.set_thinking_level"),
+    PiModelsSaveDefault => (PI_MODELS_SAVE_DEFAULT_METHOD, "pi.models.save_default"),
+    PiProvidersDiscoverModels => (PI_PROVIDERS_DISCOVER_MODELS_METHOD, "pi.providers.discover_models"),
+    PiProvidersSaveCustom => (PI_PROVIDERS_SAVE_CUSTOM_METHOD, "pi.providers.save_custom"),
+    PiProvidersRemoveCustom => (PI_PROVIDERS_REMOVE_CUSTOM_METHOD, "pi.providers.remove_custom"),
+    PiProvidersRefreshAuto => (PI_PROVIDERS_REFRESH_AUTO_METHOD, "pi.providers.refresh_auto"),
+    PiMcpAddPreset => (PI_MCP_ADD_PRESET_METHOD, "pi.mcp.add_preset"),
+    PiMcpSetEnabled => (PI_MCP_SET_ENABLED_METHOD, "pi.mcp.set_enabled"),
+    PiMcpRemove => (PI_MCP_REMOVE_METHOD, "pi.mcp.remove"),
+    PiMcpLogin => (PI_MCP_LOGIN_METHOD, "pi.mcp.login"),
+    PiPluginsRemove => (PI_PLUGINS_REMOVE_METHOD, "pi.plugins.remove"),
+    PiPluginsImport => (PI_PLUGINS_IMPORT_METHOD, "pi.plugins.import"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -539,7 +553,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 77);
+        assert_eq!(names.len(), 91);
     }
 
     #[test]

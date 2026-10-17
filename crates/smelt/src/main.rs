@@ -2408,16 +2408,15 @@ struct Workspace {
     pi_mcp_pending_remove: Option<String>,
     /// MCP 配置操作（添加、启停、移除、登录）的最近一次错误。
     pi_mcp_error: Option<String>,
-    /// 原生 Pi 模型设置缓存。渲染只读缓存，避免每帧读磁盘；刷新时清空重读。
-    ///
-    /// 懒加载而不是「打开设置页时主动拉一次」：设置页有好几个入口（齿轮、智能体
-    /// 页的配置按钮、命令面板），任何一个忘了拉都会让用户对着一屏没读过盘的界面。
-    pi_model_settings:
-        std::cell::OnceCell<Result<smelt_core::pi_model_settings::PiModelSettings, String>>,
+    /// 运行时给的 Pi 配置快照（模型、MCP、插件……）。渲染只读它；打开设置窗口、进
+    /// 能力库、开智能体编辑器时刷新，修改由运行时回带新快照。
+    pi_config: Option<smelt_core::pi_service::PiConfig>,
+    /// 最近一次读取失败的原因。
+    pi_config_error: Option<String>,
+    /// 读取的代数：晚回来的旧读取不能盖掉更新的快照。
+    pi_config_generation: u64,
     /// 交互式原生 Pi 模型表单错误。
     pi_model_editor_error: Option<String>,
-    /// Pi 插件目录扫描缓存。渲染只读缓存，避免每帧读磁盘；刷新时整体清空重扫。
-    pi_plugins: std::cell::OnceCell<Vec<smelt_core::pi_plugin_catalog::PiPlugin>>,
     /// 正在等二次确认删除的插件 id。
     pi_plugin_pending_delete: Option<String>,
     /// 插件导入 / 删除的最近一次错误。
@@ -3001,9 +3000,10 @@ impl Workspace {
             pi_mcp_login: None,
             pi_mcp_pending_remove: None,
             pi_mcp_error: None,
-            pi_model_settings: std::cell::OnceCell::new(),
+            pi_config: None,
+            pi_config_error: None,
+            pi_config_generation: 0,
             pi_model_editor_error: None,
-            pi_plugins: std::cell::OnceCell::new(),
             pi_plugin_pending_delete: None,
             pi_plugin_error: None,
             opacity_slider: None,
@@ -4452,6 +4452,19 @@ fn main() {
             if cx.global::<settings::AgentHostState>().agent_hooks_enabled {
                 settings::reconcile_agent_hooks(cx);
             }
+            // 运行时已经连上：请它照端点刷新 Pi 自动维护的模型目录（只是问端点的 /models）。
+            cx.background_executor()
+                .spawn(async {
+                    if let Err(error) = runtime_call::call::<
+                        smelt_core::control_api::PiProvidersRefreshAuto,
+                    >(
+                        smelt_runtime_client::protocol::control::EmptyParams::default(),
+                        runtime_call::RUNTIME_CALL_TIMEOUT,
+                    ) {
+                        eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
+                    }
+                })
+                .detach();
         });
         // 标记为「自动」的 dsh 自定义 provider：照端点上的模型刷新一遍目录。用户没
         // 手填模型就是把这份目录交给我们维护，中转网关上下线模型不该要他再来点一次。
@@ -4472,25 +4485,6 @@ fn main() {
                     }
                     smelt_core::dsh_auto_models::AutoRefreshOutcome::Forgotten { provider } => {
                         eprintln!("[dsh] {provider} 已不在配置中，不再自动刷新其模型目录");
-                    }
-                }
-            }
-        });
-        // Pi 侧同理，只是不必起运行时：直接问端点的 /models。
-        thread::spawn(|| {
-            for outcome in smelt_core::pi_auto_models::refresh_auto_model_catalogs() {
-                match outcome {
-                    smelt_core::pi_auto_models::AutoRefreshOutcome::Refreshed {
-                        provider,
-                        models,
-                    } => {
-                        eprintln!("[pi] {provider} 的模型目录已刷新：{models} 个模型");
-                    }
-                    smelt_core::pi_auto_models::AutoRefreshOutcome::Kept { provider, reason } => {
-                        eprintln!("[pi] {provider} 的模型目录保持不变：{reason}");
-                    }
-                    smelt_core::pi_auto_models::AutoRefreshOutcome::Forgotten { provider } => {
-                        eprintln!("[pi] {provider} 已不在配置中，不再自动刷新其模型目录");
                     }
                 }
             }

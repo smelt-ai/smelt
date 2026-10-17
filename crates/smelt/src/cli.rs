@@ -162,7 +162,10 @@ fn run_agent(args: &[String]) -> i32 {
                 Err(error) => fail(&error),
             }
         }
-        Some("plugins") => print_ok(&plugin_catalog()),
+        Some("plugins") => match plugin_catalog() {
+            Ok(catalog) => print_ok(&catalog),
+            Err(error) => fail(&error),
+        },
         Some(command) => usage(&format!("未知子命令: {command}")),
         None => {
             print_help();
@@ -495,8 +498,11 @@ fn load_automation_raw(id: &str) -> Result<Automation, String> {
         .map(|result| result.automation)
 }
 
-fn plugin_catalog() -> serde_json::Value {
-    let plugins: Vec<serde_json::Value> = smelt_core::pi_plugin_catalog::discover_plugins()
+/// 插件在运行时那台机器上，由运行时扫描。
+fn plugin_catalog() -> Result<serde_json::Value, String> {
+    let config = control::<smelt_core::control_api::PiConfigGet>(EmptyParams::default())?;
+    let plugins: Vec<serde_json::Value> = config
+        .plugins
         .into_iter()
         .map(|plugin| {
             serde_json::json!({
@@ -509,7 +515,7 @@ fn plugin_catalog() -> serde_json::Value {
             })
         })
         .collect();
-    serde_json::json!({ "plugins": plugins })
+    Ok(serde_json::json!({ "plugins": plugins }))
 }
 
 fn parse_clock(value: &str) -> Result<(u8, u8), String> {

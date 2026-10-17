@@ -333,26 +333,33 @@ impl Workspace {
         model_id: String,
         cx: &mut Context<Self>,
     ) {
-        let config = smelt_core::pi_model_settings::PiDefaultModelConfig {
-            provider: provider_id,
-            model: model_id,
-            base_url: String::new(),
-            thinking_level: String::new(),
+        let label = format!("{provider_id} / {model_id}");
+        let params = smelt_core::pi_service::SaveDefaultModelParams {
+            config: smelt_core::pi_model_settings::PiDefaultModelConfig {
+                provider: provider_id,
+                model: model_id,
+                base_url: String::new(),
+                thinking_level: String::new(),
+            },
+            api_key: None,
+            reset_base_url: false,
         };
-        match smelt_core::pi_model_settings::save_pi_default_model(&config, None) {
-            Ok(()) => {
-                self.reload_pi_model_settings(cx);
-                self.pi_auth_model_picker = None;
-                crate::status_item::notify_success(format!(
-                    "已设为默认模型：{} / {}",
-                    config.provider, config.model
-                ));
-            }
-            Err(error) => {
-                self.pi_auth_error = Some(error.clone());
-                crate::status_item::notify_error(&error);
-            }
-        }
+        self.run_pi_call::<smelt_core::control_api::PiModelsSaveDefault>(
+            params,
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| match result {
+                Ok(config) => {
+                    this.pi_auth_model_picker = None;
+                    this.adopt_pi_config(config, true, cx);
+                    crate::status_item::notify_success(format!("已设为默认模型：{label}"));
+                }
+                Err(error) => {
+                    this.pi_auth_error = Some(error.clone());
+                    crate::status_item::notify_error(&error);
+                }
+            },
+        );
         cx.notify();
     }
 

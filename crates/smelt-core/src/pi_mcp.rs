@@ -158,7 +158,8 @@ pub fn find_preset(id: &str) -> Option<&'static PiMcpPreset> {
     PI_MCP_PRESETS.iter().find(|preset| preset.id == id)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum PiMcpTransport {
     Http {
         url: String,
@@ -171,7 +172,7 @@ pub enum PiMcpTransport {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiMcpServer {
     pub name: String,
     pub transport: PiMcpTransport,

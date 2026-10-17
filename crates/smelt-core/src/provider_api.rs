@@ -42,7 +42,7 @@ pub fn normalize_provider_api(api: &str) -> &'static str {
 ///
 /// dsh 的 Node 发现桥和 Pi 的直连发现都产出它：字段是两边的交集，也是配置里
 /// 真正要落盘的那几项。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredModel {
     pub id: String,

@@ -21,7 +21,7 @@ use gpui_component::{
 
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
-use smelt_core::pi_plugin_catalog::{PiPlugin, discover_plugins};
+use smelt_core::pi_plugin_catalog::PiPlugin;
 use smelt_ui::IconAction as _;
 
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
@@ -124,9 +124,9 @@ pub(crate) struct AgentEditor {
     instructions: Entity<TextareaState>,
     /// 绑定参考链接用的输入框。目录走原生选择框，链接只能手输。
     context_link: Entity<InputState>,
-    /// 打开编辑器时扫一次磁盘的插件目录；不在渲染里扫，避免每次输入都读文件。
+    /// 运行时扫出的插件目录，取自 Workspace 的 Pi 配置快照；快照更新时跟着换。
     plugins: Vec<PiPlugin>,
-    /// `~/.pi/agent/mcp.json` 里的服务器，同样只在打开编辑器和点刷新时读。
+    /// 运行时那台机器上 `~/.pi/agent/mcp.json` 里的服务器，同上。
     mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
     /// 同理，记忆不在渲染里扫：打开编辑器、记忆目录有变化、有对话停下来、
     /// 点刷新或删除后才重扫。
@@ -142,6 +142,18 @@ pub(crate) struct AgentEditor {
     /// 关掉或换一个智能体时 drop，监听随之停止。
     _memory_watcher: Option<notify::RecommendedWatcher>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl AgentEditor {
+    /// 换上运行时新给的插件和 MCP 目录。
+    pub(crate) fn set_pi_catalog(
+        &mut self,
+        plugins: Vec<PiPlugin>,
+        mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
+    ) {
+        self.plugins = plugins;
+        self.mcp_servers = mcp_servers;
+    }
 }
 
 /// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。由运行时列出。
@@ -2036,7 +2048,7 @@ fn render_agent_model_control(
                         });
                     }),
             );
-            let groups = smelt_core::pi_model_settings::list_pi_model_choice_groups();
+            let groups = crate::settings::pi_model_choice_groups(cx);
             if !groups.is_empty() {
                 menu = menu.separator();
             }
@@ -3092,12 +3104,6 @@ fn agent_context_row(
         .into_any_element()
 }
 
-#[allow(clippy::too_many_arguments)]
-/// 编辑器打开、刷新时读一次 `mcp.json`。读不出来就当没有：错误在能力库「MCP」页签里看。
-fn load_mcp_servers_for_editor() -> Vec<smelt_core::pi_mcp::PiMcpServer> {
-    smelt_core::pi_mcp::load_pi_mcp_servers().unwrap_or_default()
-}
-
 /// 智能体的 MCP 勾选。服务器在能力库里配置，这里只决定这个智能体连哪几台。
 fn render_agent_mcp_card(
     agent: &settings::AgentDefinition,
@@ -3247,6 +3253,7 @@ enum AgentPick {
     McpServer,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_plugin_row(
     pick: AgentPick,
     agent_id: &str,

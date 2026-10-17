@@ -83,14 +83,14 @@ fn auth_entry_configured(auth_json: &serde_json::Value, provider_id: &str) -> bo
         .is_some()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiDefaultModelSummary {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking_level: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiSettingsSummary {
     pub path: PathBuf,
     pub default_model: Option<PiDefaultModelSummary>,
@@ -196,7 +196,7 @@ pub struct PiModelSettings {
 }
 
 /// 智能体定义页下拉用的一条模型。不依赖正在跑的 Pi 会话。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiModelChoice {
     pub provider: String,
     pub provider_name: String,
@@ -223,7 +223,7 @@ impl PiModelChoice {
 }
 
 /// 下拉里按 provider 分组，避免把所有模型摊成一条长名单。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiModelChoiceGroup {
     pub provider: String,
     pub provider_name: String,

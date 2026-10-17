@@ -30,7 +30,7 @@ pub(super) fn pi_mcp_page(
                 .gap_8()
                 .child(presets_section(&entity, servers, palette))
                 .child(servers_section(&entity, snapshot, servers, palette))
-                .child(footer(&entity, palette)),
+                .child(footer(&entity, &snapshot.pi_paths.mcp, palette)),
         )
         .into_any_element()
 }
@@ -312,7 +312,7 @@ fn confirm_remove(entity: &Entity<Workspace>, name: &str, palette: Palette) -> D
 }
 
 /// 原生文件入口，以及「改了要怎样才生效」的提示：Pi 只在会话启动时读 mcp.json。
-fn footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
+fn footer(entity: &Entity<Workspace>, mcp_path: &str, palette: Palette) -> Div {
     let open_entity = entity.clone();
     v_flex()
         .w_full()
@@ -338,7 +338,7 @@ fn footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
                         .ghost()
                         .xsmall()
                         .label("mcp.json")
-                        .tooltip(smelt_core::pi_mcp::pi_mcp_path().display().to_string())
+                        .tooltip(mcp_path.to_string())
                         .on_click(move |_, window, cx| {
                             open_entity.update(cx, |workspace, cx| {
                                 workspace.open_pi_config(PiConfigFileKind::Mcp, window, cx);

@@ -716,3 +716,56 @@ mod tests {
         ));
     }
 }
+
+/// 修改 Pi 配置的方法都返回改完之后的完整快照，客户端整份换掉缓存。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PiSaveCustomProviderResult {
+    /// 模型目录是否由 Smelt 照端点维护。
+    pub auto: bool,
+    pub config: crate::pi_service::PiConfig,
+}
+
+macro_rules! pi_calls {
+    ($( $(#[$doc:meta])* $call:ident => $method:ident ($params:ty) -> $result:ty; )+) => {
+        $(
+            $(#[$doc])*
+            pub enum $call {}
+
+            impl ControlCall for $call {
+                type Params = $params;
+                type Result = $result;
+
+                const METHOD: ControlMethod = ControlMethod::$method;
+            }
+        )+
+    };
+}
+
+pi_calls! {
+    /// 能力库里 Pi 相关的全部展示数据。
+    PiConfigGet => PiConfigGet(EmptyParams) -> crate::pi_service::PiConfig;
+    /// 确保某个配置文件存在，返回它在运行时那台机器上的路径。
+    PiConfigEnsureFile => PiConfigEnsureFile(crate::pi_service::EnsureConfigFileParams)
+        -> crate::pi_service::EnsureConfigFileResult;
+    PiModelsSetThinkingLevel => PiModelsSetThinkingLevel(crate::pi_service::ThinkingLevelParams)
+        -> crate::pi_service::PiConfig;
+    PiModelsSaveDefault => PiModelsSaveDefault(crate::pi_service::SaveDefaultModelParams)
+        -> crate::pi_service::PiConfig;
+    /// 问端点它提供哪些模型。没现填 key 时用已存的那份，客户端看不到它。
+    PiProvidersDiscoverModels => PiProvidersDiscoverModels(crate::pi_service::DiscoverModelsParams)
+        -> crate::pi_service::DiscoverModelsResult;
+    /// 保存自定义 provider；模型列表为空时先问端点，并标成自动维护。
+    PiProvidersSaveCustom => PiProvidersSaveCustom(crate::pi_service::SaveCustomProviderParams)
+        -> PiSaveCustomProviderResult;
+    PiProvidersRemoveCustom => PiProvidersRemoveCustom(crate::pi_service::ProviderIdParams)
+        -> crate::pi_service::PiConfig;
+    /// 照端点刷新所有自动维护的模型目录。
+    PiProvidersRefreshAuto => PiProvidersRefreshAuto(EmptyParams) -> EmptyParams;
+    PiMcpAddPreset => PiMcpAddPreset(crate::pi_service::McpPresetParams) -> crate::pi_service::PiConfig;
+    PiMcpSetEnabled => PiMcpSetEnabled(crate::pi_service::McpEnabledParams) -> crate::pi_service::PiConfig;
+    PiMcpRemove => PiMcpRemove(crate::pi_service::McpServerParams) -> crate::pi_service::PiConfig;
+    /// 跑 `pi mcp login`，可能要等用户在浏览器里授权。
+    PiMcpLogin => PiMcpLogin(crate::pi_service::McpServerParams) -> crate::pi_service::PiConfig;
+    PiPluginsRemove => PiPluginsRemove(crate::pi_service::PluginIdParams) -> crate::pi_service::PiConfig;
+    PiPluginsImport => PiPluginsImport(crate::pi_service::ImportPluginParams) -> crate::pi_service::PiConfig;
+}

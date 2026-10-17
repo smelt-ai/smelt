@@ -49,7 +49,7 @@ fn render_rerank_model(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyEle
                         auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
                     }),
             );
-            let groups = smelt_core::pi_model_settings::list_pi_model_choice_groups();
+            let groups = crate::settings::pi_model_choice_groups(cx);
             if !groups.is_empty() {
                 menu = menu.separator();
             }

@@ -310,13 +310,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 重新扫描插件目录。用户在设置里装完插件后不用重开编辑器。
+    /// 请运行时重新扫描插件和 MCP。用户在设置里装完插件后不用重开编辑器；新快照到了
+    /// 会顺带更新打开着的编辑器。
     pub(super) fn refresh_agent_plugins(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.agent_surface.editor.as_mut() {
-            editor.plugins = discover_plugins();
-            editor.mcp_servers = load_mcp_servers_for_editor();
-        }
-        cx.notify();
+        self.refresh_pi_config(cx);
     }
 
     /// 重新扫描记忆目录。智能体在对话里写了新记忆后，不用重开编辑器就能看到。
@@ -705,8 +702,16 @@ impl Workspace {
             name_editing: false,
             instructions,
             context_link,
-            plugins: discover_plugins(),
-            mcp_servers: load_mcp_servers_for_editor(),
+            plugins: self
+                .pi_config
+                .as_ref()
+                .map(|config| config.plugins.clone())
+                .unwrap_or_default(),
+            mcp_servers: self
+                .pi_config
+                .as_ref()
+                .and_then(|config| config.mcp_servers.clone().ok())
+                .unwrap_or_default(),
             memories,
             tab: AgentEditorTab::default(),
             memory_query,
@@ -716,6 +721,7 @@ impl Workspace {
             _subscriptions: subscriptions,
         });
         self.refresh_agent_memories(cx);
+        self.refresh_pi_config(cx);
         window.focus(&self.focus_handle, cx);
     }
 

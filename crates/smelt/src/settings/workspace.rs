@@ -1694,37 +1694,30 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 原生 Pi 模型设置。第一次读取时才碰磁盘。
-    pub(super) fn pi_model_settings_cached(
+    /// 缓存里的 Pi 模型设置；还没从运行时取到时给出原因。
+    pub(super) fn pi_model_settings_view(
         &self,
-    ) -> &Result<smelt_core::pi_model_settings::PiModelSettings, String> {
-        self.pi_model_settings
-            .get_or_init(smelt_core::pi_model_settings::load_pi_model_settings)
+    ) -> Result<smelt_core::pi_model_settings::PiModelSettings, String> {
+        match &self.pi_config {
+            Some(config) => config.model_settings.clone(),
+            None => Err(self
+                .pi_config_error
+                .clone()
+                .unwrap_or_else(|| "正在读取 Pi 配置…".to_string())),
+        }
     }
 
-    /// 丢掉缓存，下次读取重新读盘，并告知活着的会话「Pi 的凭据/模型配置变了」。
-    ///
-    /// 登录、登出、改 `models.json` 都汇到这里，所以通知也放这里——散在各个调用点
-    /// 早晚漏一个，漏掉的那个就是「登录了但菜单里没出现」的 bug。
-    pub(super) fn reload_pi_model_settings(&mut self, cx: &mut App) {
-        self.pi_model_settings.take();
+    /// 凭据或模型目录在别处变了（登录、登出）：重新取快照，并告知活着的会话。
+    pub(super) fn reload_pi_model_settings(&mut self, cx: &mut Context<Self>) {
         smelt_ui::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
-    }
-
-    /// 用刚写盘的内容顶掉缓存，省掉一次立刻重读。
-    fn store_pi_model_settings(
-        &mut self,
-        settings: smelt_core::pi_model_settings::PiModelSettings,
-    ) {
-        self.pi_model_settings.take();
-        let _ = self.pi_model_settings.set(Ok(settings));
+        self.refresh_pi_config(cx);
     }
 
     pub fn edit_pi_model_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_component::input::InputState;
 
         self.pi_model_editor_error = None;
-        let settings = match smelt_core::pi_model_settings::load_pi_model_settings() {
+        let settings = match self.pi_model_settings_view() {
             Ok(settings) => settings,
             Err(error) => {
                 self.pi_model_editor_error = Some(error.clone());
@@ -1733,7 +1726,6 @@ impl Workspace {
                 return;
             }
         };
-        self.store_pi_model_settings(settings.clone());
         self.pi_custom_provider_editor = None;
 
         let provider = cx.new(|cx| {
@@ -1777,40 +1769,19 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 直接改默认模型的推理强度并写盘。只在用户选过默认模型时可用（界面会禁用），
-    /// 否则写进去的 provider/model 会是 Pi 的兜底值，等于替用户做了选择。
+    /// 直接改默认模型的推理强度。只在用户选过默认模型时可用（界面会禁用；运行时
+    /// 也会拒绝），否则写进去的 provider/model 会是 Pi 的兜底值，等于替用户做了选择。
     pub fn set_pi_default_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
-        let summary = match smelt_core::pi_model_settings::pi_settings_summary() {
-            Ok(summary) => summary,
-            Err(error) => {
-                crate::status_item::notify_error(&error);
-                return;
-            }
-        };
-        let Some((provider, model)) = summary.default_model.and_then(|model| {
-            Some((
-                model.provider.filter(|v| !v.trim().is_empty())?,
-                model.model.filter(|v| !v.trim().is_empty())?,
-            ))
-        }) else {
-            crate::status_item::notify_error("先选一个默认模型，再调推理强度");
-            return;
-        };
-        let config = smelt_core::pi_model_settings::PiDefaultModelConfig {
-            provider,
-            model,
-            base_url: String::new(),
-            thinking_level: level.clone(),
-        };
-        if let Err(error) = smelt_core::pi_model_settings::save_pi_default_model(&config, None) {
-            crate::status_item::notify_error(&error);
-            return;
-        }
         // 手动填写表单开着时也同步，免得稍后保存表单把这次改动盖回去。
         if let Some(editor) = &mut self.pi_model_editor {
-            editor.thinking_level = level;
+            editor.thinking_level = level.clone();
         }
-        self.reload_pi_model_settings(cx);
+        self.run_pi_mutation::<smelt_core::control_api::PiModelsSetThinkingLevel>(
+            smelt_core::pi_service::ThinkingLevelParams { level },
+            true,
+            cx,
+            |_, error, _| crate::status_item::notify_error(&error),
+        );
         cx.notify();
     }
 
@@ -1844,40 +1815,30 @@ impl Workspace {
             return;
         }
 
-        let config = smelt_core::pi_model_settings::PiDefaultModelConfig {
-            provider,
-            model,
-            base_url,
-            thinking_level: editor.thinking_level,
+        let params = smelt_core::pi_service::SaveDefaultModelParams {
+            config: smelt_core::pi_model_settings::PiDefaultModelConfig {
+                provider,
+                model,
+                base_url,
+                thinking_level: editor.thinking_level,
+            },
+            api_key: (!api_key.is_empty()).then_some(api_key),
+            reset_base_url: true,
         };
-        let api_key_opt = if api_key.is_empty() {
-            None
-        } else {
-            Some(api_key.as_str())
-        };
-        if let Err(error) =
-            smelt_core::pi_model_settings::save_pi_default_model(&config, api_key_opt)
-        {
-            self.pi_model_editor_error = Some(error.clone());
-            crate::status_item::notify_error(error);
-            cx.notify();
-            return;
-        }
-        if config.base_url.is_empty()
-            && let Err(error) =
-                smelt_core::pi_model_settings::clear_pi_provider_base_url(&config.provider)
-        {
-            self.pi_model_editor_error = Some(error.clone());
-            crate::status_item::notify_error(error);
-            cx.notify();
-            return;
-        }
-
-        self.pi_model_editor = None;
-        self.pi_model_editor_error = None;
-        self.reload_pi_model_settings(cx);
-        crate::status_item::notify_success("Pi 模型配置已保存");
-        cx.notify();
+        self.run_pi_call::<smelt_core::control_api::PiModelsSaveDefault>(
+            params,
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            |this, result, cx| match result {
+                Ok(config) => {
+                    this.pi_model_editor = None;
+                    this.pi_model_editor_error = None;
+                    this.adopt_pi_config(config, true, cx);
+                    crate::status_item::notify_success("Pi 模型配置已保存");
+                }
+                Err(error) => this.reject_pi_model_edit(error, cx),
+            },
+        );
     }
 
     fn pi_custom_model_editor(
@@ -1915,7 +1876,7 @@ impl Workspace {
     ) {
         use gpui_component::input::InputState;
 
-        let settings = match smelt_core::pi_model_settings::load_pi_model_settings() {
+        let settings = match self.pi_model_settings_view() {
             Ok(settings) => settings,
             Err(error) => {
                 self.pi_model_editor_error = Some(error.clone());
@@ -1973,9 +1934,11 @@ impl Workspace {
         });
         // 标记为「自动」的 provider 打开时不回填模型行：配置里那份是我们刷进去的，
         // 回填等于让用户一保存就把它变回手工维护。留空即代表「继续自动」。
-        let auto = previous_id
-            .as_deref()
-            .is_some_and(|id| smelt_core::pi_auto_models::load().is_auto(id));
+        let auto = previous_id.as_deref().is_some_and(|id| {
+            self.pi_config
+                .as_ref()
+                .is_some_and(|config| config.auto_provider_ids.iter().any(|auto| auto == id))
+        });
         let mut models = if auto {
             Vec::new()
         } else {
@@ -1993,7 +1956,6 @@ impl Workspace {
         if models.is_empty() && !auto {
             models.push(Self::pi_custom_model_editor(None, window, cx));
         }
-        self.store_pi_model_settings(settings);
         self.pi_model_editor = None;
         self.pi_model_editor_error = None;
         self.pi_custom_provider_editor = Some(PiCustomProviderEditor {
@@ -2027,14 +1989,14 @@ impl Workspace {
         if matches!(editor.discovery, Some(ModelDiscoveryState::Loading)) {
             return;
         }
-        let request = smelt_core::pi_model_discovery::ModelDiscoveryRequest {
+        // 编辑器里没填 key 时，运行时用这个 provider 已存的那份（占位符写的就是「已配置」）。
+        let params = smelt_core::pi_service::DiscoverModelsParams {
             base_url: editor.base_url.read(cx).value().trim().to_string(),
             api: editor.api.clone(),
             api_key: editor.api_key.read(cx).value().trim().to_string(),
+            saved_provider_id: editor.previous_id.clone(),
         };
-        // 编辑器里没填 key，但配置里可能已经有一份（占位符写的就是「已配置」）。
-        let request = self.pi_request_with_saved_key(request, editor.previous_id.clone());
-        if let Err(error) = smelt_core::pi_model_discovery::models_endpoint(&request.base_url) {
+        if let Err(error) = smelt_core::pi_model_discovery::models_endpoint(&params.base_url) {
             self.fail_pi_discovery(error, cx);
             return;
         }
@@ -2042,48 +2004,20 @@ impl Workspace {
             editor.discovery = Some(ModelDiscoveryState::Loading);
         }
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { smelt_core::pi_model_discovery::discover_models(&request) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        self.run_pi_call::<smelt_core::control_api::PiProvidersDiscoverModels>(
+            params,
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            |this, outcome, cx| {
                 if let Some(editor) = this.pi_custom_provider_editor.as_mut() {
                     editor.discovery = Some(match outcome {
-                        Ok(models) => ModelDiscoveryState::Ready(models),
+                        Ok(result) => ModelDiscoveryState::Ready(result.models),
                         Err(error) => ModelDiscoveryState::Failed(error),
                     });
                 }
                 cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 编辑器里没现填 key 时，补上已保存的那份。
-    ///
-    /// 表单里的 key 输入框在「已配置」时是空的（不回显凭据）。不补这一步，编辑
-    /// 一个已存在的 provider 时点「获取模型列表」必然 401。
-    fn pi_request_with_saved_key(
-        &self,
-        mut request: smelt_core::pi_model_discovery::ModelDiscoveryRequest,
-        provider_id: Option<String>,
-    ) -> smelt_core::pi_model_discovery::ModelDiscoveryRequest {
-        if !request.api_key.is_empty() {
-            return request;
-        }
-        if let Some(provider_id) = provider_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            && let Some(key) = smelt_core::pi_model_settings::read_pi_provider_api_key_at(
-                &smelt_core::pi_model_settings::pi_agent_dir(),
-                provider_id,
-            )
-        {
-            request.api_key = key;
-        }
-        request
+            },
+        );
     }
 
     fn fail_pi_discovery(&mut self, error: String, cx: &mut Context<Self>) {
@@ -2177,7 +2111,7 @@ impl Workspace {
     pub fn save_pi_custom_provider(
         &mut self,
         set_default: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = self.pi_custom_provider_editor.clone() else {
@@ -2228,155 +2162,57 @@ impl Workspace {
                 max_tokens,
             });
         }
-        let api_key_for_discovery = editor.api_key.read(cx).value().trim().to_string();
-
         let api_key = editor.api_key.read(cx).value().trim().to_string();
-        let api_key_opt = if api_key.is_empty() {
-            None
-        } else {
-            Some(api_key.as_str())
-        };
-
         let display_name = if display_name.is_empty() {
             id.clone()
         } else {
             display_name
         };
-
-        let draft = PiCustomProviderDraft {
+        // 一个模型都没填 = 「这份目录我不维护，照端点上的来」：运行时先问一次端点，
+        // 问到了才落盘，并标成自动维护。
+        let from_endpoint = models.is_empty();
+        if from_endpoint {
+            if let Err(error) = smelt_core::pi_model_discovery::models_endpoint(&base_url) {
+                self.fail_pi_discovery(format!("{error}；或手动填写至少一个模型"), cx);
+                return;
+            }
+            if let Some(editor) = self.pi_custom_provider_editor.as_mut() {
+                editor.discovery = Some(ModelDiscoveryState::Loading);
+            }
+            cx.notify();
+        }
+        let params = smelt_core::pi_service::SaveCustomProviderParams {
             previous_id: editor.previous_id.clone(),
-            id,
-            display_name,
-            api: editor.api,
-            base_url,
-            api_key: api_key_opt.map(str::to_string),
-            credential_configured: editor.credential_configured || api_key_opt.is_some(),
+            provider: smelt_core::pi_model_settings::PiCustomProvider {
+                id: id.clone(),
+                display_name,
+                api: editor.api,
+                base_url,
+                credential_configured: editor.credential_configured || !api_key.is_empty(),
+                models,
+            },
+            api_key: (!api_key.is_empty()).then_some(api_key),
             set_default,
         };
-
-        // 一个模型都没填 = 「这份目录我不维护，照端点上的来」。先问一次端点，问到
-        // 了才落盘：Pi 从 models.json 解析模型，写一份空列表等于这个 provider 一个
-        // 模型都选不了。
-        if models.is_empty() {
-            self.save_pi_custom_provider_from_endpoint(draft, api_key_for_discovery, cx);
-            return;
-        }
-        self.commit_pi_custom_provider(draft, models, false, window, cx);
-    }
-
-    fn save_pi_custom_provider_from_endpoint(
-        &mut self,
-        draft: PiCustomProviderDraft,
-        typed_api_key: String,
-        cx: &mut Context<Self>,
-    ) {
-        let request = self.pi_request_with_saved_key(
-            smelt_core::pi_model_discovery::ModelDiscoveryRequest {
-                base_url: draft.base_url.clone(),
-                api: draft.api.clone(),
-                api_key: typed_api_key,
-            },
-            draft.previous_id.clone(),
-        );
-        if let Err(error) = smelt_core::pi_model_discovery::models_endpoint(&request.base_url) {
-            self.fail_pi_discovery(format!("{error}；或手动填写至少一个模型"), cx);
-            return;
-        }
-        if let Some(editor) = self.pi_custom_provider_editor.as_mut() {
-            editor.discovery = Some(ModelDiscoveryState::Loading);
-        }
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { smelt_core::pi_model_discovery::discover_models(&request) })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if this.pi_custom_provider_editor.is_none() {
-                    return;
+        self.run_pi_call::<smelt_core::control_api::PiProvidersSaveCustom>(
+            params,
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| match result {
+                Ok(saved) => {
+                    this.pi_custom_provider_editor = None;
+                    this.pi_model_editor_error = None;
+                    this.adopt_pi_config(saved.config, true, cx);
+                    crate::status_item::notify_success(if saved.auto {
+                        format!("自定义 Provider {id} 已保存，模型目录将在每次启动时刷新")
+                    } else {
+                        format!("自定义 Provider {id} 已保存")
+                    });
                 }
-                let discovered = match outcome {
-                    Ok(models) if models.is_empty() => {
-                        this.fail_pi_discovery(
-                            "该端点没有报告任何模型，请手动填写至少一个模型".to_string(),
-                            cx,
-                        );
-                        return;
-                    }
-                    Ok(models) => models,
-                    Err(error) => {
-                        this.fail_pi_discovery(
-                            format!("{error}\n未能自动获取模型，请手动填写至少一个模型"),
-                            cx,
-                        );
-                        return;
-                    }
-                };
-                let models = discovered
-                    .into_iter()
-                    .map(|model| smelt_core::pi_model_settings::PiCustomModel {
-                        name: model.label().to_string(),
-                        id: model.id,
-                        context_window: model.context_window,
-                        max_tokens: model.max_tokens,
-                    })
-                    .collect();
-                this.commit_pi_custom_provider(draft, models, true, window, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn commit_pi_custom_provider(
-        &mut self,
-        draft: PiCustomProviderDraft,
-        models: Vec<smelt_core::pi_model_settings::PiCustomModel>,
-        auto: bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = draft.id.clone();
-        let provider = smelt_core::pi_model_settings::PiCustomProvider {
-            id: id.clone(),
-            display_name: draft.display_name,
-            api: draft.api,
-            base_url: draft.base_url,
-            credential_configured: draft.credential_configured,
-            models,
-        };
-
-        if let Err(error) = smelt_core::pi_model_settings::save_pi_custom_provider_replacing(
-            draft.previous_id.as_deref(),
-            &provider,
-            draft.api_key.as_deref(),
-            draft.set_default,
-        ) {
-            self.pi_model_editor_error = Some(error.clone());
-            crate::status_item::notify_error(error);
-            cx.notify();
-            return;
-        }
-
-        // 改名要把「自动」标记带过去，否则用户会得到一个以为自动、其实再也不刷新
-        // 的 provider。
-        smelt_core::pi_auto_models::update(|store| {
-            if let Some(prev) = &draft.previous_id
-                && prev != &id
-            {
-                store.set_auto(prev, false);
-            }
-            store.set_auto(&id, auto);
-        });
-
-        self.pi_custom_provider_editor = None;
-        self.pi_model_editor_error = None;
-        self.reload_pi_model_settings(cx);
-        crate::status_item::notify_success(if auto {
-            format!("自定义 Provider {id} 已保存，模型目录将在每次启动时刷新")
-        } else {
-            format!("自定义 Provider {id} 已保存")
-        });
-        cx.notify();
+                Err(error) if from_endpoint => this.fail_pi_discovery(error, cx),
+                Err(error) => this.reject_pi_model_edit(error, cx),
+            },
+        );
     }
 
     pub fn remove_pi_custom_provider(
@@ -2385,69 +2221,59 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = smelt_core::pi_model_settings::remove_pi_custom_provider(&provider_id) {
-            crate::status_item::notify_error(error);
-            cx.notify();
-            return;
-        }
-        smelt_core::pi_auto_models::update(|store| store.set_auto(&provider_id, false));
-        self.reload_pi_model_settings(cx);
-        crate::status_item::notify_success(format!("已移除自定义 Provider {provider_id}"));
-        cx.notify();
+        self.run_pi_call::<smelt_core::control_api::PiProvidersRemoveCustom>(
+            smelt_core::pi_service::ProviderIdParams {
+                provider_id: provider_id.clone(),
+            },
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| match result {
+                Ok(config) => {
+                    this.adopt_pi_config(config, true, cx);
+                    crate::status_item::notify_success(format!(
+                        "已移除自定义 Provider {provider_id}"
+                    ));
+                }
+                Err(error) => crate::status_item::notify_error(error),
+            },
+        );
     }
 
+    /// 让运行时确保配置文件存在，再用系统文本编辑器打开。文件在运行时那台机器上，
+    /// 只有本机运行时打得开。
     pub(super) fn open_pi_config(
         &mut self,
         file_kind: PiConfigFileKind,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        let path = match file_kind {
-            PiConfigFileKind::Settings => smelt_core::pi_model_settings::pi_settings_path(),
-            PiConfigFileKind::Models => smelt_core::pi_model_settings::pi_models_path(),
-            PiConfigFileKind::Credentials => smelt_core::pi_model_settings::pi_auth_path(),
-            PiConfigFileKind::Mcp => smelt_core::pi_mcp::pi_mcp_path(),
+        let file = match file_kind {
+            PiConfigFileKind::Settings => smelt_core::pi_service::PiConfigFile::Settings,
+            PiConfigFileKind::Models => smelt_core::pi_service::PiConfigFile::Models,
+            PiConfigFileKind::Credentials => smelt_core::pi_service::PiConfigFile::Credentials,
+            PiConfigFileKind::Mcp => smelt_core::pi_service::PiConfigFile::Mcp,
         };
-        if !path.exists() {
-            use std::io::Write as _;
-
-            if let Some(parent) = path.parent()
-                && let Err(error) = std::fs::create_dir_all(parent)
-            {
-                crate::status_item::notify_error(format!("创建 Pi 配置目录失败：{error}"));
-                return;
-            }
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    if let Err(error) = file.write_all(b"{\n}\n") {
-                        crate::status_item::notify_error(format!("创建 Pi 配置文件失败：{error}"));
+        self.run_pi_call::<smelt_core::control_api::PiConfigEnsureFile>(
+            smelt_core::pi_service::EnsureConfigFileParams { file },
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            |_, result, _| {
+                let path = match result {
+                    Ok(result) => std::path::PathBuf::from(result.path),
+                    Err(error) => {
+                        crate::status_item::notify_error(error);
                         return;
                     }
-                    #[cfg(unix)]
-                    if matches!(file_kind, PiConfigFileKind::Credentials) {
-                        use std::os::unix::fs::PermissionsExt as _;
-                        let _ =
-                            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-                    }
+                };
+                match crate::ide::open_in_system_text_editor(&path) {
+                    Ok(()) => crate::status_item::notify_success(format!(
+                        "已在系统文本编辑器打开 {}",
+                        path.display()
+                    )),
+                    Err(error) => crate::status_item::notify_error(error),
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    crate::status_item::notify_error(format!("创建 Pi 配置文件失败：{error}"));
-                    return;
-                }
-            }
-        }
-        match crate::ide::open_in_system_text_editor(&path) {
-            Ok(()) => crate::status_item::notify_success(format!(
-                "已在系统文本编辑器打开 {}",
-                path.display()
-            )),
-            Err(error) => crate::status_item::notify_error(error),
-        }
+            },
+        );
     }
 
     pub(super) fn refresh_pi_settings(&mut self, cx: &mut Context<Self>) {
@@ -2455,15 +2281,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 扫一次插件目录并缓存。设置页每次渲染都拿缓存，不重复读磁盘。
-    pub(super) fn pi_plugins_cached(&self) -> &[smelt_core::pi_plugin_catalog::PiPlugin] {
-        self.pi_plugins
-            .get_or_init(smelt_core::pi_plugin_catalog::discover_plugins)
-    }
-
     pub(super) fn refresh_pi_plugins(&mut self, cx: &mut Context<Self>) {
-        self.pi_plugins.take();
         self.pi_plugin_pending_delete = None;
+        self.refresh_pi_config(cx);
         cx.notify();
     }
 
@@ -2481,31 +2301,35 @@ impl Workspace {
 
     /// 真删 `~/.pi` 下的实体，并把所有引用它的智能体的勾选一并清掉。
     pub(super) fn confirm_pi_plugin_delete(&mut self, id: String, cx: &mut Context<Self>) {
-        let plugins = self.pi_plugins_cached().to_vec();
-        let Some(plugin) = plugins.iter().find(|plugin| plugin.id == id) else {
-            self.pi_plugin_pending_delete = None;
-            cx.notify();
-            return;
-        };
-        match smelt_core::pi_plugin_catalog::remove_plugin(plugin) {
-            Ok(()) => {
-                self.pi_plugin_error = None;
-                let removed = id.clone();
-                super::apply_agent_host(
-                    move |config| {
-                        for agent in &mut config.agents {
-                            agent.plugins.retain(|plugin_id| *plugin_id != removed);
-                        }
-                    },
-                    cx,
-                );
-            }
-            Err(error) => self.pi_plugin_error = Some(error),
-        }
-        self.refresh_pi_plugins(cx);
+        self.pi_plugin_pending_delete = None;
+        self.run_pi_call::<smelt_core::control_api::PiPluginsRemove>(
+            smelt_core::pi_service::PluginIdParams { id: id.clone() },
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| match result {
+                Ok(config) => {
+                    this.pi_plugin_error = None;
+                    super::apply_agent_host(
+                        move |host| {
+                            for agent in &mut host.agents {
+                                agent.plugins.retain(|plugin_id| *plugin_id != id);
+                            }
+                        },
+                        cx,
+                    );
+                    this.adopt_pi_config(config, false, cx);
+                }
+                Err(error) => {
+                    this.pi_plugin_error = Some(error);
+                    this.refresh_pi_config(cx);
+                }
+            },
+        );
+        cx.notify();
     }
 
-    /// 从本地目录 / 文件导入插件：拷贝进全局插件目录，之后就能在智能体里勾选。
+    /// 从本地目录 / 文件导入插件：运行时把它拷贝进全局插件目录，之后就能在智能体里
+    /// 勾选。选的是本机路径，只对本机运行时有意义。
     pub(super) fn import_pi_plugin(
         &mut self,
         kind: smelt_core::pi_plugin_catalog::PiPluginKind,
@@ -2524,13 +2348,16 @@ impl Workspace {
             let Some(source) = paths.into_iter().next() else {
                 return;
             };
-            let outcome = smelt_core::pi_plugin_catalog::import_plugin(kind, &source);
             let _ = this.update(cx, |this, cx| {
-                match outcome {
-                    Ok(_) => this.pi_plugin_error = None,
-                    Err(error) => this.pi_plugin_error = Some(error),
-                }
-                this.refresh_pi_plugins(cx);
+                this.run_pi_mutation::<smelt_core::control_api::PiPluginsImport>(
+                    smelt_core::pi_service::ImportPluginParams {
+                        kind,
+                        source: source.to_string_lossy().into_owned(),
+                    },
+                    false,
+                    cx,
+                    |this, error, _| this.pi_plugin_error = Some(error),
+                );
             });
         })
         .detach();

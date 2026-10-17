@@ -26,6 +26,7 @@ use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
 mod agent_hooks;
 mod bundled_helpers;
+mod pi_config;
 mod memory;
 mod nav;
 mod pi_auth;
@@ -47,6 +48,7 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::{sync_bundled_smelt_agent_mcp, sync_bundled_smelt_notify};
+pub(crate) use pi_config::pi_model_choice_groups;
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -1043,23 +1045,6 @@ impl PiLoginView {
     }
 }
 
-/// 保存 Pi 自定义 provider 时，从各个输入框读出来的纯文本草稿。
-///
-/// 单独拎出来的理由和 dsh 那份一样：「不填模型」那条路要先去端点问一遍模型，
-/// 问完才能落盘，而 `Entity<InputState>` 不能跨 await 带走。
-#[derive(Clone)]
-pub struct PiCustomProviderDraft {
-    pub previous_id: Option<String>,
-    pub id: String,
-    pub display_name: String,
-    pub api: String,
-    pub base_url: String,
-    /// `None` 表示这次没改凭据，沿用已保存的那份。
-    pub api_key: Option<String>,
-    pub credential_configured: bool,
-    pub set_default: bool,
-}
-
 /// 保存自定义 provider 时，从各个输入框读出来的纯文本草稿。
 ///
 /// 单独拎出来是因为「不填模型」那条路要先去端点问一遍模型，问完才能落盘，而
@@ -1514,6 +1499,7 @@ struct SettingsRenderSnapshot {
     pi_model_settings: Result<smelt_core::pi_model_settings::PiModelSettings, String>,
     pi_settings: Result<smelt_core::pi_model_settings::PiSettingsSummary, String>,
     pi_plugins: Vec<smelt_core::pi_plugin_catalog::PiPlugin>,
+    pi_paths: smelt_core::pi_service::PiConfigPaths,
     pi_plugin_pending_delete: Option<String>,
     pi_plugin_error: Option<String>,
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
