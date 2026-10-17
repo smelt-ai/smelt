@@ -35,6 +35,7 @@ use smelt_model::osc;
 mod provider_quota;
 mod resizable_split;
 mod runtime_call;
+mod runtime_events;
 mod runtime_space;
 mod runtimes;
 pub(crate) use runtime_space::ProjectRef;
@@ -876,14 +877,19 @@ pub(crate) use smelt_ui::history_titles_global::HistoryTitles;
 
 /// 按稳定 session id 读取守护状态镜像；终端 pane 和 ACP 会话必须共用这一个入口，
 /// 否则状态栏会出现 attention 已完成、ACP 本地快照仍显示运行中的双事实源竞态。
-fn daemon_state_for_session_id(session_id: &str, cx: &App) -> Option<terminal::DaemonSessionState> {
-    DaemonStates::get(session_id, cx)
+fn daemon_state_for_session_id(
+    runtime: &RuntimeKey,
+    session_id: &str,
+    cx: &App,
+) -> Option<terminal::DaemonSessionState> {
+    DaemonStates::get(runtime, session_id, cx)
 }
 
 /// 取某个终端 pane 对应的守护状态；没有全局单例（比如极早期尚未注册）或那个
 /// session id 还没有数据都返回 None。
 fn daemon_state_for(view: &Entity<TerminalView>, cx: &App) -> Option<terminal::DaemonSessionState> {
-    daemon_state_for_session_id(view.read(cx).session_id(), cx)
+    let view = view.read(cx);
+    daemon_state_for_session_id(view.runtime().key(), view.session_id(), cx)
 }
 
 fn agent_notification_enabled(config: &settings::AgentHostState, kind: AttentionKind) -> bool {
@@ -1293,7 +1299,7 @@ impl Session {
             // 再走同一优先级，避免派发或失败的同步窗口短暂变灰。
             SessionKind::Conversation(view) => {
                 let v = view.read(cx);
-                let daemon = daemon_state_for_session_id(v.session_id(), cx)
+                let daemon = daemon_state_for_session_id(v.runtime().key(), v.session_id(), cx)
                     .and_then(|state| AgentStatus::from_daemon_state(&state))
                     .unwrap_or(AgentStatus::Idle);
                 AgentStatus::highest([daemon, v.agent_status()])
@@ -3578,6 +3584,7 @@ impl Workspace {
     /// 因为非当前顶层会话不会被挂进当前窗口的渲染树。
     fn handle_daemon_state_event(
         &mut self,
+        runtime: &RuntimeKey,
         state: &terminal::DaemonSessionState,
         cx: &mut Context<Self>,
     ) {
@@ -3591,7 +3598,8 @@ impl Workspace {
         // 终端内容本身走 TerminalView::drive_redraws 的事件通道即时重绘，
         // 不依赖这里。
         for pane in panes {
-            if pane.read(cx).session_id() == state.id {
+            let pane_view = pane.read(cx);
+            if pane_view.session_id() == state.id && pane_view.runtime().key() == runtime {
                 pane.update(cx, |terminal, cx| terminal.handle_daemon_state(state, cx));
             }
         }
@@ -4464,9 +4472,10 @@ fn main() {
             let states = DaemonStates::drain_pending(cx);
             if let Some(ws) = current_workspace(&current_ws_for_daemon_states) {
                 let _ = ws.update(cx, |ws, cx| {
-                    for state in &states {
-                        ws.handle_daemon_state_event(state, cx);
+                    for (runtime, state) in &states {
+                        ws.handle_daemon_state_event(runtime, state, cx);
                     }
+                    let states: Vec<_> = states.into_iter().map(|(_, state)| state).collect();
                     ws.refresh_agent_memories_after_turns(&states, cx);
                     ws.sync_notification_surfaces(cx);
                     if ws.session_manager_open {
@@ -4526,26 +4535,15 @@ fn main() {
                 })
                 .detach();
         });
-        let (daemon_state_tx, daemon_state_rx) =
-            smol::channel::unbounded::<terminal::DaemonStateEvent>();
-        thread::spawn(move || {
-            let mut reconnect_attempt = 0u32;
-            loop {
-                let connected_at = Instant::now();
-                terminal::subscribe_daemon_states_blocking(&crate::runtimes::local(), &daemon_state_tx);
-                let _ = daemon_state_tx.try_send(terminal::DaemonStateEvent::Disconnected);
-                // 短暂可用后断开（daemon 升级）从首档开始；连续失败则指数退避并封顶，
-                // 避免 GUI 与网关在 daemon 未起时固定节拍反复争抢同一 socket。
-                if connected_at.elapsed() >= Duration::from_secs(5) {
-                    reconnect_attempt = 0;
-                }
-                thread::sleep(terminal::daemon_reconnect_backoff(reconnect_attempt));
-                reconnect_attempt = reconnect_attempt.saturating_add(1);
-            }
-        });
+        // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
+        runtimes::start_runtime_hub(cx);
+        // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求、项目文件
+        // 变化这些投影目前只认本机；各运行时都有的是会话状态。
+        let daemon_state_rx = runtime_events::start(cx);
         let current_ws_for_menu_republish = current_ws.clone();
         cx.spawn(async move |cx| {
-            while let Ok(event) = daemon_state_rx.recv().await {
+            while let Ok((runtime, event)) = daemon_state_rx.recv().await {
+                let is_local = runtime == RuntimeKey::Local;
                 // 唤醒要拿窗口去重启对话视图，走 update_in；它不是状态投影，后面不用再看。
                 // 主窗口已经关掉就放弃这次唤醒，不另开一扇。
                 if let terminal::DaemonStateEvent::ConversationWakeRequested { session_id } = &event {
@@ -4558,25 +4556,37 @@ fn main() {
                     continue;
                 }
                 // 运行时换了进程，它替我们建的项目监听也没了：清空，下次刷新重新登记。
-                if matches!(event, terminal::DaemonStateEvent::Disconnected)
+                if is_local
+                    && matches!(event, terminal::DaemonStateEvent::Disconnected)
                     && let Some(ws) = current_workspace(&current_ws_for_menu_republish)
                 {
                     let _ = ws.update(cx, |ws, _| ws.watched_projects.clear());
                 }
                 if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
-                    if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                    if is_local && let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
                         let root = root.clone();
                         let _ = ws.update(cx, |ws, cx| ws.on_project_changed(root, cx));
                     }
                     continue;
                 }
                 if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
-                    let settings = settings.clone();
-                    cx.update(|cx| settings::apply_requested_appearance(&settings, cx));
+                    if is_local {
+                        let settings = settings.clone();
+                        cx.update(|cx| settings::apply_requested_appearance(&settings, cx));
+                    }
                     continue;
                 }
                 cx.update(|cx| {
                     match &event {
+                        // 刚连上一个运行时：把桌面持有的那份目录和菜单重新交给它（见下）。
+                        terminal::DaemonStateEvent::Snapshot { .. } if !is_local => {
+                            if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                                let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
+                            }
+                        }
+                        terminal::DaemonStateEvent::RemoteSessions(_)
+                        | terminal::DaemonStateEvent::Automations(_)
+                            if !is_local => {}
                         terminal::DaemonStateEvent::Snapshot {
                             remote_sessions,
                             automations,
@@ -4624,15 +4634,13 @@ fn main() {
                     }
                     match event {
                         terminal::DaemonStateEvent::Snapshot { sessions: list, .. } => {
-                            let initial_snapshot = !DaemonStates::is_primed(cx);
+                            let initial_snapshot = !DaemonStates::is_primed(&runtime, cx);
                             // attention 必须在 signal 前算完：先读旧镜像，写完
                             // 再 replace_all 唤醒观察器做 pane 副作用和合并刷新。
-                            let previous = {
-                                let map = cx.global::<DaemonStates>().map.lock().unwrap();
-                                list.iter()
-                                    .map(|state| map.get(&state.id).cloned())
-                                    .collect::<Vec<_>>()
-                            };
+                            let previous = list
+                                .iter()
+                                .map(|state| DaemonStates::get(&runtime, &state.id, cx))
+                                .collect::<Vec<_>>();
                             let now = Instant::now();
                             for (state, previous) in list.iter().zip(previous.iter()) {
                                 if initial_snapshot {
@@ -4641,29 +4649,24 @@ fn main() {
                                     apply_daemon_attention(previous.as_ref(), state, now, cx);
                                 }
                             }
-                            let stale_attention_ids = DaemonStates::replace_all(list, cx);
+                            let stale_attention_ids =
+                                DaemonStates::replace_all(&runtime, list, cx);
                             for id in stale_attention_ids {
                                 AttentionGlobal::remove_session(&id, cx);
                             }
                         }
                         terminal::DaemonStateEvent::Update(s) => {
-                            let previous = cx
-                                .global::<DaemonStates>()
-                                .map
-                                .lock()
-                                .unwrap()
-                                .get(&s.id)
-                                .cloned();
+                            let previous = DaemonStates::get(&runtime, &s.id, cx);
                             apply_daemon_attention(
                                 previous.as_ref(),
                                 &s,
                                 Instant::now(),
                                 cx,
                             );
-                            DaemonStates::upsert(s, cx);
+                            DaemonStates::upsert(&runtime, s, cx);
                         }
                         terminal::DaemonStateEvent::Removed { id } => {
-                            DaemonStates::remove(&id, cx);
+                            DaemonStates::remove(&runtime, &id, cx);
                             AttentionGlobal::remove_session(&id, cx);
                         }
                         terminal::DaemonStateEvent::RemoteSessions(_) => {}
@@ -4673,7 +4676,7 @@ fn main() {
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {
-                            DaemonStates::mark_subscription_disconnected(cx);
+                            DaemonStates::mark_subscription_disconnected(&runtime, cx);
                         }
                     }
                 });
@@ -4690,8 +4693,6 @@ fn main() {
         // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题。
         // 远程访问同理跑在 smeltd 里，GUI 退出不影响远程设备。
         settings::start_remote_config_load(cx);
-        // 登记过的远程运行时：读库、连 iroh 都在后台。
-        runtimes::start_runtime_hub(cx);
         // 首启主窗口，记入 current_ws（reopen 回调 / URL 投递循环都靠它判断当前主窗口）。
         *current_ws.borrow_mut() = Some(open_workspace_window(cx, window_bg));
 

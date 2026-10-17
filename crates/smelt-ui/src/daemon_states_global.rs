@@ -7,24 +7,32 @@ use std::time::Instant;
 
 use gpui::{App, BorrowAppContext, Global};
 
-pub use smelt_model::attention::{AttentionItem, AttentionKind, AttentionStore};
 use smelt_client::daemon_state::DaemonSessionState;
+use smelt_client::runtime::RuntimeKey;
+pub use smelt_model::attention::{AttentionItem, AttentionKind, AttentionStore};
 
-/// 守护上报的会话状态镜像（全局单例，跨窗口共享）。key = smeltd session id
-/// （每个 pane 一个）/ ACP 会话的 `acp-` 前缀 sid。由主 GUI 启动时那条常驻
-/// subscribe 转发任务维护；终端 hook 与 ACP 协议状态都先在 smeltd 归约，再共用
-/// 同一套「状态着色 / Dock 与菜单栏角标 / 通知」链路。
+/// 各运行时上报的会话状态镜像（全局单例，跨窗口共享）。按运行时分开：每个运行时一条
+/// 常驻 subscribe，各自的快照只替换自己那份，断线也只影响自己那份。会话 key =
+/// smeltd session id（每个 pane 一个）/ ACP 会话的 `acp-` 前缀 sid。终端 hook 与 ACP
+/// 协议状态都先在运行时归约，再共用同一套「状态着色 / Dock 与菜单栏角标 / 通知」链路。
 ///
 /// 与 [`AttentionGlobal`] 相同：内层存数据，`revision` 只为让 GPUI 觉得
 /// Global 变了。写入必须走 [`Self::replace_all`] / [`Self::upsert`]，成功后
 /// 唤醒应用级观察器。观察器负责 pane 副作用和合并刷新，不要在各面板手写 notify。
 #[derive(Clone, Default)]
 pub struct DaemonStates {
-    pub map: Arc<Mutex<HashMap<String, DaemonSessionState>>>,
-    pending: Arc<Mutex<Vec<DaemonSessionState>>>,
+    runtimes: Arc<Mutex<HashMap<RuntimeKey, RuntimeMirror>>>,
+    pending: Arc<Mutex<Vec<(RuntimeKey, DaemonSessionState)>>>,
     revision: u64,
+}
+
+#[derive(Default)]
+struct RuntimeMirror {
+    sessions: HashMap<String, DaemonSessionState>,
+    /// 收到过至少一帧快照（空目录也算）。
+    primed: bool,
     /// 当前这条 subscribe 连接是否仍活着。守护 exec 后旧连接断开，必须先置
-    /// false，否则上一 epoch 的 primed 快照会把「正在交接」误判成会话已死。
+    /// false，否则上一 epoch 的快照会把「正在交接」误判成会话已死。
     subscription_live: bool,
 }
 
@@ -35,102 +43,158 @@ impl DaemonStates {
         });
     }
 
-    pub fn replace_all(list: Vec<DaemonSessionState>, cx: &mut App) -> Vec<String> {
-        let map = cx.global::<Self>().map.clone();
+    fn read<T>(cx: &App, read: impl FnOnce(&HashMap<RuntimeKey, RuntimeMirror>) -> T) -> Option<T> {
+        let global = cx.try_global::<Self>()?;
+        let runtimes = global.runtimes.lock().ok()?;
+        Some(read(&runtimes))
+    }
+
+    /// 一个运行时的完整快照：换掉它那份镜像，返回不再存在的会话。
+    pub fn replace_all(
+        runtime: &RuntimeKey,
+        list: Vec<DaemonSessionState>,
+        cx: &mut App,
+    ) -> Vec<String> {
+        let runtimes = cx.global::<Self>().runtimes.clone();
         let pending = cx.global::<Self>().pending.clone();
         let stale_ids = {
-            let mut map = map.lock().unwrap();
+            let mut runtimes = runtimes.lock().unwrap();
+            let mirror = runtimes.entry(runtime.clone()).or_default();
             let live_ids: std::collections::HashSet<&str> =
                 list.iter().map(|state| state.id.as_str()).collect();
-            let stale_ids: Vec<String> = map
+            let stale_ids: Vec<String> = mirror
+                .sessions
                 .keys()
                 .filter(|id| !live_ids.contains(id.as_str()))
                 .cloned()
                 .collect();
-            map.clear();
-            for state in &list {
-                map.insert(state.id.clone(), state.clone());
-            }
+            mirror.sessions = list
+                .iter()
+                .map(|state| (state.id.clone(), state.clone()))
+                .collect();
+            mirror.primed = true;
+            mirror.subscription_live = true;
             stale_ids
         };
         {
             let mut pending = pending.lock().unwrap();
-            pending.clear();
-            pending.extend(list);
+            pending.retain(|(key, _)| key != runtime);
+            pending.extend(list.into_iter().map(|state| (runtime.clone(), state)));
         }
-        cx.update_global::<Self, _>(|global, _| {
-            global.subscription_live = true;
-            global.revision = global.revision.wrapping_add(1);
-        });
+        Self::signal(cx);
         stale_ids
     }
 
-    pub fn remove(id: &str, cx: &mut App) -> bool {
-        let map = cx.global::<Self>().map.clone();
+    pub fn remove(runtime: &RuntimeKey, id: &str, cx: &mut App) -> bool {
+        let runtimes = cx.global::<Self>().runtimes.clone();
         let pending = cx.global::<Self>().pending.clone();
-        let removed = map.lock().unwrap().remove(id).is_some();
-        pending.lock().unwrap().retain(|state| state.id != id);
+        let removed = runtimes
+            .lock()
+            .unwrap()
+            .get_mut(runtime)
+            .is_some_and(|mirror| mirror.sessions.remove(id).is_some());
+        pending
+            .lock()
+            .unwrap()
+            .retain(|(key, state)| key != runtime || state.id != id);
         if removed {
             Self::signal(cx);
         }
         removed
     }
 
-    pub fn upsert(state: DaemonSessionState, cx: &mut App) {
-        let map = cx.global::<Self>().map.clone();
+    pub fn upsert(runtime: &RuntimeKey, state: DaemonSessionState, cx: &mut App) {
+        let runtimes = cx.global::<Self>().runtimes.clone();
         let pending = cx.global::<Self>().pending.clone();
-        map.lock().unwrap().insert(state.id.clone(), state.clone());
-        pending.lock().unwrap().push(state);
+        runtimes
+            .lock()
+            .unwrap()
+            .entry(runtime.clone())
+            .or_default()
+            .sessions
+            .insert(state.id.clone(), state.clone());
+        pending.lock().unwrap().push((runtime.clone(), state));
         Self::signal(cx);
     }
 
-    pub fn drain_pending(cx: &mut App) -> Vec<DaemonSessionState> {
+    /// 运行时被移除：它那份镜像整个丢掉，返回原来在上面的会话。
+    pub fn forget_runtime(runtime: &RuntimeKey, cx: &mut App) -> Vec<String> {
+        let Some(global) = cx.try_global::<Self>() else {
+            return Vec::new();
+        };
+        let runtimes = global.runtimes.clone();
+        let pending = global.pending.clone();
+        let ids: Vec<String> = runtimes
+            .lock()
+            .unwrap()
+            .remove(runtime)
+            .map(|mirror| mirror.sessions.into_keys().collect())
+            .unwrap_or_default();
+        pending.lock().unwrap().retain(|(key, _)| key != runtime);
+        Self::signal(cx);
+        ids
+    }
+
+    pub fn drain_pending(cx: &mut App) -> Vec<(RuntimeKey, DaemonSessionState)> {
         std::mem::take(&mut *cx.global::<Self>().pending.lock().unwrap())
     }
 
-    pub fn get(session_id: &str, cx: &App) -> Option<DaemonSessionState> {
-        cx.try_global::<Self>()?
-            .map
-            .lock()
-            .ok()?
-            .get(session_id)
-            .cloned()
+    pub fn get(runtime: &RuntimeKey, session_id: &str, cx: &App) -> Option<DaemonSessionState> {
+        Self::read(cx, |runtimes| {
+            runtimes
+                .get(runtime)
+                .and_then(|mirror| mirror.sessions.get(session_id))
+                .cloned()
+        })
+        .flatten()
     }
 
-    /// 是否已收到过至少一帧 subscribe（空目录的 replace_all 也算）。
-    pub fn is_primed(cx: &App) -> bool {
-        cx.try_global::<Self>()
-            .is_some_and(|global| global.revision != 0)
+    /// 这个运行时是否已收到过至少一帧 subscribe（空目录的快照也算）。
+    pub fn is_primed(runtime: &RuntimeKey, cx: &App) -> bool {
+        Self::read(cx, |runtimes| {
+            runtimes.get(runtime).is_some_and(|m| m.primed)
+        })
+        .unwrap_or(false)
     }
 
-    /// subscribe socket 断开：当前镜像不再代表活着的 daemon epoch。
-    pub fn mark_subscription_disconnected(cx: &mut App) {
-        if cx.try_global::<Self>().is_none() {
+    /// 这个运行时的 subscribe 断开：它那份镜像不再代表活着的 daemon epoch。
+    pub fn mark_subscription_disconnected(runtime: &RuntimeKey, cx: &mut App) {
+        let Some(global) = cx.try_global::<Self>() else {
             return;
+        };
+        let changed = global
+            .runtimes
+            .lock()
+            .unwrap()
+            .get_mut(runtime)
+            .is_some_and(|mirror| std::mem::replace(&mut mirror.subscription_live, false));
+        if changed {
+            Self::signal(cx);
         }
-        cx.update_global::<Self, _>(|global, _| {
-            if !global.subscription_live {
-                return;
-            }
-            global.subscription_live = false;
-            global.revision = global.revision.wrapping_add(1);
-        });
     }
 
-    pub fn snapshot(cx: &App) -> Vec<DaemonSessionState> {
-        cx.try_global::<Self>()
-            .and_then(|global| global.map.lock().ok())
-            .map(|map| map.values().cloned().collect())
-            .unwrap_or_default()
+    pub fn snapshot(runtime: &RuntimeKey, cx: &App) -> Vec<DaemonSessionState> {
+        Self::read(cx, |runtimes| {
+            runtimes
+                .get(runtime)
+                .map(|mirror| mirror.sessions.values().cloned().collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
     }
 
-    /// `None`：当前订阅未就绪，不能判死。`Some(false)`：当前 epoch 快照里没有可 attach 的运行时。
-    pub fn runtime_alive(session_id: &str, cx: &App) -> Option<bool> {
-        let global = cx.try_global::<Self>()?;
-        let subscription_live = global.subscription_live;
-        let primed = global.revision != 0;
-        let state = global.map.lock().ok()?.get(session_id).cloned();
-        DaemonSessionState::runtime_alive_from_mirror(subscription_live, primed, state.as_ref())
+    /// `None`：这个运行时的订阅未就绪，不能判死。`Some(false)`：当前 epoch 快照里没有可
+    /// attach 的运行时进程。
+    pub fn runtime_alive(runtime: &RuntimeKey, session_id: &str, cx: &App) -> Option<bool> {
+        Self::read(cx, |runtimes| {
+            let mirror = runtimes.get(runtime);
+            DaemonSessionState::runtime_alive_from_mirror(
+                mirror.is_some_and(|m| m.subscription_live),
+                mirror.is_some_and(|m| m.primed),
+                mirror.and_then(|m| m.sessions.get(session_id)),
+            )
+        })
+        .flatten()
     }
 }
 
@@ -223,3 +287,53 @@ impl AttentionGlobal {
 }
 
 impl Global for AttentionGlobal {}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    fn state(id: &str) -> DaemonSessionState {
+        DaemonSessionState {
+            id: id.to_string(),
+            generation: 1,
+            revision: 1,
+            ..Default::default()
+        }
+    }
+
+    /// 一个运行时的快照、断线只动它自己那份：远程运行时连上时不能把本机会话冲掉，
+    /// 远程断线也不能让本机会话被判死。
+    #[gpui::test]
+    fn each_runtime_keeps_its_own_mirror(cx: &mut TestAppContext) {
+        let remote = RuntimeKey::Remote("rt-linux".to_string());
+        cx.update(|cx| {
+            cx.set_global(DaemonStates::default());
+            DaemonStates::replace_all(&RuntimeKey::Local, vec![state("t-local")], cx);
+            assert!(!DaemonStates::is_primed(&remote, cx));
+
+            let stale = DaemonStates::replace_all(&remote, vec![state("t-remote")], cx);
+            assert!(stale.is_empty());
+            assert!(DaemonStates::get(&RuntimeKey::Local, "t-local", cx).is_some());
+            assert!(DaemonStates::get(&remote, "t-local", cx).is_none());
+            assert!(DaemonStates::get(&remote, "t-remote", cx).is_some());
+
+            DaemonStates::mark_subscription_disconnected(&remote, cx);
+            assert_eq!(DaemonStates::runtime_alive(&remote, "t-remote", cx), None);
+            assert_ne!(
+                DaemonStates::runtime_alive(&RuntimeKey::Local, "t-local", cx),
+                None
+            );
+
+            let drained = DaemonStates::drain_pending(cx);
+            assert_eq!(drained.len(), 2);
+            assert_eq!(
+                DaemonStates::forget_runtime(&remote, cx),
+                vec!["t-remote".to_string()]
+            );
+            assert!(DaemonStates::snapshot(&remote, cx).is_empty());
+            assert_eq!(DaemonStates::snapshot(&RuntimeKey::Local, cx).len(), 1);
+        });
+    }
+}

@@ -663,11 +663,12 @@ fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
     }
 }
 
-/// 阻塞：连接正式 `event_subscribe`，逐行解析稳定 DTO，直到连接断开或协议错误。
-/// Ephemeral 订阅不发送 ack；Lag 后只等待 daemon 的恢复 snapshots。
+/// 阻塞：连接正式 `event_subscribe`，逐行解析稳定 DTO，直到连接断开、协议错误或
+/// `emit` 返回 false（收的一方不要了）。Ephemeral 订阅不发送 ack；Lag 后只等待 daemon
+/// 的恢复 snapshots。
 pub fn subscribe_daemon_states_blocking(
     runtime: &smelt_runtime_client::RuntimeClient,
-    tx: &smol::channel::Sender<DaemonStateEvent>,
+    mut emit: impl FnMut(DaemonStateEvent) -> bool,
 ) {
     let Ok(mut s) = runtime.connect() else {
         return;
@@ -689,7 +690,7 @@ pub fn subscribe_daemon_states_blocking(
                 return;
             }
         };
-        if tx.try_send(event).is_err() {
+        if !emit(event) {
             return;
         }
     }

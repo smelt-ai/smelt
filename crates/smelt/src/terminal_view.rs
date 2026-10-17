@@ -271,10 +271,11 @@ fn fallback_attention(
 }
 
 fn daemon_agent_state(
+    runtime: &crate::runtimes::Runtime,
     session_id: &str,
     cx: &App,
 ) -> Option<smelt_client::daemon_state::DaemonSessionState> {
-    smelt_ui::daemon_states_global::DaemonStates::get(session_id, cx)
+    smelt_ui::daemon_states_global::DaemonStates::get(runtime.key(), session_id, cx)
 }
 
 fn terminal_bell_notifications_enabled(cx: &App) -> bool {
@@ -391,7 +392,7 @@ impl TerminalView {
             write_error: None,
             session_runtime_gone: false,
         };
-        if let Some(state) = daemon_agent_state(&view.session_id, cx) {
+        if let Some(state) = daemon_agent_state(&view.runtime, &view.session_id, cx) {
             view.handle_daemon_state(&state, cx);
         }
         view
@@ -447,7 +448,7 @@ impl TerminalView {
 
     /// PTY 读线程每批输出只唤醒一次。终端内容与信息性 OSC/BEL 通知都在这里消费。
     fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
-        let daemon_state = daemon_agent_state(&self.session_id, cx);
+        let daemon_state = daemon_agent_state(&self.runtime, &self.session_id, cx);
         let structured_events = daemon_state
             .as_ref()
             .is_some_and(|state| state.structured_events);
@@ -502,7 +503,7 @@ impl TerminalView {
                 if this.bell_timer_generation != generation {
                     return;
                 }
-                let structured = daemon_agent_state(&this.session_id, cx)
+                let structured = daemon_agent_state(&this.runtime, &this.session_id, cx)
                     .as_ref()
                     .is_some_and(|state| state.structured_events);
                 if structured || !terminal_bell_notifications_enabled(cx) {
@@ -598,8 +599,12 @@ impl TerminalView {
                     .await;
                 let sid2 = sid.clone();
                 let alive = this
-                    .update(cx, |_, cx| {
-                        smelt_ui::daemon_states_global::DaemonStates::runtime_alive(&sid2, cx)
+                    .update(cx, |this, cx| {
+                        smelt_ui::daemon_states_global::DaemonStates::runtime_alive(
+                            this.runtime.key(),
+                            &sid2,
+                            cx,
+                        )
                     })
                     .ok()
                     .flatten();
@@ -682,7 +687,7 @@ impl TerminalView {
         self.pty_kick_pending = true;
         self.session_runtime_gone = false;
         self.flush_recovery_input(cx);
-        if let Some(state) = daemon_agent_state(&self.session_id, cx) {
+        if let Some(state) = daemon_agent_state(&self.runtime, &self.session_id, cx) {
             self.handle_daemon_state(&state, cx);
         }
         cx.notify();

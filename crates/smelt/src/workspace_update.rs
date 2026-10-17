@@ -389,21 +389,19 @@ impl Workspace {
         .detach();
     }
 
-    /// 是否有 agent 正在跑（结构化 phase 处于 Thinking / ExecutingTool）。
-    /// 空闲升级的门控：升级会让终端闪断重连，不该打断正在跑的任务。
+    /// 本机运行时上是否有 agent 正在跑（结构化 phase 处于 Thinking / ExecutingTool）。
+    /// 本机守护空闲升级的门控：升级会让终端闪断重连，不该打断正在跑的任务。
     pub(crate) fn any_agent_busy(&self, cx: &App) -> bool {
-        cx.try_global::<DaemonStates>()
-            .map(|states| {
-                states.map.lock().unwrap().values().any(|s| {
-                    s.has_runtime()
-                        && matches!(
-                            s.phase,
-                            crate::terminal::DaemonPhase::Thinking
-                                | crate::terminal::DaemonPhase::ExecutingTool
-                        )
-                })
+        DaemonStates::snapshot(&crate::RuntimeKey::Local, cx)
+            .iter()
+            .any(|s| {
+                s.has_runtime()
+                    && matches!(
+                        s.phase,
+                        crate::terminal::DaemonPhase::Thinking
+                            | crate::terminal::DaemonPhase::ExecutingTool
+                    )
             })
-            .unwrap_or(false)
     }
 
     /// subscribe 相位变化后调用：挂起的升级等所有 agent 空闲再发一次。
@@ -427,12 +425,18 @@ impl Workspace {
                 };
                 let leaf_for_result = leaf.clone();
                 cx.spawn(async move |_, cx| {
-                    let terminal =
-                        cx.background_executor()
-                            .spawn(async move {
-                                terminal::Terminal::reattach(&crate::runtimes::Runtime::local(), 24, 80, cwd.as_deref(), &sid)
-                            })
-                            .await;
+                    let terminal = cx
+                        .background_executor()
+                        .spawn(async move {
+                            terminal::Terminal::reattach(
+                                &crate::runtimes::Runtime::local(),
+                                24,
+                                80,
+                                cwd.as_deref(),
+                                &sid,
+                            )
+                        })
+                        .await;
                     if let Ok(terminal) = terminal {
                         leaf_for_result.update(cx, |view, cx| {
                             view.adopt_terminal(terminal, cx);
@@ -522,13 +526,13 @@ impl Workspace {
     }
 
     pub(crate) fn refresh_session_manager(&mut self, cx: &mut Context<Self>) {
-        if !DaemonStates::is_primed(cx) {
+        if !DaemonStates::is_primed(&crate::RuntimeKey::Local, cx) {
             self.session_manager_list = None;
             cx.notify();
             return;
         }
         self.session_manager_list = Some(smelt_client::daemon_state::apply_identity_tombstones(
-            DaemonStates::snapshot(cx),
+            DaemonStates::snapshot(&crate::RuntimeKey::Local, cx),
             &mut self.session_manager_tombstones,
         ));
         cx.notify();
@@ -625,7 +629,14 @@ impl Workspace {
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
                     for (entity, cwd, sid) in jobs {
-                        let term = terminal::Terminal::spawn(&crate::runtimes::Runtime::local(), 24, 80, cwd.as_deref(), &sid, None);
+                        let term = terminal::Terminal::spawn(
+                            &crate::runtimes::Runtime::local(),
+                            24,
+                            80,
+                            cwd.as_deref(),
+                            &sid,
+                            None,
+                        );
                         out.push((entity, term));
                     }
                     out
