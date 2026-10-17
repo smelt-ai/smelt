@@ -479,8 +479,8 @@ struct SessionUiState {
     pending_diff_file: Option<String>,
     /// 点「+」之后才展开评论。拖选期间不往 Diff 里加注释，列表高度不变。
     diff_comment_open: bool,
-    /// 「全部更改」里点开过的文件。其余文件默认收起。
-    git_expanded_diff_files: HashSet<String>,
+    /// 「全部更改」里用户收起过的文件。其余文件默认展开。
+    git_collapsed_diff_files: HashSet<String>,
     diff_split: bool,
     /// 变更栏正文。补丁原文没变时不调用 `set_files`，滚动和折叠才留得住。
     diff_view: Option<Entity<gpui_component::diff::DiffState>>,
@@ -518,7 +518,7 @@ impl Default for SessionUiState {
             diff_gen: 0,
             pending_diff_file: None,
             diff_comment_open: false,
-            git_expanded_diff_files: HashSet::new(),
+            git_collapsed_diff_files: HashSet::new(),
             diff_split: false,
             diff_view: None,
             diff_view_patch: String::new(),
@@ -639,7 +639,7 @@ impl SessionUiState {
             diff_gen: 0,
             pending_diff_file: None,
             diff_comment_open: false,
-            git_expanded_diff_files: HashSet::new(),
+            git_collapsed_diff_files: HashSet::new(),
             diff_split: archive.diff_split,
             diff_view: None,
             diff_view_patch: String::new(),
@@ -686,7 +686,7 @@ struct ProjectUiState {
     diff_gen: u64,
     pending_diff_file: Option<String>,
     diff_comment_open: bool,
-    git_expanded_diff_files: HashSet<String>,
+    git_collapsed_diff_files: HashSet<String>,
     diff_split: bool,
     diff_view: Option<Entity<gpui_component::diff::DiffState>>,
     diff_view_patch: String,
@@ -725,7 +725,7 @@ impl SessionUiState {
             diff_gen: std::mem::take(&mut self.diff_gen),
             pending_diff_file: self.pending_diff_file.take(),
             diff_comment_open: std::mem::take(&mut self.diff_comment_open),
-            git_expanded_diff_files: std::mem::take(&mut self.git_expanded_diff_files),
+            git_collapsed_diff_files: std::mem::take(&mut self.git_collapsed_diff_files),
             diff_split: std::mem::replace(&mut self.diff_split, defaults.diff_split),
             diff_view: self.diff_view.take(),
             diff_view_patch: std::mem::take(&mut self.diff_view_patch),
@@ -759,7 +759,7 @@ impl SessionUiState {
         self.diff_gen = ui.diff_gen;
         self.pending_diff_file = ui.pending_diff_file;
         self.diff_comment_open = ui.diff_comment_open;
-        self.git_expanded_diff_files = ui.git_expanded_diff_files;
+        self.git_collapsed_diff_files = ui.git_collapsed_diff_files;
         self.diff_split = ui.diff_split;
         self.diff_view = ui.diff_view;
         self.diff_view_patch = ui.diff_view_patch;

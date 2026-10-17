@@ -4,7 +4,7 @@
 // 模块会让 trait 解析图爆炸，`cargo test` 编译期能把 rustc 撑崩。只导入真正
 // 用到的名字。
 use super::RepoSet;
-use super::workspace::apply_expanded_files;
+use super::workspace::apply_collapsed_files;
 use super::{
     DiffScope, GitDiff, GitStatusData, GitStatusResponseAction, GitWrite, PendingGitIndexOp,
     aggregate_diff_ready_for_file, build_git_tree, clear_confirmed_git_index_ops,
@@ -537,7 +537,7 @@ fn a_clean_repository_still_shows_up_when_it_has_work_left() {
 }
 
 #[gpui::test]
-fn aggregate_diff_files_stay_collapsed_until_opened(cx: &mut gpui::TestAppContext) {
+fn aggregate_diff_files_stay_expanded_unless_collapsed(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
     use std::collections::HashSet;
 
@@ -545,19 +545,19 @@ fn aggregate_diff_files_stay_collapsed_until_opened(cx: &mut gpui::TestAppContex
                  diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n";
     let files = gpui_component::diff::DiffFile::parse(patch).unwrap();
     let state = cx.new(|cx| gpui_component::diff::DiffState::new(files, cx));
-    let opened = HashSet::from(["b.rs".to_string()]);
+    let collapsed = HashSet::from(["b.rs".to_string()]);
 
     state.update(cx, |state, cx| {
-        apply_expanded_files(state, true, &opened, cx)
+        apply_collapsed_files(state, true, &collapsed, cx)
     });
     state.read_with(cx, |state, _| {
-        assert!(state.is_file_collapsed("a.rs"));
-        assert!(!state.is_file_collapsed("b.rs"));
+        assert!(!state.is_file_collapsed("a.rs"));
+        assert!(state.is_file_collapsed("b.rs"));
     });
 
     // 单文件 diff 不跟这份集合走，总是展开。
     state.update(cx, |state, cx| {
-        apply_expanded_files(state, false, &HashSet::new(), cx)
+        apply_collapsed_files(state, false, &collapsed, cx)
     });
     state.read_with(cx, |state, _| {
         assert!(!state.is_file_collapsed("a.rs"));
