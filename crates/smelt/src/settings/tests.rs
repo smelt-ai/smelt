@@ -38,6 +38,44 @@ mod appearance_tests {
         );
     }
 
+    /// 升级时运行时交回的旧外观要能原样读成客户端的外观，字段名、枚举写法都对得上。
+    #[test]
+    fn appearance_handed_back_by_the_runtime_reads_as_the_client_appearance() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "smelt-appearance-migrate-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store =
+            smelt_store::Store::open_or_create(dir.join(smelt_store::DATABASE_FILE_NAME)).unwrap();
+        let mut snapshot = smelt_core::appearance_settings::default_snapshot();
+        snapshot.glass_style = "clear".into();
+        snapshot.theme_mode = "light".into();
+        snapshot.theme_name = "Ayu Light".into();
+        snapshot.ui_font_px = 18;
+        snapshot.bg_image = Some("/tmp/bg.png".into());
+        store
+            .modify_appearance_snapshot(
+                smelt_core::appearance_settings::default_snapshot,
+                |current| {
+                    *current = snapshot.clone();
+                    Ok::<(), smelt_store::StoreError>(())
+                },
+            )
+            .unwrap();
+
+        let legacy = smelt_core::client_migration::take_on(&store)
+            .appearance
+            .unwrap();
+        let appearance: Appearance = serde_json::from_value(legacy).unwrap();
+        assert_eq!(super::snapshot_from_appearance(&appearance), snapshot);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn liquid_glass_keeps_a_stable_blurred_window_backdrop() {
         assert_eq!(

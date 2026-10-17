@@ -230,39 +230,22 @@ impl Default for UpdateSettings {
 
 impl Global for UpdateSettings {}
 
+/// 更新设置归客户端（每台设备各自管自己的更新），存在客户端库。
 pub fn load_update_settings() -> UpdateSettings {
-    let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
-        return UpdateSettings::default();
-    };
-    match store.get_update_settings_snapshot() {
-        Ok(Some(snapshot)) => settings_from_snapshot(snapshot),
-        Ok(None) | Err(_) => UpdateSettings::default(),
-    }
+    let (scope, key) = smelt_client_store::keys::UPDATE_SETTINGS;
+    smelt_client_store::client_store()
+        .and_then(|store| store.get::<UpdateSettings>(scope, key))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 pub fn save_update_settings(settings: &UpdateSettings) {
-    if let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() {
-        let _ = store.put_update_settings_snapshot(&snapshot_from_settings(settings));
-    }
-}
-
-fn snapshot_from_settings(settings: &UpdateSettings) -> smelt_store::UpdateSettingsSnapshot {
-    smelt_store::UpdateSettingsSnapshot {
-        channel: match settings.channel {
-            updater::UpdateChannel::Dev => "dev".into(),
-            updater::UpdateChannel::Prod => "prod".into(),
-        },
-        auto_install: settings.auto_install,
-    }
-}
-
-fn settings_from_snapshot(snapshot: smelt_store::UpdateSettingsSnapshot) -> UpdateSettings {
-    UpdateSettings {
-        channel: match snapshot.channel.as_str() {
-            "dev" => updater::UpdateChannel::Dev,
-            _ => updater::UpdateChannel::Prod,
-        },
-        auto_install: snapshot.auto_install,
+    let (scope, key) = smelt_client_store::keys::UPDATE_SETTINGS;
+    if let Err(error) =
+        smelt_client_store::client_store().and_then(|store| store.put(scope, key, settings))
+    {
+        eprintln!("[storage] 保存更新设置失败: {error}");
     }
 }
 
@@ -280,12 +263,25 @@ pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
     cx.set_global(settings);
 }
 
-/// CLI 改过 SQLite 后，打开设置页时把外观重新套上窗口。
-pub fn reload_appearance_from_store(cx: &mut App) {
-    install_appearance(load_appearance(), cx);
+/// CLI / Control API 经运行时转来的外观改动：按可脚本目录的规则套到当前外观上，
+/// 存进客户端库并整份重新安装。规则在运行时那边已经校验过一遍，这里再走同一份
+/// 校验，是因为「主题明暗」要按本机当前的主题找同族的另一侧。
+pub fn apply_requested_appearance(
+    settings: &std::collections::BTreeMap<String, serde_json::Value>,
+    cx: &mut App,
+) {
+    let current = cx.global::<Appearance>().clone();
+    let mut snapshot = snapshot_from_appearance(&current);
+    if let Err(error) = smelt_core::appearance_settings::apply_patch(&mut snapshot, settings) {
+        crate::status_item::notify_error(format!("外观修改未生效：{error}"));
+        return;
+    }
+    let next = appearance_from_snapshot(snapshot);
+    save_appearance(&next);
+    install_appearance(next, cx);
 }
 
-/// 把一份完整外观套到所有层并重绘。外观的真源是 SQLite，内存里的全局只是它的投影。
+/// 把一份完整外观套到所有层并重绘。外观的真源是客户端库，内存里的全局只是它的投影。
 fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_px(appearance.font_px);
     terminal_view::set_font_family(&appearance.font_family);
@@ -376,13 +372,11 @@ fn current_terminal_theme() -> smelt_core::terminal_theme::TerminalThemeSnapshot
     }
 }
 
-/// 读取外观设置；缺失/损坏回退默认。
+/// 读取外观设置；缺失/损坏回退默认。外观归客户端，存在客户端库。
 pub fn load_appearance() -> Appearance {
-    let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
-        return Appearance::default();
-    };
-    match store.get_appearance_snapshot() {
-        Ok(Some(snapshot)) => appearance_from_snapshot(snapshot),
+    let (scope, key) = smelt_client_store::keys::APPEARANCE;
+    match smelt_client_store::client_store().and_then(|store| store.get::<Appearance>(scope, key)) {
+        Ok(Some(appearance)) => appearance,
         Ok(None) => Appearance::default(),
         Err(error) => {
             eprintln!("[storage] 读取外观设置失败，使用默认值: {error}");
@@ -391,21 +385,12 @@ pub fn load_appearance() -> Appearance {
     }
 }
 
-/// 提交一次界面编辑，返回库里提交后的完整外观。
-///
-/// 只落 `before → after` 改过的字段（见 `appearance_settings::commit_edit`）：设置页
-/// 打开期间 CLI / Control API 可能改过别的字段，不能用内存旧副本整份覆盖。
-/// 写库失败时记日志并沿用本地编辑结果，界面主流程继续运行。
-fn commit_appearance(before: &Appearance, after: &Appearance) -> Appearance {
-    match smelt_core::appearance_settings::commit_edit(
-        &snapshot_from_appearance(before),
-        &snapshot_from_appearance(after),
-    ) {
-        Ok(committed) => appearance_from_snapshot(committed),
-        Err(error) => {
-            eprintln!("[storage] 保存外观设置失败: {error}");
-            after.clone()
-        }
+fn save_appearance(appearance: &Appearance) {
+    let (scope, key) = smelt_client_store::keys::APPEARANCE;
+    if let Err(error) =
+        smelt_client_store::client_store().and_then(|store| store.put(scope, key, appearance))
+    {
+        eprintln!("[storage] 保存外观设置失败: {error}");
     }
 }
 
@@ -841,19 +826,12 @@ pub(crate) fn copy_with_feedback(text: String, btn_id: &'static str, cx: &mut Ap
 /// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
 /// 供只有 `&mut App`（没有 `Context<Self>`）的场景用，比如设置页 SettingField 的 get/set 闭包。
 fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
-    let before = cx.global::<Appearance>().clone();
-    let mut edited = before.clone();
+    let mut edited = cx.global::<Appearance>().clone();
     f(&mut edited);
-    let committed = commit_appearance(&before, &edited);
-    if snapshot_from_appearance(&committed) != snapshot_from_appearance(&edited) {
-        // 合并带进了别的进程刚提交的字段（主题、字体等），只套底色和字体不够，
-        // 整份重新安装，界面与库保持一致。
-        install_appearance(committed, cx);
-        return;
-    }
+    save_appearance(&edited);
     // 用户自选底色要镜像给 PTY 线程（OSC 11 应答）和移动端配色快照，三处同源。
-    apply_bg_color(&committed);
-    cx.set_global(committed);
+    apply_bg_color(&edited);
+    cx.set_global(edited);
     sync_theme_fonts(cx);
 }
 

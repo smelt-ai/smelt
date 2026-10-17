@@ -473,6 +473,35 @@ impl DaemonEventHub {
         Ok(true)
     }
 
+    /// 有没有在线的桌面端能接外观改动。
+    pub(crate) fn has_appearance_listener(&self) -> Result<bool, EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED)
+            .expect("registered core topic is valid");
+        self.hub.has_subscriber(&topic)
+    }
+
+    /// 把 CLI / Control API 发来的外观改动转给桌面端。返回 `false` 表示没有在线的
+    /// 桌面端，改动无处生效。
+    pub(crate) fn request_appearance_change(
+        &self,
+        settings: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<bool, EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(false);
+        }
+        let payload = smelt_event_protocol::AppearanceChangeRequested { settings };
+        self.publish_core(
+            smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+            serde_json::to_value(payload).map_err(|error| {
+                EventBusError::new(format!("serialize appearance change request: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(true)
+    }
+
     /// 请桌面端把一段冷恢复的对话拉起来。返回 `false` 表示此刻没有任何一方
     /// 能兑现这个请求（桌面端没开），调用方应立刻放弃而不是空等。
     pub(crate) fn request_conversation_wake(

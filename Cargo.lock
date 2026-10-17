@@ -9636,6 +9636,7 @@ dependencies = [
  "serde_json",
  "shell-words",
  "smelt-acp-view",
+ "smelt-client-store",
  "smelt-core",
  "smelt-pairing",
  "smelt-paths",
@@ -9664,6 +9665,17 @@ dependencies = [
  "smelt-ui",
  "smol",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "smelt-client-store"
+version = "0.9.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "smelt-paths",
  "uuid",
 ]
 
@@ -9813,6 +9825,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smelt-client-store",
  "smelt-core",
  "smelt-runtime-client",
  "smelt-store",

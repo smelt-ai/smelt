@@ -315,6 +315,7 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
             Capability::new(CORE_CAPABILITY_WORKSPACE_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap(),
+            Capability::new(smelt_event_protocol::CORE_CAPABILITY_APPEARANCE_CONTROL).unwrap(),
         ])
     );
 

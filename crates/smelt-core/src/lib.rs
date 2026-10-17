@@ -28,6 +28,7 @@ pub mod automation_transcript;
 pub mod background_tasks;
 pub mod block_on;
 pub mod claude_paths;
+pub mod client_migration;
 pub mod codex_app_server;
 pub mod control_api;
 pub mod conversation;

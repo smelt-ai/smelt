@@ -316,6 +316,10 @@ pub enum DaemonStateEvent {
     /// 有人要看一段 daemon 里没在跑的对话，请持有启动规格的桌面端把它拉起来。
     /// 一次性请求，不是投影：没有快照、不参与水位。
     ConversationWakeRequested { session_id: String },
+    /// CLI / Control API 要改外观，已由运行时校验过。一次性请求，不是投影。
+    AppearanceChangeRequested {
+        settings: std::collections::BTreeMap<String, serde_json::Value>,
+    },
     /// 当前这条 subscribe 连接已断开（守护 exec / 崩溃 / socket 没了）。
     /// 不是协议帧，由客户端在 `subscribe_daemon_states_blocking` 返回后注入。
     Disconnected,
@@ -452,6 +456,7 @@ struct SubscriptionShape {
     workspace_menu: bool,
     automations: bool,
     conversation_wake: bool,
+    appearance_requests: bool,
 }
 
 #[derive(Default)]
@@ -527,12 +532,15 @@ impl DaemonStateEventClient {
                 CORE_TOPIC_AUTOMATIONS_CHANGED,
                 // 冷恢复的对话启动规格只在桌面端手里，唤醒请求只能由它兑现。
                 CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+                // 外观归桌面端，CLI 发来的外观改动由它来改。
+                smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
             ],
             SubscriptionShape {
                 remote_sessions: true,
                 workspace_menu: true,
                 automations: true,
                 conversation_wake: true,
+                appearance_requests: true,
             },
         )
     }
@@ -555,6 +563,7 @@ impl DaemonStateEventClient {
                 workspace_menu: true,
                 automations: true,
                 conversation_wake: false,
+                appearance_requests: false,
             },
         )
     }
@@ -803,6 +812,15 @@ impl DaemonStateEventClient {
                 let request: ConversationWakeRequested = decode_payload(payload, topic)?;
                 Ok(Some(DaemonStateEvent::ConversationWakeRequested {
                     session_id: request.session_id,
+                }))
+            }
+            smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED
+                if self.shape.appearance_requests =>
+            {
+                let request: smelt_event_protocol::AppearanceChangeRequested =
+                    decode_payload(payload, topic)?;
+                Ok(Some(DaemonStateEvent::AppearanceChangeRequested {
+                    settings: request.settings,
                 }))
             }
             _ => Err(DaemonEventClientError::Protocol(format!(
@@ -1281,7 +1299,7 @@ mod tests {
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
-        assert_eq!(topics.len(), 6);
+        assert_eq!(topics.len(), 7);
         assert!(
             topics
                 .iter()
@@ -1292,6 +1310,12 @@ mod tests {
                 .iter()
                 .any(|topic| topic == CORE_TOPIC_CONVERSATION_WAKE_REQUESTED),
             "桌面端是冷恢复对话的唯一启动方，必须接唤醒请求"
+        );
+        assert!(
+            topics
+                .iter()
+                .any(|topic| topic == smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED),
+            "外观归桌面端，CLI 发来的外观修改只能交给它"
         );
         assert_ne!(
             first.handshake().request.subscription.id,

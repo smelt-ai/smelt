@@ -163,6 +163,30 @@ fn git_status_runs_on_the_runtime() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// 外观归桌面端。没有在线的桌面端时，外观修改无处生效，要明确拒绝，而不是回个成功。
+#[test]
+fn appearance_update_without_a_desktop_is_refused() {
+    use smelt_core::appearance_settings::SettingsPatch;
+    use smelt_core::control_api::SettingsUpdate;
+
+    let error = in_process_runtime()
+        .call::<SettingsUpdate>(
+            &SettingsPatch {
+                settings: std::collections::BTreeMap::from([(
+                    "appearance.theme_mode".to_string(),
+                    serde_json::json!("light"),
+                )]),
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap_err();
+
+    let ControlClientError::Protocol(error) = error else {
+        panic!("expected a protocol error, got {error}");
+    };
+    assert_eq!(error.code, ControlErrorCode::FailedPrecondition);
+}
+
 #[test]
 fn git_failure_reaches_the_client_as_an_operation_error() {
     use smelt_runtime_client::protocol::git::{GitBranchParams, GitCheckoutCall};

@@ -556,35 +556,21 @@ struct NotifyPrefs {
     terminal_bell: bool,
 }
 
-/// 存在客户端自己的键下。SQLite 一分为二之后随客户端库一起搬走。
-const NOTIFY_PREFS_NAMESPACE: &str = "client";
-const NOTIFY_PREFS_KEY: &str = "notify_prefs";
-
-/// 读客户端的通知偏好。第一次没有时从旧位置（运行时的智能体偏好表）取一次。
+/// 读客户端库里的通知偏好；没有时用出厂值。
 fn load_notify_prefs() -> NotifyPrefs {
-    if let Ok(Some(prefs)) = smelt_core::sqlite_state::load_sqlite_kv::<NotifyPrefs>(
-        NOTIFY_PREFS_NAMESPACE,
-        NOTIFY_PREFS_KEY,
-    ) {
-        return prefs;
-    }
-    let previous = smelt_core::sqlite_state::default_sqlite_store()
+    let (scope, key) = smelt_client_store::keys::NOTIFY_PREFS;
+    smelt_client_store::client_store()
+        .and_then(|store| store.get::<NotifyPrefs>(scope, key))
         .ok()
-        .and_then(|store| store.get_agent_ui_snapshot().ok().flatten());
-    match previous {
-        Some(snapshot) => NotifyPrefs {
-            approval: snapshot.notify_approval,
-            input: snapshot.notify_input,
-            success: snapshot.notify_success,
-            failure: snapshot.notify_failure,
-            terminal_bell: snapshot.notify_terminal_bell,
-        },
-        None => AgentHostState::default().notify_prefs(),
-    }
+        .flatten()
+        .unwrap_or_else(|| AgentHostState::default().notify_prefs())
 }
 
 fn save_notify_prefs(prefs: NotifyPrefs) -> Result<(), String> {
-    smelt_core::sqlite_state::save_sqlite_kv(NOTIFY_PREFS_NAMESPACE, NOTIFY_PREFS_KEY, &prefs)
+    let (scope, key) = smelt_client_store::keys::NOTIFY_PREFS;
+    smelt_client_store::client_store()
+        .and_then(|store| store.put(scope, key, &prefs))
+        .map_err(|error| error.to_string())
 }
 
 /// 启动时的初始状态：客户端的通知偏好立刻可用；运行时那部分还没加载，

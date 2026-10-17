@@ -124,6 +124,7 @@ define_control_methods! {
     AutomationRunDetail => (AUTOMATION_RUN_DETAIL_METHOD, "automation.run_detail"),
     AgentSpaceEnsure => (AGENT_SPACE_ENSURE_METHOD, "agent.space.ensure"),
     HistoryRememberAgent => (HISTORY_REMEMBER_AGENT_METHOD, "history.remember_agent"),
+    MigrationTakeClientState => (MIGRATION_TAKE_CLIENT_STATE_METHOD, "migration.take_client_state"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -533,7 +534,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 71);
+        assert_eq!(names.len(), 72);
     }
 
     #[test]

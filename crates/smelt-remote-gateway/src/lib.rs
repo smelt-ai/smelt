@@ -881,7 +881,9 @@ fn apply_mobile_lifecycle_event(hub: &MobileLifecycleHub, event: DaemonStateEven
             false
         }
         // 网关不订阅唤醒请求：它兑现不了，订阅了反而会让 daemon 误以为桌面端在场。
-        DaemonStateEvent::ConversationWakeRequested { .. } | DaemonStateEvent::Disconnected => {
+        DaemonStateEvent::ConversationWakeRequested { .. }
+        | DaemonStateEvent::AppearanceChangeRequested { .. }
+        | DaemonStateEvent::Disconnected => {
             false
         }
     }

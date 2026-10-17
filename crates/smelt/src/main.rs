@@ -21,6 +21,7 @@ pub(crate) use smelt_ui::ui_theme;
 pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
+mod client_state;
 mod dock;
 mod file_tree;
 mod git_log;
@@ -4366,6 +4367,8 @@ fn main() {
 
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
+        // 升级后第一次启动：客户端数据还在运行时库里，先取回来再读。
+        client_state::migrate_client_state_once();
         let appearance = load_appearance();
         let window_bg = appearance.window_bg();
         cx.set_global(appearance.clone());
@@ -4527,6 +4530,11 @@ fn main() {
                     }
                     continue;
                 }
+                if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
+                    let settings = settings.clone();
+                    cx.update(|cx| settings::apply_requested_appearance(&settings, cx));
+                    continue;
+                }
                 cx.update(|cx| {
                     match &event {
                         terminal::DaemonStateEvent::Snapshot {
@@ -4570,6 +4578,7 @@ fn main() {
                         terminal::DaemonStateEvent::Removed { .. } => {}
                         terminal::DaemonStateEvent::WorkspaceMenu(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {}
                     }
                     match event {
@@ -4620,6 +4629,7 @@ fn main() {
                         terminal::DaemonStateEvent::WorkspaceMenu(_) => {}
                         terminal::DaemonStateEvent::Automations(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
+                        terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {
                             DaemonStates::mark_subscription_disconnected(cx);
                         }

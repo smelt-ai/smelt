@@ -15,6 +15,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-store = { path = "../smelt-store" }
 smelt-pairing = { path = "../smelt-pairing" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-client-store = { path = "../smelt-client-store" }
 # 共享 GPUI UI 基建（色板/markdown+mermaid/@补全/ACP agent UI 偏好数据模型）与
 # ACP 会话消息流渲染层，均已独立成 crate（见各自 Cargo.toml 文件头注释）。
 smelt-ui = { path = "../smelt-ui" }

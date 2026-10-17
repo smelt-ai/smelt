@@ -417,8 +417,10 @@
 <ul>
   <li><b>GUI 不再打开运行时库，本机也不例外。</b>用依赖关系保证：<code>crates/smelt</code> 不再依赖 <code>smelt-store</code> 里运行时那部分表，也不再依赖 <code>smelt-git</code>。客户端库放进<b>单独的 crate</b>（例如 <code>smelt-client-store</code>）：只有拆成独立 crate，「GUI 不依赖运行时那部分表」才能由依赖关系保证，放在 <code>smelt-store</code> 里做不到。</li>
   <li><code>smelt agent</code> CLI 改为走 Control API，不再绕过 smeltd 直接写库。</li>
-  <li>迁移：GUI 自己也不能为了迁移去打开运行时库，所以由运行时来做。smeltd 升级到新 schema 时，把客户端那部分字段挪进一张暂存表；新版 GUI 第一次连上本机运行时，通过一次性的 <code>migration.take_client_state</code> 取走，写进客户端库，运行时随即删除暂存表。照「不为兼容性妥协」的原则，迁移完旧字段直接删除，不保留双写。</li>
+  <li>迁移：GUI 自己也不能为了迁移去打开运行时库，所以由运行时来做。新版 GUI 第一次启动时调一次 <code>migration.take_client_state</code>，运行时从自己库里读出外观、更新设置、通知开关、界面状态交回来；GUI 只填客户端库里还空着的条目，成功后记下 <code>meta/runtime_migrated</code>，之后的启动只读客户端库。失败就下次启动再试。运行时库里的旧行此后不再被任何人读写；下一个版本删掉这几张表和这个方法，不保留双写。</li>
+  <li><b>外观归客户端。</b><code>smelt settings set appearance.*</code> 由运行时按可脚本目录校验，再以 <code>appearance.change_requested</code> 事件转给持有 <code>appearance.control</code> 能力的桌面端（只发给桌面，网关不订阅），桌面套用后存进客户端库、立即重绘。没有在线的桌面端时整单拒绝（<code>failed_precondition</code>），不会出现「记忆配置写了、外观没生效」的半截结果。<code>settings.get</code> 只返回运行时自己存的记忆配置。</li>
 </ul>
+<div class="note"><b>进度</b>：<span class="chip chip-cl">已完成</span> <code>smelt-client-store</code> crate、外观 / 更新设置 / 通知开关 / 界面状态迁到客户端库、一次性迁移、外观修改事件。<span class="chip chip-split">未完成</span> GUI 还依赖 <code>smelt-store</code>（Provider 领域的剩余直连，见 D4 能力清单），要等这些都走运行时后才能从依赖上拿掉。</div>
 
 <!-- ───────────────────────────────────────── -->
 <h2>9. D6 RuntimeId 与多运行时</h2>

@@ -44,6 +44,6 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16 appearan
 
 记忆的向量检索（可选）：`memory.embedding_base_url`（OpenAI 兼容的 /embeddings 地址，Ollama 填 `http://localhost:11434/v1`）、`memory.embedding_model`、`memory.embedding_api_key`（本地服务可不填）。填空字符串清除。没配或服务不可用时召回退回关键词 + 模型重排。召回重排模型：`memory.rerank_model_provider` + `memory.rerank_model_id`（Pi 里已登录的模型），都空表示自动挑。
 
-允许的设置：`appearance.theme`（主题名，例如 `Default Dark`、`Ayu Light`）、`appearance.theme_mode`（dark|light，把当前主题拨到同一族的另一侧）、`appearance.ui_font_px`（14–26）、`appearance.ui_font_family`、`appearance.font_px`（9–22）、`appearance.font_family`、`appearance.opacity`（0.3–1.0）。改完后用户打开设置页会套上；正在看的窗口可能要再点一次设置。
+允许的设置：`appearance.theme`（主题名，例如 `Default Dark`、`Ayu Light`）、`appearance.theme_mode`（dark|light，把当前主题拨到同一族的另一侧）、`appearance.ui_font_px`（14–26）、`appearance.ui_font_family`、`appearance.font_px`（9–22）、`appearance.font_family`、`appearance.opacity`（0.3–1.0）。外观存在桌面客户端里：改动经 smeltd 转给打开着的桌面，立刻生效；桌面没开时 `set` 外观会报错。`settings get` 只列记忆这类存在 smeltd 里的设置。
 
 先 list 再 update。不要和 `smelt_list_agents`（跨会话发消息）搞混。

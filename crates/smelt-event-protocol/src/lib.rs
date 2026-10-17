@@ -24,6 +24,8 @@ pub const CORE_TOPIC_AGENT_MESSAGE_DELIVERED: &str = "agent.message_delivered";
 /// 有人要看一段 daemon 里还没在跑的对话（典型是 daemon 冷重启后手机点开）。
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
 pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requested";
+/// CLI / Control API 要改外观。外观归客户端，运行时只校验后转给在线的桌面端。
+pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_REMOTE_SESSIONS_READ: &str = "remote_sessions.read";
@@ -33,6 +35,8 @@ pub const CORE_CAPABILITY_AGENT_MESSAGE_READ: &str = "agent.message.read";
 /// 接收对话唤醒请求。只有持有对话启动规格的一方（桌面端）该拿这项能力：
 /// daemon 靠「有没有人订阅」判断请求能不能被兑现。
 pub const CORE_CAPABILITY_CONVERSATION_WAKE: &str = "conversation.wake";
+/// 接收外观修改请求。只有自己持有外观的桌面端该拿：运行时据此判断有没有人能接。
+pub const CORE_CAPABILITY_APPEARANCE_CONTROL: &str = "appearance.control";
 
 pub const CORE_SNAPSHOT_SESSIONS: &str = "core.sessions.v1";
 pub const CORE_SNAPSHOT_REMOTE_SESSIONS: &str = "core.remote_sessions.v1";
@@ -427,6 +431,13 @@ pub struct ConversationWakeRequested {
     pub session_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppearanceChangeRequested {
+    /// 已由运行时按可脚本目录校验过的外观键值。
+    pub settings: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMessageDelivered {
@@ -503,6 +514,13 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
             DeliveryClass::Ephemeral,
             CORE_CAPABILITY_CONVERSATION_WAKE,
+            None,
+            4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
+            DeliveryClass::Ephemeral,
+            CORE_CAPABILITY_APPEARANCE_CONTROL,
             None,
             4 * 1024,
         )?,
@@ -748,6 +766,12 @@ mod tests {
             ),
             (
                 CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+                DeliveryClass::Ephemeral,
+                None,
+                1,
+            ),
+            (
+                CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
                 DeliveryClass::Ephemeral,
                 None,
                 1,

@@ -30,7 +30,8 @@
 
 use super::super::*;
 use smelt_event_protocol::{
-    CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
+    CORE_CAPABILITY_APPEARANCE_CONTROL, CORE_CAPABILITY_AUTOMATION_READ,
+    CORE_CAPABILITY_CONVERSATION_WAKE,
     CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
     CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth, FIRST_PARTY_DESKTOP_PLUGIN_ID,
     FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind, PluginId,
@@ -843,6 +844,8 @@ pub(super) fn first_party_event_client(kind: FirstPartyClientKind) -> Authentica
                 CORE_CAPABILITY_AUTOMATION_READ,
                 // 冷恢复对话的启动规格只在桌面端，唤醒请求只投给它。
                 CORE_CAPABILITY_CONVERSATION_WAKE,
+                // 外观归桌面端，CLI 发来的外观改动只能交给它。
+                CORE_CAPABILITY_APPEARANCE_CONTROL,
             ],
         ),
         FirstPartyClientKind::RemoteGateway => (

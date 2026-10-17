@@ -217,6 +217,20 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::MigrationTakeClientState => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::client_migration::take() {
+                Ok(state) => success_value(control_version, &request_id, state),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
         ControlMethod::AgentSpaceEnsure => {
             let params: AgentDefinitionIdParams =
                 match params_or_error(control_version, &request_id, params) {
@@ -602,8 +616,34 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
+            // 外观归桌面端：没有在线的桌面端就整单拒绝，别让记忆配置写了一半。
+            let wants_appearance = params
+                .settings
+                .keys()
+                .any(|key| !smelt_core::memory_settings::is_memory_key(key));
+            if wants_appearance && !event_hub.has_appearance_listener().unwrap_or(false) {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::FailedPrecondition,
+                        "外观属于桌面客户端，现在没有打开的桌面客户端来接收这次修改",
+                    ),
+                );
+            }
             match appearance_settings::update_settings(params).map_err(control_error_for_settings) {
-                Ok(result) => success_value(control_version, &request_id, result),
+                Ok(update) => {
+                    if !update.appearance.is_empty()
+                        && let Err(error) = event_hub.request_appearance_change(update.appearance)
+                    {
+                        return error_value(
+                            control_version,
+                            request_id,
+                            ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                        );
+                    }
+                    success_value(control_version, &request_id, update.result)
+                }
                 Err(error) => error_value(control_version, request_id, error),
             }
         }

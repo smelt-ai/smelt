@@ -461,36 +461,23 @@ fn catalog_document(mut state: WsState) -> WsState {
     state
 }
 
-/// 界面状态存在客户端自己的键下。SQLite 一分为二之后随客户端库一起搬走。
-const WORKSPACE_UI_NAMESPACE: &str = "client";
-const WORKSPACE_UI_KEY: &str = "workspace_ui";
-
-/// 启动时同步读界面状态（本地，很快）。第一次没有时从旧位置（运行时库里的工作区
-/// 快照）取一次并存到新位置。
+/// 启动时同步读界面状态（客户端库，本地，很快）。没有时用默认值。
 pub(crate) fn load_workspace_ui() -> WorkspaceUiState {
-    if let Ok(Some(ui)) = smelt_core::sqlite_state::load_sqlite_kv::<WorkspaceUiState>(
-        WORKSPACE_UI_NAMESPACE,
-        WORKSPACE_UI_KEY,
-    ) {
-        return ui;
+    let (scope, key) = smelt_client_store::keys::WORKSPACE_UI;
+    match smelt_client_store::client_store().and_then(|store| store.get(scope, key)) {
+        Ok(ui) => ui.unwrap_or_default(),
+        Err(error) => {
+            eprintln!("[workspace] 读取界面状态失败，使用默认值：{error}");
+            WorkspaceUiState::default()
+        }
     }
-    let previous = smelt_core::sqlite_state::default_sqlite_store()
-        .ok()
-        .and_then(|store| store.get_workspace_snapshot().ok().flatten())
-        .and_then(|snapshot| smelt_store::Store::workspace_snapshot_to_json(&snapshot).ok())
-        .and_then(|raw| serde_json::from_slice::<WsState>(&raw).ok());
-    let ui = previous
-        .as_ref()
-        .map(WorkspaceUiState::from_state)
-        .unwrap_or_default();
-    if let Err(error) = save_workspace_ui(&ui) {
-        eprintln!("[workspace] 保存界面状态失败：{error}");
-    }
-    ui
 }
 
 fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
-    smelt_core::sqlite_state::save_sqlite_kv(WORKSPACE_UI_NAMESPACE, WORKSPACE_UI_KEY, ui)
+    let (scope, key) = smelt_client_store::keys::WORKSPACE_UI;
+    smelt_client_store::client_store()
+        .and_then(|store| store.put(scope, key, ui))
+        .map_err(|error| error.to_string())
 }
 
 /// 和运行时那份工作区目录的同步状态。保存在后台线程推进版本，所以用原子量共享。
