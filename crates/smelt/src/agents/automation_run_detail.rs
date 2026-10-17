@@ -119,13 +119,17 @@ impl Workspace {
             let (archived, transcript) = cx
                 .background_executor()
                 .spawn(async move {
-                    let archived = need_archive
-                        .then(|| smelt_core::automation_store::load_run(&run_id))
-                        .flatten();
-                    let transcript =
-                        smelt_core::automation_transcript::load_run_transcript(&run_id)
-                            .unwrap_or_default();
-                    (archived, transcript)
+                    // 运行记录在运行时库里；读不到时按「没有归档、没有对话记录」显示。
+                    let detail =
+                        crate::runtime_call::call::<smelt_core::control_api::AutomationRunDetail>(
+                            smelt_core::control_api::AutomationRunDetailParams {
+                                run_id,
+                                include_archived_run: need_archive,
+                            },
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .unwrap_or_default();
+                    (detail.archived_run, detail.transcript)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

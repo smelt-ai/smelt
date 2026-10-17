@@ -87,6 +87,82 @@ pub struct MemoryTestResult {
     pub elapsed_ms: u64,
 }
 
+/// 设置页列出某个智能体的两层记忆（`id` 是智能体定义 id）。
+pub enum AgentMemoryList {}
+
+impl ControlCall for AgentMemoryList {
+    type Params = AgentDefinitionIdParams;
+    type Result = crate::agent_memory::AgentMemories;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryList;
+}
+
+/// 设置页删除一条记忆。删了就没了，用户全局层的还会从所有智能体里消失。
+pub enum AgentMemoryDelete {}
+
+impl ControlCall for AgentMemoryDelete {
+    type Params = AgentMemoryFileParams;
+    type Result = EmptyParams;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryDelete;
+}
+
+/// 设置页采纳一条待确认的记忆。
+pub enum AgentMemoryApprove {}
+
+impl ControlCall for AgentMemoryApprove {
+    type Params = AgentMemoryFileParams;
+    type Result = EmptyParams;
+
+    const METHOD: ControlMethod = ControlMethod::AgentMemoryApprove;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMemoryFileParams {
+    pub agent_id: String,
+    pub layer: AgentMemoryLayer,
+    pub file_name: String,
+}
+
+/// 一次自动化运行的详情：归档的完整运行（实时投影里裁掉了大字段时才取）和对话记录。
+pub enum AutomationRunDetail {}
+
+impl ControlCall for AutomationRunDetail {
+    type Params = AutomationRunDetailParams;
+    type Result = AutomationRunDetailResult;
+
+    const METHOD: ControlMethod = ControlMethod::AutomationRunDetail;
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationRunDetailParams {
+    pub run_id: String,
+    /// 客户端手上的运行缺输出或指令时才要归档那份。
+    pub include_archived_run: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AutomationRunDetailResult {
+    pub archived_run: Option<crate::automation::AutomationRun>,
+    pub transcript: Vec<crate::acp_chat::AcpEntry>,
+}
+
+/// 确保智能体的工作目录存在并返回它（运行时那台机器上的路径）。产品智能体的对话
+/// 都开在这里。
+pub enum AgentSpaceEnsure {}
+
+impl ControlCall for AgentSpaceEnsure {
+    type Params = AgentDefinitionIdParams;
+    type Result = AgentSpaceResult;
+
+    const METHOD: ControlMethod = ControlMethod::AgentSpaceEnsure;
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSpaceResult {
+    pub path: String,
+}
+
 pub enum SessionList {}
 
 impl ControlCall for SessionList {

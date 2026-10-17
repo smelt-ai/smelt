@@ -118,6 +118,12 @@ define_control_methods! {
     MemoryTestEmbedding => (MEMORY_TEST_EMBEDDING_METHOD, "memory.test_embedding"),
     WorkspaceLoad => (WORKSPACE_LOAD_METHOD, "workspace.load"),
     WorkspaceSave => (WORKSPACE_SAVE_METHOD, "workspace.save"),
+    AgentMemoryList => (AGENT_MEMORY_LIST_METHOD, "agent.memory.list"),
+    AgentMemoryDelete => (AGENT_MEMORY_DELETE_METHOD, "agent.memory.delete"),
+    AgentMemoryApprove => (AGENT_MEMORY_APPROVE_METHOD, "agent.memory.approve"),
+    AutomationRunDetail => (AUTOMATION_RUN_DETAIL_METHOD, "automation.run_detail"),
+    AgentSpaceEnsure => (AGENT_SPACE_ENSURE_METHOD, "agent.space.ensure"),
+    HistoryRememberAgent => (HISTORY_REMEMBER_AGENT_METHOD, "history.remember_agent"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -527,7 +533,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 65);
+        assert_eq!(names.len(), 71);
     }
 
     #[test]

@@ -203,12 +203,10 @@ impl Workspace {
                             saved.history_session_id.as_ref(),
                             agent_definition_id.as_deref(),
                         ) {
-                            let _ = smelt_core::session_metadata::remember_agent_definition(
-                                agent.into(),
+                            crate::session_history::remember_history_agent(agent.into(),
                                 saved.profile_id.as_deref(),
                                 &resume_id.to_string(),
-                                definition_id,
-                            );
+                                definition_id, cx);
                         }
                         let automation_id = saved.automation_id.clone();
                         let session_title = saved.session_title.clone();
@@ -1206,12 +1204,19 @@ impl Workspace {
 
         // 续接必须按原来的智能体定义启动：space 目录或历史绑定都能认出主人。
         // 只认 space 的话，项目里开的智能体对话会退化成裸引擎，插件和人设全丢。
-        let definition = smelt_core::session_metadata::resume_agent_definition_id(
+        let definition = smelt_core::agent_definition_store::agent_definition_id_for_space(
             std::path::Path::new(&cwd),
-            agent.into(),
-            profile_id.as_deref(),
-            &resume_id,
         )
+        .or_else(|| {
+            // 历史列表加载时运行时一并给了「这段会话属于哪个智能体」。
+            self.history_agent_bindings
+                .get(&crate::session_history::session_list_key(
+                    agent.into(),
+                    profile_id.as_deref(),
+                    &cwd,
+                ))
+                .and_then(|bindings| bindings.get(&resume_id).cloned())
+        })
         .and_then(|id| {
             cx.global::<settings::AgentHostState>()
                 .agents
@@ -1230,18 +1235,20 @@ impl Workspace {
         };
         // 智能体名是动态身份，不是用户给某段会话的命名覆盖层。无用户标题时，
         // Session::title 会按自动标题、当前智能体名依次回退。
-        let custom_title = smelt_core::session_metadata::custom_title(
-            agent.into(),
+        let custom_title = crate::HistoryTitles::get(
+            settings::HistorySourceKind::from(agent).id(),
             profile_id.as_deref(),
             &resume_id,
+            cx,
         );
         let agent_definition_id = definition.map(|definition| definition.id);
         if let Some(id) = agent_definition_id.as_deref() {
-            let _ = smelt_core::session_metadata::remember_agent_definition(
+            crate::session_history::remember_history_agent(
                 agent.into(),
                 profile_id.as_deref(),
                 &resume_id,
                 id,
+                cx,
             );
         }
         let view_profile_id = profile_id;
@@ -2612,11 +2619,12 @@ impl Workspace {
         let Some(resume_id) = view.history_session_id_for_save() else {
             return;
         };
-        let _ = smelt_core::session_metadata::remember_agent_definition(
+        crate::session_history::remember_history_agent(
             view.agent_kind().into(),
             view.profile_id(),
             &resume_id.to_string(),
             agent_definition_id,
+            cx,
         );
     }
 

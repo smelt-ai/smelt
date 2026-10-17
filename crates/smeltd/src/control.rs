@@ -210,10 +210,93 @@ fn dispatch_control(
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
         | ControlMethod::HistoryDelete
-        | ControlMethod::HistoryTitles) => {
+        | ControlMethod::HistoryTitles
+        | ControlMethod::HistoryRememberAgent) => {
             match super::history_control::dispatch(history, params) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::AgentSpaceEnsure => {
+            let params: AgentDefinitionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::agent_definition_store::ensure_agent_space(&params.id) {
+                Some(path) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AgentSpaceResult {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                ),
+                None => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, "无法创建智能体工作区"),
+                ),
+            }
+        }
+        ControlMethod::AutomationRunDetail => {
+            let params: smelt_core::control_api::AutomationRunDetailParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::control_api::AutomationRunDetailResult {
+                    archived_run: params
+                        .include_archived_run
+                        .then(|| smelt_core::automation_store::load_run(&params.run_id))
+                        .flatten(),
+                    transcript: smelt_core::automation_transcript::load_run_transcript(
+                        &params.run_id,
+                    )
+                    .unwrap_or_default(),
+                },
+            )
+        }
+        ControlMethod::AgentMemoryList => {
+            let params: AgentDefinitionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_memory::list_for_agent(&params.id),
+            )
+        }
+        ControlMethod::AgentMemoryDelete | ControlMethod::AgentMemoryApprove => {
+            let params: smelt_core::control_api::AgentMemoryFileParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let result = if known_method == ControlMethod::AgentMemoryDelete {
+                smelt_core::agent_memory::delete_for_agent(
+                    &params.agent_id,
+                    params.layer,
+                    &params.file_name,
+                )
+            } else {
+                smelt_core::agent_memory::approve_for_agent(
+                    &params.agent_id,
+                    params.layer,
+                    &params.file_name,
+                )
+            };
+            match result {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
             }
         }
         ControlMethod::WorkspaceLoad => {

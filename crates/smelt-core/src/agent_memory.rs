@@ -25,7 +25,7 @@ pub fn is_rule_memory_kind(kind: Option<&str>) -> bool {
     kind.is_some_and(|kind| CORE_MEMORY_TYPES.contains(&kind))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MemoryEntry {
     pub file_name: String,
     pub name: String,
@@ -46,7 +46,7 @@ pub struct MemoryEntry {
     pub body: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MemoryListing {
     pub entries: Vec<MemoryEntry>,
     /// 已生效的规则正文超出常驻预算（通常是手改的），启动时只会注入一部分。
@@ -256,6 +256,64 @@ fn delete_memory_with(
 }
 
 /// 用户采纳一条待确认的记忆：之后照常注入和召回。
+/// 设置页看的两层记忆：智能体自己的，和所有智能体共享的用户全局层。
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentMemories {
+    pub agent: MemoryListing,
+    pub user: MemoryListing,
+}
+
+fn layer_scope_and_dir(
+    agent_id: &str,
+    layer: crate::control_api::AgentMemoryLayer,
+) -> Option<(MemoryScope, PathBuf)> {
+    use crate::control_api::AgentMemoryLayer;
+    match layer {
+        AgentMemoryLayer::Agent => Some((
+            MemoryScope::Agent(agent_id.to_string()),
+            crate::agent_definition_store::agent_memory_dir(agent_id)?,
+        )),
+        AgentMemoryLayer::User => Some((
+            MemoryScope::User,
+            crate::agent_definition_store::user_memory_dir()?,
+        )),
+    }
+}
+
+/// 列出某个智能体的两层记忆。目录在运行时那台机器上。
+pub fn list_for_agent(agent_id: &str) -> AgentMemories {
+    use crate::control_api::AgentMemoryLayer;
+    let list = |layer| {
+        layer_scope_and_dir(agent_id, layer)
+            .map(|(scope, dir)| list_memories(&dir, &scope))
+            .unwrap_or_default()
+    };
+    AgentMemories {
+        agent: list(AgentMemoryLayer::Agent),
+        user: list(AgentMemoryLayer::User),
+    }
+}
+
+pub fn delete_for_agent(
+    agent_id: &str,
+    layer: crate::control_api::AgentMemoryLayer,
+    file_name: &str,
+) -> std::io::Result<()> {
+    let (scope, dir) = layer_scope_and_dir(agent_id, layer)
+        .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+    delete_memory(&dir, &scope, file_name)
+}
+
+pub fn approve_for_agent(
+    agent_id: &str,
+    layer: crate::control_api::AgentMemoryLayer,
+    file_name: &str,
+) -> std::io::Result<()> {
+    let (scope, _) = layer_scope_and_dir(agent_id, layer)
+        .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+    approve_memory(&scope, file_name)
+}
+
 pub fn approve_memory(scope: &MemoryScope, file_name: &str) -> std::io::Result<()> {
     ensure_memory_file_name(file_name)?;
     store()?

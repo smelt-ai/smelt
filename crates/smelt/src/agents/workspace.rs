@@ -320,11 +320,73 @@ impl Workspace {
     }
 
     /// 重新扫描记忆目录。智能体在对话里写了新记忆后，不用重开编辑器就能看到。
+    /// 向运行时重新取当前编辑器那个智能体的记忆。回来时编辑器已换人就丢掉。
     pub(super) fn refresh_agent_memories(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.agent_surface.editor.as_mut() {
-            editor.memories = AgentMemories::scan(&editor.id);
-        }
-        cx.notify();
+        let Some(agent_id) = self.agent_surface.editor.as_ref().map(|e| e.id.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let id = agent_id.clone();
+            let listed = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<smelt_core::control_api::AgentMemoryList>(
+                        smelt_core::control_api::AgentDefinitionIdParams { id },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match listed {
+                    Ok(memories) => {
+                        if let Some(editor) = this
+                            .agent_surface
+                            .editor
+                            .as_mut()
+                            .filter(|editor| editor.id == agent_id)
+                        {
+                            editor.memories = memories;
+                        }
+                    }
+                    Err(error) => {
+                        this.agent_surface.error = Some(format!("读取记忆失败：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 删除或采纳一条记忆，完成后重取列表。
+    fn submit_memory_change<C>(
+        &mut self,
+        params: C::Params,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) where
+        C: smelt_runtime_client::protocol::control::ControlCall,
+        C::Params: Send + 'static,
+        C::Result: Send + 'static,
+    {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<C>(
+                        params,
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_surface.error = result.err().map(|error| format!("{failure}：{error}"));
+                this.refresh_agent_memories(cx);
+            });
+        })
+        .detach();
     }
 
     pub(super) fn select_agent_editor_tab(&mut self, tab: AgentEditorTab, cx: &mut Context<Self>) {
@@ -476,15 +538,15 @@ impl Workspace {
             file_name,
             ..
         } = target;
-        self.agent_surface.error = match layer.dir(&agent_id) {
-            Some(dir) => {
-                smelt_core::agent_memory::delete_memory(&dir, &layer.scope(&agent_id), &file_name)
-            }
-            .map_err(|error| format!("删除记忆失败：{error}"))
-            .err(),
-            None => Some("找不到记忆目录".to_string()),
-        };
-        self.refresh_agent_memories(cx);
+        self.submit_memory_change::<smelt_core::control_api::AgentMemoryDelete>(
+            smelt_core::control_api::AgentMemoryFileParams {
+                agent_id,
+                layer: layer.wire(),
+                file_name,
+            },
+            "删除记忆失败",
+            cx,
+        );
     }
 
     pub(super) fn approve_agent_memory(
@@ -494,11 +556,15 @@ impl Workspace {
         file_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.agent_surface.error =
-            smelt_core::agent_memory::approve_memory(&layer.scope(&agent_id), &file_name)
-                .map_err(|error| format!("采纳记忆失败：{error}"))
-                .err();
-        self.refresh_agent_memories(cx);
+        self.submit_memory_change::<smelt_core::control_api::AgentMemoryApprove>(
+            smelt_core::control_api::AgentMemoryFileParams {
+                agent_id,
+                layer: layer.wire(),
+                file_name,
+            },
+            "采纳记忆失败",
+            cx,
+        );
     }
 
     pub(super) fn finish_automation_name_edit(&mut self, cx: &mut Context<Self>) {
@@ -631,7 +697,7 @@ impl Workspace {
             }
         }));
 
-        let memories = AgentMemories::scan(&id);
+        let memories = AgentMemories::default();
         let memory_watcher = self.watch_agent_memories(&id, cx);
         self.agent_surface.editor = Some(AgentEditor {
             id,
@@ -649,6 +715,7 @@ impl Workspace {
             _memory_watcher: memory_watcher,
             _subscriptions: subscriptions,
         });
+        self.refresh_agent_memories(cx);
         window.focus(&self.focus_handle, cx);
     }
 
@@ -688,25 +755,41 @@ impl Workspace {
             return;
         }
         self.agent_surface.error = None;
-        let Some(fallback_cwd) = ensure_agent_conversation_cwd(&agent.id) else {
-            self.agent_surface.error = Some("无法创建智能体工作区".to_string());
-            cx.notify();
-            return;
-        };
-        self.add_acp_session(
-            NewAcpSessionRequest {
-                agent: kind,
-                launch_override: Some(launch),
-                profile_id: None,
-                agent_definition: Some(agent),
-                fallback_cwd: Some(fallback_cwd),
-                pending_prompt: None,
-                automation_id: None,
-                activate: true,
-            },
-            window,
-            cx,
-        );
+        // 对话开在智能体的工作目录里。目录在运行时那台机器上，由运行时建好并给出路径。
+        cx.spawn_in(window, async move |this, cx| {
+            let agent_id = agent.id.clone();
+            let space = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<smelt_core::control_api::AgentSpaceEnsure>(
+                        smelt_core::control_api::AgentDefinitionIdParams { id: agent_id },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match space {
+                Ok(space) => this.add_acp_session(
+                    NewAcpSessionRequest {
+                        agent: kind,
+                        launch_override: Some(launch),
+                        profile_id: None,
+                        agent_definition: Some(agent),
+                        fallback_cwd: Some(space.path),
+                        pending_prompt: None,
+                        automation_id: None,
+                        activate: true,
+                    },
+                    window,
+                    cx,
+                ),
+                Err(error) => {
+                    this.agent_surface.error = Some(format!("无法创建智能体工作区：{error}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 侧栏「新对话」。有默认就直接开；没有可对话智能体就去创建；有人但没默认时

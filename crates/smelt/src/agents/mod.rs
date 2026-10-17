@@ -144,27 +144,8 @@ pub(crate) struct AgentEditor {
     _subscriptions: Vec<Subscription>,
 }
 
-/// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。
-#[derive(Default)]
-pub(crate) struct AgentMemories {
-    agent: smelt_core::agent_memory::MemoryListing,
-    user: smelt_core::agent_memory::MemoryListing,
-}
-
-impl AgentMemories {
-    pub(crate) fn scan(agent_id: &str) -> Self {
-        let list = |layer: MemoryLayer| {
-            layer
-                .dir(agent_id)
-                .map(|dir| smelt_core::agent_memory::list_memories(&dir, &layer.scope(agent_id)))
-                .unwrap_or_default()
-        };
-        Self {
-            agent: list(MemoryLayer::Agent),
-            user: list(MemoryLayer::User),
-        }
-    }
-}
+/// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。由运行时列出。
+pub(crate) use smelt_core::agent_memory::AgentMemories;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryLayer {
@@ -173,13 +154,14 @@ pub(crate) enum MemoryLayer {
 }
 
 impl MemoryLayer {
-    pub(crate) fn scope(self, agent_id: &str) -> smelt_core::agent_memory::MemoryScope {
+    pub(crate) fn wire(self) -> smelt_core::control_api::AgentMemoryLayer {
         match self {
-            Self::Agent => smelt_core::agent_memory::MemoryScope::Agent(agent_id.to_string()),
-            Self::User => smelt_core::agent_memory::MemoryScope::User,
+            Self::Agent => smelt_core::control_api::AgentMemoryLayer::Agent,
+            Self::User => smelt_core::control_api::AgentMemoryLayer::User,
         }
     }
 
+    /// 本机路径，只给「在访达中打开」用；运行时不在本机时没有意义。
     pub(crate) fn dir(self, agent_id: &str) -> Option<std::path::PathBuf> {
         match self {
             Self::Agent => smelt_core::agent_definition_store::agent_memory_dir(agent_id),
@@ -473,11 +455,6 @@ fn render_identity_name(input: &Entity<InputState>) -> AnyElement {
                 .font_semibold(),
         )
         .into_any_element()
-}
-
-fn ensure_agent_conversation_cwd(agent_definition_id: &str) -> Option<String> {
-    let dir = smelt_core::agent_definition_store::ensure_agent_space(agent_definition_id)?;
-    Some(dir.to_string_lossy().into_owned())
 }
 
 /// 侧栏「新对话」的文案。有默认时带上名字，没有就只写动作。

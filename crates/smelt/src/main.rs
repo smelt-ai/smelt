@@ -3314,10 +3314,11 @@ impl Workspace {
             .strip_prefix("profile:")
             .map(String::from);
         let stored_title = record.resume_id.as_deref().and_then(|resume_id| {
-            smelt_core::session_metadata::custom_title(
-                agent.into(),
+            HistoryTitles::get(
+                settings::HistorySourceKind::from(agent).id(),
                 profile_id.as_deref(),
                 resume_id,
+                cx,
             )
         });
         // 手机上用产品智能体开的对话必须带着归属落地，否则接管后它会掉进项目

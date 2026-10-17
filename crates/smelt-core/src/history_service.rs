@@ -7,8 +7,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use smelt_runtime_client::protocol::history::{
-    HistoryDeleteParams, HistoryDetail, HistoryListParams, HistoryListResult, HistorySession,
-    HistoryTitle, HistoryTitlesResult, HistoryTurn,
+    HistoryDeleteParams, HistoryDetail, HistoryListParams, HistoryListResult,
+    HistoryRememberAgentParams, HistorySession, HistoryTitle, HistoryTitlesResult, HistoryTurn,
 };
 
 use crate::agent_kind::HistorySourceKind;
@@ -138,6 +138,17 @@ fn delete_history_path(path: &Path) -> Result<(), HistoryError> {
         LocalFs.remove_file(path)
     };
     result.map_err(|error| HistoryError::Io(format!("删除会话存档失败：{error}")))
+}
+
+pub fn remember_agent(params: &HistoryRememberAgentParams) -> Result<(), HistoryError> {
+    let kind = source(&params.agent)?;
+    crate::session_metadata::remember_agent_definition(
+        kind,
+        params.profile_id.as_deref(),
+        &params.resume_id,
+        &params.agent_definition_id,
+    )
+    .map_err(HistoryError::Io)
 }
 
 pub fn titles() -> HistoryTitlesResult {

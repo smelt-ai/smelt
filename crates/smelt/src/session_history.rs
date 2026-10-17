@@ -955,6 +955,33 @@ fn load_history_list(
     }
 }
 
+/// 记下一段历史会话属于哪个产品智能体，以后「继续」时按原来的智能体启动。交给
+/// 运行时异步写，失败只记日志：漏记的后果只是继续时退回裸引擎。
+pub(crate) fn remember_history_agent(
+    agent: HistorySourceKind,
+    profile_id: Option<&str>,
+    resume_id: &str,
+    agent_definition_id: &str,
+    cx: &App,
+) {
+    let params = smelt_runtime_client::protocol::history::HistoryRememberAgentParams {
+        agent: agent.id().to_string(),
+        profile_id: profile_id.map(str::to_string),
+        resume_id: resume_id.to_string(),
+        agent_definition_id: agent_definition_id.to_string(),
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(error) = call::<
+                smelt_runtime_client::protocol::history::HistoryRememberAgentCall,
+            >(params, RUNTIME_CALL_TIMEOUT)
+            {
+                eprintln!("[history] 记录会话归属失败：{}", error_text(error));
+            }
+        })
+        .detach();
+}
+
 /// 向运行时要一份历史会话的对话内容。存档被删、格式认不出、或运行时连不上都是 `None`。
 fn load_history_detail(agent: HistorySourceKind, path: &Path) -> Option<SessionDetail> {
     let params = HistoryDetailParams {

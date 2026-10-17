@@ -25,6 +25,10 @@ pub(crate) fn dispatch(
             history_service::delete(&p)?;
             Ok(EmptyParams::default())
         }),
+        ControlMethod::HistoryRememberAgent => call::<HistoryRememberAgentCall>(params, |p| {
+            history_service::remember_agent(&p)?;
+            Ok(EmptyParams::default())
+        }),
         ControlMethod::HistoryTitles => {
             call::<HistoryTitlesCall>(params, |_| Ok(history_service::titles()))
         }
