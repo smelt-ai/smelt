@@ -128,6 +128,8 @@ define_control_methods! {
     AgentHooksStatus => (AGENT_HOOKS_STATUS_METHOD, "agent.hooks.status"),
     AgentHooksInstall => (AGENT_HOOKS_INSTALL_METHOD, "agent.hooks.install"),
     AgentHooksUninstall => (AGENT_HOOKS_UNINSTALL_METHOD, "agent.hooks.uninstall"),
+    AgentCliInspect => (AGENT_CLI_INSPECT_METHOD, "agent.cli.inspect"),
+    AgentCliInstall => (AGENT_CLI_INSTALL_METHOD, "agent.cli.install"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -537,7 +539,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 75);
+        assert_eq!(names.len(), 77);
     }
 
     #[test]

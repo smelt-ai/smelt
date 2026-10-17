@@ -4706,7 +4706,7 @@ fn cleanup_stale_managed_adapters(status: &dyn Fn(&str)) {
 /// `path` 为 `None` 代表 Smelt 无法提供该运行时；找到但 `--version` 失败时仍
 /// 保留路径，并将原因写入 `error`，避免把损坏的 shim 误报成「未安装」。对于
 /// 首次使用才物化的内置运行时，`path` 是它将落盘的目标入口。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeExecutable {
     pub program: String,
     pub path: Option<String>,
@@ -4720,11 +4720,55 @@ impl RuntimeExecutable {
     }
 }
 
-/// Agent CLI 运行环境的只读诊断快照。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Agent CLI 运行环境的只读诊断快照。探测在运行时那台机器上做（`agent.cli.inspect`），
+/// 线上按各家的稳定 `id` 传；认不出的 id（对端版本更新）丢掉。
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(into = "AcpRuntimeDiagnosticsWire", from = "AcpRuntimeDiagnosticsWire")]
 pub struct AcpRuntimeDiagnostics {
     terminal: HashMap<TerminalAgentKind, RuntimeExecutable>,
     acp: HashMap<ConversationAgentKind, RuntimeExecutable>,
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct AcpRuntimeDiagnosticsWire {
+    #[serde(default)]
+    terminal: BTreeMap<String, RuntimeExecutable>,
+    #[serde(default)]
+    acp: BTreeMap<String, RuntimeExecutable>,
+}
+
+impl From<AcpRuntimeDiagnostics> for AcpRuntimeDiagnosticsWire {
+    fn from(diagnostics: AcpRuntimeDiagnostics) -> Self {
+        Self {
+            terminal: diagnostics
+                .terminal
+                .into_iter()
+                .map(|(kind, runtime)| (kind.id().to_string(), runtime))
+                .collect(),
+            acp: diagnostics
+                .acp
+                .into_iter()
+                .map(|(kind, runtime)| (kind.id().to_string(), runtime))
+                .collect(),
+        }
+    }
+}
+
+impl From<AcpRuntimeDiagnosticsWire> for AcpRuntimeDiagnostics {
+    fn from(wire: AcpRuntimeDiagnosticsWire) -> Self {
+        Self {
+            terminal: wire
+                .terminal
+                .into_iter()
+                .filter_map(|(id, runtime)| Some((TerminalAgentKind::from_id(&id)?, runtime)))
+                .collect(),
+            acp: wire
+                .acp
+                .into_iter()
+                .filter_map(|(id, runtime)| Some((ConversationAgentKind::from_id(&id)?, runtime)))
+                .collect(),
+        }
+    }
 }
 
 impl AcpRuntimeDiagnostics {
@@ -7350,5 +7394,35 @@ mod dsh_live_tests {
         );
 
         let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+    }
+}
+
+#[cfg(test)]
+mod runtime_diagnostics_wire_tests {
+    use super::*;
+
+    /// 诊断从运行时传到客户端后，按种类查到的还是同一份结果；对端新加的 agent
+    /// 本端认不出，丢掉而不是整份解析失败。
+    #[test]
+    fn diagnostics_survive_the_wire_and_skip_unknown_agents() {
+        let mut diagnostics = AcpRuntimeDiagnostics::default();
+        let claude = RuntimeExecutable {
+            program: "claude".into(),
+            path: Some("/usr/local/bin/claude".into()),
+            version: Some("2.0.0".into()),
+            error: None,
+        };
+        diagnostics.record_terminal(TerminalAgentKind::Claude, claude.clone());
+        diagnostics.record_agent(ConversationAgentKind::Pi, RuntimeExecutable::default());
+
+        let mut wire = serde_json::to_value(&diagnostics).unwrap();
+        wire["acp"]["future-agent"] = serde_json::json!({"program": "x"});
+        let decoded: AcpRuntimeDiagnostics = serde_json::from_value(wire).unwrap();
+
+        assert_eq!(decoded, diagnostics);
+        assert_eq!(
+            decoded.for_terminal(TerminalAgentKind::Claude),
+            Some(&claude)
+        );
     }
 }

@@ -1353,7 +1353,7 @@ impl Workspace {
         self.check_for_update(false, cx);
     }
 
-    /// 后台刷新本机 Agent CLI 的诊断快照。
+    /// 后台刷新运行时那台机器上 Agent CLI 的诊断快照。
     ///
     /// 这条路径只运行固定的 `--version`，不启动 agent 或访问网络；因此设置页可
     /// 安全地自动首查，并允许用户手动复查 PATH 变动。
@@ -1373,11 +1373,14 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let diagnostics = cx
                 .background_executor()
-                .spawn(async { smelt_core::acp_conn::inspect_acp_runtime() })
+                .spawn(async { inspect_agent_clis() })
                 .await;
             let _ = this.update(cx, |_this, cx| {
                 cx.set_global(AcpRuntimeState {
-                    diagnostics: Some(diagnostics),
+                    diagnostics: diagnostics.or_else(|| {
+                        cx.try_global::<AcpRuntimeState>()
+                            .and_then(|state| state.diagnostics.clone())
+                    }),
                     refreshing: false,
                     checked_at: Some(Instant::now()),
                     ..cx.try_global::<AcpRuntimeState>()
@@ -1411,32 +1414,41 @@ impl Workspace {
             let (result, diagnostics) = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = smelt_core::acp_conn::install_acp_cli(agent);
-                    let diagnostics = smelt_core::acp_conn::inspect_acp_runtime();
-                    (result, diagnostics)
+                    match crate::runtime_call::call::<smelt_core::control_api::AgentCliInstall>(
+                        smelt_core::control_api::AgentCliInstallParams {
+                            agent: agent.id().to_string(),
+                        },
+                        CLI_INSTALL_TIMEOUT,
+                    ) {
+                        Ok(installed) => (Ok(installed.installer), Some(installed.diagnostics)),
+                        // 装到一半失败也可能已经改了东西，重新探测一次。
+                        Err(error) => (
+                            Err(crate::runtime_call::error_text(error)),
+                            inspect_agent_clis(),
+                        ),
+                    }
                 })
                 .await;
             let _ = this.update(cx, |_this, cx| {
                 // 探测不到可执行文件的（dsh 走 npx，没有独立 CLI）不当作"没装"：
                 // 安装成功就照直说成功，别让一个探不到的事实盖掉真实结果。
                 let executable_available = diagnostics
-                    .for_agent(agent)
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.for_agent(agent))
                     .is_none_or(|executable| executable.is_available());
                 let (install_message, install_failed) = match result {
-                    Ok(report) if executable_available => (
+                    Ok(installer) if executable_available => (
                         format!(
-                            "{} 已通过 {} 安装；请在首次启动时完成登录。",
+                            "{} 已通过 {installer} 安装；请在首次启动时完成登录。",
                             agent.label(),
-                            report.installer
                         )
                         .into(),
                         false,
                     ),
-                    Ok(report) => (
+                    Ok(installer) => (
                         format!(
-                            "{} 已通过 {} 安装，但当前搜索路径未找到 CLI；重启 Smelt 或检查 PATH 后重试检测。",
+                            "{} 已通过 {installer} 安装，但当前搜索路径未找到 CLI；重启 Smelt 或检查 PATH 后重试检测。",
                             agent.label(),
-                            report.installer
                         )
                         .into(),
                         true,
@@ -1444,7 +1456,10 @@ impl Workspace {
                     Err(error) => (format!("安装失败：{error}").into(), true),
                 };
                 cx.set_global(AcpRuntimeState {
-                    diagnostics: Some(diagnostics),
+                    diagnostics: diagnostics.or_else(|| {
+                        cx.try_global::<AcpRuntimeState>()
+                            .and_then(|state| state.diagnostics.clone())
+                    }),
                     refreshing: false,
                     checked_at: Some(Instant::now()),
                     installing: None,
@@ -2558,4 +2573,17 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+/// 装 CLI 要等包管理器下载，比普通调用久得多。
+const CLI_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// 请运行时探测各家 agent CLI。连不上运行时返回 `None`，调用方保留上一次的结果。
+fn inspect_agent_clis() -> Option<smelt_core::acp_conn::AcpRuntimeDiagnostics> {
+    crate::runtime_call::call::<smelt_core::control_api::AgentCliInspect>(
+        smelt_runtime_client::protocol::control::EmptyParams::default(),
+        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+    )
+    .inspect_err(|error| eprintln!("[settings] 探测 agent CLI 失败：{error}"))
+    .ok()
 }

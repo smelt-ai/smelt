@@ -217,6 +217,50 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::AgentCliInspect => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::acp_conn::inspect_acp_runtime(),
+            )
+        }
+        ControlMethod::AgentCliInstall => {
+            let params: smelt_core::control_api::AgentCliInstallParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let Some(agent) = smelt_core::agent_kind::ConversationAgentKind::from_id(&params.agent)
+            else {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::InvalidParams,
+                        format!("未知的 agent：{}", params.agent),
+                    ),
+                );
+            };
+            match smelt_core::acp_conn::install_acp_cli(agent) {
+                Ok(report) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AgentCliInstallResult {
+                        installer: report.installer.to_string(),
+                        diagnostics: smelt_core::acp_conn::inspect_acp_runtime(),
+                    },
+                ),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
         ControlMethod::AgentHooksStatus => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

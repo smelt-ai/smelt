@@ -163,6 +163,40 @@ pub struct AgentSpaceResult {
     pub path: String,
 }
 
+/// 探测运行时那台机器上各家 agent CLI 装没装、什么版本。只跑 `--version`。
+pub enum AgentCliInspect {}
+
+impl ControlCall for AgentCliInspect {
+    type Params = EmptyParams;
+    type Result = crate::acp_conn::AcpRuntimeDiagnostics;
+
+    const METHOD: ControlMethod = ControlMethod::AgentCliInspect;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCliInstallParams {
+    /// `ConversationAgentKind::id`。
+    pub agent: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCliInstallResult {
+    /// 用的包管理器（`brew` / `npm`）。
+    pub installer: String,
+    /// 装完重新探测的结果。
+    pub diagnostics: crate::acp_conn::AcpRuntimeDiagnostics,
+}
+
+/// 用运行时那台机器上的包管理器安装某家 agent 的 CLI。装失败时返回业务错误。
+pub enum AgentCliInstall {}
+
+impl ControlCall for AgentCliInstall {
+    type Params = AgentCliInstallParams;
+    type Result = AgentCliInstallResult;
+
+    const METHOD: ControlMethod = ControlMethod::AgentCliInstall;
+}
+
 /// 各家 agent 的 hooks 接入状态。
 pub enum AgentHooksStatus {}
 
