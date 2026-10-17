@@ -1256,7 +1256,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::local(),
+                    runtime: crate::runtimes::Runtime::local(),
                     launch_prep: None,
                     agent,
                     launch: record.launch,

@@ -1,61 +1,29 @@
 //! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自客户端库里登记的
 //! 连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
-use std::sync::OnceLock;
-
 use smelt_runtime_client::RuntimeClient;
+
+pub(crate) use smelt_client::runtime::{Runtime, RuntimeKey};
 
 /// 本机运行时的客户端。连本机 socket；守护的拉起和升级另由 `terminal` 管。
 pub(crate) fn local() -> RuntimeClient {
-    static LOCAL: OnceLock<RuntimeClient> = OnceLock::new();
-    LOCAL
-        .get_or_init(smelt_runtime_client::local::local_runtime)
-        .clone()
+    Runtime::local().client().clone()
 }
 
-/// 运行时的身份。本机运行时总是 `Local`；远程运行时按它永久不变的 `runtime_id` 认。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum RuntimeKey {
-    Local,
-    Remote(String),
-}
-
-/// 一个挂着的运行时：它是谁，怎么连。
-#[derive(Clone)]
-pub(crate) struct Runtime {
-    key: RuntimeKey,
-    client: RuntimeClient,
-}
-
-impl Runtime {
-    pub(crate) fn local() -> Self {
-        Self {
-            key: RuntimeKey::Local,
-            client: local(),
-        }
-    }
-
-    pub(crate) fn client(&self) -> &RuntimeClient {
-        &self.client
-    }
-
-    /// 开一条新连接。本机守护没在跑就先拉起来，这只有本机做得到；远程运行时连不上
-    /// 就是连不上，由调用方按断线处理。
-    pub(crate) fn connect(&self) -> std::io::Result<std::os::unix::net::UnixStream> {
-        match self.key {
-            RuntimeKey::Local => crate::terminal::connect_daemon(),
-            RuntimeKey::Remote(_) => self.client.connect(),
-        }
+/// 给终端开一条连接。本机守护没在跑就先拉起来，这只有本机做得到；远程运行时连不上
+/// 就是连不上，由调用方按断线处理。
+pub(crate) fn connect_terminal(
+    runtime: &Runtime,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    if runtime.is_local() {
+        crate::terminal::connect_daemon()
+    } else {
+        runtime.client().connect()
     }
 }
 
-impl Runtime {
-    fn remote(runtime_id: &str, client: RuntimeClient) -> Self {
-        Self {
-            key: RuntimeKey::Remote(runtime_id.to_string()),
-            client,
-        }
-    }
+fn remote_runtime(runtime_id: &str, client: RuntimeClient) -> Runtime {
+    Runtime::new(RuntimeKey::Remote(runtime_id.to_string()), client)
 }
 
 /// 远程运行时现在连不连得上。
@@ -160,12 +128,12 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                         .into_iter()
                         .map(|connection| match remote_client(&connection) {
                             Ok(client) => RemoteRuntime {
-                                runtime: Runtime::remote(&connection.runtime_id, client),
+                                runtime: remote_runtime(&connection.runtime_id, client),
                                 connection,
                                 status: RuntimeStatus::Connecting,
                             },
                             Err(error) => RemoteRuntime {
-                                runtime: Runtime::remote(
+                                runtime: remote_runtime(
                                     &connection.runtime_id,
                                     RuntimeClient::new(move || {
                                         Err(std::io::Error::other("运行时配置无效"))
@@ -303,7 +271,7 @@ fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         .and_then(|store| store.put_runtime_connection(&connection))
         .map_err(|error| format!("保存运行时失败：{error}"))?;
     Ok(RemoteRuntime {
-        runtime: Runtime::remote(&connection.runtime_id, client),
+        runtime: remote_runtime(&connection.runtime_id, client),
         status: RuntimeStatus::Online {
             version: described.daemon.version,
             platform: described

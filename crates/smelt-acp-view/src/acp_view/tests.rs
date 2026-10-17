@@ -4306,6 +4306,9 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
 }
 
 /// 测试里的视图不连任何运行时：一连就失败，和运行时离线时一样。
-fn offline_runtime() -> smelt_runtime_client::RuntimeClient {
-    smelt_runtime_client::RuntimeClient::new(|| Err(std::io::Error::other("测试里不连运行时")))
+fn offline_runtime() -> smelt_client::runtime::Runtime {
+    smelt_client::runtime::Runtime::new(
+        smelt_client::runtime::RuntimeKey::Remote("test".to_string()),
+        smelt_runtime_client::RuntimeClient::new(|| Err(std::io::Error::other("测试里不连运行时"))),
+    )
 }

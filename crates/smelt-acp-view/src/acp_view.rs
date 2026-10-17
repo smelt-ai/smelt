@@ -33,6 +33,7 @@ use smelt_client::acp_client::{
     spawn_acp_client,
 };
 use smelt_client::daemon_state::DaemonPhase;
+use smelt_client::runtime::Runtime;
 use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_model::acp_session::{
     AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, BackgroundTaskStatus,
@@ -42,7 +43,6 @@ use smelt_model::acp_session::{
 };
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
-use smelt_runtime_client::RuntimeClient;
 use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
@@ -1310,7 +1310,7 @@ pub struct AcpHandoffTarget {
 #[derive(Clone)]
 pub struct AcpHandoffRequest {
     /// 新会话跑在哪个运行时上。
-    pub runtime: RuntimeClient,
+    pub runtime: Runtime,
     /// 见 [`AcpViewOrigin::launch_prep`]。
     pub launch_prep: Option<LaunchPrep>,
     /// 交接来源。`None` = 不是从另一个会话 fork 的（任务开跑等无来源场景）。
@@ -1356,7 +1356,7 @@ pub use smelt_model::agent_definition_store::LaunchPrep;
 
 pub struct AcpViewOrigin {
     /// 会话所在的运行时。连接、补齐启动规格、发输入、关闭都发给它。
-    pub runtime: RuntimeClient,
+    pub runtime: Runtime,
     pub agent: ConversationAgentKind,
     pub launch: ConversationLaunchSpec,
     /// 第一次连上运行时之前，要运行时先把启动规格补齐成什么样。已经补好的（复制自
@@ -1405,7 +1405,7 @@ enum CopySite {
 }
 
 pub struct AcpView {
-    runtime: RuntimeClient,
+    runtime: Runtime,
     sid: String,
     cwd: Option<String>,
     entries: Vec<AcpEntry>,
@@ -1725,12 +1725,17 @@ fn elicitation_input_shape(card: &PendingElicitation) -> Vec<(usize, bool)> {
 }
 
 impl AcpView {
+    /// 会话所在的运行时。
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
     /// 建视图并立即向 smeltd 发起 `acp_open`（非阻塞，握手结果以快照回来）。
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         window: &mut Window,
         cx: &mut Context<Self>,
-        runtime: RuntimeClient,
+        runtime: Runtime,
         agent: ConversationAgentKind,
         launch: ConversationLaunchSpec,
         launch_prep: Option<LaunchPrep>,
@@ -2493,7 +2498,7 @@ impl AcpView {
                     launch: self.launch.clone(),
                     cwd: self.cwd.clone(),
                 };
-                let runtime = self.runtime.clone();
+                let runtime = self.runtime.client().clone();
                 cx.spawn(async move |this, cx| {
                     let scanned = cx
                         .background_executor()
@@ -2533,7 +2538,7 @@ impl AcpView {
         cx: &mut Context<Self>,
     ) {
         let Some(prep) = self.launch_prep.take() else {
-            let handle = spawn_acp_client(self.runtime.clone(), client);
+            let handle = spawn_acp_client(self.runtime.client().clone(), client);
             self.attach_handle(handle, cx);
             return;
         };
@@ -2542,7 +2547,7 @@ impl AcpView {
             prep: prep.clone(),
             cwd: self.cwd.clone(),
         };
-        let runtime = self.runtime.clone();
+        let runtime = self.runtime.client().clone();
         cx.spawn(async move |this, cx| {
             let prepared = cx
                 .background_executor()
@@ -2563,7 +2568,7 @@ impl AcpView {
                             skills: prepared.skills,
                         });
                         client.launch = prepared.launch;
-                        let handle = spawn_acp_client(this.runtime.clone(), client);
+                        let handle = spawn_acp_client(this.runtime.client().clone(), client);
                         this.attach_handle(handle, cx);
                     }
                     Err(error) => {
@@ -2673,7 +2678,7 @@ impl AcpView {
         self.history_loading = true;
         let sid = self.sid.clone();
         let before = self.loaded_entries_offset;
-        let runtime = self.runtime.clone();
+        let runtime = self.runtime.client().clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -2939,7 +2944,7 @@ impl AcpView {
         self.restart_error = None;
         cx.notify();
         let sid = self.sid.clone();
-        let runtime = self.runtime.clone();
+        let runtime = self.runtime.client().clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -3015,7 +3020,7 @@ impl AcpView {
         // 几百 ms），完成后重算当前补全；期间 At 补全先给空，等任务回来自动弹出。
         // 取不到（运行时没起、版本旧）就当没有候选，不打断输入。
         self.file_list_loading = true;
-        let runtime = self.runtime.clone();
+        let runtime = self.runtime.client().clone();
         cx.spawn(async move |this, cx| {
             let list = cx
                 .background_executor()
@@ -3188,7 +3193,7 @@ impl AcpView {
 
         let sid = self.sid.clone();
         let config_values = self.pending_config_values.clone();
-        let runtime = self.runtime.clone();
+        let runtime = self.runtime.client().clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -3630,7 +3635,10 @@ impl AcpView {
         // provider 会耗满 5s 控制超时；该等待绝不能发生在 GPUI 主线程。
         self.handle = None;
         if let Some(sid) = kill_sid {
-            smelt_client::acp_client::kill_acp_session_in_background(self.runtime.clone(), sid);
+            smelt_client::acp_client::kill_acp_session_in_background(
+                self.runtime.client().clone(),
+                sid,
+            );
         }
     }
 

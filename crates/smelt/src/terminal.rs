@@ -2341,7 +2341,7 @@ impl Terminal {
                 // 阻塞（重试 × 每次再拉一遍守护），启动恢复 8 个会话就是 3 分钟
                 // beachball。重试只留给握手层：连上了但读到 EOF/坏行，那才是
                 // upgrade 交接的百毫秒抖动，重连一次就好。
-                let writer = runtime.connect()?;
+                let writer = crate::runtimes::connect_terminal(runtime)?;
                 match Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing) {
                     Ok(x) => {
                         result = Some(x);

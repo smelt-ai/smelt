@@ -1354,7 +1354,7 @@ fn build_history_handoff_request(
     let prompt = build_handoff_prompt(&context);
 
     acp_view::AcpHandoffRequest {
-        runtime: crate::runtimes::local(),
+        runtime: crate::runtimes::Runtime::local(),
         launch_prep: None,
         source: Some(acp_view::AcpForkOrigin {
             session_id: source.resume_id.clone(),

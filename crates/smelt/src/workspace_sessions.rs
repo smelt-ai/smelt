@@ -210,7 +210,7 @@ impl Workspace {
                             acp_view::AcpView::placeholder(
                                 cx,
                                 acp_view::AcpViewOrigin {
-                                    runtime: crate::runtimes::local(),
+                                    runtime: crate::runtimes::Runtime::local(),
                                     launch_prep: Some(launch_prep),
                                     agent,
                                     launch: saved.launch,
@@ -1105,7 +1105,7 @@ impl Workspace {
             acp_view::AcpView::start(
                 window,
                 cx,
-                crate::runtimes::local(),
+                crate::runtimes::Runtime::local(),
                 agent,
                 launch,
                 Some(launch_prep),
@@ -1243,7 +1243,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
-                    runtime: crate::runtimes::local(),
+                    runtime: crate::runtimes::Runtime::local(),
                     launch_prep: Some(acp_view::LaunchPrep {
                         agent_definition_id: agent_definition_id.clone(),
                         restore: false,
