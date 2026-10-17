@@ -411,4 +411,90 @@ mod tests {
         eprintln!("已添加 {}（{}）", stored[0].name, stored[0].runtime_id);
         let _ = std::fs::remove_dir_all(home);
     }
+
+    /// 对着一台真实运行时走一遍桌面要用的远程链路：配对、读工作区目录、在那台机器上开
+    /// 终端、订阅里收到这个终端的状态，最后杀掉终端、撤销这台设备。默认不跑：
+    /// `SMELT_TEST_PAIRING_URI='smelt+iroh://…' cargo test -p smelt runtimes -- --ignored`
+    #[test]
+    #[ignore = "需要一台真实运行时和一次性配对串"]
+    fn drives_a_real_remote_runtime() {
+        use smelt_runtime_client::protocol::control::EmptyParams;
+        use smelt_runtime_client::protocol::workspace::WorkspaceLoadCall;
+
+        let uri = std::env::var("SMELT_TEST_PAIRING_URI").expect("设置 SMELT_TEST_PAIRING_URI");
+        let home = std::env::temp_dir().join(format!(
+            "smelt-remote-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        // SAFETY: nextest 每个测试一个进程，这里没有别的线程在读环境变量。
+        unsafe { std::env::set_var("SMELT_HOME", &home) };
+
+        let remote = pair_with(&uri).unwrap();
+        let runtime = remote.runtime.clone();
+        runtime
+            .client()
+            .call::<WorkspaceLoadCall>(&EmptyParams::default(), std::time::Duration::from_secs(30))
+            .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let subscriber = runtime.client().clone();
+        std::thread::spawn(move || {
+            crate::terminal::subscribe_daemon_states_blocking(&subscriber, |event| {
+                tx.send(event).is_ok()
+            });
+        });
+
+        let sid = format!("remote-test-{}", uuid::Uuid::new_v4().simple());
+        let terminal = crate::terminal::Terminal::spawn(
+            &runtime,
+            24,
+            80,
+            None,
+            &sid,
+            Some("echo smelt-remote-ok; sleep 60"),
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut seen = false;
+        while !seen && std::time::Instant::now() < deadline {
+            let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(1)) else {
+                continue;
+            };
+            seen = match event {
+                crate::terminal::DaemonStateEvent::Snapshot { sessions, .. } => {
+                    sessions.iter().any(|state| state.id == sid)
+                }
+                crate::terminal::DaemonStateEvent::Update(state) => state.id == sid,
+                _ => false,
+            };
+        }
+        assert!(seen, "订阅里没看到远程终端 {sid}");
+
+        drop(terminal);
+        crate::terminal::kill_remote(&runtime, &sid);
+        // 撤销自己时运行时会先断掉这台设备的连接，回执不一定发得出来；看之后还能不能调。
+        let me = iroh_client().unwrap().id().to_string();
+        let _ = runtime
+            .client()
+            .call::<smelt_model::control_api::DeviceRevoke>(
+                &smelt_model::remote_config::DeviceIdParams { endpoint_id: me },
+                smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+            );
+        assert!(
+            runtime
+                .client()
+                .call::<WorkspaceLoadCall>(
+                    &EmptyParams::default(),
+                    std::time::Duration::from_secs(30)
+                )
+                .is_err(),
+            "撤销之后不该还能调"
+        );
+        eprintln!(
+            "远程链路走通：{}（{}）",
+            remote.connection.name, remote.connection.runtime_id
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
 }
