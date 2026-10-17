@@ -804,6 +804,17 @@ pi_calls! {
     /// 查一轮额度（全部或一家）并更新缓存。每家一次网络往返。
     QuotaRefresh => QuotaRefresh(crate::quota_service::QuotaRefreshParams)
         -> crate::quota_service::QuotaRefreshResult;
+    /// 远程访问的开关、relay、写权限。存在运行时库，守护按它自愈。
+    RemoteConfigGet => RemoteConfigGet(EmptyParams) -> crate::remote_config::RemoteConfig;
+    RemoteConfigSet => RemoteConfigSet(crate::remote_config::RemoteConfig) -> EmptyParams;
+    /// 新建菜单里用户标为「常用」的动作。桌面和手机共用这一份。
+    NewSessionPinsGet => NewSessionPinsGet(EmptyParams) -> crate::new_session::NewSessionPreferences;
+    NewSessionPinsToggle => NewSessionPinsToggle(crate::new_session::PinParams)
+        -> crate::new_session::NewSessionPreferences;
+    /// 桌面当前生效的终端配色，运行时转给移动端：手机渲染同一份 PTY 字节流，TUI 用
+    /// OSC 11 查到的底色得和桌面实际底色一致。
+    TerminalThemePublish => TerminalThemePublish(crate::terminal_theme::TerminalThemeSnapshot)
+        -> EmptyParams;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

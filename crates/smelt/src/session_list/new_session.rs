@@ -26,8 +26,8 @@ use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{Workspace, ui_theme};
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind};
 use smelt_core::new_session::{
-    NewSessionAction, NewSessionPreferences, NewSessionTarget, SECTION_LABELS, build_sections,
-    load_preferences, save_preferences,
+    NewSessionAction, NewSessionPreferences, NewSessionTarget, PinParams, SECTION_LABELS,
+    build_sections,
 };
 use smelt_core::session_control::AcpAgentOption;
 
@@ -42,28 +42,74 @@ const PICKER_EMPTY_HEIGHT: f32 = 56.;
 const PICKER_FOOTER_HEIGHT: f32 = 24.;
 const PICKER_MAX_VISIBLE_ROWS: usize = 7;
 
-/// Pin 偏好在进程内的缓存。偏好本体是 `smelt-core` 的类型，这里只是给它套一层
-/// 本地 newtype 才能当 gpui 全局用。
+/// Pin 偏好的客户端缓存。偏好存在运行时（桌面和手机共用），第一次用到时异步取回；
+/// 取回之前按没有 Pin 显示。
 #[derive(Clone, Debug, Default)]
-struct NewSessionPins(NewSessionPreferences);
+struct NewSessionPins {
+    preferences: NewSessionPreferences,
+    requested: bool,
+}
 
 impl gpui::Global for NewSessionPins {}
 
-/// 只在第一次打开选择器时读库。这样启动首帧不会因为偏好读取而阻塞。
 fn current_new_session_preferences(cx: &mut App) -> NewSessionPreferences {
-    if let Some(pins) = cx.try_global::<NewSessionPins>() {
-        return pins.0.clone();
+    let pins = cx.default_global::<NewSessionPins>();
+    if !pins.requested {
+        pins.requested = true;
+        cx.spawn(async move |cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async {
+                    crate::runtime_call::call::<smelt_core::control_api::NewSessionPinsGet>(
+                        smelt_runtime_client::protocol::control::EmptyParams::default(),
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                })
+                .await;
+            cx.update(|cx| match fetched {
+                Ok(preferences) => {
+                    cx.default_global::<NewSessionPins>().preferences = preferences;
+                    cx.refresh_windows();
+                }
+                // 下次打开再试。
+                Err(_) => cx.default_global::<NewSessionPins>().requested = false,
+            });
+        })
+        .detach();
     }
-    let preferences = load_preferences();
-    cx.set_global(NewSessionPins(preferences.clone()));
-    preferences
+    cx.global::<NewSessionPins>().preferences.clone()
 }
 
+/// 先在本地切换让菜单立刻有反应，再交给运行时；运行时回来的是切换后的权威值。
 fn toggle_new_session_pin(key: &str, cx: &mut App) {
-    let mut preferences = current_new_session_preferences(cx);
-    preferences.toggle(key);
-    save_preferences(&preferences);
-    cx.set_global(NewSessionPins(preferences));
+    cx.default_global::<NewSessionPins>()
+        .preferences
+        .toggle(key);
+    let params = PinParams {
+        key: key.to_string(),
+    };
+    cx.spawn(async move |cx| {
+        let toggled = cx
+            .background_executor()
+            .spawn(async move {
+                crate::runtime_call::call::<smelt_core::control_api::NewSessionPinsToggle>(
+                    params,
+                    crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                )
+            })
+            .await;
+        cx.update(|cx| match toggled {
+            Ok(preferences) => {
+                cx.default_global::<NewSessionPins>().preferences = preferences;
+                cx.refresh_windows();
+            }
+            Err(error) => crate::status_item::notify_error(format!(
+                "保存常用项失败：{}",
+                crate::runtime_call::error_text(error)
+            )),
+        });
+    })
+    .detach();
 }
 
 fn picker_item_icon(target: &NewSessionTarget) -> Icon {

@@ -204,7 +204,21 @@ pub fn load_preferences() -> NewSessionPreferences {
     }
 }
 
-pub fn save_preferences(preferences: &NewSessionPreferences) {
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PinParams {
+    pub key: String,
+}
+
+/// 切换一个动作的「常用」标记，返回切换后的偏好。偏好存在运行时：桌面和手机的新建
+/// 菜单读的是同一份。
+pub fn toggle_pin(params: PinParams) -> NewSessionPreferences {
+    let mut preferences = load_preferences();
+    preferences.toggle(&params.key);
+    save_preferences(&preferences);
+    preferences
+}
+
+fn save_preferences(preferences: &NewSessionPreferences) {
     if let Err(error) = crate::sqlite_state::save_sqlite_kv(
         NEW_SESSION_SQLITE_NAMESPACE,
         NEW_SESSION_SQLITE_KEY,

@@ -38,13 +38,104 @@ impl std::ops::DerefMut for RemoteConfig {
 
 impl Global for RemoteConfig {}
 
-/// 读取远程网关开关；缺失/损坏回退默认（关闭）。
-pub fn load_remote_config() -> RemoteConfig {
-    RemoteConfig(smelt_core::remote_config::load())
+/// 用户最新想要的远程配置。后台的远程操作拿到控制门闩后用它复查自己是否已经过时
+/// （见 [`persisted_remote_config_matches`]）。UI 线程改配置时同步更新，所以不用等
+/// 运行时那边落盘就能拦住迟到的旧操作。
+struct DesiredRemoteConfig {
+    config: RemoteConfig,
+    /// 运行时里的配置还没取回来之前，用户已经改过。取回来的旧值不能盖掉这次修改。
+    edited: bool,
 }
 
-fn save_remote_config(c: &RemoteConfig) {
-    smelt_core::remote_config::save(&c.0)
+fn desired() -> &'static std::sync::Mutex<DesiredRemoteConfig> {
+    static DESIRED: OnceLock<std::sync::Mutex<DesiredRemoteConfig>> = OnceLock::new();
+    DESIRED.get_or_init(|| {
+        std::sync::Mutex::new(DesiredRemoteConfig {
+            config: RemoteConfig::default(),
+            edited: false,
+        })
+    })
+}
+
+fn load_remote_config() -> RemoteConfig {
+    desired()
+        .lock()
+        .map(|desired| desired.config.clone())
+        .unwrap_or_default()
+}
+
+/// 记下用户的新配置，并按顺序交给运行时落盘（守护按落盘的配置自愈）。
+fn save_remote_config(config: &RemoteConfig) {
+    if let Ok(mut desired) = desired().lock() {
+        desired.config = config.clone();
+        desired.edited = true;
+    }
+    remote_config_writer()
+        .try_send(config.clone())
+        .expect("remote config writer lives for the process");
+}
+
+/// 落盘按提交顺序一个个发，后一次总是覆盖前一次。
+fn remote_config_writer() -> &'static smol::channel::Sender<RemoteConfig> {
+    static WRITER: OnceLock<smol::channel::Sender<RemoteConfig>> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        let (tx, rx) = smol::channel::unbounded::<RemoteConfig>();
+        std::thread::spawn(move || {
+            while let Ok(config) = rx.recv_blocking() {
+                if let Err(error) = crate::runtime_call::call::<
+                    smelt_core::control_api::RemoteConfigSet,
+                >(
+                    config.0, crate::runtime_call::RUNTIME_CALL_TIMEOUT
+                ) {
+                    eprintln!(
+                        "[remote] 保存远程配置失败：{}",
+                        crate::runtime_call::error_text(error)
+                    );
+                }
+            }
+        });
+        tx
+    })
+}
+
+/// 启动时从运行时取回远程配置，再按它把远程访问拉起来。运行时可能还在起来，按
+/// 断线重连的节奏等它。
+pub fn start_remote_config_load(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut attempt = 0u32;
+        let loaded = loop {
+            let fetched = cx
+                .background_executor()
+                .spawn(async {
+                    crate::runtime_call::call::<smelt_core::control_api::RemoteConfigGet>(
+                        smelt_runtime_client::protocol::control::EmptyParams::default(),
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                })
+                .await;
+            if let Ok(config) = fetched {
+                break RemoteConfig(config);
+            }
+            cx.background_executor()
+                .timer(smelt_core::daemon_state::daemon_reconnect_backoff(attempt))
+                .await;
+            attempt = attempt.saturating_add(1);
+        };
+        cx.update(|cx| {
+            let adopted = desired().lock().is_ok_and(|mut desired| {
+                if desired.edited {
+                    return false;
+                }
+                desired.config = loaded.clone();
+                true
+            });
+            if adopted {
+                cx.set_global(loaded);
+                spawn_remote_bootstrap(cx);
+            }
+        });
+    })
+    .detach();
 }
 
 /// 内嵌远程网关的运行时状态（不落盘，纯展示用）。网关只作为 iroh 的本机落点，

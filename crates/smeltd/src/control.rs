@@ -253,6 +253,58 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
+        ControlMethod::TerminalThemePublish => {
+            let theme: smelt_core::terminal_theme::TerminalThemeSnapshot =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            smelt_core::terminal_theme::publish(&theme);
+            success_value(control_version, &request_id, EmptyParams::default())
+        }
+        ControlMethod::NewSessionPinsGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::new_session::load_preferences(),
+            )
+        }
+        ControlMethod::NewSessionPinsToggle => {
+            let params: smelt_core::new_session::PinParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::new_session::toggle_pin(params),
+            )
+        }
+        ControlMethod::RemoteConfigGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::remote_config::load(),
+            )
+        }
+        ControlMethod::RemoteConfigSet => {
+            let config: smelt_core::remote_config::RemoteConfig =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            smelt_core::remote_config::save(&config);
+            success_value(control_version, &request_id, EmptyParams::default())
+        }
         ControlMethod::QuotaGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

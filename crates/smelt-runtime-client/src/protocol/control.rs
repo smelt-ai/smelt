@@ -162,6 +162,11 @@ define_control_methods! {
     DshPluginsRun => (DSH_PLUGINS_RUN_METHOD, "dsh.plugins.run"),
     QuotaGet => (QUOTA_GET_METHOD, "quota.get"),
     QuotaRefresh => (QUOTA_REFRESH_METHOD, "quota.refresh"),
+    RemoteConfigGet => (REMOTE_CONFIG_GET_METHOD, "remote.config.get"),
+    RemoteConfigSet => (REMOTE_CONFIG_SET_METHOD, "remote.config.set"),
+    NewSessionPinsGet => (NEW_SESSION_PINS_GET_METHOD, "new_session.pins.get"),
+    NewSessionPinsToggle => (NEW_SESSION_PINS_TOGGLE_METHOD, "new_session.pins.toggle"),
+    TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -571,7 +576,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 109);
+        assert_eq!(names.len(), 114);
     }
 
     #[test]

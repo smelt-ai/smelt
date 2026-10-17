@@ -350,8 +350,35 @@ fn sync_theme_fonts(cx: &mut App) {
 /// 而且一部手机可以连多台设备，配色必须**按设备**下发而不是客户端内置。
 ///
 /// 主题、用户自选底色变化时都要调（见 `apply_named_theme` / `apply_appearance`）。
+///
+/// 交给运行时落盘，在后台按顺序发：主题切换时会连着调好几次，只有最后一份要紧。
 pub fn publish_terminal_theme() {
-    smelt_core::terminal_theme::publish(&current_terminal_theme());
+    static PUBLISHER: std::sync::OnceLock<
+        smol::channel::Sender<smelt_core::terminal_theme::TerminalThemeSnapshot>,
+    > = std::sync::OnceLock::new();
+    let publisher = PUBLISHER.get_or_init(|| {
+        let (tx, rx) =
+            smol::channel::unbounded::<smelt_core::terminal_theme::TerminalThemeSnapshot>();
+        std::thread::spawn(move || {
+            while let Ok(mut theme) = rx.recv_blocking() {
+                // 积压的旧配色直接跳过。
+                while let Ok(newer) = rx.try_recv() {
+                    theme = newer;
+                }
+                if let Err(error) = crate::runtime_call::call::<
+                    smelt_core::control_api::TerminalThemePublish,
+                >(theme, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
+                {
+                    eprintln!(
+                        "[theme] 发布终端配色失败：{}",
+                        crate::runtime_call::error_text(error)
+                    );
+                }
+            }
+        });
+        tx
+    });
+    let _ = publisher.try_send(current_terminal_theme());
 }
 
 /// 按当前主题 + 外观设置组装配色快照。
