@@ -11,8 +11,11 @@ use smelt_runtime_client::protocol::workspace::{
     WorkspaceLoadCall, WorkspaceLoadResult, WorkspaceSaveCall, WorkspaceSaveParams,
 };
 
+use smelt_client_store::ProjectKey;
+
+use crate::runtimes::Runtime;
 use crate::{
-    AcpSaved, LegacyAgentRunState, MIN_TOOL_PANEL_WIDTH, Pane, PaneState, SessionKind,
+    AcpSaved, LegacyAgentRunState, MIN_TOOL_PANEL_WIDTH, Pane, PaneState, RuntimeKey, SessionKind,
     SessionRouteArchive, SessionState, SidebarGrouping, Workspace, WorkspaceRoute, tool_panel,
     unix_now_secs,
 };
@@ -380,14 +383,35 @@ pub(crate) struct WorkspaceUiState {
     pub(crate) selected_agent_id: Option<String>,
     pub(crate) sidebar_w: Option<f32>,
     pub(crate) sidebar_open: Option<bool>,
-    pub(crate) collapsed_projects: Vec<String>,
+    /// 各运行时上折叠、置顶的项目。
+    pub(crate) collapsed_projects: Vec<ProjectKey>,
     pub(crate) collapsed_agents: Vec<String>,
     pub(crate) sidebar_grouping: SidebarGrouping,
-    pub(crate) pinned_projects: Vec<String>,
+    pub(crate) pinned_projects: Vec<ProjectKey>,
     pub(crate) sidebar_hide_empty_projects: bool,
 }
 
+/// 项目在客户端库里的身份。
+pub(crate) fn project_key(runtime: &RuntimeKey, root: &str) -> ProjectKey {
+    ProjectKey {
+        runtime_id: match runtime {
+            RuntimeKey::Local => None,
+            RuntimeKey::Remote(id) => Some(id.clone()),
+        },
+        root: root.to_string(),
+    }
+}
+
+/// 某个运行时上的那些项目根。
+pub(crate) fn project_roots_of(keys: &[ProjectKey], runtime: &RuntimeKey) -> Vec<String> {
+    keys.iter()
+        .filter(|key| project_key(runtime, &key.root) == **key)
+        .map(|key| key.root.clone())
+        .collect()
+}
+
 impl WorkspaceUiState {
+    /// 折叠、置顶的项目按运行时分，不在 `WsState` 里，由调用方填。
     fn from_state(state: &WsState) -> Self {
         Self {
             active_session: state.active_session,
@@ -396,10 +420,10 @@ impl WorkspaceUiState {
             selected_agent_id: state.selected_agent_id.clone(),
             sidebar_w: state.sidebar_w,
             sidebar_open: state.sidebar_open,
-            collapsed_projects: state.collapsed_projects.clone(),
+            collapsed_projects: Vec::new(),
             collapsed_agents: state.collapsed_agents.clone(),
             sidebar_grouping: state.sidebar_grouping,
-            pinned_projects: state.pinned_projects.clone(),
+            pinned_projects: Vec::new(),
             sidebar_hide_empty_projects: state.sidebar_hide_empty_projects,
         }
     }
@@ -414,10 +438,8 @@ impl WorkspaceUiState {
             selected_agent_id: self.selected_agent_id,
             sidebar_w: self.sidebar_w,
             sidebar_open: self.sidebar_open,
-            collapsed_projects: self.collapsed_projects,
             collapsed_agents: self.collapsed_agents,
             sidebar_grouping: self.sidebar_grouping,
-            pinned_projects: self.pinned_projects,
             sidebar_hide_empty_projects: self.sidebar_hide_empty_projects,
             ..Default::default()
         }
@@ -497,9 +519,11 @@ pub(crate) struct WorkspaceCatalogSync {
     pub(crate) blocked: Arc<AtomicBool>,
 }
 
-/// 一次 workspace 状态提交的快照。主线程构建（纯内存），后台线程提交。
+/// 一个运行时那份目录的一次提交。主线程构建（纯内存），后台线程提交。
 struct SnapshotJob {
-    ui: WorkspaceUiState,
+    runtime: Runtime,
+    /// 客户端界面状态只有一份，跟本机那份目录一起写。
+    ui: Option<WorkspaceUiState>,
     document: serde_json::Value,
     catalog: WorkspaceCatalogSync,
     /// 同步发给 smeltd 的侧栏菜单。网关只消费 daemon 订阅，不读工作区快照。
@@ -554,7 +578,9 @@ impl WorkspaceSnapshotWriteQueue {
 ///
 /// 返回 `Some(提示)` 表示目录被别的客户端改过、这边以后不再提交。
 fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
-    if let Err(error) = save_workspace_ui(&job.ui) {
+    if let Some(ui) = &job.ui
+        && let Err(error) = save_workspace_ui(ui)
+    {
         eprintln!("[workspace] 保存界面状态失败：{error}");
     }
     let mut notice = None;
@@ -563,10 +589,11 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
             base_revision: job.catalog.revision.load(Ordering::Acquire),
             document: job.document.clone(),
         };
-        match crate::runtime_call::call::<WorkspaceSaveCall>(
-            params,
-            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-        ) {
+        match job
+            .runtime
+            .client()
+            .call::<WorkspaceSaveCall>(&params, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
+        {
             Ok(saved) => job
                 .catalog
                 .revision
@@ -587,7 +614,7 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
         }
     }
     if let Err(e) =
-        smelt_client::session_ops::publish_workspace_menu(&crate::runtimes::local(), &job.menu)
+        smelt_client::session_ops::publish_workspace_menu(job.runtime.client(), &job.menu)
     {
         eprintln!("[workspace] 发布侧栏菜单失败: {e}");
     }
@@ -630,9 +657,14 @@ impl Workspace {
         if self.ws_snapshot_finalizing {
             return;
         }
-        let Some(job) = self.build_ws_snapshot(cx) else {
+        let jobs = self
+            .space_keys()
+            .into_iter()
+            .filter_map(|key| Some((key.clone(), self.build_ws_snapshot(&key, cx)?)))
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
             return;
-        };
+        }
         let epoch = self.ws_snapshot_epoch;
         // render 期间不能再次 update 当前 Workspace 实体。启动首帧会触发一次
         // save_state，直接 spawn 可能在布局仍借用实体时回到 update_entity，最终
@@ -643,13 +675,15 @@ impl Workspace {
                 return;
             };
             workspace.update(cx, |this, cx| {
-                this.enqueue_ws_snapshot(job, epoch, cx);
+                for (key, job) in jobs {
+                    this.enqueue_ws_snapshot(&key, job, epoch, cx);
+                }
             });
         });
     }
 
-    /// 窗口起来后向运行时读工作区目录。先把本机守护拉起并对齐版本（可能交接），
-    /// 再读；运行时还没就绪就按退避重试。
+    /// 窗口起来后向本机运行时读工作区目录。先把本机守护拉起并对齐版本（可能交接），
+    /// 再读。
     pub(crate) fn start_workspace_catalog_load(
         &mut self,
         window: &mut Window,
@@ -662,34 +696,57 @@ impl Workspace {
                     crate::terminal::ensure_daemon_running();
                 })
                 .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.start_space_catalog_load(crate::runtimes::Runtime::local(), window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// 向一个运行时读它那份工作区目录，读到为止：运行时还没就绪、远程运行时离线都按
+    /// 退避重试。运行时被移除了就停。
+    pub(crate) fn start_space_catalog_load(
+        &mut self,
+        runtime: Runtime,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let key = runtime.key().clone();
             let mut attempt = 0u32;
             loop {
+                let client = runtime.client().clone();
                 let loaded = cx
                     .background_executor()
-                    .spawn(async {
-                        crate::runtime_call::call::<WorkspaceLoadCall>(
-                            EmptyParams::default(),
+                    .spawn(async move {
+                        client.call::<WorkspaceLoadCall>(
+                            &EmptyParams::default(),
                             crate::runtime_call::RUNTIME_CALL_TIMEOUT,
                         )
                     })
                     .await;
+                let still_there = this
+                    .update(cx, |this, _| this.space(&key).is_some())
+                    .unwrap_or(false);
+                if !still_there {
+                    return;
+                }
                 match loaded {
                     Ok(result) => {
                         let _ = this.update_in(cx, |this, window, cx| {
-                            this.apply_workspace_catalog(result, window, cx)
+                            this.apply_workspace_catalog(&key, result, window, cx)
                         });
                         return;
                     }
-                    Err(error) => {
-                        if attempt == 4 {
-                            let message = format!(
-                                "正在等待运行时的工作区：{}",
-                                crate::runtime_call::error_text(error)
-                            );
-                            let _ =
-                                this.update(cx, |this, _| this.report_background_error(message));
-                        }
+                    // 远程运行时离线是常态，侧栏那一段会标出来，不再弹提示。
+                    Err(error) if attempt == 4 && key == RuntimeKey::Local => {
+                        let message = format!(
+                            "正在等待运行时的工作区：{}",
+                            crate::runtime_call::error_text(error)
+                        );
+                        let _ = this.update(cx, |this, _| this.report_background_error(message));
                     }
+                    Err(_) => {}
                 }
                 cx.background_executor()
                     .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
@@ -702,14 +759,21 @@ impl Workspace {
         .detach();
     }
 
-    /// 目录到了：挂上项目、恢复会话、补做远程目录投影，此后才开始保存。
+    /// 目录到了：挂上项目、恢复会话，此后这个运行时那份才开始保存。活动会话只按本机
+    /// 那份认（客户端记的是上次的活动会话）；远程目录投影也只有本机的。
     fn apply_workspace_catalog(
         &mut self,
+        key: &RuntimeKey,
         result: WorkspaceLoadResult,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.local
+        let is_local = *key == RuntimeKey::Local;
+        let Some(space) = self.space(key) else {
+            return;
+        };
+        let runtime = space.runtime.clone();
+        space
             .catalog
             .revision
             .store(result.revision, Ordering::Release);
@@ -721,25 +785,31 @@ impl Workspace {
             Ok(state) => state.unwrap_or_default(),
             Err(error) => {
                 // 读不懂的文档不能当成空工作区，否则下一次保存就把它冲掉了。
-                self.local.catalog.blocked.store(true, Ordering::Release);
+                space.catalog.blocked.store(true, Ordering::Release);
                 self.report_background_error(format!(
                     "工作区目录无法读取，已停止保存以免覆盖原会话：{error}"
                 ));
                 WsState::default()
             }
         };
-        state.active_session = self.startup_active_session;
-        state.active_session_id = self.saved_active_session_id.clone();
+        if is_local {
+            state.active_session = self.startup_active_session;
+            state.active_session_id = self.saved_active_session_id.clone();
+        }
         let (pending, active) = normalize_saved_sessions(&state);
-        let saved_active_session_id = state
-            .active_session_id
-            .clone()
-            .filter(|id| !id.is_empty())
-            .or_else(|| {
-                pending
-                    .get(active)
-                    .and_then(crate::session_state_persist_id)
-            });
+        let saved_active_session_id = if is_local {
+            state
+                .active_session_id
+                .clone()
+                .filter(|id| !id.is_empty())
+                .or_else(|| {
+                    pending
+                        .get(active)
+                        .and_then(crate::session_state_persist_id)
+                })
+        } else {
+            None
+        };
         // 项目列表：新存档直接读；旧存档（没有 projects 字段）从各会话 cwd 反推一份。
         // 目录到之前用户刚加的项目排在后面保留。
         let mut projects: Vec<String> = if state.projects.is_empty() {
@@ -753,46 +823,80 @@ impl Workspace {
         } else {
             std::mem::take(&mut state.projects)
         };
-        for existing in &self.local.projects {
+        let Some(space) = self.space_mut(key) else {
+            return;
+        };
+        for existing in &space.projects {
             if !projects.contains(existing) {
                 projects.push(existing.clone());
             }
         }
-        self.local.projects = projects;
-        self.saved_active_session_id = saved_active_session_id.clone();
-        self.local.restore_pending = pending.iter().cloned().enumerate().collect();
-        self.local.catalog_loaded = true;
+        space.projects = projects;
+        space.restore_pending = pending.iter().cloned().enumerate().collect();
+        space.catalog_loaded = true;
         if pending.is_empty() {
-            self.local.sessions_restored = true;
-            self.check_daemon_outdated(cx);
-        } else {
-            eprintln!("[workspace] 后台恢复 {} 个会话（不堵 UI）…", pending.len());
-            self.schedule_session_restore(pending, active, saved_active_session_id, window, cx);
+            space.sessions_restored = true;
         }
-        self.reconcile_remote_catalog_projection(window, cx);
+        if is_local {
+            self.saved_active_session_id = saved_active_session_id.clone();
+        }
+        if pending.is_empty() {
+            if is_local {
+                self.check_daemon_outdated(cx);
+            }
+        } else {
+            eprintln!(
+                "[workspace] 后台恢复 {:?} 上的 {} 个会话（不堵 UI）…",
+                key,
+                pending.len()
+            );
+            self.schedule_session_restore(
+                runtime,
+                pending,
+                active,
+                saved_active_session_id,
+                window,
+                cx,
+            );
+        }
+        if is_local {
+            self.reconcile_remote_catalog_projection(window, cx);
+        }
         self.save_state(cx);
         cx.notify();
     }
 
-    /// 所有 workspace 文档写入（常规保存与退出 flush）都进入同一条单消费者队列。
+    /// 一个运行时那份目录的写入（常规保存与退出 flush）都进入它自己的单消费者队列。
     /// 取下一项、标记 idle、唤醒退出等待者在同一个 `update` 中完成，避免旧实现里
     /// “看到空队列”与“把 inflight 置 false”之间的新快照永久搁置。
-    fn enqueue_ws_snapshot(&mut self, job: SnapshotJob, epoch: u64, cx: &mut Context<Self>) {
+    fn enqueue_ws_snapshot(
+        &mut self,
+        key: &RuntimeKey,
+        job: SnapshotJob,
+        epoch: u64,
+        cx: &mut Context<Self>,
+    ) {
         if epoch != self.ws_snapshot_epoch {
             return;
         }
         // 解封只能由「写入真正成功」触发，不能由「内存里有会话」触发：损坏窗口期
         // 新建的会话同样是非空快照，旧逻辑会立刻解除封锁，等库被别的进程修好后
         // 用这份残缺状态覆盖掉完整存档。
-        if !self.local.write_queue.enqueue(job) {
+        let Some(space) = self.space_mut(key) else {
+            return;
+        };
+        if !space.write_queue.enqueue(job) {
             return;
         }
+        let key = key.clone();
         cx.spawn(async move |workspace, cx| {
             let executor = cx.background_executor().clone();
             loop {
-                let next =
-                    workspace.update(cx, |this, _| this.local.write_queue.take_next_or_finish());
-                let Ok((job, waiters)) = next else {
+                let next = workspace.update(cx, |this, _| {
+                    this.space_mut(&key)
+                        .map(|space| space.write_queue.take_next_or_finish())
+                });
+                let Ok(Some((job, waiters))) = next else {
                     break;
                 };
                 let Some(job) = job else {
@@ -812,18 +916,18 @@ impl Workspace {
         .detach();
     }
 
-    /// 主线程构建待写快照（纯内存，不碰磁盘）。返回 None 表示本次无需写。
-    fn build_ws_snapshot(&self, cx: &mut Context<Self>) -> Option<SnapshotJob> {
+    /// 主线程构建一个运行时那份待写快照（纯内存，不碰磁盘）。返回 None 表示本次无需写。
+    fn build_ws_snapshot(&self, key: &RuntimeKey, cx: &mut Context<Self>) -> Option<SnapshotJob> {
+        let space = self.space(key)?;
         // 目录还没从运行时读到：内存里的空列表不代表「用户关光了会话」，不能提交。
-        if !self.local.catalog_loaded {
+        if !space.catalog_loaded {
             return None;
         }
-        // 目前只写本机运行时那份目录，远程运行时上的会话不混进来。
-        let menu = self.workspace_menu_snapshot(&crate::RuntimeKey::Local, cx);
+        let menu = self.workspace_menu_snapshot(key, cx);
         let mut sessions: Vec<SessionState> = self
             .sessions
             .iter()
-            .filter(|session| session.runtime(cx).is_local())
+            .filter(|session| session.runtime(cx).key() == key)
             .filter(|session| {
                 persist_in_workspace_snapshot(
                     matches!(session.kind, SessionKind::Conversation(_)),
@@ -878,11 +982,11 @@ impl Workspace {
             })
             .collect();
         // 启动时恢复失败的会话按原位置写回，下次冷启动重试。
-        sessions = merge_restore_pending(sessions, &self.local.restore_pending);
+        sessions = merge_restore_pending(sessions, &space.restore_pending);
 
         let state = WsState {
             sessions,
-            projects: self.local.projects.clone(),
+            projects: space.projects.clone(),
             menu: menu.clone(),
             active_session: persisted_active_position(
                 self.active_session,
@@ -900,25 +1004,47 @@ impl Workspace {
             selected_agent_id: self.agent_surface.selected_id.clone(),
             sidebar_w: Some(self.sidebar_w),
             sidebar_open: Some(self.sidebar_open),
-            collapsed_projects: self.local.collapsed_projects.iter().cloned().collect(),
             collapsed_agents: self.collapsed_agents.iter().cloned().collect(),
             sidebar_grouping: self.sidebar_grouping,
-            pinned_projects: self.local.pinned_projects.iter().cloned().collect(),
             sidebar_hide_empty_projects: self.sidebar_hide_empty_projects,
             ..Default::default()
         };
-        let ui = WorkspaceUiState::from_state(&state);
+        let ui = (*key == RuntimeKey::Local).then(|| {
+            let mut ui = WorkspaceUiState::from_state(&state);
+            for space_key in self.space_keys() {
+                let Some(space) = self.space(&space_key) else {
+                    continue;
+                };
+                ui.collapsed_projects.extend(
+                    space
+                        .collapsed_projects
+                        .iter()
+                        .map(|root| project_key(&space_key, root)),
+                );
+                ui.pinned_projects.extend(
+                    space
+                        .pinned_projects
+                        .iter()
+                        .map(|root| project_key(&space_key, root)),
+                );
+            }
+            ui
+        });
         let document = serde_json::to_value(catalog_document(state)).ok()?;
         Some(SnapshotJob {
+            runtime: space.runtime.clone(),
             ui,
             document,
-            catalog: self.local.catalog.clone(),
+            catalog: space.catalog.clone(),
             menu,
         })
     }
 
     /// 退出阶段强制构建一份最新快照，并等待现有写盘循环自然清空。不能把 pending
     /// 快照拿出来另起线程写，否则旧循环可能在它之后完成并覆盖最终状态。
+    ///
+    /// 只等本机那份（界面状态也跟它走）：远程运行时可能已经离线，等它就要等到拨号
+    /// 超时，退出会卡住。远程的照样入队，赶得上就写进去。
     pub(crate) fn flush_ws_state_on_quit(
         &mut self,
         cx: &mut Context<Self>,
@@ -926,8 +1052,10 @@ impl Workspace {
         self.ws_snapshot_finalizing = true;
         self.ws_snapshot_epoch = self.ws_snapshot_epoch.wrapping_add(1);
         let epoch = self.ws_snapshot_epoch;
-        if let Some(job) = self.build_ws_snapshot(cx) {
-            self.enqueue_ws_snapshot(job, epoch, cx);
+        for key in self.space_keys() {
+            if let Some(job) = self.build_ws_snapshot(&key, cx) {
+                self.enqueue_ws_snapshot(&key, job, epoch, cx);
+            }
         }
         self.local.write_queue.wait_for_drain()
     }
@@ -939,7 +1067,8 @@ mod workspace_snapshot_write_queue_tests {
 
     fn job(name: &str) -> SnapshotJob {
         SnapshotJob {
-            ui: Default::default(),
+            runtime: crate::runtimes::Runtime::local(),
+            ui: None,
             document: serde_json::json!(name),
             catalog: Default::default(),
             menu: Default::default(),
@@ -973,8 +1102,8 @@ mod workspace_snapshot_write_queue_tests {
 #[cfg(test)]
 mod agent_conversation_persist_tests {
     use super::{
-        WorkspaceUiState, WsState, catalog_document, persist_in_workspace_snapshot,
-        unproject_acp_when_remote_catalog_drops,
+        RuntimeKey, WorkspaceUiState, WsState, catalog_document, persist_in_workspace_snapshot,
+        project_key, project_roots_of, unproject_acp_when_remote_catalog_drops,
     };
     use std::path::PathBuf;
 
@@ -1090,7 +1219,27 @@ mod agent_conversation_persist_tests {
 
         let restored = ui.into_state();
         assert_eq!(restored.sidebar_w, Some(320.0));
-        assert_eq!(restored.pinned_projects, vec!["/repo".to_string()]);
         assert_eq!(restored.active_session_id.as_deref(), Some("acp-1"));
+    }
+
+    /// 折叠、置顶的项目按运行时存：同一个路径在两台机器上是两个项目。
+    #[test]
+    fn project_keys_split_by_runtime() {
+        let remote = RuntimeKey::Remote("rt-linux".to_string());
+        let keys = vec![
+            project_key(&RuntimeKey::Local, "/repo"),
+            project_key(&remote, "/repo"),
+            project_key(&remote, "/srv/app"),
+        ];
+
+        assert_eq!(
+            project_roots_of(&keys, &RuntimeKey::Local),
+            vec!["/repo".to_string()]
+        );
+        assert_eq!(
+            project_roots_of(&keys, &remote),
+            vec!["/repo".to_string(), "/srv/app".to_string()]
+        );
+        assert!(project_roots_of(&keys, &RuntimeKey::Remote("rt-pi".to_string())).is_empty());
     }
 }

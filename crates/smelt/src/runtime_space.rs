@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use crate::SessionState;
-use crate::runtimes::Runtime;
+use crate::runtimes::{Runtime, RuntimeKey};
 use crate::workspace_persist::{WorkspaceCatalogSync, WorkspaceSnapshotWriteQueue};
 
 pub(crate) struct RuntimeSpace {
@@ -150,5 +150,107 @@ impl crate::Workspace {
             })
             .flat_map(|group| group.sessions)
             .collect()
+    }
+}
+
+impl crate::Workspace {
+    /// 远程运行时的空间跟着 [`crate::runtimes::RuntimeHub`] 走：新添加的建空间、读目录；
+    /// 移除的连同它的会话一起从侧栏摘掉（运行时上的进程不动，那台机器不归这台桌面管）。
+    pub(crate) fn sync_remote_spaces(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() else {
+            return;
+        };
+        let remotes: Vec<Runtime> = hub
+            .remotes
+            .iter()
+            .map(|remote| remote.runtime.clone())
+            .collect();
+        let removed: Vec<RuntimeKey> = self
+            .remote_spaces
+            .iter()
+            .map(|space| space.runtime.key().clone())
+            .filter(|key| !remotes.iter().any(|runtime| runtime.key() == key))
+            .collect();
+        let mut changed = !removed.is_empty();
+        for key in removed {
+            let mut ixs = self.space_members(&key, cx);
+            // 降序移除：前面的下标不受后面 remove 影响。
+            ixs.sort_unstable_by(|a, b| b.cmp(a));
+            for ix in ixs {
+                self.remove_session(ix, false, cx);
+            }
+            self.remote_spaces
+                .retain(|space| space.runtime.key() != &key);
+            if self
+                .active_project
+                .as_ref()
+                .is_some_and(|project| project.runtime == key)
+            {
+                self.active_project = None;
+            }
+        }
+        for runtime in remotes {
+            if self.space(runtime.key()).is_some() {
+                continue;
+            }
+            changed = true;
+            self.remote_spaces.push(RuntimeSpace::new(runtime.clone()));
+            self.start_space_catalog_load(runtime, window, cx);
+        }
+        if changed {
+            self.save_state(cx);
+        }
+        // 在线状态变了也要重画运行时标题。
+        cx.notify();
+    }
+}
+
+impl crate::Workspace {
+    /// 恢复回来的会话已经不要了：路径被删掉了，或者运行时整个被移除了。
+    pub(crate) fn restore_cancelled(&self, key: &RuntimeKey, cwd: Option<&str>) -> bool {
+        self.space(key).is_none_or(|space| {
+            crate::restore_path_is_cancelled(cwd, &space.cancelled_restore_paths)
+        })
+    }
+
+    pub(crate) fn forget_pending_restore(&mut self, key: &RuntimeKey, original_index: usize) {
+        if let Some(space) = self.space_mut(key) {
+            space
+                .restore_pending
+                .retain(|(index, _)| *index != original_index);
+        }
+    }
+
+    /// 恢复的会话插在哪：按存档顺序排在这个运行时自己的会话里。返回（在这个运行时会话
+    /// 里的位置，在整个会话列表里的下标）。几个运行时同时恢复时各排各的，互不打乱。
+    pub(crate) fn restore_insert_at(
+        &self,
+        key: &RuntimeKey,
+        restored_order: &[usize],
+        original_index: usize,
+        order_intact: &mut bool,
+        cx: &gpui::App,
+    ) -> (usize, usize) {
+        let members = self.space_members(key, cx);
+        let position = if *order_intact {
+            crate::planned_restore_insert_position(restored_order, original_index, members.len())
+                .unwrap_or_else(|| {
+                    *order_intact = false;
+                    members.len()
+                })
+        } else {
+            members.len()
+        };
+        let insert_at = members.get(position).copied().unwrap_or_else(|| {
+            members
+                .last()
+                .map(|last| last + 1)
+                .unwrap_or(self.sessions.len())
+        });
+        (position, insert_at)
     }
 }

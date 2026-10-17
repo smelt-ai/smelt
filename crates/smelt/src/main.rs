@@ -2125,14 +2125,21 @@ struct SpawnedLeaf {
     custom_title: Option<String>,
 }
 
-/// 阻塞：按 DFS 顺序 spawn 一棵布局树的全部叶子（**只**在后台线程调用）。
-fn spawn_layout_leaves(ps: &PaneState) -> Result<Vec<SpawnedLeaf>, String> {
+/// 阻塞：按 DFS 顺序在运行时上 spawn 一棵布局树的全部叶子（**只**在后台线程调用）。
+fn spawn_layout_leaves(
+    runtime: &crate::runtimes::Runtime,
+    ps: &PaneState,
+) -> Result<Vec<SpawnedLeaf>, String> {
     let mut out = Vec::new();
-    spawn_layout_leaves_rec(ps, &mut out)?;
+    spawn_layout_leaves_rec(runtime, ps, &mut out)?;
     Ok(out)
 }
 
-fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result<(), String> {
+fn spawn_layout_leaves_rec(
+    runtime: &crate::runtimes::Runtime,
+    ps: &PaneState,
+    out: &mut Vec<SpawnedLeaf>,
+) -> Result<(), String> {
     match ps {
         PaneState::Leaf {
             cwd,
@@ -2143,7 +2150,7 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
         } => {
             let sid = id.clone().unwrap_or_else(new_sid);
             let terminal = terminal::Terminal::spawn(
-                &crate::runtimes::Runtime::local(),
+                runtime,
                 24,
                 80,
                 cwd.as_deref(),
@@ -2166,7 +2173,7 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
         }
         PaneState::Split { children, .. } => {
             for c in children {
-                spawn_layout_leaves_rec(c, out)?;
+                spawn_layout_leaves_rec(runtime, c, out)?;
             }
             Ok(())
         }
@@ -2175,6 +2182,7 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
 
 /// 用已 spawn 的叶子（DFS 序）重建布局树；**只**在 UI 线程建 Entity。
 fn rebuild_pane_ready(
+    runtime: &crate::runtimes::Runtime,
     ps: &PaneState,
     leaves: &mut std::vec::IntoIter<SpawnedLeaf>,
     tabs: &mut Vec<Entity<TerminalView>>,
@@ -2186,7 +2194,7 @@ fn rebuild_pane_ready(
             let v = cx.new(|cx| {
                 let mut view = TerminalView::from_terminal(
                     cx,
-                    crate::runtimes::Runtime::local(),
+                    runtime.clone(),
                     leaf.terminal,
                     leaf.cwd,
                     leaf.sid,
@@ -2206,7 +2214,7 @@ fn rebuild_pane_ready(
         } => {
             let mut kept: Vec<Pane> = children
                 .iter()
-                .filter_map(|c| rebuild_pane_ready(c, leaves, tabs, cx))
+                .filter_map(|c| rebuild_pane_ready(runtime, c, leaves, tabs, cx))
                 .collect();
             match kept.len() {
                 0 => None,
@@ -2659,6 +2667,8 @@ struct Workspace {
     /// 远程目录来自 app 级唯一 daemon 订阅；随 Workspace 释放，避免创建第二条 socket
     /// 订阅或后台轮询线程。
     _remote_sessions_sub: Option<Subscription>,
+    /// 远程运行时增删时同步侧栏的空间。
+    _runtime_hub_sub: Option<Subscription>,
     /// 自动化目录读 AgentHostState；不观察的话，投影写进 global 后当前页不会重绘。
     _agent_host_sub: Option<Subscription>,
     /// provider 账户状态（额度）变化时重绘侧栏额度行。
@@ -2795,7 +2805,24 @@ impl Workspace {
         // （见 start_workspace_catalog_load）。
         let ui = load_workspace_ui();
         let startup_active_session = ui.active_session;
+        let collapsed_projects = ui.collapsed_projects.clone();
+        let pinned_projects = ui.pinned_projects.clone();
         let saved = Some(ui.into_state());
+        // 折叠、置顶按运行时分到各自的空间。
+        let space_with_ui = |runtime: crate::runtimes::Runtime| {
+            let mut space = crate::runtime_space::RuntimeSpace::new(runtime);
+            let key = space.runtime.key().clone();
+            space.collapsed_projects =
+                workspace_persist::project_roots_of(&collapsed_projects, &key)
+                    .into_iter()
+                    .collect();
+            space.pinned_projects = workspace_persist::project_roots_of(&pinned_projects, &key)
+                .iter()
+                .map(|root| crate::sidebar_order::normalize_project_root(root))
+                .filter(|root| !root.is_empty())
+                .collect();
+            space
+        };
         // 旧版开合动画曾把过渡中的接近零宽度误存为用户偏好；加载时按侧栏
         // 可拖拽下限修复这类状态，避免下一次展开仍以错误宽度为目标。
         let sidebar_w = saved
@@ -2900,27 +2927,20 @@ impl Workspace {
             next_workspace_menu_source_revision: AtomicU64::new(1),
             close_project_target: None,
             local: {
-                let mut space =
-                    crate::runtime_space::RuntimeSpace::new(crate::runtimes::Runtime::local());
+                let mut space = space_with_ui(crate::runtimes::Runtime::local());
                 space.projects = projects;
                 space.restore_pending = restore_pending;
-                space.collapsed_projects = saved
-                    .as_ref()
-                    .map(|s| s.collapsed_projects.iter().cloned().collect())
-                    .unwrap_or_default();
-                space.pinned_projects = saved
-                    .as_ref()
-                    .map(|s| {
-                        s.pinned_projects
-                            .iter()
-                            .map(|root| crate::sidebar_order::normalize_project_root(root))
-                            .filter(|root| !root.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 space
             },
-            remote_spaces: Vec::new(),
+            remote_spaces: cx
+                .try_global::<crate::runtimes::RuntimeHub>()
+                .map(|hub| {
+                    hub.remotes
+                        .iter()
+                        .map(|remote| space_with_ui(remote.runtime.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             active_project: None,
             collapsed_agents: saved
                 .as_ref()
@@ -3065,6 +3085,7 @@ impl Workspace {
             workspace_window_active: false,
             saved_active_session_id,
             _remote_sessions_sub: None,
+            _runtime_hub_sub: None,
             _agent_host_sub: None,
             _provider_status_sub: None,
             _history_titles_sub: None,
@@ -3095,6 +3116,17 @@ impl Workspace {
         // 作业后走与用户点击完全相同的安装驱动，没有待办才做常规静默检查。
         ws.recover_update_at_launch(true, cx);
         ws.start_workspace_catalog_load(window, cx);
+        for space in &ws.remote_spaces {
+            let runtime = space.runtime.clone();
+            cx.defer_in(window, move |this, window, cx| {
+                this.start_space_catalog_load(runtime, window, cx)
+            });
+        }
+        ws._runtime_hub_sub = Some(
+            cx.observe_global_in::<crate::runtimes::RuntimeHub>(window, |this, window, cx| {
+                this.sync_remote_spaces(window, cx)
+            }),
+        );
         ws.start_daemon_outdated_watch(cx);
         ws.reconcile_remote_catalog_projection(window, cx);
         ws._remote_sessions_sub = Some(

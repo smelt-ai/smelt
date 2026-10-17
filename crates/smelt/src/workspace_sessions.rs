@@ -74,6 +74,7 @@ impl Workspace {
     /// 完成后才 `check_daemon_outdated`（不与 restore 并行 upgrade）。
     pub(crate) fn schedule_session_restore(
         &mut self,
+        runtime: crate::runtimes::Runtime,
         pending: Vec<SessionState>,
         active_session: usize,
         active_session_id: Option<String>,
@@ -81,6 +82,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.schedule_indexed_session_restore(
+            runtime,
             pending.into_iter().enumerate().collect(),
             active_session,
             active_session_id,
@@ -89,14 +91,20 @@ impl Workspace {
         );
     }
 
+    /// 会话恢复到它们所在的运行时上。活动会话只按本机那份认；本机守护的拉起、升级
+    /// 检查、远程目录投影也只有本机才做。
     fn schedule_indexed_session_restore(
         &mut self,
+        runtime: crate::runtimes::Runtime,
         pending: Vec<(usize, SessionState)>,
         active_session: usize,
         active_session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let key = runtime.key().clone();
+        let is_local = runtime.is_local();
+        let runtime_bg = runtime.clone();
         let restore_revision = self.session_list_revision;
         let restore_active_revision = self.active_session_revision;
         let (acp_saved, pending) = split_indexed_restore_queue(pending);
@@ -110,8 +118,10 @@ impl Workspace {
             .name("smelt-restore-sessions".into())
             .spawn(move || {
                 // 1) 完整 ensure（可能 handoff）→ 2) 再 reattach。禁止与 UI 侧并行 upgrade。
-                let _ = terminal::ensure_managed_daemon_current();
-                terminal::ensure_daemon_running();
+                if runtime_bg.is_local() {
+                    let _ = terminal::ensure_managed_daemon_current();
+                    terminal::ensure_daemon_running();
+                }
                 // ACP 占位只有收到这道闸门后才会在 UI 线程创建；否则当前活动会话
                 // 会立刻 auto-resume，随后 ensure/handoff 重启守护，把刚建的 socket
                 // 踢成「与 smeltd 的连接已断开」。
@@ -121,7 +131,7 @@ impl Workspace {
                 let mut daemon_ok = true;
                 for (original_index, ss) in pending {
                     let outcome = if daemon_ok {
-                        match spawn_layout_leaves(&ss.layout) {
+                        match spawn_layout_leaves(&runtime_bg, &ss.layout) {
                             Ok(leaves) => Ok(leaves),
                             Err(e) => {
                                 if restore_error_blocks_remaining(&e) {
@@ -168,12 +178,8 @@ impl Workspace {
             if this
                 .update_in(cx, |this, window, cx| {
                     for (original_index, ss) in acp_saved {
-                        if restore_path_is_cancelled(
-                            session_state_cwd(&ss).as_deref(),
-                            &this.local.cancelled_restore_paths,
-                        ) {
-                            this.local.restore_pending
-                                .retain(|(index, _)| *index != original_index);
+                        if this.restore_cancelled(&key, session_state_cwd(&ss).as_deref()) {
+                            this.forget_pending_restore(&key, original_index);
                             continue;
                         }
                         let Some(saved) = ss.acp else { continue };
@@ -212,7 +218,7 @@ impl Workspace {
                             acp_view::AcpView::placeholder(
                                 cx,
                                 acp_view::AcpViewOrigin {
-                                    runtime: crate::runtimes::Runtime::local(),
+                                    runtime: runtime.clone(),
                                     launch_prep: Some(launch_prep),
                                     agent,
                                     launch: saved.launch,
@@ -237,19 +243,13 @@ impl Workspace {
                         if this.session_list_revision != restore_revision {
                             restore_order_intact = false;
                         }
-                        let insert_at = if restore_order_intact {
-                            planned_restore_insert_position(
-                                &restored_order,
-                                original_index,
-                                this.sessions.len(),
-                            )
-                            .unwrap_or_else(|| {
-                                restore_order_intact = false;
-                                this.sessions.len()
-                            })
-                        } else {
-                            this.sessions.len()
-                        };
+                        let (position, insert_at) = this.restore_insert_at(
+                            &key,
+                            &restored_order,
+                            original_index,
+                            &mut restore_order_intact,
+                            cx,
+                        );
                         this.sessions.insert(
                             insert_at,
                             Session {
@@ -270,12 +270,11 @@ impl Workspace {
                         );
                         record_restored_index(
                             &mut restored_order,
-                            insert_at,
+                            position,
                             original_index,
                             restore_order_intact,
                         );
-                        this.local.restore_pending
-                            .retain(|(index, _)| *index != original_index);
+                        this.forget_pending_restore(&key, original_index);
                         restored += 1;
                     }
                     this.consume_pending_notification_session_jump(window, cx);
@@ -290,17 +289,13 @@ impl Workspace {
             // 收一个渲染一个。后台线程跑完会 drop sender，recv 报错即代表全部处理完。
             while let Ok((original_index, ss, result)) = rx.recv().await {
                 let outcome = this.update_in(cx, |this, window, cx| {
-                    if restore_path_is_cancelled(
-                        session_state_cwd(&ss).as_deref(),
-                        &this.local.cancelled_restore_paths,
-                    ) {
+                    if this.restore_cancelled(&key, session_state_cwd(&ss).as_deref()) {
                         if let Ok(leaves) = result {
                             for leaf in leaves {
-                                terminal::kill_remote(&crate::runtimes::Runtime::local(), &leaf.sid);
+                                terminal::kill_remote(&runtime, &leaf.sid);
                             }
                         }
-                        this.local.restore_pending
-                            .retain(|(index, _)| *index != original_index);
+                        this.forget_pending_restore(&key, original_index);
                         return false;
                     }
                     let leaves = match result {
@@ -313,7 +308,7 @@ impl Workspace {
                     let mut leaf_iter = leaves.into_iter();
                     let mut tabs = Vec::new();
                     let Some(layout) =
-                        rebuild_pane_ready(&ss.layout, &mut leaf_iter, &mut tabs, cx)
+                        rebuild_pane_ready(&runtime, &ss.layout, &mut leaf_iter, &mut tabs, cx)
                     else {
                         return false;
                     };
@@ -323,19 +318,13 @@ impl Workspace {
                     if this.session_list_revision != restore_revision {
                         restore_order_intact = false;
                     }
-                    let insert_at = if restore_order_intact {
-                        planned_restore_insert_position(
-                            &restored_order,
-                            original_index,
-                            this.sessions.len(),
-                        )
-                        .unwrap_or_else(|| {
-                            restore_order_intact = false;
-                            this.sessions.len()
-                        })
-                    } else {
-                        this.sessions.len()
-                    };
+                    let (position, insert_at) = this.restore_insert_at(
+                        &key,
+                        &restored_order,
+                        original_index,
+                        &mut restore_order_intact,
+                        cx,
+                    );
                     this.sessions.insert(
                         insert_at,
                         Session {
@@ -356,12 +345,11 @@ impl Workspace {
                     );
                     record_restored_index(
                         &mut restored_order,
-                        insert_at,
+                        position,
                         original_index,
                         restore_order_intact,
                     );
-                    this.local.restore_pending
-                        .retain(|(index, _)| *index != original_index);
+                    this.forget_pending_restore(&key, original_index);
                     this.consume_pending_notification_session_jump(window, cx);
                     // 让这一个立刻上屏，不等其余的
                     cx.notify();
@@ -375,62 +363,78 @@ impl Workspace {
             }
 
             let _ = this.update_in(cx, |this, window, cx| {
-                this.local.sessions_restored = true;
-                let live_ids = this
-                    .sessions
-                    .iter()
-                    .map(|session| crate::live_session_persist_id(session, cx))
-                    .collect::<Vec<_>>();
-                this.active_session = crate::resolve_restored_active_session(
-                    &live_ids,
-                    active_session_id.as_deref(),
-                    active_session,
-                    &restored_order,
-                    restore_order_intact,
-                    this.active_session_revision != restore_active_revision,
-                    this.active_session,
-                );
-                this.sync_session_ui(window, cx);
-                this.consume_pending_notification_session_jump(window, cx);
-                this.consume_pending_conversation_wakes(window, cx);
-                if let Some(Session {
-                    kind: SessionKind::Conversation(view),
-                    ..
-                }) = this.sessions.get(this.active_session)
-                {
-                    view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
+                let Some(space) = this.space_mut(&key) else {
+                    // 运行时在恢复期间被移除了，它的会话已经一起摘掉。
+                    return;
+                };
+                space.sessions_restored = true;
+                if is_local {
+                    let live_ids = this
+                        .sessions
+                        .iter()
+                        .map(|session| crate::live_session_persist_id(session, cx))
+                        .collect::<Vec<_>>();
+                    this.active_session = crate::resolve_restored_active_session(
+                        &live_ids,
+                        active_session_id.as_deref(),
+                        active_session,
+                        &restored_order,
+                        restore_order_intact,
+                        this.active_session_revision != restore_active_revision,
+                        this.active_session,
+                    );
+                    this.sync_session_ui(window, cx);
+                    this.consume_pending_notification_session_jump(window, cx);
+                    this.consume_pending_conversation_wakes(window, cx);
+                    if let Some(Session {
+                        kind: SessionKind::Conversation(view),
+                        ..
+                    }) = this.sessions.get(this.active_session)
+                    {
+                        view.update(cx, |view, cx| view.maybe_auto_resume(window, cx));
+                    }
                 }
                 this.save_state(cx);
-                let failed = this.local.restore_pending.len();
-                eprintln!("[workspace] 后台恢复完成：成功 {restored}，失败 {failed}");
-                if should_retry_failed_restore(failed, this.local.restore_retry_attempt) {
-                    this.local.restore_retry_attempt += 1;
+                let Some(space) = this.space_mut(&key) else {
+                    return;
+                };
+                let failed = space.restore_pending.len();
+                eprintln!("[workspace] {key:?} 后台恢复完成：成功 {restored}，失败 {failed}");
+                if should_retry_failed_restore(failed, space.restore_retry_attempt) {
+                    space.restore_retry_attempt += 1;
+                    let attempt = space.restore_retry_attempt;
+                    let leftover = space.restore_pending.clone();
                     let delay = restore_retry_delay();
-                    this.report_background_error(format!(
-                        "{failed} 个会话暂时没挂上（守护握手超时），{} 秒后自动重试…",
-                        delay.as_secs()
-                    ));
-                    let leftover = this.local.restore_pending.clone();
+                    if is_local {
+                        this.report_background_error(format!(
+                            "{failed} 个会话暂时没挂上（守护握手超时），{} 秒后自动重试…",
+                            delay.as_secs()
+                        ));
+                    }
                     let active_session = this.active_session;
                     let active_session_id = this.saved_active_session_id.clone();
                     eprintln!(
-                        "[workspace] {failed} 个会话未能恢复，将在 {} 秒后重试（第 {}/{} 次）",
+                        "[workspace] {failed} 个会话未能恢复，将在 {} 秒后重试（第 {attempt}/{} 次）",
                         delay.as_secs(),
-                        this.local.restore_retry_attempt,
                         RESTORE_RETRY_LIMIT
                     );
+                    let runtime = runtime.clone();
                     cx.spawn_in(window, async move |this, cx| {
                         cx.background_executor().timer(delay).await;
                         let _ = this.update_in(cx, |this, window, cx| {
-                            if this.local.restore_pending.is_empty() {
-                                this.check_daemon_outdated(cx);
+                            let pending = this
+                                .space(runtime.key())
+                                .map(|space| space.restore_pending.len())
+                                .unwrap_or(0);
+                            if pending == 0 {
+                                if runtime.is_local() {
+                                    this.check_daemon_outdated(cx);
+                                }
                                 return;
                             }
-                            eprintln!(
-                                "[workspace] 重试恢复 {} 个会话…",
-                                this.local.restore_pending.len()
-                            );
+                            eprintln!("[workspace] 重试恢复 {pending} 个会话…");
                             this.schedule_indexed_session_restore(
+                                runtime,
                                 leftover,
                                 active_session,
                                 active_session_id,
@@ -440,7 +444,7 @@ impl Workspace {
                         });
                     })
                     .detach();
-                } else {
+                } else if is_local {
                     if failed > 0 {
                         this.report_background_error(format!(
                             "{failed} 个会话未能恢复，已保留在存档中。退出并重新打开 Smelt 会再试一次。"
@@ -463,10 +467,12 @@ impl Workspace {
                     })
                     .detach();
                 }
-                // 恢复落定后再对一次远程目录：恢复期间我们故意跳过了还在排队的 id，
-                // 真的没恢复成功的（比如终端 reattach 失败）得在这里被重新投影回来，
-                // 不能干等下一次目录推送。
-                this.reconcile_remote_catalog_projection(window, cx);
+                if is_local {
+                    // 恢复落定后再对一次远程目录：恢复期间我们故意跳过了还在排队的 id，
+                    // 真的没恢复成功的（比如终端 reattach 失败）得在这里被重新投影回来，
+                    // 不能干等下一次目录推送。
+                    this.reconcile_remote_catalog_projection(window, cx);
+                }
                 this.schedule_visible_refresh(cx);
                 cx.notify();
             });

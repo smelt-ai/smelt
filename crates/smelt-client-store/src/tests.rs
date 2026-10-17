@@ -41,10 +41,10 @@ fn workspace_ui() -> WorkspaceUiRecord {
         selected_agent_id: None,
         sidebar_w: Some(320.0),
         sidebar_open: Some(true),
-        collapsed_projects: vec!["/repo/b".to_string(), "/repo/a".to_string()],
+        collapsed_projects: vec![ProjectKey::local("/repo/b"), ProjectKey::local("/repo/a")],
         collapsed_agents: vec!["writer".to_string()],
         sidebar_grouping: "project".to_string(),
-        pinned_projects: vec!["/repo/z".to_string(), "/repo/a".to_string()],
+        pinned_projects: vec![ProjectKey::local("/repo/z"), ProjectKey::local("/repo/a")],
         sidebar_hide_empty_projects: true,
     }
 }
@@ -81,11 +81,24 @@ fn records_round_trip_and_start_empty() {
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
     let shrunk = WorkspaceUiRecord {
         collapsed_projects: Vec::new(),
-        pinned_projects: vec!["/repo/a".to_string()],
+        pinned_projects: vec![ProjectKey::local("/repo/a")],
         ..workspace_ui()
     };
     store.put_workspace_ui(&shrunk).unwrap();
     assert_eq!(store.workspace_ui().unwrap(), Some(shrunk));
+
+    // 两个运行时上可以有同一个路径，各算各的。
+    let remote_a = ProjectKey {
+        runtime_id: Some("rt-linux".to_string()),
+        root: "/repo/a".to_string(),
+    };
+    let both = WorkspaceUiRecord {
+        pinned_projects: vec![remote_a.clone(), ProjectKey::local("/repo/a")],
+        collapsed_projects: vec![remote_a],
+        ..workspace_ui()
+    };
+    store.put_workspace_ui(&both).unwrap();
+    assert_eq!(store.workspace_ui().unwrap(), Some(both));
 
     store.mark_runtime_migrated().unwrap();
     store.mark_runtime_migrated().unwrap();
@@ -224,6 +237,38 @@ fn legacy_preference_rows_move_into_tables_once() {
         .unwrap();
     assert!(!leftover);
     drop(connection);
+    cleanup(&path);
+}
+
+/// v1 的折叠、置顶不分运行时，升上来都算本机的。
+#[test]
+fn v1_projects_become_local_projects() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v1 = Connection::open(&path).unwrap();
+    v1.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    v1.execute_batch(
+        "DROP TABLE collapsed_project;
+         DROP TABLE pinned_project;
+         CREATE TABLE collapsed_project (root TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
+         CREATE TABLE pinned_project (root TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
+         INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);
+         INSERT INTO collapsed_project VALUES ('/repo/b', 0), ('/repo/a', 1);
+         INSERT INTO collapsed_agent VALUES ('writer', 0);
+         INSERT INTO pinned_project VALUES ('/repo/z', 0), ('/repo/a', 1);
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    drop(v1);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
+    drop(store);
+    let version: u32 = Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, schema::SCHEMA_VERSION);
     cleanup(&path);
 }
 

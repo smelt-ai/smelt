@@ -5,7 +5,7 @@
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -48,16 +48,20 @@ CREATE TABLE workspace_ui (
   sidebar_hide_empty_projects INTEGER NOT NULL CHECK (sidebar_hide_empty_projects IN (0, 1))
 );
 CREATE TABLE collapsed_project (
-  root TEXT PRIMARY KEY,
-  position INTEGER NOT NULL
+  runtime_id TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, root)
 ) WITHOUT ROWID;
 CREATE TABLE collapsed_agent (
   agent_id TEXT PRIMARY KEY,
   position INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE pinned_project (
-  root TEXT PRIMARY KEY,
-  position INTEGER NOT NULL
+  runtime_id TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, root)
 ) WITHOUT ROWID;
 CREATE TABLE update_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -96,6 +100,28 @@ CREATE TABLE runtime_connection (
 ) WITHOUT ROWID;
 ";
 
+/// v1 → v2：折叠、置顶的项目加上所在运行时。v1 时只有本机运行时（空串）。
+const PROJECTS_BY_RUNTIME: &str = "
+CREATE TABLE collapsed_project_v2 (
+  runtime_id TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, root)
+) WITHOUT ROWID;
+INSERT INTO collapsed_project_v2 SELECT '', root, position FROM collapsed_project;
+DROP TABLE collapsed_project;
+ALTER TABLE collapsed_project_v2 RENAME TO collapsed_project;
+CREATE TABLE pinned_project_v2 (
+  runtime_id TEXT NOT NULL,
+  root TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, root)
+) WITHOUT ROWID;
+INSERT INTO pinned_project_v2 SELECT '', root, position FROM pinned_project;
+DROP TABLE pinned_project;
+ALTER TABLE pinned_project_v2 RENAME TO pinned_project;
+";
+
 /// 打开时把库带到当前版本。
 pub(crate) fn migrate(connection: &mut Connection) -> Result<(), String> {
     let transaction = connection
@@ -117,6 +143,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<(), String> {
                     .map_err(|error| error.to_string())?;
             }
         }
+        1 => transaction
+            .execute_batch(PROJECTS_BY_RUNTIME)
+            .map_err(|error| error.to_string())?,
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }
     transaction
@@ -358,10 +387,18 @@ mod legacy {
                     selected_agent_id: old.selected_agent_id,
                     sidebar_w: old.sidebar_w,
                     sidebar_open: old.sidebar_open,
-                    collapsed_projects: old.collapsed_projects,
+                    collapsed_projects: old
+                        .collapsed_projects
+                        .into_iter()
+                        .map(crate::ProjectKey::local)
+                        .collect(),
                     collapsed_agents: old.collapsed_agents,
                     sidebar_grouping: old.sidebar_grouping,
-                    pinned_projects: old.pinned_projects,
+                    pinned_projects: old
+                        .pinned_projects
+                        .into_iter()
+                        .map(crate::ProjectKey::local)
+                        .collect(),
                     sidebar_hide_empty_projects: old.sidebar_hide_empty_projects,
                 },
             )?;

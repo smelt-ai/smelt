@@ -75,6 +75,34 @@ fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohClient>, Stri
     Ok(client)
 }
 
+/// 远程运行时的连接器。iroh 要起 tokio，不能在主线程绑，所以第一次连接（总在后台）时
+/// 才绑；之后复用同一个，同一条 QUIC 连接上开流。
+struct LazyRemoteConnector {
+    endpoint: smelt_iroh::EndpointId,
+    relay: Option<smelt_iroh::RelaySettings>,
+    connector: std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::RuntimeConnector>>>,
+}
+
+impl smelt_runtime_client::Connector for LazyRemoteConnector {
+    fn connect(&self) -> std::io::Result<std::os::unix::net::UnixStream> {
+        let connector = {
+            let mut slot = self.connector.lock().unwrap_or_else(|e| e.into_inner());
+            match slot.as_ref() {
+                Some(connector) => std::sync::Arc::clone(connector),
+                None => {
+                    let client = iroh_client().map_err(std::io::Error::other)?;
+                    let connector =
+                        std::sync::Arc::new(client.connector(self.endpoint, self.relay.as_ref()));
+                    *slot = Some(std::sync::Arc::clone(&connector));
+                    connector
+                }
+            }
+        };
+        smelt_runtime_client::Connector::connect(connector.as_ref())
+    }
+}
+
+/// 只解析地址，不碰网络，主线程可以调。
 fn remote_client(
     connection: &smelt_client_store::RuntimeConnection,
 ) -> Result<RuntimeClient, String> {
@@ -88,9 +116,11 @@ fn remote_client(
         .map(smelt_iroh::RelaySettings::parse)
         .transpose()
         .map_err(|error| format!("relay 地址不合法：{error:#}"))?;
-    Ok(RuntimeClient::new(
-        iroh_client()?.connector(endpoint, relay.as_ref()),
-    ))
+    Ok(RuntimeClient::new(LazyRemoteConnector {
+        endpoint,
+        relay,
+        connector: std::sync::Mutex::new(None),
+    }))
 }
 
 fn status_of(client: &RuntimeClient) -> RuntimeStatus {
@@ -113,49 +143,37 @@ fn update_hub(cx: &mut gpui::App, change: impl FnOnce(&mut RuntimeHub)) {
     cx.set_global(hub);
 }
 
-/// 启动时读出登记过的远程运行时并探一次状态。读库、绑 iroh、拨号都在后台。
+/// 启动时读出登记过的远程运行时（客户端库在本机，同步读，主窗口一起来侧栏就有它们
+/// 的分段），再在后台探一次状态。
 pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
-    cx.set_global(RuntimeHub::default());
-    cx.spawn(async move |cx| {
-        let loaded = cx
-            .background_executor()
-            .spawn(async {
-                let connections = smelt_client_store::client_store()
-                    .and_then(|store| store.runtime_connections())
-                    .map_err(|error| format!("读取运行时列表失败：{error}"))?;
-                Ok::<_, String>(
-                    connections
-                        .into_iter()
-                        .map(|connection| match remote_client(&connection) {
-                            Ok(client) => RemoteRuntime {
-                                runtime: remote_runtime(&connection.runtime_id, client),
-                                connection,
-                                status: RuntimeStatus::Connecting,
-                            },
-                            Err(error) => RemoteRuntime {
-                                runtime: remote_runtime(
-                                    &connection.runtime_id,
-                                    RuntimeClient::new(move || {
-                                        Err(std::io::Error::other("运行时配置无效"))
-                                    }),
-                                ),
-                                connection,
-                                status: RuntimeStatus::Offline(error),
-                            },
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .await;
-        cx.update(|cx| match loaded {
-            Ok(remotes) => {
-                update_hub(cx, |hub| hub.remotes = remotes);
-                refresh_runtime_status(cx);
-            }
-            Err(error) => update_hub(cx, |hub| hub.error = Some(error)),
-        });
-    })
-    .detach();
+    let mut hub = RuntimeHub::default();
+    match smelt_client_store::client_store().and_then(|store| store.runtime_connections()) {
+        Ok(connections) => {
+            hub.remotes = connections
+                .into_iter()
+                .map(|connection| match remote_client(&connection) {
+                    Ok(client) => RemoteRuntime {
+                        runtime: remote_runtime(&connection.runtime_id, client),
+                        connection,
+                        status: RuntimeStatus::Connecting,
+                    },
+                    Err(error) => RemoteRuntime {
+                        runtime: remote_runtime(
+                            &connection.runtime_id,
+                            RuntimeClient::new(move || {
+                                Err(std::io::Error::other("运行时配置无效"))
+                            }),
+                        ),
+                        connection,
+                        status: RuntimeStatus::Offline(error),
+                    },
+                })
+                .collect();
+        }
+        Err(error) => hub.error = Some(format!("读取运行时列表失败：{error}")),
+    }
+    cx.set_global(hub);
+    refresh_runtime_status(cx);
 }
 
 /// 重新探一遍每个远程运行时（打开设置窗口时调）。
@@ -352,7 +370,7 @@ mod tests {
             .unwrap()
             .runtime_connections()
             .unwrap();
-        assert_eq!(stored, vec![remote.connection.clone()]);
+        assert_eq!(stored, vec![remote.connection]);
 
         let again = remote_client(&stored[0]).unwrap().describe().unwrap();
         assert_eq!(

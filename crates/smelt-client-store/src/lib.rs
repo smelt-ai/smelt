@@ -69,6 +69,23 @@ pub struct NotifyPrefsRecord {
     pub terminal_bell: bool,
 }
 
+/// 侧栏里的一个项目：哪个运行时上的哪个根目录。路径只在一个运行时里唯一。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProjectKey {
+    /// `None` 是本机运行时。
+    pub runtime_id: Option<String>,
+    pub root: String,
+}
+
+impl ProjectKey {
+    pub fn local(root: impl Into<String>) -> Self {
+        Self {
+            runtime_id: None,
+            root: root.into(),
+        }
+    }
+}
+
 /// 侧栏、路由这些界面状态。列表按原顺序存取。
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceUiRecord {
@@ -78,10 +95,10 @@ pub struct WorkspaceUiRecord {
     pub selected_agent_id: Option<String>,
     pub sidebar_w: Option<f32>,
     pub sidebar_open: Option<bool>,
-    pub collapsed_projects: Vec<String>,
+    pub collapsed_projects: Vec<ProjectKey>,
     pub collapsed_agents: Vec<String>,
     pub sidebar_grouping: String,
-    pub pinned_projects: Vec<String>,
+    pub pinned_projects: Vec<ProjectKey>,
     pub sidebar_hide_empty_projects: bool,
 }
 
@@ -239,6 +256,52 @@ fn read_list(connection: &Connection, table: &str, column: &str) -> Result<Vec<S
     rows.collect::<Result<_, _>>().map_err(sql)
 }
 
+/// 项目表里本机运行时的 `runtime_id` 存空串：它要进主键，不能是 NULL。
+const LOCAL_RUNTIME_ID: &str = "";
+
+fn write_project_list(
+    connection: &Connection,
+    table: &str,
+    items: &[ProjectKey],
+) -> Result<(), String> {
+    connection
+        .execute(&format!("DELETE FROM {table}"), [])
+        .map_err(sql)?;
+    let mut statement = connection
+        .prepare(&format!(
+            "INSERT OR IGNORE INTO {table} (runtime_id, root, position) VALUES (?1, ?2, ?3)"
+        ))
+        .map_err(sql)?;
+    for (position, item) in items.iter().enumerate() {
+        statement
+            .execute(params![
+                item.runtime_id.as_deref().unwrap_or(LOCAL_RUNTIME_ID),
+                item.root,
+                position as i64
+            ])
+            .map_err(sql)?;
+    }
+    Ok(())
+}
+
+fn read_project_list(connection: &Connection, table: &str) -> Result<Vec<ProjectKey>, String> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT runtime_id, root FROM {table} ORDER BY position"
+        ))
+        .map_err(sql)?;
+    let rows = statement
+        .query_map([], |row| {
+            let runtime_id: String = row.get(0)?;
+            Ok(ProjectKey {
+                runtime_id: (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id),
+                root: row.get(1)?,
+            })
+        })
+        .map_err(sql)?;
+    rows.collect::<Result<_, _>>().map_err(sql)
+}
+
 pub(crate) fn write_workspace_ui(
     connection: &Connection,
     record: &WorkspaceUiRecord,
@@ -261,24 +324,14 @@ pub(crate) fn write_workspace_ui(
             ],
         )
         .map_err(sql)?;
-    write_list(
-        connection,
-        "collapsed_project",
-        "root",
-        &record.collapsed_projects,
-    )?;
+    write_project_list(connection, "collapsed_project", &record.collapsed_projects)?;
     write_list(
         connection,
         "collapsed_agent",
         "agent_id",
         &record.collapsed_agents,
     )?;
-    write_list(
-        connection,
-        "pinned_project",
-        "root",
-        &record.pinned_projects,
-    )
+    write_project_list(connection, "pinned_project", &record.pinned_projects)
 }
 
 pub(crate) fn write_update_state(
@@ -518,9 +571,9 @@ impl ClientStore {
             else {
                 return Ok(None);
             };
-            record.collapsed_projects = read_list(connection, "collapsed_project", "root")?;
+            record.collapsed_projects = read_project_list(connection, "collapsed_project")?;
             record.collapsed_agents = read_list(connection, "collapsed_agent", "agent_id")?;
-            record.pinned_projects = read_list(connection, "pinned_project", "root")?;
+            record.pinned_projects = read_project_list(connection, "pinned_project")?;
             Ok(Some(record))
         })
     }
