@@ -1458,6 +1458,10 @@ pub struct AcpProfile {
     /// workspace 目录，允许 `~` 开头（展开逻辑跟 build_agent 共用一份，见
     /// `crate::workspace_override`）。
     pub workspace_dir: String,
+    /// 原生 DSH profile 的启动规格，由运行时列 profile 时按它那台机器上桥的安装情况
+    /// 算好（见 `native_dsh_profiles`）。其余 profile 为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_launch: Option<ConversationLaunchSpec>,
 }
 
 impl AcpProfile {
@@ -1486,7 +1490,10 @@ impl AcpProfile {
     pub fn launch_spec(&self) -> Result<ConversationLaunchSpec, String> {
         let kind = self.required_kind()?;
         if kind == ConversationAgentKind::Dsh && self.id.starts_with("dsh-native-") {
-            return Ok(dsh_profile_launch_spec(&self.workspace_dir));
+            return self
+                .native_launch
+                .clone()
+                .ok_or_else(|| format!("原生 DSH profile `{}` 缺少运行时给出的启动规格", self.id));
         }
         Ok(kind
             .default_launch()
@@ -2185,6 +2192,7 @@ mod tests {
     #[test]
     fn profile_launch_spec_keeps_workspace_path_with_spaces_in_one_env_value() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "claude-quant".to_string(),
             kind_id: "claude".to_string(),
             label: "Claude Quant".to_string(),
@@ -2207,6 +2215,7 @@ mod tests {
     #[test]
     fn pi_profile_uses_the_agent_directory_override_for_tui_and_acp() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "pi-team".to_string(),
             kind_id: "pi".to_string(),
             label: "Pi Team".to_string(),
@@ -2225,6 +2234,7 @@ mod tests {
     #[test]
     fn unknown_profile_kind_cannot_be_launched_as_claude() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "future-profile".to_string(),
             kind_id: "future-agent".to_string(),
             label: "Future Agent".to_string(),

@@ -419,6 +419,7 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
                 .profiles
                 .iter()
                 .map(|profile| AcpProfile {
+                    native_launch: None,
                     id: profile.id.clone(),
                     kind_id: profile.kind_id.clone(),
                     label: profile.label.clone(),

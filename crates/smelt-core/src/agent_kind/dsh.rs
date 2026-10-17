@@ -980,6 +980,7 @@ pub fn native_dsh_profiles() -> Vec<AcpProfile> {
                 id: format!("dsh-native-{name}"),
                 kind_id: ConversationAgentKind::Dsh.id().to_string(),
                 label: format!("{} · {name}", ConversationAgentKind::Dsh.label()),
+                native_launch: Some(dsh_profile_launch_spec(&name)),
                 workspace_dir: name,
             })
         })
@@ -1257,6 +1258,7 @@ mod dsh_launch_tests {
     #[test]
     fn native_dsh_profile_uses_profile_name_instead_of_a_workspace_env() {
         let profile = AcpProfile {
+            native_launch: Some(crate::agent_kind::dsh_profile_launch_spec("team")),
             id: "dsh-native-team".into(),
             kind_id: "dsh".into(),
             label: "DeepSeek Harness · team".into(),

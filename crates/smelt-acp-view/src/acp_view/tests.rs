@@ -2166,6 +2166,7 @@ fn restart_uses_updated_profile_launch_spec_when_profile_still_exists() {
     let mut config =
         AgentHostState::default().with_acp_cmd(ConversationAgentKind::Claude, "claude --current");
     config.profiles.push(AcpProfile {
+        native_launch: None,
         id: "quant".into(),
         kind_id: "claude".into(),
         label: "Quant".into(),
@@ -2213,6 +2214,7 @@ fn restart_keeps_persisted_launch_when_profile_agent_is_unknown() {
         .with_env("FUTURE_HOME", "~/.future-agent");
     let mut config = AgentHostState::default();
     config.profiles.push(AcpProfile {
+        native_launch: None,
         id: "future-profile".into(),
         kind_id: "future-agent".into(),
         label: "Future Agent".into(),

@@ -1482,6 +1482,7 @@ impl Workspace {
         apply_agent_host(
             |c| {
                 c.profiles.push(AcpProfile {
+                    native_launch: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     kind_id: ConversationAgentKind::Claude.id().to_string(),
                     label: "新 workspace".into(),

@@ -1,0 +1,23 @@
+[package]
+name = "smelt-sys"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+# 桌面客户端和运行时都要用的底层工具：日志、在线程里跑 tokio、等子进程输出、
+# 文件描述符上限、终端颜色环境变量、守护进程映像。不含任何业务逻辑，也不碰
+# 运行时的库。
+
+[dependencies]
+smelt-paths = { path = "../smelt-paths" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+libc = "0.2"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

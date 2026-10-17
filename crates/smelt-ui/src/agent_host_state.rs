@@ -1070,6 +1070,7 @@ mod tests {
     #[test]
     fn profile_inherits_kind_env_without_losing_its_workspace_dir() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "p1".into(),
             kind_id: ConversationAgentKind::Claude.id().into(),
             label: "Claude Quant".into(),
@@ -1103,6 +1104,7 @@ mod tests {
     #[test]
     fn native_dsh_profile_keeps_credentials_owned_by_dsh() {
         let profile = AcpProfile {
+            native_launch: Some(smelt_core::agent_kind::dsh_profile_launch_spec("team")),
             id: "dsh-native-team".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · team".into(),
@@ -1124,6 +1126,7 @@ mod tests {
     #[test]
     fn default_dsh_launch_prefers_the_discovered_native_profile() {
         let native = AcpProfile {
+            native_launch: Some(smelt_core::agent_kind::dsh_profile_launch_spec("web")),
             id: "dsh-native-web".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · web".into(),
@@ -1224,6 +1227,7 @@ mod tests {
         let mut config = AgentHostState::default();
         config.set_acp_cmd_for(ConversationAgentKind::Claude, "claude-custom --acp".into());
         let profile = AcpProfile {
+            native_launch: None,
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
@@ -1242,6 +1246,7 @@ mod tests {
     #[test]
     fn unknown_profile_cannot_resolve_a_launch_spec() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "future-profile".into(),
             kind_id: "future-agent".into(),
             label: "Future Agent".into(),

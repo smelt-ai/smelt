@@ -9706,6 +9706,7 @@ dependencies = [
  "smelt-paths",
  "smelt-runtime-client",
  "smelt-store",
+ "smelt-sys",
  "smol",
  "tempfile",
  "tokio",
@@ -9809,6 +9810,20 @@ dependencies = [
  "smelt-event-bus",
  "smelt-event-protocol",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "smelt-sys"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libc",
+ "sha2 0.10.9",
+ "smelt-paths",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

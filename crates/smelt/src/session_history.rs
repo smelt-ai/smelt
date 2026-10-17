@@ -1447,6 +1447,7 @@ mod tests {
     #[test]
     fn history_resume_profile_launch_uses_current_agent_command() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),

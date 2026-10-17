@@ -123,6 +123,7 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
             .profiles
             .into_iter()
             .map(|profile| AcpProfile {
+                native_launch: None,
                 id: profile.id,
                 kind_id: profile.kind_id,
                 label: profile.label,
@@ -393,6 +394,7 @@ mod tests {
 
     fn profile(id: &str, label: &str) -> AcpProfile {
         AcpProfile {
+            native_launch: None,
             id: id.into(),
             kind_id: "claude".into(),
             label: label.into(),
