@@ -501,9 +501,9 @@ pub(super) fn write_dsh_npx_shim(
 }
 
 fn ensure_npx_dsh_shim(cli: &DshCli) -> Result<std::path::PathBuf, String> {
-    let dir = dirs::home_dir()
+    let dir = smelt_paths::smelt_home()
         .ok_or_else(|| "无法定位 HOME".to_string())?
-        .join(".smelt/runtime/dsh-npx");
+        .join("runtime/dsh-npx");
     write_dsh_npx_shim(&dir, cli)
 }
 

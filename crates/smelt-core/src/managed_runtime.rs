@@ -532,6 +532,29 @@ pub(crate) fn pi_runtime_files() -> &'static [(&'static str, &'static str)] {
 
 #[cfg(test)]
 mod tests {
+    /// 真去下载、校验、安装钉死的 Bun 和 Pi，再跑一下。要联网，默认不跑；新平台上线、
+    /// 改 Bun 版本或校验值时手动跑：`cargo test -p smelt-core managed_runtime -- --ignored`。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    #[ignore = "需要联网下载 Bun 和 Pi 依赖"]
+    fn installs_and_runs_the_pinned_bun_and_pi_runtime() {
+        let home = std::env::temp_dir().join(format!(
+            "smelt-managed-runtime-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        // SAFETY: nextest 每个测试一个进程，这里没有别的线程在读环境变量。
+        unsafe { std::env::set_var("SMELT_HOME", &home) };
+        let runtime = sync_managed_pi_agent(&|message| eprintln!("{message}")).unwrap();
+        assert!(runtime.entry.is_file(), "{}", runtime.entry.display());
+        let output = std::process::Command::new(&runtime.bun)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), BUN_VERSION);
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     use super::*;
 
     #[test]

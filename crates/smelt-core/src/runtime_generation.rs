@@ -43,9 +43,11 @@ pub struct GenerationStore {
 }
 
 impl GenerationStore {
+    /// `$SMELT_HOME/runtime`。跟着 `SMELT_HOME` 走，第二个运行时实例才不会和第一个
+    /// 共用、互相回收对方的代际。
     pub fn managed() -> Result<Self, String> {
-        let home = dirs::home_dir().ok_or("找不到 home 目录")?;
-        Ok(Self::new(home.join(".smelt/runtime")))
+        let root = smelt_paths::smelt_home().ok_or("找不到 home 目录")?;
+        Ok(Self::new(root.join("runtime")))
     }
 
     pub fn new(runtime: PathBuf) -> Self {
