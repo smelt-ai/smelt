@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
+smelt-event-protocol = { path = "../smelt-event-protocol" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
 agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 base64 = "0.22"

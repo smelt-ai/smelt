@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::agent_kind::TerminalAgentKind;
-use crate::new_session::{LaunchEntry, default_launch_entries};
+pub use crate::new_session::{LaunchEntry, default_launch_entries};
 
 /// 启动项迁移版本。旧出厂命令与标签只在对应版本升级时改写；固定内置项则在
 /// 每次加载时与注册表对齐。

@@ -9773,7 +9773,9 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "smelt-event-protocol",
  "smelt-paths",
+ "smelt-runtime-client",
  "tempfile",
  "uuid",
 ]

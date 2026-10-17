@@ -31,7 +31,7 @@ pub use smelt_sys::block_on;
 pub mod claude_paths;
 pub mod client_migration;
 pub mod codex_app_server;
-pub mod control_api;
+pub use smelt_model::control_api;
 pub mod control_skill;
 pub use smelt_model::conversation;
 pub mod copilot_quota;
