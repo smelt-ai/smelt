@@ -211,42 +211,69 @@ async fn pump(mut send: SendStream, mut recv: RecvStream, unix: tokio::net::Unix
     }
 }
 
-/// 客户端：经 iroh 连一个远程运行时。实现 [`smelt_runtime_client::Connector`]，每次
-/// `connect` 在同一条 QUIC 连接上新开一条流；连接断了就重拨。
-pub struct RuntimeConnector {
+/// 拨号一个运行时最多等多久。离线的运行时靠地址发现找不到，不能把调用方一直挂着。
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// 客户端这一侧的 iroh endpoint，所有远程运行时共用一个：运行时按客户端密钥的公钥认
+/// 设备，同一把密钥同时绑几个 endpoint 会让 relay 上出现重复的节点。用 n0 的公共 relay
+/// 和地址发现；目标运行时用了自建 relay 时，拨号地址里带上它即可。
+pub struct IrohClient {
     runtime: tokio::runtime::Runtime,
     endpoint: Endpoint,
-    target: EndpointAddr,
-    conn: tokio::sync::Mutex<Option<Connection>>,
 }
 
-impl RuntimeConnector {
-    /// `secret` 是这台客户端自己的身份，运行时按它的公钥认设备，所以必须持久。
-    pub fn new(
-        secret: SecretKey,
-        target: EndpointId,
-        relay: Option<RelaySettings>,
-    ) -> Result<Self> {
+impl IrohClient {
+    /// `secret` 是这台客户端自己的身份，必须持久。
+    pub fn new(secret: SecretKey) -> Result<Arc<Self>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("smelt-iroh-client")
             .enable_all()
             .build()
             .context("起不了 iroh 客户端的 tokio 运行时")?;
-        let endpoint =
-            runtime.block_on(bind_runtime_endpoint(secret, Vec::new(), relay.as_ref()))?;
-        let mut addr = EndpointAddr::new(target);
-        if let Some(relay) = relay {
-            addr = addr.with_relay_url(relay.url);
-        }
-        Ok(Self {
-            runtime,
-            endpoint,
-            target: addr,
-            conn: tokio::sync::Mutex::new(None),
-        })
+        let endpoint = runtime.block_on(bind_runtime_endpoint(secret, Vec::new(), None))?;
+        Ok(Arc::new(Self { runtime, endpoint }))
     }
 
+    /// 这台客户端的设备身份（endpoint id）。
+    pub fn id(&self) -> EndpointId {
+        self.endpoint.id()
+    }
+
+    /// 连某个运行时的连接器。
+    pub fn connector(
+        self: &Arc<Self>,
+        target: EndpointId,
+        relay: Option<&RelaySettings>,
+    ) -> RuntimeConnector {
+        let mut addr = EndpointAddr::new(target);
+        if let Some(relay) = relay {
+            addr = addr.with_relay_url(relay.url.clone());
+        }
+        RuntimeConnector {
+            client: Arc::clone(self),
+            target: addr,
+            conn: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Drop for IrohClient {
+    fn drop(&mut self) {
+        let endpoint = self.endpoint.clone();
+        self.runtime.block_on(async move { endpoint.close().await });
+    }
+}
+
+/// 经 iroh 连一个远程运行时。实现 [`smelt_runtime_client::Connector`]，每次 `connect`
+/// 在同一条 QUIC 连接上新开一条流；连接断了就重拨。不能在 tokio 运行时里面调用。
+pub struct RuntimeConnector {
+    client: Arc<IrohClient>,
+    target: EndpointAddr,
+    conn: tokio::sync::Mutex<Option<Connection>>,
+}
+
+impl RuntimeConnector {
     async fn connection(&self) -> io::Result<Connection> {
         let mut slot = self.conn.lock().await;
         if let Some(conn) = slot.as_ref()
@@ -254,10 +281,13 @@ impl RuntimeConnector {
         {
             return Ok(conn.clone());
         }
-        let conn = self
+        let dial = self
+            .client
             .endpoint
-            .connect(self.target.clone(), RUNTIME_ALPN)
+            .connect(self.target.clone(), RUNTIME_ALPN);
+        let conn = tokio::time::timeout(DIAL_TIMEOUT, dial)
             .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "连不上运行时（超时）"))?
             .map_err(|error| io::Error::new(io::ErrorKind::ConnectionRefused, error))?;
         *slot = Some(conn.clone());
         Ok(conn)
@@ -276,7 +306,7 @@ impl RuntimeConnector {
 
 impl smelt_runtime_client::Connector for RuntimeConnector {
     fn connect(&self) -> io::Result<UnixStream> {
-        self.runtime.block_on(async {
+        self.client.runtime.block_on(async {
             let conn = self.connection().await?;
             match conn.open_bi().await {
                 Ok((send, recv)) => bridge(send, recv),
@@ -289,12 +319,5 @@ impl smelt_runtime_client::Connector for RuntimeConnector {
                 }
             }
         })
-    }
-}
-
-impl Drop for RuntimeConnector {
-    fn drop(&mut self) {
-        let endpoint = self.endpoint.clone();
-        self.runtime.block_on(async move { endpoint.close().await });
     }
 }

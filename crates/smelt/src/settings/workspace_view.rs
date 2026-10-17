@@ -202,6 +202,7 @@ impl Workspace {
     pub fn open_settings_window(&mut self, cx: &mut Context<Self>) {
         super::refresh_agent_hooks_status(cx);
         super::refresh_remote(cx);
+        crate::runtimes::refresh_runtime_status(cx);
         self.refresh_pi_config(cx);
         let workspace = cx.entity();
         cx.defer(move |cx| {

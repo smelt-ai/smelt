@@ -2123,7 +2123,7 @@ fn spawn_layout_leaves_rec(ps: &PaneState, out: &mut Vec<SpawnedLeaf>) -> Result
         } => {
             let sid = id.clone().unwrap_or_else(new_sid);
             let terminal =
-                terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, launch_cmd.as_deref())
+                terminal::Terminal::spawn(&crate::runtimes::Runtime::local(), 24, 80, cwd.as_deref(), &sid, launch_cmd.as_deref())
                     .map_err(|e| {
                         eprintln!("[workspace] 恢复会话 {sid}（{cwd:?}）失败：{e:#}");
                         e.to_string()
@@ -2160,6 +2160,7 @@ fn rebuild_pane_ready(
             let v = cx.new(|cx| {
                 let mut view = TerminalView::from_terminal(
                     cx,
+                    crate::runtimes::Runtime::local(),
                     leaf.terminal,
                     leaf.cwd,
                     leaf.sid,
@@ -3458,7 +3459,7 @@ impl Workspace {
             std::thread::Builder::new()
                 .name("smelt-remote-term-reattach".into())
                 .spawn(move || {
-                    let r = terminal::Terminal::reattach(24, 80, Some(&cwd_bg), &sid_bg);
+                    let r = terminal::Terminal::reattach(&crate::runtimes::Runtime::local(), 24, 80, Some(&cwd_bg), &sid_bg);
                     let _ = tx.send_blocking(r);
                 })
                 .expect("spawn smelt-remote-term-reattach 线程");
@@ -3505,7 +3506,7 @@ impl Workspace {
                         return;
                     }
                     let view = cx.new(|cx| {
-                        TerminalView::from_terminal(cx, terminal, Some(cwd), sid, None, None)
+                        TerminalView::from_terminal(cx, crate::runtimes::Runtime::local(), terminal, Some(cwd), sid, None, None)
                     });
                     let mut session = Session::single(view);
                     session.remote_owned = true;
@@ -4641,6 +4642,8 @@ fn main() {
         // 整个 GUI 进程也不会带走子进程——这正是托管这一层要解决的问题。
         // 远程访问同理跑在 smeltd 里，GUI 退出不影响远程设备。
         settings::start_remote_config_load(cx);
+        // 登记过的远程运行时：读库、连 iroh 都在后台。
+        runtimes::start_runtime_hub(cx);
         // 首启主窗口，记入 current_ws（reopen 回调 / URL 投递循环都靠它判断当前主窗口）。
         *current_ws.borrow_mut() = Some(open_workspace_window(cx, window_bg));
 

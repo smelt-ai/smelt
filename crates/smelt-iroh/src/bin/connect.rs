@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use iroh::EndpointId;
 use smelt_iroh::RelaySettings;
-use smelt_iroh::runtime::RuntimeConnector;
+use smelt_iroh::runtime::IrohClient;
 use smelt_model::control_api::{DeviceList, DevicePair};
 use smelt_model::remote_config::PairParams;
 use smelt_runtime_client::RuntimeClient;
@@ -55,10 +55,9 @@ enum Command {
 fn client(peer: EndpointId, relay: Option<&str>) -> Result<RuntimeClient> {
     let relay = relay.map(RelaySettings::parse).transpose()?;
     let secret = smelt_iroh::load_or_create_secret(&smelt_iroh::default_client_secret_path()?)?;
-    eprintln!("本机设备身份：{}", secret.public());
-    Ok(RuntimeClient::new(RuntimeConnector::new(
-        secret, peer, relay,
-    )?))
+    let iroh = IrohClient::new(secret)?;
+    eprintln!("本机设备身份：{}", iroh.id());
+    Ok(RuntimeClient::new(iroh.connector(peer, relay.as_ref())))
 }
 
 fn main() -> Result<()> {

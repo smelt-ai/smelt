@@ -1174,7 +1174,7 @@ static CONNECT_MANAGED_ENSURED: AtomicBool = AtomicBool::new(false);
 /// 连不上则拉起 `~/.smelt/bin/smeltd`（独立进程组）再重试。
 ///
 /// **这里绝不删 sock 文件。**（僵尸 sock 由 smeltd bind 方清理，见 smeltd。）
-fn connect_daemon() -> std::io::Result<UnixStream> {
+pub(crate) fn connect_daemon() -> std::io::Result<UnixStream> {
     let path = sock_path();
 
     // 已有守护：进程内只 ensure 一次。
@@ -1950,19 +1950,13 @@ pub fn ensure_daemon_running() {
     let _ = connect_daemon();
 }
 
-/// 让守护杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
-pub fn kill_remote(id: &str) {
-    let Ok(mut s) = connect_daemon_control() else {
-        return;
-    };
-    let _ = writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::Kill, "id": id })
+/// 让运行时杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
+/// 等回执再返回，确保 kill 落地后再继续（避免关 pane 后立刻退出时丢命令）。
+pub(crate) fn kill_remote(runtime: &crate::runtimes::Runtime, id: &str) {
+    let _ = runtime.client().request(
+        &serde_json::json!({ "op": DaemonOperation::Kill, "id": id }),
+        smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
     );
-    // 等守护回执，确保 kill 落地后再继续（避免关 pane 后立刻退出时丢命令）。
-    let mut resp = String::new();
-    let _ = BufReader::new(s).read_line(&mut resp);
 }
 
 // ===================== 状态通道（见 docs/archive/state-channel-plan.md） =====================
@@ -2290,23 +2284,31 @@ impl Terminal {
     /// iTerm2 伪装 / LANG 兜底，见 smeltd）。id 已存在 → attach，守护先重放输出
     /// 缓冲恢复画面，再实时转发。`launch`：新建会话时要先跑的命令（编进 shell 启动
     /// 命令行，见 `smeltd::terminal_registry`），只在新建时生效，reattach 会被忽略。
-    pub fn spawn(
+    pub(crate) fn spawn(
+        runtime: &crate::runtimes::Runtime,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
         id: &str,
         launch: Option<&str>,
     ) -> anyhow::Result<Self> {
-        Self::spawn_inner(rows, cols, cwd, id, launch, true)
+        Self::spawn_inner(runtime, rows, cols, cwd, id, launch, true)
     }
 
     /// 只重新附着守护中仍存在的 PTY。用于实时流异常断开后的自动恢复；会话已经
     /// 正常退出时返回错误，绝不创建一个同 id 的新 shell 冒充原会话。
-    pub fn reattach(rows: usize, cols: usize, cwd: Option<&str>, id: &str) -> anyhow::Result<Self> {
-        Self::spawn_inner(rows, cols, cwd, id, None, false)
+    pub(crate) fn reattach(
+        runtime: &crate::runtimes::Runtime,
+        rows: usize,
+        cols: usize,
+        cwd: Option<&str>,
+        id: &str,
+    ) -> anyhow::Result<Self> {
+        Self::spawn_inner(runtime, rows, cols, cwd, id, None, false)
     }
 
     fn spawn_inner(
+        runtime: &crate::runtimes::Runtime,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
@@ -2339,7 +2341,7 @@ impl Terminal {
                 // 阻塞（重试 × 每次再拉一遍守护），启动恢复 8 个会话就是 3 分钟
                 // beachball。重试只留给握手层：连上了但读到 EOF/坏行，那才是
                 // upgrade 交接的百毫秒抖动，重连一次就好。
-                let writer = connect_daemon()?;
+                let writer = runtime.connect()?;
                 match Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing) {
                     Ok(x) => {
                         result = Some(x);
@@ -3362,7 +3364,15 @@ mod damage_gate_tests {
                  （`make test` 会一并构建）"
             );
         }
-        Terminal::spawn(24, 80, dir.to_str(), id, None).expect("spawn 失败")
+        Terminal::spawn(
+            &crate::runtimes::Runtime::local(),
+            24,
+            80,
+            dir.to_str(),
+            id,
+            None,
+        )
+        .expect("spawn 失败")
     }
 
     /// 一次性测试会话的自动清理：Drop 无论函数正常返回还是中途 panic（assert
@@ -3378,7 +3388,7 @@ mod damage_gate_tests {
     struct TestSessionGuard(String);
     impl Drop for TestSessionGuard {
         fn drop(&mut self) {
-            kill_remote(&self.0);
+            kill_remote(&crate::runtimes::Runtime::local(), &self.0);
         }
     }
 
@@ -3398,7 +3408,7 @@ mod damage_gate_tests {
 
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
         thread::sleep(Duration::from_millis(500));
-        kill_remote(&id);
+        kill_remote(&crate::runtimes::Runtime::local(), &id);
 
         // 守护 remove 会话并 shutdown client → 读线程 EOF → dead 置位。
         let deadline = std::time::Instant::now() + Duration::from_secs(5);

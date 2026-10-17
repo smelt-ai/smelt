@@ -163,6 +163,7 @@ fn dispatch_control(
                     runtime_id: super::runtime_identity::runtime_id().map(|id| id.to_string()),
                     os: Some(std::env::consts::OS.to_string()),
                     arch: Some(std::env::consts::ARCH.to_string()),
+                    hostname: smelt_sys::hostname(),
                 },
             };
             success_value(control_version, &request_id, result)

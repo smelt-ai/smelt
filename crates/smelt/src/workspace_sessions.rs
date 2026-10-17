@@ -294,7 +294,7 @@ impl Workspace {
                     ) {
                         if let Ok(leaves) = result {
                             for leaf in leaves {
-                                terminal::kill_remote(&leaf.sid);
+                                terminal::kill_remote(&crate::runtimes::Runtime::local(), &leaf.sid);
                             }
                         }
                         this.restore_pending
@@ -1344,6 +1344,7 @@ impl Workspace {
             .name("smelt-spawn-session".into())
             .spawn(move || {
                 let r = terminal::Terminal::spawn(
+                    &crate::runtimes::Runtime::local(),
                     24,
                     80,
                     cwd_bg.as_deref(),
@@ -1381,6 +1382,7 @@ impl Workspace {
                 let view = cx.new(|cx| {
                     TerminalView::from_terminal(
                         cx,
+                        crate::runtimes::Runtime::local(),
                         terminal,
                         cwd.clone(),
                         sid,
@@ -1420,7 +1422,7 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    terminal::Terminal::spawn(24, 80, cwd_bg.as_deref(), &sid_bg, None)
+                    terminal::Terminal::spawn(&crate::runtimes::Runtime::local(), 24, 80, cwd_bg.as_deref(), &sid_bg, None)
                 })
                 .await;
             let terminal = match result {
@@ -1437,7 +1439,7 @@ impl Workspace {
                     return;
                 }
                 let view =
-                    cx.new(|cx| TerminalView::from_terminal(cx, terminal, cwd, sid, None, None));
+                    cx.new(|cx| TerminalView::from_terminal(cx, crate::runtimes::Runtime::local(), terminal, cwd, sid, None, None));
                 let state = cx.new(|_| ResizableState::default());
                 let sess = &mut this.sessions[session_ix];
                 // old 叶子若已被拆掉/关掉，split_leaf 找不到就不动。
@@ -1855,7 +1857,7 @@ impl Workspace {
                 // 用户主动关闭会话时要在移除视图前完成有界 kill 往返。
                 // `terminal::kill_remote` 使用 5s socket 超时，确保 App 紧接着退出时
                 // 不会把尚未送达的命令留给一个 detached 任务。
-                terminal::kill_remote(&id);
+                terminal::kill_remote(&crate::runtimes::Runtime::local(), &id);
             }
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| v.shutdown(cx));
@@ -1983,7 +1985,7 @@ impl Workspace {
         }
         // 用户主动关 pane → 守护真正杀掉该 shell（区别于退出 GUI：那时保活）。
         let closed_session_id = view.read(cx).session_id().to_string();
-        terminal::kill_remote(&closed_session_id);
+        terminal::kill_remote(&crate::runtimes::Runtime::local(), &closed_session_id);
         if cx.try_global::<AttentionGlobal>().is_some() {
             AttentionGlobal::remove_session(&closed_session_id, cx);
         }

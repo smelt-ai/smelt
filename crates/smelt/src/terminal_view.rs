@@ -129,6 +129,8 @@ const PAGE_LINES: i32 = 20;
 
 /// 一个内嵌终端视图。
 pub struct TerminalView {
+    /// 会话所在的运行时。断线重连、关闭都找它。
+    runtime: crate::runtimes::Runtime,
     terminal: Terminal,
     /// 每次替换底层连接递增。旧连接的 redraw 任务退出时只能重连自己的 generation，
     /// 避免显式重启/其它成功重连已经装上新 Terminal 后又被迟到任务覆盖。
@@ -317,8 +319,9 @@ impl TerminalView {
     /// 便捷构造：所有调用方都在 GPUI 的 ObjC 回调栈上（启动
     /// did_finish_launching / 用户事件），panic 不能跨 FFI unwind，一炸就是
     /// 整个 app abort——历史上「重启就崩」「拖文件夹就崩」都是它。
-    pub fn from_terminal(
+    pub(crate) fn from_terminal(
         cx: &mut Context<Self>,
+        runtime: crate::runtimes::Runtime,
         terminal: Terminal,
         cwd: Option<String>,
         session_id: String,
@@ -346,6 +349,7 @@ impl TerminalView {
             .to_string();
 
         let mut view = Self {
+            runtime,
             terminal,
             terminal_generation: 0,
             focus_handle: cx.focus_handle(),
@@ -567,6 +571,7 @@ impl TerminalView {
         self.reconnecting = true;
         let sid = self.session_id.clone();
         let cwd = self.cwd.clone();
+        let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             // 退避：500ms 起步，翻倍到 10s 封顶，重到成功或会话消失为止。
             let mut delay = Duration::from_millis(500);
@@ -579,11 +584,12 @@ impl TerminalView {
                 if !still_current {
                     return;
                 }
-                // 1) 守护活着吗？exec 期间 socket 短暂不可连 / 守护还没起来时，
+                // 1) 运行时活着吗？exec 期间 socket 短暂不可连 / 守护还没起来 / 网络断了，
                 //    都不能判「会话没了」——那是要等的，不是要放弃的。
+                let probe = runtime.client().clone();
                 let daemon_up = cx
                     .background_executor()
-                    .spawn(async { terminal::daemon_info().is_some() })
+                    .spawn(async move { probe.describe().is_ok() })
                     .await;
                 let sid2 = sid.clone();
                 let alive = this
@@ -613,9 +619,10 @@ impl TerminalView {
                 // 镜像未知时也立刻 attach：tmux 式，attach 本人才是还活着的权威答案。
                 let sid3 = sid.clone();
                 let cwd3 = cwd.clone();
+                let runtime3 = runtime.clone();
                 let term = cx
                     .background_executor()
-                    .spawn(async move { Terminal::reattach(24, 80, cwd3.as_deref(), &sid3) })
+                    .spawn(async move { Terminal::reattach(&runtime3, 24, 80, cwd3.as_deref(), &sid3) })
                     .await;
                 match term {
                     Ok(t) => {

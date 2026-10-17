@@ -430,7 +430,7 @@ impl Workspace {
                     let terminal =
                         cx.background_executor()
                             .spawn(async move {
-                                terminal::Terminal::reattach(24, 80, cwd.as_deref(), &sid)
+                                terminal::Terminal::reattach(&crate::runtimes::Runtime::local(), 24, 80, cwd.as_deref(), &sid)
                             })
                             .await;
                     if let Ok(terminal) = terminal {
@@ -542,7 +542,7 @@ impl Workspace {
         if id.starts_with("acp-") {
             smelt_client::acp_client::kill_acp_session(&crate::runtimes::local(), id);
         } else {
-            terminal::kill_remote(id);
+            terminal::kill_remote(&crate::runtimes::Runtime::local(), id);
         }
     }
 
@@ -625,7 +625,7 @@ impl Workspace {
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
                     for (entity, cwd, sid) in jobs {
-                        let term = terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None);
+                        let term = terminal::Terminal::spawn(&crate::runtimes::Runtime::local(), 24, 80, cwd.as_deref(), &sid, None);
                         out.push((entity, term));
                     }
                     out

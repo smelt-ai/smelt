@@ -16,6 +16,9 @@ use tracing::info;
 
 pub mod runtime;
 
+/// 客户端解析配对串、拼拨号地址要用到，免得各自直接依赖 iroh。
+pub use iroh::EndpointId;
+
 /// 旧的手机隧道 ALPN。运行时已经不再接收它，手机改走 [`runtime::RUNTIME_ALPN`]
 /// 时一并删除（设计文档 P4）。
 pub const ALPN: &[u8] = b"smelt/tunnel/1";

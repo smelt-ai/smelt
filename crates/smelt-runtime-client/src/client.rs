@@ -173,6 +173,7 @@ mod tests {
                 runtime_id: Some("runtime-a".to_string()),
                 os: Some("linux".to_string()),
                 arch: Some("aarch64".to_string()),
+                hostname: Some("linux-box".to_string()),
             },
         }
     }

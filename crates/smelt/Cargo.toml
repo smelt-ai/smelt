@@ -15,6 +15,7 @@ smelt-client = { path = "../smelt-client" }
 smelt-paths = { path = "../smelt-paths" }
 # GUI/守护共用的无 UI 逻辑（终端文本、OSC 扫描、权限菜单解析、远程网关）。
 smelt-pairing = { path = "../smelt-pairing" }
+smelt-iroh = { path = "../smelt-iroh" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-client-store = { path = "../smelt-client-store" }
 # 共享 GPUI UI 基建（色板/markdown+mermaid/@补全/ACP agent UI 偏好数据模型）与

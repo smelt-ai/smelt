@@ -234,6 +234,9 @@ pub struct DaemonRuntimeInfo {
     /// `std::env::consts::ARCH`，如 `aarch64`、`x86_64`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
+    /// 运行时所在机器的主机名，客户端添加运行时时拿它当默认名字。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

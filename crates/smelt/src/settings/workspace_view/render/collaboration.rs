@@ -134,16 +134,21 @@ pub(super) fn remote_page(
                 "配对新设备"
             };
             card = card.child(
-                h_flex().child(btn("begin-pairing", label.into()).on_mouse_down(
-                    MouseButton::Left,
-                    |_, _window, cx: &mut App| begin_pairing(cx),
-                )),
+                h_flex().child(
+                    btn("begin-pairing", label.into())
+                        .on_mouse_down(MouseButton::Left, |_, _window, cx: &mut App| {
+                            begin_pairing(cx)
+                        }),
+                ),
             );
             let Some(offer) = state.offer else {
                 return card
-                    .child(div().text_xs().text_color(muted).child(
-                        "配对一台设备，就是把这台机器上你这个用户的 shell 权限交给它。",
-                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("配对一台设备，就是把这台机器上你这个用户的 shell 权限交给它。"),
+                    )
                     .into_any_element();
             };
             let uri = offer.uri.clone();
@@ -158,35 +163,44 @@ pub(super) fn remote_page(
                         .child(img(image).w(px(132.)).h(px(132.))),
                 );
             }
-            row = row.child(
-                v_flex()
-                    .gap_1p5()
-                    .min_w(px(0.))
-                    .flex_1()
-                    .child(
-                        div()
-                            .max_w(px(280.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis_middle()
-                            .text_xs()
-                            .text_color(fg)
-                            .child(offer.uri),
-                    )
-                    .child(h_flex().gap_2().child(
-                        btn("copy-pairing-uri", copy_btn_label("copy-pairing-uri", "复制配对串", cx))
-                            .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
-                                copy_with_feedback(uri.clone(), "copy-pairing-uri", cx);
-                            }),
-                    ))
-                    .child(div().text_xs().text_color(muted).child(
-                        "在另一台电脑的 Smelt「添加运行时」里粘贴，或用手机扫码。\
+            row =
+                row.child(
+                    v_flex()
+                        .gap_1p5()
+                        .min_w(px(0.))
+                        .flex_1()
+                        .child(
+                            div()
+                                .max_w(px(280.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis_middle()
+                                .text_xs()
+                                .text_color(fg)
+                                .child(offer.uri),
+                        )
+                        .child(
+                            h_flex().gap_2().child(
+                                btn(
+                                    "copy-pairing-uri",
+                                    copy_btn_label("copy-pairing-uri", "复制配对串", cx),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    move |_, _window, cx: &mut App| {
+                                        copy_with_feedback(uri.clone(), "copy-pairing-uri", cx);
+                                    },
+                                ),
+                            ),
+                        )
+                        .child(div().text_xs().text_color(muted).child(
+                            "在另一台电脑的 Smelt「添加运行时」里粘贴，或用手机扫码。\
                          只能用一次，10 分钟内有效。",
-                    ))
-                    .child(div().text_xs().text_color(muted).child(
-                        "配对一台设备，就是把这台机器上你这个用户的 shell 权限交给它。",
-                    )),
-            );
+                        ))
+                        .child(div().text_xs().text_color(muted).child(
+                            "配对一台设备，就是把这台机器上你这个用户的 shell 权限交给它。",
+                        )),
+                );
             card.child(row).into_any_element()
         }),
         // 已配对设备
@@ -239,9 +253,101 @@ pub(super) fn remote_page(
                                 border,
                             )
                             .hover(|s| s.bg(border))
-                            .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
-                                revoke_device(endpoint_id.clone(), cx);
-                            }),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                move |_, _window, cx: &mut App| {
+                                    revoke_device(endpoint_id.clone(), cx);
+                                },
+                            ),
+                        ),
+                );
+            }
+            list.into_any_element()
+        }),
+    ]);
+
+    let runtimes_group = SettingGroup::new().title("其他运行时").items(vec![
+        SettingItem::new(
+            "配对串",
+            SettingField::input(
+                |cx: &App| {
+                    cx.try_global::<crate::runtimes::RuntimeHub>()
+                        .map(|hub| hub.pairing_input.clone().into())
+                        .unwrap_or_default()
+                },
+                |v: SharedString, cx: &mut App| crate::runtimes::set_pairing_input(&v, cx),
+            ),
+        )
+        .description(
+            "在另一台机器上执行 smeltd pair（或在它的「远程访问」里生成配对串），粘贴到这里再点添加。",
+        ),
+        SettingItem::render(move |_, _, cx: &mut App| {
+            let hub = cx
+                .try_global::<crate::runtimes::RuntimeHub>()
+                .cloned()
+                .unwrap_or_default();
+            let muted = cx.theme().muted_foreground;
+            let danger = cx.theme().danger;
+            let fg = cx.theme().foreground;
+            let online = gpui::rgb(crate::ui_theme::green());
+
+            let mut list = v_flex().gap_2();
+            let label = if hub.adding { "正在配对…" } else { "添加运行时" };
+            list = list.child(h_flex().child(
+                btn("add-runtime", label.into()).on_mouse_down(
+                    MouseButton::Left,
+                    |_, _window, cx: &mut App| crate::runtimes::add_runtime(cx),
+                ),
+            ));
+            if let Some(error) = hub.error.clone() {
+                list = list.child(div().text_xs().text_color(danger).child(error));
+            }
+            if hub.remotes.is_empty() {
+                return list
+                    .child(div().text_xs().text_color(muted).child("还没有添加其他运行时。"))
+                    .into_any_element();
+            }
+            for (index, remote) in hub.remotes.iter().enumerate() {
+                let runtime_id = remote.connection.runtime_id.clone();
+                let (status, is_online) = match &remote.status {
+                    crate::runtimes::RuntimeStatus::Connecting => ("正在连接…".to_string(), false),
+                    crate::runtimes::RuntimeStatus::Online { version, platform } => (
+                        match platform {
+                            Some(platform) => format!("在线 · {version} · {platform}"),
+                            None => format!("在线 · {version}"),
+                        },
+                        true,
+                    ),
+                    crate::runtimes::RuntimeStatus::Offline(error) => (format!("离线：{error}"), false),
+                };
+                list = list.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().size(px(8.)).rounded_full().when_else(
+                            is_online,
+                            |dot| dot.bg(online),
+                            |dot| dot.bg(muted),
+                        ))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(fg)
+                                        .child(remote.connection.name.clone()),
+                                )
+                                .child(div().text_xs().text_color(muted).child(status)),
+                        )
+                        .child(
+                            settings_chip_button(("remove-runtime", index), "移除", fg, popover, border)
+                                .hover(|s| s.bg(border))
+                                .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                                    crate::runtimes::remove_runtime(runtime_id.clone(), cx);
+                                }),
                         ),
                 );
             }
@@ -250,7 +356,8 @@ pub(super) fn remote_page(
     ]);
 
     SettingPage::new("远程访问")
-        .description("让配对过的电脑和手机经 iroh 连这台机器的运行时。")
+        .description("让配对过的电脑和手机经 iroh 连这台机器的运行时，或者添加其他机器上的运行时。")
         .group(access_group)
         .group(devices_group)
+        .group(runtimes_group)
 }

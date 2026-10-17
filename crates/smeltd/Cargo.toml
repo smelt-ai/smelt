@@ -15,6 +15,7 @@ dirs = "5"
 notify = "6"
 smelt-paths = { path = "../smelt-paths" }
 smelt-core = { path = "../smelt-core" }
+smelt-sys = { path = "../smelt-sys" }
 smelt-event-protocol = { path = "../smelt-event-protocol" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-git = { path = "../smelt-git" }
