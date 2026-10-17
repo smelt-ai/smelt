@@ -9773,6 +9773,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "smelt-paths",
  "tempfile",
  "uuid",
 ]

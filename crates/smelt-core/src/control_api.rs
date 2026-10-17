@@ -833,6 +833,9 @@ pi_calls! {
         -> EmptyParams;
     /// 把教智能体用 `smelt` 命令行的技能写到运行时那台机器上（内容没变就不写）。
     SkillsSyncControl => SkillsSyncControl(EmptyParams) -> EmptyParams;
+    /// 用产品智能体定义开一场对话（`smelt agent start`）。
+    ConversationCreateForAgent => ConversationCreateForAgent(AgentDefinitionIdParams)
+        -> crate::session_control::CreatedAgentConversation;
     /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录），顺带给出
     /// 会加载的技能。
     SessionLaunchPrepare => SessionLaunchPrepare(crate::agent_definition_store::LaunchPrepareParams)

@@ -11,6 +11,7 @@ workspace = true
 # 和执行留在 smelt-core，只有运行时依赖它。
 
 [dependencies]
+smelt-paths = { path = "../smelt-paths" }
 agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 base64 = "0.22"

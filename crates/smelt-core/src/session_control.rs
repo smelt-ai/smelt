@@ -1219,10 +1219,9 @@ pub struct CreatedAgentConversation {
     pub cwd: String,
 }
 
-/// 用产品智能体定义开一场对话。会话进 daemon 远程目录，桌面会投影到「对话」栏。
-pub fn create_agent_conversation(
-    agent_definition_id: &str,
-) -> Result<CreatedAgentConversation, String> {
+/// 运行时开一场产品智能体对话之前，按定义组好它在远程目录里的那一条：校验定义能开
+/// 对话、建好智能体的 space 作为工作目录、按定义解析启动规格。
+pub fn agent_conversation_session(agent_definition_id: &str) -> Result<RemoteAcpSession, String> {
     let agent_definition_id = agent_definition_id.trim();
     if agent_definition_id.is_empty() {
         return Err("智能体 id 不能为空".into());
@@ -1238,7 +1237,6 @@ pub fn create_agent_conversation(
         .ok_or_else(|| "智能体不可开对话".to_string())?;
     let cwd = crate::agent_definition_store::ensure_agent_space(agent_definition_id)
         .ok_or_else(|| "无法创建智能体工作区".to_string())?;
-    let session_id = format!("acp-{}", uuid::Uuid::new_v4());
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
@@ -1248,8 +1246,8 @@ pub fn create_agent_conversation(
     } else {
         definition.name
     };
-    create_remote_acp_session(&RemoteAcpSession {
-        id: session_id.clone(),
+    Ok(RemoteAcpSession {
+        id: format!("acp-{}", uuid::Uuid::new_v4()),
         cwd: cwd.to_string_lossy().into_owned(),
         title,
         agent_option_id: option.id,
@@ -1259,11 +1257,6 @@ pub fn create_agent_conversation(
         created_at,
         lifecycle: RemoteSessionLifecycle::default(),
         hidden: false,
-    })?;
-    Ok(CreatedAgentConversation {
-        session_id,
-        agent_definition_id: agent_definition_id.to_string(),
-        cwd: cwd.to_string_lossy().into_owned(),
     })
 }
 
@@ -1629,8 +1622,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_agent_conversation_rejects_a_missing_definition() {
-        let error = create_agent_conversation("missing-agent").unwrap_err();
+    fn agent_conversation_rejects_a_missing_definition() {
+        let error = agent_conversation_session("missing-agent").unwrap_err();
         assert!(error.contains("不存在"), "{error}");
     }
 

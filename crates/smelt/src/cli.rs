@@ -141,7 +141,9 @@ fn run_agent(args: &[String]) -> i32 {
             let Some(id) = args.get(1).map(String::as_str).filter(|id| !id.is_empty()) else {
                 return usage("smelt agent chat <id>");
             };
-            match smelt_core::session_control::create_agent_conversation(id) {
+            match control::<smelt_core::control_api::ConversationCreateForAgent>(
+                AgentDefinitionIdParams { id: id.to_string() },
+            ) {
                 Ok(created) => print_ok(&created),
                 Err(error) => fail(&error),
             }

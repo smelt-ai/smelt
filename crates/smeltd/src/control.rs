@@ -25,7 +25,7 @@ use smelt_runtime_client::protocol::control::{
 };
 
 use super::session_catalog::published_session_states;
-use super::{AcpSessions, EventHubHandle, Sessions};
+use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions};
 
 fn error_value(
     control_version: u16,
@@ -112,6 +112,7 @@ fn dispatch_control(
     envelope: ControlRequestEnvelope,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
+    remote_sessions: &RemoteSessions,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -437,6 +438,27 @@ fn dispatch_control(
             };
             match smelt_core::client_migration::take() {
                 Ok(state) => success_value(control_version, &request_id, state),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::ConversationCreateForAgent => {
+            let params: AgentDefinitionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match create_agent_conversation(
+                &params.id,
+                sessions,
+                acp_sessions,
+                event_hub,
+                remote_sessions,
+            ) {
+                Ok(created) => success_value(control_version, &request_id, created),
                 Err(error) => error_value(
                     control_version,
                     request_id,
@@ -1161,11 +1183,46 @@ fn run_automation_once(
     Ok(applied.result)
 }
 
+/// 用产品智能体定义开一场对话：会话进运行时的远程目录，桌面会投影到「对话」栏。
+fn create_agent_conversation(
+    agent_definition_id: &str,
+    sessions: &Sessions,
+    acp_sessions: &AcpSessions,
+    event_hub: &EventHubHandle,
+    remote_sessions: &RemoteSessions,
+) -> Result<smelt_core::session_control::CreatedAgentConversation, String> {
+    let session = smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
+    let request = serde_json::json!({
+        "id": session.id,
+        "cwd": session.cwd,
+        "launch": session.launch,
+        "agent": session.agent,
+        "resume_id": session.resume_id,
+    });
+    let open = super::acp_host::parse_acp_open_request(&request)
+        .ok_or_else(|| "invalid ACP create request".to_string())?;
+    let created = smelt_core::session_control::CreatedAgentConversation {
+        session_id: session.id.clone(),
+        agent_definition_id: agent_definition_id.trim().to_string(),
+        cwd: session.cwd.clone(),
+    };
+    super::acp_host::create_daemon_acp_session(
+        &open,
+        Some(session),
+        sessions,
+        acp_sessions,
+        event_hub,
+        remote_sessions,
+    )?;
+    Ok(created)
+}
+
 pub(crate) fn handle_control(
     mut conn: UnixStream,
     payload: serde_json::Value,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
+    remote_sessions: &RemoteSessions,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -1175,6 +1232,7 @@ pub(crate) fn handle_control(
             envelope,
             sessions,
             acp_sessions,
+            remote_sessions,
             automations,
             event_hub,
             exe_mtime,
@@ -1218,6 +1276,7 @@ mod tests {
             serde_json::Value::Object(payload),
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             123,
@@ -1264,6 +1323,7 @@ mod tests {
             envelope,
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             0,
@@ -1292,6 +1352,7 @@ mod tests {
             }),
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             0,
@@ -1325,6 +1386,7 @@ mod tests {
             }),
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             0,

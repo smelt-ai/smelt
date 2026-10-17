@@ -71,6 +71,7 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
             v,
             &sessions,
             &acp_sessions,
+            &remote_sessions,
             &automations,
             &event_hub,
             exe_mtime,
