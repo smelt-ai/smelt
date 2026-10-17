@@ -2,6 +2,7 @@
 //! 执行。业务规则在 `smelt_core::pi_service`。修改类方法都回带新的完整快照。
 
 use smelt_core::control_api::*;
+use smelt_core::pi_auth_service;
 use smelt_core::pi_service::{self, PiConfig};
 use smelt_runtime_client::protocol::control::{
     ControlCall, ControlError, ControlErrorCode, ControlMethod, EmptyParams, decode_params,
@@ -54,6 +55,32 @@ pub(crate) fn dispatch(
         ControlMethod::PiPluginsImport => {
             mutate::<PiPluginsImport>(params, pi_service::import_plugin)
         }
+        ControlMethod::PiAuthProviders => {
+            call::<PiAuthProviders>(params, |_| pi_auth_service::providers())
+        }
+        ControlMethod::PiAuthModels => {
+            call::<PiAuthModels>(params, |p| pi_auth_service::models(&p.provider_id))
+        }
+        ControlMethod::PiAuthLogout => call::<PiAuthLogout>(params, |p| {
+            pi_auth_service::logout(&p.provider_id)?;
+            Ok(EmptyParams::default())
+        }),
+        ControlMethod::PiAuthLoginStart => call::<PiAuthLoginStart>(params, |p| {
+            Ok(pi_auth_service::LoginIdParams {
+                login_id: pi_auth_service::start(p)?,
+            })
+        }),
+        ControlMethod::PiAuthLoginEvents => {
+            call::<PiAuthLoginEvents>(params, pi_auth_service::events)
+        }
+        ControlMethod::PiAuthLoginAnswer => call::<PiAuthLoginAnswer>(params, |p| {
+            pi_auth_service::answer(p)?;
+            Ok(EmptyParams::default())
+        }),
+        ControlMethod::PiAuthLoginCancel => call::<PiAuthLoginCancel>(params, |p| {
+            pi_auth_service::cancel(p)?;
+            Ok(EmptyParams::default())
+        }),
         other => Err(ControlError::new(
             ControlErrorCode::Internal,
             format!("`{other}` is not a pi method"),

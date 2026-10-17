@@ -50,6 +50,7 @@ pub mod memory_settings;
 pub mod new_session;
 pub mod osc;
 pub mod pi_auth;
+pub mod pi_auth_service;
 pub mod pi_auto_models;
 pub mod pi_mcp;
 pub mod pi_model_discovery;

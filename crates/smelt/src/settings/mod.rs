@@ -1004,15 +1004,13 @@ pub struct PiLoginPrompt {
     pub options: Vec<smelt_core::pi_auth::PiPromptOption>,
 }
 
-/// 一次进行中的（或刚结束的）登录。
-///
-/// `session` 用 `Arc` 是因为快照会把它复制给渲染层，而它的 `Drop` 会杀掉登录
-/// 子进程：面板还开着、渲染却持有最后一个引用被丢掉，用户的授权就断在半路。
+/// 一次进行中的（或刚结束的）登录。登录本身跑在运行时那边，这里只拿着它的 id。
 #[derive(Clone)]
 pub struct PiLoginView {
     pub provider_id: String,
     pub provider_name: String,
-    pub session: std::sync::Arc<smelt_core::pi_auth::PiLoginSession>,
+    /// 运行时给的登录 id：取事件、回答、取消都带着它。
+    pub login_id: String,
     /// progress / info 的流水，最新的在最后。
     pub messages: Vec<String>,
     pub auth_url: Option<String>,

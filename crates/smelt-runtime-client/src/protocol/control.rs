@@ -144,6 +144,13 @@ define_control_methods! {
     PiMcpLogin => (PI_MCP_LOGIN_METHOD, "pi.mcp.login"),
     PiPluginsRemove => (PI_PLUGINS_REMOVE_METHOD, "pi.plugins.remove"),
     PiPluginsImport => (PI_PLUGINS_IMPORT_METHOD, "pi.plugins.import"),
+    PiAuthProviders => (PI_AUTH_PROVIDERS_METHOD, "pi.auth.providers"),
+    PiAuthModels => (PI_AUTH_MODELS_METHOD, "pi.auth.models"),
+    PiAuthLogout => (PI_AUTH_LOGOUT_METHOD, "pi.auth.logout"),
+    PiAuthLoginStart => (PI_AUTH_LOGIN_START_METHOD, "pi.auth.login_start"),
+    PiAuthLoginEvents => (PI_AUTH_LOGIN_EVENTS_METHOD, "pi.auth.login_events"),
+    PiAuthLoginAnswer => (PI_AUTH_LOGIN_ANSWER_METHOD, "pi.auth.login_answer"),
+    PiAuthLoginCancel => (PI_AUTH_LOGIN_CANCEL_METHOD, "pi.auth.login_cancel"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -553,7 +560,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 91);
+        assert_eq!(names.len(), 98);
     }
 
     #[test]

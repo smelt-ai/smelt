@@ -768,4 +768,17 @@ pi_calls! {
     PiMcpLogin => PiMcpLogin(crate::pi_service::McpServerParams) -> crate::pi_service::PiConfig;
     PiPluginsRemove => PiPluginsRemove(crate::pi_service::PluginIdParams) -> crate::pi_service::PiConfig;
     PiPluginsImport => PiPluginsImport(crate::pi_service::ImportPluginParams) -> crate::pi_service::PiConfig;
+    /// 内置 provider 及其凭据现状（起一次凭据助手子进程）。
+    PiAuthProviders => PiAuthProviders(EmptyParams) -> crate::pi_auth_service::ProvidersResult;
+    /// 某个 provider 当前凭据能用的模型。
+    PiAuthModels => PiAuthModels(crate::pi_service::ProviderIdParams) -> crate::pi_auth_service::ModelsResult;
+    PiAuthLogout => PiAuthLogout(crate::pi_service::ProviderIdParams) -> EmptyParams;
+    /// 开始一次登录，返回登录 id。之后用 `pi.auth.login_events` 长轮询事件。
+    PiAuthLoginStart => PiAuthLoginStart(crate::pi_auth_service::LoginStartParams)
+        -> crate::pi_auth_service::LoginIdParams;
+    /// 取登录事件；没有新事件时最多等 20 秒。
+    PiAuthLoginEvents => PiAuthLoginEvents(crate::pi_auth_service::LoginEventsParams)
+        -> crate::pi_auth_service::LoginEventsResult;
+    PiAuthLoginAnswer => PiAuthLoginAnswer(crate::pi_auth_service::LoginAnswerParams) -> EmptyParams;
+    PiAuthLoginCancel => PiAuthLoginCancel(crate::pi_auth_service::LoginIdParams) -> EmptyParams;
 }

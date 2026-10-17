@@ -230,7 +230,14 @@ fn dispatch_control(
         | ControlMethod::PiMcpRemove
         | ControlMethod::PiMcpLogin
         | ControlMethod::PiPluginsRemove
-        | ControlMethod::PiPluginsImport) => match super::pi_control::dispatch(pi, params) {
+        | ControlMethod::PiPluginsImport
+        | ControlMethod::PiAuthProviders
+        | ControlMethod::PiAuthModels
+        | ControlMethod::PiAuthLogout
+        | ControlMethod::PiAuthLoginStart
+        | ControlMethod::PiAuthLoginEvents
+        | ControlMethod::PiAuthLoginAnswer
+        | ControlMethod::PiAuthLoginCancel) => match super::pi_control::dispatch(pi, params) {
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },

@@ -26,7 +26,7 @@ const AUTH_SCRIPT: &str = "src/auth-main.ts";
 const ONE_SHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 一个 provider 当前的凭据状态。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PiAuthStatus {
     /// 订阅登录过，`auth.json` 里是 OAuth 令牌。
@@ -44,7 +44,7 @@ impl PiAuthStatus {
 }
 
 /// 一个内置 provider 的登录能力与现状。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PiAuthProvider {
     pub id: String,
@@ -70,9 +70,11 @@ pub struct PiAuthProvider {
 }
 
 /// 登录方式。`Models.login` 按它选 `provider.auth.oauth` 还是 `auth.apiKey`。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PiLoginMethod {
+    #[serde(rename = "oauth")]
     OAuth,
+    #[serde(rename = "api_key")]
     ApiKey,
 }
 
@@ -85,7 +87,7 @@ impl PiLoginMethod {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PiPromptKind {
     Text,
@@ -94,7 +96,7 @@ pub enum PiPromptKind {
     ManualCode,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiPromptOption {
     pub id: String,
     pub label: String,
@@ -102,7 +104,7 @@ pub struct PiPromptOption {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PiAuthLink {
     pub url: String,
     #[serde(default)]
@@ -110,7 +112,7 @@ pub struct PiAuthLink {
 }
 
 /// 登录流程推给宿主的一步。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum PiLoginEvent {
     Providers {
