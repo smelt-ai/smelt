@@ -2,13 +2,16 @@
 
 pub mod acp_chat;
 pub mod acp_conn;
+pub mod acp_session;
 pub mod agent_kind;
 pub mod agent_paths;
 pub mod automation;
 pub mod conversation;
+pub mod daemon_state;
 pub mod font_config;
 pub mod osc;
 pub mod provider_api;
+pub mod session_control;
 pub mod session_title;
 pub mod term_config;
 pub mod theme_index;
