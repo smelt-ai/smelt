@@ -586,7 +586,9 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
             ),
         }
     }
-    if let Err(e) = smelt_client::session_ops::publish_workspace_menu(&job.menu) {
+    if let Err(e) =
+        smelt_client::session_ops::publish_workspace_menu(&crate::runtimes::local(), &job.menu)
+    {
         eprintln!("[workspace] 发布侧栏菜单失败: {e}");
     }
     notice

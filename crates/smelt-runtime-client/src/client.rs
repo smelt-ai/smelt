@@ -86,6 +86,21 @@ impl RuntimeClient {
             .map_err(|error| RequestError::InvalidResponse(error.to_string()))
     }
 
+    /// 首帧 op 的一问一答，再看回包的 `ok`：`false` 时把 `error` 当失败原因。
+    pub fn request_ok(&self, request: &Value, timeout: Duration) -> Result<Value, String> {
+        let response = self
+            .request(request, timeout)
+            .map_err(|error| error.to_string())?;
+        if response.get("ok").and_then(Value::as_bool) == Some(false) {
+            return Err(response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("session operation failed")
+                .to_string());
+        }
+        Ok(response)
+    }
+
     pub fn call<C: ControlCall>(
         &self,
         params: &C::Params,

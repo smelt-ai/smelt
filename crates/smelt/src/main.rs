@@ -35,6 +35,7 @@ use smelt_model::osc;
 mod provider_quota;
 mod resizable_split;
 mod runtime_call;
+mod runtimes;
 mod session_history;
 mod session_list;
 mod settings;
@@ -3341,6 +3342,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
+                    runtime: crate::runtimes::local(),
                     launch_prep: None,
                     agent,
                     launch: record.launch,
@@ -4481,7 +4483,7 @@ fn main() {
             let mut reconnect_attempt = 0u32;
             loop {
                 let connected_at = Instant::now();
-                terminal::subscribe_daemon_states_blocking(&daemon_state_tx);
+                terminal::subscribe_daemon_states_blocking(&crate::runtimes::local(), &daemon_state_tx);
                 let _ = daemon_state_tx.try_send(terminal::DaemonStateEvent::Disconnected);
                 // 短暂可用后断开（daemon 升级）从首档开始；连续失败则指数退避并封顶，
                 // 避免 GUI 与网关在 daemon 未起时固定节拍反复争抢同一 socket。

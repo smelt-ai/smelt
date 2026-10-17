@@ -32,15 +32,7 @@ pub fn daemon_request(request: Value) -> Result<Value, String> {
 }
 
 pub fn daemon_request_with_timeout(request: Value, timeout: Duration) -> Result<Value, String> {
-    let response = daemon_response_with_timeout(request, timeout)?;
-    if response.get("ok").and_then(Value::as_bool) == Some(false) {
-        return Err(response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("session operation failed")
-            .to_string());
-    }
-    Ok(response)
+    local_runtime().request_ok(&request, timeout)
 }
 
 /// 不看 `ok` 字段，原样返回回包。

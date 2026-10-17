@@ -210,6 +210,7 @@ impl Workspace {
                             acp_view::AcpView::placeholder(
                                 cx,
                                 acp_view::AcpViewOrigin {
+                                    runtime: crate::runtimes::local(),
                                     launch_prep: Some(launch_prep),
                                     agent,
                                     launch: saved.launch,
@@ -1104,6 +1105,7 @@ impl Workspace {
             acp_view::AcpView::start(
                 window,
                 cx,
+                crate::runtimes::local(),
                 agent,
                 launch,
                 Some(launch_prep),
@@ -1193,26 +1195,25 @@ impl Workspace {
 
         // 续接必须按原来的智能体定义启动：space 目录或历史绑定都能认出主人。
         // 只认 space 的话，项目里开的智能体对话会退化成裸引擎，插件和人设全丢。
-        let definition = smelt_model::agent_paths::agent_definition_id_for_space(
-            std::path::Path::new(&cwd),
-        )
-        .or_else(|| {
-            // 历史列表加载时运行时一并给了「这段会话属于哪个智能体」。
-            self.history_agent_bindings
-                .get(&crate::session_history::session_list_key(
-                    agent.into(),
-                    profile_id.as_deref(),
-                    &cwd,
-                ))
-                .and_then(|bindings| bindings.get(&resume_id).cloned())
-        })
-        .and_then(|id| {
-            cx.global::<settings::AgentHostState>()
-                .agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .cloned()
-        });
+        let definition =
+            smelt_model::agent_paths::agent_definition_id_for_space(std::path::Path::new(&cwd))
+                .or_else(|| {
+                    // 历史列表加载时运行时一并给了「这段会话属于哪个智能体」。
+                    self.history_agent_bindings
+                        .get(&crate::session_history::session_list_key(
+                            agent.into(),
+                            profile_id.as_deref(),
+                            &cwd,
+                        ))
+                        .and_then(|bindings| bindings.get(&resume_id).cloned())
+                })
+                .and_then(|id| {
+                    cx.global::<settings::AgentHostState>()
+                        .agents
+                        .iter()
+                        .find(|agent| agent.id == id)
+                        .cloned()
+                });
         let launch = launch_override.unwrap_or_else(|| settings::acp_launch_for(agent, cx));
         let initial_config = if definition.is_some() {
             settings::initial_agent_conversation_config_for(agent, cx)
@@ -1242,6 +1243,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
+                    runtime: crate::runtimes::local(),
                     launch_prep: Some(acp_view::LaunchPrep {
                         agent_definition_id: agent_definition_id.clone(),
                         restore: false,
@@ -2487,6 +2489,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Err(error) = smelt_client::session_ops::rename_history_title(
+            &crate::runtimes::local(),
             agent,
             profile_id.as_deref(),
             &resume_id,

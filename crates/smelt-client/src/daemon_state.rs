@@ -665,8 +665,11 @@ fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
 
 /// 阻塞：连接正式 `event_subscribe`，逐行解析稳定 DTO，直到连接断开或协议错误。
 /// Ephemeral 订阅不发送 ack；Lag 后只等待 daemon 的恢复 snapshots。
-pub fn subscribe_daemon_states_blocking(tx: &smol::channel::Sender<DaemonStateEvent>) {
-    let Ok(mut s) = local_runtime().connect() else {
+pub fn subscribe_daemon_states_blocking(
+    runtime: &smelt_runtime_client::RuntimeClient,
+    tx: &smol::channel::Sender<DaemonStateEvent>,
+) {
+    let Ok(mut s) = runtime.connect() else {
         return;
     };
     let mut client = DaemonStateEventClient::desktop();

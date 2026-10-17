@@ -1176,9 +1176,12 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { smelt_client::session_ops::submit_automation_command(&command) },
-                )
+                .spawn(async move {
+                    smelt_client::session_ops::submit_automation_command(
+                        &crate::runtimes::local(),
+                        &command,
+                    )
+                })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(_) => {
@@ -1253,6 +1256,7 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
+                    runtime: crate::runtimes::local(),
                     launch_prep: None,
                     agent,
                     launch: record.launch,
@@ -2039,9 +2043,12 @@ impl Workspace {
             };
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { smelt_client::session_ops::submit_automation_command(&command) },
-                )
+                .spawn(async move {
+                    smelt_client::session_ops::submit_automation_command(
+                        &crate::runtimes::local(),
+                        &command,
+                    )
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let retry = match result {

@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::daemon_state::DaemonPhase;
 use smelt_model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 pub const ACP_INITIAL_TAIL_LIMIT: usize = 100;
@@ -28,8 +29,8 @@ const ACP_ACTION_QUEUE_CAPACITY: usize = 256;
 /// 及时释放 worker，不能把关闭、重启或翻历史的任务永久挂住。
 const ACP_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn connect_acp_control() -> Result<UnixStream, String> {
-    crate::daemon_state::local_runtime()
+fn connect_acp_control(runtime: &RuntimeClient) -> Result<UnixStream, String> {
+    runtime
         .connect_with_timeout(ACP_CONTROL_TIMEOUT)
         .map_err(|e| format!("连不上 smeltd：{e}"))
 }
@@ -343,11 +344,12 @@ fn history_snapshot_from_response(response: &str) -> Result<ConversationSnapshot
 /// Read one bounded page immediately before `before` without disturbing the long-lived
 /// control connection. The caller runs this blocking helper off the GPUI thread.
 pub fn load_acp_history(
+    runtime: &RuntimeClient,
     id: &str,
     before: usize,
     limit: usize,
 ) -> Result<ConversationSnapshot, String> {
-    let mut stream = connect_acp_control()?;
+    let mut stream = connect_acp_control(runtime)?;
     smelt_runtime_client::protocol::write_json_line(
         &mut stream,
         &acp_snapshot_request(id, before, limit),
@@ -366,7 +368,10 @@ pub fn load_acp_history(
 /// `acp_conn::spawn_acp` 遇到起不来的情况一律走 `ConversationEvent::Fatal` 是同一个
 /// 约定，调用方（GUI 视图）只需要处理"连不上"和"agent 本身连不上"两种一样
 /// 的终态展示，不用分别处理。
-pub fn spawn_acp_client(launch: ConversationClientLaunch) -> ConversationClientHandle {
+pub fn spawn_acp_client(
+    runtime: RuntimeClient,
+    launch: ConversationClientLaunch,
+) -> ConversationClientHandle {
     // UI 回调只做 `try_send`。daemon 停止读 action 时，既不能等待，也不能无限积压
     // 大型图片 prompt；队列满后视图保留草稿，连接恢复后用户可再次提交。
     let (action_tx, action_rx) = smol::channel::bounded::<AcpUserAction>(ACP_ACTION_QUEUE_CAPACITY);
@@ -381,7 +386,7 @@ pub fn spawn_acp_client(launch: ConversationClientLaunch) -> ConversationClientH
             let mut known_entries_end = launch.retained_entries_end;
             let mut known_session_title = None;
             let mut last_phase = None;
-            let conn = match crate::daemon_state::local_runtime().connect() {
+            let conn = match runtime.connect() {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = snapshot_tx.try_send(fallback_snapshot(
@@ -480,8 +485,8 @@ pub fn spawn_acp_client(launch: ConversationClientLaunch) -> ConversationClientH
 ///
 /// 阻塞：等守护回执再返回，跟 `terminal::kill_remote` 同一个理由——避免
 /// 关闭动作和后续可能的 App 退出之间有个窗口，kill 命令还没送达就被中断。
-pub fn kill_acp_session(id: &str) {
-    let Ok(mut s) = connect_acp_control() else {
+pub fn kill_acp_session(runtime: &RuntimeClient, id: &str) {
+    let Ok(mut s) = connect_acp_control(runtime) else {
         return;
     };
     let _ = smelt_runtime_client::protocol::write_json_line(
@@ -506,8 +511,8 @@ where
 ///
 /// 请求仍使用 [`kill_acp_session`] 的完整回执语义，只把等待移出调用线程。若连专用
 /// 线程都无法创建，只记录错误而不在 UI 线程同步回退，否则资源紧张时反而重新卡住。
-pub fn kill_acp_session_in_background(id: String) {
-    if let Err(error) = spawn_acp_session_kill(id, kill_acp_session) {
+pub fn kill_acp_session_in_background(runtime: RuntimeClient, id: String) {
+    if let Err(error) = spawn_acp_session_kill(id, move |id| kill_acp_session(&runtime, id)) {
         eprintln!("[acp] 无法启动会话关闭线程：{error}");
     }
 }
@@ -520,8 +525,8 @@ pub fn kill_acp_session_in_background(id: String) {
 ///
 /// 阻塞等守护回执，理由同 `kill_acp_session`：调用方（GUI 点"强制重启"）想要
 /// 一个确定的成功/失败结果，不想留下"到底发出去没有"的悬念。
-pub fn restart_acp_session(id: &str) -> Result<(), String> {
-    let mut s = connect_acp_control()?;
+pub fn restart_acp_session(runtime: &RuntimeClient, id: &str) -> Result<(), String> {
+    let mut s = connect_acp_control(runtime)?;
     smelt_runtime_client::protocol::write_json_line(
         &mut s,
         &serde_json::json!({ "op": DaemonOperation::AcpRestart, "id": id }),

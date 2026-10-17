@@ -540,7 +540,7 @@ impl Workspace {
     /// 实际上会话根本没被杀掉，圈了个大坑）。
     pub(crate) fn kill_daemon_session(id: &str) {
         if id.starts_with("acp-") {
-            smelt_client::acp_client::kill_acp_session(id);
+            smelt_client::acp_client::kill_acp_session(&crate::runtimes::local(), id);
         } else {
             terminal::kill_remote(id);
         }

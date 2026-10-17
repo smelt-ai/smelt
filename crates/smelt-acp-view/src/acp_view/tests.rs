@@ -36,6 +36,7 @@ use super::{
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
+use smelt_client::daemon_state::DaemonPhase;
 use smelt_model::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
 use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
 use smelt_model::acp_session::{
@@ -45,7 +46,6 @@ use smelt_model::acp_session::{
     RuntimeDebug, RuntimeDebugModel, RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
 };
 use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
-use smelt_client::daemon_state::DaemonPhase;
 use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
 
@@ -2891,7 +2891,10 @@ fn subagent_headline_strips_spawn_prefixes() {
         "explorer"
     );
     assert_eq!(smelt_model::acp_chat::subagent_visible_title("Task"), "");
-    assert_eq!(smelt_model::acp_chat::subagent_visible_title("subagent"), "");
+    assert_eq!(
+        smelt_model::acp_chat::subagent_visible_title("subagent"),
+        ""
+    );
     assert_eq!(smelt_model::acp_chat::subagent_visible_title(""), "");
     assert_eq!(
         smelt_model::acp_chat::subagent_visible_title("查登录"),
@@ -3140,6 +3143,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3194,6 +3198,7 @@ fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext)
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3240,6 +3245,7 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3319,6 +3325,7 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3369,6 +3376,7 @@ fn snapshot_binding_becomes_the_views_persisted_binding(cx: &mut gpui::TestAppCo
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Codex,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3411,6 +3419,7 @@ fn stop_button_click_requests_cancel_then_force_restarts_on_second_click(
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3534,6 +3543,7 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3601,6 +3611,7 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3673,6 +3684,7 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3746,6 +3758,7 @@ fn revealing_the_pinned_prompt_parks_it_below_the_title_island(cx: &mut gpui::Te
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3813,6 +3826,7 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -3934,6 +3948,7 @@ fn open_conversation<'a>(
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -4268,6 +4283,7 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
                 launch_prep: None,
                 agent: ConversationAgentKind::Codex,
                 launch: ConversationLaunchSpec::from_command("true"),
@@ -4287,4 +4303,9 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
         weak.upgrade().is_none(),
         "关掉会话后消息流不能再把 AcpView 留住"
     );
+}
+
+/// 测试里的视图不连任何运行时：一连就失败，和运行时离线时一样。
+fn offline_runtime() -> smelt_runtime_client::RuntimeClient {
+    smelt_runtime_client::RuntimeClient::new(|| Err(std::io::Error::other("测试里不连运行时")))
 }
