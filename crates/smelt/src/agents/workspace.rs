@@ -405,7 +405,7 @@ impl Workspace {
     /// 看不到。有对话停下来时这些已经落库，编辑器开着就重扫一次。
     pub(crate) fn refresh_agent_memories_after_turns(
         &mut self,
-        states: &[smelt_core::daemon_state::DaemonSessionState],
+        states: &[smelt_client::daemon_state::DaemonSessionState],
         cx: &mut Context<Self>,
     ) {
         if self.agent_surface.editor.is_some()
@@ -1177,7 +1177,7 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(
-                    async move { smelt_core::session_control::submit_automation_command(&command) },
+                    async move { smelt_client::session_ops::submit_automation_command(&command) },
                 )
                 .await;
             let _ = this.update(cx, |this, cx| match result {
@@ -2040,7 +2040,7 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(
-                    async move { smelt_core::session_control::submit_automation_command(&command) },
+                    async move { smelt_client::session_ops::submit_automation_command(&command) },
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {

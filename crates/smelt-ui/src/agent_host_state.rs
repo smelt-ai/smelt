@@ -582,7 +582,7 @@ pub fn initial_agent_host_state() -> AgentHostState {
 }
 
 fn fetch_agent_host() -> Result<AgentHostSettings, String> {
-    smelt_core::daemon_state::local_runtime()
+    smelt_client::daemon_state::local_runtime()
         .call::<AgentHostGet>(&EmptyParams::default(), RUNTIME_TIMEOUT)
         .map_err(|error| error.to_string())
 }
@@ -627,7 +627,7 @@ pub fn start_agent_host_load(cx: &mut App, on_first_load: impl FnOnce(&mut App) 
                 }
             }
             cx.background_executor()
-                .timer(smelt_core::daemon_state::daemon_reconnect_backoff(attempt))
+                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
                 .await;
             attempt = attempt.saturating_add(1);
         }
@@ -652,7 +652,7 @@ fn submit_agent_host_edit(edit: AgentHostEdit, cx: &mut App) {
                 let applied = cx
                     .background_executor()
                     .spawn(async move {
-                        smelt_core::daemon_state::local_runtime()
+                        smelt_client::daemon_state::local_runtime()
                             .call::<AgentHostApplyEdit>(&edit, RUNTIME_TIMEOUT)
                             .map_err(|error| error.to_string())
                     })

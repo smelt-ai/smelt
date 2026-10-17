@@ -8,7 +8,7 @@ use std::time::Instant;
 use gpui::{App, BorrowAppContext, Global};
 
 pub use smelt_core::attention::{AttentionItem, AttentionKind, AttentionStore};
-use smelt_core::daemon_state::DaemonSessionState;
+use smelt_client::daemon_state::DaemonSessionState;
 
 /// 守护上报的会话状态镜像（全局单例，跨窗口共享）。key = smeltd session id
 /// （每个 pane 一个）/ ACP 会话的 `acp-` 前缀 sid。由主 GUI 启动时那条常驻

@@ -9,6 +9,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+smelt-client = { path = "../smelt-client" }
 smelt-paths = { path = "../smelt-paths" }
 # GUI/守护共用的无 UI 逻辑（终端文本、OSC 扫描、权限菜单解析、远程网关）。
 smelt-core = { path = "../smelt-core" }

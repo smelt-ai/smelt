@@ -271,7 +271,7 @@ fn fallback_attention(
 fn daemon_agent_state(
     session_id: &str,
     cx: &App,
-) -> Option<smelt_core::daemon_state::DaemonSessionState> {
+) -> Option<smelt_client::daemon_state::DaemonSessionState> {
     smelt_ui::daemon_states_global::DaemonStates::get(session_id, cx)
 }
 
@@ -520,7 +520,7 @@ impl TerminalView {
 
     fn handle_structured_state(
         &mut self,
-        daemon_state: Option<&smelt_core::daemon_state::DaemonSessionState>,
+        daemon_state: Option<&smelt_client::daemon_state::DaemonSessionState>,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = daemon_state.filter(|state| state.phase_is_authoritative()) else {
@@ -536,7 +536,7 @@ impl TerminalView {
     /// 由 daemon 状态订阅直接分发，独立于该 pane 当前是否正在渲染。
     pub fn handle_daemon_state(
         &mut self,
-        state: &smelt_core::daemon_state::DaemonSessionState,
+        state: &smelt_client::daemon_state::DaemonSessionState,
         cx: &mut Context<Self>,
     ) {
         if state.id != self.session_id {
@@ -592,13 +592,13 @@ impl TerminalView {
                     })
                     .ok()
                     .flatten();
-                match smelt_core::daemon_state::terminal_reconnect_action(daemon_up, alive) {
-                    smelt_core::daemon_state::TerminalReconnectAction::Wait => {
+                match smelt_client::daemon_state::terminal_reconnect_action(daemon_up, alive) {
+                    smelt_client::daemon_state::TerminalReconnectAction::Wait => {
                         cx.background_executor().timer(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(10));
                         continue;
                     }
-                    smelt_core::daemon_state::TerminalReconnectAction::GiveUp => {
+                    smelt_client::daemon_state::TerminalReconnectAction::GiveUp => {
                         let _ = this.update(cx, |this, cx| {
                             if this.terminal_generation == generation {
                                 this.mark_session_runtime_gone(TERMINAL_SESSION_ENDED_MESSAGE);
@@ -607,7 +607,7 @@ impl TerminalView {
                         });
                         break;
                     }
-                    smelt_core::daemon_state::TerminalReconnectAction::Reattach => {}
+                    smelt_client::daemon_state::TerminalReconnectAction::Reattach => {}
                 }
                 // 3) 重连（reattach：守护按 id 重放历史画面，输出不丢）。
                 // 镜像未知时也立刻 attach：tmux 式，attach 本人才是还活着的权威答案。

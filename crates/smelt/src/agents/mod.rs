@@ -177,8 +177,8 @@ impl MemoryLayer {
 
 /// 会话是否停在两步之间。记忆的读写元数据在工具结果里落库，模型还在想或工具还在跑
 /// 时重扫可能赶在写文件之后、记元数据之前。
-pub(crate) fn session_phase_settled(phase: smelt_core::daemon_state::DaemonPhase) -> bool {
-    use smelt_core::daemon_state::DaemonPhase;
+pub(crate) fn session_phase_settled(phase: smelt_client::daemon_state::DaemonPhase) -> bool {
+    use smelt_client::daemon_state::DaemonPhase;
     !matches!(
         phase,
         DaemonPhase::Connecting | DaemonPhase::Thinking | DaemonPhase::ExecutingTool

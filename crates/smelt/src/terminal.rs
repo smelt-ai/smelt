@@ -644,11 +644,11 @@ fn os_clipboard_read() -> String {
 /// 本机运行时 socket 的路径。只用于生命周期管理：拉起后的错误提示、按 socket 反查
 /// 守护进程、清理残留文件。连守护一律走 [`local_runtime`]。
 fn sock_path() -> std::path::PathBuf {
-    smelt_core::daemon_state::smeltd_sock_path()
+    smelt_client::daemon_state::smeltd_sock_path()
 }
 
 fn local_runtime() -> smelt_runtime_client::RuntimeClient {
-    smelt_core::daemon_state::local_runtime()
+    smelt_client::daemon_state::local_runtime()
 }
 
 /// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
@@ -2249,7 +2249,7 @@ pub fn iroh_connections() -> Vec<IrohConnection> {
 //
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
 // 视图独立成 crate 后也要用同一份），这里重导出成原来的裸名字。
-pub(crate) use smelt_core::daemon_state::{
+pub(crate) use smelt_client::daemon_state::{
     DaemonPhase, DaemonSessionState, DaemonStateEvent, daemon_reconnect_backoff,
     subscribe_daemon_states_blocking,
 };

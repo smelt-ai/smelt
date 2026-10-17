@@ -48,7 +48,7 @@ impl Workspace {
                     break snapshot;
                 }
                 cx.background_executor()
-                    .timer(smelt_core::daemon_state::daemon_reconnect_backoff(attempt))
+                    .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
                     .await;
                 attempt = attempt.saturating_add(1);
             };

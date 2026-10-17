@@ -102,7 +102,7 @@ fn memory_summary_is_one_line_of_counts() {
 /// 记忆卡片在会话停下时重扫：模型还在想、工具还在跑时，元数据可能还没落库。
 #[test]
 fn memory_card_rescans_only_when_the_session_is_between_steps() {
-    use smelt_core::daemon_state::DaemonPhase;
+    use smelt_client::daemon_state::DaemonPhase;
     for phase in [
         DaemonPhase::Connecting,
         DaemonPhase::Thinking,

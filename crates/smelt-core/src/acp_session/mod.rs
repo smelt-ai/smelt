@@ -848,184 +848,6 @@ impl AcpSessionState {
     }
 }
 
-/// 会话的活状态。不含历史正文。窗口靠它离开「正在启动」；
-/// 历史读失败不能把相位退回去。
-#[derive(Clone, Debug)]
-pub struct SessionLive {
-    pub phase: DaemonPhase,
-    pub end_reason: String,
-    pub end_kind: AcpEndKind,
-    pub acp_session_id: Option<String>,
-    pub history_session_id: Option<String>,
-    pub session_title: Option<String>,
-    pub status_line: Option<String>,
-    /// 已提交历史的长度。`None` 表示这帧仍把历史放在快照 `entries` 里（旧守护）。
-    pub history_len: Option<usize>,
-    /// 旧帧在快照解析失败时用来保住当前回合。新守护不再填写：正文只在快照 `entries`。
-    pub open_turn: Vec<crate::acp_chat::AcpEntry>,
-}
-
-impl SessionLive {
-    pub fn from_snapshot(snap: &ConversationSnapshot) -> Self {
-        Self {
-            phase: snap.phase,
-            end_reason: snap.end_reason.clone(),
-            end_kind: snap.end_kind,
-            acp_session_id: snap.acp_session_id.clone(),
-            history_session_id: snap.history_session_id.clone(),
-            session_title: snap.session_title.clone(),
-            status_line: snap.status_line.clone(),
-            history_len: None,
-            open_turn: Vec::new(),
-        }
-    }
-
-    /// 活状态头。`history_len == None`，正文仍由快照 `entries` 携带。
-    /// 不克隆 entries、工具参数表或 runtime debug。
-    pub fn header_from_state(state: &AcpSessionState) -> Self {
-        Self {
-            phase: state.phase,
-            end_reason: state.end_reason.clone(),
-            end_kind: state.end_kind,
-            acp_session_id: state.acp_session_id.clone(),
-            history_session_id: state.history_session_id.clone(),
-            session_title: state.resolved_session_title(),
-            status_line: state.status_line.clone(),
-            history_len: None,
-            open_turn: Vec::new(),
-        }
-    }
-
-    /// 窗口投影。`history_len` 标出已提交历史的终点；当前回合的正文不在这里复制。
-    pub fn from_state(state: &AcpSessionState) -> Self {
-        let (history_len, _) = state.open_turn_range();
-        let mut live = Self::header_from_state(state);
-        live.history_len = Some(history_len);
-        live
-    }
-
-    /// 从 `live` 对象或快照对象里取出活状态。相位只认当前 snake_case。
-    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-        let phase_value = value.get("phase").ok_or_else(|| "缺少相位".to_string())?;
-        let decoded = snapshot_phase_from_value(phase_value)?;
-        let stored_reason = value
-            .get("end_reason")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let end_reason = if stored_reason.is_empty() {
-            decoded.ended_reason
-        } else {
-            stored_reason.to_string()
-        };
-        let end_kind = value
-            .get("end_kind")
-            .and_then(|kind| serde_json::from_value(kind.clone()).ok())
-            .unwrap_or_default();
-        Ok(Self {
-            phase: decoded.phase,
-            end_reason,
-            end_kind,
-            acp_session_id: json_string(value, "acp_session_id"),
-            history_session_id: json_string(value, "history_session_id"),
-            session_title: json_string(value, "session_title"),
-            status_line: json_string(value, "status_line"),
-            history_len: value
-                .get("history_len")
-                .and_then(serde_json::Value::as_u64)
-                .map(|len| len as usize),
-            open_turn: value
-                .get("open_turn")
-                .and_then(|entries| serde_json::from_value(entries.clone()).ok())
-                .unwrap_or_default(),
-        })
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct SessionLiveDe {
-    phase: DaemonPhase,
-    #[serde(default)]
-    end_reason: String,
-    #[serde(default)]
-    end_kind: AcpEndKind,
-    #[serde(default)]
-    acp_session_id: Option<String>,
-    #[serde(default)]
-    history_session_id: Option<String>,
-    #[serde(default)]
-    session_title: Option<String>,
-    #[serde(default)]
-    status_line: Option<String>,
-    #[serde(default)]
-    history_len: Option<usize>,
-    #[serde(default)]
-    open_turn: Vec<crate::acp_chat::AcpEntry>,
-}
-
-impl From<SessionLiveDe> for SessionLive {
-    fn from(value: SessionLiveDe) -> Self {
-        Self {
-            phase: value.phase,
-            end_reason: value.end_reason,
-            end_kind: value.end_kind,
-            acp_session_id: value.acp_session_id,
-            history_session_id: value.history_session_id,
-            session_title: value.session_title,
-            status_line: value.status_line,
-            history_len: value.history_len,
-            open_turn: value.open_turn,
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SessionLive {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        SessionLiveDe::deserialize(deserializer).map(Self::from)
-    }
-}
-
-/// 守护推给窗口的一帧。正文只在 `snapshot`；`live` 是相位和历史边界。
-/// 恢复身份的放弃标志在 `snapshot.history_abandoned` 上，和会话状态同一份。
-#[derive(serde::Serialize)]
-pub struct AcpSnapshotFrame<'a> {
-    pub live: &'a SessionLive,
-    pub snapshot: &'a ConversationSnapshot,
-    pub provider_pid: Option<i32>,
-}
-
-impl AcpSnapshotFrame<'_> {
-    pub fn to_line_bytes(&self) -> Vec<u8> {
-        let mut bytes =
-            serde_json::to_vec(self).expect("ACP snapshot frame contains only serializable data");
-        bytes.push(b'\n');
-        bytes
-    }
-}
-
-impl serde::Serialize for SessionLive {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("SessionLive", 9)?;
-        state.serialize_field("phase", &self.phase)?;
-        state.serialize_field("end_reason", &self.end_reason)?;
-        state.serialize_field("end_kind", &self.end_kind)?;
-        state.serialize_field("acp_session_id", &self.acp_session_id)?;
-        state.serialize_field("history_session_id", &self.history_session_id)?;
-        state.serialize_field("session_title", &self.session_title)?;
-        state.serialize_field("status_line", &self.status_line)?;
-        state.serialize_field("history_len", &self.history_len)?;
-        state.serialize_field("open_turn", &self.open_turn)?;
-        state.end()
-    }
-}
-
-fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-}
-
 /// daemon 镜像只需把 host 快照重新投影给 GUI，不会在本地把字段翻译回 ACP
 /// response。选项值使用 label 占位，避免为只读镜像再引入一套平行字段类型。
 fn mirror_elicitation_field(field: ElicitFieldView) -> ElicitField {
@@ -1522,6 +1344,30 @@ pub fn dismiss_elicitation(state: &mut AcpSessionState) {
 /// 有旧 session id 才值得——没有 id 只能开全新会话，交给用户手动决定。
 pub fn should_auto_resume(state: &AcpSessionState) -> bool {
     matches!(state.phase, DaemonPhase::Dead) && state.history_session_id.is_some()
+}
+
+/// 活状态头。`history_len == None`，正文仍由快照 `entries` 携带。
+/// 不克隆 entries、工具参数表或 runtime debug。
+pub fn live_header_from_state(state: &AcpSessionState) -> SessionLive {
+    SessionLive {
+        phase: state.phase,
+        end_reason: state.end_reason.clone(),
+        end_kind: state.end_kind,
+        acp_session_id: state.acp_session_id.clone(),
+        history_session_id: state.history_session_id.clone(),
+        session_title: state.resolved_session_title(),
+        status_line: state.status_line.clone(),
+        history_len: None,
+        open_turn: Vec::new(),
+    }
+}
+
+/// 窗口投影。`history_len` 标出已提交历史的终点；当前回合的正文不在这里复制。
+pub fn live_from_state(state: &AcpSessionState) -> SessionLive {
+    let (history_len, _) = state.open_turn_range();
+    let mut live = live_header_from_state(state);
+    live.history_len = Some(history_len);
+    live
 }
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ use smelt_core::automation::{
     AutomationAction, AutomationCommand, AutomationFile, AutomationRun, AutomationRunSource,
     AutomationRunStatus, AutomationSchedule,
 };
-use smelt_core::daemon_state::{
+use smelt_client::daemon_state::{
     DaemonPhase, DaemonSessionState, DaemonStateEvent, DaemonStateEventClient,
 };
 use smelt_core::session_control::{RemoteSessionKind, RemoteSessionSnapshot};
@@ -423,7 +423,7 @@ async fn automation_catalog_response(automations: &AutomationFile) -> serde_json
 /// 把命令解释成别的结果。回一份权威快照，手机就不会出现「开关拨过去了、实际没生效」。
 async fn submit_automation_catalog_command(command: AutomationCommand) -> serde_json::Value {
     let submitted = tokio::task::spawn_blocking(move || {
-        smelt_core::session_control::submit_automation_command(&command)
+        smelt_client::session_ops::submit_automation_command(&command)
     })
     .await;
     match submitted {
@@ -837,7 +837,7 @@ async fn mobile_lifecycle_subscription(hub: Weak<MobileLifecycleHub>) {
         if connected_at.elapsed() >= Duration::from_secs(5) {
             reconnect_attempt = 0;
         }
-        let delay = smelt_core::daemon_state::daemon_reconnect_backoff(reconnect_attempt);
+        let delay = smelt_client::daemon_state::daemon_reconnect_backoff(reconnect_attempt);
         reconnect_attempt = reconnect_attempt.saturating_add(1);
         tokio::time::sleep(delay).await;
     }
@@ -1778,7 +1778,7 @@ fn rename_mobile_history_session(
         .as_deref()
         .map(str::trim)
         .filter(|title| !title.is_empty());
-    smelt_core::session_control::rename_history_title(
+    smelt_client::session_ops::rename_history_title(
         kind.into(),
         option.profile_id(),
         resume_id,
@@ -1887,7 +1887,7 @@ fn create_mobile_terminal_session(
         if existing.cwd != project_root {
             return Err("requestId is already bound to a different project".to_string());
         }
-        smelt_core::session_control::create_remote_terminal_session(&existing, launch)?;
+        smelt_client::session_ops::create_remote_terminal_session(&existing, launch)?;
         return Ok(id);
     }
     let session = smelt_core::session_control::RemoteTerminalSession {
@@ -1897,7 +1897,7 @@ fn create_mobile_terminal_session(
         created_at: now_unix(),
         lifecycle: Default::default(),
     };
-    smelt_core::session_control::create_remote_terminal_session(&session, launch)?;
+    smelt_client::session_ops::create_remote_terminal_session(&session, launch)?;
     Ok(id)
 }
 
@@ -2040,7 +2040,7 @@ fn create_mobile_acp_session(
         {
             return Err("requestId is already bound to different session parameters".to_string());
         }
-        smelt_core::session_control::create_remote_acp_session(&existing)?;
+        smelt_client::session_ops::create_remote_acp_session(&existing)?;
         return Ok(id);
     }
     let session = smelt_core::session_control::RemoteAcpSession {
@@ -2055,7 +2055,7 @@ fn create_mobile_acp_session(
         lifecycle: Default::default(),
         hidden: false,
     };
-    smelt_core::session_control::create_remote_acp_session(&session)?;
+    smelt_client::session_ops::create_remote_acp_session(&session)?;
     Ok(session.id)
 }
 
@@ -2419,7 +2419,7 @@ async fn acp_ws_pump(socket: WebSocket, state: AppState) {
                                 kinds.0,
                                 kinds.1,
                             )?;
-                            smelt_core::session_control::delete_session(&delete_id, kind)
+                            smelt_client::session_ops::delete_session(&delete_id, kind)
                         }).await;
                         let resp = match response {
                             Ok(Ok(())) => {

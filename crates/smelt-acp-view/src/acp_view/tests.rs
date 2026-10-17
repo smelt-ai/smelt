@@ -45,7 +45,7 @@ use smelt_core::acp_session::{
     RuntimeDebug, RuntimeDebugModel, RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
 };
 use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
-use smelt_core::daemon_state::DaemonPhase;
+use smelt_client::daemon_state::DaemonPhase;
 use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
 

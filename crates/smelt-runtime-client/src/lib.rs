@@ -9,6 +9,7 @@
 
 pub mod client;
 pub mod connector;
+pub mod local;
 pub mod protocol;
 
 pub use client::{DEFAULT_REQUEST_TIMEOUT, RequestError, RuntimeClient};

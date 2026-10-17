@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::agent_kind::ConversationLaunchSpec;
-use crate::workspace_menu::{WorkspaceMenuProject, WorkspaceMenuSnapshot};
+use crate::workspace_menu::{WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot};
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,4 +375,21 @@ pub fn parse_conversation_submit_response(
 pub enum SessionDeleteKind {
     Terminal,
     Acp,
+}
+
+/// 远程目录里的 kind 是所有权真相；菜单只覆盖未进目录的本地会话。
+/// 两边都没有就失败，不要默认当 ACP 杀——会把远程终端的目录摘掉却留下 PTY。
+pub fn resolve_session_delete_kind(
+    catalog_kind: Option<RemoteSessionKind>,
+    menu_kind: Option<WorkspaceMenuSessionKind>,
+) -> Result<SessionDeleteKind, String> {
+    match catalog_kind {
+        Some(RemoteSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
+        Some(RemoteSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
+        None => match menu_kind {
+            Some(WorkspaceMenuSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
+            Some(WorkspaceMenuSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
+            None => Err("session not found".to_string()),
+        },
+    }
 }

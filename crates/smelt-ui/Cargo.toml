@@ -11,6 +11,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+smelt-client = { path = "../smelt-client" }
 smelt-core = { path = "../smelt-core" }
 smelt-store = { path = "../smelt-store" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }

@@ -578,7 +578,7 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
             ),
         }
     }
-    if let Err(e) = smelt_core::session_control::publish_workspace_menu(&job.menu) {
+    if let Err(e) = smelt_client::session_ops::publish_workspace_menu(&job.menu) {
         eprintln!("[workspace] 发布侧栏菜单失败: {e}");
     }
     notice
@@ -682,7 +682,7 @@ impl Workspace {
                     }
                 }
                 cx.background_executor()
-                    .timer(smelt_core::daemon_state::daemon_reconnect_backoff(attempt))
+                    .timer(smelt_client::daemon_state::daemon_reconnect_backoff(attempt))
                     .await;
                 attempt = attempt.saturating_add(1);
             }

@@ -1,7 +1,7 @@
 //! ACP 输入栏：补全、模型选择、发送。
 
 use super::*;
-use smelt_core::daemon_state::DaemonPhase;
+use smelt_client::daemon_state::DaemonPhase;
 
 /// 排队条目用正文当身份。相同正文按出现次序分开，删掉前面一条时后面的格子跟着正文走。
 fn queue_row_id<'a>(

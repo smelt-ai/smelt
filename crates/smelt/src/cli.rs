@@ -14,7 +14,6 @@ use smelt_core::control_api::{
     AgentDefinitionList, AgentDefinitionUpdateCall, AgentDefinitionUpdateParams, AutomationGet,
     AutomationList, SettingsGet, SettingsUpdate,
 };
-use smelt_core::session_control;
 use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, EmptyParams};
 use std::collections::BTreeMap;
 
@@ -148,7 +147,7 @@ fn run_agent(args: &[String]) -> i32 {
                 Err(error) => fail(&error),
             }
         }
-        Some("conversations") => match smelt_core::session_control::list_agent_conversations() {
+        Some("conversations") => match smelt_client::session_ops::list_agent_conversations() {
             Ok(conversations) => print_ok(&serde_json::json!({ "conversations": conversations })),
             Err(error) => fail(&error),
         },
@@ -160,7 +159,7 @@ fn run_agent(args: &[String]) -> i32 {
                 Ok(title) => title,
                 Err(message) => return usage(&message),
             };
-            match smelt_core::session_control::rename_agent_conversation(id, &title) {
+            match smelt_client::session_ops::rename_agent_conversation(id, &title) {
                 Ok(renamed) => print_ok(&renamed),
                 Err(error) => fail(&error),
             }
@@ -179,7 +178,7 @@ fn run_agent(args: &[String]) -> i32 {
 
 /// 一次 Control API 调用。smeltd 没在跑时给出能看懂的原因。
 fn control<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
-    smelt_core::daemon_state::local_runtime()
+    smelt_client::daemon_state::local_runtime()
         .call::<C>(&params, std::time::Duration::from_secs(10))
         .map_err(|error| match error {
             ControlClientError::Protocol(error) => error.message,
@@ -296,7 +295,7 @@ fn get_automation(id: &str) -> Result<serde_json::Value, String> {
 }
 
 fn submit_automation(command: AutomationCommand) -> Result<serde_json::Value, String> {
-    let (result, snapshot) = session_control::submit_automation_command(&command)?;
+    let (result, snapshot) = smelt_client::session_ops::submit_automation_command(&command)?;
     let snapshot = redact_automation_credentials(snapshot);
     serde_json::to_value(serde_json::json!({
         "result": result,

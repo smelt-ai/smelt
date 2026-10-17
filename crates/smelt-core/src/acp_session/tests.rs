@@ -374,7 +374,7 @@ fn history_replay_does_not_publish_the_empty_scratch_buffer() {
 
     assert!(state.entries.is_empty(), "归约草稿从空缓冲重建");
     assert!(state.replaying_history);
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.history_len, Some(2));
     assert!(
         live.open_turn.is_empty(),
@@ -390,7 +390,7 @@ fn history_replay_does_not_publish_the_empty_scratch_buffer() {
         ConversationEvent::UserChunk("看看这个仓库".into()),
     );
     assert_eq!(state.entries.len(), 1, "草稿只累积已经重放的条目");
-    assert_eq!(SessionLive::from_state(&state).history_len, Some(2));
+    assert_eq!(super::live_from_state(&state).history_len, Some(2));
     assert_eq!(state.to_snapshot(false).entries.len(), 2);
 
     apply_event(
@@ -405,7 +405,7 @@ fn history_replay_does_not_publish_the_empty_scratch_buffer() {
 
     assert!(!state.replaying_history);
     assert_eq!(state.entries.len(), 2);
-    let done = SessionLive::from_state(&state);
+    let done = super::live_from_state(&state);
     assert_eq!(done.history_len, Some(2));
     assert_eq!(state.to_snapshot(false).entries.len(), 2);
 }
@@ -461,7 +461,7 @@ fn prompt_during_empty_replay_appends_to_the_published_transcript() {
         [AcpEntry::User(first), AcpEntry::User(second)]
             if first == "看看这个仓库" && second == "继续"
     ));
-    assert_eq!(SessionLive::from_state(&state).history_len, Some(1));
+    assert_eq!(super::live_from_state(&state).history_len, Some(1));
 }
 
 /// 重放失败时草稿是空的或不完整的。失败不能把上一份已发布正文换成这份草稿。
@@ -481,7 +481,7 @@ fn failed_history_replay_keeps_the_transcript_that_was_already_published() {
     assert!(!state.replaying_history);
     assert!(matches!(state.phase, DaemonPhase::Dead));
     assert!(matches!(&state.entries[..], [AcpEntry::User(text)] if text == "看看这个仓库"));
-    assert_eq!(SessionLive::from_state(&state).history_len, Some(1));
+    assert_eq!(super::live_from_state(&state).history_len, Some(1));
 }
 
 /// 恢复后用户不再发消息时，`replaying_history` 必须靠显式的结束信号收尾。
@@ -1054,7 +1054,7 @@ fn idle_session_keeps_history_out_of_the_open_turn() {
     ];
     let (start, end) = state.open_turn_range();
     assert_eq!((start, end), (2, 2));
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.history_len, Some(2));
     assert!(live.open_turn.is_empty());
 
@@ -2025,7 +2025,7 @@ fn live_header_matches_snapshot_without_entry_payload() {
             raw_input: None,
         },
     );
-    let header = SessionLive::header_from_state(&state);
+    let header = super::live_header_from_state(&state);
     let via_snapshot = SessionLive::from_snapshot(&state.to_snapshot(false));
     assert_eq!(header.phase, via_snapshot.phase);
     assert_eq!(header.end_reason, via_snapshot.end_reason);
@@ -2036,7 +2036,7 @@ fn live_header_matches_snapshot_without_entry_payload() {
     assert_eq!(header.status_line, via_snapshot.status_line);
     assert_eq!(header.history_len, None);
     assert!(header.open_turn.is_empty());
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.session_title, header.session_title);
     assert!(live.history_len.is_some());
     assert!(
@@ -3039,7 +3039,7 @@ fn hosted_mirror_keeps_the_last_turn_when_idle() {
         state.resolved_session_title().as_deref(),
         Some("来自宿主的标题")
     );
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.history_len, Some(4));
     assert!(live.open_turn.is_empty());
 

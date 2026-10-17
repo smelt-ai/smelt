@@ -15,8 +15,8 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
-use crate::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+use smelt_model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
+use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use crate::daemon_state::DaemonPhase;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
@@ -53,14 +53,14 @@ pub struct ConversationClientLaunch {
     pub fork_id: Option<String>,
     /// 与 `fork_id` 搭配的分叉切点：整拷打开后、重放前切到该用户消息之前。
     /// 见 `acp_conn::AcpForkCut`。
-    pub fork_cut: Option<crate::acp_conn::AcpForkCut>,
+    pub fork_cut: Option<smelt_model::acp_conn::AcpForkCut>,
     /// 建连前 GUI 已持有的连续历史末端（全局 offset，不是本地 Vec 长度）。若
     /// 第一份 daemon 快照到达前连接失败，终态快照用它作为 offset，避免把仍可
     /// 展示的分页历史误清空。
     pub retained_entries_end: usize,
     /// 新 daemon 会话的交互输入路由。已有会话 attach 时 daemon 自己的状态优先，
     /// 因此客户端存档不会覆盖一个热会话的当前 binding。
-    pub conversation_binding: crate::conversation::ConversationBinding,
+    pub conversation_binding: smelt_model::conversation::ConversationBinding,
     /// 只在新 daemon 会话创建时登记。热 attach 不会用客户端的旧存档覆盖 daemon
     /// 已消费的状态。
     pub pending_agent_preset: Option<String>,
@@ -194,7 +194,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
 }
 
 fn snapshot_from_live(
-    live: crate::acp_session::SessionLive,
+    live: smelt_model::acp_session::SessionLive,
     entries_offset: usize,
     history_error: Option<String>,
 ) -> ConversationSnapshot {
@@ -229,8 +229,8 @@ enum SnapshotFrame {
 #[derive(serde::Deserialize)]
 struct DecodedAcpSnapshotFrame {
     #[serde(default)]
-    live: Option<crate::acp_session::SessionLive>,
-    snapshot: Option<crate::acp_session::ConversationSnapshot>,
+    live: Option<smelt_model::acp_session::SessionLive>,
+    snapshot: Option<smelt_model::acp_session::ConversationSnapshot>,
 }
 
 fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
@@ -259,11 +259,11 @@ fn read_snapshot_frame(line: &str, entries_offset: usize) -> SnapshotFrame {
     };
     let live = value
         .get("live")
-        .and_then(|live| crate::acp_session::SessionLive::from_json(live).ok())
+        .and_then(|live| smelt_model::acp_session::SessionLive::from_json(live).ok())
         .or_else(|| {
             value
                 .get("snapshot")
-                .and_then(|snapshot| crate::acp_session::SessionLive::from_json(snapshot).ok())
+                .and_then(|snapshot| smelt_model::acp_session::SessionLive::from_json(snapshot).ok())
         });
     if let Some(snapshot) = value.get("snapshot") {
         return match serde_json::from_value::<ConversationSnapshot>(snapshot.clone()) {
@@ -546,7 +546,7 @@ mod tests {
         acp_open_request, acp_snapshot_request, history_snapshot_from_response,
         read_snapshot_frame, snapshot_after_stream_disconnect, spawn_acp_session_kill,
     };
-    use crate::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+    use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
     use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -566,7 +566,7 @@ mod tests {
             fork_id: None,
             fork_cut: None,
             retained_entries_end: 0,
-            conversation_binding: crate::conversation::ConversationBinding::Direct,
+            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
             pending_agent_preset: None,
         });
 
@@ -595,7 +595,7 @@ mod tests {
             fork_id: None,
             fork_cut: None,
             retained_entries_end: 0,
-            conversation_binding: crate::conversation::ConversationBinding::Direct,
+            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
             pending_agent_preset: None,
         });
 
@@ -629,11 +629,11 @@ mod tests {
 
     #[test]
     fn snapshot_omitting_history_id_keeps_the_live_id() {
-        let mut state = crate::acp_session::AcpSessionState::default();
+        let mut state = smelt_core::acp_session::AcpSessionState::default();
         state.history_session_id = Some("01a128ad".into());
         state.acp_session_id = Some("runtime".into());
         state.phase = crate::daemon_state::DaemonPhase::Idle;
-        let live = crate::acp_session::SessionLive::from_state(&state);
+        let live = smelt_core::acp_session::live_from_state(&state);
         let mut snapshot = state.to_snapshot(false);
         snapshot.history_session_id = None;
         snapshot.entries_offset = 660;
@@ -657,18 +657,18 @@ mod tests {
     fn frame_keeps_entries_written_as_the_turn_closed() {
         // 收尾时写下的报错已经算历史，`live.open_turn` 是空的。快照带着它，
         // 不能拿空的当前一轮把它盖掉。
-        let mut state = crate::acp_session::AcpSessionState::default();
+        let mut state = smelt_core::acp_session::AcpSessionState::default();
         state
             .entries_mut()
-            .push(crate::acp_chat::AcpEntry::User("A".into()));
+            .push(smelt_model::acp_chat::AcpEntry::User("A".into()));
         state.phase = crate::daemon_state::DaemonPhase::Thinking;
         state.turn_started_at_ms = Some(1);
-        crate::acp_session::apply_event(
+        smelt_core::acp_session::apply_event(
             &mut state,
-            crate::acp_conn::ConversationEvent::TurnFailed("499 status code (no body)".into()),
+            smelt_core::acp_conn::ConversationEvent::TurnFailed("499 status code (no body)".into()),
         );
         let line = serde_json::json!({
-            "live": crate::acp_session::SessionLive::from_state(&state),
+            "live": smelt_core::acp_session::live_from_state(&state),
             "snapshot": state.to_snapshot_range(false, 1, 2),
         })
         .to_string();
@@ -680,13 +680,13 @@ mod tests {
         assert_eq!(snapshot.entries_total, 2);
         assert!(matches!(
             snapshot.entries.as_slice(),
-            [crate::acp_chat::AcpEntry::Assistant { text, .. }] if text.contains("回合失败")
+            [smelt_model::acp_chat::AcpEntry::Assistant { text, .. }] if text.contains("回合失败")
         ));
     }
 
     #[test]
     fn unreadable_snapshot_phase_ends_startup_wait() {
-        let mut snapshot = crate::acp_session::AcpSessionState::default().to_snapshot(false);
+        let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
         snapshot.phase = crate::daemon_state::DaemonPhase::Idle;
         let mut frame = serde_json::json!({ "snapshot": snapshot });
         frame["snapshot"]["phase"] = serde_json::json!("not-a-phase");
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn history_response_returns_the_snapshot() {
-        let mut snapshot = crate::acp_session::AcpSessionState::default().to_snapshot(false);
+        let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
         snapshot.entries_offset = 3;
         let response = serde_json::json!({ "snapshot": snapshot }).to_string();
         let parsed = history_snapshot_from_response(&response).expect("合法快照应能读回");

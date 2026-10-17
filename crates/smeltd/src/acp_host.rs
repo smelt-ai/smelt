@@ -1107,9 +1107,9 @@ pub(crate) fn encode_acp_snapshot(
             include_runtime_debug && include_debug && runtime_debug.is_none();
         let (history_len, open_end) = reduced.open_turn_range();
         let live = if include_history {
-            smelt_core::acp_session::SessionLive::header_from_state(&reduced)
+            smelt_core::acp_session::live_header_from_state(&reduced)
         } else {
-            smelt_core::acp_session::SessionLive::from_state(&reduced)
+            smelt_core::acp_session::live_from_state(&reduced)
         };
         let mut snapshot = if include_history {
             reduced.to_snapshot_range_selective(
@@ -3294,7 +3294,7 @@ pub(crate) fn handle_acp_open(
             let reduced = sess.reduced.lock().unwrap();
             let omit_history = req.omit_history;
             let (history_len, open_end) = reduced.open_turn_range();
-            let live = smelt_core::acp_session::SessionLive::from_state(&reduced);
+            let live = smelt_core::acp_session::live_from_state(&reduced);
             let tool_debug_generation = reduced.tool_debug_generation;
             let mut snapshot = if omit_history {
                 reduced.to_snapshot_range(false, history_len, open_end)

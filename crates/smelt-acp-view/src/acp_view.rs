@@ -3,7 +3,7 @@
 //! **薄客户端**：agent 子进程由 smeltd 托管（`smelt_core::acp_session` 里的
 //! `apply_event` 归约、`ConversationEvent::Permission`/`Elicitation` 的 responder 也
 //! 都在那边——responder 绑在连接线程上没法跨进程传，这里没有资格直接持有
-//! 它们）。这层只做两件事：把 `smelt_core::acp_client` 收到的 `ConversationSnapshot`
+//! 它们）。这层只做两件事：把 `smelt_client::acp_client` 收到的 `ConversationSnapshot`
 //! 摊平进本地字段渲染出来，把用户操作打包成 `AcpUserAction` 发回去。四档
 //! 着色 / Dock 角标 / 应用内待处理通知现在都由 smeltd 的集中状态订阅驱动
 //! （跟终端会话共用 subscribe 通道），这层只镜像视图态，不再自己判相位跳变。
@@ -28,7 +28,7 @@ use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h
 
 use agent_client_protocol::schema::v1::SessionId;
 
-use smelt_core::acp_client::{
+use smelt_client::acp_client::{
     ACP_HISTORY_PAGE_LIMIT, ConversationClientHandle, ConversationClientLaunch, load_acp_history,
     spawn_acp_client,
 };
@@ -41,7 +41,7 @@ use smelt_core::acp_session::{
 };
 use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_core::agent_status::{AcpStatusEvidence, AgentStatus};
-use smelt_core::daemon_state::DaemonPhase;
+use smelt_client::daemon_state::DaemonPhase;
 use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
@@ -2486,7 +2486,7 @@ impl AcpView {
                     let scanned = cx
                         .background_executor()
                         .spawn(async move {
-                            smelt_core::daemon_state::local_runtime()
+                            smelt_client::daemon_state::local_runtime()
                                 .call::<smelt_core::control_api::SessionLoadedSkills>(
                                     &params,
                                     RUNTIME_PREPARE_TIMEOUT,
@@ -2530,7 +2530,7 @@ impl AcpView {
             let prepared = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_core::daemon_state::local_runtime()
+                    smelt_client::daemon_state::local_runtime()
                         .call::<smelt_core::control_api::SessionLaunchPrepare>(
                             &params,
                             RUNTIME_PREPARE_TIMEOUT,
@@ -2923,7 +2923,7 @@ impl AcpView {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { smelt_core::acp_client::restart_acp_session(&sid) })
+                .spawn(async move { smelt_client::acp_client::restart_acp_session(&sid) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.restarting = false;
@@ -3002,7 +3002,7 @@ impl AcpView {
                     use smelt_runtime_client::protocol::files::{
                         CompleteFilesParams, SessionCompleteFilesCall,
                     };
-                    smelt_core::daemon_state::local_runtime()
+                    smelt_client::daemon_state::local_runtime()
                         .call::<SessionCompleteFilesCall>(
                             &CompleteFilesParams { cwd },
                             smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
@@ -3171,7 +3171,7 @@ impl AcpView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_core::session_control::submit_conversation_input(
+                    smelt_client::session_ops::submit_conversation_input(
                         &sid,
                         &input,
                         &config_values,
@@ -3605,7 +3605,7 @@ impl AcpView {
         // provider 会耗满 5s 控制超时；该等待绝不能发生在 GPUI 主线程。
         self.handle = None;
         if let Some(sid) = kill_sid {
-            smelt_core::acp_client::kill_acp_session_in_background(sid);
+            smelt_client::acp_client::kill_acp_session_in_background(sid);
         }
     }
 

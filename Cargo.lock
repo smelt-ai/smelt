@@ -9634,6 +9634,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smelt-acp-view",
+ "smelt-client",
  "smelt-client-store",
  "smelt-core",
  "smelt-pairing",
@@ -9658,11 +9659,28 @@ dependencies = [
  "gpui-pre",
  "serde",
  "serde_json",
+ "smelt-client",
  "smelt-core",
  "smelt-runtime-client",
  "smelt-ui",
  "smol",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "smelt-client"
+version = "0.9.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "smelt-core",
+ "smelt-event-protocol",
+ "smelt-model",
+ "smelt-paths",
+ "smelt-runtime-client",
+ "smol",
+ "tempfile",
  "uuid",
 ]
 
@@ -9805,6 +9823,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smelt-client",
  "smelt-core",
  "smelt-paths",
  "smelt-runtime-client",
@@ -9820,6 +9839,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "smelt-paths",
  "uuid",
 ]
 
@@ -9861,6 +9881,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smelt-client",
  "smelt-client-store",
  "smelt-core",
  "smelt-runtime-client",

@@ -14,7 +14,7 @@ pub(crate) fn call<C: ControlCall>(
     params: C::Params,
     timeout: Duration,
 ) -> Result<C::Result, ControlClientError> {
-    smelt_core::daemon_state::local_runtime().call::<C>(&params, timeout)
+    smelt_client::daemon_state::local_runtime().call::<C>(&params, timeout)
 }
 
 /// 给人看的失败原因：运行时报的业务错误原样给出，连不上运行时则是传输错误。

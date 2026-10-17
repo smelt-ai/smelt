@@ -11,6 +11,7 @@ workspace = true
 # smelt-store（原生 SQLite）或 smelt-core。CI 在 ci/android/ci.sh 里按移动端
 # target 单独检查。
 [dependencies]
+smelt-paths = { path = "../smelt-paths" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }

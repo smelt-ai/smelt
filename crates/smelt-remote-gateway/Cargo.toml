@@ -8,6 +8,7 @@ description = "Smelt mobile remote ACP and terminal gateway"
 workspace = true
 
 [dependencies]
+smelt-client = { path = "../smelt-client" }
 smelt-paths = { path = "../smelt-paths" }
 smelt-core = { path = "../smelt-core" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }

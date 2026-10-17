@@ -4,7 +4,7 @@
 //! 消息列表、审批卡、输入栏分别在 sibling 模块。
 
 use super::*;
-use smelt_core::daemon_state::DaemonPhase;
+use smelt_client::daemon_state::DaemonPhase;
 
 use super::ConversationTranscript;
 

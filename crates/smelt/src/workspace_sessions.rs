@@ -926,10 +926,10 @@ impl Workspace {
                                     // Starting 只是 provider 正在重建，不能重置预算；
                                     // 等 daemon 返回可用相位。
                                     match view.phase() {
-                                        smelt_core::daemon_state::DaemonPhase::Connecting => {
+                                        smelt_client::daemon_state::DaemonPhase::Connecting => {
                                             return AcpReconnectStep::Waiting;
                                         }
-                                        smelt_core::daemon_state::DaemonPhase::Dead => {}
+                                        smelt_client::daemon_state::DaemonPhase::Dead => {}
                                         _ => return AcpReconnectStep::Recovered,
                                     }
                                     if view.maybe_auto_reconnect(window, cx) {
@@ -948,7 +948,7 @@ impl Workspace {
                                             .update_in(cx, |view, _window, _cx| {
                                                 matches!(
                                                     view.phase(),
-                                                    smelt_core::daemon_state::DaemonPhase::Dead
+                                                    smelt_client::daemon_state::DaemonPhase::Dead
                                                 )
                                             })
                                             .unwrap_or(false);
@@ -2486,7 +2486,7 @@ impl Workspace {
         custom_title: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = smelt_core::session_control::rename_history_title(
+        if let Err(error) = smelt_client::session_ops::rename_history_title(
             agent,
             profile_id.as_deref(),
             &resume_id,

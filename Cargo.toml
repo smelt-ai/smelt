@@ -13,6 +13,7 @@ members = [
     "crates/smelt-paths",
     "crates/smelt-sys",
     "crates/smelt-model",
+    "crates/smelt-client",
     "crates/smelt-event-protocol",
     "crates/smelt-event-bus",
     "crates/smelt-store",
