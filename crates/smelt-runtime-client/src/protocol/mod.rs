@@ -5,3 +5,4 @@ pub mod daemon;
 pub mod files;
 pub mod git;
 pub mod history;
+pub mod workspace;

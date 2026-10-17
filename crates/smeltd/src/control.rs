@@ -216,6 +216,52 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::WorkspaceLoad => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::workspace_catalog::load() {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
+            }
+        }
+        ControlMethod::WorkspaceSave => {
+            let params: smelt_runtime_client::protocol::workspace::WorkspaceSaveParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::workspace_catalog::save(params.base_revision, &params.document) {
+                Ok(revision) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_runtime_client::protocol::workspace::WorkspaceSaveResult { revision },
+                ),
+                Err(error) => {
+                    let code = match error {
+                        smelt_core::workspace_catalog::CatalogError::Conflict { .. } => {
+                            ControlErrorCode::Conflict
+                        }
+                        smelt_core::workspace_catalog::CatalogError::Invalid(_) => {
+                            ControlErrorCode::InvalidParams
+                        }
+                        smelt_core::workspace_catalog::CatalogError::Store(_) => {
+                            ControlErrorCode::OperationFailed
+                        }
+                    };
+                    error_value(
+                        control_version,
+                        request_id,
+                        ControlError::new(code, error.to_string()),
+                    )
+                }
+            }
+        }
         ControlMethod::LaunchGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

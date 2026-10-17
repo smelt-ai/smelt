@@ -484,8 +484,9 @@ fn sqlite_workspace_snapshot_keeps_live_sidebar_fields() {
     assert!(restored.sidebar_hide_empty_projects);
 }
 
+/// 升级后第一次启动，客户端界面状态要从旧位置（运行时库里的工作区快照）取一次。
 #[test]
-fn load_ws_state_reads_sqlite_snapshot() {
+fn old_sqlite_snapshot_still_carries_the_client_ui_state() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -500,11 +501,11 @@ fn load_ws_state_reads_sqlite_snapshot() {
     .unwrap();
     store.put_workspace_snapshot(&snapshot).unwrap();
 
-    let crate::workspace_persist::WorkspaceLoad::Loaded(restored) =
-        crate::workspace_persist::load_ws_state_from_database(&database)
-    else {
-        panic!("应读出工作区快照");
-    };
+    let raw = smelt_store::Store::workspace_snapshot_to_json(
+        &store.get_workspace_snapshot().unwrap().unwrap(),
+    )
+    .unwrap();
+    let restored: crate::WsState = serde_json::from_slice(&raw).expect("应读出工作区快照");
     assert_eq!(restored.active_session_id.as_deref(), Some("sid-1"));
     assert_eq!(restored.pinned_projects, vec!["/repo".to_string()]);
     assert!(restored.sidebar_hide_empty_projects);

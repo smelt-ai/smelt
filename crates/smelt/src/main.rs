@@ -60,7 +60,7 @@ mod worktree_inherit;
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
 pub(crate) use workspace_persist::{
-    WorkspaceLoad, WorkspaceSnapshotWriteQueue, load_ws_state, normalize_saved_sessions,
+    WorkspaceCatalogSync, WorkspaceSnapshotWriteQueue, load_workspace_ui, normalize_saved_sessions,
     pending_restore_session_ids, unproject_acp_when_remote_catalog_drops,
 };
 #[cfg(test)]
@@ -2699,9 +2699,13 @@ struct Workspace {
     /// 一次性闸门。智能体面的子页不落盘，补位只该在恢复完成后做一次；持续做会把
     /// 用户返回智能体目录的操作顶回对话页。
     restored_agent_conversation_route: bool,
-    /// workspace 文档存在但无法解析时，禁止空快照覆盖原数据；有新会话后才允许
-    /// 用新的有效快照替换损坏内容。
-    workspace_state_load_failed: bool,
+    /// 运行时那份工作区目录（项目、会话组）是否已经读到。读到之前不保存：内存里
+    /// 的空列表不代表用户关光了会话。
+    workspace_catalog_loaded: bool,
+    /// 和运行时目录的版本同步，保存在后台线程推进。
+    workspace_catalog: WorkspaceCatalogSync,
+    /// 客户端记下的上次活动会话位置。目录到了以后，按 id 找不到时用它兜底。
+    startup_active_session: usize,
     /// workspace 文档的唯一写入队列。退出也必须排到这里，不能旁路另起写者。
     ws_write_queue: WorkspaceSnapshotWriteQueue,
     /// deferred 保存携带的代际。退出 flush 切换代际，已排队但尚未进入写队列的旧快照
@@ -2779,21 +2783,12 @@ impl Workspace {
         // 插件 tab 必须先于存档读取挂好：存档里的 tab 以插件 id 记录，
         // 注册表为空时会降级成 Files，用户上次停在插件面板就再也回不去。
         plugins::mount_all(window, cx);
-        // 存档只读元数据；**不**在 UI 线程同步 Terminal::spawn（会 beachball 数秒）。
-        // 会话 reattach 丢后台线程，窗口先起来用户即可点侧栏/设置。
-        let (saved, workspace_state_load_failed, workspace_load_error) = match load_ws_state() {
-            WorkspaceLoad::Loaded(state) => (Some(*state), false, None),
-            WorkspaceLoad::Missing => (None, false, None),
-            WorkspaceLoad::Failed(error) => {
-                eprintln!("[workspace] workspace 存档无法读取: {error}");
-                (None, true, Some(error))
-            }
-        };
-        if workspace_state_load_failed {
-            eprintln!("[workspace] 暂停空快照写入，避免覆盖原数据");
-        }
-        let workspace_load_notice = workspace_load_error
-            .map(|error| format!("工作区存档无法打开，已停止写入以免覆盖原会话。{error}"));
+        // 客户端界面状态（侧栏、当前页、Dock 布局）存在本机，同步读，窗口一次成型。
+        // 项目和会话属于运行时，窗口起来后异步加载，到了再恢复会话
+        // （见 start_workspace_catalog_load）。
+        let ui = load_workspace_ui();
+        let startup_active_session = ui.active_session;
+        let saved = Some(ui.into_state());
         // 旧版开合动画曾把过渡中的接近零宽度误存为用户偏好；加载时按侧栏
         // 可拖拽下限修复这类状态，避免下一次展开仍以错误宽度为目标。
         let sidebar_w = saved
@@ -2893,13 +2888,14 @@ impl Workspace {
             diff_body: None,
             commit_msg_inputs: HashMap::new(),
             commit_errors: HashMap::new(),
-            // 没有待恢复会话 → 一开始就算「恢复完毕」，否则等 schedule_session_restore 置位。
-            // 存档读失败时绝不能算恢复完毕：那会让空快照被当成「用户关光了所有会话」。
-            sessions_restored: pending_sessions.is_empty() && !workspace_state_load_failed,
+            // 目录到了才知道有没有要恢复的会话，见 apply_workspace_catalog。
+            sessions_restored: false,
             pending_notification_session_id: None,
             pending_conversation_wakes: Vec::new(),
             restored_agent_conversation_route: false,
-            workspace_state_load_failed,
+            workspace_catalog_loaded: false,
+            workspace_catalog: WorkspaceCatalogSync::default(),
+            startup_active_session,
             ws_write_queue: WorkspaceSnapshotWriteQueue::default(),
             ws_snapshot_epoch: 0,
             ws_snapshot_finalizing: false,
@@ -3060,7 +3056,7 @@ impl Workspace {
             workspace_window_active: false,
             restore_pending,
             restore_retry_attempt: 0,
-            saved_active_session_id: saved_active_session_id.clone(),
+            saved_active_session_id,
             cancelled_restore_paths: Vec::new(),
             _remote_sessions_sub: None,
             _agent_host_sub: None,
@@ -3089,37 +3085,10 @@ impl Workspace {
         ws.start_provider_quota_watch(cx);
         // 侧栏「+」菜单按本机已装 CLI 过滤；启动后立刻探一次，免得等用户打开设置。
         ws.refresh_acp_runtime(cx);
-        // pending 已挂上全部待恢复会话 → 写盘不会抹掉存档。
-        // 存档读失败时连这次启动首帧保存也跳过，避免空快照被排队。
-        if !ws.workspace_state_load_failed {
-            ws.save_state(cx);
-        }
         // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；恢复出待安装
         // 作业后走与用户点击完全相同的安装驱动，没有待办才做常规静默检查。
         ws.recover_update_at_launch(true, cx);
-        // 有待恢复会话：ensure+reattach 在 restore 线程串行做完后再 check_daemon_outdated，
-        // 避免与 ensure handoff 三线并行踩踏。无会话则直接查守护状态。
-        if !pending_sessions.is_empty() {
-            eprintln!(
-                "[workspace] 后台恢复 {} 个会话（不堵 UI）…",
-                pending_sessions.len()
-            );
-            ws.schedule_session_restore(
-                pending_sessions,
-                active_session,
-                saved_active_session_id,
-                window,
-                cx,
-            );
-        } else {
-            ws.check_daemon_outdated(cx);
-            std::thread::Builder::new()
-                .name("smelt-daemon-current".into())
-                .spawn(|| {
-                    let _ = terminal::ensure_managed_daemon_current();
-                })
-                .ok();
-        }
+        ws.start_workspace_catalog_load(window, cx);
         ws.start_daemon_outdated_watch(cx);
         ws.reconcile_remote_catalog_projection(window, cx);
         ws._remote_sessions_sub = Some(
@@ -3143,9 +3112,6 @@ impl Workspace {
             }),
         );
         ws.start_visible_data_watch(cx);
-        if let Some(message) = workspace_load_notice {
-            ws.report_background_error(message);
-        }
         // 首帧绘制前就把输入框和缓存任务备好。观察器只在之后的外观变化时再排一次。
         ws.refresh_visible_caches(window, cx);
         ws
@@ -3176,6 +3142,11 @@ impl Workspace {
     /// 将 app 级 daemon 目录投影到当前窗口。全局状态由唯一的 subscribe 循环写入，
     /// 此处不会轮询文件或额外建立 socket。
     fn reconcile_remote_catalog_projection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 工作区目录还没到时不知道哪些会话会被恢复，这时投影远程目录会把同一场会话
+        // 再投一份。目录到了以后会补做一次。
+        if !self.workspace_catalog_loaded {
+            return;
+        }
         let Some(global) = cx.try_global::<RemoteSessionCatalogGlobal>() else {
             return;
         };

@@ -76,6 +76,7 @@ pub mod terminal_theme;
 pub mod theme_index;
 pub mod tty_color;
 pub mod updater;
+pub mod workspace_catalog;
 pub mod workspace_menu;
 pub mod workspace_override;
 pub mod worktree_inherit;

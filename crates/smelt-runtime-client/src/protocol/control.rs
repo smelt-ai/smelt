@@ -116,6 +116,8 @@ define_control_methods! {
     LaunchGet => (LAUNCH_GET_METHOD, "launch.get"),
     LaunchReplace => (LAUNCH_REPLACE_METHOD, "launch.replace"),
     MemoryTestEmbedding => (MEMORY_TEST_EMBEDDING_METHOD, "memory.test_embedding"),
+    WorkspaceLoad => (WORKSPACE_LOAD_METHOD, "workspace.load"),
+    WorkspaceSave => (WORKSPACE_SAVE_METHOD, "workspace.save"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -525,7 +527,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 63);
+        assert_eq!(names.len(), 65);
     }
 
     #[test]

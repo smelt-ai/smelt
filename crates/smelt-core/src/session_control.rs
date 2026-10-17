@@ -1315,6 +1315,11 @@ pub fn list_agent_conversations() -> Result<Vec<AgentConversationSummary>, Strin
 /// 把已经写进工作区快照的对话标题改掉。GUI 没开时，下次冷启动靠这份标题，
 /// 而不是远程目录里的种子标题。没有这份快照或这场对话还没落盘时返回 false。
 pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Result<bool, String> {
+    // 不推进版本：GUI 开着时也会收到同一个改名并在下次保存时写同样的标题，推进版本
+    // 只会让它的保存无谓地冲突。但读改写要和 workspace.save 互斥。
+    let _guard = crate::workspace_catalog::CATALOG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let store = crate::sqlite_state::default_sqlite_store()?;
     let Some(mut snapshot) = store
         .get_workspace_snapshot()
