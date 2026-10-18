@@ -34,8 +34,6 @@ struct HostedSnapshotLine {
     snapshot: smelt_core::acp_session::ConversationSnapshot,
     #[serde(default)]
     provider_pid: Option<i32>,
-    #[serde(default)]
-    entries_delta: Option<smelt_core::acp_wire::EntriesDelta>,
 }
 
 /// 历史页不是快照。读者必须先认这条，再按快照解析；认错会把镜像拆掉。
@@ -636,7 +634,7 @@ fn reap_host_tasks(host_pid: i32) {
 
 fn dispatch_snapshot_line(
     line: &[u8],
-    mirror: &mut smelt_core::acp_wire::EntryMirror,
+    mirror: &mut smelt_core::acp_wire::FrameMirror,
     tx: &smol::channel::Sender<HostedSnapshotEnvelope>,
     provider_pid: &AtomicI32,
     history_waiters: &Mutex<
@@ -666,7 +664,24 @@ fn dispatch_snapshot_line(
         }
         return true;
     }
-    let mut parsed = match serde_json::from_value::<HostedSnapshotLine>(value) {
+    // 增量帧经镜像还原成完整的快照帧，和整段帧一样交给合并。镜像接不上只会发生在
+    // 交接后接手的读端上，父进程这时已经要了整段帧，丢掉这一帧等它即可。
+    let value = match value.get("delta") {
+        Some(delta) => {
+            let restored = serde_json::from_value(delta.clone())
+                .ok()
+                .and_then(|delta| mirror.apply(&delta).ok());
+            match restored {
+                Some(frame) => frame,
+                None => return true,
+            }
+        }
+        None => {
+            mirror.full(&value);
+            value
+        }
+    };
+    let parsed = match serde_json::from_value::<HostedSnapshotLine>(value) {
         Ok(parsed) => parsed,
         Err(error) => {
             // 快照解析失败几乎只有一个原因：host 与主 daemon 不同版本，快照 schema
@@ -682,18 +697,6 @@ fn dispatch_snapshot_line(
             return false;
         }
     };
-    // 增量帧经镜像还原成连续尾片，和整段帧一样交给合并。镜像接不上只会发生在交接后
-    // 接手的读端上，父进程这时已经要了整段帧，丢掉这一帧等它即可。
-    match parsed.entries_delta.take() {
-        None => mirror.splice(parsed.snapshot.entries_offset, &parsed.snapshot.entries),
-        Some(delta) => match mirror.apply(&delta) {
-            Ok((first, entries)) => {
-                parsed.snapshot.entries_offset = first;
-                parsed.snapshot.entries = entries;
-            }
-            Err(_) => return true,
-        },
-    }
     let live_provider_pid = parsed.provider_pid.filter(|pid| *pid > 1);
     // None 也是事实：provider 已被宿主收尸后必须清掉旧 pid，避免该
     // pid 被系统复用后，后续异常清理误杀无关进程组。
@@ -723,7 +726,7 @@ fn start_snapshot_reader(
             let mut reader = BufReader::with_capacity(8192, PrefixedRead::new(prefix, stream));
             let mut pending: Vec<u8> = Vec::new();
             // 宿主发来的增量帧要靠这份镜像还原。交接后接手的读端从空镜像开始。
-            let mut mirror = smelt_core::acp_wire::EntryMirror::default();
+            let mut mirror = smelt_core::acp_wire::FrameMirror::default();
             loop {
                 // 半行还没超限就可以立刻停。超限的半行继续读到换行，避免把残行交出去。
                 if handoff.stopped() && pending.len() <= HOST_HANDOFF_RESIDUAL_LIMIT {

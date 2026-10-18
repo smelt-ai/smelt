@@ -9,24 +9,24 @@ fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
     Arc::new(make_acp_session_value(id, reduced))
 }
 
-/// 没发首帧的连接：对方手里什么都没有，之后的增量帧会把条目整条带过去。
-fn nothing_sent() -> smelt_core::acp_wire::EntryMirror {
-    let mut mirror = smelt_core::acp_wire::EntryMirror::default();
-    mirror.splice(0, &[]);
-    mirror
+/// 没发首帧的连接：对方手里什么都没有，之后的增量帧会把快照头和条目整个带过去。
+fn nothing_sent() -> smelt_core::acp_wire::FrameMirror {
+    full_frame(&serde_json::json!({ "snapshot": { "entries": [] } })).1
 }
 
-/// 像客户端那样读一帧：增量帧经接收方镜像还原成「从第一个变化的条目到末尾」。
-/// 这些测试的连接没发首帧，接收方也从什么都没有开始。
-fn decoded_frame(line: &str) -> serde_json::Value {
-    let mut frame: serde_json::Value = serde_json::from_str(line).unwrap();
-    if let Some(delta) = frame.get("entries_delta").cloned() {
-        let delta: smelt_core::acp_wire::EntriesDelta = serde_json::from_value(delta).unwrap();
-        let (first, entries) = nothing_sent().apply(&delta).unwrap();
-        frame["snapshot"]["entries_offset"] = first.into();
-        frame["snapshot"]["entries"] = serde_json::to_value(entries).unwrap();
+/// 像客户端那样读一帧：增量帧经这条连接的接收方镜像还原成完整的快照帧，条目是从
+/// 第一个变化的那条到末尾；整段帧顺手重建镜像。同一条连接上的帧要共用一份镜像。
+fn decode_frame(mirror: &mut smelt_core::acp_wire::FrameMirror, line: &str) -> serde_json::Value {
+    let frame: serde_json::Value = serde_json::from_str(line).unwrap();
+    match frame.get("delta") {
+        Some(delta) => mirror
+            .apply(&serde_json::from_value(delta.clone()).unwrap())
+            .unwrap(),
+        None => {
+            mirror.full(&frame);
+            frame
+        }
     }
-    frame
 }
 
 fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> AcpSnapshotLink {
@@ -2710,7 +2710,8 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
 
     let mut line = String::new();
     BufReader::new(w_client).read_line(&mut line).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let mut mirror = nothing_sent();
+    let v = decode_frame(&mut mirror, &line);
     assert!(v.get("snapshot").is_some());
 }
 
@@ -2787,7 +2788,8 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     push_acp_snapshot_since(&sess, false, None);
     let mut incremental = String::new();
     reader.read_line(&mut incremental).unwrap();
-    let incremental: serde_json::Value = serde_json::from_str(&incremental).unwrap();
+    let mut mirror = nothing_sent();
+    let incremental = decode_frame(&mut mirror, &incremental);
     assert!(
         incremental["snapshot"].get("runtime_debug").is_none(),
         "普通流式帧不应重复携带完整 provider payload"
@@ -2796,7 +2798,7 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     push_acp_snapshot_with_runtime_debug_for_test(&sess);
     let mut changed = String::new();
     reader.read_line(&mut changed).unwrap();
-    let changed: serde_json::Value = serde_json::from_str(&changed).unwrap();
+    let changed = decode_frame(&mut mirror, &changed);
     assert_eq!(
         changed["snapshot"]["runtime_debug"]["modelCalls"][0]["payload"]["messages"][0]["content"],
         "hello"
@@ -2835,7 +2837,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let response = decoded_frame(&line);
+    let response = decode_frame(&mut nothing_sent(), &line);
     assert_eq!(response["snapshot"]["entries_offset"], 0);
     assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -2888,7 +2890,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let frame = decoded_frame(&line);
+    let frame = decode_frame(&mut nothing_sent(), &line);
     assert_eq!(frame["live"]["history_len"], 2);
     assert!(frame["live"]["open_turn"].as_array().unwrap().is_empty());
     assert_eq!(frame["snapshot"]["entries_offset"], 1);
@@ -2962,7 +2964,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let frame = decoded_frame(&line);
+    let frame = decode_frame(&mut nothing_sent(), &line);
     assert_eq!(frame["snapshot"]["entries_offset"], 3);
     assert_eq!(frame["snapshot"]["entries_total"], 4);
     let entries = frame["snapshot"]["entries"].as_array().unwrap();
@@ -2980,7 +2982,8 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     push_acp_snapshot_since(&sess, false, None);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
-    let first: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let mut mirror = nothing_sent();
+    let first = decode_frame(&mut mirror, &line);
     assert!(
         first["snapshot"].get("tool_debug").is_none(),
         "没变过的工具参数表不该出现在增量帧里"
@@ -3000,7 +3003,7 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     push_acp_snapshot_since(&sess, false, Some(0));
     line.clear();
     reader.read_line(&mut line).unwrap();
-    let changed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let changed = decode_frame(&mut mirror, &line);
     assert_eq!(
         changed["snapshot"]["tool_debug"]["tool-1"]["raw_input"]["cmd"],
         "ls"
@@ -3009,7 +3012,7 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     push_acp_snapshot_since(&sess, false, None);
     line.clear();
     reader.read_line(&mut line).unwrap();
-    let later: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let later = decode_frame(&mut mirror, &line);
     assert!(
         later["snapshot"].get("tool_debug").is_none(),
         "参数表没再变时，下一帧必须省略整表"
@@ -3064,7 +3067,7 @@ fn kill_removes_session_and_closes_connections() {
     let mut tail = String::new();
     BufReader::new(c_client).read_to_string(&mut tail).unwrap();
     let mut lines = tail.lines();
-    let payload: serde_json::Value = serde_json::from_str(lines.next().expect("终态快照")).unwrap();
+    let payload = decode_frame(&mut nothing_sent(), lines.next().expect("终态快照"));
     let final_snapshot: smelt_core::acp_session::ConversationSnapshot =
         serde_json::from_value(payload["snapshot"].clone()).unwrap();
     assert_eq!(

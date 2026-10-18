@@ -3,7 +3,7 @@
 //! 从 `main.rs` 整块搬出。连接与归约仍在 `smelt_core::acp_session`；这里只跑守护侧的会话活体。
 
 use super::*;
-use smelt_core::acp_wire::EntryMirror;
+use smelt_core::acp_wire::FrameMirror;
 use std::collections::{BTreeSet, VecDeque};
 
 // ===================== ACP 会话托管 =====================
@@ -834,18 +834,18 @@ type SnapshotEncode = Arc<
 /// 这一帧怎么编码条目。两种都会更新这条连接的发送方镜像。
 pub(crate) enum SnapshotFrameKind<'a> {
     /// 只发相对镜像的变化。
-    Delta(&'a mut EntryMirror),
+    Delta(&'a mut FrameMirror),
     /// 整段帧，镜像按它重建。
-    Full(&'a mut EntryMirror),
+    Full(&'a mut FrameMirror),
 }
 
-/// 按首帧的条目建发送方镜像：首帧是整段帧，对方手里就是这一段。
-pub(crate) fn sent_mirror(
-    snapshot: &smelt_core::acp_session::ConversationSnapshot,
-) -> EntryMirror {
-    let mut mirror = EntryMirror::default();
-    mirror.splice(snapshot.entries_offset, &snapshot.entries);
-    mirror
+/// 整段帧：编成一行字节，同时建出发送方镜像，对方收到后手里就是这一帧。
+pub(crate) fn full_frame(frame: &serde_json::Value) -> (Vec<u8>, FrameMirror) {
+    let mut mirror = FrameMirror::default();
+    mirror.full(frame);
+    let mut bytes = frame.to_string().into_bytes();
+    bytes.push(b'\n');
+    (bytes, mirror)
 }
 
 type SnapshotDetach = Arc<dyn Fn(RawFd) + Send + Sync>;
@@ -853,7 +853,7 @@ type SnapshotDetach = Arc<dyn Fn(RawFd) + Send + Sync>;
 pub(crate) fn spawn_acp_snapshot_link(
     stream: UnixStream,
     initial: Vec<u8>,
-    mirror: EntryMirror,
+    mirror: FrameMirror,
     tool_debug_generation_sent: u64,
     id: &str,
     kind: &'static str,
@@ -919,13 +919,13 @@ impl SnapshotProjection {
     };
 }
 
-/// `initial` 是首帧（整段帧），`mirror` 按同一份快照建：见 [`sent_mirror`]。
+/// `initial` 是首帧（整段帧），`mirror` 和它一起建：见 [`full_frame`]。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn acp_snapshot_link_for_slot(
     slot: &Arc<AcpSlot<AcpSession>>,
     stream: UnixStream,
     initial: Vec<u8>,
-    mirror: EntryMirror,
+    mirror: FrameMirror,
     tool_debug_generation_sent: u64,
     id: &str,
     kind: &'static str,
@@ -975,7 +975,7 @@ struct SnapshotWriter {
     stream: UnixStream,
     initial: Vec<u8>,
     /// 对方手里有哪些条目。只有这条写线程读写它。
-    mirror: EntryMirror,
+    mirror: FrameMirror,
     encode: SnapshotEncode,
     detach: SnapshotDetach,
     inner: Arc<SnapshotLinkInner>,
@@ -1147,6 +1147,10 @@ pub(crate) fn encode_acp_snapshot(
         history: include_history,
         debug: include_debug,
     } = projection;
+    let (mirror, full) = match frame_kind {
+        SnapshotFrameKind::Full(mirror) => (mirror, true),
+        SnapshotFrameKind::Delta(mirror) => (mirror, false),
+    };
     let (mut snap, entries_delta, live, tool_debug_generation, included_tool_debug) = {
         let reduced = sess.reduced.lock().unwrap();
         let tool_debug_generation = reduced.tool_debug_generation;
@@ -1175,31 +1179,26 @@ pub(crate) fn encode_acp_snapshot(
                 include_envelope,
             )
         };
-        let (mut snapshot, entries_delta) = match frame_kind {
-            SnapshotFrameKind::Full(mirror) => {
-                // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
-                // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
-                let start = if include_history {
-                    from
-                } else {
-                    from.min(history_len)
-                };
-                let snapshot = range(start);
-                mirror.splice(snapshot.entries_offset, &snapshot.entries);
-                (snapshot, None)
-            }
-            SnapshotFrameKind::Delta(mirror) => {
-                // 条目不进快照，只发相对对方镜像的变化。已收尾的回合不会再长，
-                // 双方都不必再为它留镜像。
-                let delta = mirror.encode(
-                    reduced.entries_base(),
-                    reduced.entries(),
-                    from,
-                    window_end,
-                    history_len.min(from),
-                );
-                (range(window_end), Some(delta))
-            }
+        let (mut snapshot, entries_delta) = if full {
+            // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
+            // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
+            let start = if include_history {
+                from
+            } else {
+                from.min(history_len)
+            };
+            (range(start), None)
+        } else {
+            // 条目不进快照，只发相对对方镜像的变化。已收尾的回合不会再长，
+            // 双方都不必再为它留镜像。
+            let delta = mirror.encode_entries(
+                reduced.entries_base(),
+                reduced.entries(),
+                from,
+                window_end,
+                history_len.min(from),
+            );
+            (range(window_end), Some(delta))
         };
         if let Some(runtime_debug) =
             runtime_debug.filter(|_| include_runtime_debug && include_debug)
@@ -1230,13 +1229,28 @@ pub(crate) fn encode_acp_snapshot(
         .unwrap()
         .as_ref()
         .and_then(|handle| handle.stdio.lock().unwrap().map(|stdio| stdio.pid));
-    let payload = smelt_core::acp_session::AcpSnapshotFrame {
+    let frame = serde_json::to_value(smelt_core::acp_session::AcpSnapshotFrame {
         live: &live,
         snapshot: &snap,
         provider_pid,
-        entries_delta: entries_delta.as_ref(),
-    }
-    .to_line_bytes();
+    })
+    .expect("ACP snapshot frame contains only serializable data");
+    let payload = match entries_delta {
+        None => {
+            let (bytes, rebuilt) = full_frame(&frame);
+            *mirror = rebuilt;
+            bytes
+        }
+        Some(entries) => {
+            let delta = smelt_core::acp_wire::FrameDelta {
+                fields: mirror.encode_header(&frame),
+                entries,
+            };
+            let mut bytes = serde_json::json!({ "delta": delta }).to_string().into_bytes();
+            bytes.push(b'\n');
+            bytes
+        }
+    };
     EncodedAcpSnapshot {
         bytes: payload,
         tool_debug_generation,
@@ -3396,18 +3410,19 @@ pub(crate) fn handle_acp_open(
                 .unwrap()
                 .as_ref()
                 .and_then(|handle| handle.stdio.lock().unwrap().map(|stdio| stdio.pid));
-            let initial = smelt_core::acp_session::AcpSnapshotFrame {
-                live: &live,
-                snapshot: &snapshot,
-                provider_pid,
-                entries_delta: None,
-            }
-            .to_line_bytes();
+            let (initial, mirror) = full_frame(
+                &serde_json::to_value(smelt_core::acp_session::AcpSnapshotFrame {
+                    live: &live,
+                    snapshot: &snapshot,
+                    provider_pid,
+                })
+                .expect("ACP snapshot frame contains only serializable data"),
+            );
             let Ok(attachment) = acp_snapshot_link_for_slot(
                 &slot,
                 c,
                 initial,
-                sent_mirror(&snapshot),
+                mirror,
                 tool_debug_generation,
                 &id,
                 "acp-client",
@@ -3885,15 +3900,12 @@ pub(crate) fn handle_acp_watch(
         }
         snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
         set_conversation_snapshot(sess, &mut snapshot);
-        let mut initial = serde_json::json!({ "snapshot": snapshot })
-            .to_string()
-            .into_bytes();
-        initial.push(b'\n');
+        let (initial, mirror) = full_frame(&serde_json::json!({ "snapshot": snapshot }));
         let Ok(attachment) = acp_snapshot_link_for_slot(
             &slot,
             c,
             initial,
-            sent_mirror(&snapshot),
+            mirror,
             tool_debug_generation,
             &id,
             "acp-watcher",
@@ -4636,8 +4648,7 @@ mod snapshot_link_tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
 
-        let mut mirror = EntryMirror::default();
-        mirror.splice(0, &[]);
+        let (_, mirror) = full_frame(&serde_json::json!({ "snapshot": { "entries": [] } }));
         let link = acp_snapshot_link_for_slot(
             &slot,
             server,

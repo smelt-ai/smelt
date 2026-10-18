@@ -1245,15 +1245,13 @@ impl<'de> serde::Deserialize<'de> for SessionLive {
 /// 守护推给窗口的一帧。正文只在 `snapshot`；`live` 是相位和历史边界。
 /// 恢复身份的放弃标志在 `snapshot.history_abandoned` 上，和会话状态同一份。
 ///
-/// 带 `entries_delta` 的是增量帧：`snapshot.entries` 为空，条目变化由接收方的
-/// [`crate::acp_wire::EntryMirror`] 应用出来；不带的是整段帧，按快照里的条目重建。
+/// 这是整段帧。长连接上之后的帧是相对它的增量 `{"delta": …}`，接收方用
+/// [`crate::acp_wire::FrameMirror`] 还原成这个形状再解析。
 #[derive(serde::Serialize)]
 pub struct AcpSnapshotFrame<'a> {
     pub live: &'a SessionLive,
     pub snapshot: &'a ConversationSnapshot,
     pub provider_pid: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entries_delta: Option<&'a crate::acp_wire::EntriesDelta>,
 }
 
 impl AcpSnapshotFrame<'_> {

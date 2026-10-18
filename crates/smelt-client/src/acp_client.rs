@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crate::daemon_state::DaemonPhase;
 use smelt_model::acp_session::{AcpEndKind, AcpUserAction, ConversationSnapshot};
-use smelt_model::acp_wire::{EntriesDelta, EntryMirror};
+use smelt_model::acp_wire::FrameMirror;
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
@@ -225,8 +225,8 @@ fn snapshot_from_live(
 enum SnapshotFrame {
     Ignore,
     Snapshot(ConversationSnapshot),
-    /// 增量帧接不上手里的镜像：状态照样更新，条目要等守护重发整段帧。
-    NeedsFullFrame(ConversationSnapshot),
+    /// 增量帧接不上手里的镜像：这一帧作废，要等守护重发整段帧。
+    NeedsFullFrame,
     Unreadable(ConversationSnapshot),
 }
 
@@ -235,42 +235,35 @@ struct DecodedAcpSnapshotFrame {
     #[serde(default)]
     live: Option<smelt_model::acp_session::SessionLive>,
     snapshot: Option<smelt_model::acp_session::ConversationSnapshot>,
-    #[serde(default)]
-    entries_delta: Option<EntriesDelta>,
-}
-
-/// 把增量帧的条目经镜像还原成「从第一个变化的条目到末尾」，正是视图按下标合并要的
-/// 那一段；整段帧照原样用，并据此重建镜像。接不上时这一帧不带条目。
-fn restore_entries(
-    snapshot: &mut ConversationSnapshot,
-    delta: Option<EntriesDelta>,
-    mirror: &mut EntryMirror,
-) -> bool {
-    let Some(delta) = delta else {
-        mirror.splice(snapshot.entries_offset, &snapshot.entries);
-        return true;
-    };
-    match mirror.apply(&delta) {
-        Ok((first, entries)) => {
-            snapshot.entries_offset = first;
-            snapshot.entries = entries;
-            true
-        }
-        Err(_) => {
-            snapshot.entries_offset = snapshot.entries_total;
-            snapshot.entries.clear();
-            false
-        }
-    }
 }
 
 fn read_snapshot_frame(
     line: &str,
     entries_offset: usize,
-    mirror: &mut EntryMirror,
+    mirror: &mut FrameMirror,
 ) -> SnapshotFrame {
-    let trimmed = line.trim();
-    if let Ok(frame) = serde_json::from_str::<DecodedAcpSnapshotFrame>(trimmed) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return SnapshotFrame::Ignore;
+    };
+    // 增量帧经镜像还原成完整的快照帧，之后和整段帧一样解析；整段帧顺手重建镜像。
+    let value = match value.get("delta") {
+        Some(delta) => {
+            let restored = serde_json::from_value(delta.clone())
+                .ok()
+                .and_then(|delta| mirror.apply(&delta).ok());
+            match restored {
+                Some(frame) => frame,
+                None => return SnapshotFrame::NeedsFullFrame,
+            }
+        }
+        None => {
+            if value.get("snapshot").is_some() {
+                mirror.full(&value);
+            }
+            value
+        }
+    };
+    if let Ok(frame) = serde_json::from_value::<DecodedAcpSnapshotFrame>(value.clone()) {
         if let Some(mut snapshot) = frame.snapshot {
             // 快照对象缺了恢复身份时，活状态头里的那份仍然有效。
             // 不能因为这一帧没带字段，就把已经确认的对话 id 丢掉。
@@ -282,9 +275,6 @@ fn read_snapshot_frame(
             {
                 snapshot.history_session_id = Some(history_session_id);
             }
-            if !restore_entries(&mut snapshot, frame.entries_delta, mirror) {
-                return SnapshotFrame::NeedsFullFrame(snapshot);
-            }
             return SnapshotFrame::Snapshot(snapshot);
         }
         if let Some(live) = frame.live {
@@ -292,9 +282,6 @@ fn read_snapshot_frame(
         }
         return SnapshotFrame::Ignore;
     }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-        return SnapshotFrame::Ignore;
-    };
     let live = value
         .get("live")
         .and_then(|live| smelt_model::acp_session::SessionLive::from_json(live).ok())
@@ -479,7 +466,7 @@ pub fn spawn_acp_client(
             // 读循环：逐行 JSON 解出 `{"snapshot": ConversationSnapshot}`，增量帧经镜像还原。
             let mut reader = BufReader::new(conn);
             let mut line = String::new();
-            let mut mirror = EntryMirror::default();
+            let mut mirror = FrameMirror::default();
             let mut full_frame_requested = false;
             loop {
                 line.clear();
@@ -488,13 +475,13 @@ pub fn spawn_acp_client(
                     Ok(_) => {}
                 }
                 let frame = match read_snapshot_frame(&line, known_entries_end, &mut mirror) {
-                    SnapshotFrame::NeedsFullFrame(snapshot) => {
+                    SnapshotFrame::NeedsFullFrame => {
                         // 守护收到 Refresh 会给这条连接重发整段帧，镜像随之重建。
                         if !full_frame_requested {
                             full_frame_requested =
                                 refresh_tx.try_send(AcpUserAction::Refresh).is_ok();
                         }
-                        SnapshotFrame::Snapshot(snapshot)
+                        continue;
                     }
                     SnapshotFrame::Snapshot(snapshot) => {
                         full_frame_requested = false;
@@ -503,7 +490,7 @@ pub fn spawn_acp_client(
                     other => other,
                 };
                 match frame {
-                    SnapshotFrame::NeedsFullFrame(_) | SnapshotFrame::Ignore => continue,
+                    SnapshotFrame::NeedsFullFrame | SnapshotFrame::Ignore => continue,
                     SnapshotFrame::Unreadable(terminal) => {
                         let _ = snapshot_tx.try_send(terminal);
                         return;
@@ -676,7 +663,7 @@ mod tests {
         })
         .to_string();
         let SnapshotFrame::Snapshot(snapshot) =
-            read_snapshot_frame(&line, 4, &mut smelt_model::acp_wire::EntryMirror::default())
+            read_snapshot_frame(&line, 4, &mut smelt_model::acp_wire::FrameMirror::default())
         else {
             panic!("历史坏了也必须留下活状态，不能停在正在启动");
         };
@@ -711,9 +698,11 @@ mod tests {
             .expect("snapshot object")
             .remove("history_session_id");
 
-        let SnapshotFrame::Snapshot(snapshot) =
-            read_snapshot_frame(&frame.to_string(), 0, &mut smelt_model::acp_wire::EntryMirror::default())
-        else {
+        let SnapshotFrame::Snapshot(snapshot) = read_snapshot_frame(
+            &frame.to_string(),
+            0,
+            &mut smelt_model::acp_wire::FrameMirror::default(),
+        ) else {
             panic!("快照对象在，就必须交给窗口");
         };
         assert_eq!(snapshot.history_session_id.as_deref(), Some("01a128ad"));
@@ -740,7 +729,7 @@ mod tests {
         .to_string();
 
         let SnapshotFrame::Snapshot(snapshot) =
-            read_snapshot_frame(&line, 0, &mut smelt_model::acp_wire::EntryMirror::default())
+            read_snapshot_frame(&line, 0, &mut smelt_model::acp_wire::FrameMirror::default())
         else {
             panic!("读得懂的快照必须交给窗口");
         };
@@ -759,9 +748,11 @@ mod tests {
         let mut frame = serde_json::json!({ "snapshot": snapshot });
         frame["snapshot"]["phase"] = serde_json::json!("not-a-phase");
 
-        let SnapshotFrame::Unreadable(terminal) =
-            read_snapshot_frame(&frame.to_string(), 12, &mut smelt_model::acp_wire::EntryMirror::default())
-        else {
+        let SnapshotFrame::Unreadable(terminal) = read_snapshot_frame(
+            &frame.to_string(),
+            12,
+            &mut smelt_model::acp_wire::FrameMirror::default(),
+        ) else {
             panic!("旧相位名不能再被悄悄丢掉，否则页面会停在正在启动");
         };
         assert!(matches!(

@@ -4,16 +4,21 @@
 //! 的那条消息每长一点就全文重发一遍，传输量随回复长度平方增长。本机 socket 看不出
 //! 来，远程链路上会远远落后于生成。
 //!
-//! 这里让连接两端各持一份 [`EntryMirror`]：发送方的那份记着「对方手里有什么」，接收方
-//! 的那份就是手里那份。两边用同一个 [`EntryMirror::apply`] 演进，不会漂移。发送方只发
-//! 变化：每条变化的消息按序列化后的 JSON 算公共前缀，只发「保留前几个字节 + 新的尾巴」。
-//! 正文、工具输出、子代理记录在哪里增长都是同一个机制，整条替换就是保留 0 字节。
+//! 这里让连接两端各持一份 [`FrameMirror`]：发送方的那份记着「对方手里有什么」，接收方
+//! 的那份就是手里那份。两边用同一个 [`FrameMirror::apply`] 演进，不会漂移。发送方只发
+//! 变化，条目和快照头都一样：按序列化后的 JSON 求公共前缀，只发「保留前几个字节 + 新
+//! 的尾巴」。正文、工具输出、子代理记录在哪里增长都是同一个机制，整条替换就是保留 0
+//! 字节；快照头逐字段比，没变的字段不发。
 //!
-//! 不带增量的整段帧（附着时的首帧、`Refresh` 之后的帧）照旧用快照里的条目，接收方
-//! 用 [`EntryMirror::splice`] 重建。镜像对不上增量帧时（例如守护交接后接手的读端）
-//! 这一帧的条目作废，等下一份整段帧。
+//! 线路上只有两种帧：整段帧（附着时的首帧、`Refresh` 之后的帧，形状就是完整的快照帧），
+//! 两端用 [`FrameMirror::full`] 重建镜像；增量帧 `{"delta": FrameDelta}`，接收方还原出
+//! 完整的帧再照常解析。镜像对不上增量帧时（例如守护交接后接手的读端）这一帧作废，
+//! 等下一份整段帧。
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::acp_chat::AcpEntry;
 
@@ -193,6 +198,181 @@ impl EntryMirror {
         self.offset = keep_from;
         self.json = json.split_off(keep_from - start);
         Ok((first.min(delta.end), entries))
+    }
+}
+
+/// 快照头里一个字段的变化：保留旧 JSON 的前 `keep` 个字节，接上 `tail`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldPatch {
+    pub keep: usize,
+    pub tail: String,
+}
+
+/// 相对这条连接上一帧的变化。`fields` 的键是 `live.phase`、`snapshot.turn_timings`
+/// 这样的字段路径，值为 `None` 表示这个字段这一帧没有了。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameDelta {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, Option<FieldPatch>>,
+    pub entries: EntriesDelta,
+}
+
+/// 帧里的这两个对象按字段拆开比较，其余顶层字段整个比较。
+const SPLIT_OBJECTS: [&str; 2] = ["live", "snapshot"];
+/// 快照里由条目镜像管的字段，不算快照头。
+const ENTRY_FIELDS: [&str; 2] = ["entries", "entries_offset"];
+
+fn header_fields(frame: &Value) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    for (key, value) in frame.as_object().into_iter().flatten() {
+        match value.as_object() {
+            Some(inner) if SPLIT_OBJECTS.contains(&key.as_str()) => {
+                for (field, value) in inner {
+                    if key == "snapshot" && ENTRY_FIELDS.contains(&field.as_str()) {
+                        continue;
+                    }
+                    fields.insert(format!("{key}.{field}"), value.to_string());
+                }
+            }
+            _ => {
+                fields.insert(key.clone(), value.to_string());
+            }
+        }
+    }
+    fields
+}
+
+fn frame_from_fields(fields: &BTreeMap<String, String>) -> Result<Map<String, Value>, MirrorGap> {
+    let mut frame = Map::new();
+    for (key, json) in fields {
+        let value: Value = serde_json::from_str(json).map_err(|_| MirrorGap)?;
+        match key.split_once('.') {
+            Some((outer, field)) => {
+                frame
+                    .entry(outer)
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+                    .ok_or(MirrorGap)?
+                    .insert(field.to_string(), value);
+            }
+            None => {
+                frame.insert(key.clone(), value);
+            }
+        }
+    }
+    Ok(frame)
+}
+
+/// 连接一端持有的整帧镜像：快照头各字段的 JSON，加上条目镜像。
+#[derive(Clone, Debug, Default)]
+pub struct FrameMirror {
+    header: BTreeMap<String, String>,
+    entries: EntryMirror,
+}
+
+impl FrameMirror {
+    /// 整段帧：发出或收到时各调一次，镜像变成这一帧的样子。条目读不出来时镜像作废。
+    pub fn full(&mut self, frame: &Value) {
+        self.header = header_fields(frame);
+        let snapshot = &frame["snapshot"];
+        let offset = snapshot["entries_offset"].as_u64().unwrap_or(0) as usize;
+        match serde_json::from_value::<Vec<AcpEntry>>(snapshot["entries"].clone()) {
+            Ok(entries) => self.entries.splice(offset, &entries),
+            Err(_) => self.entries.synced = false,
+        }
+    }
+
+    /// 发送方：`frame` 是这一帧完整的快照头（条目不必带），`entries` 是从绝对下标 `base`
+    /// 起的当前条目。算出相对镜像的变化，并应用到镜像上。
+    pub fn encode(
+        &mut self,
+        frame: &Value,
+        base: usize,
+        entries: &[AcpEntry],
+        from: usize,
+        end: usize,
+        keep_from: usize,
+    ) -> FrameDelta {
+        let entries = self.encode_entries(base, entries, from, end, keep_from);
+        FrameDelta {
+            fields: self.encode_header(frame),
+            entries,
+        }
+    }
+
+    /// 发送方第一步：条目的变化。条目要在持有归约状态时读，所以和快照头分开算。
+    pub fn encode_entries(
+        &mut self,
+        base: usize,
+        entries: &[AcpEntry],
+        from: usize,
+        end: usize,
+        keep_from: usize,
+    ) -> EntriesDelta {
+        self.entries.encode(base, entries, from, end, keep_from)
+    }
+
+    /// 发送方第二步：快照头里变了的字段。
+    pub fn encode_header(&mut self, frame: &Value) -> BTreeMap<String, Option<FieldPatch>> {
+        let header = header_fields(frame);
+        let mut fields: BTreeMap<String, Option<FieldPatch>> = self
+            .header
+            .keys()
+            .filter(|key| !header.contains_key(*key))
+            .map(|key| (key.clone(), None))
+            .collect();
+        for (key, new) in &header {
+            let keep = match self.header.get(key) {
+                Some(old) if old == new => continue,
+                Some(old) => common_prefix(old, new),
+                None => 0,
+            };
+            fields.insert(
+                key.clone(),
+                Some(FieldPatch {
+                    keep,
+                    tail: new[keep..].to_string(),
+                }),
+            );
+        }
+        self.header = header;
+        fields
+    }
+
+    /// 应用一帧增量，还原出完整的快照帧：`snapshot.entries` 是从第一个变化的条目到末尾，
+    /// `snapshot.entries_offset` 是它的下标，正是视图按下标合并要的那一段。
+    pub fn apply(&mut self, delta: &FrameDelta) -> Result<Value, MirrorGap> {
+        let mut header = self.header.clone();
+        for (key, patch) in &delta.fields {
+            match patch {
+                None => {
+                    header.remove(key);
+                }
+                Some(patch) => {
+                    let old = header.get(key).map(String::as_str).unwrap_or("");
+                    if patch.keep > old.len() || !old.is_char_boundary(patch.keep) {
+                        self.entries.synced = false;
+                        return Err(MirrorGap);
+                    }
+                    let new = format!("{}{}", &old[..patch.keep], patch.tail);
+                    header.insert(key.clone(), new);
+                }
+            }
+        }
+        let mut frame = frame_from_fields(&header)?;
+        let (first, entries) = self.entries.apply(&delta.entries)?;
+        let snapshot = frame
+            .entry("snapshot")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or(MirrorGap)?;
+        snapshot.insert("entries_offset".into(), first.into());
+        snapshot.insert(
+            "entries".into(),
+            serde_json::to_value(entries).map_err(|_| MirrorGap)?,
+        );
+        self.header = header;
+        Ok(Value::Object(frame))
     }
 }
 
@@ -382,5 +562,88 @@ mod tests {
             "流式回复总共发 {sent} 字节，回复本身 {reply} 字节"
         );
         assert_eq!(texts(&link.view), texts(&entries));
+    }
+
+    fn frame(revision: u64, phase: &str, entries: &[AcpEntry]) -> Value {
+        serde_json::json!({
+            "live": {"phase": phase, "history_len": 0},
+            "snapshot": {
+                "entries_offset": 0,
+                "entries_total": entries.len(),
+                "snapshot_revision": revision,
+                "phase": phase,
+                "available_commands": (0..50).map(|i| format!("/command-{i}")).collect::<Vec<_>>(),
+                "entries": entries,
+            },
+            "provider_pid": 42,
+        })
+    }
+
+    /// 发送方按 `frame` 编码，接收方还原，返回（线路上的字节数，还原出的帧）。
+    fn round_trip(
+        sender: &mut FrameMirror,
+        receiver: &mut FrameMirror,
+        frame: &Value,
+    ) -> (usize, Value) {
+        let entries: Vec<AcpEntry> =
+            serde_json::from_value(frame["snapshot"]["entries"].clone()).unwrap();
+        let delta = sender.encode(frame, 0, &entries, 0, entries.len(), 0);
+        let wire = serde_json::to_string(&serde_json::json!({ "delta": delta })).unwrap();
+        let decoded: FrameDelta =
+            serde_json::from_value(serde_json::from_str::<Value>(&wire).unwrap()["delta"].clone())
+                .unwrap();
+        (wire.len(), receiver.apply(&decoded).unwrap())
+    }
+
+    fn attached(frame: &Value) -> (FrameMirror, FrameMirror) {
+        let mut sender = FrameMirror::default();
+        let mut receiver = FrameMirror::default();
+        sender.full(frame);
+        receiver.full(frame);
+        (sender, receiver)
+    }
+
+    #[test]
+    fn unchanged_header_fields_are_not_resent() {
+        let entries = vec![assistant("一段回复")];
+        let first = frame(1, "thinking", &entries);
+        let (mut sender, mut receiver) = attached(&first);
+        let mut entries = entries;
+        entries[0] = assistant("一段回复，接着说");
+        let next = frame(2, "thinking", &entries);
+        let (bytes, restored) = round_trip(&mut sender, &mut receiver, &next);
+        assert!(bytes < 200, "只该发修订号和新增文字，实际 {bytes} 字节");
+        assert_eq!(restored["snapshot"]["snapshot_revision"], 2);
+        assert_eq!(
+            restored["snapshot"]["available_commands"],
+            next["snapshot"]["available_commands"]
+        );
+        assert_eq!(restored["live"], next["live"]);
+        assert_eq!(restored["provider_pid"], 42);
+        assert_eq!(restored["snapshot"]["entries"], next["snapshot"]["entries"]);
+    }
+
+    #[test]
+    fn changed_and_removed_header_fields_round_trip() {
+        let first = frame(1, "thinking", &[]);
+        let (mut sender, mut receiver) = attached(&first);
+        let mut next = frame(2, "idle", &[]);
+        next.as_object_mut().unwrap().remove("provider_pid");
+        next["snapshot"]["status_line"] = "完成".into();
+        let (_, restored) = round_trip(&mut sender, &mut receiver, &next);
+        assert_eq!(restored["live"]["phase"], "idle");
+        assert_eq!(restored["snapshot"]["status_line"], "完成");
+        assert!(restored.get("provider_pid").is_none());
+    }
+
+    #[test]
+    fn a_receiver_without_a_full_frame_rejects_deltas() {
+        let first = frame(1, "thinking", &[assistant("a")]);
+        let mut sender = FrameMirror::default();
+        sender.full(&first);
+        let entries = vec![assistant("ab")];
+        let delta = sender.encode(&frame(2, "thinking", &entries), 0, &entries, 0, 1, 0);
+        let mut receiver = FrameMirror::default();
+        assert_eq!(receiver.apply(&delta), Err(MirrorGap));
     }
 }
