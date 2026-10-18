@@ -169,7 +169,7 @@
   <li>D6 RuntimeId 与多运行时</li>
   <li>D7 生命周期与升级</li>
   <li>D8 插件放在哪一侧</li>
-  <li>D9 常驻浏览器：agent 控制，人可接管</li>
+  <li>D9 远程桌面：agent 用浏览器，人看整块屏幕、可接管</li>
   <li>Linux 无头运行时清单</li>
   <li>分期</li>
   <li>风险与待定问题</li>
@@ -488,7 +488,7 @@
     <li><b>一条命令</b>：<code>curl -fsSL &lt;Release 地址&gt;/install.sh | bash</code>。脚本按 <code>uname -m</code> 下载对应的包、核对校验和，再走现有的 <code>install.sh</code>（装到 <code>~/.smelt/bin</code>、<code>smeltd install</code>、<code>smeltd pair</code>）。</li>
     <li><b>只在必须时用 sudo</b>：开 <code>loginctl enable-linger</code>、装系统包。没有 sudo 就照旧提示，运行时本身不需要 root。</li>
     <li><b>不依赖额外的系统命令</b>：准备受管 Pi 运行时现在要调用系统的 <code>unzip</code>，全新 Debian 没有，改成 smeltd 自己解压。</li>
-    <li><b>可选组件 <code>--with-browser</code></b>：装常驻浏览器，见 D9。</li>
+    <li><b>可选组件 <code>--with-desktop</code></b>：装远程桌面和常驻浏览器，见 D9。</li>
     <li><b>模型和密钥不进安装脚本</b>：装完在桌面能力库里配，能力库按运行时切换（P2 第 5 步）。</li>
   </ul>
 </div>
@@ -510,29 +510,36 @@
 </div>
 
 <!-- ───────────────────────────────────────── -->
-<h2>12. D9 常驻浏览器：agent 控制，人可接管</h2>
+<h2>12. D9 远程桌面：agent 用浏览器，人看整块屏幕、可接管</h2>
 <p>Linux 运行时的一个主要用途是当个人助理：上面常驻一个 Chrome，agent（例如 Pi）用它查机票、填表、看后台；遇到验证码、二次验证、付款确认，人随时接管，处理完交还。浏览器用一个持久的用户目录，人登录过的网站 agent 直接沿用登录状态。</p>
-<p>机器没有图形界面也可以：Chrome 正常有界面地渲染，画到 Xvfb 虚拟显示器里（只在内存里的 X 服务，没有显示器、显卡和桌面环境）。不用 <code>--headless</code>，部分网站能识别出 headless，登录时更容易被风控。人看画面也不需要服务器有界面：smeltd 把画面推到桌面或手机上显示。</p>
+<p>机器没有显示器也可以：TigerVNC 的 Xvnc 本身就是一个只在内存里的 X 服务器（取代 Xvfb），上面跑 XFCE 和有界面的 Chrome。不用 <code>--headless</code>，部分网站能识别出 headless，登录时更容易被风控。</p>
 <div class="decision">
-  <div class="label">决定：smeltd 管配置，systemd 管进程，smeltd 通过 CDP 用它</div>
+  <div class="label">决定：agent 经 CDP 用浏览器，人经 VNC 看整块屏幕</div>
   <ul>
-    <li><b>不做 smeltd 的子进程</b>：smeltd 会经常无缝升级（exec 交接），浏览器做成子进程就得接进交接逻辑，或者每次升级都重启、打断正在做的事。看管常驻进程（崩溃重启、开机自启、日志）是 systemd 的本职。</li>
-    <li><b><code>smeltd install --with-browser</code></b> 写一个 systemd <b>用户级</b>服务（和 smeltd 自己的服务一样，不需要 root）：<code>xvfb-run</code> 把虚拟显示器和 Chrome 放在同一个服务里，用户目录在 <code>~/.smelt/browser/profile</code>，调试端口只绑 <code>127.0.0.1</code>，<code>--password-store=basic</code>（服务器上没有系统钥匙串）。同时把「本机常驻浏览器」写进 Pi 的 <code>mcp.json</code>。</li>
-    <li><b>安装脚本</b>用 sudo 装系统包：Chrome、Xvfb、中文和 emoji 字体（不装中文字体，中文网页全是方块）。第一版只支持 Debian/Ubuntu。</li>
-    <li><b>agent 控制</b>：agent 和浏览器在同一台机器上，用 MCP 连本机的 CDP 端口（Playwright MCP 的 <code>--cdp-endpoint</code>）。Smelt 自带的 Pi 运行时读同一份 <code>~/.pi/agent/mcp.json</code>，对话和终端里的 Pi 都能用。</li>
-    <li><b>人看和接管</b>：smeltd 作为 CDP 客户端，用 <code>Page.startScreencast</code> 推画面、<code>Input.dispatch*</code> 转发鼠标键盘、<code>Target.*</code> 管标签页，走现有的 iroh 连接和设备配对，不另开端口。screencast 每帧要 <code>screencastFrameAck</code> 才发下一帧，天然是一帧在途的流控（和终端流控同一思路）。Chrome 是谁拉起的不影响这些。</li>
-    <li><b>接管的第一版</b>：桌面浏览器面板上点「接管」就暂停 agent 当前回合，面板明确显示现在谁在控制；点「交还」再继续。agent 的浏览器操作必须经过 Smelt、接管期间直接拦下，等确实需要再做。</li>
-    <li><b>以普通用户运行</b>：Chrome 的沙箱正常开着。前提是 smeltd 也不用 root 跑。</li>
+    <li><b>人看的是整块屏幕，不只是网页</b>：先做过「只推网页」（smeltd 当 CDP 客户端，<code>Page.startScreencast</code> 推画面、<code>Input.dispatch*</code> 转输入），对着真 Chrome 跑通了，但 Chrome 自己的界面（标签栏、地址栏、权限气泡、系统文件框）和别的程序都看不到，已整套删除。</li>
+    <li><b>画面走 VNC</b>：业内 agent 沙盒（Daytona、E2B、Bytebot、Cua、Anthropic 的 computer use 示例）都是虚拟屏幕 + XFCE + VNC + 网页版 noVNC，人看和接管走 VNC，agent 的操作接口另走一条。WebRTC（neko、Selkies）画质好，但要视频编解码和打洞/TURN，不做。</li>
+    <li><b>运行时只转发不解析</b>：新连接 <code>desktop_attach</code> 回 ok 之后就是到本机 VNC（<code>127.0.0.1:5999</code>）的原始 RFB 字节流。VNC 只听本机，外面只能经过运行时，也就是只有配对过的设备能连；走现有的 iroh，不另开端口。</li>
+    <li><b>客户端用网页视图里的 noVNC</b>：<code>smelt-runtime-client</code> 在 127.0.0.1 的随机端口开转发口（websockify 的角色），提供 noVNC 页面，把页面的 WebSocket 换成 <code>desktop_attach</code>；WebSocket 必须带启动时生成的令牌、来源必须是这个口自己的页面。noVNC 用 Debian 包里的 1.6.0，编进二进制，桌面和手机共用。桌面用 <code>gpui-wry</code> 0.7.3（默认跑在 gpui-pre 上，不引入 GPUI Fast）。</li>
+    <li><b>中文另走一条</b>：VNC 只能逐键发，本机输入法拼出来的字过不去。页面下方有输入框，文字整段交给 <code>desktop.type_text</code>，运行时用 xdotool 注入到当前聚焦的窗口（对键盘上没有的字临时改一个空闲键码的映射），远端不用装输入法。</li>
+    <li><b>默认只看</b>：点「接管」才把鼠标键盘交给远端，「交还」后又只看。这个开关在客户端：能连上的都是配对过的设备，本来就有完整权限。</li>
+    <li><b>进程交给 systemd</b>：浏览器不做 smeltd 的子进程，smeltd 会经常无缝升级。三个系统服务，都以普通用户运行：<code>smelt-display</code>（Xvnc <code>:99</code>，1440×900，只听本机 5999）、<code>smelt-desktop</code>（XFCE 会话）、<code>smelt-chrome</code>（调试端口只绑 127.0.0.1:9222，<code>--password-store=basic</code>）。</li>
+    <li><b>agent 控制</b>：Pi 用 Playwright MCP 的 <code>--cdp-endpoint</code> 连本机 9222，和人看的是同一个 Chrome。</li>
   </ul>
 </div>
-<p><b>实测</b>（2026-10-18，gs-wynn 这台 Debian 13 / 4 核 / 7GB 的 VPS，手动搭的，没有改代码）：Xvfb、Chrome 155、x11vnc 三个 systemd 服务，Chrome 用普通用户 <code>assistant</code> 跑；Pi 配 Playwright MCP 0.0.83（CDP 模式）。Pi 用浏览器在 Google Flights 上查「台北 → 东京、10 月 30 日、单程」，2 分钟报回最便宜的 3 个直飞航班，和页面截图逐项一致。临时用 x11vnc（只监听本机、带密码）加 SSH 隧道看画面和接管，浏览器面板做好后去掉。维基百科、Bing 用这台机房 IP 访问正常（第一次访问维基百科偶发过一次 429，重试正常）。</p>
-<p><b>要改的代码</b>，按顺序：</p>
+<p><b>实测</b>（2026-10-18，gs-wynn，Debian 13 / 4 核 / 8GB）：</p>
+<ul>
+  <li>Pi 用浏览器在 Google Flights 上查「台北 → 东京、10 月 30 日、单程」，2 分钟报回最便宜的 3 个直飞航班，和页面截图逐项一致。</li>
+  <li>换成 Xvnc + XFCE 后，Chrome 自己的界面（包括「恢复页面」气泡）都在画面里；xdotool 往地址栏注入「北京 天气 abc」正常上屏。</li>
+  <li>整条链路：本机转发口 → 运行时 <code>desktop_attach</code> → Xvnc → noVNC 出画面（在远端的 Chrome 里打开转发口页面，看到自己套着自己）。</li>
+  <li>系统包：<code>tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xdotool fonts-noto-cjk</code>，都在 Debian 官方源里。不装中文字体，中文网页全是方块。</li>
+</ul>
+<p><b>还要做的</b>，按顺序：</p>
 <ol>
-  <li>能力库按运行时切换（P2 第 5 步）：远程运行时的 Pi 模型、密钥、MCP 能在桌面上配。运行时这边的 <code>pi.*</code> 控制接口已经有了。</li>
-  <li>能力库加「本机常驻浏览器」MCP 预设：连 <code>127.0.0.1</code> 上的 CDP 端口。现有的 Playwright、Agent360 预设是扩展模式，控制的是桌面上的 Chrome。</li>
-  <li>安装：<code>install.sh --with-browser</code> 和 <code>smeltd install --with-browser</code>。</li>
-  <li>smeltd 的浏览器画面流（新的长连接 op）和桌面的浏览器面板，含接管/交还；手机随 P4。</li>
-  <li>安全前提（正式用之前）：smeltd 不用 root 跑；桌面终端关掉 <code>OSC 52</code> 读剪贴板；中继加白名单。</li>
+  <li>安装：<code>install.sh --with-desktop</code> 装系统包、写三个 systemd 服务、把「本机 Chrome」写进 Pi 的 <code>mcp.json</code>。现在 gs-wynn 上是手写的服务文件。</li>
+  <li>交接：Pi 遇到登录、验证码、付款时，用现有的「问用户」工具请人去远程桌面接管，人回答后接着办。运行时有远程桌面时给 Pi 加一段说明。</li>
+  <li>能力库按运行时切换（P2 第 5 步），远程运行时的 Pi 模型、密钥、MCP 能在桌面上配。</li>
+  <li>手机：Flutter 的网页视图打开同一个转发口（随 P4）。</li>
+  <li>安全前提（正式用之前）：Xvnc 加 X 鉴权（现在本机任何进程都能连那块屏幕）；smeltd 不用 root 跑；中继加白名单。</li>
 </ol>
 <div class="note">这台机器存着人的各种登录状态，保存的密码和 cookie 在磁盘上只是弱加密（<code>--password-store=basic</code>），机器本身的安全就是这些账号的安全。</div>
 
@@ -555,7 +562,7 @@
   <tr><td>agent hook 安装</td><td><span class="chip chip-done">已完成</span></td><td>运行时执行 <code>agent.hooks.*</code>，在自己那台机器上写配置；<code>smelt-notify</code> 由运行时安装包放进 <code>~/.smelt/bin</code>（本机仍由桌面从 App 包同步）</td></tr>
   <tr><td>打包分发</td><td><span class="chip chip-done">已完成</span> <code>ci/linux/ci.sh package</code> 出 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，解包执行 <code>./install.sh</code>：<code>smeltd install</code> 用和桌面同一套受管布局（不可变映像 + 启动名软链），已在跑就交接到新版本、会话保留，再注册 systemd 用户服务，最后 <code>smeltd pair</code></td><td>按 D7 的桌面推送，同一份二进制也随桌面安装包附带</td></tr>
   <tr><td>一键安装</td><td><span class="chip chip-na">未做</span> 包还没有发布到可下载的地方，gs-wynn 上是现场装 Rust、从源码编译的；linger、<code>unzip</code> 都是手动</td><td>按 D7「一键安装」：GitHub Release 加 <code>curl … | bash</code></td></tr>
-  <tr><td>常驻浏览器</td><td><span class="chip chip-split">手动验证</span> gs-wynn 上手搭，agent 查机票跑通（见 D9）</td><td>按 D9 做成 <code>--with-browser</code> 和浏览器面板</td></tr>
+  <tr><td>远程桌面与常驻浏览器</td><td><span class="chip chip-split">部分</span> 远程桌面页、转发、文字注入已完成；gs-wynn 上 Xvnc + XFCE + Chrome 三个 systemd 服务是手写的（见 D9）</td><td><code>--with-desktop</code> 安装、Pi 交接、手机</td></tr>
 </table></div>
 
 <!-- ───────────────────────────────────────── -->
@@ -639,11 +646,10 @@
 <div class="phase">
   <div class="num">P5</div>
   <div>
-    <p><b>个人助理：常驻浏览器</b>（D9）</p>
+    <p><b>个人助理：远程桌面与常驻浏览器</b>（D9）</p>
     <ul>
-      <li>能力库按运行时切换，加「本机常驻浏览器」MCP 预设。</li>
-      <li><code>install.sh --with-browser</code>、<code>smeltd install --with-browser</code>。</li>
-      <li>浏览器画面流和桌面浏览器面板，接管/交还；手机随 P4。</li>
+      <li><span class="chip chip-done">已完成</span> 远程桌面：运行时转发 VNC、本机转发口、桌面的远程桌面页（noVNC + 中文输入框）。</li>
+      <li><code>install.sh --with-desktop</code>；Pi 遇到登录、验证码时请人接管；能力库按运行时切换；手机随 P4。</li>
     </ul>
     <p class="exit"><b>完成标准：</b>一台全新的 Linux 机器上，一条命令装好运行时和浏览器；在桌面上让 Pi 用浏览器办一件事，中途接管、处理完交还，Pi 接着办完。</p>
   </div>
