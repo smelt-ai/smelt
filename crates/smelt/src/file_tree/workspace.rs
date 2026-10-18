@@ -864,9 +864,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 文件树右键「发送到终端」：把路径转成相对当前 cwd 的 @提及，写进当前激活终端
-    /// 的 PTY（不带回车，同 send_diff_comments 的做法）。
-    pub fn send_path_to_terminal(&mut self, path: String, cx: &mut Context<Self>) {
+    /// 文件树右键「发送到会话」：把路径转成相对项目根的 @提及，交给这个项目里正在看的
+    /// 会话（不带回车，同 send_diff_comments 的做法）。
+    pub fn send_path_to_session(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let root = self.active_project_root(cx);
         let rel = root
             .and_then(|root| {
@@ -877,14 +882,12 @@ impl Workspace {
             })
             .unwrap_or_else(|| path.clone());
         let msg = format!("@{rel} ");
-        if let Some(view) = self.cur().and_then(|s| s.active_term().cloned()) {
-            view.update(cx, |tv, cx| tv.send_text(&msg, cx));
-        }
+        self.send_to_panel_session(&msg, window, cx);
     }
 
-    /// 文件内容框选右键「发送选中内容到终端」：带上文件名 + 选中文字，写进当前激活
-    /// 终端的 PTY（不带回车）。
-    pub fn send_open_file_selection(&mut self, cx: &mut Context<Self>) {
+    /// 文件内容框选右键「发送选中内容到会话」：带上文件名 + 选中文字，交给这个项目里
+    /// 正在看的会话（不带回车）。
+    pub fn send_open_file_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(of) = &self.open_file else { return };
         let selected = of.editor.read(cx).selected_value().to_string();
         if selected.trim().is_empty() {
@@ -900,8 +903,6 @@ impl Workspace {
             })
             .unwrap_or_else(|| of.path.clone());
         let msg = format!("{rel} 里选中的这段：\n```\n{selected}\n```\n");
-        if let Some(view) = self.cur().and_then(|s| s.active_term().cloned()) {
-            view.update(cx, |tv, cx| tv.send_text(&msg, cx));
-        }
+        self.send_to_panel_session(&msg, window, cx);
     }
 }

@@ -450,10 +450,10 @@ impl Workspace {
                                         cx.stop_propagation()
                                     })
                                     .child(Icon::new(IconName::Close).size(px(14.)))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
                                         close_entity.update(cx, |workspace, cx| {
-                                            workspace.close_session(open_ix, cx)
+                                            workspace.request_close_session(open_ix, window, cx)
                                         });
                                     }),
                             ),

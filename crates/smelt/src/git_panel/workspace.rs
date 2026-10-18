@@ -1342,8 +1342,8 @@ impl Workspace {
         self.publish_diff_body(cx);
     }
 
-    /// 把选中的源码和评论拼成一段文本，写进当前激活终端的 PTY
-    /// （不带回车，留给用户自己看一眼再发送）。
+    /// 把选中的源码和评论拼成一段文本，交给这个项目里正在看的会话：终端写进 PTY，
+    /// 对话放进输入框（不带回车，留给用户自己看一眼再发送）。没送到时选区和评论都留着。
     pub(super) fn send_diff_comments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(range) = self.diff_comment_range.clone() else {
             return;
@@ -1361,13 +1361,9 @@ impl Workspace {
         // 选区带的是文件路径。聚合 diff 的 `git_diff.path` 是「全部更改」。
         let path = range.path().to_string();
         let msg = diff_feedback_text(&path, range.start(), range.end(), &selected, &comment);
-        let target = self
-            .cur()
-            .and_then(|session| session.active_term().cloned());
-        if let Some(view) = target {
-            view.update(cx, |tv, cx| tv.send_text(&msg, cx));
+        if self.send_to_panel_session(&msg, window, cx) {
+            self.clear_diff_comment_selection(window, cx);
         }
-        self.clear_diff_comment_selection(window, cx);
     }
 
     /// 在 `root` 上跑一条 git 写入，回来在 UI 线程收尾。

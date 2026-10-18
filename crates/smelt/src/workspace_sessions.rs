@@ -520,6 +520,42 @@ impl Workspace {
         ))
     }
 
+    /// 把工具面板（变更、文件树）里的文字交给当前会话：终端写进 PTY，对话放进输入框。
+    /// 都不带回车，发不发由人定。面板跟着选中的项目走，舞台上的会话不一定是这个项目的；
+    /// 不是时不发，不能把 B 项目的评论写进 A 的会话。没送到时告诉用户原因，返回 false。
+    pub(crate) fn send_to_panel_session(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let group = self
+            .active_project_ref(cx)
+            .and_then(|project| self.find_project_group(&project, cx));
+        let target = panel_send_target(
+            self.cur().map(|_| self.active_session),
+            group
+                .as_ref()
+                .map(|group| (group.label.as_str(), group.sessions.as_slice())),
+        );
+        let index = match target {
+            Ok(index) => index,
+            Err(reason) => {
+                self.report_background_error(reason);
+                return false;
+            }
+        };
+        match &self.sessions[index].kind {
+            SessionKind::Term { active, .. } => {
+                active.update(cx, |terminal, cx| terminal.send_text(text, cx));
+            }
+            SessionKind::Conversation(view) => {
+                view.update(cx, |view, cx| view.insert_prompt_text(text, window, cx));
+            }
+        }
+        true
+    }
+
     /// 活动 session 变化时，完整交换右侧工作区。用 session 自己的稳定 ui_id 判断，
     /// 不依赖数组下标，所以拖拽排序、关闭前面的 session 都不会把快照串给别人。
     pub(crate) fn sync_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -989,6 +1025,12 @@ impl Workspace {
                 }
                 acp_view::AcpViewEvent::Recovered => {
                     // 保留视图自身的快照更新。
+                }
+                acp_view::AcpViewEvent::ReturnedToLatest => {
+                    // 往上翻着看时到的完成没算已读；滚回最新位置才补上。
+                    if this.workspace_window_active {
+                        this.mark_visible_session_read(cx);
+                    }
                 }
             },
         )
@@ -1672,21 +1714,90 @@ impl Workspace {
         if g.sessions.is_empty() {
             self.close_project(&project, cx);
         } else {
-            self.close_project_target = Some((g.label, project, g.sessions.len()));
+            self.close_confirm = Some(CloseConfirm::Project {
+                label: g.label,
+                project,
+                sessions: g.sessions.len(),
+            });
             cx.notify();
         }
     }
 
-    pub(crate) fn cancel_close_project(&mut self, cx: &mut Context<Self>) {
-        self.close_project_target = None;
+    pub(crate) fn cancel_close_confirm(&mut self, cx: &mut Context<Self>) {
+        self.close_confirm = None;
         cx.notify();
     }
 
-    pub(crate) fn confirm_close_project(&mut self, cx: &mut Context<Self>) {
-        let Some((_, project, _)) = self.close_project_target.take() else {
+    pub(crate) fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.close_confirm.take() {
+            Some(CloseConfirm::Project { project, .. }) => self.close_project(&project, cx),
+            Some(CloseConfirm::Session { ui_id, pane, .. }) => {
+                // 弹窗开着时会话可能已经自己结束、被关掉或换了位置，按 ui_id 重新找。
+                let Some(ix) = self.sessions.iter().position(|s| s.ui_id == ui_id) else {
+                    cx.notify();
+                    return;
+                };
+                match pane {
+                    Some(view) => self.close_session_pane(ix, view, window, cx),
+                    None => {
+                        self.close_session(ix, cx);
+                        self.focus_active(window, cx);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// 用户点 ×、Cmd+W 关会话的入口。正在跑的先确认：关掉会终止这一轮，找不回来。
+    /// 空闲的直接关。关项目、清理目录这类连带关闭不走这里。
+    pub(crate) fn request_close_session(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(ix) else {
             return;
         };
-        self.close_project(&project, cx);
+        if closing_needs_confirm(session.status(cx)) {
+            self.close_confirm = Some(CloseConfirm::Session {
+                ui_id: session.ui_id,
+                title: session.title(cx),
+                pane: None,
+            });
+            cx.notify();
+            return;
+        }
+        self.close_session(ix, cx);
+        self.focus_active(window, cx);
+    }
+
+    /// 关一个分屏的用户入口。这个分屏里的 agent 正在跑就先确认；只剩它一个时等于关整个会话。
+    pub(crate) fn request_close_session_pane(
+        &mut self,
+        ix: usize,
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(ix) else {
+            return;
+        };
+        if session.pane_count() <= 1 {
+            self.request_close_session(ix, window, cx);
+            return;
+        }
+        if closing_needs_confirm(pane_status(&view, cx)) {
+            self.close_confirm = Some(CloseConfirm::Session {
+                ui_id: session.ui_id,
+                title: pane_title(&view, cx),
+                pane: Some(view),
+            });
+            cx.notify();
+            return;
+        }
+        self.close_session_pane(ix, view, window, cx);
     }
 
     /// 关闭项目：从列表移除，并连带关掉挂在它下面的所有会话。认运行时加 **root 路径**
@@ -2050,15 +2161,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Cmd+W：会话内多 pane 时关掉活动 pane（切到相邻），否则关整个会话。
+    /// Cmd+W：会话内多 pane 时关掉活动 pane（切到相邻），否则关整个会话。正在跑的先确认。
     pub(crate) fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.cur().and_then(|s| s.active_term().cloned()) {
-            Some(view) => self.close_session_pane(self.active_session, view, window, cx),
+            Some(view) => self.request_close_session_pane(self.active_session, view, window, cx),
             // ACP 会话没有分屏树，只能整个关。
-            None => {
-                self.close_session(self.active_session, cx);
-                self.focus_active(window, cx);
-            }
+            None => self.request_close_session(self.active_session, window, cx),
         }
     }
 
@@ -2176,8 +2284,16 @@ impl Workspace {
     }
 
     /// 用户正在看的会话标已读。切会话、窗口回到前台、或正在看时新关注到达。
+    /// 对话正往上翻着看历史时，最新结果不在眼前，不算看过；滚回最新位置时再标。
     pub(crate) fn mark_visible_session_read(&mut self, cx: &mut Context<Self>) {
         if cx.try_global::<AttentionGlobal>().is_none() {
+            return;
+        }
+        let scrolled_away = self.cur().is_some_and(|session| match &session.kind {
+            SessionKind::Conversation(view) => view.read(cx).is_viewing_history(),
+            SessionKind::Term { .. } => false,
+        });
+        if scrolled_away {
             return;
         }
         if let Some(sid) = self.viewed_session_id(cx) {
@@ -2671,4 +2787,28 @@ impl Workspace {
         self._rename_sub = None;
         cx.notify();
     }
+}
+
+/// 工具面板要把文字交给哪个会话。`active` 是舞台上的会话下标，`project` 是面板
+/// 绑定的项目（显示名和组内会话下标）。面板没绑项目时只有当前会话可发。
+pub(crate) fn panel_send_target(
+    active: Option<usize>,
+    project: Option<(&str, &[usize])>,
+) -> Result<usize, String> {
+    let Some(active) = active else {
+        return Err("没有发出去：还没有打开会话。".to_string());
+    };
+    match project {
+        Some((label, sessions)) if !sessions.contains(&active) => Err(format!(
+            "没有发出去：当前会话不在「{label}」里。先在侧栏打开这个项目的会话再发送。"
+        )),
+        _ => Ok(active),
+    }
+}
+
+/// 用户关会话（或分屏）前要不要先确认。只拦正在跑的：关掉会终止这一轮、找不回来，
+/// 而用户多半没在看它。空闲的直接关；等你处理的（批准、回答、看失败）本来就在等用户，
+/// 关它是用户看过之后的决定，不再多问一次。
+pub(crate) fn closing_needs_confirm(status: AgentStatus) -> bool {
+    status == AgentStatus::Running
 }

@@ -1188,6 +1188,8 @@ pub enum AcpViewEvent {
     /// 会话从 Ended 恢复（自动重连 / 用户手动重启 / GUI 重开 attach）的上升沿。
     /// 只用于刷新视图；Task 状态由 smeltd 直接观察同一 ACP 快照归约。
     Recovered,
+    /// 用户从往上翻的历史滚回了最新位置。这时才算看到了最新结果，上层据此补标已读。
+    ReturnedToLatest,
 }
 
 /// 上一轮没正常结束后能做的事。
@@ -1234,6 +1236,11 @@ fn notice_to_show(
     dismissed_id: Option<u64>,
 ) -> Option<&smelt_model::acp_session::AcpNoticeView> {
     notice.filter(|notice| Some(notice.id) != dismissed_id)
+}
+
+/// 这次滚动是不是从往上翻的历史回到了最新位置。只有这一下才补标已读。
+fn returned_to_latest(was_viewing_history: bool, viewing_history: bool) -> bool {
+    was_viewing_history && !viewing_history
 }
 
 fn task_body_from_selection(selection: String) -> Option<String> {
@@ -1921,7 +1928,11 @@ impl AcpView {
             cx.defer(move |cx| {
                 let _ = view.update(cx, |this, cx| {
                     if this.viewing_history != viewing_history {
+                        let returned = returned_to_latest(this.viewing_history, viewing_history);
                         this.viewing_history = viewing_history;
+                        if returned {
+                            cx.emit(AcpViewEvent::ReturnedToLatest);
+                        }
                         cx.notify();
                     }
                     if near_loaded_top {

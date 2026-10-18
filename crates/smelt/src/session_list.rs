@@ -1209,9 +1209,9 @@ impl Workspace {
                                 cx.stop_propagation()
                             })
                             .child(Icon::new(IconName::Close).size(px(14.)))
-                            .on_click(move |_ev, _w, cx| {
+                            .on_click(move |_ev, window, cx| {
                                 cx.stop_propagation();
-                                e_close.update(cx, |ws, cx| ws.close_session(ix, cx));
+                                e_close.update(cx, |ws, cx| ws.request_close_session(ix, window, cx));
                             }),
                     )
                     .when(can_drag, |row| {
@@ -1445,7 +1445,9 @@ impl Workspace {
                                                     cx.stop_propagation();
                                                     let pane = close_pane.clone();
                                                     e_pane_close.update(cx, |ws, cx| {
-                                                        ws.close_session_pane(ix, pane, window, cx)
+                                                        ws.request_close_session_pane(
+                                                            ix, pane, window, cx,
+                                                        )
                                                     });
                                                 }),
                                         ),
@@ -1500,9 +1502,10 @@ impl Workspace {
                                     .item(
                                         PopupMenuItem::new("关闭整个会话（含全部分屏）")
                                             .icon(IconName::Close)
-                                            .on_click(move |_ev, _window, cx| {
-                                                e_close_all
-                                                    .update(cx, |ws, cx| ws.close_session(ix, cx));
+                                            .on_click(move |_ev, window, cx| {
+                                                e_close_all.update(cx, |ws, cx| {
+                                                    ws.request_close_session(ix, window, cx)
+                                                });
                                             }),
                                     )
                                 })

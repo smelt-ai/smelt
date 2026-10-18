@@ -669,9 +669,10 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
                     let this_del = menu_view.clone();
                     let p_del = menu_path.clone();
                     menu.item(
-                        PopupMenuItem::new("发送到终端").on_click(move |_ev, _window, cx| {
-                            this_term
-                                .update(cx, |ws, cx| ws.send_path_to_terminal(p_term.clone(), cx));
+                        PopupMenuItem::new("发送到会话").on_click(move |_ev, window, cx| {
+                            this_term.update(cx, |ws, cx| {
+                                ws.send_path_to_session(p_term.clone(), window, cx)
+                            });
                         }),
                     )
                     .item(
@@ -1009,7 +1010,7 @@ pub fn file_content_parts(
                                     .separator()
                                     .menu("全选", Box::new(gpui_component::input::SelectAll))
                                     .separator()
-                                    .menu("发送选中内容到终端", Box::new(SendSelectionToTerminal))
+                                    .menu("发送选中内容到会话", Box::new(SendSelectionToTerminal))
                             }),
                     )
                     .into_any_element()

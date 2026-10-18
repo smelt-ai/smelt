@@ -10,13 +10,15 @@ use gpui_component::*;
 use crate::resizable_split::{h_resizable, v_resizable};
 use crate::session_history::{HistoryListState, HistoryViewParams, history_view};
 use crate::{
-    Pane, RenameTarget, UpdateInstallTrigger, Workspace, request_app_quit, ui_theme, updater,
+    CloseConfirm, Pane, RenameTarget, UpdateInstallTrigger, Workspace, request_app_quit, ui_theme,
+    updater,
 };
 
 impl Workspace {
-    /// 「关闭项目」确认弹窗：说清会连带关掉几个会话（视觉同删 Worktree 那套危险配色）。
-    pub(crate) fn render_close_project_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some((label, _, n)) = self.close_project_target.clone() else {
+    /// 关闭确认弹窗：关项目说清会连带关掉几个会话；关正在跑的会话说清这一轮会被终止。
+    /// 用危险配色。
+    pub(crate) fn render_close_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(target) = self.close_confirm.clone() else {
             return div().into_any_element();
         };
         let (fg, muted) = {
@@ -24,32 +26,54 @@ impl Workspace {
             (t.foreground, t.muted_foreground)
         };
         let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let (title, body, confirm_label) = match &target {
+            CloseConfirm::Project {
+                label, sessions, ..
+            } => (
+                "确定关闭这个项目吗？",
+                format!(
+                    "「{label}」下的 {sessions} 个会话会被一起关掉，终端里正在跑的东西会被终止。项目本身只是从工作台移走，磁盘上的目录不动。"
+                ),
+                "关闭项目",
+            ),
+            CloseConfirm::Session { title, pane, .. } => (
+                if pane.is_some() {
+                    "这个分屏还在运行，确定关闭吗？"
+                } else {
+                    "这个会话还在运行，确定关闭吗？"
+                },
+                format!("「{title}」正在跑的这一轮会被终止，关掉之后找不回来。"),
+                if pane.is_some() {
+                    "关闭分屏"
+                } else {
+                    "关闭会话"
+                },
+            ),
+        };
 
         let content = v_flex()
-            .child(Self::modal_title(fg, "确定关闭这个项目吗？"))
-            .child(div().text_sm().text_color(muted).child(format!(
-                "「{label}」下的 {n} 个会话会被一起关掉，终端里正在跑的东西会被终止。项目本身只是从工作台移走，磁盘上的目录不动。"
-            )))
+            .child(Self::modal_title(fg, title))
+            .child(div().text_sm().text_color(muted).child(body))
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
                     .child(Self::modal_button(
-                        "cancel-close-project",
+                        "cancel-close-confirm",
                         "取消",
                         neutral_bg,
                         neutral_hover,
                         fg,
-                        |this, _, _, cx| this.cancel_close_project(cx),
+                        |this, _, _, cx| this.cancel_close_confirm(cx),
                         cx,
                     ))
                     .child(Self::modal_button(
-                        "confirm-close-project",
-                        "关闭项目",
+                        "confirm-close-confirm",
+                        confirm_label,
                         tint,
                         hover,
                         accent_text,
-                        |this, _, _, cx| this.confirm_close_project(cx),
+                        |this, _, window, cx| this.confirm_close(window, cx),
                         cx,
                     )),
             );
@@ -57,7 +81,7 @@ impl Workspace {
             380.,
             true,
             content,
-            crate::overlay::ModalLayer::CloseProject,
+            crate::overlay::ModalLayer::CloseConfirm,
             cx,
         )
     }

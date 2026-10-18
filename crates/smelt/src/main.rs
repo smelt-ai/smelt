@@ -1703,6 +1703,25 @@ pub(crate) enum PaneState {
     },
 }
 
+/// 关闭前要确认的东西。关掉就找不回来：终端里正在跑的命令、对话里正在跑的回合都会被终止。
+#[derive(Clone)]
+pub(crate) enum CloseConfirm {
+    /// 关项目，连带关掉下面的全部会话。显示名只用来写文案，真正关哪个项目认 root。
+    /// 空项目不走确认（无损），会话数恒 > 0。
+    Project {
+        label: String,
+        project: ProjectRef,
+        sessions: usize,
+    },
+    /// 关一个正在跑的会话。用 ui_id 认会话：弹窗开着时侧栏可能重排，下标会变。
+    /// `pane` 有值时只关这一个分屏。
+    Session {
+        ui_id: u64,
+        title: String,
+        pane: Option<Entity<TerminalView>>,
+    },
+}
+
 /// 侧栏的一个项目分组。**身份是 root（路径），不是 label**——两个不同目录的末段名
 /// 可能一模一样（`~/a/smelt` 和 `~/b/smelt`），拿显示名当 key 会把它们认成同一个项目：
 /// 第二个连行都不显示、会话挂错组、关一个连带关掉另一个的会话。
@@ -2323,9 +2342,8 @@ struct Workspace {
     /// PATH 缺失而失败正是这样被当成「按钮没反应」。
     /// 下次对同一仓库发起提交/推送时清掉，不留过期错误。
     commit_errors: HashMap<String, String>,
-    /// 「关闭项目」二次确认弹窗：(显示名, root 路径, 会连带关掉的会话数)。Some = 弹窗开着。
-    /// 显示名只用来写文案，真正关哪个项目认 root。空项目不走确认（无损），会话数恒 > 0。
-    close_project_target: Option<(String, ProjectRef, usize)>,
+    /// 关闭前的二次确认弹窗。Some = 弹窗开着。
+    close_confirm: Option<CloseConfirm>,
     /// 已打开的项目根目录（有序，就是侧栏分组的骨架）。项目是**独立于会话**的实体：
     /// 活动项目的 **root 路径**（不是显示名——同名目录是两个项目，见 ProjectGroup）：
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
@@ -2904,7 +2922,7 @@ impl Workspace {
             ws_snapshot_finalizing: false,
             workspace_menu_source_id: uuid::Uuid::new_v4().to_string(),
             next_workspace_menu_source_revision: AtomicU64::new(1),
-            close_project_target: None,
+            close_confirm: None,
             local: {
                 let mut space = space_with_ui(crate::runtimes::Runtime::local());
                 space.projects = projects;
@@ -3708,10 +3726,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
                 cx.open_url(settings::FEEDBACK_URL);
             }))
-            // 文件内容视图右键菜单里的「发送选中内容到终端」，见 send_open_file_selection。
+            // 文件内容视图右键菜单里的「发送选中内容到会话」，见 send_open_file_selection。
             .on_action(
-                cx.listener(|this, _: &SendSelectionToTerminal, _window, cx| {
-                    this.send_open_file_selection(cx);
+                cx.listener(|this, _: &SendSelectionToTerminal, window, cx| {
+                    this.send_open_file_selection(window, cx);
                 }),
             )
             // 左右侧边栏切换（全局 Action，焦点在子组件或输入框内也能响应）
@@ -3791,7 +3809,7 @@ impl Render for Workspace {
                     && this.palette.is_none()
                     && this.rename_target.is_none()
                     && !this.show_quit_confirm
-                    && this.close_project_target.is_none()
+                    && this.close_confirm.is_none()
                     && this.active_tab().is_session()
                     && this.stage_cover.is_some()
                 {

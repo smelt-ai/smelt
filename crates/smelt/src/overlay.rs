@@ -13,7 +13,7 @@ use super::*;
 pub(crate) enum ModalLayer {
     Rename,
     Quit,
-    CloseProject,
+    CloseConfirm,
     DiscardHunk,
     DiscardFile,
     DiscardAll,
@@ -34,7 +34,7 @@ impl ModalLayer {
         match self {
             Self::Rename => 1,
             Self::Quit => 2,
-            Self::CloseProject => 3,
+            Self::CloseConfirm => 3,
             Self::DiscardHunk => 4,
             Self::DiscardFile => 5,
             Self::DiscardAll => 6,
@@ -79,8 +79,8 @@ impl Workspace {
         raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
         raise(
             &mut rank,
-            self.close_project_target.is_some(),
-            ModalLayer::CloseProject.rank(),
+            self.close_confirm.is_some(),
+            ModalLayer::CloseConfirm.rank(),
         );
         raise(
             &mut rank,
@@ -278,7 +278,7 @@ impl Workspace {
             self.show_quit_confirm = false;
             cx.notify();
             true
-        } else if self.close_project_target.is_some()
+        } else if self.close_confirm.is_some()
             || self.discard_hunk_target.is_some()
             || self.discard_file_target.is_some()
             || self.discard_all_target.is_some()
@@ -290,7 +290,7 @@ impl Workspace {
             || self.automation_surface.pending_delete.is_some()
             || self.pending_file_switch.is_some()
         {
-            self.close_project_target = None;
+            self.close_confirm = None;
             self.discard_hunk_target = None;
             self.discard_file_target = None;
             self.discard_all_target = None;
@@ -473,9 +473,9 @@ impl Workspace {
                     .then(|| self.render_dir_picker(cx)),
             )
             .children(
-                self.close_project_target
+                self.close_confirm
                     .is_some()
-                    .then(|| self.render_close_project_confirm(cx)),
+                    .then(|| self.render_close_confirm(cx)),
             )
             .children(
                 self.discard_hunk_target
