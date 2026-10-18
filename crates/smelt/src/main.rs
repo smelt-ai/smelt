@@ -1265,6 +1265,10 @@ impl Session {
     /// 会话状态：两类会话先把各自事实源适配成共享三态，再统一按
     /// 要你 > 运行中 > 空闲聚合。
     fn status(&self, cx: &App) -> AgentStatus {
+        // 远程运行时连不上时，守护镜像停在断线那一刻，「运行中」不能当真：按运行时已丢算。
+        if crate::runtimes::runtime_unavailable_label(self.runtime(cx).key(), cx).is_some() {
+            return AgentStatus::Idle;
+        }
         match &self.kind {
             // ACP 协议视图与守护镜像可能先后到达；两边都先给出完整 AgentStatus，
             // 再走同一优先级，避免派发或失败的同步窗口短暂变灰。

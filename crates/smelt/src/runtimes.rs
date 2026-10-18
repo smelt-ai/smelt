@@ -84,7 +84,7 @@ fn remote_runtime(runtime_id: &str, client: RuntimeClient) -> Runtime {
 }
 
 /// 远程运行时现在连不连得上。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeStatus {
     Connecting,
     Online {
@@ -210,15 +210,24 @@ fn described_status(
     }
 }
 
-/// 事件订阅连上前对出版本不兼容（见 `runtime_events`）：记到运行时上给人看。
-pub(crate) fn mark_incompatible(key: &RuntimeKey, detail: String, cx: &mut gpui::App) {
+/// 事件订阅报来的连通性（见 `runtime_events`）：记到运行时上给人看。没变就不动 hub，
+/// 订阅每次重连都会探测一次，不能每次都让看着 hub 的界面重画。
+pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui::App) {
+    let changed = cx.try_global::<RuntimeHub>().is_some_and(|hub| {
+        hub.remotes
+            .iter()
+            .any(|remote| remote.runtime.key() == key && remote.status != status)
+    });
+    if !changed {
+        return;
+    }
     update_hub(cx, |hub| {
         if let Some(remote) = hub
             .remotes
             .iter_mut()
             .find(|remote| remote.runtime.key() == key)
         {
-            remote.status = RuntimeStatus::Incompatible(detail);
+            remote.status = status;
         }
     });
 }
@@ -539,6 +548,30 @@ mod tests {
             panic!("控制协议对不上应判为不兼容");
         };
         assert!(detail.contains("需要升级桌面"), "{detail}");
+    }
+
+    /// 订阅线程把每次探测到的连通性报回来，订阅断开也报：侧栏的「离线」靠它更新，
+    /// 不能只在启动时探一次。
+    #[test]
+    fn subscription_reports_reachability_changes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (events, _events_rx) = smol::channel::unbounded();
+        let (status, status_rx) = smol::channel::unbounded();
+        let stop = Arc::new(AtomicBool::new(false));
+        crate::runtime_events::spawn_subscription(
+            remote_runtime("rt-test", describe_without("no.such.method")),
+            events,
+            status,
+            Arc::clone(&stop),
+        );
+        let (key, first) = status_rx.recv_blocking().unwrap();
+        assert_eq!(key, RuntimeKey::Remote("rt-test".into()));
+        assert!(matches!(first, RuntimeStatus::Online { .. }), "{first:?}");
+        // 假运行时只答 describe，订阅随即断开：断开要报离线。
+        let (_, second) = status_rx.recv_blocking().unwrap();
+        assert!(matches!(second, RuntimeStatus::Offline(_)), "{second:?}");
+        stop.store(true, Ordering::Release);
     }
 
     #[test]

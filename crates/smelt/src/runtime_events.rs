@@ -5,6 +5,9 @@
 //! 远程运行时每次连之前先对版本（本机守护由桌面自己拉起和升级，版本总是对的）：对不上
 //! 就不订阅，把原因记到 [`RuntimeHub`] 上给人看，这条订阅停下，直到再探测时对上了才重起。
 //! 不然订阅解不出投影就断，断了又连，会话状态永远到不了，也没人知道为什么。
+//!
+//! 订阅线程是远程运行时连通性的唯一来源：每次探测的结果、订阅断开，都报回 [`RuntimeHub`]，
+//! 侧栏的「离线」跟着它走，不是只在启动时探一次。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,8 +23,8 @@ pub(crate) type RuntimeEvent = (RuntimeKey, DaemonStateEvent);
 
 struct RuntimeSubscriptions {
     sender: smol::channel::Sender<RuntimeEvent>,
-    /// 订阅线程对出版本不兼容时报给主线程：哪个运行时、说明。
-    incompatible: smol::channel::Sender<(RuntimeKey, String)>,
+    /// 订阅线程把远程运行时的连通性报给主线程：哪个运行时、现在怎样。
+    status: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     /// 远程运行时各自的停止标记。
     remotes: HashMap<RuntimeKey, Arc<AtomicBool>>,
     _hub_watch: Option<Subscription>,
@@ -32,22 +35,22 @@ impl Global for RuntimeSubscriptions {}
 /// 起本机和已登记远程运行时的订阅，返回事件的接收端。要在 [`RuntimeHub`] 装好之后调。
 pub(crate) fn start(cx: &mut App) -> smol::channel::Receiver<RuntimeEvent> {
     let (sender, receiver) = smol::channel::unbounded();
-    let (incompatible, incompatible_rx) = smol::channel::unbounded::<(RuntimeKey, String)>();
+    let (status, status_rx) = smol::channel::unbounded::<(RuntimeKey, RuntimeStatus)>();
     cx.spawn(async move |cx| {
-        while let Ok((key, detail)) = incompatible_rx.recv().await {
-            cx.update(|cx| crate::runtimes::mark_incompatible(&key, detail, cx));
+        while let Ok((key, status)) = status_rx.recv().await {
+            cx.update(|cx| crate::runtimes::set_status(&key, status, cx));
         }
     })
     .detach();
     spawn_subscription(
         Runtime::local(),
         sender.clone(),
-        incompatible.clone(),
+        status.clone(),
         Arc::new(AtomicBool::new(false)),
     );
     cx.set_global(RuntimeSubscriptions {
         sender,
-        incompatible,
+        status,
         remotes: HashMap::new(),
         _hub_watch: None,
     });
@@ -57,10 +60,10 @@ pub(crate) fn start(cx: &mut App) -> smol::channel::Receiver<RuntimeEvent> {
     receiver
 }
 
-fn spawn_subscription(
+pub(crate) fn spawn_subscription(
     runtime: Runtime,
     sender: smol::channel::Sender<RuntimeEvent>,
-    incompatible: smol::channel::Sender<(RuntimeKey, String)>,
+    status_tx: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     stop: Arc<AtomicBool>,
 ) {
     let key = runtime.key().clone();
@@ -72,11 +75,11 @@ fn spawn_subscription(
                 let status =
                     (!runtime.is_local()).then(|| crate::runtimes::status_of(runtime.client()));
                 let connected_at = Instant::now();
+                if let Some(status) = &status {
+                    let _ = status_tx.try_send((key.clone(), status.clone()));
+                }
                 match status {
-                    Some(RuntimeStatus::Incompatible(detail)) => {
-                        let _ = incompatible.try_send((key.clone(), detail));
-                        return;
-                    }
+                    Some(RuntimeStatus::Incompatible(_)) => return,
                     // 连不上就不再拨一次订阅，直接退避。
                     Some(RuntimeStatus::Offline(_)) => {}
                     _ => crate::terminal::subscribe_daemon_states_blocking(
@@ -89,6 +92,11 @@ fn spawn_subscription(
                 }
                 if stop.load(Ordering::Acquire) {
                     return;
+                }
+                // 订阅断了：远程运行时这会儿算连不上，退避后再探测时连上了会报回在线。
+                if !runtime.is_local() {
+                    let _ = status_tx
+                        .try_send((key.clone(), RuntimeStatus::Offline("连接断开".to_string())));
                 }
                 let _ = sender.try_send((key.clone(), DaemonStateEvent::Disconnected));
                 // 短暂可用后断开（daemon 升级）从首档开始；连续失败则指数退避并封顶，
@@ -138,7 +146,7 @@ fn sync_remote_subscriptions(cx: &mut App) {
         spawn_subscription(
             runtime,
             subscriptions.sender.clone(),
-            subscriptions.incompatible.clone(),
+            subscriptions.status.clone(),
             stop,
         );
     }
