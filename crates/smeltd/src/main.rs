@@ -1991,13 +1991,15 @@ fn main() {
     // 会话宿主和主进程都要钉住自己映射的那份文件。钉晚了，启动名若已被拨走，
     // 再去解析 `current_exe()` 就会拿到下一份映像。
     pin_running_daemon_image();
-    // `smeltd install` / `status` 这类子命令跑完就退出，不起守护。
-    if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
-        std::process::exit(code);
-    }
+    // 会话宿主的 `--acp-session-host` 是内部参数，必须先于子命令分流认出来，
+    // 否则会被当成未知子命令退出，对话会话起来就挂。
     if acp_runtime_host::is_session_host_process() {
         acp_runtime_host::run_session_host();
         return;
+    }
+    // `smeltd install` / `status` 这类子命令跑完就退出，不起守护。
+    if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(code);
     }
     smelt_core::sqlite_state::enable_sqlite_state();
     // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
