@@ -413,7 +413,7 @@ impl Workspace {
         let agent_conversation =
             self.selected_agent_conversation_view(cx)
                 .map(|(ix, view)| ChromeSessionTitle {
-                    title: self.sessions[ix].title(cx),
+                    title: Self::title_with_runtime(&self.sessions[ix], cx),
                     model: view.read(cx).model_name(),
                     conversation: Some(view),
                 });
@@ -423,7 +423,7 @@ impl Workspace {
             }
             let conversation = session.active_acp().cloned();
             Some(ChromeSessionTitle {
-                title: session.title(cx),
+                title: Self::title_with_runtime(session, cx),
                 model: conversation
                     .as_ref()
                     .and_then(|view| view.read(cx).model_name()),

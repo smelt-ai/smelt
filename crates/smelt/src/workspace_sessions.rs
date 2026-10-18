@@ -493,6 +493,20 @@ impl Workspace {
             .and_then(|session| session.cwd(cx))
     }
 
+    /// 会话标题，远程会话后面跟上运行时名字。舞台、命令面板、通知这些地方没有侧栏那样
+    /// 的运行时分段，本机和远程有同名会话时要分得清。
+    pub(crate) fn title_with_runtime(session: &Session, cx: &App) -> String {
+        let title = session.title(cx);
+        let runtime = session.runtime(cx);
+        if runtime.is_local() {
+            return title;
+        }
+        format!(
+            "{title} · {}",
+            crate::runtimes::runtime_name(runtime.key(), cx)
+        )
+    }
+
     /// 活动项目在远程运行时上时，工具面板该说的话。面板目前只读本机，这时拿不到项目
     /// 根，但不能说成「没有项目」：项目明明打开着，只是在另一台机器上。
     pub(crate) fn remote_project_notice(&self, cx: &App) -> Option<String> {

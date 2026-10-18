@@ -127,11 +127,11 @@ impl Workspace {
                 SessionKind::Conversation(view) if view.read(cx).session_id() == notification.session_id
             );
             if matches_acp {
-                session_title = Some(session.title(cx));
+                session_title = Some(Self::title_with_runtime(session, cx));
             }
             for leaf in session.term_leaves() {
                 if leaf.read(cx).session_id() == notification.session_id {
-                    session_title = Some(session.title(cx));
+                    session_title = Some(Self::title_with_runtime(session, cx));
                 }
             }
         }
@@ -215,7 +215,7 @@ impl Workspace {
                 };
                 Some(status_item::SessionEntry {
                     session_id,
-                    title: self.sessions[ix].title(cx),
+                    title: Self::title_with_runtime(&self.sessions[ix], cx),
                     status_text,
                     color: ui_theme::agent_status_rgb8(color_status),
                     agent: self.sessions[ix].agent_icon_id(cx),
