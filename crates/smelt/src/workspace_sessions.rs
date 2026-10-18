@@ -493,6 +493,19 @@ impl Workspace {
             .and_then(|session| session.cwd(cx))
     }
 
+    /// 活动项目在远程运行时上时，工具面板该说的话。面板目前只读本机，这时拿不到项目
+    /// 根，但不能说成「没有项目」：项目明明打开着，只是在另一台机器上。
+    pub(crate) fn remote_project_notice(&self, cx: &App) -> Option<String> {
+        let project = self.active_project_ref(cx)?;
+        if project.runtime == crate::RuntimeKey::Local {
+            return None;
+        }
+        let name = crate::runtimes::runtime_name(&project.runtime, cx);
+        Some(format!(
+            "这是「{name}」上的项目，这个面板暂时只支持本机项目"
+        ))
+    }
+
     /// 活动 session 变化时，完整交换右侧工作区。用 session 自己的稳定 ui_id 判断，
     /// 不依赖数组下标，所以拖拽排序、关闭前面的 session 都不会把快照串给别人。
     pub(crate) fn sync_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {

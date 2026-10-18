@@ -109,6 +109,8 @@ impl HistoryListSnapshot {
 /// 主行优先显示用户名称，副行保留 Agent 原始标题或时间信息。
 pub enum HistoryListState {
     NoProject,
+    /// 活动项目在远程运行时上，历史页目前只读本机存档。带着给人看的说明。
+    RemoteProject(String),
     Loading,
     Empty,
     Ready(Rc<Vec<SessionSummary>>),
@@ -295,6 +297,9 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
     let list_body: AnyElement = match (&list, &sessions) {
         (HistoryListState::NoProject, _) => {
             placeholder_view("当前没有活动项目", muted).into_any_element()
+        }
+        (HistoryListState::RemoteProject(notice), _) => {
+            placeholder_view(notice, muted).into_any_element()
         }
         (HistoryListState::Loading, _) => placeholder_view("加载中…", muted).into_any_element(),
         (HistoryListState::Empty, _) | (_, None) => {

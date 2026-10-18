@@ -641,6 +641,11 @@ impl Workspace {
         use crate::ui_theme;
 
         let Some(root) = self.active_project_root(cx) else {
+            let remote = self.remote_project_notice(cx);
+            let (title, hint) = match remote.as_deref() {
+                Some(notice) => ("远程项目", notice.to_string()),
+                None => ("没有项目", "打开一个项目后再看更改".to_string()),
+            };
             return v_flex()
                 .flex_1()
                 .min_h_0()
@@ -657,13 +662,13 @@ impl Workspace {
                                 .text_lg()
                                 .font_semibold()
                                 .text_color(rgb(ui_theme::text_bright()))
-                                .child("没有项目"),
+                                .child(title),
                         )
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(rgb(ui_theme::text_faint()))
-                                .child("打开一个项目后再看更改"),
+                                .child(hint),
                         ),
                 )
                 .into_any_element();

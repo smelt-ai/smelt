@@ -755,7 +755,10 @@ impl Workspace {
                 ),
             };
         let list_state = match (cwd.as_ref(), sessions) {
-            (None, _) => HistoryListState::NoProject,
+            (None, _) => match self.remote_project_notice(cx) {
+                Some(notice) => HistoryListState::RemoteProject(notice),
+                None => HistoryListState::NoProject,
+            },
             (Some(_), None) => HistoryListState::Loading,
             (Some(_), Some(s)) if s.is_empty() => HistoryListState::Empty,
             (Some(_), Some(s)) => HistoryListState::Ready(s),

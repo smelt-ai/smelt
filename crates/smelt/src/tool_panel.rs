@@ -507,6 +507,11 @@ impl Workspace {
     ) -> AnyElement {
         match tab {
             ToolPanelTab::Plugin(slot) => {
+                // 插件读写的是本机磁盘（D8），远程项目上不可用，说明原因。
+                if let Some(notice) = self.remote_project_notice(cx) {
+                    return crate::placeholder_view(&notice, cx.theme().muted_foreground)
+                        .into_any_element();
+                }
                 // 插件经 smelt-workspace.context() 读当前项目；这里只写内存。
                 crate::plugins::set_project_root(self.active_project_root(cx));
                 crate::plugins::render(slot, cx)
@@ -546,7 +551,18 @@ impl Workspace {
             .file_tree_w
             .clamp(MIN_FILE_TREE_WIDTH, MAX_FILE_TREE_WIDTH);
         let tree_open = self.file_tree_open;
-        let tree = if has_query {
+        // 远程项目：本机没有它的目录，搜索也搜不到；没钉别的本机目录时直接说明。
+        let remote_notice = self
+            .active_project_root(cx)
+            .is_none()
+            .then(|| self.remote_project_notice(cx))
+            .flatten();
+        let tree = if let Some(notice) = remote_notice
+            .as_ref()
+            .filter(|_| has_query || roots.is_empty())
+        {
+            crate::placeholder_view(notice, cx.theme().muted_foreground).into_any_element()
+        } else if has_query {
             match &self.search_results {
                 Some(state) => {
                     crate::file_tree::search_results_view(state, &self.file_tree_scroll, cx)
