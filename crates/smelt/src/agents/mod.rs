@@ -511,6 +511,24 @@ fn bound_agent_definition_id<'a>(
     definition_id.map(str::trim).filter(|id| !id.is_empty())
 }
 
+/// 侧栏「最近对话」收起时列几条。它和项目同在一个滚动区，列多了项目就被推到下面。
+const SIDEBAR_RECENT_CONVERSATION_LIMIT: usize = 5;
+
+/// 侧栏「最近对话」要画哪几条：`len` 条已按最近活动排好，返回其中的位置。
+/// 收起时只取前几条；当前打开的那条排在后面也补上，选中的对话不能藏起来。
+fn visible_recent_conversations(len: usize, selected: Option<usize>, expanded: bool) -> Vec<usize> {
+    if expanded || len <= SIDEBAR_RECENT_CONVERSATION_LIMIT {
+        return (0..len).collect();
+    }
+    let mut shown: Vec<usize> = (0..SIDEBAR_RECENT_CONVERSATION_LIMIT).collect();
+    if let Some(selected) =
+        selected.filter(|&ix| (SIDEBAR_RECENT_CONVERSATION_LIMIT..len).contains(&ix))
+    {
+        shown.push(selected);
+    }
+    shown
+}
+
 /// 侧栏「最近对话」：按最近活动排，新的在前。
 fn recent_conversation_order(updated_at: &[u64]) -> Vec<usize> {
     let mut ixes: Vec<usize> = (0..updated_at.len()).collect();

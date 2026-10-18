@@ -64,7 +64,6 @@ impl Workspace {
         &self,
         entity: Entity<Workspace>,
         statuses: &[AgentStatus],
-        animate_running: bool,
         cx: &App,
     ) -> Div {
         let config = cx.global::<settings::AgentHostState>();
@@ -103,9 +102,8 @@ impl Workspace {
                 IconName::LayoutDashboard,
                 false,
                 WorkspaceRoute::Capabilities,
-                entity.clone(),
+                entity,
             ))
-            .child(self.render_product_conversation_nav(entity, statuses, animate_running, cx))
     }
 
     pub(super) fn render_automation_drill_header(

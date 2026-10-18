@@ -150,7 +150,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .px_3()
+                .px(px(PROJECT_HEADER_PAD_X))
                 .py(px(4.))
                 .child(
                     div()
@@ -178,7 +178,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                 .text_size(px(12.))
                                 .font_semibold()
                                 .text_color(rgb(if drag.empty {
-                                    ui_theme::text_faint()
+                                    ui_theme::text_muted()
                                 } else {
                                     ui_theme::text_bright()
                                 }))

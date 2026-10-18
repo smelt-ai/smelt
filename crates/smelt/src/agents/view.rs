@@ -321,11 +321,11 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn render_product_conversation_nav(
+    /// 侧栏「最近对话」。跟项目在同一个滚动区里，收起时只列几条。
+    pub(crate) fn render_product_conversation_nav(
         &self,
         entity: Entity<Workspace>,
         statuses: &[AgentStatus],
-        _animate_running: bool,
         cx: &App,
     ) -> AnyElement {
         let config = cx.global::<settings::AgentHostState>();
@@ -340,12 +340,28 @@ impl Workspace {
             .iter()
             .map(|&ix| self.sessions[ix].effective_updated_at(cx))
             .collect();
-        let ixes: Vec<usize> = recent_conversation_order(&updated)
+        let ordered: Vec<(usize, u64)> = recent_conversation_order(&updated)
             .into_iter()
-            .map(|order| product[order])
+            .map(|order| (product[order], updated[order]))
             .collect();
+        let selected_sid = if self.active_tab() == &WorkspaceRoute::Agents {
+            self.nav.agents().conversation_sid()
+        } else {
+            None
+        };
+        let selected_pos = selected_sid.and_then(|sid| {
+            ordered.iter().position(|&(ix, _)| {
+                self.sessions[ix]
+                    .active_acp()
+                    .is_some_and(|view| view.read(cx).session_id().to_string() == sid)
+            })
+        });
+        let expanded = self.sidebar_recent_conversations_expanded;
+        let shown = visible_recent_conversations(ordered.len(), selected_pos, expanded);
+        let hidden = ordered.len() - shown.len();
+        let now = chrono::Local::now();
         let mut rows = Vec::new();
-        for &ix in &ixes {
+        for (ix, updated_at) in shown.into_iter().map(|pos| ordered[pos]) {
             let Some(session) = self.sessions.get(ix) else {
                 continue;
             };
@@ -353,8 +369,8 @@ impl Workspace {
                 continue;
             };
             let sid = view.read(cx).session_id().to_string();
-            let selected = self.active_tab() == &WorkspaceRoute::Agents
-                && self.nav.agents().conversation_sid() == Some(sid.as_str());
+            let selected = selected_sid == Some(sid.as_str());
+            let updated_text = crate::session_list::row::session_updated_at_text(updated_at, &now);
             let title = conversation_row_title(
                 session.custom_title.as_deref(),
                 view.read(cx).auto_title().as_deref(),
@@ -380,8 +396,8 @@ impl Workspace {
                 div()
                     .id(format!("product-conversation-{sid}"))
                     .group("product-conv-row")
-                    .h(crate::ui_theme::height::md())
                     .px_2()
+                    .py(px(6.))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -408,18 +424,36 @@ impl Workspace {
                             .text_color(conversation_icon_color(status, None))
                             .child(mark),
                     )
+                    // 跟项目下的会话行一样两行：标题，下面是最近活动时间。
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .text_color(rgb(if selected {
-                                crate::ui_theme::text_bright()
-                            } else {
-                                crate::ui_theme::text()
-                            }))
-                            .truncate()
-                            .child(title),
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .line_height(px(16.))
+                                    .text_sm()
+                                    .text_color(rgb(if selected {
+                                        crate::ui_theme::text_bright()
+                                    } else {
+                                        crate::ui_theme::text()
+                                    }))
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .line_height(px(14.))
+                                    .text_xs()
+                                    .text_color(rgb(crate::ui_theme::text_faint()))
+                                    .truncate()
+                                    .child(updated_text),
+                            ),
                     )
                     .children(
                         crate::session_list::row::session_row_status_label(status).map(|label| {
@@ -482,18 +516,27 @@ impl Workspace {
                     .into_any_element(),
             );
         }
+        let toggle_label = (ordered.len() > SIDEBAR_RECENT_CONVERSATION_LIMIT).then(|| {
+            if expanded {
+                "收起".to_string()
+            } else {
+                format!("显示其余 {hidden} 个")
+            }
+        });
         div()
+            .px_2()
             .pt_1()
+            .pb_1()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(1.))
             .child(
                 div()
                     .px_2()
                     .pb_1()
-                    .text_sm()
+                    .text_xs()
                     .font_medium()
-                    .text_color(rgb(crate::ui_theme::text_faint()))
+                    .text_color(rgb(crate::ui_theme::text_muted()))
                     .child("最近对话"),
             )
             .map(|section| {
@@ -511,6 +554,29 @@ impl Workspace {
                 } else {
                     section.children(rows)
                 }
+            })
+            .when_some(toggle_label, |section, label| {
+                section.child(
+                    div()
+                        .id("recent-conversations-toggle")
+                        .px_2()
+                        .h(crate::ui_theme::height::sm())
+                        .flex()
+                        .items_center()
+                        .rounded(crate::ui_theme::row_radius())
+                        .cursor_pointer()
+                        .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .child(label)
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |workspace, cx| {
+                                workspace.sidebar_recent_conversations_expanded =
+                                    !workspace.sidebar_recent_conversations_expanded;
+                                cx.notify();
+                            });
+                        }),
+                )
             })
             .into_any_element()
     }

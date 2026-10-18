@@ -18,7 +18,7 @@ pub use smelt_model::attention::{AttentionItem, AttentionKind, AttentionStore};
 ///
 /// 与 [`AttentionGlobal`] 相同：内层存数据，`revision` 只为让 GPUI 觉得
 /// Global 变了。写入必须走 [`Self::replace_all`] / [`Self::upsert`]，成功后
-/// 唤醒应用级观察器。观察器负责 pane 副作用和合并刷新，不要在各面板手写 notify。
+/// 唤醒应用级观察器。观察器负责 pane 副作用和侧栏刷新，不要在各面板手写 notify。
 #[derive(Clone, Default)]
 pub struct DaemonStates {
     runtimes: Arc<Mutex<HashMap<RuntimeKey, RuntimeMirror>>>,

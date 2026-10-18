@@ -40,6 +40,9 @@ const PROJ_HEADER_GROUP: &str = "proj-header-hover";
 /// 「项目」分组标题行：筛选和打开项目只在 hover 这行时出现，跟 Grok 一样。
 const PROJ_SECTION_GROUP: &str = "proj-section-hover";
 
+/// 会话行：关闭按钮只在 hover 这行时出现。
+const SESSION_ROW_GROUP: &str = "session-row-hover";
+
 /// 侧栏正文走 `text_sm`，辅助信息走 `text_xs`，跟着界面字号缩放。
 /// 层级靠字重和颜色，不靠放大字。
 ///
@@ -48,8 +51,12 @@ const PROJ_SECTION_GROUP: &str = "proj-section-hover";
 const PROJECT_NEW_BUTTON_SIZE: f32 = 28.;
 const PROJECT_ACTION_SLOT_HEIGHT: f32 = 20.;
 const PROJECT_DISCLOSURE_ICON_SIZE: f32 = 15.;
-const PROJECT_SESSION_INDENT: f32 = 22.;
-const PROJECT_GUIDE_LEFT: f32 = 18.;
+/// 项目行左内边距。加上分组外边距，文件夹图标跟侧栏入口图标、分组标题落在同一条左缘。
+const PROJECT_HEADER_PAD_X: f32 = 8.;
+/// 会话图标落在项目名正下方。
+const PROJECT_SESSION_INDENT: f32 = 18.;
+/// 引导线对着文件夹图标的中线。
+const PROJECT_GUIDE_LEFT: f32 = 14.;
 const SESSION_AGENT_ICON_BOX_SIZE: f32 = 18.;
 const SESSION_AGENT_ICON_SIZE: f32 = 17.;
 pub(crate) const SESSION_GLOW_PERIOD: Duration = Duration::from_secs(2);
@@ -432,6 +439,57 @@ impl Workspace {
                     }),
             );
 
+        // 「项目」分组标题跟「最近对话」一起放进滚动区：两段列表共用一个滚动条，
+        // 对话再多也只是往下推，不会把项目列表压没。
+        let e_open = this.clone();
+        let project_section_header = div()
+            .id("project-section-header")
+            .group(PROJ_SECTION_GROUP)
+            .flex_shrink_0()
+            .child(crate::workspace_frame::with_window_drag(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .px_1()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(rgb(ui_theme::text_muted()))
+                            .child("项目"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .opacity(0.0)
+                            .group_hover(PROJ_SECTION_GROUP, |s| s.opacity(1.0))
+                            .child(grouping_btn)
+                            .child(
+                                div()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .child(
+                                        Button::new("open-project")
+                                            .ghost()
+                                            .size(px(24.))
+                                            .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
+                                            .icon_action("添加项目")
+                                            .on_click(move |_ev, _window, cx| {
+                                                e_open.update(cx, |ws, cx| ws.open_project(cx));
+                                            }),
+                                    ),
+                            ),
+                    ),
+            ));
+
         let e_scroll_sess = this.clone();
         let e_scroll_proj = this.clone();
         // 滚动条必须叠在滚动容器外面：若作为 flex_col 的子节点，即使 absolute
@@ -453,7 +511,9 @@ impl Workspace {
                 e_scroll_proj.update(cx, |ws, cx| {
                     ws.update_sidebar_drag_scroll(ev.event.position, cx);
                 });
-            });
+            })
+            .child(self.render_product_conversation_nav(this.clone(), statuses, cx))
+            .child(project_section_header);
 
         // 拖拽排序生效后，项目组和会话行都从旧位置滑到新位置。
         let reorder_generation = self.sidebar_reorder_generation;
@@ -589,7 +649,7 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap_1p5()
-                        .px_3()
+                        .px(px(PROJECT_HEADER_PAD_X))
                         .py(px(4.))
                         .rounded(ui_theme::row_radius())
                         .group(PROJ_HEADER_GROUP)
@@ -628,18 +688,19 @@ impl Workspace {
                                 .overflow_hidden()
                                 .child(
                                     // 项目名与会话同为 text_sm，再用 semibold 区分结构层级；
-                                    // 空项目继续降到 faint，避免和活跃项目争夺注意力。
+                                    // 空项目降一档到 muted，不和活跃项目抢注意力。不降到 faint：
+                                    // 它仍是能点、能新建会话的条目，faint 读起来像禁用。
                                     div()
                                         .flex_shrink_0()
                                         .text_sm()
                                         .font_semibold()
                                         .text_color(rgb(if is_active_group {
                                             ui_theme::text_bright()
-                                        } else if crate::sidebar_order::project_header_is_faint(
+                                        } else if crate::sidebar_order::project_header_is_dimmed(
                                             is_active_group,
                                             empty_group,
                                         ) {
-                                            ui_theme::text_faint()
+                                            ui_theme::text_muted()
                                         } else {
                                             ui_theme::text_mid()
                                         }))
@@ -665,18 +726,28 @@ impl Workspace {
                                     )
                                 })
                                 .children(branch_label.as_ref().map(|b| {
+                                    // 窄侧栏里分支名常被截掉后半段，悬浮看全名。
+                                    let full_branch: SharedString = b.clone().into();
                                     div()
+                                        .id(project_element_id("proj-branch", &project))
                                         .min_w_0()
                                         .truncate()
                                         .text_xs()
                                         .font_family(crate::terminal_view::font_family())
                                         .text_color(rgb(ui_theme::text_faint()))
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                full_branch.clone(),
+                                            )
+                                            .build(window, cx)
+                                        })
                                         .child(b.clone())
                                 })),
                         )
                         .child(
                             // 数字和「+」不是两套右对齐元素，而是同一个方形槽里的
                             // 两个满铺图层；hover 只切透明度，因此字形中心不会横跳。
+                            // 数字只在折叠或空项目时有用：展开后下面的会话一眼就数得出来。
                             div()
                                 .relative()
                                 .flex_shrink_0()
@@ -697,7 +768,9 @@ impl Workspace {
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
-                                        .child(ixs.len().to_string()),
+                                        .when(collapsed || empty_group, |d| {
+                                            d.child(ixs.len().to_string())
+                                        }),
                                 )
                                 .when(is_project_group, |slot| {
                                     slot.child(
@@ -1100,6 +1173,7 @@ impl Workspace {
                 let row_tooltip = title.clone();
                 let row = div()
                     .id(("sess-row", ui_id))
+                    .group(SESSION_ROW_GROUP)
                     .relative()
                     .flex()
                     .items_center()
@@ -1191,7 +1265,8 @@ impl Workspace {
                             .child(label)
                     }))
                     .child(
-                        // 关闭是这一行唯一的主操作，一直放在行尾。不用 ghost Button：
+                        // 关闭是这一行唯一的主操作，放在行尾，hover 整行才显出来；用透明度
+                        // 而不是不渲染，位置一直占着，显隐时标题截断不跳。不用 ghost Button：
                         // 它的 hover 底是 secondary(bg_card).lighten(0.1)，压在选中行的
                         // bg_selected 上比底色还暗，且图标色 hover 前后不变。这里自己画，
                         // hover 只把图标转红、不加底。
@@ -1204,6 +1279,8 @@ impl Workspace {
                             .size(px(20.))
                             .rounded(px(4.))
                             .text_color(rgb(ui_theme::text_muted()))
+                            .opacity(0.0)
+                            .group_hover(SESSION_ROW_GROUP, |s| s.opacity(1.0))
                             .hover(|d| d.text_color(rgb(ui_theme::red())))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation()
@@ -1576,7 +1653,7 @@ impl Workspace {
                     .id("hidden-empty-projects")
                     .mx_2()
                     .mt_2()
-                    .px_3()
+                    .px(px(PROJECT_HEADER_PAD_X))
                     .py(px(4.))
                     .rounded(ui_theme::row_radius())
                     .cursor_pointer()
@@ -1596,8 +1673,7 @@ impl Workspace {
         }
 
         // ---- 底部操作条：设置 ----
-        // 「打开项目」已经挪到「项目」标题行右侧，跟 Grok 一样跟分组标题同行。
-        let e_open = this.clone();
+        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。
         let e_settings = this.clone();
         let settings_needs_attention =
             self.update_available() || self.daemon_outdated == Some(true);
@@ -1830,70 +1906,8 @@ impl Workspace {
             // 外层工作区负责玻璃表面、描边与裁切；列表自身保持透明，才能让
             // vibrancy / 半透明底贯穿整个面板而不是只透出四角。
             .bg(gpui::transparent_black())
-            // 工作台（含智能体对话）与项目是两个并列分组。
-            .child(self.render_automation_navigation(
-                this,
-                statuses,
-                animate_running,
-                cx,
-            ))
-            .child(
-                div()
-                    .id("project-section-header")
-                    .group(PROJ_SECTION_GROUP)
-                    .flex_shrink_0()
-                    .child(
-                        crate::workspace_frame::with_window_drag(
-                            div()
-                                .px_3()
-                                .pt_2()
-                                .pb_1()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .px_1()
-                                        .flex_shrink_0()
-                                        .text_sm()
-                                        .font_medium()
-                                        .text_color(rgb(ui_theme::text_faint()))
-                                        .child("项目"),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .opacity(0.0)
-                                        .group_hover(PROJ_SECTION_GROUP, |s| s.opacity(1.0))
-                                        .child(grouping_btn)
-                                        .child(
-                                            div()
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                    cx.stop_propagation()
-                                                })
-                                                .child(
-                                                    Button::new("open-project")
-                                                        .ghost()
-                                                        .size(px(24.))
-                                                        .icon(
-                                                            Icon::empty().path(
-                                                                "smelt-icons/folder-plus.svg",
-                                                            ),
-                                                        )
-                                                        .icon_action("打开项目")
-                                                        .on_click(move |_ev, _window, cx| {
-                                                            e_open.update(cx, |ws, cx| {
-                                                                ws.open_project(cx)
-                                                            });
-                                                        }),
-                                                ),
-                                        ),
-                                ),
-                        ),
-                    ),
-            )
+            // 顶部固定的只有几个入口；「最近对话」和项目都在下面的滚动区里。
+            .child(self.render_automation_navigation(this, statuses, cx))
             .child(
                 div()
                     .id("session-rows-pane")
@@ -1922,7 +1936,7 @@ mod tests {
     const _: () = {
         assert!(PROJECT_NEW_BUTTON_SIZE >= 28.);
         assert!(PROJECT_NEW_BUTTON_SIZE > PROJECT_ACTION_SLOT_HEIGHT);
-        assert!(PROJECT_SESSION_INDENT == 22.);
+        assert!(PROJECT_SESSION_INDENT == 18.);
         assert!(PROJECT_GUIDE_LEFT < PROJECT_SESSION_INDENT);
         assert!(PROJECT_DISCLOSURE_ICON_SIZE >= 15.);
         assert!(SESSION_AGENT_ICON_SIZE >= 17.);

@@ -15,6 +15,7 @@ mod project_tests;
 mod remote_terminal_bench;
 mod remote_session_catalog_global_tests;
 mod resizable_split_tests;
+mod session_facts_tests;
 mod session_route_tests;
 mod sidebar_order_tests;
 mod sidebar_width_tests;

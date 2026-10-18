@@ -299,11 +299,6 @@ impl StageCover {
     }
 }
 
-/// 守护状态更新很频繁（agent 活跃时每步都推 phase/标题变化）。
-/// 这里合并后只 notify 当前 Workspace，让侧栏/状态点重算；不用
-/// `refresh_windows()` 把独立的 TerminalView 画布也一起标脏。
-static STATE_REFRESH_SCHEDULED: AtomicBool = AtomicBool::new(false);
-
 /// 当前主工作台。窗口在不在只看 `window`：设置窗口强持有同一份 `Workspace`，
 /// 主窗口关掉之后 `workspace` 仍能 `upgrade`。
 #[derive(Clone)]
@@ -418,30 +413,10 @@ fn apply_automation_projection(
         }
     }
 
-    // 自动化投影不是 ACP 相位那种高频流，不能走 300ms 合并刷新：
-    // 保存回包已经 notify 过一次，若这里再延迟 notify，编辑器会隔一拍再闪。
+    // 自动化投影不在会话事实里（见 SessionFacts），这里直接通知。
     if let Some(workspace) = current_workspace(current_ws) {
         let _ = workspace.update(cx, |_, cx| cx.notify());
     }
-}
-
-fn schedule_state_refresh(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: &mut gpui::App) {
-    if STATE_REFRESH_SCHEDULED.swap(true, Ordering::Relaxed) {
-        return; // 已有一笔刷新在途，这次更新并入它
-    }
-    let current_ws = current_ws.clone();
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(300))
-            .await;
-        STATE_REFRESH_SCHEDULED.store(false, Ordering::Relaxed);
-        cx.update(|cx| {
-            if let Some(workspace) = current_workspace(&current_ws) {
-                let _ = workspace.update(cx, |_, cx| cx.notify());
-            }
-        });
-    })
-    .detach();
 }
 
 /// 一个长期存活的右侧路由实例。左侧 session 路由器只整体交换这个对象，不读取其中
@@ -1307,6 +1282,73 @@ impl Session {
             }
         }
     }
+
+    fn facts(&self, cx: &App) -> SessionFacts {
+        SessionFacts {
+            title: self.title(cx),
+            status: self.status(cx),
+            updated_at: self.effective_updated_at(cx),
+            cwd: self.cwd(cx),
+            session_id: live_session_persist_id(self, cx),
+            icon: self.agent_icon_id(cx),
+            model: self.active_acp().and_then(|view| view.read(cx).model_name()),
+            panes: self
+                .term_leaves()
+                .iter()
+                .map(|view| PaneFacts {
+                    title: pane_title(view, cx),
+                    status: pane_status(view, cx),
+                    updated_at: daemon_state_for(view, cx)
+                        .map(|state| state.updated_at)
+                        .unwrap_or_default(),
+                    icon: pane_provider_kind(view, cx).map(|kind| kind.id()),
+                    progress: {
+                        let view = view.read(cx);
+                        DaemonStates::progress(view.runtime().key(), view.session_id(), cx)
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+/// 会话露在工作台上的事实：侧栏行和分屏子行、工具面板绑定的项目、舞台标题、
+/// 最近对话。
+///
+/// 对话每来一条增量、守护每走一步都会推一次，这些事实却很少变。侧栏和工具面板
+/// 跟着 Workspace 的通知整块重画，所以只有它们变了才通知（见
+/// `Workspace::notify_if_session_facts_changed`）。对话正文由 AcpView 自己
+/// 通知，终端画面走 TerminalView 自己的重绘通道，都不经过这里。
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct SessionFacts {
+    title: String,
+    status: AgentStatus,
+    /// 留到秒：侧栏按时间分组和最近对话都按它排序，不只显示到分钟。
+    updated_at: u64,
+    cwd: Option<String>,
+    session_id: Option<String>,
+    icon: Option<&'static str>,
+    model: Option<String>,
+    /// 终端会话的各个分屏，ACP 会话为空。
+    panes: Vec<PaneFacts>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PaneFacts {
+    title: String,
+    status: AgentStatus,
+    updated_at: u64,
+    icon: Option<&'static str>,
+    progress: Option<smelt_client::daemon_state::TerminalProgress>,
+}
+
+/// 换上这次看到的事实，返回它们变没变。
+fn replace_changed_facts(shown: &mut Vec<SessionFacts>, current: Vec<SessionFacts>) -> bool {
+    if *shown == current {
+        return false;
+    }
+    *shown = current;
+    true
 }
 
 fn next_session_ui_id() -> u64 {
@@ -2359,6 +2401,8 @@ struct Workspace {
     sidebar_grouping: SidebarGrouping,
     /// 按项目分组时是否把无会话的项目从侧栏藏起来（固定的 / 当前项目除外）。
     sidebar_hide_empty_projects: bool,
+    /// 侧栏「最近对话」是否展开全部。只在本次运行内记住。
+    sidebar_recent_conversations_expanded: bool,
     /// 会话拖拽悬停中的插入位置：(目标会话 ui_id, 插它前面?)。
     sess_drop_hint: Option<(u64, bool)>,
     /// 项目拖拽悬停中的插入位置：(目标项目 root, 插它前面?)。
@@ -2367,6 +2411,8 @@ struct Workspace {
     sidebar_drag: Option<SidebarDrag>,
     /// 侧栏拖拽排序生效一次就加一。各行据此在下一帧从旧位置滑到新位置，见 `flip_slot`。
     sidebar_reorder_generation: u64,
+    /// 上一次比较时各会话露在工作台上的事实，见 `notify_if_session_facts_changed`。
+    shown_session_facts: Vec<SessionFacts>,
     /// 最近一次拖拽排序里被拖的那一项，和松手时拖拽浮层的高度。它从这里落到新位置。
     sidebar_drop_origin: Option<(SidebarDrag, Pixels)>,
     /// 侧栏会话列表的滚动位置；拖到顶底边缘时靠它自动滚。
@@ -2951,10 +2997,12 @@ impl Workspace {
                 .as_ref()
                 .map(|s| s.sidebar_hide_empty_projects)
                 .unwrap_or(false),
+            sidebar_recent_conversations_expanded: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
             sidebar_drag: None,
             sidebar_reorder_generation: 0,
+            shown_session_facts: Vec::new(),
             sidebar_drop_origin: None,
             sidebar_scroll: ScrollHandle::new(),
             sidebar_auto_scroll: gpui_component::scroll::AutoScroll::default(),
@@ -3123,6 +3171,7 @@ impl Workspace {
             }),
         );
         ws.start_daemon_outdated_watch(cx);
+        ws.start_date_change_watch(cx);
         ws.reconcile_remote_catalog_projection(window, cx);
         ws._remote_sessions_sub = Some(
             cx.observe_global_in::<RemoteSessionCatalogGlobal>(window, |this, window, cx| {
@@ -3163,6 +3212,32 @@ impl Workspace {
                     .await;
                 let ok = this.update(cx, |this, cx| {
                     this.check_daemon_outdated(cx);
+                });
+                if ok.is_err() {
+                    break; // Workspace 已销毁
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 侧栏的「今天 / 昨天」和按时间分组的分桶都按当前日期算，日期一变就得重画，
+    /// 哪怕没有任何会话事实变化。每分钟看一次日期，而不是排一个到零点的长计时器：
+    /// 计时器按开机时长走，合盖睡眠那段不算，醒来后会晚很久才响。
+    fn start_date_change_watch(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut today = Local::now().date_naive();
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let date = Local::now().date_naive();
+                let changed = date != today;
+                today = date;
+                let ok = this.update(cx, |_, cx| {
+                    if changed {
+                        cx.notify();
+                    }
                 });
                 if ok.is_err() {
                     break; // Workspace 已销毁
@@ -3578,15 +3653,24 @@ impl Workspace {
             .iter()
             .flat_map(Session::term_leaves)
             .collect();
-        // 状态/相位变化不直接标脏 TerminalView：由
-        // schedule_state_refresh 合并 notify Workspace，只更新侧栏与徽标。
-        // 终端内容本身走 TerminalView::drive_redraws 的事件通道即时重绘，
-        // 不依赖这里。
+        // 状态/相位变化不直接标脏 TerminalView：侧栏与徽标由
+        // notify_if_session_facts_changed 刷新。终端内容本身走
+        // TerminalView::drive_redraws 的事件通道即时重绘，不依赖这里。
         for pane in panes {
             let pane_view = pane.read(cx);
             if pane_view.session_id() == state.id && pane_view.runtime().key() == runtime {
                 pane.update(cx, |terminal, cx| terminal.handle_daemon_state(state, cx));
             }
+        }
+    }
+
+    /// 对话增量和守护状态推得很频繁，侧栏、工具面板却跟着 Workspace 的通知整块
+    /// 重画。两条路径都只在会话露在工作台上的事实（见 `SessionFacts`）变了才
+    /// 通知，变了就立刻通知，不靠定时合并：同一帧里的多次通知 GPUI 本来就只画一次。
+    pub(crate) fn notify_if_session_facts_changed(&mut self, cx: &mut Context<Self>) {
+        let current = self.sessions.iter().map(|session| session.facts(cx)).collect();
+        if replace_changed_facts(&mut self.shown_session_facts, current) {
+            cx.notify();
         }
     }
 }
@@ -4483,9 +4567,9 @@ fn main() {
                         ws.refresh_session_manager(cx);
                     }
                     ws.maybe_flush_pending_daemon_upgrade(cx);
+                    ws.notify_if_session_facts_changed(cx);
                 });
             }
-            schedule_state_refresh(&current_ws_for_daemon_states, cx);
         });
         cx.set_global(DaemonStatesSubscription {
             _subscription: daemon_states_subscription,
@@ -4663,7 +4747,7 @@ fn main() {
                         terminal::DaemonStateEvent::Snapshot { sessions: list, .. } => {
                             let initial_snapshot = !DaemonStates::is_primed(&runtime, cx);
                             // attention 必须在 signal 前算完：先读旧镜像，写完
-                            // 再 replace_all 唤醒观察器做 pane 副作用和合并刷新。
+                            // 再 replace_all 唤醒观察器做 pane 副作用和侧栏刷新。
                             let previous = list
                                 .iter()
                                 .map(|state| DaemonStates::get(&runtime, &state.id, cx))

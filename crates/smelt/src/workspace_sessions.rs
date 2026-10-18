@@ -871,11 +871,11 @@ impl Workspace {
                     this.persist_pending_history_title_for_view(_view, cx);
                     this.persist_history_agent_definition_for_view(_view, cx);
                     this.save_state(cx);
-                    // save_state 只排队写盘，不会重绘。侧栏「运行中」读的是
-                    // Session::status，视图相位一变就要立刻刷新，不能等守护
-                    // 镜像 300ms 合并窗口。
                     this.sync_notification_surfaces(cx);
-                    cx.notify();
+                    // save_state 只排队写盘，不会重绘。正文增量只归 AcpView 重画；
+                    // 侧栏「运行中」读的是 Session::status，相位一变事实就变，
+                    // 这里立刻通知。
+                    this.notify_if_session_facts_changed(cx);
                 }
                 acp_view::AcpViewEvent::ConfigSelected {
                     config_id,

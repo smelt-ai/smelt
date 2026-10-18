@@ -2,6 +2,7 @@ use super::{
     MemoryFilter, agent_catalog_monogram, bound_agent_definition_id, conversation_agent_mark,
     conversation_icon_color, conversation_row_title, memory_summary_text,
     new_conversation_row_label, recent_conversation_order, session_phase_settled, visible_memories,
+    visible_recent_conversations,
 };
 use crate::AgentStatus;
 use gpui::rgb;
@@ -129,6 +130,29 @@ fn recent_conversations_put_the_newest_first() {
         recent_conversation_order(&[5, 5]),
         vec![0, 1],
         "同一秒保持原来的顺序"
+    );
+}
+
+#[test]
+fn sidebar_recent_conversations_cap_but_keep_the_selected_one() {
+    assert_eq!(visible_recent_conversations(3, None, false), vec![0, 1, 2]);
+    assert_eq!(
+        visible_recent_conversations(8, None, false),
+        vec![0, 1, 2, 3, 4],
+        "收起时只列前几条，不能把下面的项目挤没"
+    );
+    assert_eq!(
+        visible_recent_conversations(8, Some(6), false),
+        vec![0, 1, 2, 3, 4, 6],
+        "当前打开的对话排在后面也要补上"
+    );
+    assert_eq!(
+        visible_recent_conversations(8, Some(2), false),
+        vec![0, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        visible_recent_conversations(8, Some(6), true),
+        (0..8).collect::<Vec<_>>()
     );
 }
 
