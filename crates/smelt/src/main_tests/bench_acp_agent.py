@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import time
+import uuid
 
 
 def send(message):
@@ -41,7 +42,8 @@ for line in sys.stdin:
     if method == "initialize":
         result = {"protocolVersion": 1, "agentCapabilities": {}}
     elif method == "session/new":
-        result = {"sessionId": "bench-session"}
+        # 每个进程一个会话 id：Smelt 不许两个会话共用同一个 provider 会话。
+        result = {"sessionId": f"bench-{uuid.uuid4().hex}"}
     elif method == "session/prompt":
         text = " ".join(part.get("text", "") for part in params.get("prompt", []))
         found = re.search(r"stream (\d+) (\d+) (\d+) (\S+)", text)

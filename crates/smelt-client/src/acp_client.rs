@@ -591,9 +591,10 @@ pub fn restart_acp_session(runtime: &RuntimeClient, id: &str) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, SnapshotFrame,
-        acp_open_request, acp_snapshot_request, history_snapshot_from_response,
-        read_snapshot_frame, snapshot_after_stream_disconnect, spawn_acp_session_kill,
+        ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, ConversationSnapshot,
+        DaemonPhase, SnapshotFrame, acp_open_request, acp_snapshot_request, fallback_snapshot,
+        history_snapshot_from_response, read_snapshot_frame, snapshot_after_stream_disconnect,
+        spawn_acp_session_kill,
     };
     use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
     use std::collections::BTreeMap;
@@ -862,5 +863,71 @@ mod tests {
         release_kill_tx.send(()).unwrap();
         worker.join().unwrap();
         scheduler.join().unwrap();
+    }
+
+    /// 守护发的一帧：整段帧原样，增量帧由发送方镜像算出。
+    fn wire_frame(
+        sender: &mut smelt_model::acp_wire::FrameMirror,
+        snapshot: &ConversationSnapshot,
+        full: bool,
+    ) -> String {
+        let live = smelt_model::acp_session::SessionLive::from_snapshot(snapshot);
+        let mut header = snapshot.clone();
+        header.entries.clear();
+        let frame = serde_json::to_value(smelt_model::acp_session::AcpSnapshotFrame {
+            live: &live,
+            snapshot: if full { snapshot } else { &header },
+            provider_pid: Some(7),
+        })
+        .unwrap();
+        if full {
+            sender.full(&frame);
+            return frame.to_string();
+        }
+        let delta = sender.encode(&frame, 0, &snapshot.entries, 0, snapshot.entries.len(), 0);
+        serde_json::json!({ "delta": delta }).to_string()
+    }
+
+    #[test]
+    fn delta_frames_restore_the_same_snapshot_the_view_would_get_in_full() {
+        let mut snapshot = fallback_snapshot("", 0);
+        snapshot.phase = DaemonPhase::Thinking;
+        snapshot.end_kind = AcpEndKind::Unknown;
+        snapshot.entries = vec![smelt_model::acp_chat::AcpEntry::User("你好".into())];
+        snapshot.entries_total = 1;
+        let mut sender = smelt_model::acp_wire::FrameMirror::default();
+        let mut receiver = smelt_model::acp_wire::FrameMirror::default();
+        let SnapshotFrame::Snapshot(first) =
+            read_snapshot_frame(&wire_frame(&mut sender, &snapshot, true), 0, &mut receiver)
+        else {
+            panic!("整段帧读不出来");
+        };
+        assert_eq!(first.phase, DaemonPhase::Thinking);
+
+        snapshot
+            .entries
+            .push(smelt_model::acp_chat::AcpEntry::Assistant {
+                text: "回复".into(),
+                thought: false,
+            });
+        snapshot.entries_total = 2;
+        snapshot.snapshot_revision = 2;
+        snapshot.phase = DaemonPhase::Idle;
+        let line = wire_frame(&mut sender, &snapshot, false);
+        let restored = match read_snapshot_frame(&line, 1, &mut receiver) {
+            SnapshotFrame::Snapshot(restored) => restored,
+            SnapshotFrame::Unreadable(terminal) => {
+                panic!("增量帧还原后读不出来：{}", terminal.end_reason)
+            }
+            _ => panic!("增量帧没有还原出快照：{line}"),
+        };
+        assert_eq!(restored.phase, DaemonPhase::Idle);
+        assert_eq!(restored.snapshot_revision, 2);
+        assert_eq!(restored.entries_offset, 1);
+        assert_eq!(restored.entries_total, 2);
+        assert!(matches!(
+            &restored.entries[..],
+            [smelt_model::acp_chat::AcpEntry::Assistant { text, .. }] if text == "回复"
+        ));
     }
 }

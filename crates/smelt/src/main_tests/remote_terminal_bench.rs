@@ -446,10 +446,21 @@ fn report_turn(label: &str, view: &TurnView) {
 /// 看不出线路上的量，所以这里直接读原始连接。
 fn conversation_wire_bytes(runtime: &Runtime, count: usize, size: usize, delay_ms: u64) {
     let id = sid("chat-wire");
+    measure_conversation_wire(runtime, &id, count, size, delay_ms);
+    smelt_client::acp_client::kill_acp_session(runtime.client(), &id);
+}
+
+fn measure_conversation_wire(
+    runtime: &Runtime,
+    id: &str,
+    count: usize,
+    size: usize,
+    delay_ms: u64,
+) {
     let mut stream = runtime.client().connect().unwrap();
     let open = serde_json::json!({
         "op": "acp_open",
-        "id": &id,
+        "id": id,
         "cwd": null,
         "launch": bench_agent_launch(),
         "agent": "opencode",
@@ -467,6 +478,21 @@ fn conversation_wire_bytes(runtime: &Runtime, count: usize, size: usize, delay_m
         .get_ref()
         .set_read_timeout(Some(Duration::from_secs(60)))
         .unwrap();
+    // 增量帧只带变了的字段，状态要经镜像还原才读得出来。
+    let mut mirror = smelt_model::acp_wire::FrameMirror::default();
+    let mut restore = |line: &str| -> serde_json::Value {
+        let frame: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
+        match frame.get("delta") {
+            Some(delta) => serde_json::from_value(delta.clone())
+                .ok()
+                .and_then(|delta| mirror.apply(&delta).ok())
+                .unwrap_or_default(),
+            None => {
+                mirror.full(&frame);
+                frame
+            }
+        }
+    };
     let mut line = String::new();
     loop {
         line.clear();
@@ -474,12 +500,17 @@ fn conversation_wire_bytes(runtime: &Runtime, count: usize, size: usize, delay_m
             eprintln!("[对话 线路] 打开失败");
             return;
         }
-        let frame: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
-        if frame["live"]["phase"]
-            .as_str()
-            .is_some_and(|phase| phase != "connecting")
-        {
-            break;
+        let frame = restore(&line);
+        match frame["live"]["phase"].as_str() {
+            Some("connecting") | None => {}
+            Some("dead" | "failed") => {
+                eprintln!(
+                    "[对话 线路] 假 agent 没起来：{}",
+                    frame["live"]["end_reason"]
+                );
+                return;
+            }
+            Some(_) => break,
         }
     }
     let prompt = AcpUserAction::Prompt {
@@ -525,9 +556,6 @@ fn conversation_wire_bytes(runtime: &Runtime, count: usize, size: usize, delay_m
     for (field, bytes) in fields.into_iter().take(6) {
         eprintln!("    {field}: {:.2}MB", mb(bytes as u64));
     }
-    drop(reader);
-    drop(stream);
-    smelt_client::acp_client::kill_acp_session(runtime.client(), &id);
 }
 
 #[test]
