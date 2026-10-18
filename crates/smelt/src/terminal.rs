@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -333,6 +333,9 @@ enum TerminalWrite {
     Frame { ty: u8, payload: Vec<u8> },
     /// 用户/终端输入；writer 线程消费时再按单帧上限切分，保持请求内顺序。
     Input(Vec<u8>),
+    /// 输出确认。不带数值：writer 发的时候读最新的累计字节数，排队期间的多次确认
+    /// 自然合并成一帧，读线程每批都确认也不会把写队列塞满。
+    Ack,
 }
 
 /// GUI / PTY 读线程到 smeltd attachment 的单写端。
@@ -346,6 +349,10 @@ struct TerminalWriter {
     tx: smol::channel::Sender<TerminalWrite>,
     queued_bytes: Arc<AtomicUsize>,
     pending_input_bytes: Arc<AtomicUsize>,
+    /// 读线程已处理的累计输出字节数（从快照第一个字节算起），守护按它做流控。
+    consumed: Arc<AtomicU64>,
+    /// 已经有一个 `Ack` 在写队列里，后来的确认只需更新 `consumed`。
+    ack_queued: Arc<AtomicBool>,
     shutdown: Arc<UnixStream>,
     closed: Arc<AtomicBool>,
 }
@@ -359,6 +366,8 @@ impl TerminalWriter {
             tx,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
             pending_input_bytes: Arc::new(AtomicUsize::new(0)),
+            consumed: Arc::new(AtomicU64::new(0)),
+            ack_queued: Arc::new(AtomicBool::new(false)),
             shutdown,
             closed: Arc::new(AtomicBool::new(false)),
         };
@@ -388,6 +397,12 @@ impl TerminalWriter {
                                 .pending_input_bytes
                                 .fetch_sub(byte_len, Ordering::AcqRel);
                             result
+                        }
+                        TerminalWrite::Ack => {
+                            // 先清标记再读数：读之后才到的确认会再排一帧，不会漏。
+                            worker.ack_queued.store(false, Ordering::Release);
+                            let consumed = worker.consumed.load(Ordering::Acquire);
+                            write_frame(&mut stream, 2, &consumed.to_be_bytes())
                         }
                     };
                     if result.is_err() {
@@ -448,6 +463,19 @@ impl TerminalWriter {
             }
         }
         true
+    }
+
+    /// 确认已处理到第 `consumed` 个输出字节。不确认，守护就会认为这个客户端跟不上，
+    /// 把后续输出合并成关键帧。
+    fn acknowledge(&self, consumed: u64) {
+        self.consumed.store(consumed, Ordering::Release);
+        if self.ack_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.tx.try_send(TerminalWrite::Ack).is_err() {
+            // 写队列满说明 writer 已经卡死，和输入排不进去同样处理：断开走重连。
+            self.close();
+        }
     }
 
     fn send_input(&self, bytes: &[u8]) -> bool {
@@ -1982,7 +2010,8 @@ fn term_config() -> Config {
     }
 }
 
-/// 客户端 → 守护的帧：`[type:u8][len:u32 BE][payload]`。type 0=输入，1=resize。
+/// 客户端 → 守护的帧：`[type:u8][len:u32 BE][payload]`。type 0=输入，1=resize，
+/// 2=输出确认（已处理的累计字节数，u64 BE）。
 fn write_frame(w: &mut UnixStream, ty: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(ty);
@@ -2394,6 +2423,7 @@ impl Terminal {
         let metrics_reader = Arc::clone(&metrics);
         let daemon_geometry_reader = Arc::clone(&daemon_geometry);
         let dead_reader = Arc::clone(&dead);
+        let ack_writer = writer.clone();
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
@@ -2475,6 +2505,9 @@ impl Terminal {
                         // 关键性质：最后一批喂完后必有一次待处理唤醒 → UI 必定再画一帧，
                         // 与 reattach 快照喂完这个场景精确对应。
                         let _ = redraw_tx.try_send(());
+                        // 解析完才确认：守护按它判断我们跟不跟得上。每批都确认，最后一批
+                        // 一定会被确认到，合并才结束得了；多次确认在写端合并成一帧。
+                        ack_writer.acknowledge(bytes_seen as u64);
                     }
                     Err(_) => break,
                 }

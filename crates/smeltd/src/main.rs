@@ -199,10 +199,11 @@ use smelt_core::session_control::{
 use smelt_core::workspace_menu::{
     WorkspaceMenuSnapshot, load_published_workspace_menu, persist_published_workspace_menu,
 };
-use terminal_output::{OutputAttachment, enqueue_session_streams};
+use terminal_output::{KeyframeNeed, OutputAttachment, enqueue_session_streams};
 use terminal_registry::{TerminalRegistry, TerminalSlot};
 use terminal_snapshot::{
     SNAPSHOT_MAX_LINES, available_snapshot_lines, snapshot_ansi, snapshot_ansi_for_watch,
+    snapshot_ansi_screen,
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -1867,6 +1868,54 @@ fn dispatch_session_outputs_under_gate(
     let mut out = sess.out.lock().unwrap();
     out.clients.extend(live_clients);
     out.watchers.extend(live_watchers);
+}
+
+/// 交互连接的关键帧：几何标记 + 终端重置（RIS）+ 画面快照。客户端不管原来处在
+/// 什么状态，解析完都和刚附着时一样，所以它可以随时插进实时流，取代跳过的输出。
+/// 调用方持有 output_gate；这里依次拿 ctl、term，和 attach 的加锁顺序一致。
+fn terminal_keyframe(sess: &Session, need: KeyframeNeed) -> Vec<u8> {
+    let ctl = sess.ctl.lock().unwrap();
+    let term = sess.term.lock().unwrap();
+    let mut keyframe = terminal_geometry_osc(
+        &sess.geometry_token,
+        TerminalGeometryOsc {
+            cols: ctl.cols,
+            rows: ctl.rows,
+            cell_width: ctl.cell_w,
+            cell_height: ctl.cell_h,
+            remote_controlled: ctl.remote_viewports > 0,
+        },
+    );
+    keyframe.extend_from_slice(b"\x1bc");
+    keyframe.extend(match need {
+        KeyframeNeed::Screen => snapshot_ansi_screen(&term),
+        KeyframeNeed::Full => snapshot_ansi(&term, None),
+    });
+    keyframe
+}
+
+/// 客户端确认处理到第 `consumed` 个字节。合并中的连接追上来了，就补一帧关键帧。
+fn acknowledge_terminal_output(sess: &Session, fd: RawFd, consumed: u64) {
+    let _output_gate = sess.output_gate.lock().unwrap();
+    let need = {
+        let mut out = sess.out.lock().unwrap();
+        let Some(client) = out.clients.iter_mut().find(|client| client.fd == fd) else {
+            return;
+        };
+        client.acknowledge(consumed)
+    };
+    let Some(need) = need else {
+        return;
+    };
+    // 生成快照要拿 ctl/term，不能在 `out` 锁里拿；output_gate 保证这期间没有新输出插进来。
+    let keyframe = terminal_keyframe(sess, need);
+    let mut out = sess.out.lock().unwrap();
+    let Some(pos) = out.clients.iter().position(|client| client.fd == fd) else {
+        return;
+    };
+    if !out.clients[pos].send_keyframe(&keyframe, need) {
+        out.clients.swap_remove(pos).close();
+    }
 }
 
 /// 守护侧常驻终端状态机尺寸（实现 alacritty Dimensions）。

@@ -24,6 +24,11 @@ pub(crate) fn snapshot_ansi<T: EventListener>(term: &Term<T>, _launch: Option<&s
     snapshot_for_terminal_mode(term, SNAPSHOT_MAX_LINES)
 }
 
+/// 流控合并时补的屏幕关键帧：只画可视区，不带滚动历史，刷屏中也传得动。
+pub(crate) fn snapshot_ansi_screen<T: EventListener>(term: &Term<T>) -> Vec<u8> {
+    snapshot_for_terminal_mode(term, term.screen_lines())
+}
+
 /// Read-only renderers and handoff use the same mode-aware keyframe as desktop attach.
 ///
 /// `max_scrollback_lines` 是**消费端声明的预算**，不是服务端的猜测：手机走的是

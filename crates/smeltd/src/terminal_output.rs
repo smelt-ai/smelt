@@ -14,7 +14,15 @@ use std::thread;
 
 /// 单个终端 attachment 尚未交给内核的输出上限。超过说明该客户端已经长期不消费；
 /// 摘掉它以保护守护进程内存，而不是让它反压 PTY 泵或拖慢其它 attachment。
+/// 交互连接有流控，在途量远小于它；这里只兜底不回确认的旁观连接和失常的客户端。
 const TERMINAL_OUTPUT_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// 交互连接上客户端还没确认的实时输出上限。超过就不再往这个客户端发实时字节，
+/// 改为合并：等它追上来补一帧当前画面。窗口要盖住慢链路的带宽时延积，否则卡吞吐。
+const FLOW_WINDOW_BYTES: u64 = 512 * 1024;
+
+/// 合并中的客户端确认到只剩这么多在途，就补发当前屏幕，不必等完全排空再多等一个往返。
+const FLOW_RESUME_BYTES: u64 = 128 * 1024;
 
 /// 优雅关闭的冲刷上限。客户端不读时不能无限占住写线程与 fd。
 // 冲刷关闭只被同文件单测调用。bin 目标不编译 tests，所以这里单独放开死代码检查。
@@ -129,15 +137,101 @@ impl OutputMailbox {
     }
 }
 
+/// 合并结束时要补哪一种关键帧。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyframeNeed {
+    /// 只画当前屏幕：刷屏还在继续，先让客户端看到最新画面。
+    Screen,
+    /// 屏幕加滚动历史：客户端已经追平，把合并期间跳过的内容补回它的历史里。
+    Full,
+}
+
+/// 按客户端确认做的流控（tmux、muxy 同一思路）。同时在途的实时输出有上限，超出的
+/// 不排队，客户端追上来时用一帧关键帧代替。慢客户端因此只是看到的帧变少，不会被
+/// 断开，也拖不慢 PTY 和其它客户端。只给会回 `Ack` 的交互连接用。
+#[derive(Debug, Default)]
+struct FlowControl {
+    /// 交给邮箱的累计字节数，不含首行 header。
+    sent: u64,
+    /// 客户端确认已处理的累计字节数。
+    acked: u64,
+    /// 最近一帧关键帧在流里的结束位置。关键帧本身不占窗口：它是我们主动选的，
+    /// 算进去的话补一次完整历史就会把紧随其后的实时输出全挤成合并。
+    keyframe_end: u64,
+    /// 正在合并：实时输出不再发给这个客户端，它的画面已过时。
+    coalescing: bool,
+    /// 合并期间跳过的内容也不在客户端的滚动历史里，追平后要补一帧完整的。
+    history_stale: bool,
+}
+
+impl FlowControl {
+    fn with_keyframe(len: u64) -> Self {
+        Self {
+            sent: len,
+            keyframe_end: len,
+            ..Self::default()
+        }
+    }
+
+    /// 这段实时输出能不能发。在途为零时总能发，否则一段超窗的输出会让客户端
+    /// 再也收不到可确认的东西，合并就永远结束不了。
+    fn admit(&mut self, len: u64) -> bool {
+        if self.coalescing {
+            return false;
+        }
+        let in_flight = self.sent - self.acked.max(self.keyframe_end);
+        if in_flight > 0 && in_flight + len > FLOW_WINDOW_BYTES {
+            self.coalescing = true;
+            return false;
+        }
+        self.sent += len;
+        true
+    }
+
+    fn keyframe_sent(&mut self, len: u64, need: KeyframeNeed) {
+        self.sent += len;
+        self.keyframe_end = self.sent;
+        self.coalescing = false;
+        self.history_stale = need == KeyframeNeed::Screen;
+    }
+
+    fn acknowledge(&mut self, consumed: u64) -> Option<KeyframeNeed> {
+        self.acked = self.acked.max(consumed.min(self.sent));
+        let in_flight = self.sent - self.acked;
+        if self.coalescing {
+            return (in_flight <= FLOW_RESUME_BYTES).then_some(KeyframeNeed::Screen);
+        }
+        (self.history_stale && in_flight == 0).then_some(KeyframeNeed::Full)
+    }
+}
+
 /// 一个客户端输出端。`shutdown` 是写线程 socket 的 duplicate，连接移除时用它同时
 /// 唤醒可能阻塞的写线程与 handle_open/handle_watch 的读循环。
 pub(crate) struct OutputAttachment {
     pub(crate) fd: RawFd,
     mailbox: Arc<OutputMailbox>,
     shutdown: UnixStream,
+    /// `None`：不回确认的旁观连接，仍按邮箱上限隔离。
+    flow: Option<FlowControl>,
 }
 
 impl OutputAttachment {
+    /// 交互连接：`header` 是首行，`keyframe` 是紧随其后的画面快照。客户端从快照第
+    /// 一个字节起按累计字节数回确认，流控据此限制在途的实时输出。
+    pub(crate) fn interactive(
+        stream: UnixStream,
+        header: Vec<u8>,
+        keyframe: Vec<u8>,
+        id: &str,
+    ) -> std::io::Result<Self> {
+        let flow = FlowControl::with_keyframe(keyframe.len() as u64);
+        let mut initial = header;
+        initial.extend_from_slice(&keyframe);
+        let mut attachment = Self::new(stream, initial, id, "attachment")?;
+        attachment.flow = Some(flow);
+        Ok(attachment)
+    }
+
     pub(crate) fn new(
         stream: UnixStream,
         initial: Vec<u8>,
@@ -154,6 +248,7 @@ impl OutputAttachment {
             fd,
             mailbox: Arc::clone(&mailbox),
             shutdown,
+            flow: None,
         };
         // 初始 header + keyframe 先入队；调用方仍持有 output_gate，因此后续实时输出
         // 不可能插到它前面。
@@ -189,6 +284,29 @@ impl OutputAttachment {
 
     pub(crate) fn enqueue(&self, bytes: &[u8]) -> bool {
         self.mailbox.enqueue(bytes)
+    }
+
+    /// 实时输出。流控判定要合并的就不发；返回 false 只表示这个连接已经死了。
+    fn send_output(&mut self, bytes: &[u8]) -> bool {
+        if let Some(flow) = self.flow.as_mut()
+            && !flow.admit(bytes.len() as u64)
+        {
+            return !self.mailbox.is_closed();
+        }
+        self.mailbox.enqueue(bytes)
+    }
+
+    /// 客户端确认处理到第 `consumed` 个字节，返回此刻要不要补关键帧。
+    pub(crate) fn acknowledge(&mut self, consumed: u64) -> Option<KeyframeNeed> {
+        self.flow.as_mut()?.acknowledge(consumed)
+    }
+
+    /// 补一帧关键帧（终端重置 + 画面快照），它取代合并期间跳过的全部输出。
+    pub(crate) fn send_keyframe(&mut self, keyframe: &[u8], need: KeyframeNeed) -> bool {
+        if let Some(flow) = self.flow.as_mut() {
+            flow.keyframe_sent(keyframe.len() as u64, need);
+        }
+        self.mailbox.enqueue(keyframe)
     }
 
     pub(crate) fn close(&self) {
@@ -239,8 +357,8 @@ pub(crate) fn enqueue_session_streams(
     kind: &str,
 ) -> Vec<OutputAttachment> {
     let mut live = Vec::with_capacity(streams.len());
-    for stream in streams {
-        if stream.enqueue(bytes) {
+    for mut stream in streams {
+        if stream.send_output(bytes) {
             live.push(stream);
         } else {
             crate::dlog(&format!(
@@ -330,8 +448,75 @@ mod tests {
             fd: server.as_raw_fd(),
             mailbox: Arc::new(OutputMailbox::new(1024)),
             shutdown: server,
+            flow: None,
         };
         let live = enqueue_session_streams(vec![attachment], b"x", "test", "attachment");
         assert_eq!(live.len(), 1, "背压 attachment 不应阻塞或影响 PTY 转发");
+    }
+
+    const CHUNK: u64 = 8 * 1024;
+
+    #[test]
+    fn flow_passes_output_through_while_the_client_keeps_up() {
+        let mut flow = FlowControl::with_keyframe(1000);
+        for _ in 0..1000 {
+            assert!(flow.admit(CHUNK));
+            assert_eq!(flow.acknowledge(flow.sent), None);
+        }
+        assert!(!flow.coalescing);
+    }
+
+    #[test]
+    fn flow_coalesces_past_the_window_and_resumes_with_the_screen() {
+        let mut flow = FlowControl::with_keyframe(0);
+        let mut admitted = 0;
+        while flow.admit(CHUNK) {
+            admitted += CHUNK;
+        }
+        assert!(admitted <= FLOW_WINDOW_BYTES, "在途不能超过窗口");
+        assert!(flow.coalescing);
+        assert!(!flow.admit(1), "合并期间实时输出一律不发");
+
+        assert_eq!(flow.acknowledge(admitted - FLOW_RESUME_BYTES - 1), None);
+        assert_eq!(
+            flow.acknowledge(admitted - FLOW_RESUME_BYTES),
+            Some(KeyframeNeed::Screen),
+            "追到只剩少量在途就补当前屏幕"
+        );
+        flow.keyframe_sent(4096, KeyframeNeed::Screen);
+        assert!(flow.admit(CHUNK), "补完画面接着发实时输出");
+    }
+
+    #[test]
+    fn flow_fills_history_once_the_client_has_fully_caught_up() {
+        let mut flow = FlowControl::with_keyframe(0);
+        while flow.admit(CHUNK) {}
+        flow.acknowledge(flow.sent);
+        flow.keyframe_sent(4096, KeyframeNeed::Screen);
+        assert!(flow.admit(CHUNK));
+        assert_eq!(flow.acknowledge(flow.sent - 1), None, "还有在途就先不补");
+        assert_eq!(flow.acknowledge(flow.sent), Some(KeyframeNeed::Full));
+        flow.keyframe_sent(1024 * 1024, KeyframeNeed::Full);
+        assert_eq!(flow.acknowledge(flow.sent), None, "补过一次就不再补");
+    }
+
+    #[test]
+    fn a_large_keyframe_in_flight_does_not_push_live_output_into_coalescing() {
+        let mut flow = FlowControl::with_keyframe(2 * FLOW_WINDOW_BYTES);
+        let mut admitted = 0;
+        while admitted < FLOW_WINDOW_BYTES - CHUNK {
+            assert!(flow.admit(CHUNK), "关键帧本身不占窗口");
+            admitted += CHUNK;
+        }
+    }
+
+    #[test]
+    fn coalescing_always_has_something_left_to_acknowledge() {
+        let mut flow = FlowControl::with_keyframe(0);
+        flow.acknowledge(flow.sent);
+        assert!(
+            flow.admit(FLOW_WINDOW_BYTES * 2),
+            "在途为零时超窗的一段也要发，否则不会再有确认来结束合并"
+        );
     }
 }

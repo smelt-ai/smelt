@@ -61,17 +61,37 @@ fn drain(
     let mut bytes = 0u64;
     loop {
         if start.elapsed() > timeout {
-            return RawRun { bytes, elapsed: start.elapsed(), saw_done: false, dropped: false };
+            return RawRun {
+                bytes,
+                elapsed: start.elapsed(),
+                saw_done: false,
+                dropped: false,
+            };
         }
         match reader.read(&mut buf) {
             Ok(0) => {
-                return RawRun { bytes, elapsed: start.elapsed(), saw_done: false, dropped: true };
+                return RawRun {
+                    bytes,
+                    elapsed: start.elapsed(),
+                    saw_done: false,
+                    dropped: true,
+                };
             }
             Ok(n) => {
                 bytes += n as u64;
+                // 和桌面读线程一样每块都确认，不然守护会把后续输出全合并掉。
+                let mut ack = vec![2u8];
+                ack.extend_from_slice(&8u32.to_be_bytes());
+                ack.extend_from_slice(&bytes.to_be_bytes());
+                let _ = reader.get_ref().write_all(&ack);
                 tail.extend_from_slice(&buf[..n]);
                 if tail.windows(DONE.len()).any(|w| w == DONE) {
-                    return RawRun { bytes, elapsed: start.elapsed(), saw_done: true, dropped: false };
+                    return RawRun {
+                        bytes,
+                        elapsed: start.elapsed(),
+                        saw_done: true,
+                        dropped: false,
+                    };
                 }
                 let keep = tail.len().saturating_sub(DONE.len());
                 tail.drain(..keep);
@@ -85,7 +105,12 @@ fn drain(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) => {}
             Err(_) => {
-                return RawRun { bytes, elapsed: start.elapsed(), saw_done: false, dropped: true };
+                return RawRun {
+                    bytes,
+                    elapsed: start.elapsed(),
+                    saw_done: false,
+                    dropped: true,
+                };
             }
         }
     }
@@ -131,7 +156,7 @@ fn remote_terminal_under_heavy_output() {
     // SAFETY: nextest 每个测试一个进程，这里没有别的线程在读环境变量。
     unsafe { std::env::set_var("SMELT_HOME", &home) };
     let remote = crate::runtimes::pair_with(&uri).unwrap();
-    let runtime = remote.runtime.clone();
+    let runtime = remote.runtime;
     let mut sessions = Vec::new();
 
     // 往返时延：一次最小的控制调用。
@@ -220,11 +245,15 @@ fn remote_terminal_under_heavy_output() {
             echo.send_input(tag.as_bytes());
             wait_for_screen(echo, tag, Duration::from_secs(30)).map(|_| start.elapsed())
         };
-        let idle: Vec<_> = (0..5).map(|i| measure(&mut echo, &format!("idle{i}x"))).collect();
+        let idle: Vec<_> = (0..5)
+            .map(|i| measure(&mut echo, &format!("idle{i}x")))
+            .collect();
         eprintln!("[回显 空闲] {:?}", idle);
         let flood = Terminal::spawn(&runtime, 40, 160, None, &flood_id, Some(COLOR_FLOOD)).unwrap();
         std::thread::sleep(Duration::from_secs(1));
-        let busy: Vec<_> = (0..5).map(|i| measure(&mut echo, &format!("busy{i}x"))).collect();
+        let busy: Vec<_> = (0..5)
+            .map(|i| measure(&mut echo, &format!("busy{i}x")))
+            .collect();
         eprintln!("[回显 刷屏中] {:?}", busy);
         drop(flood);
     }
@@ -237,7 +266,11 @@ fn remote_terminal_under_heavy_output() {
         let (_, mut fast) = raw_attach(&runtime, &id, Some(&launch), true);
         let (_, mut slow) = raw_attach(&runtime, &id, None, false);
         let slow_thread = std::thread::spawn(move || {
-            drain(&mut slow, Duration::from_secs(300), Some((16 * 1024, Duration::from_millis(20))))
+            drain(
+                &mut slow,
+                Duration::from_secs(300),
+                Some((16 * 1024, Duration::from_millis(20))),
+            )
         });
         let fast_run = drain(&mut fast, Duration::from_secs(300), None);
         let slow_run = slow_thread.join().unwrap();
@@ -261,9 +294,11 @@ fn remote_terminal_under_heavy_output() {
         crate::terminal::kill_remote(&runtime, id);
     }
     let me = crate::runtimes::iroh_client().unwrap().id().to_string();
-    let _ = runtime.client().call::<smelt_model::control_api::DeviceRevoke>(
-        &smelt_model::remote_config::DeviceIdParams { endpoint_id: me },
-        smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
-    );
+    let _ = runtime
+        .client()
+        .call::<smelt_model::control_api::DeviceRevoke>(
+            &smelt_model::remote_config::DeviceIdParams { endpoint_id: me },
+            smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+        );
     let _ = std::fs::remove_dir_all(home);
 }

@@ -20,6 +20,7 @@ mod agent_mcp_tests;
 mod automation_command_tests;
 mod autostart_remote_tests;
 mod daemon_executable_tests;
+mod flow_control_tests;
 mod handoff_tests;
 mod handoff_v2_tests;
 mod history_rename_tests;

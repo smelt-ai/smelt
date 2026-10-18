@@ -569,36 +569,21 @@ pub(crate) fn handle_open(
     // 输出闸门保证 snapshot 与挂载之间不被泵插入。header + keyframe 会先进入该
     // attachment 的专属写队列；若先释放闸门再注册，泵可能 advance(D) 后发现还没
     // client 而丢弃 D，新客户端的网格就永久缺字节（正是「吐快照」要避免的错位）。
-    let launch_for_snap = sess.state.lock().unwrap().launch.clone();
     let attached_fd = {
         let _output_gate = sess.output_gate.lock().unwrap();
         let Ok(c) = conn.try_clone() else { return };
 
-        let (cur_cols, cur_rows, snapshot) = {
+        let (cur_cols, cur_rows) = {
             let ctl = sess.ctl.lock().unwrap();
-            let term = sess.term.lock().unwrap();
-            let mut snapshot = terminal_geometry_osc(
-                &sess.geometry_token,
-                TerminalGeometryOsc {
-                    cols: ctl.cols,
-                    rows: ctl.rows,
-                    cell_width: ctl.cell_w,
-                    cell_height: ctl.cell_h,
-                    remote_controlled: ctl.remote_viewports > 0,
-                },
-            );
-            // 快照分流只看真实 ALT_SCREEN；启动命令不能把主屏 scrollback 错当成 TUI。
-            snapshot.extend(snapshot_ansi(&term, launch_for_snap.as_deref()));
-            drop(term);
-            let geometry = (ctl.cols, ctl.rows);
-            drop(ctl);
-            (geometry.0, geometry.1, snapshot)
+            (ctl.cols, ctl.rows)
         };
+        // 和流控合并后补的是同一种关键帧；快照分流只看真实 ALT_SCREEN。
+        let snapshot = terminal_keyframe(&sess, KeyframeNeed::Full);
 
         // replay_len = 快照字节数：客户端仍用它划「历史/实时」边界，跳过快照里的
         // 历史 OSC 9（网格快照本身不含旧通知序列，但边界语义保留兼容）。
         let replay_len = snapshot.len();
-        let mut initial = format!(
+        let header = format!(
             "{}\n",
             serde_json::json!({
                 "cols": cur_cols,
@@ -609,8 +594,7 @@ pub(crate) fn handle_open(
             })
         )
         .into_bytes();
-        initial.extend_from_slice(&snapshot);
-        let Ok(attachment) = OutputAttachment::new(c, initial, &id, "attachment") else {
+        let Ok(attachment) = OutputAttachment::interactive(c, header, snapshot, &id) else {
             return;
         };
         let fd = attachment.fd;
@@ -670,6 +654,18 @@ pub(crate) fn handle_open(
                 if sessions
                     .with_current(&id, &slot, |session| {
                         resize_session(session, cols, rows, cell_w, cell_h);
+                    })
+                    .is_none()
+                {
+                    break;
+                }
+            }
+            // 确认：客户端已处理到快照起第几个字节（累计）。流控据此放行或补关键帧。
+            2 if len == 8 => {
+                let consumed = u64::from_be_bytes(payload[..8].try_into().unwrap());
+                if sessions
+                    .with_current(&id, &slot, |session| {
+                        acknowledge_terminal_output(session, attached_fd, consumed);
                     })
                     .is_none()
                 {
