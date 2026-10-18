@@ -10,8 +10,9 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
 /// attach/handoff 快照最多带上的历史行数（含可视区）；避免超大会话一次吐爆客户端。
 pub(crate) const SNAPSHOT_MAX_LINES: usize = 10_000;
@@ -104,6 +105,7 @@ fn snapshot_mode_prefix<T: EventListener>(term: &Term<T>, clear_scrollback: bool
     let screen_lines = term.screen_lines().max(1);
     let mut out = Vec::with_capacity(cols.saturating_mul(screen_lines).saturating_mul(8));
     reset_painting_modes(&mut out);
+    append_color_overrides(&mut out, term.colors());
     // 先切屏再恢复其余模式：kitty 栈按主/备用屏各存一份，必须落在当前屏上。
     if mode.contains(TermMode::ALT_SCREEN) {
         out.extend_from_slice(b"\x1b[?1049h");
@@ -121,6 +123,28 @@ fn snapshot_mode_prefix<T: EventListener>(term: &Term<T>, clear_scrollback: bool
         out.extend_from_slice(b"\x1b[3J");
     }
     out
+}
+
+/// 程序用 OSC 4 / 10 / 11 / 12 改过的颜色。先全部复位再逐个写回：关键帧可能插在
+/// 客户端已有状态的流中间，流控合并跳过的那段里程序也可能复位过颜色；alacritty 的
+/// RIS 不复位颜色，不能指望关键帧开头那个 RIS。
+fn append_color_overrides(out: &mut Vec<u8>, colors: &Colors) {
+    out.extend_from_slice(b"\x1b]104\x1b\\\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\");
+    let spec = |rgb: Rgb| format!("rgb:{:02x}/{:02x}/{:02x}", rgb.r, rgb.g, rgb.b);
+    for index in 0..256 {
+        if let Some(rgb) = colors[index] {
+            let _ = write!(out, "\x1b]4;{index};{}\x1b\\", spec(rgb));
+        }
+    }
+    for (code, named) in [
+        (10, NamedColor::Foreground),
+        (11, NamedColor::Background),
+        (12, NamedColor::Cursor),
+    ] {
+        if let Some(rgb) = colors[named] {
+            let _ = write!(out, "\x1b]{code};{}\x1b\\", spec(rgb));
+        }
+    }
 }
 
 fn snapshot_cursor_suffix<T: EventListener>(term: &Term<T>, out: &mut Vec<u8>) {

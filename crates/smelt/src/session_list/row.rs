@@ -3,6 +3,7 @@
 use chrono::{DateTime, Datelike, Local, TimeZone};
 
 use super::*;
+use smelt_client::daemon_state::{TerminalProgress, TerminalProgressState};
 use smelt_model::agent_kind::TerminalAgentKind;
 
 /// agent 身份图标统一走本地单色 SVG，颜色由会话状态驱动：图标同时回答
@@ -52,6 +53,43 @@ pub(super) fn status_text(status: AgentStatus) -> &'static str {
 /// 侧栏会话行要写出来的状态：只要人管的才占字。运行中靠图标颜色，不写「运行中」。
 pub(crate) fn session_row_status_label(status: AgentStatus) -> Option<&'static str> {
     (status == AgentStatus::NeedsYou).then(|| status_text(status))
+}
+
+/// 进度条填满的比例：不确定进度和没有数值的出错画满一条，其余按百分比。
+pub(super) fn progress_fraction(progress: TerminalProgress) -> f32 {
+    match (progress.state, progress.percent) {
+        (TerminalProgressState::Indeterminate, _)
+        | (TerminalProgressState::Error, None | Some(0)) => 1.0,
+        (_, percent) => f32::from(percent.unwrap_or(0).min(100)) / 100.0,
+    }
+}
+
+/// 会话行底部的细进度条：终端程序用 OSC 9;4 报的进度。不确定进度画一条淡色满条，
+/// 不做动画——侧栏常驻，动画会让整个工作台不停重绘。
+pub(super) fn session_progress_bar(progress: TerminalProgress) -> Div {
+    let (color, opacity) = match progress.state {
+        TerminalProgressState::Normal => (ui_theme::blue(), 1.0),
+        TerminalProgressState::Indeterminate => (ui_theme::blue(), 0.35),
+        TerminalProgressState::Error => (ui_theme::red(), 1.0),
+        TerminalProgressState::Paused => (ui_theme::yellow(), 1.0),
+    };
+    div()
+        .absolute()
+        .left(px(8.))
+        .right(px(8.))
+        .bottom_0()
+        .h(px(2.))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(rgb(ui_theme::border_dim()))
+        .child(
+            div()
+                .h_full()
+                .w(relative(progress_fraction(progress)))
+                .rounded_full()
+                .bg(rgb(color))
+                .opacity(opacity),
+        )
 }
 
 /// 侧栏第二行的最近活动时间。采用不会随分钟流逝而过期的本地日历文案：今天和
@@ -197,11 +235,14 @@ pub(super) fn provider_quota_row(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_pane_updated_at, provider_quota_row, session_updated_at_text};
+    use super::{
+        effective_pane_updated_at, progress_fraction, provider_quota_row, session_updated_at_text,
+    };
     use crate::provider_quota::{ProviderQuotaData, QuotaStatus, QuotaTarget};
     use crate::settings::ConversationAgentKind;
     use crate::ui_theme;
     use chrono::{Local, TimeZone};
+    use smelt_client::daemon_state::{TerminalProgress, TerminalProgressState};
     use smelt_model::copilot_quota::{CopilotQuota, CopilotQuotaUnit};
     use smelt_model::provider_quota::{ProviderQuota, ProviderQuotaWindow};
 
@@ -255,6 +296,20 @@ mod tests {
         assert_eq!(row.text, "25%");
         assert_eq!(row.color, ui_theme::text_muted());
         assert!(row.hint.contains("25 / 100 premium requests（25%）"));
+    }
+
+    #[test]
+    fn progress_bar_fills_by_percent_and_fully_when_unknown() {
+        let bar = |state, percent| progress_fraction(TerminalProgress { state, percent });
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(close(bar(TerminalProgressState::Normal, Some(42)), 0.42));
+        assert!(close(bar(TerminalProgressState::Paused, Some(100)), 1.0));
+        assert!(close(bar(TerminalProgressState::Indeterminate, None), 1.0));
+        assert!(
+            close(bar(TerminalProgressState::Error, None), 1.0),
+            "出错没数值也要看得见"
+        );
+        assert!(close(bar(TerminalProgressState::Error, Some(30)), 0.3));
     }
 
     #[test]

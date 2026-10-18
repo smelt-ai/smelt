@@ -263,16 +263,6 @@ fn terminal_event_needs_redraw(grid_damaged: bool, daemon_geometry_changed: bool
     grid_damaged || daemon_geometry_changed
 }
 
-fn fallback_attention(
-    bell_due: bool,
-    osc: Option<String>,
-) -> Option<(AttentionKind, &'static str, String)> {
-    if bell_due {
-        return Some((AttentionKind::Bell, "响铃", "🔔 响铃".to_string()));
-    }
-    osc.map(|message| (AttentionKind::Notice, "终端通知", message))
-}
-
 fn daemon_agent_state(
     runtime: &crate::runtimes::Runtime,
     session_id: &str,
@@ -450,14 +440,14 @@ impl TerminalView {
         .detach();
     }
 
-    /// PTY 读线程每批输出只唤醒一次。终端内容与信息性 OSC/BEL 通知都在这里消费。
+    /// PTY 读线程每批输出只唤醒一次。终端内容与 BEL 提醒在这里消费；OSC 通知由运行时
+    /// 扫好走事件总线，不经过这里。
     fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
         let daemon_state = daemon_agent_state(&self.runtime, &self.session_id, cx);
         let structured_events = daemon_state
             .as_ref()
             .is_some_and(|state| state.structured_events);
         let bell_received = self.terminal.take_bell_notification().is_some();
-        let osc = self.terminal.take_notification();
         let now = Instant::now();
         let bell_notifications_enabled = terminal_bell_notifications_enabled(cx);
 
@@ -469,17 +459,8 @@ impl TerminalView {
             self.bell_timer_generation = self.bell_timer_generation.wrapping_add(1);
             self.schedule_bell_timer(cx);
         }
-        let bell_due = !structured_events
-            && bell_notifications_enabled
-            && bell_notification_due(self.pending_bell_at, now);
-        if let Some((kind, title, message)) =
-            fallback_attention(bell_due, (!structured_events).then_some(osc).flatten())
-        {
-            if kind == AttentionKind::Bell {
-                self.invalidate_bell_timer();
-            }
-            self.publish_attention(kind, title, message, cx);
-        }
+        // 上面已按结构化事件和设置清掉了待发的响铃，这里只剩到点的那种。
+        self.flush_bell_if_due(now, cx);
 
         self.handle_structured_state(daemon_state.as_ref(), cx);
 
@@ -2828,13 +2809,12 @@ mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
         BELL_NOTIFICATION_GRACE, CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bell_notification_due,
-        bg_spans, cells_to_token, classify_launch, fallback_attention, keystroke_to_bytes, link_at,
-        scrollbar_thumb, terminal_event_needs_redraw, text_batches, visible_end,
+        bg_spans, cells_to_token, classify_launch, keystroke_to_bytes, link_at, scrollbar_thumb,
+        terminal_event_needs_redraw, text_batches, visible_end,
     };
     use crate::terminal;
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
-    use smelt_model::attention::AttentionKind;
     use std::time::{Duration, Instant};
 
     /// 默认样式：bg = None 表示「终端默认底色」（不画底色矩形）。
@@ -2886,17 +2866,6 @@ mod tests {
             received_at + BELL_NOTIFICATION_GRACE
         ));
         assert!(!bell_notification_due(None, received_at));
-    }
-
-    #[test]
-    fn terminal_notifications_are_informational() {
-        let bell = fallback_attention(true, Some("ignored".into())).unwrap();
-        assert_eq!(bell.0, AttentionKind::Bell);
-        assert_eq!(bell.2, "🔔 响铃");
-
-        let notice = fallback_attention(false, Some("turn complete".into())).unwrap();
-        assert_eq!(notice.0, AttentionKind::Notice);
-        assert!(fallback_attention(false, None).is_none());
     }
 
     /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。

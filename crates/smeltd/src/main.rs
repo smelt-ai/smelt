@@ -160,6 +160,7 @@ mod menubar;
 mod peer_messaging;
 mod pi_control;
 use devices::Principal;
+mod program_status;
 mod project_watch;
 mod protocol;
 mod remote;
@@ -169,6 +170,7 @@ mod session_catalog;
 mod session_directory;
 mod session_state;
 mod terminal_output;
+mod terminal_progress;
 mod terminal_registry;
 mod terminal_snapshot;
 mod webhook;
@@ -179,6 +181,7 @@ use remote::*;
 
 use acp_registry::{AcpRegistry, AcpSlot};
 use event_hub::EventHubHandle;
+use program_status::ProgramStatusNotices;
 use session_directory::SessionDirectory;
 #[cfg(test)]
 pub(crate) use session_state::AgentBlocker;
@@ -191,7 +194,9 @@ use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboun
 use smelt_core::automation_store::{
     AutomationStore, local_timezone_fingerprint, new_automation_store,
 };
-use smelt_core::osc::{TerminalGeometryOsc, terminal_geometry_osc};
+use smelt_core::osc::{
+    OscEvent, OscScan, TerminalGeometryOsc, program_status_reply, terminal_geometry_osc,
+};
 use smelt_core::session_control::{
     RemoteAcpSession, RemoteSessionCatalog, RemoteSessionKind, RemoteSessionLifecycle,
     RemoteSessionSnapshot, RemoteTerminalSession, find_agent_option_for,
@@ -200,6 +205,7 @@ use smelt_core::workspace_menu::{
     WorkspaceMenuSnapshot, load_published_workspace_menu, persist_published_workspace_menu,
 };
 use terminal_output::{KeyframeNeed, OutputAttachment, enqueue_session_streams};
+use terminal_progress::ProgressTracker;
 use terminal_registry::{TerminalRegistry, TerminalSlot};
 use terminal_snapshot::{
     SNAPSHOT_MAX_LINES, available_snapshot_lines, snapshot_ansi, snapshot_ansi_for_watch,
@@ -1379,7 +1385,10 @@ struct StateListener {
     color_replies: PendingColorReplies,
 }
 
-type PendingColorReplies = Arc<Mutex<VecDeque<String>>>;
+/// 一条待回应的颜色查询：查哪个颜色槽，和把颜色格式化成回应的函数。颜色到写回时
+/// 才定：程序用 OSC 4 / 10 / 11 改过的值要优先，而它记在 `Term` 里，入队时拿不到锁。
+type PendingColorReply = (usize, Arc<dyn Fn(Rgb) -> String + Send + Sync>);
+type PendingColorReplies = Arc<Mutex<VecDeque<PendingColorReply>>>;
 
 impl StateListener {
     #[cfg(test)]
@@ -1404,7 +1413,7 @@ impl EventListener for StateListener {
     fn send_event(&self, event: Event) {
         if let Event::ColorRequest(index, format) = &event {
             if let Ok(mut replies) = self.color_replies.lock() {
-                replies.push_back(format(resolve_terminal_color(*index)));
+                replies.push_back((*index, Arc::clone(format)));
             }
             return;
         }
@@ -3842,15 +3851,58 @@ fn shell_launch_args(shell: &str, launch: Option<&str>) -> Vec<String> {
     }
 }
 
-/// 交互式 PTY 是真终端：声明真彩能力，并卸掉宿主漏进来的关色开关。
+/// 宿主终端的身份变量。smeltd 从别的终端里起（开发时 `cargo run`、命令行里跑 `smelt`）
+/// 会把它们带进会话：不少程序先看这些、再看 `TERM_PROGRAM`（Pi 认 `KITTY_WINDOW_ID`、
+/// Claude Code 认 `ITERM_SESSION_ID`），漏进来的 `TMUX` 还会让程序把转义序列包成 tmux
+/// 透传。会话的终端是 smelt，这些一律去掉。
+const HOST_TERMINAL_IDENTITY_VARS: &[&str] = &[
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    "TERM_SESSION_ID",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_INSTALLATION_DIR",
+    "WEZTERM_PANE",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_UNIX_SOCKET",
+    "WARP_SESSION_ID",
+    "WARP_TERMINAL_SESSION_UUID",
+    "WARP_IS_LOCAL_SHELL_SESSION",
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_BIN_DIR",
+    "GHOSTTY_SHELL_FEATURES",
+    "ALACRITTY_WINDOW_ID",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_LOG",
+    "KONSOLE_VERSION",
+    "VTE_VERSION",
+    "TERMINAL_EMULATOR",
+    "WT_SESSION",
+    "ZED_TERM",
+];
+
+/// 交互式 PTY 是真终端：声明真彩能力，并卸掉宿主漏进来的关色开关和终端身份。
 fn apply_interactive_pty_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM", "xterm-256color");
     // 少数 CLI 只认 COLORTERM 才开 24-bit 真彩（Zed 也会设）。
     cmd.env("COLORTERM", "truecolor");
-    // 伪装 iTerm2：让 Claude Code 自动发 OSC 9 通知（GUI 侧捕获），见 terminal.rs 注释。
-    cmd.env("TERM_PROGRAM", "iTerm.app");
-    cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
-    for key in smelt_core::tty_color::SUPPRESSION_VARS {
+    // 自报 Ghostty 1.2：程序按 TERM_PROGRAM 白名单开功能，没有 smelt 这一项。Ghostty
+    // 白名单打开的正好是 smelt 支持的——OSC 8 超链接、OSC 777 / 9 通知、OSC 9;4 进度
+    // （Claude Code 要 Ghostty ≥ 1.2）、7501。伪装 iTerm 时 Claude Code 每 200ms 跑一次
+    // 清屏探测、Codex 多发 iTerm 私有的 OSC 21337，换掉就没了。TERM 不能跟着改成
+    // `xterm-ghostty`：那要 Ghostty 自己的 terminfo。
+    cmd.env("TERM_PROGRAM", "ghostty");
+    cmd.env("TERM_PROGRAM_VERSION", "1.2.0");
+    for key in smelt_core::tty_color::SUPPRESSION_VARS
+        .iter()
+        .chain(HOST_TERMINAL_IDENTITY_VARS)
+    {
         cmd.env_remove(key);
     }
     // UTF-8 locale 兜底（无 LANG 时 zsh 落 C locale 会把 UTF-8 续字节转成乱码）。
@@ -4220,18 +4272,23 @@ fn spawn_session(
 }
 
 fn write_terminal_color_replies(sess: &Session) {
-    let replies = {
+    let pending = {
         let Ok(mut pending) = sess.color_replies.lock() else {
             return;
         };
         std::mem::take(&mut *pending)
     };
-    if replies.is_empty() {
+    if pending.is_empty() {
         return;
     }
+    // 只为读改过的颜色短暂拿一下网格锁，写回 PTY 前放开。
+    let overrides = sess.term.lock().ok().map(|term| *term.colors());
 
-    for reply in replies {
-        if write_session_input(sess, reply.as_bytes()).is_err() {
+    for (index, format) in pending {
+        let color = overrides
+            .and_then(|colors| colors[index])
+            .unwrap_or_else(|| resolve_terminal_color(index));
+        if write_session_input(sess, format(color).as_bytes()).is_err() {
             break;
         }
     }
@@ -4241,6 +4298,39 @@ fn write_terminal_color_replies(sess: &Session) {
 /// 统一写回 child，沿用 `Ctl` 的串行写入路径，避免与 resize 反向抢锁。
 fn flush_terminal_color_replies(sess: &Session) {
     write_terminal_color_replies(sess);
+}
+
+/// 把一批输出里扫到的 OSC 通知发给订阅的客户端。会话已有结构化 hook 事件时不发：
+/// 那之后 agent 的状态和通知都以 hook 为准，终端通知只会重复。
+fn publish_terminal_notifications(
+    state: &Mutex<SessionState>,
+    id: &str,
+    event_hub: &EventHubHandle,
+    messages: Vec<String>,
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let structured = state
+        .lock()
+        .map(|state| state.structured_events)
+        .unwrap_or(true);
+    if structured {
+        return;
+    }
+    for message in messages {
+        if let Err(error) = event_hub.publish_terminal_notification(id, &message) {
+            eprintln!("[event-hub] terminal notification publish failed: {error}");
+        }
+    }
+}
+
+fn publish_terminal_progress(progress: &mut ProgressTracker, id: &str, event_hub: &EventHubHandle) {
+    if let Some(update) = progress.take_update(Instant::now())
+        && let Err(error) = event_hub.publish_terminal_progress(id, update)
+    {
+        eprintln!("[event-hub] terminal progress publish failed: {error}");
+    }
 }
 
 /// PTY 输出泵：读 PTY → advance 常驻 Term → 转发 client / watchers。
@@ -4257,6 +4347,12 @@ fn start_pty_pump(
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut parser: Processor = Processor::new();
+        // OSC 9/99/777 通知、9;4 进度和 7501 程序状态 alacritty 不解析，在这里逐字节扫
+        // 一次。只扫实时输出：resume 喂进网格的旧 keyframe 不经过这里，历史通知不会被
+        // 当成新的再发。
+        let mut osc_scan = OscScan::default();
+        let mut status_notices = ProgramStatusNotices::default();
+        let mut progress = ProgressTracker::default();
         // resume 的旧 keyframe 理论上不含查询序列；即便有，也要在首次 read 前答复。
         flush_terminal_color_replies(&sess);
         loop {
@@ -4283,11 +4379,32 @@ fn start_pty_pump(
                             break;
                         }
                     }
+                    // 没输出时每秒醒一次：顺带把不再刷新的进度条清掉、定期重发还在的。
+                    publish_terminal_progress(&mut progress, &id, &event_hub);
                     continue;
                 }
                 Err(_) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
+                    let mut notifications = Vec::new();
+                    for event in chunk.iter().filter_map(|&byte| osc_scan.feed(byte)) {
+                        match event {
+                            OscEvent::Notification(notification) => {
+                                notifications.push(notification.text);
+                            }
+                            OscEvent::ProgramStatus(status) => {
+                                notifications.extend(status_notices.observe(status));
+                            }
+                            OscEvent::Progress(report) => progress.observe(report, Instant::now()),
+                            // 在这批输出交给客户端之前就回应：Pi 把探测和 DA 查询一起发，
+                            // 拿 DA 的回应当探测结束；DA 由客户端的终端回应，绕一圈回来
+                            // 一定在这之后。
+                            OscEvent::ProgramStatusQuery(terminator) => {
+                                let _ =
+                                    write_session_input(&sess, &program_status_reply(terminator));
+                            }
+                        }
+                    }
                     // Claim the output sequence before advancing the grid. Resize uses
                     // the same gate, so its geometry marker cannot overtake bytes from
                     // this read. The gate is released before any potentially blocking
@@ -4305,6 +4422,8 @@ fn start_pty_pump(
                     // 颜色查询应答可能等待 PTY 输入队列变得可写；必须在释放网格锁后
                     // 再做，避免把 resize 的 ctl -> term 路径拖住。
                     flush_terminal_color_replies(&sess);
+                    publish_terminal_notifications(&sess.state, &id, &event_hub, notifications);
+                    publish_terminal_progress(&mut progress, &id, &event_hub);
                 }
             }
         }

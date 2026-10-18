@@ -3,8 +3,8 @@ use smelt_event_bus::Delivery;
 use smelt_event_protocol::{
     Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
     CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, Capability, CoreProjectionEvent, DeliveryClass, PluginId,
-    SessionStateRemoved, SubscriptionId, Topic,
+    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_TERMINAL_NOTIFICATION, Capability,
+    CoreProjectionEvent, DeliveryClass, PluginId, SessionStateRemoved, SubscriptionId, Topic,
 };
 use std::collections::BTreeSet;
 
@@ -414,5 +414,34 @@ fn frozen_subscription_does_not_block_state_producers() {
     assert_eq!(
         event_hub.legacy_snapshot().unwrap()["sessions"][0]["revision"],
         2_000
+    );
+}
+
+#[test]
+fn terminal_notifications_reach_subscribers_until_hooks_take_over() {
+    let event_hub = new_event_hub();
+    let subscription = subscribe(&event_hub, &[CORE_TOPIC_TERMINAL_NOTIFICATION]);
+    let state = Mutex::new(SessionState {
+        id: "term".to_string(),
+        ..Default::default()
+    });
+
+    publish_terminal_notifications(&state, "term", &event_hub, vec!["构建完成".to_string()]);
+    let event = recv_event(&subscription);
+    assert_eq!(
+        event.envelope.topic.as_str(),
+        CORE_TOPIC_TERMINAL_NOTIFICATION
+    );
+    assert_eq!(event.envelope.payload["session_id"], "term");
+    assert_eq!(event.envelope.payload["message"], "构建完成");
+
+    state.lock().unwrap().structured_events = true;
+    publish_terminal_notifications(&state, "term", &event_hub, vec!["已完成".to_string()]);
+    assert!(
+        matches!(
+            subscription.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "hook 接通后通知以 hook 为准，终端通知不再发"
     );
 }

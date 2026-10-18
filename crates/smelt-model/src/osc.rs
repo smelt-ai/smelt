@@ -1,8 +1,10 @@
-//! OSC 通知扫描——主要给 GUI（`crates/smelt/src/terminal.rs`）用。
+//! alacritty 不解析的 OSC，逐字节自己扫。
 //!
-//! - `OscScan`：OSC 9 / 99 / 777 通知（alacritty 不解析，逐字节自己扫，跟 cmux 同协议）
+//! - `OscScan`：OSC 9 / 99 / 777 通知（跟 cmux 同协议）、OSC 9;4 进度和 OSC 7501 程序状态。smeltd 在
+//!   PTY 输出泵里扫，结果走事件总线；客户端不扫，免得没连着时丢、多个客户端各弹一遍。
+//! - `TerminalGeometryOscScan`：smeltd 发给渲染端的私有几何标记，只有客户端扫。
 
-/// OSC 9 / 99 / 777 通知扫描：提取 `ESC ] … (BEL|ST)`，跨 `feed` 调用保持状态
+/// OSC 9 / 99 / 777 / 7501 扫描：提取 `ESC ] … (BEL|ST)`，跨 `feed` 调用保持状态
 /// （字节可能跨 PTY read 边界断开）。
 #[derive(Default)]
 pub struct OscScan {
@@ -143,23 +145,185 @@ pub struct OscNotification {
     pub text: String,
 }
 
-impl OscScan {
-    /// 喂一个字节；扫到一条完整的 OSC 9/99/777 通知就返回 `Some(消息文本)`，
-    /// 调用方自己决定拿这条消息去做什么（GUI 弹通知 / 守护写进 SessionState）。
-    pub fn feed(&mut self, b: u8) -> Option<String> {
-        self.feed_notification(b)
-            .map(|notification| notification.text)
-    }
+/// OSC 序列的结束符。查询的回应要用和查询相同的那种。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OscTerminator {
+    Bel,
+    St,
+}
 
-    /// 与 [`Self::feed`] 相同，但保留 OSC 协议种类供通知消费者展示。
-    pub fn feed_notification(&mut self, b: u8) -> Option<OscNotification> {
+impl OscTerminator {
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::Bel => b"\x07",
+            Self::St => b"\x1b\\",
+        }
+    }
+}
+
+/// 扫出来的一条 OSC。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OscEvent {
+    Notification(OscNotification),
+    /// OSC 7501 根记录的状态报告。
+    ProgramStatus(ProgramStatus),
+    /// OSC 7501 特性探测 `OSC 7501 ; ? ST`，终端支持就要回应。
+    ProgramStatusQuery(OscTerminator),
+    /// OSC 9;4 进度。
+    Progress(ProgressReport),
+}
+
+/// OSC 9;4（ConEmu 进度，`OSC 9;4;状态[;数值] ST`），按 Ghostty 文档的语义：
+/// <https://ghostty.org/docs/vt/osc/conemu>。数值 0..=100，超出的压到 100。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressReport {
+    /// 状态 0：清掉进度条。
+    Remove,
+    /// 状态 1：进行中，没给数值按 0。
+    Set(u8),
+    /// 状态 2：出错。没给数值就沿用上一个。
+    Error(Option<u8>),
+    /// 状态 3：不确定进度。
+    Indeterminate,
+    /// 状态 4：暂停。没给数值就沿用上一个。
+    Paused(Option<u8>),
+}
+
+/// 解析 `9;4;` 之后的部分。
+fn parse_progress(pt: &str) -> Option<ProgressReport> {
+    let mut fields = pt.split(';');
+    let state = fields.next()?.trim();
+    let value = match fields
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(value.parse::<u32>().ok()?.min(100) as u8),
+        None => None,
+    };
+    Some(match state {
+        "0" => ProgressReport::Remove,
+        "1" => ProgressReport::Set(value.unwrap_or(0)),
+        "2" => ProgressReport::Error(value),
+        "3" => ProgressReport::Indeterminate,
+        "4" => ProgressReport::Paused(value),
+        _ => return None,
+    })
+}
+
+/// OSC 7501（Program Status Protocol，规范 0.4）的状态。
+/// <https://www.superlogical.com/rex/docs/build/program-status>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+    Clear,
+}
+
+/// `blocked` 在等什么。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramBlockedKind {
+    Permission,
+    Question,
+    Auth,
+}
+
+/// 一条 OSC 7501 报告。内容来自 PTY 里任意程序，只能拿来给人看，不能据此授权任何操作。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramStatus {
+    pub state: ProgramState,
+    pub kind: Option<ProgramBlockedKind>,
+    /// 程序自报的机器名，如 `codex`、`pi`。
+    pub app: Option<String>,
+    /// 已解 base64 的说明文字。
+    pub message: Option<String>,
+}
+
+/// 回应 OSC 7501 探测，表示支持规范里的全部状态和阻塞种类。
+pub fn program_status_reply(terminator: OscTerminator) -> Vec<u8> {
+    let mut reply = b"\x1b]7501;?".to_vec();
+    reply.extend_from_slice(terminator.bytes());
+    reply
+}
+
+/// 规范对 `msg` 编码后长度的上限（解码后 2048 字节）。
+const PROGRAM_STATUS_MSG_MAX_ENCODED: usize = 2732;
+
+/// 解析 `7501;` 之后的部分。不合规范的整条丢掉（规范要求终端这样做）。只认根记录：
+/// 带 `id` 的子记录是程序内部的分项进度，这里用不上。
+fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
+    let mut state = None;
+    let mut kind = None;
+    let mut app = None;
+    let mut message = None;
+    for pair in pt.split(':').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=')?;
+        if !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.,+/=-".contains(&b))
+        {
+            return None;
+        }
+        match key {
+            "state" => {
+                state = Some(match value {
+                    "idle" => ProgramState::Idle,
+                    "working" => ProgramState::Working,
+                    "done" => ProgramState::Done,
+                    "blocked" => ProgramState::Blocked,
+                    "error" => ProgramState::Error,
+                    "clear" => ProgramState::Clear,
+                    _ => return None,
+                });
+            }
+            "kind" => {
+                kind = match value {
+                    "permission" => Some(ProgramBlockedKind::Permission),
+                    "question" => Some(ProgramBlockedKind::Question),
+                    "auth" => Some(ProgramBlockedKind::Auth),
+                    _ => None,
+                };
+            }
+            "app" if (1..=32).contains(&value.len()) && !value.contains([',', '/', '=']) => {
+                app = Some(value.to_string());
+            }
+            "msg" if !value.is_empty() => {
+                if value.len() > PROGRAM_STATUS_MSG_MAX_ENCODED {
+                    return None;
+                }
+                let text = decode_base64_utf8(value)?;
+                // 规范：说明里带控制字符的报告整条丢掉。
+                if text.chars().any(char::is_control) {
+                    return None;
+                }
+                message = Some(text.trim().to_string()).filter(|text| !text.is_empty());
+            }
+            "id" if !value.is_empty() => return None,
+            _ => {}
+        }
+    }
+    let state = state?;
+    Some(ProgramStatus {
+        state,
+        kind: kind.filter(|_| state == ProgramState::Blocked),
+        app,
+        message,
+    })
+}
+
+impl OscScan {
+    /// 喂一个字节；扫到一条完整的、认得的 OSC 就返回它。
+    pub fn feed(&mut self, b: u8) -> Option<OscEvent> {
         if self.in_osc {
             if b == 0x07 {
-                return self.finish(); // BEL 结束
+                return self.finish(OscTerminator::Bel);
             }
             if self.prev_esc && b == 0x5c {
                 self.buf.pop(); // 去掉刚推入的 ESC，ST（ESC \）结束
-                return self.finish();
+                return self.finish(OscTerminator::St);
             }
             self.buf.push(b);
             self.prev_esc = b == 0x1b;
@@ -176,19 +340,29 @@ impl OscScan {
         None
     }
 
-    fn finish(&mut self) -> Option<OscNotification> {
-        let notification = std::str::from_utf8(&self.buf).ok().and_then(|s| {
+    fn finish(&mut self, terminator: OscTerminator) -> Option<OscEvent> {
+        let event = std::str::from_utf8(&self.buf).ok().and_then(|s| {
             let (ps, pt) = s.split_once(';')?;
+            if ps == "9"
+                && let Some(progress) = pt.strip_prefix("4;")
+            {
+                return parse_progress(progress).map(OscEvent::Progress);
+            }
             let kind = match ps {
                 "9" => OscNotificationKind::Osc9,
                 "99" => OscNotificationKind::Osc99,
                 "777" => OscNotificationKind::Osc777,
+                "7501" if pt.starts_with('?') => {
+                    return Some(OscEvent::ProgramStatusQuery(terminator));
+                }
+                "7501" => return parse_program_status(pt).map(OscEvent::ProgramStatus),
                 _ => return None,
             };
-            notify_text_from_osc(ps, pt).map(|text| OscNotification { kind, text })
+            notify_text_from_osc(ps, pt)
+                .map(|text| OscEvent::Notification(OscNotification { kind, text }))
         });
         self.reset();
-        notification
+        event
     }
 
     fn reset(&mut self) {
@@ -291,15 +465,26 @@ fn decode_base64_utf8(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn scan_all(bytes: &[u8]) -> Option<String> {
+    fn scan_events(bytes: &[u8]) -> Vec<OscEvent> {
         let mut scan = OscScan::default();
-        let mut got = None;
-        for &b in bytes {
-            if let Some(m) = scan.feed(b) {
-                got = Some(m);
-            }
+        bytes.iter().filter_map(|&b| scan.feed(b)).collect()
+    }
+
+    fn scan_all(bytes: &[u8]) -> Option<String> {
+        scan_events(bytes)
+            .into_iter()
+            .filter_map(|event| match event {
+                OscEvent::Notification(notification) => Some(notification.text),
+                _ => None,
+            })
+            .next_back()
+    }
+
+    fn status(bytes: &[u8]) -> Option<ProgramStatus> {
+        match scan_events(bytes).pop()? {
+            OscEvent::ProgramStatus(status) => Some(status),
+            _ => None,
         }
-        got
     }
 
     #[test]
@@ -350,17 +535,14 @@ mod tests {
 
     #[test]
     fn typed_scan_preserves_notification_protocol() {
-        let mut scan = OscScan::default();
-        let mut notifications = Vec::new();
-        for &byte in b"\x1b]9;done\x07\x1b]99;plain note\x1b\\\x1b]777;notify;t;b\x07" {
-            if let Some(notification) = scan.feed_notification(byte) {
-                notifications.push(notification);
-            }
-        }
+        let events = scan_events(b"\x1b]9;done\x07\x1b]99;plain note\x1b\\\x1b]777;notify;t;b\x07");
         assert_eq!(
-            notifications
+            events
                 .iter()
-                .map(|notification| notification.kind)
+                .map(|event| match event {
+                    OscEvent::Notification(notification) => notification.kind,
+                    other => panic!("unexpected {other:?}"),
+                })
                 .collect::<Vec<_>>(),
             vec![
                 OscNotificationKind::Osc9,
@@ -413,8 +595,8 @@ mod tests {
         let mut got = None;
         for chunk in full.chunks(3) {
             for &b in chunk {
-                if let Some(m) = scan.feed(b) {
-                    got = Some(m);
+                if let Some(OscEvent::Notification(m)) = scan.feed(b) {
+                    got = Some(m.text);
                 }
             }
         }
@@ -431,10 +613,97 @@ mod tests {
         }
         let mut got = None;
         for &b in b"\x1b]9;still works\x07" {
-            if let Some(m) = scan.feed(b) {
-                got = Some(m);
+            if let Some(OscEvent::Notification(m)) = scan.feed(b) {
+                got = Some(m.text);
             }
         }
         assert_eq!(got.as_deref(), Some("still works"));
+    }
+
+    #[test]
+    fn program_status_query_is_answered_with_the_same_terminator() {
+        assert_eq!(
+            scan_events(b"\x1b]7501;?\x1b\\"),
+            vec![OscEvent::ProgramStatusQuery(OscTerminator::St)]
+        );
+        assert_eq!(
+            scan_events(b"\x1b]7501;?\x07"),
+            vec![OscEvent::ProgramStatusQuery(OscTerminator::Bel)]
+        );
+        assert_eq!(
+            program_status_reply(OscTerminator::St),
+            b"\x1b]7501;?\x1b\\"
+        );
+        assert_eq!(program_status_reply(OscTerminator::Bel), b"\x1b]7501;?\x07");
+    }
+
+    #[test]
+    fn program_status_reads_state_kind_app_and_base64_message() {
+        // "批准 rm -rf" 的 base64，不带填充。
+        let report = concat!(
+            "\x1b]7501;state=blocked:kind=permission:app=codex:",
+            "msg=5om55YeGIHJtIC1yZg\x1b\\",
+        );
+        let blocked = status(report.as_bytes()).unwrap();
+        assert_eq!(blocked.state, ProgramState::Blocked);
+        assert_eq!(blocked.kind, Some(ProgramBlockedKind::Permission));
+        assert_eq!(blocked.app.as_deref(), Some("codex"));
+        assert_eq!(blocked.message.as_deref(), Some("批准 rm -rf"));
+
+        let done = status(b"\x1b]7501;state=done:kind=question\x07").unwrap();
+        assert_eq!(done.state, ProgramState::Done);
+        assert_eq!(done.kind, None, "kind 只对 blocked 有意义");
+        assert_eq!(done.message, None);
+    }
+
+    #[test]
+    fn invalid_program_status_reports_are_dropped_whole() {
+        assert_eq!(
+            status(b"\x1b]7501;state=sleeping\x07"),
+            None,
+            "不认识的状态"
+        );
+        assert_eq!(status(b"\x1b]7501;kind=permission\x07"), None, "缺 state");
+        assert_eq!(
+            status(b"\x1b]7501;state=done:msg=a b\x07"),
+            None,
+            "值里有空格"
+        );
+        // "a\nb"：说明里带控制字符。
+        assert_eq!(status(b"\x1b]7501;state=done:msg=YQpi\x07"), None);
+        assert_eq!(
+            status(b"\x1b]7501;state=working:id=build\x07"),
+            None,
+            "子记录不当成根状态"
+        );
+        let oversized = format!("\x1b]7501;state=done:msg={}\x07", "A".repeat(2800));
+        assert_eq!(status(oversized.as_bytes()), None);
+    }
+
+    #[test]
+    fn program_status_ignores_unknown_keys_and_empty_values() {
+        let status = status(b"\x1b]7501;state=working:progress=40:future=1:msg=\x07").unwrap();
+        assert_eq!(status.state, ProgramState::Working);
+        assert_eq!(status.message, None);
+    }
+
+    #[test]
+    fn conemu_progress_reports_are_parsed_not_shown_as_notifications() {
+        assert_eq!(
+            scan_events(b"\x1b]9;4;1;42\x1b\\"),
+            vec![OscEvent::Progress(ProgressReport::Set(42))]
+        );
+        assert_eq!(
+            scan_events(b"\x1b]9;4;0\x07\x1b]9;4;3\x07\x1b]9;4;2\x07\x1b]9;4;4;250\x07"),
+            vec![
+                OscEvent::Progress(ProgressReport::Remove),
+                OscEvent::Progress(ProgressReport::Indeterminate),
+                OscEvent::Progress(ProgressReport::Error(None)),
+                OscEvent::Progress(ProgressReport::Paused(Some(100))),
+            ]
+        );
+        assert_eq!(scan_events(b"\x1b]9;4;7;10\x07"), vec![], "不认识的状态");
+        assert_eq!(scan_events(b"\x1b]9;4;1;abc\x07"), vec![], "数值不是数字");
+        assert_eq!(scan_all(b"\x1b]9;4;1;42\x07"), None, "进度不是通知");
     }
 }

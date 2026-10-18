@@ -29,6 +29,12 @@ pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requ
 pub const CORE_TOPIC_PROJECT_CHANGED: &str = "project.changed";
 /// CLI / Control API 要改外观。外观归客户端，运行时只校验后转给在线的桌面端。
 pub const CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED: &str = "appearance.change_requested";
+/// 终端里的程序用 OSC 9 / 99 / 777 发了一条通知。运行时在 PTY 字节流上扫一次，
+/// 会话已有结构化 hook 事件时不发；没人连着时发生的就丢了，不补。
+pub const CORE_TOPIC_TERMINAL_NOTIFICATION: &str = "terminal.notification";
+/// 终端里的程序用 OSC 9;4（ConEmu 进度）报的进度变了。运行时变了就发，进度条还在时
+/// 每 5 秒重发一次（后连上的客户端据此补齐），15 秒没新报告就清掉。不进会话投影。
+pub const CORE_TOPIC_TERMINAL_PROGRESS: &str = "terminal.progress";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_REMOTE_SESSIONS_READ: &str = "remote_sessions.read";
@@ -440,6 +446,39 @@ pub struct ProjectChanged {
     pub root: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalNotification {
+    pub session_id: String,
+    /// 通知正文，已从 OSC 载荷里取出（777 取最后一段，99 已解 base64）。
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalProgressState {
+    Normal,
+    Error,
+    Indeterminate,
+    Paused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalProgress {
+    pub state: TerminalProgressState,
+    /// 0..=100。不确定进度（indeterminate）时没有。
+    pub percent: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalProgressChanged {
+    pub session_id: String,
+    /// `None`：进度条清掉了。
+    pub progress: Option<TerminalProgress>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppearanceChangeRequested {
@@ -537,6 +576,21 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_TOPIC_PROJECT_CHANGED,
             DeliveryClass::Ephemeral,
             CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            4 * 1024,
+        )?,
+        // 正文最多 4096 字节（扫描器上限），JSON 转义后可能翻倍。
+        descriptor(
+            CORE_TOPIC_TERMINAL_NOTIFICATION,
+            DeliveryClass::Ephemeral,
+            CORE_CAPABILITY_SESSION_READ,
+            None,
+            16 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_TERMINAL_PROGRESS,
+            DeliveryClass::Ephemeral,
+            CORE_CAPABILITY_SESSION_READ,
             None,
             4 * 1024,
         )?,
@@ -793,6 +847,18 @@ mod tests {
             ),
             (
                 CORE_TOPIC_PROJECT_CHANGED,
+                DeliveryClass::Ephemeral,
+                None,
+                1,
+            ),
+            (
+                CORE_TOPIC_TERMINAL_NOTIFICATION,
+                DeliveryClass::Ephemeral,
+                None,
+                1,
+            ),
+            (
+                CORE_TOPIC_TERMINAL_PROGRESS,
                 DeliveryClass::Ephemeral,
                 None,
                 1,

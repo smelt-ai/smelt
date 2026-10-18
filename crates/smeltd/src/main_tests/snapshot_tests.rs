@@ -427,6 +427,9 @@ fn interactive_pty_strips_host_color_suppression() {
     cmd.env("CLICOLOR", "0");
     cmd.env("CLICOLOR_FORCE", "0");
     cmd.env("TERM", "dumb");
+    cmd.env("TERM_PROGRAM", "iTerm.app");
+    cmd.env("KITTY_WINDOW_ID", "1");
+    cmd.env("TMUX", "/tmp/tmux-501/default,1,0");
     apply_interactive_pty_env(&mut cmd);
 
     assert_eq!(
@@ -443,6 +446,14 @@ fn interactive_pty_strips_host_color_suppression() {
             "{key} 不得带进交互式 PTY，实际: {:?}",
             cmd.get_env(key)
         );
+    }
+    assert_eq!(
+        cmd.get_env("TERM_PROGRAM").and_then(|v| v.to_str()),
+        Some("ghostty"),
+        "宿主终端的身份不能盖过 smelt 自报的"
+    );
+    for key in ["KITTY_WINDOW_ID", "TMUX"] {
+        assert!(cmd.get_env(key).is_none(), "宿主终端的 {key} 不得带进会话");
     }
 }
 
@@ -640,4 +651,33 @@ fn daemon_term_tracks_kitty_keyboard_protocol() {
     let mut parser: Processor = Processor::new();
     parser.advance(&mut term, b"\x1b[>1u");
     assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+}
+
+/// 程序用 OSC 改过的颜色要跟着快照走：重连、热交接之后客户端拿到的是一份新 Term，
+/// 不带上就会退回主题色。接收端原来改过、源端已经复位的颜色也要清掉。
+#[test]
+fn snapshot_carries_program_color_overrides() {
+    let size = DaemonTermSize { rows: 2, cols: 10 };
+    let mut original = Term::new(daemon_term_config(), &size, VoidListener);
+    let mut parser: Processor = Processor::new();
+    parser.advance(
+        &mut original,
+        b"\x1b]4;1;rgb:ff/00/80\x07\x1b]11;rgb:01/02/03\x07\x1b]12;rgb:aa/bb/cc\x07",
+    );
+
+    let mut receiver = Term::new(daemon_term_config(), &size, VoidListener);
+    let mut receiver_parser: Processor = Processor::new();
+    receiver_parser.advance(
+        &mut receiver,
+        b"\x1b]4;2;rgb:11/11/11\x07\x1b]10;rgb:22/22/22\x07",
+    );
+    receiver_parser.advance(&mut receiver, &snapshot_ansi(&original, None));
+
+    for index in 0..alacritty_terminal::term::color::COUNT {
+        assert_eq!(
+            receiver.colors()[index],
+            original.colors()[index],
+            "color[{index}]"
+        );
+    }
 }

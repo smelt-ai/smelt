@@ -18,9 +18,11 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Direction, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{
-    Config, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport, viewport_to_point,
+    Config, Osc52, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport,
+    viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
@@ -227,12 +229,18 @@ pub struct Frame {
 }
 
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
-fn resolve(color: Color, is_fg: bool) -> u32 {
+/// 程序用 OSC 4 / 10 / 11 改过的颜色（alacritty 记在 `overrides` 里）优先于主题色，
+/// 跟主流终端一致：base16-shell 这类主题脚本、TUI 自己换底色都靠它。
+fn resolve(color: Color, is_fg: bool, overrides: &Colors) -> u32 {
     match color {
-        Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32,
-        Color::Indexed(i) => indexed_rgb(i),
-        Color::Named(n) => named_rgb(n, is_fg),
+        Color::Spec(rgb) => rgb_u32(rgb),
+        Color::Indexed(i) => overrides[i as usize].map_or_else(|| indexed_rgb(i), rgb_u32),
+        Color::Named(n) => overrides[n].map_or_else(|| named_rgb(n, is_fg), rgb_u32),
     }
+}
+
+fn rgb_u32(rgb: Rgb) -> u32 {
+    ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
 }
 
 fn named_rgb(n: NamedColor, is_fg: bool) -> u32 {
@@ -302,7 +310,7 @@ impl Dimensions for TermSize {
     }
 }
 
-/// OSC 9/99/777 普通通知槽；UI 侧轮询后用于横幅/通知记录，不参与 Agent 状态。
+/// BEL 普通提醒槽；UI 侧轮询后用于通知记录，不参与 Agent 状态。
 type NotifySlot = Arc<Mutex<Option<String>>>;
 
 /// 网格行列 + 单元格像素尺寸，给 OSC/CSI 查询（TextAreaSizeRequest）和 PTY resize 用。
@@ -547,7 +555,7 @@ impl TerminalWriter {
 
 /// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态。
 /// OSC 0/2 标题直接忽略：它不是会话名，这里也不保存。
-/// PtyWrite / Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
+/// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
 /// 旧守护没有声明该能力时才在客户端兜底。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
@@ -606,14 +614,10 @@ impl EventListener for EventProxy {
                 self.write_pty(format(Self::resolve_color(index)).as_bytes())
             }
             Event::ColorRequest(_, _) => {}
-            // OSC 52：应用把文本写到系统剪贴板 / 从剪贴板读回。远程会话、嵌套
-            // tmux、部分 CLI 复制都靠它。读写走系统工具（见 os_clipboard_*），不必
-            // 绕到 UI 线程——EventProxy 跑在 PTY 读线程上。
+            // OSC 52：应用把文本写到系统剪贴板。远程会话、嵌套 tmux、部分 CLI 复制都靠
+            // 它。走系统工具，不必绕到 UI 线程——EventProxy 跑在 PTY 读线程上。读剪贴板
+            // 在 `term_config` 里关掉了，alacritty 不会发 ClipboardLoad。
             Event::ClipboardStore(_ty, data) => os_clipboard_write(&data),
-            Event::ClipboardLoad(_ty, format) => {
-                let text = os_clipboard_read();
-                self.write_pty(format(&text).as_bytes());
-            }
             Event::TextAreaSizeRequest(format) => {
                 let m = self.metrics.lock().ok().map(|g| *g).unwrap_or(TermMetrics {
                     rows: 24,
@@ -653,19 +657,7 @@ fn os_clipboard_write(text: &str) {
     }
 }
 
-/// OSC 52 读系统剪贴板。macOS 用 `pbpaste`；失败 / 其它平台返回空串（format 仍会写出
-/// 空应答，对端不至于卡死等回包）。
-fn os_clipboard_read() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(out) = std::process::Command::new("pbpaste").output() {
-            return String::from_utf8_lossy(&out.stdout).into_owned();
-        }
-    }
-    String::new()
-}
-
-// OSC 9/99/777 扫描（`OscScan`）在 crate::osc，跟守护共用；含 Kitty OSC 99。
+// OSC 9/99/777 通知由 smeltd 在 PTY 输出泵里扫，走事件总线推来，客户端不扫。
 
 // ===================== smeltd 守护连接层 =====================
 
@@ -2006,6 +1998,9 @@ fn term_config() -> Config {
         semantic_escape_chars: format!(
             "{SEMANTIC_ESCAPE_CHARS}：，。；！？、（）「」『』【】《》“”‘’"
         ),
+        // OSC 52 只许写、不许读：终端里任何程序（包括远程运行时上的）都能发读请求，
+        // 放开就等于让它们静默读走本机剪贴板。主流终端默认也是关着或逐次询问。
+        osc52: Osc52::OnlyCopy,
         ..smelt_model::term_config::emulation_config()
     }
 }
@@ -2219,9 +2214,7 @@ pub struct Terminal {
     daemon_geometry: Arc<Mutex<DaemonGeometrySignal>>,
     daemon_geometry_generation: u64,
     remote_geometry_locked: bool,
-    /// 普通 OSC 9/99/777 通知槽（UI 在 PTY 唤醒事件中取走）。
-    notify: NotifySlot,
-    /// BEL 普通提醒槽，与 OSC 分开，结构化 agent 激活后仍可独立提醒。
+    /// BEL 普通提醒槽，结构化 agent 激活后仍可独立提醒。
     bell_notify: NotifySlot,
     /// `take_damage` 用来识别「光标真的动了」——alacritty 每帧都会把当前光标格标脏，
     /// 静止时要滤掉；但光标移动后若只标了新位置那一格，也得算变化（见 take_damage）。
@@ -2310,7 +2303,7 @@ fn finalize_reattach_term(term: &mut Term<EventProxy>) {
 
 impl Terminal {
     /// 打开（或重连）守护里 id 对应的会话：shell 环境由 smeltd 负责（-l / TERM /
-    /// iTerm2 伪装 / LANG 兜底，见 smeltd）。id 已存在 → attach，守护先重放输出
+    /// 自报 Ghostty / LANG 兜底，见 smeltd）。id 已存在 → attach，守护先重放输出
     /// 缓冲恢复画面，再实时转发。`launch`：新建会话时要先跑的命令（编进 shell 启动
     /// 命令行，见 `smeltd::terminal_registry`），只在新建时生效，reattach 会被忽略。
     pub(crate) fn spawn(
@@ -2388,7 +2381,6 @@ impl Terminal {
 
         // 2) alacritty 终端状态机。EventProxy 把 PTY 自动应答写回共享写端。
         //    OSC 0/2 不保存。
-        let notify: NotifySlot = Arc::new(Mutex::new(None));
         let bell_notify: NotifySlot = Arc::new(Mutex::new(None));
         let metrics = Arc::new(Mutex::new(TermMetrics {
             rows: size.rows as u16,
@@ -2409,7 +2401,7 @@ impl Terminal {
         );
         let term = Arc::new(Mutex::new(term));
 
-        // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫 OSC 9/99/777。
+        // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫几何标记。
         //    EOF = shell 退出或守护离线（网格冻结，重开会话即恢复）。
         //    复用尺寸行的 BufReader：重放字节可能已在其内部缓冲里。
         // 重绘唤醒通道：读线程 → UI。bounded(1) 合并突发（已有待处理唤醒时后续 try_send
@@ -2419,7 +2411,6 @@ impl Terminal {
 
         let mut reader = buffered;
         let term_reader = Arc::clone(&term);
-        let notify_reader = notify.clone();
         let metrics_reader = Arc::clone(&metrics);
         let daemon_geometry_reader = Arc::clone(&daemon_geometry);
         let dead_reader = Arc::clone(&dead);
@@ -2427,20 +2418,11 @@ impl Terminal {
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
-            let mut osc = crate::osc::OscScan::default();
             let mut geometry_osc = geometry_token
                 .map(smelt_model::osc::TerminalGeometryOscScan::new)
                 .unwrap_or_default();
             let mut buf = [0u8; 4096];
             let mut bytes_seen: usize = 0;
-            // 重放缓冲里的历史字节可能藏着早就处理完的 OSC 9/99/777 通知（比如 Claude
-            // 之前问过的权限确认，用户当时已经批准、任务也跑完了）——reattach 时如果
-            // 原样喂给通知扫描，会把它们当成刚发生的事件重新弹出来，把明明已完成的
-            // 会话错误标红（"重开 app 状态变红"那个 bug）。sink 接住落在 replay_len
-            // 范围内关闭的 OSC 序列，只有真正在重放边界之后关闭的才写进 notify_reader；
-            // 每个字节仍然逐一喂给 osc（状态机不断流），只是根据这个字节的绝对位置
-            // 决定它触发的通知该进哪个槽，边界处不会解析错位。
-            let sink: Mutex<Option<String>> = Mutex::new(None);
             // reattach 快照是否已整段喂完；越过边界时贴底一次。
             let mut replay_finalized = replay_len == 0;
             loop {
@@ -2448,18 +2430,7 @@ impl Terminal {
                     Ok(0) => break, // EOF：shell 退出
                     Ok(n) => {
                         let mut geometry_updates = Vec::new();
-                        // OSC 9/99/777 通知：alacritty 不解析，自己扫字节提取
                         for (i, &b) in buf[..n].iter().enumerate() {
-                            let target = if bytes_seen + i < replay_len {
-                                &sink
-                            } else {
-                                &notify_reader
-                            };
-                            if let Some(msg) = osc.feed(b)
-                                && let Ok(mut g) = target.lock()
-                            {
-                                *g = Some(msg);
-                            }
                             if let Some(geometry) = geometry_osc.feed(b)
                                 && let Ok(mut signal) = daemon_geometry_reader.lock()
                             {
@@ -2530,7 +2501,6 @@ impl Terminal {
             daemon_geometry,
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            notify,
             bell_notify,
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
@@ -2606,11 +2576,6 @@ impl Terminal {
             geometry_token,
             daemon_handles_color_requests,
         ))
-    }
-
-    /// 取走最新普通通知消息（读并清）：OSC 9/99/777 上报的文本。
-    pub fn take_notification(&self) -> Option<String> {
-        self.notify.lock().ok().and_then(|mut g| g.take())
     }
 
     /// 取走一次普通终端 BEL 提醒；它不携带 Agent 状态语义。
@@ -2866,6 +2831,7 @@ impl Terminal {
         let content = term.renderable_content();
         let cursor_pt = content.cursor.point;
         let display_offset = content.display_offset;
+        let overrides = content.colors;
         // 选区范围由 alacritty 维护（滚动跟随、新输出漂移、宽字符边界都是它处理），
         // 这里只做逐 cell 的 contains 判定——indexed.point 与 SelectionRange 坐标同源，直接比。
         let sel_range = content.selection;
@@ -2885,11 +2851,13 @@ impl Terminal {
             let flags = cell.flags;
             row_wraps = flags.contains(Flags::WRAPLINE);
             let inverse = flags.contains(Flags::INVERSE);
-            let mut fg = resolve(cell.fg, true);
-            let mut bg = resolve(cell.bg, false);
+            let mut fg = resolve(cell.fg, true, overrides);
+            let mut bg = resolve(cell.bg, false, overrides);
             // 反色（SGR 7）后真正当底色用的是**前景那个颜色**，默认底色的判定也得跟着换。
+            // 程序用 OSC 11 改过底色时，默认底色的格子也要画成它改的颜色，不再留空。
             let bg_color = if inverse { cell.fg } else { cell.bg };
-            let bg_default = matches!(bg_color, Color::Named(NamedColor::Background));
+            let bg_default = matches!(bg_color, Color::Named(NamedColor::Background))
+                && overrides[NamedColor::Background].is_none();
             if inverse {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -4486,7 +4454,6 @@ mod resize_tests {
                 daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
                 daemon_geometry_generation: 0,
                 remote_geometry_locked: false,
-                notify: Arc::new(Mutex::new(None)),
                 bell_notify: Arc::new(Mutex::new(None)),
                 last_damage_cursor: Mutex::new(None),
                 search_query: Mutex::new(String::new()),
@@ -4560,6 +4527,59 @@ mod paste_encode_tests {
     fn bracketed_paste_wraps_and_strips_esc() {
         let out = encode_paste("hi\x1b[31m", true);
         assert_eq!(out, b"\x1b[200~hi[31m\x1b[201~");
+    }
+}
+
+#[cfg(test)]
+mod color_override_tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+
+    #[test]
+    fn colors_set_by_the_program_win_over_the_theme() {
+        let _guard = lock_theme_globals();
+        let size = TermSize { rows: 2, cols: 10 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        assert_eq!(
+            resolve(Color::Indexed(1), true, term.colors()),
+            palette()[1]
+        );
+
+        let mut parser: Processor = Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1b]4;1;rgb:ff/00/80\x07\x1b]11;rgb:01/02/03\x1b\\",
+        );
+        let overrides = term.colors();
+        assert_eq!(resolve(Color::Indexed(1), true, overrides), 0x00ff_0080);
+        assert_eq!(
+            resolve(Color::Named(NamedColor::Red), true, overrides),
+            0x00ff_0080,
+            "OSC 4 改的是 0~15 号槽，具名色也跟着变"
+        );
+        assert_eq!(
+            resolve(Color::Named(NamedColor::Background), false, overrides),
+            0x0001_0203
+        );
+        assert_eq!(
+            resolve(
+                Color::Spec(Rgb {
+                    r: 0,
+                    g: 0,
+                    b: 0x10
+                }),
+                true,
+                overrides
+            ),
+            0x10,
+            "直接给的 RGB 不受影响"
+        );
+
+        parser.advance(&mut term, b"\x1b]104\x07\x1b]111\x07");
+        assert_eq!(
+            resolve(Color::Indexed(1), true, term.colors()),
+            palette()[1]
+        );
     }
 }
 
@@ -4660,7 +4680,6 @@ mod search_resync_tests {
             daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            notify: Arc::new(Mutex::new(None)),
             bell_notify: Arc::new(Mutex::new(None)),
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
@@ -4864,7 +4883,7 @@ mod scroll_wheel_plan_tests {
     }
 }
 
-// OSC 通知解析单测见 crate::osc（workspace 与 smeltd 共用）。
+// OSC 通知解析单测见 smelt_model::osc。
 
 #[cfg(test)]
 mod search_literal_tests {

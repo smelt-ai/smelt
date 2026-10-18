@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+pub use smelt_event_protocol::{TerminalProgress, TerminalProgressState};
+
 use crate::automation::AutomationFile;
 use crate::session_control::RemoteSessionSnapshot;
 use crate::workspace_menu::WorkspaceMenuSnapshot;
@@ -285,6 +287,15 @@ pub enum DaemonStateEvent {
     ConversationWakeRequested { session_id: String },
     /// 关注过的项目目录里有文件变了。
     ProjectChanged { root: String },
+    /// 会话里的终端程序发了一条 OSC 9/99/777 通知。一次性事件，不是投影；会话已有
+    /// 结构化 hook 事件时运行时不会发。
+    TerminalNotification { session_id: String, message: String },
+    /// 会话里的终端程序用 OSC 9;4 报的进度变了（`None` = 清掉）。不是投影：运行时在
+    /// 进度条还在时定期重发，后连上的客户端靠它补齐。
+    TerminalProgress {
+        session_id: String,
+        progress: Option<TerminalProgress>,
+    },
     /// CLI / Control API 要改外观，已由运行时校验过。一次性请求，不是投影。
     AppearanceChangeRequested {
         settings: std::collections::BTreeMap<String, serde_json::Value>,

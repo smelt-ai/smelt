@@ -31,7 +31,6 @@ mod liquid_glass;
 mod overlay;
 mod plugins;
 mod tool_panel;
-use smelt_model::osc;
 mod provider_quota;
 mod resizable_split;
 mod runtime_call;
@@ -4553,6 +4552,30 @@ fn main() {
                     }
                     continue;
                 }
+                // 终端程序的 OSC 通知：运行时已滤掉有结构化 hook 的会话，这里进同一个
+                // 关注 store，正在看的会话由 store 标已读、不弹。
+                if let terminal::DaemonStateEvent::TerminalNotification { session_id, message } =
+                    &event
+                {
+                    let item = AttentionItem {
+                        session_id: session_id.clone(),
+                        title: "终端通知".to_string(),
+                        message: message.clone(),
+                        kind: AttentionKind::Notice,
+                    };
+                    cx.update(|cx| {
+                        AttentionGlobal::publish_terminal_notification(item, Instant::now(), cx);
+                    });
+                    continue;
+                }
+                if let terminal::DaemonStateEvent::TerminalProgress {
+                    session_id,
+                    progress,
+                } = &event
+                {
+                    cx.update(|cx| DaemonStates::set_progress(&runtime, session_id, *progress, cx));
+                    continue;
+                }
                 if let terminal::DaemonStateEvent::AppearanceChangeRequested { settings } = &event {
                     if is_local {
                         let settings = settings.clone();
@@ -4614,6 +4637,8 @@ fn main() {
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
+                        terminal::DaemonStateEvent::TerminalNotification { .. } => {}
+                        terminal::DaemonStateEvent::TerminalProgress { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {}
                     }
                     match event {
@@ -4659,6 +4684,8 @@ fn main() {
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
                         terminal::DaemonStateEvent::ProjectChanged { .. } => {}
+                        terminal::DaemonStateEvent::TerminalNotification { .. } => {}
+                        terminal::DaemonStateEvent::TerminalProgress { .. } => {}
                         terminal::DaemonStateEvent::Disconnected => {
                             DaemonStates::mark_subscription_disconnected(&runtime, cx);
                         }

@@ -160,6 +160,8 @@ struct SubscriptionShape {
     conversation_wake: bool,
     appearance_requests: bool,
     project_changes: bool,
+    terminal_notifications: bool,
+    terminal_progress: bool,
 }
 
 #[derive(Default)]
@@ -239,6 +241,10 @@ impl DaemonStateEventClient {
                 smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
                 // 桌面关注的项目里文件变了：重取 git 状态和文件树。
                 smelt_event_protocol::CORE_TOPIC_PROJECT_CHANGED,
+                // 终端程序发的 OSC 通知，运行时扫好再推过来，桌面不再自己扫字节流。
+                smelt_event_protocol::CORE_TOPIC_TERMINAL_NOTIFICATION,
+                // 终端程序用 OSC 9;4 报的进度，侧栏画进度条。
+                smelt_event_protocol::CORE_TOPIC_TERMINAL_PROGRESS,
             ],
             SubscriptionShape {
                 remote_sessions: true,
@@ -247,6 +253,8 @@ impl DaemonStateEventClient {
                 conversation_wake: true,
                 appearance_requests: true,
                 project_changes: true,
+                terminal_notifications: true,
+                terminal_progress: true,
             },
         )
     }
@@ -501,6 +509,24 @@ impl DaemonStateEventClient {
                 let changed: smelt_event_protocol::ProjectChanged = decode_payload(payload, topic)?;
                 Ok(Some(DaemonStateEvent::ProjectChanged {
                     root: changed.root,
+                }))
+            }
+            smelt_event_protocol::CORE_TOPIC_TERMINAL_NOTIFICATION
+                if self.shape.terminal_notifications =>
+            {
+                let notification: smelt_event_protocol::TerminalNotification =
+                    decode_payload(payload, topic)?;
+                Ok(Some(DaemonStateEvent::TerminalNotification {
+                    session_id: notification.session_id,
+                    message: notification.message,
+                }))
+            }
+            smelt_event_protocol::CORE_TOPIC_TERMINAL_PROGRESS if self.shape.terminal_progress => {
+                let changed: smelt_event_protocol::TerminalProgressChanged =
+                    decode_payload(payload, topic)?;
+                Ok(Some(DaemonStateEvent::TerminalProgress {
+                    session_id: changed.session_id,
+                    progress: changed.progress,
                 }))
             }
             smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED
@@ -992,7 +1018,7 @@ mod tests {
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
-        assert_eq!(topics.len(), 8);
+        assert_eq!(topics.len(), 10);
         assert!(
             topics
                 .iter()
@@ -1009,6 +1035,12 @@ mod tests {
                 .iter()
                 .any(|topic| topic == smelt_event_protocol::CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED),
             "外观归桌面端，CLI 发来的外观修改只能交给它"
+        );
+        assert!(
+            topics
+                .iter()
+                .any(|topic| topic == smelt_event_protocol::CORE_TOPIC_TERMINAL_NOTIFICATION),
+            "终端 OSC 通知由运行时扫好推来，桌面不再自己扫"
         );
         assert_ne!(
             first.handshake().request.subscription.id,
@@ -1132,6 +1164,50 @@ mod tests {
             desktop.decode_message(wake()).unwrap(),
             Some(DaemonStateEvent::ConversationWakeRequested { session_id })
                 if session_id == "acp-dormant"
+        ));
+    }
+
+    #[test]
+    fn desktop_decodes_terminal_notifications() {
+        let mut desktop = DaemonStateEventClient::desktop();
+        let _ = complete_desktop_snapshot(&mut desktop, 7, vec![]);
+        assert!(matches!(
+            desktop
+                .decode_message(event_message(
+                    smelt_event_protocol::CORE_TOPIC_TERMINAL_NOTIFICATION,
+                    serde_json::json!({ "session_id": "s1", "message": "构建完成" }),
+                ))
+                .unwrap(),
+            Some(DaemonStateEvent::TerminalNotification { session_id, message })
+                if session_id == "s1" && message == "构建完成"
+        ));
+    }
+
+    #[test]
+    fn desktop_decodes_terminal_progress() {
+        let mut desktop = DaemonStateEventClient::desktop();
+        let _ = complete_desktop_snapshot(&mut desktop, 7, vec![]);
+        assert!(matches!(
+            desktop
+                .decode_message(event_message(
+                    smelt_event_protocol::CORE_TOPIC_TERMINAL_PROGRESS,
+                    serde_json::json!({
+                        "session_id": "s1",
+                        "progress": { "state": "normal", "percent": 42 },
+                    }),
+                ))
+                .unwrap(),
+            Some(DaemonStateEvent::TerminalProgress { session_id, progress: Some(progress) })
+                if session_id == "s1" && progress.percent == Some(42)
+        ));
+        assert!(matches!(
+            desktop
+                .decode_message(event_message(
+                    smelt_event_protocol::CORE_TOPIC_TERMINAL_PROGRESS,
+                    serde_json::json!({ "session_id": "s1", "progress": null }),
+                ))
+                .unwrap(),
+            Some(DaemonStateEvent::TerminalProgress { progress: None, .. })
         ));
     }
 

@@ -183,8 +183,8 @@ pub(crate) mod row;
 use new_session::new_session_picker;
 use row::{
     acp_provider_icon, effective_pane_updated_at, project_header_is_selected, provider_icon,
-    provider_quota_row, session_row_is_selected, session_row_status_label, session_updated_at_text,
-    status_text,
+    provider_quota_row, session_progress_bar, session_row_is_selected, session_row_status_label,
+    session_updated_at_text, status_text,
 };
 
 /// 工具面板（文件树 / 变更 / 历史 / 技能 / 插件）绑定的上下文根。
@@ -982,6 +982,18 @@ impl Workspace {
                 // 运行中 / 要人管的状态才配文字。空闲不写——每行都写「空闲」
                 // 等于用一整行高度说一句废话。
                 let status_label = session_row_status_label(status);
+                // 终端程序报的进度（OSC 9;4），看当前那个分屏的。
+                let progress = match &self.sessions[ix].kind {
+                    SessionKind::Term { active, .. } => {
+                        let view = active.read(cx);
+                        smelt_ui::daemon_states_global::DaemonStates::progress(
+                            view.runtime().key(),
+                            view.session_id(),
+                            cx,
+                        )
+                    }
+                    SessionKind::Conversation(_) => None,
+                };
                 let session_updated_at = last_updated_at.get(ix).copied().unwrap_or_default();
                 let updated_text = session_updated_at_text(session_updated_at, &now);
                 let project_context = (grouping != SidebarGrouping::Project)
@@ -1169,6 +1181,7 @@ impl Workspace {
                                     .child(name)
                             }))
                     }))
+                    .children(progress.map(session_progress_bar))
                     // 只要人管才写字，不加色胶囊。
                     .children(status_label.map(|label| {
                         div()

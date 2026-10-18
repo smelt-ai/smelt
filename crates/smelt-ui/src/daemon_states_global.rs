@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use gpui::{App, BorrowAppContext, Global};
 
-use smelt_client::daemon_state::DaemonSessionState;
+use smelt_client::daemon_state::{DaemonSessionState, TerminalProgress};
 use smelt_client::runtime::RuntimeKey;
 pub use smelt_model::attention::{AttentionItem, AttentionKind, AttentionStore};
 
@@ -34,6 +34,8 @@ struct RuntimeMirror {
     /// 当前这条 subscribe 连接是否仍活着。守护 exec 后旧连接断开，必须先置
     /// false，否则上一 epoch 的快照会把「正在交接」误判成会话已死。
     subscription_live: bool,
+    /// 终端程序用 OSC 9;4 报的进度，只在内存里。断线就清：运行时会定期重发还在的。
+    progress: HashMap<String, TerminalProgress>,
 }
 
 impl DaemonStates {
@@ -72,6 +74,9 @@ impl DaemonStates {
                 .iter()
                 .map(|state| (state.id.clone(), state.clone()))
                 .collect();
+            mirror
+                .progress
+                .retain(|id, _| live_ids.contains(id.as_str()));
             mirror.primed = true;
             mirror.subscription_live = true;
             stale_ids
@@ -92,7 +97,10 @@ impl DaemonStates {
             .lock()
             .unwrap()
             .get_mut(runtime)
-            .is_some_and(|mirror| mirror.sessions.remove(id).is_some());
+            .is_some_and(|mirror| {
+                mirror.progress.remove(id);
+                mirror.sessions.remove(id).is_some()
+            });
         pending
             .lock()
             .unwrap()
@@ -167,10 +175,49 @@ impl DaemonStates {
             .lock()
             .unwrap()
             .get_mut(runtime)
-            .is_some_and(|mirror| std::mem::replace(&mut mirror.subscription_live, false));
+            .is_some_and(|mirror| {
+                let had_progress = !mirror.progress.is_empty();
+                mirror.progress.clear();
+                std::mem::replace(&mut mirror.subscription_live, false) || had_progress
+            });
         if changed {
             Self::signal(cx);
         }
+    }
+
+    /// 运行时推来的终端进度（`None` = 清掉）。没变就不唤醒观察器。
+    pub fn set_progress(
+        runtime: &RuntimeKey,
+        session_id: &str,
+        progress: Option<TerminalProgress>,
+        cx: &mut App,
+    ) {
+        let Some(global) = cx.try_global::<Self>() else {
+            return;
+        };
+        let changed = {
+            let mut runtimes = global.runtimes.lock().unwrap();
+            let mirror = runtimes.entry(runtime.clone()).or_default();
+            match progress {
+                Some(progress) => {
+                    mirror.progress.insert(session_id.to_string(), progress) != Some(progress)
+                }
+                None => mirror.progress.remove(session_id).is_some(),
+            }
+        };
+        if changed {
+            Self::signal(cx);
+        }
+    }
+
+    pub fn progress(runtime: &RuntimeKey, session_id: &str, cx: &App) -> Option<TerminalProgress> {
+        Self::read(cx, |runtimes| {
+            runtimes
+                .get(runtime)
+                .and_then(|mirror| mirror.progress.get(session_id))
+                .copied()
+        })
+        .flatten()
     }
 
     pub fn snapshot(runtime: &RuntimeKey, cx: &App) -> Vec<DaemonSessionState> {
