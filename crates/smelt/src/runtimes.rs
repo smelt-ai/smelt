@@ -90,7 +90,7 @@ pub(crate) struct RuntimeHub {
 impl gpui::Global for RuntimeHub {}
 
 /// 这台桌面的 iroh 身份，所有远程运行时共用。绑定要起 tokio 运行时，只能在后台调。
-fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohClient>, String> {
+pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohClient>, String> {
     static CLIENT: std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::IrohClient>>> =
         std::sync::Mutex::new(None);
     let mut slot = CLIENT.lock().unwrap_or_else(|e| e.into_inner());
@@ -279,7 +279,7 @@ pub(crate) fn add_runtime(cx: &mut gpui::App) {
     .detach();
 }
 
-fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
+pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
     use smelt_model::control_api::DevicePair;
     use smelt_model::remote_config::PairParams;
 

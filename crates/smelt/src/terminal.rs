@@ -2251,7 +2251,7 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// 最多让 writer 线程等约一秒，随后断开 attachment 并由 UI 的重连路径恢复。
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
-fn open_request(
+pub(crate) fn open_request(
     rows: usize,
     cols: usize,
     cwd: Option<&str>,

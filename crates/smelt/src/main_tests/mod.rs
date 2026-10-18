@@ -12,6 +12,7 @@ mod main_window_liveness_tests;
 mod overlay_architecture_tests;
 mod pane_state_tests;
 mod project_tests;
+mod remote_terminal_bench;
 mod remote_session_catalog_global_tests;
 mod resizable_split_tests;
 mod session_route_tests;
