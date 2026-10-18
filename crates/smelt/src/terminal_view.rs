@@ -213,6 +213,9 @@ pub struct TerminalView {
     pty_kick_pending: bool,
     /// 断线自动重连是否已在跑（防并发：多个触发点同时 schedule 时只起一个后台任务）。
     reconnecting: bool,
+    /// 断线超过一个退避间隔还没接回来：终端上方显示提示。瞬间就接回的（本机守护
+    /// 无缝升级）不提示，免得闪一下。
+    reconnect_notice: bool,
     /// attachment 已断开但尚未重连时的用户输入。这里只收「明确没有进入旧写队列」
     /// 的输入，重连后按原顺序补发，不能把用户键入当成一次可丢的 UI 事件。
     recovery_input: VecDeque<RecoveryInput>,
@@ -387,6 +390,7 @@ impl TerminalView {
             launch_cmd,
             pty_kick_pending: true,
             reconnecting: false,
+            reconnect_notice: false,
             recovery_input: VecDeque::new(),
             recovery_input_bytes: 0,
             write_error: None,
@@ -610,6 +614,7 @@ impl TerminalView {
                     .flatten();
                 match smelt_client::daemon_state::terminal_reconnect_action(daemon_up, alive) {
                     smelt_client::daemon_state::TerminalReconnectAction::Wait => {
+                        let _ = this.update(cx, |this, cx| this.show_reconnect_notice(cx));
                         cx.background_executor().timer(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(10));
                         continue;
@@ -653,19 +658,31 @@ impl TerminalView {
                         break;
                     }
                     Err(_) => {
+                        let _ = this.update(cx, |this, cx| this.show_reconnect_notice(cx));
                         cx.background_executor().timer(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(10));
                     }
                 }
             }
-            // 会话消失（shell 退出）或视图销毁：复位标志，下次断线还能再触发。
-            let _ = this.update(cx, |this, _| {
+            // 接回、会话消失（shell 退出）或视图销毁：复位标志，下次断线还能再触发。
+            let _ = this.update(cx, |this, cx| {
+                if this.reconnect_notice {
+                    this.reconnect_notice = false;
+                    cx.notify();
+                }
                 if this.terminal_generation == generation {
                     this.reconnecting = false;
                 }
             });
         })
         .detach();
+    }
+
+    fn show_reconnect_notice(&mut self, cx: &mut Context<Self>) {
+        if !self.reconnect_notice {
+            self.reconnect_notice = true;
+            cx.notify();
+        }
     }
 
     /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
@@ -1841,6 +1858,28 @@ impl Render for TerminalView {
             // 滚动条：有 scrollback 时画在右侧；拖 thumb / 点轨道跳转。
             .when(scroll_info.max_offset > 0, |root| {
                 root.child(self.render_scrollbar(scroll_info, cx))
+            })
+            // 断线提示：画面停在断开前，不说明的话像是卡死了。
+            .when(self.reconnect_notice, |root| {
+                let runtime = crate::runtimes::runtime_name(self.runtime.key(), cx);
+                root.child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .left_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(crate::ui_theme::bg_card()))
+                        .border_1()
+                        .border_color(rgb(crate::ui_theme::border_mid()))
+                        .shadow_md()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(format!(
+                            "与「{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出"
+                        )),
+                )
             })
     }
 }
