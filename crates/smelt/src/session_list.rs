@@ -77,7 +77,7 @@ fn runtime_section_header(
 ) -> Stateful<Div> {
     let key = runtime.key().clone();
     let name = crate::runtimes::runtime_name(&key, cx);
-    let online = crate::runtimes::runtime_online(&key, cx);
+    let unavailable = crate::runtimes::runtime_unavailable_label(&key, cx);
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     div()
         .id(ElementId::from(group.clone()))
@@ -90,13 +90,18 @@ fn runtime_section_header(
         .gap_1p5()
         .text_xs()
         .text_color(rgb(ui_theme::text_faint()))
-        .child(div().size(px(6.)).rounded_full().bg(rgb(if online {
-            ui_theme::session_dot_color(AgentStatus::Idle).into()
-        } else {
-            ui_theme::text_faint()
-        })))
+        .child(
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .bg(rgb(if unavailable.is_none() {
+                    ui_theme::session_dot_color(AgentStatus::Idle).into()
+                } else {
+                    ui_theme::text_faint()
+                })),
+        )
         .child(name)
-        .when(!online, |d| d.child("· 离线"))
+        .when_some(unavailable, |d, label| d.child(format!("· {label}")))
         .child(div().flex_1())
         .child(
             Button::new(ElementId::from(SharedString::from(format!(

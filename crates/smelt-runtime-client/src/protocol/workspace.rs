@@ -18,7 +18,8 @@ impl ControlCall for WorkspaceLoadCall {
     const METHOD: ControlMethod = ControlMethod::WorkspaceLoad;
 }
 
-/// 整份保存。`base_revision` 不是当前版本时回 `conflict`，不写入。
+/// 整份保存。`base_revision` 不是当前版本时回 `conflict`，不写入；例外是当前版本正是
+/// 同一个 `writer` 用更小的 `writer_seq` 提交的（上次的回执丢了），照常提交。
 pub enum WorkspaceSaveCall {}
 
 impl ControlCall for WorkspaceSaveCall {
@@ -39,6 +40,10 @@ pub struct WorkspaceLoadResult {
 pub struct WorkspaceSaveParams {
     /// 客户端上次读到或保存后的版本。
     pub base_revision: u64,
+    /// 客户端这次运行的写入方 id，每次启动重新生成。
+    pub writer: String,
+    /// 同一写入方每次提交加一，运行时据此挡住超时后才到的旧请求。
+    pub writer_seq: u64,
     pub document: serde_json::Value,
 }
 

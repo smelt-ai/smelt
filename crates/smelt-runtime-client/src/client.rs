@@ -175,6 +175,7 @@ mod tests {
                 arch: Some("aarch64".to_string()),
                 hostname: Some("linux-box".to_string()),
             },
+            events: None,
         }
     }
 

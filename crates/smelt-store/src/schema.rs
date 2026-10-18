@@ -563,7 +563,9 @@ CREATE TABLE runtime_identity (
 );
 CREATE TABLE workspace_catalog (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  revision INTEGER NOT NULL CHECK (revision >= 0)
+  revision INTEGER NOT NULL CHECK (revision >= 0),
+  writer TEXT,
+  writer_seq INTEGER
 );
 CREATE TABLE launch_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1693,4 +1695,11 @@ CREATE TABLE workspace_menu_session (
   agent TEXT
 );
 DROP TABLE kv;
+";
+
+/// v18 → v19：工作区目录记下提交当前版本的写入方（客户端这次运行的 id 和它的提交序号），
+/// 回执丢了的客户端带着旧版本重发时，运行时认得出是它自己的提交，不当成冲突。
+pub const MIGRATE_V18_TO_V19: &str = "
+ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
+ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
 ";

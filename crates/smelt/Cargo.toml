@@ -78,5 +78,7 @@ raw-window-handle = "0.6"
 # 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
 smelt-core = { path = "../smelt-core" }
 smelt-store = { path = "../smelt-store" }
+# 版本协商的测试要按这个桌面的事件投影版本扮一台运行时。
+smelt-event-protocol = { path = "../smelt-event-protocol" }
 gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
 rusqlite = { version = "0.37", features = ["bundled"] }

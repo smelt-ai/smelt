@@ -48,9 +48,9 @@ pub use snapshots::{
     PublishedSessionRecord, PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot,
     QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
     RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
-    RemoteTerminalSessionRecord, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceLayoutNode,
-    WorkspaceMenuProjectRecord, WorkspaceMenuSessionRecord, WorkspaceSessionRecord,
-    WorkspaceSnapshot, WorktreeInheritSnapshot,
+    RemoteTerminalSessionRecord, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogCommit,
+    WorkspaceCatalogWriter, WorkspaceLayoutNode, WorkspaceMenuProjectRecord,
+    WorkspaceMenuSessionRecord, WorkspaceSessionRecord, WorkspaceSnapshot, WorktreeInheritSnapshot,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -62,7 +62,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 18;
+pub const STORE_SCHEMA_VERSION: u32 = 19;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -279,8 +279,22 @@ impl Store {
         imp::workspace_catalog_revision(&self.backend)
     }
 
-    pub fn put_workspace_catalog_revision(&self, revision: u64) -> Result<(), StoreError> {
-        imp::put_workspace_catalog_revision(&self.backend, revision)
+    /// 基于 `base_revision` 提交整份工作区目录。比对版本、写快照、推进版本、记下写入方
+    /// 在同一个事务里，中途失败什么都不留下。
+    ///
+    /// 基准就是当前版本时照常提交。基准落后时，只有当前版本正是同一个写入方用更小的
+    /// 序号提交的，才算它自己的提交：回执在路上丢了，客户端还停在旧版本，这不是冲突。
+    /// 写入方的版本只在收到回执或重新读取时前进，它基于旧版本而当前版本是它写的，
+    /// 中间那些版本也都是它写的；别人写过一次，最后的写入方就不是它了。序号挡住超时后
+    /// 才到的旧请求，免得它盖掉后发先到的新提交。
+    pub fn commit_workspace_snapshot(
+        &self,
+        base_revision: u64,
+        writer: &WorkspaceCatalogWriter,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Result<WorkspaceCatalogCommit, StoreError> {
+        validate_name("workspace catalog writer", &writer.id)?;
+        imp::commit_workspace_snapshot(&self.backend, base_revision, writer, snapshot)
     }
 
     /// 某条历史会话由哪个智能体定义创建。`profile_id` 为空表示没有 profile。
@@ -1081,12 +1095,23 @@ mod imp {
         read(backend, crate::config::read_workspace_catalog_revision)
     }
 
-    pub(super) fn put_workspace_catalog_revision(
+    pub(super) fn commit_workspace_snapshot(
         backend: &Backend,
-        revision: u64,
-    ) -> Result<(), StoreError> {
+        base_revision: u64,
+        writer: &super::WorkspaceCatalogWriter,
+        snapshot: &super::WorkspaceSnapshot,
+    ) -> Result<super::WorkspaceCatalogCommit, StoreError> {
         write(backend, |transaction| {
-            crate::config::write_workspace_catalog_revision(transaction, revision)
+            let head = crate::config::read_workspace_catalog_head(transaction)?;
+            if !head.accepts(base_revision, writer) {
+                return Ok(super::WorkspaceCatalogCommit::Conflict {
+                    current: head.revision,
+                });
+            }
+            crate::workspace::write_workspace_snapshot(transaction, snapshot)?;
+            let revision = head.revision + 1;
+            crate::config::write_workspace_catalog_head(transaction, revision, writer)?;
+            Ok(super::WorkspaceCatalogCommit::Committed { revision })
         })
     }
 
@@ -2741,6 +2766,16 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 18 {
+            apply_v19_workspace_catalog_writer(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v18 形状：补完两列后与当前形状逐字一致，就说明原来正是 v18。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 17 {
             if !schema_matches_v17(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -2996,18 +3031,31 @@ mod imp {
     }
 
     /// v18 去掉通用 `kv`：先把运行时自己的数据读进内存，改完结构再写进新表。
-    /// 已经没有 `kv` 的库（新形状的夹具）跳过。
+    /// 已经没有 `kv` 的库（新形状的夹具）跳过这一步，接着补 v19。
     fn apply_v18_runtime_tables(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
-        if !table_names(transaction)?.iter().any(|table| table == "kv") {
-            return Ok(());
+        if table_names(transaction)?.iter().any(|table| table == "kv") {
+            // 只改认得的 v17 形状；前面哪一步没收敛到 v17，就按认不出的库拒绝，整笔回滚。
+            if !schema_matches_v17(transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            let state = crate::migrate_v18::read_v17_state(transaction)?;
+            transaction.execute_batch(crate::schema::MIGRATE_V17_TO_V18)?;
+            crate::migrate_v18::write_v18_state(transaction, state)?;
         }
-        // 只改认得的 v17 形状；前面哪一步没收敛到 v17，就按认不出的库拒绝，整笔回滚。
-        if !schema_matches_v17(transaction)? {
-            return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+        apply_v19_workspace_catalog_writer(transaction)
+    }
+
+    /// v19 给工作区目录补上写入方两列。已经有这两列的库跳过。
+    fn apply_v19_workspace_catalog_writer(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "workspace_catalog")?
+            .iter()
+            .any(|column| column == "writer")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V18_TO_V19)?;
         }
-        let state = crate::migrate_v18::read_v17_state(transaction)?;
-        transaction.execute_batch(crate::schema::MIGRATE_V17_TO_V18)?;
-        crate::migrate_v18::write_v18_state(transaction, state)
+        Ok(())
     }
 
     fn unrecognized_schema_error(version: u32) -> StoreError {
@@ -3850,10 +3898,12 @@ mod imp {
     pub(super) fn workspace_catalog_revision(_backend: &Backend) -> Result<u64, StoreError> {
         unsupported()
     }
-    pub(super) fn put_workspace_catalog_revision(
+    pub(super) fn commit_workspace_snapshot(
         _backend: &Backend,
-        _revision: u64,
-    ) -> Result<(), StoreError> {
+        _base_revision: u64,
+        _writer: &super::WorkspaceCatalogWriter,
+        _snapshot: &super::WorkspaceSnapshot,
+    ) -> Result<super::WorkspaceCatalogCommit, StoreError> {
         unsupported()
     }
     pub(super) fn history_agent_binding(
@@ -7116,6 +7166,195 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    fn catalog_writer(id: &str, seq: u64) -> WorkspaceCatalogWriter {
+        WorkspaceCatalogWriter {
+            id: id.to_string(),
+            seq,
+        }
+    }
+
+    fn catalog_snapshot(project: &str) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            projects: vec![project.to_string()],
+            sessions: Vec::new(),
+        }
+    }
+
+    fn catalog_projects(store: &Store) -> Vec<String> {
+        store.get_workspace_snapshot().unwrap().unwrap().projects
+    }
+
+    /// 回执丢了：运行时已经提交，客户端还停在旧版本。它下一次提交基于旧版本，
+    /// 但当前版本正是它自己写的，必须照常提交，不能当成别的设备改过。
+    #[test]
+    fn same_writer_resending_on_a_stale_base_after_a_lost_reply_commits() {
+        let dir = temp_dir("catalog-lost-reply");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let writer = |seq| catalog_writer("client-a", seq);
+
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(0, &writer(1), &catalog_snapshot("/a1"))
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 1 }
+        );
+        // 回执丢了，客户端仍以 0 为基准，接连又丢了一次。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(0, &writer(2), &catalog_snapshot("/a2"))
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 2 }
+        );
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(0, &writer(3), &catalog_snapshot("/a3"))
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 3 }
+        );
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 3);
+        assert_eq!(catalog_projects(&store), ["/a3"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 别的写入方提交过一次，基于旧版本的提交就是真冲突，哪怕更早的版本是自己写的。
+    #[test]
+    fn stale_base_after_another_writer_committed_is_a_conflict() {
+        let dir = temp_dir("catalog-other-writer");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+
+        store
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
+            .unwrap();
+        store
+            .commit_workspace_snapshot(1, &catalog_writer("client-b", 1), &catalog_snapshot("/b"))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    0,
+                    &catalog_writer("client-a", 2),
+                    &catalog_snapshot("/mine")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 2 }
+        );
+        // 新的写入方（比如重启后的客户端）基于旧版本也一样。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    1,
+                    &catalog_writer("client-c", 1),
+                    &catalog_snapshot("/mine")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 2 }
+        );
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 2);
+        assert_eq!(catalog_projects(&store), ["/b"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 超时的旧请求在新提交之后才到：序号更小，不能盖掉更新的那份。
+    #[test]
+    fn late_request_from_the_same_writer_cannot_overwrite_a_newer_commit() {
+        let dir = temp_dir("catalog-late-request");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+
+        store
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 2), &catalog_snapshot("/new"))
+            .unwrap();
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    0,
+                    &catalog_writer("client-a", 1),
+                    &catalog_snapshot("/old")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 1 }
+        );
+        assert_eq!(catalog_projects(&store), ["/new"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 库里各结构对象的建表语句，去掉空白后按名字排好，用来比较两份库的形状。
+    fn normalized_schema(path: &Path) -> Vec<(String, String, String)> {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_schema
+                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                let sql: Option<String> = row.get(2)?;
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    sql.unwrap_or_default()
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect(),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// v18 的库：工作区目录补上写入方两列，原来的版本号留着。
+    #[test]
+    fn migrates_v18_workspace_catalog_to_record_its_writer() {
+        let dir = temp_dir("migrate-v18-catalog-writer");
+        let path = dir.join(DATABASE_FILE_NAME);
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
+                 ALTER TABLE workspace_catalog DROP COLUMN writer;
+                 INSERT INTO workspace_catalog(id, revision) VALUES (1, 41);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 18).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 41);
+        // 迁移来的版本没有写入方，只认基于当前版本的提交。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    40,
+                    &catalog_writer("client-a", 1),
+                    &catalog_snapshot("/a")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 41 }
+        );
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    41,
+                    &catalog_writer("client-a", 1),
+                    &catalog_snapshot("/a")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 42 }
+        );
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v18 升上来的库要和新建的库一个形状"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn runtime_settings_round_trip_through_typed_tables() {
         let dir = temp_dir("runtime-settings");
@@ -7126,8 +7365,10 @@ mod tests {
         assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
 
         assert_eq!(store.workspace_catalog_revision().unwrap(), 0);
-        store.put_workspace_catalog_revision(7).unwrap();
-        assert_eq!(store.workspace_catalog_revision().unwrap(), 7);
+        store
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
+            .unwrap();
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 1);
 
         store
             .put_remote_config_snapshot(&RemoteConfigSnapshot {

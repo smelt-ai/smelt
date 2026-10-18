@@ -8,7 +8,7 @@ use super::*;
 use smelt_core::control_api::SessionList;
 use smelt_runtime_client::protocol::control::{
     CONTROL_API_VERSION, ControlClientError, ControlErrorCode, EmptyParams,
-    SUPPORTED_CONTROL_METHODS,
+    EventProtocolDescription, SUPPORTED_CONTROL_METHODS,
 };
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use smelt_runtime_client::{DEFAULT_REQUEST_TIMEOUT, RequestError, RuntimeClient};
@@ -98,6 +98,16 @@ fn describe_reports_protocol_version_methods_and_platform() {
     assert_eq!(result.daemon.arch.as_deref(), Some(std::env::consts::ARCH));
     // 测试进程不开 SQLite 路由，运行时身份读不到；持久化由 runtime_identity 的单测覆盖。
     assert_eq!(result.daemon.runtime_id, None);
+    // 客户端订阅前靠这几项判断解不解得了这个运行时推来的投影。
+    assert_eq!(
+        result.events,
+        Some(EventProtocolDescription {
+            protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
+            projection_version: smelt_event_protocol::CORE_PROJECTION_VERSION,
+            session_projection_version: smelt_event_protocol::CORE_SESSION_PROJECTION_VERSION,
+            session_state_schema_version: smelt_event_protocol::CORE_SESSION_STATE_SCHEMA_VERSION,
+        })
+    );
 }
 
 #[test]

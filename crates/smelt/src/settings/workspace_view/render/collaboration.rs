@@ -319,6 +319,9 @@ pub(super) fn remote_page(
                         true,
                     ),
                     crate::runtimes::RuntimeStatus::Offline(error) => (format!("离线：{error}"), false),
+                    crate::runtimes::RuntimeStatus::Incompatible(detail) => {
+                        (format!("版本不兼容：{detail}"), false)
+                    }
                 };
                 list = list.child(
                     h_flex()

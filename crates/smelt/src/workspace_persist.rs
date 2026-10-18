@@ -588,12 +588,40 @@ fn save_workspace_ui(ui: &WorkspaceUiState) -> Result<(), String> {
 }
 
 /// 和运行时那份工作区目录的同步状态。保存在后台线程推进版本，所以用原子量共享。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct WorkspaceCatalogSync {
     /// 上次读到或保存成功后的版本，下一次保存以它为基准。
     pub(crate) revision: Arc<AtomicU64>,
     /// 别的客户端改过目录、这边的保存被拒之后置位：不再提交，免得覆盖对方。
     pub(crate) blocked: Arc<AtomicBool>,
+    /// 这边这次运行的写入方 id。保存的回执丢了、版本没跟上时，运行时凭它认出当前版本
+    /// 是这边自己提交的，下一次保存照常提交，不当成别的设备改过。
+    writer: Arc<str>,
+    /// 每次提交加一，运行时据此挡住超时后才到的旧请求。
+    writer_seq: Arc<AtomicU64>,
+}
+
+impl Default for WorkspaceCatalogSync {
+    fn default() -> Self {
+        Self {
+            revision: Arc::default(),
+            blocked: Arc::default(),
+            writer: uuid::Uuid::new_v4().to_string().into(),
+            writer_seq: Arc::default(),
+        }
+    }
+}
+
+impl WorkspaceCatalogSync {
+    /// 下一次提交：以上次确认的版本为基准，序号加一。
+    fn save_params(&self, document: serde_json::Value) -> WorkspaceSaveParams {
+        WorkspaceSaveParams {
+            base_revision: self.revision.load(Ordering::Acquire),
+            writer: self.writer.to_string(),
+            writer_seq: self.writer_seq.fetch_add(1, Ordering::AcqRel) + 1,
+            document,
+        }
+    }
 }
 
 /// 一个运行时那份目录的一次提交。主线程构建（纯内存），后台线程提交。
@@ -667,10 +695,7 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
     }
     let mut notice = None;
     if !job.catalog.blocked.load(Ordering::Acquire) {
-        let params = WorkspaceSaveParams {
-            base_revision: job.catalog.revision.load(Ordering::Acquire),
-            document: job.document.clone(),
-        };
+        let params = job.catalog.save_params(job.document.clone());
         match job
             .runtime
             .client()
@@ -689,6 +714,8 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
                         .to_string(),
                 );
             }
+            // 运行时可能已经提交、只是回执没回来。版本不动，下一次保存仍以它为基准，
+            // 运行时认得出中间的版本是这边自己写的。
             Err(error) => eprintln!(
                 "[workspace] 保存工作区失败：{}",
                 crate::runtime_call::error_text(error)
@@ -1195,6 +1222,30 @@ impl Workspace {
             }
         }
         self.local.write_queue.wait_for_drain()
+    }
+}
+
+#[cfg(test)]
+mod workspace_catalog_sync_tests {
+    use super::WorkspaceCatalogSync;
+    use std::sync::atomic::Ordering;
+
+    /// 同一个运行时那份目录的各次提交（各自克隆了同步状态）用同一个写入方、序号递增；
+    /// 另一份同步状态是另一个写入方。
+    #[test]
+    fn saves_share_one_writer_and_advance_its_sequence() {
+        let sync = WorkspaceCatalogSync::default();
+        sync.revision.store(7, Ordering::Release);
+
+        let first = sync.clone().save_params(serde_json::json!("a"));
+        let second = sync.clone().save_params(serde_json::json!("b"));
+        assert_eq!((first.base_revision, first.writer_seq), (7, 1));
+        assert_eq!((second.base_revision, second.writer_seq), (7, 2));
+        assert_eq!(first.writer, second.writer);
+        assert!(!first.writer.is_empty());
+
+        let other = WorkspaceCatalogSync::default().save_params(serde_json::json!("c"));
+        assert_ne!(other.writer, first.writer);
     }
 }
 

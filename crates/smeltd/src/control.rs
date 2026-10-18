@@ -19,8 +19,8 @@ use smelt_core::control_api::{
 use smelt_runtime_client::protocol::control::{
     CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlError, ControlErrorCode,
     ControlMethod, ControlProtocolDescription, ControlRequestEnvelope, ControlResponse,
-    DaemonRuntimeInfo, EmptyParams, SUPPORTED_CONTROL_METHODS, SystemDescribeResult, decode_params,
-    decode_request_envelope,
+    DaemonRuntimeInfo, EmptyParams, EventProtocolDescription, SUPPORTED_CONTROL_METHODS,
+    SystemDescribeResult, decode_params, decode_request_envelope,
 };
 
 use super::session_catalog::published_session_states;
@@ -165,6 +165,14 @@ fn dispatch_control(
                     arch: Some(std::env::consts::ARCH.to_string()),
                     hostname: smelt_sys::hostname(),
                 },
+                events: Some(EventProtocolDescription {
+                    protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
+                    projection_version: smelt_event_protocol::CORE_PROJECTION_VERSION,
+                    session_projection_version:
+                        smelt_event_protocol::CORE_SESSION_PROJECTION_VERSION,
+                    session_state_schema_version:
+                        smelt_event_protocol::CORE_SESSION_STATE_SCHEMA_VERSION,
+                }),
             };
             success_value(control_version, &request_id, result)
         }
@@ -655,7 +663,7 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            match smelt_core::workspace_catalog::save(params.base_revision, &params.document) {
+            match smelt_core::workspace_catalog::save(&params) {
                 Ok(revision) => success_value(
                     control_version,
                     &request_id,

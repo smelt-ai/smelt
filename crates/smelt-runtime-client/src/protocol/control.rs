@@ -12,6 +12,9 @@ use serde_json::Value;
 
 use super::daemon::DaemonOperation;
 
+/// 控制协议版本。只加方法不升它：客户端按 `system.describe` 的方法清单看运行时有没有
+/// 自己要用的方法。删方法、改已有方法的参数或结果才升，同时抬
+/// [`CONTROL_API_MIN_SUPPORTED_VERSION`]，旧客户端据此知道该升级自己。
 pub const CONTROL_API_VERSION: u16 = 1;
 pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 1;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
@@ -239,10 +242,27 @@ pub struct DaemonRuntimeInfo {
     pub hostname: Option<String>,
 }
 
+/// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：版本对不上，
+/// 客户端订阅了也解不出来，只会断开再连。所以运行时在这里报出来，客户端订阅前先对。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventProtocolDescription {
+    /// `event_subscribe` 握手的事件总线协议版本。
+    pub protocol_version: u16,
+    /// 会话以外的核心投影（远程会话目录、菜单、自动化）的版本。
+    pub projection_version: u16,
+    /// 会话投影快照的版本。
+    pub session_projection_version: u16,
+    /// `session.state_changed` 事件的 schema 版本。
+    pub session_state_schema_version: u16,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SystemDescribeResult {
     pub control: ControlProtocolDescription,
     pub daemon: DaemonRuntimeInfo,
+    /// `None` 只表示运行时早于版本协商。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<EventProtocolDescription>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

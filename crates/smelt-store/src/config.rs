@@ -3,8 +3,8 @@
 use crate::{
     AutoModelHarness, MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
     QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
-    StoreError, TerminalThemeSnapshot, WorkspaceMenuProjectRecord, WorkspaceMenuSessionRecord,
-    WorktreeInheritSnapshot,
+    StoreError, TerminalThemeSnapshot, WorkspaceCatalogWriter, WorkspaceMenuProjectRecord,
+    WorkspaceMenuSessionRecord, WorktreeInheritSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -32,14 +32,7 @@ pub(crate) fn write_runtime_id(
 }
 
 pub(crate) fn read_workspace_catalog_revision(connection: &Connection) -> Result<u64, StoreError> {
-    let revision: Option<i64> = connection
-        .query_row(
-            "SELECT revision FROM workspace_catalog WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(revision.map_or(0, |revision| revision.max(0) as u64))
+    Ok(read_workspace_catalog_head(connection)?.revision)
 }
 
 pub(crate) fn write_workspace_catalog_revision(
@@ -50,6 +43,66 @@ pub(crate) fn write_workspace_catalog_revision(
         "INSERT INTO workspace_catalog(id, revision) VALUES (1, ?1)
          ON CONFLICT(id) DO UPDATE SET revision = excluded.revision",
         [i64::try_from(revision).unwrap_or(i64::MAX)],
+    )?;
+    Ok(())
+}
+
+/// 工作区目录当前的版本，和提交这个版本的写入方。
+pub(crate) struct WorkspaceCatalogHead {
+    pub(crate) revision: u64,
+    writer: Option<(String, u64)>,
+}
+
+impl WorkspaceCatalogHead {
+    /// 规则见 [`crate::Store::commit_workspace_snapshot`]。
+    pub(crate) fn accepts(&self, base_revision: u64, writer: &WorkspaceCatalogWriter) -> bool {
+        match &self.writer {
+            Some((id, seq)) if *id == writer.id => {
+                writer.seq > *seq && base_revision <= self.revision
+            }
+            _ => base_revision == self.revision,
+        }
+    }
+}
+
+pub(crate) fn read_workspace_catalog_head(
+    connection: &Connection,
+) -> Result<WorkspaceCatalogHead, StoreError> {
+    let row: Option<(i64, Option<String>, Option<i64>)> = connection
+        .query_row(
+            "SELECT revision, writer, writer_seq FROM workspace_catalog WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((revision, writer, writer_seq)) = row else {
+        return Ok(WorkspaceCatalogHead {
+            revision: 0,
+            writer: None,
+        });
+    };
+    Ok(WorkspaceCatalogHead {
+        revision: revision.max(0) as u64,
+        writer: writer.zip(writer_seq.map(|seq| seq.max(0) as u64)),
+    })
+}
+
+pub(crate) fn write_workspace_catalog_head(
+    transaction: &Transaction<'_>,
+    revision: u64,
+    writer: &WorkspaceCatalogWriter,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO workspace_catalog(id, revision, writer, writer_seq) VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+           revision = excluded.revision,
+           writer = excluded.writer,
+           writer_seq = excluded.writer_seq",
+        params![
+            i64::try_from(revision).unwrap_or(i64::MAX),
+            writer.id,
+            i64::try_from(writer.seq).unwrap_or(i64::MAX),
+        ],
     )?;
     Ok(())
 }

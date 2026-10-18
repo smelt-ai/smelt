@@ -9637,6 +9637,7 @@ dependencies = [
  "smelt-client",
  "smelt-client-store",
  "smelt-core",
+ "smelt-event-protocol",
  "smelt-iroh",
  "smelt-model",
  "smelt-pairing",
