@@ -169,6 +169,7 @@ define_control_methods! {
     NewSessionPinsGet => (NEW_SESSION_PINS_GET_METHOD, "new_session.pins.get"),
     NewSessionPinsToggle => (NEW_SESSION_PINS_TOGGLE_METHOD, "new_session.pins.toggle"),
     TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
+    DesktopTypeText => (DESKTOP_TYPE_TEXT_METHOD, "desktop.type_text"),
     SessionLaunchPrepare => (SESSION_LAUNCH_PREPARE_METHOD, "session.launch.prepare"),
     SessionLoadedSkills => (SESSION_LOADED_SKILLS_METHOD, "session.loaded_skills"),
     AgentMemoryEnsureDir => (AGENT_MEMORY_ENSURE_DIR_METHOD, "agent.memory.ensure_dir"),
@@ -605,7 +606,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 120);
+        assert_eq!(names.len(), 121);
     }
 
     #[test]

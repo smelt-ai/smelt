@@ -1,0 +1,70 @@
+<!doctype html>
+<!--
+  Smelt 远程桌面页：noVNC 的 RFB 客户端，经本机转发口（见 smelt-runtime-client 的 desktop 模块）
+  连到运行时那台机器的 VNC。默认只看；宿主调 window.smelt.setControl(true) 才放行鼠标键盘。
+  连接状态经 window.ipc.postMessage 报给宿主（wry 的 IPC），没有宿主时静默。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>远程桌面</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+  #screen { width: 100%; height: 100%; }
+  #status {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #9a9a9a; font: 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="status">正在连接远程桌面…</div>
+<script type="module">
+import RFB from './core/rfb.js';
+
+const params = new URLSearchParams(location.search);
+const url = `ws://${location.host}/ws?token=${encodeURIComponent(params.get('token') || '')}`;
+const status = document.getElementById('status');
+
+function post(message) {
+  try {
+    if (window.ipc) window.ipc.postMessage(JSON.stringify(message));
+  } catch (_) {}
+}
+
+const rfb = new RFB(document.getElementById('screen'), url, { shared: true });
+rfb.scaleViewport = true;
+rfb.resizeSession = false;
+rfb.viewOnly = params.get('control') !== '1';
+rfb.showDotCursor = true;
+rfb.qualityLevel = 6;
+rfb.compressionLevel = 2;
+
+rfb.addEventListener('connect', () => {
+  status.style.display = 'none';
+  post({ event: 'connected' });
+});
+rfb.addEventListener('disconnect', (event) => {
+  status.style.display = 'flex';
+  status.textContent = event.detail.clean ? '远程桌面已断开' : '和远程桌面的连接断了';
+  post({ event: 'disconnected', clean: event.detail.clean });
+});
+rfb.addEventListener('clipboard', (event) => post({ event: 'clipboard', text: event.detail.text }));
+
+window.smelt = {
+  /** 接管或交还。交还后只看不动。 */
+  setControl(on) {
+    rfb.viewOnly = !on;
+    if (on) rfb.focus();
+  },
+  /** 把文字放进远端的剪贴板，远端再粘贴。 */
+  paste(text) {
+    rfb.clipboardPasteFrom(text);
+  },
+};
+</script>
+</body>
+</html>

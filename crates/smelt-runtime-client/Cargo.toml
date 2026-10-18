@@ -19,3 +19,7 @@ uuid = { version = "1", features = ["v4"] }
 similar = "2"
 # 文件查看器的图片等二进制内容在 JSON 里按 base64 传。
 base64 = "0.22"
+# 远程桌面的本机转发口：网页视图里的 noVNC 说 WebSocket；noVNC 和宿主页总是编进二进制
+# （debug 也一样，手机上没有源码目录可读）。
+tungstenite = "0.29"
+rust-embed = { version = "8", features = ["debug-embed"] }

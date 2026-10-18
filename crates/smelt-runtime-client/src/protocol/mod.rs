@@ -3,6 +3,7 @@
 pub mod browser;
 pub mod control;
 pub mod daemon;
+pub mod desktop;
 pub mod files;
 pub mod git;
 pub mod history;

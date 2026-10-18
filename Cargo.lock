@@ -9836,10 +9836,12 @@ name = "smelt-runtime-client"
 version = "0.9.0"
 dependencies = [
  "base64",
+ "rust-embed",
  "serde",
  "serde_json",
  "similar",
  "smelt-paths",
+ "tungstenite",
  "uuid",
 ]
 

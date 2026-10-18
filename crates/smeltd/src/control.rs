@@ -292,6 +292,21 @@ fn dispatch_control(
             smelt_core::terminal_theme::publish(&theme);
             success_value(control_version, &request_id, EmptyParams::default())
         }
+        ControlMethod::DesktopTypeText => {
+            let params: smelt_runtime_client::protocol::desktop::DesktopTypeTextParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::desktop::type_text(&params.text) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(message) => error_value(
+                    control_version,
+                    &request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, message),
+                ),
+            }
+        }
         ControlMethod::NewSessionPinsGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

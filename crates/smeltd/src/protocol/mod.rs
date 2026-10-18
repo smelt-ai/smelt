@@ -177,6 +177,9 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         DaemonOperation::BrowserAttach => {
             crate::browser::handle_browser_attach(conn, reader, &crate::browser::cdp_endpoint())
         }
+        DaemonOperation::DesktopAttach => {
+            crate::desktop::handle_desktop_attach(conn, reader, &crate::desktop::vnc_endpoint())
+        }
     }
 }
 
