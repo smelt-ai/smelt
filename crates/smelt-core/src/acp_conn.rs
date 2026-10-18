@@ -162,6 +162,8 @@ pub enum ConversationCommand {
     /// 改会话名。用户在侧栏重命名后同步给 agent，让 agent 侧的会话档也叫这个名字。
     /// 不是所有 agent 都支持，不支持的静默忽略——重命名对本地侧栏始终生效。
     SetSessionTitle(String),
+    /// 用户在界面上停一个后台任务。只有会话宿主管着后台任务的驱动（Pi）会处理。
+    StopBackgroundTask { id: String },
     /// 关闭会话：退出连接循环，随连接 drop 杀掉子进程。
     Shutdown,
 }
@@ -220,6 +222,9 @@ where
 pub enum ConversationEvent {
     /// 启动阶段的进度文案（下载运行时 / 拉取适配器等），Starting 横幅显示。
     Status(String),
+    /// 用户该看到的一次性提示（插话、压缩、停后台任务失败等）。显示在输入框上方，
+    /// 下一回合开始时清掉；不能走 `Status`，那条只在启动横幅里显示。
+    Notice(String),
     /// 冷恢复即将由 agent 重放完整历史。必须先清空 daemon 中的旧投影；Ready
     /// 到达时历史可能已经同步回放完，不能再在那里清空。
     HistoryReplayStarted,
@@ -356,6 +361,8 @@ pub enum ConversationEvent {
         used: Option<u64>,
         size: Option<u64>,
     },
+    /// Provider 开始（`Some`）或结束（`None`）自动重试这一轮的模型请求。
+    ProviderRetry(Option<crate::acp_session::ProviderRetryView>),
     /// Provider 侧 steering / follow-up 队列快照。
     PromptQueue {
         steering: Vec<String>,
@@ -363,10 +370,12 @@ pub enum ConversationEvent {
     },
     /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加；客户端处理后
     /// 发送 `AcknowledgeComposerRestore`，服务端清掉文本和图片，但保留 revision 水位。
+    /// `images[i]` 是 `texts[i]` 的附图：「立即发送」认领其中一条时，图片要跟着它走。
+    /// 只有图的那条，文字是空串。
     ComposerRestore {
         revision: u64,
         texts: Vec<String>,
-        images: Vec<PromptImage>,
+        images: Vec<Vec<PromptImage>>,
     },
     /// agent 的选择题 / 表单（AskUserQuestion 类）：UI 渲染字段，凭 responder 回填。
     Elicitation {
@@ -383,6 +392,10 @@ pub enum ConversationEvent {
     /// Pi 现在能接受一条不带 streamingBehavior 的 prompt。
     /// 只有这条信号才打开 Pi 会话的发送闸门；界面上的回合结束不算。
     ProviderIdle,
+    /// Provider 自己开了一轮，不是宿主发的 prompt。Pi 的后台任务、后台子智能体
+    /// 结果带 `triggerTurn` 时就是这样。没有它，这一轮的输出落在已结束的回合上：
+    /// 界面不转圈、不能停，结束也没有完成提示。
+    ProviderTurnStarted,
     /// 一轮 prompt 结束（含被取消）。
     TurnEnded(StopReason),
     /// 一轮 prompt 以 JSON-RPC 错误收场（agent 明确回了 error，而不是断线）。
@@ -3151,6 +3164,8 @@ async fn drive_session<S: SessionDrive>(
             }
             // 通用 ACP 没有改会话名的方法；本地标题已经改好，这里无声跳过。
             Next::Cmd(Some(ConversationCommand::SetSessionTitle(_))) => {}
+            // 通用 ACP 没有宿主里的后台任务，界面也不会给它出停止按钮。
+            Next::Cmd(Some(ConversationCommand::StopBackgroundTask { .. })) => {}
             // 通用 ACP 的模型列表由 agent 在 `session/update` 里自己推，没有「重拉」
             // 这个动作；这条命令是给 Pi 那条路径的。
             Next::Cmd(Some(ConversationCommand::RefreshModels)) => {}

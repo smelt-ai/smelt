@@ -2,6 +2,11 @@ import { connect, type Socket } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import { createBashTool, defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { keepsForegroundTimeout, watchHostCommand } from "./bash-run.ts";
+import {
+	SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
+	type SubagentResultStatus,
+	subagentResultMessage,
+} from "./subagent/result.ts";
 
 /** 会话宿主创建的控制套接字。任务进程不在 Pi 里。 */
 export const SMELT_BACKGROUND_TASK_SOCK_ENV = "SMELT_BACKGROUND_TASK_SOCK";
@@ -68,6 +73,8 @@ type HostRequest = Record<string, unknown>;
 
 export type TaskCompletionNotice = {
 	id: string;
+	/** `command` 是宿主起的命令，`subagent` 是挂接的后台子智能体交回的结果。 */
+	kind: "command" | "subagent";
 	title: string;
 	status: string;
 	exitCode: number | null;
@@ -106,6 +113,7 @@ function parseCompletion(value: unknown): TaskCompletionNotice | undefined {
 	if (row.op !== "completion" || typeof row.id !== "string" || !row.id) return undefined;
 	return {
 		id: row.id,
+		kind: row.kind === "subagent" ? "subagent" : "command",
 		title: typeof row.title === "string" ? row.title : "",
 		status: typeof row.status === "string" ? row.status : "",
 		exitCode: typeof row.exitCode === "number" ? row.exitCode : null,
@@ -115,10 +123,22 @@ function parseCompletion(value: unknown): TaskCompletionNotice | undefined {
 	};
 }
 
-function deliverCompletion(pi: ExtensionAPI, notice: TaskCompletionNotice): void {
-	// 同一批里连续调用，不等待。第一条会同步进入运行，后面的跟进当前这一轮。
-	void pi.sendMessage(
-		{
+/** 宿主交回的结果写成会话里的哪条消息、怎么送。命令和后台子智能体各用自己的消息类型。 */
+export function completionMessage(notice: TaskCompletionNotice): {
+	message: Parameters<ExtensionAPI["sendMessage"]>[0];
+	options: Parameters<ExtensionAPI["sendMessage"]>[1];
+} {
+	if (notice.kind === "subagent") {
+		const status: SubagentResultStatus =
+			notice.status === "completed" ? "completed" : notice.status === "stopped" ? "stopped" : "failed";
+		return {
+			message: subagentResultMessage({ id: notice.id, title: notice.title, status, text: notice.output }),
+			// 子智能体的结果等这一轮做完再看，不打断手上的工具调用。
+			options: { triggerTurn: notice.wake, deliverAs: "followUp" },
+		};
+	}
+	return {
+		message: {
 			customType: SMELT_BACKGROUND_TASK_CUSTOM_TYPE,
 			content: [{ type: "text", text: taskNotificationText(notice) }],
 			display: false,
@@ -130,13 +150,51 @@ function deliverCompletion(pi: ExtensionAPI, notice: TaskCompletionNotice): void
 				outputTail: notice.outputTail,
 			},
 		},
-		completionSendOptions(notice.wake),
-	);
+		options: completionSendOptions(notice.wake),
+	};
+}
+
+/** 宿主等 ack 的那两类结果消息。Pi 把它交给模型时，扩展能看到它的 `message_start`。 */
+export function deliveredResultId(message: unknown): string | undefined {
+	const row = message as { role?: unknown; customType?: unknown; details?: { id?: unknown } } | undefined;
+	if (row?.role !== "custom") return undefined;
+	if (row.customType !== SMELT_BACKGROUND_TASK_CUSTOM_TYPE && row.customType !== SMELT_SUBAGENT_RESULT_CUSTOM_TYPE) {
+		return undefined;
+	}
+	return typeof row.details?.id === "string" && row.details.id ? row.details.id : undefined;
+}
+
+/** 告诉宿主这条已经交给模型。连接不在时，宿主会把它交给下一条连接，到时再认一次。 */
+function acknowledgeResult(state: CompletionListener, id: string): void {
+	state.consumed.add(id);
+	const socket = state.socket;
+	if (socket && !socket.destroyed) socket.write(`${JSON.stringify({ op: "ack", id })}\n`);
+}
+
+function deliverCompletion(pi: ExtensionAPI, state: CompletionListener, notice: TaskCompletionNotice): void {
+	// 已经交给过模型、ack 没到宿主（连接断了）的那条，宿主会再写一次。只补 ack。
+	if (state.consumed.has(notice.id)) {
+		acknowledgeResult(state, notice.id);
+		return;
+	}
+	const { message, options } = completionMessage(notice);
+	try {
+		// 同一批里连续调用，不等待。第一条会同步进入运行，后面的跟进当前这一轮。
+		pi.sendMessage(message, options);
+	} catch {
+		// 会话已经换掉（fork、reload），旧的 pi 不能再用。不 ack，宿主交给新会话的监听。
+		return;
+	}
+	// 不开回合的结果直接写进会话，不进 Pi 的队列，`clear_queue` 清不掉它，这时就算收下。
+	// 开回合的要么进队列、要么开一轮，等它的 `message_start` 再认。
+	if (!options?.triggerTurn) acknowledgeResult(state, notice.id);
 }
 
 type CompletionListener = {
 	socket?: Socket;
 	closed: boolean;
+	/** 已经交给模型的结果。宿主重写时只补 ack，不再送。 */
+	consumed: Set<string>;
 };
 
 /** 已经收下 ack 的连接断开，并且扩展还在，就由新连接接着收还没写到的结果。没连上过就停。 */
@@ -185,7 +243,7 @@ function ensureCompletionListener(pi: ExtensionAPI, state: CompletionListener): 
 			const notice = parseCompletion(parsed);
 			if (notice) batch.push(notice);
 		}
-		for (const notice of batch) deliverCompletion(pi, notice);
+		for (const notice of batch) deliverCompletion(pi, state, notice);
 	});
 	socket.on("error", () => {
 		socket.destroy();
@@ -251,11 +309,15 @@ export function endBackgroundTaskOwner(target: string): Promise<BackgroundHostRe
 	return callBackgroundHost(process.env[SMELT_BACKGROUND_TASK_SOCK_ENV], { op: "end_owner", target });
 }
 
-/** 挂接在宿主里的一个后台任务。`finish` 只算第一次，之后的调用什么也不做。 */
+/**
+ * 挂接在宿主里的一个后台任务。`finish` 只算第一次，之后的调用什么也不做。
+ * 带上 `result` 时宿主把它交回会话：和后台命令的完成走同一条监听，等 Pi 真交给模型才算送到，
+ * 会话换了（fork）也交给新会话。
+ */
 export type AttachedBackgroundTask = {
 	id: string;
 	progress(text: string): void;
-	finish(status: "completed" | "failed" | "stopped"): void;
+	finish(status: "completed" | "failed" | "stopped", result?: string): void;
 };
 
 /** 等宿主回 id 最多这么久。宿主不应答时不能把派子智能体卡住。 */
@@ -317,8 +379,8 @@ export function attachBackgroundTask(
 					attached = {
 						id: message.id,
 						progress: (text) => send({ op: "progress", text }),
-						finish: (status) => {
-							send({ op: "finish", status });
+						finish: (status, result) => {
+							send(result === undefined ? { op: "finish", status } : { op: "finish", status, result });
 							ended = true;
 							socket.end();
 						},
@@ -353,7 +415,10 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 	}
 	const names = new Set(configured.map((tool) => tool.name));
 	const socket = () => process.env[SMELT_BACKGROUND_TASK_SOCK_ENV];
-	if (!names.has(SMELT_BACKGROUND_TASK_TOOL_NAME)) {
+	// 子智能体这一轮做完，父进程就结束它，它名下的后台任务跟着被停掉。所以子智能体里
+	// 命令一律前台跑完，也不提供后台启动；不然跑长测试转到后台，结果永远等不回来。
+	const inSubagent = backgroundTaskOwner() !== "";
+	if (!inSubagent && !names.has(SMELT_BACKGROUND_TASK_TOOL_NAME)) {
 		pi.registerTool(defineTool({
 			name: SMELT_BACKGROUND_TASK_TOOL_NAME,
 			label: "后台任务",
@@ -421,18 +486,30 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 		pi.registerTool(defineTool({
 			name: "bash",
 			label: "bash",
-			description:
-				"在当前目录执行 shell 命令。不超过 60 秒的命令沿用 Pi 的执行器并返回输出；更久、nohup 或末尾 & 会转入后台并返回任务 id。",
+			description: inSubagent
+				? "在当前目录执行 shell 命令，等它结束后返回输出。nohup 或末尾 & 会转入后台并返回任务 id。"
+				: "在当前目录执行 shell 命令。不超过 60 秒的命令沿用 Pi 的执行器并返回输出；更久、nohup 或末尾 & 会转入后台并返回任务 id。",
 			promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
-			promptGuidelines: [
-				"Use bash for ordinary commands. Output comes back when the command finishes within 60 seconds.",
-				"A timeout of 60 seconds or less stops the command. A longer timeout, or no timeout, moves it to the background at 60 seconds.",
-				"Do not append & or use nohup. Those start as background tasks immediately.",
-				"Use background_task_output, background_task_wait, and background_task_stop with a returned task id.",
-			],
+			promptGuidelines: inSubagent
+				? [
+						"Use bash for ordinary commands. Output comes back when the command finishes, however long it takes.",
+						"Do not append & or use nohup. Those start as background tasks, which stop when you finish.",
+					]
+				: [
+						"Use bash for ordinary commands. Output comes back when the command finishes within 60 seconds.",
+						"A timeout of 60 seconds or less stops the command. A longer timeout, or no timeout, moves it to the background at 60 seconds.",
+						"Do not append & or use nohup. Those start as background tasks immediately.",
+						"Use background_task_output, background_task_wait, and background_task_stop with a returned task id.",
+					],
 			parameters: Type.Object({
 				command: Type.String({ description: "Shell command to execute" }),
-				timeout: Type.Optional(Type.Number({ description: "Timeout in seconds. At most 60 stops the command; above that it continues in the background." })),
+				timeout: Type.Optional(
+					Type.Number({
+						description: inSubagent
+							? "Timeout in seconds. The command stops when it runs out."
+							: "Timeout in seconds. At most 60 stops the command; above that it continues in the background.",
+					}),
+				),
 			}),
 			async execute(toolCallId, params, signal, onUpdate, ctx) {
 				const command = String(params.command ?? "");
@@ -448,7 +525,7 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 					return hostText({ ok: true, id: started.id, text: `已转入后台 ${started.id}。nohup 和末尾 & 不会脱离管理。` });
 				}
 				const timeout = typeof params.timeout === "number" ? params.timeout : undefined;
-				if (keepsForegroundTimeout(timeout)) {
+				if (inSubagent || keepsForegroundTimeout(timeout)) {
 					return createBashTool(ctx.cwd).execute(toolCallId, { command, timeout }, signal, onUpdate);
 				}
 				const ran = await watchHostCommand({
@@ -530,13 +607,18 @@ function registerBackgroundTools(pi: ExtensionAPI): void {
 
 export function smeltBackgroundTaskExtension(pi: ExtensionAPI): void {
 	registerBackgroundTools(pi);
-	const listener: CompletionListener = { closed: false };
+	const listener: CompletionListener = { closed: false, consumed: new Set() };
 	ensureCompletionListener(pi, listener);
 	// 工具表在工厂执行时可能还没绑上。session_start 再注册一次。
 	// 这里不停任务：进程在会话宿主里，/reload 只重建扩展。
 	pi.on("session_start", () => {
 		registerBackgroundTools(pi);
 		ensureCompletionListener(pi, listener);
+	});
+	// Pi 把排队或开回合送出的结果交给模型了，这时才告诉宿主收下。
+	pi.on("message_start", (event) => {
+		const id = deliveredResultId(event.message);
+		if (id) acknowledgeResult(listener, id);
 	});
 	pi.on("session_shutdown", () => {
 		listener.closed = true;

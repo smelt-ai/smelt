@@ -976,14 +976,6 @@ fn starting_status_copy(
     (title, detail, elapsed)
 }
 
-fn move_queue_item_to_front<T>(queue: &mut std::collections::VecDeque<T>, index: usize) -> bool {
-    let Some(item) = queue.remove(index) else {
-        return false;
-    };
-    queue.push_front(item);
-    true
-}
-
 fn should_cancel_for_immediate_prompt(phase: &DaemonPhase, prompt_dispatch_pending: bool) -> bool {
     matches!(
         phase,
@@ -994,56 +986,24 @@ fn should_cancel_for_immediate_prompt(phase: &DaemonPhase, prompt_dispatch_pendi
     ) || (prompt_dispatch_pending && matches!(phase, DaemonPhase::Idle))
 }
 
-fn is_dispatch_in_flight(prompt_dispatch_pending: bool, immediate_cancel_pending: bool) -> bool {
-    prompt_dispatch_pending || immediate_cancel_pending
-}
-
-/// 快照到达后本地 prompt 闸门怎么走。立即发送会先 cancel 再等 Idle 派发队首；
-/// 若把「任意 Idle」当成取消完成，上一条尚未确认的 dispatch 会把队首永远卡住。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SnapshotPromptGate {
-    prompt_dispatch_pending: bool,
-    immediate_cancel_pending: bool,
-    should_flush_queue: bool,
-}
-
-fn next_snapshot_prompt_gate(
+/// 快照到达后本地派发闸门还要不要握着。
+fn next_prompt_dispatch_pending(
     phase: &DaemonPhase,
     turn_started_at_ms: Option<u64>,
     prompt_dispatch_pending: bool,
-    immediate_cancel_pending: bool,
-    queue_is_empty: bool,
     turn_outcome: Option<AcpTurnOutcome>,
-) -> SnapshotPromptGate {
-    let ended = matches!(phase, DaemonPhase::Dead);
+) -> bool {
     let idle = matches!(phase, DaemonPhase::Idle);
-    // Running 确认、会话结束，或「立即发送」已经把当前回合取消到 Idle：
-    // 上一条 dispatch 不会再等到 Running 回执。
+    // Running 确认或会话结束：上一条 dispatch 不会再等到 Running 回执。
     // 失败/取消的 Idle 也必须放开：否则 Stop 一直亮，回车被当成还在跑。
     // 成功 Idle 不能清——那是防连续提交并发的闸门。
     let failed_or_cancelled = idle
         && turn_outcome.is_some_and(|outcome| {
             outcome.failure_message().is_some() || matches!(outcome, AcpTurnOutcome::Cancelled)
         });
-    let prompt_dispatch_pending = if turn_started_at_ms.is_some()
-        || ended
-        || failed_or_cancelled
-        || (immediate_cancel_pending && idle)
-    {
-        false
-    } else {
-        prompt_dispatch_pending
-    };
-    let should_flush_queue = idle && !prompt_dispatch_pending && !queue_is_empty;
-    // 取消意图保留到真正能派发（或已经无队）为止。
-    let immediate_cancel_pending =
-        immediate_cancel_pending && !ended && !(idle && !prompt_dispatch_pending);
-
-    SnapshotPromptGate {
-        prompt_dispatch_pending,
-        immediate_cancel_pending,
-        should_flush_queue,
-    }
+    let settled =
+        turn_started_at_ms.is_some() || matches!(phase, DaemonPhase::Dead) || failed_or_cancelled;
+    prompt_dispatch_pending && !settled
 }
 
 /// smeltd 会为每份实时快照分配单调递增版本。版本为 0 的是旧 daemon 或本地
@@ -1228,6 +1188,52 @@ pub enum AcpViewEvent {
     /// 会话从 Ended 恢复（自动重连 / 用户手动重启 / GUI 重开 attach）的上升沿。
     /// 只用于刷新视图；Task 状态由 smeltd 直接观察同一 ACP 快照归约。
     Recovered,
+}
+
+/// 上一轮没正常结束后能做的事。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnOutcomeAction {
+    /// 原样重发最后一条用户消息。
+    Retry,
+    /// 接着被截断的地方说。
+    Continue,
+}
+
+/// 上一轮的结局要不要在对话末尾给一张卡：要的话给提示和按钮。成功没有卡；
+/// 取消是用户自己停的，也没有。
+fn turn_outcome_card(outcome: Option<AcpTurnOutcome>) -> Option<(&'static str, TurnOutcomeAction)> {
+    match outcome? {
+        AcpTurnOutcome::Succeeded | AcpTurnOutcome::Cancelled => None,
+        AcpTurnOutcome::Failed => Some(("这一轮没有完成", TurnOutcomeAction::Retry)),
+        AcpTurnOutcome::Refused => Some(("Agent 拒绝继续处理", TurnOutcomeAction::Retry)),
+        AcpTurnOutcome::MaxTokens => Some(("回复太长，被截断了", TurnOutcomeAction::Continue)),
+        AcpTurnOutcome::MaxTurnRequests => {
+            Some(("已达到本轮最大请求数", TurnOutcomeAction::Continue))
+        }
+    }
+}
+
+/// 自动重试的一行说明。
+fn provider_retry_label(retry: &smelt_model::acp_session::ProviderRetryView) -> String {
+    let attempt = if retry.max_attempts > 0 {
+        format!("{}/{}", retry.attempt, retry.max_attempts)
+    } else {
+        retry.attempt.to_string()
+    };
+    let wait = retry.delay_ms.div_ceil(1_000);
+    if wait > 0 {
+        format!("模型请求出错，{wait} 秒后第 {attempt} 次重试")
+    } else {
+        format!("模型请求出错，正在第 {attempt} 次重试")
+    }
+}
+
+/// 输入框上方要不要显示这条提示：本窗口关掉的那一条不再显示，换了新提示照常出来。
+fn notice_to_show(
+    notice: Option<&smelt_model::acp_session::AcpNoticeView>,
+    dismissed_id: Option<u64>,
+) -> Option<&smelt_model::acp_session::AcpNoticeView> {
+    notice.filter(|notice| Some(notice.id) != dismissed_id)
 }
 
 fn task_body_from_selection(selection: String) -> Option<String> {
@@ -1466,16 +1472,9 @@ pub struct AcpView {
     /// macOS 剪贴板会优先把 CleanShot 这类图片暴露为文件路径。文件在
     /// 后台读取时阻止提交，避免用户立即回车只发出了文字。
     pending_external_image_loads: usize,
-    /// ACP 同一 session 一次只能运行一个 turn。新建空白会话的首条 prompt 会直接
-    /// 交给 smeltd（它在握手完成后发送）；运行中或上一条 prompt 尚未确认时，
-    /// 新消息仍先排队，等 Idle 后按顺序发送。「下一条发送」只调整顺序；
-    /// 用户明确选择「立即发送」时才会中断当前回合。
-    queued_prompts: std::collections::VecDeque<(String, Vec<std::sync::Arc<gpui::Image>>)>,
     /// action 已交给 smeltd，但 Running 快照尚未回来。防止快点两次时本地 phase
     /// 仍是 Idle，第二条 prompt 越过队列直接并发发送。
     prompt_dispatch_pending: bool,
-    /// 用户明确要求「立即发送」后，已请求停止当前 turn，等待 Idle 再派发队首。
-    immediate_cancel_pending: bool,
     /// 已发送消息的解码图片缓存，避免流式输出或 spinner 重绘时反复解码 base64。
     rendered_images: std::collections::HashMap<(usize, usize), std::sync::Arc<gpui::Image>>,
     /// Edit diff 的算法结果与紧凑预览，避免卡片展开后的每次重绘都重新计算。
@@ -1549,6 +1548,8 @@ pub struct AcpView {
     /// 最后一条用户气泡悬停时显示。
     supports_rewind: bool,
     compacting: bool,
+    /// smeltd 回合闸门后面排队的消息。回合在跑时不能插话的 agent 收到的新消息都在这。
+    pending_prompts: Vec<smelt_model::acp_session::PendingPromptView>,
     queued_steering: Vec<String>,
     queued_follow_up: Vec<String>,
     last_composer_restore_revision: u64,
@@ -1574,6 +1575,8 @@ pub struct AcpView {
     background_tasks_open: bool,
     /// 用户展开了输出的后台任务 id。
     expanded_background_tasks: std::collections::HashSet<String>,
+    /// 用户点了停止、还在等它结束的后台任务 id。任务结束后从这里拿掉。
+    stopping_background_tasks: std::collections::HashSet<String>,
     /// 用户手动展开的过程/分析摘要（key = entries 索引）。过程组外的思考、
     /// 过程组里对用户说的中间正文，以及后台任务 / 子智能体状态行的输出共用这份状态；
     /// 只属于当前视图。
@@ -1613,6 +1616,12 @@ pub struct AcpView {
     running_tick: bool,
     /// 最近一轮的真实终结结果；Idle 只表示当前没有运行中的回合。
     turn_outcome: Option<AcpTurnOutcome>,
+    /// Provider 正在自动重试这一轮的模型请求。
+    provider_retry: Option<smelt_model::acp_session::ProviderRetryView>,
+    /// 守护进程给用户的一次性提示（操作失败等）。
+    notice: Option<smelt_model::acp_session::AcpNoticeView>,
+    /// 本窗口已经关掉的那条提示。只藏这一条，新提示照常出来。
+    dismissed_notice_id: Option<u64>,
     /// 上一份快照的 `completed_unread` 与相位是否已处于 Ended：用于检测完成/失败
     /// 上升沿（绑定任务的边沿），避免每个 Idle 快照都重复触发。
     was_completed_unread: bool,
@@ -1964,9 +1973,7 @@ impl AcpView {
             agent,
             pending_images: Vec::new(),
             pending_external_image_loads: 0,
-            queued_prompts: std::collections::VecDeque::new(),
             prompt_dispatch_pending: false,
-            immediate_cancel_pending: false,
             rendered_images,
             rendered_diffs,
             rendered_tool_images: std::collections::HashMap::new(),
@@ -2001,6 +2008,7 @@ impl AcpView {
             supports_native_queue: false,
             supports_rewind: false,
             compacting: false,
+            pending_prompts: Vec::new(),
             queued_steering: Vec::new(),
             queued_follow_up: Vec::new(),
             last_composer_restore_revision: 0,
@@ -2016,6 +2024,7 @@ impl AcpView {
             background_tasks: Vec::new(),
             background_tasks_open: false,
             expanded_background_tasks: std::collections::HashSet::new(),
+            stopping_background_tasks: std::collections::HashSet::new(),
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
             user_enter: None,
@@ -2034,6 +2043,9 @@ impl AcpView {
             turn_timings: Vec::new(),
             running_tick: false,
             turn_outcome: None,
+            provider_retry: None,
+            notice: None,
+            dismissed_notice_id: None,
             was_completed_unread: false,
             was_ended: false,
             expanded_tools: std::collections::HashSet::new(),
@@ -2140,6 +2152,7 @@ impl AcpView {
         self.background_tasks.clear();
         self.background_tasks_open = false;
         self.expanded_background_tasks.clear();
+        self.stopping_background_tasks.clear();
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
         self.pending_config_values.clear();
@@ -2150,7 +2163,6 @@ impl AcpView {
         self.usage_breakdown = None;
         self.usage_popover_open = false;
         self.prompt_dispatch_pending = false;
-        self.immediate_cancel_pending = false;
         self.turn_outcome = None;
         self.phase = DaemonPhase::Connecting;
         self.end_reason.clear();
@@ -2199,6 +2211,10 @@ impl AcpView {
         true
     }
 
+    fn visible_notice(&self) -> Option<&smelt_model::acp_session::AcpNoticeView> {
+        notice_to_show(self.notice.as_ref(), self.dismissed_notice_id)
+    }
+
     /// 舞台头状态胶囊用的相位：ACP 当前活动，与守护相位同一枚举。
     pub fn phase(&self) -> DaemonPhase {
         self.phase
@@ -2225,7 +2241,7 @@ impl AcpView {
                 | DaemonPhase::AwaitingApproval
                 | DaemonPhase::WaitingForUser
         ) || self.has_pending_fresh_start_prompt()
-            || is_dispatch_in_flight(self.prompt_dispatch_pending, self.immediate_cancel_pending)
+            || self.prompt_dispatch_pending
     }
 
     /// 消息列表每帧都要布局，但已结束回合的分组不会因为尾部 token 改变。
@@ -2327,7 +2343,6 @@ impl AcpView {
             turn_outcome: self.turn_outcome,
             prompt_dispatch_pending: self.prompt_dispatch_pending
                 || self.pending_conversation_input.is_some(),
-            immediate_cancel_pending: self.immediate_cancel_pending,
             fresh_start_pending: self.has_pending_fresh_start_prompt(),
             has_unfinished_tool: smelt_model::acp_chat::has_unfinished_tool_call(&self.entries),
         }
@@ -2818,7 +2833,6 @@ impl AcpView {
     pub fn pending_prompt_for_save(&self) -> Option<String> {
         self.pending_initial_prompt
             .clone()
-            .or_else(|| self.queued_prompts.front().map(|(text, _)| text.clone()))
             .filter(|text| !text.trim().is_empty())
     }
 
@@ -2905,7 +2919,7 @@ impl AcpView {
     pub fn restore_pending_prompt(&mut self, prompt: Option<String>, delivery_id: Option<String>) {
         // 旧版本可能把未派发的外部投递首包存进 GUI workspace。daemon 现在是
         // 唯一执行者，带 delivery id 的旧意图必须丢弃，避免打开多个窗口时重放。
-        if self.pending_initial_prompt.is_some() || !self.queued_prompts.is_empty() {
+        if self.pending_initial_prompt.is_some() {
             return;
         }
         self.pending_initial_prompt = restorable_gui_prompt(prompt, delivery_id.as_deref());
@@ -3150,6 +3164,43 @@ impl AcpView {
         if let Some(input) = &self.input {
             input.update(cx, |s, cx| s.focus(window, cx));
         }
+    }
+
+    /// 上一轮没正常结束时，再来一次：「重试」原样重发最后一条用户消息（带图），
+    /// 「继续」接着被截断的地方说。都走普通发送，输入框里的草稿和图不受影响。
+    fn rerun_last_turn(
+        &mut self,
+        action: TurnOutcomeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, images) = match action {
+            TurnOutcomeAction::Continue => ("继续".to_string(), Vec::new()),
+            TurnOutcomeAction::Retry => {
+                let Some(last) = self.entries.iter().rev().find_map(|entry| match entry {
+                    AcpEntry::User(text) => Some((text.clone(), Vec::new())),
+                    AcpEntry::UserWithImages { text, images } => Some((
+                        text.clone(),
+                        images
+                            .iter()
+                            .filter_map(decode_acp_image)
+                            .collect::<Vec<_>>(),
+                    )),
+                    _ => None,
+                }) else {
+                    return;
+                };
+                last
+            }
+        };
+        let draft = std::mem::replace(&mut self.pending_images, images);
+        self.send_prompt(text, window, cx);
+        self.pending_images = draft;
+    }
+
+    /// 用户是否正往上翻着看历史。这时最新结果不在眼前，不能算已读。
+    pub fn is_viewing_history(&self) -> bool {
+        self.viewing_history
     }
 
     /// 把一段文本塞进输入框并聚焦（SKILLS 面板点一条 skill 用）。
@@ -3418,48 +3469,19 @@ impl AcpView {
         true
     }
 
-    /// 相位回 Idle 时按顺序取一条排队消息发出去。一次只发一条，避免把整个队列
-    /// 一口气打光后又回到协议不支持的裸并发。
-    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
-        if self.prompt_dispatch_pending || !matches!(self.phase, DaemonPhase::Idle) {
-            return;
+    /// 撤回 smeltd 队列里还没发出的一条。正文和附图由守护进程经输入框还原送回来，
+    /// 这里不抄一份，也不猜它还在不在队里。
+    fn withdraw_pending_prompt(&mut self, id: u64, cx: &mut Context<Self>) {
+        let sent = self.handle.as_ref().is_some_and(|handle| {
+            handle
+                .action_tx
+                .try_send(AcpUserAction::WithdrawPendingPrompt { id })
+                .is_ok()
+        });
+        if !sent {
+            self.paste_hint = Some("无法撤回排队消息".to_string());
+            cx.notify();
         }
-        let Some((text, images)) = self.queued_prompts.pop_front() else {
-            return;
-        };
-        if !self.send_prompt_now(&text, &images, cx) {
-            self.queued_prompts.push_front((text, images));
-        }
-    }
-
-    /// 把一条排队消息移到队首。这里只改变下一条顺序，**绝不**取消正在进行的
-    /// turn；需要中断时用户必须明确点击底部「停止」。
-    fn move_queued_prompt_next(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if !move_queue_item_to_front(&mut self.queued_prompts, ix) {
-            return;
-        }
-
-        if matches!(self.phase, DaemonPhase::Idle) {
-            self.flush_queued_prompt(cx);
-        }
-        cx.notify();
-    }
-
-    /// 立即发送必须先停止当前 turn；ACP 同一 session 不支持并发 prompt。这个
-    /// 动作只由队列项里明确标注的「立即发送（停止当前回答）」触发。
-    fn send_queued_prompt_immediately(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if self.immediate_cancel_pending || !move_queue_item_to_front(&mut self.queued_prompts, ix)
-        {
-            return;
-        }
-
-        if should_cancel_for_immediate_prompt(&self.phase, self.prompt_dispatch_pending) {
-            self.immediate_cancel_pending = true;
-            self.cancel_turn();
-        } else if matches!(self.phase, DaemonPhase::Idle) {
-            self.flush_queued_prompt(cx);
-        }
-        cx.notify();
     }
 
     /// 原生排队「立即发送」是守护进程的一个动作：从 provider 队列拿走这一条，
@@ -3746,6 +3768,22 @@ impl AcpView {
         cx.notify();
     }
 
+    /// 停掉一个后台任务。结果照常交回会话，但不叫醒模型。
+    fn stop_background_task(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(h) = &self.handle else {
+            return;
+        };
+        if h.action_tx
+            .try_send(AcpUserAction::StopBackgroundTask { id: id.clone() })
+            .is_err()
+        {
+            self.paste_hint = Some("无法停止后台任务".to_string());
+        } else {
+            self.stopping_background_tasks.insert(id);
+        }
+        cx.notify();
+    }
+
     fn clear_native_queue(&mut self, cx: &mut Context<Self>) {
         if !self.supports_native_queue {
             return;
@@ -4007,6 +4045,11 @@ impl AcpView {
             self.supports_native_queue = snap.supports_native_queue;
             self.supports_rewind = snap.supports_rewind;
             self.compacting = snap.compacting;
+            self.pending_prompts = snap.pending_prompts;
+            if snap.notice.is_none() {
+                self.dismissed_notice_id = None;
+            }
+            self.notice = snap.notice;
             self.queued_steering = snap.queued_steering;
             self.queued_follow_up = snap.queued_follow_up;
             let restore_revision = snap.composer_restore_revision;
@@ -4039,6 +4082,12 @@ impl AcpView {
             }
             self.plan = snap.plan;
             self.background_tasks = snap.background_tasks;
+            let background_tasks = &self.background_tasks;
+            self.stopping_background_tasks.retain(|id| {
+                running_background_tasks(background_tasks)
+                    .iter()
+                    .any(|task| &task.id == id)
+            });
             if running_background_tasks(&self.background_tasks).is_empty() {
                 self.background_tasks_open = false;
             }
@@ -4092,20 +4141,15 @@ impl AcpView {
         }
         self.supports_image = snap.supports_image;
         self.turn_outcome = snap.turn_outcome;
+        self.provider_retry = snap.provider_retry;
         // note_prompt_sent 会先把 Running 快照推给 GUI，再开始真正的 ACP RPC。
-        // 只有收到这份确认后才允许下一条排队消息等待 Idle；不能用旧的 Idle 快照
-        // 清掉 pending 标记，否则快速连续提交仍会并发打进同一个 session。
-        // 「立即发送」取消成功后的 Idle 是例外：那条 dispatch 不会再有 Running 回执。
-        let gate = next_snapshot_prompt_gate(
+        // 不能用旧的 Idle 快照清掉 pending 标记，否则首包会在握手后的 Idle 上再发一次。
+        self.prompt_dispatch_pending = next_prompt_dispatch_pending(
             &self.phase,
             self.turn_started_at_ms,
             self.prompt_dispatch_pending,
-            self.immediate_cancel_pending,
-            self.queued_prompts.is_empty(),
             self.turn_outcome,
         );
-        self.prompt_dispatch_pending = gate.prompt_dispatch_pending;
-        self.immediate_cancel_pending = gate.immediate_cancel_pending;
         // 完成边沿以 TurnEnded 为准：回合明确成功、无人等待即可。未完成工具
         // 只影响展示，迟到终态按 tool id 回写，不再挡住 CompletedTurn。
         let waiting_on_user = !self.permissions.is_empty() || self.elicitation.is_some();
@@ -4177,10 +4221,6 @@ impl AcpView {
                     self.pending_initial_prompt = Some(prompt);
                     self.pending_images = images;
                 }
-            } else if gate.should_flush_queue {
-                // 交接提示和排队消息不会同时出现（前者只在全新 fork 会话里用），
-                // 分支互斥即可：这轮 Idle 只发队首一条，剩下的等下一次 Idle。
-                self.flush_queued_prompt(cx);
             }
         }
 
@@ -4997,6 +5037,14 @@ fn background_task_running_for(tasks: &[BackgroundTaskView], tool_call_id: &str)
         task.status == BackgroundTaskStatus::Running
             && task.tool_call_id.as_deref() == Some(tool_call_id)
     })
+}
+
+/// 后台任务已经跑了多久。时钟往回拨时按刚开始算。
+fn background_task_elapsed(started_at_ms: u64, now_ms: u64) -> String {
+    format!(
+        "已运行 {}",
+        format_duration(now_ms.saturating_sub(started_at_ms))
+    )
 }
 
 fn background_task_summary(running: usize) -> String {

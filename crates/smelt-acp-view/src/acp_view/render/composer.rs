@@ -487,8 +487,7 @@ impl AcpView {
                             &self.phase,
                             self.prompt_dispatch_pending,
                         );
-                        let immediate_action_available =
-                            can_move_next && !self.immediate_cancel_pending;
+                        let immediate_action_available = can_move_next;
                         let native_items = self.queued_steering.iter().map(|text| {
                             (false, text.as_str())
                         }).chain(self.queued_follow_up.iter().map(|text| {
@@ -512,7 +511,10 @@ impl AcpView {
                                 },
                             );
                             let preview: String = text.chars().take(60).collect();
-                            let preview = if text.chars().count() > 60 {
+                            let preview = if text.trim().is_empty() {
+                                // 只有图的插话，文字是空串。
+                                "[图片]".to_string()
+                            } else if text.chars().count() > 60 {
                                 format!("{preview}…")
                             } else {
                                 preview
@@ -541,14 +543,6 @@ impl AcpView {
                                             .text_color(gpui::rgb(ui_theme::text_muted()))
                                             .child(format!("{kind} · {preview}")),
                                     )
-                                    .when(self.immediate_cancel_pending && ix == 0, |row| {
-                                        row.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(gpui::rgb(ui_theme::text_muted()))
-                                                .child("正在停止当前回答…"),
-                                        )
-                                    })
                                     .when(immediate_action_available, |row| {
                                         let immediate_label = if immediate_cancels_turn {
                                             "立即发送（停止当前回答）"
@@ -590,7 +584,7 @@ impl AcpView {
                                     }),
                             );
                         }
-                        if self.supports_native_queue && !self.immediate_cancel_pending {
+                        if self.supports_native_queue {
                             strip = strip.child(
                                 div()
                                     .id("acp-native-queue-clear")
@@ -609,35 +603,28 @@ impl AcpView {
                         col.child(strip)
                     },
                 )
-                // 排队消息条：当前 turn 未结束时不会立刻打给 agent，得让人看见
-                // 「排队中」，还能撤回，避免误以为消息已丢失。
-                .when(!self.queued_prompts.is_empty(), |col| {
+                // 守护进程排队条：不能中途插话的 agent 在回合结束前不会收到新消息，
+                // 得让人看见「排队中」，还能撤回改了再发，免得以为消息丢了。
+                .when(!self.pending_prompts.is_empty(), |col| {
                     let mut strip = v_flex().px_4().pt_3().gap_1p5();
-                    let can_move_next =
-                        !matches!(self.phase, DaemonPhase::Connecting | DaemonPhase::Dead);
-                    let immediate_cancels_turn = should_cancel_for_immediate_prompt(
-                        &self.phase,
-                        self.prompt_dispatch_pending,
-                    );
-                    let immediate_action_available =
-                        can_move_next && !self.immediate_cancel_pending;
-                    let mut seen_prompts = std::collections::HashMap::new();
-                    for (ix, (text, images)) in self.queued_prompts.iter().enumerate() {
-                        let row_id = queue_row_id("acp-queued-prompt", text, &mut seen_prompts);
-                        let preview: String = text.chars().take(60).collect();
-                        let preview = if text.chars().count() > 60 {
+                    for item in &self.pending_prompts {
+                        let id = item.id;
+                        let preview: String = item.text.chars().take(60).collect();
+                        let preview = if item.text.trim().is_empty() {
+                            "[图片]".to_string()
+                        } else if item.text.chars().count() > 60 {
                             format!("{preview}…")
                         } else {
                             preview
                         };
-                        let img_suffix = if images.is_empty() {
+                        let img_suffix = if item.image_count == 0 || item.text.trim().is_empty() {
                             String::new()
                         } else {
-                            format!("（含 {} 张图）", images.len())
+                            format!("（含 {} 张图）", item.image_count)
                         };
                         strip = strip.child(
                             h_flex()
-                                .id(row_id)
+                                .id(("acp-pending-prompt", id as usize))
                                 .gap_2()
                                 .items_center()
                                 .px_2p5()
@@ -659,95 +646,30 @@ impl AcpView {
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .child(format!("排队中 · {preview}{img_suffix}")),
                                 )
-                                .when(self.immediate_cancel_pending && ix == 0, |row| {
+                                .when(item.withdrawable, |row| {
                                     row.child(
                                         div()
+                                            .id(("acp-pending-prompt-withdraw", id as usize))
+                                            .role(gpui::Role::Button)
+                                            .aria_label("撤回")
                                             .text_xs()
                                             .text_color(gpui::rgb(ui_theme::text_muted()))
-                                            .child("正在停止当前回答…"),
-                                    )
-                                })
-                                .when(immediate_action_available, |row| {
-                                    let immediate_label = if immediate_cancels_turn {
-                                        "立即发送（停止当前回答）"
-                                    } else {
-                                        "立即发送"
-                                    };
-                                    row.child(
-                                        div()
-                                            .id("acp-queued-prompt-immediate")
-                                            .role(gpui::Role::Button)
-                                            .aria_label(immediate_label)
-                                            .text_xs()
-                                            .text_color(gpui::rgb(if immediate_cancels_turn {
-                                                ui_theme::yellow()
-                                            } else {
-                                                ui_theme::accent()
-                                            }))
                                             .cursor_pointer()
                                             .hover(|d| d.opacity(0.8))
-                                            .tooltip(move |window, cx| {
+                                            .tooltip(|window, cx| {
                                                 gpui_component::tooltip::Tooltip::new(
-                                                    if immediate_cancels_turn {
-                                                        "停止当前回答后，立即发送这条消息"
-                                                    } else {
-                                                        "立即发送这条消息"
-                                                    },
+                                                    "撤回这条，放回输入框",
                                                 )
                                                 .build(window, cx)
                                             })
-                                            .child(immediate_label)
+                                            .child("撤回")
                                             .on_click(cx.listener(
                                                 move |this, _ev, _window, cx| {
-                                                    this.send_queued_prompt_immediately(ix, cx);
+                                                    this.withdraw_pending_prompt(id, cx);
                                                 },
                                             )),
                                     )
-                                })
-                                .when(
-                                    can_move_next && !self.immediate_cancel_pending && ix > 0,
-                                    |row| {
-                                        row.child(
-                                            div()
-                                                .id("acp-queued-prompt-send")
-                                                .role(gpui::Role::Button)
-                                                .aria_label("下一条发送")
-                                                .text_xs()
-                                                .text_color(gpui::rgb(ui_theme::accent()))
-                                                .cursor_pointer()
-                                                .hover(|d| d.opacity(0.8))
-                                                .tooltip(|window, cx| {
-                                                    gpui_component::tooltip::Tooltip::new(
-                                                        "当前回合结束后，优先发送这条消息",
-                                                    )
-                                                    .build(window, cx)
-                                                })
-                                                .child("下一条发送")
-                                                .on_click(cx.listener(
-                                                    move |this, _ev, _window, cx| {
-                                                        this.move_queued_prompt_next(ix, cx);
-                                                    },
-                                                )),
-                                        )
-                                    },
-                                )
-                                .child(
-                                    div()
-                                        .id("acp-queued-prompt-remove")
-                                        .role(gpui::Role::Button)
-                                        .aria_label("撤回")
-                                        .text_xs()
-                                        .text_color(gpui::rgb(ui_theme::text_muted()))
-                                        .cursor_pointer()
-                                        .hover(|d| d.opacity(0.8))
-                                        .child("撤回")
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            if ix < this.queued_prompts.len() {
-                                                this.queued_prompts.remove(ix);
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
+                                }),
                         );
                     }
                     col.child(strip)
@@ -1334,8 +1256,11 @@ impl AcpView {
             .max_h(px(320.))
             .overflow_y_scroll()
             .gap_1();
+        let now_ms = now_unix_ms();
         for task in running {
             let id = task.id.clone();
+            let stop_id = task.id.clone();
+            let stopping = self.stopping_background_tasks.contains(&task.id);
             let title_line = background_task_one_line(&task.title);
             let mut row = v_flex()
                 .id((gpui::ElementId::from("acp-background-task"), id.clone()))
@@ -1380,7 +1305,42 @@ impl AcpView {
                                 .text_sm()
                                 .text_color(gpui::rgb(ui_theme::text_bright()))
                                 .child(title_line),
-                        ),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::text_faint()))
+                                .child(background_task_elapsed(task.started_at_ms, now_ms)),
+                        )
+                        .child(if stopping {
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::text_muted()))
+                                .child("正在停止…")
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id((
+                                    gpui::ElementId::from("acp-background-task-stop"),
+                                    stop_id.clone(),
+                                ))
+                                .flex_shrink_0()
+                                .role(gpui::Role::Button)
+                                .aria_label("停止")
+                                .text_xs()
+                                .text_color(gpui::rgb(ui_theme::yellow()))
+                                .cursor_pointer()
+                                .hover(|d| d.opacity(0.8))
+                                .child("停止")
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    // 不要顺带展开或收起这一行的输出。
+                                    cx.stop_propagation();
+                                    this.stop_background_task(stop_id.clone(), cx);
+                                }))
+                                .into_any_element()
+                        }),
                 )
                 .child(
                     div()

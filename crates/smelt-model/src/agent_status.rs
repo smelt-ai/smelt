@@ -26,7 +26,6 @@ pub struct AcpStatusEvidence {
     pub phase: DaemonPhase,
     pub turn_outcome: Option<AcpTurnOutcome>,
     pub prompt_dispatch_pending: bool,
-    pub immediate_cancel_pending: bool,
     pub fresh_start_pending: bool,
     /// 消息流里是否还有 Pending/InProgress 工具。只还原现场；回合结束后
     /// 不能单独把会话画成运行中。
@@ -47,7 +46,6 @@ impl AcpStatusEvidence {
             DaemonPhase::Thinking | DaemonPhase::ExecutingTool
         ) || self.fresh_start_pending
             || self.prompt_dispatch_pending
-            || self.immediate_cancel_pending
     }
 
     /// 将 ACP 本地协议快照压成共享三态，供守护镜像尚未到达时兜底。
@@ -136,7 +134,6 @@ mod tests {
             phase,
             turn_outcome: None,
             prompt_dispatch_pending: false,
-            immediate_cancel_pending: false,
             fresh_start_pending: false,
             has_unfinished_tool: false,
         }

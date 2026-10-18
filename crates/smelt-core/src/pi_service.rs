@@ -158,8 +158,8 @@ pub fn remove_custom_provider(params: ProviderIdParams) -> Result<(), String> {
     Ok(())
 }
 
-/// 确保配置文件存在（不存在就建一个空对象；凭据文件只给本人读写），返回路径，
-/// 供用户用编辑器手改。
+/// 确保配置文件存在（不存在就建一个空对象，只给本人读写：`auth.json` 之外，用户手改
+/// `models.json`、`mcp.json` 时也常直接写令牌），返回路径，供用户用编辑器手改。
 pub fn ensure_config_file(
     params: EnsureConfigFileParams,
 ) -> Result<EnsureConfigFileResult, String> {
@@ -171,19 +171,17 @@ pub fn ensure_config_file(
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("创建 Pi 配置目录失败：{error}"))?;
         }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
             Ok(mut file) => {
                 file.write_all(b"{\n}\n")
                     .map_err(|error| format!("创建 Pi 配置文件失败：{error}"))?;
-                #[cfg(unix)]
-                if params.file == PiConfigFile::Credentials {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(format!("创建 Pi 配置文件失败：{error}")),

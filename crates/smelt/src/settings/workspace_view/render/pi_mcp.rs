@@ -94,6 +94,15 @@ fn preset_row(
             })
             .into_any_element()
     };
+    // 加没加都留着：先添加、后装扩展也是常见顺序。
+    let install = preset.extension_url.map(|url| {
+        Button::new(format!("pi-mcp-extension-{}", preset.id))
+            .ghost()
+            .xsmall()
+            .label("安装扩展")
+            .tooltip("打开 Chrome 应用商店里的扩展页")
+            .on_click(move |_, _, cx| cx.open_url(url))
+    });
     h_flex()
         .w_full()
         .items_center()
@@ -112,7 +121,14 @@ fn preset_row(
                         .child(preset.summary),
                 ),
         )
-        .child(div().flex_none().child(action))
+        .child(
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .items_center()
+                .children(install)
+                .child(action),
+        )
 }
 
 fn servers_section(

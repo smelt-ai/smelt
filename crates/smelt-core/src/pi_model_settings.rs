@@ -383,40 +383,102 @@ pub(crate) fn read_or_create_json(path: &Path) -> Result<serde_json::Value, Stri
     }
 }
 
+/// 原子写 JSON：同目录临时文件写好再 rename 过去。
+///
+/// - 路径是符号链接（dotfiles 常这么管 `~/.pi/agent`）时写到它最终指向的文件；直接 rename
+///   到链接上会把链接换成普通文件。
+/// - 已有文件沿用原来的权限位：`models.json`、`mcp.json` 里可能直接写着令牌，用户
+///   `chmod 600` 过，改一次设置不能变成谁都能读。新建的文件一律 0600。
+/// - `secure`（`auth.json`）：不管原来是什么都收紧到 0600。
 pub(crate) fn write_json_file(
     path: &Path,
     value: &serde_json::Value,
     secure: bool,
 ) -> Result<(), String> {
+    let path = resolve_symlinks(path)?;
+    let path = path.as_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;
     }
     let content =
         serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
+    #[cfg(unix)]
+    let mode = target_file_mode(path, secure)?;
 
     let tmp_path = unique_tmp_path(path);
-    {
+    let write_tmp = || -> Result<(), String> {
         use std::io::Write as _;
-        let mut file = std::fs::File::create(&tmp_path)
-            .map_err(|e| format!("创建临时文件 {} 失败：{e}", tmp_path.display()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // 先以 0600 建出来，内容写进去之前就不给别人读。
         #[cfg(unix)]
-        if secure {
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp_path)
+            .map_err(|e| format!("创建临时文件 {} 失败：{e}", tmp_path.display()))?;
+        // 建文件的权限受 umask 影响，这里再显式设一次，才能原样还原用户给的权限。
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            file.set_permissions(std::fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("设置临时文件 {} 的权限失败：{e}", tmp_path.display()))?;
         }
         file.write_all(content.as_bytes())
             .map_err(|e| format!("写入临时文件 {} 失败：{e}", tmp_path.display()))?;
         file.flush()
             .map_err(|e| format!("刷新临时文件 {} 失败：{e}", tmp_path.display()))?;
         file.sync_all()
-            .map_err(|e| format!("同步临时文件 {} 失败：{e}", tmp_path.display()))?;
+            .map_err(|e| format!("同步临时文件 {} 失败：{e}", tmp_path.display()))
+    };
+    if let Err(error) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
     }
     if let Err(error) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("覆盖写入 {} 失败：{error}", path.display()));
     }
     Ok(())
+}
+
+/// 顺着符号链接找到最终路径。目标还不存在（悬空链接）也返回目标，写出来正好补上。
+fn resolve_symlinks(path: &Path) -> Result<PathBuf, String> {
+    // 和内核的 MAXSYMLINKS 同量级，防链接成环。
+    const MAX_HOPS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_HOPS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current)
+                    .map_err(|e| format!("读取符号链接 {} 失败：{e}", current.display()))?;
+                // 相对目标相对链接所在目录；绝对目标 `join` 后就是它本身。
+                current = match current.parent() {
+                    Some(parent) => parent.join(target),
+                    None => target,
+                };
+            }
+            _ => return Ok(current),
+        }
+    }
+    Err(format!("{} 的符号链接层数过多", path.display()))
+}
+
+/// 写出去的文件该有的权限位。
+#[cfg(unix)]
+fn target_file_mode(path: &Path, secure: bool) -> Result<u32, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    if secure {
+        return Ok(0o600);
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.permissions().mode() & 0o777),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0o600),
+        Err(error) => Err(format!("读取 {} 的权限失败：{error}", path.display())),
+    }
 }
 
 /// Pi 和登录助手用 `proper-lockfile` 锁 `auth.json`：锁是旁边的 `auth.json.lock` 目录。
@@ -1644,8 +1706,9 @@ mod pi_model_settings_integration_tests {
     use crate::pi_model_settings::{
         PiCustomModel, PiCustomProvider, PiDefaultModelConfig, load_pi_model_settings_at,
         pi_settings_summary_at, remove_pi_custom_provider_at, save_pi_custom_provider_at,
-        save_pi_default_model_at,
+        save_pi_default_model_at, write_json_file,
     };
+    use std::path::Path;
 
     #[test]
     fn pi_model_settings_lifecycle_in_isolated_dir() {
@@ -1707,5 +1770,116 @@ mod pi_model_settings_integration_tests {
         let after_removal = load_pi_model_settings_at(temp).expect("after remove");
         assert!(after_removal.custom_providers.is_empty());
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_file_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// 用户把写着令牌的配置 `chmod 600` 了，改一次设置不能让它变成谁都能读；
+    /// 特意放开的权限也不该被我们改掉。
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_keeps_the_existing_file_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mcp.json");
+        for mode in [0o600, 0o640, 0o644] {
+            std::fs::write(&path, "{}").unwrap();
+            set_file_mode(&path, mode);
+            write_json_file(&path, &serde_json::json!({ "mcpServers": {} }), false).unwrap();
+            assert_eq!(file_mode(&path), mode, "原来是 {mode:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_files_are_private_and_auth_is_always_tightened() {
+        let temp = tempfile::tempdir().unwrap();
+        let fresh = temp.path().join("models.json");
+        write_json_file(&fresh, &serde_json::json!({}), false).unwrap();
+        assert_eq!(file_mode(&fresh), 0o600, "新建的配置里可能会写进令牌");
+
+        let auth = temp.path().join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        set_file_mode(&auth, 0o644);
+        write_json_file(&auth, &serde_json::json!({}), true).unwrap();
+        assert_eq!(file_mode(&auth), 0o600);
+    }
+
+    /// dotfiles 把 `~/.pi/agent/mcp.json` 链到仓库里：写的是仓库里那份，链接保持原样。
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_through_a_symlink_updates_the_target_and_keeps_the_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let dotfiles = temp.path().join("dotfiles");
+        let agent = temp.path().join("agent");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        let target = dotfiles.join("mcp.json");
+        std::fs::write(&target, "{}").unwrap();
+        set_file_mode(&target, 0o600);
+        let link = agent.join("mcp.json");
+        // 相对链接：相对的是链接所在目录，不是进程当前目录。
+        std::os::unix::fs::symlink("../dotfiles/mcp.json", &link).unwrap();
+
+        write_json_file(&link, &serde_json::json!({ "k": 1 }), false).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "链接不能被换成普通文件"
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(written["k"], 1);
+        assert_eq!(file_mode(&target), 0o600);
+        let leftovers: Vec<_> = std::fs::read_dir(&agent)
+            .unwrap()
+            .chain(std::fs::read_dir(&dotfiles).unwrap())
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "临时文件没清掉：{leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_filled_in_instead_of_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("store").join("mcp.json");
+        let link = temp.path().join("mcp.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_json_file(&link, &serde_json::json!({}), false).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(target.is_file());
+        assert_eq!(file_mode(&target), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loops_are_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a.json");
+        let b = temp.path().join("b.json");
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        assert!(write_json_file(&a, &serde_json::json!({}), false).is_err());
     }
 }

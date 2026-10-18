@@ -17,6 +17,8 @@ pub struct PiMcpPreset {
     pub exposure: Option<&'static str>,
     /// 单次请求超时（秒）。不写用 Pi 的默认 60 秒；进度通知会重置计时。
     pub timeout_secs: Option<u64>,
+    /// 要配套安装的 Chrome 扩展的应用商店页，能力库里给个按钮直接打开。
+    pub extension_url: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +54,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         },
         exposure: Some("direct"),
         timeout_secs: None,
+        extension_url: None,
     },
     // REA（github.com/morluto/rea）本机逆向分析。用 Smelt 自带的 Bun 跑它的 package
     // runner（`bun x`），不要求用户装 Node、也不全局安装：包只进 Bun 的下载缓存。
@@ -69,6 +72,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         },
         exposure: None,
         timeout_secs: Some(120),
+        extension_url: None,
     },
     // Agent360 Browser MCP（github.com/Agent360dk/browser-mcp）驱动用户已登录的 Chrome，
     // 另需装它的 Chrome 扩展。和 REA 一样用自带 Bun 的 `bun x --bun`、钉死版本；入口
@@ -79,7 +83,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
     PiMcpPreset {
         id: "browser-mcp",
         name: "Agent360 浏览器",
-        summary: "操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先在 Chrome 应用商店安装 Agent360 Browser MCP 扩展。用 Smelt 自带的 Bun 运行。",
+        summary: "操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。用 Smelt 自带的 Bun 运行。",
         description: "Browser automation in the user's own signed-in Chrome: navigate, click, fill forms, read pages and take screenshots, and ask the user for 2FA codes or CAPTCHAs",
         transport: PiMcpPresetTransport::Stdio {
             command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
@@ -87,6 +91,30 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         },
         exposure: Some("deferred"),
         timeout_secs: None,
+        extension_url: Some(
+            "https://chromewebstore.google.com/detail/agent360-browser-mcp/jdehgalffmffhfhmmhaokfbfnafnmgcl",
+        ),
+    },
+    // Playwright MCP（github.com/microsoft/playwright-mcp）用 `--extension` 接用户正在用的
+    // Chrome，沿用已有的登录状态，需装它的 Chrome 扩展。不加这个参数它会另开一份按项目目录
+    // 区分的浏览器配置，换个项目就得重新登录。连接时扩展会弹页面让用户确认；跳过确认要的
+    // token 每人不同，不写进预设。同样走自带 Bun 的 `bun x --bun`、钉死版本（上游文档写的
+    // `@latest` 不能用于持久注册）。服务器名沿用上游示例的 `playwright`。25 个工具、
+    // 二十来 KB schema，和 Agent360 一样是逐步交互的浏览器操作，用 `deferred`。
+    PiMcpPreset {
+        id: "playwright",
+        name: "Playwright 浏览器",
+        summary: "通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。用 Smelt 自带的 Bun 运行。",
+        description: "Browser automation with Playwright in the user's own signed-in Chrome via the Playwright extension: navigate, click, type, fill forms, read accessibility snapshots, take screenshots and inspect console and network",
+        transport: PiMcpPresetTransport::Stdio {
+            command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
+            args: &["x", "--bun", "@playwright/mcp@0.0.83", "--extension"],
+        },
+        exposure: Some("deferred"),
+        timeout_secs: None,
+        extension_url: Some(
+            "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
+        ),
     },
 ];
 
@@ -132,6 +160,8 @@ pub fn find_preset(id: &str) -> Option<&'static PiMcpPreset> {
     PI_MCP_PRESETS.iter().find(|preset| preset.id == id)
 }
 
+/// 给人看的连接方式：运行时读 `mcp.json` 时已用 [`crate::redact`] 打过码（地址里的
+/// `?api_key=…`、命令行里的 `--token xxx` 之类），原样显示即可，不能拿来连接。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PiMcpTransport {

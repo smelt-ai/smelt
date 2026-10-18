@@ -3,37 +3,37 @@
 use super::trajectory::runtime_debug_contexts;
 use super::{
     CachedDiff, ComposerMenuSection, FileLinks, LoadedSkillsRefresh, LoadedSkillsSnapshot,
-    OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity,
-    append_prompt_text, apply_pending_config_selection, background_task_one_line,
-    background_task_output_lines, background_task_running_for, background_task_summary,
-    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
-    build_tool_image_parts, cached_diff_stats, can_load_older_history, classify_attached_paths,
-    compact_token_count, compact_tool_headline, compact_tool_run_label,
-    composer_config_section_label, composer_menu_sections, composer_model_label,
-    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
-    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
-    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
-    conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
-    diff_cache_matches_output, diff_stats_for_output, entries_to_fade_in,
-    escape_html_tags_for_markdown, external_clipboard_image_paths, filter_trajectory_events,
-    format_attached_paths, is_active_permission_selection, is_dispatch_in_flight,
-    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
-    is_stale_blank_history_id, latest_user_message_index, loaded_entries_end,
-    loaded_skills_refresh, markdown_text_for_cwd, markdown_user_text_for_cwd,
+    OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction,
+    ViewHistoryIdentity, append_prompt_text, apply_pending_config_selection,
+    background_task_elapsed, background_task_one_line, background_task_output_lines,
+    background_task_running_for, background_task_summary, build_conversation_layout,
+    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
+    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
+    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
+    composer_menu_sections, composer_model_label, composer_model_scroll,
+    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
+    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
+    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
+    current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
+    diff_stats_for_output, entries_to_fade_in, escape_html_tags_for_markdown,
+    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
+    is_active_permission_selection, is_fresh_conversation_start, is_match_count_line,
+    is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
+    loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd, markdown_user_text_for_cwd,
     merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
-    move_queue_item_to_front, native_queue_item_kind_label, next_snapshot_prompt_gate,
+    native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
     pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
     process_group_label, progress_has_details, progress_summary, provider_menu_label,
-    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
-    resolve_restart_launch, restorable_gui_prompt, rows_with_changed_shape,
+    provider_retry_label, provider_switch_value, reconcile_pending_config_values,
+    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt, rows_with_changed_shape,
     running_background_tasks, search_summary_text, selected_provider_group,
     session_trajectory_events, settled_thought_elapsed, settled_thought_label,
     should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
     task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
     tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
-    usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
+    turn_outcome_card, usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
@@ -674,7 +674,6 @@ fn missing_global_degrades_to_the_plain_name(cx: &mut gpui::TestAppContext) {
     });
 }
 use smelt_ui::agent_host_state::AgentHostState;
-use std::collections::VecDeque;
 
 #[test]
 fn legacy_delivery_prompt_is_not_restored_by_the_gui() {
@@ -1077,20 +1076,6 @@ fn starting_status_copy_explains_resume_and_wait() {
 }
 
 #[test]
-fn queued_prompt_can_be_moved_next_without_dropping_any_message() {
-    let mut queue = VecDeque::from(["first", "second", "third"]);
-    assert!(move_queue_item_to_front(&mut queue, 2));
-    assert_eq!(
-        queue.into_iter().collect::<Vec<_>>(),
-        vec!["third", "first", "second"]
-    );
-
-    let mut queue = VecDeque::from(["only"]);
-    assert!(!move_queue_item_to_front(&mut queue, 1));
-    assert_eq!(queue.into_iter().collect::<Vec<_>>(), vec!["only"]);
-}
-
-#[test]
 fn immediate_send_cancels_only_after_the_user_chooses_it() {
     assert!(!should_cancel_for_immediate_prompt(
         &DaemonPhase::Connecting,
@@ -1120,53 +1105,51 @@ fn immediate_send_cancels_only_after_the_user_chooses_it() {
 }
 
 #[test]
-fn immediate_send_idle_releases_stuck_dispatch_pending() {
-    // 上一条 prompt 已发出但 Running 尚未回来，用户点了排队消息的立即发送。
-    // 取消后的 Idle 必须放开 dispatch 闸门，否则队首永远 flush 不出去，
-    // 后续输入会一直堆在排队条里。
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Idle, None, true, true, false, None);
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
-}
-
-#[test]
 fn stale_idle_does_not_clear_unconfirmed_dispatch() {
-    // 没有立即发送时，旧 Idle 快照不能清掉 pending——那是防并发派发的闸门。
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Idle, None, true, false, true, None);
-    assert!(gate.prompt_dispatch_pending);
-    assert!(!gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
+    // 旧 Idle 快照不能清掉 pending——那是防并发派发的闸门。
+    assert!(next_prompt_dispatch_pending(
+        &DaemonPhase::Idle,
+        None,
+        true,
+        None
+    ));
 }
 
 #[test]
 fn failed_idle_releases_stuck_dispatch_pending() {
-    let gate = next_snapshot_prompt_gate(
+    assert!(!next_prompt_dispatch_pending(
         &DaemonPhase::Idle,
         None,
         true,
-        false,
-        true,
         Some(AcpTurnOutcome::Failed),
-    );
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(!gate.should_flush_queue);
+    ));
 }
 
 #[test]
-fn running_snapshot_confirms_dispatch_and_does_not_flush() {
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Thinking, Some(1), true, false, false, None);
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(!gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
+fn running_snapshot_confirms_dispatch() {
+    assert!(!next_prompt_dispatch_pending(
+        &DaemonPhase::Thinking,
+        Some(1),
+        true,
+        None
+    ));
 }
 
 #[test]
-fn settled_idle_after_immediate_send_flushes_queue() {
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Idle, None, false, true, false, None);
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
+fn dismissed_notice_stays_hidden_until_a_new_one_arrives() {
+    use smelt_model::acp_session::AcpNoticeView;
+    let first = AcpNoticeView {
+        id: 10,
+        text: "压缩上下文失败：busy".into(),
+    };
+    assert_eq!(notice_to_show(Some(&first), None), Some(&first));
+    assert_eq!(notice_to_show(Some(&first), Some(10)), None);
+    let second = AcpNoticeView {
+        id: 11,
+        text: "Pi Extension：boom".into(),
+    };
+    assert_eq!(notice_to_show(Some(&second), Some(10)), Some(&second));
+    assert_eq!(notice_to_show(None, None), None);
 }
 
 #[test]
@@ -1192,13 +1175,6 @@ fn unknown_plugin_submission_reuses_its_id_only_for_the_unchanged_draft() {
     let edited =
         conversation_input_for_submit("换一种方式处理".into(), Vec::new(), Some(&previous));
     assert_ne!(edited.submission_id, "stable-submission");
-}
-
-#[test]
-fn dispatch_stays_in_flight_until_the_prompt_and_cancel_both_settle() {
-    assert!(is_dispatch_in_flight(true, false));
-    assert!(is_dispatch_in_flight(false, true));
-    assert!(!is_dispatch_in_flight(false, false));
 }
 
 #[test]
@@ -2854,6 +2830,64 @@ fn compact_tool_headlines_use_verbs_like_opened_page() {
     assert_eq!(
         compact_tool_headline(ToolKind::Execute, "cargo test -p smelt-acp-view"),
         "运行了 cargo test -p smelt-acp-view"
+    );
+}
+
+/// 没正常结束的回合在末尾给卡：出错、被拒重试，截断、到上限接着说。
+/// 成功和用户自己停的不给。
+#[test]
+fn only_an_unfinished_turn_gets_a_card_with_the_right_action() {
+    use smelt_model::acp_session::AcpTurnOutcome;
+
+    assert_eq!(turn_outcome_card(None), None);
+    assert_eq!(turn_outcome_card(Some(AcpTurnOutcome::Succeeded)), None);
+    assert_eq!(turn_outcome_card(Some(AcpTurnOutcome::Cancelled)), None);
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::Failed)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Retry)
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::Refused)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Retry)
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::MaxTokens)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Continue)
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::MaxTurnRequests)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Continue)
+    );
+}
+
+#[test]
+fn provider_retry_label_says_which_attempt_and_when() {
+    let retry = smelt_model::acp_session::ProviderRetryView {
+        attempt: 2,
+        max_attempts: 3,
+        delay_ms: 4_200,
+        error: "429 rate limited".into(),
+    };
+    assert_eq!(
+        provider_retry_label(&retry),
+        "模型请求出错，5 秒后第 2/3 次重试"
+    );
+    let now = smelt_model::acp_session::ProviderRetryView {
+        delay_ms: 0,
+        max_attempts: 0,
+        ..retry
+    };
+    assert_eq!(provider_retry_label(&now), "模型请求出错，正在第 2 次重试");
+}
+
+#[test]
+fn background_task_elapsed_counts_from_the_start() {
+    assert_eq!(background_task_elapsed(1_000, 193_000), "已运行 3m 12s");
+    assert_eq!(background_task_elapsed(1_000, 1_500), "已运行 0s");
+    assert_eq!(
+        background_task_elapsed(5_000, 1_000),
+        "已运行 0s",
+        "时钟往回拨时不能下溢"
     );
 }
 

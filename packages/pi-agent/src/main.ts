@@ -8,7 +8,7 @@ import { consumeAgentInstructions } from "./agent-instructions.ts";
 import { consumeAgentMemory } from "./agent-memory.ts";
 import { consumeMcpSelection } from "./mcp-selection.ts";
 import { consumePluginArgs } from "./plugin-args.ts";
-import { SMELT_EXTENSION_FACTORIES, withAgentMcp } from "./runtime-extensions.ts";
+import { smeltExtensionFactories } from "./runtime-extensions.ts";
 
 // 与 Pi 官方 bun CLI / auth-main 一样，启动时静态注册 OAuth flow。
 // 否则 token 刷新会按 import.meta.url 再读磁盘；旧运行时目录被回收后就会 ENOENT。
@@ -22,5 +22,5 @@ process.env.PI_CODING_AGENT = "true";
 process.env.AI_AGENT = "pi";
 process.emitWarning = (() => {}) as typeof process.emitWarning;
 await main(["--mode", "rpc", ...process.argv.slice(2)], {
-	extensionFactories: withAgentMcp(SMELT_EXTENSION_FACTORIES, mcpSelection),
+	extensionFactories: smeltExtensionFactories(mcpSelection),
 });

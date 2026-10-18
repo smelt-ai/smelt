@@ -159,6 +159,13 @@ pub struct AcpSessionState {
     pub supports_native_queue: bool,
     pub supports_rewind: bool,
     pub compacting: bool,
+    /// Provider 正在自动重试模型请求。
+    pub provider_retry: Option<ProviderRetryView>,
+    /// 给用户看的一次性提示。启动进度不在这里，在 `status_line`。
+    pub notice: Option<AcpNoticeView>,
+    /// smeltd 回合闸门后面那条队列的展示投影。队列本体（附图、投递 id）在 smeltd，
+    /// 它每次改队列都整份重写这里；归约器不碰。
+    pub pending_prompts: Vec<PendingPromptView>,
     pub queued_steering: Vec<String>,
     /// 与 `queued_steering` 对齐的附图。快照只发文本，活体状态用来在真正插入时还原。
     pub queued_steering_images: Vec<Vec<crate::acp_chat::AcpImage>>,
@@ -226,6 +233,9 @@ impl Default for AcpSessionState {
             supports_native_queue: false,
             supports_rewind: false,
             compacting: false,
+            provider_retry: None,
+            notice: None,
+            pending_prompts: Vec::new(),
             queued_steering: Vec::new(),
             queued_steering_images: Vec::new(),
             queued_follow_up: Vec::new(),
@@ -323,6 +333,10 @@ impl AcpSessionState {
             supports_native_queue: snap.supports_native_queue,
             supports_rewind: snap.supports_rewind,
             compacting: snap.compacting,
+            provider_retry: snap.provider_retry,
+            notice: snap.notice,
+            // 队列本体不随进程交接（交接会等队列先清空），新进程从空队列开始。
+            pending_prompts: Vec::new(),
             queued_steering: snap.queued_steering,
             queued_steering_images: Vec::new(),
             queued_follow_up: snap.queued_follow_up,
@@ -395,6 +409,9 @@ impl AcpSessionState {
             supports_native_queue,
             supports_rewind,
             compacting,
+            provider_retry,
+            notice,
+            pending_prompts,
             queued_steering,
             queued_follow_up,
             composer_restore_revision,
@@ -495,6 +512,9 @@ impl AcpSessionState {
             self.supports_native_queue = supports_native_queue;
             self.supports_rewind = supports_rewind;
             self.compacting = compacting;
+            self.provider_retry = provider_retry;
+            self.notice = notice;
+            self.pending_prompts = pending_prompts;
             self.queued_steering = queued_steering;
             self.queued_steering_images.clear();
             self.queued_follow_up = queued_follow_up;
@@ -570,6 +590,28 @@ impl AcpSessionState {
         }
         let fallback = crate::acp_chat::auto_title(self.entries());
         crate::session_title::session_name(None, fallback.as_deref())
+    }
+
+    /// 回合成功结束了，「完成」还压着没报。后台任务、后台子智能体还在跑时压着，
+    /// 等它们结束再报；正常结束的会叫醒 Provider 再跑一轮，完成交给那一轮报。
+    /// 只用快照里有的字段推出来，宿主镜像和热升级之后都一样。
+    pub fn completion_withheld(&self) -> bool {
+        matches!(self.phase, DaemonPhase::Idle)
+            && self.turn_started_at_ms.is_none()
+            && !self.completed_unread
+            && self.turn_outcome.is_some_and(AcpTurnOutcome::is_success)
+    }
+
+    /// 后台任务、后台子智能体还有在跑的。
+    pub fn background_work_running(&self) -> bool {
+        self.background_tasks
+            .iter()
+            .any(|task| task.status == BackgroundTaskStatus::Running)
+    }
+
+    /// 回合结束了，但后台还在干活：会话对外算在执行，不算完成。
+    pub fn completion_waits_on_background(&self) -> bool {
+        self.completion_withheld() && self.background_work_running()
     }
 
     /// 会话正文：窗口、分页、活帧、回退校验与持久化看到的都是这一份。
@@ -805,6 +847,13 @@ impl AcpSessionState {
             supports_native_queue: self.supports_native_queue,
             supports_rewind: self.supports_rewind,
             compacting: self.compacting,
+            provider_retry: self.provider_retry.clone(),
+            notice: include_envelope.then(|| self.notice.clone()).flatten(),
+            pending_prompts: if include_envelope {
+                self.pending_prompts.clone()
+            } else {
+                Vec::new()
+            },
             queued_steering: if include_envelope {
                 self.queued_steering.clone()
             } else {
@@ -973,6 +1022,8 @@ pub fn reset_for_restart(state: &mut AcpSessionState) {
     state.usage_breakdown = None;
     state.completed_unread = false;
     state.turn_outcome = None;
+    state.provider_retry = None;
+    state.notice = None;
     state.awaiting_user_echo = false;
     state.cancelled_tool_call_ids.clear();
     state.cancelled_turn_seq = None;
@@ -1069,6 +1120,8 @@ pub fn note_prompt_sent_with_delivery(
     state.completed_delivery_id = None;
     state.completed_unread = false;
     state.turn_outcome = None;
+    state.provider_retry = None;
+    state.notice = None;
     let started_at_ms = unix_time_ms();
     state.turn_started_at_ms = Some(started_at_ms);
     state.turn_timings.push(TurnTiming {
@@ -1118,6 +1171,16 @@ pub fn undo_prompt_sent(
     state.active_delivery_id = None;
     state.phase = DaemonPhase::Idle;
     Some(taken)
+}
+
+/// 换上一条新的用户提示。id 取毫秒时间且严格大于上一条：进程重启后也不会撞上
+/// 客户端已经关掉的那条。
+pub fn raise_notice(state: &mut AcpSessionState, text: String) {
+    let floor = state.notice.as_ref().map_or(0, |notice| notice.id + 1);
+    state.notice = Some(AcpNoticeView {
+        id: unix_time_ms().max(floor),
+        text,
+    });
 }
 
 const PROVIDER_STILL_RUNNING_STATUS: &str = "已排队，这一轮结束后再发";

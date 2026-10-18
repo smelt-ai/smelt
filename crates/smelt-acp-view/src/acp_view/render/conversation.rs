@@ -1205,6 +1205,7 @@ impl AcpView {
                     && i + 1 == this.entries.len()
                     && is_user_entry(entry)
                     && !current_turn_has_agent_output(&this.entries)
+                    && this.provider_retry.is_none()
                 {
                     el = v_flex()
                         .w_full()
@@ -1216,6 +1217,25 @@ impl AcpView {
                             animate_ambient,
                         ))
                         .into_any_element();
+                }
+                // 对话末尾：在跑时说明正在自动重试；跑完了没正常结束就给一张卡，
+                // 能直接重试或继续。都挂在最后一条上，不另占一行虚拟项。
+                if i + 1 == this.entries.len() {
+                    let tail = if current_turn_active {
+                        this.provider_retry
+                            .as_ref()
+                            .map(|retry| this.render_provider_retry(retry, i, animate_ambient))
+                    } else {
+                        this.render_turn_outcome_card(i, cx)
+                    };
+                    if let Some(tail) = tail {
+                        el = v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(el)
+                            .child(tail)
+                            .into_any_element();
+                    }
                 }
                 // `gpui::list` 不像 flex 容器那样处理 `gap`；间距必须属于
                 // 虚拟项本身，否则测得的高度不包含消息间的留白。
@@ -1269,6 +1289,82 @@ impl AcpView {
     }
 
     /// 模型还没出字时的一行耗时。有动作之后，时间改挂在那一行后面。
+    fn render_provider_retry(
+        &self,
+        retry: &smelt_model::acp_session::ProviderRetryView,
+        entry_ix: usize,
+        animate_ambient: bool,
+    ) -> gpui::AnyElement {
+        let mark: gpui::Hsla = gpui::rgb(ui_theme::yellow()).into();
+        v_flex()
+            .id(("acp-provider-retry", entry_ix))
+            .gap_0p5()
+            .text_xs()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_color(gpui::rgb(ui_theme::text_mid()))
+                    .child(quiet_dots(
+                        ("acp-provider-retry-dots", entry_ix),
+                        mark,
+                        animate_ambient,
+                    ))
+                    .child(provider_retry_label(retry)),
+            )
+            .when(!retry.error.is_empty(), |col| {
+                col.child(
+                    div()
+                        .pl(px(14.))
+                        .truncate()
+                        .text_color(gpui::rgb(ui_theme::text_muted()))
+                        .child(retry.error.clone()),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_turn_outcome_card(
+        &self,
+        entry_ix: usize,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let (message, action) = turn_outcome_card(self.turn_outcome)?;
+        let label = match action {
+            TurnOutcomeAction::Retry => "重试",
+            TurnOutcomeAction::Continue => "继续",
+        };
+        Some(
+            h_flex()
+                .id(("acp-turn-outcome", entry_ix))
+                .w_full()
+                .gap_2()
+                .items_center()
+                .px_3()
+                .py_2()
+                .rounded(ui_theme::card_radius())
+                .border_1()
+                .border_color(ui_theme::card_stroke())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(gpui::rgb(ui_theme::yellow()))
+                        .child(message),
+                )
+                .child(
+                    Button::new(("acp-turn-outcome-action", entry_ix))
+                        .small()
+                        .label(label)
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.rerun_last_turn(action, window, cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_working_status(
         &self,
         elapsed_ms: Option<u64>,

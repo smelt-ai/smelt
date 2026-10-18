@@ -43,6 +43,42 @@ impl AcpEndKind {
     }
 }
 
+/// Provider 正在自动重试这一轮的模型请求（限流、过载这类临时错误）。重试结束
+/// （成功或放弃）、回合结束、开新一轮时清掉。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderRetryView {
+    /// 第几次重试，从 1 数起。
+    pub attempt: u32,
+    pub max_attempts: u32,
+    /// 这次重试前要等多久。
+    pub delay_ms: u64,
+    /// 触发重试的错误。
+    pub error: String,
+}
+
+/// 守护进程闸门后面排队、还没交给 agent 的一条消息。回合在跑时不支持中途插话的
+/// agent 收到的新消息都在这里，等当前回合结束再按序发出。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPromptView {
+    /// 会话内稳定 id。撤回按它找，不按文本或下标。
+    pub id: u64,
+    pub text: String,
+    #[serde(default)]
+    pub image_count: usize,
+    /// 用户自己在输入框里发的才能撤回。任务、自动化、其它智能体的投递归守护进程。
+    #[serde(default)]
+    pub withdrawable: bool,
+}
+
+/// 给用户看的一次性提示（插话、压缩、停后台任务失败这类）。不是启动进度：
+/// 启动进度走 `status_line`。新回合开始、会话重启时清掉。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AcpNoticeView {
+    /// 单调递增，客户端按它记「这条已经关掉」，新提示不会被旧的关闭动作盖住。
+    pub id: u64,
+    pub text: String,
+}
+
 /// ACP 回合终结原因的稳定投影。`DaemonPhase::Idle` 只描述当前没有运行中的回合，
 /// 不能同时承担“上一轮成功/取消/被拒绝”的结果语义；否则 daemon 只能把所有
 /// `TurnEnded` 猜成成功。
@@ -683,6 +719,15 @@ pub struct ConversationSnapshot {
     /// 正在压缩上下文。
     #[serde(default)]
     pub compacting: bool,
+    /// Provider 正在自动重试模型请求。旧快照缺省为 None。
+    #[serde(default)]
+    pub provider_retry: Option<ProviderRetryView>,
+    /// 用户该看到的一次性提示。旧快照缺省为 None。
+    #[serde(default)]
+    pub notice: Option<AcpNoticeView>,
+    /// 守护进程闸门后面排队的消息。旧快照缺省为空。
+    #[serde(default)]
+    pub pending_prompts: Vec<PendingPromptView>,
     /// Provider 侧 steering 队列。
     #[serde(default)]
     pub queued_steering: Vec<String>,
@@ -794,6 +839,12 @@ pub struct ConversationSnapshotDe {
     #[serde(default)]
     pub compacting: bool,
     #[serde(default)]
+    pub provider_retry: Option<ProviderRetryView>,
+    #[serde(default)]
+    pub notice: Option<AcpNoticeView>,
+    #[serde(default)]
+    pub pending_prompts: Vec<PendingPromptView>,
+    #[serde(default)]
     pub queued_steering: Vec<String>,
     #[serde(default)]
     pub queued_follow_up: Vec<String>,
@@ -861,6 +912,9 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             supports_native_queue: de.supports_native_queue,
             supports_rewind: de.supports_rewind,
             compacting: de.compacting,
+            provider_retry: de.provider_retry,
+            notice: de.notice,
+            pending_prompts: de.pending_prompts,
             queued_steering: de.queued_steering,
             queued_follow_up: de.queued_follow_up,
             composer_restore_revision: de.composer_restore_revision,
@@ -919,6 +973,9 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             supports_native_queue: snap.supports_native_queue,
             supports_rewind: snap.supports_rewind,
             compacting: snap.compacting,
+            provider_retry: snap.provider_retry,
+            notice: snap.notice,
+            pending_prompts: snap.pending_prompts,
             queued_steering: snap.queued_steering,
             queued_follow_up: snap.queued_follow_up,
             composer_restore_revision: snap.composer_restore_revision,
@@ -1039,10 +1096,20 @@ pub enum AcpUserAction {
     },
     /// 清空 provider 侧队列并把原文还回输入框，不中止当前回合。
     ClearQueue,
+    /// 停掉会话的一个后台任务（后台命令或后台子智能体）。和模型调停止是同一件事：
+    /// 结果照常交回会话，但不叫醒模型。旧 daemon 不认识，会回 unknown variant。
+    StopBackgroundTask {
+        id: String,
+    },
     /// 把原生队列里的这一条从 provider 拿走，停掉当前回答，等 provider 真正空闲后只发一次。
     /// 再发同一个文本是同一个动作，不会再发一遍。旧 daemon 不认识，会回 unknown variant。
     DeliverQueuedNow {
         text: String,
+    },
+    /// 撤回守护进程队列里还没发出的一条（`PendingPromptView::id`），正文和附图回输入框。
+    /// 已经发出、或不是用户自己发的，不动。旧 daemon 不认识，会回 unknown variant。
+    WithdrawPendingPrompt {
+        id: u64,
     },
     /// 编辑并重发最后一条用户消息：agent 切到该消息之前（Pi 的 fork），消息原文
     /// 回输入框供修改。`entry_index` 是投影里的绝对 entry 下标。仅空闲

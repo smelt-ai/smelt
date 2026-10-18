@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+use smelt_model::redact::{redact_args, redact_secrets};
 
 use crate::pi_model_settings::{pi_agent_dir, read_or_create_json, write_json_file};
 
@@ -58,26 +59,31 @@ fn parse_servers(doc: &Value, signed_in: &HashSet<String>) -> Vec<PiMcpServer> {
                     .filter(|value| !value.is_empty())
                     .map(str::to_string)
             };
-            let transport = match (text("url"), text("command")) {
-                (Some(url), _) => PiMcpTransport::Http { url },
+            let url = text("url");
+            // 登录状态按原始地址认；交出去的地址和命令行打过码（见 `PiMcpTransport`）。
+            let signed_in = url
+                .as_deref()
+                .is_some_and(|url| signed_in.contains(&normalize_url(url)));
+            let transport = match (url, text("command")) {
+                (Some(url), _) => PiMcpTransport::Http {
+                    url: redact_secrets(&url),
+                },
                 (None, Some(command)) => PiMcpTransport::Stdio {
-                    command,
-                    args: entry
-                        .get("args")
-                        .and_then(Value::as_array)
-                        .map(|args| {
-                            args.iter()
-                                .filter_map(Value::as_str)
-                                .map(str::to_string)
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    command: redact_secrets(&command),
+                    args: redact_args(
+                        &entry
+                            .get("args")
+                            .and_then(Value::as_array)
+                            .map(|args| {
+                                args.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
+                    ),
                 },
                 (None, None) => PiMcpTransport::Unknown,
-            };
-            let signed_in = match &transport {
-                PiMcpTransport::Http { url } => signed_in.contains(&normalize_url(url)),
-                _ => false,
             };
             PiMcpServer {
                 name: name.clone(),
@@ -164,10 +170,17 @@ pub fn remove_pi_mcp_server_at(agent_dir: &Path, name: &str) -> Result<(), Strin
 }
 
 /// 读 → 改 `mcpServers` → 写回。文件里其他顶层键（如 `autoEnableCodemode`）原样保留。
+///
+/// 运行时会并发处理控制请求（连点两个开关），读改写不串行的话，后写的拿着旧快照会把
+/// 先写的改动盖掉。进程内一把锁就够；Pi 自己改 `mcp.json`（`/mcp` 里切开关）不在此列。
 fn edit_servers(
     agent_dir: &Path,
     edit: impl FnOnce(&mut Map<String, Value>) -> Result<(), String>,
 ) -> Result<(), String> {
+    static EDIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = EDIT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = agent_dir.join("mcp.json");
     let mut doc = read_or_create_json(&path)?;
     let root = doc
@@ -201,14 +214,7 @@ pub fn login_pi_mcp_server(name: &str, status: &dyn Fn(&str)) -> Result<String, 
     let output = command
         .output()
         .map_err(|error| format!("启动 Pi MCP 助手失败：{error}"))?;
-    let last_lines = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .last()
-            .map(str::to_string)
-    };
+    let last_lines = |bytes: &[u8]| last_output_line(&String::from_utf8_lossy(bytes));
     if output.status.success() {
         Ok(last_lines(&output.stdout).unwrap_or_else(|| format!("已登录 {name}")))
     } else {
@@ -216,6 +222,16 @@ pub fn login_pi_mcp_server(name: &str, status: &dyn Fn(&str)) -> Result<String, 
             .or_else(|| last_lines(&output.stdout))
             .unwrap_or_else(|| format!("登录 {name} 失败")))
     }
+}
+
+/// 助手输出的最后一个非空行，要显示在界面上：OAuth 出错时这一行可能带着令牌端点的
+/// 错误体或带凭据的地址，先打码。
+fn last_output_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .map(redact_secrets)
 }
 
 #[cfg(test)]
@@ -322,6 +338,31 @@ mod tests {
     }
 
     #[test]
+    fn adding_playwright_writes_a_pinned_deferred_stdio_entry() {
+        let dir = temp_dir();
+        add_pi_mcp_preset_at(&dir, "playwright").unwrap();
+
+        let playwright = &read(&dir)["mcpServers"]["playwright"];
+        assert_eq!(playwright["command"], "~/.smelt/runtime/bin/bun");
+        assert_eq!(
+            playwright["args"],
+            serde_json::json!(["x", "--bun", "@playwright/mcp@0.0.83", "--extension"]),
+            "钉死版本，不能用 @latest；--bun 防止转交给系统 node；--extension 接用户已登录的 Chrome"
+        );
+        assert_eq!(playwright["exposure"], "deferred");
+        assert!(playwright.get("url").is_none());
+        let preset = find_preset("playwright").unwrap();
+        assert!(!preset.transport.needs_sign_in());
+        assert!(
+            preset
+                .extension_url
+                .is_some_and(|url| url.starts_with("https://chromewebstore.google.com/")),
+            "--extension 模式离不开扩展，得给安装入口"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn preset_ids_are_unique_valid_server_names() {
         let mut seen = HashSet::new();
         for preset in PI_MCP_PRESETS {
@@ -394,6 +435,144 @@ mod tests {
         );
         assert_eq!(by_name("override").transport, PiMcpTransport::Unknown);
         assert!(!by_name("override").enabled);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 地址和命令行里的凭据不出运行时：交给客户端的快照已经打码，登录状态照样按原地址认。
+    #[test]
+    fn listed_transports_mask_credentials() {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"mcpServers":{
+                "remote":{"url":"https://u:p@mcp.example.com/mcp?api_key=k1&team=a"},
+                "local":{"command":"npx","args":["-y","server","--token","t1","-H","Authorization: Bearer b1","DEBUG=1"]}
+            }}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("mcp-auth.json"),
+            r#"{"mcp__remote|https://u:p@mcp.example.com/mcp?api_key=k1&team=a":{"tokens":{}}}"#,
+        )
+        .unwrap();
+
+        let servers = load_pi_mcp_servers_at(&dir).unwrap();
+        let by_name = |name: &str| servers.iter().find(|server| server.name == name).unwrap();
+        assert_eq!(
+            by_name("remote").transport,
+            PiMcpTransport::Http {
+                url: "https://***@mcp.example.com/mcp?api_key=***&team=a".into(),
+            }
+        );
+        assert!(by_name("remote").signed_in, "登录状态按原始地址匹配");
+        assert_eq!(
+            by_name("local").transport,
+            PiMcpTransport::Stdio {
+                command: "npx".into(),
+                args: vec![
+                    "-y".into(),
+                    "server".into(),
+                    "--token".into(),
+                    "***".into(),
+                    "-H".into(),
+                    "Authorization: Bearer ***".into(),
+                    "DEBUG=1".into(),
+                ],
+            }
+        );
+        let raw = std::fs::read_to_string(dir.join("mcp.json")).unwrap();
+        assert!(raw.contains("k1") && raw.contains("t1"), "文件本身不动");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn login_output_line_is_the_last_non_empty_one_and_redacted() {
+        assert_eq!(
+            last_output_line(
+                "Opening browser…\nError: token endpoint https://auth.example.com/token?client_secret=s1 returned {\"access_token\":\"a1\"}\n\n"
+            )
+            .as_deref(),
+            Some(
+                "Error: token endpoint https://auth.example.com/token?client_secret=*** returned {\"access_token\":\"***\"}"
+            )
+        );
+        assert_eq!(last_output_line(" \n\n"), None);
+    }
+
+    /// 用户把写着令牌的 `mcp.json` 设成 600、还用 dotfiles 链接管着：在设置里切一次开关，
+    /// 权限和链接都得原样留着。
+    #[cfg(unix)]
+    #[test]
+    fn toggling_keeps_mode_and_symlink_of_mcp_json() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir();
+        let dotfiles = dir.join("dotfiles");
+        let agent = dir.join("agent");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        let target = dotfiles.join("mcp.json");
+        std::fs::write(
+            &target,
+            r#"{"mcpServers":{"docs":{"url":"https://example.com/mcp","headers":{"Authorization":"Bearer literal"}}}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, agent.join("mcp.json")).unwrap();
+
+        set_pi_mcp_server_enabled_at(&agent, "docs", false).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(agent.join("mcp.json"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["docs"]["enabled"], Value::Bool(false));
+        assert_eq!(
+            doc["mcpServers"]["docs"]["headers"]["Authorization"],
+            "Bearer literal"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 并发的读改写不能互相覆盖：每个线程停用一台，最后全都是停用。
+    #[test]
+    fn concurrent_edits_do_not_lose_updates() {
+        let dir = temp_dir();
+        let names: Vec<String> = (0..8).map(|index| format!("s{index}")).collect();
+        let servers: Map<String, Value> = names
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    serde_json::json!({ "url": "https://example.com/mcp" }),
+                )
+            })
+            .collect();
+        std::fs::write(
+            dir.join("mcp.json"),
+            serde_json::json!({ "mcpServers": servers }).to_string(),
+        )
+        .unwrap();
+
+        std::thread::scope(|scope| {
+            for name in &names {
+                let dir = &dir;
+                scope.spawn(move || set_pi_mcp_server_enabled_at(dir, name, false).unwrap());
+            }
+        });
+
+        let servers = load_pi_mcp_servers_at(&dir).unwrap();
+        assert_eq!(servers.len(), names.len());
+        assert!(
+            servers.iter().all(|server| !server.enabled),
+            "有改动被覆盖：{servers:?}"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

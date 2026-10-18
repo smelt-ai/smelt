@@ -60,6 +60,7 @@ fn make_acp_session_value(
         prompt_in_flight: AtomicBool::new(false),
         automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        next_pending_prompt_id: AtomicU64::new(0),
         immediate_delivery: Mutex::new(None),
         unaccepted_prompt: Mutex::new(None),
         provider_hold: AtomicBool::new(false),

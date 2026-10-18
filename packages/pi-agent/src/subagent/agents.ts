@@ -9,6 +9,8 @@ export interface AgentConfig {
   description: string;
   tools?: string[];
   model?: string;
+  /** 定义里写了 `max_turns` 才有：跑到这么多轮还在调工具就要它收尾。没写不限。 */
+  maxTurns?: number;
   systemPrompt: string;
   source: "user" | "project";
   filePath: string;
@@ -19,7 +21,14 @@ type AgentFrontmatter = {
   description?: unknown;
   tools?: unknown;
   model?: unknown;
+  max_turns?: unknown;
 };
+
+/** `max_turns` 只认正整数；写错了当没写，不能变成 0 轮就中止。 */
+export function parseMaxTurns(value: unknown): number | undefined {
+  const turns = typeof value === "number" ? value : typeof value === "string" ? Number(value.trim()) : Number.NaN;
+  return Number.isInteger(turns) && turns > 0 ? turns : undefined;
+}
 
 function parseToolList(value: unknown): string[] | undefined {
   const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
@@ -61,6 +70,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
       description: frontmatter.description,
       tools: parseToolList(frontmatter.tools),
       model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+      maxTurns: parseMaxTurns(frontmatter.max_turns),
       systemPrompt: body.trim(),
       source,
       filePath,

@@ -27,14 +27,21 @@ pub fn acknowledge_composer_restore(state: &mut AcpSessionState, revision: u64) 
     true
 }
 
-/// 立即发送已经认领了这一条。`clear_queue` 还回来的原文里拿掉一次出现，
-/// 不能再进输入框。没还回来说明 provider 已经把它吃掉或根本没进队列，调用方不得再发。
-pub fn take_claimed_queue_text(texts: &mut Vec<String>, claimed: &str) -> bool {
-    let Some(ix) = texts.iter().position(|text| text == claimed) else {
-        return false;
-    };
+/// 立即发送已经认领了这一条。`clear_queue` 还回来的原文里拿掉一次出现，连同它的
+/// 附图，不能再进输入框；拿掉的附图交给调用方随这一条发出。`None` 说明没还回来：
+/// provider 已经把它吃掉或根本没进队列，调用方不得再发。
+pub fn take_claimed_queue_text(
+    texts: &mut Vec<String>,
+    images: &mut Vec<Vec<PromptImage>>,
+    claimed: &str,
+) -> Option<Vec<PromptImage>> {
+    let ix = texts.iter().position(|text| text == claimed)?;
     texts.remove(ix);
-    true
+    Some(if ix < images.len() {
+        images.remove(ix)
+    } else {
+        Vec::new()
+    })
 }
 
 /// 活队列里第一次出现的文本。steering 附图跟着走；follow-up 没有附图。
@@ -193,11 +200,17 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             state.queued_follow_up.clear();
             if revision > state.composer_restore_revision {
                 state.composer_restore_revision = revision;
-                state.composer_restore_texts = texts;
-                state.composer_restore_images = images;
+                // 只有图的那条文字是空串，输入框里不能多出空段。
+                state.composer_restore_texts = texts
+                    .into_iter()
+                    .filter(|text| !text.trim().is_empty())
+                    .collect();
+                state.composer_restore_images = images.into_iter().flatten().collect();
             }
         }
         ConversationEvent::Status(msg) => state.status_line = Some(msg),
+        ConversationEvent::Notice(msg) => super::raise_notice(state, msg),
+        ConversationEvent::ProviderRetry(retry) => state.provider_retry = retry,
         ConversationEvent::SessionTitle(title) => state.protocol_title = title,
         ConversationEvent::HistoryReplayStarted => {
             apply_history_replay_started(state, &mut outcome)
@@ -262,7 +275,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::Model(model) => state.model = Some(model),
         ConversationEvent::ConfigOptions(options) => state.config_options = options,
         ConversationEvent::Plan(plan) => apply_plan(state, plan),
-        ConversationEvent::BackgroundTasks(tasks) => state.background_tasks = tasks,
+        ConversationEvent::BackgroundTasks(tasks) => apply_background_tasks(state, tasks),
         ConversationEvent::Permission {
             question,
             tool_call_id,
@@ -300,6 +313,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             outcome.entries_offset = Some(state.entries.len());
             state.entries.push(AcpEntry::TaskNote(note));
         }
+        ConversationEvent::ProviderTurnStarted => apply_provider_turn_started(state, &mut outcome),
         ConversationEvent::PromptAccepted
         | ConversationEvent::PromptNotAccepted
         | ConversationEvent::ProviderIdle => {
@@ -393,6 +407,8 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
             | ConversationEvent::RuntimeDebug(_)
             | ConversationEvent::SessionControls { .. }
             | ConversationEvent::Compaction { .. }
+            | ConversationEvent::ProviderRetry(_)
+            | ConversationEvent::Notice(_)
             | ConversationEvent::PromptQueue { .. }
             | ConversationEvent::ComposerRestore { .. }
     )
@@ -404,11 +420,13 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
         ConversationEvent::UserChunk(_)
             | ConversationEvent::UserImage(_)
             | ConversationEvent::Status(_)
+            | ConversationEvent::Notice(_)
             | ConversationEvent::AvailableCommands(_)
             | ConversationEvent::Usage { .. }
             | ConversationEvent::RuntimeDebug(_)
             | ConversationEvent::SessionControls { .. }
             | ConversationEvent::Compaction { .. }
+            | ConversationEvent::ProviderRetry(_)
             | ConversationEvent::PromptQueue { .. }
             | ConversationEvent::ComposerRestore { .. }
             | ConversationEvent::Plan(_)
@@ -553,6 +571,58 @@ fn apply_agent_chunk(
     if !state.replaying_history && state.turn_started_at_ms.is_some() {
         resume_running(state);
     }
+}
+
+/// 后台任务快照。压着的完成在这里放出来：后台都结束了，且这次结束的全是被停掉的。
+/// 有正常结束的，结果会叫醒 Provider 再跑一轮，完成交给那一轮，这里不提前报。
+fn apply_background_tasks(
+    state: &mut AcpSessionState,
+    tasks: Vec<crate::acp_session::BackgroundTaskView>,
+) {
+    use crate::acp_session::BackgroundTaskStatus;
+    let finished: Vec<BackgroundTaskStatus> = state
+        .background_tasks
+        .iter()
+        .filter(|old| old.status == BackgroundTaskStatus::Running)
+        .map(|old| {
+            tasks
+                .iter()
+                .find(|new| new.id == old.id)
+                .map_or(BackgroundTaskStatus::Stopped, |new| new.status)
+        })
+        .filter(|status| *status != BackgroundTaskStatus::Running)
+        .collect();
+    state.background_tasks = tasks;
+    if finished.is_empty() || !state.completion_withheld() || state.background_work_running() {
+        return;
+    }
+    if finished
+        .iter()
+        .all(|status| *status == BackgroundTaskStatus::Stopped)
+    {
+        state.completed_unread = true;
+    }
+}
+
+/// Provider 自己开的一轮。没有用户消息，也就没有回显和计时条目，其余照新回合开。
+/// 必须新开一代：上一轮若是被停掉的，不开新代这一轮的正文会被当成停止后的迟到内容丢掉。
+fn apply_provider_turn_started(state: &mut AcpSessionState, outcome: &mut ApplyOutcome) {
+    if state.replaying_history
+        || state.turn_started_at_ms.is_some()
+        || !matches!(state.phase, DaemonPhase::Idle)
+    {
+        return;
+    }
+    outcome.entries_offset = finalize_dangling_tool_calls(state);
+    state.turn_seq = state.turn_seq.saturating_add(1);
+    state.cancel_requested = false;
+    resume_running(state);
+    state.end_reason.clear();
+    state.active_delivery_id = None;
+    state.completed_unread = false;
+    state.turn_outcome = None;
+    state.provider_retry = None;
+    state.turn_started_at_ms = Some(super::unix_time_ms());
 }
 
 fn apply_terminal_output(
@@ -1275,9 +1345,13 @@ fn finish_turn_with(state: &mut AcpSessionState, outcome: AcpTurnOutcome) -> Opt
     state.elicitation = None;
     state.phase = DaemonPhase::Idle;
     state.end_reason.clear();
+    // 回合结束，重试也就结束了。Provider 漏发重试结束时不能一直挂着。
+    state.provider_retry = None;
     state.completed_delivery_id = state.active_delivery_id.take();
     if turn_open {
-        state.completed_unread = true;
+        // 后台还在跑就报「完成」，用户点开发现它还在干。失败、截断照常立刻报；
+        // 取消是用户自己停的，本来就不提醒。
+        state.completed_unread = !(outcome.is_success() && state.background_work_running());
     }
     state.turn_outcome = Some(outcome);
     let ended_at_ms = super::unix_time_ms();

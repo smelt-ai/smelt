@@ -149,7 +149,10 @@ pub(crate) struct AcpSession {
     pub(crate) prompt_in_flight: AtomicBool,
     /// 自动化只关心相位、投递账本和闸门。流式文本不进这组，避免每来一个字就整段重算。
     pub(crate) automation_watch: Mutex<Option<AutomationWatch>>,
+    /// 回合闸门后面排队的输入。只经 [`edit_pending_prompts`] 改，快照里那份展示投影跟着它走。
     pub(crate) pending_prompts: Mutex<VecDeque<QueuedAcpPrompt>>,
+    /// 排队消息的会话内 id。撤回按它找。
+    pub(crate) next_pending_prompt_id: AtomicU64,
     /// 一次「立即发送」还没落地。文本是稳定键；附图在认领时抄下，因为 Pi 的 clear_queue 还原不带图。
     pub(crate) immediate_delivery: Mutex<Option<ImmediateDelivery>>,
     /// 已经写给 Pi、还没被收下的那条。收下之前不回显；拒绝后回到队列，不记回合失败。
@@ -217,12 +220,46 @@ pub(crate) struct ImmediateDelivery {
 }
 
 pub(crate) struct QueuedAcpPrompt {
+    pub(crate) id: u64,
     pub(crate) text: String,
     pub(crate) images: Vec<smelt_core::acp_conn::PromptImage>,
     pub(crate) delivery_id: Option<String>,
     pub(crate) origin: AcpPromptOrigin,
     /// 正文已经在消息流里了。Pi 拒收后重发的是同一条气泡，不能再写一遍。
     pub(crate) echoed: bool,
+}
+
+impl QueuedAcpPrompt {
+    /// 用户自己在输入框里发的、气泡还没写出来的那种才能撤回。外部投递归守护进程；
+    /// 已回显的那条撤回要连气泡一起撤，那是 Pi 拒收的路径，不走这里。
+    fn withdrawable(&self) -> bool {
+        self.delivery_id.is_none() && !self.echoed
+    }
+}
+
+/// 改 daemon 排队并重写快照里的展示投影。两份必须一起变，所以队列只从这里改。
+/// 已回显的那条气泡就在消息流里，排队条不再列一遍。
+pub(crate) fn edit_pending_prompts<R>(
+    sess: &AcpSession,
+    edit: impl FnOnce(&mut VecDeque<QueuedAcpPrompt>) -> R,
+) -> R {
+    let mut queue = sess.pending_prompts.lock().unwrap();
+    let result = edit(&mut queue);
+    sess.reduced.lock().unwrap().pending_prompts = queue
+        .iter()
+        .filter(|prompt| !prompt.echoed)
+        .map(|prompt| smelt_core::acp_session::PendingPromptView {
+            id: prompt.id,
+            text: prompt.text.clone(),
+            image_count: prompt.images.len(),
+            withdrawable: prompt.withdrawable(),
+        })
+        .collect();
+    result
+}
+
+pub(crate) fn next_pending_prompt_id(sess: &AcpSession) -> u64 {
+    sess.next_pending_prompt_id.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 pub(crate) type AcpSessions = Arc<AcpRegistry<AcpSession>>;
@@ -471,6 +508,9 @@ pub(crate) fn compute_acp_daemon_phase(
                 Phase::Idle
             }
         }
+        // 回合说完了，后台任务、后台子智能体还在跑：对外仍在干活，完成等它们结束再报。
+        // 只动广播的相位，归约里仍是 Idle，发送闸门照常开着，用户随时能接着说。
+        DaemonPhase::Idle if reduced.completion_waits_on_background() => Phase::ExecutingTool,
         DaemonPhase::Idle => Phase::Idle,
         DaemonPhase::Thinking | DaemonPhase::ExecutingTool if executing_tool => {
             Phase::ExecutingTool
@@ -1560,10 +1600,12 @@ pub(crate) fn start_acp_event_drain(
                             .mark_restored(history_id.as_deref());
                     }
                     if let smelt_core::acp_conn::ConversationEvent::ComposerRestore {
-                        texts, ..
+                        texts,
+                        images,
+                        ..
                     } = &mut ev
                     {
-                        note_immediate_queue_restore(sess, texts);
+                        note_immediate_queue_restore(sess, texts, images);
                     }
                     let (outcome, owner_ids) = {
                         let mut st = sess.reduced.lock().unwrap();
@@ -2097,6 +2139,7 @@ pub(crate) fn make_acp_session(
         prompt_in_flight: AtomicBool::new(false),
         automation_watch: Mutex::new(None),
         pending_prompts: Mutex::new(VecDeque::new()),
+        next_pending_prompt_id: AtomicU64::new(0),
         immediate_delivery: Mutex::new(None),
         unaccepted_prompt: Mutex::new(None),
         provider_hold: AtomicBool::new(false),
@@ -2183,7 +2226,22 @@ pub(crate) fn requeue_unaccepted_prompt(sess: &AcpSession) {
     // provider 空下来重发同一条，不能再写第二个气泡。
     prompt.echoed = true;
     sess.prompt_in_flight.store(true, Ordering::SeqCst);
-    sess.pending_prompts.lock().unwrap().push_front(prompt);
+    edit_pending_prompts(sess, |queue| queue.push_front(prompt));
+}
+
+/// 用户撤回还在 daemon 队列里的一条：从队列拿掉，正文和附图回输入框。
+/// 已经发出去的、外部投递的，都不归输入框，找不到就是撤不了。
+fn withdraw_pending_prompt(sess: &AcpSession, id: u64) -> Result<(), &'static str> {
+    let prompt = edit_pending_prompts(sess, |queue| {
+        let ix = queue
+            .iter()
+            .position(|prompt| prompt.id == id && prompt.withdrawable())?;
+        queue.remove(ix)
+    })
+    .ok_or("queued prompt is no longer pending")?;
+    restore_prompt_to_composer(sess, prompt);
+    push_acp_snapshot_since(sess, false, None);
+    Ok(())
 }
 
 /// 还草稿：正文回输入框的同时把消息流里的气泡撤掉，不能两处都留。
@@ -2283,6 +2341,7 @@ fn remember_outgoing_prompt(
     }
     if pi {
         *sess.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+            id: next_pending_prompt_id(sess),
             text: text.clone(),
             images: images.clone(),
             delivery_id: delivery_id.clone(),
@@ -2579,7 +2638,11 @@ fn deliver_queued_now(
 }
 
 /// clear_queue 还回来的原文里拿掉已经认领的那一条。没还回来就丢掉这次发送，不能再补一次。
-pub(crate) fn note_immediate_queue_restore(sess: &AcpSession, texts: &mut Vec<String>) {
+pub(crate) fn note_immediate_queue_restore(
+    sess: &AcpSession,
+    texts: &mut Vec<String>,
+    images: &mut Vec<Vec<smelt_core::acp_conn::PromptImage>>,
+) {
     let mut slot = sess.immediate_delivery.lock().unwrap();
     let Some(delivery) = slot.as_mut() else {
         return;
@@ -2588,9 +2651,14 @@ pub(crate) fn note_immediate_queue_restore(sess: &AcpSession, texts: &mut Vec<St
         return;
     }
     delivery.awaiting_clear = false;
-    delivery.send = smelt_core::acp_session::take_claimed_queue_text(texts, &delivery.text);
-    if !delivery.send {
-        *slot = None;
+    let claimed =
+        smelt_core::acp_session::take_claimed_queue_text(texts, images, &delivery.text);
+    delivery.send = claimed.is_some();
+    match claimed {
+        // 驱动按发出时的原样记着附图；follow-up 的图只有这里有。
+        Some(restored) if !restored.is_empty() => delivery.images = restored,
+        Some(_) => {}
+        None => *slot = None,
     }
 }
 
@@ -2655,6 +2723,16 @@ fn send_acp_clear_queue(sess: &AcpSession) -> Result<(), &'static str> {
         return Err("ACP command channel is busy or closed");
     }
     Ok(())
+}
+
+fn send_acp_stop_background_task(sess: &AcpSession, id: String) -> Result<(), &'static str> {
+    let cmd_tx = sess.handle.lock().unwrap().as_ref().map(|h| h.cmd_tx.clone());
+    let Some(cmd_tx) = cmd_tx else {
+        return Err("ACP session is not running");
+    };
+    cmd_tx
+        .try_send(smelt_core::acp_conn::ConversationCommand::StopBackgroundTask { id })
+        .map_err(|_| "ACP command channel is busy or closed")
 }
 
 /// 编辑并重发最后一条用户消息。入口是 GUI 传来的 entry 下标，但下标背后的一切
@@ -2750,7 +2828,7 @@ pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &E
     if sess.prompt_in_flight.swap(true, Ordering::SeqCst) {
         return;
     }
-    let Some(prompt) = sess.pending_prompts.lock().unwrap().pop_front() else {
+    let Some(prompt) = edit_pending_prompts(sess, VecDeque::pop_front) else {
         sess.prompt_in_flight.store(false, Ordering::SeqCst);
         return;
     };
@@ -2765,7 +2843,7 @@ pub(crate) fn flush_pending_acp_prompt_locked(sess: &AcpSession, subscribers: &E
     )
     .is_err()
     {
-        sess.pending_prompts.lock().unwrap().push_front(prompt);
+        edit_pending_prompts(sess, |queue| queue.push_front(prompt));
     }
 }
 
@@ -2902,16 +2980,18 @@ fn apply_acp_user_action_inner(
                         }
                     }
                 }
-                sess.pending_prompts
-                    .lock()
-                    .unwrap()
-                    .push_back(QueuedAcpPrompt {
+                // 排队条从快照里读这份队列：用户看得见、撤得回，不会以为消息丢了。
+                let id = next_pending_prompt_id(sess);
+                edit_pending_prompts(sess, |queue| {
+                    queue.push_back(QueuedAcpPrompt {
+                        id,
                         text,
                         images,
                         delivery_id,
                         origin: AcpPromptOrigin::User,
                         echoed: false,
-                    });
+                    })
+                });
                 push_acp_snapshot_since(sess, false, None);
                 return Ok(());
             }
@@ -2958,7 +3038,9 @@ fn apply_acp_user_action_inner(
             Ok(())
         }
         AcpUserAction::ClearQueue => send_acp_clear_queue(sess),
+        AcpUserAction::StopBackgroundTask { id } => send_acp_stop_background_task(sess, id),
         AcpUserAction::DeliverQueuedNow { text } => deliver_queued_now(sess, text, subscribers),
+        AcpUserAction::WithdrawPendingPrompt { id } => withdraw_pending_prompt(sess, id),
         AcpUserAction::RewindToMessage { entry_index } => send_acp_rewind(sess, entry_index),
         AcpUserAction::Cancel => request_acp_cancel(sess, subscribers),
         AcpUserAction::SetConfigOption {
@@ -3302,8 +3384,10 @@ pub(crate) fn handle_acp_action(
                         &action,
                         smelt_core::acp_session::AcpUserAction::Cancel
                             | smelt_core::acp_session::AcpUserAction::DeliverQueuedNow { .. }
+                            | smelt_core::acp_session::AcpUserAction::WithdrawPendingPrompt { .. }
                             | smelt_core::acp_session::AcpUserAction::Compact
                             | smelt_core::acp_session::AcpUserAction::ClearQueue
+                            | smelt_core::acp_session::AcpUserAction::StopBackgroundTask { .. }
                             | smelt_core::acp_session::AcpUserAction::RewindToMessage { .. }
                             | smelt_core::acp_session::AcpUserAction::SetConfigOption { .. }
                             | smelt_core::acp_session::AcpUserAction::RestartRuntime
@@ -4563,8 +4647,8 @@ pub(crate) fn acp_upgrade_blockers(acp_sessions: &AcpSessions) -> Vec<String> {
                 .unwrap()
                 .as_ref()
                 .is_some_and(|handle| handle.in_flight_rpc.load(Ordering::SeqCst) != 0);
-            // `pending_prompts` 不在 ACP 快照中；只要 daemon 还握着回合闸门，
-            // 交接就必须等它先派发/清空队列，不能把用户已经提交的输入丢掉。
+            // 快照只带 `pending_prompts` 的展示投影，附图和投递 id 不随交接；只要
+            // daemon 还握着回合闸门，交接就必须等它先派发/清空队列，不能把用户已经提交的输入丢掉。
             let prompt_queue_held = slot.value.prompt_in_flight.load(Ordering::SeqCst)
                 || !slot.value.pending_prompts.lock().unwrap().is_empty();
             (phase_blocks || has_unfinished_tool || in_flight || prompt_queue_held).then_some(id)

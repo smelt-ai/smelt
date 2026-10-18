@@ -1120,6 +1120,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
         .lock()
         .unwrap()
         .push_back(QueuedAcpPrompt {
+            id: 1,
             text: "下一句".to_string(),
             images: Vec::new(),
             delivery_id: None,
@@ -1154,6 +1155,141 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     assert_eq!(
         unaccepted.as_ref().map(|prompt| prompt.text.as_str()),
         Some("下一句")
+    );
+}
+
+#[test]
+fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn() {
+    use smelt_core::acp_session::AcpUserAction;
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-withdraw-queued", || {
+        make_acp_session_value("acp-withdraw-queued", reduced)
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    // Claude / Codex 这类通用 ACP agent 不能中途插话，回合在跑时只能排在 daemon 闸门后面。
+    slot.value
+        .handle
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .supports_mid_turn_input = false;
+    let subscribers = new_event_hub();
+    let prompt = |text: &str, images, delivery_id: Option<&str>| AcpUserAction::Prompt {
+        text: text.to_string(),
+        images,
+        delivery_id: delivery_id.map(str::to_string),
+    };
+    let image = smelt_core::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aW1n".into(),
+    };
+
+    apply_acp_user_action(
+        &slot.value,
+        prompt("第一句", Vec::new(), None),
+        &subscribers,
+    )
+    .unwrap();
+    assert!(matches!(
+        cmd_rx.try_recv().unwrap(),
+        smelt_core::acp_conn::ConversationCommand::Prompt { .. }
+    ));
+    apply_acp_user_action(
+        &slot.value,
+        prompt("第二句", vec![image.clone()], None),
+        &subscribers,
+    )
+    .unwrap();
+    apply_acp_user_action(
+        &slot.value,
+        prompt("任务投递", Vec::new(), Some("run-1")),
+        &subscribers,
+    )
+    .unwrap();
+    assert!(cmd_rx.try_recv().is_err(), "回合在跑，不能并发派发");
+
+    // 排队的消息在快照里：客户端看得见，不会以为发丢了。
+    let queued = slot
+        .value
+        .reduced
+        .lock()
+        .unwrap()
+        .to_snapshot(false)
+        .pending_prompts;
+    assert_eq!(
+        queued
+            .iter()
+            .map(|item| (item.text.as_str(), item.image_count, item.withdrawable))
+            .collect::<Vec<_>>(),
+        vec![("第二句", 1, true), ("任务投递", 0, false)]
+    );
+    assert_ne!(queued[0].id, queued[1].id);
+
+    // 外部投递归守护进程，输入框撤不走。
+    assert!(
+        apply_acp_user_action(
+            &slot.value,
+            AcpUserAction::WithdrawPendingPrompt { id: queued[1].id },
+            &subscribers,
+        )
+        .is_err()
+    );
+    apply_acp_user_action(
+        &slot.value,
+        AcpUserAction::WithdrawPendingPrompt { id: queued[0].id },
+        &subscribers,
+    )
+    .unwrap();
+    {
+        let state = slot.value.reduced.lock().unwrap();
+        assert_eq!(
+            state
+                .pending_prompts
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["任务投递"]
+        );
+        // 正文和附图回到输入框，消息流里没有这条。
+        assert_eq!(state.composer_restore_texts, vec!["第二句".to_string()]);
+        assert_eq!(state.composer_restore_images, vec![image]);
+        assert!(!state.entries().iter().any(|entry| matches!(
+            entry,
+            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } if text == "第二句"
+        )));
+    }
+    // 撤过的不能再撤第二次，也不会在回合结束后发出去。
+    assert!(
+        apply_acp_user_action(
+            &slot.value,
+            AcpUserAction::WithdrawPendingPrompt { id: queued[0].id },
+            &subscribers,
+        )
+        .is_err()
+    );
+    {
+        let mut state = slot.value.reduced.lock().unwrap();
+        state.phase = DaemonPhase::Idle;
+        state.turn_started_at_ms = None;
+    }
+    settle_acp_turn_locked(&slot.value, true, false, false, &subscribers);
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "任务投递");
+        }
+        _ => panic!("回合结束只放出队首一条"),
+    }
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(
+        slot.value
+            .reduced
+            .lock()
+            .unwrap()
+            .pending_prompts
+            .is_empty()
     );
 }
 
@@ -1241,6 +1377,7 @@ fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再问一句".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1335,6 +1472,7 @@ fn real_prompt_failure_returns_the_text_instead_of_retrying() {
         session
     });
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再试一次".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1377,6 +1515,7 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
         data_b64: "aGk=".into(),
     };
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "看这张".to_string(),
         images: vec![image.clone()],
         delivery_id: None,
@@ -1397,6 +1536,7 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
     assert_eq!(user_bubbles(&slot.value, "看这张"), 0);
 
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "   ".to_string(),
         images: vec![image.clone()],
         delivery_id: None,
@@ -1423,6 +1563,7 @@ fn real_prompt_failure_restores_the_images_with_the_text() {
         data_b64: "aGk=".into(),
     };
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再试一次".to_string(),
         images: vec![image.clone()],
         delivery_id: None,
@@ -1449,6 +1590,7 @@ fn cancel_before_accept_restores_user_text() {
         make_acp_session_value("acp-pi-cancel-unaccepted", AcpSessionState::default())
     });
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "用户刚发的".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1481,6 +1623,7 @@ fn pi_queue_hold_clears_when_the_provider_becomes_idle() {
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再问一句".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1689,14 +1832,22 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
     assert!(cmd_rx.try_recv().is_err(), "还原没到不能发");
 
     let mut texts = vec!["但是我想字数一致".to_string(), "别的".to_string()];
-    note_immediate_queue_restore(&slot.value, &mut texts);
+    let mut images = vec![
+        vec![smelt_core::acp_chat::AcpImage {
+            mime: "image/png".into(),
+            data_b64: "aGk=".into(),
+        }],
+        Vec::new(),
+    ];
+    note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
     assert_eq!(texts, vec!["别的".to_string()]);
+    assert_eq!(images, vec![Vec::new()], "认领那条的图不能再还回输入框");
     smelt_core::acp_session::apply_event(
         &mut slot.value.reduced.lock().unwrap(),
         smelt_core::acp_conn::ConversationEvent::ComposerRestore {
             revision: 1,
             texts,
-            images: Vec::new(),
+            images,
         },
     );
     slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
@@ -1752,7 +1903,8 @@ fn deliver_queued_now_does_not_resend_when_the_provider_already_took_the_item() 
     ));
 
     let mut texts = vec!["别的".to_string()];
-    note_immediate_queue_restore(&slot.value, &mut texts);
+    let mut images = vec![Vec::new()];
+    note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
     assert_eq!(texts, vec!["别的".to_string()]);
     slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
     let _turn = slot.value.turn_completion.lock().unwrap();
@@ -1796,8 +1948,10 @@ fn deliver_queued_now_while_idle_waits_for_the_queue_clear_before_sending() {
     assert!(!slot.value.prompt_in_flight.load(Ordering::SeqCst));
 
     let mut texts = vec!["总结".to_string()];
-    note_immediate_queue_restore(&slot.value, &mut texts);
+    let mut images = vec![Vec::new()];
+    note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
     assert!(texts.is_empty());
+    assert!(images.is_empty());
     try_flush_immediate_delivery(&slot.value, &subscribers);
     assert!(matches!(
         cmd_rx.try_recv(),
@@ -1969,6 +2123,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         .lock()
         .unwrap()
         .push_back(QueuedAcpPrompt {
+            id: 1,
             text: "prompt B".to_string(),
             images: Vec::new(),
             delivery_id: None,
@@ -2086,6 +2241,7 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
         .lock()
         .unwrap()
         .push_back(QueuedAcpPrompt {
+            id: 1,
             text: "send now".to_string(),
             images: Vec::new(),
             delivery_id: None,
@@ -3651,6 +3807,35 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
     let connecting = AcpSessionState::default();
     assert_eq!(connecting.phase, DaemonPhase::Connecting);
     assert_eq!(compute_acp_daemon_phase(&connecting), Phase::Connecting);
+}
+
+#[test]
+fn daemon_phase_keeps_working_while_background_work_outlives_the_turn() {
+    use smelt_core::acp_session::{AcpTurnOutcome, BackgroundTaskStatus, BackgroundTaskView};
+
+    let mut state = AcpSessionState::default();
+    state.phase = DaemonPhase::Idle;
+    state.turn_outcome = Some(AcpTurnOutcome::Succeeded);
+    state.background_tasks = vec![BackgroundTaskView {
+        id: "bg-1".into(),
+        title: "测试".into(),
+        command: "npm test".into(),
+        status: BackgroundTaskStatus::Running,
+        exit_code: None,
+        output: String::new(),
+        started_at_ms: 10,
+        finished_at_ms: None,
+        tool_call_id: None,
+    }];
+    assert_eq!(
+        compute_acp_daemon_phase(&state),
+        Phase::ExecutingTool,
+        "回合说完了但后台还在跑，对外不能是空闲或完成"
+    );
+
+    state.background_tasks[0].status = BackgroundTaskStatus::Stopped;
+    state.completed_unread = true;
+    assert_eq!(compute_acp_daemon_phase(&state), Phase::Succeeded);
 }
 
 #[test]

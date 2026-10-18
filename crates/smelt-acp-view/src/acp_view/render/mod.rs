@@ -103,7 +103,7 @@ impl AcpView {
             self.entries.is_empty(),
             self.history_session_id.is_some(),
             self.pending_initial_prompt.is_some(),
-            self.queued_prompts.is_empty()
+            self.pending_prompts.is_empty()
                 && self.queued_steering.is_empty()
                 && self.queued_follow_up.is_empty(),
             self.prompt_dispatch_pending,
@@ -641,6 +641,33 @@ impl AcpView {
             )
             .children(permission)
             .children(elicitation)
+            .children(self.visible_notice().map(|notice| {
+                let id = notice.id;
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_1p5()
+                    .border_t_1()
+                    .border_color(border)
+                    .bg(ui_theme::tint(ui_theme::yellow(), 0x14))
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::yellow()))
+                    .child(div().flex_1().min_w(px(0.)).child(notice.text.clone()))
+                    .child(
+                        div()
+                            .id(("acp-notice-dismiss", id as usize))
+                            .role(gpui::Role::Button)
+                            .aria_label("关闭提示")
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.8))
+                            .child(Icon::new(IconName::Close).size_3p5())
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.dismissed_notice_id = Some(id);
+                                cx.notify();
+                            })),
+                    )
+            }))
             .children(self.paste_hint.as_ref().map(|msg| {
                 h_flex()
                     .items_center()

@@ -1385,6 +1385,59 @@ fn pi_model_from_change(entry: &Value) -> Option<String> {
     })
 }
 
+/// 文件头之后的全部 entry（文件顺序）和文件头 `version`（缺省按 v1）。
+/// 跟 Pi 一样跳过解析失败的行和多余的 `session` 头。
+fn pi_session_entries(text: &str) -> (u64, Vec<Value>) {
+    let mut lines = text.lines();
+    let version = lines
+        .next()
+        .and_then(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .and_then(|header| header.get("version").and_then(Value::as_u64))
+        .unwrap_or(1);
+    let entries = lines
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter(|entry| entry.get("type").and_then(Value::as_str) != Some("session"))
+        .collect();
+    (version, entries)
+}
+
+/// 按 Pi 自己加载会话的规则取当前活动分支（根 → 叶）。
+///
+/// Pi 不持久化叶子指针：`SessionManager._buildIndex` 把文件里最后一个 entry 当叶子，
+/// `buildSessionPath` 再沿 `parentId` 走回根，父节点找不到就停（见 pi-coding-agent
+/// `dist/core/session-manager.js`）。终端里 `/tree` 跳到别的节点后接着追加，旧分支
+/// 仍留在文件里，逐行读会把它混进历史和交接。实时恢复 `pi_rpc::active_branch_messages`
+/// 走的是 Pi `get_entries` 给出的同一条链，两边由此一致；跟它一样保留整条链上的
+/// 原始消息，不按 compaction 裁掉旧消息。
+///
+/// `version < 2` 的旧格式没有 id/parentId，Pi 迁移时按文件顺序串成一条链，这里同样
+/// 线性返回。
+fn pi_active_branch(version: u64, entries: &[Value]) -> Vec<&Value> {
+    if version < 2 {
+        return entries.iter().collect();
+    }
+    // 重复 id 后写的覆盖先写的，跟 Pi 的 `Map.set` 一致。
+    let mut by_id = std::collections::HashMap::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(id) = entry.get("id").and_then(Value::as_str) {
+            by_id.insert(id, index);
+        }
+    }
+    let mut path = Vec::new();
+    let mut visited = HashSet::new();
+    let mut cursor = entries.len().checked_sub(1);
+    // 损坏文件的 parent 链成环时 Pi 自己会死循环；历史只是预览，截断在环上即可。
+    while let Some(index) = cursor.filter(|index| visited.insert(*index)) {
+        path.push(&entries[index]);
+        cursor = entries[index]
+            .get("parentId")
+            .and_then(Value::as_str)
+            .and_then(|parent| by_id.get(parent).copied());
+    }
+    path.reverse();
+    path
+}
+
 pub fn list_pi_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
     list_pi_sessions_with(&LocalFs, cwd, override_dir)
 }
@@ -1414,7 +1467,17 @@ fn summarize_pi_session_with(
         return None;
     }
 
-    let mut title = None;
+    let (version, entries) = pi_session_entries(&text);
+    // 会话名跟 Pi 的 `getSessionName` 一样取全文件最后一个 session_info（空名即清除），
+    // 不随分支走；其余统计只算当前活动分支，跟详情里展示的一致。
+    let title = entries
+        .iter()
+        .rev()
+        .find(|entry| entry.get("type").and_then(Value::as_str) == Some("session_info"))
+        .and_then(|entry| entry.get("name").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
     let mut first_user_title = None;
     let mut started_at = header_timestamp;
     let mut latest_message_at: Option<DateTime<Utc>> = None;
@@ -1422,54 +1485,39 @@ fn summarize_pi_session_with(
     let mut message_count = 0usize;
     let mut total_tokens = 0u64;
 
-    for line in text.lines().skip(1) {
-        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        let timestamp = pi_entry_timestamp(&entry);
+    for entry in pi_active_branch(version, &entries) {
+        let timestamp = pi_entry_timestamp(entry);
         if let Some(timestamp) = timestamp {
             started_at = Some(started_at.map_or(timestamp, |current| current.min(timestamp)));
             latest_any_at = Some(latest_any_at.map_or(timestamp, |current| current.max(timestamp)));
         }
-        match entry.get("type").and_then(Value::as_str) {
-            Some("session_info") => {
-                if let Some(name) = entry
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                {
-                    title = Some(name.to_string());
+        if entry.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        if let Some(timestamp) = timestamp {
+            latest_message_at =
+                Some(latest_message_at.map_or(timestamp, |current| current.max(timestamp)));
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        match message.get("role").and_then(Value::as_str) {
+            Some("user") => {
+                let text = pi_content_text(message.get("content"));
+                if !text.trim().is_empty() {
+                    message_count += 1;
+                    if first_user_title.is_none() {
+                        first_user_title = Some(text);
+                    }
                 }
             }
-            Some("message") => {
-                if let Some(timestamp) = timestamp {
-                    latest_message_at =
-                        Some(latest_message_at.map_or(timestamp, |current| current.max(timestamp)));
+            Some("assistant") => {
+                let (text, tools, _) = pi_assistant_parts(message);
+                if !text.trim().is_empty() || !tools.is_empty() {
+                    message_count += 1;
                 }
-                let Some(message) = entry.get("message") else {
-                    continue;
-                };
-                match message.get("role").and_then(Value::as_str) {
-                    Some("user") => {
-                        let text = pi_content_text(message.get("content"));
-                        if !text.trim().is_empty() {
-                            message_count += 1;
-                            if first_user_title.is_none() {
-                                first_user_title = Some(text);
-                            }
-                        }
-                    }
-                    Some("assistant") => {
-                        let (text, tools, _) = pi_assistant_parts(message);
-                        if !text.trim().is_empty() || !tools.is_empty() {
-                            message_count += 1;
-                        }
-                        if let Some(usage) = message.get("usage") {
-                            total_tokens = total_tokens.saturating_add(pi_usage_total(usage));
-                        }
-                    }
-                    _ => {}
+                if let Some(usage) = message.get("usage") {
+                    total_tokens = total_tokens.saturating_add(pi_usage_total(usage));
                 }
             }
             _ => {}
@@ -1507,13 +1555,11 @@ fn parse_pi_session_detail(text: &str) -> Option<SessionDetail> {
     let mut turns = Vec::new();
     let mut model = None;
 
-    for line in text.lines().skip(1) {
-        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
+    let (version, entries) = pi_session_entries(text);
+    for entry in pi_active_branch(version, &entries) {
         match entry.get("type").and_then(Value::as_str) {
             Some("model_change") => {
-                if let Some(value) = pi_model_from_change(&entry) {
+                if let Some(value) = pi_model_from_change(entry) {
                     model = Some(value);
                 }
             }
@@ -1521,7 +1567,7 @@ fn parse_pi_session_detail(text: &str) -> Option<SessionDetail> {
                 let Some(message) = entry.get("message") else {
                     continue;
                 };
-                let timestamp = pi_entry_timestamp(&entry);
+                let timestamp = pi_entry_timestamp(entry);
                 match message.get("role").and_then(Value::as_str) {
                     Some("user") => {
                         let text = pi_content_text(message.get("content"));
@@ -2692,6 +2738,95 @@ mod tests {
         assert_eq!(detail.turns[1].text, "我来检查");
         assert_eq!(detail.turns[1].tools, ["read"]);
         assert_eq!(detail.turns[1].tool_paths, ["src/lib.rs"]);
+    }
+
+    #[test]
+    fn pi_reader_follows_only_the_branch_pi_would_load() {
+        // 终端里用 `/tree` 回到 a1 再继续：u2/a2/i1 成了被放弃的分支，仍留在文件里。
+        // Pi 把文件最后一个 entry（a3）当叶子沿 parentId 走回根，历史也只能看到这一条。
+        let fs = MemFs::new();
+        let cwd = "/workspace/project";
+        let agent_dir = PathBuf::from("/providers/pi/agent");
+        let session = agent_dir.join("sessions").join("branched.jsonl");
+        write(
+            &fs,
+            &session,
+            concat!(
+                r#"{"type":"session","version":3,"id":"pi-branch","timestamp":"2026-08-17T05:00:00Z","cwd":"/workspace/project"}"#,
+                "\n",
+                r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-17T05:00:01Z","message":{"role":"user","content":"第一个问题"}}"#,
+                "\n",
+                r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-17T05:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"第一个回答"}],"model":"p/first-model","usage":{"input":10}}}"#,
+                "\n",
+                r#"{"type":"message","id":"u2","parentId":"a1","timestamp":"2026-08-17T05:00:03Z","message":{"role":"user","content":"被放弃的追问"}}"#,
+                "\n",
+                r#"{"type":"message","id":"a2","parentId":"u2","timestamp":"2026-08-17T05:00:04Z","message":{"role":"assistant","content":[{"type":"text","text":"被放弃的回答"},{"type":"toolCall","id":"call-x","name":"edit","arguments":{"path":"src/abandoned.rs"}}],"model":"p/abandoned-model","usage":{"input":100}}}"#,
+                "\n",
+                r#"{"type":"session_info","id":"i1","parentId":"a2","timestamp":"2026-08-17T05:00:05Z","name":"分支会话"}"#,
+                "\n",
+                r#"{"type":"branch_summary","id":"b1","parentId":"a1","fromId":"i1","timestamp":"2026-08-17T05:00:06Z","summary":"放弃的分支试过改 abandoned.rs"}"#,
+                "\n",
+                r#"{"type":"message","id":"u3","parentId":"b1","timestamp":"2026-08-17T05:00:07Z","message":{"role":"user","content":"新分支追问"}}"#,
+                "\n",
+                r#"{"type":"message","id":"a3","parentId":"u3","timestamp":"2026-08-17T05:00:08Z","message":{"role":"assistant","content":[{"type":"text","text":"新分支回答"}],"usage":{"input":1}}}"#,
+                "\n",
+            ),
+        );
+
+        let sessions = list_pi_sessions_with(&fs, cwd, Some(agent_dir.to_str().unwrap()));
+        assert_eq!(sessions.len(), 1);
+        let summary = &sessions[0];
+        // 会话名跟 Pi 的 getSessionName 一样取全文件最新的 session_info，不随分支走。
+        assert_eq!(summary.agent_title, "分支会话");
+        assert_eq!(summary.message_count, 4);
+        assert_eq!(summary.total_tokens, 11);
+        assert_eq!(summary.started_at, parse_rfc3339("2026-08-17T05:00:00Z"));
+        assert_eq!(
+            summary.last_active_at,
+            parse_rfc3339("2026-08-17T05:00:08Z")
+        );
+
+        let detail = load_pi_session_detail_with(&fs, &session).unwrap();
+        let texts: Vec<&str> = detail.turns.iter().map(|turn| turn.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["第一个问题", "第一个回答", "新分支追问", "新分支回答"]
+        );
+        assert!(detail.turns.iter().all(|turn| turn.tools.is_empty()));
+        // a3 没带 model，活动分支上最近的是 a1；被放弃分支的 a2 不算。
+        assert_eq!(detail.model.as_deref(), Some("p/first-model"));
+    }
+
+    #[test]
+    fn pi_reader_treats_legacy_files_without_ids_as_linear() {
+        // v1 文件头没有 version，entry 没有 id/parentId；Pi 迁移时按文件顺序串成一条链。
+        let fs = MemFs::new();
+        let cwd = "/workspace/project";
+        let agent_dir = PathBuf::from("/providers/pi/agent");
+        let session = agent_dir.join("sessions").join("legacy.jsonl");
+        write(
+            &fs,
+            &session,
+            concat!(
+                r#"{"type":"session","id":"pi-legacy","timestamp":"2026-08-17T05:00:00Z","cwd":"/workspace/project"}"#,
+                "\n",
+                r#"{"type":"message","timestamp":"2026-08-17T05:00:01Z","message":{"role":"user","content":"旧问题"}}"#,
+                "\n",
+                r#"{"type":"message","timestamp":"2026-08-17T05:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"旧回答"}]}}"#,
+                "\n",
+                r#"{"type":"message","timestamp":"2026-08-17T05:00:03Z","message":{"role":"user","content":"再问"}}"#,
+                "\n",
+            ),
+        );
+
+        let sessions = list_pi_sessions_with(&fs, cwd, Some(agent_dir.to_str().unwrap()));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].message_count, 3);
+        assert_eq!(sessions[0].agent_title, "旧问题");
+
+        let detail = load_pi_session_detail_with(&fs, &session).unwrap();
+        let texts: Vec<&str> = detail.turns.iter().map(|turn| turn.text.as_str()).collect();
+        assert_eq!(texts, ["旧问题", "旧回答", "再问"]);
     }
 
     #[test]

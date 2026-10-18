@@ -57,6 +57,7 @@ pub mod pi_mcp;
 pub mod pi_model_discovery;
 pub mod pi_model_settings;
 pub mod pi_plugin_catalog;
+mod pi_queue;
 pub mod pi_quota;
 pub mod pi_rpc;
 pub mod pi_service;

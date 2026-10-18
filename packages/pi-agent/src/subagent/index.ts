@@ -17,16 +17,34 @@ import {
   backgroundTaskOwner,
   endBackgroundTaskOwner,
 } from "../background-task.ts";
+import { inheritedMcpSelectionEnvironment } from "../mcp-selection.ts";
 import { getConsumedPluginArgs } from "../plugin-args.ts";
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentCatalog } from "./agents.ts";
+import {
+  MAX_RUNNING_SUBAGENTS,
+  ProcessSlots,
+  appendTail,
+  progressMessage,
+  progressWindow,
+  subagentWrapUpMessage,
+  throttleLatest,
+  turnLimitAction,
+  turnLimitMessage,
+} from "./limits.ts";
 import { subagentResultMessage } from "./result.ts";
 import { bridgeSubagentUiRequest } from "./ui-bridge.ts";
 
 const MAX_PARALLEL_TASKS = 8;
-const MAX_CONCURRENCY = 4;
 const OUTPUT_CAP = 32_000;
+/** 本进程所有子智能体共用的进程名额（前台、后台、并行、链式都算）。 */
+export const subagentSlots = new ProcessSlots(MAX_RUNNING_SUBAGENTS);
 const backgroundRuns = new Set<AbortController>();
 let subagentSeq = 0;
+/**
+ * 当前会话的 ctx。后台子智能体会跨过回退（fork）继续跑，派它时捕获的 ctx 随旧会话作废；
+ * 子进程要弹审批时用这一个，不然读作废的 ctx 会抛错，子进程一直等不到答复。
+ */
+let liveContext: ExtensionContext | undefined;
 
 type Usage = {
   input: number;
@@ -56,6 +74,8 @@ type ResolvedAgent = {
   systemPrompt: string;
   tools?: string[];
   model?: string;
+  /** 来自智能体定义的 `max_turns`。临时写的子智能体没有，不限轮数。 */
+  maxTurns?: number;
 };
 
 const DEFAULT_INSTRUCTIONS = [
@@ -71,8 +91,11 @@ type AgentResult = {
   exitCode: number;
   stderr: string;
   usage: Usage;
-  /** Pi assistant messages consumed by Smelt's nested subagent transcript renderer. */
-  messages: Message[];
+  /**
+   * 最近几条 Pi 助手消息，只在运行中的进度里带，给 Smelt 实时画子会话。定稿的结果不带：
+   * 父会话只存结果，不把子会话的思考和工具参数存进自己的记录。
+   */
+  messages?: Message[];
   output: string;
   model?: string;
   stopReason?: string;
@@ -82,7 +105,8 @@ type AgentResult = {
 
 type SubagentDetails = {
   mode: "single" | "parallel" | "chain";
-  results: AgentResult[];
+  /** 运行中的进度带着 stderr；定稿进父会话的不带。 */
+  results: Array<Omit<AgentResult, "stderr"> & { stderr?: string }>;
 };
 
 function emptyUsage(): Usage {
@@ -105,6 +129,20 @@ function cap(text: string): string {
 }
 
 /**
+ * 定稿进父会话的 details：每个结果只留结果本身（输出截断），不带子会话消息，也不带 stderr。
+ * 出错时 stderr 的结尾已经在输出里（没有正文时输出就退到它）。
+ */
+export function finalSubagentDetails(mode: SubagentDetails["mode"], results: AgentResult[]): SubagentDetails {
+  return {
+    mode,
+    results: results.map(({ messages: _messages, stderr: _stderr, ...result }) => ({
+      ...result,
+      output: cap(result.output),
+    })),
+  };
+}
+
+/**
  * 子智能体在会话宿主里的归属：父归属下的一个新分支。子进程照样用宿主跑命令（长命令也能
  * 转后台），但它的任务和完成通知都归它自己，不进父会话。
  */
@@ -123,8 +161,9 @@ export function backgroundSubagentCommand(params: {
   return params.task ?? "子智能体";
 }
 
+/** 子进程的环境：父进程的环境，加上父进程启动时消费掉的 MCP 勾选，和它在宿主里的归属。 */
 export function subagentEnvironment(environment: NodeJS.ProcessEnv, owner: string): NodeJS.ProcessEnv {
-  return { ...environment, [SMELT_BACKGROUND_TASK_OWNER_ENV]: owner };
+  return { ...environment, ...inheritedMcpSelectionEnvironment(), [SMELT_BACKGROUND_TASK_OWNER_ENV]: owner };
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -138,27 +177,6 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
     return { command: process.execPath, args };
   }
   return { command: "pi", args };
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  if (items.length === 0) return [];
-  const limit = Math.max(1, Math.min(concurrency, items.length));
-  const results = new Array<R>(items.length);
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: limit }, async () => {
-      while (true) {
-        const index = next++;
-        if (index >= items.length) return;
-        results[index] = await fn(items[index], index);
-      }
-    }),
-  );
-  return results;
 }
 
 function resolveAgent(spec: AgentSpec, agents: AgentConfig[]): { ok: true; agent: ResolvedAgent } | { ok: false; error: string } {
@@ -180,6 +198,7 @@ function resolveAgent(spec: AgentSpec, agents: AgentConfig[]): { ok: true; agent
           : preset.systemPrompt,
         tools: spec.tools ?? preset.tools,
         model: spec.model ?? preset.model,
+        maxTurns: preset.maxTurns,
       },
     };
   }
@@ -203,7 +222,7 @@ function extractAssistantText(message: any): string {
     .join("\n");
 }
 
-async function runAgent(options: {
+export async function runAgent(options: {
   cwd: string;
   parentModel?: string;
   thinkingLevel?: string;
@@ -213,6 +232,8 @@ async function runAgent(options: {
   signal?: AbortSignal;
   context: ExtensionContext;
   onUpdate?: (result: AgentResult) => void;
+  /** 怎么起子 Pi 进程；默认就是本进程的入口。测试换成假的 RPC 子进程。 */
+  piInvocation?: (args: string[]) => { command: string; args: string[] };
 }): Promise<AgentResult> {
   const resolved = resolveAgent(options.spec, options.agents);
   if (!resolved.ok) {
@@ -231,6 +252,34 @@ async function runAgent(options: {
   }
   const agent = resolved.agent;
 
+  // 排队等进程名额。排队时被叫停就不起进程。
+  const release = await subagentSlots.acquire(options.signal);
+  if (!release) {
+    return {
+      agent: agent.name,
+      agentSource: agent.source,
+      task: options.spec.task,
+      exitCode: 1,
+      stderr: "",
+      usage: emptyUsage(),
+      messages: [],
+      output: "Subagent was aborted",
+      stopReason: "aborted",
+      errorMessage: "Subagent was aborted",
+      step: options.step,
+    };
+  }
+  try {
+    return await runAgentProcess(options, agent);
+  } finally {
+    release();
+  }
+}
+
+async function runAgentProcess(
+  options: Parameters<typeof runAgent>[0],
+  agent: ResolvedAgent,
+): Promise<AgentResult> {
   const args = ["--mode", "rpc", "--no-session", ...getConsumedPluginArgs()];
   args.push(options.context.isProjectTrusted() ? "--approve" : "--no-approve");
   args.push("--exclude-tools", "subagent");
@@ -253,7 +302,7 @@ async function runAgent(options: {
   };
 
   const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
-  const emit = () => options.onUpdate?.({ ...current, messages: [...current.messages] });
+  const emit = () => options.onUpdate?.({ ...current, messages: [...(current.messages ?? [])] });
   const taskOwner = childTaskOwner(backgroundTaskOwner(), `sub-${crypto.randomUUID().slice(0, 8)}`);
 
   try {
@@ -263,8 +312,9 @@ async function runAgent(options: {
       args.push("--append-system-prompt", promptPath);
     }
     let aborted = false;
+    let turnLimited = false;
     const exitCode = await new Promise<number>((resolve) => {
-      const invocation = getPiInvocation(args);
+      const invocation = (options.piInvocation ?? getPiInvocation)(args);
       const proc = spawn(invocation.command, invocation.args, {
         cwd: options.cwd,
         env: subagentEnvironment(process.env, taskOwner),
@@ -360,13 +410,16 @@ async function runAgent(options: {
             .then(() =>
               bridgeSubagentUiRequest(
                 event as RpcExtensionUIRequest,
-                options.context,
+                liveContext ?? options.context,
                 childUiAbort.signal,
                 async (response: RpcExtensionUIResponse) => sendRecord(response),
               ),
             )
             .catch((error: unknown) => {
-              current.stderr += `Subagent UI bridge failed: ${error instanceof Error ? error.message : String(error)}\n`;
+              current.stderr = appendTail(
+                current.stderr,
+                `Subagent UI bridge failed: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
             });
           return;
         }
@@ -379,7 +432,9 @@ async function runAgent(options: {
           return;
         }
         if (event.type !== "message_end" || event.message?.role !== "assistant") return;
-        current.messages.push(event.message);
+        // 只留最近几条、截短过的：进度每次都带着它们，留全量会让每份进度随记录变长，
+        // 写文件的工具参数就是整份文件。
+        current.messages = progressWindow([...(current.messages ?? []), progressMessage(event.message)]);
         current.usage.turns += 1;
         const usage = event.message.usage;
         if (usage) {
@@ -396,6 +451,18 @@ async function runAgent(options: {
         const output = extractAssistantText(event.message);
         if (output) current.output = output;
         emit();
+        // 轮数上限：先插话要它收尾，再不停就中止。只看还要接着调工具的消息，收尾的那条不用管。
+        const action = turnLimitAction(
+          current.usage.turns,
+          event.message.stopReason === "toolUse",
+          agent.maxTurns,
+        );
+        if (action === "wrap_up" && agent.maxTurns !== undefined) {
+          void request("steer", { message: subagentWrapUpMessage(agent.maxTurns) }).catch(() => undefined);
+        } else if (action === "abort" && !turnLimited) {
+          turnLimited = true;
+          abortChild();
+        }
       };
 
       const consume = (text: string) => {
@@ -407,7 +474,7 @@ async function runAgent(options: {
 
       proc.stdout.on("data", (chunk) => consume(decoder.write(chunk)));
       proc.stderr.on("data", (chunk) => {
-        current.stderr += chunk.toString();
+        current.stderr = appendTail(current.stderr, chunk.toString());
       });
       proc.on("close", (code) => {
         consume(decoder.end());
@@ -456,6 +523,10 @@ async function runAgent(options: {
     if (aborted) {
       current.stopReason = "aborted";
       current.errorMessage = current.errorMessage || "Subagent was aborted";
+    }
+    if (turnLimited && agent.maxTurns !== undefined) {
+      current.errorMessage = turnLimitMessage(current.usage.turns, agent.maxTurns);
+      current.output = current.output ? `${current.errorMessage}\n\n${current.output}` : current.errorMessage;
     }
     if (!current.output) current.output = current.errorMessage || current.stderr.trim();
     return current;
@@ -537,6 +608,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
     }),
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      liveContext = ctx;
       const agentScope: AgentScope = params.agentScope ?? "user";
       const discovery = discoverAgents(ctx.cwd, agentScope);
       const catalog = formatAgentCatalog(discovery.agents);
@@ -553,7 +625,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
       });
       const fail = (mode: SubagentDetails["mode"], text: string, results: AgentResult[] = []) => ({
         content: [{ type: "text" as const, text }],
-        details: details(mode, results),
+        details: finalSubagentDetails(mode, results),
         isError: true,
       });
 
@@ -602,7 +674,17 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
         });
 
       // 进度交给谁：前台就是这次工具调用；转后台后工具已经返回，改交给宿主里的那条后台任务。
+      // 只送最新一份、限频：前台每份都带着整份子会话记录，逐事件发送的流量随记录长度平方增长。
+      // 结果交出后丢掉还没送的那份。
       const finish = async (report: typeof onUpdate = onUpdate) => {
+        const progress = report ? throttleLatest(report) : undefined;
+        try {
+          return await settle(progress && ((partial) => progress.push(partial)));
+        } finally {
+          progress?.cancel();
+        }
+      };
+      const settle = async (report: typeof onUpdate) => {
       if (params.chain?.length) {
         const results: AgentResult[] = [];
         let previous = "";
@@ -630,7 +712,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
         }
         return {
           content: [{ type: "text" as const, text: cap(results.at(-1)?.output || "(no output)") }],
-          details: details("chain", results),
+          details: finalSubagentDetails("chain", results),
         };
       }
 
@@ -653,14 +735,16 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
             details: details("parallel", [...results]),
           });
         };
-        await mapWithConcurrency(params.tasks, MAX_CONCURRENCY, async (task, index) => {
-          results[index] = await run(task, undefined, (partial) => {
-            results[index] = partial;
+        // 同时跑几个由进程名额管，这里全部交出去排队。
+        await Promise.all(
+          params.tasks.map(async (task, index) => {
+            results[index] = await run(task, undefined, (partial) => {
+              results[index] = partial;
+              emit();
+            });
             emit();
-          });
-          emit();
-          return results[index];
-        });
+          }),
+        );
         const succeeded = results.filter((result) => !failed(result)).length;
         const summaries = results.map((result) => {
           const status = failed(result) ? `failed${result.stopReason ? ` (${result.stopReason})` : ""}` : "completed";
@@ -673,7 +757,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
               text: `Parallel: ${succeeded}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
             },
           ],
-          details: details("parallel", results),
+          details: finalSubagentDetails("parallel", results),
           isError: succeeded !== results.length,
         };
       }
@@ -701,7 +785,7 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
       }
       return {
         content: [{ type: "text" as const, text: cap(result.output || "(no output)") }],
-        details: details("single", [result]),
+        details: finalSubagentDetails("single", [result]),
       };
       };
 
@@ -727,20 +811,27 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
             const resultFailed = "isError" in result && result.isError === true;
             // 宿主和结果消息报同一个状态：被叫停的子进程会以 aborted 失败收场，那是停止不是失败。
             const status = controller.signal.aborted ? "stopped" : resultFailed ? "failed" : "completed";
-            hostTask?.finish(status);
+            if (hostTask) {
+              // 交给宿主送回会话：Pi 真交给模型才算送到，停止时被 clear_queue 清掉会重发，
+              // 回退（fork）换了会话也交给新会话。这里捕获的 pi 那时已经不能用了。
+              hostTask.finish(status, cap(text));
+              return;
+            }
             try {
               // 自定义消息而不是用户消息：界面画成状态行，模型也知道这是结果不是新要求。
-              void pi.sendMessage(
-                subagentResultMessage({ id, title, status, text: cap(text) }),
-                { triggerTurn: true, deliverAs: "followUp" },
-              );
+              // 被叫停的和后台命令一样不叫醒模型。
+              pi.sendMessage(subagentResultMessage({ id, title, status, text: cap(text) }), {
+                triggerTurn: status !== "stopped",
+                deliverAs: "followUp",
+              });
             } catch {
               // 会话还不能收消息时，子进程的结果留在它自己的记录里。
             }
           })
           .finally(() => {
             // 上面没走到（`finish` 抛错）时也要收掉，不然列表里留一个在跑的任务直到连接断开。
-            hostTask?.finish("failed");
+            // 已经报过结果时这一次什么也不做。
+            hostTask?.finish("failed", "后台子智能体运行出错，没有交回结果。");
             backgroundRuns.delete(controller);
           });
         const stopHint = hostTask ? `要提前停掉，用 ${SMELT_BACKGROUND_TASK_STOP_TOOL_NAME} 停 ${id}。` : "";
@@ -757,7 +848,10 @@ function registerSmeltSubagentTool(pi: ExtensionAPI): void {
 
 export default function smeltSubagentExtension(pi: ExtensionAPI): void {
   registerSmeltSubagentTool(pi);
-  pi.on("session_start", () => registerSmeltSubagentTool(pi));
+  pi.on("session_start", (_event, ctx) => {
+    liveContext = ctx;
+    registerSmeltSubagentTool(pi);
+  });
   pi.on("session_shutdown", (event) => {
     if (event.reason !== "quit") return;
     for (const controller of backgroundRuns) controller.abort();
