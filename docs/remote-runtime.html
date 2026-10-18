@@ -536,6 +536,7 @@
   <li>XFCE 再精简：桌面不放图标、纯色背景、右键不弹菜单，只留一个工作区；任务栏只放「Chrome」「终端」两个启动图标和已打开窗口的列表。Chrome 图标要带上同一个 <code>--user-data-dir</code>，点开是在 agent 用的那个实例里开新窗口，不会另起一个没有登录状态、agent 也连不上的 Chrome。关掉 xfwm4 的合成器（<code>use_compositing</code>）：没有显卡全靠 CPU，远程桌面里也用不上阴影和透明。</li>
   <li>桌面服务要设 <code>SHELL=/bin/bash</code>：<code>assistant</code> 的登录 shell 是 <code>nologin</code>，不设的话终端一打开就退出。Chrome 加 <code>--restore-last-session</code>：浏览器重启后恢复上次的标签页（调试时 Chrome 被关过一次，标签页全丢）。</li>
   <li>资源（4 核 / 8GB）：Xvnc、XFCE 一共约 400MB 内存，空闲几乎不占 CPU；Chrome 两个标签页约 2.7GB（各进程相加，含共享内存，偏高）。没有显卡，网页全靠 CPU 渲染：特斯拉首页这种带视频的页面能吃掉 1 个多核。没人看时 VNC 不编码画面。</li>
+  <li>省性能，实测（同一个特斯拉首页，静音背景视频，单位是 CPU 核）：什么都不调 2.0；加 Chrome 管理策略（<code>/etc/opt/chrome/policies/managed/smelt.json</code>：禁有声自动播放、省内存模式、关后台运行、拒通知）和 <code>--force-prefers-reduced-motion</code> 后约 1.0–1.3；分辨率从 1440×900 降到 1280×720 只再省约 10%（视频解码不随屏幕变小），不降；窗口最小化后 0.1，页面变为不可见、Chrome 自己暂停视频，agent 经 CDP 读页面照常。静态页面（论坛首页）约 0.3。无头模式不考虑：网站更容易识别，人也看不到。静音视频的自动播放没有策略能关，最大的省法是没人看时把 Chrome 藏起来；但页面不可见时懒加载、动画会停，agent 在用浏览器时不能藏，要等能判断 agent 空闲了再做。</li>
 </ul>
 <p><b>还要做的</b>，按顺序：</p>
 <ol>
