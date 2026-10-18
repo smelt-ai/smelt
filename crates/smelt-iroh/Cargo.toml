@@ -18,6 +18,8 @@ smelt-model = { path = "../smelt-model" }
 smelt-pairing = { path = "../smelt-pairing" }
 iroh = "1"
 iroh-relay = "1"
+# 构造 iroh::dns::DnsError 要用它的 AnyError（iroh 本身已依赖，不增新包）。
+n0-error = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "time"] }
 anyhow = "1"
 tracing = "0.1"

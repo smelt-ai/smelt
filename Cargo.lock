@@ -10657,6 +10657,7 @@ dependencies = [
  "futures-util",
  "iroh",
  "iroh-relay",
+ "n0-error",
  "serde_json",
  "smelt-model",
  "smelt-pairing",

@@ -15,6 +15,7 @@ use iroh_relay::{RelayConfig, RelayMap};
 use tracing::info;
 
 pub mod runtime;
+mod system_dns;
 
 /// 客户端解析配对串、拼拨号地址要用到，免得各自直接依赖 iroh。
 pub use iroh::EndpointId;
@@ -167,6 +168,9 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 ///
 /// `Minimal` 不安装 n0 relay 或 n0 DNS 地址发现；双方的配对码显式携带同一个
 /// relay URL，仍可借它交换地址、打洞，并在直连失败时中继。
+///
+/// 域名交给操作系统解析，理由见 `system_dns` 模块。它只解析 A/AAAA，所以只用在这里：
+/// 没配自建 relay 时的 n0 预设要用 DNS 的 TXT 记录做地址发现，不能换。
 pub async fn bind_endpoint(
     secret: SecretKey,
     alpns: Vec<Vec<u8>>,
@@ -176,6 +180,7 @@ pub async fn bind_endpoint(
         .secret_key(secret)
         .alpns(alpns)
         .relay_mode(RelayMode::Custom(relay.relay_map()))
+        .dns_resolver(iroh::dns::DnsResolver::custom(system_dns::SystemResolver))
         .bind()
         .await
         .context("iroh Endpoint 绑定失败")?;
