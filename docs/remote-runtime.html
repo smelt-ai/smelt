@@ -169,6 +169,7 @@
   <li>D6 RuntimeId 与多运行时</li>
   <li>D7 生命周期与升级</li>
   <li>D8 插件放在哪一侧</li>
+  <li>D9 常驻浏览器：agent 控制，人可接管</li>
   <li>Linux 无头运行时清单</li>
   <li>分期</li>
   <li>风险与待定问题</li>
@@ -194,7 +195,7 @@
       <li>任何跨运行时的操作：把会话拖到另一台机器、跨机 agent 互发消息、跨机搜索。</li>
       <li>多人共用同一个运行时。模型仍然是「一个用户，多台设备」。</li>
       <li>离线编辑：运行时掉线时，它名下的内容只读。</li>
-      <li>在远程路径上「用本机 IDE 打开」。以后另议，见第 14 节。</li>
+      <li>在远程路径上「用本机 IDE 打开」。以后另议，见第 15 节。</li>
     </ul>
   </div>
 </div>
@@ -206,7 +207,7 @@
 <div class="table-wrap"><table>
   <tr><th>类别</th><th>GUI 现在怎么做</th><th>位置</th></tr>
   <tr><td>SQLite</td><td>直接打开 <code>smelt.sqlite3</code>，读写工作区快照、项目、设置、智能体定义、记忆、额度缓存。项目列表由 GUI 维护，再通过 <code>workspace_menu</code> 推给 smeltd。</td><td><code>workspace_persist.rs</code>、<code>settings/mod.rs</code>、<code>smelt-store/src/snapshots.rs:32</code></td></tr>
-  <tr><td>Git</td><td>在本进程调用 <code>smelt_git</code> 跑 git 子进程（状态、diff、暂存、提交、推送、worktree、log），用 FSEvents 监听仓库变化，@ 补全时跑 <code>git ls-files</code>。</td><td><code>git_panel/*</code>、<code>git_log.rs</code>、<code>smelt-ui/src/acp_completion.rs</code></td></tr>
+  <tr><td>Git</td><td>在本进程调用 <code>smelt_git</code> 跑 git 子进程（状态、diff、暂存、提交、推送、log），用 FSEvents 监听仓库变化，@ 补全时跑 <code>git ls-files</code>。</td><td><code>git_panel/*</code>、<code>git_log.rs</code>、<code>smelt-ui/src/acp_completion.rs</code></td></tr>
   <tr><td>文件</td><td>文件树、编辑器的打开和保存、项目搜索、扫描各家 agent 的历史存档、存储清理、安装 agent hook（会改 provider 配置文件）。</td><td><code>file_tree/*</code>、<code>session_history.rs</code>、<code>settings/agent_hooks.rs</code></td></tr>
   <tr><td>进程</td><td>拉起、升级、杀掉 smeltd，安装或检查 ACP CLI，Pi 登录和 MCP，读钥匙串查额度，打开 IDE。</td><td><code>terminal.rs</code>、<code>settings/workspace.rs</code>、<code>provider_quota.rs</code>、<code>ide.rs</code></td></tr>
   <tr><td>插件</td><td>gpui-shell 插件从本地磁盘发现、加载；插件的 fs 模块直接访问本机 <code>$HOME</code>。</td><td><code>plugins/mod.rs</code>、<code>plugins/host_fs.rs</code></td></tr>
@@ -286,7 +287,7 @@
 <h3>iroh 流怎么接进现有分发器</h3>
 <p>smeltd 现在是「每条连接一个线程」的同步模型：<code>listener.incoming()</code> 之后 <code>thread::spawn</code>（<code>smeltd/src/main.rs:2395-2407</code>），约十个处理函数直接拿 <code>UnixStream</code>，对端身份也是从这个 socket 上读出来的。iroh 是 tokio 上的异步 QUIC 流。</p>
 <p>做法：每接到一条 QUIC 流，就建一对 <code>UnixStream::pair()</code>，由一个 tokio 任务在 QUIC 流和其中一端之间搬数据；另一端交给现有分发器，同时<b>在进程内附上这条连接的 Principal</b>（D3），不再去读对端进程身份。现有处理函数一行都不用改；回压沿着 socketpair 自然传回 QUIC 的流控。</p>
-<div class="note">不选 SSH：它要求机器能被直接 SSH 到（或配好跳板），还要处理用户各自的密钥、<code>~/.ssh/config</code>、服务器是否允许转发，而且鉴权会多出一套（转发过来的对端是 sshd，过不了现有的进程身份检查）。SSH 只在首次安装时由用户手动用一次，见 D7。只能经跳板机进入、UDP 出不去的内网是唯一的例外，见第 14 节。</div>
+<div class="note">不选 SSH：它要求机器能被直接 SSH 到（或配好跳板），还要处理用户各自的密钥、<code>~/.ssh/config</code>、服务器是否允许转发，而且鉴权会多出一套（转发过来的对端是 sshd，过不了现有的进程身份检查）。SSH 只在首次安装时由用户手动用一次，见 D7。只能经跳板机进入、UDP 出不去的内网是唯一的例外，见第 15 节。</div>
 <h3>消息层</h3>
 <ul>
   <li>继续沿用首帧 <code>op</code> 分流，加上 Control API 的 JSON-RPC 风格信封。短请求统一收进 Control API，长流保留各自的 op。这正是 control-api.md 已经定下的分工。</li>
@@ -309,7 +310,19 @@
   </ul>
 </div>
 <p>暂不做、各自单独评估的：下行也改成分帧并下发事件帧（通知、响铃、剪贴板），等 P4 手机需要时再做；终端查询（光标位置、设备属性等）改由服务端统一应答，它顺带修掉「两个客户端同时附着时重复应答」的老问题，但和这次无关；客户端只画行的瘦客户端（muxy 的做法），以后要做也可以在分帧协议上加一种行帧。</p>
-<p>实测（合并后）：刷屏的各个场景都不再断开、都看到结尾；刷屏时另一个会话的回显稳定在 170–210ms；快慢两个客户端同看一个会话也都不断开。这次测量的连接被 Surge 带上了一条带宽极差的直连路径（见第 14 节），速度数字不可比，换稳定路径后要重测。</p>
+<p>实测（合并后）：刷屏的各个场景都不再断开、都看到结尾；刷屏时另一个会话的回显稳定在 170–210ms；快慢两个客户端同看一个会话也都不断开。这次测量的连接被 Surge 带上了一条带宽极差的直连路径（见第 15 节），速度数字不可比，换稳定路径后要重测。</p>
+<h3>对话快照的增量同步</h3>
+<p>对话会话的长连接原来每帧都把「当前回合」整段重发：正在流式增长的那条消息每长一点就全文重发一遍，工具调用的输出也跟着反复发；每帧还原样带着约 1.5KB 的快照头。本机 socket 看不出来，远程链路上传输量随回复长度平方增长，远远落后于生成。</p>
+<div class="decision">
+  <div class="label">决定</div>
+  <ul>
+    <li><b>连接两端各持一份整帧镜像</b>（<code>smelt_model::acp_wire::FrameMirror</code>），双方用同一个 <code>apply</code> 演进，不会漂移。发送方的镜像记着「对方手里有什么」。</li>
+    <li><b>只发变化</b>：快照头按 <code>live.*</code>、<code>snapshot.*</code> 逐字段比，没变的不发；变了的字段和变了的条目都按序列化后的 JSON 求公共前缀，只发「保留前几个字节 + 新尾巴」。正文、工具输出、子代理记录在哪里长都是同一个机制。</li>
+    <li><b>线路上两种帧</b>：整段帧（附着时的首帧、<code>Refresh</code> 之后的帧，形状不变）和增量帧 <code>{"delta": …}</code>。接收方还原出完整的快照帧再照常解析，视图和 <code>ConversationSnapshot</code> 不变。</li>
+    <li><b>同步规则</b>：接收方镜像接不上增量帧时这一帧作废；桌面客户端随即发 <code>Refresh</code>，守护交接后接手的读端由父进程要整段帧。<code>Refresh</code> 由收到它的守护自己答，不转给宿主。</li>
+  </ul>
+</div>
+<p>实测（Linux，一条 300 片、正文 0.02MB 的流式回复）：线路字节 1.36MB → 0.45MB（只发条目增量）→ 0.07MB（快照头也只发变化）；按真实节奏生成 7.5 秒的回复，从 48.6 秒收完变成 7.86 秒；约 1MB 的极快回复从 64 秒变成 5 秒。时间这几行最后一次走的路径比前几次好，线路字节和链路无关。</p>
 
 <!-- ───────────────────────────────────────── -->
 <h3>协议客户端：桌面和手机共用一份 Rust 实现</h3>
@@ -325,7 +338,7 @@
 
 <h2>6. D3 鉴权：按设备，不按共享 token</h2>
 <p><b>只认「是不是自己的设备」，不分权限。</b>连上的客户端拥有全部能力，和今天本机桌面一样。原因：能开终端或给 agent 发消息，就等于拿到了 shell，再细分「可写」「管理」挡不住一台被冒用的设备，只会多出一套开关和状态。真正的安全边界是配对本身，以及丢失后能立刻撤销。</p>
-<p>每种传输各自有一个鉴权器，产出同一种 <code>Principal { kind, device_id }</code>。<code>device_id</code> 只用于撤销、日志和「最近操作的客户端」这类区分（例如终端尺寸，见第 14 节），不参与授权判断。</p>
+<p>每种传输各自有一个鉴权器，产出同一种 <code>Principal { kind, device_id }</code>。<code>device_id</code> 只用于撤销、日志和「最近操作的客户端」这类区分（例如终端尺寸，见第 15 节），不参与授权判断。</p>
 <div class="table-wrap"><table>
   <tr><th>传输</th><th>怎么认</th></tr>
   <tr><td>unix socket</td><td>和今天一样：socket 文件 0600，<code>event_subscribe</code> 另认对端进程身份</td></tr>
@@ -453,7 +466,7 @@
 <h2>10. D7 生命周期与升级</h2>
 <ul>
   <li><b>运行时独立存活。</b>在 Mac 上，GUI 仍然可以替用户安装、启动本机运行时，但要通过一个和远程共用的「运行时管理」接口，不再在 <code>terminal.rs</code> 里直接管理进程。</li>
-  <li><b>Linux 首次安装</b>（唯一需要用户自己 SSH 登录的一步）：运行安装脚本，它把二进制装到 <code>~/.smelt/bin</code>，写好 <code>systemd --user</code> 单元并启动，开启 iroh，最后执行 <code>smeltd pair</code> 打印配对串。脚本提示用户执行 <code>loginctl enable-linger</code>，这样退出登录后运行时也能继续跑。</li>
+  <li><b>Linux 首次安装</b>（唯一需要用户自己 SSH 登录的一步）：一条命令装好，见下面的「决定：一键安装」。装完运行时以 <code>systemd --user</code> 服务常驻，开着 iroh，打印配对串。</li>
   <li><b>升级：</b>运行时自己完成交接，复用现有的 <code>handoff_v2</code>。触发方式是 <code>runtime.upgrade</code>。</li>
   <li><b>版本错位：桌面不会错位，手机会。</b>桌面每次连上就对齐版本（见下面的决定），所以桌面只依赖冻结契约。手机走应用商店，更新节奏不受控，它和运行时之间的错位是常态：运行时要接受上一个版本的手机客户端，手机也要能面对更新的运行时。办法是协议只做增量变更，新能力靠 <code>system.describe</code> 的能力清单探测；真不兼容时标成 <code>incompatible</code>，提示更新 App。</li>
   <li><b><code>system.describe</code> 和 <code>runtime.upgrade</code> 是冻结契约</b>：永远不改形状，<code>incompatible</code> 状态下也必须能调用。否则版本一旦错开太多，就连升级都发不过去，只能让用户重新 SSH 上去手动装。</li>
@@ -466,6 +479,17 @@
     <li><b>只升不降</b>：运行时比桌面新时，桌面不推送，把该运行时标成 <code>incompatible</code> 并提示更新桌面。两台不同版本的桌面连同一个运行时时，运行时最终跟随较新的那台。</li>
     <li>交接期间所有客户端都会断开一次，按普通断线重连处理。推送前在界面上提示，有 agent 正在跑时等用户确认。</li>
     <li>不做运行时自更新（<code>updater.rs</code> 的发布渠道）。代价：只用手机、从不连桌面的运行时不会自动升级，只能重新运行安装脚本。</li>
+  </ul>
+</div>
+<div class="decision">
+  <div class="label">决定：一键安装</div>
+  <ul>
+    <li><b>安装包发布在 GitHub Release</b>：每个版本附 <code>smeltd-&lt;版本&gt;-linux-x86_64.tar.gz</code>、<code>…-linux-aarch64.tar.gz</code> 和校验和，各在对应架构的 Linux 机器上原生构建（<code>ci/linux/ci.sh package</code>），不交叉编译。</li>
+    <li><b>一条命令</b>：<code>curl -fsSL &lt;Release 地址&gt;/install.sh | bash</code>。脚本按 <code>uname -m</code> 下载对应的包、核对校验和，再走现有的 <code>install.sh</code>（装到 <code>~/.smelt/bin</code>、<code>smeltd install</code>、<code>smeltd pair</code>）。</li>
+    <li><b>只在必须时用 sudo</b>：开 <code>loginctl enable-linger</code>、装系统包。没有 sudo 就照旧提示，运行时本身不需要 root。</li>
+    <li><b>不依赖额外的系统命令</b>：准备受管 Pi 运行时现在要调用系统的 <code>unzip</code>，全新 Debian 没有，改成 smeltd 自己解压。</li>
+    <li><b>可选组件 <code>--with-browser</code></b>：装常驻浏览器，见 D9。</li>
+    <li><b>模型和密钥不进安装脚本</b>：装完在桌面能力库里配，能力库按运行时切换（P2 第 5 步）。</li>
   </ul>
 </div>
 
@@ -486,7 +510,34 @@
 </div>
 
 <!-- ───────────────────────────────────────── -->
-<h2>12. Linux 无头运行时清单</h2>
+<h2>12. D9 常驻浏览器：agent 控制，人可接管</h2>
+<p>Linux 运行时的一个主要用途是当个人助理：上面常驻一个 Chrome，agent（例如 Pi）用它查机票、填表、看后台；遇到验证码、二次验证、付款确认，人随时接管，处理完交还。浏览器用一个持久的用户目录，人登录过的网站 agent 直接沿用登录状态。</p>
+<p>机器没有图形界面也可以：Chrome 正常有界面地渲染，画到 Xvfb 虚拟显示器里（只在内存里的 X 服务，没有显示器、显卡和桌面环境）。不用 <code>--headless</code>，部分网站能识别出 headless，登录时更容易被风控。人看画面也不需要服务器有界面：smeltd 把画面推到桌面或手机上显示。</p>
+<div class="decision">
+  <div class="label">决定：smeltd 管配置，systemd 管进程，smeltd 通过 CDP 用它</div>
+  <ul>
+    <li><b>不做 smeltd 的子进程</b>：smeltd 会经常无缝升级（exec 交接），浏览器做成子进程就得接进交接逻辑，或者每次升级都重启、打断正在做的事。看管常驻进程（崩溃重启、开机自启、日志）是 systemd 的本职。</li>
+    <li><b><code>smeltd install --with-browser</code></b> 写一个 systemd <b>用户级</b>服务（和 smeltd 自己的服务一样，不需要 root）：<code>xvfb-run</code> 把虚拟显示器和 Chrome 放在同一个服务里，用户目录在 <code>~/.smelt/browser/profile</code>，调试端口只绑 <code>127.0.0.1</code>，<code>--password-store=basic</code>（服务器上没有系统钥匙串）。同时把「本机常驻浏览器」写进 Pi 的 <code>mcp.json</code>。</li>
+    <li><b>安装脚本</b>用 sudo 装系统包：Chrome、Xvfb、中文和 emoji 字体（不装中文字体，中文网页全是方块）。第一版只支持 Debian/Ubuntu。</li>
+    <li><b>agent 控制</b>：agent 和浏览器在同一台机器上，用 MCP 连本机的 CDP 端口（Playwright MCP 的 <code>--cdp-endpoint</code>）。Smelt 自带的 Pi 运行时读同一份 <code>~/.pi/agent/mcp.json</code>，对话和终端里的 Pi 都能用。</li>
+    <li><b>人看和接管</b>：smeltd 作为 CDP 客户端，用 <code>Page.startScreencast</code> 推画面、<code>Input.dispatch*</code> 转发鼠标键盘、<code>Target.*</code> 管标签页，走现有的 iroh 连接和设备配对，不另开端口。screencast 每帧要 <code>screencastFrameAck</code> 才发下一帧，天然是一帧在途的流控（和终端流控同一思路）。Chrome 是谁拉起的不影响这些。</li>
+    <li><b>接管的第一版</b>：桌面浏览器面板上点「接管」就暂停 agent 当前回合，面板明确显示现在谁在控制；点「交还」再继续。agent 的浏览器操作必须经过 Smelt、接管期间直接拦下，等确实需要再做。</li>
+    <li><b>以普通用户运行</b>：Chrome 的沙箱正常开着。前提是 smeltd 也不用 root 跑。</li>
+  </ul>
+</div>
+<p><b>实测</b>（2026-10-18，gs-wynn 这台 Debian 13 / 4 核 / 7GB 的 VPS，手动搭的，没有改代码）：Xvfb、Chrome 155、x11vnc 三个 systemd 服务，Chrome 用普通用户 <code>assistant</code> 跑；Pi 配 Playwright MCP 0.0.83（CDP 模式）。Pi 用浏览器在 Google Flights 上查「台北 → 东京、10 月 30 日、单程」，2 分钟报回最便宜的 3 个直飞航班，和页面截图逐项一致。临时用 x11vnc（只监听本机、带密码）加 SSH 隧道看画面和接管，浏览器面板做好后去掉。维基百科、Bing 用这台机房 IP 访问正常（第一次访问维基百科偶发过一次 429，重试正常）。</p>
+<p><b>要改的代码</b>，按顺序：</p>
+<ol>
+  <li>能力库按运行时切换（P2 第 5 步）：远程运行时的 Pi 模型、密钥、MCP 能在桌面上配。运行时这边的 <code>pi.*</code> 控制接口已经有了。</li>
+  <li>能力库加「本机常驻浏览器」MCP 预设：连 <code>127.0.0.1</code> 上的 CDP 端口。现有的 Playwright、Agent360 预设是扩展模式，控制的是桌面上的 Chrome。</li>
+  <li>安装：<code>install.sh --with-browser</code> 和 <code>smeltd install --with-browser</code>。</li>
+  <li>smeltd 的浏览器画面流（新的长连接 op）和桌面的浏览器面板，含接管/交还；手机随 P4。</li>
+  <li>安全前提（正式用之前）：smeltd 不用 root 跑；桌面终端关掉 <code>OSC 52</code> 读剪贴板；中继加白名单。</li>
+</ol>
+<div class="note">这台机器存着人的各种登录状态，保存的密码和 cookie 在磁盘上只是弱加密（<code>--password-store=basic</code>），机器本身的安全就是这些账号的安全。</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2>13. Linux 无头运行时清单</h2>
 <div class="table-wrap"><table>
   <tr><th>项目</th><th>现状</th><th>要做</th></tr>
   <tr><td>smeltd 编译</td><td><span class="chip chip-done">已完成</span> x86_64 Linux 上原生编译通过，运行时这边的测试全过（修了 Linux 才暴露的问题：进程启动时间读错字段且只到整秒、JSON 回包分片写卡死 socketpair、<code>msghdr</code> 字段类型）</td><td><code>ci/linux</code> <span class="chip chip-done">已完成</span>：lint、build、test、package。x86_64 和 aarch64 各在对应架构的 Linux 机器上原生构建，不交叉编译（aarch64 还缺一台构建机）</td></tr>
@@ -503,10 +554,12 @@
   <tr><td>额度查询（钥匙串）</td><td><span class="chip chip-split">部分</span> 非 macOS 跳过钥匙串，只读环境变量和各家 CLI 的凭据文件</td><td>能力清单里如实报告哪些查不了</td></tr>
   <tr><td>agent hook 安装</td><td><span class="chip chip-done">已完成</span></td><td>运行时执行 <code>agent.hooks.*</code>，在自己那台机器上写配置；<code>smelt-notify</code> 由运行时安装包放进 <code>~/.smelt/bin</code>（本机仍由桌面从 App 包同步）</td></tr>
   <tr><td>打包分发</td><td><span class="chip chip-done">已完成</span> <code>ci/linux/ci.sh package</code> 出 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，解包执行 <code>./install.sh</code>：<code>smeltd install</code> 用和桌面同一套受管布局（不可变映像 + 启动名软链），已在跑就交接到新版本、会话保留，再注册 systemd 用户服务，最后 <code>smeltd pair</code></td><td>按 D7 的桌面推送，同一份二进制也随桌面安装包附带</td></tr>
+  <tr><td>一键安装</td><td><span class="chip chip-na">未做</span> 包还没有发布到可下载的地方，gs-wynn 上是现场装 Rust、从源码编译的；linger、<code>unzip</code> 都是手动</td><td>按 D7「一键安装」：GitHub Release 加 <code>curl … | bash</code></td></tr>
+  <tr><td>常驻浏览器</td><td><span class="chip chip-split">手动验证</span> gs-wynn 上手搭，agent 查机票跑通（见 D9）</td><td>按 D9 做成 <code>--with-browser</code> 和浏览器面板</td></tr>
 </table></div>
 
 <!-- ───────────────────────────────────────── -->
-<h2>13. 分期</h2>
+<h2>14. 分期</h2>
 <p>每一期结束时，本机单运行时的体验都要和今天一致，可以单独发版。</p>
 
 <div class="phase">
@@ -562,9 +615,10 @@
   <div>
     <p><b>Linux 无头运行时 + 桌面经 iroh 连接</b></p>
     <ul>
-      <li>完成第 12 节的清单和 <code>ci/linux</code>。（清单大部分 <span class="chip chip-done">已完成</span>；<code>ci/linux</code>、文件监听上限、打包分发未做）</li>
+      <li>完成第 13 节的清单和 <code>ci/linux</code>。（清单大部分 <span class="chip chip-done">已完成</span>；<code>ci/linux</code>、文件监听上限、打包分发未做）</li>
       <li>运行时直接接收 iroh 流（D2）；按设备配对和撤销（D3）；<code>smeltd pair</code> / <code>smeltd devices</code>。<span class="chip chip-done">已完成</span>：桌面设置页「远程访问」改成开关、自建 relay 和设备（生成一次性配对串、列出、撤销）</li>
       <li>桌面的 iroh 连接器、「添加运行时」（粘贴配对串）。连接器 <span class="chip chip-done">已完成</span>（<code>smelt_iroh::runtime::RuntimeConnector</code>，桌面和手机共用；<code>smelt-iroh-connect</code> 是用它的命令行验证工具）；「添加运行时」等 P2 的多运行时</li>
+      <li>D7 的版本协商 <span class="chip chip-done">已完成</span>：<code>system.describe</code> 多报事件总线协议和投影版本（可缺省字段）；桌面连远程运行时先对控制协议区间、方法清单（缺方法即运行时旧）和投影版本（<code>smelt_client::compat</code>），对不上标成「版本不兼容」并说明该升级哪一边，不再订阅它，免得解不出投影就断开、无限重连。只加方法不升 <code>CONTROL_API_VERSION</code>；删方法、改形状才升并抬最低支持版本。不兼容后要再探测（打开设置窗口或重启）才会重新连。</li>
       <li>D7 的桌面推送升级：<code>runtime.upgrade</code> 分块传二进制、只升不降。</li>
     </ul>
     <p class="exit"><b>完成标准：</b>Mac 桌面连上一台不在同一网络的 Linux 运行时，除了能力清单里声明缺失的部分，其余功能都能用；本机运行时同时在线。</p>
@@ -582,10 +636,22 @@
     <p class="exit"><b>完成标准：</b><code>smelt-remote-gateway</code> 里不再有 <code>/acp/ws</code>、<code>/terminal/{id}/ws</code> 的处理代码，<code>~/.smelt/remote-token</code> 不再存在；<code>smelt-mobile</code> 不再开本地端口，Dart 里没有协议解析代码。</p>
   </div>
 </div>
+<div class="phase">
+  <div class="num">P5</div>
+  <div>
+    <p><b>个人助理：常驻浏览器</b>（D9）</p>
+    <ul>
+      <li>能力库按运行时切换，加「本机常驻浏览器」MCP 预设。</li>
+      <li><code>install.sh --with-browser</code>、<code>smeltd install --with-browser</code>。</li>
+      <li>浏览器画面流和桌面浏览器面板，接管/交还；手机随 P4。</li>
+    </ul>
+    <p class="exit"><b>完成标准：</b>一台全新的 Linux 机器上，一条命令装好运行时和浏览器；在桌面上让 Pi 用浏览器办一件事，中途接管、处理完交还，Pi 接着办完。</p>
+  </div>
+</div>
 <p class="note">顺序是严格的：P2 是 P3 的前提，否则连上 Linux 之后就看不到本机了；P4 依赖 P3 做好的 iroh 直连和设备配对。还没发版，不做过渡：gateway、长期 token 已随 iroh 直连一起删掉，手机在 P4 改走新协议之前连不上远程运行时。</p>
 
 <!-- ───────────────────────────────────────── -->
-<h2>14. 风险与待定问题</h2>
+<h2>15. 风险与待定问题</h2>
 <div class="table-wrap"><table>
   <tr><th>问题</th><th>影响</th><th>倾向</th></tr>
   <tr><td>远程延迟：文件树展开、编辑器打开、@ 补全</td><td>操作手感</td><td>不做客户端副本（D4）：目录按需取一层并缓存，<code>project.changed</code> 推来变化时再失效；补全由运行时去查。编辑器打开后在本地编辑，保存时带上版本号，检测冲突。终端回显延迟等于一次往返，走 relay 时更明显；不做本地回显预测。</td></tr>
