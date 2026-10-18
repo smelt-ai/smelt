@@ -150,6 +150,17 @@ impl Workspace {
             }
             if let Some(root) = cwd {
                 let (agent, pid) = self.history_source(Some(root.as_str()), cx);
+                let tabs = crate::session_history::history_source_tabs(
+                    self.history_engine_override(Some(root.as_str()), cx),
+                    cx.global::<crate::settings::AgentHostState>()
+                        .all_profiles()
+                        .cloned(),
+                );
+                for tab in tabs {
+                    if tab.kind != agent || tab.profile_id != pid {
+                        self.prefetch_session_list(tab.kind, tab.profile_id, root.clone(), cx);
+                    }
+                }
                 self.ensure_session_list(agent, pid, root, cx);
             }
         }

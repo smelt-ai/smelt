@@ -24,7 +24,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::acp_view;
 use crate::{Workspace, placeholder_view, ui_theme};
@@ -176,6 +176,20 @@ pub(crate) fn history_source_tabs(
     tabs
 }
 
+/// 标签栏只留有历史会话的来源：Cursor、OpenCode 这类还没接入本地历史的，以及在
+/// 这个项目里没用过的 agent，点进去永远是空列表。列表还没扫完的先不显示，扫到有
+/// 会话再出现；否则一排标签会先全亮再陆续消失。当前选中的那个始终保留，哪怕它是
+/// 空的——不然选中态会落在一个看不见的标签上。
+pub(crate) fn tabs_with_sessions(
+    tabs: Vec<HistorySourceTab>,
+    current: (HistorySourceKind, Option<&str>),
+    has_sessions: impl Fn(&HistorySourceTab) -> bool,
+) -> Vec<HistorySourceTab> {
+    tabs.into_iter()
+        .filter(|tab| (tab.kind, tab.profile_id.as_deref()) == current || has_sessions(tab))
+        .collect()
+}
+
 pub(crate) struct HistoryViewParams<'a> {
     pub agent: HistorySourceKind,
     /// 手动添加的 workspace profile；基础 agent 槽位为 `None`。
@@ -236,15 +250,9 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
     } = params;
     // 智能体上下文：只留「继续对话」这一条按智能体续接的路径。
     let agent_context = restrict_to_kind.is_some();
-    let (muted, fg, c_border, accent, secondary) = {
+    let (muted, fg, c_border, accent) = {
         let t = cx.theme();
-        (
-            t.muted_foreground,
-            t.foreground,
-            t.border,
-            t.primary,
-            t.secondary,
-        )
+        (t.muted_foreground, t.foreground, t.border, t.primary)
     };
 
     let current_profile = profile_id.clone();
@@ -679,22 +687,21 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         }
         Some((_, d)) => {
             let detail = d.clone();
-            let agent_label = agent.short_label();
+            // 和对话页同一套排版：居中限宽的阅读栏，间距算在虚拟项自己身上。
             gpui::list(detail_list_state, move |i, _window, _app| {
                 let turn = &detail.turns[i];
-                div()
+                h_flex()
                     .w_full()
-                    .px_3()
-                    .pb_3()
-                    .child(history_turn(
-                        turn,
-                        i,
-                        agent_label,
-                        muted,
-                        fg,
-                        accent,
-                        secondary,
-                    ))
+                    .justify_center()
+                    .px_4()
+                    .pb(px(16.))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .max_w(ui_theme::conversation_max_width())
+                            .child(history_turn(turn, i, muted, fg, c_border)),
+                    )
                     .into_any_element()
             })
             .w_full()
@@ -762,22 +769,39 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         .child(content)
 }
 
-fn history_turn(
-    turn: &Turn,
-    index: usize,
-    agent_label: &'static str,
-    muted: Hsla,
-    fg: Hsla,
-    accent: Hsla,
-    secondary: Hsla,
-) -> AnyElement {
-    let role = if turn.is_user { "用户" } else { agent_label };
-    let role_color = if turn.is_user { accent } else { fg };
-    let bubble_bg = if turn.is_user {
-        accent.opacity(0.12)
-    } else {
-        secondary
-    };
+/// 一轮对话，排版对齐对话页：用户消息是靠右的气泡，agent 回答是不套卡片的正文。
+fn history_turn(turn: &Turn, index: usize, muted: Hsla, fg: Hsla, border: Hsla) -> AnyElement {
+    // agent 回显的中断标记不是用户说的话，和对话页一样画成分隔线。
+    if turn.is_user && smelt_model::acp_chat::is_interrupt_marker(&turn.text) {
+        return h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .child(div().flex_1().h(px(1.)).bg(border))
+            .child(div().text_xs().text_color(muted).child("已中断"))
+            .child(div().flex_1().h(px(1.)).bg(border))
+            .into_any_element();
+    }
+    let body = crate::markdown_mermaid::markdown_view(("turn-md", index), turn.text.clone());
+    if turn.is_user {
+        // 最小宽度的原因见对话页 `user_message_bubble`：markdown 列表在收缩的气泡里会被裁掉。
+        return h_flex()
+            .w_full()
+            .justify_end()
+            .child(
+                div()
+                    .max_w(relative(0.72))
+                    .min_w(px(160.))
+                    .px_4()
+                    .py_2p5()
+                    .rounded(ui_theme::bubble_radius())
+                    .bg(ui_theme::overlay(0x14))
+                    .text_sm()
+                    .text_color(fg)
+                    .child(body),
+            )
+            .into_any_element();
+    }
     let tool_summary = (!turn.tools.is_empty()).then(|| {
         let mut order: Vec<&String> = Vec::new();
         let mut counts: HashMap<&String, usize> = HashMap::new();
@@ -804,34 +828,9 @@ fn history_turn(
         .w_full()
         .min_w_0()
         .gap_1()
-        .px_3()
-        .py_2()
-        .rounded(ui_theme::card_radius())
-        .bg(bubble_bg)
-        .when(turn.is_user, |element| element.max_w(px(560.)))
-        .child(
-            h_flex()
-                .gap_2()
-                .items_baseline()
-                .child(
-                    div()
-                        .font_semibold()
-                        .text_sm()
-                        .text_color(role_color)
-                        .child(role),
-                )
-                .children(turn.timestamp.map(|timestamp| {
-                    div().text_xs().text_color(muted).child(
-                        timestamp
-                            .with_timezone(&chrono::Local)
-                            .format("%m-%d %H:%M")
-                            .to_string(),
-                    )
-                })),
-        )
-        .child(div().w_full().min_w_0().text_sm().text_color(fg).child(
-            crate::markdown_mermaid::markdown_view(("turn-md", index), turn.text.clone()),
-        ))
+        .text_sm()
+        .text_color(fg)
+        .when(!turn.text.trim().is_empty(), |col| col.child(body))
         .children(tool_summary.map(|summary| {
             div()
                 .text_xs()
@@ -1029,11 +1028,35 @@ impl Workspace {
         cwd: String,
         cx: &mut Context<Self>,
     ) {
+        self.ensure_session_list_within(agent, profile_id, cwd, Duration::from_secs(10), cx);
+    }
+
+    /// 没选中的来源 tab 也要知道有没有会话，标签栏才能把空的藏起来。它们只决定
+    /// 标签显不显示，刷新放慢到一分钟：Codex 的列表要把所有项目的会话都扫一遍，
+    /// 每十秒扫九家太重。
+    pub fn prefetch_session_list(
+        &mut self,
+        agent: HistorySourceKind,
+        profile_id: Option<String>,
+        cwd: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_session_list_within(agent, profile_id, cwd, Duration::from_secs(60), cx);
+    }
+
+    fn ensure_session_list_within(
+        &mut self,
+        agent: HistorySourceKind,
+        profile_id: Option<String>,
+        cwd: String,
+        max_age: Duration,
+        cx: &mut Context<Self>,
+    ) {
         let key = session_list_key(agent, profile_id.as_deref(), &cwd);
         let fresh = self
             .session_list
             .get(&key)
-            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(10));
+            .is_some_and(|(t, _)| t.elapsed() < max_age);
         if fresh || self.session_list_inflight.contains(&key) {
             return;
         }
@@ -1396,7 +1419,7 @@ mod tests {
         HistoryListSnapshot, HistoryMigrationSource, HistorySourceTab, SessionDetail,
         SessionSummary, Turn, build_history_handoff_request, current_profile_launch,
         handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
-        history_source_tabs,
+        history_source_tabs, tabs_with_sessions,
     };
     use crate::settings::AgentHostState;
     use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind};
@@ -1587,6 +1610,20 @@ mod tests {
             == crate::settings::HistorySourceKind::TerminalOnly(
                 crate::settings::TerminalAgentKind::Antigravity
             )));
+    }
+
+    #[test]
+    fn source_tabs_hide_agents_without_sessions_but_keep_selection() {
+        let claude: crate::settings::HistorySourceKind = ConversationAgentKind::Claude.into();
+        let codex: crate::settings::HistorySourceKind = ConversationAgentKind::Codex.into();
+        let tabs = history_source_tabs(None, []);
+
+        // 选中的 Claude 是空的也留着；Codex 有会话；其余没扫到或是空的都藏起来。
+        let shown: Vec<_> = tabs_with_sessions(tabs, (claude, None), |tab| tab.kind == codex)
+            .into_iter()
+            .map(|tab| tab.kind)
+            .collect();
+        assert_eq!(shown, [claude, codex]);
     }
 
     #[test]

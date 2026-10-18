@@ -733,9 +733,8 @@ impl Workspace {
         cwd: Option<&str>,
         cx: &App,
     ) -> Option<crate::settings::ConversationAgentKind> {
-        let id = smelt_model::agent_paths::agent_definition_id_for_space(
-            std::path::Path::new(cwd?),
-        )?;
+        let id =
+            smelt_model::agent_paths::agent_definition_id_for_space(std::path::Path::new(cwd?))?;
         cx.global::<crate::settings::AgentHostState>()
             .agents
             .iter()
@@ -789,9 +788,24 @@ impl Workspace {
         };
         let (source_tabs, launch_override, profile_label, history_agent_ids) = {
             let config = cx.global::<crate::settings::AgentHostState>();
-            let source_tabs = crate::session_history::history_source_tabs(
-                restrict_to_kind,
-                config.all_profiles().cloned(),
+            let source_tabs = crate::session_history::tabs_with_sessions(
+                crate::session_history::history_source_tabs(
+                    restrict_to_kind,
+                    config.all_profiles().cloned(),
+                ),
+                (agent, profile_id.as_deref()),
+                |tab| {
+                    cwd.as_deref().is_some_and(|cwd| {
+                        let key = crate::session_history::session_list_key(
+                            tab.kind,
+                            tab.profile_id.as_deref(),
+                            cwd,
+                        );
+                        self.session_list
+                            .get(&key)
+                            .is_some_and(|(_, list)| !list.sessions.is_empty())
+                    })
+                },
             );
             let launch_override = profile_id.as_deref().and_then(|id| {
                 config
