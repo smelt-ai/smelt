@@ -1210,7 +1210,11 @@ impl Workspace {
                     .text_color(rgb(crate::ui_theme::text_bright()))
                     .child("能力库"),
             )
-            .child(tabs);
+            .child(tabs)
+            // Pi 的模型、MCP、插件、记忆都读写本机运行时上的配置。
+            .when(crate::runtimes::has_remote_runtimes(cx), |header| {
+                header.child(crate::runtimes::local_runtime_scope_chip())
+            });
 
         div()
             .flex_1()

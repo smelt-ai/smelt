@@ -253,7 +253,15 @@ fn section_page(
     selected: &SettingsSection,
     cx: &App,
 ) -> SettingPage {
-    match selected {
+    // 这几页改的是本机运行时上的配置（引擎、启动项、对话命令、CLI）。
+    let local_runtime_only = matches!(
+        selected,
+        SettingsSection::DshModel
+            | SettingsSection::AgentRuntime
+            | SettingsSection::AgentLaunch
+            | SettingsSection::AgentWorkspace
+    );
+    let page = match selected {
         SettingsSection::AppearanceTheme => appearance::theme_page(entity, snapshot, cx),
         SettingsSection::AppearanceTerminal => appearance::terminal_page(entity, snapshot, cx),
         SettingsSection::AppearanceWindow => appearance::window_page(entity, snapshot, cx),
@@ -268,5 +276,10 @@ fn section_page(
         SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
         SettingsSection::MaintenanceStorage => maintenance::storage_page(entity, snapshot, cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
+    };
+    if local_runtime_only && crate::runtimes::has_remote_runtimes(cx) {
+        page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())
+    } else {
+        page
     }
 }
