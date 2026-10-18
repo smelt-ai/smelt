@@ -84,4 +84,3 @@ pub use smelt_sys::tty_color;
 pub mod workspace_catalog;
 pub mod workspace_menu;
 pub use smelt_model::workspace_override;
-pub mod worktree_inherit;

@@ -1,4 +1,4 @@
-//! Git 面板：状态/分支/diff 查看、暂存/提交/推送、worktree 新建与删除。
+//! Git 面板：状态/分支/diff 查看、暂存/提交/推送。
 //!
 //! 从 main.rs 拆出来的 `impl Workspace` 方法 + 独立渲染/解析/git 子进程调用函数，
 //! 字段仍然声明在 main.rs 的 `Workspace` struct 里（没有挪成子结构体）。
@@ -13,19 +13,17 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::resizable::resizable_panel;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 
-use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable, ui_theme};
+use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable};
 use smelt_runtime_client::protocol::control::ControlCall;
 use smelt_runtime_client::protocol::git::*;
 pub use smelt_runtime_client::protocol::git::{
-    BranchList, DiffLine, DiffScope, GitStatusData, GitTreeRow, RepoInfo, WorktreeEntry,
-    build_git_tree, full_file_path, main_repo_root_from_common_dir, parse_diff,
-    repo_label_from_common_dir,
+    BranchList, DiffLine, DiffScope, GitSeenChange, GitStatusData, GitTreeRow, RepoInfo,
+    build_git_tree, full_file_path, parse_diff,
 };
 
 mod diff;
@@ -93,48 +91,6 @@ impl RepoSet {
             .iter()
             .map(|r| r.root.to_str().unwrap_or_default())
     }
-}
-
-/// 「删除 Worktree」弹窗要删的目标：path 是待删的 worktree 检出目录；main_root 是
-/// 同仓库下另一个稳定存在的目录（主仓库根），`git worktree remove` 必须从别处发起，
-/// 不能从待删目录自己发起。dirty = None 表示后台「有没有未提交改动」还没探测完，
-/// 弹窗先显示"检查中"。
-#[derive(Clone)]
-pub struct DeleteWorktreeTarget {
-    pub path: String,
-    pub main_root: String,
-    pub branch: String,
-    pub dirty: Option<bool>,
-}
-
-/// 「关联 Worktree」弹窗状态（字段声明在 main.rs 的 Workspace 上）。
-/// entries=None 且 error=None = 正在后台加载。
-pub struct WorktreeListState {
-    /// 右键点击的项目根（主仓库或任意 worktree 都行，git 自己定位 common dir）。
-    pub root: String,
-    /// 同仓库主仓库根，删除/清理操作从它发起；加载完成后填上。
-    pub main_root: String,
-    pub entries: Option<Vec<WorktreeEntry>>,
-    pub error: Option<String>,
-}
-
-/// 「新建 Worktree」弹窗状态（字段声明在 main.rs 的 Workspace 上）。
-/// 两个输入框是独立的 InputState 实体，随弹窗关闭一起 drop。
-pub struct NewWorktreeState {
-    /// 同仓库主仓库根，`git worktree add` 从它发起（session_list 用已缓存的
-    /// repo_info 算好传进来，不再重复跑 git）。
-    pub main_root: String,
-    /// 创建时的基准分支（仅提示用；创建本身总是基于当前 HEAD）。
-    pub base_branch: String,
-    /// 分支名输入框（留空 = detached HEAD）。
-    pub branch_input: Entity<gpui_component::input::InputState>,
-    /// 目标检出目录输入框。
-    pub path_input: Entity<gpui_component::input::InputState>,
-    /// 上次创建失败的错误文案（显示在弹窗里）。
-    /// 创建进行中不在这里记：它就是 `git_writes` 里这个主仓的 `CreateWorktree`。
-    pub error: Option<String>,
-    /// 输入框事件订阅，随 state 一起释放。
-    pub _subs: Vec<Subscription>,
 }
 
 /// 当前视图下 hunk 该给哪些按钮。
@@ -522,8 +478,6 @@ pub(crate) enum GitWrite {
     DiscardHunk,
     /// 单文件 add/reset。勾选框的乐观状态另记在 `git_index_pending`，不另占一把锁。
     IndexFile,
-    DeleteWorktree,
-    CreateWorktree,
 }
 
 impl GitWrite {
@@ -548,8 +502,6 @@ impl GitWrite {
             Self::StageHunk => "暂存块中…",
             Self::UnstageHunk => "撤出暂存块中…",
             Self::DiscardHunk => "丢弃块中…",
-            Self::DeleteWorktree => "删除工作树中…",
-            Self::CreateWorktree => "新建工作树中…",
         }
     }
 }
@@ -1138,7 +1090,6 @@ fn render_narrow_git_row(
                                             workspace.start_discard_file(
                                                 root_discard.clone(),
                                                 path_discard.clone(),
-                                                untracked,
                                                 cx,
                                             )
                                         });

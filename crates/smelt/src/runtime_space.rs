@@ -33,8 +33,6 @@ pub(crate) struct RuntimeSpace {
     pub(crate) restore_pending: Vec<(usize, SessionState)>,
     /// 已经完成的失败恢复轮次。用来限制握手超时后的自动重试。
     pub(crate) restore_retry_attempt: u32,
-    /// 用户在后台恢复期间删除的项目路径；尚未交货的恢复结果命中这些路径时直接丢弃。
-    pub(crate) cancelled_restore_paths: Vec<String>,
     /// 冷启动的会话恢复是否已经跑完（没有待恢复会话时目录一到即为 true）。保存时的抹盘
     /// 安全阀靠它区分「还没恢复上来的空」和「用户真把会话全关了」。
     pub(crate) sessions_restored: bool,
@@ -52,7 +50,6 @@ impl RuntimeSpace {
             write_queue: WorkspaceSnapshotWriteQueue::default(),
             restore_pending: Vec::new(),
             restore_retry_attempt: 0,
-            cancelled_restore_paths: Vec::new(),
             sessions_restored: false,
         }
     }
@@ -210,11 +207,9 @@ impl crate::Workspace {
 }
 
 impl crate::Workspace {
-    /// 恢复回来的会话已经不要了：路径被删掉了，或者运行时整个被移除了。
-    pub(crate) fn restore_cancelled(&self, key: &RuntimeKey, cwd: Option<&str>) -> bool {
-        self.space(key).is_none_or(|space| {
-            crate::restore_path_is_cancelled(cwd, &space.cancelled_restore_paths)
-        })
+    /// 恢复回来的会话已经不要了：运行时整个被移除了。
+    pub(crate) fn restore_cancelled(&self, key: &RuntimeKey) -> bool {
+        self.space(key).is_none()
     }
 
     pub(crate) fn forget_pending_restore(&mut self, key: &RuntimeKey, original_index: usize) {

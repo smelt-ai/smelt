@@ -38,6 +38,7 @@ fn sample_status(
         ahead,
         behind,
         files: Vec::new(),
+        worktree_hashes: Default::default(),
         stash_count: 0,
         insertions,
         deletions,
@@ -364,7 +365,7 @@ fn diff_parse_failure_keeps_non_diff_text() {
 #[test]
 fn hunk_row_shows_context_not_coordinates() {
     let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
-                   @@ -49,7 +49,7 @@ pub struct DeleteWorktreeTarget {\n\
+                   @@ -49,7 +49,7 @@ pub struct GitDiff {\n\
                    -old\n+new\n ctx\n\
                    @@ -100,3 +100,3 @@\n\
                    -a\n+b\n c\n";

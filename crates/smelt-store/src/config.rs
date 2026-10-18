@@ -4,7 +4,7 @@ use crate::{
     AutoModelHarness, MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
     QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
     StoreError, TerminalThemeSnapshot, WorkspaceCatalogWriter, WorkspaceMenuProjectRecord,
-    WorkspaceMenuSessionRecord, WorktreeInheritSnapshot,
+    WorkspaceMenuSessionRecord,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -238,49 +238,6 @@ pub(crate) fn write_remote_config_snapshot(
            iroh_relay = excluded.iroh_relay",
         params![snapshot.enabled, snapshot.iroh_relay],
     )?;
-    Ok(())
-}
-
-pub(crate) fn read_worktree_inherit_snapshot(
-    connection: &Connection,
-) -> Result<Option<WorktreeInheritSnapshot>, StoreError> {
-    let enabled: Option<bool> = connection
-        .query_row(
-            "SELECT enabled FROM worktree_inherit WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(enabled) = enabled else {
-        return Ok(None);
-    };
-    let mut statement = connection
-        .prepare("SELECT pattern FROM worktree_inherit_skip_pattern ORDER BY position")?;
-    let skip_patterns = statement
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
-    Ok(Some(WorktreeInheritSnapshot {
-        enabled,
-        skip_patterns,
-    }))
-}
-
-pub(crate) fn write_worktree_inherit_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &WorktreeInheritSnapshot,
-) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO worktree_inherit(id, enabled) VALUES (1, ?1)
-         ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled",
-        [snapshot.enabled],
-    )?;
-    transaction.execute("DELETE FROM worktree_inherit_skip_pattern", [])?;
-    for (position, pattern) in snapshot.skip_patterns.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO worktree_inherit_skip_pattern(position, pattern) VALUES (?1, ?2)",
-            params![position as i64, pattern],
-        )?;
-    }
     Ok(())
 }
 

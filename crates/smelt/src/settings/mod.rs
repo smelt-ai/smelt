@@ -553,7 +553,7 @@ fn remove_launch_entry_at(config: &mut LaunchConfig, index: usize) -> bool {
 /// 加载；没加载好之前显示出厂默认，不接受修改。
 #[derive(Clone)]
 pub struct LaunchConfig {
-    /// 除固定的「新建终端」「新建 Worktree…」外，下拉菜单里的启动项。
+    /// 除固定的「新建终端」外，下拉菜单里的启动项。
     pub entries: Vec<LaunchEntry>,
     /// 是否已从运行时加载。
     pub loaded: bool,

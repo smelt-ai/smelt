@@ -50,7 +50,7 @@ pub use snapshots::{
     RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
     RemoteTerminalSessionRecord, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogCommit,
     WorkspaceCatalogWriter, WorkspaceLayoutNode, WorkspaceMenuProjectRecord,
-    WorkspaceMenuSessionRecord, WorkspaceSessionRecord, WorkspaceSnapshot, WorktreeInheritSnapshot,
+    WorkspaceMenuSessionRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -62,7 +62,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 19;
+pub const STORE_SCHEMA_VERSION: u32 = 20;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -620,19 +620,6 @@ impl Store {
         snapshot: &RemoteConfigSnapshot,
     ) -> Result<(), StoreError> {
         imp::put_remote_config_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn get_worktree_inherit_snapshot(
-        &self,
-    ) -> Result<Option<WorktreeInheritSnapshot>, StoreError> {
-        imp::get_worktree_inherit_snapshot(&self.backend)
-    }
-
-    pub fn put_worktree_inherit_snapshot(
-        &self,
-        snapshot: &WorktreeInheritSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_worktree_inherit_snapshot(&self.backend, snapshot)
     }
 
     pub fn get_terminal_theme_snapshot(&self) -> Result<Option<TerminalThemeSnapshot>, StoreError> {
@@ -1654,23 +1641,6 @@ mod imp {
             backend,
             snapshot,
             crate::config::write_remote_config_snapshot,
-        )
-    }
-
-    pub(super) fn get_worktree_inherit_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::WorktreeInheritSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_worktree_inherit_snapshot)
-    }
-
-    pub(super) fn put_worktree_inherit_snapshot(
-        backend: &Backend,
-        snapshot: &super::WorktreeInheritSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_worktree_inherit_snapshot,
         )
     }
 
@@ -2766,10 +2736,20 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 19 {
+            apply_v20_drop_worktree_inherit(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v19 形状：删完两张表后与当前形状逐字一致，就说明原来正是 v19。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 18 {
             apply_v19_workspace_catalog_writer(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
-            // 没有冻结的 v18 形状：补完两列后与当前形状逐字一致，就说明原来正是 v18。
+            // 没有冻结的 v18 形状：补完两列、删完两张表后与当前形状逐字一致，就说明原来正是 v18。
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
             }
@@ -3045,7 +3025,7 @@ mod imp {
         apply_v19_workspace_catalog_writer(transaction)
     }
 
-    /// v19 给工作区目录补上写入方两列。已经有这两列的库跳过。
+    /// v19 给工作区目录补上写入方两列。已经有这两列的库跳过，接着补 v20。
     fn apply_v19_workspace_catalog_writer(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
@@ -3054,6 +3034,22 @@ mod imp {
             .any(|column| column == "writer")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V18_TO_V19)?;
+        }
+        apply_v20_drop_worktree_inherit(transaction)
+    }
+
+    /// v20 删掉没人读的 worktree 继承两张表。已经没有这两张表的库跳过；
+    /// 只剩其中一张的库不认，交给后面的形状校验拒绝。
+    fn apply_v20_drop_worktree_inherit(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        let tables = table_names(transaction)?;
+        if tables.iter().any(|table| table == "worktree_inherit")
+            && tables
+                .iter()
+                .any(|table| table == "worktree_inherit_skip_pattern")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V19_TO_V20)?;
         }
         Ok(())
     }
@@ -4210,17 +4206,6 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn get_worktree_inherit_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::WorktreeInheritSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_worktree_inherit_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::WorktreeInheritSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
     pub(super) fn get_terminal_theme_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::TerminalThemeSnapshot>, StoreError> {
@@ -5178,13 +5163,6 @@ mod tests {
                 })
             );
             assert_eq!(
-                store.get_worktree_inherit_snapshot().unwrap(),
-                Some(WorktreeInheritSnapshot {
-                    enabled: true,
-                    skip_patterns: vec!["node_modules".into()],
-                })
-            );
-            assert_eq!(
                 store.auto_model_providers(AutoModelHarness::Pi).unwrap(),
                 ["deepseek", "token-x"]
             );
@@ -5258,7 +5236,14 @@ mod tests {
 
             assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
             let connection = rusqlite::Connection::open(&path).unwrap();
-            for table in ["kv", "agent_ui_pref", "acp_detail_v17"] {
+            // worktree 继承随 git worktree 功能一起下线：v18 建过这两张表，v20 又删掉了。
+            for table in [
+                "kv",
+                "agent_ui_pref",
+                "acp_detail_v17",
+                "worktree_inherit",
+                "worktree_inherit_skip_pattern",
+            ] {
                 let exists: bool = connection
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
@@ -7278,6 +7263,19 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v18、v19 都有、v20 删掉的 worktree 继承两张表，原样照 v18 的建表语句。
+    /// 用当前结构的库退回旧版本做夹具时补上。
+    const V19_WORKTREE_INHERIT_TABLES: &str = "
+CREATE TABLE worktree_inherit (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+);
+CREATE TABLE worktree_inherit_skip_pattern (
+  position INTEGER PRIMARY KEY CHECK (position >= 0),
+  pattern TEXT NOT NULL
+);
+";
+
     /// 库里各结构对象的建表语句，去掉空白后按名字排好，用来比较两份库的形状。
     fn normalized_schema(path: &Path) -> Vec<(String, String, String)> {
         rusqlite::Connection::open(path)
@@ -7303,7 +7301,7 @@ mod tests {
             .unwrap()
     }
 
-    /// v18 的库：工作区目录补上写入方两列，原来的版本号留着。
+    /// v18 的库：工作区目录补上写入方两列，原来的版本号留着；接着删掉 worktree 继承两张表。
     #[test]
     fn migrates_v18_workspace_catalog_to_record_its_writer() {
         let dir = temp_dir("migrate-v18-catalog-writer");
@@ -7311,11 +7309,13 @@ mod tests {
         drop(Store::open_or_create(&path).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
-            .execute_batch(
+            .execute_batch(&format!(
                 "ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
                  ALTER TABLE workspace_catalog DROP COLUMN writer;
-                 INSERT INTO workspace_catalog(id, revision) VALUES (1, 41);",
-            )
+                 INSERT INTO workspace_catalog(id, revision) VALUES (1, 41);
+                 {V19_WORKTREE_INHERIT_TABLES}
+                 INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);"
+            ))
             .unwrap();
         connection.pragma_update(None, "user_version", 18).unwrap();
         drop(connection);
@@ -7352,6 +7352,104 @@ mod tests {
             normalized_schema(&fresh),
             "从 v18 升上来的库要和新建的库一个形状"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v19 的库：worktree 继承两张表随 git worktree 功能下线删掉，其余数据原样留着，
+    /// 升级前留一份 `.bak-v19`。
+    #[test]
+    fn migrates_v19_drops_worktree_inherit_tables() {
+        let dir = temp_dir("migrate-v19-worktree-inherit");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        store.put_runtime_id("runtime-1").unwrap();
+        store
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
+            .unwrap();
+        store
+            .put_remote_config_snapshot(&RemoteConfigSnapshot {
+                enabled: true,
+                iroh_relay: "relay.example".into(),
+            })
+            .unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V19_WORKTREE_INHERIT_TABLES}
+                 INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);
+                 INSERT INTO worktree_inherit_skip_pattern(position, pattern)
+                 VALUES (0, 'node_modules'), (1, 'target');"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 19).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 1);
+        assert_eq!(catalog_projects(&store), ["/a"]);
+        assert_eq!(
+            store.get_remote_config_snapshot().unwrap(),
+            Some(RemoteConfigSnapshot {
+                enabled: true,
+                iroh_relay: "relay.example".into(),
+            })
+        );
+        // 写入方跟着留下：同一写入方基于旧版本的下一次提交，仍认得出是自己的。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    0,
+                    &catalog_writer("client-a", 2),
+                    &catalog_snapshot("/b")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 2 }
+        );
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        for table in ["worktree_inherit", "worktree_inherit_skip_pattern"] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!exists, "{table} 应该已经删掉");
+        }
+        drop(connection);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v19 升上来的库要和新建的库一个形状"
+        );
+
+        let backup = path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v19"));
+        let backup = rusqlite::Connection::open(&backup).unwrap();
+        assert_eq!(
+            backup
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            19
+        );
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT COUNT(*) FROM worktree_inherit_skip_pattern",
+                    [],
+                    |row| row.get::<_, u32>(0)
+                )
+                .unwrap(),
+            2,
+            "备份里留着删表前的数据"
+        );
+        drop(backup);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -7393,16 +7491,6 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "两家的名单互不串"
-        );
-
-        let worktree = WorktreeInheritSnapshot {
-            enabled: true,
-            skip_patterns: vec!["node_modules".into(), "target".into()],
-        };
-        store.put_worktree_inherit_snapshot(&worktree).unwrap();
-        assert_eq!(
-            store.get_worktree_inherit_snapshot().unwrap(),
-            Some(worktree)
         );
 
         let theme = TerminalThemeSnapshot {

@@ -80,7 +80,6 @@ define_control_methods! {
     GitRepoInfo => (GIT_REPO_INFO_METHOD, "git.repo_info"),
     GitStatus => (GIT_STATUS_METHOD, "git.status"),
     GitBranches => (GIT_BRANCHES_METHOD, "git.branches"),
-    GitIsDirty => (GIT_IS_DIRTY_METHOD, "git.is_dirty"),
     GitCheckout => (GIT_CHECKOUT_METHOD, "git.checkout"),
     GitBranchDelete => (GIT_BRANCH_DELETE_METHOD, "git.branch_delete"),
     GitMerge => (GIT_MERGE_METHOD, "git.merge"),
@@ -95,10 +94,6 @@ define_control_methods! {
     GitPull => (GIT_PULL_METHOD, "git.pull"),
     GitStashPush => (GIT_STASH_PUSH_METHOD, "git.stash_push"),
     GitStashPop => (GIT_STASH_POP_METHOD, "git.stash_pop"),
-    GitWorktreeList => (GIT_WORKTREE_LIST_METHOD, "git.worktree.list"),
-    GitWorktreeCreate => (GIT_WORKTREE_CREATE_METHOD, "git.worktree.create"),
-    GitWorktreeRemove => (GIT_WORKTREE_REMOVE_METHOD, "git.worktree.remove"),
-    GitWorktreePrune => (GIT_WORKTREE_PRUNE_METHOD, "git.worktree.prune"),
     GitFileDiff => (GIT_FILE_DIFF_METHOD, "git.diff.file"),
     GitAllDiff => (GIT_ALL_DIFF_METHOD, "git.diff.all"),
     GitLog => (GIT_LOG_METHOD, "git.log"),
@@ -610,7 +605,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 125);
+        assert_eq!(names.len(), 120);
     }
 
     #[test]

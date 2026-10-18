@@ -223,12 +223,6 @@ pub struct RemoteConfigSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorktreeInheritSnapshot {
-    pub enabled: bool,
-    pub skip_patterns: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalThemeSnapshot {
     pub version: u32,
     pub dark: bool,

@@ -1,6 +1,6 @@
 use super::{
     AcpSaved, PaneState, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
-    project_root_of, remove_projects_under, session_state_cwd,
+    project_root_of, session_state_cwd,
 };
 
 fn group(root: &str, label: &str) -> ProjectGroup {
@@ -14,8 +14,7 @@ fn group(root: &str, label: &str) -> ProjectGroup {
 
 /// 跑一遍消歧，取回显示名（base 就是各组当前的 label）。
 fn labels(mut groups: Vec<ProjectGroup>) -> Vec<String> {
-    let bases: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
-    disambiguate_labels(&mut groups, &bases);
+    disambiguate_labels(&mut groups);
     groups.into_iter().map(|g| g.label).collect()
 }
 
@@ -50,18 +49,6 @@ fn keeps_climbing_until_unique() {
             group("/b/dev/smelt", "smelt")
         ]),
         vec!["a/dev · smelt", "b/dev · smelt"]
-    );
-}
-
-/// worktree 的显示名本来就是「仓库 · 分支」，消歧时整体当末段，前缀补在最前。
-#[test]
-fn worktree_labels_keep_their_branch_suffix() {
-    assert_eq!(
-        labels(vec![
-            group("/x/wt/smelt", "smelt · feat"),
-            group("/y/wt/smelt", "smelt · feat"),
-        ]),
-        vec!["x/wt · smelt · feat", "y/wt · smelt · feat"]
     );
 }
 
@@ -133,19 +120,6 @@ fn trailing_slashes_are_ignored() {
     assert_eq!(project_root_of(&p, "/a/b").as_deref(), Some("/a/b"));
     assert_eq!(project_root_of(&p, "/a/b/").as_deref(), Some("/a/b"));
     assert_eq!(project_root_of(&p, "/a/b/c").as_deref(), Some("/a/b"));
-}
-
-#[test]
-fn deleting_worktree_removes_project_even_if_session_close_readded_it() {
-    let mut p = projects(&[
-        "/repo",
-        "/repo-worktrees/feature",
-        "/repo-worktrees/feature/sub",
-    ]);
-
-    remove_projects_under(&mut p, "/repo-worktrees/feature/");
-
-    assert_eq!(p, projects(&["/repo"]));
 }
 
 /// 旧存档迁移：项目列表从会话 cwd 反推，终端会话取分屏树里第一个叶子的 cwd。

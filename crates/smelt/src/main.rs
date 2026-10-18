@@ -94,10 +94,7 @@ use gpui_component::*;
 use terminal_view::TerminalView;
 
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
-use git_panel::{
-    BranchList, DeleteWorktreeTarget, GitDiff, GitStatusData, NewWorktreeState, RepoInfo,
-    WorktreeListState,
-};
+use git_panel::{BranchList, GitDiff, GitStatusData, RepoInfo};
 use settings::{Appearance, active_launch_entries, default_launch_entries, load_appearance};
 
 const MIN_SIDEBAR_WIDTH: f32 = 240.0;
@@ -1797,7 +1794,7 @@ pub(crate) fn sidebar_groups(
 }
 
 /// 显示名撞车时往前补 `extra` 段父目录：`/a/b/smelt` + 1 → `b · smelt`。
-/// base 是这一组本来的显示名（worktree 是「仓库 · 分支」，普通项目是目录末段）。
+/// base 是这一组本来的显示名（目录末段）。
 fn label_with_parents(root: &str, base: &str, extra: usize) -> String {
     if extra == 0 {
         return base.to_string();
@@ -1816,7 +1813,8 @@ fn label_with_parents(root: &str, base: &str, extra: usize) -> String {
 }
 
 /// 给重名的分组逐步补父目录段，直到互不相同（或路径已经补到顶）。
-fn disambiguate_labels(groups: &mut [ProjectGroup], bases: &[String]) {
+fn disambiguate_labels(groups: &mut [ProjectGroup]) {
+    let bases: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
     let mut extra = vec![0usize; groups.len()];
     // 每轮给所有重名组多补一段；路径最深也就那么几段，8 轮足够收敛。
     for _ in 0..8 {
@@ -1864,15 +1862,6 @@ fn project_root_of(projects: &[String], cwd: &str) -> Option<String> {
         .filter(|root| !root.is_empty() && (cwd == *root || cwd.starts_with(&format!("{root}/"))))
         .max_by_key(|root| root.len())
         .map(str::to_string)
-}
-
-fn remove_projects_under(projects: &mut Vec<String>, path: &str) {
-    let path = path.trim_end_matches('/');
-    let prefix = format!("{path}/");
-    projects.retain(|project| {
-        let project = project.trim_end_matches('/');
-        project != path && !project.starts_with(&prefix)
-    });
 }
 
 /// 存档里一个会话的代表 cwd：ACP 取自身 cwd，终端取分屏树里第一个有 cwd 的叶子。
@@ -2077,17 +2066,6 @@ fn should_correct_agent_conversation_on_project_stage(
 ) -> bool {
     sessions_restored
         && agent_conversation_occupies_project_stage(route, active_is_agent_conversation)
-}
-
-fn restore_path_is_cancelled(cwd: Option<&str>, cancelled_paths: &[String]) -> bool {
-    let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
-        return false;
-    };
-    let cwd = cwd.trim_end_matches('/');
-    cancelled_paths.iter().any(|path| {
-        let path = path.trim_end_matches('/');
-        cwd == path || cwd.starts_with(&format!("{path}/"))
-    })
 }
 
 /// 新会话 id（uuid v4）：GUI 与 smeltd 之间的持久身份。
@@ -2615,33 +2593,26 @@ struct Workspace {
     rename_input: Option<Entity<gpui_component::input::InputState>>,
     /// 重命名文本框的事件订阅句柄，随 rename_input 一起换（回车/失焦提交）。
     _rename_sub: Option<Subscription>,
-    /// 仓库身份缓存（cwd → git-dir/common-dir/分支）：判断某个会话是不是 worktree
-    /// 检出、侧栏聚簇排序、拼「仓库名 · 分支名」标签都靠它。None = 探测过但不是
-    /// git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
+    /// 仓库身份缓存（cwd → 当前分支）：侧栏项目行和会话行显示分支名靠它。None = 探测过
+    /// 但不是 git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
     repo_info: HashMap<String, (Instant, Option<RepoInfo>)>,
     /// 正在后台探测仓库身份、避免重复起进程的 cwd 集合。
     repo_info_inflight: HashSet<String>,
-    /// 正在新建的 worktree 目标 + 弹窗里的分支名文本框（None = 没在新建）。
-    /// 正在确认删除的 worktree（None = 没在删）。
-    delete_worktree_target: Option<DeleteWorktreeTarget>,
-    /// 「关联 Worktree」弹窗状态（Some = 弹窗开着）。见 git_panel 模块。
-    worktree_list: Option<WorktreeListState>,
-    /// 「新建 Worktree」弹窗状态（Some = 弹窗开着）。见 git_panel 模块。
-    new_worktree: Option<NewWorktreeState>,
     /// 运行时目录选择器（打开项目、绑定目录、导入插件）。
     dir_picker: Option<dir_picker::DirPickerState>,
     /// 正在确认丢弃的 diff 块：(仓库根, hunk 下标)。丢弃直接改工作区文件且不进
     /// reflog，找不回来，所以必须过一道确认。
     discard_hunk_target: Option<(String, usize)>,
-    /// 正在确认丢弃整个文件的改动：(仓库根, 相对路径, 是否未跟踪)。未跟踪文件是
-    /// 直接删盘，比 restore 更狠，文案要分开写。
-    discard_file_target: Option<(String, String, bool)>,
-    /// 「丢弃全部改动」确认弹窗的目标仓库根（Some = 弹窗开着）。见 git_panel 模块。
-    discard_all_target: Option<String>,
+    /// 正在确认丢弃整个文件的改动：(仓库根, 用户点丢弃时看到的那条改动)。未跟踪
+    /// 文件是直接删盘，比 restore 更狠，文案要分开写。
+    discard_file_target: Option<(String, git_panel::GitSeenChange)>,
+    /// 「丢弃全部改动」确认弹窗（Some = 弹窗开着）：(仓库根, 用户点丢弃时看到的整份
+    /// 改动列表)。见 git_panel 模块。
+    discard_all_target: Option<(String, Vec<git_panel::GitSeenChange>)>,
     /// 每个仓库正在跑的 git 写入。键是这次命令的仓库根。
     ///
     /// `index.lock` 属于这一个仓库，所以另一个仓库可以同时写。同一个根上的
-    /// 提交、推送、获取、暂存、建工作树都进这一张表，由 `spawn_git` 占用和释放。
+    /// 提交、推送、获取、暂存都进这一张表，由 `spawn_git` 占用和释放。
     git_writes: HashMap<String, git_panel::GitWrite>,
     /// 额度刷新循环的手动信号通道。额度状态本身不在 Workspace，而在
     /// `ProviderStatus` 全局单例：侧栏和对话模型菜单都订阅它。
@@ -3072,9 +3043,6 @@ impl Workspace {
             _rename_sub: None,
             repo_info: HashMap::new(),
             repo_info_inflight: HashSet::new(),
-            delete_worktree_target: None,
-            worktree_list: None,
-            new_worktree: None,
             dir_picker: None,
             discard_hunk_target: None,
             discard_file_target: None,
@@ -3824,7 +3792,6 @@ impl Render for Workspace {
                     && this.palette.is_none()
                     && this.rename_target.is_none()
                     && !this.show_quit_confirm
-                    && this.delete_worktree_target.is_none()
                     && this.close_project_target.is_none()
                     && this.active_tab().is_session()
                     && this.stage_cover.is_some()
@@ -4307,7 +4274,7 @@ impl gpui::AssetSource for SmeltAssets {
 }
 
 fn schedule_obsolete_file_cleanup() {
-    // 启动时只删已经没有任何读写路径的废弃文件；仍存在的 git worktree 要用户确认。
+    // 启动时只删已经没有任何读写路径的废弃文件；旧版 worktree 目录要用户在设置页确认。
     let _ = thread::spawn(|| {
         let removed = storage_cleanup::remove_obsolete_files_at_startup();
         if removed > 0 {

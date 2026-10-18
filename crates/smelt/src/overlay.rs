@@ -11,9 +11,6 @@ use super::*;
 /// 这样不会共用一个 `dialog-host` 和焦点句柄。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModalLayer {
-    WorktreeList,
-    NewWorktree,
-    DeleteWorktree,
     Rename,
     Quit,
     CloseProject,
@@ -35,26 +32,23 @@ pub(crate) enum ModalLayer {
 impl ModalLayer {
     pub(crate) fn rank(self) -> u8 {
         match self {
-            Self::WorktreeList => 1,
-            Self::NewWorktree => 2,
-            Self::DeleteWorktree => 3,
-            Self::Rename => 4,
-            Self::Quit => 5,
-            Self::CloseProject => 6,
-            Self::DiscardHunk => 7,
-            Self::DiscardFile => 8,
-            Self::DiscardAll => 9,
-            Self::DeleteBranch => 10,
-            Self::DeleteFile => 11,
-            Self::DeleteHistory => 12,
-            Self::DeleteAgentMemory => 13,
-            Self::DeleteAgent => 14,
-            Self::DeleteAutomation => 15,
-            Self::UnsavedFile => 16,
+            Self::Rename => 1,
+            Self::Quit => 2,
+            Self::CloseProject => 3,
+            Self::DiscardHunk => 4,
+            Self::DiscardFile => 5,
+            Self::DiscardAll => 6,
+            Self::DeleteBranch => 7,
+            Self::DeleteFile => 8,
+            Self::DeleteHistory => 9,
+            Self::DeleteAgentMemory => 10,
+            Self::DeleteAgent => 11,
+            Self::DeleteAutomation => 12,
+            Self::UnsavedFile => 13,
             Self::SessionManager => 1,
             Self::DaemonRestart => 2,
             // 选目录盖在所有主窗口确认框之上：它总是从一次明确的点击打开。
-            Self::DirPicker => 17,
+            Self::DirPicker => 14,
         }
     }
 
@@ -65,7 +59,6 @@ impl ModalLayer {
 
 impl Workspace {
     /// 当前最上层主窗口确认框。数字大的盖住数字小的。
-    /// Worktree 列表是底，新建在其上，删除再在其上。
     pub(crate) fn main_modal_rank(&self) -> Option<u8> {
         let mut rank = None;
         let raise = |rank: &mut Option<u8>, open: bool, value: u8| {
@@ -75,23 +68,8 @@ impl Workspace {
         };
         raise(
             &mut rank,
-            self.worktree_list.is_some(),
-            ModalLayer::WorktreeList.rank(),
-        );
-        raise(
-            &mut rank,
-            self.new_worktree.is_some(),
-            ModalLayer::NewWorktree.rank(),
-        );
-        raise(
-            &mut rank,
             self.dir_picker.is_some(),
             ModalLayer::DirPicker.rank(),
-        );
-        raise(
-            &mut rank,
-            self.delete_worktree_target.is_some(),
-            ModalLayer::DeleteWorktree.rank(),
         );
         raise(
             &mut rank,
@@ -177,7 +155,7 @@ impl Workspace {
         current == Some(layer.rank())
     }
 
-    /// 在改名框、新建 worktree 的输入框拿到焦点之前调用。
+    /// 在改名框这类输入框拿到焦点之前调用。
     /// 渲染时再记焦点会把那个输入框当成「打开前的焦点」，关弹窗时又抢回来。
     /// `hold` 让紧接着的 sync 不要因为层级变化把焦点从输入框抢回对话框。
     pub(crate) fn begin_main_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
@@ -298,15 +276,6 @@ impl Workspace {
             true
         } else if self.show_quit_confirm {
             self.show_quit_confirm = false;
-            cx.notify();
-            true
-        } else if self.delete_worktree_target.is_some()
-            || self.worktree_list.is_some()
-            || self.new_worktree.is_some()
-        {
-            self.delete_worktree_target = None;
-            self.worktree_list = None;
-            self.new_worktree = None;
             cx.notify();
             true
         } else if self.close_project_target.is_some()
@@ -497,21 +466,6 @@ impl Workspace {
                 self.rename_target
                     .is_some()
                     .then(|| self.render_rename_session(cx)),
-            )
-            .children(
-                self.delete_worktree_target
-                    .is_some()
-                    .then(|| self.render_delete_worktree_confirm(cx)),
-            )
-            .children(
-                self.worktree_list
-                    .is_some()
-                    .then(|| self.render_worktree_list(cx)),
-            )
-            .children(
-                self.new_worktree
-                    .is_some()
-                    .then(|| self.render_new_worktree(cx)),
             )
             .children(
                 self.dir_picker

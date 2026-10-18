@@ -11,7 +11,7 @@ pub const LAUNCH_CONFIG_VERSION: u32 = 14;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LaunchSettings {
     pub version: u32,
-    /// 除固定的「新建终端」「新建 Worktree…」外，下拉菜单里的启动项。
+    /// 除固定的「新建终端」外，下拉菜单里的启动项。
     pub entries: Vec<LaunchEntry>,
 }
 

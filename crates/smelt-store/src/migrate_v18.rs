@@ -9,7 +9,6 @@ use crate::{
     AutoModelHarness, MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
     QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
     StoreError, TerminalThemeSnapshot, WorkspaceMenuProjectRecord, WorkspaceMenuSessionRecord,
-    WorktreeInheritSnapshot,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Map, Number, Value};
@@ -38,7 +37,6 @@ pub(crate) struct V17RuntimeState {
     new_session_pins: Vec<String>,
     memory_settings: Option<MemorySettingsRecord>,
     remote_config: Option<RemoteConfigSnapshot>,
-    worktree_inherit: Option<WorktreeInheritSnapshot>,
     terminal_theme: Option<TerminalThemeSnapshot>,
     auto_models: Vec<(AutoModelHarness, Vec<String>)>,
     quota_cache: Option<QuotaCacheSnapshot>,
@@ -114,11 +112,6 @@ pub(crate) fn read_v17_state(connection: &Connection) -> Result<V17RuntimeState,
         enabled: bool_field(&object, "enabled", false),
         iroh_relay: as_string(object.get("iroh_relay")).unwrap_or_default(),
     });
-    state.worktree_inherit =
-        scoped_object(connection, "worktree_inherit")?.map(|object| WorktreeInheritSnapshot {
-            enabled: bool_field(&object, "enabled", false),
-            skip_patterns: string_list(object.get("skip_patterns")),
-        });
     state.terminal_theme = scoped_object(connection, "terminal_theme")?.map(|object| {
         let color = |snake: &str, camel: &str| {
             u32_field(object.get(snake).or_else(|| object.get(camel))).unwrap_or(0)
@@ -241,9 +234,6 @@ pub(crate) fn write_v18_state(
     }
     if let Some(remote) = &state.remote_config {
         crate::config::write_remote_config_snapshot(transaction, remote)?;
-    }
-    if let Some(worktree) = &state.worktree_inherit {
-        crate::config::write_worktree_inherit_snapshot(transaction, worktree)?;
     }
     if let Some(theme) = &state.terminal_theme {
         crate::config::write_terminal_theme_snapshot(transaction, theme)?;

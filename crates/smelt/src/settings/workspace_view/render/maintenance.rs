@@ -35,7 +35,7 @@ pub(super) fn storage_page(
     SettingPage::new("存储清理")
         .description(
             "清理已经没人读写的残留：instincts 的 smelt.db、根目录\
-             调试/备份文件和迁库 JSON 备份。不会删除仍在使用的 worktree 或 Git 分支。",
+             调试/备份文件、迁库 JSON 备份和旧版 worktrees 目录。不会删除 Git 分支。",
         )
         .resettable(false)
         .group(storage)

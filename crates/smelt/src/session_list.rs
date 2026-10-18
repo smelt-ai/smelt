@@ -26,7 +26,6 @@ use smelt_ui::IconAction as _;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
 
-use crate::git_panel::main_repo_root_from_common_dir;
 // drag.rs / row.rs 作为本模块子模块沿用 `super::*` 读取 ACP 类型。
 use crate::settings::{AgentHostState, ConversationAgentKind};
 use crate::{
@@ -539,22 +538,13 @@ impl Workspace {
                 .min_by_key(|s| s.rank())
                 .unwrap_or(AgentStatus::Idle);
 
-            let repo_info_here = self
+            // 分支名：git 仓库都显示，跟项目名并排（淡色）。
+            let branch_label = self
                 .repo_info
                 .get(cwd.as_str())
                 .filter(|_| is_local_group)
-                .and_then(|(_, i)| i.clone());
-            let is_worktree_group = repo_info_here.as_ref().is_some_and(|i| i.is_worktree());
-            let worktree_main_root = repo_info_here
-                .as_ref()
-                .and_then(|i| main_repo_root_from_common_dir(&i.common_dir))
-                .unwrap_or_else(|| cwd.clone());
-            let worktree_branch = repo_info_here
-                .as_ref()
-                .map(|i| i.branch.clone())
-                .unwrap_or_default();
-            // 分支名：worktree / 普通仓库都显示，跟项目名并排（淡色）。
-            let branch_label = repo_info_here.as_ref().map(|i| i.branch.clone());
+                .and_then(|(_, info)| info.as_ref())
+                .map(|info| info.branch.clone());
 
             let e_toggle = this.clone();
             let toggle_project = project.clone();
@@ -773,10 +763,6 @@ impl Workspace {
                             });
                         })
                         .context_menu({
-                            // 复制路径人人有份；「删除 Worktree」只给 worktree 分组
-                            //（`when` 的两个分支类型必须一致，所以是菜单项按条件加，
-                            // 不是整个 context_menu 按条件挂）。
-                            let e_del = e_menu.clone();
                             let e_pin = e_menu.clone();
                             let e_sidebar_pin = e_menu.clone();
                             let e_close_proj = e_menu.clone();
@@ -784,15 +770,13 @@ impl Workspace {
                             let close_project = project.clone();
                             let menu_project = project.clone();
                             let sess_n = ixs.len();
-                            let del_main_root = worktree_main_root.clone();
-                            let del_branch = worktree_branch.clone();
                             let copy_branch = branch_label.clone();
                             move |menu, window, cx| {
                                 if !is_project_group {
                                     return menu;
                                 }
-                                // 远程项目的文件不在这台机器上：打开方式、文件树、worktree
-                                // 都还做不了，只给通用的几项。
+                                // 远程项目的文件不在这台机器上：打开方式、文件树都还做不了，
+                                // 只给通用的几项。
                                 if !is_local_group {
                                     return remote_project_menu(
                                         menu,
@@ -803,24 +787,13 @@ impl Workspace {
                                     );
                                 }
                                 let copy_path = path.clone();
-                                let del_path = path.clone();
                                 let pin_path = path.clone();
                                 let sidebar_pin_project = close_project.clone();
-                                let wt_root = path.clone();
-                                let e_wt = e_menu.clone();
-                                let e_del = e_del.clone();
                                 let e_pin = e_pin.clone();
                                 let e_sidebar_pin = e_sidebar_pin.clone();
                                 let e_close_proj = e_close_proj.clone();
                                 let close_project = close_project.clone();
-                                let del_main_root = del_main_root.clone();
-                                let del_branch = del_branch.clone();
                                 let copy_branch = copy_branch.clone();
-                                // 「新增 Worktree」用的主仓库根/基准分支：独立 clone，
-                                // 免得和后面「删除 Worktree」的 when 闭包抢同一个变量。
-                                let nwt_main_root = del_main_root.clone();
-                                let nwt_base_branch = del_branch.clone();
-                                let e_nwt = e_menu.clone();
                                 // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
                                 // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
                                 let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
@@ -836,12 +809,10 @@ impl Workspace {
                                 } else {
                                     "置顶"
                                 };
-                                // 按「复制 / Worktree / 项目 / 离开」分段；Worktree 是较少用
-                                // 的高级操作，收进二级菜单，避免把常用项目操作挤成一长列。
-                                let mut menu = menu;
+                                // 按「复制 / 项目 / 离开」分段。
                                 let open_root = copy_path.clone();
                                 let e_open = e_menu.clone();
-                                menu = menu
+                                menu
                                     .submenu_with_icon(
                                         Some(IconName::ExternalLink.into()),
                                         "用其他应用打开",
@@ -879,49 +850,6 @@ impl Workspace {
                                                 }),
                                         )
                                     })
-                                    .separator()
-                                    .submenu_with_icon(
-                                        Some(IconName::HardDrive.into()),
-                                        "Worktree",
-                                        window,
-                                        cx,
-                                        move |menu, _window, _cx| {
-                                            let worktree_root = wt_root.clone();
-                                            let worktree_workspace = e_wt.clone();
-                                            let new_worktree_root = nwt_main_root.clone();
-                                            let new_worktree_branch = nwt_base_branch.clone();
-                                            let new_worktree_workspace = e_nwt.clone();
-                                            menu.item(
-                                                PopupMenuItem::new("查看关联的 Worktree...")
-                                                    .icon(IconName::HardDrive)
-                                                    .on_click(move |_ev, _window, cx| {
-                                                        worktree_workspace.update(cx, |ws, cx| {
-                                                            ws.open_worktree_list(
-                                                                worktree_root.clone(),
-                                                                cx,
-                                                            )
-                                                        });
-                                                    }),
-                                            )
-                                            .item(
-                                                PopupMenuItem::new("新建 Worktree...")
-                                                    .icon(IconName::Plus)
-                                                    .on_click(move |_ev, window, cx| {
-                                                        new_worktree_workspace.update(
-                                                            cx,
-                                                            |ws, cx| {
-                                                                ws.open_new_worktree(
-                                                                    new_worktree_root.clone(),
-                                                                    new_worktree_branch.clone(),
-                                                                    window,
-                                                                    cx,
-                                                                )
-                                                            },
-                                                        );
-                                                    }),
-                                            )
-                                        },
-                                    )
                                     .separator()
                                     .item(
                                         PopupMenuItem::new(sidebar_pin_label)
@@ -961,27 +889,7 @@ impl Workspace {
                                                 });
                                             },
                                         ),
-                                    );
-
-                                menu.when(is_worktree_group, move |menu| {
-                                    menu.separator().item(
-                                        PopupMenuItem::new("删除 Worktree")
-                                            .icon(crate::trash_icon())
-                                            .on_click(move |_ev, _window, cx| {
-                                                let del_path = del_path.clone();
-                                                let del_main_root = del_main_root.clone();
-                                                let del_branch = del_branch.clone();
-                                                e_del.update(cx, |ws, cx| {
-                                                    ws.start_delete_worktree(
-                                                        del_path,
-                                                        del_main_root,
-                                                        del_branch,
-                                                        cx,
-                                                    )
-                                                });
-                                            }),
                                     )
-                                })
                             }
                         })
                         .when(can_drag && dragging, |header| {

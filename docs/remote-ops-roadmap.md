@@ -297,7 +297,7 @@ iroh 隧道握手超时；移动端 `GatewayService` 的连接层超时默认 10
 | 项 | 说明 |
 |----|------|
 | 板 = Kanban 壳 × 认领池心 | 见 collaboration.md；条目绑 `session_id`，远程链接同一会话 |
-| Provider / Profile / Worktree | 远程「开跑」更稳 |
+| Provider / Profile · ~~Worktree~~（已放弃（2026-10-18 移除 worktree 功能）） | 远程「开跑」更稳 |
 | 同事链接 | 飞书零安装；跨网复用 Phase 3 的 iroh P2P |
 | 移交 | 活会话交接 |
 

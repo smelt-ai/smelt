@@ -180,7 +180,6 @@ fn dispatch_control(
         | ControlMethod::GitRepoInfo
         | ControlMethod::GitStatus
         | ControlMethod::GitBranches
-        | ControlMethod::GitIsDirty
         | ControlMethod::GitCheckout
         | ControlMethod::GitBranchDelete
         | ControlMethod::GitMerge
@@ -195,10 +194,6 @@ fn dispatch_control(
         | ControlMethod::GitPull
         | ControlMethod::GitStashPush
         | ControlMethod::GitStashPop
-        | ControlMethod::GitWorktreeList
-        | ControlMethod::GitWorktreeCreate
-        | ControlMethod::GitWorktreeRemove
-        | ControlMethod::GitWorktreePrune
         | ControlMethod::GitFileDiff
         | ControlMethod::GitAllDiff
         | ControlMethod::GitLog

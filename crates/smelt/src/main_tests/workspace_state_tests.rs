@@ -186,10 +186,9 @@ mod restore_order_tests {
     use crate::{
         AcpSaved, PaneState, RESTORE_RETRY_LIMIT, SessionState, merge_restore_pending,
         persisted_active_position, planned_restore_insert_position, record_restored_index,
-        resolve_restored_active_session, restore_error_blocks_remaining, restore_path_is_cancelled,
-        restore_retry_delay, restored_active_position, restored_insert_position,
-        session_state_persist_id, should_auto_resume_active_acp, should_retry_failed_restore,
-        split_indexed_restore_queue,
+        resolve_restored_active_session, restore_error_blocks_remaining, restore_retry_delay,
+        restored_active_position, restored_insert_position, session_state_persist_id,
+        should_auto_resume_active_acp, should_retry_failed_restore, split_indexed_restore_queue,
     };
 
     fn state(name: &str, acp: bool) -> SessionState {
@@ -447,18 +446,6 @@ mod restore_order_tests {
             ),
             2
         );
-    }
-
-    #[test]
-    fn deleting_worktree_cancels_nested_pending_restores() {
-        assert!(restore_path_is_cancelled(
-            Some("/repo-worktrees/feature/sub"),
-            &["/repo-worktrees/feature".into()]
-        ));
-        assert!(!restore_path_is_cancelled(
-            Some("/repo-worktrees/feature-old"),
-            &["/repo-worktrees/feature".into()]
-        ));
     }
 }
 

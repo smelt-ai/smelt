@@ -9771,6 +9771,7 @@ dependencies = [
 name = "smelt-git"
 version = "0.9.0"
 dependencies = [
+ "sha2 0.10.9",
  "smelt-core",
  "smelt-runtime-client",
  "tempfile",

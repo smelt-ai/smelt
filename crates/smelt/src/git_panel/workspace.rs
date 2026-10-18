@@ -1,4 +1,4 @@
-//! Git 面板中 Workspace 的数据修改：worktree、暂存/提交、diff 生命周期。
+//! Git 面板中 Workspace 的数据修改：暂存/提交、diff 生命周期。
 //!
 //! Git 数据模型和纯解析/行渲染函数留在父模块；这里集中放置依赖 Workspace
 //! 状态的交互方法。页面渲染在 `view.rs`。字段仍由 main.rs 的 Workspace 统一持有。
@@ -30,345 +30,20 @@ fn parse_diff_files(text: &str) -> Result<Vec<gpui_component::diff::DiffFile>, S
 // ===================== Workspace 方法 =====================
 
 impl Workspace {
-    /// 项目行右键「新增 Worktree」：打开弹窗（分支名 + 检出目录两个输入框）。
-    /// main_root/base_branch 由 session_list 用已缓存的 repo_info 算好传进来，
-    /// 不重复跑 git。默认检出路径：主仓库同级目录 `<仓库名>-<分支>`。
-    pub fn open_new_worktree(
-        &mut self,
-        main_root: String,
-        base_branch: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use gpui_component::input::{InputEvent, InputState};
-        let repo_name = Path::new(&main_root)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("worktree");
-        let suffix = if base_branch.is_empty() {
-            "wt".to_string()
-        } else {
-            base_branch.clone()
-        };
-        let default_path = Path::new(&main_root)
-            .parent()
-            .map(|p| {
-                p.join(format!("{repo_name}-{suffix}"))
-                    .display()
-                    .to_string()
-            })
-            .unwrap_or_else(|| format!("{main_root}-{suffix}"));
-
-        let branch_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("分支名（留空 = detached HEAD）"));
-        let path_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("worktree 检出目录")
-                .default_value(default_path)
-        });
-        // 路径框回车 = 直接创建（主表单只有一个动作，提交体验顺一点）。
-        let mut subs = Vec::new();
-        subs.push(
-            cx.subscribe(&path_input, move |this, _s, ev: &InputEvent, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. }) {
-                    this.confirm_new_worktree(cx);
-                }
-            }),
-        );
-
-        // 先记下打开前的焦点，再把焦点交给路径框。
-        self.begin_main_modal_focus(window, cx);
-        path_input.update(cx, |input, cx| input.focus(window, cx));
-        self.new_worktree = Some(NewWorktreeState {
-            main_root,
-            base_branch,
-            branch_input,
-            path_input,
-            error: None,
-            _subs: subs,
-        });
-        cx.notify();
-    }
-
-    /// 取消新建 worktree：不落地任何改动，输入框随 state drop。
-    pub fn cancel_new_worktree(&mut self, cx: &mut Context<Self>) {
-        self.new_worktree = None;
-        cx.notify();
-    }
-
-    /// 确认新建：后台跑 `git worktree add`，成功后在新建目录打开一个终端会话
-    /// （建 worktree 就是要进去干活），并刷新「关联 Worktree」列表（若开着）。
-    pub fn confirm_new_worktree(&mut self, cx: &mut Context<Self>) {
-        let Some(main_root) = self
-            .new_worktree
-            .as_ref()
-            .map(|state| state.main_root.clone())
+    /// 文件右键「丢弃改动」：先弹确认。
+    ///
+    /// 同时记下用户此刻在列表里看到的这条改动（状态码 + 运行时算好的内容指纹），确认
+    /// 时原样带过去：agent 在这之后又写了什么，运行时对不上就拒绝，不跟着一起丢。
+    pub fn start_discard_file(&mut self, root: String, path: String, cx: &mut Context<Self>) {
+        let Some(seen) = self
+            .git_status
+            .get(&root)
+            .and_then(|(_, status)| status.seen_change(&path))
         else {
+            self.report_background_error(format!("{path} 已不在改动列表里，请刷新后再丢弃。"));
             return;
         };
-        if self.git_writes.contains_key(&main_root) {
-            if self.git_writes.get(&main_root) != Some(&GitWrite::CreateWorktree) {
-                if let Some(state) = self.new_worktree.as_mut() {
-                    state.error = Some("有 Git 操作正在进行，请稍后再建工作树".into());
-                }
-                cx.notify();
-            }
-            return;
-        }
-        let (branch, path) = {
-            let Some(state) = self.new_worktree.as_mut() else {
-                return;
-            };
-            let branch = state.branch_input.read(cx).value().to_string();
-            let path = state.path_input.read(cx).value().trim().to_string();
-            if path.is_empty() {
-                state.error = Some("请填写 worktree 检出目录".to_string());
-                cx.notify();
-                return;
-            }
-            state.error = None;
-            (branch, path)
-        };
-        let branch_opt = (!branch.trim().is_empty()).then(|| branch.trim().to_string());
-        let git_root = main_root.clone();
-        self.spawn_git(
-            &main_root,
-            GitWrite::CreateWorktree,
-            move || {
-                git_call::<GitWorktreeCreateCall>(GitWorktreeCreateParams {
-                    root: git_root,
-                    branch: branch_opt,
-                    path,
-                })
-                .map(|created| created.path)
-            },
-            |this, result, cx| {
-                let Some(state) = this.new_worktree.as_mut() else {
-                    return;
-                };
-                match result {
-                    Ok(created) => {
-                        this.new_worktree = None;
-                        // 列表弹窗还开着就刷新，让新 worktree 立刻出现。
-                        if this.worktree_list.is_some() {
-                            this.refresh_worktree_list(cx);
-                        }
-                        // 建完直接在新目录开一个终端会话。
-                        this.add_session(crate::runtimes::Runtime::local(), Some(created), cx);
-                    }
-                    Err(err) => state.error = Some(err),
-                }
-            },
-            cx,
-        );
-    }
-
-    /// 项目行右键「关联 Worktree」：打开弹窗并后台列出这个仓库的全部 worktree。
-    pub fn open_worktree_list(&mut self, root: String, cx: &mut Context<Self>) {
-        self.worktree_list = Some(WorktreeListState {
-            root,
-            main_root: String::new(),
-            entries: None,
-            error: None,
-        });
-        cx.notify();
-        self.load_worktree_list(cx);
-    }
-
-    /// 关闭「关联 Worktree」弹窗。
-    pub fn close_worktree_list(&mut self, cx: &mut Context<Self>) {
-        self.worktree_list = None;
-        cx.notify();
-    }
-
-    /// 重新加载 worktree 列表（删除/清理成功后刷新用）。弹窗没开着就什么都不做。
-    pub fn refresh_worktree_list(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.worktree_list.as_mut() else {
-            return;
-        };
-        state.entries = None;
-        state.error = None;
-        cx.notify();
-        self.load_worktree_list(cx);
-    }
-
-    fn load_worktree_list(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.worktree_list.as_mut() else {
-            return;
-        };
-        let root = state.root.clone();
-        cx.spawn(async move |this, cx| {
-            let probe_root = root.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { git_call::<GitWorktreeListCall>(root_params(&probe_root)) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                let Some(state) = this.worktree_list.as_mut() else {
-                    return;
-                };
-                // 弹窗期间用户可能又打开了别的仓库，只在还是同一个 root 时写回。
-                if state.root != root {
-                    return;
-                }
-                match result {
-                    Ok(data) => {
-                        state.main_root = data.main_root;
-                        state.entries = Some(data.entries);
-                        state.error = None;
-                    }
-                    Err(err) => {
-                        state.entries = Some(Vec::new());
-                        state.error = Some(err);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 「清理失效项」：后台 `git worktree prune` + 隔离工作区注册表对账，完成后刷新列表。
-    pub fn prune_stale_worktrees(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.worktree_list.as_mut() else {
-            return;
-        };
-        let main_root = if state.main_root.is_empty() {
-            state.root.clone()
-        } else {
-            state.main_root.clone()
-        };
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    git_call::<GitWorktreePruneCall>(root_params(&main_root)).map(drop)
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                let Some(state) = this.worktree_list.as_mut() else {
-                    return;
-                };
-                match result {
-                    Err(err) => state.error = Some(err),
-                    Ok(()) => {
-                        state.entries = None;
-                        state.error = None;
-                        this.load_worktree_list(cx);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 项目行右键「删除 Worktree」（仅 worktree 分组显示，见 render 里 is_worktree_group）：
-    /// 先弹窗（dirty=None，显示"检查中…"），后台探测有没有未提交改动，探测完再把
-    /// dirty 写回去驱动弹窗文案/是否要红色警告。main_root 是同仓库下的主仓库根目录，
-    /// 真正执行删除时 `git worktree remove` 要从那跑（不能从待删目录自己发起）。
-    pub fn start_delete_worktree(
-        &mut self,
-        path: String,
-        main_root: String,
-        branch: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.delete_worktree_target = Some(DeleteWorktreeTarget {
-            path: path.clone(),
-            main_root,
-            branch,
-            dirty: None,
-        });
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let p = path.clone();
-            let dirty = cx
-                .background_executor()
-                .spawn(async move {
-                    git_call::<GitIsDirtyCall>(root_params(&p)).is_ok_and(|result| result.dirty)
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                // 弹窗期间用户可能已经取消/又点了别的 worktree，只在还是同一个目标时写回。
-                if this
-                    .delete_worktree_target
-                    .as_ref()
-                    .is_some_and(|t| t.path == path)
-                {
-                    if let Some(t) = this.delete_worktree_target.as_mut() {
-                        t.dirty = Some(dirty);
-                    }
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// 确认删除：先关掉这个 worktree 下的所有会话，再后台跑 `git worktree remove`
-    /// （探测出有未提交改动就带 --force——用户已经在弹窗里看到红色警告并主动点了
-    /// 确定）。失败当时就送出系统通知。
-    pub fn confirm_delete_worktree(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self
-            .delete_worktree_target
-            .as_ref()
-            .map(|target| target.main_root.clone())
-        else {
-            return;
-        };
-        if self.git_writes.contains_key(&repo) {
-            return;
-        }
-        let Some(target) = self.delete_worktree_target.take() else {
-            return;
-        };
-        self.close_sessions_under(&target.path, cx);
-        let force = target.dirty.unwrap_or(false);
-        let path = target.path.clone();
-        let git_root = repo.clone();
-        let started = self.spawn_git(
-            &repo,
-            GitWrite::DeleteWorktree,
-            move || {
-                git_call::<GitWorktreeRemoveCall>(GitWorktreeRemoveParams {
-                    root: git_root,
-                    path,
-                    force,
-                })
-                .map(drop)
-            },
-            |this, result, cx| match result {
-                Err(err) => this.report_background_error(err),
-                Ok(()) => {
-                    // 「关联 Worktree」弹窗还开着就刷新，让刚删掉的条目从列表消失。
-                    if this.worktree_list.is_some() {
-                        this.refresh_worktree_list(cx);
-                    }
-                }
-            },
-            cx,
-        );
-        if !started {
-            self.delete_worktree_target = Some(target);
-        }
-    }
-
-    /// 取消删除 worktree：不落地任何改动。
-    pub fn cancel_delete_worktree(&mut self, cx: &mut Context<Self>) {
-        self.delete_worktree_target = None;
-        cx.notify();
-    }
-
-    /// 文件右键「丢弃改动」：先弹确认。untracked 标记决定是删盘还是 restore。
-    pub fn start_discard_file(
-        &mut self,
-        root: String,
-        path: String,
-        untracked: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.discard_file_target = Some((root, path, untracked));
+        self.discard_file_target = Some((root, seen));
         cx.notify();
     }
 
@@ -386,20 +61,20 @@ impl Workspace {
         let Some(root) = self
             .discard_file_target
             .as_ref()
-            .map(|(root, _, _)| root.clone())
+            .map(|(root, _)| root.clone())
         else {
             return;
         };
         if self.git_writes.contains_key(&root) {
             return;
         }
-        let Some((root, path, untracked)) = self.discard_file_target.take() else {
+        let Some((root, seen)) = self.discard_file_target.take() else {
             return;
         };
         let git_root = root.clone();
-        let git_path = path.clone();
+        let git_seen = seen.clone();
         let done_root = root.clone();
-        let done_path = path.clone();
+        let done_path = seen.path.clone();
         let started = self.spawn_git(
             &root,
             GitWrite::DiscardFile,
@@ -407,25 +82,27 @@ impl Workspace {
             move || {
                 git_call::<GitDiscardFileCall>(GitDiscardFileParams {
                     root: git_root,
-                    path: git_path,
-                    untracked,
+                    seen: git_seen,
                 })
                 .map(drop)
             },
-            move |this, result, cx| match result {
-                Ok(()) => {
-                    this.invalidate_git_status(&done_root, cx);
-                    // 丢弃的正是当前打开的那个文件时，diff 已经没意义了，关掉。
-                    if this.git_diff.as_ref().is_some_and(|d| d.path == done_path) {
-                        this.reset_git_diff_view();
+            move |this, result, cx| {
+                // 被拒绝多半是列表已经过时，也要刷新，让用户看到现在的样子。
+                this.invalidate_git_status(&done_root, cx);
+                match result {
+                    Ok(()) => {
+                        // 丢弃的正是当前打开的那个文件时，diff 已经没意义了，关掉。
+                        if this.git_diff.as_ref().is_some_and(|d| d.path == done_path) {
+                            this.reset_git_diff_view();
+                        }
                     }
+                    Err(err) => this.report_background_error(err),
                 }
-                Err(err) => this.report_background_error(err),
             },
             cx,
         );
         if !started {
-            self.discard_file_target = Some((root, path, untracked));
+            self.discard_file_target = Some((root, seen));
         }
     }
 
@@ -535,12 +212,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 确保某 cwd 的仓库身份缓存新鲜（>5s 或缺失就后台刷新）：探测它是不是 worktree
-    /// 检出、当前分支是什么，供侧栏分组用（见 group_info_for_cwd）。跟 git_status
-    /// 不同，这个要对**所有**会话的 cwd 探测（侧栏一直显示全部项目分组，不止当前
-    /// 打开的那个），所以单独走一套缓存，TTL 也放宽到 5s——身份和分支不常变，没必要
-    /// 跟 git status 一样 1.5s 就重跑。非 git 目录（比如临时终端的 $HOME）缓存
-    /// None，同样不重复重试。
+    /// 确保某 cwd 的当前分支缓存新鲜（>5s 或缺失就后台刷新），供侧栏显示分支名。跟
+    /// git_status 不同，这个要对**所有**会话的 cwd 探测（侧栏一直显示全部项目分组，不止
+    /// 当前打开的那个），所以单独走一套缓存，TTL 也放宽到 5s——分支不常变，没必要跟
+    /// git status 一样 1.5s 就重跑。非 git 目录（比如临时终端的 $HOME）缓存 None，
+    /// 同样不重复重试。
     pub fn ensure_repo_info(&mut self, cwd: String, cx: &mut Context<Self>) {
         if cwd.is_empty() {
             return;
@@ -570,25 +246,6 @@ impl Workspace {
             });
         })
         .detach();
-    }
-
-    /// cwd → 侧栏分组显示名 + 聚簇 key。是 worktree 检出（git-dir ≠ common-dir）就
-    /// 显示「仓库名 · 分支名」，聚簇 key 用 common-dir（worktree 和主仓库共享同一个
-    /// 值，project_groups 靠它把同仓库的组排在一起）；非 git 目录 / 身份缓存还没到位
-    /// 就退回旧的纯目录末段名（跟改动前完全一致，不会闪烁成别的样子）。
-    pub fn group_info_for_cwd(&self, cwd: &str) -> (String, Option<String>) {
-        let base_name = crate::project_name_for_cwd(cwd);
-        match self.repo_info.get(cwd).and_then(|(_, info)| info.as_ref()) {
-            Some(info) if info.is_worktree() => {
-                let repo_label = repo_label_from_common_dir(&info.common_dir).unwrap_or(base_name);
-                (
-                    format!("{repo_label} · {}", info.branch),
-                    Some(info.common_dir.clone()),
-                )
-            }
-            Some(info) => (base_name, Some(info.common_dir.clone())),
-            None => (base_name, None),
-        }
     }
 
     /// 标记某 root 的 git status 缓存过期并推进失效代数。
@@ -961,7 +618,7 @@ impl Workspace {
     }
 
     /// Git 页分支切换下拉：checkout 目标分支（本地分支直接切；远程分支传短名，靠 git
-    /// 内建 DWIM 自动建好跟踪分支——跟 create_worktree 判断分支存不存在同一个逻辑）。
+    /// 内建 DWIM 自动建好跟踪分支）。
     /// 成功后清掉 status/分支缓存并刷新可见数据（文件、ahead/behind 全变了）。
     pub fn checkout_branch(&mut self, root: String, branch: String, cx: &mut Context<Self>) {
         let key = root.clone();
@@ -1880,8 +1537,19 @@ impl Workspace {
     }
 
     /// 点「丢弃全部更改」：先弹确认，不直接动文件（照 start_discard_file）。
+    ///
+    /// 同时记下用户此刻看到的整份改动列表；运行时发现多了没见过的新文件、或哪个文件
+    /// 内容又变了，就整体拒绝。
     pub fn start_discard_all(&mut self, root: String, cx: &mut Context<Self>) {
-        self.discard_all_target = Some(root);
+        let Some(seen) = self
+            .git_status
+            .get(&root)
+            .map(|(_, status)| status.seen_changes())
+        else {
+            self.report_background_error("改动列表还没加载出来，请刷新后再丢弃。");
+            return;
+        };
+        self.discard_all_target = Some((root, seen));
         cx.notify();
     }
 
@@ -1893,32 +1561,44 @@ impl Workspace {
 
     /// 确认丢弃工作区全部改动（restore + clean）。
     pub fn confirm_discard_all(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.discard_all_target.clone() else {
+        let Some(root) = self
+            .discard_all_target
+            .as_ref()
+            .map(|(root, _)| root.clone())
+        else {
             return;
         };
         if self.git_writes.contains_key(&root) {
             return;
         }
-        self.discard_all_target = None;
+        let Some((root, seen)) = self.discard_all_target.take() else {
+            return;
+        };
         let key = root.clone();
-        let git_root = root.clone();
+        let params = GitDiscardAllParams {
+            root: root.clone(),
+            seen: seen.clone(),
+        };
         let done_root = root.clone();
         let started = self.spawn_git(
             &key,
             GitWrite::DiscardChanges,
-            move || git_call::<GitDiscardAllCall>(root_params(&git_root)).map(drop),
-            move |this, result, cx| match result {
-                Ok(()) => {
-                    this.invalidate_git_status(&done_root, cx);
-                    // 丢弃后当前打开的 diff 大概率没了，关掉免得看空。
-                    this.reset_git_diff_view();
+            move || git_call::<GitDiscardAllCall>(params).map(drop),
+            move |this, result, cx| {
+                // 被拒绝多半是列表已经过时，也要刷新，让用户看到现在的样子。
+                this.invalidate_git_status(&done_root, cx);
+                match result {
+                    Ok(()) => {
+                        // 丢弃后当前打开的 diff 大概率没了，关掉免得看空。
+                        this.reset_git_diff_view();
+                    }
+                    Err(err) => this.report_background_error(err),
                 }
-                Err(err) => this.report_background_error(err),
             },
             cx,
         );
         if !started {
-            self.discard_all_target = Some(root);
+            self.discard_all_target = Some((root, seen));
         }
     }
 

@@ -3,27 +3,12 @@
 //! 运行时执行 git（`smelt-git`），客户端只拿这里的结果做展示，不自己起 git 进程。
 //! 这里不许出现子进程和文件读写：手机端也要编它。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::control::{ControlCall, ControlMethod, EmptyParams};
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorktreeEntry {
-    pub path: String,
-    pub branch: Option<String>,
-    pub is_main: bool,
-    pub prunable: bool,
-    pub locked: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorktreeListData {
-    pub entries: Vec<WorktreeEntry>,
-    pub main_root: String,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffKind {
@@ -63,6 +48,9 @@ pub struct GitStatusData {
     pub ahead: u32,
     pub behind: u32,
     pub files: Vec<(String, String)>,
+    /// 改动文件工作区一侧的内容指纹（路径 → 十六进制 sha256），由运行时在拉 status 时
+    /// 从磁盘算出。没有可丢内容的路径（工作区已删除、目录、子模块）不在表里。
+    pub worktree_hashes: BTreeMap<String, String>,
     pub stash_count: u32,
     pub insertions: u32,
     pub deletions: u32,
@@ -71,6 +59,49 @@ pub struct GitStatusData {
 impl GitStatusData {
     pub fn branch_name(&self) -> &str {
         &self.branch
+    }
+
+    /// 这份快照里 `path` 那一条改动；不在快照里返回 `None`。
+    pub fn seen_change(&self, path: &str) -> Option<GitSeenChange> {
+        self.files
+            .iter()
+            .find(|(_, p)| p == path)
+            .map(|(xy, path)| self.seen(xy, path))
+    }
+
+    /// 整份快照里的全部改动。
+    pub fn seen_changes(&self) -> Vec<GitSeenChange> {
+        self.files
+            .iter()
+            .map(|(xy, path)| self.seen(xy, path))
+            .collect()
+    }
+
+    fn seen(&self, xy: &str, path: &str) -> GitSeenChange {
+        GitSeenChange {
+            path: path.to_string(),
+            xy: xy.to_string(),
+            worktree_hash: self.worktree_hashes.get(path).cloned(),
+        }
+    }
+}
+
+/// 用户发起丢弃时看到的一条改动。
+///
+/// 丢弃不可撤销，而 agent 可能在同一个工作区里接着写：请求必须带上用户看到的这一份，
+/// 运行时丢弃前从磁盘重算，任一字段对不上就拒绝，用户没见过的内容不跟着丢。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSeenChange {
+    pub path: String,
+    /// porcelain 的两位状态码。
+    pub xy: String,
+    /// 见 [`GitStatusData::worktree_hashes`]。
+    pub worktree_hash: Option<String>,
+}
+
+impl GitSeenChange {
+    pub fn untracked(&self) -> bool {
+        self.xy == "??"
     }
 }
 
@@ -92,15 +123,8 @@ impl BranchList {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoInfo {
-    pub git_dir: String,
-    pub common_dir: String,
+    /// 当前分支；detached 时是 `HEAD`。
     pub branch: String,
-}
-
-impl RepoInfo {
-    pub fn is_worktree(&self) -> bool {
-        self.git_dir != self.common_dir
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -218,18 +242,6 @@ pub fn full_file_path(root: &str, path: &str, aggregate: bool) -> Option<String>
 
 pub fn hunk_patch(header: &str, hunk: &DiffHunk) -> String {
     format!("{header}{}", hunk.raw)
-}
-
-pub fn repo_label_from_common_dir(common_dir: &str) -> Option<String> {
-    Path::new(common_dir)
-        .parent()?
-        .file_name()?
-        .to_str()
-        .map(String::from)
-}
-
-pub fn main_repo_root_from_common_dir(common_dir: &str) -> Option<String> {
-    Path::new(common_dir).parent()?.to_str().map(String::from)
 }
 
 /// 仓库在工作区里的身份。UI 用它区分图标与分组标题，写操作不看它——
@@ -600,12 +612,10 @@ macro_rules! git_calls {
 git_calls! {
     /// 项目根里有哪些仓库（项目根自己、子模块、嵌套仓库）。
     GitDiscoverCall => GitDiscover(GitRootParams) -> Discovery;
-    /// 仓库身份：git-dir、common-dir、当前分支。非 git 目录返回 `None`。
+    /// 仓库身份：当前分支。非 git 目录返回 `None`。
     GitRepoInfoCall => GitRepoInfo(GitRootParams) -> GitRepoInfoResult;
     GitStatusCall => GitStatus(GitRootParams) -> GitStatusData;
     GitBranchesCall => GitBranches(GitRootParams) -> BranchList;
-    /// 工作区有没有未提交改动（删除 worktree 前的提醒用）。
-    GitIsDirtyCall => GitIsDirty(GitRootParams) -> GitIsDirtyResult;
     GitCheckoutCall => GitCheckout(GitBranchParams) -> EmptyParams;
     GitBranchDeleteCall => GitBranchDelete(GitBranchDeleteParams) -> EmptyParams;
     GitMergeCall => GitMerge(GitBranchParams) -> EmptyParams;
@@ -614,21 +624,18 @@ git_calls! {
     /// `git reset -- <paths>`。
     GitUnstageCall => GitUnstage(GitPathsParams) -> EmptyParams;
     /// 丢弃一个文件的全部改动：已跟踪的还原暂存区和工作区，未跟踪的直接删掉。
+    /// 磁盘上的这条改动跟用户看到的不一致时拒绝。
     GitDiscardFileCall => GitDiscardFile(GitDiscardFileParams) -> EmptyParams;
     /// 按块暂存、取消暂存或丢弃。
     GitApplyPatchCall => GitApplyPatch(GitApplyPatchParams) -> EmptyParams;
-    GitDiscardAllCall => GitDiscardAll(GitRootParams) -> EmptyParams;
+    /// 丢弃工作区全部改动（含未跟踪文件）。磁盘上的改动列表跟用户看到的不一致时拒绝。
+    GitDiscardAllCall => GitDiscardAll(GitDiscardAllParams) -> EmptyParams;
     GitCommitCall => GitCommit(GitCommitParams) -> EmptyParams;
     GitPushCall => GitPush(GitBranchParams) -> EmptyParams;
     GitFetchCall => GitFetch(GitRootParams) -> EmptyParams;
     GitPullCall => GitPull(GitRootParams) -> EmptyParams;
     GitStashPushCall => GitStashPush(GitRootParams) -> EmptyParams;
     GitStashPopCall => GitStashPop(GitRootParams) -> EmptyParams;
-    GitWorktreeListCall => GitWorktreeList(GitRootParams) -> WorktreeListData;
-    /// 建 worktree，并按用户设置把主仓库的未跟踪配置链接过去。返回检出目录。
-    GitWorktreeCreateCall => GitWorktreeCreate(GitWorktreeCreateParams) -> GitWorktreeCreateResult;
-    GitWorktreeRemoveCall => GitWorktreeRemove(GitWorktreeRemoveParams) -> EmptyParams;
-    GitWorktreePruneCall => GitWorktreePrune(GitRootParams) -> EmptyParams;
     /// 单个文件的 diff 原文，以及展示它要用到的几项事实。
     GitFileDiffCall => GitFileDiff(GitFileDiffParams) -> GitFileDiffResult;
     /// 一个仓库在某个范围里的全部改动，未跟踪文件也拼进去。
@@ -668,8 +675,15 @@ pub struct GitPathsParams {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDiscardFileParams {
     pub root: String,
-    pub path: String,
-    pub untracked: bool,
+    /// 未跟踪（`??`）的直接删盘，其余走 `git restore`。
+    pub seen: GitSeenChange,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitDiscardAllParams {
+    pub root: String,
+    /// 用户看到的整份改动列表（[`GitStatusData::seen_changes`]）。
+    pub seen: Vec<GitSeenChange>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,29 +723,6 @@ pub struct GitCommitParams {
     pub branch: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitWorktreeCreateParams {
-    /// 主仓库根。
-    pub root: String,
-    /// 空表示用目录名新建分支。
-    pub branch: Option<String>,
-    /// 检出目录，相对主仓库根或绝对路径。
-    pub path: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitWorktreeCreateResult {
-    pub path: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitWorktreeRemoveParams {
-    /// 主仓库根。`git worktree remove` 不能从待删目录自己发起。
-    pub root: String,
-    pub path: String,
-    pub force: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitFileDiffParams {
     pub root: String,
@@ -768,11 +759,6 @@ pub struct GitTextResult {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitRepoInfoResult {
     pub info: Option<RepoInfo>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitIsDirtyResult {
-    pub dirty: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

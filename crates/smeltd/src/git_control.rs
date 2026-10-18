@@ -32,11 +32,6 @@ pub(crate) fn dispatch(
         ControlMethod::GitBranches => {
             call::<GitBranchesCall>(params, |p| Ok(smelt_git::load_branches(&p.root)))
         }
-        ControlMethod::GitIsDirty => call::<GitIsDirtyCall>(params, |p| {
-            Ok(GitIsDirtyResult {
-                dirty: smelt_git::is_dirty(&p.root),
-            })
-        }),
         ControlMethod::GitCheckout => call::<GitCheckoutCall>(params, |p| {
             smelt_git::checkout_branch(&p.root, &p.branch).map(done)
         }),
@@ -53,14 +48,14 @@ pub(crate) fn dispatch(
             smelt_git::unstage_paths(&p.root, &p.paths).map(done)
         }),
         ControlMethod::GitDiscardFile => call::<GitDiscardFileCall>(params, |p| {
-            smelt_git::discard_file(&p.root, &p.path, p.untracked).map(done)
+            smelt_git::discard_file(&p.root, &p.seen).map(done)
         }),
         ControlMethod::GitApplyPatch => call::<GitApplyPatchCall>(params, |p| {
             smelt_git::apply_patch_action(&p.root, p.action, &p.patch).map(done)
         }),
-        ControlMethod::GitDiscardAll => {
-            call::<GitDiscardAllCall>(params, |p| smelt_git::discard_all(&p.root).map(done))
-        }
+        ControlMethod::GitDiscardAll => call::<GitDiscardAllCall>(params, |p| {
+            smelt_git::discard_all(&p.root, &p.seen).map(done)
+        }),
         ControlMethod::GitCommit => call::<GitCommitCall>(params, |p| {
             smelt_git::commit_and_maybe_push(&p.root, &p.message, p.push, &p.branch).map(done)
         }),
@@ -79,20 +74,6 @@ pub(crate) fn dispatch(
         ControlMethod::GitStashPop => {
             call::<GitStashPopCall>(params, |p| smelt_git::stash_pop(&p.root).map(done))
         }
-        ControlMethod::GitWorktreeList => {
-            call::<GitWorktreeListCall>(params, |p| smelt_git::list_worktrees(&p.root))
-        }
-        ControlMethod::GitWorktreeCreate => call::<GitWorktreeCreateCall>(params, |p| {
-            let path = smelt_git::create_worktree(&p.root, p.branch.as_deref(), &p.path)?;
-            inherit_untracked_into(&p.root, &p.path);
-            Ok(GitWorktreeCreateResult { path })
-        }),
-        ControlMethod::GitWorktreeRemove => call::<GitWorktreeRemoveCall>(params, |p| {
-            smelt_git::remove_worktree(&p.root, &p.path, p.force).map(done)
-        }),
-        ControlMethod::GitWorktreePrune => call::<GitWorktreePruneCall>(params, |p| {
-            smelt_git::prune_stale_worktrees(&p.root).map(done)
-        }),
         ControlMethod::GitFileDiff => call::<GitFileDiffCall>(params, |p| {
             Ok(smelt_git::file_diff(&p.root, &p.path, p.untracked, p.scope))
         }),
@@ -136,24 +117,4 @@ fn call<C: ControlCall>(
 
 fn done(_: ()) -> EmptyParams {
     EmptyParams::default()
-}
-
-/// 建完 worktree 后按用户设置把主仓库的未跟踪配置链接过去。失败只记日志：worktree
-/// 本身已经建好，不能因为继承失败报整个操作失败。
-fn inherit_untracked_into(main_root: &str, worktree_dir: &str) {
-    let resolved = smelt_git::resolve_worktree_path(main_root, worktree_dir);
-    let report = smelt_core::worktree_inherit::inherit_if_enabled(
-        std::path::Path::new(main_root),
-        &resolved,
-    );
-    if !report.linked.is_empty() {
-        eprintln!(
-            "[worktree] 继承未跟踪条目 {} 个 -> {}",
-            report.linked.len(),
-            resolved.display()
-        );
-    }
-    for warning in &report.warnings {
-        eprintln!("[worktree] {warning}");
-    }
 }

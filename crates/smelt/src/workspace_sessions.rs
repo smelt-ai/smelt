@@ -178,7 +178,7 @@ impl Workspace {
             if this
                 .update_in(cx, |this, window, cx| {
                     for (original_index, ss) in acp_saved {
-                        if this.restore_cancelled(&key, session_state_cwd(&ss).as_deref()) {
+                        if this.restore_cancelled(&key) {
                             this.forget_pending_restore(&key, original_index);
                             continue;
                         }
@@ -289,7 +289,7 @@ impl Workspace {
             // 收一个渲染一个。后台线程跑完会 drop sender，recv 报错即代表全部处理完。
             while let Ok((original_index, ss, result)) = rx.recv().await {
                 let outcome = this.update_in(cx, |this, window, cx| {
-                    if this.restore_cancelled(&key, session_state_cwd(&ss).as_deref()) {
+                    if this.restore_cancelled(&key) {
                         if let Ok(leaves) = result {
                             for leaf in leaves {
                                 terminal::kill_remote(&runtime, &leaf.sid);
@@ -628,23 +628,12 @@ impl Workspace {
     /// 顺手删了项目。
     ///
     /// 已落在某个已打开项目之下时不新增子项目；只有完全无主的 cwd 才成为项目根。
-    /// **git worktree 检出除外**：独立工作区即使落在 home/dev 等已打开
-    /// 项目之下，也必须保留为独立项目——否则关闭它最后一个会话后，worktree
-    /// 分组会随会话一起消失（`project_root_for_cwd` 会把它的 cwd 吸进父项目，
-    /// 骨架里没有它，组就没了）。
     pub(crate) fn remember_session_project(&mut self, runtime: &RuntimeKey, cwd: Option<&str>) {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
             return;
         };
         let root = cwd.trim_end_matches('/');
-        // 仓库信息目前只有本机项目有。
-        let is_worktree = *runtime == RuntimeKey::Local
-            && self
-                .repo_info
-                .get(root)
-                .and_then(|(_, info)| info.as_ref())
-                .is_some_and(|info| info.is_worktree());
-        if !is_worktree && self.project_root_for_cwd(runtime, root).is_some() {
+        if self.project_root_for_cwd(runtime, root).is_some() {
             return;
         }
         let Some(space) = self.space_mut(runtime) else {
@@ -666,10 +655,7 @@ impl Workspace {
     /// 分组身份一律用 **root 路径**：末段同名的两个目录是两个项目，各占一行、会话不混。
     /// 显示名重复时由 disambiguate_labels 补父目录段区分。
     ///
-    /// 侧栏渲染和拖拽排序共用同一份算法，避免两处各算一遍、行为跑偏。worktree 检出
-    /// 显示「仓库名 · 分支名」（见 group_info_for_cwd），且跟主仓库、其余 worktree 聚在
-    /// 一起排序，不会散落在列表各处——组间相对顺序按「同一簇里最早出现的组」的先后来
-    /// （stable_sort，不会无意义打乱手动拖拽过的顺序）。
+    /// 侧栏渲染和拖拽排序共用同一份算法，避免两处各算一遍、行为跑偏。
     pub(crate) fn project_groups(
         &self,
         runtime: &crate::runtimes::RuntimeKey,
@@ -679,9 +665,6 @@ impl Workspace {
             return Vec::new();
         };
         let mut groups: Vec<ProjectGroup> = Vec::new();
-        // 聚簇 key（worktree 与主仓库共享 common-dir）与消歧用的原始显示名，按组下标存。
-        let mut clusters: Vec<Option<String>> = Vec::new();
-        let mut bases: Vec<String> = Vec::new();
         let same_root = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
 
         // 骨架：已打开的项目按列表顺序占位，先不管有没有会话。
@@ -689,76 +672,35 @@ impl Workspace {
             if groups.iter().any(|g| same_root(&g.root, root)) {
                 continue;
             }
-            let (label, cluster) = self.group_info_for_cwd(root);
-            bases.push(label.clone());
-            clusters.push(cluster);
             groups.push(ProjectGroup {
                 runtime: runtime.clone(),
                 root: root.clone(),
-                label,
+                label: crate::project_name_for_cwd(root),
                 sessions: Vec::new(),
             });
         }
-        // 会话挂到所属项目下；无主的按自己的 cwd 自建一组。所有 git worktree
-        // 都以自身路径成组，避免被已打开的父目录项目吸收；这条规则不依赖创建
-        // worktree 的具体插件。
+        // 会话挂到所属项目下；无主的按自己的 cwd 自建一组。
         for (ix, s) in self.sessions.iter().enumerate() {
             if s.is_product_conversation(cx) || s.runtime(cx).key() != runtime {
                 continue;
             }
             let cwd = s.cwd(cx).unwrap_or_default();
-            let is_worktree = self
-                .repo_info
-                .get(&cwd)
-                .and_then(|(_, info)| info.as_ref())
-                .is_some_and(|info| info.is_worktree());
-            let root = if is_worktree {
-                cwd.clone()
-            } else {
-                self.project_root_for_cwd(runtime, &cwd)
-                    .unwrap_or_else(|| cwd.clone())
-            };
+            let root = self
+                .project_root_for_cwd(runtime, &cwd)
+                .unwrap_or_else(|| cwd.clone());
             match groups.iter_mut().find(|g| same_root(&g.root, &root)) {
                 Some(g) => g.sessions.push(ix),
-                None => {
-                    let (label, cluster) = self.group_info_for_cwd(&root);
-                    bases.push(label.clone());
-                    clusters.push(cluster);
-                    groups.push(ProjectGroup {
-                        runtime: runtime.clone(),
-                        root,
-                        label,
-                        sessions: vec![ix],
-                    });
-                }
+                None => groups.push(ProjectGroup {
+                    runtime: runtime.clone(),
+                    label: crate::project_name_for_cwd(&root),
+                    root,
+                    sessions: vec![ix],
+                }),
             }
         }
 
-        // 同仓库（主仓库 + 各 worktree）聚到一起：按「这一簇里最早出现的组」排。
-        let key_of = |i: usize| {
-            clusters[i]
-                .clone()
-                .unwrap_or_else(|| groups[i].root.clone())
-        };
-        let mut first_seen: HashMap<String, usize> = HashMap::new();
-        for i in 0..groups.len() {
-            first_seen.entry(key_of(i)).or_insert(i);
-        }
-        let mut order: Vec<usize> = (0..groups.len()).collect();
-        order.sort_by_key(|&i| first_seen[&key_of(i)]);
-        let mut sorted: Vec<ProjectGroup> = Vec::with_capacity(groups.len());
-        let mut sorted_bases: Vec<String> = Vec::with_capacity(groups.len());
-        for i in order {
-            sorted.push(ProjectGroup {
-                runtime: groups[i].runtime.clone(),
-                root: groups[i].root.clone(),
-                label: groups[i].label.clone(),
-                sessions: groups[i].sessions.clone(),
-            });
-            sorted_bases.push(bases[i].clone());
-        }
-        disambiguate_labels(&mut sorted, &sorted_bases);
-        sorted
+        disambiguate_labels(&mut groups);
+        groups
     }
 
     /// 项目内会话拖拽排序。跨项目直接不动——会话归属由 cwd 决定，拖拽只改显示顺序。
@@ -2061,47 +2003,6 @@ impl Workspace {
                 self.active_session -= 1;
             }
         }
-        self.save_state(cx);
-        self.schedule_visible_refresh(cx);
-        cx.notify();
-    }
-
-    /// 删 worktree 前先清掉 cwd 落在 `path`（或它子目录）下的所有会话，不然会留下
-    /// 指向即将被删除目录的死会话。顺带把这个目录从项目列表里摘掉——目录都要没了，
-    /// 留一条指向不存在路径的项目没有意义。
-    pub(crate) fn close_sessions_under(&mut self, path: &str, cx: &mut Context<Self>) {
-        let path = path.trim_end_matches('/').to_string();
-        if !self
-            .local
-            .cancelled_restore_paths
-            .iter()
-            .any(|existing| existing == &path)
-        {
-            self.local.cancelled_restore_paths.push(path.clone());
-        }
-        self.local.restore_pending.retain(|(_, session)| {
-            !restore_path_is_cancelled(
-                session_state_cwd(session).as_deref(),
-                std::slice::from_ref(&path),
-            )
-        });
-        let prefix = format!("{path}/");
-        let mut ixs: Vec<usize> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| {
-                let cwd = s.cwd(cx).unwrap_or_default();
-                cwd == path || cwd.starts_with(&prefix)
-            })
-            .map(|(ix, _)| ix)
-            .collect();
-        // 降序关闭：前面的下标不受后面 remove 影响。
-        ixs.sort_unstable_by(|a, b| b.cmp(a));
-        for ix in ixs {
-            self.close_session(ix, cx);
-        }
-        remove_projects_under(&mut self.local.projects, &path);
         self.save_state(cx);
         self.schedule_visible_refresh(cx);
         cx.notify();

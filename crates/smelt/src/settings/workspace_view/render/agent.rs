@@ -144,7 +144,7 @@ fn agent_groups(
                                         )
                                         .child(
                                             div().w(field_w).text_sm().text_color(muted).child(
-                                                "项目行「+」菜单里除「新建终端」「新建 Worktree…」外的项。\
+                                                "项目行「+」菜单里除「新建终端」外的项。\
                                                  显示名会出现在菜单上；命令是在该项目目录下执行的 shell 命令\
                                                  （可含参数）。内置 Agent 项固定存在，自定义项可删除。",
                                             ),

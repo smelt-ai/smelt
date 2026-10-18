@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 53] = [
+pub const TABLES: [&str; 51] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -66,8 +66,6 @@ pub const TABLES: [&str; 53] = [
     "workspace_menu",
     "workspace_menu_project",
     "workspace_menu_session",
-    "worktree_inherit",
-    "worktree_inherit_skip_pattern",
 ];
 
 /// v17 的表清单。v18 去掉了通用 `kv`，各领域改成按字段建表。
@@ -598,14 +596,6 @@ CREATE TABLE remote_config (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   iroh_relay TEXT NOT NULL
-);
-CREATE TABLE worktree_inherit (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
-);
-CREATE TABLE worktree_inherit_skip_pattern (
-  position INTEGER PRIMARY KEY CHECK (position >= 0),
-  pattern TEXT NOT NULL
 );
 CREATE TABLE terminal_theme (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1702,4 +1692,10 @@ DROP TABLE kv;
 pub const MIGRATE_V18_TO_V19: &str = "
 ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
 ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
+";
+
+/// v19 → v20：去掉 git worktree 功能后，worktree 继承开关和跳过名单没人读了，两张表直接删。
+pub const MIGRATE_V19_TO_V20: &str = "
+DROP TABLE worktree_inherit_skip_pattern;
+DROP TABLE worktree_inherit;
 ";

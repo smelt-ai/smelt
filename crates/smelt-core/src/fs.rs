@@ -1,7 +1,7 @@
 //! 文件系统能力接缝（Service Definition + Provider + Consumer）。
 //!
 //! **为什么要这层间接**：smelt 现在有 600+ 处直接 `std::fs::`，等价于把「文件
-//! 住在本机」这条假设焊死在每个调用点上。远程访问（iroh）、worktree 沙箱、
+//! 住在本机」这条假设焊死在每个调用点上。远程访问（iroh）
 //! 以及将来自研 agent 的模型可见文件工具，都需要同一套读写换一个执行世界；
 //! 没有这层，每加一个世界就得再抄一遍所有调用点。
 //!
@@ -411,7 +411,7 @@ pub const HIDDEN_ENTRIES: [&str; 4] = [".git", "node_modules", "target", ".DS_St
 /// [`HIDDEN_ENTRIES`]。读不到目录时返回空列表（文件树原语义：不弹错、当空目录）。
 ///
 /// 这是 Consumer 的样板——**只认 [`FileSystem`]，不认 `std::fs`**，所以本地
-/// 面板和将来的远程 worktree 用的是同一份排序与过滤规则，不会各自漂移。
+/// 面板和远程运行时用的是同一份排序与过滤规则，不会各自漂移。
 pub fn list_dir(fs: &dyn FileSystem, dir: &Path) -> Vec<DirEntry> {
     let mut items = match fs.read_dir(dir) {
         Ok(items) => items,

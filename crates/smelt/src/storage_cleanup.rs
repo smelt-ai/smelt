@@ -8,10 +8,9 @@
 //! - `mermaid_cache/`：旧版 mermaid 磁盘缓存，渲染已改为只走内存。
 //! - `handoffs/`：已废弃的交接底稿目录。
 //! - `automation-runs/`：自动化对话曾旁路成 JSON 文件，现只走 SQLite。
-//! - `worktrees/`：更早版本固定检出目录，现在路径由用户自选。
+//! - `worktrees/`：更早版本固定的 worktree 检出目录，smelt 已经不管 worktree 了。
 //!
-//! 不碰的东西：仍存在的 git worktree
-//! （那是 `git worktree remove` 的事，避免误删用户还在看的 Issue 副本）。
+//! `worktrees/` 里可能还有用户没提交的检出，启动时不删，只在设置页由用户确认后清理。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +21,7 @@ fn smelt_home() -> Option<PathBuf> {
 
 /// 启动时回收已经没有任何读写路径的废弃文件。
 ///
-/// 包含 instincts 旧库、根目录调试/备份文件和已迁走的 JSON。仍存在的 git worktree
+/// 包含 instincts 旧库、根目录调试/备份文件和已迁走的 JSON。旧版 `worktrees/`
 /// 不在这里删。
 pub fn remove_obsolete_files_at_startup() -> usize {
     let Some(home) = smelt_home() else {

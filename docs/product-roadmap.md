@@ -160,7 +160,7 @@ flowchart LR
 - [ ] **审查闭环：** diff 行内选区 + 评论 → 打包（path/行号/hunk）→ 回注 agent（ACP 排队 / PTY 等 Idle）→ 新 diff 对照
 - [ ] **提交体验：** stage/commit/push 手感打磨 · AI commit message · 提交后可一键回到该次 diff
 - [ ] **回看：** 轻量 log · 点开单 commit 看 diff · 评论与 commit/sha 关联可回溯
-- [ ] 从 diff/tool 跳文件定位 · 外部变更提示 · 分支/stash · 删 worktree 前提示绑会话
+- [ ] 从 diff/tool 跳文件定位 · 外部变更提示 · 分支/stash · ~~删 worktree 前提示绑会话~~（已放弃（2026-10-18 移除 worktree 功能））
 - [ ] 联机 review（后置，同一回注管道）
 
 ```mermaid
@@ -289,12 +289,12 @@ flowchart TB
 | | 2.1 | 多会话 · Remix · content block · terminal/* 面板 | 同项目两线程；命令在真 PTY 可见 |
 | **Review** | 3.1 | diff 行内评论 → 回注 agent | 三条评论一键打回 |
 | | 3.2 | 提交 · 回看 log/commit diff · 评论挂 sha | 改→审→交→回看不离 smelt |
-| | 3.3 | 跳文件 · 分支/stash · worktree 提示 | 日常 Git 少切客户端 |
+| | 3.3 | 跳文件 · 分支/stash · ~~worktree 提示~~（已放弃（2026-10-18 移除 worktree 功能）） | 日常 Git 少切客户端 |
 | | 3.4 | 联机 review（后置） | 同事评论进同一管道 |
 | **任务** | 4.1 | 执行记录 · 相位 · 失败态 | 会话与任务不割裂 |
-| | 4.2 | Issue Worktree · branch 绑定 | 多 Issue 隔离执行 |
+| | 4.2 | ~~Issue Worktree~~（已放弃（2026-10-18 移除 worktree 功能）） · branch 绑定 | 多 Issue 隔离执行 |
 | | 4.3 | `channel=acp` · 完成边沿 | 任务可走多家 ACP |
-| | 4.4 | Runtime 执行 · Worktree 保留 · 显式交付入口 | 执行完成后由用户决定代码交付 |
+| | 4.4 | Runtime 执行 · ~~Worktree 保留~~（已放弃（2026-10-18 移除 worktree 功能）） · 显式交付入口 | 执行完成后由用户决定代码交付 |
 | **体验** | 5.* | §5 表（含手机小屏） | 高频路径变顺；与各线穿插 |
 | **远程** | 6.1 | 网关 action/state 稳 · 手机操作台 + 会话列表 | 手机能批一条权限回本机 |
 | | 6.2 | 推送 · 深链 · token · 弱网重连 | 通知一点进会话 |

@@ -9,11 +9,10 @@ use smelt_core::fs::FileSystem as _;
 pub use smelt_core::subprocess::{LocalSubprocess, Output, Subprocess};
 pub use smelt_runtime_client::protocol::git::{
     BranchList, CommitNode, DiffHunk, DiffKind, DiffLine, DiffScope, GitFileDiffResult,
-    GitPatchAction, GitStatusData, LOG_FORMAT, LogScope, ParsedDiff, RepoInfo, WorktreeEntry,
-    WorktreeListData, main_repo_root_from_common_dir, parse_diff, parse_diff_with_file_headers,
-    parse_log, parse_name_status,
+    GitPatchAction, GitSeenChange, GitStatusData, LOG_FORMAT, LogScope, ParsedDiff, RepoInfo,
+    parse_diff, parse_diff_with_file_headers, parse_log, parse_name_status,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub type GitOutput = Output;
 
@@ -153,7 +152,26 @@ fn diff_shortstat_with(subprocess: &dyn Subprocess, root: &str) -> (u32, u32) {
 }
 
 pub fn load_git_status_with(subprocess: &dyn Subprocess, root: &str) -> GitStatusData {
-    let Ok(out) = run_git_with(
+    let Some(mut status) = porcelain_status_with(subprocess, root) else {
+        return GitStatusData::default();
+    };
+    status.stash_count = stash_count_with(subprocess, root);
+    (status.insertions, status.deletions) = diff_shortstat_with(subprocess, root);
+    status
+}
+
+/// 本机仓库的 status，带上每个改动文件的工作区内容指纹（丢弃前校验用，见
+/// [`GitSeenChange`]）。指纹读的是本机磁盘，所以只在这个本机变体里算。
+pub fn load_git_status(root: &str) -> GitStatusData {
+    let mut status = load_git_status_with(&LocalSubprocess, root);
+    fill_worktree_hashes(root, &mut status);
+    status
+}
+
+/// 只跑 porcelain status 并解析出分支和改动列表。拉 status 和丢弃前的重算共用它，
+/// 两边看到的才是同一种快照。
+fn porcelain_status_with(subprocess: &dyn Subprocess, root: &str) -> Option<GitStatusData> {
+    let out = run_git_with(
         subprocess,
         root,
         // 不传 `--ignore-submodules`：让 git 按仓库自己的配置（`.gitmodules` 的
@@ -169,20 +187,49 @@ pub fn load_git_status_with(subprocess: &dyn Subprocess, root: &str) -> GitStatu
             "-b",
             "-z",
         ],
-    ) else {
-        return GitStatusData::default();
-    };
-    if !out.success() {
-        return GitStatusData::default();
-    }
-    let mut status = parse_git_status(&String::from_utf8_lossy(&out.stdout));
-    status.stash_count = stash_count_with(subprocess, root);
-    (status.insertions, status.deletions) = diff_shortstat_with(subprocess, root);
-    status
+    )
+    .ok()
+    .filter(Output::success)?;
+    Some(parse_git_status(&String::from_utf8_lossy(&out.stdout)))
 }
 
-pub fn load_git_status(root: &str) -> GitStatusData {
-    load_git_status_with(&LocalSubprocess, root)
+fn fill_worktree_hashes(root: &str, status: &mut GitStatusData) {
+    status.worktree_hashes = status
+        .files
+        .iter()
+        .filter_map(|(_, path)| Some((path.clone(), worktree_hash(root, path)?)))
+        .collect();
+}
+
+/// 工作区一侧的内容指纹：普通文件取内容的 sha256；符号链接取它指向的路径（丢弃删的是
+/// 链接本身，不是目标）。工作区里已经没有、或者是目录（嵌套仓库、子模块）的返回
+/// `None`——没有内容可丢，状态码已经说明了一切。
+pub fn worktree_hash(root: &str, path: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let full = Path::new(root).join(path);
+    let meta = std::fs::symlink_metadata(&full).ok()?;
+    let mut hasher = Sha256::new();
+    if meta.file_type().is_symlink() {
+        hasher.update(b"symlink\0");
+        hasher.update(
+            std::fs::read_link(&full)
+                .ok()?
+                .as_os_str()
+                .as_encoded_bytes(),
+        );
+    } else if meta.is_file() {
+        hasher.update(b"file\0");
+        std::io::copy(&mut std::fs::File::open(&full).ok()?, &mut hasher).ok()?;
+    } else {
+        return None;
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// 丢弃前的校验失败时给人看的话。
+fn stale_view_error(path: &str) -> String {
+    format!("{path} 在你查看之后又变了，没有丢弃。请刷新后再确认一次。")
 }
 
 pub fn load_branches_with(subprocess: &dyn Subprocess, root: &str) -> BranchList {
@@ -219,181 +266,16 @@ pub fn load_branches(root: &str) -> BranchList {
 }
 
 pub fn load_repo_info_with(subprocess: &dyn Subprocess, root: &str) -> Option<RepoInfo> {
-    let out = run_git_with(
-        subprocess,
-        root,
-        &[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-dir",
-            "--git-common-dir",
-            "--abbrev-ref",
-            "HEAD",
-        ],
-    )
-    .ok()?;
+    let out = run_git_with(subprocess, root, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
     if !out.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines();
-    Some(RepoInfo {
-        git_dir: lines.next()?.to_string(),
-        common_dir: lines.next()?.to_string(),
-        branch: lines.next().unwrap_or("HEAD").to_string(),
-    })
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Some(RepoInfo { branch })
 }
 
 pub fn load_repo_info(root: &str) -> Option<RepoInfo> {
     load_repo_info_with(&LocalSubprocess, root)
-}
-
-pub fn parse_worktree_list(stdout: &str, main_root_path: Option<&str>) -> Vec<WorktreeEntry> {
-    let mut entries: Vec<WorktreeEntry> = Vec::new();
-    for line in stdout.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            entries.push(WorktreeEntry {
-                path: path.to_string(),
-                branch: None,
-                is_main: false,
-                prunable: false,
-                locked: false,
-            });
-        } else if let Some(entry) = entries.last_mut() {
-            if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-                entry.branch = Some(branch.to_string());
-            } else if line.starts_with("prunable") {
-                entry.prunable = true;
-            } else if line.starts_with("locked") {
-                entry.locked = true;
-            }
-        }
-    }
-    for entry in &mut entries {
-        entry.is_main = main_root_path == Some(entry.path.as_str());
-    }
-    entries
-}
-
-pub fn list_worktrees_with(
-    subprocess: &dyn Subprocess,
-    root: &str,
-) -> Result<WorktreeListData, String> {
-    let common = run_git_with(
-        subprocess,
-        root,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .map_err(|error| error.to_string())?;
-    if !common.success() {
-        return Err(git_err(&common, "读取 git common dir 失败"));
-    }
-    let common_dir = String::from_utf8_lossy(&common.stdout).trim().to_string();
-    let main_root = main_repo_root_from_common_dir(&common_dir).unwrap_or_else(|| root.to_string());
-
-    let out = run_git_with(subprocess, root, &["worktree", "list", "--porcelain"])
-        .map_err(|error| error.to_string())?;
-    if !out.success() {
-        return Err(git_err(&out, "git worktree list 失败"));
-    }
-    let top = run_git_with(subprocess, root, &["rev-parse", "--show-toplevel"])
-        .ok()
-        .filter(Output::success)
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
-    Ok(WorktreeListData {
-        entries: parse_worktree_list(&String::from_utf8_lossy(&out.stdout), top.as_deref()),
-        main_root,
-    })
-}
-
-pub fn list_worktrees(root: &str) -> Result<WorktreeListData, String> {
-    list_worktrees_with(&LocalSubprocess, root)
-}
-
-pub fn remove_worktree_with(
-    subprocess: &dyn Subprocess,
-    main_root: &str,
-    path: &str,
-    force: bool,
-) -> Result<(), String> {
-    let mut args = vec!["worktree", "remove"];
-    if force {
-        args.push("--force");
-    }
-    args.push(path);
-    checked(
-        run_git_with(subprocess, main_root, &args),
-        "git worktree remove 失败",
-    )
-}
-
-pub fn remove_worktree(main_root: &str, path: &str, force: bool) -> Result<(), String> {
-    remove_worktree_with(&LocalSubprocess, main_root, path, force)
-}
-
-pub fn prune_stale_worktrees_with(
-    subprocess: &dyn Subprocess,
-    main_root: &str,
-) -> Result<(), String> {
-    checked(
-        run_git_with(subprocess, main_root, &["worktree", "prune"]),
-        "git worktree prune 失败",
-    )
-}
-
-pub fn prune_stale_worktrees(main_root: &str) -> Result<(), String> {
-    prune_stale_worktrees_with(&LocalSubprocess, main_root)
-}
-
-pub fn create_worktree_with(
-    subprocess: &dyn Subprocess,
-    main_root: &str,
-    branch: Option<&str>,
-    path: &str,
-) -> Result<String, String> {
-    let mut args = vec!["worktree", "add"];
-    match branch.filter(|branch| !branch.trim().is_empty()) {
-        Some(branch) => {
-            let reference = format!("refs/heads/{branch}");
-            let exists = run_git_with(
-                subprocess,
-                main_root,
-                &["show-ref", "--verify", "--quiet", &reference],
-            )
-            .map_err(|error| error.to_string())?;
-            if exists.success() {
-                let list =
-                    run_git_with(subprocess, main_root, &["worktree", "list", "--porcelain"])
-                        .map_err(|error| error.to_string())?;
-                let occupied = String::from_utf8_lossy(&list.stdout)
-                    .lines()
-                    .any(|line| line.strip_prefix("branch refs/heads/") == Some(branch));
-                if occupied {
-                    return Err(format!(
-                        "分支「{branch}」已被其他 worktree 检出，不能重复检出"
-                    ));
-                }
-                args.extend([path, branch]);
-            } else {
-                args.extend(["-b", branch, path, "HEAD"]);
-            }
-        }
-        None => args.extend(["--detach", path]),
-    }
-    let out = run_git_with(subprocess, main_root, &args).map_err(|error| error.to_string())?;
-    if out.success() {
-        Ok(path.to_string())
-    } else {
-        Err(git_err(&out, "git worktree add 失败"))
-    }
-}
-
-pub fn create_worktree(
-    main_root: &str,
-    branch: Option<&str>,
-    path: &str,
-) -> Result<String, String> {
-    create_worktree_with(&LocalSubprocess, main_root, branch, path)
 }
 
 fn checked(result: std::io::Result<Output>, fallback: &str) -> Result<(), String> {
@@ -578,23 +460,40 @@ pub fn stash_pop(root: &str) -> Result<(), String> {
     stash_pop_with(&LocalSubprocess, root)
 }
 
-pub fn discard_all_with(subprocess: &dyn Subprocess, root: &str) -> Result<(), String> {
+/// 丢弃工作区全部改动：已跟踪的还原暂存区和工作区，未跟踪的 `git clean -fd`。
+///
+/// `seen` 是用户看到的整份改动列表。先从磁盘重算一遍，多了、少了、状态码或内容变了
+/// 任何一条就整体拒绝：`clean` 会把用户从没见过的新文件连根删掉，不能赌。
+/// 校验和丢弃之间仍有毫秒级窗口，外部写入者不认我们的锁，这里收窄不了。
+pub fn discard_all(root: &str, seen: &[GitSeenChange]) -> Result<(), String> {
+    let mut status = porcelain_status_with(&LocalSubprocess, root).ok_or("读取 git status 失败")?;
+    fill_worktree_hashes(root, &mut status);
+    if let Some(path) = first_seen_mismatch(seen, &status.seen_changes()) {
+        return Err(stale_view_error(path));
+    }
     checked(
-        run_git_with(
-            subprocess,
-            root,
-            &["restore", "--staged", "--worktree", "."],
-        ),
+        run_git(root, &["restore", "--staged", "--worktree", "."]),
         "git restore 失败",
     )?;
-    checked(
-        run_git_with(subprocess, root, &["clean", "-fd"]),
-        "git clean 失败",
-    )
+    checked(run_git(root, &["clean", "-fd"]), "git clean 失败")
 }
 
-pub fn discard_all(root: &str) -> Result<(), String> {
-    discard_all_with(&LocalSubprocess, root)
+/// 两份快照第一处不一致的路径（不看顺序）；完全一致返回 `None`。
+fn first_seen_mismatch<'a>(
+    seen: &'a [GitSeenChange],
+    current: &'a [GitSeenChange],
+) -> Option<&'a str> {
+    let by_path = |changes: &'a [GitSeenChange]| {
+        changes
+            .iter()
+            .map(|change| (change.path.as_str(), change))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let (seen, current) = (by_path(seen), by_path(current));
+    seen.keys()
+        .chain(current.keys())
+        .find(|path| seen.get(*path) != current.get(*path))
+        .copied()
 }
 
 pub fn checkout_branch(root: &str, branch: &str) -> Result<(), String> {
@@ -668,24 +567,36 @@ fn index_paths(root: &str, verb: &str, paths: &[String], fallback: &str) -> Resu
 /// 丢弃一个文件的全部改动。已跟踪走 `git restore --staged --worktree`（暂存区和
 /// 工作区一起还原，省得用户为「已 add 过」的文件再点一次）；未跟踪的 git 管不着，
 /// 直接删盘。
-pub fn discard_file(root: &str, path: &str, untracked: bool) -> Result<(), String> {
-    if untracked {
+///
+/// `seen` 是用户看到的那一条改动。磁盘上这条改动的状态码或内容跟它不一致（agent
+/// 接着写了、已经被提交或还原了）就拒绝，不丢用户没见过的内容。
+pub fn discard_file(root: &str, seen: &GitSeenChange) -> Result<(), String> {
+    let path = seen.path.as_str();
+    let status = porcelain_status_with(&LocalSubprocess, root).ok_or("读取 git status 失败")?;
+    let current = status
+        .files
+        .iter()
+        .find(|(_, p)| p == path)
+        .map(|(xy, _)| GitSeenChange {
+            path: path.to_string(),
+            xy: xy.clone(),
+            worktree_hash: worktree_hash(root, path),
+        });
+    if current.as_ref() != Some(seen) {
+        return Err(stale_view_error(path));
+    }
+    if seen.untracked() {
         let full = Path::new(root).join(path);
         return smelt_core::fs::LocalFs
             .remove_file(&full)
             .map_err(|e| format!("删除 {path} 失败：{e}"));
     }
+    // 按字面路径匹配：`[id].tsx` 当 glob 会连带还原 `i.tsx`、`d.tsx`，校验只看了这一个。
+    let literal = format!(":(literal){path}");
     checked(
-        run_git(root, &["restore", "--staged", "--worktree", "--", path]),
+        run_git(root, &["restore", "--staged", "--worktree", "--", &literal]),
         "git restore 失败",
     )
-}
-
-/// 工作区有没有未提交改动。探测失败按「干净」算：这只用来决定提醒文案。
-pub fn is_dirty(root: &str) -> bool {
-    run_git(root, &["status", "--porcelain"])
-        .ok()
-        .is_some_and(|o| o.success() && !o.stdout.is_empty())
 }
 
 pub fn apply_patch_action(root: &str, action: GitPatchAction, patch: &str) -> Result<(), String> {
@@ -808,16 +719,6 @@ pub fn commit_file_diff(root: &str, hash: &str, path: &str) -> String {
             }
         }
         Err(err) => format!("无法执行 git show：{err}"),
-    }
-}
-
-pub fn resolve_worktree_path(main_root: &str, worktree_dir: &str) -> PathBuf {
-    let root = Path::new(main_root);
-    let path = Path::new(worktree_dir);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
     }
 }
 
