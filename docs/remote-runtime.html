@@ -532,6 +532,7 @@
   <li>换成 Xvnc + XFCE 后，Chrome 自己的界面（包括「恢复页面」气泡）都在画面里；xdotool 往地址栏注入「北京 天气 abc」正常上屏。</li>
   <li>整条链路：本机转发口 → 运行时 <code>desktop_attach</code> → Xvnc → noVNC 出画面（在远端的 Chrome 里打开转发口页面，看到自己套着自己）。</li>
   <li>系统包：<code>tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xdotool fonts-noto-cjk</code>，都在 Debian 官方源里。不装中文字体，中文网页全是方块。</li>
+  <li>XFCE 去掉多余的：只留顶部任务栏（切窗口、看开着什么），删掉底部停靠栏（<code>xfce4-panel</code> 的 <code>/panels</code> 只留 1）；最大化的窗口不画 xfwm4 标题栏（<code>xfwm4</code> 的 <code>/general/titleless_maximize</code>）。Chrome 最大化后就贴在任务栏下面，安装时要一并设好。</li>
 </ul>
 <p><b>还要做的</b>，按顺序：</p>
 <ol>
