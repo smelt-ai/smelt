@@ -23,11 +23,12 @@ use crate::settings::{
     AcpRuntimeState, AgentDefinition, LaunchEntry, active_launch_entries, icon_for_launch_command,
 };
 use crate::workspace_sessions::NewAcpSessionRequest;
-use crate::{Workspace, ui_theme};
+use crate::{RuntimeKey, Workspace, ui_theme};
+use smelt_model::acp_conn::AcpRuntimeDiagnostics;
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind};
 use smelt_model::new_session::{
     NewSessionAction, NewSessionPreferences, NewSessionTarget, PinParams, SECTION_LABELS,
-    build_sections,
+    build_sections, new_session_actions,
 };
 use smelt_model::session_control::AcpAgentOption;
 
@@ -78,6 +79,60 @@ fn current_new_session_preferences(cx: &mut App) -> NewSessionPreferences {
         .detach();
     }
     cx.global::<NewSessionPins>().preferences.clone()
+}
+
+/// 远程运行时那台机器上的启动项和 CLI 探测结果。启动项按运行时各存一份，装没装
+/// 也只有那台机器说了算，所以不能拿本机的去凑。每次打开菜单从那台机器重新取一次，
+/// 取回之前沿用上一次的。
+#[derive(Clone, Debug, Default)]
+struct RemoteLaunchCatalog {
+    entries: Vec<LaunchEntry>,
+    diagnostics: AcpRuntimeDiagnostics,
+}
+
+#[derive(Default)]
+struct RemoteLaunchCatalogs(std::collections::HashMap<RuntimeKey, RemoteLaunchCatalog>);
+
+impl gpui::Global for RemoteLaunchCatalogs {}
+
+fn refresh_remote_launch_catalog(runtime: crate::runtimes::Runtime, cx: &mut App) {
+    if runtime.is_local() {
+        return;
+    }
+    let key = runtime.key().clone();
+    let client = runtime.client().clone();
+    cx.spawn(async move |cx| {
+        let fetched = cx
+            .background_executor()
+            .spawn(async move {
+                let empty = smelt_runtime_client::protocol::control::EmptyParams::default();
+                let settings = client.call::<smelt_model::control_api::LaunchGet>(
+                    &empty,
+                    crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                )?;
+                let diagnostics = client.call::<smelt_model::control_api::AgentCliInspect>(
+                    &empty,
+                    crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                )?;
+                Ok::<_, smelt_runtime_client::protocol::control::ControlClientError>(
+                    RemoteLaunchCatalog {
+                        entries: settings.entries,
+                        diagnostics,
+                    },
+                )
+            })
+            .await;
+        // 取不到（离线、超时）就留着上一次的，下次打开再取。
+        if let Ok(catalog) = fetched {
+            cx.update(|cx| {
+                cx.default_global::<RemoteLaunchCatalogs>()
+                    .0
+                    .insert(key, catalog);
+                cx.refresh_windows();
+            });
+        }
+    })
+    .detach();
 }
 
 /// 先在本地切换让菜单立刻有反应，再交给运行时；运行时回来的是切换后的权威值。
@@ -222,16 +277,36 @@ fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchCh
 }
 
 /// 探测只在 Popover 打开时执行，避免每次侧栏重绘都重建动态候选集。
-fn available_new_session_actions(local: bool, cx: &App) -> Vec<NewSessionAction> {
-    let diagnostics = cx
-        .try_global::<AcpRuntimeState>()
-        .and_then(|state| state.diagnostics.clone())
-        .filter(|_| local);
-    smelt_model::new_session::new_session_actions(
-        &conversation_options(local, cx),
-        active_launch_entries(cx).as_slice(),
-        diagnostics.as_ref(),
-    )
+/// 启动项和装没装都以项目所在的那台机器为准：本机读常驻的配置与探测结果，远程读
+/// [`RemoteLaunchCatalogs`]。
+fn available_new_session_actions(runtime: &RuntimeKey, cx: &App) -> Vec<NewSessionAction> {
+    let local = *runtime == RuntimeKey::Local;
+    let conversations = conversation_options(local, cx);
+    if local {
+        let diagnostics = cx
+            .try_global::<AcpRuntimeState>()
+            .and_then(|state| state.diagnostics.clone());
+        return new_session_actions(
+            &conversations,
+            active_launch_entries(cx).as_slice(),
+            diagnostics.as_ref(),
+        );
+    }
+    let catalog = cx
+        .try_global::<RemoteLaunchCatalogs>()
+        .and_then(|catalogs| catalogs.0.get(runtime));
+    remote_new_session_actions(&conversations, catalog)
+}
+
+/// 远程还没取回过时按「什么都没装」处理，只剩空白终端。放行的话会把本机的清单
+/// 当成那台机器的，点了起不来。
+fn remote_new_session_actions(
+    conversations: &[AcpAgentOption],
+    catalog: Option<&RemoteLaunchCatalog>,
+) -> Vec<NewSessionAction> {
+    let empty = RemoteLaunchCatalog::default();
+    let catalog = catalog.unwrap_or(&empty);
+    new_session_actions(conversations, &catalog.entries, Some(&catalog.diagnostics))
 }
 
 /// 新建菜单的状态与绘制。
@@ -633,7 +708,8 @@ impl RenderOnce for NewSessionPicker {
         let workspace = self.workspace;
         let cwd = self.cwd;
         let runtime = self.runtime;
-        let local = runtime.is_local();
+        let runtime_key = runtime.key().clone();
+        let refresh_runtime = runtime.clone();
         // 项目排序会改变下标。状态以运行时加项目路径为主键，拖动后同一个列表位置不能
         // 把新会话建到旧项目，两个运行时上的同名路径也不能共用一份。
         let picker_root = format!(
@@ -656,8 +732,13 @@ impl RenderOnce for NewSessionPicker {
             .p_0()
             .trigger(self.trigger)
             .track_focus(&focus_handle)
+            .on_open_change(move |open, _, cx| {
+                if *open {
+                    refresh_remote_launch_catalog(refresh_runtime.clone(), cx);
+                }
+            })
             .content(move |_, _window, cx| {
-                let actions = available_new_session_actions(local, cx);
+                let actions = available_new_session_actions(&runtime_key, cx);
                 let popover = cx.entity();
                 picker.update(cx, |state, cx| {
                     sync_picker_state(state, &actions, popover.downgrade(), cx)
@@ -718,5 +799,81 @@ impl RenderOnce for NewSessionPicker {
                             .child("↑↓ 选择 · Enter 创建 · Esc 关闭"),
                     )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_model::acp_conn::RuntimeExecutable;
+    use smelt_model::new_session::BLANK_TERMINAL_KEY;
+
+    fn bare_engines() -> Vec<AcpAgentOption> {
+        [ConversationAgentKind::Claude, ConversationAgentKind::Codex]
+            .into_iter()
+            .map(|kind| AcpAgentOption {
+                id: kind.id().to_string(),
+                kind: kind.id().to_string(),
+                label: kind.label().to_string(),
+                profile: false,
+                agent_definition_id: None,
+                launch: kind.default_launch(),
+                history_dir: None,
+            })
+            .collect()
+    }
+
+    fn keys(actions: &[NewSessionAction]) -> Vec<&str> {
+        actions.iter().map(|action| action.key.as_str()).collect()
+    }
+
+    #[test]
+    fn a_remote_not_yet_inspected_offers_only_a_blank_terminal() {
+        let actions = remote_new_session_actions(&bare_engines(), None);
+        assert_eq!(keys(&actions), vec![BLANK_TERMINAL_KEY]);
+    }
+
+    #[test]
+    fn a_remote_offers_its_own_entries_and_only_what_it_has_installed() {
+        let mut diagnostics = AcpRuntimeDiagnostics::default();
+        diagnostics.record_terminal(
+            TerminalAgentKind::Claude,
+            RuntimeExecutable {
+                program: "claude".into(),
+                path: Some("/root/.local/bin/claude".into()),
+                ..Default::default()
+            },
+        );
+        diagnostics.record_terminal(TerminalAgentKind::Codex, RuntimeExecutable::default());
+        let catalog = RemoteLaunchCatalog {
+            entries: vec![
+                LaunchEntry {
+                    label: "Claude Code".into(),
+                    command: "claude".into(),
+                    provider: Some("claude".into()),
+                },
+                LaunchEntry {
+                    label: "Codex".into(),
+                    command: "codex".into(),
+                    provider: Some("codex".into()),
+                },
+                LaunchEntry {
+                    label: "部署".into(),
+                    command: "./deploy.sh".into(),
+                    provider: None,
+                },
+            ],
+            diagnostics,
+        };
+        let actions = remote_new_session_actions(&bare_engines(), Some(&catalog));
+        assert_eq!(
+            keys(&actions),
+            vec![
+                "terminal:claude:claude",
+                "terminal::./deploy.sh",
+                BLANK_TERMINAL_KEY,
+                "conversation:claude",
+            ]
+        );
     }
 }
