@@ -1,4 +1,4 @@
-//! 远程桌面页：看运行时那台机器的整块屏幕，点「接管」后能操作（设计文档 D9）。
+//! 远程桌面页：运行时那台机器的整块屏幕，打开就能操作；切到「只看」时鼠标键盘不发（设计文档 D9）。
 //!
 //! 画面和鼠标键盘交给网页视图里的 noVNC，经本机转发口（`smelt_runtime_client::desktop`）
 //! 和运行时连到那台机器的 VNC。VNC 只能逐键发，本机输入法拼出来的中文过不去，所以下面
@@ -96,7 +96,8 @@ impl DesktopView {
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.webview = None;
         self.proxy = None;
-        self.controlling = false;
+        // 打开就是接管：开这一页多半就是要动手。只看反而要人去切。
+        self.controlling = true;
         self.status = Status::Connecting;
         let proxy = match DesktopProxy::start(self.runtime.client().clone()) {
             Ok(proxy) => proxy,
@@ -109,7 +110,7 @@ impl DesktopView {
         let origin = proxy.page_url(false);
         let origin = origin[..origin.find("/desktop.html").unwrap_or(origin.len())].to_string();
         let native = wry::WebViewBuilder::new()
-            .with_url(proxy.page_url(false))
+            .with_url(proxy.page_url(true))
             .with_background_color((17, 17, 17, 255))
             // 只停在转发口自己的页面上，页面里的链接不会把视图带走。
             .with_navigation_handler(move |url| url.starts_with(&origin))
@@ -247,7 +248,7 @@ impl DesktopView {
                 let button = Button::new("desktop-control")
                     .small()
                     .disabled(!connected)
-                    .label(if controlling { "交还" } else { "接管" })
+                    .label(if controlling { "只看" } else { "接管" })
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.set_control(!controlling, cx)),
                     );
