@@ -2740,6 +2740,9 @@ impl AcpView {
         let mut page = snapshot.entries;
         page.append(&mut self.entries);
         self.entries = page;
+        // 空闲会话的首帧不带正文，这一页才是首份非空历史。之后的帧按增量合并，
+        // 否则下一帧只带快照头的空尾片会被当成首帧，把翻出来的对话整个换掉。
+        self.awaiting_initial_history_snapshot = false;
         self.layout_cache.borrow_mut().dirty_from = Some(0);
         self.loaded_entries_offset = snapshot.entries_offset;
         self.entries_total = self.entries_total.max(snapshot.entries_total);

@@ -4387,6 +4387,56 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// 空闲会话重开时，首帧不带已提交的正文（桌面连接只订阅进行中的一轮），正文靠往前
+/// 翻页补上。补上之后就不再是在等首帧：之后的帧（后台任务多了一行输出、已读状态变了）
+/// 只带快照头，按增量合并，不能把翻出来的对话整个换成那一帧的空尾片。
+#[gpui::test]
+fn frames_after_the_first_history_page_keep_the_loaded_conversation(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "restored".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-idle-reopen".into()),
+            },
+        )
+    });
+    let history = vec![
+        AcpEntry::User("截一张图给我看".into()),
+        AcpEntry::Assistant {
+            text: "图在 http://example.com/shot.png".into(),
+            thought: false,
+        },
+    ];
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.apply_snapshot(tail_snapshot(1, 2, Vec::new(), DaemonPhase::Idle), cx);
+            view.prepend_history_page(
+                tail_snapshot(0, 0, history.clone(), DaemonPhase::Idle),
+                cx,
+            );
+            view.apply_snapshot(tail_snapshot(2, 2, Vec::new(), DaemonPhase::Idle), cx);
+        });
+    });
+
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.entries, history, "只带快照头的帧不能清空已翻出的对话");
+        assert_eq!(view.loaded_entries_offset, 0);
+    });
+}
+
 /// 测试里的视图不连任何运行时：一连就失败，和运行时离线时一样。
 fn offline_runtime() -> smelt_client::runtime::Runtime {
     smelt_client::runtime::Runtime::new(
