@@ -37,8 +37,6 @@ pub enum DaemonOperation {
     Action,
     Input,
     Resize,
-    /// 看常驻浏览器的画面，接管时转输入，见 [`super::browser`]。
-    BrowserAttach,
     /// 远程桌面：转发到运行时本机 VNC 的原始字节流，见 [`super::desktop`]。
     DesktopAttach,
 }
@@ -89,7 +87,6 @@ mod tests {
             (DaemonOperation::Action, "action"),
             (DaemonOperation::Input, "input"),
             (DaemonOperation::Resize, "resize"),
-            (DaemonOperation::BrowserAttach, "browser_attach"),
             (DaemonOperation::DesktopAttach, "desktop_attach"),
         ];
 

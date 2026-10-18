@@ -113,17 +113,17 @@ fn runtime_section_header(
             let runtime = runtime.clone();
             let workspace = workspace.clone();
             Button::new(ElementId::from(SharedString::from(format!(
-                "runtime-browser-{key:?}"
+                "runtime-desktop-{key:?}"
             ))))
             .ghost()
             .xsmall()
-            .icon(IconName::Globe)
-            .icon_action("浏览器")
+            .icon(Icon::empty().path("smelt-icons/monitor.svg"))
+            .icon_action("远程桌面")
             .opacity(0.0)
             .group_hover(group.clone(), |style| style.opacity(1.0))
             .on_click(move |_ev, window, cx| {
                 let runtime = runtime.clone();
-                workspace.update(cx, |ws, cx| ws.open_browser(runtime, window, cx));
+                workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
             })
         })
         .child(

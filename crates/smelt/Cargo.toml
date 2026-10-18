@@ -62,6 +62,10 @@ agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operati
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# 远程桌面页：noVNC 跑在原生网页视图里。gpui-wry 0.7.3 默认跑在 gpui-pre 上（不开 gpui-fast）；
+# wry 必须和它用同一份。
+gpui-wry = "0.7.3"
+wry = { package = "lb-wry", version = "0.53.3" }
 # 生成 agent hook 命令时按 shell 规则引用 smelt-notify 路径。
 # macOS：菜单栏 status item 需要直接操作 AppKit（GPUI 没有 status item 概念），
 # 用 objc crate 声明 Objective-C 类做 target-action。系统通知使用现代、带异步回执的

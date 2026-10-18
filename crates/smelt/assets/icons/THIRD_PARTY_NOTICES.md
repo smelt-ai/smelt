@@ -26,3 +26,6 @@ Pi 仓库以 MIT License 发布（Copyright (c) 2025 Mario Zechner）；SVG 仅�
 由该 SVG 光栅化。上游资源 Copyright 2025–2026 Charmbracelet, Inc.，随 Crush
 以 [FSL-1.1-MIT](https://github.com/charmbracelet/crush/blob/main/LICENSE.md) 发布。
 图形仅用于在 Smelt 中标识对应客户端，Crush 名称与商标归其权利人所有。
+
+`monitor.svg` 来自 [Lucide](https://lucide.dev/icons/monitor)，以 ISC License 发布，
+未改动图形。

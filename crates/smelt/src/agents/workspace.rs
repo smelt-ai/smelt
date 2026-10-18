@@ -16,8 +16,8 @@ impl Workspace {
             // 侧栏「智能体」回根页。草稿还没提交，离开编辑器就等于取消。
             self.cancel_conversation_draft(cx);
         }
-        if tab != WorkspaceRoute::Browser {
-            self.browser = None;
+        if tab != WorkspaceRoute::Desktop {
+            self.desktop = None;
         }
         self.nav.set_active(tab);
         self.pop_active_tab_to_root();
@@ -31,8 +31,8 @@ impl Workspace {
     }
 
     pub(super) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute, cx: &mut Context<Self>) {
-        if tab != WorkspaceRoute::Browser {
-            self.browser = None;
+        if tab != WorkspaceRoute::Desktop {
+            self.desktop = None;
         }
         self.nav.set_active(tab);
         if !self.active_tab().is_session() {

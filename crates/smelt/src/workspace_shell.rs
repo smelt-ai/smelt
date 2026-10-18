@@ -520,7 +520,7 @@ impl Workspace {
             WorkspaceRoute::Agents => self.render_agents_page(window, cx),
             WorkspaceRoute::Automations => self.render_automations_page(window, cx),
             WorkspaceRoute::Capabilities => self.render_capabilities_page(window, cx),
-            WorkspaceRoute::Browser => self.render_browser_page(window, cx),
+            WorkspaceRoute::Desktop => self.render_desktop_page(window, cx),
             WorkspaceRoute::Session => {
                 if self.tool_panel_promoted() {
                     self.render_tool_panel_stage(left_guard, window, cx)

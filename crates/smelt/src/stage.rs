@@ -59,7 +59,7 @@ pub(crate) fn stage_has_page_header(
     }
     match route {
         WorkspaceRoute::Agents => !agent_conversation_open,
-        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities | WorkspaceRoute::Browser => {
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities | WorkspaceRoute::Desktop => {
             true
         }
         WorkspaceRoute::Session => false,
@@ -109,7 +109,7 @@ pub(crate) fn chrome_title_for_stage(
     match route {
         WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
         WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
-        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities | WorkspaceRoute::Browser => {
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities | WorkspaceRoute::Desktop => {
             ChromeTitle::Hidden
         }
     }

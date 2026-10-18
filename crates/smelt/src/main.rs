@@ -28,7 +28,7 @@ mod git_log_view;
 mod git_panel;
 mod ide;
 mod liquid_glass;
-mod browser_view;
+mod desktop_view;
 mod overlay;
 mod plugins;
 mod tool_panel;
@@ -2391,9 +2391,9 @@ struct Workspace {
     commit_errors: HashMap<String, String>,
     /// 关闭前的二次确认弹窗。Some = 弹窗开着。
     close_confirm: Option<CloseConfirm>,
-    /// 浏览器页正在看的那台运行时的浏览器（`WorkspaceRoute::Browser`）。离开这一页就丢掉，
-    /// 连接随之断开，不在后台推画面。
-    browser: Option<Entity<browser_view::BrowserView>>,
+    /// 远程桌面页正在看的那台运行时（`WorkspaceRoute::Desktop`）。离开这一页就丢掉，
+    /// 网页视图和连接随之关掉，不在后台推画面。
+    desktop: Option<Entity<desktop_view::DesktopView>>,
     /// 已打开的项目根目录（有序，就是侧栏分组的骨架）。项目是**独立于会话**的实体：
     /// 活动项目的 **root 路径**（不是显示名——同名目录是两个项目，见 ProjectGroup）：
     /// 会话列表里高亮哪一组、顶栏显示谁、「+对话/+终端」新建到哪个 cwd。None 或该组
@@ -2977,7 +2977,7 @@ impl Workspace {
             workspace_menu_source_id: uuid::Uuid::new_v4().to_string(),
             next_workspace_menu_source_revision: AtomicU64::new(1),
             close_confirm: None,
-            browser: None,
+            desktop: None,
             local: {
                 let mut space = space_with_ui(crate::runtimes::Runtime::local());
                 space.projects = projects;
