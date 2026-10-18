@@ -9913,6 +9913,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "core-foundation 0.10.0",
@@ -9940,6 +9941,7 @@ dependencies = [
  "smol",
  "tokio",
  "tower",
+ "tungstenite",
  "uuid",
 ]
 

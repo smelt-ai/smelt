@@ -147,6 +147,7 @@ mod acp_registry;
 mod acp_runtime_host;
 mod agent_memory_control;
 mod automation_runtime;
+mod browser;
 mod control;
 mod devices;
 mod dsh_control;

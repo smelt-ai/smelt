@@ -37,6 +37,8 @@ pub enum DaemonOperation {
     Action,
     Input,
     Resize,
+    /// 看常驻浏览器的画面，接管时转输入，见 [`super::browser`]。
+    BrowserAttach,
 }
 
 /// 首帧只先解析操作名，其余字段原样留给对应 handler。
@@ -85,6 +87,7 @@ mod tests {
             (DaemonOperation::Action, "action"),
             (DaemonOperation::Input, "input"),
             (DaemonOperation::Resize, "resize"),
+            (DaemonOperation::BrowserAttach, "browser_attach"),
         ];
 
         for (operation, wire_name) in operations {

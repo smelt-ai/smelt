@@ -174,6 +174,9 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         DaemonOperation::Action => handle_action(conn, &v, &sessions),
         DaemonOperation::Input => handle_raw_input(conn, &v, &sessions),
         DaemonOperation::Resize => handle_resize(conn, &v, &sessions),
+        DaemonOperation::BrowserAttach => {
+            crate::browser::handle_browser_attach(conn, reader, &crate::browser::cdp_endpoint())
+        }
     }
 }
 
