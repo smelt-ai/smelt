@@ -533,6 +533,9 @@
   <li>整条链路：本机转发口 → 运行时 <code>desktop_attach</code> → Xvnc → noVNC 出画面（在远端的 Chrome 里打开转发口页面，看到自己套着自己）。</li>
   <li>系统包：<code>tigervnc-standalone-server xfce4 xfce4-terminal dbus-x11 xdotool fonts-noto-cjk</code>，都在 Debian 官方源里。不装中文字体，中文网页全是方块。</li>
   <li>XFCE 去掉多余的：只留顶部任务栏（切窗口、看开着什么），删掉底部停靠栏（<code>xfce4-panel</code> 的 <code>/panels</code> 只留 1）；最大化的窗口不画 xfwm4 标题栏（<code>xfwm4</code> 的 <code>/general/titleless_maximize</code>）。Chrome 最大化后就贴在任务栏下面，安装时要一并设好。</li>
+  <li>XFCE 再精简：桌面不放图标、纯色背景、右键不弹菜单，只留一个工作区；任务栏只放「Chrome」「终端」两个启动图标和已打开窗口的列表。Chrome 图标要带上同一个 <code>--user-data-dir</code>，点开是在 agent 用的那个实例里开新窗口，不会另起一个没有登录状态、agent 也连不上的 Chrome。关掉 xfwm4 的合成器（<code>use_compositing</code>）：没有显卡全靠 CPU，远程桌面里也用不上阴影和透明。</li>
+  <li>桌面服务要设 <code>SHELL=/bin/bash</code>：<code>assistant</code> 的登录 shell 是 <code>nologin</code>，不设的话终端一打开就退出。Chrome 加 <code>--restore-last-session</code>：浏览器重启后恢复上次的标签页（调试时 Chrome 被关过一次，标签页全丢）。</li>
+  <li>资源（4 核 / 8GB）：Xvnc、XFCE 一共约 400MB 内存，空闲几乎不占 CPU；Chrome 两个标签页约 2.7GB（各进程相加，含共享内存，偏高）。没有显卡，网页全靠 CPU 渲染：特斯拉首页这种带视频的页面能吃掉 1 个多核。没人看时 VNC 不编码画面。</li>
 </ul>
 <p><b>还要做的</b>，按顺序：</p>
 <ol>
