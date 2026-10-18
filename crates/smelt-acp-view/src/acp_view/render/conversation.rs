@@ -360,7 +360,7 @@ impl AcpView {
                                             &this.rendered_markdown,
                                             i,
                                             entry,
-                                            this.cwd.as_deref(),
+                                            FileLinks::of(&this.runtime, this.cwd.as_deref()),
                                         ),
                                         cx,
                                     ))
@@ -395,7 +395,7 @@ impl AcpView {
                                         &this.rendered_markdown,
                                         i,
                                         entry,
-                                        this.cwd.as_deref(),
+                                        FileLinks::of(&this.runtime, this.cwd.as_deref()),
                                     ),
                                     cx,
                                 ),
@@ -500,7 +500,7 @@ impl AcpView {
                                     &this.rendered_markdown,
                                     i,
                                     entry,
-                                    this.cwd.as_deref(),
+                                    FileLinks::of(&this.runtime, this.cwd.as_deref()),
                                 ),
                                 cx,
                             ))
@@ -581,13 +581,13 @@ impl AcpView {
                             "任务完成".to_string()
                         };
                         let body_markdown = if !has_summary {
-                            markdown_text_for_cwd(&body, this.cwd.as_deref()).into()
+                            markdown_text_for_cwd(&body, FileLinks::of(&this.runtime, this.cwd.as_deref())).into()
                         } else {
                             cached_entry_markdown(
                                 &this.rendered_markdown,
                                 i,
                                 entry,
-                                this.cwd.as_deref(),
+                                FileLinks::of(&this.runtime, this.cwd.as_deref()),
                             )
                         };
                         let mut answer = v_flex()
@@ -2002,7 +2002,7 @@ impl AcpView {
                         &self.rendered_markdown,
                         entry_ix,
                         entry,
-                        self.cwd.as_deref(),
+                        FileLinks::of(&self.runtime, self.cwd.as_deref()),
                     ),
                     cx,
                 ))

@@ -4143,16 +4143,33 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
 }
 
 /// ACP Markdown 的内部文件链接。使用独立 scheme，避免 `file://` 被 macOS
-/// LaunchServices 交给外部应用；`#L42` 可选片段用于定位行号。
-fn smelt_file_url_to_target(url: &str) -> Option<(String, Option<usize>)> {
+/// LaunchServices 交给外部应用；`#L42` 可选片段用于定位行号。远程运行时上的文件
+/// 以运行时 id 作 host（`smelt-file://<id>/path`），本机的不带 host。
+#[derive(Debug, PartialEq)]
+struct InternalFileLink {
+    /// 远程运行时的 id；本机为 None。
+    runtime: Option<String>,
+    path: String,
+    line: Option<usize>,
+}
+
+fn smelt_file_url_to_target(url: &str) -> Option<InternalFileLink> {
     let rest = url.strip_prefix("smelt-file://")?;
-    let (path_part, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let (runtime, path_part) = match rest.find('/')? {
+        0 => (None, rest),
+        host_end => (Some(rest[..host_end].to_string()), &rest[host_end..]),
+    };
     let path = file_url_to_path(&format!("file://{path_part}"))?;
     let path = path.to_str()?.to_string();
     let line = fragment
         .strip_prefix('L')
         .and_then(|value| value.parse().ok());
-    Some((path, line))
+    Some(InternalFileLink {
+        runtime,
+        path,
+        line,
+    })
 }
 
 /// 开一扇主工作台窗口（Workspace + Root 包装）。
@@ -4736,7 +4753,7 @@ fn main() {
         let current_ws_status = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_rx.recv().await {
-                let internal_files: Vec<(String, Option<usize>)> = urls
+                let internal_files: Vec<InternalFileLink> = urls
                     .iter()
                     .filter_map(|url| smelt_file_url_to_target(url))
                     .collect();
@@ -4754,9 +4771,18 @@ fn main() {
                     }
                     main.workspace
                 });
-                for (path, line) in internal_files {
-                    let _ = workspace.update_in(cx, |ws, window, cx| {
-                        ws.view_file_at(path, line, window, cx)
+                for link in internal_files {
+                    let _ = workspace.update_in(cx, |ws, window, cx| match link.runtime {
+                        // 内置编辑器只读本机文件。远程的文件在另一台机器上，打开本机同路径
+                        // 的文件是错的，先说明；面板按运行时分以后改成去那台机器读。
+                        Some(runtime) => {
+                            let name = runtimes::runtime_name(&RuntimeKey::Remote(runtime), cx);
+                            ws.report_background_error(format!(
+                                "「{name}」上的文件暂时不能在这里打开：{}",
+                                link.path
+                            ));
+                        }
+                        None => ws.view_file_at(link.path, link.line, window, cx),
                     });
                 }
             }

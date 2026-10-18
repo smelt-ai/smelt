@@ -2,30 +2,31 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
-    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity, append_prompt_text,
-    apply_pending_config_selection, background_task_one_line, background_task_output_lines,
-    background_task_running_for, background_task_summary, build_conversation_layout,
-    build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
-    cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
-    compact_tool_headline, compact_tool_run_label, composer_config_section_label,
-    composer_menu_sections, composer_model_label, composer_model_scroll,
-    composer_native_queue_shortcut_hint, composer_next_turn_notice, composer_should_nest_models,
-    composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
-    consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
-    current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
-    diff_stats_for_output, entries_to_fade_in, escape_html_tags_for_markdown,
-    external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
-    is_active_permission_selection, is_dispatch_in_flight, is_fresh_conversation_start,
-    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
-    latest_user_message_index, loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd,
-    markdown_user_text_for_cwd, merge_rejected_prompt, merge_snapshot_entries,
-    model_label_with_provider, move_queue_item_to_front, native_queue_item_kind_label,
-    next_snapshot_prompt_gate, overlay_model_state, overlay_pending_initial_config,
-    overlay_session_configs, pending_config_choice_names, plan_current_step, preformatted_html,
-    process_group_header_label, process_group_label, progress_has_details, progress_summary,
-    provider_menu_label, provider_switch_value, reconcile_pending_config_values,
-    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt, rows_with_changed_shape,
+    CachedDiff, ComposerMenuSection, FileLinks, LoadedSkillsRefresh, LoadedSkillsSnapshot,
+    OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity,
+    append_prompt_text, apply_pending_config_selection, background_task_one_line,
+    background_task_output_lines, background_task_running_for, background_task_summary,
+    build_conversation_layout, build_conversation_layout_with_timings, build_markdown_cache,
+    build_tool_image_parts, cached_diff_stats, can_load_older_history, classify_attached_paths,
+    compact_token_count, compact_tool_headline, compact_tool_run_label,
+    composer_config_section_label, composer_menu_sections, composer_model_label,
+    composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
+    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
+    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
+    conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
+    diff_cache_matches_output, diff_stats_for_output, entries_to_fade_in,
+    escape_html_tags_for_markdown, external_clipboard_image_paths, filter_trajectory_events,
+    format_attached_paths, is_active_permission_selection, is_dispatch_in_flight,
+    is_fresh_conversation_start, is_match_count_line, is_new_conversation_command,
+    is_stale_blank_history_id, latest_user_message_index, loaded_entries_end,
+    loaded_skills_refresh, markdown_text_for_cwd, markdown_user_text_for_cwd,
+    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
+    move_queue_item_to_front, native_queue_item_kind_label, next_snapshot_prompt_gate,
+    overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
+    pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
+    process_group_label, progress_has_details, progress_summary, provider_menu_label,
+    provider_switch_value, reconcile_pending_config_values, refresh_markdown_cache,
+    resolve_restart_launch, restorable_gui_prompt, rows_with_changed_shape,
     running_background_tasks, search_summary_text, selected_provider_group,
     session_trajectory_events, settled_thought_elapsed, settled_thought_label,
     should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
@@ -1445,7 +1446,10 @@ fn state_only_snapshot_does_not_rebuild_loaded_entries() {
 fn markdown_local_files_become_internal_file_urls() {
     let rendered = markdown_text_for_cwd(
         "看 [workspace.md](docs/workspace.md)、[源码](/tmp/source.rs#L42) 和 [官网](https://example.com)",
-        Some("/tmp/project"),
+        FileLinks {
+            cwd: Some("/tmp/project"),
+            runtime: None,
+        },
     );
     assert!(rendered.contains("[workspace.md](smelt-file:///tmp/project/docs/workspace.md)"));
     assert!(rendered.contains("[源码](smelt-file:///tmp/source.rs#L42)"));
@@ -1456,7 +1460,7 @@ fn markdown_local_files_become_internal_file_urls() {
 fn markdown_absolute_files_resolve_without_session_cwd() {
     let rendered = markdown_text_for_cwd(
         "无弹窗：[截图](/tmp/smelt-current-notification-final.png)",
-        None,
+        FileLinks::default(),
     );
     assert_eq!(
         rendered,
@@ -1471,7 +1475,10 @@ fn markdown_absolute_files_resolve_without_session_cwd() {
 fn markdown_colon_line_refs_resolve_to_fragment() {
     let rendered = markdown_text_for_cwd(
         "见 [acp_view.rs](crates/smelt-acp-view/src/acp_view.rs:2765)",
-        Some("/tmp/project"),
+        FileLinks {
+            cwd: Some("/tmp/project"),
+            runtime: None,
+        },
     );
     assert!(rendered.contains(
         "[acp_view.rs](smelt-file:///tmp/project/crates/smelt-acp-view/src/acp_view.rs#L2765)"
@@ -1481,8 +1488,32 @@ fn markdown_colon_line_refs_resolve_to_fragment() {
 /// `path:行号:列号` 形式（列号可选的第二段）也只取行号，列号丢弃。
 #[test]
 fn markdown_colon_line_col_refs_take_line_not_col() {
-    let rendered = markdown_text_for_cwd("见 [x](src/main.rs:10:5)", Some("/tmp/project"));
+    let rendered = markdown_text_for_cwd(
+        "见 [x](src/main.rs:10:5)",
+        FileLinks {
+            cwd: Some("/tmp/project"),
+            runtime: None,
+        },
+    );
     assert!(rendered.contains("[x](smelt-file:///tmp/project/src/main.rs#L10)"));
+}
+
+/// 远程对话里的文件在另一台机器上：链接带上运行时 id，桌面不会去打开本机同路径的文件。
+#[test]
+fn markdown_files_in_remote_conversations_carry_the_runtime() {
+    let rendered = markdown_text_for_cwd(
+        "看 [main.rs](src/main.rs:3) 和 [hosts](/etc/hosts)",
+        FileLinks {
+            cwd: Some("/root/project"),
+            runtime: Some("39fafd41-9942-49b0-b9ec-7eb670d2711e"),
+        },
+    );
+    assert!(rendered.contains(
+        "[main.rs](smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/root/project/src/main.rs#L3)"
+    ));
+    assert!(
+        rendered.contains("[hosts](smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/etc/hosts)")
+    );
 }
 
 #[test]
@@ -1497,7 +1528,8 @@ fn user_markdown_keeps_html_tags_literal() {
              ```html\n<div>代码</div>\n```\n"
     );
 
-    let rendered = markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", None);
+    let rendered =
+        markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", FileLinks::default());
     assert!(rendered.contains("\\<panel>"));
 }
 
@@ -1540,7 +1572,11 @@ fn markdown_cache_reuses_prefix_and_refreshes_changed_tail() {
             thought: false,
         },
     ];
-    let mut cache = build_markdown_cache(&entries, Some("/tmp/project"));
+    let links = FileLinks {
+        cwd: Some("/tmp/project"),
+        runtime: None,
+    };
+    let mut cache = build_markdown_cache(&entries, links);
     let unchanged_prefix = cache[0].clone();
 
     entries.truncate(1);
@@ -1549,7 +1585,7 @@ fn markdown_cache_reuses_prefix_and_refreshes_changed_tail() {
         thought: false,
     });
     entries.push(AcpEntry::Divider("next".into()));
-    refresh_markdown_cache(&entries, 1, Some("/tmp/project"), &mut cache);
+    refresh_markdown_cache(&entries, 1, links, &mut cache);
 
     assert_eq!(cache.len(), entries.len());
     assert_eq!(cache[0], unchanged_prefix);
@@ -3709,7 +3745,10 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
         view.update(cx, |view, cx| {
             view.entries = vec![AcpEntry::User("已经写好的那一句".into())];
             view.loaded_entries_offset = 0;
-            view.rendered_markdown = build_markdown_cache(&view.entries, view.cwd.as_deref());
+            view.rendered_markdown = build_markdown_cache(
+                &view.entries,
+                FileLinks::of(&view.runtime, view.cwd.as_deref()),
+            );
             super::reveal_first_history_page(&view.list_state, view.entries.len());
             cx.notify();
         });

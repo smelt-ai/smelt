@@ -1006,14 +1006,14 @@ impl TerminalView {
     /// 因为正好卡在断行处就点出被截断的错误地址（#21）。
     fn url_at(&self, (r, c): (usize, usize)) -> Option<String> {
         let frame = self.last_frame.as_ref()?;
-        link_at(frame, r, c).map(|(_, url)| url)
+        link_at(frame, r, c, self.runtime.is_local()).map(|(_, url)| url)
     }
 
     /// 单元处链接跨越的所有物理行区间 [(行, 起列, 止列), ...]，用于悬停高亮——软换行的
     /// 链接可能横跨好几行，每行各给一段列区间。
     fn link_range_at(&self, (r, c): (usize, usize)) -> Option<Vec<(usize, usize, usize)>> {
         let frame = self.last_frame.as_ref()?;
-        link_at(frame, r, c).map(|(segs, _)| segs)
+        link_at(frame, r, c, self.runtime.is_local()).map(|(segs, _)| segs)
     }
 }
 
@@ -1046,7 +1046,9 @@ fn wrapped_line_range(frame: &terminal::Frame, r: usize) -> (usize, usize) {
 type LinkRowRange = (usize, usize, usize);
 type TerminalLink = (Vec<LinkRowRange>, String);
 
-fn link_at(frame: &terminal::Frame, r: usize, c: usize) -> Option<TerminalLink> {
+/// `local_files`：终端的 shell 是不是在本机。远程终端里的路径和 `file:` 链接指向
+/// 另一台机器，本机既判断不了存不存在，打开的也是本机同路径的文件，所以只认网址。
+fn link_at(frame: &terminal::Frame, r: usize, c: usize, local_files: bool) -> Option<TerminalLink> {
     let (first, last) = wrapped_line_range(frame, r);
     let mut buf: Vec<terminal::Cell> = Vec::new();
     let mut starts: Vec<usize> = Vec::with_capacity(last - first + 2);
@@ -1076,11 +1078,17 @@ fn link_at(frame: &terminal::Frame, r: usize, c: usize) -> Option<TerminalLink> 
         }
         (a, b, uri.to_string())
     } else {
-        let (a, b, url) = find_links(&buf)
-            .into_iter()
-            .find(|&(a, b, _)| idx >= a && idx <= b)?;
+        let links = if local_files {
+            find_links(&buf)
+        } else {
+            find_urls(&buf)
+        };
+        let (a, b, url) = links.into_iter().find(|&(a, b, _)| idx >= a && idx <= b)?;
         (a, b, url)
     };
+    if !local_files && url.starts_with("file:") {
+        return None;
+    }
 
     // 把缓冲区下标区间 [a, b] 切回各物理行的列区间，供悬停高亮逐行绘制。
     let mut segs = Vec::new();
@@ -3043,19 +3051,46 @@ mod tests {
         let frame = single_row_frame(cells);
 
         assert_eq!(
-            link_at(&frame, 0, 3),
+            link_at(&frame, 0, 3, true),
             Some((vec![(0, 3, 4)], "https://example.com/notes".to_string())),
             "命中 OSC 8：范围覆盖挂着同一 URI 的连续格子"
         );
         assert_eq!(
-            link_at(&frame, 0, 4),
-            link_at(&frame, 0, 3),
+            link_at(&frame, 0, 4, true),
+            link_at(&frame, 0, 3, true),
             "同一链接内任意一格结果相同"
         );
         assert_eq!(
-            link_at(&frame, 0, 0),
+            link_at(&frame, 0, 0, true),
             None,
             "没挂链接、可见文本也不是 URL 的格子：没有链接"
+        );
+    }
+
+    /// 远程终端：路径和 `file:` 链接在另一台机器上，不能当本机文件打开；网址照常。
+    #[test]
+    fn remote_terminals_only_link_urls() {
+        use std::sync::Arc;
+        let mut cells = row("/tmp https://a.b/c x");
+        // 「x」挂着远程 `eza` 这类程序给的文件超链接。
+        let last = cells.len() - 1;
+        cells[last].link = Some(Arc::from("file://gs-wynn/etc/hosts"));
+        let frame = single_row_frame(cells);
+
+        assert!(
+            link_at(&frame, 0, 1, true).is_some(),
+            "本机终端：存在的路径可点"
+        );
+        assert_eq!(link_at(&frame, 0, 1, false), None, "远程终端：路径不可点");
+        assert_eq!(
+            link_at(&frame, 0, 6, false).map(|(_, url)| url),
+            Some("https://a.b/c".to_string()),
+            "远程终端：网址照常可点"
+        );
+        assert_eq!(
+            link_at(&frame, 0, last, false),
+            None,
+            "远程终端：file 超链接不可点"
         );
     }
 
@@ -3077,7 +3112,7 @@ mod tests {
 
         let full = "https://a.b/c123".to_string();
         // 点在第 0 行最后一格（断行前）
-        let (segs, url) = link_at(&frame, 0, 7).expect("软换行前半截也应命中链接");
+        let (segs, url) = link_at(&frame, 0, 7, true).expect("软换行前半截也应命中链接");
         assert_eq!(url, full, "拼接后应是完整 URL，而不是被换行切断的前半截");
         assert_eq!(
             segs,
@@ -3086,7 +3121,7 @@ mod tests {
         );
 
         // 点在第 1 行开头（断行后）结果应完全一致
-        assert_eq!(link_at(&frame, 1, 0), Some((segs, full)));
+        assert_eq!(link_at(&frame, 1, 0, true), Some((segs, full)));
     }
 
     /// 零宽字符（变体选择器 U+FE0F、组合变音符等）挂在基字符那一格上（alacritty 的

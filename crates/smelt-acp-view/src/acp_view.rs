@@ -1898,7 +1898,8 @@ impl AcpView {
         let initial_entry_count = entries.len();
         let rendered_images = decode_entry_images(&entries, 0);
         let rendered_diffs = std::collections::HashMap::new();
-        let rendered_markdown = build_markdown_cache(&entries, cwd.as_deref());
+        let rendered_markdown =
+            build_markdown_cache(&entries, FileLinks::of(&runtime, cwd.as_deref()));
         let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.))
             .with_uniform_item_height(px(RESTORED_ENTRY_HEIGHT_HINT_PX));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -2736,7 +2737,10 @@ impl AcpView {
         self.rendered_images
             .extend(decode_entry_images(&self.entries[..page_len], 0));
 
-        let mut markdown = build_markdown_cache(&self.entries[..page_len], self.cwd.as_deref());
+        let mut markdown = build_markdown_cache(
+            &self.entries[..page_len],
+            FileLinks::of(&self.runtime, self.cwd.as_deref()),
+        );
         markdown.append(&mut self.rendered_markdown);
         self.rendered_markdown = markdown;
         self.expanded_thoughts = self
@@ -3560,7 +3564,15 @@ impl AcpView {
         cx: &mut Context<Self>,
     ) {
         let (image_paths, file_paths) = classify_attached_paths(&paths, self.supports_image);
-        if !file_paths.is_empty() {
+        // 选的是本机的文件。图片读成字节发出去，远程也能用；别的文件只能给路径，
+        // 远程那台机器上读不到，说明一下，不插进去。
+        if !file_paths.is_empty() && !self.runtime.is_local() {
+            self.paste_hint = Some(format!(
+                "远程对话只能附加图片：{} 个本机文件的路径在那台机器上读不到",
+                file_paths.len()
+            ));
+            cx.notify();
+        } else if !file_paths.is_empty() {
             self.insert_prompt_text(
                 &format_attached_paths(&file_paths, self.cwd.as_deref()),
                 window,
@@ -3892,7 +3904,7 @@ impl AcpView {
             refresh_markdown_cache(
                 &self.entries,
                 entries_offset,
-                self.cwd.as_deref(),
+                FileLinks::of(&self.runtime, self.cwd.as_deref()),
                 &mut self.rendered_markdown,
             );
             let loaded =
@@ -6585,7 +6597,7 @@ fn format_duration(milliseconds: u64) -> String {
 /// gpui-component 会把 Markdown 链接目标原样交给 `open_url`。相对文件路径在
 /// macOS 上会被 LaunchServices 误当作应用标识并报 -50，因此在进入 Markdown
 /// 渲染前把本地路径解析成 Smelt 内部使用的 file URL。
-fn markdown_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
+fn markdown_text_for_cwd(text: &str, links: FileLinks<'_>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find("](") {
@@ -6596,7 +6608,7 @@ fn markdown_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
         let target_end = target_start + close_offset;
         let target = &rest[target_start..target_end];
         out.push_str(&rest[..target_start]);
-        if let Some(resolved) = resolve_relative_file_link(target, cwd) {
+        if let Some(resolved) = resolve_relative_file_link(target, links) {
             out.push_str(&resolved);
         } else {
             out.push_str(target);
@@ -6608,21 +6620,41 @@ fn markdown_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
     out
 }
 
-fn markdown_user_text_for_cwd(text: &str, cwd: Option<&str>) -> String {
-    markdown_text_for_cwd(&escape_html_tags_for_markdown(text), cwd)
+/// Markdown 里文件链接的解析基准。相对路径按 `cwd` 补全；`runtime` 是远程运行时的 id，
+/// 写进链接的 host，桌面据此知道文件在哪台机器上，不会去打开本机同路径的文件。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FileLinks<'a> {
+    cwd: Option<&'a str>,
+    runtime: Option<&'a str>,
 }
 
-fn markdown_for_entry(entry: &AcpEntry, cwd: Option<&str>) -> Option<gpui::SharedString> {
+impl<'a> FileLinks<'a> {
+    fn of(runtime: &'a Runtime, cwd: Option<&'a str>) -> Self {
+        let runtime = match runtime.key() {
+            smelt_client::runtime::RuntimeKey::Local => None,
+            smelt_client::runtime::RuntimeKey::Remote(id) => Some(id.as_str()),
+        };
+        Self { cwd, runtime }
+    }
+}
+
+fn markdown_user_text_for_cwd(text: &str, links: FileLinks<'_>) -> String {
+    markdown_text_for_cwd(&escape_html_tags_for_markdown(text), links)
+}
+
+fn markdown_for_entry(entry: &AcpEntry, links: FileLinks<'_>) -> Option<gpui::SharedString> {
     let rendered = match entry {
-        AcpEntry::User(text) if !is_interrupt_marker(text) => markdown_user_text_for_cwd(text, cwd),
-        AcpEntry::UserWithImages { text, .. } => markdown_user_text_for_cwd(text, cwd),
-        AcpEntry::Assistant { text, .. } => markdown_text_for_cwd(text, cwd),
+        AcpEntry::User(text) if !is_interrupt_marker(text) => {
+            markdown_user_text_for_cwd(text, links)
+        }
+        AcpEntry::UserWithImages { text, .. } => markdown_user_text_for_cwd(text, links),
+        AcpEntry::Assistant { text, .. } => markdown_text_for_cwd(text, links),
         AcpEntry::ToolCall { title, output, .. } if is_task_completion_tool_title(title) => {
             let text = completion_summary_text(output);
             if text.trim().is_empty() {
                 return None;
             }
-            markdown_text_for_cwd(&text, cwd)
+            markdown_text_for_cwd(&text, links)
         }
         _ => return None,
     };
@@ -6631,29 +6663,29 @@ fn markdown_for_entry(entry: &AcpEntry, cwd: Option<&str>) -> Option<gpui::Share
 
 fn build_markdown_cache(
     entries: &[AcpEntry],
-    cwd: Option<&str>,
+    links: FileLinks<'_>,
 ) -> Vec<Option<gpui::SharedString>> {
     entries
         .iter()
-        .map(|entry| markdown_for_entry(entry, cwd))
+        .map(|entry| markdown_for_entry(entry, links))
         .collect()
 }
 
 fn refresh_markdown_cache(
     entries: &[AcpEntry],
     entries_offset: usize,
-    cwd: Option<&str>,
+    links: FileLinks<'_>,
     cache: &mut Vec<Option<gpui::SharedString>>,
 ) {
     if cache.len() < entries_offset {
-        *cache = build_markdown_cache(entries, cwd);
+        *cache = build_markdown_cache(entries, links);
         return;
     }
     cache.truncate(entries_offset);
     cache.extend(
         entries[entries_offset..]
             .iter()
-            .map(|entry| markdown_for_entry(entry, cwd)),
+            .map(|entry| markdown_for_entry(entry, links)),
     );
 }
 
@@ -6661,12 +6693,12 @@ fn cached_entry_markdown(
     cache: &[Option<gpui::SharedString>],
     entry_ix: usize,
     entry: &AcpEntry,
-    cwd: Option<&str>,
+    links: FileLinks<'_>,
 ) -> gpui::SharedString {
     cache
         .get(entry_ix)
         .and_then(Clone::clone)
-        .or_else(|| markdown_for_entry(entry, cwd))
+        .or_else(|| markdown_for_entry(entry, links))
         .unwrap_or_default()
 }
 
@@ -6856,7 +6888,7 @@ fn html_tag_end(text: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn resolve_relative_file_link(target: &str, cwd: Option<&str>) -> Option<String> {
+fn resolve_relative_file_link(target: &str, links: FileLinks<'_>) -> Option<String> {
     let target = target.trim();
     if target.is_empty()
         || target.starts_with('#')
@@ -6884,9 +6916,13 @@ fn resolve_relative_file_link(target: &str, cwd: Option<&str>) -> Option<String>
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::path::Path::new(cwd?).join(path)
+        std::path::Path::new(links.cwd?).join(path)
     };
     let mut url = url::Url::from_file_path(absolute).ok()?;
+    // 远程运行时上的文件：host 写运行时 id。本机的不带 host。
+    if let Some(runtime) = links.runtime {
+        url.set_host(Some(runtime)).ok()?;
+    }
     if !fragment.is_empty() {
         url.set_fragment(Some(&fragment));
     }
