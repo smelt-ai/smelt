@@ -5,6 +5,7 @@
 //! 本 crate 不许出现 GPUI 依赖。
 
 pub use smelt_model::acp_chat;
+pub use smelt_model::acp_wire;
 pub mod acp_conn;
 pub mod acp_session;
 pub mod acp_terminal;

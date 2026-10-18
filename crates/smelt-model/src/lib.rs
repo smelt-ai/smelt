@@ -3,6 +3,7 @@
 pub mod acp_chat;
 pub mod acp_conn;
 pub mod acp_session;
+pub mod acp_wire;
 pub mod agent_bus;
 pub mod agent_definition;
 pub mod agent_definition_store;

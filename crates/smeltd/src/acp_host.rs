@@ -3,6 +3,7 @@
 //! 从 `main.rs` 整块搬出。连接与归约仍在 `smelt_core::acp_session`；这里只跑守护侧的会话活体。
 
 use super::*;
+use smelt_core::acp_wire::EntryMirror;
 use std::collections::{BTreeSet, VecDeque};
 
 // ===================== ACP 会话托管 =====================
@@ -691,6 +692,9 @@ struct SnapshotMailbox {
 struct SnapshotLinkInner {
     mailbox: Mutex<SnapshotMailbox>,
     cv: Condvar,
+    /// 下一帧发整段帧并重建发送方镜像：对方要了完整快照（`Refresh`），
+    /// 例如守护交接后接手的读端手里没有镜像。
+    resync: AtomicBool,
     closed: AtomicBool,
     finishing: AtomicBool,
     failed: AtomicBool,
@@ -747,6 +751,11 @@ impl AcpSnapshotLink {
         }
         drop(mailbox);
         self.inner.cv.notify_one();
+    }
+
+    /// 下一帧改发整段帧。调用方随后要记脏，写线程才会出帧。
+    fn request_full_frame(&self) {
+        self.inner.resync.store(true, Ordering::SeqCst);
     }
 
     /// 历史页回包和快照共用写线程，避免和快照字节抢同一条 socket。
@@ -810,6 +819,7 @@ pub(crate) struct EncodedAcpSnapshot {
 
 type SnapshotEncode = Arc<
     dyn Fn(
+            SnapshotFrameKind<'_>,
             usize,
             bool,
             bool,
@@ -821,11 +831,29 @@ type SnapshotEncode = Arc<
         + Sync,
 >;
 
+/// 这一帧怎么编码条目。两种都会更新这条连接的发送方镜像。
+pub(crate) enum SnapshotFrameKind<'a> {
+    /// 只发相对镜像的变化。
+    Delta(&'a mut EntryMirror),
+    /// 整段帧，镜像按它重建。
+    Full(&'a mut EntryMirror),
+}
+
+/// 按首帧的条目建发送方镜像：首帧是整段帧，对方手里就是这一段。
+pub(crate) fn sent_mirror(
+    snapshot: &smelt_core::acp_session::ConversationSnapshot,
+) -> EntryMirror {
+    let mut mirror = EntryMirror::default();
+    mirror.splice(snapshot.entries_offset, &snapshot.entries);
+    mirror
+}
+
 type SnapshotDetach = Arc<dyn Fn(RawFd) + Send + Sync>;
 
 pub(crate) fn spawn_acp_snapshot_link(
     stream: UnixStream,
     initial: Vec<u8>,
+    mirror: EntryMirror,
     tool_debug_generation_sent: u64,
     id: &str,
     kind: &'static str,
@@ -841,6 +869,7 @@ pub(crate) fn spawn_acp_snapshot_link(
             lines: VecDeque::new(),
         }),
         cv: Condvar::new(),
+        resync: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         finishing: AtomicBool::new(false),
         failed: AtomicBool::new(false),
@@ -856,6 +885,7 @@ pub(crate) fn spawn_acp_snapshot_link(
             acp_snapshot_writer(SnapshotWriter {
                 stream,
                 initial,
+                mirror,
                 encode,
                 detach,
                 inner: writer_inner,
@@ -889,10 +919,13 @@ impl SnapshotProjection {
     };
 }
 
+/// `initial` 是首帧（整段帧），`mirror` 按同一份快照建：见 [`sent_mirror`]。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn acp_snapshot_link_for_slot(
     slot: &Arc<AcpSlot<AcpSession>>,
     stream: UnixStream,
     initial: Vec<u8>,
+    mirror: EntryMirror,
     tool_debug_generation_sent: u64,
     id: &str,
     kind: &'static str,
@@ -903,11 +936,13 @@ pub(crate) fn acp_snapshot_link_for_slot(
     spawn_acp_snapshot_link(
         stream,
         initial,
+        mirror,
         tool_debug_generation_sent,
         id,
         kind,
         Arc::new(
-            move |from,
+            move |frame_kind,
+                  from,
                   should_persist,
                   include_envelope,
                   include_runtime_debug,
@@ -916,6 +951,7 @@ pub(crate) fn acp_snapshot_link_for_slot(
                 let slot = encode_slot.upgrade()?;
                 Some(encode_acp_snapshot(
                     &slot.value,
+                    frame_kind,
                     from,
                     should_persist,
                     include_envelope,
@@ -938,6 +974,8 @@ pub(crate) fn acp_snapshot_link_for_slot(
 struct SnapshotWriter {
     stream: UnixStream,
     initial: Vec<u8>,
+    /// 对方手里有哪些条目。只有这条写线程读写它。
+    mirror: EntryMirror,
     encode: SnapshotEncode,
     detach: SnapshotDetach,
     inner: Arc<SnapshotLinkInner>,
@@ -950,6 +988,7 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
     let SnapshotWriter {
         mut stream,
         initial,
+        mut mirror,
         encode,
         detach,
         inner,
@@ -997,7 +1036,13 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
             continue;
         };
         let sent_generation = inner.tool_debug_generation_sent.load(Ordering::SeqCst);
+        let frame_kind = if inner.resync.swap(false, Ordering::SeqCst) {
+            SnapshotFrameKind::Full(&mut mirror)
+        } else {
+            SnapshotFrameKind::Delta(&mut mirror)
+        };
         let Some(encoded) = encode(
+            frame_kind,
             job.from,
             job.should_persist,
             job.include_envelope,
@@ -1084,8 +1129,12 @@ pub(crate) fn detach_failed_snapshot_link(sess: &AcpSession, fd: RawFd) {
     out.watchers.retain(|link| link.fd != fd);
 }
 
+/// 编码一帧。增量帧只带相对 `frame_kind` 里镜像的条目变化；整段帧带从 `from` 起的
+/// 条目，镜像按它重建。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_acp_snapshot(
     sess: &AcpSession,
+    frame_kind: SnapshotFrameKind<'_>,
     from: usize,
     should_persist: bool,
     include_envelope: bool,
@@ -1098,7 +1147,7 @@ pub(crate) fn encode_acp_snapshot(
         history: include_history,
         debug: include_debug,
     } = projection;
-    let (mut snap, live, tool_debug_generation, included_tool_debug) = {
+    let (mut snap, entries_delta, live, tool_debug_generation, included_tool_debug) = {
         let reduced = sess.reduced.lock().unwrap();
         let tool_debug_generation = reduced.tool_debug_generation;
         let included_tool_debug =
@@ -1111,26 +1160,46 @@ pub(crate) fn encode_acp_snapshot(
         } else {
             smelt_core::acp_session::live_from_state(&reduced)
         };
-        let mut snapshot = if include_history {
-            reduced.to_snapshot_range_selective(
-                should_persist,
-                from,
-                reduced.entries_total(),
-                included_tool_debug,
-                include_runtime_body,
-                include_envelope,
-            )
+        let window_end = if include_history {
+            reduced.entries_total()
         } else {
-            // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
-            // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
+            open_end
+        };
+        let range = |start| {
             reduced.to_snapshot_range_selective(
                 should_persist,
-                from.min(history_len),
-                open_end,
+                start,
+                window_end,
                 included_tool_debug,
                 include_runtime_body,
                 include_envelope,
             )
+        };
+        let (mut snapshot, entries_delta) = match frame_kind {
+            SnapshotFrameKind::Full(mirror) => {
+                // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
+                // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
+                let start = if include_history {
+                    from
+                } else {
+                    from.min(history_len)
+                };
+                let snapshot = range(start);
+                mirror.splice(snapshot.entries_offset, &snapshot.entries);
+                (snapshot, None)
+            }
+            SnapshotFrameKind::Delta(mirror) => {
+                // 条目不进快照，只发相对对方镜像的变化。已收尾的回合不会再长，
+                // 双方都不必再为它留镜像。
+                let delta = mirror.encode(
+                    reduced.entries_base(),
+                    reduced.entries(),
+                    from,
+                    window_end,
+                    history_len.min(from),
+                );
+                (range(window_end), Some(delta))
+            }
         };
         if let Some(runtime_debug) =
             runtime_debug.filter(|_| include_runtime_debug && include_debug)
@@ -1144,7 +1213,13 @@ pub(crate) fn encode_acp_snapshot(
             snapshot.tool_debug = None;
         }
         snapshot.snapshot_revision = sess.snapshot_revision.fetch_add(1, Ordering::SeqCst) + 1;
-        (snapshot, live, tool_debug_generation, included_tool_debug)
+        (
+            snapshot,
+            entries_delta,
+            live,
+            tool_debug_generation,
+            included_tool_debug,
+        )
     };
     if include_envelope {
         set_conversation_snapshot(sess, &mut snap);
@@ -1159,6 +1234,7 @@ pub(crate) fn encode_acp_snapshot(
         live: &live,
         snapshot: &snap,
         provider_pid,
+        entries_delta: entries_delta.as_ref(),
     }
     .to_line_bytes();
     EncodedAcpSnapshot {
@@ -1219,6 +1295,14 @@ fn push_acp_snapshot_since_with_runtime_debug(
             include_envelope,
             runtime_debug.clone(),
         );
+    }
+}
+
+/// 对方要了完整快照：各连接下一帧改发整段帧，发送方镜像跟着重建。
+fn request_full_snapshot_frames(sess: &AcpSession) {
+    let out = sess.out.lock().unwrap();
+    for link in out.client.iter().chain(out.watchers.iter()) {
+        link.request_full_frame();
     }
 }
 
@@ -2714,7 +2798,11 @@ fn apply_acp_user_action_inner(
     {
         return Err("automation Run input is daemon-owned");
     }
-    if let Some(hosted) = sess.hosted_handle.lock().unwrap().as_ref() {
+    // Refresh 要的是这个守护手里的完整快照：发给连着它的客户端，宿主模式下也由这里答，
+    // 不转给宿主。父进程要宿主重发时直接调 `request_full_snapshot`。
+    if !matches!(action, AcpUserAction::Refresh)
+        && let Some(hosted) = sess.hosted_handle.lock().unwrap().as_ref()
+    {
         // 历史页由父进程直接问宿主，不能被 GUI 动作转发过去。
         if matches!(action, AcpUserAction::HistoryPage { .. }) {
             return Err("history page is internal");
@@ -2726,6 +2814,7 @@ fn apply_acp_user_action_inner(
     }
     match action {
         AcpUserAction::Refresh => {
+            request_full_snapshot_frames(sess);
             push_acp_snapshot_since_with_runtime_debug(sess, false, Some(0), true, true, None);
             Ok(())
         }
@@ -3311,12 +3400,14 @@ pub(crate) fn handle_acp_open(
                 live: &live,
                 snapshot: &snapshot,
                 provider_pid,
+                entries_delta: None,
             }
             .to_line_bytes();
             let Ok(attachment) = acp_snapshot_link_for_slot(
                 &slot,
                 c,
                 initial,
+                sent_mirror(&snapshot),
                 tool_debug_generation,
                 &id,
                 "acp-client",
@@ -3802,6 +3893,7 @@ pub(crate) fn handle_acp_watch(
             &slot,
             c,
             initial,
+            sent_mirror(&snapshot),
             tool_debug_generation,
             &id,
             "acp-watcher",
@@ -4544,10 +4636,13 @@ mod snapshot_link_tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
 
+        let mut mirror = EntryMirror::default();
+        mirror.splice(0, &[]);
         let link = acp_snapshot_link_for_slot(
             &slot,
             server,
             b"{\"snapshot\":\"initial\"}\n".to_vec(),
+            mirror,
             0,
             "acp-burst",
             "acp-client",

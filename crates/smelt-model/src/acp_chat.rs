@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 消息流里的一条。由 agent 会话历史重放，也可随 smeltd 热升级快照交接。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AcpEntry {
     User(String),
     /// 带图片的用户消息。保留旧的 `User(String)` 变体，兼容已有快照。
@@ -161,7 +161,7 @@ pub struct AcpImage {
 }
 
 /// 工具调用的一段输出：纯文本，文件 diff，或嵌入的 ACP 终端。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ToolOutputPart {
     Text(String),
     Diff {

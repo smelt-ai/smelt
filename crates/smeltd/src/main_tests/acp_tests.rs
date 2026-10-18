@@ -9,6 +9,26 @@ fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
     Arc::new(make_acp_session_value(id, reduced))
 }
 
+/// 没发首帧的连接：对方手里什么都没有，之后的增量帧会把条目整条带过去。
+fn nothing_sent() -> smelt_core::acp_wire::EntryMirror {
+    let mut mirror = smelt_core::acp_wire::EntryMirror::default();
+    mirror.splice(0, &[]);
+    mirror
+}
+
+/// 像客户端那样读一帧：增量帧经接收方镜像还原成「从第一个变化的条目到末尾」。
+/// 这些测试的连接没发首帧，接收方也从什么都没有开始。
+fn decoded_frame(line: &str) -> serde_json::Value {
+    let mut frame: serde_json::Value = serde_json::from_str(line).unwrap();
+    if let Some(delta) = frame.get("entries_delta").cloned() {
+        let delta: smelt_core::acp_wire::EntriesDelta = serde_json::from_value(delta).unwrap();
+        let (first, entries) = nothing_sent().apply(&delta).unwrap();
+        frame["snapshot"]["entries_offset"] = first.into();
+        frame["snapshot"]["entries"] = serde_json::to_value(entries).unwrap();
+    }
+    frame
+}
+
 fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> AcpSnapshotLink {
     let tool_debug_generation_sent = sess.reduced.lock().unwrap().tool_debug_generation;
     let encode_sess = Arc::downgrade(sess);
@@ -16,11 +36,13 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
     spawn_acp_snapshot_link(
         stream,
         Vec::new(),
+        nothing_sent(),
         tool_debug_generation_sent,
         id,
         "acp-test",
         Arc::new(
-            move |from,
+            move |frame_kind,
+                  from,
                   should_persist,
                   include_envelope,
                   include_runtime_debug,
@@ -29,6 +51,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
                 let sess = encode_sess.upgrade()?;
                 Some(encode_acp_snapshot(
                     &sess,
+                    frame_kind,
                     from,
                     should_persist,
                     include_envelope,
@@ -410,6 +433,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
             &slot,
             control_server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-action",
             "acp-test",
@@ -2811,7 +2835,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let response = decoded_frame(&line);
     assert_eq!(response["snapshot"]["entries_offset"], 0);
     assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -2844,6 +2868,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
             &slot,
             server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-turn-failed",
             "acp-client",
@@ -2863,7 +2888,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let frame = decoded_frame(&line);
     assert_eq!(frame["live"]["history_len"], 2);
     assert!(frame["live"]["open_turn"].as_array().unwrap().is_empty());
     assert_eq!(frame["snapshot"]["entries_offset"], 1);
@@ -2908,6 +2933,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
             &slot,
             server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-hosted-turn-failed",
             "acp-client",
@@ -2936,7 +2962,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let frame = decoded_frame(&line);
     assert_eq!(frame["snapshot"]["entries_offset"], 3);
     assert_eq!(frame["snapshot"]["entries_total"], 4);
     let entries = frame["snapshot"]["entries"].as_array().unwrap();
@@ -3005,6 +3031,7 @@ fn kill_removes_session_and_closes_connections() {
             &slot,
             c_server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-3",
             "acp-test",
