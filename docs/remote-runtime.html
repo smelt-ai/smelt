@@ -295,6 +295,21 @@
   <li>编码：控制和事件消息用 JSON，PTY 数据用现有的二进制帧 <code>[type][u32 len][payload]</code>，图片和大文件走分块。</li>
   <li>不区分管理面：<code>remote_*</code>、<code>iroh_*</code>、<code>upgrade</code>、<code>shutdown</code>、设备管理和其它操作一样，本机连接和已配对设备都能调用（见 D3）。</li>
 </ul>
+<h3>终端输出的流控</h3>
+<p>原来服务端把 PTY 字节原样推给每个客户端，积压超过 8MB 就把这个客户端摘掉。远程链路每秒只有零点几到一两 MB，刷屏时每秒能产生几十 MB，所以一刷屏必断，重连再拉一份约 1MB 的快照。实测（Mac 到洛杉矶，n0 公共 relay）：刷屏几秒内被摘，只收到 1.3MB；快、慢两个客户端看同一会话时两个都被摘。</p>
+<div class="decision">
+  <div class="label">决定</div>
+  <ul>
+    <li><b>按客户端确认做流控，跟不上就合并成关键帧，不断开。</b>这是 tmux（慢客户端丢积压、稍后整屏重画）和 muxy（一帧在途 + 合并）的同一思路。不选 SSH、VS Code 那种背压：它会让程序被最慢的客户端拖住，而同一会话常常有本机、远程桌面、手机同时在看。</li>
+    <li>客户端每解析完一批输出就回确认：上行帧 type 2，载荷是从快照第一个字节起的累计字节数（u64 BE）。写端只保留最新值，排队中的多次确认合并成一帧。</li>
+    <li>服务端限制「已发出、未确认」的实时输出 ≤ 512KB。超了就不再发给这个客户端（合并）；它确认到只剩 ≤ 128KB 在途时，补一帧<b>当前屏幕</b>；完全追平后，再补一帧<b>带滚动历史</b>的，把合并期间跳过的内容补回来。关键帧本身不占窗口，否则补一次完整历史就会把紧随其后的输出挤成合并。</li>
+    <li>关键帧 = 几何标记 + RIS（<code>ESC c</code>）+ 现有的附着快照。RIS 让客户端回到全新终端的状态，所以关键帧可以随时插进字节流，效果和重新附着完全一样。<b>客户端的终端解析和渲染不用改。</b></li>
+    <li>只读的旁观连接（<code>watch</code>）不回确认，仍按 8MB 邮箱上限兜底。</li>
+    <li>本机 unix socket 确认几乎即时，在途远到不了窗口，平时行为和原来一致；只有程序输出比桌面解析还快时才会合并，原来那种情况同样会被断开。</li>
+  </ul>
+</div>
+<p>暂不做、各自单独评估的：下行也改成分帧并下发事件帧（通知、响铃、剪贴板），等 P4 手机需要时再做；终端查询（光标位置、设备属性等）改由服务端统一应答，它顺带修掉「两个客户端同时附着时重复应答」的老问题，但和这次无关；客户端只画行的瘦客户端（muxy 的做法），以后要做也可以在分帧协议上加一种行帧。</p>
+<p>实测（合并后）：刷屏的各个场景都不再断开、都看到结尾；刷屏时另一个会话的回显稳定在 170–210ms；快慢两个客户端同看一个会话也都不断开。这次测量的连接被 Surge 带上了一条带宽极差的直连路径（见第 14 节），速度数字不可比，换稳定路径后要重测。</p>
 
 <!-- ───────────────────────────────────────── -->
 <h3>协议客户端：桌面和手机共用一份 Rust 实现</h3>
@@ -480,7 +495,8 @@
   <tr><td>文件监听</td><td><span class="chip chip-done">已完成</span> macOS 照旧 FSEvents 递归；其它平台自己遍历，只给非噪音目录加非递归 watch（<code>target</code>、<code>node_modules</code> 等不占 watch），<code>.git</code> 只看它本身和 <code>refs</code>，新建目录在事件里补上；<code>max_user_watches</code> 用完就只监听已加上的部分并记日志</td><td>能力清单里报告降级</td></tr>
   <tr><td>对端身份鉴权</td><td><span class="chip chip-done">已有</span> <code>SO_PEERCRED</code> + <code>/proc/&lt;pid&gt;/exe</code></td><td>补测试</td></tr>
   <tr><td>子进程监控</td><td><span class="chip chip-done">已有</span> pidfd</td><td></td></tr>
-  <tr><td>独立启动</td><td><span class="chip chip-done">已完成</span> <code>smeltd install</code> 写 systemd 用户单元并启动（<code>KillMode=process</code>，会话进程由守护自己收拾），没开 linger 时提示；<code>smeltd uninstall</code> / <code>status</code> / <code>--version</code></td><td></td></tr>
+  <tr><td>独立启动</td><td><span class="chip chip-done">已完成</span> <code>smeltd install</code> 写 systemd 用户单元并启动（<code>KillMode=process</code>，会话进程由守护自己收拾），没开 linger 时提示；<code>smeltd uninstall</code> / <code>status</code> / <code>--version</code>。加子命令时曾把分流放在会话宿主判断前面，守护用 <code>--acp-session-host</code> 拉起自己被当成未知子命令退出，本机和远程的对话会话全部起不来、无限重启；已修，并有启动分流的回归测试</td><td></td></tr>
+  <tr><td>全新机器缺的系统依赖</td><td><span class="chip chip-split">部分</span> 在全新的 Debian 13 上实测：准备受管 Pi 运行时要调用系统的 <code>unzip</code>，没有就报「无法执行 unzip」；用 npm 装 CLI 时不看 Node 版本，Pi CLI 要求 Node ≥ 22.19 而 Debian 13 自带 20，装上了却跑不起来，只在探测的 <code>--version</code> 里报错</td><td>smeltd 自己解压，不依赖 <code>unzip</code>；装 CLI 前检查 Node 版本，不满足就明确报错</td></tr>
   <tr><td>iroh 接入</td><td><span class="chip chip-done">已完成</span> 运行时直接接收 <code>smelt/runtime/1</code> 的流，每条流桥接成 socketpair 交给同一个分发器；没配自建 relay 就用 n0 公共 relay 和地址发现。开关归运行时（<code>remote.config.set</code> / <code>remote.status</code>），启动按配置自愈、绑定失败一直退避重试。无头机器上 <code>smeltd pair</code> 顺手把远程访问打开</td><td></td></tr>
   <tr><td>配对与设备管理</td><td><span class="chip chip-done">已完成</span> 库结构 v17 的 <code>paired_device</code> 表；一次性配对码（10 分钟、猜错 5 次全部作废）；未配对设备只能调 <code>device.pair</code>；<code>smeltd pair</code> 打印配对串和终端二维码，<code>smeltd devices [revoke]</code>；撤销立即断开该设备的全部连接。长期 token、网关、<code>write_enabled</code> 已删除</td><td></td></tr>
   <tr><td>菜单栏、IOKit 防休眠</td><td><span class="chip chip-na">不适用</span> 已有桩实现</td><td>能力清单里如实报告没有</td></tr>
@@ -535,7 +551,7 @@
       <li><b>连接底层</b> <span class="chip chip-done">已完成</span>：<code>smelt_client::runtime::{RuntimeKey, Runtime}</code>；会话操作、ACP 会话、事件订阅、终端都按所属运行时连；远程运行时共用一个客户端 iroh 身份；设置页「其他运行时」粘贴配对串添加、移除，<code>RuntimeHub</code> 记着状态。</li>
       <li><b>按运行时分空间</b> <span class="chip chip-done">已完成</span>：<code>Workspace</code> 里每个运行时一份 <code>RuntimeSpace</code>（项目、置顶、折叠、目录同步版本和写队列、待恢复会话）；会话仍在一个列表里，从视图读出所属运行时；项目身份是 <code>ProjectRef</code>（运行时 + 根路径）。远程运行时启动时就有空间，目录各自读（离线退避重试）、各自保存；会话恢复到原来的运行时，插入位置按该运行时自己的会话排。客户端库 v2：折叠、置顶带上运行时，各会话的界面路由存在客户端（运行时库拆表后不再存）。</li>
       <li><b>状态按运行时</b>：每个运行时一条事件订阅、会话状态镜像按运行时分开 <span class="chip chip-done">已完成</span>（会话 id 是桌面生成的 UUID，通知仍按会话 id）。手机建的会话目录、自动化、外观请求、项目文件变化这些投影仍只认本机；历史标题、智能体配置、额度、CLI 探测、hooks 等还没按运行时分。</li>
-      <li><b>侧栏</b>：只连本机时不变；有远程运行时时每个运行时一段，标题显示名字和在线状态，hover 出「打开项目」（目录浏览器按运行时调）；在远程项目上新建终端、对话（远程只给裸引擎，智能体定义和 profile 还只读本机配置）。<span class="chip chip-done">已完成</span>。离线时标题标出「离线」，不缓存远程的项目和会话：桌面不为离线显示多存一份别人的目录，连上再读。</li>
+      <li><b>侧栏</b>：只连本机时不变；有远程运行时时每个运行时一段，标题显示名字和在线状态，hover 出「打开项目」（目录浏览器按运行时调）；在远程项目上新建终端、对话（远程只给裸引擎，智能体定义和 profile 还只读本机配置）。新建菜单的启动项和「装没装」都以项目所在的那台机器为准：每次打开菜单向它取 <code>launch.get</code> 和 <code>agent.cli.inspect</code>，没装的不显示，和本机一致；还没取回时只给空白终端，不拿本机的清单冒充。启动项按运行时各存一份。<span class="chip chip-done">已完成</span>。从桌面给远程装 CLI 还没有入口（运行时已有 <code>agent.cli.install</code>），归到下一步的面板按运行时。离线时标题标出「离线」，不缓存远程的项目和会话：桌面不为离线显示多存一份别人的目录，连上再读。</li>
       <li><b>面板</b>：Git、文件树、历史、搜索、额度按当前会话或项目所在的运行时调，以路径为键的缓存加上运行时。设置和能力库按运行时切换。</li>
     </ol>
     <p class="exit"><b>完成标准：</b>一个窗口挂两个本机运行时，能同时看住两边的会话。</p>
@@ -577,9 +593,10 @@
   <tr><td>「用 IDE 打开」远程路径</td><td>编辑体验</td><td>不在这次范围。本机 IDE 打不开远程路径；以后可以考虑生成 VS Code Remote 之类的链接，但那需要用户另外配好 SSH。</td></tr>
   <tr><td>所有客户端都不在线时 agent 需要关注</td><td>漏掉提醒</td><td>已知限制：手机没有推送（没有接 APNs/FCM），没有人在线就没人收到提醒。运行时保存关注状态，客户端上线拉快照后立刻显示。以后可以用路线图里的飞书卡片补上这个缺口。</td></tr>
   <tr><td>多个客户端同时看同一个终端</td><td>PTY 尺寸互相打架</td><td>现在手机连上会按自己的视口改共享 PTY 的尺寸。规则定为「最近一次有输入或聚焦的客户端说了算」，其他客户端按这个尺寸显示。</td></tr>
-  <tr><td>慢客户端拖住别人（走 relay 时大量终端输出）</td><td>其他客户端卡顿</td><td><span class="chip chip-na">待核实</span> 需要确认一个客户端回压时不会卡住 PTY 读取和其他订阅者；必要时对慢客户端丢弃中间输出，改用快照追平。</td></tr>
+  <tr><td>慢客户端拖住别人（走 relay 时大量终端输出）</td><td>其他客户端卡顿</td><td><span class="chip chip-done">已解决</span> 每个客户端有自己的写队列，PTY 读取和其他客户端本来就不受影响；跟不上的客户端改为按确认合并成关键帧，不再断开（见 D2「终端输出的流控」）。在 n0 公共 relay 上测到的「刷屏时另一会话回显卡 10 秒」是 relay 限速排队造成的，换自建 relay 后回显不受刷屏影响。</td></tr>
   <tr><td>插件读写的是客户端本机磁盘（D8）</td><td>远程运行时上插件不可用</td><td>先只支持本机运行时，P3 之后让 <code>smelt-fs</code> 转发到运行时给插件单独定的、限定目录的文件接口（D8）。</td></tr>
-  <tr><td>默认依赖 n0 的公共 relay 和 DNS 发现</td><td>n0 服务不可用时跨网连不上；n0 能看到连接元数据</td><td>已接受：内容端到端加密。同网时仍然直连；在意元数据或要保证可用性的用户改用自建 relay。</td></tr>
+  <tr><td>默认依赖 n0 的公共 relay 和 DNS 发现</td><td>n0 服务不可用时跨网连不上；n0 能看到连接元数据；<b>公共 relay 限速</b></td><td>已接受：内容端到端加密。同网时仍然直连；在意元数据或要保证可用性的用户改用自建 relay。<br><span class="chip chip-split">实测</span> Mac（台湾）到洛杉矶的 Linux，同一套基准：n0 公共 relay 吞吐 0.19MB/s、控制往返 450ms–1.2s、1MB 重连快照 4.25s；在那台 Linux 上自建 relay（iroh-relay 1.2.0 + Let's Encrypt）后吞吐 0.5–1.6MB/s、往返 320–360ms、快照 0.37s。打洞失败时 relay 是常态而不是例外，公共 relay 的限速会直接变成终端体验。<code>smelt-iroh/src/lib.rs</code> 注释写着「Smelt 不提供默认值」，与实际默认走 n0 不一致，要么改注释，要么改默认，待定。</td></tr>
+  <tr><td>客户端开着 Surge、Clash 这类增强模式（TUN）</td><td>打洞失败，或者走上一条很差的路径</td><td><span class="chip chip-split">实测</span> Surge 增强模式接管 UDP：Mac 侧变成对称 NAT，UDP 和 TCP 的出口 IP 都不一样，打洞失败、一直走 relay。另一次 iroh 打通了「直连」，对端看到的地址是某个代理节点（RTT 168ms），但带宽极差，1MB 快照要 96 秒：iroh 按延迟挑路径，不看带宽。国内用户开增强模式很常见。倾向：文档里写明给 Smelt 设 UDP 直连规则或排除出增强模式；路径选择是 iroh 上游的限制，暂不自己做。</td></tr>
   <tr><td>公司内网封了 UDP 出口，或者机器只能经跳板机 SSH 进入</td><td>iroh 直连和公网 relay 都连不上</td><td>先在内网自建 relay。还不行，再评估把 SSH 加成第二种远程连接器；连接器接口（P0）留着这个口子，但现在不做。</td></tr>
 </table></div>
 
