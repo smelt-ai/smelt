@@ -2198,6 +2198,7 @@ impl Workspace {
     ) {
         let changed = self.stage_cover != v;
         if v.is_some() {
+            self.browser = None;
             self.nav.set_active(WorkspaceRoute::Session);
         }
         self.stage_cover = v;
@@ -2337,6 +2338,7 @@ impl Workspace {
                 });
             }
             self.sync_session_ui(window, cx);
+            self.browser = None;
             self.nav.set_active(WorkspaceRoute::Session);
             let route_has_overlay = self.stage_cover.is_some();
             // 切到会话即视为看过一次性通知；结构化等待状态仍由 daemon phase 保留。

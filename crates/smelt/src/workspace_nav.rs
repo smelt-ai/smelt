@@ -12,6 +12,8 @@ pub(crate) enum WorkspaceRoute {
     Automations,
     /// 能力库：智能体共用的模型、插件和记忆。
     Capabilities,
+    /// 运行时上常驻浏览器的画面。看哪台运行时记在 Workspace 上，不落盘。
+    Browser,
     #[default]
     Session,
 }
@@ -197,12 +199,16 @@ impl WorkspaceNav {
         match self.active {
             WorkspaceRoute::Agents => self.agents.pop_to_root(),
             WorkspaceRoute::Automations => self.automations.pop_to_root(),
-            WorkspaceRoute::Capabilities | WorkspaceRoute::Session => {}
+            WorkspaceRoute::Capabilities | WorkspaceRoute::Browser | WorkspaceRoute::Session => {}
         }
     }
 
     pub(crate) fn persist(&self) -> WorkspaceRoute {
-        self.active.clone()
+        match &self.active {
+            // 浏览器画面是现场，重启后不自动连回去。
+            WorkspaceRoute::Browser => WorkspaceRoute::Session,
+            route => route.clone(),
+        }
     }
 }
 
@@ -284,6 +290,14 @@ mod tests {
         nav.pop_active_to_root();
         assert_eq!(nav.automations(), &AutomationsView::List);
         assert_eq!(nav.agents(), &AgentsView::Catalog);
+    }
+
+    #[test]
+    fn browser_route_is_not_restored_after_restart() {
+        let mut nav = WorkspaceNav::from_persisted(WorkspaceRoute::Agents);
+        nav.set_active(WorkspaceRoute::Browser);
+        assert_eq!(nav.active(), &WorkspaceRoute::Browser);
+        assert_eq!(nav.persist(), WorkspaceRoute::Session);
     }
 
     #[test]

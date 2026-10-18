@@ -109,6 +109,23 @@ fn runtime_section_header(
         .child(name)
         .when_some(unavailable, |d, label| d.child(format!("· {label}")))
         .child(div().flex_1())
+        .child({
+            let runtime = runtime.clone();
+            let workspace = workspace.clone();
+            Button::new(ElementId::from(SharedString::from(format!(
+                "runtime-browser-{key:?}"
+            ))))
+            .ghost()
+            .xsmall()
+            .icon(IconName::Globe)
+            .icon_action("浏览器")
+            .opacity(0.0)
+            .group_hover(group.clone(), |style| style.opacity(1.0))
+            .on_click(move |_ev, window, cx| {
+                let runtime = runtime.clone();
+                workspace.update(cx, |ws, cx| ws.open_browser(runtime, window, cx));
+            })
+        })
         .child(
             Button::new(ElementId::from(SharedString::from(format!(
                 "runtime-open-project-{key:?}"

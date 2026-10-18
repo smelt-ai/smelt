@@ -2140,7 +2140,7 @@ fn product_back_button(
 ///
 /// 最上 `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐。分段、标题和按钮放在这条下面，
 /// 不再塞进 34px 里贴着窗口顶。左侧让开交通灯，右侧让开窗口开关，底边是发丝。按钮自己拦住点击。
-fn product_page_chrome(left_guard: Pixels) -> Div {
+pub(crate) fn product_page_chrome(left_guard: Pixels) -> Div {
     crate::workspace_frame::with_window_drag(
         div()
             .w_full()
