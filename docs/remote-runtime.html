@@ -520,7 +520,7 @@
     <li><b>画面走 VNC</b>：业内 agent 沙盒（Daytona、E2B、Bytebot、Cua、Anthropic 的 computer use 示例）都是虚拟屏幕 + XFCE + VNC + 网页版 noVNC，人看和接管走 VNC，agent 的操作接口另走一条。WebRTC（neko、Selkies）画质好，但要视频编解码和打洞/TURN，不做。</li>
     <li><b>运行时只转发不解析</b>：新连接 <code>desktop_attach</code> 回 ok 之后就是到本机 VNC（<code>127.0.0.1:5999</code>）的原始 RFB 字节流。VNC 只听本机，外面只能经过运行时，也就是只有配对过的设备能连；走现有的 iroh，不另开端口。</li>
     <li><b>客户端用网页视图里的 noVNC</b>：<code>smelt-runtime-client</code> 在 127.0.0.1 的随机端口开转发口（websockify 的角色），提供 noVNC 页面，把页面的 WebSocket 换成 <code>desktop_attach</code>；WebSocket 必须带启动时生成的令牌、来源必须是这个口自己的页面。noVNC 用 Debian 包里的 1.6.0，编进二进制，桌面和手机共用。桌面用 <code>gpui-wry</code> 0.7.3（默认跑在 gpui-pre 上，不引入 GPUI Fast）。</li>
-    <li><b>中文另走一条</b>：VNC 只能逐键发，本机输入法拼出来的字过不去。页面下方有输入框，文字整段交给 <code>desktop.type_text</code>，运行时用 xdotool 注入到当前聚焦的窗口（对键盘上没有的字临时改一个空闲键码的映射），远端不用装输入法。</li>
+    <li><b>中文另走一条</b>：VNC 只能逐键发，本机输入法拼出来的字过不去。noVNC 页面里放一个看不见的输入元素接键盘（跟着最后一次点击走，候选窗出在那附近）：普通按键照旧由 noVNC 发出去；拼字中的按键截下来留给本机输入法，上屏的整段文字（还有 Cmd+V 粘贴的）交给 <code>desktop.type_text</code>，运行时用 xdotool 注入到当前聚焦的窗口（对键盘上没有的字临时改一个空闲键码的映射）。不用额外的输入框，远端也不用装输入法。</li>
     <li><b>打开就能操作</b>：打开远程桌面页多半就是要动手，所以直接是接管状态；切到「只看」后鼠标键盘不发，适合在旁边看 agent 干活。这个开关在客户端：能连上的都是配对过的设备，本来就有完整权限。</li>
     <li><b>进程交给 systemd</b>：浏览器不做 smeltd 的子进程，smeltd 会经常无缝升级。三个系统服务，都以普通用户运行：<code>smelt-display</code>（Xvnc <code>:99</code>，1440×900，只听本机 5999）、<code>smelt-desktop</code>（XFCE 会话）、<code>smelt-chrome</code>（调试端口只绑 127.0.0.1:9222，<code>--password-store=basic</code>）。</li>
     <li><b>agent 控制</b>：Pi 用 Playwright MCP 的 <code>--cdp-endpoint</code> 连本机 9222，和人看的是同一个 Chrome。</li>
