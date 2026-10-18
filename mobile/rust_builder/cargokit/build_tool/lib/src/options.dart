@@ -54,7 +54,8 @@ enum Toolchain {
 }
 
 class CargoBuildOptions {
-  final Toolchain toolchain;
+  /// null 表示 cargokit.yaml 没指定，由 RustBuilder 跟随仓库的 rust-toolchain。
+  final Toolchain? toolchain;
   final List<String> flags;
 
   CargoBuildOptions({
@@ -79,7 +80,7 @@ class CargoBuildOptions {
     if (node is! YamlMap) {
       throw SourceSpanException('Cargo options must be a map', node.span);
     }
-    Toolchain toolchain = Toolchain.stable;
+    Toolchain? toolchain;
     List<String> flags = [];
     for (final MapEntry(:key, :value) in node.nodes.entries) {
       if (key case YamlScalar(value: 'toolchain')) {

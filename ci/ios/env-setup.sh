@@ -16,6 +16,8 @@
 #   FLUTTER_GIT_URL           Flutter SDK 的 git 源
 #   FLUTTER_STORAGE_BASE_URL  Flutter 引擎产物的下载源
 #   PUB_HOSTED_URL            pub 包管理源
+#   RUSTUP_UPDATE_ROOT        rustup 自身的下载源
+#   RUSTUP_DIST_SERVER        Rust 工具链与 target 的下载源
 #   GEM_SOURCE_URL            RubyGems 镜像（装 CocoaPods 用）
 #   COCOAPODS_CDN_URL         CocoaPods 的 spec 源
 #   SMELT_IOS_RUBY            指定装 CocoaPods 用的 ruby 可执行文件
@@ -27,10 +29,19 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
 # Flutter    钉在 ci/lib/common.sh 的 REQUIRED_FLUTTER：那一版必须和开发机一致，
 #            否则两边会把 iOS/Android 工程来回迁移。理由见那里的注释。
 # CocoaPods  iOS 构建时 flutter 会自动调 pod install 装 Runner 的原生依赖。
+# Rust       取自仓库根 rust-toolchain.toml（见 ci/lib/common.sh 的 REQUIRED_RUST），
+#            与桌面端同一把；cargokit 编 crates/smelt-mobile 时也按它选工具链。
 REQUIRED_COCOAPODS="1.15.2"
 # Ruby       CocoaPods 的原生依赖 ffi 要求 >= 3.0。macOS 自带的 ruby 停在 2.6，
 #            且 Apple 已标为 deprecated，所以不能指望系统 ruby。
 REQUIRED_RUBY="3.0"
+
+# 真机与 Apple Silicon 模拟器。Intel 模拟器（x86_64-apple-ios）很少用到，
+# 真要用时 cargokit 会自己补装。
+RUST_IOS_TARGETS=(
+  aarch64-apple-ios
+  aarch64-apple-ios-sim
+)
 
 # resolve_ruby 的结果
 RUBY_BIN=""
@@ -178,14 +189,18 @@ write_env_file() {
   cat >>"$file" <<EOF
 
 # 工具链装在 \$HOME 下的独立目录，不碰系统目录，也不碰机器上可能已有的
-# ~/.pub-cache / ~/.gem。
+# ~/.cargo / ~/.rustup / ~/.pub-cache / ~/.gem。
 export FLUTTER_ROOT="$FLUTTER_DIR"
 export PUB_CACHE="$PUB_CACHE_DIR"
+export CARGO_HOME="$CARGO_HOME_DIR"
+export RUSTUP_HOME="$RUSTUP_HOME_DIR"
 
 # 只设 GEM_HOME：gem 会装到这里，但搜索路径仍保留 ruby 自带的 gem 目录。若把
 # GEM_PATH 也独占改掉，CocoaPods 依赖的 default gem（base64 等）就找不到了。
 export GEM_HOME="$GEM_HOME_DIR"
-export PATH="$FLUTTER_DIR/bin:$GEM_HOME_DIR/bin:\$PATH"
+# CARGO_HOME/bin 要在前：Xcode 的构建阶段继承这个 PATH，cargokit 调的 rustup
+# 必须是我们这套，不能落到机器上的 ~/.cargo/bin。
+export PATH="$FLUTTER_DIR/bin:$CARGO_HOME_DIR/bin:$GEM_HOME_DIR/bin:\$PATH"
 
 # 关掉遥测。用环境变量而不是 flutter config，后者会写 ~/.flutter，那是持久的
 # 全局状态。
@@ -197,7 +212,8 @@ export COCOAPODS_DISABLE_STATS=true
 export CP_HOME_DIR="$TOOLCHAIN_ROOT/cocoapods"
 EOF
 
-  passthrough_mirrors "$file" FLUTTER_STORAGE_BASE_URL PUB_HOSTED_URL COCOAPODS_CDN_URL
+  passthrough_mirrors "$file" FLUTTER_STORAGE_BASE_URL PUB_HOSTED_URL COCOAPODS_CDN_URL \
+    RUSTUP_DIST_SERVER
 }
 
 main() {
@@ -208,6 +224,7 @@ main() {
   echo
 
   setup_flutter
+  setup_rust_toolchain "${RUST_IOS_TARGETS[@]}"
   setup_cocoapods
   echo
 

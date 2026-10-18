@@ -29,14 +29,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
 # ── 版本要求：单一事实来源 ──────────────────────────────────────────────────
 # Flutter    钉在 ci/lib/common.sh 的 REQUIRED_FLUTTER：那一版必须和开发机一致，
 #            否则两边会把 iOS/Android 工程来回迁移。理由见那里的注释。
-# Rust       与仓库根 rust-toolchain.toml 一致。编 crates/smelt-mobile；
-#            edition 2024 需要 1.85+，桌面 CI 钉 1.97.0，移动端跟同一把。
+# Rust       取自仓库根 rust-toolchain.toml（见 ci/lib/common.sh 的 REQUIRED_RUST），
+#            与桌面端同一把；cargokit 编 crates/smelt-mobile 时也按它选工具链。
 # JDK        Gradle 9.1 + AGP 9 支持到 JDK 25；JDK 26 目前会被 Gradle 直接拒绝，
 #            所以这里既要下限也要上限。
 # SDK/NDK    必须和 Flutter 模板里的默认值一致，见
 #            packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt。
 #            改这里要同步 mobile/rust_builder/android/build.gradle 里写死的那份。
-REQUIRED_RUST="1.97.0"
 REQUIRED_JDK_MIN=17
 REQUIRED_JDK_MAX=25
 ANDROID_COMPILE_SDK="36"
@@ -132,59 +131,10 @@ setup_flutter() {
 }
 
 # ── Rust ────────────────────────────────────────────────────────────────────
-# 和 ci/mac/env-setup.sh 共用 CARGO_HOME / RUSTUP_HOME，区别只在多装几个
-# Android target。
+# 安装逻辑与 mac/ios 共用（ci/lib/common.sh 的 setup_rust_toolchain），这里只
+# 多给几个 Android target。
 setup_rust() {
-  export CARGO_HOME="$CARGO_HOME_DIR" RUSTUP_HOME="$RUSTUP_HOME_DIR"
-  local rustup_bin="$CARGO_HOME_DIR/bin/rustup"
-  local rustc_bin="$CARGO_HOME_DIR/bin/rustc"
-  local have=""
-  have="$(tool_version "$rustc_bin" --version)"
-
-  if need_install "Rust" "$have" "$REQUIRED_RUST"; then
-    [[ "$CHECK_ONLY" == 1 ]] && die "Rust 不满足要求（--check 模式不安装）"
-
-    if [[ -x "$rustup_bin" ]]; then
-      info "升级 Rust 到 $REQUIRED_RUST"
-      "$rustup_bin" toolchain install "$REQUIRED_RUST" --profile minimal || die "Rust 工具链安装失败"
-      "$rustup_bin" default "$REQUIRED_RUST" || die "切换默认工具链失败"
-    else
-      info "安装 rustup 到 $CARGO_HOME_DIR"
-      mkdir -p "$TOOLCHAIN_ROOT"
-      # 和 ci/mac/env-setup.sh 一样走架构无关的安装脚本。按 uname -m 自己拼
-      # dist/<arch>-apple-darwin/rustup-init 是错的：Apple Silicon 上 uname -m
-      # 返回 arm64，而 rustup 的分发路径用的是 Rust 三元组里的 aarch64，拼出来
-      # 的 URL 一定 404。
-      local init="$TOOLCHAIN_ROOT/rustup-init.sh"
-      curl -fsSL --retry 3 "${RUSTUP_UPDATE_ROOT:-https://sh.rustup.rs}" -o "$init" \
-        || die "下载 rustup 失败。内网机器请设置 RUSTUP_UPDATE_ROOT 指向镜像。"
-      # --no-modify-path 是关键：默认行为会往 ~/.profile、~/.bashrc 里塞 PATH，
-      # 那是对构建机的永久污染。PATH 由本脚本写进 ci/.env/android.sh。
-      sh "$init" -y --no-modify-path --default-toolchain "$REQUIRED_RUST" --profile minimal \
-        || die "rustup 安装失败"
-      rm -f "$init"
-    fi
-    ok "Rust $(tool_version "$rustc_bin" --version)"
-  fi
-
-  # Android target 必须装到 rust-toolchain.toml 钉死的那套工具链上。装到
-  # default/stable 上，cargo 进仓库后切到 1.97.0，交叉编译会找不到 target。
-  if [[ "$CHECK_ONLY" != 1 ]]; then
-    "$rustup_bin" toolchain install "$REQUIRED_RUST" --profile minimal \
-      || die "安装 Rust $REQUIRED_RUST 失败"
-  fi
-  local installed target
-  installed="$("$rustup_bin" target list --toolchain "$REQUIRED_RUST" --installed 2>/dev/null || true)"
-  for target in "${RUST_ANDROID_TARGETS[@]}"; do
-    if grep -qx "$target" <<<"$installed"; then
-      ok "Rust target $target"
-      continue
-    fi
-    [[ "$CHECK_ONLY" == 1 ]] && die "缺少 Rust target ${target}（--check 模式不安装）"
-    info "安装 Rust target ${target}（${REQUIRED_RUST}）"
-    "$rustup_bin" target add "$target" --toolchain "$REQUIRED_RUST" \
-      || die "安装 Rust target ${target} 失败"
-  done
+  setup_rust_toolchain "${RUST_ANDROID_TARGETS[@]}"
 }
 
 # ── Android SDK ─────────────────────────────────────────────────────────────
