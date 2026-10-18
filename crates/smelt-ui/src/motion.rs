@@ -1,35 +1,19 @@
-//! 状态装饰动画的统一能耗策略。
+//! 装饰动画（状态提亮、spinner、思考点）和交互过渡的共用件。
 //!
-//! GPUI 的重复动画默认跟随显示器刷新率；即使用 `with_max_fps`，每个动画元素也会
-//! 各自创建 timer。Smelt 的根视图较重，多个侧栏呼吸灯或 spinner 错峰唤醒时会让
-//! 整窗持续布局、绘制和提交 Metal。状态进入动画只走一次、同窗共用 timer，
-//! 到达静态终态后停止唤醒。进行中的 spinner 也走这只时钟，按周期循环，
-//! 不跟显示器刷新率。面板开合等交互过渡仍由调用方使用默认动画帧率。
+//! 装饰动画跟 gpui 的 `with_animation` 一样按显示器刷新率出帧，不限帧率。成本靠视图缓存压：
+//! gpui-pre 通知一个视图会把它的祖先一并标脏，祖先自己那层 render 每帧重跑；不在这条链上的
+//! `.cached()` 子树直接复用上一帧。所以重的子树（对话列表、工作台各栏）要做成 cached 实体，
+//! 链上各层的 render 只读内存。应用不在前台、窗口失焦或系统开了减弱动态效果时，停在静态终态。
 
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Element, ElementId, Entity,
-    EntityId, Global, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
-    ParentElement, Pixels, Render, Rgba, Styled as _, Transformation, Window, WindowId, hsla,
-    percentage, point, px,
+    AnyElement, App, Bounds, BoxShadow, Element, ElementId, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled as _,
+    Transformation, Window, hsla, percentage, point, px,
 };
 use gpui_component::{Icon, IconName, Sizable as _, h_flex};
 // 时间一律从 `cx.background_executor().now()` 取（测试里可换假时钟）。它返回的
 // `Instant` 在桌面端就是 std 的，直接用 std 的类型名，不为一个类型依赖 scheduler 包。
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    rc::Rc,
-    time::{Duration, Instant},
-};
-
-/// 状态提亮、一次性 pulse、spinner 等装饰过渡的最高刷新率。
-///
-/// 6 FPS 足以表达状态刚刚发生变化，并把短暂过渡的重绘量压低一个数量级。
-pub const AMBIENT_ANIMATION_MAX_FPS: f32 = 6.0;
-
-fn ambient_frame_interval() -> Duration {
-    Duration::from_secs_f32(1.0 / AMBIENT_ANIMATION_MAX_FPS)
-}
+use std::time::{Duration, Instant};
 
 /// 状态装饰动画只在用户当前能看到它时运行。
 pub const fn ambient_motion_enabled(
@@ -45,7 +29,7 @@ struct AmbientMotionState {
     application_active: bool,
 }
 
-impl Global for AmbientMotionState {}
+impl gpui::Global for AmbientMotionState {}
 
 /// 发布 macOS 应用级激活状态。`Window::is_window_active()` 只表示 key window，在
 /// 切换应用或 Space 后可能仍为 true，不能单独决定后台动画是否继续。
@@ -63,62 +47,6 @@ pub fn set_ambient_application_active(cx: &mut App, application_active: bool) {
 pub fn ambient_application_active(cx: &App) -> bool {
     cx.try_global::<AmbientMotionState>()
         .is_none_or(|state| state.application_active)
-}
-
-#[derive(Default)]
-struct AmbientFrameScheduler {
-    pending_targets: RefCell<HashMap<WindowId, HashSet<EntityId>>>,
-}
-
-impl Global for AmbientFrameScheduler {}
-
-impl AmbientFrameScheduler {
-    /// 同一窗口已有下一帧在途时，后续动画只登记所属视图，不再各自创建 timer。
-    /// 返回 true 表示调用方取得 timer 所有权。
-    fn claim(&self, window_id: WindowId, target: EntityId) -> bool {
-        let mut pending = self.pending_targets.borrow_mut();
-        let targets = pending.entry(window_id).or_default();
-        let owns_timer = targets.is_empty();
-        targets.insert(target);
-        owns_timer
-    }
-
-    fn take_targets(&self, window_id: WindowId) -> HashSet<EntityId> {
-        self.pending_targets
-            .borrow_mut()
-            .remove(&window_id)
-            .unwrap_or_default()
-    }
-}
-
-fn request_shared_ambient_frame(window: &Window, target: EntityId, cx: &mut App) {
-    if !cx.has_global::<AmbientFrameScheduler>() {
-        cx.set_global(AmbientFrameScheduler::default());
-    }
-
-    let window_id = window.window_handle().window_id();
-    if !cx
-        .global::<AmbientFrameScheduler>()
-        .claim(window_id, target)
-    {
-        return;
-    }
-
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(ambient_frame_interval())
-            .await;
-        cx.update(move |cx| {
-            let targets = cx.global::<AmbientFrameScheduler>().take_targets(window_id);
-            for target in targets {
-                // 目标是动画元素在 prepaint 时所属的响应式视图。普通 entity
-                // invalidation 会按布局依赖标脏祖先，但不会像 Window::refresh
-                // 那样绕过全部缓存。
-                cx.notify(target);
-            }
-        });
-    })
-    .detach();
 }
 
 fn ambient_transition_phase(duration: Duration, elapsed: Duration) -> (f32, bool) {
@@ -152,34 +80,16 @@ pub struct AmbientAnimationLayoutState {
     running: bool,
 }
 
-/// 一段装饰动画的参数。外层每次重建都会带来新的 `renderer`，原样交给动画视图。
-#[derive(Clone)]
-struct AmbientAnimationSpec {
+/// 按时间取相位、重建子元素、没到终态就要下一帧的元素。起点存在元素状态里。
+///
+/// 不直接用 `with_animation`：它取的是真实时钟，测试换不了；它要先有一个元素再改，
+/// 这里是按相位整个重建；`animate` 从关到开时还要从头播。
+pub struct AmbientAnimationElement {
     id: ElementId,
     duration: Duration,
     animate: bool,
     repeat: bool,
-    renderer: Rc<dyn Fn(f32) -> AnyElement>,
-}
-
-/// 装饰动画单独占一个小视图。动画帧只通知这个视图：保留模式渲染下，它外面的大
-/// 视图（比如整个工作台）直接沿用上一帧，不会跟着 6 FPS 时钟整个重建。
-///
-/// 视图实体存在外层的元素状态里，元素从树上消失时随之释放。
-pub struct AmbientAnimationElement {
-    spec: AmbientAnimationSpec,
-}
-
-struct AmbientAnimationView {
-    spec: AmbientAnimationSpec,
-}
-
-impl Render for AmbientAnimationView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        AmbientAnimationFrame {
-            spec: self.spec.clone(),
-        }
-    }
+    renderer: Box<dyn Fn(f32) -> AnyElement>,
 }
 
 impl IntoElement for AmbientAnimationElement {
@@ -191,84 +101,11 @@ impl IntoElement for AmbientAnimationElement {
 }
 
 impl Element for AmbientAnimationElement {
-    type RequestLayoutState = AnyElement;
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        Some(self.spec.id.clone())
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let id = id.expect("状态动画元素必须有稳定 id");
-        let spec = self.spec.clone();
-        let view =
-            window.with_element_state(id, |view: Option<Entity<AmbientAnimationView>>, _| {
-                let view =
-                    view.unwrap_or_else(|| cx.new(|_| AmbientAnimationView { spec: spec.clone() }));
-                (view.clone(), view)
-            });
-        // 只写不通知：动画视图跟着外层这次重建一起重画，外层不会因此被标成已变化。
-        view.update(cx, |view, _| view.spec = spec);
-        let mut element = view.into_any_element();
-        let layout_id = element.request_layout(window, cx);
-        (layout_id, element)
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        element: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        element.prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        element: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        element.paint(window, cx);
-    }
-}
-
-/// 动画视图里真正按时间取相位、预约下一帧的元素。起点存在元素状态里。
-struct AmbientAnimationFrame {
-    spec: AmbientAnimationSpec,
-}
-
-impl IntoElement for AmbientAnimationFrame {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for AmbientAnimationFrame {
     type RequestLayoutState = AmbientAnimationLayoutState;
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
-        Some(self.spec.id.clone())
+        Some(self.id.clone())
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -283,9 +120,9 @@ impl Element for AmbientAnimationFrame {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let id = id.expect("状态动画元素必须有稳定 id");
-        let duration = self.spec.duration;
-        let animate = self.spec.animate;
-        let repeat = self.spec.repeat;
+        let duration = self.duration;
+        let animate = self.animate;
+        let repeat = self.repeat;
         let now = cx.background_executor().now();
         let (phase, running) =
             window.with_element_state(id, |state: Option<AmbientAnimationState>, _window| {
@@ -307,7 +144,7 @@ impl Element for AmbientAnimationFrame {
                 };
                 (transition, state)
             });
-        let mut element = (self.spec.renderer)(phase);
+        let mut element = (self.renderer)(phase);
         let layout_id = element.request_layout(window, cx);
         (layout_id, AmbientAnimationLayoutState { element, running })
     }
@@ -322,7 +159,7 @@ impl Element for AmbientAnimationFrame {
         cx: &mut App,
     ) -> Self::PrepaintState {
         if state.running {
-            request_shared_ambient_frame(window, window.current_view(), cx);
+            window.request_animation_frame();
         }
         state.element.prepaint(window, cx);
     }
@@ -342,7 +179,7 @@ impl Element for AmbientAnimationFrame {
 }
 
 /// 构造由元素状态保存起点的一次性状态动画。调用方传入可重复执行的元素工厂，而
-/// 不是一次性的已构造元素；动画到达 1.0 后不再预约帧，稳态保持静态提示。
+/// 不是一次性的已构造元素；动画到达 1.0 后不再要帧，稳态保持静态提示。
 pub fn ambient_animation<E: IntoElement + 'static>(
     id: impl Into<ElementId>,
     duration: Duration,
@@ -350,32 +187,41 @@ pub fn ambient_animation<E: IntoElement + 'static>(
     renderer: impl Fn(f32) -> E + 'static,
 ) -> AmbientAnimationElement {
     AmbientAnimationElement {
-        spec: AmbientAnimationSpec {
-            id: id.into(),
-            duration,
-            animate,
-            repeat: false,
-            renderer: Rc::new(move |phase| renderer(phase).into_any_element()),
-        },
+        id: id.into(),
+        duration,
+        animate,
+        repeat: false,
+        renderer: Box::new(move |phase| renderer(phase).into_any_element()),
     }
 }
 
-/// 低能耗的小号 loading spinner。
+/// 按周期一直循环的装饰动画，`animate == false` 时停在相位 1。
+fn ambient_loop<E: IntoElement + 'static>(
+    id: impl Into<ElementId>,
+    cycle: Duration,
+    animate: bool,
+    renderer: impl Fn(f32) -> E + 'static,
+) -> AmbientAnimationElement {
+    AmbientAnimationElement {
+        repeat: true,
+        ..ambient_animation(id, cycle, animate, renderer)
+    }
+}
+
+/// 小号 loading spinner。
 ///
-/// 进行中一直转。帧率和同窗其它装饰动画共用一只时钟，不按显示器刷新率重绘。
-/// `animate == false` 或系统开启减弱动态效果时停在静态图标。
+/// 进行中一直转。`animate == false` 或系统开启减弱动态效果时停在静态图标。
 pub fn ambient_spinner(id: impl Into<ElementId>, color: Hsla, animate: bool) -> AnyElement {
-    let mut animation = ambient_animation(id, Duration::from_millis(800), animate, move |delta| {
+    ambient_loop(id, Duration::from_millis(800), animate, move |delta| {
         Icon::new(IconName::Loader)
             .xsmall()
             .text_color(color)
             .transform(Transformation::rotate(percentage(delta)))
-    });
-    animation.spec.repeat = true;
-    animation.into_any_element()
+    })
+    .into_any_element()
 }
 
-/// 按下反馈。交互过渡走调用方的帧率，不进 6 FPS 装饰时钟。
+/// 按下反馈。
 pub const PRESS_MS: u64 = 80;
 /// 焦点呼吸、思考展开。
 pub const BASE_MS: u64 = 200;
@@ -441,12 +287,12 @@ pub fn quiet_dot_opacity(cycle_t: f32) -> f32 {
     }
 }
 
-/// 纯思考的记号。走共享的 6 FPS 时钟，不给每个点单独开 timer。
+/// 纯思考的记号。
 ///
 /// `animate == false` 或减弱动态效果时，相位会被定在 1，而波形在 1 的透明度是 0。
 /// 那种情况画三颗静态点，避免记号消失。
 pub fn quiet_dots(id: impl Into<ElementId>, color: Hsla, animate: bool) -> AnyElement {
-    let mut animation = ambient_animation(
+    ambient_loop(
         id,
         Duration::from_millis(QUIET_DOT_CYCLE_MS),
         animate,
@@ -470,9 +316,118 @@ pub fn quiet_dots(id: impl Into<ElementId>, color: Hsla, animate: bool) -> AnyEl
                     .bg(color.opacity(opacity))
             }))
         },
-    );
-    animation.spec.repeat = true;
-    animation.into_any_element()
+    )
+    .into_any_element()
+}
+
+/// 光带往返一次的时长，单程 2.2 秒。它一跑就是好几分钟、一直在余光里，
+/// 比几秒钟的进度条走得慢。
+const SWEEP_CYCLE_MS: u64 = 4_400;
+/// 光带占轨道宽度的比例。
+const SWEEP_WIDTH: f32 = 0.3;
+/// 光晕：挂在光带中段的胶囊投影，往上偏，光主要渗到框外，不压输入的字。
+const SWEEP_HALO_ALPHA: f32 = 0.35;
+const SWEEP_HALO_BLUR_PX: f32 = 8.0;
+/// 不动时整条顶边染色的浓度，相对亮芯。
+const SWEEP_STILL_ALPHA: f32 = 0.4;
+
+/// 光带的三种样子。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepMode {
+    /// 在干活：来回扫。
+    Sweep,
+    /// 轮到用户（等批准、等回答）：停在正中，颜色由调用方换。
+    Hold,
+    /// 窗口失焦或系统减弱动态效果：整条顶边淡淡染色，不动。
+    Still,
+}
+
+/// 光带左缘在轨道上的位置（占轨道宽度的比例）。前半圈从左到右，后半圈折回，两头放慢。
+/// 光带始终整段留在轨道里，两头渐隐到透明，走到端点也不会被裁出硬边。
+fn sweep_left(cycle_t: f32) -> f32 {
+    gpui::bounce(gpui::ease_in_out)(cycle_t.rem_euclid(1.0)) * (1.0 - SWEEP_WIDTH)
+}
+
+/// 亮芯的峰值透明度。同样的蓝在浅色底上更扎眼，压低一些。
+fn sweep_core_alpha() -> f32 {
+    if crate::ui_theme::is_light() {
+        0.7
+    } else {
+        0.9
+    }
+}
+
+/// 一段两头渐隐的亮条，`left`、`width` 都是占轨道宽度的比例。
+/// 渐变只有两个色标，所以拆成左右两半各渐一边；渐到同色的透明，不渐到透明黑，免得两头发灰。
+fn sweep_band(left: f32, width: f32, color: Hsla, halo: bool) -> gpui::Div {
+    let clear = color.opacity(0.0);
+    let half = |from: Hsla, to: Hsla| {
+        gpui::div().flex_1().h_full().bg(gpui::linear_gradient(
+            90.,
+            gpui::linear_color_stop(from, 0.),
+            gpui::linear_color_stop(to, 1.),
+        ))
+    };
+    let band = h_flex()
+        .absolute()
+        .top_0()
+        .h_full()
+        .left(gpui::relative(left))
+        .w(gpui::relative(width))
+        .child(half(clear, color))
+        .child(half(color, clear));
+    if !halo {
+        return band;
+    }
+    // 光晕只挂中段一半：两头本来就渐隐，模糊边落在暗处，看不出投影的方角。
+    band.child(
+        gpui::div()
+            .absolute()
+            .top(px(-0.5))
+            .left(gpui::relative(0.25))
+            .w(gpui::relative(0.5))
+            .h(px(2.))
+            .rounded_full()
+            .shadow(vec![BoxShadow {
+                color: color.opacity(SWEEP_HALO_ALPHA),
+                offset: point(px(0.), px(-2.)),
+                blur_radius: px(SWEEP_HALO_BLUR_PX),
+                spread_radius: px(0.),
+                inset: false,
+            }]),
+    )
+}
+
+/// 运行中的光带：亮芯加光晕，铺满父元素给出的轨道。
+///
+/// `presence` 是 0 到 1 的显隐，回合开始、结束时由调用方过渡，光带淡入淡出而不是一下冒出来。
+pub fn running_sweep(
+    id: impl Into<ElementId>,
+    color: Hsla,
+    mode: SweepMode,
+    presence: f32,
+) -> AnyElement {
+    let core = color.opacity(sweep_core_alpha());
+    let layer = match mode {
+        SweepMode::Sweep => ambient_loop(
+            id,
+            Duration::from_millis(SWEEP_CYCLE_MS),
+            true,
+            move |phase| sweep_band(sweep_left(phase), SWEEP_WIDTH, core, true),
+        )
+        .into_any_element(),
+        SweepMode::Hold => {
+            sweep_band((1.0 - SWEEP_WIDTH) / 2.0, SWEEP_WIDTH, core, true).into_any_element()
+        }
+        SweepMode::Still => {
+            sweep_band(0.0, 1.0, core.opacity(SWEEP_STILL_ALPHA), false).into_any_element()
+        }
+    };
+    gpui::div()
+        .size_full()
+        .opacity(presence.clamp(0.0, 1.0))
+        .child(layer)
+        .into_any_element()
 }
 
 /// 在 RGBA 上混合。灰边插到蓝色时不能走色相，否则会绕过一整圈色环。
@@ -716,28 +671,54 @@ pub fn unit_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, Render, TestAppContext, div, px, size};
-    use std::{cell::Cell, rc::Rc, time::Duration};
+    use gpui::{Context, Render, TestAppContext, WindowHandle, div, px, size};
+    use std::{cell::RefCell, rc::Rc, time::Duration};
 
-    struct AmbientTransitionTestView {
-        parent_renders: Rc<Cell<usize>>,
-        animation_renders: Rc<Cell<usize>>,
+    struct AmbientTestView {
+        repeat: bool,
+        phases: Rc<RefCell<Vec<f32>>>,
     }
 
-    impl Render for AmbientTransitionTestView {
+    impl Render for AmbientTestView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            self.parent_renders.set(self.parent_renders.get() + 1);
-            let animation_renders = self.animation_renders.clone();
-            div().child(ambient_animation(
-                "ambient-render-boundary-test",
-                Duration::from_secs(1),
-                true,
-                move |_| {
-                    animation_renders.set(animation_renders.get() + 1);
-                    div()
-                },
-            ))
+            let phases = self.phases.clone();
+            let renderer = move |phase| {
+                phases.borrow_mut().push(phase);
+                div()
+            };
+            let id = "ambient-frame-test";
+            let cycle = Duration::from_secs(1);
+            div().child(if self.repeat {
+                ambient_loop(id, cycle, true, renderer)
+            } else {
+                ambient_animation(id, cycle, true, renderer)
+            })
         }
+    }
+
+    fn open_ambient_test_view(
+        repeat: bool,
+        cx: &mut TestAppContext,
+    ) -> (Rc<RefCell<Vec<f32>>>, WindowHandle<AmbientTestView>) {
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.), px(100.)), {
+            let phases = phases.clone();
+            move |_, _| AmbientTestView { repeat, phases }
+        });
+        cx.run_until_parked();
+        (phases, window)
+    }
+
+    /// 送出一帧，返回这一帧前有几个元素要过帧。
+    fn simulate_next_frame(
+        window: &WindowHandle<AmbientTestView>,
+        cx: &mut TestAppContext,
+    ) -> usize {
+        let callbacks = window
+            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap();
+        cx.run_until_parked();
+        callbacks
     }
 
     #[test]
@@ -779,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn ambient_animation_is_one_shot_and_frame_limited() {
+    fn ambient_animation_is_one_shot() {
         let duration = Duration::from_secs(2);
         assert_eq!(
             ambient_transition_phase(duration, Duration::from_millis(500)),
@@ -789,11 +770,6 @@ mod tests {
             ambient_transition_phase(duration, Duration::from_millis(2_500)),
             (1.0, false),
             "状态动画结束后必须停在静态终态，不能继续循环"
-        );
-        assert_eq!(
-            ambient_frame_interval(),
-            Duration::from_secs_f32(1.0 / AMBIENT_ANIMATION_MAX_FPS),
-            "装饰动画不能退回显示器刷新率"
         );
     }
 
@@ -818,70 +794,38 @@ mod tests {
         assert!(!ambient_motion_enabled(false, false, false));
     }
 
-    #[test]
-    fn ambient_frame_scheduler_coalesces_requests_per_window() {
-        let first_window = gpui::WindowId::from(1);
-        let second_window = gpui::WindowId::from(2);
-        let first_target = gpui::EntityId::from(1);
-        let second_target = gpui::EntityId::from(2);
-        let scheduler = AmbientFrameScheduler::default();
+    #[gpui::test]
+    fn ambient_animation_follows_frames_then_stops_at_the_end(cx: &mut TestAppContext) {
+        let (phases, window) = open_ambient_test_view(false, cx);
+        assert_eq!(*phases.borrow(), vec![0.0]);
 
-        assert!(scheduler.claim(first_window, first_target));
-        assert!(!scheduler.claim(first_window, first_target));
-        assert!(!scheduler.claim(first_window, second_target));
-        assert!(scheduler.claim(second_window, second_target));
+        cx.executor().advance_clock(Duration::from_millis(250));
+        assert!(simulate_next_frame(&window, cx) > 0, "动画中途必须要下一帧");
+        let mid = *phases.borrow().last().unwrap();
+        assert!((mid - 0.25).abs() < 0.01, "相位跟着时钟走，实际 {mid}");
+
+        cx.executor().advance_clock(Duration::from_secs(2));
+        assert!(simulate_next_frame(&window, cx) > 0);
+        assert_eq!(*phases.borrow().last().unwrap(), 1.0);
 
         assert_eq!(
-            scheduler.take_targets(first_window),
-            HashSet::from([first_target, second_target])
+            simulate_next_frame(&window, cx),
+            0,
+            "状态动画到达终态后不能再要帧"
         );
-        assert!(scheduler.claim(first_window, first_target));
     }
 
     #[gpui::test]
-    fn ambient_frame_stops_scheduling_after_the_transition(cx: &mut TestAppContext) {
-        let parent_renders = Rc::new(Cell::new(0));
-        let animation_renders = Rc::new(Cell::new(0));
-        cx.open_window(size(px(100.), px(100.)), {
-            let parent_renders = parent_renders.clone();
-            let animation_renders = animation_renders.clone();
-            move |_, _| AmbientTransitionTestView {
-                parent_renders,
-                animation_renders,
-            }
-        });
-        cx.run_until_parked();
+    fn ambient_loop_keeps_requesting_frames_past_one_cycle(cx: &mut TestAppContext) {
+        let (phases, window) = open_ambient_test_view(true, cx);
 
-        assert_eq!(parent_renders.get(), 1);
-        assert_eq!(animation_renders.get(), 1);
-
-        cx.executor()
-            .advance_clock(ambient_frame_interval() + Duration::from_millis(5));
-        cx.run_until_parked();
-
+        cx.executor().advance_clock(Duration::from_millis(2_500));
+        assert!(simulate_next_frame(&window, cx) > 0);
+        let phase = *phases.borrow().last().unwrap();
+        assert!((phase - 0.5).abs() < 0.01, "两圈半应回到半圈，实际 {phase}");
         assert!(
-            animation_renders.get() > 1,
-            "动画子树应在共享时钟到点后更新"
-        );
-        // gpui-pre 通知子视图时会把祖先标脏，父视图的 render 会再跑。
-        // 「沿用上一帧」只在保留模式渲染器上成立，这里不把它当门。
-
-        cx.executor().advance_clock(Duration::from_secs(2));
-        cx.run_until_parked();
-        let settled_parent_renders = parent_renders.get();
-        let settled_animation_renders = animation_renders.get();
-
-        cx.executor().advance_clock(Duration::from_secs(2));
-        cx.run_until_parked();
-        assert_eq!(
-            parent_renders.get(),
-            settled_parent_renders,
-            "状态动画到达终态后不能继续唤醒父视图"
-        );
-        assert_eq!(
-            animation_renders.get(),
-            settled_animation_renders,
-            "状态动画到达终态后不能继续创建 timer"
+            simulate_next_frame(&window, cx) > 0,
+            "循环动画过了一圈也要继续要帧"
         );
     }
 
@@ -930,6 +874,27 @@ mod tests {
         assert_eq!(quiet_dot_opacity(0.22), 1.0);
         assert_eq!(quiet_dot_opacity(0.50), 1.0);
         assert_eq!(quiet_dot_opacity(0.70), 1.0);
+    }
+
+    #[test]
+    fn sweep_goes_left_to_right_then_back_and_stays_on_the_track() {
+        assert_eq!(sweep_left(0.0), 0.0);
+        assert!(
+            (sweep_left(0.5) - (1.0 - SWEEP_WIDTH)).abs() < 1e-5,
+            "半圈走到右端"
+        );
+        assert!(sweep_left(1.0).abs() < 1e-5, "一圈回到左端");
+        assert!(sweep_left(0.25) < sweep_left(0.4), "前半圈往右");
+        assert!(sweep_left(0.6) > sweep_left(0.75), "后半圈往左");
+        let mut t = 0.0;
+        while t <= 1.0 {
+            let left = sweep_left(t);
+            assert!(
+                (0.0..=1.0 - SWEEP_WIDTH + 1e-5).contains(&left),
+                "{t} 时光带出了轨道：{left}"
+            );
+            t += 0.01;
+        }
     }
 
     #[test]

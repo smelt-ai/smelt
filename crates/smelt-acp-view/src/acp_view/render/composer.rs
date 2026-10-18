@@ -27,6 +27,8 @@ impl AcpView {
     pub(super) fn render_composer(
         &self,
         composer_focus: f32,
+        sweep_presence: f32,
+        animate_ambient: bool,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         if matches!(
@@ -445,6 +447,7 @@ impl AcpView {
                 composer_focus,
             );
             let composer = v_flex()
+                .relative()
                 .w_full()
                 .max_w(ui_theme::conversation_max_width())
                 .rounded(ui_theme::composer_radius())
@@ -995,7 +998,35 @@ impl AcpView {
                                     })),
                             )
                         }),
-                );
+                )
+                // 跑着时顶边上来回扫一道光。轨道骑在 1px 顶边上，左右让开圆角，只走直的那段。
+                // 回合结束后等它淡完再拿掉。
+                .when(sweep_presence > 0.0, |col| {
+                    // 等批准、等回答时回合还算在跑，但该用户动手了：停住、换成审批卡的黄。
+                    let awaiting_user =
+                        !self.permissions.is_empty() || self.elicitation.is_some();
+                    let (color, mode) = if awaiting_user {
+                        (ui_theme::yellow(), SweepMode::Hold)
+                    } else if animate_ambient && !cx.reduce_motion() {
+                        (ui_theme::blue(), SweepMode::Sweep)
+                    } else {
+                        (ui_theme::blue(), SweepMode::Still)
+                    };
+                    col.child(
+                        div()
+                            .absolute()
+                            .top(px(-1.))
+                            .left(ui_theme::composer_radius())
+                            .right(ui_theme::composer_radius())
+                            .h(px(1.))
+                            .child(running_sweep(
+                                "acp-composer-running-sweep",
+                                gpui::rgb(color).into(),
+                                mode,
+                                sweep_presence,
+                            )),
+                    )
+                });
 
             v_flex()
                 // 外层必须先有确定的宽度：`composer` 自己既是 `w_full` 又有

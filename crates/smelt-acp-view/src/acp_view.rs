@@ -46,9 +46,10 @@ use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
-    BASE_MS, COPY_ACK_MS, ENTER_MS, PRESS_OPACITY, ambient_animation, ambient_application_active,
-    ambient_motion_enabled, ambient_spinner, composer_shadows, copy_ack_opacity, ease_overshoot,
-    ease_snap, enter_offset_px, mix_rgba, quiet_dots, unit_transition,
+    BASE_MS, COPY_ACK_MS, ENTER_MS, PRESS_OPACITY, SweepMode, ambient_animation,
+    ambient_application_active, ambient_motion_enabled, ambient_spinner, composer_shadows,
+    copy_ack_opacity, ease_overshoot, ease_snap, enter_offset_px, mix_rgba, quiet_dots,
+    running_sweep, unit_transition,
 };
 use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;

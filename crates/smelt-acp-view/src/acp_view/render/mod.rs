@@ -43,11 +43,20 @@ impl Render for AcpView {
             window,
             cx,
         );
+        // 运行光带的显隐：回合开始淡入，结束淡出。曲线同样每个会话一条。
+        let sweep_id: gpui::ElementId = ("acp-composer-sweep", cx.entity_id()).into();
+        let sweep_presence = unit_transition(
+            sweep_id,
+            if self.is_visibly_running() { 1.0 } else { 0.0 },
+            window,
+            cx,
+        );
         if !cx.reduce_motion() && !self.pending_image_enter.is_empty() {
             window.request_animation_frame();
         }
         self.view(
             composer_focus,
+            sweep_presence,
             ambient_motion_enabled(
                 ambient_application_active(cx),
                 window.is_window_active(),
@@ -64,6 +73,7 @@ impl AcpView {
     fn view(
         &self,
         composer_focus: f32,
+        sweep_presence: f32,
         animate_ambient: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -518,7 +528,7 @@ impl AcpView {
                 .min_h(gpui::px(0.)),
         );
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
-        let input_row = self.render_composer(composer_focus, cx);
+        let input_row = self.render_composer(composer_focus, sweep_presence, animate_ambient, cx);
         v_flex()
             .size_full()
             .relative()
