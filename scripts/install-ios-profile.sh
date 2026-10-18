@@ -18,7 +18,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MOBILE_DIR="$REPO_ROOT/mobile"
-BUNDLE_ID="ai.smelt.smeltMobile"
 BUILD_MODE="profile"
 DEVICE_ID=""
 CHECK_ONLY=false
@@ -185,6 +184,27 @@ print("empty" if not any(data.values()) else "ok")
   exit 1
 }
 
+# Bundle ID 不写死：和构建一样按 xcconfig 的 include 顺序取，后写的覆盖先写的。
+# SigningDefaults 给默认值，Profile/Debug 再 include? Developer.xcconfig 让开发者换成
+# 自己 Team 下注册的 ID；Release 不读 Developer.xcconfig。
+resolve_bundle_id() {
+  local flutter_dir="$MOBILE_DIR/ios/Flutter"
+  local -a files=("$flutter_dir/SigningDefaults.xcconfig")
+  [[ "$BUILD_MODE" == "release" ]] || files+=("$flutter_dir/Developer.xcconfig")
+  local file value id=""
+  for file in "${files[@]}"; do
+    [[ -f "$file" ]] || continue
+    value=$(sed -nE 's|^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=[[:space:]]*([^[:space:]/]+).*|\1|p' "$file" | tail -n 1)
+    [[ -n "$value" ]] && id="$value"
+  done
+  [[ -n "$id" ]] || {
+    echo "无法从 ${flutter_dir} 下的 xcconfig 读出 PRODUCT_BUNDLE_IDENTIFIER。" >&2
+    exit 1
+  }
+  printf '%s' "$id"
+}
+BUNDLE_ID=$(resolve_bundle_id)
+
 APP_PATH="$MOBILE_DIR/build/ios/iphoneos/Runner.app"
 
 if [[ "$CHECK_ONLY" == true ]]; then
@@ -193,13 +213,34 @@ if [[ "$CHECK_ONLY" == true ]]; then
   exit 0
 fi
 
+# Flutter 工具链装在 ~/.smelt-ci 下，不进全局 PATH，由 ci/ios/env-setup.sh 生成的
+# env 文件提供。PATH 里已有 flutter 就尊重它，否则加载 env 文件；两者都没有时
+# 明确报错——否则下面 `flutter devices` 失败会被误报成「没连手机」。
+ensure_flutter() {
+  command -v flutter >/dev/null 2>&1 && return 0
+  local env_file="$REPO_ROOT/ci/.env/ios.sh"
+  if [[ -f "$env_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$env_file"
+  fi
+  command -v flutter >/dev/null 2>&1 && return 0
+  echo "找不到 flutter：PATH 里没有，${env_file} 也没提供。" >&2
+  echo "先跑 ./ci/ios/env-setup.sh 生成 iOS 构建环境，再重跑本脚本。" >&2
+  exit 1
+}
+
 preflight_xcode_account
+ensure_flutter
 
 # 没显式指定就自己找：真机 iOS 设备（排掉模拟器/macOS/Chrome）。恰好一台才自动选，
 # 多台时要求指定——装错设备比报错更烦人。
 if [[ -z "$DEVICE_ID" ]]; then
   echo "正在查找已连接的 iPhone…"
-  DEVICES=$(cd "$MOBILE_DIR" && flutter devices --machine 2>/dev/null | python3 -c '
+  DEVICES_JSON=$(cd "$MOBILE_DIR" && flutter devices --machine) || {
+    echo "flutter devices 执行失败（见上方输出），无法列出设备。" >&2
+    exit 1
+  }
+  DEVICES=$(printf '%s' "$DEVICES_JSON" | python3 -c '
 import json, sys
 try:
     devices = json.load(sys.stdin)
