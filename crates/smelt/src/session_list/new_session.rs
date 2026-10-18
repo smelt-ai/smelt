@@ -90,10 +90,47 @@ struct RemoteLaunchCatalog {
     diagnostics: AcpRuntimeDiagnostics,
 }
 
+/// 一个远程运行时的目录：上次读到的内容，和这次读得怎么样。菜单据此说明眼下看到的
+/// 是什么：还在读、读不到，和那台机器真的什么都没装，看起来都是只剩空白终端。
+#[derive(Clone, Debug, Default)]
+struct RemoteCatalogEntry {
+    catalog: Option<RemoteLaunchCatalog>,
+    reading: CatalogReading,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+enum CatalogReading {
+    #[default]
+    InFlight,
+    Done,
+    Failed,
+}
+
 #[derive(Default)]
-struct RemoteLaunchCatalogs(std::collections::HashMap<RuntimeKey, RemoteLaunchCatalog>);
+struct RemoteLaunchCatalogs(std::collections::HashMap<RuntimeKey, RemoteCatalogEntry>);
 
 impl gpui::Global for RemoteLaunchCatalogs {}
+
+/// 菜单底部的说明：目录不是最新时说清楚现在显示的是什么，是最新的就不说。
+fn remote_catalog_notice(runtime_name: &str, entry: Option<&RemoteCatalogEntry>) -> Option<String> {
+    let entry = entry?;
+    let have_catalog = entry.catalog.is_some();
+    match (&entry.reading, have_catalog) {
+        (CatalogReading::Done, _) => None,
+        (CatalogReading::InFlight, false) => {
+            Some(format!("正在读取「{runtime_name}」上装了哪些工具…"))
+        }
+        (CatalogReading::InFlight, true) => {
+            Some(format!("正在刷新「{runtime_name}」，先显示上次读到的"))
+        }
+        (CatalogReading::Failed, false) => {
+            Some(format!("连不上「{runtime_name}」，只能开空白终端"))
+        }
+        (CatalogReading::Failed, true) => {
+            Some(format!("连不上「{runtime_name}」，显示的是上次读到的"))
+        }
+    }
+}
 
 fn refresh_remote_launch_catalog(runtime: crate::runtimes::Runtime, cx: &mut App) {
     if runtime.is_local() {
@@ -101,6 +138,11 @@ fn refresh_remote_launch_catalog(runtime: crate::runtimes::Runtime, cx: &mut App
     }
     let key = runtime.key().clone();
     let client = runtime.client().clone();
+    cx.default_global::<RemoteLaunchCatalogs>()
+        .0
+        .entry(key.clone())
+        .or_default()
+        .reading = CatalogReading::InFlight;
     cx.spawn(async move |cx| {
         let fetched = cx
             .background_executor()
@@ -122,15 +164,22 @@ fn refresh_remote_launch_catalog(runtime: crate::runtimes::Runtime, cx: &mut App
                 )
             })
             .await;
-        // 取不到（离线、超时）就留着上一次的，下次打开再取。
-        if let Ok(catalog) = fetched {
-            cx.update(|cx| {
-                cx.default_global::<RemoteLaunchCatalogs>()
-                    .0
-                    .insert(key, catalog);
-                cx.refresh_windows();
-            });
-        }
+        // 取不到（离线、超时）就留着上一次的，标成读取失败，下次打开再取。
+        cx.update(|cx| {
+            let entry = cx
+                .default_global::<RemoteLaunchCatalogs>()
+                .0
+                .entry(key)
+                .or_default();
+            match fetched {
+                Ok(catalog) => {
+                    entry.catalog = Some(catalog);
+                    entry.reading = CatalogReading::Done;
+                }
+                Err(_) => entry.reading = CatalogReading::Failed,
+            }
+            cx.refresh_windows();
+        });
     })
     .detach();
 }
@@ -294,7 +343,8 @@ fn available_new_session_actions(runtime: &RuntimeKey, cx: &App) -> Vec<NewSessi
     }
     let catalog = cx
         .try_global::<RemoteLaunchCatalogs>()
-        .and_then(|catalogs| catalogs.0.get(runtime));
+        .and_then(|catalogs| catalogs.0.get(runtime))
+        .and_then(|entry| entry.catalog.as_ref());
     remote_new_session_actions(&conversations, catalog)
 }
 
@@ -739,6 +789,12 @@ impl RenderOnce for NewSessionPicker {
             })
             .content(move |_, _window, cx| {
                 let actions = available_new_session_actions(&runtime_key, cx);
+                let footer = remote_catalog_notice(
+                    &crate::runtimes::runtime_name(&runtime_key, cx),
+                    cx.try_global::<RemoteLaunchCatalogs>()
+                        .and_then(|catalogs| catalogs.0.get(&runtime_key)),
+                )
+                .unwrap_or_else(|| "↑↓ 选择 · Enter 创建 · Esc 关闭".to_string());
                 let popover = cx.entity();
                 picker.update(cx, |state, cx| {
                     sync_picker_state(state, &actions, popover.downgrade(), cx)
@@ -796,7 +852,7 @@ impl RenderOnce for NewSessionPicker {
                             .items_center()
                             .text_size(px(9.))
                             .text_color(gpui::rgb(ui_theme::text_faint()))
-                            .child("↑↓ 选择 · Enter 创建 · Esc 关闭"),
+                            .child(footer),
                     )
             })
     }
@@ -825,6 +881,31 @@ mod tests {
 
     fn keys(actions: &[NewSessionAction]) -> Vec<&str> {
         actions.iter().map(|action| action.key.as_str()).collect()
+    }
+
+    #[test]
+    fn the_footer_says_why_a_remote_menu_is_short() {
+        let reading = |reading, catalog: bool| RemoteCatalogEntry {
+            catalog: catalog.then(RemoteLaunchCatalog::default),
+            reading,
+        };
+        assert_eq!(remote_catalog_notice("Linux", None), None, "本机没有这一说");
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::Done, true))),
+            None
+        );
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::InFlight, false))),
+            Some("正在读取「Linux」上装了哪些工具…".to_string())
+        );
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::Failed, false))),
+            Some("连不上「Linux」，只能开空白终端".to_string())
+        );
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::Failed, true))),
+            Some("连不上「Linux」，显示的是上次读到的".to_string())
+        );
     }
 
     #[test]
