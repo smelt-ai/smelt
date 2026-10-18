@@ -346,7 +346,7 @@ pub fn git_log_view(
                         .text_color(rgb(ui_theme::action_on()))
                         .hover(|d| d.opacity(0.8))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let root = this.cur().and_then(|s| s.cwd(cx));
+                            let root = this.current_local_cwd(cx);
                             if let Some(r) = root {
                                 this.reload_git_log(r, cx);
                             }

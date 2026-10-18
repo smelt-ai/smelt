@@ -101,7 +101,13 @@ impl Workspace {
             self.ensure_git_watch(root, cx);
         }
 
-        let repo_cwds: HashSet<String> = self.sessions.iter().filter_map(|s| s.cwd(cx)).collect();
+        // 仓库信息问的是本机运行时，只收本机会话的目录。
+        let repo_cwds: HashSet<String> = self
+            .sessions
+            .iter()
+            .filter(|s| s.runtime(cx).is_local())
+            .filter_map(|s| s.cwd(cx))
+            .collect();
         for cwd in repo_cwds {
             self.ensure_repo_info(cwd, cx);
         }

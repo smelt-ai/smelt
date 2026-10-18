@@ -158,7 +158,7 @@ fn builtin_panel(tab: ToolPanelTab) -> Option<&'static BuiltinPanel> {
 /// 只数项目根一个仓库会让子仓里的改动在角标上隐形，而角标正是用户判断
 /// “要不要点进去看”的唯一依据。
 fn git_changes_badge(ws: &Workspace, cx: &mut Context<Workspace>) -> usize {
-    let Some(cwd) = ws.cur().and_then(|s| s.cwd(cx)) else {
+    let Some(cwd) = ws.current_local_cwd(cx) else {
         return 0;
     };
     let roots: Vec<String> = match ws.git_repos.get(&cwd) {

@@ -559,7 +559,9 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                         PopupMenuItem::new("恢复默认名称")
                                                             .on_click(move |_ev, _window, cx| {
                                                                 ws.update(cx, |this, cx| {
+                                                                    // 历史页读的是本机运行时的存档。
                                                                     this.set_history_custom_title(
+                                                                        &crate::runtimes::Runtime::local(),
                                                                         agent,
                                                                         reset_profile_id.clone(),
                                                                         reset_cwd.clone(),

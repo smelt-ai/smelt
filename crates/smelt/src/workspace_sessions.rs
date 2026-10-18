@@ -485,6 +485,14 @@ impl Workspace {
         self.sessions.get(self.active_session)
     }
 
+    /// 当前会话在本机上的工作目录。本机 git、文件这些查询只能用它：远程会话的路径
+    /// 在另一台机器上，拿来问本机要么查不到，要么查到同名的另一个目录。
+    pub(crate) fn current_local_cwd(&self, cx: &App) -> Option<String> {
+        self.cur()
+            .filter(|session| session.runtime(cx).is_local())
+            .and_then(|session| session.cwd(cx))
+    }
+
     /// 活动 session 变化时，完整交换右侧工作区。用 session 自己的稳定 ui_id 判断，
     /// 不依赖数组下标，所以拖拽排序、关闭前面的 session 都不会把快照串给别人。
     pub(crate) fn sync_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -905,7 +913,8 @@ impl Workspace {
                     });
                     this.add_acp_session(
                         NewAcpSessionRequest {
-                            runtime: crate::runtimes::Runtime::local(),
+                            // 从哪段对话里新开，就开在那段对话所在的运行时上。
+                            runtime: _view.read(cx).runtime().clone(),
                             agent: request.agent,
                             launch_override: Some(request.launch.clone()),
                             profile_id: request.profile_id.clone(),
@@ -1113,7 +1122,17 @@ impl Workspace {
         // 工作目录属于这次对话/Run，而非 AgentDefinition；项目菜单或触发器传来
         // 的上下文就是本次执行上下文。
         let cwd = fallback_cwd;
-        let launch = launch_override.unwrap_or_else(|| settings::acp_launch_for(agent, cx));
+        // 设置里的启动命令、环境变量和初始配置都是本机的。远程那台机器有自己的 CLI 和
+        // 配置，不能把本机的命令和环境变量（可能含密钥）带过去：先用引擎默认值，
+        // 能力库按运行时切换后改成读那台机器自己的设置。
+        let local = runtime.is_local();
+        let launch = launch_override.unwrap_or_else(|| {
+            if local {
+                settings::acp_launch_for(agent, cx)
+            } else {
+                agent.default_launch()
+            }
+        });
         let agent_model = agent_definition
             .as_ref()
             .and_then(|definition| definition.model_config_value());
@@ -1126,7 +1145,9 @@ impl Workspace {
         if !is_agent_conversation && automation_id.is_none() {
             self.remember_session_project(runtime.key(), cwd.as_deref());
         }
-        let mut initial_config = if is_agent_conversation {
+        let mut initial_config = if !local {
+            Vec::new()
+        } else if is_agent_conversation {
             settings::initial_agent_conversation_config_for(agent, cx)
         } else {
             settings::initial_acp_config_for(agent, &[], cx)
@@ -1455,24 +1476,23 @@ impl Workspace {
         let Some(active) = sess.active_term() else {
             return;
         };
-        let cwd = active.read(cx).cwd().or_else(current_dir);
+        // 新 pane 和当前 pane 在同一台机器上。退回本进程的当前目录只对本机有意义。
+        let runtime = active.read(cx).runtime().clone();
+        let cwd = active
+            .read(cx)
+            .cwd()
+            .or_else(|| runtime.is_local().then(current_dir).flatten());
         let old = sess.anchor_id();
         let session_ix = self.active_session;
         let sid = new_sid();
         let cwd_bg = cwd.clone();
         let sid_bg = sid.clone();
+        let runtime_bg = runtime.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    terminal::Terminal::spawn(
-                        &crate::runtimes::Runtime::local(),
-                        24,
-                        80,
-                        cwd_bg.as_deref(),
-                        &sid_bg,
-                        None,
-                    )
+                    terminal::Terminal::spawn(&runtime_bg, 24, 80, cwd_bg.as_deref(), &sid_bg, None)
                 })
                 .await;
             let terminal = match result {
@@ -1489,15 +1509,7 @@ impl Workspace {
                     return;
                 }
                 let view = cx.new(|cx| {
-                    TerminalView::from_terminal(
-                        cx,
-                        crate::runtimes::Runtime::local(),
-                        terminal,
-                        cwd,
-                        sid,
-                        None,
-                        None,
-                    )
+                    TerminalView::from_terminal(cx, runtime, terminal, cwd, sid, None, None)
                 });
                 let state = cx.new(|_| ResizableState::default());
                 let sess = &mut this.sessions[session_ix];
@@ -1951,16 +1963,20 @@ impl Workspace {
             SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
         };
         if kill_runtime {
-            let terminal_ids = self.sessions[ix]
+            // 每个 pane 在自己的运行时上杀：远程会话的 shell 在那台机器上。
+            let terminals = self.sessions[ix]
                 .term_leaves()
                 .iter()
-                .map(|t| t.read(cx).session_id().to_string())
+                .map(|t| {
+                    let t = t.read(cx);
+                    (t.runtime().clone(), t.session_id().to_string())
+                })
                 .collect::<Vec<_>>();
-            for id in terminal_ids {
+            for (runtime, id) in terminals {
                 // 用户主动关闭会话时要在移除视图前完成有界 kill 往返。
                 // `terminal::kill_remote` 使用 5s socket 超时，确保 App 紧接着退出时
                 // 不会把尚未送达的命令留给一个 detached 任务。
-                terminal::kill_remote(&crate::runtimes::Runtime::local(), &id);
+                terminal::kill_remote(&runtime, &id);
             }
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| v.shutdown(cx));
@@ -2089,7 +2105,7 @@ impl Workspace {
         }
         // 用户主动关 pane → 守护真正杀掉该 shell（区别于退出 GUI：那时保活）。
         let closed_session_id = view.read(cx).session_id().to_string();
-        terminal::kill_remote(&crate::runtimes::Runtime::local(), &closed_session_id);
+        terminal::kill_remote(view.read(cx).runtime(), &closed_session_id);
         if cx.try_global::<AttentionGlobal>().is_some() {
             AttentionGlobal::remove_session(&closed_session_id, cx);
         }
@@ -2459,8 +2475,12 @@ impl Workspace {
                     let title = custom_title.clone();
                     view.update(cx, |view, _cx| view.rename_session(title));
                 }
-                if let Some((agent, cwd, conversation_id)) = terminal_identity {
+                let runtime = self.sessions.get(ix).map(|session| session.runtime(cx));
+                if let Some((agent, cwd, conversation_id)) = terminal_identity
+                    && let Some(runtime) = runtime.as_ref()
+                {
                     self.set_history_custom_title(
+                        runtime,
                         agent,
                         None,
                         cwd,
@@ -2468,11 +2488,14 @@ impl Workspace {
                         custom_title.clone(),
                         cx,
                     );
-                } else if let Some((agent, profile_id, cwd, resume_id)) = history_identity {
+                } else if let Some((agent, profile_id, cwd, resume_id)) = history_identity
+                    && let Some(runtime) = runtime.as_ref()
+                {
                     if let Some(session) = self.sessions.get(ix) {
                         self.pending_history_title_persist.remove(&session.ui_id);
                     }
                     self.set_history_custom_title(
+                        runtime,
                         agent,
                         profile_id,
                         cwd,
@@ -2493,8 +2516,10 @@ impl Workspace {
                 match pane_conversation_identity(&view, cx) {
                     Some((agent, conversation_id)) => {
                         let cwd = view.read(cx).cwd().unwrap_or_default();
+                        let runtime = view.read(cx).runtime().clone();
                         view.update(cx, |t, _| t.set_custom_title(None));
                         self.set_history_custom_title(
+                            &runtime,
                             agent,
                             None,
                             cwd,
@@ -2513,7 +2538,16 @@ impl Workspace {
                 resume_id,
                 ..
             } => {
-                self.set_history_custom_title(agent, profile_id, cwd, resume_id, custom_title, cx);
+                // 历史页目前只读本机运行时的存档。
+                self.set_history_custom_title(
+                    &crate::runtimes::Runtime::local(),
+                    agent,
+                    profile_id,
+                    cwd,
+                    resume_id,
+                    custom_title,
+                    cx,
+                );
             }
         }
         self.save_state(cx);
@@ -2569,8 +2603,11 @@ impl Workspace {
         .detach();
     }
 
+    /// `runtime`：这段对话的存档在哪台机器上。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_history_custom_title(
         &mut self,
+        runtime: &crate::runtimes::Runtime,
         agent: settings::HistorySourceKind,
         profile_id: Option<String>,
         cwd: String,
@@ -2579,7 +2616,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Err(error) = smelt_client::session_ops::rename_history_title(
-            &crate::runtimes::local(),
+            runtime.client(),
             agent,
             profile_id.as_deref(),
             &resume_id,
@@ -2658,8 +2695,10 @@ impl Workspace {
             view.cwd().unwrap_or_default(),
             resume_id.to_string(),
         );
+        let runtime = view.runtime().clone();
         self.pending_history_title_persist.remove(&ui_id);
         self.set_history_custom_title(
+            &runtime,
             identity.0,
             identity.1,
             identity.2,

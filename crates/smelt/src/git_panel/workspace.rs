@@ -1182,8 +1182,7 @@ impl Workspace {
             .as_ref()
             .map(|diff| (diff.path.clone(), diff.aggregate))
             .and_then(|(path, aggregate)| {
-                self.cur()
-                    .and_then(|session| session.cwd(cx))
+                self.current_local_cwd(cx)
                     .map(|root| (root, path, aggregate))
             })
         {
