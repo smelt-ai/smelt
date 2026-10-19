@@ -1,8 +1,10 @@
-//! smeltd 自己的命令行：`install`、`uninstall`、`status`、`pair`、`devices`、`--version`。
+//! smeltd 自己的命令行：`install`、`uninstall`、`status`、`pair`、`devices`、`mcp`、
+//! `--version`。
 //!
 //! 无头机器上没有桌面来拉起守护，运行时要能自己装成常驻服务（设计文档 D7）。Linux 用
 //! systemd 用户单元：跟着这个用户的登录会话走，`loginctl enable-linger` 之后退出登录
-//! 也继续跑。macOS 上守护照旧由桌面拉起，这里只提示。
+//! 也继续跑。没有 systemd 的机器（多半是容器）只装映像，由安装脚本放的 `smelt-up` 拉起
+//! 并看着。macOS 上守护照旧由桌面拉起，这里只提示。
 
 #[cfg(any(target_os = "linux", test))]
 use std::path::Path;
@@ -27,6 +29,7 @@ pub(crate) fn maybe_run(args: &[String]) -> Option<i32> {
         "uninstall" => report(uninstall()),
         "pair" => report(pair()),
         "devices" => report(devices(&args[2..])),
+        "mcp" => report(mcp(&args[2..])),
         "help" | "--help" | "-h" => {
             print_help();
             0
@@ -43,13 +46,15 @@ fn print_help() {
     println!(
         "用法：
   smeltd             以前台方式运行守护（通常由 systemd 或桌面拉起）
-  smeltd install     装成 systemd 用户服务并立即启动（Linux）
+  smeltd install     装成 systemd 用户服务并立即启动（Linux）；没有 systemd 时只装映像
   smeltd uninstall   停止并移除 systemd 用户服务（Linux）
   smeltd status      查看本机运行时是否在跑
   smeltd pair        开启远程访问，打印一次性配对串和二维码
   smeltd devices     列出已配对设备
   smeltd devices revoke <endpoint-id>
                      撤销一台设备，立即断开它
+  smeltd mcp add <id>
+                     把内置的 MCP 服务器加进 Pi 的 mcp.json，已经有了就不动
   smeltd --version   打印版本"
     );
 }
@@ -211,6 +216,37 @@ fn devices(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// 把内置的 MCP 服务器加进 Pi 的 `mcp.json`。安装脚本会重复跑，所以已经有同名服务器就
+/// 算成功、不去动它（可能是用户改过的）。
+fn mcp(args: &[String]) -> Result<(), String> {
+    use smelt_core::control_api::{PiConfigGet, PiMcpAddPreset};
+    use smelt_core::pi_service::McpPresetParams;
+    use smelt_runtime_client::protocol::control::EmptyParams;
+
+    match args {
+        [command, id] if command == "add" => {
+            let servers = call::<PiConfigGet>(&EmptyParams::default())?
+                .mcp_servers
+                .map_err(|error| format!("读不了 Pi 的 mcp.json：{error}"))?;
+            if servers.iter().any(|server| server.name == *id) {
+                println!("Pi 的 mcp.json 里已经有 {id}");
+                return Ok(());
+            }
+            call::<PiMcpAddPreset>(&McpPresetParams { id: id.clone() })?;
+            println!("已把 {id} 加进 Pi 的 mcp.json");
+            Ok(())
+        }
+        _ => Err("用法：smeltd mcp add <内置服务器 id>".to_string()),
+    }
+}
+
+/// 这台机器是不是由 systemd 启动的，判断方法同 sd_booted(3)。容器里一般不是：装了
+/// systemctl 也连不上 systemd。
+#[cfg(target_os = "linux")]
+fn systemd_booted() -> bool {
+    Path::new("/run/systemd/system").is_dir()
+}
+
 #[cfg(target_os = "linux")]
 fn unit_path() -> Result<PathBuf, String> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
@@ -312,6 +348,12 @@ fn install_image() -> Result<PathBuf, String> {
 
 #[cfg(target_os = "linux")]
 fn install() -> Result<(), String> {
+    if !systemd_booted() {
+        // 没有服务管理器可登记。已经在跑（smelt-up 拉起的）就照常交接到新映像。
+        install_image()?;
+        println!("这台机器没有 systemd，没装服务：运行时由 smelt-up 拉起并看着");
+        return Ok(());
+    }
     // 已经在跑、却不归 systemd 管（手动起的）：收编不进来，装上去也只是两个实例抢锁。
     if smelt_runtime_client::local::local_runtime()
         .describe()
@@ -345,6 +387,11 @@ fn install() -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn uninstall() -> Result<(), String> {
+    if !systemd_booted() {
+        return Err(
+            "这台机器没有 systemd，没有服务可移除；运行时由 smelt-up 看着，停掉它即可".to_string(),
+        );
+    }
     let unit = unit_path()?;
     // 服务可能已经停了或从没装过，停和禁用失败都不算错。
     let _ = systemctl(&["disable", "--now", UNIT_NAME]);

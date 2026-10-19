@@ -1,5 +1,6 @@
-# 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release。
-# 本地打包链路复用：make dist-build → scripts/package-mac.sh（详见该脚本）。
+# 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release，
+# 再附上 Linux 运行时两种架构的包和一键安装脚本。
+# 本地打包链路复用：make dist-build → scripts/package-mac.sh；ci/linux/ci.sh package。
 name: release
 
 on:
@@ -121,3 +122,74 @@ jobs:
         with:
           files: dist/Smelt.dmg
           generate_release_notes: true
+
+  # Linux 运行时的包（设计文档 D7「一键安装」）：两种架构各在对应架构的 runner 上原生构建，
+  # 不交叉编译。在 Ubuntu 22.04 容器里编，链接的 glibc 是 2.35，Debian 12+、Ubuntu 22.04+
+  # 都能跑；直接在 runner 上编会链到更新的 glibc，老一点的系统上起不来。
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 容器里工作区属主和当前用户不一致，git 会拒绝操作。
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Toolchain
+        run: ./ci/linux/env-setup.sh
+
+      - name: Package
+        run: ./ci/linux/ci.sh package
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: smeltd-linux-${{ matrix.arch }}
+          path: dist/smeltd-*-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  # 等 dmg 那边建好 Release 再往上加，避免两边同时建。附上一键安装脚本（发布名 install.sh）
+  # 和校验和清单：一键安装从清单里认出各架构的包名，并对着它核对。
+  linux-release:
+    needs: [build, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: smeltd-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums and installer
+        run: |
+          cd dist
+          sha256sum smeltd-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          install -m 0755 ../scripts/get-smeltd.sh install.sh
+
+      - name: Add to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/smeltd-*.tar.gz
+            dist/SHA256SUMS
+            dist/install.sh

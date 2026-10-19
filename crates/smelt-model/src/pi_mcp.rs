@@ -116,6 +116,29 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
             "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
         ),
     },
+    // 远程桌面（设计文档 D9）里常驻的 Chrome：调试端口只绑本机 9222，Playwright MCP 用
+    // `--cdp-endpoint` 直接接上，不要扩展、也没有连接确认。人在远程桌面里看的是同一个
+    // 浏览器，遇到验证码、付款随时接管。`install.sh --with-desktop` 装好桌面后自动加上，
+    // 没装远程桌面的机器上连不上。版本和上面的 `playwright` 一致。
+    PiMcpPreset {
+        id: "desktop-chrome",
+        name: "远程桌面的 Chrome",
+        summary: "操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态；遇到验证码、付款，人在远程桌面里接管。要先用 install.sh --with-desktop 装好远程桌面。用 Smelt 自带的 Bun 运行。",
+        description: "Browser automation with Playwright in the always-on Chrome on this machine's remote desktop, keeping its signed-in sessions: navigate, click, type, fill forms, read accessibility snapshots and take screenshots. A person can watch and take over the same browser from the remote desktop",
+        transport: PiMcpPresetTransport::Stdio {
+            command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
+            args: &[
+                "x",
+                "--bun",
+                "@playwright/mcp@0.0.83",
+                "--cdp-endpoint",
+                "http://127.0.0.1:9222",
+            ],
+        },
+        exposure: Some("deferred"),
+        timeout_secs: None,
+        extension_url: None,
+    },
 ];
 
 impl PiMcpPreset {
