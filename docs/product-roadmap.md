@@ -66,7 +66,7 @@ app-server = smelt 直接消费 Codex 的原生 JSONL 协议
 
 沿用现有 Claude 路径（受管 Bun 在 `~/.smelt/runtime/store/bun/<generation>/`，不是 `bun-v*` 目录）：
 
-1. **首次**用适配器会话 → 若无受管 bun，自动下载锁定版本 bun  
+1. **首次**用适配器会话 → 若无受管 bun，从随包压缩包解压锁定版本（开发构建用仓库 `.cache/bun`）  
 2. `bunx <adapter>@<锁版本>` 由受管 bun 解析/缓存，**用户不必自己装 node/npx/适配器**  
 3. 出厂命令**一律 `bunx …@版本`**，不用 `npx`（避免依赖用户系统 Node）  
 4. 版本锁定在出厂默认里；设置可「升级到 latest」并写回  

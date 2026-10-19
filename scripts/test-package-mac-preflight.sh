@@ -8,6 +8,7 @@ trap 'rm -rf "$FIXTURE"' EXIT
 
 mkdir -p "$FIXTURE/scripts"
 cp "$ROOT/scripts/package-mac.sh" "$FIXTURE/scripts/package-mac.sh"
+cp "$ROOT/scripts/runtime-target.sh" "$FIXTURE/scripts/runtime-target.sh"
 cp "$ROOT/Cargo.toml" "$FIXTURE/Cargo.toml"
 mkdir -p "$FIXTURE/target/release"
 : >"$FIXTURE/target/release/smelt"
@@ -15,6 +16,24 @@ mkdir -p "$FIXTURE/target/release"
 : >"$FIXTURE/target/release/smelt-notify"
 : >"$FIXTURE/target/release/smelt-agent-mcp"
 : >"$FIXTURE/target/release/smelt-installer"
+# shellcheck source=runtime-target.sh
+source "$ROOT/scripts/runtime-target.sh"
+runtime_target
+mkdir -p "$FIXTURE/pi-runtime/dist" "$FIXTURE/.cache/bun"
+printf 'runtime\n' >"$FIXTURE/pi-runtime/dist/pi-runtime-${RUNTIME_OS}-${RUNTIME_ARCH}.tar.gz"
+perl -MDigest::SHA=sha256_hex -e 'local $/; print sha256_hex(<>), "\n"' \
+  "$FIXTURE/pi-runtime/dist/pi-runtime-${RUNTIME_OS}-${RUNTIME_ARCH}.tar.gz" \
+  >"$FIXTURE/pi-runtime/dist/archive.sha256"
+printf 'bun\n' >"$FIXTURE/.cache/bun/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.zip"
+perl -MDigest::SHA=sha256_hex -e 'local $/; print sha256_hex(<>), "\n"' \
+  "$FIXTURE/.cache/bun/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.zip" \
+  >"$FIXTURE/.cache/bun/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.sha256"
+# 校验值编进二进制：二进制必须不旧于归档。
+touch "$FIXTURE/target/release/smelt" \
+  "$FIXTURE/target/release/smeltd" \
+  "$FIXTURE/target/release/smelt-notify" \
+  "$FIXTURE/target/release/smelt-agent-mcp" \
+  "$FIXTURE/target/release/smelt-installer"
 mkdir -p "$FIXTURE/plugins/example"
 printf '%s\n' '{"id":"com.example","name":"示例"}' >"$FIXTURE/plugins/example/gpui-shell.json"
 : >"$FIXTURE/plugins/example/main.js"

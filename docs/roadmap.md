@@ -20,7 +20,7 @@
 
 - **受保护操作完全访问下也要确认，无人值守直接拒**：参考 Claude Code 完全访问下写受保护目录仍弹确认、
   Codex 可写沙箱里 `.git` / `.codex` / `.agents` 保持只读。
-  - Pi 侧 `packages/pi-agent/src/smelt-permission.ts` 给命中的调用打「受保护」标记；
+  - Pi 侧 `pi-runtime/src/smelt-permission.ts` 给命中的调用打「受保护」标记；
   - Rust 侧 `crates/smelt-core/src/pi_rpc.rs` 的 `handle_permission_request` 对标记调用在完全访问下也弹确认；
   - 自动化发起的运行要能被识别，碰到受保护操作直接拒绝，原因回给智能体。
   - 未定：保护范围。候选从窄到宽：只保护 Smelt 自身配置（`smelt agent` 增删改、`smelt automation`

@@ -41,8 +41,10 @@ __pycache__/
 /.sessions/
 /.sessions-index/
 
-# TS 包（packages/pi-agent）的依赖树，不入库。
-packages/*/node_modules/
+# Pi 运行时的依赖、打包产物，以及脚本下载的 Bun。不入库。
+/pi-runtime/node_modules/
+/pi-runtime/dist/
+/.cache/
 
 # npm pack 产物（本地验证发布内容时会生成）
 *.tgz

@@ -25,13 +25,14 @@ Extension / Tool / Skill 交付。
 
 ## 运行与安全
 
-发布时入口、Smelt Extensions、`package.json` 和 `bun.lock` 会嵌入
-`smelt-core`。受管 Bun 与 Pi 分别以完整 SHA-256 identity 发布到
-`~/.smelt/runtime/store/bun/<generation-id>/` 和
-`~/.smelt/runtime/store/pi/<generation-id>/`；Pi generation identity 同时绑定 Bun
-identity。首次准备时，Smelt 在私有 staging 中用锁定 Bun 执行
-`--frozen-lockfile --production --ignore-scripts`，验证完成后原子发布；Pi 会话持有
-两份 generation lease，并将 lease FD 继承给子进程。运行时不依赖系统 Bun。
+给人看的版本号是工作区版本。generation identity 是归档 SHA-256，并绑定 Bun
+generation、平台和桥协议。打包时 `make pi-runtime-pack` 用锁定 Bun 在干净目录执行
+`--frozen-lockfile --production --ignore-scripts`，打出当前平台的生产树归档；SHA
+写进 `pi-runtime/dist/archive.sha256`，release 构建只把这 64 个十六进制字符编进二进制。
+归档和 Bun zip 随 macOS `.app` 的 Resources、以及 Linux tar.gz 分发。首次启动校验
+SHA 后解压到 `~/.smelt/runtime/store/{bun,pi}/<generation-id>/`，走原来的 staging、
+原子发布和 lease。debug 直接使用仓库里已安装依赖的 `pi-runtime/`，不复制、不回收
+已经发布的 Pi generation。运行时不访问网络，也不依赖系统 Bun。
 
 读取与搜索工具只有在 Pi registry 证明其确为 built-in 时才默认直接执行；写文件、
 执行命令和 Extension 注册的 Tool 由权限 Extension 通过 Pi RPC 的 Extension UI

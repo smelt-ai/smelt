@@ -20,10 +20,10 @@ pub use smelt_model::pi_auth::*;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Condvar, Mutex};
 
-/// 受管运行时里的登录入口，相对 pi-agent 根目录。
+/// 受管运行时里的登录入口，相对 pi-runtime 根目录。
 const AUTH_SCRIPT: &str = "src/auth-main.ts";
 
-/// 一次「问一句、答一句」的助手命令最多等这么久。首次调用可能连带装运行时，
+/// 一次「问一句、答一句」的助手命令最多等这么久。首次调用可能连带解压运行时，
 /// 所以给得比一次网络往返宽。
 const ONE_SHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -433,7 +433,7 @@ mod tests {
 
     /// 每一种事件都要能整条落地。
     ///
-    /// 这些 JSON 逐字对应 `packages/pi-agent/src/auth-protocol.ts` 里的
+    /// 这些 JSON 逐字对应 `pi-runtime/src/auth-protocol.ts` 里的
     /// `HostEvent`。曾经 `device_code` 的字段在 TS 那边是 camelCase、在这边是
     /// snake_case，解析失败被当成噪声丢掉，界面就永远停在等待上——所以每个
     /// 可选字段这里都断言成 `Some`：只测「解析没报错」抓不到少一个键。

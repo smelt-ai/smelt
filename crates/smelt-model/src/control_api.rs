@@ -581,7 +581,7 @@ mod tests {
     use serde_json::Value;
     use smelt_runtime_client::protocol::control::*;
 
-    /// Pi 启动器（`packages/pi-agent/src/memory-host.ts`）按这份样例解析 daemon 的回复。
+    /// Pi 启动器（`pi-runtime/src/memory-host.ts`）按这份样例解析 daemon 的回复。
     /// 两边共用同一个文件，任何一边改了线上格式都会让对方的测试失败。
     #[test]
     fn agent_memory_meta_response_matches_the_pi_client_fixture() {
@@ -603,7 +603,7 @@ mod tests {
             },
         );
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../packages/pi-agent/tests/fixtures/agent-memory-meta-response.json"
+            "../../../pi-runtime/tests/fixtures/agent-memory-meta-response.json"
         ))
         .unwrap();
         assert_eq!(serde_json::to_value(response).unwrap(), fixture);

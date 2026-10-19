@@ -57,9 +57,6 @@ zstd = "0.13"
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
 
-[build-dependencies]
-serde_json = "1"
-
 [dev-dependencies]
 chrono-tz = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }

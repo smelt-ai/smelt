@@ -1,7 +1,7 @@
 //! 智能体记忆：桌面端记忆卡片的列出、删除、采纳，以及 Pi 启动器读写记忆元数据的宿主协议。
 //!
 //! 一条记忆一个 `<slug>.md`，写入由 Pi 启动器里的 `smelt-memory` 扩展校验，注入用的索引也由
-//! 它按 frontmatter 生成（`packages/pi-agent/src/memory-files.ts`），格式规则与那边保持一致。
+//! 它按 frontmatter 生成（`pi-runtime/src/memory-files.ts`），格式规则与那边保持一致。
 //! 元数据（使用统计、来源）在主库，经 `smelt-store` 读写。Pi 进程不碰数据库，也不能交给
 //! 托管它的会话宿主（会话宿主不初始化 SQLite）：它带着会话 id 和 capability token 调主
 //! daemon 的 `agent.memory.*` 控制方法，由主 daemon 调这里的 [`launch_memory_meta`] 等函数。

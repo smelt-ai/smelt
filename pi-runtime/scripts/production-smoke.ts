@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { access, cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,12 +9,6 @@ const stage = await mkdtemp(join(tmpdir(), "smelt-pi-production-smoke-"));
 
 try {
 	const paths = ["package.json", "bun.lock", "src"];
-	try {
-		await access(join(packageRoot, "patches"));
-		paths.push("patches");
-	} catch {
-		// 没有上游补丁时不复制 patches。
-	}
 	for (const path of paths) {
 		await cp(join(packageRoot, path), join(stage, path), { recursive: true });
 	}

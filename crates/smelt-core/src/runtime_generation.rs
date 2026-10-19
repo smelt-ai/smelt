@@ -385,8 +385,7 @@ pub struct PiGenerationManifest {
     pub platform: String,
     pub arch: String,
     pub bridge_protocol: String,
-    pub source_sha256: String,
-    pub dependency_sha256: String,
+    pub archive_sha256: String,
     pub bun_generation_id: String,
 }
 

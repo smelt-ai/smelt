@@ -360,12 +360,12 @@ capability）。daemon 校验令牌、会话未结束后，从该会话的启动
 | `smelt-core/src/agent_definition_store.rs` | `prepare_agent_definition_launch` 设置记忆目录；新增 `agent_memory_dir` / `user_memory_dir` |
 | `smelt-acp-view/src/acp_view.rs` | 设置刷新时保留 `SMELT_AGENT_LAUNCH_IDENTITY_ENVS`（说明 + 两个记忆目录） |
 | `smelt-core/src/agent_memory.rs` | 新增：列出、删除记忆，供桌面端卡片使用 |
-| `packages/pi-agent/src/agent-memory.ts` | 新增：消费并规范化记忆目录 |
-| `packages/pi-agent/src/memory-files.ts` | 新增：路径解析、内容与预算校验、分层渲染记忆段落 |
-| `packages/pi-agent/src/memory-extension.ts` | 新增：分节注入、第一轮召回、使用统计、写入校验、edit 回滚、免审批判定、超限提示 |
-| `packages/pi-agent/src/memory-host.ts` | 新增：`agent.memory.*` 控制方法的客户端 |
-| `packages/pi-agent/src/memory-recall.ts` | 新增：中文分词、BM25、RRF、模型重排、重排模型选择 |
-| `packages/pi-agent/src/memory-embedding.ts` | 新增：向量服务客户端、缓存、余弦相似度 |
+| `pi-runtime/src/agent-memory.ts` | 新增：消费并规范化记忆目录 |
+| `pi-runtime/src/memory-files.ts` | 新增：路径解析、内容与预算校验、分层渲染记忆段落 |
+| `pi-runtime/src/memory-extension.ts` | 新增：分节注入、第一轮召回、使用统计、写入校验、edit 回滚、免审批判定、超限提示 |
+| `pi-runtime/src/memory-host.ts` | 新增：`agent.memory.*` 控制方法的客户端 |
+| `pi-runtime/src/memory-recall.ts` | 新增：中文分词、BM25、RRF、模型重排、重排模型选择 |
+| `pi-runtime/src/memory-embedding.ts` | 新增：向量服务客户端、缓存、余弦相似度 |
 | `smelt-core/src/memory_settings.rs` | 向量检索配置。存在运行时库 `memory_settings` 表（`crates/smelt-store/src/schema.rs`），不是 kv。键名在 `smelt-model/src/memory_settings.rs` |
 | `smelt-store`（schema v13） | 新增 `agent_memory_usage`、`agent_memory_provenance` 及仓储方法 |
 | `smelt-model` 的 `control_api`（`smelt-core` 再导出；没有 `smelt-core/src/control_api.rs`） | `agent.memory.*`。方法名在 `crates/smelt-runtime-client/src/protocol/control.rs` 的 `define_control_methods!` |
@@ -373,8 +373,8 @@ capability）。daemon 校验令牌、会话未结束后，从该会话的启动
 | `smeltd/src/automation_runtime.rs` | 自动化启动带 `SMELT_AGENT_UNATTENDED=1` |
 | `smelt-store`（schema v14） | `agent_definition.memory_enabled` |
 | `smelt/src/cli.rs` | `smelt agent create/update --memory on\|off` |
-| `packages/pi-agent/src/runtime-extensions.ts` | 注册 `smelt-memory`，位于 `smelt-permission` 之前 |
-| `packages/pi-agent/src/smelt-permission.ts` | 合法记忆写入免审批 |
+| `pi-runtime/src/runtime-extensions.ts` | 注册 `smelt-memory`，位于 `smelt-permission` 之前 |
+| `pi-runtime/src/smelt-permission.ts` | 合法记忆写入免审批 |
 | `smelt/src/agents/` | 配置页"记忆"卡片；删除智能体的提示改为"删除智能体和它的记忆" |
 
 ## 11. 测试

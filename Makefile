@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all
+.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-runtime-check pi-runtime-pack check-all
 
 build run install: SHELL := /bin/bash
 
@@ -26,7 +26,7 @@ lint-sh: ## 检查 shell 脚本里 $$var 紧跟非 ASCII 的写法
 	@# 字节当成变量名的一部分，于是 set -u 直接报 "unbound variable"。ASCII locale 下
 	@# 完全看不出来，所以只能靠这条检查兜住——本仓 echo 里中文很多，必然复发。
 	@# 修法是加花括号：$${plugin_id}（…）。
-	@out=$$(LC_ALL=C find scripts ci packages -name '*.sh' -print0 2>/dev/null \
+	@out=$$(LC_ALL=C find scripts ci pi-runtime -name '*.sh' -print0 2>/dev/null \
 		| LC_ALL=C xargs -0 grep -nE '\$$[A-Za-z_][A-Za-z0-9_]*[^[:print:][:space:]]'); \
 	if [ -n "$$out" ]; then \
 		echo "✗ shell 变量后紧跟非 ASCII 字符，请改成 \$${var}："; \
@@ -50,19 +50,27 @@ test: ## 运行全工作区单元测试（nextest：smeltd handoff 不能同进�
 		echo "✗ 需要 cargo-nextest（与 CI 同一运行器）。安装：cargo install cargo-nextest --locked"; exit 1; }
 	cargo nextest run --workspace
 
-pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
-	@bun="$$(./scripts/bun.sh --managed-only)" || { \
-		echo "✗ 找不到源码锁定版本的受管 Bun。请先运行一次 Smelt 完成 runtime 准备"; exit 1; }; \
-	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent \
-		&& "$$bun" run check \
-		&& "$$bun" run production-smoke
+pi-runtime-pack: ## 用锁定 Bun 打当前平台的 Pi 生产归档
+	./scripts/pi-runtime-pack.sh
 
-check-all: fmt-check lint lint-sh lint-paths test pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
+pi-runtime-check: ## 检查 Pi 运行时（冻结安装、类型、单测、生产冒烟）
+	@bun="$$(./scripts/bun.sh)"; \
+	cd pi-runtime && "$$bun" install --frozen-lockfile \
+		&& "$$bun" run typecheck \
+		&& "$$bun" test tests \
+		&& "$$bun" scripts/production-smoke.ts
+
+check-all: fmt-check lint lint-sh lint-paths test pi-runtime-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
 
 build: ## 编译 release 二进制（GUI + 守护 + helpers）
+	./scripts/pi-runtime-pack.sh
 	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
 
 run: ## 本地直接跑 GUI（开发用）
+	@./scripts/bun.sh >/dev/null
+	@if [ ! -f pi-runtime/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js ]; then \
+		echo "✗ 开发运行需要已安装的 pi-runtime 依赖。请先 make pi-runtime-check"; exit 1; \
+	fi
 	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
 	cargo run --bin $(BIN)
 
@@ -110,6 +118,8 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
 		|| [ target/release/smelt-agent-mcp -nt dist/Smelt.app/Contents/MacOS/smelt-agent-mcp ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
+		|| [ ! -d dist/Smelt.app/Contents/Resources/runtime ] \
+		|| [ pi-runtime/dist/archive.sha256 -nt dist/Smelt.app/Contents/Resources/runtime ] \
 		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
 		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \

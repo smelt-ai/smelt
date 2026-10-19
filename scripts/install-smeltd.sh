@@ -21,7 +21,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROGRAMS=(smeltd smelt-notify smelt-agent-mcp)
-# 准备受管 Pi 运行时要调系统的 curl、unzip。
+# 随包 Bun zip 用 unzip 解开，Pi 归档用 tar。curl 仍给安装器和 Chrome 下载用。
 BASE_PACKAGES=(ca-certificates curl unzip)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
 # 所以 Xvnc 要的 X 核心字体（fixed）和任务栏图标的主题要自己列上。
@@ -319,6 +319,11 @@ user_phase() {
     put 0755 "$HERE/$program" "$BIN/$program"
   done
   put 0755 "$HERE/smelt-up" "$BIN/smelt-up"
+  # smeltd 随后把自己发布成 ~/.smelt/bin 里的不可变映像。随包运行时必须跟到这个目录，
+  # 否则 /proc/self/exe 旁边找不到 runtime/。
+  [[ -d "$HERE/runtime" ]] || die "包里缺少 runtime（Pi 归档和 Bun 压缩包）"
+  rm -rf "$BIN/runtime"
+  cp -R "$HERE/runtime" "$BIN/runtime"
 
   # 发布不可变映像、拨启动名（已经在跑就交接到新版本，会话保留）；有 systemd 时写用户单元
   # 并启动。

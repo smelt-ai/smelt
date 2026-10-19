@@ -17,7 +17,7 @@ use smelt_model::redact::{redact_args, redact_secrets};
 
 use crate::pi_model_settings::{pi_agent_dir, read_or_create_json, write_json_file};
 
-/// 受管运行时里的 `pi mcp` 入口，相对 pi-agent 根目录。
+/// 受管运行时里的 `pi mcp` 入口，相对 pi-runtime 根目录。
 const MCP_SCRIPT: &str = "src/mcp-main.ts";
 
 /// 登录最多等浏览器这么久，和 `pi mcp login` 的默认值一致。

@@ -54,6 +54,9 @@ jobs:
             and not test(short_ordered_list_bubble_does_not_collapse_below_min_width)
           '
 
+      - name: Check Pi runtime
+        run: make pi-runtime-check
+
   mobile:
     runs-on: macos-14
     defaults:

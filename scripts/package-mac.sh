@@ -62,6 +62,8 @@ if [[ "$SKIP_DMG" -eq 0 ]]; then
 fi
 
 if [[ "$BUILD" -eq 1 ]]; then
+  echo "▶ 打包 Pi 运行时归档 …"
+  "$ROOT/scripts/pi-runtime-pack.sh"
   echo "▶ 编译 release …"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
 fi
@@ -89,6 +91,41 @@ fi
 # 校验是 arm64，避免误把 Intel 产物发给 Apple Silicon 同事
 if ! file "$BIN" | grep -q "arm64"; then
   echo "✗ $BIN 不是 arm64，同事的 Apple Silicon Mac 会闪退。请在 Apple Silicon 上编译。" >&2
+  exit 1
+fi
+
+# shellcheck source=runtime-target.sh
+source "$ROOT/scripts/runtime-target.sh"
+runtime_target
+PI_ARCHIVE="$ROOT/pi-runtime/dist/pi-runtime-${RUNTIME_OS}-${RUNTIME_ARCH}.tar.gz"
+PI_SHA_FILE="$ROOT/pi-runtime/dist/archive.sha256"
+BUN_ZIP="$ROOT/.cache/bun/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.zip"
+BUN_SHA_FILE="$ROOT/.cache/bun/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.sha256"
+sha256_file() {
+  perl -MDigest::SHA=sha256_hex -e 'local $/; print sha256_hex(<>)' "$1"
+}
+if [[ ! -f "$PI_ARCHIVE" || ! -f "$PI_SHA_FILE" ]]; then
+  echo "✗ 缺少 Pi 运行时归档。先运行 ./scripts/pi-runtime-pack.sh，再 cargo build --release" >&2
+  exit 1
+fi
+pi_actual="$(sha256_file "$PI_ARCHIVE")"
+pi_expected="$(tr -d '[:space:]' <"$PI_SHA_FILE")"
+if [[ "$pi_actual" != "$pi_expected" || ${#pi_expected} -ne 64 ]]; then
+  echo "✗ Pi 运行时归档与 archive.sha256 不一致" >&2
+  exit 1
+fi
+if [[ "$PI_SHA_FILE" -nt "$BIN" || "$PI_ARCHIVE" -nt "$BIN" ]]; then
+  echo "✗ Pi 运行时归档比 release 二进制新。校验值编在二进制里，请重新 cargo build --release" >&2
+  exit 1
+fi
+if [[ ! -f "$BUN_ZIP" || ! -f "$BUN_SHA_FILE" ]]; then
+  echo "✗ 缺少随包 Bun 压缩包。先运行 ./scripts/bun.sh" >&2
+  exit 1
+fi
+bun_actual="$(sha256_file "$BUN_ZIP")"
+bun_expected="$(tr -d '[:space:]' <"$BUN_SHA_FILE")"
+if [[ "$bun_actual" != "$bun_expected" || ${#bun_expected} -ne 64 ]]; then
+  echo "✗ Bun 压缩包与校验值不一致" >&2
   exit 1
 fi
 
@@ -166,6 +203,11 @@ for dir in "$ROOT"/plugins/*/; do
   done
   echo "  … 打包插件：$(basename "$dir")"
 done
+# 数据归档不是 Mach-O，不单独签名。Developer ID 只签 MacOS/ 里的可执行文件，再封 .app。
+mkdir -p "$RES/runtime"
+cp "$PI_ARCHIVE" "$RES/runtime/pi-runtime-${RUNTIME_OS}-${RUNTIME_ARCH}.tar.gz"
+cp "$BUN_ZIP" "$RES/runtime/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.zip"
+echo "  … 打包运行时：pi-runtime-${RUNTIME_OS}-${RUNTIME_ARCH}.tar.gz、bun-${RUNTIME_OS}-${RUNTIME_ARCH}.zip"
 
 # 可选：把当前包对应的内部发布地址写进 App。若发布系统是在打包后才生成
 # release URL，也可以不设这个变量；updater 会在成功自更新后把 URL 写入用户状态。

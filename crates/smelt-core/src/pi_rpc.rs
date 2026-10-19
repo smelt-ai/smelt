@@ -4140,7 +4140,7 @@ fn absolute_tool_path(path: &str, cwd: Option<&str>) -> String {
         .into_owned()
 }
 
-/// 与 `packages/pi-agent/src/elicitation.ts` 的 `MULTI_SELECT_TITLE_MARK` 同一份。
+/// 与 `pi-runtime/src/elicitation.ts` 的 `MULTI_SELECT_TITLE_MARK` 同一份。
 const MULTI_SELECT_TITLE_MARK: &str = "\u{200B}\u{200C}\u{200B}";
 
 fn strip_multi_select_title(title: &str) -> (bool, String) {

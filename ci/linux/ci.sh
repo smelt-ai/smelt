@@ -67,6 +67,12 @@ workspace_version() {
   awk -F'"' '/^\[workspace.package\]/{inside=1; next} /^\[/{inside=0} inside && /^version *=/{print $2; exit}' Cargo.toml
 }
 
+stage_pi_runtime() {
+  info "Pi 运行时"
+  make pi-runtime-check
+  ok "Pi 运行时检查通过"
+}
+
 stage_package() {
   local version arch name staging
   version="$(workspace_version)"
@@ -74,11 +80,12 @@ stage_package() {
   arch="$(uname -m)"
   name="smeltd-${version}-linux-${arch}"
   info "打包 ${name}"
+  ./scripts/pi-runtime-pack.sh
   cargo build --release -p smeltd --bins --locked
 
   staging="dist/$name"
   rm -rf "$staging" "dist/$name.tar.gz"
-  mkdir -p "$staging"
+  mkdir -p "$staging/runtime"
   local program
   for program in "${PROGRAMS[@]}"; do
     install -m 0755 "target/release/$program" "$staging/$program"
@@ -87,6 +94,12 @@ stage_package() {
   install -m 0755 scripts/smelt-up.sh "$staging/smelt-up"
   # 远程桌面（install.sh --with-desktop）的启动脚本、XFCE 设置、Chrome 策略。
   cp -R scripts/desktop "$staging/desktop"
+  # shellcheck source=scripts/runtime-target.sh
+  source scripts/runtime-target.sh
+  runtime_target
+  cp "pi-runtime/dist/pi-runtime-${RUNTIME_OS}-${RUNTIME_ARCH}.tar.gz" "$staging/runtime/"
+  cp ".cache/bun/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.zip" \
+    "$staging/runtime/bun-${RUNTIME_OS}-${RUNTIME_ARCH}.zip"
   tar -C dist -czf "dist/$name.tar.gz" "$name"
   rm -rf "$staging"
   ok "产物：dist/$name.tar.gz"
@@ -97,6 +110,7 @@ case "${1:-all}" in
     stage_lint
     stage_build
     stage_test
+    stage_pi_runtime
     ;;
   lint) stage_lint ;;
   build) stage_build ;;
