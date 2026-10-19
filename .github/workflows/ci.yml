@@ -1,4 +1,8 @@
-# 每次 PR 与 main 推送都跑 Rust 与 Flutter 的检查。发版流程另见 release.yml。
+# PR 与 main 推送都跑；只跑这次改动波及的 job，发版流程另见 release.yml。
+#
+# main 上那次不是重复劳动：GitHub 的缓存按分支隔离，只有 main 存的缓存所有 PR 都能读。
+# 所以缓存只在 main 上写（save-if），PR 只读——否则每个 PR 各存一份 2GB+，很快顶到
+# 仓库 10GB 的上限，把 main 那份挤掉，后面的 PR 全变冷启动。
 name: ci
 
 on:
@@ -14,7 +18,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 按改动路径决定跑哪些 job。只改文档时三个都跳过，由 ci-ok 汇总成通过。
+  # 手动触发（workflow_dispatch）时全部跑。
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.rust == 'true' }}
+      mobile: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.mobile == 'true' }}
+      android: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.android == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          # rust：整个 workspace 的输入。smelt-core 的 build.rs 会打包 packages/pi-agent，
+          # 桌面与 smeltd 会嵌 assets/，所以这两处也算。
+          # android：手机内核 smelt_mobile 及其依赖的 crate（`cargo tree -p smelt_mobile`
+          # 里的本地 crate，加依赖时同步这里）和 Flutter 工程。
+          filters: |
+            workflow: &workflow
+              - '.github/workflows/ci.yml'
+            toolchain: &toolchain
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+            rust:
+              - *workflow
+              - *toolchain
+              - 'crates/**'
+              - 'packages/**'
+              - 'assets/**'
+            mobile:
+              - *workflow
+              - 'mobile/**'
+            android:
+              - *workflow
+              - *toolchain
+              - 'mobile/**'
+              - 'crates/smelt-mobile/**'
+              - 'crates/smelt-model/**'
+              - 'crates/smelt-runtime-client/**'
+              - 'crates/smelt-iroh/**'
+              - 'crates/smelt-pairing/**'
+              - 'crates/smelt-event-protocol/**'
+              - 'crates/smelt-paths/**'
+
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     # GPUI 只在 macOS 上编得过，且 runner 必须是 Apple Silicon（同 release.yml）。
     runs-on: macos-14
     steps:
@@ -24,9 +79,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。
+      # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。只在 main 上写，见文件头。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # 这里不跑 cargo fmt --check：仓库从来没有 rustfmt 干净过（main 上百余处
       # 漂移），加上去只会一上来就红，把真正的信号淹掉。要么先整体格式化一次，
@@ -55,6 +112,8 @@ jobs:
           '
 
   mobile:
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true'
     runs-on: macos-14
     defaults:
       run:
@@ -67,6 +126,8 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          # 缓存 Flutter SDK 与 pub 依赖，省下每次约 1 分钟的下载。
+          cache: true
 
       # 也是在验证 xterm 那条 git 依赖能解析：它指向 smelt-ai/xterm.dart 的一个
       # commit，pub 上没有，解析不了的话这一步就直接红。
@@ -88,6 +149,8 @@ jobs:
   # 用 ubuntu 而不是 macos runner：Android 构建不需要 macOS，且 Linux runner 更
   # 便宜、配额更宽松。
   android-build:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -115,18 +178,41 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      # cargokit 不用 crates/smelt-mobile/target，而是把 Rust 编进 Gradle 给插件工程的
+      # 构建目录（rust_builder/cargokit/gradle/plugin.gradle 的 cargoBuildDir）。缓存要
+      # 指到那里，否则每次 APK 构建都从头交叉编译整棵依赖树。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/smelt-mobile
+          workspaces: ". -> mobile/build/rust_lib_smelt_mobile/build/release"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          # 缓存 Flutter SDK 与 pub 依赖，省下每次约 1 分钟的下载。
+          cache: true
 
       # 不带签名配置，app/build.gradle.kts 会退回 debug 签名。这里只验证能不能
       # 编过，可分发的包由发版流水线单独出。
       - name: Build release APK
         working-directory: mobile
         run: flutter build apk --release --target-platform android-arm64
+
+  # 唯一的必需检查（分支保护里只要求它）。被跳过的 job 算通过；任何一个失败或被取消
+  # 就失败。这样按路径跳过的 job 不会把 PR 卡在「等待检查」。
+  ci-ok:
+    if: always()
+    needs: [changes, rust, mobile, android-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if echo "$RESULTS" | jq -e 'to_entries | any(.value.result == "failure" or .value.result == "cancelled")' >/dev/null; then
+            echo "✗ 有 job 失败或被取消"
+            exit 1
+          fi

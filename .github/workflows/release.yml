@@ -60,6 +60,9 @@ jobs:
       # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        # 只读 main 存的缓存：tag 上存的缓存别处读不到，每次发版白占 1.8GB，还会把 main 的挤掉。
+        with:
+          save-if: false
 
       # 导入稳定签名身份（scripts/setup-codesign-identity.sh 本地生成、存进
       # repo secrets 的自签名证书）：签名的 designated requirement 锚定在证书
@@ -229,15 +232,18 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      # 路径与只读的原因见 ci.yml 的 android-build：tag 上存的缓存别处读不到，只读 main 的。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/smelt-mobile
+          workspaces: ". -> mobile/build/rust_lib_smelt_mobile/build/release"
+          save-if: false
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Write keystore
         env:
