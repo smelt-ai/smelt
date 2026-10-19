@@ -6,10 +6,15 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
-import 'api_iroh.dart';
+import 'api/connection.dart';
+import 'api/error.dart';
+import 'api/identity.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_web.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
@@ -21,25 +26,69 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<ConnectionEvent> dco_decode_StreamSink_connection_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
-  IrohPathStatus dco_decode_box_autoadd_iroh_path_status(dynamic raw);
+  LinkMetrics dco_decode_box_autoadd_link_metrics(dynamic raw);
+
+  @protected
+  SmeltError dco_decode_box_autoadd_smelt_error(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
-  IrohPathStatus dco_decode_iroh_path_status(dynamic raw);
+  ConnectionEvent dco_decode_connection_event(dynamic raw);
+
+  @protected
+  ConnectionState dco_decode_connection_state(dynamic raw);
+
+  @protected
+  DeviceIdentity dco_decode_device_identity(dynamic raw);
+
+  @protected
+  int dco_decode_i_32(dynamic raw);
+
+  @protected
+  LinkMetrics dco_decode_link_metrics(dynamic raw);
+
+  @protected
+  LinkPath dco_decode_link_path(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
-  IrohPathStatus? dco_decode_opt_box_autoadd_iroh_path_status(dynamic raw);
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  LinkMetrics? dco_decode_opt_box_autoadd_link_metrics(dynamic raw);
+
+  @protected
+  SmeltError? dco_decode_opt_box_autoadd_smelt_error(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  PairingTarget dco_decode_pairing_target(dynamic raw);
+
+  @protected
+  RuntimeInfo dco_decode_runtime_info(dynamic raw);
+
+  @protected
+  SmeltError dco_decode_smelt_error(dynamic raw);
+
+  @protected
+  SmeltErrorKind dco_decode_smelt_error_kind(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -51,29 +100,73 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<ConnectionEvent> sse_decode_StreamSink_connection_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
-  IrohPathStatus sse_decode_box_autoadd_iroh_path_status(
-    SseDeserializer deserializer,
-  );
+  LinkMetrics sse_decode_box_autoadd_link_metrics(SseDeserializer deserializer);
+
+  @protected
+  SmeltError sse_decode_box_autoadd_smelt_error(SseDeserializer deserializer);
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
-  IrohPathStatus sse_decode_iroh_path_status(SseDeserializer deserializer);
+  ConnectionEvent sse_decode_connection_event(SseDeserializer deserializer);
+
+  @protected
+  ConnectionState sse_decode_connection_state(SseDeserializer deserializer);
+
+  @protected
+  DeviceIdentity sse_decode_device_identity(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  LinkMetrics sse_decode_link_metrics(SseDeserializer deserializer);
+
+  @protected
+  LinkPath sse_decode_link_path(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
-  IrohPathStatus? sse_decode_opt_box_autoadd_iroh_path_status(
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  LinkMetrics? sse_decode_opt_box_autoadd_link_metrics(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SmeltError? sse_decode_opt_box_autoadd_smelt_error(
     SseDeserializer deserializer,
   );
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  PairingTarget sse_decode_pairing_target(SseDeserializer deserializer);
+
+  @protected
+  RuntimeInfo sse_decode_runtime_info(SseDeserializer deserializer);
+
+  @protected
+  SmeltError sse_decode_smelt_error(SseDeserializer deserializer);
+
+  @protected
+  SmeltErrorKind sse_decode_smelt_error_kind(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -85,68 +178,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
-
-  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
-  String cst_encode_String(String raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw;
-  }
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  );
 
   @protected
-  JSAny cst_encode_box_autoadd_iroh_path_status(IrohPathStatus raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_iroh_path_status(raw);
-  }
-
-  @protected
-  int cst_encode_box_autoadd_u_32(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_u_32(raw);
-  }
-
-  @protected
-  JSAny cst_encode_iroh_path_status(IrohPathStatus raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return [cst_encode_String(raw.kind), cst_encode_u_32(raw.rttMs)].jsify()!;
-  }
-
-  @protected
-  JSAny cst_encode_list_prim_u_8_strict(Uint8List raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw.jsify()!;
-  }
-
-  @protected
-  JSAny? cst_encode_opt_box_autoadd_iroh_path_status(IrohPathStatus? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_iroh_path_status(raw);
-  }
-
-  @protected
-  int? cst_encode_opt_box_autoadd_u_32(int? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? null : cst_encode_box_autoadd_u_32(raw);
-  }
-
-  @protected
-  int cst_encode_u_32(int raw);
-
-  @protected
-  int cst_encode_u_8(int raw);
-
-  @protected
-  void cst_encode_unit(void raw);
+  void sse_encode_StreamSink_connection_event_Sse(
+    RustStreamSink<ConnectionEvent> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
-  void sse_encode_box_autoadd_iroh_path_status(
-    IrohPathStatus self,
+  void sse_encode_box_autoadd_link_metrics(
+    LinkMetrics self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_smelt_error(
+    SmeltError self,
     SseSerializer serializer,
   );
 
@@ -154,10 +211,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_iroh_path_status(
-    IrohPathStatus self,
+  void sse_encode_connection_event(
+    ConnectionEvent self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_connection_state(
+    ConnectionState self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_device_identity(
+    DeviceIdentity self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_link_metrics(LinkMetrics self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_link_path(LinkPath self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -166,13 +244,37 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_opt_box_autoadd_iroh_path_status(
-    IrohPathStatus? self,
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_link_metrics(
+    LinkMetrics? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_smelt_error(
+    SmeltError? self,
     SseSerializer serializer,
   );
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_pairing_target(PairingTarget self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_runtime_info(RuntimeInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_smelt_error(SmeltError self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_smelt_error_kind(
+    SmeltErrorKind self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
@@ -184,9 +286,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer);
-
-  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 }
 
@@ -194,29 +293,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
 class RustLibWire implements BaseWire {
   RustLibWire.fromExternalLibrary(ExternalLibrary lib);
-
-  void wire__crate__api_iroh__init_app(NativePortType port_) =>
-      wasmModule.wire__crate__api_iroh__init_app(port_);
-
-  void wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(
-    NativePortType port_,
-  ) => wasmModule.wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(port_);
-
-  void wire__crate__api_iroh__iroh_tunnel_path_status(NativePortType port_) =>
-      wasmModule.wire__crate__api_iroh__iroh_tunnel_path_status(port_);
-
-  void wire__crate__api_iroh__iroh_tunnel_start(
-    NativePortType port_,
-    String endpoint_id,
-    String relay_url,
-  ) => wasmModule.wire__crate__api_iroh__iroh_tunnel_start(
-    port_,
-    endpoint_id,
-    relay_url,
-  );
-
-  void wire__crate__api_iroh__iroh_tunnel_stop(NativePortType port_) =>
-      wasmModule.wire__crate__api_iroh__iroh_tunnel_stop(port_);
 }
 
 @JS('wasm_bindgen')
@@ -224,22 +300,4 @@ external RustLibWasmModule get wasmModule;
 
 @JS()
 @anonymous
-extension type RustLibWasmModule._(JSObject _) implements JSObject {
-  external void wire__crate__api_iroh__init_app(NativePortType port_);
-
-  external void wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(
-    NativePortType port_,
-  );
-
-  external void wire__crate__api_iroh__iroh_tunnel_path_status(
-    NativePortType port_,
-  );
-
-  external void wire__crate__api_iroh__iroh_tunnel_start(
-    NativePortType port_,
-    String endpoint_id,
-    String relay_url,
-  );
-
-  external void wire__crate__api_iroh__iroh_tunnel_stop(NativePortType port_);
-}
+extension type RustLibWasmModule._(JSObject _) implements JSObject {}

@@ -3,11 +3,16 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
-import 'api_iroh.dart';
+import 'api/connection.dart';
+import 'api/error.dart';
+import 'api/identity.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
+
 import 'frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_io.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
@@ -19,25 +24,69 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<ConnectionEvent> dco_decode_StreamSink_connection_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
-  IrohPathStatus dco_decode_box_autoadd_iroh_path_status(dynamic raw);
+  LinkMetrics dco_decode_box_autoadd_link_metrics(dynamic raw);
+
+  @protected
+  SmeltError dco_decode_box_autoadd_smelt_error(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
-  IrohPathStatus dco_decode_iroh_path_status(dynamic raw);
+  ConnectionEvent dco_decode_connection_event(dynamic raw);
+
+  @protected
+  ConnectionState dco_decode_connection_state(dynamic raw);
+
+  @protected
+  DeviceIdentity dco_decode_device_identity(dynamic raw);
+
+  @protected
+  int dco_decode_i_32(dynamic raw);
+
+  @protected
+  LinkMetrics dco_decode_link_metrics(dynamic raw);
+
+  @protected
+  LinkPath dco_decode_link_path(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
-  IrohPathStatus? dco_decode_opt_box_autoadd_iroh_path_status(dynamic raw);
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  LinkMetrics? dco_decode_opt_box_autoadd_link_metrics(dynamic raw);
+
+  @protected
+  SmeltError? dco_decode_opt_box_autoadd_smelt_error(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  PairingTarget dco_decode_pairing_target(dynamic raw);
+
+  @protected
+  RuntimeInfo dco_decode_runtime_info(dynamic raw);
+
+  @protected
+  SmeltError dco_decode_smelt_error(dynamic raw);
+
+  @protected
+  SmeltErrorKind dco_decode_smelt_error_kind(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -49,29 +98,73 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<ConnectionEvent> sse_decode_StreamSink_connection_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
-  IrohPathStatus sse_decode_box_autoadd_iroh_path_status(
-    SseDeserializer deserializer,
-  );
+  LinkMetrics sse_decode_box_autoadd_link_metrics(SseDeserializer deserializer);
+
+  @protected
+  SmeltError sse_decode_box_autoadd_smelt_error(SseDeserializer deserializer);
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
-  IrohPathStatus sse_decode_iroh_path_status(SseDeserializer deserializer);
+  ConnectionEvent sse_decode_connection_event(SseDeserializer deserializer);
+
+  @protected
+  ConnectionState sse_decode_connection_state(SseDeserializer deserializer);
+
+  @protected
+  DeviceIdentity sse_decode_device_identity(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  LinkMetrics sse_decode_link_metrics(SseDeserializer deserializer);
+
+  @protected
+  LinkPath sse_decode_link_path(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
-  IrohPathStatus? sse_decode_opt_box_autoadd_iroh_path_status(
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  LinkMetrics? sse_decode_opt_box_autoadd_link_metrics(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SmeltError? sse_decode_opt_box_autoadd_smelt_error(
     SseDeserializer deserializer,
   );
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  PairingTarget sse_decode_pairing_target(SseDeserializer deserializer);
+
+  @protected
+  RuntimeInfo sse_decode_runtime_info(SseDeserializer deserializer);
+
+  @protected
+  SmeltError sse_decode_smelt_error(SseDeserializer deserializer);
+
+  @protected
+  SmeltErrorKind sse_decode_smelt_error_kind(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -83,89 +176,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
-
-  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
-  ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_encode_String(String raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return cst_encode_list_prim_u_8_strict(utf8.encoder.convert(raw));
-  }
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  );
 
   @protected
-  ffi.Pointer<wire_cst_iroh_path_status>
-  cst_encode_box_autoadd_iroh_path_status(IrohPathStatus raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    final ptr = wire.cst_new_box_autoadd_iroh_path_status();
-    cst_api_fill_to_wire_iroh_path_status(raw, ptr.ref);
-    return ptr;
-  }
-
-  @protected
-  ffi.Pointer<ffi.Uint32> cst_encode_box_autoadd_u_32(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return wire.cst_new_box_autoadd_u_32(cst_encode_u_32(raw));
-  }
-
-  @protected
-  ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_encode_list_prim_u_8_strict(
-    Uint8List raw,
-  ) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    final ans = wire.cst_new_list_prim_u_8_strict(raw.length);
-    ans.ref.ptr.asTypedList(raw.length).setAll(0, raw);
-    return ans;
-  }
-
-  @protected
-  ffi.Pointer<wire_cst_iroh_path_status>
-  cst_encode_opt_box_autoadd_iroh_path_status(IrohPathStatus? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null
-        ? ffi.nullptr
-        : cst_encode_box_autoadd_iroh_path_status(raw);
-  }
-
-  @protected
-  ffi.Pointer<ffi.Uint32> cst_encode_opt_box_autoadd_u_32(int? raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw == null ? ffi.nullptr : cst_encode_box_autoadd_u_32(raw);
-  }
-
-  @protected
-  void cst_api_fill_to_wire_box_autoadd_iroh_path_status(
-    IrohPathStatus apiObj,
-    ffi.Pointer<wire_cst_iroh_path_status> wireObj,
-  ) {
-    cst_api_fill_to_wire_iroh_path_status(apiObj, wireObj.ref);
-  }
-
-  @protected
-  void cst_api_fill_to_wire_iroh_path_status(
-    IrohPathStatus apiObj,
-    wire_cst_iroh_path_status wireObj,
-  ) {
-    wireObj.kind = cst_encode_String(apiObj.kind);
-    wireObj.rtt_ms = cst_encode_u_32(apiObj.rttMs);
-  }
-
-  @protected
-  int cst_encode_u_32(int raw);
-
-  @protected
-  int cst_encode_u_8(int raw);
-
-  @protected
-  void cst_encode_unit(void raw);
+  void sse_encode_StreamSink_connection_event_Sse(
+    RustStreamSink<ConnectionEvent> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
-  void sse_encode_box_autoadd_iroh_path_status(
-    IrohPathStatus self,
+  void sse_encode_box_autoadd_link_metrics(
+    LinkMetrics self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_smelt_error(
+    SmeltError self,
     SseSerializer serializer,
   );
 
@@ -173,10 +209,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_iroh_path_status(
-    IrohPathStatus self,
+  void sse_encode_connection_event(
+    ConnectionEvent self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_connection_state(
+    ConnectionState self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_device_identity(
+    DeviceIdentity self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_link_metrics(LinkMetrics self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_link_path(LinkPath self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -185,13 +242,37 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_opt_box_autoadd_iroh_path_status(
-    IrohPathStatus? self,
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_link_metrics(
+    LinkMetrics? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_smelt_error(
+    SmeltError? self,
     SseSerializer serializer,
   );
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_pairing_target(PairingTarget self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_runtime_info(RuntimeInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_smelt_error(SmeltError self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_smelt_error_kind(
+    SmeltErrorKind self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
@@ -203,21 +284,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer);
-
-  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 }
 
 // Section: wire_class
 
-// ignore_for_file: camel_case_types, non_constant_identifier_names, avoid_positional_boolean_parameters, annotate_overrides, constant_identifier_names
-// AUTO GENERATED FILE, DO NOT EDIT.
-//
-// Generated by `package:ffigen`.
-// ignore_for_file: type=lint
-
-/// generated by flutter_rust_bridge
 class RustLibWire implements BaseWire {
   factory RustLibWire.fromExternalLibrary(ExternalLibrary lib) =>
       RustLibWire(lib.ffiDynamicLibrary);
@@ -229,172 +300,4 @@ class RustLibWire implements BaseWire {
   /// The symbols are looked up in [dynamicLibrary].
   RustLibWire(ffi.DynamicLibrary dynamicLibrary)
     : _lookup = dynamicLibrary.lookup;
-
-  /// The symbols are looked up with [lookup].
-  RustLibWire.fromLookup(
-    ffi.Pointer<T> Function<T extends ffi.NativeType>(String symbolName) lookup,
-  ) : _lookup = lookup;
-
-  void store_dart_post_cobject(DartPostCObjectFnType ptr) {
-    return _store_dart_post_cobject(ptr);
-  }
-
-  late final _store_dart_post_cobjectPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(DartPostCObjectFnType)>>(
-        'store_dart_post_cobject',
-      );
-  late final _store_dart_post_cobject = _store_dart_post_cobjectPtr
-      .asFunction<void Function(DartPostCObjectFnType)>();
-
-  void wire__crate__api_iroh__init_app(int port_) {
-    return _wire__crate__api_iroh__init_app(port_);
-  }
-
-  late final _wire__crate__api_iroh__init_appPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
-        'frbgen_smelt_mobile_wire__crate__api_iroh__init_app',
-      );
-  late final _wire__crate__api_iroh__init_app =
-      _wire__crate__api_iroh__init_appPtr.asFunction<void Function(int)>();
-
-  void wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(int port_) {
-    return _wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(port_);
-  }
-
-  late final _wire__crate__api_iroh__iroh_tunnel_inbound_idle_msPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
-        'frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms',
-      );
-  late final _wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms =
-      _wire__crate__api_iroh__iroh_tunnel_inbound_idle_msPtr
-          .asFunction<void Function(int)>();
-
-  void wire__crate__api_iroh__iroh_tunnel_path_status(int port_) {
-    return _wire__crate__api_iroh__iroh_tunnel_path_status(port_);
-  }
-
-  late final _wire__crate__api_iroh__iroh_tunnel_path_statusPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
-        'frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_path_status',
-      );
-  late final _wire__crate__api_iroh__iroh_tunnel_path_status =
-      _wire__crate__api_iroh__iroh_tunnel_path_statusPtr
-          .asFunction<void Function(int)>();
-
-  void wire__crate__api_iroh__iroh_tunnel_start(
-    int port_,
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> endpoint_id,
-    ffi.Pointer<wire_cst_list_prim_u_8_strict> relay_url,
-  ) {
-    return _wire__crate__api_iroh__iroh_tunnel_start(
-      port_,
-      endpoint_id,
-      relay_url,
-    );
-  }
-
-  late final _wire__crate__api_iroh__iroh_tunnel_startPtr =
-      _lookup<
-        ffi.NativeFunction<
-          ffi.Void Function(
-            ffi.Int64,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-          )
-        >
-      >('frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_start');
-  late final _wire__crate__api_iroh__iroh_tunnel_start =
-      _wire__crate__api_iroh__iroh_tunnel_startPtr
-          .asFunction<
-            void Function(
-              int,
-              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
-            )
-          >();
-
-  void wire__crate__api_iroh__iroh_tunnel_stop(int port_) {
-    return _wire__crate__api_iroh__iroh_tunnel_stop(port_);
-  }
-
-  late final _wire__crate__api_iroh__iroh_tunnel_stopPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
-        'frbgen_smelt_mobile_wire__crate__api_iroh__iroh_tunnel_stop',
-      );
-  late final _wire__crate__api_iroh__iroh_tunnel_stop =
-      _wire__crate__api_iroh__iroh_tunnel_stopPtr
-          .asFunction<void Function(int)>();
-
-  ffi.Pointer<wire_cst_iroh_path_status>
-  cst_new_box_autoadd_iroh_path_status() {
-    return _cst_new_box_autoadd_iroh_path_status();
-  }
-
-  late final _cst_new_box_autoadd_iroh_path_statusPtr =
-      _lookup<
-        ffi.NativeFunction<ffi.Pointer<wire_cst_iroh_path_status> Function()>
-      >('frbgen_smelt_mobile_cst_new_box_autoadd_iroh_path_status');
-  late final _cst_new_box_autoadd_iroh_path_status =
-      _cst_new_box_autoadd_iroh_path_statusPtr
-          .asFunction<ffi.Pointer<wire_cst_iroh_path_status> Function()>();
-
-  ffi.Pointer<ffi.Uint32> cst_new_box_autoadd_u_32(int value) {
-    return _cst_new_box_autoadd_u_32(value);
-  }
-
-  late final _cst_new_box_autoadd_u_32Ptr =
-      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Uint32> Function(ffi.Uint32)>>(
-        'frbgen_smelt_mobile_cst_new_box_autoadd_u_32',
-      );
-  late final _cst_new_box_autoadd_u_32 = _cst_new_box_autoadd_u_32Ptr
-      .asFunction<ffi.Pointer<ffi.Uint32> Function(int)>();
-
-  ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_new_list_prim_u_8_strict(
-    int len,
-  ) {
-    return _cst_new_list_prim_u_8_strict(len);
-  }
-
-  late final _cst_new_list_prim_u_8_strictPtr =
-      _lookup<
-        ffi.NativeFunction<
-          ffi.Pointer<wire_cst_list_prim_u_8_strict> Function(ffi.Int32)
-        >
-      >('frbgen_smelt_mobile_cst_new_list_prim_u_8_strict');
-  late final _cst_new_list_prim_u_8_strict = _cst_new_list_prim_u_8_strictPtr
-      .asFunction<ffi.Pointer<wire_cst_list_prim_u_8_strict> Function(int)>();
-
-  int dummy_method_to_enforce_bundling() {
-    return _dummy_method_to_enforce_bundling();
-  }
-
-  late final _dummy_method_to_enforce_bundlingPtr =
-      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
-        'dummy_method_to_enforce_bundling',
-      );
-  late final _dummy_method_to_enforce_bundling =
-      _dummy_method_to_enforce_bundlingPtr.asFunction<int Function()>();
-}
-
-typedef DartPort = ffi.Int64;
-typedef DartDartPort = int;
-typedef DartPostCObjectFnTypeFunction =
-    ffi.Bool Function(DartPort port_id, ffi.Pointer<ffi.Void> message);
-typedef DartDartPostCObjectFnTypeFunction =
-    bool Function(DartDartPort port_id, ffi.Pointer<ffi.Void> message);
-typedef DartPostCObjectFnType =
-    ffi.Pointer<ffi.NativeFunction<DartPostCObjectFnTypeFunction>>;
-
-final class wire_cst_list_prim_u_8_strict extends ffi.Struct {
-  external ffi.Pointer<ffi.Uint8> ptr;
-
-  @ffi.Int32()
-  external int len;
-}
-
-final class wire_cst_iroh_path_status extends ffi.Struct {
-  external ffi.Pointer<wire_cst_list_prim_u_8_strict> kind;
-
-  @ffi.Uint32()
-  external int rtt_ms;
 }

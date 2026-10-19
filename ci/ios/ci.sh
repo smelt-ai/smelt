@@ -35,13 +35,13 @@ stage_analyze() {
   info "Flutter：静态分析"
   (cd "$MOBILE_DIR" && flutter analyze)
   ok "静态分析通过"
-  info "Rust：手机内核共用的 crate 按移动端 target 检查"
-  # smelt-model / smelt-runtime-client / smelt-iroh 桌面和手机共用，依赖必须能编进
-  # 移动端（不许引 GPUI、原生 SQLite 或 smelt-core）。只查 lib：smelt-iroh 的命令行
-  # bin 只在桌面编。ring 的构建脚本要编 C，用 Xcode 的 clang。
-  cargo check -p smelt-model -p smelt-runtime-client -p smelt-iroh --lib \
+  info "Rust：手机内核及其共用 crate 按移动端 target 检查"
+  # smelt_mobile 是手机内核本体（FFI 层）；smelt-model / smelt-runtime-client / smelt-iroh
+  # 桌面和手机共用，依赖必须能编进移动端（不许引 GPUI、原生 SQLite 或 smelt-core）。
+  # 只查 lib：smelt-iroh 的命令行 bin 只在桌面编。ring 的构建脚本要编 C，用 Xcode 的 clang。
+  cargo check -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt_mobile --lib \
     --target aarch64-apple-ios --locked
-  ok "手机内核共用的 crate 可编进 iOS"
+  ok "手机内核及其共用 crate 可编进 iOS"
 }
 
 stage_test() {

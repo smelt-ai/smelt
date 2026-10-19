@@ -3,12 +3,17 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
-import 'api_iroh.dart';
+import 'api/connection.dart';
+import 'api/error.dart';
+import 'api/identity.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
 import 'frb_generated.io.dart'
     if (dart.library.js_interop) 'frb_generated.web.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// Main entrypoint of the Rust API
@@ -55,7 +60,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 
   @override
   Future<void> executeRustInitializers() async {
-    await api.crateApiIrohInitApp();
+    await api.crateApiInitApp();
   }
 
   @override
@@ -66,7 +71,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 17977170;
+  int get rustContentHash => -999557082;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -78,18 +83,27 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
-  Future<void> crateApiIrohInitApp();
-
-  Future<int?> crateApiIrohIrohTunnelInboundIdleMs();
-
-  Future<IrohPathStatus?> crateApiIrohIrohTunnelPathStatus();
-
-  Future<int> crateApiIrohIrohTunnelStart({
+  Future<RuntimeInfo> crateApiConnectionConnect({
     required String endpointId,
-    required String relayUrl,
+    String? relayUrl,
   });
 
-  Future<void> crateApiIrohIrohTunnelStop();
+  Stream<ConnectionEvent> crateApiConnectionConnectionEvents();
+
+  Future<void> crateApiConnectionDisconnect();
+
+  Future<void> crateApiInitApp();
+
+  Future<DeviceIdentity> crateApiIdentityInitClient({required String dataDir});
+
+  Future<RuntimeInfo> crateApiIdentityPair({
+    required String uri,
+    required String deviceName,
+  });
+
+  PairingTarget crateApiIdentityParsePairing({required String uri});
+
+  Future<void> crateApiConnectionVerifyConnection();
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -101,124 +115,248 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
-  Future<void> crateApiIrohInitApp() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          return wire.wire__crate__api_iroh__init_app(port_);
-        },
-        codec: DcoCodec(
-          decodeSuccessData: dco_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiIrohInitAppConstMeta,
-        argValues: [],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiIrohInitAppConstMeta =>
-      const TaskConstMeta(debugName: "init_app", argNames: []);
-
-  @override
-  Future<int?> crateApiIrohIrohTunnelInboundIdleMs() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          return wire.wire__crate__api_iroh__iroh_tunnel_inbound_idle_ms(port_);
-        },
-        codec: DcoCodec(
-          decodeSuccessData: dco_decode_opt_box_autoadd_u_32,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiIrohIrohTunnelInboundIdleMsConstMeta,
-        argValues: [],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiIrohIrohTunnelInboundIdleMsConstMeta =>
-      const TaskConstMeta(
-        debugName: "iroh_tunnel_inbound_idle_ms",
-        argNames: [],
-      );
-
-  @override
-  Future<IrohPathStatus?> crateApiIrohIrohTunnelPathStatus() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          return wire.wire__crate__api_iroh__iroh_tunnel_path_status(port_);
-        },
-        codec: DcoCodec(
-          decodeSuccessData: dco_decode_opt_box_autoadd_iroh_path_status,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiIrohIrohTunnelPathStatusConstMeta,
-        argValues: [],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiIrohIrohTunnelPathStatusConstMeta =>
-      const TaskConstMeta(debugName: "iroh_tunnel_path_status", argNames: []);
-
-  @override
-  Future<int> crateApiIrohIrohTunnelStart({
+  Future<RuntimeInfo> crateApiConnectionConnect({
     required String endpointId,
-    required String relayUrl,
+    String? relayUrl,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
-          var arg0 = cst_encode_String(endpointId);
-          var arg1 = cst_encode_String(relayUrl);
-          return wire.wire__crate__api_iroh__iroh_tunnel_start(
-            port_,
-            arg0,
-            arg1,
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(endpointId, serializer);
+          sse_encode_opt_String(relayUrl, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
           );
         },
-        codec: DcoCodec(
-          decodeSuccessData: dco_decode_u_32,
-          decodeErrorData: dco_decode_String,
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_runtime_info,
+          decodeErrorData: sse_decode_smelt_error,
         ),
-        constMeta: kCrateApiIrohIrohTunnelStartConstMeta,
+        constMeta: kCrateApiConnectionConnectConstMeta,
         argValues: [endpointId, relayUrl],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiIrohIrohTunnelStartConstMeta =>
-      const TaskConstMeta(
-        debugName: "iroh_tunnel_start",
-        argNames: ["endpointId", "relayUrl"],
-      );
+  TaskConstMeta get kCrateApiConnectionConnectConstMeta => const TaskConstMeta(
+    debugName: "connect",
+    argNames: ["endpointId", "relayUrl"],
+  );
 
   @override
-  Future<void> crateApiIrohIrohTunnelStop() {
+  Stream<ConnectionEvent> crateApiConnectionConnectionEvents() {
+    final sink = RustStreamSink<ConnectionEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_StreamSink_connection_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 2,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: null,
+          ),
+          constMeta: kCrateApiConnectionConnectionEventsConstMeta,
+          argValues: [sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiConnectionConnectionEventsConstMeta =>
+      const TaskConstMeta(debugName: "connection_events", argNames: ["sink"]);
+
+  @override
+  Future<void> crateApiConnectionDisconnect() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
-          return wire.wire__crate__api_iroh__iroh_tunnel_stop(port_);
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
         },
-        codec: DcoCodec(
-          decodeSuccessData: dco_decode_unit,
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
           decodeErrorData: null,
         ),
-        constMeta: kCrateApiIrohIrohTunnelStopConstMeta,
+        constMeta: kCrateApiConnectionDisconnectConstMeta,
         argValues: [],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiIrohIrohTunnelStopConstMeta =>
-      const TaskConstMeta(debugName: "iroh_tunnel_stop", argNames: []);
+  TaskConstMeta get kCrateApiConnectionDisconnectConstMeta =>
+      const TaskConstMeta(debugName: "disconnect", argNames: []);
+
+  @override
+  Future<void> crateApiInitApp() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiInitAppConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiInitAppConstMeta =>
+      const TaskConstMeta(debugName: "init_app", argNames: []);
+
+  @override
+  Future<DeviceIdentity> crateApiIdentityInitClient({required String dataDir}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(dataDir, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_device_identity,
+          decodeErrorData: sse_decode_smelt_error,
+        ),
+        constMeta: kCrateApiIdentityInitClientConstMeta,
+        argValues: [dataDir],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiIdentityInitClientConstMeta =>
+      const TaskConstMeta(debugName: "init_client", argNames: ["dataDir"]);
+
+  @override
+  Future<RuntimeInfo> crateApiIdentityPair({
+    required String uri,
+    required String deviceName,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(uri, serializer);
+          sse_encode_String(deviceName, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_runtime_info,
+          decodeErrorData: sse_decode_smelt_error,
+        ),
+        constMeta: kCrateApiIdentityPairConstMeta,
+        argValues: [uri, deviceName],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiIdentityPairConstMeta =>
+      const TaskConstMeta(debugName: "pair", argNames: ["uri", "deviceName"]);
+
+  @override
+  PairingTarget crateApiIdentityParsePairing({required String uri}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(uri, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_pairing_target,
+          decodeErrorData: sse_decode_smelt_error,
+        ),
+        constMeta: kCrateApiIdentityParsePairingConstMeta,
+        argValues: [uri],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiIdentityParsePairingConstMeta =>
+      const TaskConstMeta(debugName: "parse_pairing", argNames: ["uri"]);
+
+  @override
+  Future<void> crateApiConnectionVerifyConnection() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiConnectionVerifyConnectionConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiConnectionVerifyConnectionConstMeta =>
+      const TaskConstMeta(debugName: "verify_connection", argNames: []);
+
+  @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AnyhowException(raw as String);
+  }
+
+  @protected
+  RustStreamSink<ConnectionEvent> dco_decode_StreamSink_connection_event_Sse(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
 
   @protected
   String dco_decode_String(dynamic raw) {
@@ -227,9 +365,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  IrohPathStatus dco_decode_box_autoadd_iroh_path_status(dynamic raw) {
+  LinkMetrics dco_decode_box_autoadd_link_metrics(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_iroh_path_status(raw);
+    return dco_decode_link_metrics(raw);
+  }
+
+  @protected
+  SmeltError dco_decode_box_autoadd_smelt_error(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_smelt_error(raw);
   }
 
   @protected
@@ -239,15 +383,56 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  IrohPathStatus dco_decode_iroh_path_status(dynamic raw) {
+  ConnectionEvent dco_decode_connection_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return ConnectionEvent(
+      state: dco_decode_connection_state(arr[0]),
+      endpointId: dco_decode_opt_String(arr[1]),
+      link: dco_decode_opt_box_autoadd_link_metrics(arr[2]),
+      error: dco_decode_opt_box_autoadd_smelt_error(arr[3]),
+    );
+  }
+
+  @protected
+  ConnectionState dco_decode_connection_state(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ConnectionState.values[raw as int];
+  }
+
+  @protected
+  DeviceIdentity dco_decode_device_identity(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return DeviceIdentity(endpointId: dco_decode_String(arr[0]));
+  }
+
+  @protected
+  int dco_decode_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
+  LinkMetrics dco_decode_link_metrics(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
     if (arr.length != 2)
       throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return IrohPathStatus(
-      kind: dco_decode_String(arr[0]),
-      rttMs: dco_decode_u_32(arr[1]),
+    return LinkMetrics(
+      path: dco_decode_link_path(arr[0]),
+      rttMs: dco_decode_opt_box_autoadd_u_32(arr[1]),
     );
+  }
+
+  @protected
+  LinkPath dco_decode_link_path(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LinkPath.values[raw as int];
   }
 
   @protected
@@ -257,15 +442,73 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  IrohPathStatus? dco_decode_opt_box_autoadd_iroh_path_status(dynamic raw) {
+  String? dco_decode_opt_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_iroh_path_status(raw);
+    return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  LinkMetrics? dco_decode_opt_box_autoadd_link_metrics(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_link_metrics(raw);
+  }
+
+  @protected
+  SmeltError? dco_decode_opt_box_autoadd_smelt_error(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_smelt_error(raw);
   }
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
+  PairingTarget dco_decode_pairing_target(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return PairingTarget(
+      endpointId: dco_decode_String(arr[0]),
+      relayUrl: dco_decode_opt_String(arr[1]),
+    );
+  }
+
+  @protected
+  RuntimeInfo dco_decode_runtime_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return RuntimeInfo(
+      runtimeId: dco_decode_String(arr[0]),
+      hostname: dco_decode_opt_String(arr[1]),
+      os: dco_decode_opt_String(arr[2]),
+      version: dco_decode_String(arr[3]),
+      endpointId: dco_decode_String(arr[4]),
+      relayUrl: dco_decode_opt_String(arr[5]),
+    );
+  }
+
+  @protected
+  SmeltError dco_decode_smelt_error(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return SmeltError(
+      kind: dco_decode_smelt_error_kind(arr[0]),
+      message: dco_decode_String(arr[1]),
+    );
+  }
+
+  @protected
+  SmeltErrorKind dco_decode_smelt_error_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return SmeltErrorKind.values[raw as int];
   }
 
   @protected
@@ -287,6 +530,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_String(deserializer);
+    return AnyhowException(inner);
+  }
+
+  @protected
+  RustStreamSink<ConnectionEvent> sse_decode_StreamSink_connection_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
@@ -294,11 +552,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  IrohPathStatus sse_decode_box_autoadd_iroh_path_status(
+  LinkMetrics sse_decode_box_autoadd_link_metrics(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_iroh_path_status(deserializer));
+    return (sse_decode_link_metrics(deserializer));
+  }
+
+  @protected
+  SmeltError sse_decode_box_autoadd_smelt_error(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_smelt_error(deserializer));
   }
 
   @protected
@@ -308,11 +572,53 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  IrohPathStatus sse_decode_iroh_path_status(SseDeserializer deserializer) {
+  ConnectionEvent sse_decode_connection_event(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_kind = sse_decode_String(deserializer);
-    var var_rttMs = sse_decode_u_32(deserializer);
-    return IrohPathStatus(kind: var_kind, rttMs: var_rttMs);
+    var var_state = sse_decode_connection_state(deserializer);
+    var var_endpointId = sse_decode_opt_String(deserializer);
+    var var_link = sse_decode_opt_box_autoadd_link_metrics(deserializer);
+    var var_error = sse_decode_opt_box_autoadd_smelt_error(deserializer);
+    return ConnectionEvent(
+      state: var_state,
+      endpointId: var_endpointId,
+      link: var_link,
+      error: var_error,
+    );
+  }
+
+  @protected
+  ConnectionState sse_decode_connection_state(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ConnectionState.values[inner];
+  }
+
+  @protected
+  DeviceIdentity sse_decode_device_identity(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_endpointId = sse_decode_String(deserializer);
+    return DeviceIdentity(endpointId: var_endpointId);
+  }
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  LinkMetrics sse_decode_link_metrics(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_path = sse_decode_link_path(deserializer);
+    var var_rttMs = sse_decode_opt_box_autoadd_u_32(deserializer);
+    return LinkMetrics(path: var_path, rttMs: var_rttMs);
+  }
+
+  @protected
+  LinkPath sse_decode_link_path(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return LinkPath.values[inner];
   }
 
   @protected
@@ -323,13 +629,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  IrohPathStatus? sse_decode_opt_box_autoadd_iroh_path_status(
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  LinkMetrics? sse_decode_opt_box_autoadd_link_metrics(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_iroh_path_status(deserializer));
+      return (sse_decode_box_autoadd_link_metrics(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  SmeltError? sse_decode_opt_box_autoadd_smelt_error(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_smelt_error(deserializer));
     } else {
       return null;
     }
@@ -344,6 +674,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     } else {
       return null;
     }
+  }
+
+  @protected
+  PairingTarget sse_decode_pairing_target(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_endpointId = sse_decode_String(deserializer);
+    var var_relayUrl = sse_decode_opt_String(deserializer);
+    return PairingTarget(endpointId: var_endpointId, relayUrl: var_relayUrl);
+  }
+
+  @protected
+  RuntimeInfo sse_decode_runtime_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_runtimeId = sse_decode_String(deserializer);
+    var var_hostname = sse_decode_opt_String(deserializer);
+    var var_os = sse_decode_opt_String(deserializer);
+    var var_version = sse_decode_String(deserializer);
+    var var_endpointId = sse_decode_String(deserializer);
+    var var_relayUrl = sse_decode_opt_String(deserializer);
+    return RuntimeInfo(
+      runtimeId: var_runtimeId,
+      hostname: var_hostname,
+      os: var_os,
+      version: var_version,
+      endpointId: var_endpointId,
+      relayUrl: var_relayUrl,
+    );
+  }
+
+  @protected
+  SmeltError sse_decode_smelt_error(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_smelt_error_kind(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    return SmeltError(kind: var_kind, message: var_message);
+  }
+
+  @protected
+  SmeltErrorKind sse_decode_smelt_error_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return SmeltErrorKind.values[inner];
   }
 
   @protected
@@ -364,33 +736,35 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getInt32();
-  }
-
-  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
   }
 
   @protected
-  int cst_encode_u_32(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw;
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.message, serializer);
   }
 
   @protected
-  int cst_encode_u_8(int raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw;
-  }
-
-  @protected
-  void cst_encode_unit(void raw) {
-    // Codec=Cst (C-struct based), see doc to use other codecs
-    return raw;
+  void sse_encode_StreamSink_connection_event_Sse(
+    RustStreamSink<ConnectionEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_connection_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
   }
 
   @protected
@@ -400,12 +774,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_box_autoadd_iroh_path_status(
-    IrohPathStatus self,
+  void sse_encode_box_autoadd_link_metrics(
+    LinkMetrics self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_iroh_path_status(self, serializer);
+    sse_encode_link_metrics(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_smelt_error(
+    SmeltError self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_smelt_error(self, serializer);
   }
 
   @protected
@@ -415,13 +798,52 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_iroh_path_status(
-    IrohPathStatus self,
+  void sse_encode_connection_event(
+    ConnectionEvent self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.kind, serializer);
-    sse_encode_u_32(self.rttMs, serializer);
+    sse_encode_connection_state(self.state, serializer);
+    sse_encode_opt_String(self.endpointId, serializer);
+    sse_encode_opt_box_autoadd_link_metrics(self.link, serializer);
+    sse_encode_opt_box_autoadd_smelt_error(self.error, serializer);
+  }
+
+  @protected
+  void sse_encode_connection_state(
+    ConnectionState self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_device_identity(
+    DeviceIdentity self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.endpointId, serializer);
+  }
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putInt32(self);
+  }
+
+  @protected
+  void sse_encode_link_metrics(LinkMetrics self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_link_path(self.path, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.rttMs, serializer);
+  }
+
+  @protected
+  void sse_encode_link_path(LinkPath self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -435,15 +857,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_opt_box_autoadd_iroh_path_status(
-    IrohPathStatus? self,
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_link_metrics(
+    LinkMetrics? self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     sse_encode_bool(self != null, serializer);
     if (self != null) {
-      sse_encode_box_autoadd_iroh_path_status(self, serializer);
+      sse_encode_box_autoadd_link_metrics(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_smelt_error(
+    SmeltError? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_smelt_error(self, serializer);
     }
   }
 
@@ -455,6 +900,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     if (self != null) {
       sse_encode_box_autoadd_u_32(self, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_pairing_target(PairingTarget self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.endpointId, serializer);
+    sse_encode_opt_String(self.relayUrl, serializer);
+  }
+
+  @protected
+  void sse_encode_runtime_info(RuntimeInfo self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.runtimeId, serializer);
+    sse_encode_opt_String(self.hostname, serializer);
+    sse_encode_opt_String(self.os, serializer);
+    sse_encode_String(self.version, serializer);
+    sse_encode_String(self.endpointId, serializer);
+    sse_encode_opt_String(self.relayUrl, serializer);
+  }
+
+  @protected
+  void sse_encode_smelt_error(SmeltError self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_smelt_error_kind(self.kind, serializer);
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_smelt_error_kind(
+    SmeltErrorKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -472,12 +951,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-  }
-
-  @protected
-  void sse_encode_i_32(int self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putInt32(self);
   }
 
   @protected

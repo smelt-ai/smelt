@@ -1,15 +1,10 @@
 # flutter_rust_bridge 配置
-# 只桥 api_iroh：手机端实际使用 iroh 隧道，不在 FFI 层暴露网关内部实现
-rust_input: crate::api_iroh
+# 只桥 crate::api（含子模块）：那里只放 Dart 用的视图模型和入口，内核实现不暴露。
+rust_input: crate::api
 rust_root: ../crates/smelt-mobile/
 dart_output: lib/src/rust/
 
-# 输出模式
-full_dep: true
+# 不开 full_dep：默认的 SSE 编解码不需要 ffigen，生成时也就不依赖本机的 LLVM/libclang。
 
 # 禁用 freezed（避免依赖冲突）
 dart3: true
-
-# LLVM 路径（用于 ffigen）
-llvm_path:
-  - /opt/homebrew/opt/llvm/lib

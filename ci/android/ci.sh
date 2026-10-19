@@ -45,12 +45,12 @@ stage_analyze() {
   info "Flutter：静态分析"
   (cd "$MOBILE_DIR" && flutter analyze)
   ok "静态分析通过"
-  info "Rust：手机内核共用的 crate 按移动端 target 检查"
-  # smelt-model / smelt-runtime-client / smelt-iroh 桌面和手机共用，依赖必须能编进
-  # 移动端（不许引 GPUI、原生 SQLite 或 smelt-core）。只查 lib：smelt-iroh 的命令行
-  # bin 只在桌面编。cargo check 不链接，但 iroh 经 rustls 依赖 ring，它的构建脚本要
-  # 用 NDK 的 clang 编 C，CC/AR 照 cargokit 的取法指过去（minSdk 与
-  # mobile/rust_builder/android/build.gradle 一致）。
+  info "Rust：手机内核及其共用 crate 按移动端 target 检查"
+  # smelt_mobile 是手机内核本体（FFI 层）；smelt-model / smelt-runtime-client / smelt-iroh
+  # 桌面和手机共用，依赖必须能编进移动端（不许引 GPUI、原生 SQLite 或 smelt-core）。
+  # 只查 lib：smelt-iroh 的命令行 bin 只在桌面编。cargo check 不链接，但 iroh 经 rustls
+  # 依赖 ring，它的构建脚本要用 NDK 的 clang 编 C，CC/AR 照 cargokit 的取法指过去
+  # （minSdk 与 mobile/rust_builder/android/build.gradle 一致）。
   local ndk_host
   case "$(uname -s)" in
     Darwin) ndk_host=darwin-x86_64 ;;
@@ -61,9 +61,9 @@ stage_analyze() {
   local ndk_bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$ndk_host/bin"
   CC_aarch64_linux_android="$ndk_bin/aarch64-linux-android24-clang" \
   AR_aarch64_linux_android="$ndk_bin/llvm-ar" \
-    cargo check -p smelt-model -p smelt-runtime-client -p smelt-iroh --lib \
+    cargo check -p smelt-model -p smelt-runtime-client -p smelt-iroh -p smelt_mobile --lib \
       --target aarch64-linux-android --locked
-  ok "手机内核共用的 crate 可编进 Android"
+  ok "手机内核及其共用 crate 可编进 Android"
 }
 
 stage_test() {

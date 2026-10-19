@@ -80,16 +80,22 @@ FRB 只暴露 `smelt-mobile` 自己定义的视图模型（只含界面用到的
   系统 DNS（同 `bind_endpoint`）；`IrohClient` 补一个按 relay 构造的入口。链路类型与 RTT 用
   `RuntimeConnector` 上新增的 `path_status()`（搬旧隧道的选中路径判断）。
 
-FRB 接口草案（一次只连一个当前运行时，与现在「当前桌面」一致）：
+FRB 接口（已实现，`crates/smelt-mobile/src/api`）。会阻塞的调用都是普通 `pub fn`：FRB 2.12 把它们放在自己的
+线程池上跑，Dart 拿到 Future；`async fn` 会进 FRB 的 tokio 运行时，而 `RuntimeConnector` 内部 `block_on`，不能在那里调用。
+一次只连一个当前运行时，与现在「当前桌面」一致。
 
 ```rust
-fn init_client(data_dir) -> DeviceIdentity                       // 密钥落盘、起 IrohClient
-fn parse_pairing(uri) -> PairingTarget                            // 只解析，给界面预览
-async fn pair(uri, device_name) -> RuntimeInfo                    // device.pair + system.describe
-async fn connect(endpoint_id, relay_url?) -> RuntimeInfo          // 切换当前运行时
-async fn disconnect()
-fn connection_events(sink: StreamSink<ConnectionEvent>)          // 状态、链路、延迟
+fn init_client(data_dir) -> DeviceIdentity                       // 密钥落盘
+#[frb(sync)] fn parse_pairing(uri) -> PairingTarget               // 只解析，给界面预览
+fn pair(uri, device_name) -> RuntimeInfo                          // device.pair + system.describe
+fn connect(endpoint_id, relay_url?) -> RuntimeInfo                // 切换当前运行时
+fn disconnect(); fn verify_connection()
+fn connection_events(sink: StreamSink<ConnectionEvent>)          // 状态、链路、错误
+// 错误：SmeltError { kind: Unpaired | Offline | InvalidPairing | Incompatible | Cancelled | Other, message }
 ```
+
+crate 内部给后续阶段的入口：`client::current_runtime()`（generation + RuntimeClient）与 `client::subscribe`
+（generation 变了就丢掉旧运行时的状态）。`IrohClient` 的 `Drop` 会 `block_on`，不能在 tokio 线程上释放。
 
 ### P4.2 会话目录
 
