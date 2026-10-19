@@ -55,7 +55,7 @@ enum Command {
 fn client(peer: EndpointId, relay: Option<&str>) -> Result<RuntimeClient> {
     let relay = relay.map(RelaySettings::parse).transpose()?;
     let secret = smelt_iroh::load_or_create_secret(&smelt_iroh::default_client_secret_path()?)?;
-    let iroh = IrohClient::new(secret)?;
+    let iroh = IrohClient::new(secret, None)?;
     eprintln!("本机设备身份：{}", iroh.id());
     Ok(RuntimeClient::new(iroh.connector(peer, relay.as_ref())))
 }

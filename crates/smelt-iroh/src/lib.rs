@@ -209,22 +209,10 @@ pub(crate) fn observe_selected_paths(
     });
 }
 
-fn report_selected_path(
-    conn: &Connection,
-    remote: &str,
-    observer: Option<&PathObserver>,
-    last_address: &mut Option<String>,
-) {
+/// 连接当前选中的传输路径。还没选出路径（刚握手）时为 None。
+pub(crate) fn selected_path(conn: &Connection, remote: &str) -> Option<PathStatus> {
     let paths = conn.paths();
-    let Some(path) = paths.iter().find(|path| path.is_selected()) else {
-        return;
-    };
-    let address = path.remote_addr().to_string();
-    if last_address.as_ref() == Some(&address) {
-        return;
-    }
-    *last_address = Some(address.clone());
-
+    let path = paths.iter().find(|path| path.is_selected())?;
     let kind = if path.is_ip() {
         PathKind::Direct
     } else if path.is_relay() {
@@ -232,12 +220,27 @@ fn report_selected_path(
     } else {
         PathKind::Custom
     };
-    let status = PathStatus {
+    Some(PathStatus {
         remote: remote.to_string(),
         kind,
-        address,
+        address: path.remote_addr().to_string(),
         rtt: path.rtt(),
+    })
+}
+
+fn report_selected_path(
+    conn: &Connection,
+    remote: &str,
+    observer: Option<&PathObserver>,
+    last_address: &mut Option<String>,
+) {
+    let Some(status) = selected_path(conn, remote) else {
+        return;
     };
+    if last_address.as_ref() == Some(&status.address) {
+        return;
+    }
+    *last_address = Some(status.address.clone());
     info!(
         remote = %status.remote,
         path = %status.kind,
