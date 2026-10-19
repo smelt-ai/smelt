@@ -1,7 +1,6 @@
 //! ACP 输入栏：补全、模型选择、发送。
 
 use super::*;
-use gpui_component::{Disableable as _, Selectable as _};
 use smelt_client::daemon_state::DaemonPhase;
 
 /// 排队条目用正文当身份。相同正文按出现次序分开，删掉前面一条时后面的格子跟着正文走。
@@ -222,17 +221,14 @@ impl AcpView {
                     .unwrap_or_default();
                 let grouped = grouped_models.is_some();
                 Button::new("acp-model-pill")
-                    .ghost()
-                    .small()
-                    .rounded(ButtonRounded::Size(px(9999.)))
+                    .quiet()
+                    .compact()
+                    .capsule()
                     .dropdown_caret(true)
                     .label(model_label)
-                    .text_color(gpui::rgb(if next_turn_notice.is_some() {
-                        ui_theme::yellow()
-                    } else {
-                        ui_theme::text_mid()
-                    }))
-                    .hover(|d| d.bg(ui_theme::overlay(0x28)))
+                    .when(next_turn_notice.is_some(), |button| {
+                        button.text_color(cx.theme().warning)
+                    })
                     // 输入栏贴窗口底，默认 TopLeft 会往下弹，长模型列表把配置挤出屏幕。
                     .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, cx| {
                         let mut menu = menu;
@@ -405,13 +401,11 @@ impl AcpView {
                 let skills = self.loaded_skills().to_vec();
                 let count = skills.len();
                 Button::new("acp-skills-pill")
-                    .ghost()
-                    .small()
-                    .rounded(ButtonRounded::Size(px(9999.)))
+                    .quiet()
+                    .compact()
+                    .capsule()
                     .dropdown_caret(true)
                     .label(format!("技能 {count}"))
-                    .text_color(gpui::rgb(ui_theme::text_mid()))
-                    .hover(|d| d.bg(ui_theme::overlay(0x28)))
                     .dropdown_menu_with_anchor(
                         gpui::Anchor::BottomLeft,
                         move |mut menu, _window, _cx| {
@@ -555,8 +549,8 @@ impl AcpView {
                                         };
                                         row.child(
                                             Button::new("acp-native-queue-immediate")
-                                                .text()
-                                                .xsmall()
+                                                .quiet()
+                                                .icon_size()
                                                 .label(immediate_label)
                                                 .text_color(gpui::rgb(if immediate_cancels_turn {
                                                     ui_theme::yellow()
@@ -582,8 +576,8 @@ impl AcpView {
                         if self.supports_native_queue {
                             strip = strip.child(
                                 Button::new("acp-native-queue-clear")
-                                    .text()
-                                    .xsmall()
+                                    .quiet()
+                                    .icon_size()
                                     .label("撤回排队")
                                     .text_color(gpui::rgb(ui_theme::text_muted()))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -640,8 +634,8 @@ impl AcpView {
                                 .when(item.withdrawable, |row| {
                                     row.child(
                                         Button::new(("acp-pending-prompt-withdraw", id as usize))
-                                            .text()
-                                            .xsmall()
+                                            .quiet()
+                                            .icon_size()
                                             .label("撤回")
                                             .text_color(gpui::rgb(ui_theme::text_muted()))
                                             .tooltip("撤回这条，放回输入框")
@@ -784,10 +778,8 @@ impl AcpView {
                                 .child(
                                     // 图标作为子元素放进去，保持 16px；`icon()` 会按按钮尺寸缩到 13.5px。
                                     Button::new("acp-trajectory")
-                                        .ghost()
-                                        .xsmall()
-                                        .size(px(18.))
-                                        .p_0()
+                                        .quiet()
+                                        .icon_size()
                                         .text_color(gpui::rgb(ui_theme::text_muted()))
                                         .child(Icon::new(IconName::Inspector).size(px(16.)))
                                         .icon_action("会话追踪")
@@ -865,11 +857,9 @@ impl AcpView {
                         }))
                         .child(
                             Button::new("acp-attach")
-                                .secondary()
-                                .size(px(32.))
-                                .p_0()
-                                .rounded(px(16.))
-                                .child(div().text_lg().font_semibold().child("+"))
+                                .normal()
+                                .circle()
+                                .icon(IconName::Plus)
                                 .icon_action("添加文件")
                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                     this.pick_composer_files(window, cx);
@@ -885,33 +875,12 @@ impl AcpView {
                             } else {
                                 "停止"
                             };
-                            // 红色软底，已经请求过停止时再深一档。
-                            let (fill, hover, press) = if in_cancel {
-                                (0x50, 0x60, 0x70)
-                            } else {
-                                (0x28, 0x38, 0x48)
-                            };
-                            let red = |alpha| gpui::Hsla::from(ui_theme::tint(ui_theme::red(), alpha));
                             row.child(
                                 Button::new("acp-stop")
-                                    .custom(
-                                        ButtonCustomVariant::new(cx)
-                                            .color(red(fill))
-                                            .hover(red(hover))
-                                            .active(red(press)),
-                                    )
-                                    .size(px(32.))
-                                    .p_0()
-                                    .rounded(px(16.))
-                                    // 自定义变体的底色只取 `color` 的两成，这里直接给足。
-                                    .bg(red(fill))
+                                    .danger()
+                                    .circle()
+                                    .label("■")
                                     .icon_action(label)
-                                    .child(
-                                        div()
-                                            .size(px(10.))
-                                            .rounded(px(2.))
-                                            .bg(gpui::rgb(ui_theme::red())),
-                                    )
                                     .on_click(
                                         cx.listener(|this, _ev, _window, cx| this.on_stop_button_click(cx)),
                                     ),
@@ -923,12 +892,10 @@ impl AcpView {
                             row.child(
                                 // 圆钮 + 上箭头。有内容才是主操作，空着不可点。
                                 Button::new("acp-send")
-                                    .primary()
+                                    .commit()
+                                    .circle()
                                     .disabled(!can_send)
-                                    .size(px(32.))
-                                    .p_0()
-                                    .rounded(px(16.))
-                                    .child(div().text_sm().font_semibold().child("↑"))
+                                    .label("↑")
                                     .accessibility_label("发送")
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.submit_input(window, false, cx);
@@ -1022,8 +989,7 @@ impl AcpView {
                     .child(div().flex_1())
                     .child(
                         Button::new("acp-usage-close")
-                            .ghost()
-                            .small()
+                            .dismiss()
                             .icon(IconName::Close)
                             .icon_action("关闭")
                             .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -1119,10 +1085,8 @@ impl AcpView {
             } else {
                 h_flex().w_full().justify_end().child(
                     Button::new("acp-usage-compact")
-                        .secondary()
-                        .xsmall()
-                        .h(ui_theme::height::sm())
-                        .px_3()
+                        .normal()
+                        .compact()
                         .label("压缩上下文")
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.compact_context(cx);
@@ -1156,12 +1120,10 @@ impl AcpView {
         let summary = background_task_summary(running);
         Some(
             Button::new("acp-background-tasks")
-                .ghost()
-                .xsmall()
+                .quiet()
+                .compact()
+                .capsule()
                 .selected(self.background_tasks_open)
-                .h(ui_theme::height::xxs())
-                .px_2()
-                .rounded(px(11.))
                 .accessibility_label(summary.clone())
                 .child(
                     div()
@@ -1263,10 +1225,9 @@ impl AcpView {
                                 gpui::ElementId::from("acp-background-task-stop"),
                                 stop_id.clone(),
                             ))
-                            .text()
-                            .xsmall()
+                            .danger()
+                            .icon_size()
                             .label("停止")
-                            .text_color(gpui::rgb(ui_theme::yellow()))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 // 不要顺带展开或收起这一行的输出。
                                 cx.stop_propagation();
@@ -1324,8 +1285,7 @@ impl AcpView {
                     .child(div().flex_1())
                     .child(
                         Button::new("acp-background-task-close")
-                            .ghost()
-                            .small()
+                            .dismiss()
                             .icon(IconName::Close)
                             .icon_action("关闭")
                             .on_click(cx.listener(|this, _ev, _window, cx| {

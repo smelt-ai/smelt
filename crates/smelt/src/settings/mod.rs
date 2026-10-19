@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::progress::Progress;
@@ -21,6 +20,7 @@ use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPa
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::switch::Switch;
 use gpui_component::*;
+pub(crate) use smelt_ui::Button;
 
 use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
@@ -1239,13 +1239,10 @@ fn render_dsh_effort_section(
                     effort.name.clone()
                 };
                 Button::new(format!("dsh-reasoning-{}", effort.id))
-                    .secondary()
-                    .small()
-                    .label(if selected {
-                        format!("✓ {label}")
-                    } else {
-                        label
-                    })
+                    .choice()
+                    .compact()
+                    .selected(selected)
+                    .label(label)
                     .on_click(move |_, _, cx| {
                         let value = value.clone();
                         entity.update(cx, |workspace, cx| {
@@ -1355,13 +1352,10 @@ fn render_dsh_model_choices_section(
                 let value = model.id.clone();
                 let state = editor_model.clone();
                 Button::new(format!("dsh-model-choice-{}", model.id))
-                    .secondary()
-                    .small()
-                    .label(if selected {
-                        format!("✓ {}", model.label())
-                    } else {
-                        model.label().to_string()
-                    })
+                    .choice()
+                    .compact()
+                    .selected(selected)
+                    .label(model.label().to_string())
                     .on_click(move |_, window, cx| {
                         let value = value.clone();
                         state.update(cx, |state, cx| state.set_value(value, window, cx));
@@ -1441,9 +1435,10 @@ fn render_model_discovery_section(
                 let taken = adopted.iter().any(|id| id == &model.id);
                 let label = model.label().to_string();
                 Button::new(format!("{id_prefix}-discovered-{}", model.id))
-                    .secondary()
-                    .small()
-                    .label(if taken { format!("✓ {label}") } else { label })
+                    .choice()
+                    .compact()
+                    .selected(taken)
+                    .label(label)
                     .disabled(taken)
                     .on_click(move |_, window, cx| {
                         let model = model.clone();

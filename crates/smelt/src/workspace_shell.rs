@@ -16,9 +16,8 @@ use gpui_component::dock::{
 };
 
 use gpui_component::ActiveTheme as _;
-use gpui_component::Sizable as _;
 use gpui_component::StyledExt as _;
-use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
+pub(crate) use smelt_ui::Button;
 
 use crate::settings::Appearance;
 use crate::{
@@ -596,9 +595,8 @@ impl Workspace {
                             )
                             .child(
                                 Button::new("empty-open")
-                                    .primary()
-                                    .large()
-                                    .rounded(ButtonRounded::Size(px(9999.)))
+                                    .commit()
+                                    .capsule()
                                     .label("打开项目")
                                     .on_click(
                                         cx.listener(|this, _, _window, cx| this.open_project(cx)),

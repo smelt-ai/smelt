@@ -12,13 +12,13 @@ use std::time::Instant;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement};
-use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::resizable::resizable_panel;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
+pub(crate) use smelt_ui::Button;
 
-use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable, ui_theme};
+use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable};
 use smelt_runtime_client::protocol::control::ControlCall;
 use smelt_runtime_client::protocol::git::*;
 pub use smelt_runtime_client::protocol::git::{
@@ -533,13 +533,12 @@ pub(crate) fn release_git_write(
     true
 }
 
-/// 树行里的暂存 / 取消暂存。固定 16px 见方，不挤文件名，也不撑高行。
+/// 树行里的暂存 / 取消暂存。图标档 20，不挤文件名。
 fn stage_toggle_button(id: ElementId, staged: bool) -> Button {
     Button::new(id)
-        .ghost()
-        .with_size(px(16.))
+        .quiet()
+        .icon_size()
         .flex_shrink_0()
-        .text_color(rgb(ui_theme::text_muted()))
         .icon(if staged {
             IconName::Minus
         } else {
@@ -607,10 +606,9 @@ fn render_narrow_git_row(
                 // 折叠箭头：未初始化的仓库没有内容可折，留空位保持对齐。
                 .child(
                     Button::new(git_repo_id("git-repo-caret", root))
-                        .ghost()
-                        .with_size(px(16.))
+                        .quiet()
+                        .icon_size()
                         .flex_shrink_0()
-                        .text_color(rgb(ui_theme::text_faint()))
                         .icon(if *collapsed {
                             IconName::ChevronRight
                         } else {
@@ -667,8 +665,8 @@ fn render_narrow_git_row(
                 // 而不是“当前项目”——多仓工作区里后者根本不是一个明确的对象。
                 .child(
                     Button::new(git_repo_id("git-repo-ops", root))
-                            .ghost()
-                            .xsmall()
+                            .quiet()
+                            .icon_size()
                             .label(sync_label)
                             .font_family(crate::terminal_view::font_family())
                             .text_color(rgb(if ahead + behind > 0 {
@@ -730,10 +728,9 @@ fn render_narrow_git_row(
                         .gap_1p5()
                         .child(
                             Button::new(git_repo_id("git-commit-push", root))
-                                .primary()
-                                .small()
+                                .commit()
+                                .compact()
                                 .flex_1()
-                                .h(ui_theme::height::sm())
                                 .label(commit_label)
                                 .disabled(!can_commit)
                                 .on_click(move |_ev, window, cx| {
@@ -747,9 +744,8 @@ fn render_narrow_git_row(
                         )
                         .child(
                             Button::new(git_repo_id("git-commit-only", root))
-                                .ghost()
-                                .small()
-                                .h(ui_theme::height::sm())
+                                .quiet()
+                                .compact()
                                 .label("仅提交")
                                 .disabled(!can_commit)
                                 .on_click(move |_ev, window, cx| {
@@ -762,9 +758,8 @@ fn render_narrow_git_row(
                         )
                         .child(
                             Button::new(git_repo_id("git-push-only", root))
-                                .ghost()
-                                .small()
-                                .h(ui_theme::height::sm())
+                                .quiet()
+                                .compact()
                                 .label(format!("↑{ahead}"))
                                 // 点击跟可用态同一个条件：↑0 时点了就是一次毫无意义的
                                 // push（失败时还会贴出一条报错）。

@@ -4,7 +4,6 @@
 //! 消息列表、审批卡、输入栏分别在 sibling 模块。
 
 use super::*;
-use gpui_component::button::ButtonCustomVariant;
 use smelt_client::daemon_state::DaemonPhase;
 
 use super::ConversationTranscript;
@@ -182,11 +181,8 @@ impl AcpView {
                             .child(div().flex_1())
                             .child(
                                 Button::new("acp-restart")
-                                    .secondary()
-                                    .xsmall()
-                                    .h(ui_theme::height::sm())
-                                    .px_3()
-                                    .font_medium()
+                                    .commit()
+                                    .capsule()
                                     .label("重新开始")
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.restart(window, cx);
@@ -328,11 +324,8 @@ impl AcpView {
                         )
                         .child(
                             Button::new("acp-restart")
-                                .primary()
-                                .h(ui_theme::height::lg())
-                                .px_5()
-                                .rounded(ui_theme::height::lg() / 2.)
-                                .font_semibold()
+                                .commit()
+                                .capsule()
                                 .label(action_label)
                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                     this.restart(window, cx);
@@ -379,9 +372,8 @@ impl AcpView {
                 let prompt = prompt.to_string();
                 prompt_chips = prompt_chips.child(
                     Button::new((gpui::ElementId::from("acp-empty-prompt"), title))
-                        .secondary()
-                        .px_3()
-                        .rounded(ui_theme::height::md() / 2.)
+                        .normal()
+                        .capsule()
                         .label(title)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.insert_prompt_text(&prompt, window, cx);
@@ -453,18 +445,8 @@ impl AcpView {
                 .justify_center()
                 .child(
                     Button::new("acp-jump-to-latest")
-                        .custom(
-                            ButtonCustomVariant::new(cx)
-                                .color(ui_theme::glass_floating().into())
-                                .hover(gpui::rgb(ui_theme::bg_hover()).into())
-                                .active(gpui::rgb(ui_theme::bg_hover()).into()),
-                        )
-                        .h(ui_theme::height::lg())
-                        .px_4()
-                        .rounded(ui_theme::height::lg() / 2.)
-                        // 自定义变体的底色只取 `color` 的两成，这里直接给足。
-                        .bg(ui_theme::glass_floating())
-                        .shadow_sm()
+                        .surface()
+                        .capsule()
                         .accessibility_label("回到最新")
                         .child(
                             div()
@@ -649,8 +631,7 @@ impl AcpView {
                     .child(div().flex_1().min_w(px(0.)).child(notice.text.clone()))
                     .child(
                         Button::new(("acp-notice-dismiss", id as usize))
-                            .ghost()
-                            .xsmall()
+                            .dismiss()
                             .icon(IconName::Close)
                             .text_color(gpui::rgb(ui_theme::yellow()))
                             .icon_action("关闭提示")

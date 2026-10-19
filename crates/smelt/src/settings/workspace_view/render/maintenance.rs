@@ -206,8 +206,8 @@ fn maintenance_groups(
 
         let check_entity = update_entity.clone();
         let check_btn = Button::new("check-update")
-            .primary()
-            .small()
+            .normal()
+            .compact()
             .label(check_label)
             .disabled(!can_request_check)
             .on_click(move |_, _window, cx: &mut App| {
@@ -228,9 +228,8 @@ fn maintenance_groups(
                 };
                 Some(
                     Button::new("download-update")
-                        .info()
-                        .outline()
-                        .small()
+                        .commit()
+                        .compact()
                         .label("下载并更新")
                         .on_click(move |_, _window, cx: &mut App| {
                             let candidate = candidate.clone();
@@ -246,9 +245,8 @@ fn maintenance_groups(
         let restart_entity = update_entity.clone();
         let restart_btn = ready.then(|| {
             Button::new("restart-update")
-                .info()
-                .outline()
-                .small()
+                .commit()
+                .compact()
                 .label(
                     if matches!(&status, updater::UpdateStatus::InstallFailed(_)) {
                         "重试重启更新"
@@ -278,8 +276,8 @@ fn maintenance_groups(
             .flex_wrap()
             .child(
                 Button::new("settings-github-link")
-                    .text()
-                    .xsmall()
+                    .link()
+                    .icon_size()
                     .label("源码 GitHub ↗")
                     .on_click(|_, _window, cx| {
                         cx.open_url("https://github.com/smelt-ai/smelt");
@@ -287,8 +285,8 @@ fn maintenance_groups(
             )
             .child(
                 Button::new("settings-help-link")
-                    .text()
-                    .xsmall()
+                    .link()
+                    .icon_size()
                     .label("帮助文档 ↗")
                     .on_click(|_, _window, cx| {
                         cx.open_url("https://smelt.onoo.io/");
@@ -296,8 +294,8 @@ fn maintenance_groups(
             )
             .child(
                 Button::new("settings-open-log-link")
-                    .text()
-                    .xsmall()
+                    .quiet()
+                    .icon_size()
                     .label("打开日志 ↗")
                     .on_click(|_, _window, _cx| {
                         // 反馈问题时手动带上这份日志：GitHub issue 附件靠拖拽，
@@ -321,8 +319,8 @@ fn maintenance_groups(
             )
             .child(
                 Button::new("settings-report-issue-link")
-                    .text()
-                    .xsmall()
+                    .link()
+                    .icon_size()
                     .label("反馈问题 ↗")
                     .on_click(|_, _window, cx| {
                         // 先把日志在 Finder 里选出来，用户点开 issue 页面后可以直接把它拖进去。
@@ -467,7 +465,7 @@ fn maintenance_groups(
                     // 首选：无缝升级（exec 交接，会话不中断）。
                     let upgrade_daemon_btn = (outdated == Some(true)).then(|| {
                         Button::new("upgrade-daemon")
-                            .small()
+                            .compact()
                             .label(if upgrading { "升级中…" } else { "无缝升级" })
                             .loading(upgrading)
                             .disabled(upgrading)
@@ -480,9 +478,8 @@ fn maintenance_groups(
                     // 硬重启：常驻入口（守护卡死 / 想强制换二进制时用），会断会话。
                     // 不受版本是否落后限制；点击走二次确认弹窗兜底。
                     let restart_daemon_btn = Button::new("restart-daemon")
-                        .danger()
-                        .outline()
-                        .small()
+                        .danger_outline()
+                        .compact()
                         .label("重启守护进程")
                         .on_click(move |_, _window, cx: &mut App| {
                             restart_entity.update(cx, |this, cx| {
@@ -510,8 +507,8 @@ fn maintenance_groups(
                     let manage_sessions_entity = daemon_entity.clone();
                     let manage_sessions_link = info.is_some().then(|| {
                         Button::new("settings-manage-daemon-sessions")
-                            .text()
-                            .xsmall()
+                            .quiet()
+                            .icon_size()
                             .label("查看/清理会话 ›")
                             .on_click(move |_, _window, cx| {
                                 manage_sessions_entity.update(cx, |ws, cx| {
@@ -570,7 +567,7 @@ fn maintenance_groups(
         let has_findings = state.scan.as_ref().is_some_and(|s| !s.is_empty());
 
         let scan_btn = Button::new("storage-scan")
-            .small()
+            .compact()
             .label("扫描残留数据")
             .on_click(move |_, _window, cx: &mut App| {
                 let scan = crate::storage_cleanup::scan();
@@ -582,9 +579,8 @@ fn maintenance_groups(
 
         let clean_btn = has_findings.then(|| {
             Button::new("storage-clean")
-                .info()
-                .outline()
-                .small()
+                .danger()
+                .compact()
                 .label("清理")
                 .on_click(move |_, _window, cx: &mut App| {
                     let Some(scan) = cx

@@ -171,7 +171,7 @@ pub(super) fn dsh_model_page(
                                             )
                                             .child(
                                                 Button::new("dsh-configure-deepseek")
-                                                    .small()
+                                                    .compact()
                                                     .label(if model_editor.is_some() {
                                                         "配置中"
                                                     } else {
@@ -226,8 +226,8 @@ pub(super) fn dsh_model_page(
                                             )
                                             .child(
                                                 Button::new("dsh-add-custom-provider")
-                                                    .secondary()
-                                                    .small()
+                                                    .normal()
+                                                    .compact()
                                                     .icon(IconName::Plus)
                                                     .label("添加")
                                                     .disabled(custom_editor.is_some())
@@ -323,8 +323,8 @@ pub(super) fn dsh_model_page(
                                                             "dsh-edit-custom-provider-{}",
                                                             provider.id
                                                         ))
-                                                        .secondary()
-                                                        .small()
+                                                        .normal()
+                                                        .compact()
                                                         .label("编辑")
                                                         .disabled(custom_editor.is_some())
                                                         .on_click(move |_, window, cx| {
@@ -353,8 +353,8 @@ pub(super) fn dsh_model_page(
                                     .flex_wrap()
                                     .child(
                                         Button::new("dsh-edit-model-settings")
-                                            .ghost()
-                                            .small()
+                                            .quiet()
+                                            .compact()
                                             .label("编辑原生设置文件")
                                             .on_click(move |_, window, cx| {
                                                 settings_entity.update(cx, |workspace, cx| {
@@ -365,8 +365,8 @@ pub(super) fn dsh_model_page(
                                     )
                                     .child(
                                         Button::new("dsh-edit-credentials-file")
-                                            .ghost()
-                                            .small()
+                                            .quiet()
+                                            .compact()
                                             .label("编辑原生凭据文件")
                                             .on_click(move |_, window, cx| {
                                                 credentials_entity.update(cx, |workspace, cx| {
@@ -377,8 +377,8 @@ pub(super) fn dsh_model_page(
                                     )
                                     .child(
                                         Button::new("dsh-refresh-settings")
-                                            .ghost()
-                                            .small()
+                                            .quiet()
+                                            .compact()
                                             .label("刷新")
                                             .on_click(move |_, _, cx| {
                                                 refresh_entity.update(cx, |workspace, cx| {
@@ -520,8 +520,8 @@ pub(super) fn dsh_model_page(
                                             .justify_end()
                                             .child(
                                                 Button::new("dsh-cancel-model-settings")
-                                                    .ghost()
-                                                    .small()
+                                                    .quiet()
+                                                    .compact()
                                                     .label("取消")
                                                     .on_click(move |_, _, cx| {
                                                         cancel_entity.update(cx, |workspace, cx| {
@@ -532,7 +532,7 @@ pub(super) fn dsh_model_page(
                                             )
                                             .child(
                                                 Button::new("dsh-save-model-settings")
-                                                    .small()
+                                                    .compact()
                                                     .label("保存配置")
                                                     .on_click(move |_, window, cx| {
                                                         save_entity.update(cx, |workspace, cx| {
@@ -610,8 +610,8 @@ pub(super) fn dsh_model_page(
                                                 .child(div().flex_1())
                                                 .child(
                                                     Button::new("dsh-remove-custom-model")
-                                                    .ghost()
-                                                    .small()
+                                                    .quiet()
+                                                    .compact()
                                                     .icon(crate::trash_icon())
                                                     .icon_action("移除此模型")
                                                     .on_click(move |_, _, cx| {
@@ -798,8 +798,8 @@ pub(super) fn dsh_model_page(
                                                         Button::new(
                                                             "dsh-custom-provider-api",
                                                         )
-                                                        .secondary()
-                                                        .small()
+                                                        .normal()
+                                                        .compact()
                                                         .label(editor.api.clone())
                                                         .dropdown_menu(move |mut menu, _window, _cx| {
                                                             for api in smelt_model::provider_api::PROVIDER_API_PROTOCOLS {
@@ -855,8 +855,8 @@ pub(super) fn dsh_model_page(
                                                     .gap_2()
                                                     .child(
                                                         Button::new("dsh-discover-custom-models")
-                                                            .secondary()
-                                                            .small()
+                                                            .normal()
+                                                            .compact()
                                                             .label(if discovery_busy {
                                                                 "正在读取…"
                                                             } else {
@@ -875,8 +875,8 @@ pub(super) fn dsh_model_page(
                                                     )
                                                     .child(
                                                         Button::new("dsh-add-custom-model")
-                                                            .secondary()
-                                                            .small()
+                                                            .normal()
+                                                            .compact()
                                                             .icon(IconName::Plus)
                                                             .label("添加模型")
                                                             .on_click(move |_, window, cx| {
@@ -911,8 +911,8 @@ pub(super) fn dsh_model_page(
                                             .justify_end()
                                             .child(
                                                 Button::new("dsh-cancel-custom-provider")
-                                                    .ghost()
-                                                    .small()
+                                                    .quiet()
+                                                    .compact()
                                                     .label("取消")
                                                     .on_click(move |_, _, cx| {
                                                         cancel_entity.update(
@@ -928,8 +928,8 @@ pub(super) fn dsh_model_page(
                                             )
                                             .child(
                                                 Button::new("dsh-save-custom-provider")
-                                                    .secondary()
-                                                    .small()
+                                                    .normal()
+                                                    .compact()
                                                     .label("保存")
                                                     .on_click(move |_, window, cx| {
                                                         save_entity.update(
@@ -945,7 +945,7 @@ pub(super) fn dsh_model_page(
                                             )
                                             .child(
                                                 Button::new("dsh-save-custom-provider-default")
-                                                    .small()
+                                                    .compact()
                                                     .label("保存并设为默认")
                                                     .on_click(move |_, window, cx| {
                                                         save_default_entity.update(
@@ -1025,8 +1025,8 @@ pub(super) fn dsh_model_page(
                                                 Button::new(format!(
                                                     "dsh-manage-plugins-{profile_name}"
                                                 ))
-                                                .secondary()
-                                                .small()
+                                                .normal()
+                                                .compact()
                                                 .label(if open.is_some() {
                                                     "收起插件"
                                                 } else {
@@ -1128,8 +1128,8 @@ pub(super) fn dsh_model_page(
                                                                 "dsh-plugin-update-{profile_name}-{}",
                                                                 plugin.name
                                                             ))
-                                                            .ghost()
-                                                            .small()
+                                                            .quiet()
+                                                            .compact()
                                                             .label("更新")
                                                             .disabled(busy.is_some())
                                                             .on_click(move |_, window, cx| {
@@ -1157,9 +1157,8 @@ pub(super) fn dsh_model_page(
                                                             "dsh-plugin-remove-{profile_name}-{}",
                                                             plugin.name
                                                         ))
-                                                        .ghost()
-                                                        .small()
                                                         .danger()
+                                                        .compact()
                                                         .label("卸载")
                                                         .disabled(busy.is_some())
                                                         .on_click(move |_, window, cx| {
@@ -1207,7 +1206,7 @@ pub(super) fn dsh_model_page(
                                                 Button::new(format!(
                                                     "dsh-plugin-install-{profile_name}"
                                                 ))
-                                                .small()
+                                                .compact()
                                                 .label("安装")
                                                 .loading(busy.is_some())
                                                 .disabled(busy.is_some())
@@ -1222,8 +1221,8 @@ pub(super) fn dsh_model_page(
                                                 Button::new(format!(
                                                     "dsh-plugin-refresh-{profile_name}"
                                                 ))
-                                                .ghost()
-                                                .small()
+                                                .quiet()
+                                                .compact()
                                                 .label("刷新")
                                                 .disabled(busy.is_some())
                                                 .on_click(move |_, _, cx| {
@@ -1309,7 +1308,7 @@ pub(super) fn dsh_model_page(
                                                 Button::new(format!(
                                                     "dsh-install-smelt-host-{profile_name}"
                                                 ))
-                                                .small()
+                                                .compact()
                                                 .label("安装/更新 Smelt Host")
                                                 .loading(busy.is_some())
                                                 .disabled(busy.is_some())

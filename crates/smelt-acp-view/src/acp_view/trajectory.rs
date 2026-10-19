@@ -784,8 +784,7 @@ fn render_inspector(
                         .child(div().flex_1())
                         .child(
                             Button::new("trajectory-inspector-close")
-                                .ghost()
-                                .xsmall()
+                                .dismiss()
                                 .icon(IconName::Close)
                                 .icon_action("关闭")
                                 .on_click(cx.listener(|this, _, _, cx| {

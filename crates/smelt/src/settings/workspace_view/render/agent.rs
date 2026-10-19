@@ -185,11 +185,11 @@ fn agent_groups(
                                 let row_key = label.entity_id();
                                 let delete_slot = if *removable {
                                     Button::new(("del-launch", row_key))
-                                        .ghost()
-                                        .small()
+                                        .quiet()
+                                        .compact()
                                         .icon(IconName::Close)
                                         .icon_action("删除启动项")
-                                        .size(del_w)
+                                        .w(del_w)
                                         .flex_none()
                                         .on_click(move |_, _, cx: &mut App| {
                                             del_entity.update(cx, |ws, cx| {
@@ -250,8 +250,8 @@ fn agent_groups(
                         };
                         let refresh_entity = runtime_entity.clone();
                         let refresh = Button::new("refresh-acp-runtime")
-                            .ghost()
-                            .small()
+                            .quiet()
+                            .compact()
                             .icon(IconName::Redo)
                             .loading_icon(IconName::LoaderCircle)
                             .loading(runtime.refreshing)
@@ -318,8 +318,8 @@ fn agent_groups(
                                     let install_entity = runtime_entity.clone();
                                     let installing_this = runtime.installing == Some(agent);
                                     Button::new(format!("install-acp-cli-{}", agent.id()))
-                                        .secondary()
-                                        .small()
+                                        .normal()
+                                        .compact()
                                         .icon(IconName::Plus)
                                         .label(if installing_this { "安装中…" } else { "安装" })
                                         .loading_icon(IconName::LoaderCircle)
@@ -446,8 +446,8 @@ fn agent_groups(
                                 )
                                 .children(presentation.is_error.then(|| {
                                     Button::new("refresh-system-notification-status")
-                                        .small()
-                                        .ghost()
+                                        .compact()
+                                        .quiet()
                                         .label("重新检查")
                                         .on_click(|_, _, _| {
                                             crate::status_item::refresh_system_notification_authorization();
@@ -455,8 +455,8 @@ fn agent_groups(
                                 }))
                                 .children(presentation.can_open_settings.then(|| {
                                     Button::new("open-system-notification-settings")
-                                        .small()
-                                        .ghost()
+                                        .compact()
+                                        .quiet()
                                         .icon(IconName::ExternalLink)
                                         .label("系统设置")
                                         .tooltip("打开 macOS 通知设置")
@@ -670,8 +670,8 @@ fn agent_groups(
                                             .items_center()
                                             .child(
                                                 Button::new(("profile-kind", row_key))
-                                                    .ghost()
-                                                    .small()
+                                                    .quiet()
+                                                    .compact()
                                                     .w(kind_w)
                                                     .label(current_kind_label)
                                                     .dropdown_menu(move |mut menu, _window, _cx| {
@@ -700,11 +700,11 @@ fn agent_groups(
                                             )
                                             .child(
                                                 Button::new(("del-profile", row_key))
-                                                    .ghost()
-                                                    .small()
+                                                    .quiet()
+                                                    .compact()
                                                     .icon(IconName::Close)
                                                     .icon_action("删除 workspace")
-                                                    .size(del_w)
+                                                    .w(del_w)
                                                     .flex_none()
                                                     .on_click(move |_, _, cx: &mut App| {
                                                         del_entity.update(cx, |ws, cx| {
@@ -789,7 +789,6 @@ fn agent_groups(
                                 .gap_2()
                                 .child(
                                     Button::new("install-agent-hooks")
-                                        .success()
                                         .outline()
                                         .label(if installed {
                                             "重新安装 hooks"
@@ -808,7 +807,7 @@ fn agent_groups(
                                 )
                                 .child(
                                     Button::new("uninstall-agent-hooks")
-                                        .outline()
+                                        .danger()
                                         .label("移除 Smelt hooks")
                                         .disabled(busy)
                                         .on_click(move |_, _window, cx: &mut App| {

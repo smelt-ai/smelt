@@ -9,7 +9,6 @@ use std::collections::BTreeSet;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::ButtonVariants as _;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 use smelt_runtime_client::protocol::workspace::{
@@ -201,8 +200,6 @@ impl Workspace {
             let theme = cx.theme();
             (theme.foreground, theme.muted_foreground, theme.border)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
-            Self::modal_accent_colors(false);
         let multiple = picker.purpose.multiple();
         let listing = picker.listing.as_ref();
         let current = listing.and_then(|listing| listing.as_ref().ok());
@@ -211,9 +208,9 @@ impl Workspace {
             .gap_2()
             .items_center()
             .child(
-                gpui_component::button::Button::new("dir-picker-up")
-                    .ghost()
-                    .small()
+                smelt_ui::Button::new("dir-picker-up")
+                    .quiet()
+                    .compact()
                     .icon(IconName::ArrowUp)
                     .tooltip("上一级")
                     .disabled(current.is_none_or(|listing| listing.parent.is_none()))
@@ -230,9 +227,9 @@ impl Workspace {
                     })),
             )
             .child(
-                gpui_component::button::Button::new("dir-picker-home")
-                    .ghost()
-                    .small()
+                smelt_ui::Button::new("dir-picker-home")
+                    .quiet()
+                    .compact()
                     .label("主目录")
                     .on_click(cx.listener(|this, _, _, cx| this.dir_picker_navigate(None, cx))),
             )
@@ -313,9 +310,9 @@ impl Workspace {
                         // 多选时目录行右侧单独一个勾选；点名字进入目录。
                         .when(multiple && is_dir, |row| {
                             row.child(
-                                gpui_component::button::Button::new(("dir-picker-pick", ix))
-                                    .ghost()
-                                    .xsmall()
+                                smelt_ui::Button::new(("dir-picker-pick", ix))
+                                    .quiet()
+                                    .icon_size()
                                     .icon(if selected {
                                         IconName::Check
                                     } else {
@@ -374,22 +371,16 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-dir-picker",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_dir_picker(cx),
                         cx,
                     ))
                     .child(
-                        Self::modal_button(
+                        Self::modal_commit_button(
                             "confirm-dir-picker",
                             confirm_label,
-                            tint,
-                            hover,
-                            accent_text,
                             |this, _, _, cx| this.dir_picker_confirm(cx),
                             cx,
                         )

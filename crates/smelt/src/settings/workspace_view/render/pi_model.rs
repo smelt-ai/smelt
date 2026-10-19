@@ -245,7 +245,7 @@ fn change_model_button(
 ) -> impl IntoElement {
     let entity = entity.clone();
     Button::new("pi-change-default-model")
-        .xsmall()
+        .icon_size()
         .label("更换模型")
         .disabled(editing)
         .dropdown_menu(move |mut menu, window, cx| {
@@ -333,20 +333,17 @@ fn thinking_level_row(
                 .gap_1()
                 .children(THINKING_LEVELS.into_iter().map(|level| {
                     let level_entity = entity.clone();
-                    let button = Button::new(format!("pi-default-thinking-{level}"))
-                        .xsmall()
+                    Button::new(format!("pi-default-thinking-{level}"))
+                        .choice()
+                        .icon_size()
+                        .selected(current == level)
                         .label(level)
                         .disabled(!enabled)
                         .on_click(move |_, _, cx| {
                             level_entity.update(cx, |workspace, cx| {
                                 workspace.set_pi_default_thinking_level(level.to_string(), cx);
                             });
-                        });
-                    if current == level {
-                        button.primary()
-                    } else {
-                        button.ghost()
-                    }
+                        })
                 })),
         )
         .children((!enabled).then(|| {
@@ -448,8 +445,8 @@ fn provider_section(
 
     let add_entity = entity.clone();
     let add = Button::new("pi-add-custom-provider")
-        .ghost()
-        .xsmall()
+        .quiet()
+        .icon_size()
         .icon(IconName::Plus)
         .label("自定义 Provider")
         .tooltip("OpenAI / Anthropic 兼容网关、自托管服务或其他模型端点")
@@ -593,8 +590,8 @@ fn provider_list_footer(
     let retry = move |label: &'static str| {
         let entity = retry_entity.clone();
         Button::new("pi-auth-load")
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .label(label)
             .on_click(move |_, _, cx| {
                 entity.update(cx, |workspace, cx| workspace.refresh_pi_auth_providers(cx));
@@ -623,8 +620,8 @@ fn provider_list_footer(
             let toggle_entity = entity.clone();
             let toggle = (show_all || hidden > 0).then(|| {
                 Button::new("pi-auth-toggle-all")
-                    .ghost()
-                    .xsmall()
+                    .quiet()
+                    .icon_size()
                     .label(if show_all {
                         "只看常用".to_string()
                     } else {
@@ -710,8 +707,8 @@ fn custom_provider_row(
                 .gap_1()
                 .child(
                     Button::new(format!("pi-edit-custom-provider-{}", provider.id))
-                        .ghost()
-                        .xsmall()
+                        .quiet()
+                        .icon_size()
                         .label("编辑")
                         .disabled(editor_open)
                         .on_click(move |_, window, cx| {
@@ -723,8 +720,8 @@ fn custom_provider_row(
                 )
                 .child(
                     Button::new(format!("pi-delete-custom-provider-{delete_id}"))
-                        .ghost()
-                        .xsmall()
+                        .quiet()
+                        .icon_size()
                         .icon(crate::trash_icon())
                         .icon_action("删除此 Provider")
                         .disabled(editor_open)
@@ -748,8 +745,8 @@ fn config_files_footer(
         |id: &'static str, label: &'static str, kind: PiConfigFileKind, path: &str| {
             let entity = entity.clone();
             Button::new(id)
-                .ghost()
-                .xsmall()
+                .quiet()
+                .icon_size()
                 .label(label)
                 .tooltip(path.to_string())
                 .on_click(move |_, window, cx| {
@@ -795,8 +792,8 @@ fn config_files_footer(
         .child(div().flex_1())
         .child(
             Button::new("pi-refresh-settings")
-                .ghost()
-                .xsmall()
+                .quiet()
+                .icon_size()
                 .icon(IconName::Redo)
                 .icon_action("重新读取 ~/.pi/agent/ 下的配置")
                 .on_click(move |_, _, cx| {
@@ -923,8 +920,8 @@ fn default_model_form(
                 .justify_end()
                 .child(
                     Button::new("pi-cancel-model-settings")
-                        .ghost()
-                        .small()
+                        .quiet()
+                        .compact()
                         .label("取消")
                         .on_click(move |_, _, cx| {
                             cancel_entity.update(cx, |workspace, cx| {
@@ -934,7 +931,7 @@ fn default_model_form(
                 )
                 .child(
                     Button::new("pi-save-model-settings")
-                        .small()
+                        .compact()
                         .label("保存配置")
                         .on_click(move |_, window, cx| {
                             save_entity.update(cx, |workspace, cx| {
@@ -1010,8 +1007,8 @@ fn custom_provider_form(
                         .child(div().flex_1())
                         .child(
                             Button::new("pi-remove-custom-model")
-                                .ghost()
-                                .small()
+                                .quiet()
+                                .compact()
                                 .icon(crate::trash_icon())
                                 .icon_action("移除此模型")
                                 .on_click(move |_, _, cx| {
@@ -1164,8 +1161,8 @@ fn custom_provider_form(
                         .child(div().text_xs().font_semibold().text_color(fg).child("协议"))
                         .child(
                             Button::new("pi-custom-provider-api")
-                                .secondary()
-                                .small()
+                                .normal()
+                                .compact()
                                 .label(editor.api.clone())
                                 .dropdown_menu(move |mut menu, _window, _cx| {
                                     for api in smelt_model::provider_api::PROVIDER_API_PROTOCOLS {
@@ -1219,8 +1216,8 @@ fn custom_provider_form(
                         .gap_2()
                         .child(
                             Button::new("pi-discover-custom-models")
-                                .secondary()
-                                .small()
+                                .normal()
+                                .compact()
                                 .label(if discovery_busy {
                                     "正在读取…"
                                 } else {
@@ -1235,8 +1232,8 @@ fn custom_provider_form(
                         )
                         .child(
                             Button::new("pi-add-custom-model")
-                                .secondary()
-                                .small()
+                                .normal()
+                                .compact()
                                 .icon(IconName::Plus)
                                 .label("添加模型")
                                 .on_click(move |_, window, cx| {
@@ -1270,8 +1267,8 @@ fn custom_provider_form(
                 .justify_end()
                 .child(
                     Button::new("pi-cancel-custom-provider")
-                        .ghost()
-                        .small()
+                        .quiet()
+                        .compact()
                         .label("取消")
                         .on_click(move |_, _, cx| {
                             cancel_entity.update(cx, |workspace, cx| {
@@ -1281,8 +1278,8 @@ fn custom_provider_form(
                 )
                 .child(
                     Button::new("pi-save-custom-provider")
-                        .secondary()
-                        .small()
+                        .normal()
+                        .compact()
                         .label("保存")
                         .on_click(move |_, window, cx| {
                             save_entity.update(cx, |workspace, cx| {
@@ -1292,7 +1289,7 @@ fn custom_provider_form(
                 )
                 .child(
                     Button::new("pi-save-custom-provider-default")
-                        .small()
+                        .compact()
                         .label("保存并设为默认")
                         .on_click(move |_, window, cx| {
                             save_default_entity.update(cx, |workspace, cx| {

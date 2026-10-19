@@ -13,7 +13,6 @@ impl Workspace {
             let theme = cx.theme();
             (theme.foreground, theme.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let body = if target.runs == 0 {
             format!("将删除「{}」，此操作不可撤销。", target.name)
         } else {
@@ -32,21 +31,15 @@ impl Workspace {
                     .flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-delete-automation",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_delete_automation(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-delete-automation",
                         "确定删除",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_delete_automation(cx),
                         cx,
                     )),
@@ -171,7 +164,7 @@ impl Workspace {
                 .flex_shrink_0()
                 .child(
                     Button::new("automation-create")
-                        .primary()
+                        .commit()
                         .label("创建")
                         .loading(saving)
                         .disabled(!missing.is_empty())
@@ -202,8 +195,8 @@ impl Workspace {
             .flex_shrink_0()
             .child(
                 Button::new("automation-editor-more")
-                    .ghost()
-                    .small()
+                    .quiet()
+                    .compact()
                     .icon(IconName::Ellipsis)
                     .accessibility_label("更多操作")
                     .dropdown_menu(move |mut menu, _, _| {
@@ -379,9 +372,8 @@ impl Workspace {
         let no_ready_agents = ready_agents.is_empty();
         let agent_entity = entity.clone();
         let agent_selector = Button::new("automation-agent")
-            .ghost()
-            .small()
-            .focus_ring(false)
+            .quiet()
+            .compact()
             .icon(IconName::Bot)
             .label(current_agent_name)
             .disabled(no_ready_agents)
@@ -569,8 +561,8 @@ impl Workspace {
                         let run_id = run_id.clone();
                         bar.child(
                             Button::new("automation-run-pane-cancel")
-                                .ghost()
-                                .small()
+                                .danger()
+                                .compact()
                                 .icon(IconName::Close)
                                 .label("停止")
                                 .on_click(move |_, _, cx| {

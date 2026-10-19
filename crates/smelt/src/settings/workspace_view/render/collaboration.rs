@@ -128,7 +128,7 @@ pub(super) fn remote_page(
             card = card.child(
                 h_flex().child(
                     Button::new("begin-pairing")
-                        .small()
+                        .compact()
                         .label(label)
                         .loading(state.generating_offer)
                         .disabled(state.generating_offer)
@@ -176,7 +176,7 @@ pub(super) fn remote_page(
                         .child(
                             h_flex().gap_2().child(
                                 Button::new("copy-pairing-uri")
-                                    .small()
+                                    .compact()
                                     .label(copy_btn_label("copy-pairing-uri", "复制配对串", cx))
                                     .on_click(move |_, _window, cx: &mut App| {
                                         copy_with_feedback(uri.clone(), "copy-pairing-uri", cx);
@@ -236,7 +236,7 @@ pub(super) fn remote_page(
                         )
                         .child(
                             Button::new(("revoke-device", index))
-                                .small()
+                                .compact()
                                 .label("撤销")
                                 .on_click(move |_, _window, cx: &mut App| {
                                     revoke_device(endpoint_id.clone(), cx);
@@ -277,7 +277,7 @@ pub(super) fn remote_page(
             let label = if hub.adding { "正在配对…" } else { "添加运行时" };
             list = list.child(h_flex().child(
                 Button::new("add-runtime")
-                    .small()
+                    .compact()
                     .label(label)
                     .loading(hub.adding)
                     .disabled(hub.adding)
@@ -331,7 +331,7 @@ pub(super) fn remote_page(
                         )
                         .child(
                             Button::new(("remove-runtime", index))
-                                .small()
+                                .compact()
                                 .label("移除")
                                 .on_click(move |_, _window, cx: &mut App| {
                                     crate::runtimes::remove_runtime(runtime_id.clone(), cx);

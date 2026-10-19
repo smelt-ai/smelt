@@ -14,9 +14,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::popover::{Popover, PopoverState};
-use gpui_component::{Icon, IconName, IndexPath, Sizable as _, StyledExt as _};
+use gpui_component::{Icon, IconName, IndexPath, StyledExt as _};
+use smelt_ui::Button;
 use smelt_ui::IconAction as _;
 
 use crate::settings::{
@@ -637,9 +637,8 @@ impl Render for NewSessionPickerState {
                 let selected = selected_index == Some(index);
                 let pin_key = item_key.clone();
                 let pin_button = Button::new("new-session-picker-pin")
-                    .custom(ButtonCustomVariant::new(cx))
-                    .ghost()
-                    .xsmall()
+                    .quiet()
+                    .icon_size()
                     .flex_shrink_0()
                     .icon(pin_icon)
                     .icon_action(pin_tip)
@@ -735,7 +734,7 @@ pub(super) fn new_session_picker(
     workspace: Entity<Workspace>,
     runtime: crate::runtimes::Runtime,
     cwd: String,
-    cx: &App,
+    _cx: &App,
 ) -> NewSessionPicker {
     let trigger_id = ElementId::from((ElementId::from("proj-new"), cwd.clone()));
     NewSessionPicker {
@@ -743,11 +742,10 @@ pub(super) fn new_session_picker(
         runtime,
         cwd: (!cwd.is_empty()).then_some(cwd),
         trigger: Button::new(trigger_id)
-            .custom(ButtonCustomVariant::new(cx))
+            .quiet()
+            .icon_size()
             .opacity(0.0)
             .group_hover(super::PROJ_HEADER_GROUP, |style| style.opacity(1.0))
-            .small()
-            .size(px(super::PROJECT_NEW_BUTTON_SIZE))
             .icon(IconName::Plus)
             .icon_action("新建会话"),
     }

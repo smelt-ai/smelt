@@ -561,8 +561,10 @@ pub fn bubble_radius() -> Pixels {
     px(20.)
 }
 
-/// 控件和行的高度阶梯。同一档的东西并排放时顶边、底边才对得齐；新控件先挑一档，
-/// 别再写裸 `px`。数值就是现有界面在用的六档，换成这组名字不改任何观感。
+/// 行、输入框、页签条的高度阶梯。同一档的东西并排放时顶边、底边才对得齐。
+///
+/// 按钮不要用这里的高度去压 `smelt_ui::Button`。按钮只有 icon / compact / default
+/// 三档，跟库的 20 / 24 / 32 rem 步长对齐。
 ///
 /// 圆角和内边距不跟着绑死：同一档里主操作和次操作的内边距本来就有意不同。
 pub mod height {
@@ -578,7 +580,7 @@ pub mod height {
         px(24.)
     }
 
-    /// 紧凑按钮、短输入框、小表头。
+    /// 短输入框、小表头。
     pub fn sm() -> Pixels {
         px(28.)
     }
@@ -588,12 +590,12 @@ pub mod height {
         px(32.)
     }
 
-    /// 常规按钮、主操作胶囊、面板标题条和页签条。
+    /// 面板标题条和页签条。
     pub fn lg() -> Pixels {
         px(36.)
     }
 
-    /// 页面级大按钮、表单行、检查器标题栏。
+    /// 表单行、检查器标题栏。
     pub fn xl() -> Pixels {
         px(44.)
     }
@@ -1008,5 +1010,66 @@ mod tests {
                 && dark_lightness_gain > light_lightness_gain,
             "状态提亮必须保持蓝色色相，且浅色主题更克制：dark hue={dark_hue_shift}, light hue={light_hue_shift}, dark gain={dark_lightness_gain}, light gain={light_lightness_gain}",
         );
+    }
+
+    /// Ayu Light / Catppuccin Latte 的主按钮字色曾经低于 4.5:1。深色主题本来就够，锁住别回退。
+    #[test]
+    fn primary_button_text_meets_contrast() {
+        const MIN: f32 = 4.5;
+        let watched = [
+            "Ayu Light",
+            "Ayu Dark",
+            "Catppuccin Latte",
+            "Catppuccin Mocha",
+        ];
+        for file in crate::theme_files::THEME_FILES {
+            let doc: serde_json::Value = serde_json::from_str(file).expect("theme json");
+            let Some(themes) = doc["themes"].as_array() else {
+                continue;
+            };
+            for theme in themes {
+                let name = theme["name"].as_str().unwrap_or("");
+                if !watched.contains(&name) {
+                    continue;
+                }
+                let colors = &theme["colors"];
+                let fg = parse_theme_hex(
+                    colors["primary.foreground"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{name} missing primary.foreground")),
+                );
+                let background = colors["primary.background"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name} missing primary.background"));
+                let slots = [
+                    ("primary.background", background),
+                    (
+                        "primary.hover.background",
+                        colors["primary.hover.background"]
+                            .as_str()
+                            .unwrap_or(background),
+                    ),
+                    (
+                        "primary.active.background",
+                        colors["primary.active.background"]
+                            .as_str()
+                            .unwrap_or(background),
+                    ),
+                ];
+                for (slot, hex) in slots {
+                    let ratio = contrast_ratio(fg, parse_theme_hex(hex));
+                    assert!(
+                        ratio >= MIN,
+                        "{name} primary.foreground on {slot} ({hex}) is {ratio:.2}, need {MIN}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn parse_theme_hex(hex: &str) -> u32 {
+        let hex = hex.trim_start_matches('#');
+        let rgb = &hex[..hex.len().min(6)];
+        u32::from_str_radix(rgb, 16).unwrap_or_else(|_| panic!("bad color {hex}"))
     }
 }

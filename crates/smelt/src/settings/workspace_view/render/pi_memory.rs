@@ -38,7 +38,7 @@ fn render_rerank_model(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyEle
     let current = form.read(cx).rerank_model.clone();
     let label = rerank_model_label(current.as_ref());
     let picker = Button::new("pi-memory-rerank-model")
-        .small()
+        .compact()
         .label(label)
         .dropdown_menu(move |mut menu, window, cx| {
             let auto_form = form.clone();
@@ -140,7 +140,7 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
         .items_center()
         .child(
             Button::new("test-pi-memory")
-                .small()
+                .compact()
                 .label(if testing {
                     "测试中…"
                 } else {
@@ -154,8 +154,8 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
         )
         .child(
             Button::new("save-pi-memory")
-                .primary()
-                .small()
+                .commit()
+                .compact()
                 .label("保存")
                 .on_click(move |_, window, cx| {
                     save_form.update(cx, |form, cx| form.save(window, cx));
@@ -164,8 +164,8 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
     if api_key_set {
         actions = actions.child(
             Button::new("clear-pi-memory-key")
-                .ghost()
-                .small()
+                .quiet()
+                .compact()
                 .label("清除密钥")
                 .on_click(move |_, window, cx| {
                     clear_key_form.update(cx, |form, cx| form.clear_api_key(window, cx));
@@ -174,8 +174,8 @@ fn render_form(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyElement {
     }
     actions = actions.child(
         Button::new("clear-pi-memory")
-            .ghost()
-            .small()
+            .quiet()
+            .compact()
             .label("清空配置")
             .on_click(move |_, window, cx| {
                 clear_all_form.update(cx, |form, cx| form.clear_all(window, cx));

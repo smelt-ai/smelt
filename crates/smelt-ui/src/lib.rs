@@ -5,6 +5,7 @@
 pub mod acp_completion;
 pub mod agent_host_state;
 pub mod automation;
+pub mod button;
 pub mod daemon_states_global;
 pub mod frame_stats;
 pub mod history_titles_global;
@@ -17,4 +18,5 @@ pub mod theme_catalog;
 pub mod theme_files;
 pub mod ui_theme;
 
+pub use button::Button;
 pub use icon_action::IconAction;

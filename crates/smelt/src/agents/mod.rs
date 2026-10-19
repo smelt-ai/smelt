@@ -10,9 +10,7 @@
 use chrono::{Local, TimeZone, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{
-    Button, ButtonCustomVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
-};
+use gpui_component::button::{Toggle, ToggleGroup, ToggleVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, NumberInput, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::switch::Switch;
@@ -22,6 +20,7 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Sizable as _,
     StyledExt as _,
 };
+pub(crate) use smelt_ui::Button;
 
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
@@ -1059,7 +1058,7 @@ fn render_add_trigger_button(entity: Entity<Workspace>) -> AnyElement {
         .items_center()
         .child(
             Button::new("automation-add-trigger")
-                .ghost()
+                .quiet()
                 .w_full()
                 .icon(IconName::Plus)
                 .label("添加触发器")
@@ -1249,8 +1248,7 @@ fn render_notification_field(
     let picker_entity = entity;
     let picker = automation_form_row().child(
         Button::new("automation-notification")
-            .ghost()
-            .focus_ring(false)
+            .quiet()
             .w_full()
             .dropdown_caret(true)
             .icon(notification_preset_icon(selected))
@@ -1977,8 +1975,8 @@ fn render_agent_engine_control(
     let icon = render_engine_mark(kind, 12.);
     if agent_engine_kinds().len() > 1 {
         Button::new("agent-engine")
-            .ghost()
-            .small()
+            .quiet()
+            .compact()
             .icon(icon)
             .label(label)
             .tooltip("执行这个智能体的运行时。后续 skill 和插件会挂在这个引擎上。")
@@ -2012,8 +2010,8 @@ fn render_agent_model_control(
         format!("{model_provider} / {model_id}")
     };
     Button::new("agent-model")
-        .ghost()
-        .small()
+        .quiet()
+        .compact()
         .label(label)
         .tooltip("这个智能体的新对话和自动化用这套模型。对话里仍可再改。")
         .dropdown_menu(move |mut menu, window, cx| {
@@ -2091,7 +2089,7 @@ fn product_back_button(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     Button::new(id)
-        .ghost()
+        .quiet()
         .icon(IconName::ChevronLeft)
         .icon_action(tooltip)
         .on_click(on_click)
@@ -2708,7 +2706,7 @@ fn agent_memory_section(
     let folder_agent = agent_id.to_string();
     let folder_entity = entity.clone();
     let open_folder = compact_chip(format!("agent-memory-folder-{layer_key}"))
-        .xsmall()
+        .icon_size()
         .icon(IconName::FolderOpen)
         .icon_action("打开记忆文件夹")
         .on_click(move |_, _, cx| {
@@ -2931,7 +2929,7 @@ fn agent_memory_row(
         })
         .child(
             compact_chip(format!("agent-memory-open-{layer_key}-{}", entry.file_name))
-                .xsmall()
+                .icon_size()
                 .icon(IconName::ExternalLink)
                 .icon_action("用文本编辑器打开")
                 .on_click(move |_, _, cx| {
@@ -2947,7 +2945,7 @@ fn agent_memory_row(
                     "agent-memory-approve-{layer_key}-{}",
                     entry.file_name
                 ))
-                .xsmall()
+                .icon_size()
                 .icon(IconName::Check)
                 .accessibility_label("采纳")
                 .tooltip("采纳：之后的对话会用到这条记忆")
@@ -2965,7 +2963,7 @@ fn agent_memory_row(
                 "agent-memory-remove-{layer_key}-{}",
                 entry.file_name
             ))
-            .xsmall()
+            .icon_size()
             .icon(IconName::Close)
             .icon_action("删除这条记忆")
             .on_click(move |_, _, cx| {
@@ -3059,7 +3057,7 @@ fn agent_context_row(
         )
         .child(
             compact_chip(format!("agent-context-remove-{kind_label}-{value}"))
-                .xsmall()
+                .icon_size()
                 .icon(crate::trash_icon())
                 .icon_action(if is_folder {
                     "解除这个目录的绑定"
@@ -3380,7 +3378,7 @@ fn framed_automation_textarea(textarea: Textarea) -> AnyElement {
 }
 
 fn compact_chip(id: impl Into<ElementId>) -> Button {
-    Button::new(id).ghost().small().focus_ring(false)
+    Button::new(id).quiet().compact()
 }
 
 fn automation_form_shell() -> Div {

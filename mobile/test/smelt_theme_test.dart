@@ -138,4 +138,31 @@ void main() {
       }
     }
   });
+
+  test('primary and danger fills meet 4.5:1', () {
+    double contrast(Color a, Color b) {
+      final l1 = a.computeLuminance();
+      final l2 = b.computeLuminance();
+      final lighter = l1 > l2 ? l1 : l2;
+      final darker = l1 > l2 ? l2 : l1;
+      return (lighter + 0.05) / (darker + 0.05);
+    }
+
+    for (final brightness in Brightness.values) {
+      final scheme = smeltTheme(brightness).colorScheme;
+      expect(
+        contrast(scheme.primary, scheme.onPrimary),
+        greaterThanOrEqualTo(4.5),
+        reason: '$brightness primary',
+      );
+    }
+    expect(
+      contrast(SmeltColors.dark.dangerFill, SmeltColors.dark.onDangerFill),
+      greaterThanOrEqualTo(4.5),
+    );
+    expect(
+      contrast(SmeltColors.light.dangerFill, SmeltColors.light.onDangerFill),
+      greaterThanOrEqualTo(4.5),
+    );
+  });
 }

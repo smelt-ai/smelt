@@ -4,8 +4,9 @@
 //! 按钮因此没有名字。说明性的长提示不要用这个方法，它会把整段提示当成名称。
 
 use gpui::SharedString;
-use gpui_component::button::Button;
 use gpui_component::clipboard::Clipboard;
+
+use crate::button::Button;
 
 /// 用同一句短动作名设置无障碍名称和悬停提示。
 pub trait IconAction {

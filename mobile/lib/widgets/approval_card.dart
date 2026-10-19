@@ -17,6 +17,7 @@ import 'approval_sheet.dart';
 ///   3. **允许不再是最抢眼的落点。** 原来 Allow 是绿色实心按钮、位于拇指热区、
 ///      无二次确认；「总是允许」还跟「仅此一次」平权并排。这里把允许改成描边，
 ///      并把带 Always 的选项降到次要位置——误触的代价是不可逆的。
+///      桌面同一动作是实心 commit；手机保留描边，是因为拇指热区上的误触更贵。
 class ApprovalCard extends StatelessWidget {
   const ApprovalCard({
     super.key,

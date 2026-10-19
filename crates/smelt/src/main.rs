@@ -20,6 +20,7 @@ pub(crate) use smelt_ui::ui_theme;
 pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
+mod desktop_view;
 mod dir_picker;
 mod dock;
 mod file_tree;
@@ -28,16 +29,15 @@ mod git_log_view;
 mod git_panel;
 mod ide;
 mod liquid_glass;
-mod desktop_view;
 mod overlay;
 mod plugins;
-mod tool_panel;
 mod provider_quota;
 mod resizable_split;
 mod runtime_call;
 mod runtime_events;
 mod runtime_space;
 mod runtimes;
+mod tool_panel;
 pub(crate) use runtime_space::ProjectRef;
 pub(crate) use runtimes::RuntimeKey;
 mod session_history;
@@ -84,7 +84,6 @@ use std::time::{Duration, Instant, SystemTime};
 use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
 use gpui::*;
-use gpui_component::button::ButtonVariants as _;
 use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{
     DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart,
@@ -1307,7 +1306,9 @@ impl Session {
             cwd: self.cwd(cx),
             session_id: live_session_persist_id(self, cx),
             icon: self.agent_icon_id(cx),
-            model: self.active_acp().and_then(|view| view.read(cx).model_name()),
+            model: self
+                .active_acp()
+                .and_then(|view| view.read(cx).model_name()),
             panes: self
                 .term_leaves()
                 .iter()
@@ -3646,7 +3647,11 @@ impl Workspace {
     /// 重画。两条路径都只在会话露在工作台上的事实（见 `SessionFacts`）变了才
     /// 通知，变了就立刻通知，不靠定时合并：同一帧里的多次通知 GPUI 本来就只画一次。
     pub(crate) fn notify_if_session_facts_changed(&mut self, cx: &mut Context<Self>) {
-        let current = self.sessions.iter().map(|session| session.facts(cx)).collect();
+        let current = self
+            .sessions
+            .iter()
+            .map(|session| session.facts(cx))
+            .collect();
         if replace_changed_facts(&mut self.shown_session_facts, current) {
             cx.notify();
         }
@@ -3942,12 +3947,9 @@ impl Render for Workspace {
                             .ml(px(if window.is_fullscreen() { 18. } else { 92. }))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
-                                gpui_component::button::Button::new("sidebar-toggle")
-                                    .ghost()
-                                    .small()
-                                    .rounded(gpui_component::button::ButtonRounded::Size(px(
-                                        9999.,
-                                    )))
+                                smelt_ui::Button::new("sidebar-toggle")
+                                    .quiet()
+                                    .compact()
                                     // 跟右侧两个开关同一套「细线 ↔ 实心色块」区分开合：
                                     // 收起态用 bundled 的细线 PanelLeft，展开态换成
                                     // panel-left-filled 实心色块，不再用带箭头的
@@ -4017,7 +4019,8 @@ fn acp_agent_from_cmd(cmd: &str) -> settings::ConversationAgentKind {
 fn command_program(command: &str) -> Option<&str> {
     let mut tokens = command.split_whitespace();
     for token in tokens.by_ref() {
-        if smelt_model::workspace_override::split_env_assignment(token).is_some() || token == "env" {
+        if smelt_model::workspace_override::split_env_assignment(token).is_some() || token == "env"
+        {
             continue;
         }
         return std::path::Path::new(token)

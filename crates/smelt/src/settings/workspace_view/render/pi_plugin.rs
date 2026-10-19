@@ -100,7 +100,7 @@ fn overview_group(entity: Entity<Workspace>, plugins: &[PiPlugin]) -> SettingGro
                         .gap_2()
                         .child(
                             Button::new("import-pi-skill")
-                                .small()
+                                .compact()
                                 .label("导入技能目录")
                                 .on_click(move |_, _, cx| {
                                     skill_entity.update(cx, |workspace, cx| {
@@ -110,7 +110,7 @@ fn overview_group(entity: Entity<Workspace>, plugins: &[PiPlugin]) -> SettingGro
                         )
                         .child(
                             Button::new("import-pi-extension")
-                                .small()
+                                .compact()
                                 .label("导入扩展")
                                 .on_click(move |_, _, cx| {
                                     extension_entity.update(cx, |workspace, cx| {
@@ -120,8 +120,8 @@ fn overview_group(entity: Entity<Workspace>, plugins: &[PiPlugin]) -> SettingGro
                         )
                         .child(
                             Button::new("refresh-pi-plugins")
-                                .ghost()
-                                .small()
+                                .quiet()
+                                .compact()
                                 .label("重新扫描")
                                 .on_click(move |_, _, cx| {
                                     refresh_entity.update(cx, |workspace, cx| {
@@ -220,7 +220,7 @@ fn plugin_item(
                     .child(
                         Button::new(format!("confirm-delete-pi-plugin-{id}"))
                             .danger()
-                            .small()
+                            .compact()
                             .label("确认删除")
                             .on_click(move |_, _, cx| {
                                 let id = id_for_confirm.clone();
@@ -231,8 +231,8 @@ fn plugin_item(
                     )
                     .child(
                         Button::new(format!("cancel-delete-pi-plugin-{id}"))
-                            .ghost()
-                            .small()
+                            .quiet()
+                            .compact()
                             .label("取消")
                             .on_click(move |_, _, cx| {
                                 cancel_entity.update(cx, |workspace, cx| {
@@ -243,8 +243,8 @@ fn plugin_item(
                     .into_any_element()
             } else {
                 Button::new(format!("delete-pi-plugin-{id}"))
-                    .ghost()
-                    .small()
+                    .quiet()
+                    .compact()
                     .label("删除")
                     .on_click(move |_, _, cx| {
                         let id = id_for_request.clone();
