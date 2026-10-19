@@ -1,5 +1,6 @@
 //! 运行时推给客户端的会话状态和事件：会话的相位、标题、需要关注的问题，远程目录、
-//! 菜单、自动化投影的替换，以及断线重连的退避节奏。订阅连接本身在客户端。
+//! 菜单、自动化投影的替换，以及断线重连的退避节奏。订阅请求怎么写、回来的行怎么
+//! 解在 [`DaemonStateEventClient`]；连接本身在客户端。
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -9,6 +10,10 @@ pub use smelt_event_protocol::{TerminalProgress, TerminalProgressState};
 use crate::automation::AutomationFile;
 use crate::session_control::RemoteSessionSnapshot;
 use crate::workspace_menu::WorkspaceMenuSnapshot;
+
+mod event_client;
+
+pub use event_client::{DaemonEventClientError, DaemonStateEventClient, SubscriptionShape};
 
 /// 断线后快速首试、连续失败逐步退让，避免 daemon 正在升级/尚未启动时 GUI 和网关
 /// 同步地每两秒撞一次 socket。上限保证守护恢复后不会长期不可见。
@@ -303,4 +308,170 @@ pub enum DaemonStateEvent {
     /// 当前这条 subscribe 连接已断开（守护 exec / 崩溃 / socket 没了）。
     /// 不是协议帧，由客户端在 `subscribe_daemon_states_blocking` 返回后注入。
     Disconnected,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_tombstones_hide_until_snapshot_drops_them() {
+        let live = |id: &str| DaemonSessionState {
+            id: id.into(),
+            runtime: true,
+            ..Default::default()
+        };
+        let mut tombstones = HashSet::from(["gone".into()]);
+        let filtered = apply_identity_tombstones(vec![live("keep"), live("gone")], &mut tombstones);
+        assert_eq!(
+            filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["keep"]
+        );
+        assert_eq!(tombstones, HashSet::from(["gone".into()]));
+
+        let filtered = apply_identity_tombstones(vec![live("keep")], &mut tombstones);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "keep");
+        assert!(tombstones.is_empty());
+    }
+
+    #[test]
+    fn runtime_alive_waits_until_mirror_is_primed() {
+        let live = DaemonSessionState {
+            id: "s1".into(),
+            runtime: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(true, false, Some(&live)),
+            None
+        );
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(true, false, None),
+            None
+        );
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(true, true, Some(&live)),
+            Some(true)
+        );
+        let ghost = DaemonSessionState {
+            runtime: false,
+            ..live
+        };
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(true, true, Some(&ghost)),
+            Some(false)
+        );
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(true, true, None),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn runtime_alive_ignores_stale_snapshot_while_subscription_is_down() {
+        let live = DaemonSessionState {
+            id: "s1".into(),
+            runtime: true,
+            ..Default::default()
+        };
+        let ghost = DaemonSessionState {
+            runtime: false,
+            ..live.clone()
+        };
+        // 守护 exec 后旧 subscribe 已死：即使上一帧还写着 runtime=false / 缺 id，
+        // 也不能判死，否则 make install 会把还活着的普通 shell 输入丢掉。
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(false, true, Some(&live)),
+            None
+        );
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(false, true, Some(&ghost)),
+            None
+        );
+        assert_eq!(
+            DaemonSessionState::runtime_alive_from_mirror(false, true, None),
+            None
+        );
+    }
+
+    #[test]
+    fn reconnect_tries_attach_until_current_epoch_says_dead() {
+        assert_eq!(
+            terminal_reconnect_action(false, None),
+            TerminalReconnectAction::Wait
+        );
+        assert_eq!(
+            terminal_reconnect_action(false, Some(false)),
+            TerminalReconnectAction::Wait
+        );
+        // 守护已起来但新订阅还没到：立刻 reattach，不要空等镜像。
+        assert_eq!(
+            terminal_reconnect_action(true, None),
+            TerminalReconnectAction::Reattach
+        );
+        assert_eq!(
+            terminal_reconnect_action(true, Some(true)),
+            TerminalReconnectAction::Reattach
+        );
+        assert_eq!(
+            terminal_reconnect_action(true, Some(false)),
+            TerminalReconnectAction::GiveUp
+        );
+    }
+
+    #[test]
+    fn missing_turn_events_defaults_to_not_authoritative() {
+        let state: DaemonSessionState = serde_json::from_value(serde_json::json!({
+            "id": "copilot",
+            "structured_events": true
+        }))
+        .unwrap();
+        assert!(state.structured_events);
+        assert!(!state.turn_events);
+        assert!(!state.phase_is_authoritative());
+
+        let thinking: DaemonSessionState = serde_json::from_value(serde_json::json!({
+            "id": "copilot",
+            "phase": "thinking",
+            "structured_events": true
+        }))
+        .unwrap();
+        assert!(
+            !thinking.phase_is_authoritative(),
+            "旧守护的活动 phase 无法证明来源，必须 fail closed"
+        );
+        assert_eq!(thinking.effective_phase(), DaemonPhase::Idle);
+        assert_eq!(thinking.detail_line(), None);
+
+        let verified = DaemonSessionState {
+            turn_events: true,
+            ..thinking
+        };
+        assert!(verified.phase_is_authoritative());
+        assert_eq!(verified.effective_phase(), DaemonPhase::Thinking);
+    }
+    #[test]
+    fn reconnect_backoff_grows_exponentially_and_is_capped() {
+        assert_eq!(
+            daemon_reconnect_backoff(0),
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(1),
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(4),
+            std::time::Duration::from_secs(4)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(5),
+            std::time::Duration::from_secs(8)
+        );
+        assert_eq!(
+            daemon_reconnect_backoff(u32::MAX),
+            std::time::Duration::from_secs(8)
+        );
+    }
 }
