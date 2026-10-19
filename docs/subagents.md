@@ -34,27 +34,15 @@
 - **路径只按子智能体 id 定，不按父会话。** 父会话的 Pi 会话 id 会变：对话内回退（Pi `fork(entryId)`）换一份新文件，桌面「从这里分叉」用 `--fork` 复制出新会话。复制出来的记录里引用的还是同一批子智能体 id，按 id 找文件不受影响。
 - 子智能体 id 由会话宿主分配（`sa-` 加 12 位十六进制），文件路径也由宿主算好交给扩展。扩展不自己拼 `~/.smelt` 路径。
 
-### 引用表（运行时库）
+### 谁引用了它：以父会话记录为准，不另建表
 
-子会话什么时候能删，取决于还有没有会话记录引用它。分叉之后两份父会话引用同一个子智能体，所以要记引用，不能跟着某一份父会话删。
+「哪份 Pi 会话记录引用了哪个子智能体」本来就写在父会话 JSONL 的 `subagent` 工具结果里（`details.runs[].id`）。不在运行时库里再记一份：那是同一件事的第二个来源，还得靠「会话 id 从 A 变成 B」这类钩子去维护，漏一次就错删或删不掉。
 
-```sql
-CREATE TABLE subagent_ref (
-    pi_session_id TEXT NOT NULL,   -- 引用它的 Pi 会话 id（父会话，或者分叉/回退出来的会话）
-    subagent_id   TEXT NOT NULL,
-    created_at    INTEGER NOT NULL,
-    PRIMARY KEY (pi_session_id, subagent_id)
-);
-CREATE INDEX subagent_ref_by_subagent ON subagent_ref(subagent_id);
-```
+- **删除。** `history.delete` 删一份 Pi 记录时，先读出它引用的子智能体 id，再看同一工作目录下其余的 Pi 记录（分叉、回退出来的都在这里，`delete` 本来就要列一遍）还有没有引用；没有的，子会话文件一起删。
+- **孤儿不扫。** 在 smelt 之外删掉的 Pi 记录留下的子会话就留着，和 Pi 自己的会话文件一样。
+- **读取不查引用。** Control API 的调用方本来就完全受信（`history.detail` 能读历史文件），读子会话只校验 id 的格式（`sa-` 加 12 位十六进制），防路径穿越。
 
-- 运行时库加一个版本（v23 → v24），按现有规矩写迁移。
-- 只有 smeltd 写这张表（`docs/local-storage.md`「谁写」）。会话宿主不碰 SQLite：子智能体一登记就出现在会话状态的 `subagents` 列表里（见下），smeltd 镜像状态时看到新 id 就插一行引用。
-- **分叉和回退复制引用。** smeltd 看到某段对话的 `history_session_id` 从 A 变成 B（回退），或者新对话带着 `--fork A` 启动、报出自己的 B，就把 A 的引用复制给 B。实现时确认这两个变化在 smeltd 里各自从哪里观察到。
-- **删除。** `history.delete` 删掉一份 Pi 会话文件时，删掉这份会话的引用；某个子智能体没有引用了，就删它的文件。`session.delete` 本来就不删 Pi 记录，子会话也不删。
-- **孤儿文件。** 登记后、smeltd 插引用前崩溃，会留下没有引用的文件。smeltd 启动时清掉没有引用、且最后修改超过 7 天的子会话文件。
-
-不另建「子智能体运行记录」表：标题、状态、结果在父会话 JSONL 的工具结果和结果消息里，过程在子会话文件里，运行中的状态在会话宿主内存里。再存一份只会出现两个来源。
+不另建「子智能体运行记录」表也是同一个理由：标题、状态、结果在父会话 JSONL 的工具结果和结果消息里，过程在子会话文件里，运行中的状态在会话宿主内存里。
 
 ## 运行时
 
@@ -146,7 +134,7 @@ subagent_transcript { session_id, subagent_id, before?, limit? }
   → { entries: Vec<AcpEntry>, revision, has_more }
 ```
 
-- 校验：`subagent_id` 必须被这段对话当前的 `history_session_id` 引用（查 `subagent_ref`）。不能拿任意 id 读任意文件。
+- 校验：`subagent_id` 必须是宿主分的格式（`sa-` 加 12 位十六进制），文件在 `~/.smelt/subagents/` 下。
 - 解析复用 `pi_rpc` 的历史回放（`replay_messages`），子会话里的工具调用、输出和普通对话一样显示。
 - 桌面（本机和远程运行时）、手机都走这个操作，界面不直接读文件。
 
@@ -154,18 +142,19 @@ subagent_transcript { session_id, subagent_id, before?, limit? }
 
 ### 哪张卡片是 Pi 子智能体：显式字段
 
-`AcpEntry::ToolCall` 加一个字段 `subagent_ids: Vec<String>`。Pi 驱动（`pi_rpc`）在 `subagent` 工具的开始、结束和历史回放时，从 `details.runs[].id` 填进去。非空就按下面的子智能体卡片画。
+`AcpEntry::ToolCall` 加一个字段 `subagents: Vec<SubagentRun>`（id、标题、智能体、状态）。Pi 驱动（`pi_rpc`）只对 `subagent` 工具，在进度、结束和历史回放时从 `details.runs` 发 `ConversationEvent::SubagentRuns` 整份替换。非空就按下面的子智能体卡片画。
+
+后台派发的结果消息（`TaskNote` 的 `runs`）到达时，归约顺手把这张卡片里各子智能体的状态定下来；重放历史也一样。卡片只看自己的条目和会话状态里的实时记录。
 
 ACP 智能体（Claude Code、Codex 经 ACP）自己的子智能体卡片不变：它们由 `acp_conn` 产出 `ToolChildren`，过程本来就在它们自己的记录里，这次不动。所以 `ToolChildren` 和嵌套渲染保留，只删 Pi 这一路的产出。
 
 ### 卡片状态：只认 id
 
-卡片按 `subagent_ids` 和派发的 `tool_call_id` 依次查：
+卡片里每个子智能体按 id 依次查（`subagent_status`）：
 
 1. 会话状态 `subagents` 里有这个 id → 用它（运行中、刚结束都在这里）。
-2. 父会话里有 `toolCallId` 对得上的 `smelt.subagent_result` → 用里面的状态。
-3. 工具结果本身是定稿状态（前台跑完的）→ 用它。
-4. 都没有 → **已中断**（宿主在它跑完前退出了）。
+2. 条目里记下的状态已经定了（前台工具结果定稿，或后台结果消息定下的）→ 用它。
+3. 记下的还是运行中、派发的调用已经结束、宿主也不再报它 → **已中断**（宿主在它跑完前退出了）。
 
 删掉 `background_task_running_for` 和卡片里「工具调用完成就打勾」的判断。失败、已停止、已中断各有自己的样子，不会再出现失败还打勾。
 
@@ -232,15 +221,13 @@ ACP 智能体（Claude Code、Codex 经 ACP）自己的子智能体卡片不变�
 - 后台子智能体失败后，卡片显示失败，不打勾。
 - 重新加载后：有结果消息的显示结果消息里的状态；没有的显示「已中断」。
 - 输入栏子智能体和后台任务分开计数。
-- `pi_rpc` 在开始、结束、历史回放时都给 `subagent` 工具调用填上 `subagent_ids`；ACP 智能体带 `ToolChildren` 的卡片照旧显示。
+- `pi_rpc` 在进度、结束、历史回放时都给 `subagent` 工具调用发 `SubagentRuns`；别的工具 details 里碰巧有 `runs` 也不算；ACP 智能体带 `ToolChildren` 的卡片照旧显示。
 
-smeltd：
+smeltd 和历史：
 
-- 新子智能体出现在状态里时写一行引用。
-- 回退和分叉后，新会话继承引用；`subagent_transcript` 用新会话能读。
-- `history.delete` 删掉最后一个引用时删子会话文件，还有别的引用时保留。
-- 读不属于这段对话的子智能体 id 被拒绝。
-- 没有引用且超过 7 天的文件在启动时清掉。
+- 从一份 Pi 记录里认出它引用的子智能体 id（只认 `subagent` 工具结果）。
+- `history.delete` 删掉最后一份引用它的记录时删子会话文件，同目录还有别的记录（分叉、回退）引用时保留。
+- `subagent_transcript` 读出子会话的对话条目；格式不对的 id 被拒绝。
 
 ## 实施顺序
 
@@ -248,7 +235,7 @@ smeltd：
 
 1. 会话宿主：派发和子智能体记录、`subagents` 状态、`StopSubagent`；删 `attach`。
 2. 扩展：派发连接、`--session`、新的 `details` 和结果消息、`subagent_stop`。1 和 2 要一起提交，中间状态不能用。
-3. smeltd：`subagent_ref` 表和迁移、写引用、分叉/回退复制、删除和孤儿清理、`subagent_transcript`。
+3. 历史删除时连带删子会话；`subagent_transcript`。
 4. 界面：卡片状态、一行卡片、输入栏入口和弹层、侧边视图。
 5. 手机 API：`ConversationView.subagents`。
 

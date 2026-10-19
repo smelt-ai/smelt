@@ -12,15 +12,7 @@ export const MAX_RUNNING_SUBAGENTS = 4;
 export const SUBAGENT_WRAP_UP_TURNS = 5;
 /** 子进程 stderr 只留最后这么多字符：出错时要看的是结尾。只在进程内用，不进父会话。 */
 export const STDERR_TAIL_CHARS = 16_000;
-/** 运行中的进度最多带子会话最近这么多条助手消息，供实时显示。 */
-export const PROGRESS_MESSAGES = 20;
-/** 进度里每段文字、每个工具参数字符串最多留这么长。写文件的参数就是整份文件。 */
-export const PROGRESS_FIELD_CHARS = 1_000;
-/** 一份进度里消息的总大小（序列化后的字符数）上限。超了从最早的开始丢，至少留最新一条。 */
-export const PROGRESS_TOTAL_CHARS = 64_000;
-/**
- * 进度更新最密这么久一次。前台更新带着整份子会话记录，每来一个事件就发一份，流量随记录长度平方增长。
- */
+/** 进度更新最密这么久一次。子智能体每调一次工具、每说完一句都有一份。 */
 export const PROGRESS_INTERVAL_MS = 500;
 
 export function subagentWrapUpMessage(maxTurns: number): string {
@@ -51,53 +43,6 @@ export function turnLimitAction(
 	if (turns >= maxTurns + wrapUpTurns) return "abort";
 	if (turns === maxTurns) return "wrap_up";
 	return "continue";
-}
-
-function clip(text: string, max: number): string {
-	return text.length <= max ? text : `${text.slice(0, max)}…[${text.length - max} chars]`;
-}
-
-/** 工具参数里的每个字符串都截短，结构和键名不变，界面照样能从里面取路径、命令当标题。 */
-function clipStrings(value: unknown, max: number): unknown {
-	if (typeof value === "string") return clip(value, max);
-	if (Array.isArray(value)) return value.map((item) => clipStrings(item, max));
-	if (value && typeof value === "object") {
-		return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clipStrings(item, max)]));
-	}
-	return value;
-}
-
-/**
- * 进度里的一条助手消息：去掉思考过程，正文和工具参数里的字符串截短。只用于实时显示，
- * 不进父会话。
- */
-export function progressMessage<T>(message: T, max = PROGRESS_FIELD_CHARS): T {
-	const row = message as { content?: unknown };
-	if (!Array.isArray(row.content)) return message;
-	const content = row.content
-		.filter((part: { type?: unknown }) => part?.type !== "thinking")
-		.map((part: Record<string, unknown>) => {
-			if (part?.type === "text" && typeof part.text === "string") return { ...part, text: clip(part.text, max) };
-			if (part?.type === "toolCall") {
-				return {
-					...part,
-					...("arguments" in part ? { arguments: clipStrings(part.arguments, max) } : {}),
-					...("args" in part ? { args: clipStrings(part.args, max) } : {}),
-				};
-			}
-			return part;
-		});
-	return { ...message, content };
-}
-
-/** 进度带的消息：最多最近 `PROGRESS_MESSAGES` 条，总大小超了从最早的开始丢，至少留最新一条。 */
-export function progressWindow<T>(messages: T[], maxMessages = PROGRESS_MESSAGES, maxChars = PROGRESS_TOTAL_CHARS): T[] {
-	const window = messages.slice(-maxMessages);
-	let size = window.reduce((total, message) => total + JSON.stringify(message).length, 0);
-	while (window.length > 1 && size > maxChars) {
-		size -= JSON.stringify(window.shift()).length;
-	}
-	return window;
 }
 
 /** 追加后只留结尾 `max` 个字符。 */

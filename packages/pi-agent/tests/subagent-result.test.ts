@@ -13,26 +13,60 @@ import {
 
 describe("background subagent result", () => {
 	test("tells the model it is a result, not a new user request", () => {
-		const text = subagentResultText({ id: "sub-1", title: "迁移", status: "completed", text: "改好了" });
+		const text = subagentResultText({
+			toolCallId: "call-1",
+			title: "迁移",
+			status: "completed",
+			text: "改好了",
+			runs: [{ id: "sa-1", title: "迁移", status: "completed" }],
+		});
 		expect(text).toContain("不是用户的新请求");
-		expect(text).toContain("子智能体 sub-1（迁移）已结束，状态 完成。");
+		expect(text).toContain("派发（迁移）已结束，状态 完成。");
 		expect(text).toContain("改好了");
 	});
 
-	test("is a hidden custom message Smelt renders as a status line", () => {
-		const message = subagentResultMessage({ id: "sub-2", title: "", status: "failed", text: "x".repeat(5000) });
+	test("a parallel dispatch lists each subagent's status", () => {
+		const text = subagentResultText({
+			toolCallId: "call-2",
+			title: "2 个并行任务",
+			status: "failed",
+			text: "结果",
+			runs: [
+				{ id: "sa-a", title: "审计 a", status: "completed" },
+				{ id: "sa-b", title: "审计 b", status: "failed" },
+			],
+		});
+		expect(text).toContain("- sa-a（审计 a）：完成");
+		expect(text).toContain("- sa-b（审计 b）：失败");
+	});
+
+	test("is a hidden custom message keyed by the dispatching tool call", () => {
+		const message = subagentResultMessage({
+			toolCallId: "call-3",
+			title: "",
+			status: "failed",
+			text: "x".repeat(5000),
+			runs: [{ id: "sa-3", title: "", status: "failed" }],
+		});
 		expect(message.customType).toBe(SMELT_SUBAGENT_RESULT_CUSTOM_TYPE);
 		expect(message.display).toBe(false);
-		expect(message.details).toMatchObject({ id: "sub-2", status: "failed" });
+		expect(message.details).toMatchObject({ id: "call-3", status: "failed" });
+		expect(message.details.runs).toEqual([{ id: "sa-3", title: "", status: "failed" }]);
 		expect(message.details.outputTail.length).toBeLessThan(4100);
 		expect(message.details.outputTail.startsWith("…")).toBe(true);
 		expect(message.content[0].text).toContain("x".repeat(5000));
 	});
 
-	test("a stopped subagent reports stopped, not failed", () => {
-		const message = subagentResultMessage({ id: "bg-1", title: "审计", status: "stopped", text: "aborted" });
+	test("a stopped dispatch reports stopped, not failed", () => {
+		const message = subagentResultMessage({
+			toolCallId: "call-4",
+			title: "审计",
+			status: "stopped",
+			text: "aborted",
+			runs: [{ id: "sa-4", title: "审计", status: "stopped" }],
+		});
 		expect(message.details).toMatchObject({ status: "stopped" });
-		expect(message.content[0].text).toContain("子智能体 bg-1（审计）已结束，状态 已停止。");
+		expect(message.content[0].text).toContain("派发（审计）已结束，状态 已停止。");
 	});
 
 	test("child gets its own branch of the session's background task owner", () => {

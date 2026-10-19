@@ -115,6 +115,8 @@ struct SubagentCard<'a> {
     status: ToolCallStatus,
     output: &'a [ToolOutputPart],
     children: &'a [AcpEntry],
+    /// Pi 子智能体派发里的子智能体。非空时画成派发卡片。
+    subagents: &'a [smelt_model::acp_chat::SubagentRun],
     has_expandable_content: bool,
     default_expanded: bool,
     card_expanded: bool,
@@ -664,6 +666,7 @@ impl AcpView {
                         status,
                         output,
                         children,
+                        subagents,
                     } => {
                         let owner = super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, id);
                         let failed = matches!(status, ToolCallStatus::Failed);
@@ -677,17 +680,25 @@ impl AcpView {
                         let has_pending_permission =
                             active_permission_tool_id.as_deref() == Some(id.as_str());
                         let has_nested_transcript = !children.is_empty();
-                        let is_subagent =
-                            matches!(kind, ToolKind::Collaborate) || has_nested_transcript;
-                        let has_expandable_content = is_subagent
-                            || tool_output_has_content(output)
+                        // Pi 子智能体派发：过程在各自的子会话里，卡片只占一行；并行时能展开成
+                        // 每个子智能体一行。
+                        let is_pi_dispatch = !subagents.is_empty();
+                        let is_subagent = is_pi_dispatch
+                            || matches!(kind, ToolKind::Collaborate)
                             || has_nested_transcript;
-                        let default_expanded = tool_has_live_children(children)
-                            || (is_subagent
-                                && matches!(
-                                    status,
-                                    ToolCallStatus::Pending | ToolCallStatus::InProgress
-                                ));
+                        let has_expandable_content = if is_pi_dispatch {
+                            // 派发卡片不折叠：子智能体就是卡片的内容，点行打开侧边视图。
+                            false
+                        } else {
+                            is_subagent || tool_output_has_content(output) || has_nested_transcript
+                        };
+                        let default_expanded = !is_pi_dispatch
+                            && (tool_has_live_children(children)
+                                || (is_subagent
+                                    && matches!(
+                                        status,
+                                        ToolCallStatus::Pending | ToolCallStatus::InProgress
+                                    )));
                         let card_expanded =
                             this.tool_card_is_expanded(id, has_expandable_content, default_expanded);
                         let compact_in_process = process_expanded
@@ -800,6 +811,7 @@ impl AcpView {
                                     status: *status,
                                     output,
                                     children,
+                                    subagents,
                                     has_expandable_content,
                                     default_expanded,
                                     card_expanded,
@@ -1608,6 +1620,9 @@ impl AcpView {
         card: SubagentCard<'_>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if !card.subagents.is_empty() {
+            return self.render_dispatch_card(card, cx);
+        }
         let SubagentCard {
             index: i,
             id,
@@ -1615,6 +1630,7 @@ impl AcpView {
             status,
             output,
             children,
+            subagents: _,
             has_expandable_content,
             default_expanded,
             card_expanded,
@@ -1627,21 +1643,14 @@ impl AcpView {
         let faint = gpui::rgb(ui_theme::text_faint());
         let red = gpui::rgb(ui_theme::red());
         let ink = if failed { red.into() } else { muted };
-        // 转后台的派发调用一启动就返回，调用本身是「完成」。子智能体还在不在跑，以宿主里
-        // 挂着这次调用的后台任务为准：Pi 没了任务也跟着结束，不会一直转。
-        let background_running = background_task_running_for(&self.background_tasks, id);
         let running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending)
-            || smelt_model::acp_chat::has_unfinished_tool_call(children)
-            || background_running;
+            || smelt_model::acp_chat::has_unfinished_tool_call(children);
         let roster = smelt_model::acp_chat::is_subagent_roster(children);
         let mut headline = smelt_model::acp_chat::subagent_card_title(title, children);
         if headline.is_empty() {
             headline = "子代理".to_string();
         }
-        let mut progress = smelt_model::acp_chat::subagent_progress_text(status, children);
-        if background_running && progress.is_empty() {
-            progress = "后台运行中".to_string();
-        }
+        let progress = smelt_model::acp_chat::subagent_progress_text(status, children);
         let progress_failed = failed || progress.contains("失败");
         let show_fail_label = failed && !progress.contains("失败");
         let show_header_spinner = running && !(card_expanded && roster);
@@ -1758,6 +1767,246 @@ impl AcpView {
         card.into_any_element()
     }
 
+    /// Pi 子智能体派发。一个子智能体就是一行；并行、串联时标题行下面每个子智能体一行。
+    /// 点一行在侧边看它的过程，运行中的能就地停下。过程在各自的子会话里，不在父对话里展开。
+    /// 状态按子智能体 id 取（`subagent_status`）。
+    fn render_dispatch_card(
+        &self,
+        card: SubagentCard<'_>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let SubagentCard {
+            id,
+            title,
+            status,
+            subagents,
+            animate_ambient,
+            muted,
+            border,
+            ..
+        } = card;
+        let faint = gpui::rgb(ui_theme::text_faint());
+        let red = gpui::rgb(ui_theme::red());
+        let now = now_unix_ms();
+        let dispatch_running = matches!(status, ToolCallStatus::InProgress | ToolCallStatus::Pending);
+        let statuses: Vec<SubagentStatus> = subagents
+            .iter()
+            .map(|run| subagent_status(run, &self.subagents, dispatch_running))
+            .collect();
+        let live: Vec<&SubagentView> = subagents
+            .iter()
+            .filter_map(|run| self.subagents.iter().find(|view| view.id == run.id))
+            .collect();
+        let single = subagents.len() == 1;
+        let activity = if single {
+            live.first().and_then(|view| view.last_activity.as_deref())
+        } else {
+            None
+        };
+        let progress = dispatch_progress(&statuses, activity);
+        let owner = super::super::lookup_owner(&self.layout_cache.borrow().owner_ids, id);
+        let headline = if single {
+            subagent_run_title(&subagents[0], title)
+        } else {
+            format!("{} 个子智能体", subagents.len())
+        };
+        let ink = if progress.problem { red.into() } else { muted };
+        let header_status = if single {
+            statuses[0]
+        } else if progress.running {
+            SubagentStatus::Running
+        } else if progress.problem {
+            SubagentStatus::Failed
+        } else {
+            SubagentStatus::Completed
+        };
+        let mut header = h_flex()
+            .w_full()
+            .min_h(px(24.))
+            .gap_2()
+            .items_center()
+            .child(Icon::new(IconName::Bot).size(px(14.)).text_color(ink))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(ink)
+                    .child(headline.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .max_w(px(360.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(if progress.problem { red } else { faint })
+                    .child(progress.text),
+            )
+            .child(subagent_status_icon(
+                header_status,
+                owner_id("acp-subagent-spin", &owner),
+                animate_ambient,
+                muted,
+            ))
+            .when_some(dispatch_elapsed_ms(&live, now), |header, elapsed_ms| {
+                header.child(elapsed_suffix(elapsed_ms, muted))
+            });
+        if single {
+            header = header.children(self.render_subagent_stop(&subagents[0].id, statuses[0], cx));
+        }
+        let header: gpui::AnyElement = if single {
+            let run_id = subagents[0].id.clone();
+            let run_title = headline.clone();
+            Button::new(owner_id("acp-subagent-open", &owner))
+                .quiet()
+                .w_full()
+                .justify_start()
+                .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
+                .child(header)
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    this.open_subagent_inspector(run_id.clone(), run_title.clone(), cx);
+                }))
+                .into_any_element()
+        } else {
+            header.into_any_element()
+        };
+        let mut card = v_flex()
+            .id(owner_id("acp-subagent-card", &owner))
+            .w_full()
+            .rounded(ui_theme::card_radius())
+            .border_1()
+            .border_color(if progress.problem { red.into() } else { border })
+            .bg(ui_theme::glass_card())
+            .px_3()
+            .py_2()
+            .gap_1()
+            .child(header);
+        if !single {
+            for (index, (run, run_status)) in subagents.iter().zip(&statuses).enumerate() {
+                card = card.child(self.render_subagent_run_row(
+                    &owner,
+                    index,
+                    run,
+                    title,
+                    *run_status,
+                    animate_ambient,
+                    muted,
+                    now,
+                    cx,
+                ));
+            }
+        }
+        card.into_any_element()
+    }
+
+    /// 派发卡片里的一个子智能体：状态、名字、在做什么、耗时、停止。整行点开侧边视图。
+    #[allow(clippy::too_many_arguments)]
+    fn render_subagent_run_row(
+        &self,
+        owner: &gpui::SharedString,
+        index: usize,
+        run: &smelt_model::acp_chat::SubagentRun,
+        dispatch_title: &str,
+        run_status: SubagentStatus,
+        animate_ambient: bool,
+        muted: gpui::Hsla,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let faint = gpui::rgb(ui_theme::text_faint());
+        let red = gpui::rgb(ui_theme::red());
+        let view = self.subagents.iter().find(|view| view.id == run.id);
+        let problem = matches!(run_status, SubagentStatus::Failed | SubagentStatus::Interrupted);
+        let detail = view
+            .and_then(|view| view.last_activity.clone())
+            .filter(|_| run_status.is_running())
+            .unwrap_or_else(|| run_status.label().to_string());
+        let run_title = subagent_run_title(run, dispatch_title);
+        let row_owner = gpui::SharedString::from(format!("{owner}-{index}"));
+        let row = h_flex()
+            .w_full()
+            .min_h(px(22.))
+            .gap_2()
+            .items_center()
+            .pl(px(22.))
+            .child(subagent_status_icon(
+                run_status,
+                owner_id("acp-subagent-row-spin", &row_owner),
+                animate_ambient,
+                muted,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(run_title.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .max_w(px(280.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(if problem { red } else { faint })
+                    .child(detail),
+            )
+            .when_some(view.map(|view| subagent_elapsed_ms(view, now)), |row, elapsed_ms| {
+                row.child(elapsed_suffix(elapsed_ms, muted))
+            })
+            .children(self.render_subagent_stop(&run.id, run_status, cx));
+        let run_id = run.id.clone();
+        Button::new(owner_id("acp-subagent-row-open", &row_owner))
+            .quiet()
+            .w_full()
+            .justify_start()
+            .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
+            .child(row)
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                this.open_subagent_inspector(run_id.clone(), run_title.clone(), cx);
+            }))
+            .into_any_element()
+    }
+
+    /// 运行中的子智能体就地停下。点过之后到它真停下之前显示「正在停止…」。
+    pub(super) fn render_subagent_stop(
+        &self,
+        id: &str,
+        status: SubagentStatus,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !status.is_running() || !self.subagents.iter().any(|view| view.id == id) {
+            return None;
+        }
+        if self.stopping_subagents.contains(id) {
+            return Some(
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::text_muted()))
+                    .child("正在停止…")
+                    .into_any_element(),
+            );
+        }
+        let stop_id = id.to_string();
+        Some(
+            Button::new((gpui::ElementId::from("acp-subagent-stop"), stop_id.clone()))
+                .danger()
+                .icon_size()
+                .label("停止")
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    // 不要顺带打开侧边视图。
+                    cx.stop_propagation();
+                    this.stop_subagent(stop_id.clone(), cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_subagent_children(
         &self,
         parent_ix: usize,
@@ -1800,6 +2049,7 @@ impl AcpView {
                     status,
                     output,
                     children: nested,
+                    subagents: _,
                 } => {
                     let failed = matches!(status, ToolCallStatus::Failed);
                     let nested_running = smelt_model::acp_chat::has_unfinished_tool_call(nested);
@@ -2484,7 +2734,7 @@ fn subagent_output_summary(output: &[ToolOutputPart]) -> Option<String> {
     }
 }
 
-fn render_nested_transcript(children: &[AcpEntry], muted: gpui::Hsla) -> gpui::AnyElement {
+pub(super) fn render_nested_transcript(children: &[AcpEntry], muted: gpui::Hsla) -> gpui::AnyElement {
     let mut col = v_flex().w_full().gap_1();
     for child in children {
         col = col.child(match child {
@@ -2584,6 +2834,38 @@ fn nested_tool_row(
             )
             .into_any_element()
     }
+}
+
+/// 子智能体状态的图标。状态不只靠颜色：图标形状各不相同，旁边总有文字。
+pub(super) fn subagent_status_icon(
+    status: SubagentStatus,
+    spinner_id: gpui::ElementId,
+    animate_ambient: bool,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    let faint: gpui::Hsla = gpui::rgb(ui_theme::text_faint()).into();
+    let (icon, color) = match status {
+        SubagentStatus::Running => {
+            return if animate_ambient {
+                ambient_spinner(spinner_id, muted, animate_ambient)
+            } else {
+                Icon::new(IconName::Loader)
+                    .size(px(13.))
+                    .text_color(muted)
+                    .into_any_element()
+            };
+        }
+        SubagentStatus::Completed => (IconName::CircleCheck, faint),
+        SubagentStatus::Failed => (IconName::CircleX, gpui::rgb(ui_theme::red()).into()),
+        SubagentStatus::Interrupted => {
+            (IconName::TriangleAlert, gpui::rgb(ui_theme::red()).into())
+        }
+        SubagentStatus::Stopped => (IconName::Pause, faint),
+    };
+    Icon::new(icon)
+        .size(px(13.))
+        .text_color(color)
+        .into_any_element()
 }
 
 fn elapsed_suffix(elapsed_ms: u64, color: gpui::Hsla) -> gpui::Div {

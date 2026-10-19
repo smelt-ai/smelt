@@ -1387,7 +1387,7 @@ fn pi_model_from_change(entry: &Value) -> Option<String> {
 
 /// 文件头之后的全部 entry（文件顺序）和文件头 `version`（缺省按 v1）。
 /// 跟 Pi 一样跳过解析失败的行和多余的 `session` 头。
-fn pi_session_entries(text: &str) -> (u64, Vec<Value>) {
+pub(crate) fn pi_session_entries(text: &str) -> (u64, Vec<Value>) {
     let mut lines = text.lines();
     let version = lines
         .next()
@@ -1412,7 +1412,7 @@ fn pi_session_entries(text: &str) -> (u64, Vec<Value>) {
 ///
 /// `version < 2` 的旧格式没有 id/parentId，Pi 迁移时按文件顺序串成一条链，这里同样
 /// 线性返回。
-fn pi_active_branch(version: u64, entries: &[Value]) -> Vec<&Value> {
+pub(crate) fn pi_active_branch(version: u64, entries: &[Value]) -> Vec<&Value> {
     if version < 2 {
         return entries.iter().collect();
     }

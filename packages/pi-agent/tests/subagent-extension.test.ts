@@ -10,8 +10,10 @@ import {
 import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import smeltSubagentExtension, {
 	SMELT_SUBAGENT_EXTENSION_PATH,
+	SMELT_SUBAGENT_STOP_TOOL_NAME,
 	SMELT_SUBAGENT_TOOL_NAME,
-	backgroundSubagentCommand,
+	dispatchTitle,
+	stopSubagents,
 	subagentShouldBackground,
 } from "../src/subagent/index.ts";
 
@@ -80,11 +82,22 @@ describe("Smelt Pi subagent extension", () => {
 		expect(tools[0]?.definition.description).toBe("user-owned subagent implementation");
 	});
 
-	test("describes a background subagent by what it is doing", () => {
-		expect(
-			backgroundSubagentCommand({ tasks: [{ task: "看 a.rs", label: "审计 a" }, { task: "看 b.rs", agent: "reviewer" }] }),
-		).toBe("审计 a · reviewer");
-		expect(backgroundSubagentCommand({ task: "迁移数据库" })).toBe("迁移数据库");
+	test("names a dispatch by what it sends out", () => {
+		expect(dispatchTitle({ tasks: [{}, {}] })).toBe("2 个并行任务");
+		expect(dispatchTitle({ chain: [{}, {}, {}] })).toBe("3 步串联");
+		expect(dispatchTitle({ task: "迁移数据库\n细节" })).toBe("迁移数据库");
+		expect(dispatchTitle({ task: "x", label: "迁移" })).toBe("迁移");
+	});
+
+	test("registers a stop tool next to the subagent tool", async () => {
+		const runner = await loadSubagentExtensions();
+		const names = runner.getAllRegisteredTools().map((candidate) => candidate.definition.name);
+		expect(names).toContain(SMELT_SUBAGENT_STOP_TOOL_NAME);
+	});
+
+	test("stopping unknown subagents says so instead of pretending", () => {
+		expect(stopSubagents(["sa-missing"])).toEqual({ stopped: [], unknown: ["sa-missing"] });
+		expect(stopSubagents(undefined)).toEqual({ stopped: [], unknown: [] });
 	});
 
 	test("rejects too many parallel tasks before going to the background", async () => {

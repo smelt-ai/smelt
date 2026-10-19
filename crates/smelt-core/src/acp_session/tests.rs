@@ -24,7 +24,6 @@ fn background_task_updates_replace_the_list_without_persisting_or_clearing_echo(
         output: "running".into(),
         started_at_ms: 10,
         finished_at_ms: None,
-        tool_call_id: None,
     }];
     let outcome = apply_event(
         &mut state,
@@ -1615,7 +1614,6 @@ fn background_task(id: &str, status: BackgroundTaskStatus) -> BackgroundTaskView
         output: String::new(),
         started_at_ms: 10,
         finished_at_ms: None,
-        tool_call_id: None,
     }
 }
 
@@ -2024,6 +2022,7 @@ fn background_notice_is_a_status_line_and_not_a_user_turn() {
         status: "failed".into(),
         exit_code: Some(1),
         output_tail: "error: boom".into(),
+        runs: Vec::new(),
     };
     let outcome = apply_event(
         &mut state,

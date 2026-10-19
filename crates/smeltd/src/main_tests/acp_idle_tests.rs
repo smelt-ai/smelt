@@ -77,7 +77,6 @@ fn only_running_background_tasks_block_suspension() {
         output: String::new(),
         started_at_ms: 0,
         finished_at_ms: None,
-        tool_call_id: None,
     };
     let running =
         quiet_with(|state| state.background_tasks = vec![task(BackgroundTaskStatus::Running)]);

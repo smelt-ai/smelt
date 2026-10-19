@@ -2769,6 +2769,23 @@ fn send_acp_clear_queue(sess: &AcpSession) -> Result<(), &'static str> {
 }
 
 fn send_acp_stop_background_task(sess: &AcpSession, id: String) -> Result<(), &'static str> {
+    send_acp_command(
+        sess,
+        smelt_core::acp_conn::ConversationCommand::StopBackgroundTask { id },
+    )
+}
+
+fn send_acp_stop_subagent(sess: &AcpSession, id: String) -> Result<(), &'static str> {
+    send_acp_command(
+        sess,
+        smelt_core::acp_conn::ConversationCommand::StopSubagent { id },
+    )
+}
+
+fn send_acp_command(
+    sess: &AcpSession,
+    command: smelt_core::acp_conn::ConversationCommand,
+) -> Result<(), &'static str> {
     let cmd_tx = sess
         .handle
         .lock()
@@ -2779,7 +2796,7 @@ fn send_acp_stop_background_task(sess: &AcpSession, id: String) -> Result<(), &'
         return Err("ACP session is not running");
     };
     cmd_tx
-        .try_send(smelt_core::acp_conn::ConversationCommand::StopBackgroundTask { id })
+        .try_send(command)
         .map_err(|_| "ACP command channel is busy or closed")
 }
 
@@ -3087,6 +3104,7 @@ fn apply_acp_user_action_inner(
         }
         AcpUserAction::ClearQueue => send_acp_clear_queue(sess),
         AcpUserAction::StopBackgroundTask { id } => send_acp_stop_background_task(sess, id),
+        AcpUserAction::StopSubagent { id } => send_acp_stop_subagent(sess, id),
         AcpUserAction::DeliverQueuedNow { text } => deliver_queued_now(sess, text, subscribers),
         AcpUserAction::WithdrawPendingPrompt { id } => withdraw_pending_prompt(sess, id),
         AcpUserAction::RewindToMessage { entry_index } => send_acp_rewind(sess, entry_index),
@@ -3464,6 +3482,7 @@ pub(crate) fn handle_acp_action(
                             | smelt_core::acp_session::AcpUserAction::Compact
                             | smelt_core::acp_session::AcpUserAction::ClearQueue
                             | smelt_core::acp_session::AcpUserAction::StopBackgroundTask { .. }
+                            | smelt_core::acp_session::AcpUserAction::StopSubagent { .. }
                             | smelt_core::acp_session::AcpUserAction::RewindToMessage { .. }
                             | smelt_core::acp_session::AcpUserAction::SetConfigOption { .. }
                             | smelt_core::acp_session::AcpUserAction::RestartRuntime

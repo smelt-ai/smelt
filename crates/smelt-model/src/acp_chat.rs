@@ -37,6 +37,10 @@ pub enum AcpEntry {
         /// 旧快照没有这个字段，缺省为空。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         children: Vec<AcpEntry>,
+        /// Pi 子智能体派发：这次 `subagent` 调用派出的子智能体，来自工具结果。非空就画成
+        /// 子智能体卡片，过程在各自的子会话里，不挂 `children`。旧快照没有这个字段。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subagents: Vec<SubagentRun>,
     },
     /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
     Divider(String),
@@ -58,6 +62,45 @@ pub enum TaskNoteKind {
     Subagent,
 }
 
+/// 一次 Pi 子智能体派发里的一个子智能体，按父会话记录里写下的那份。运行中的实时状态
+/// 在会话状态的 `subagents` 里，按 `id` 对上。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentRun {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub agent: String,
+    pub status: crate::acp_session::SubagentStatus,
+}
+
+/// 从工具结果或结果消息的 `runs` 还原。没有 id 的跳过。
+pub fn subagent_runs_from_value(runs: Option<&serde_json::Value>) -> Vec<SubagentRun> {
+    let Some(runs) = runs.and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    runs.iter()
+        .filter_map(|run| {
+            let text = |key: &str| {
+                run.get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let id = text("id");
+            if id.is_empty() {
+                return None;
+            }
+            Some(SubagentRun {
+                id,
+                title: text("title"),
+                agent: text("agent"),
+                status: crate::acp_session::SubagentStatus::parse(&text("status")),
+            })
+        })
+        .collect()
+}
+
 /// 一条后台任务的结束说明。人看到的是状态行；模型另走自定义消息。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +115,9 @@ pub struct TaskNote {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub output_tail: String,
+    /// 后台子智能体派发：每个子智能体的结束状态。`id` 是派发它的工具调用 id。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<SubagentRun>,
 }
 
 impl TaskNote {
@@ -89,17 +135,17 @@ impl TaskNote {
             .exit_code
             .map(|code| format!("，退出码 {code}"))
             .unwrap_or_default();
-        let what = match self.kind {
-            TaskNoteKind::BackgroundTask => "后台任务",
-            TaskNoteKind::Subagent => "子智能体",
+        // 子智能体派发的 `id` 是派发它的工具调用 id，只给程序对卡片用；人看的是子智能体自己的 id。
+        let who = match (self.kind, self.runs.as_slice()) {
+            (TaskNoteKind::BackgroundTask, _) => format!("后台任务 {}", self.id),
+            (TaskNoteKind::Subagent, [run]) => format!("子智能体 {}", run.id),
+            (TaskNoteKind::Subagent, []) => format!("子智能体 {}", self.id),
+            (TaskNoteKind::Subagent, runs) => format!("{} 个子智能体", runs.len()),
         };
         if self.title.is_empty() {
-            format!("{what} {} 已结束，状态 {status}{code}", self.id)
+            format!("{who} 已结束，状态 {status}{code}")
         } else {
-            format!(
-                "{what} {}（{}）已结束，状态 {status}{code}",
-                self.id, self.title
-            )
+            format!("{who}（{}）已结束，状态 {status}{code}", self.title)
         }
     }
 }
@@ -141,6 +187,7 @@ pub fn task_note_from_pi_custom(message: &serde_json::Value) -> Option<TaskNote>
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string(),
+        runs: subagent_runs_from_value(details.get("runs")),
     })
 }
 
@@ -357,6 +404,7 @@ impl AcpEntry {
             status,
             output,
             children: Vec::new(),
+            subagents: Vec::new(),
         }
     }
 }
@@ -931,6 +979,41 @@ mod tests {
         assert!(task_note_from_pi_custom(&other).is_none());
     }
 
+    /// 派发的结果按工具调用 id 交回，状态行说的是子智能体自己的 id，不露工具调用 id。
+    #[test]
+    fn a_dispatch_result_names_its_subagents_not_the_tool_call() {
+        let single = serde_json::json!({
+            "customType": SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
+            "details": {
+                "id": "toolu_01Vc", "title": "仓库概览", "status": "completed",
+                "runs": [{"id": "sa-e8fd14d08fd4", "title": "仓库概览", "status": "completed"}],
+            },
+        });
+        let note = task_note_from_pi_custom(&single).unwrap();
+        assert_eq!(note.id, "toolu_01Vc", "卡片按派发的工具调用对上");
+        assert_eq!(
+            note.summary(),
+            "子智能体 sa-e8fd14d08fd4（仓库概览）已结束，状态 完成"
+        );
+
+        let parallel = serde_json::json!({
+            "customType": SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
+            "details": {
+                "id": "toolu_02", "title": "2 个并行任务", "status": "failed",
+                "runs": [
+                    {"id": "sa-a", "title": "a", "status": "completed"},
+                    {"id": "sa-b", "title": "b", "status": "failed"},
+                ],
+            },
+        });
+        let note = task_note_from_pi_custom(&parallel).unwrap();
+        assert_eq!(note.runs.len(), 2);
+        assert_eq!(
+            note.summary(),
+            "2 个子智能体（2 个并行任务）已结束，状态 失败"
+        );
+    }
+
     #[test]
     fn strips_whole_output_code_fence_only() {
         // adapter 把工具输出整段包在围栏里 → 剥掉，别把 ``` 显示给人看
@@ -1189,6 +1272,7 @@ mod tests {
                 status,
                 output,
                 children,
+                subagents: _,
             } => {
                 assert_eq!(id, "call-1");
                 assert_eq!(title, "Read foo.rs");

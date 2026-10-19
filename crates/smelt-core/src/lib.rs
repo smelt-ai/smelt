@@ -75,6 +75,7 @@ pub mod session_history;
 pub mod session_metadata;
 pub use smelt_model::session_title;
 pub mod sqlite_state;
+pub mod subagent_sessions;
 pub mod subprocess;
 pub use smelt_model::term_config;
 pub mod term_text;

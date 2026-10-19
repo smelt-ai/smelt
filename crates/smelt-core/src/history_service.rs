@@ -99,25 +99,42 @@ pub fn detail(agent: &str, path: &str) -> Result<Option<HistoryDetail>, HistoryE
 }
 
 /// 删除一份历史存档。先确认它确实在这个项目的历史列表里，再删；删完同步清掉自定义
-/// 标题，否则同一个 resume id 被复用时会继承旧标题。
+/// 标题，否则同一个 resume id 被复用时会继承旧标题。Pi 的记录还带走它引用、而同一
+/// 项目下别的记录（分叉、回退出来的）不再引用的子智能体子会话。
 pub fn delete(params: &HistoryDeleteParams) -> Result<(), HistoryError> {
     let kind = source(&params.agent)?;
     let profile_id = params.profile_id.as_deref();
-    let listed = crate::session_control::list_history_for(
+    let sessions = crate::session_control::list_history_for(
         kind,
         profile_id,
         &params.cwd,
         override_dir(kind, profile_id).as_deref(),
-    )
-    .into_iter()
-    .any(|session| {
-        session.resume_id == params.resume_id && session.path == Path::new(&params.path)
-    });
+    );
+    let target = Path::new(&params.path);
+    let listed = sessions
+        .iter()
+        .any(|session| session.resume_id == params.resume_id && session.path == target);
     if !listed {
         return Err(HistoryError::NotInHistory(params.path.clone()));
     }
-    delete_history_path(Path::new(&params.path))?;
+    let is_pi = kind == HistorySourceKind::Conversation(crate::agent_kind::ConversationAgentKind::Pi);
+    // 删之前读：删完就不知道它引用过谁了。
+    let released = is_pi
+        .then(|| std::fs::read_to_string(target).ok())
+        .flatten()
+        .map(|text| crate::subagent_sessions::referenced_subagent_ids(&text))
+        .unwrap_or_default();
+    delete_history_path(target)?;
     let _ = crate::session_metadata::set_custom_title(kind, profile_id, &params.resume_id, None);
+    if !released.is_empty()
+        && let Some(dir) = smelt_model::agent_paths::subagent_sessions_dir()
+    {
+        let remaining = sessions
+            .iter()
+            .filter(|session| session.path != target)
+            .map(|session| session.path.clone());
+        crate::subagent_sessions::remove_unreferenced(released, remaining, &dir);
+    }
     Ok(())
 }
 

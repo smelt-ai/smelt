@@ -651,6 +651,7 @@ fn handoff_only_recovers_a_running_turn_with_an_active_start_marker() {
             status: smelt_core::acp_chat::ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         });
     assert!(snapshot_has_active_turn(&snapshot));
 }
@@ -670,6 +671,7 @@ fn handoff_dangling_tool_is_not_recovered_as_an_active_turn() {
             status: smelt_core::acp_chat::ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         });
     assert!(snapshot_has_active_turn(&snapshot));
 

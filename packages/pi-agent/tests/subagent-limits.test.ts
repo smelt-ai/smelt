@@ -6,22 +6,22 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SMELT_AGENT_MCP_SERVERS_ENV, SMELT_MCP_EXTENSION_NAME, consumeMcpSelection } from "../src/mcp-selection.ts";
 import { SMELT_EXTENSION_FACTORIES, withAgentMcp } from "../src/runtime-extensions.ts";
 import {
-	finalSubagentDetails,
+	dispatchStatus,
 	runAgent,
+	subagentActivity,
+	subagentDetails,
 	subagentEnvironment,
+	subagentSessionArgs,
 	subagentSlots,
+	subagentTitle,
 } from "../src/subagent/index.ts";
 import { type AgentConfig, parseMaxTurns } from "../src/subagent/agents.ts";
 import {
 	MAX_RUNNING_SUBAGENTS,
-	PROGRESS_FIELD_CHARS,
-	PROGRESS_MESSAGES,
 	ProcessSlots,
 	STDERR_TAIL_CHARS,
 	SUBAGENT_WRAP_UP_TURNS,
 	appendTail,
-	progressMessage,
-	progressWindow,
 	throttleLatest,
 	turnLimitAction,
 	turnLimitMessage,
@@ -63,6 +63,7 @@ function runFake(
 	signal?: AbortSignal,
 	onUpdate?: Parameters<typeof runAgent>[0]["onUpdate"],
 	agent?: AgentConfig,
+	sessionFile?: string,
 ) {
 	return runAgent({
 		cwd: process.cwd(),
@@ -71,6 +72,8 @@ function runFake(
 		signal,
 		onUpdate,
 		context,
+		id: "sa-test",
+		sessionFile,
 		piInvocation: (args) => ({ command: process.execPath, args: [FAKE_PI, JSON.stringify(config), ...args] }),
 	});
 }
@@ -166,31 +169,6 @@ describe("subagent limits", () => {
 		expect(parseMaxTurns(undefined)).toBeUndefined();
 	});
 
-	test("progress drops thinking and clips long text and tool arguments", () => {
-		const big = "z".repeat(PROGRESS_FIELD_CHARS * 5);
-		const message = progressMessage({
-			role: "assistant",
-			content: [
-				{ type: "thinking", thinking: big },
-				{ type: "text", text: big },
-				{ type: "toolCall", id: "t1", name: "write", arguments: { path: "a.ts", content: big } },
-			],
-		});
-		expect(message.content.map((part: { type: string }) => part.type)).toEqual(["text", "toolCall"]);
-		const text = message.content[0] as { text: string };
-		const call = message.content[1] as { arguments: { path: string; content: string } };
-		expect(text.text.length).toBeLessThan(PROGRESS_FIELD_CHARS + 50);
-		expect(call.arguments.path).toBe("a.ts");
-		expect(call.arguments.content.length).toBeLessThan(PROGRESS_FIELD_CHARS + 50);
-	});
-
-	test("progress window is bounded by size, keeping at least the newest message", () => {
-		const message = (n: number) => ({ n, text: "w".repeat(1_000) });
-		const window = progressWindow(Array.from({ length: 10 }, (_, n) => message(n)), 20, 3_500);
-		expect(window.map((item) => item.n)).toEqual([7, 8, 9]);
-		expect(progressWindow([message(1)], 20, 10).map((item) => item.n)).toEqual([1]);
-	});
-
 	test("stderr keeps only its tail", () => {
 		expect(appendTail("abc", "def", 4)).toBe("cdef");
 		expect(appendTail("", "ab", 4)).toBe("ab");
@@ -213,40 +191,112 @@ describe("subagent limits", () => {
 });
 
 describe("subagent details", () => {
-	test("the settled details keep only the result, not the child's messages", () => {
+	const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, turns: 1 };
+	const result = (overrides: Record<string, unknown>) =>
+		({
+			id: "sa-1",
+			title: "看看",
+			agent: "scout",
+			agentSource: "inline",
+			task: "看看",
+			exitCode: 0,
+			stderr: "warning: 很多 debug 输出",
+			usage,
+			toolCalls: 3,
+			output: "结果",
+			stopReason: "stop",
+			...overrides,
+		}) as never;
+
+	test("the parent records only each subagent's id, status and result", () => {
 		const long = "y".repeat(40_000);
-		const details = finalSubagentDetails("parallel", [
-			{
-				agent: "scout",
-				agentSource: "inline",
-				task: "看看",
-				exitCode: 0,
-				stderr: "warning: 很多 debug 输出",
-				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, turns: 1 },
-				messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "很长的思考" }] } as never],
-				output: long,
-				stopReason: "stop",
-			},
-		]);
-		const [result] = details.results;
+		const details = subagentDetails("parallel", false, [result({ output: long })]);
+		const [run] = details.runs;
 		expect(details.mode).toBe("parallel");
-		expect("messages" in result!).toBe(false);
-		expect("stderr" in result!).toBe(false);
-		expect(result!.agent).toBe("scout");
-		expect(result!.stopReason).toBe("stop");
-		expect(result!.output.length).toBeLessThan(long.length);
-		expect(result!.output).toContain("[truncated");
+		expect(details.background).toBe(false);
+		expect(Object.keys(run!).sort()).toEqual(["agent", "id", "output", "status", "title", "usage"]);
+		expect(run!.id).toBe("sa-1");
+		expect(run!.status).toBe("completed");
+		expect(run!.output.length).toBeLessThan(long.length);
+		expect(run!.output).toContain("[truncated");
+	});
+
+	test("a running subagent has no output yet; a stopped one is stopped, not failed", () => {
+		const [running] = subagentDetails("single", true, [result({ exitCode: -1, output: "半截" })]).runs;
+		expect(running!.status).toBe("running");
+		expect(running!.output).toBe("");
+		const [stopped] = subagentDetails("single", true, [result({ exitCode: 1, stopReason: "aborted", stopped: true })]).runs;
+		expect(stopped!.status).toBe("stopped");
+		const [failed] = subagentDetails("single", true, [result({ exitCode: 1, stopReason: "error" })]).runs;
+		expect(failed!.status).toBe("failed");
+	});
+
+	test("a dispatch is stopped only when every subagent was stopped", () => {
+		const done = result({});
+		const stopped = result({ exitCode: 1, stopReason: "aborted", stopped: true });
+		const failed = result({ exitCode: 1, stopReason: "error" });
+		expect(dispatchStatus([done, done])).toBe("completed");
+		expect(dispatchStatus([stopped, stopped])).toBe("stopped");
+		expect(dispatchStatus([done, stopped])).toBe("completed");
+		expect(dispatchStatus([done, failed])).toBe("failed");
+	});
+
+	test("a subagent is named by its label, its agent, or the first line of its task", () => {
+		expect(subagentTitle({ label: "审计 a", agent: "reviewer", task: "x" })).toBe("审计 a");
+		expect(subagentTitle({ agent: "reviewer", task: "x" })).toBe("reviewer");
+		expect(subagentTitle({ task: "查登录\n细节" })).toBe("查登录");
+	});
+
+	test("what a subagent is doing reads as the tool and its command or path", () => {
+		expect(subagentActivity("bash", { command: "rg  -n\nfoo" })).toBe("bash rg -n foo");
+		expect(subagentActivity("read", { path: "README.md" })).toBe("read README.md");
+		expect(subagentActivity("todo", {})).toBe("todo");
+		expect(subagentActivity(undefined, {})).toBeUndefined();
+		expect(subagentActivity("bash", { command: "x".repeat(500) })!.length).toBeLessThanOrEqual(121);
+	});
+
+	test("a child session is saved where the host says, or not at all outside Smelt", () => {
+		expect(subagentSessionArgs("/home/u/.smelt/subagents/sa-1.jsonl")).toEqual([
+			"--session",
+			"/home/u/.smelt/subagents/sa-1.jsonl",
+		]);
+		expect(subagentSessionArgs(undefined)).toEqual(["--no-session"]);
 	});
 });
 
 describe("subagent child process", () => {
-	test("progress carries only the most recent messages", async () => {
-		const seen: number[] = [];
-		const result = await runFake({ turns: PROGRESS_MESSAGES + 10 }, undefined, (partial) => {
-			seen.push(partial.messages?.length ?? 0);
+	test("the child writes its session to the file the host gave", async () => {
+		const dir = temporaryDir();
+		const log = join(dir, "log");
+		const sessionFile = join(dir, "sa-test.jsonl");
+		await runFake({ log, turns: 1, logArgs: true }, undefined, undefined, undefined, sessionFile);
+		const argsLine = logLines(log).find((line) => line.startsWith("args "));
+		const args = JSON.parse(argsLine!.slice("args ".length)) as string[];
+		expect(args).toContain("--session");
+		expect(args[args.indexOf("--session") + 1]).toBe(sessionFile);
+		expect(args).not.toContain("--no-session");
+	});
+
+	test("progress counts turns and tool calls and says what the child is doing", async () => {
+		const seen: Array<{ turns: number; toolCalls: number; lastActivity?: string }> = [];
+		const result = await runFake({ turns: 3, toolCalls: true }, undefined, (partial) => {
+			seen.push({ turns: partial.usage.turns, toolCalls: partial.toolCalls, lastActivity: partial.lastActivity });
 		});
-		expect(result.usage.turns).toBe(PROGRESS_MESSAGES + 10);
-		expect(Math.max(...seen)).toBe(PROGRESS_MESSAGES);
+		expect(result.id).toBe("sa-test");
+		expect(result.usage.turns).toBe(3);
+		expect(result.toolCalls).toBe(3);
+		expect(result.lastActivity).toBe("bash echo 3");
+		expect(seen.some((progress) => progress.toolCalls === 1 && progress.lastActivity === "bash echo 1")).toBe(true);
+	});
+
+	test("a child stopped from outside is stopped, not failed", async () => {
+		const controller = new AbortController();
+		const running = runFake({ slowAfter: 0 }, controller.signal);
+		await delay(200);
+		controller.abort();
+		const result = await running;
+		expect(result.stopReason).toBe("aborted");
+		expect(result.stopped).toBe(true);
 	});
 
 	test("waits for a free process slot shared by every call", async () => {

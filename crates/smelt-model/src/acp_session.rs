@@ -272,10 +272,6 @@ pub struct BackgroundTaskView {
     pub started_at_ms: u64,
     #[serde(default)]
     pub finished_at_ms: Option<u64>,
-    /// 挂接任务（后台子智能体）是哪次工具调用派出去的。界面据此把那张派发卡片
-    /// 画成还在后台跑；宿主自己起的命令没有。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -297,6 +293,84 @@ impl BackgroundTaskStatus {
             Self::Failed => "失败",
             Self::Stopped => "已停止",
             Self::TimedOut => "超时",
+        }
+    }
+}
+
+/// Pi 子智能体的展示态。一次 `subagent` 工具调用（派发）可以有几个：并行的每一个、
+/// 串联的每一步。会话宿主每次变化都推全量；只覆盖本次宿主生命期，重启后的状态从
+/// 父会话记录里恢复。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentView {
+    pub id: String,
+    /// 派出它的那次 `subagent` 工具调用。
+    pub tool_call_id: String,
+    /// 派发时父会话的 Pi 会话 id。运行时据此记下哪份会话记录引用了它。
+    pub parent_session_id: String,
+    pub title: String,
+    pub agent: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 后台派发：工具调用先返回，这一轮可以结束。
+    pub background: bool,
+    pub status: SubagentStatus,
+    pub started_at_ms: u64,
+    #[serde(default)]
+    pub finished_at_ms: Option<u64>,
+    pub turns: u32,
+    pub tool_calls: u32,
+    /// 最近一次工具调用的标题：「正在做什么」。
+    #[serde(default)]
+    pub last_activity: Option<String>,
+    /// 子会话每多一条消息加一。看着它的界面据此重读子会话。
+    pub revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+    /// 没跑完就没了下文：派发它的扩展或会话宿主先退出了。
+    Interrupted,
+}
+
+impl SubagentStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "运行中",
+            Self::Completed => "完成",
+            Self::Failed => "失败",
+            Self::Stopped => "已停止",
+            Self::Interrupted => "已中断",
+        }
+    }
+
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// Pi 扩展和结果消息里的写法。认不出来的按失败算，不能当成完成。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "stopped" => Self::Stopped,
+            "interrupted" => Self::Interrupted,
+            _ => Self::Failed,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -702,6 +776,9 @@ pub struct ConversationSnapshot {
     /// Pi 后台任务。旧快照缺省为空；空列表表示当前没有任务。
     #[serde(default)]
     pub background_tasks: Vec<BackgroundTaskView>,
+    /// Pi 子智能体。旧快照缺省为空。
+    #[serde(default)]
+    pub subagents: Vec<SubagentView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     /// 宿主级会话输入状态。旧 daemon / 独立 session host 不提供时为 None，客户端
@@ -826,6 +903,8 @@ pub struct ConversationSnapshotDe {
     pub plan: Option<PlanView>,
     #[serde(default)]
     pub background_tasks: Vec<BackgroundTaskView>,
+    #[serde(default)]
+    pub subagents: Vec<SubagentView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     #[serde(default)]
@@ -905,6 +984,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             usage_breakdown: de.usage_breakdown,
             plan: de.plan,
             background_tasks: de.background_tasks,
+            subagents: de.subagents,
             model: de.model,
             config_options: de.config_options,
             conversation_state: de.conversation_state,
@@ -966,6 +1046,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             usage_breakdown: snap.usage_breakdown,
             plan: snap.plan,
             background_tasks: snap.background_tasks,
+            subagents: snap.subagents,
             model: snap.model,
             config_options: snap.config_options,
             conversation_state: snap.conversation_state,
@@ -1096,9 +1177,14 @@ pub enum AcpUserAction {
     },
     /// 清空 provider 侧队列并把原文还回输入框，不中止当前回合。
     ClearQueue,
-    /// 停掉会话的一个后台任务（后台命令或后台子智能体）。和模型调停止是同一件事：
-    /// 结果照常交回会话，但不叫醒模型。旧 daemon 不认识，会回 unknown variant。
+    /// 停掉会话的一个后台命令。和模型调停止是同一件事：结果照常交回会话，但不叫醒模型。
+    /// 旧 daemon 不认识，会回 unknown variant。
     StopBackgroundTask {
+        id: String,
+    },
+    /// 停掉会话的一个 Pi 子智能体（`SubagentView::id`）。后台派发的结果照常交回会话，
+    /// 但不叫醒模型。旧 daemon 不认识，会回 unknown variant。
+    StopSubagent {
         id: String,
     },
     /// 把原生队列里的这一条从 provider 拿走，停掉当前回答，等 provider 真正空闲后只发一次。

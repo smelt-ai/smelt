@@ -108,7 +108,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | 组 | 方法 |
 |---|---|
 | 远程与设备 | `remote.config.get` / `remote.config.set` / `remote.status`；`device.pair_begin` / `device.pair` / `device.list` / `device.revoke` |
-| 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image` |
+| 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`subagent.transcript` |
 | 工作区与文件 | `workspace.load` / `workspace.save` / `workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
 | 智能体记忆 | `agent.memory.meta` / `record_read` / `record_write` / `list` / `delete` / `approve` / `ensure_dir`；`memory.test_embedding` |

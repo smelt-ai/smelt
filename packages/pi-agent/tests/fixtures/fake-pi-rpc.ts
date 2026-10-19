@@ -14,6 +14,10 @@ type Config = {
 	stderrChars?: number;
 	/** 从这一轮起每轮停 10ms，好让父进程的插话在下一轮之前到。 */
 	slowAfter?: number;
+	/** 启动时把真 Pi 的命令行参数记一行 `args <json>`。 */
+	logArgs?: boolean;
+	/** 每轮先调一次 bash 工具（发 `tool_execution_start`）。 */
+	toolCalls?: boolean;
 };
 
 const config = JSON.parse(process.argv[2] ?? "{}") as Config;
@@ -29,6 +33,7 @@ const message = (stopReason: string, text: string) => ({
 });
 
 log("start");
+if (config.logArgs) log(`args ${JSON.stringify(process.argv.slice(3))}`);
 if (config.stderrChars) process.stderr.write(`${"x".repeat(config.stderrChars)}END`);
 
 let steered = false;
@@ -44,6 +49,9 @@ async function run(): Promise<void> {
 			break;
 		}
 		turn += 1;
+		if (config.toolCalls) {
+			send({ type: "tool_execution_start", toolCallId: `t${turn}`, toolName: "bash", args: { command: `echo ${turn}` } });
+		}
 		const finishing = turn >= (config.turns ?? Number.POSITIVE_INFINITY) || (steered && !config.ignoreSteer);
 		send({ type: "message_end", message: message(finishing ? "stop" : "toolUse", `turn ${turn}`) });
 		if (finishing) break;

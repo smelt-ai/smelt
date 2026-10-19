@@ -11,6 +11,7 @@ use super::ConversationTranscript;
 mod cards;
 mod composer;
 mod conversation;
+mod subagents;
 
 impl Render for AcpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -494,8 +495,10 @@ impl AcpView {
         );
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
         let input_row = self.render_composer(composer_focus, sweep_presence, animate_ambient, cx);
-        v_flex()
+        let conversation = v_flex()
             .size_full()
+            .flex_1()
+            .min_w_0()
             .relative()
             .track_focus(&self.focus_handle)
             // ⌘⏎ 快捷批准：有待审批卡片时等价于点绿色主按钮。挂在根上冒泡接收，
@@ -654,7 +657,12 @@ impl AcpView {
                     .text_color(gpui::rgb(ui_theme::yellow()))
                     .child(msg.clone())
             }))
-            .children(input_row)
+            .children(input_row);
+        // 子智能体的侧边视图是这段对话视图的一部分，切到别的对话就是别的对话的。
+        h_flex()
+            .size_full()
+            .child(conversation)
+            .children(self.render_subagent_inspector(cx))
     }
 
     fn message_list_clears_capsule(&self) -> bool {

@@ -170,6 +170,7 @@ fn fallback_snapshot(reason: &str, entries_offset: usize) -> ConversationSnapsho
         usage_breakdown: None,
         plan: None,
         background_tasks: Vec::new(),
+        subagents: Vec::new(),
         model: None,
         config_options: Vec::new(),
         conversation_state: None,

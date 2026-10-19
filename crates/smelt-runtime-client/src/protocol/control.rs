@@ -184,6 +184,7 @@ define_control_methods! {
     SessionDelete => (SESSION_DELETE_METHOD, "session.delete"),
     SessionAgentBindings => (SESSION_AGENT_BINDINGS_METHOD, "session.agent_bindings"),
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
+    SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;

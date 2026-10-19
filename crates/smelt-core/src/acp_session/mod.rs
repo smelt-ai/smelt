@@ -153,6 +153,8 @@ pub struct AcpSessionState {
     pub usage_breakdown: Option<crate::acp_conn::ContextUsageBreakdown>,
     pub plan: Option<PlanView>,
     pub background_tasks: Vec<BackgroundTaskView>,
+    /// Pi 子智能体。会话宿主每次变化推全量。
+    pub subagents: Vec<SubagentView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     pub supports_compaction: bool,
@@ -227,6 +229,7 @@ impl Default for AcpSessionState {
             usage_breakdown: None,
             plan: None,
             background_tasks: Vec::new(),
+            subagents: Vec::new(),
             model: None,
             config_options: Vec::new(),
             supports_compaction: false,
@@ -327,6 +330,7 @@ impl AcpSessionState {
             usage_breakdown: snap.usage_breakdown,
             plan: snap.plan,
             background_tasks: snap.background_tasks,
+            subagents: snap.subagents,
             model: snap.model,
             config_options: snap.config_options,
             supports_compaction: snap.supports_compaction,
@@ -402,6 +406,7 @@ impl AcpSessionState {
             usage_breakdown,
             plan,
             background_tasks,
+            subagents,
             model,
             config_options,
             conversation_state: _,
@@ -506,6 +511,7 @@ impl AcpSessionState {
             self.usage_breakdown = usage_breakdown;
             self.plan = plan;
             self.background_tasks = background_tasks;
+            self.subagents = subagents;
             self.model = model;
             self.config_options = config_options;
             self.supports_compaction = supports_compaction;
@@ -607,6 +613,10 @@ impl AcpSessionState {
         self.background_tasks
             .iter()
             .any(|task| task.status == BackgroundTaskStatus::Running)
+            || self
+                .subagents
+                .iter()
+                .any(|subagent| subagent.background && subagent.status.is_running())
     }
 
     /// 回合结束了，但后台还在干活：会话对外算在执行，不算完成。
@@ -833,6 +843,11 @@ impl AcpSessionState {
             plan: include_envelope.then(|| self.plan.clone()).flatten(),
             background_tasks: if include_envelope {
                 self.background_tasks.clone()
+            } else {
+                Vec::new()
+            },
+            subagents: if include_envelope {
+                self.subagents.clone()
             } else {
                 Vec::new()
             },

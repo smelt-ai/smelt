@@ -882,6 +882,9 @@ pi_calls! {
     /// 取对话里一张没有内联的图（`acp_watch` / `acp_snapshot` 带 `image_refs` 时帧里只有
     /// 引用）。条目被回退或压缩改写过、摘要对不上时回 `not_found`。
     ConversationImage => ConversationImage(ConversationImageParams) -> ConversationImageResult;
+    /// 读一个 Pi 子智能体的子会话（`~/.smelt/subagents/<id>.jsonl`），按对话条目给出，
+    /// 默认是最后一页。子智能体还在跑时文件随时在长，再读一次就是新的。
+    SubagentTranscript => SubagentTranscript(SubagentTranscriptParams) -> SubagentTranscriptResult;
     /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录），顺带给出
     /// 会加载的技能。
     SessionLaunchPrepare => SessionLaunchPrepare(crate::agent_definition_store::LaunchPrepareParams)
@@ -965,6 +968,27 @@ pub struct ConversationImageParams {
 pub struct ConversationImageResult {
     pub mime: String,
     pub data_b64: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentTranscriptParams {
+    /// 会话宿主分的子智能体 id（`sa-` 加 12 位十六进制）。
+    pub subagent_id: String,
+    /// 只要这一条之前的条目（翻更早的页）。不给就是最后一页。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+    /// 一页最多几条。运行时会把它夹到 1..=1000，不给是 200。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubagentTranscriptResult {
+    pub entries: Vec<crate::acp_chat::AcpEntry>,
+    /// `entries` 第一条在整段子会话里的下标。大于 0 说明前面还有。
+    pub offset: u64,
+    /// 整段子会话一共多少条。
+    pub total: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

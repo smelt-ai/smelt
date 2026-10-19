@@ -6,7 +6,8 @@ use super::{
     OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction,
     ViewHistoryIdentity, append_prompt_text, apply_pending_config_selection,
     background_task_elapsed, background_task_one_line, background_task_output_lines,
-    background_task_running_for, background_task_summary, build_conversation_layout,
+    background_task_summary, build_conversation_layout, dispatch_elapsed_ms, dispatch_progress,
+    running_subagents, subagent_elapsed_ms, subagent_run_title, subagent_status,
     build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
     cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
     compact_tool_headline, compact_tool_run_label, composer_config_section_label,
@@ -44,7 +45,8 @@ use smelt_model::acp_session::{
     AcpTurnOutcome, ApprovalDetailsView, BackgroundTaskStatus, BackgroundTaskView,
     ElicitFieldKindView, ElicitFieldView, ElicitOptionView, PendingElicitation, PendingPermission,
     PermissionOptionKindView, PermissionOptionView, PlanEntryStatusView, PlanEntryView, PlanView,
-    RuntimeDebug, RuntimeDebugModel, RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
+    RuntimeDebug, RuntimeDebugModel, RuntimeDebugModelCall, RuntimeDebugTool, SubagentStatus,
+    SubagentView, TurnTiming,
 };
 use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
@@ -1514,6 +1516,7 @@ fn long_tool(id: &str) -> AcpEntry {
         status: ToolCallStatus::Completed,
         output: Vec::new(),
         children: Vec::new(),
+        subagents: Vec::new(),
     }
 }
 
@@ -1595,6 +1598,7 @@ fn final_answer_is_the_last_body_in_each_user_turn() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "已修复".into(),
@@ -1629,6 +1633,7 @@ fn incremental_open_turn_layout_matches_full_rebuild() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "好".into(),
@@ -1648,6 +1653,7 @@ fn incremental_open_turn_layout_matches_full_rebuild() {
         status: ToolCallStatus::InProgress,
         output: Vec::new(),
         children: Vec::new(),
+        subagents: Vec::new(),
     });
     let from = super::layout_recompute_start(&entries, entries.len() - 1);
     assert!(from >= 3, "已结束回合不应重算，起点={from}");
@@ -1891,6 +1897,7 @@ fn active_turn_wraps_tools_in_a_live_process_group() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::ToolCall {
             id: "read-1".into(),
@@ -1899,6 +1906,7 @@ fn active_turn_wraps_tools_in_a_live_process_group() {
             status: ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
     ];
 
@@ -1919,6 +1927,7 @@ fn task_note_stays_outside_the_process_group() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::TaskNote(TaskNote {
             kind: Default::default(),
@@ -1927,6 +1936,7 @@ fn task_note_stays_outside_the_process_group() {
             status: "failed".into(),
             exit_code: Some(1),
             output_tail: "error: boom".into(),
+            runs: Vec::new(),
         }),
         AcpEntry::Assistant {
             text: "编译失败了".into(),
@@ -1985,6 +1995,7 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
             status: ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::ToolCall {
             id: "read-1".into(),
@@ -1993,6 +2004,7 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
     ];
 
@@ -2025,6 +2037,7 @@ fn completed_process_group_keeps_inner_tool_failures_inside() {
             status: ToolCallStatus::Failed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::ToolCall {
             id: "test-2".into(),
@@ -2033,6 +2046,7 @@ fn completed_process_group_keeps_inner_tool_failures_inside() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "测过了，已经修好".into(),
@@ -2058,6 +2072,7 @@ fn previous_turn_subagent_does_not_join_the_next_process_group() {
             status: ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "旧问题已完成".into(),
@@ -2125,6 +2140,7 @@ fn task_complete_is_final_and_not_counted_as_a_process_tool() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "已经修好".into(),
@@ -2137,6 +2153,7 @@ fn task_complete_is_final_and_not_counted_as_a_process_tool() {
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
     ];
 
@@ -2159,6 +2176,7 @@ fn task_complete_is_final_when_no_assistant_answer_exists() {
             status: ToolCallStatus::Completed,
             output: vec![ToolOutputPart::Text("全部完成".into())],
             children: Vec::new(),
+            subagents: Vec::new(),
         },
     ];
 
@@ -2385,6 +2403,7 @@ fn completed_tool(id: &str, kind: ToolKind, title: &str) -> AcpEntry {
         status: ToolCallStatus::Completed,
         output: Vec::new(),
         children: Vec::new(),
+        subagents: Vec::new(),
     }
 }
 
@@ -2578,6 +2597,7 @@ fn nested_subagent_entries_are_independent_trajectory_events() {
                     vec![ToolOutputPart::Text("issuer = demo".into())],
                 ),
             ],
+            subagents: Vec::new(),
         },
     ];
     let tool_debug = std::collections::BTreeMap::from([(
@@ -2617,6 +2637,7 @@ fn session_trajectory_events_keep_debug_sources_and_model_thinking() {
             status: ToolCallStatus::Completed,
             output: vec![ToolOutputPart::Text("found icon.rs".into())],
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         completed_tool("done", ToolKind::Other, "task_complete"),
         AcpEntry::Assistant {
@@ -2750,6 +2771,7 @@ fn failed_tools_do_not_join_compact_runs() {
             status: ToolCallStatus::Failed,
             output: vec![ToolOutputPart::Text("boom".into())],
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         completed_tool("r3", ToolKind::Read, "c.rs"),
         completed_tool("r4", ToolKind::Read, "d.rs"),
@@ -2791,6 +2813,7 @@ fn compact_tool_run_breaks_on_kind_change_or_progress() {
             status: ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         completed_tool("s4", ToolKind::Search, "e"),
         completed_tool("s5", ToolKind::Search, "f"),
@@ -2908,34 +2931,12 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
         output: String::new(),
         started_at_ms: 1,
         finished_at_ms: None,
-        tool_call_id: None,
     };
     let done = BackgroundTaskView {
         status: BackgroundTaskStatus::Completed,
         ..running.clone()
     };
     assert_eq!(background_task_summary(1), "1 个后台任务");
-    let subagent = BackgroundTaskView {
-        id: "bg-2".into(),
-        tool_call_id: Some("call-1".into()),
-        ..running.clone()
-    };
-    assert!(background_task_running_for(
-        &[running.clone(), subagent.clone()],
-        "call-1"
-    ));
-    assert!(
-        !background_task_running_for(&[running.clone()], "call-1"),
-        "宿主自己起的命令不挂在任何工具调用上"
-    );
-    let finished = BackgroundTaskView {
-        status: BackgroundTaskStatus::Stopped,
-        ..subagent
-    };
-    assert!(
-        !background_task_running_for(&[finished], "call-1"),
-        "子智能体结束（含 Pi 被杀、连接断开）后卡片不能再转"
-    );
     assert_eq!(
         running_background_tasks(&[running, done.clone()])
             .iter()
@@ -3197,6 +3198,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
             status: ToolCallStatus::Completed,
             output: vec![ToolOutputPart::Text("Found 12 matches".into())],
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "已经定位入口，正在读取实现".into(),
@@ -3209,6 +3211,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
             status: ToolCallStatus::Completed,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "已经改好过程组展示".into(),
@@ -3602,6 +3605,7 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
             status: ToolCallStatus::Completed,
             output: vec![ToolOutputPart::Text(log)],
             children: Vec::new(),
+            subagents: Vec::new(),
         },
         AcpEntry::Assistant {
             text: "好了".into(),
@@ -3674,6 +3678,7 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
             status: ToolCallStatus::Completed,
             output: vec![ToolOutputPart::Text(log)],
             children: Vec::new(),
+            subagents: Vec::new(),
         },
     ];
     let layout = super::build_conversation_layout(&entries, false);
@@ -3928,7 +3933,6 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
         output: String::new(),
         started_at_ms: 1,
         finished_at_ms: None,
-        tool_call_id: None,
     };
     let mut snapshot = AcpSessionState::default().to_snapshot(false);
     snapshot.snapshot_revision = 1;
@@ -3966,6 +3970,7 @@ fn live_elapsed_hangs_on_the_current_action_row() {
             status: ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         },
     ];
     let layout = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));
@@ -4440,4 +4445,123 @@ fn offline_runtime() -> smelt_client::runtime::Runtime {
         smelt_client::runtime::RuntimeKey::Remote("test".to_string()),
         smelt_runtime_client::RuntimeClient::new(|| Err(std::io::Error::other("测试里不连运行时"))),
     )
+}
+
+fn subagent_view(id: &str, status: SubagentStatus) -> SubagentView {
+    SubagentView {
+        id: id.into(),
+        tool_call_id: "call-1".into(),
+        parent_session_id: "pi-1".into(),
+        title: "审计".into(),
+        agent: "reviewer".into(),
+        model: None,
+        background: true,
+        status,
+        started_at_ms: 1_000,
+        finished_at_ms: (!status.is_running()).then_some(61_000),
+        turns: 3,
+        tool_calls: 5,
+        last_activity: Some("bash rg".into()),
+        revision: 4,
+    }
+}
+
+fn dispatched(id: &str, status: SubagentStatus) -> smelt_model::acp_chat::SubagentRun {
+    smelt_model::acp_chat::SubagentRun {
+        id: id.into(),
+        title: "审计".into(),
+        agent: "reviewer".into(),
+        status,
+    }
+}
+
+/// 后台派发的工具调用一启动就「完成」。子智能体失败了，卡片要说失败，不能打勾。
+#[test]
+fn a_failed_background_subagent_is_shown_as_failed() {
+    let run = dispatched("sa-1", SubagentStatus::Running);
+    let live = [subagent_view("sa-1", SubagentStatus::Failed)];
+    let status = subagent_status(&run, &live, false);
+    assert_eq!(status, SubagentStatus::Failed);
+    let progress = dispatch_progress(&[status], None);
+    assert_eq!(progress.text, "失败");
+    assert!(progress.problem);
+    assert!(!progress.running);
+}
+
+/// 宿主报的实时状态优先；没有实时记录时用卡片记下的（结果消息定下的）；记下的还在跑、
+/// 派发也结束了，宿主却不再报它：宿主在它跑完前退出过，是已中断。
+#[test]
+fn a_subagent_without_live_state_uses_its_recorded_status_or_is_interrupted() {
+    let live = [subagent_view("sa-1", SubagentStatus::Running)];
+    assert_eq!(
+        subagent_status(&dispatched("sa-1", SubagentStatus::Running), &live, false),
+        SubagentStatus::Running
+    );
+    assert_eq!(
+        subagent_status(&dispatched("sa-2", SubagentStatus::Completed), &live, false),
+        SubagentStatus::Completed,
+        "重新加载后由结果消息定下的状态"
+    );
+    assert_eq!(
+        subagent_status(&dispatched("sa-3", SubagentStatus::Running), &live, false),
+        SubagentStatus::Interrupted
+    );
+    assert_eq!(
+        subagent_status(&dispatched("sa-3", SubagentStatus::Running), &[], true),
+        SubagentStatus::Running,
+        "前台派发还在跑时，宿主的记录可能还没到"
+    );
+}
+
+#[test]
+fn a_dispatch_line_summarizes_its_subagents() {
+    use SubagentStatus::*;
+    assert_eq!(
+        dispatch_progress(&[Running], Some("bash rg")).text,
+        "运行中 · 正在：bash rg"
+    );
+    let parallel = dispatch_progress(&[Completed, Running, Running], None);
+    assert_eq!(parallel.text, "已完成 1/3");
+    assert!(parallel.running);
+    assert_eq!(dispatch_progress(&[Completed, Completed], None).text, "全部完成");
+    let mixed = dispatch_progress(&[Completed, Failed, Interrupted, Stopped], None);
+    assert_eq!(mixed.text, "完成 1/4 · 1 个失败 · 1 个中断 · 1 个已停止");
+    assert!(mixed.problem);
+    assert!(
+        !dispatch_progress(&[Stopped, Completed], None).problem,
+        "被叫停不是问题"
+    );
+}
+
+#[test]
+fn a_dispatch_runs_from_its_first_start_to_its_last_finish() {
+    let first = subagent_view("sa-1", SubagentStatus::Completed);
+    let mut second = subagent_view("sa-2", SubagentStatus::Completed);
+    second.started_at_ms = 5_000;
+    second.finished_at_ms = Some(90_000);
+    assert_eq!(dispatch_elapsed_ms(&[&first, &second], 200_000), Some(89_000));
+    let running = subagent_view("sa-3", SubagentStatus::Running);
+    assert_eq!(dispatch_elapsed_ms(&[&first, &running], 200_000), Some(199_000));
+    assert_eq!(dispatch_elapsed_ms(&[], 200_000), None);
+}
+
+#[test]
+fn a_subagent_row_is_named_and_timed_by_its_own_record() {
+    let mut run = dispatched("sa-1", SubagentStatus::Running);
+    assert_eq!(subagent_run_title(&run, "2 个并行任务"), "审计");
+    run.title = "  ".into();
+    assert_eq!(subagent_run_title(&run, "迁移数据库"), "迁移数据库");
+
+    let finished = subagent_view("sa-1", SubagentStatus::Completed);
+    assert_eq!(subagent_elapsed_ms(&finished, 500_000), 60_000);
+    let running = subagent_view("sa-2", SubagentStatus::Running);
+    assert_eq!(subagent_elapsed_ms(&running, 31_000), 30_000);
+    assert_eq!(
+        running_subagents(&[finished, running])
+            .iter()
+            .map(|view| view.id.as_str())
+            .collect::<Vec<_>>(),
+        ["sa-2"],
+        "输入栏只数在跑的"
+    );
 }

@@ -157,6 +157,8 @@ pub enum ConversationCommand {
     SetSessionTitle(String),
     /// 用户在界面上停一个后台任务。只有会话宿主管着后台任务的驱动（Pi）会处理。
     StopBackgroundTask { id: String },
+    /// 用户在界面上停一个 Pi 子智能体。只有 Pi 驱动会处理。
+    StopSubagent { id: String },
     /// 关闭会话：退出连接循环，随连接 drop 杀掉子进程。
     Shutdown,
 }
@@ -278,17 +280,24 @@ pub enum ConversationEvent {
         status: crate::acp_chat::ToolCallStatus,
         output: Vec<crate::acp_chat::ToolOutputPart>,
     },
-    /// 用完整子轨迹替换某条工具的 `children`（Pi subagent 的 details 全量快照）。
+    /// 用完整子轨迹替换某条工具的 `children`（ACP agent 的子代理）。
     ToolChildren {
         id: String,
         children: Vec<crate::acp_chat::AcpEntry>,
         debug: BTreeMap<String, crate::acp_session::ToolCallDebug>,
+    },
+    /// 这次 Pi `subagent` 调用派出的子智能体（工具结果里的 `runs`），全量替换。
+    SubagentRuns {
+        id: String,
+        runs: Vec<crate::acp_chat::SubagentRun>,
     },
     /// agent 的任务计划（步骤清单 + 三态进度）：每次全量覆盖，回合态不落盘。
     /// UI 渲染成消息流上方的可折叠 PLAN 条。
     Plan(Plan),
     /// Pi 后台任务的全量快照。输出是尾部，不随每个字节落盘。
     BackgroundTasks(Vec<crate::acp_session::BackgroundTaskView>),
+    /// Pi 子智能体的全量快照（本次会话宿主生命期内的）。
+    Subagents(Vec<crate::acp_session::SubagentView>),
     /// 后台任务结束。归约写成状态行，不开回合，也不当成用户说的话。
     BackgroundNotice(crate::acp_chat::TaskNote),
     /// 模型状态：当前名 + 可选列表。来自会话配置项里 category=Model 的那条
@@ -2736,6 +2745,7 @@ fn push_missing_tool(
         status,
         output,
         children,
+        subagents: _,
     } = entry
     else {
         return;
@@ -3124,7 +3134,10 @@ async fn drive_session<S: SessionDrive>(
             // 通用 ACP 没有改会话名的方法；本地标题已经改好，这里无声跳过。
             Next::Cmd(Some(ConversationCommand::SetSessionTitle(_))) => {}
             // 通用 ACP 没有宿主里的后台任务，界面也不会给它出停止按钮。
-            Next::Cmd(Some(ConversationCommand::StopBackgroundTask { .. })) => {}
+            Next::Cmd(Some(
+                ConversationCommand::StopBackgroundTask { .. }
+                | ConversationCommand::StopSubagent { .. },
+            )) => {}
             // 通用 ACP 的模型列表由 agent 在 `session/update` 里自己推，没有「重拉」
             // 这个动作；这条命令是给 Pi 那条路径的。
             Next::Cmd(Some(ConversationCommand::RefreshModels)) => {}

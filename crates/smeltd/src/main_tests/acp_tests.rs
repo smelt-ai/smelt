@@ -1152,6 +1152,7 @@ fn task_note() -> smelt_core::acp_chat::TaskNote {
         status: "failed".into(),
         exit_code: Some(1),
         output_tail: "error: boom".into(),
+        runs: Vec::new(),
     }
 }
 
@@ -2139,6 +2140,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         status: ToolCallStatus::InProgress,
         output: Vec::new(),
         children: Vec::new(),
+        subagents: Vec::new(),
     });
     let session = make_acp_session("acp-dangling-tool", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
@@ -3008,6 +3010,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
             status: ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         });
     }
     let sess = make_acp_session("acp-parallel", reduced);
@@ -3686,6 +3689,7 @@ fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
             status: ToolCallStatus::InProgress,
             output: Vec::new(),
             children: Vec::new(),
+            subagents: Vec::new(),
         });
     assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
 
@@ -3815,6 +3819,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         status: ToolCallStatus::InProgress,
         output: Vec::new(),
         children: Vec::new(),
+        subagents: Vec::new(),
     });
     assert_eq!(
         compute_acp_daemon_phase(&running_with_tool),
@@ -3834,6 +3839,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         status: ToolCallStatus::Pending,
         output: Vec::new(),
         children: Vec::new(),
+        subagents: Vec::new(),
     });
     assert_eq!(
         compute_acp_daemon_phase(&idle_with_tool),
@@ -3862,7 +3868,6 @@ fn daemon_phase_keeps_working_while_background_work_outlives_the_turn() {
         output: String::new(),
         started_at_ms: 10,
         finished_at_ms: None,
-        tool_call_id: None,
     }];
     assert_eq!(
         compute_acp_daemon_phase(&state),
@@ -3896,6 +3901,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
         status: ToolCallStatus::InProgress,
         output: Vec::new(),
         children: Vec::new(),
+        subagents: Vec::new(),
     });
     assert_eq!(
         compute_acp_daemon_phase(&completed),

@@ -81,15 +81,10 @@ impl AcpIdleState {
     }
 }
 
-/// 有 runtime，或者挂起了、用时能拉起。对外（跨智能体目标列表等）这两种都算可用。
-pub(crate) fn acp_runtime_available(sess: &AcpSession) -> bool {
-    acp_runtime_alive(sess) || sess.idle.is_suspended()
-}
-
 /// 这个动作要不要真正的 runtime。只读镜像的动作不必为它拉起进程。取消闲置会话
 /// 本来就没有可取消的。刷新模型目录由 GUI 在登录新 provider 后广播给所有对话，
 /// 挂起的会话醒来时本就会重新取一遍，不值得为它全部唤醒。有后台任务在跑的会话
-/// 不会被挂起，所以挂起的会话也没有后台任务可停。
+/// 不会被挂起，所以挂起的会话也没有后台任务或子智能体可停。
 pub(crate) fn acp_action_needs_runtime(action: &smelt_core::acp_session::AcpUserAction) -> bool {
     use smelt_core::acp_session::AcpUserAction;
     !matches!(
@@ -99,6 +94,7 @@ pub(crate) fn acp_action_needs_runtime(action: &smelt_core::acp_session::AcpUser
             | AcpUserAction::Cancel
             | AcpUserAction::RefreshModels
             | AcpUserAction::StopBackgroundTask { .. }
+            | AcpUserAction::StopSubagent { .. }
     )
 }
 
@@ -130,6 +126,14 @@ pub(crate) fn reduced_suspend_blocker(
     {
         // 后台任务的 supervisor 在宿主里，停宿主会把任务一起杀掉。
         return Some("background task running");
+    }
+    if reduced
+        .subagents
+        .iter()
+        .any(|subagent| subagent.status.is_running())
+    {
+        // 子智能体的进程是会话里的 Pi 起的，停宿主会把它一起杀掉。
+        return Some("subagent running");
     }
     None
 }

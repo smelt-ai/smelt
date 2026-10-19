@@ -504,6 +504,7 @@ mod tests {
                     text: "Hello".into(),
                     thought: false,
                 }],
+                subagents: Vec::new(),
             },
             AcpEntry::Assistant {
                 text: "子 agent 已输出：\n\nHello".into(),

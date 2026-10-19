@@ -272,10 +272,14 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
             children,
             debug,
         } => apply_tool_children(state, &mut outcome, id, children, debug),
+        ConversationEvent::SubagentRuns { id, runs } => {
+            apply_subagent_runs(state, &mut outcome, id, runs)
+        }
         ConversationEvent::Model(model) => state.model = Some(model),
         ConversationEvent::ConfigOptions(options) => state.config_options = options,
         ConversationEvent::Plan(plan) => apply_plan(state, plan),
         ConversationEvent::BackgroundTasks(tasks) => apply_background_tasks(state, tasks),
+        ConversationEvent::Subagents(subagents) => apply_subagents(state, subagents),
         ConversationEvent::Permission {
             question,
             tool_call_id,
@@ -310,7 +314,8 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ),
         ConversationEvent::BackgroundNotice(note) => {
             // 状态行不是一轮对话。相位、回合序号和用户回显都保持原样。
-            outcome.entries_offset = Some(state.entries.len());
+            outcome.entries_offset = settle_dispatched_subagents(state, &note)
+                .or(Some(state.entries.len()));
             state.entries.push(AcpEntry::TaskNote(note));
         }
         ConversationEvent::ProviderTurnStarted => apply_provider_turn_started(state, &mut outcome),
@@ -386,6 +391,7 @@ fn is_transcript_delta(ev: &ConversationEvent) -> bool {
             | ConversationEvent::ToolStarted { .. }
             | ConversationEvent::ToolFinished { .. }
             | ConversationEvent::ToolChildren { .. }
+            | ConversationEvent::SubagentRuns { .. }
             | ConversationEvent::ToolDebug { .. }
             | ConversationEvent::UserChunk(_)
             | ConversationEvent::UserImage(_)
@@ -401,6 +407,7 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
             | ConversationEvent::ToolOutputDelta { .. }
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
+            | ConversationEvent::Subagents(_)
             | ConversationEvent::Model(_)
             | ConversationEvent::ConfigOptions(_)
             | ConversationEvent::Usage { .. }
@@ -431,6 +438,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::ComposerRestore { .. }
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
+            | ConversationEvent::Subagents(_)
             | ConversationEvent::BackgroundNotice(_)
             | ConversationEvent::PromptAccepted
             | ConversationEvent::PromptNotAccepted
@@ -574,7 +582,6 @@ fn apply_agent_chunk(
 }
 
 /// 后台任务快照。压着的完成在这里放出来：后台都结束了，且这次结束的全是被停掉的。
-/// 有正常结束的，结果会叫醒 Provider 再跑一轮，完成交给那一轮，这里不提前报。
 fn apply_background_tasks(
     state: &mut AcpSessionState,
     tasks: Vec<crate::acp_session::BackgroundTaskView>,
@@ -593,13 +600,50 @@ fn apply_background_tasks(
         .filter(|status| *status != BackgroundTaskStatus::Running)
         .collect();
     state.background_tasks = tasks;
+    release_withheld_completion(state, &finished, |status| {
+        *status == BackgroundTaskStatus::Stopped
+    });
+}
+
+/// 子智能体快照。后台派发的子智能体和后台任务一样压着完成：全停掉了才在这里放出来，
+/// 正常结束的会把结果交回会话、叫醒 Provider 再跑一轮。
+fn apply_subagents(
+    state: &mut AcpSessionState,
+    subagents: Vec<crate::acp_session::SubagentView>,
+) {
+    use crate::acp_session::SubagentStatus;
+    let finished: Vec<SubagentStatus> = state
+        .subagents
+        .iter()
+        .filter(|old| old.background && old.status.is_running())
+        .map(|old| {
+            subagents
+                .iter()
+                .find(|new| new.id == old.id)
+                .map_or(SubagentStatus::Interrupted, |new| new.status)
+        })
+        .filter(|status| !status.is_running())
+        .collect();
+    state.subagents = subagents;
+    release_withheld_completion(state, &finished, |status| {
+        matches!(
+            status,
+            SubagentStatus::Stopped | SubagentStatus::Interrupted
+        )
+    });
+}
+
+/// 刚结束的后台工作全是被停掉（或没了下文）的，且已经没有在跑的：压着的完成放出来。
+/// 有正常结束的，它的结果会叫醒 Provider 再跑一轮，完成交给那一轮。
+fn release_withheld_completion<S>(
+    state: &mut AcpSessionState,
+    finished: &[S],
+    stopped: impl Fn(&S) -> bool,
+) {
     if finished.is_empty() || !state.completion_withheld() || state.background_work_running() {
         return;
     }
-    if finished
-        .iter()
-        .all(|status| *status == BackgroundTaskStatus::Stopped)
-    {
+    if finished.iter().all(stopped) {
         state.completed_unread = true;
     }
 }
@@ -944,6 +988,43 @@ fn apply_tool_children(
         .tool_debug
         .extend(debug.into_iter().filter(|(id, _)| next_ids.contains(id)));
     state.note_tool_debug_changed();
+}
+
+/// 后台子智能体派发交回了结果：把派发卡片里各子智能体的状态定下来。卡片只看自己的条目，
+/// 重放历史时也一样得到最终状态。返回改动的那条卡片的位置。
+fn settle_dispatched_subagents(
+    state: &mut AcpSessionState,
+    note: &crate::acp_chat::TaskNote,
+) -> Option<usize> {
+    if note.kind != crate::acp_chat::TaskNoteKind::Subagent || note.runs.is_empty() {
+        return None;
+    }
+    let index = crate::acp_chat::find_tool_top_level_index(&state.entries, &note.id);
+    let Some(AcpEntry::ToolCall { subagents, .. }) =
+        crate::acp_chat::find_tool_call_mut(&mut state.entries, &note.id)
+    else {
+        return None;
+    };
+    for run in subagents.iter_mut() {
+        if let Some(settled) = note.runs.iter().find(|settled| settled.id == run.id) {
+            run.status = settled.status;
+        }
+    }
+    index
+}
+
+fn apply_subagent_runs(
+    state: &mut AcpSessionState,
+    outcome: &mut ApplyOutcome,
+    id: String,
+    runs: Vec<crate::acp_chat::SubagentRun>,
+) {
+    outcome.entries_offset = crate::acp_chat::find_tool_top_level_index(&state.entries, &id);
+    if let Some(AcpEntry::ToolCall { subagents, .. }) =
+        crate::acp_chat::find_tool_call_mut(&mut state.entries, &id)
+    {
+        *subagents = runs;
+    }
 }
 
 fn apply_tool_finished(

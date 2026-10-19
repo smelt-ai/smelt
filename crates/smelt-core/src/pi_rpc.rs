@@ -1464,6 +1464,7 @@ fn background_notice_from_outbound(message: &serde_json::Value) -> Option<Conver
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            runs: Vec::new(),
         },
     ))
 }
@@ -1685,6 +1686,17 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             if let Err(error) = result {
                 let _ = event_tx.try_send(ConversationEvent::Notice(format!(
                     "停止后台任务失败：{error}"
+                )));
+            }
+        }
+        ConversationCommand::StopSubagent { id } => {
+            let result = match &state.background {
+                Some(background) => background.stop_subagent(&id),
+                None => Err("子智能体服务还没就绪".to_string()),
+            };
+            if let Err(error) = result {
+                let _ = event_tx.try_send(ConversationEvent::Notice(format!(
+                    "停止子智能体失败：{error}"
                 )));
             }
         }
@@ -2637,15 +2649,15 @@ fn handle_event(
             let Some(id) = event.get("toolCallId").and_then(serde_json::Value::as_str) else {
                 return;
             };
-            if let Some((children, debug)) = event
+            let name = state.tool_names.get(id).cloned().unwrap_or_default();
+            if let Some(runs) = event
                 .get("partialResult")
                 .and_then(|value| value.get("details"))
-                .and_then(|details| subagent_children_from_details(id, details))
+                .and_then(|details| subagent_runs_from_details(&name, details))
             {
-                let _ = event_tx.try_send(ConversationEvent::ToolChildren {
+                let _ = event_tx.try_send(ConversationEvent::SubagentRuns {
                     id: id.to_string(),
-                    children,
-                    debug,
+                    runs,
                 });
                 let text = content_text(
                     event
@@ -2691,15 +2703,14 @@ fn handle_event(
                 .cloned()
                 .or_else(|| state.tool_args.remove(id));
             state.partial_tool_args.remove(id);
-            if let Some((children, debug)) = event
+            if let Some(runs) = event
                 .get("result")
                 .and_then(|value| value.get("details"))
-                .and_then(|details| subagent_children_from_details(id, details))
+                .and_then(|details| subagent_runs_from_details(&name, details))
             {
-                let _ = event_tx.try_send(ConversationEvent::ToolChildren {
+                let _ = event_tx.try_send(ConversationEvent::SubagentRuns {
                     id: id.to_string(),
-                    children,
-                    debug,
+                    runs,
                 });
             }
             let output = event
@@ -3089,6 +3100,9 @@ fn edit_args_to_texts(args: &serde_json::Value) -> Option<(String, String)> {
     Some((old.to_string(), new.to_string()))
 }
 
+/// smelt 的 Pi 扩展登记的子智能体派发工具。
+const PI_SUBAGENT_TOOL: &str = "subagent";
+
 fn tool_kind(name: &str) -> ToolKind {
     match name {
         "read" => ToolKind::Read,
@@ -3100,255 +3114,14 @@ fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
-fn subagent_children_from_details(
-    parent_id: &str,
+/// Pi `subagent` 工具结果里记下的子智能体（`details.runs`）。过程在各自的子会话里，
+/// 父会话只认这份名单；别的工具没有。
+fn subagent_runs_from_details(
+    name: &str,
     details: &serde_json::Value,
-) -> Option<(
-    Vec<AcpEntry>,
-    BTreeMap<String, crate::acp_session::ToolCallDebug>,
-)> {
-    let results = details.get("results")?.as_array()?;
-    if results.len() <= 1 {
-        let result = results.first()?;
-        return Some(entries_from_subagent_result(
-            result,
-            &format!("{parent_id}-child"),
-            subagent_result_running(result),
-        ));
-    }
-    let mut entries = Vec::with_capacity(results.len());
-    let mut debug = BTreeMap::new();
-    for (index, result) in results.iter().enumerate() {
-        let agent = result
-            .get("agent")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("agent");
-        let running = subagent_result_running(result);
-        let failed = subagent_result_failed(result);
-        let (children, child_debug) = entries_from_subagent_result(
-            result,
-            &format!("{parent_id}-result-{index}-child"),
-            running,
-        );
-        debug.extend(child_debug);
-        entries.push(AcpEntry::ToolCall {
-            id: format!("{parent_id}-result-{index}"),
-            title: agent.to_string(),
-            kind: ToolKind::Collaborate,
-            status: if running {
-                ToolCallStatus::InProgress
-            } else if failed {
-                ToolCallStatus::Failed
-            } else {
-                ToolCallStatus::Completed
-            },
-            output: Vec::new(),
-            children,
-        });
-    }
-    Some((entries, debug))
-}
-
-fn subagent_result_running(result: &serde_json::Value) -> bool {
-    match result.get("exitCode").and_then(serde_json::Value::as_i64) {
-        Some(-1) => true,
-        Some(_) => false,
-        None => result
-            .get("stopReason")
-            .and_then(serde_json::Value::as_str)
-            .is_none(),
-    }
-}
-
-fn subagent_result_failed(result: &serde_json::Value) -> bool {
-    result
-        .get("exitCode")
-        .and_then(serde_json::Value::as_i64)
-        .is_some_and(|code| code != 0 && code != -1)
-        || matches!(
-            result.get("stopReason").and_then(serde_json::Value::as_str),
-            Some("error" | "aborted")
-        )
-}
-
-fn entries_from_subagent_result(
-    result: &serde_json::Value,
-    id_prefix: &str,
-    running: bool,
-) -> (
-    Vec<AcpEntry>,
-    BTreeMap<String, crate::acp_session::ToolCallDebug>,
-) {
-    let (mut entries, debug) =
-        if let Some(messages) = result.get("messages").and_then(serde_json::Value::as_array) {
-            entries_from_subagent_messages(Some(messages), id_prefix, running)
-        } else {
-            entries_from_subagent_items(
-                result.get("items").and_then(serde_json::Value::as_array),
-                id_prefix,
-                running,
-            )
-        };
-    // 定稿的结果只存结果、不带子会话消息：没有过程可画时用最终输出当卡片内容，不留空卡。
-    if entries.is_empty()
-        && let Some(output) = result
-            .get("output")
-            .and_then(serde_json::Value::as_str)
-            .filter(|output| !output.trim().is_empty())
-    {
-        entries.push(AcpEntry::Assistant {
-            text: output.to_string(),
-            thought: false,
-        });
-    }
-    (entries, debug)
-}
-
-fn entries_from_subagent_items(
-    items: Option<&Vec<serde_json::Value>>,
-    id_prefix: &str,
-    running: bool,
-) -> (
-    Vec<AcpEntry>,
-    BTreeMap<String, crate::acp_session::ToolCallDebug>,
-) {
-    let Some(items) = items else {
-        return (Vec::new(), BTreeMap::new());
-    };
-    let mut entries = Vec::with_capacity(items.len());
-    let mut debug = BTreeMap::new();
-    let mut tool_index = 0_usize;
-    for item in items {
-        match item.get("type").and_then(serde_json::Value::as_str) {
-            Some("text") => {
-                if let Some(text) = item.get("text").and_then(serde_json::Value::as_str)
-                    && !text.is_empty()
-                {
-                    entries.push(AcpEntry::Assistant {
-                        text: text.to_string(),
-                        thought: false,
-                    });
-                }
-            }
-            Some("toolCall") => {
-                let name = item
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("tool");
-                let args = item.get("args").or_else(|| item.get("arguments"));
-                tool_index += 1;
-                let id = format!("{id_prefix}-{tool_index}");
-                debug.insert(
-                    id.clone(),
-                    crate::acp_session::ToolCallDebug {
-                        name: Some(name.to_string()),
-                        raw_input: args.cloned(),
-                    },
-                );
-                entries.push(AcpEntry::tool_call(
-                    id,
-                    tool_title(name, args),
-                    tool_kind(name),
-                    ToolCallStatus::Completed,
-                    Vec::new(),
-                ));
-            }
-            _ => {}
-        }
-    }
-    mark_last_subagent_tool_in_progress(&mut entries, running);
-    (entries, debug)
-}
-
-fn entries_from_subagent_messages(
-    messages: Option<&Vec<serde_json::Value>>,
-    id_prefix: &str,
-    running: bool,
-) -> (
-    Vec<AcpEntry>,
-    BTreeMap<String, crate::acp_session::ToolCallDebug>,
-) {
-    let Some(messages) = messages else {
-        return (Vec::new(), BTreeMap::new());
-    };
-    let mut entries = Vec::new();
-    let mut debug = BTreeMap::new();
-    let mut tool_index = 0_usize;
-    for message in messages {
-        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(parts) = message.get("content").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        for part in parts {
-            let kind = part
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            match kind {
-                "text" => {
-                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str)
-                        && !text.is_empty()
-                    {
-                        entries.push(AcpEntry::Assistant {
-                            text: text.to_string(),
-                            thought: false,
-                        });
-                    }
-                }
-                "thinking" => {
-                    // pi 协议 thinking block 的字段是 `thinking`，不是 `text`。
-                    if let Some(text) = part.get("thinking").and_then(serde_json::Value::as_str)
-                        && !text.is_empty()
-                    {
-                        entries.push(AcpEntry::Assistant {
-                            text: text.to_string(),
-                            thought: true,
-                        });
-                    }
-                }
-                "toolCall" | "tool_call" => {
-                    let name = part
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("tool");
-                    let args = part.get("arguments").or_else(|| part.get("args"));
-                    tool_index += 1;
-                    let id = format!("{id_prefix}-{tool_index}");
-                    debug.insert(
-                        id.clone(),
-                        crate::acp_session::ToolCallDebug {
-                            name: Some(name.to_string()),
-                            raw_input: args.cloned(),
-                        },
-                    );
-                    entries.push(AcpEntry::tool_call(
-                        id,
-                        tool_title(name, args),
-                        tool_kind(name),
-                        ToolCallStatus::Completed,
-                        Vec::new(),
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-    mark_last_subagent_tool_in_progress(&mut entries, running);
-    (entries, debug)
-}
-
-fn mark_last_subagent_tool_in_progress(entries: &mut [AcpEntry], running: bool) {
-    if !running {
-        return;
-    }
-    for entry in entries.iter_mut().rev() {
-        if let AcpEntry::ToolCall { status, .. } = entry {
-            *status = ToolCallStatus::InProgress;
-            break;
-        }
-    }
+) -> Option<Vec<crate::acp_chat::SubagentRun>> {
+    (name == PI_SUBAGENT_TOOL)
+        .then(|| crate::acp_chat::subagent_runs_from_value(details.get("runs")))
 }
 
 fn content_text(content: Option<&serde_json::Value>) -> String {
@@ -3518,20 +3291,43 @@ fn active_branch_messages(data: &serde_json::Value) -> Result<Vec<serde_json::Va
     }
     branch.reverse();
 
-    Ok(branch
+    Ok(branch.into_iter().filter_map(entry_message).collect())
+}
+
+/// Pi 会话 entry 里能回放的那条消息：普通消息原样，自定义消息还原成 `role: custom`。
+fn entry_message(entry: &serde_json::Value) -> Option<serde_json::Value> {
+    match entry.get("type").and_then(serde_json::Value::as_str) {
+        Some("message") => entry.get("message").cloned(),
+        Some("custom_message") => Some(serde_json::json!({
+            "role": "custom",
+            "customType": entry.get("customType").cloned().unwrap_or(serde_json::Value::Null),
+            "content": entry.get("content").cloned().unwrap_or_default(),
+            "display": entry.get("display").cloned().unwrap_or(serde_json::Value::Bool(true)),
+            "details": entry.get("details").cloned().unwrap_or_default(),
+        })),
+        _ => None,
+    }
+}
+
+/// 不起 Pi 进程，把一份 Pi 会话文件读成对话条目：取 Pi 自己认的活动分支，按实时回放
+/// 同一套规则归约。子智能体的子会话就这样给界面看。
+pub fn transcript_entries_from_session_file(text: &str) -> Vec<AcpEntry> {
+    let (version, entries) = crate::session_history::pi_session_entries(text);
+    let messages: Vec<serde_json::Value> = crate::session_history::pi_active_branch(version, &entries)
         .into_iter()
-        .filter_map(|entry| match entry.get("type").and_then(serde_json::Value::as_str) {
-            Some("message") => entry.get("message").cloned(),
-            Some("custom_message") => Some(serde_json::json!({
-                "role": "custom",
-                "customType": entry.get("customType").cloned().unwrap_or(serde_json::Value::Null),
-                "content": entry.get("content").cloned().unwrap_or_default(),
-                "display": entry.get("display").cloned().unwrap_or(serde_json::Value::Bool(true)),
-                "details": entry.get("details").cloned().unwrap_or_default(),
-            })),
-            _ => None,
-        })
-        .collect())
+        .filter_map(entry_message)
+        .collect();
+    let (event_tx, event_rx) = smol::channel::unbounded();
+    let mut state = PiState::new();
+    // 和恢复会话时同一个顺序：开始、整段回放、结束。
+    let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
+    replay_history(&messages, &event_tx, &mut state);
+    drop(event_tx);
+    let mut reduced = crate::acp_session::AcpSessionState::default();
+    while let Ok(event) = event_rx.try_recv() {
+        let _ = crate::acp_session::apply_event(&mut reduced, event);
+    }
+    reduced.entries().to_vec()
 }
 
 /// 全量重放 + 显式收尾。Pi 先把当前分支的原始 message entries 重放完再握手，
@@ -3566,21 +3362,20 @@ fn replay_messages(
                     "content": message.get("content").cloned().unwrap_or_default(),
                     "details": message.get("details").cloned().unwrap_or_default(),
                 });
-                if let Some((children, debug)) = message
-                    .get("details")
-                    .and_then(|details| subagent_children_from_details(id, details))
-                {
-                    let _ = event_tx.try_send(ConversationEvent::ToolChildren {
-                        id: id.to_string(),
-                        children,
-                        debug,
-                    });
-                }
                 let name = state
                     .tool_names
                     .get(id)
                     .cloned()
                     .unwrap_or_else(|| "tool".to_string());
+                if let Some(runs) = message
+                    .get("details")
+                    .and_then(|details| subagent_runs_from_details(&name, details))
+                {
+                    let _ = event_tx.try_send(ConversationEvent::SubagentRuns {
+                        id: id.to_string(),
+                        runs,
+                    });
+                }
                 let args = state.tool_args.get(id).cloned();
                 let _ = event_tx.try_send(ConversationEvent::ToolFinished {
                     id: id.to_string(),
@@ -5097,72 +4892,54 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
     }
 
+    /// 子会话文件不起 Pi 进程就能读成对话条目：只取活动分支，自定义消息照常还原。
     #[test]
-    fn replayed_subagent_tool_result_restores_nested_transcript() {
-        let (event_tx, event_rx) = smol::channel::unbounded();
-        let mut state = PiState::new();
-        let messages = [
-            serde_json::json!({
-                "role": "assistant",
-                "content": [{
-                    "type": "toolCall",
-                    "id": "subagent-call",
-                    "name": "subagent",
-                    "arguments": {"task": "inspect the project"}
-                }]
-            }),
-            serde_json::json!({
-                "role": "toolResult",
-                "toolCallId": "subagent-call",
-                "toolName": "subagent",
-                "content": [{"type": "text", "text": "finished"}],
-                "details": {
-                    "mode": "single",
-                    "results": [{
-                        "agent": "scout",
-                        "exitCode": 0,
-                        "messages": [
-                            {"role": "assistant", "content": [{"type": "text", "text": "early child result"}]},
-                            {"role": "assistant", "content": [{"type": "toolCall", "name": "read", "arguments": {"path": "README.md"}}]},
-                            {"role": "assistant", "content": [{"type": "text", "text": "latest child result"}]}
-                        ]
-                    }]
-                }
-            }),
+    fn a_session_file_reads_as_conversation_entries_without_pi() {
+        let lines = [
+            serde_json::json!({"type": "session", "version": 3, "id": "sa-aaaaaaaaaaaa", "cwd": "/repo"}),
+            serde_json::json!({"type": "message", "id": "u1", "parentId": null,
+                "message": {"role": "user", "content": [{"type": "text", "text": "查登录"}]}}),
+            serde_json::json!({"type": "message", "id": "a-old", "parentId": "u1",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "旧分支"}]}}),
+            serde_json::json!({"type": "message", "id": "a1", "parentId": "u1",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "先看看"},
+                    {"type": "toolCall", "id": "t1", "name": "read", "arguments": {"path": "src/auth.rs"}}
+                ]}}),
+            serde_json::json!({"type": "message", "id": "r1", "parentId": "a1",
+                "message": {"role": "toolResult", "toolCallId": "t1", "toolName": "read",
+                    "content": [{"type": "text", "text": "fn login() {}"}]}}),
+            serde_json::json!({"type": "message", "id": "a2", "parentId": "r1",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "登录在 src/auth.rs"}]}}),
         ];
+        let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
 
-        replay_history(&messages, &event_tx, &mut state);
-
-        let mut restored_children = None;
-        while let Ok(event) = event_rx.try_recv() {
-            if let ConversationEvent::ToolChildren { id, children, .. } = event {
-                assert_eq!(id, "subagent-call");
-                restored_children = Some(children);
-            }
-        }
-        let children = restored_children.expect("completed subagent transcript should replay");
-        assert!(matches!(
-            &children[0],
-            AcpEntry::Assistant { thought: false, text } if text == "early child result"
-        ));
-        assert!(matches!(
-            &children[1],
-            AcpEntry::ToolCall {
-                kind: ToolKind::Read,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &children[2],
-            AcpEntry::Assistant { thought: false, text } if text == "latest child result"
-        ));
+        let entries = transcript_entries_from_session_file(&text);
+        let texts: Vec<String> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                AcpEntry::User(text) => Some(format!("user:{text}")),
+                AcpEntry::Assistant { text, thought: false } => Some(format!("assistant:{text}")),
+                AcpEntry::ToolCall { kind, .. } => Some(format!("tool:{kind:?}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "user:查登录",
+                "assistant:先看看",
+                "tool:Read",
+                "assistant:登录在 src/auth.rs"
+            ],
+            "旧分支不算，工具调用和结果对上"
+        );
     }
 
     #[test]
-    fn replayed_result_only_subagent_details_show_each_final_output() {
+    fn replayed_subagent_tool_result_restores_the_dispatched_runs() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         let mut state = PiState::new();
-        // 定稿的 details 只存结果、不带子会话消息。
         let messages = [
             serde_json::json!({
                 "role": "assistant",
@@ -5180,9 +4957,10 @@ mod tests {
                 "content": [{"type": "text", "text": "Parallel: 1/2 succeeded"}],
                 "details": {
                     "mode": "parallel",
-                    "results": [
-                        {"agent": "审计 a", "exitCode": 0, "stopReason": "stop", "output": "a 没问题"},
-                        {"agent": "审计 b", "exitCode": 1, "stopReason": "error", "output": ""}
+                    "background": false,
+                    "runs": [
+                        {"id": "sa-a", "title": "审计 a", "agent": "reviewer", "status": "completed"},
+                        {"id": "sa-b", "title": "审计 b", "agent": "reviewer", "status": "failed"}
                     ]
                 }
             }),
@@ -5190,41 +4968,28 @@ mod tests {
 
         replay_history(&messages, &event_tx, &mut state);
 
-        let mut restored_children = None;
+        let mut restored = None;
         while let Ok(event) = event_rx.try_recv() {
-            if let ConversationEvent::ToolChildren { id, children, .. } = event {
+            assert!(
+                !matches!(event, ConversationEvent::ToolChildren { .. }),
+                "子智能体的过程在子会话里，不挂进父会话"
+            );
+            if let ConversationEvent::SubagentRuns { id, runs } = event {
                 assert_eq!(id, "parallel-call");
-                restored_children = Some(children);
+                restored = Some(runs);
             }
         }
-        let children = restored_children.expect("result-only subagent details should replay");
-        let AcpEntry::ToolCall {
-            status,
-            children: first,
-            ..
-        } = &children[0]
-        else {
-            panic!("each parallel result is a card");
-        };
-        assert_eq!(*status, ToolCallStatus::Completed);
-        assert!(matches!(
-            first.as_slice(),
-            [AcpEntry::Assistant { thought: false, text }] if text == "a 没问题"
-        ));
-        let AcpEntry::ToolCall {
-            status,
-            children: second,
-            ..
-        } = &children[1]
-        else {
-            panic!("each parallel result is a card");
-        };
-        assert_eq!(*status, ToolCallStatus::Failed);
-        assert!(second.is_empty());
+        let runs = restored.expect("工具结果里的子智能体名单要还原");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, "sa-a");
+        assert_eq!(runs[0].title, "审计 a");
+        assert_eq!(runs[0].status, crate::acp_session::SubagentStatus::Completed);
+        assert_eq!(runs[1].id, "sa-b");
+        assert_eq!(runs[1].status, crate::acp_session::SubagentStatus::Failed);
     }
 
     #[test]
-    fn replayed_subagent_item_details_restore_the_saved_transcript() {
+    fn only_the_subagent_tool_carries_runs() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         let mut state = PiState::new();
         let messages = [
@@ -5232,57 +4997,28 @@ mod tests {
                 "role": "assistant",
                 "content": [{
                     "type": "toolCall",
-                    "id": "legacy-subagent-call",
-                    "name": "subagent",
-                    "arguments": {"task": "inspect the project"}
+                    "id": "read-call",
+                    "name": "read",
+                    "arguments": {"path": "README.md"}
                 }]
             }),
             serde_json::json!({
                 "role": "toolResult",
-                "toolCallId": "legacy-subagent-call",
-                "toolName": "subagent",
-                "content": [{"type": "text", "text": "finished"}],
-                "details": {
-                    "mode": "single",
-                    "results": [{
-                        "agent": "scout",
-                        "exitCode": 0,
-                        "items": [
-                            {"type": "text", "text": "early child result"},
-                            {"type": "toolCall", "name": "read", "args": {"path": "README.md"}},
-                            {"type": "text", "text": "latest child result"}
-                        ]
-                    }]
-                }
+                "toolCallId": "read-call",
+                "toolName": "read",
+                "content": [{"type": "text", "text": "ok"}],
+                "details": {"runs": [{"id": "sa-x", "title": "x", "status": "completed"}]}
             }),
         ];
 
         replay_history(&messages, &event_tx, &mut state);
 
-        let mut restored_children = None;
         while let Ok(event) = event_rx.try_recv() {
-            if let ConversationEvent::ToolChildren { id, children, .. } = event {
-                assert_eq!(id, "legacy-subagent-call");
-                restored_children = Some(children);
-            }
+            assert!(
+                !matches!(event, ConversationEvent::SubagentRuns { .. }),
+                "别的工具的 details 碰巧有 runs 也不是子智能体派发"
+            );
         }
-        let children = restored_children.expect("persisted subagent items should replay");
-        assert_eq!(children.len(), 3);
-        assert!(matches!(
-            &children[0],
-            AcpEntry::Assistant { thought: false, text } if text == "early child result"
-        ));
-        assert!(matches!(
-            &children[1],
-            AcpEntry::ToolCall {
-                kind: ToolKind::Read,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &children[2],
-            AcpEntry::Assistant { thought: false, text } if text == "latest child result"
-        ));
     }
 
     #[test]
@@ -5460,7 +5196,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_details_become_nested_children_instead_of_output_text() {
+    fn live_subagent_progress_reports_the_runs_instead_of_nested_children() {
         let launch = test_launch(SMELT_PI_AGENT_COMMAND);
         let (event_tx, event_rx) = smol::channel::unbounded();
         let (outbound_tx, _) = smol::channel::unbounded();
@@ -5470,7 +5206,7 @@ mod tests {
         handle_event(
             serde_json::json!({
                 "type": "tool_execution_start",
-                "toolCallId": "sa-1",
+                "toolCallId": "call-1",
                 "toolName": "subagent",
                 "args": {"agent": "scout", "task": "find auth"}
             }),
@@ -5482,27 +5218,14 @@ mod tests {
         handle_event(
             serde_json::json!({
                 "type": "tool_execution_update",
-                "toolCallId": "sa-1",
+                "toolCallId": "call-1",
                 "toolName": "subagent",
                 "partialResult": {
-                    "content": [{"type": "text", "text": "(running...)"}],
+                    "content": [{"type": "text", "text": "(running scout...)"}],
                     "details": {
                         "mode": "single",
-                        "results": [{
-                            "agent": "scout",
-                            "exitCode": -1,
-                            "messages": [{
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "thinking", "thinking": "looking"},
-                                    {
-                                        "type": "toolCall",
-                                        "name": "read",
-                                        "arguments": {"path": "README.md"}
-                                    }
-                                ]
-                            }]
-                        }]
+                        "background": false,
+                        "runs": [{"id": "sa-1", "title": "find auth", "agent": "scout", "status": "running"}]
                     }
                 }
             }),
@@ -5518,44 +5241,19 @@ mod tests {
                 id,
                 title,
                 kind: ToolKind::Collaborate
-            }) if id == "sa-1" && title == "find auth"
+            }) if id == "call-1" && title == "find auth"
         ));
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::ToolDebug {
-                id,
-                name: Some(name),
-                raw_input: Some(args),
-            }) if id == "sa-1" && name == "subagent" && args["task"] == "find auth"
+            Ok(ConversationEvent::ToolDebug { id, .. }) if id == "call-1"
         ));
-        let ConversationEvent::ToolChildren {
-            id,
-            children,
-            debug,
-        } = event_rx.try_recv().unwrap()
-        else {
-            panic!("expected nested subagent children");
+        let ConversationEvent::SubagentRuns { id, runs } = event_rx.try_recv().unwrap() else {
+            panic!("expected the dispatched runs");
         };
-        assert_eq!(id, "sa-1");
-        assert_eq!(children.len(), 2);
-        assert_eq!(debug["sa-1-child-1"].name.as_deref(), Some("read"));
-        assert_eq!(
-            debug["sa-1-child-1"].raw_input,
-            Some(serde_json::json!({"path": "README.md"}))
-        );
-        assert!(matches!(
-            &children[0],
-            AcpEntry::Assistant { thought: true, text } if text == "looking"
-        ));
-        assert!(matches!(
-            &children[1],
-            AcpEntry::ToolCall {
-                kind: ToolKind::Read,
-                status: ToolCallStatus::InProgress,
-                title,
-                ..
-            } if title == "README.md"
-        ));
+        assert_eq!(id, "call-1");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "sa-1");
+        assert_eq!(runs[0].status, crate::acp_session::SubagentStatus::Running);
         assert!(event_rx.try_recv().is_err());
     }
 

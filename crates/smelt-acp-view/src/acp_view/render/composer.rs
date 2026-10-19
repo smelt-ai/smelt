@@ -35,8 +35,12 @@ impl AcpView {
             &self.conversation_binding,
             smelt_model::conversation::ConversationBinding::Automation { .. }
         ) {
-            // 自动化 Run 没有输入框；有进程在跑时，后台任务入口单独占底部一行。
-            let chip = self.render_background_task_chip(cx)?;
+            // 自动化 Run 没有输入框；有进程或子智能体在跑时，入口单独占底部一行。
+            let chip = self.render_background_task_chip(cx);
+            let subagent_chip = self.render_subagent_chip(cx);
+            if chip.is_none() && subagent_chip.is_none() {
+                return None;
+            }
             return Some(
                 v_flex()
                     .relative()
@@ -45,11 +49,14 @@ impl AcpView {
                     .py_2()
                     .items_center()
                     .children(self.render_background_task_popover(cx))
+                    .children(self.render_subagent_popover(cx))
                     .child(
                         h_flex()
                             .w_full()
                             .max_w(ui_theme::conversation_max_width())
-                            .child(chip),
+                            .gap_2()
+                            .children(subagent_chip)
+                            .children(chip),
                     )
                     .into_any_element(),
             );
@@ -824,6 +831,7 @@ impl AcpView {
                                         .on_click(cx.listener(|this, _ev, _window, cx| {
                                             this.usage_popover_open = !this.usage_popover_open;
                                             this.background_tasks_open = false;
+                                            this.subagents_open = false;
                                             cx.notify();
                                         }));
                                     if !popover_open {
@@ -846,6 +854,7 @@ impl AcpView {
                                     }
                                     row.child(chip)
                                 })
+                                .children(self.render_subagent_chip(cx))
                                 .children(self.render_background_task_chip(cx))
                         )
                         .children(self.restart_error.as_ref().map(|err| {
@@ -943,6 +952,7 @@ impl AcpView {
                 .items_center()
                 .children(self.render_usage_popover(cx))
                 .children(self.render_background_task_popover(cx))
+                .children(self.render_subagent_popover(cx))
                 .children(completion_bar)
                 .child(composer)
         });
@@ -1135,6 +1145,7 @@ impl AcpView {
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.background_tasks_open = !this.background_tasks_open;
                     this.usage_popover_open = false;
+                    this.subagents_open = false;
                     cx.notify();
                 }))
                 .into_any_element(),

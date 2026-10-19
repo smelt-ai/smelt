@@ -138,6 +138,7 @@ mod automation_runtime;
 mod desktop;
 mod control;
 mod conversation_image;
+mod subagent_transcript;
 mod devices;
 mod dsh_control;
 mod event_hub;

@@ -75,3 +75,24 @@ pub fn is_workbench_conversation_workspace(path: &Path) -> bool {
     };
     path.starts_with(&root)
 }
+
+/// Pi 子智能体的子会话目录：`~/.smelt/subagents`。不放进 Pi 的会话目录：历史列表会把
+/// 那里每份记录都当成一段独立的对话；Pi profile 还会挪那个目录。
+pub fn subagent_sessions_dir() -> Option<PathBuf> {
+    smelt_paths::smelt_home().map(|home| home.join("subagents"))
+}
+
+/// 一个子智能体的子会话：`~/.smelt/subagents/<id>.jsonl`。只按子智能体 id 定，
+/// 父会话回退或分叉换了会话 id 也找得到。id 不能安全地当文件名时返回 `None`。
+pub fn subagent_session_file(subagent_id: &str) -> Option<PathBuf> {
+    subagent_session_file_in(&subagent_sessions_dir()?, subagent_id)
+}
+
+pub fn subagent_session_file_in(dir: &Path, subagent_id: &str) -> Option<PathBuf> {
+    let id = subagent_id.trim();
+    let safe = !id.is_empty()
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    safe.then(|| dir.join(format!("{id}.jsonl")))
+}

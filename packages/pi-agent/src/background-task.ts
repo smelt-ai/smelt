@@ -5,6 +5,8 @@ import { keepsForegroundTimeout, watchHostCommand } from "./bash-run.ts";
 import {
 	SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
 	type SubagentResultStatus,
+	type SubagentRunStatus,
+	type SubagentRunSummary,
 	subagentResultMessage,
 } from "./subagent/result.ts";
 
@@ -72,14 +74,17 @@ export type BackgroundHostResponse = {
 type HostRequest = Record<string, unknown>;
 
 export type TaskCompletionNotice = {
+	/** 后台命令是任务 id；后台子智能体派发是派发它的工具调用 id。 */
 	id: string;
-	/** `command` 是宿主起的命令，`subagent` 是挂接的后台子智能体交回的结果。 */
+	/** `command` 是宿主起的命令，`subagent` 是一次后台子智能体派发交回的结果。 */
 	kind: "command" | "subagent";
 	title: string;
 	status: string;
 	exitCode: number | null;
 	output: string;
 	outputTail: string;
+	/** 后台子智能体派发里每个子智能体的结束状态。 */
+	runs: SubagentRunSummary[];
 	wake: boolean;
 };
 
@@ -119,8 +124,21 @@ function parseCompletion(value: unknown): TaskCompletionNotice | undefined {
 		exitCode: typeof row.exitCode === "number" ? row.exitCode : null,
 		output: typeof row.output === "string" ? row.output : "",
 		outputTail: typeof row.outputTail === "string" ? row.outputTail : "",
+		runs: parseRuns(row.runs),
 		wake: row.wake === true,
 	};
+}
+
+const RUN_STATUSES: readonly SubagentRunStatus[] = ["running", "completed", "failed", "stopped", "interrupted"];
+
+function parseRuns(value: unknown): SubagentRunSummary[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item) => {
+		const row = item && typeof item === "object" ? (item as Record<string, unknown>) : undefined;
+		if (!row || typeof row.id !== "string" || !row.id) return [];
+		const status = RUN_STATUSES.find((candidate) => candidate === row.status) ?? "failed";
+		return [{ id: row.id, title: typeof row.title === "string" ? row.title : "", status }];
+	});
 }
 
 /** 宿主交回的结果写成会话里的哪条消息、怎么送。命令和后台子智能体各用自己的消息类型。 */
@@ -132,7 +150,13 @@ export function completionMessage(notice: TaskCompletionNotice): {
 		const status: SubagentResultStatus =
 			notice.status === "completed" ? "completed" : notice.status === "stopped" ? "stopped" : "failed";
 		return {
-			message: subagentResultMessage({ id: notice.id, title: notice.title, status, text: notice.output }),
+			message: subagentResultMessage({
+				toolCallId: notice.id,
+				title: notice.title,
+				status,
+				text: notice.output,
+				runs: notice.runs,
+			}),
 			// 子智能体的结果等这一轮做完再看，不打断手上的工具调用。
 			options: { triggerTurn: notice.wake, deliverAs: "followUp" },
 		};
@@ -307,94 +331,6 @@ export function callBackgroundHost(
  */
 export function endBackgroundTaskOwner(target: string): Promise<BackgroundHostResponse> {
 	return callBackgroundHost(process.env[SMELT_BACKGROUND_TASK_SOCK_ENV], { op: "end_owner", target });
-}
-
-/**
- * 挂接在宿主里的一个后台任务。`finish` 只算第一次，之后的调用什么也不做。
- * 带上 `result` 时宿主把它交回会话：和后台命令的完成走同一条监听，等 Pi 真交给模型才算送到，
- * 会话换了（fork）也交给新会话。
- */
-export type AttachedBackgroundTask = {
-	id: string;
-	progress(text: string): void;
-	finish(status: "completed" | "failed" | "stopped", result?: string): void;
-};
-
-/** 等宿主回 id 最多这么久。宿主不应答时不能把派子智能体卡住。 */
-const ATTACH_ACK_TIMEOUT_MS = 5_000;
-
-/**
- * 把不由宿主启动的后台工作（后台子智能体）登记进宿主，让它和后台命令一样出现在会话的
- * 后台任务列表里，模型也能用 list / stop 管它。这条连接就是它的命：断开即结束，Pi 被杀
- * 也不会留下一个永远在跑的假任务。宿主要停它时（模型调 stop、会话结束）调用 `onStop`。
- *
- * 拿不到宿主（不在 Smelt 里、套接字不通）时返回 undefined：调用方照常干活，只是看不到。
- */
-export function attachBackgroundTask(
-	request: { title: string; command: string; toolCallId?: string },
-	onStop: () => void,
-	socketPath = process.env[SMELT_BACKGROUND_TASK_SOCK_ENV],
-): Promise<AttachedBackgroundTask | undefined> {
-	if (!socketPath) return Promise.resolve(undefined);
-	return new Promise((resolve) => {
-		const socket: Socket = connect(socketPath);
-		let attached: AttachedBackgroundTask | undefined;
-		let settled = false;
-		let ended = false;
-		let buffer = "";
-		const settle = (task: AttachedBackgroundTask | undefined) => {
-			if (settled) return;
-			settled = true;
-			resolve(task);
-		};
-		const send = (message: Record<string, unknown>) => {
-			if (ended || socket.destroyed) return;
-			socket.write(`${JSON.stringify(message)}\n`);
-		};
-		socket.setTimeout(ATTACH_ACK_TIMEOUT_MS);
-		socket.on("timeout", () => {
-			socket.destroy();
-			settle(undefined);
-		});
-		socket.on("data", (chunk: Buffer | string) => {
-			buffer += chunk.toString();
-			let newline = buffer.indexOf("\n");
-			while (newline >= 0) {
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				newline = buffer.indexOf("\n");
-				let message: { ok?: unknown; id?: unknown; op?: unknown };
-				try {
-					message = JSON.parse(line);
-				} catch {
-					continue;
-				}
-				if (!attached) {
-					if (message.ok !== true || typeof message.id !== "string") {
-						socket.destroy();
-						settle(undefined);
-						return;
-					}
-					socket.setTimeout(0);
-					attached = {
-						id: message.id,
-						progress: (text) => send({ op: "progress", text }),
-						finish: (status, result) => {
-							send(result === undefined ? { op: "finish", status } : { op: "finish", status, result });
-							ended = true;
-							socket.end();
-						},
-					};
-					settle(attached);
-					continue;
-				}
-				if (message.op === "stop") onStop();
-			}
-		});
-		socket.on("error", () => settle(undefined));
-		socket.on("close", () => settle(undefined));
-		send({ op: "attach", owner: backgroundTaskOwner(), ...request });
-	});
 }
 
 function hostText(response: BackgroundHostResponse): { content: [{ type: "text"; text: string }]; details: { error: boolean }; isError: boolean } {

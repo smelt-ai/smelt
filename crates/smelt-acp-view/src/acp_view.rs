@@ -39,7 +39,7 @@ use smelt_model::acp_session::{
     AcpEndKind, AcpTurnOutcome, AcpUserAction, ApprovalDetailsView, BackgroundTaskStatus,
     BackgroundTaskView, ConversationSnapshot, ElicitFieldKindView, PendingElicitation,
     PendingPermission, PermissionOptionKindView, PlanEntryStatusView, PlanView, RuntimeDebug,
-    ToolCallDebug,
+    SubagentStatus, SubagentView, ToolCallDebug,
 };
 use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
@@ -1584,6 +1584,14 @@ pub struct AcpView {
     expanded_background_tasks: std::collections::HashSet<String>,
     /// 用户点了停止、还在等它结束的后台任务 id。任务结束后从这里拿掉。
     stopping_background_tasks: std::collections::HashSet<String>,
+    /// 会话宿主报的 Pi 子智能体（本次宿主生命期内的）。卡片按 id 取实时状态。
+    subagents: Vec<SubagentView>,
+    /// 输入栏「子智能体」弹层是否打开。
+    subagents_open: bool,
+    /// 用户点了停止、还在等它停下的子智能体 id。停下后从这里拿掉。
+    stopping_subagents: std::collections::HashSet<String>,
+    /// 侧边视图里看着的子智能体。只属于当前视图，不落盘：重开对话时是关的。
+    subagent_inspector: Option<SubagentInspector>,
     /// 用户手动展开的过程/分析摘要（key = entries 索引）。过程组外的思考、
     /// 过程组里对用户说的中间正文，以及后台任务 / 子智能体状态行的输出共用这份状态；
     /// 只属于当前视图。
@@ -2036,6 +2044,10 @@ impl AcpView {
             background_tasks_open: false,
             expanded_background_tasks: std::collections::HashSet::new(),
             stopping_background_tasks: std::collections::HashSet::new(),
+            subagents: Vec::new(),
+            subagents_open: false,
+            stopping_subagents: std::collections::HashSet::new(),
+            subagent_inspector: None,
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_process_groups: std::collections::HashSet::new(),
             user_enter: None,
@@ -2164,6 +2176,10 @@ impl AcpView {
         self.background_tasks_open = false;
         self.expanded_background_tasks.clear();
         self.stopping_background_tasks.clear();
+        self.subagents.clear();
+        self.subagents_open = false;
+        self.stopping_subagents.clear();
+        self.subagent_inspector = None;
         self.model = None; // 模型等新会话握手后重新上报
         self.config_options.clear();
         self.pending_config_values.clear();
@@ -3782,6 +3798,147 @@ impl AcpView {
         cx.notify();
     }
 
+    /// 停掉会话的一个子智能体。后台派发的结果照常交回会话，但不叫醒模型。
+    fn stop_subagent(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(h) = &self.handle else {
+            return;
+        };
+        if h.action_tx
+            .try_send(AcpUserAction::StopSubagent { id: id.clone() })
+            .is_err()
+        {
+            self.paste_hint = Some("无法停止子智能体".to_string());
+        } else {
+            self.stopping_subagents.insert(id);
+        }
+        cx.notify();
+    }
+
+    /// 停掉会话里所有在跑的子智能体。
+    fn stop_all_subagents(&mut self, cx: &mut Context<Self>) {
+        let running: Vec<String> = running_subagents(&self.subagents)
+            .iter()
+            .map(|view| view.id.clone())
+            .filter(|id| !self.stopping_subagents.contains(id))
+            .collect();
+        for id in running {
+            self.stop_subagent(id, cx);
+        }
+    }
+
+    /// 在侧边视图里看一个子智能体的过程。已经开着同一个就不重读。
+    fn open_subagent_inspector(&mut self, id: String, title: String, cx: &mut Context<Self>) {
+        if self
+            .subagent_inspector
+            .as_ref()
+            .is_some_and(|inspector| inspector.id == id)
+        {
+            return;
+        }
+        self.subagents_open = false;
+        self.subagent_inspector = Some(SubagentInspector {
+            id,
+            title,
+            entries: Vec::new(),
+            revision: None,
+            loading: false,
+            error: None,
+            _load: None,
+        });
+        self.load_subagent_transcript(cx);
+        cx.notify();
+    }
+
+    /// 读侧边视图看着的那个子智能体的子会话（最后一页），在后台读，结果放回视图状态。
+    /// 读回来时侧边视图已经换成别的子智能体，就丢掉。
+    fn load_subagent_transcript(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .subagent_inspector
+            .as_ref()
+            .map(|inspector| inspector.id.clone())
+        else {
+            return;
+        };
+        let revision = self
+            .subagents
+            .iter()
+            .find(|view| view.id == id)
+            .map(|view| view.revision);
+        let params = smelt_model::control_api::SubagentTranscriptParams {
+            subagent_id: id.clone(),
+            before: None,
+            limit: None,
+        };
+        let runtime = self.runtime.client().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let page = cx
+                .background_executor()
+                .spawn(async move {
+                    runtime.call::<smelt_model::control_api::SubagentTranscript>(
+                        &params,
+                        SUBAGENT_TRANSCRIPT_TIMEOUT,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(inspector) = this
+                    .subagent_inspector
+                    .as_mut()
+                    .filter(|inspector| inspector.id == id)
+                else {
+                    return;
+                };
+                inspector.loading = false;
+                // 宿主不再报它（重启过）时没有版本可比，读过一次就算读到了。
+                inspector.revision = Some(revision.unwrap_or_default());
+                match page {
+                    Ok(page) => {
+                        inspector.entries = page.entries;
+                        inspector.error = None;
+                    }
+                    Err(error) => inspector.error = Some(error.to_string()),
+                }
+                // 读的时候子会话又长了：再读一次。
+                this.after_subagents_changed(cx);
+                cx.notify();
+            });
+        });
+        if let Some(inspector) = self.subagent_inspector.as_mut() {
+            inspector.loading = true;
+            inspector._load = Some(task);
+        }
+    }
+
+    fn close_subagent_inspector(&mut self, cx: &mut Context<Self>) {
+        self.subagent_inspector = None;
+        cx.notify();
+    }
+
+    /// 宿主推来新的子智能体快照：停下的拿出「正在停止」，没有在跑的就收起弹层；侧边视图
+    /// 看着的那个有了新消息就重读。
+    fn after_subagents_changed(&mut self, cx: &mut Context<Self>) {
+        let subagents = &self.subagents;
+        self.stopping_subagents.retain(|id| {
+            subagents
+                .iter()
+                .any(|view| &view.id == id && view.status.is_running())
+        });
+        if running_subagents(&self.subagents).is_empty() {
+            self.subagents_open = false;
+        }
+        let stale = self.subagent_inspector.as_ref().is_some_and(|inspector| {
+            !inspector.loading
+                && self
+                    .subagents
+                    .iter()
+                    .find(|view| view.id == inspector.id)
+                    .is_some_and(|view| inspector.revision != Some(view.revision))
+        });
+        if stale {
+            self.load_subagent_transcript(cx);
+        }
+    }
+
     /// 停掉一个后台任务。结果照常交回会话，但不叫醒模型。
     fn stop_background_task(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(h) = &self.handle else {
@@ -4105,6 +4262,8 @@ impl AcpView {
             if running_background_tasks(&self.background_tasks).is_empty() {
                 self.background_tasks_open = false;
             }
+            self.subagents = snap.subagents;
+            self.after_subagents_changed(cx);
             self.model = snap.model;
             self.config_options = snap.config_options;
             reconcile_pending_config_values(
@@ -5038,12 +5197,117 @@ fn running_background_tasks(tasks: &[BackgroundTaskView]) -> Vec<&BackgroundTask
         .collect()
 }
 
-/// 某次工具调用派出去的后台工作（挂接在宿主里的后台子智能体）是否还在跑。
-fn background_task_running_for(tasks: &[BackgroundTaskView], tool_call_id: &str) -> bool {
-    tasks.iter().any(|task| {
-        task.status == BackgroundTaskStatus::Running
-            && task.tool_call_id.as_deref() == Some(tool_call_id)
-    })
+/// 侧边视图里看着的一个子智能体：它的子会话读到了哪一版。
+struct SubagentInspector {
+    id: String,
+    title: String,
+    entries: Vec<AcpEntry>,
+    /// 读到的是子会话的哪一版（`SubagentView::revision`）。还没读到是 `None`。
+    revision: Option<u64>,
+    loading: bool,
+    error: Option<String>,
+    _load: Option<gpui::Task<()>>,
+}
+
+fn running_subagents(subagents: &[SubagentView]) -> Vec<&SubagentView> {
+    subagents
+        .iter()
+        .filter(|view| view.status.is_running())
+        .collect()
+}
+
+/// 卡片上一个子智能体叫什么：它自己的标题，没有就用派发的标题。
+fn subagent_run_title(run: &smelt_model::acp_chat::SubagentRun, dispatch_title: &str) -> String {
+    let own = run.title.trim();
+    if own.is_empty() {
+        smelt_model::acp_chat::subagent_visible_title(dispatch_title)
+    } else {
+        own.to_string()
+    }
+}
+
+/// 一个子智能体跑了多久：开始到结束，还在跑就到现在。
+fn subagent_elapsed_ms(view: &SubagentView, now_ms: u64) -> u64 {
+    view.finished_at_ms
+        .unwrap_or(now_ms)
+        .saturating_sub(view.started_at_ms)
+}
+
+/// 派发卡片里一个子智能体现在怎样。会话宿主报的实时状态优先；没有实时记录时用卡片
+/// 自己记下的（工具结果、结果消息定下的）。记下的还是「运行中」，而派发的调用已经结束、
+/// 宿主也不再报它，说明宿主在它跑完前退出了：已中断。
+fn subagent_status(
+    run: &smelt_model::acp_chat::SubagentRun,
+    live: &[SubagentView],
+    dispatch_running: bool,
+) -> SubagentStatus {
+    if let Some(view) = live.iter().find(|view| view.id == run.id) {
+        return view.status;
+    }
+    if run.status.is_running() && !dispatch_running {
+        return SubagentStatus::Interrupted;
+    }
+    run.status
+}
+
+/// 派发卡片一行里的状态说明。
+#[derive(Debug, PartialEq, Eq)]
+struct DispatchProgress {
+    text: String,
+    running: bool,
+    /// 有失败或中断的：卡片画成红色。被叫停的不算问题。
+    problem: bool,
+}
+
+fn dispatch_progress(statuses: &[SubagentStatus], activity: Option<&str>) -> DispatchProgress {
+    let total = statuses.len();
+    let count = |wanted: SubagentStatus| statuses.iter().filter(|status| **status == wanted).count();
+    let running = count(SubagentStatus::Running);
+    let completed = count(SubagentStatus::Completed);
+    let failed = count(SubagentStatus::Failed);
+    let interrupted = count(SubagentStatus::Interrupted);
+    let stopped = count(SubagentStatus::Stopped);
+    let text = if total == 1 {
+        match (statuses[0], activity) {
+            (SubagentStatus::Running, Some(activity)) => format!("运行中 · 正在：{activity}"),
+            (status, _) => status.label().to_string(),
+        }
+    } else if running > 0 {
+        format!("已完成 {}/{total}", total - running)
+    } else if completed == total {
+        "全部完成".to_string()
+    } else {
+        let mut parts = vec![format!("完成 {completed}/{total}")];
+        if failed > 0 {
+            parts.push(format!("{failed} 个失败"));
+        }
+        if interrupted > 0 {
+            parts.push(format!("{interrupted} 个中断"));
+        }
+        if stopped > 0 {
+            parts.push(format!("{stopped} 个已停止"));
+        }
+        parts.join(" · ")
+    };
+    DispatchProgress {
+        text,
+        running: running > 0,
+        problem: failed + interrupted > 0,
+    }
+}
+
+/// 派发跑了多久：最早开始到最晚结束，还有在跑的就到现在。宿主不再报它（重启过）时不显示。
+fn dispatch_elapsed_ms(live: &[&SubagentView], now_ms: u64) -> Option<u64> {
+    let started = live.iter().map(|view| view.started_at_ms).min()?;
+    let end = if live.iter().any(|view| view.status.is_running()) {
+        now_ms
+    } else {
+        live.iter()
+            .filter_map(|view| view.finished_at_ms)
+            .max()
+            .unwrap_or(now_ms)
+    };
+    Some(end.saturating_sub(started))
 }
 
 /// 后台任务已经跑了多久。时钟往回拨时按刚开始算。
@@ -6271,6 +6535,9 @@ fn tool_running_label(kind: ToolKind) -> &'static str {
 
 /// 补齐启动规格、扫技能都要遍历插件目录，给足余量。
 const RUNTIME_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 读一页子会话：一个文件解析一遍，远程运行时还要走一趟网络。
+const SUBAGENT_TRANSCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 struct LoadedSkillsSnapshot {
     launch: ConversationLaunchSpec,
