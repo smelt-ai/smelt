@@ -547,6 +547,17 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::ConversationImage => {
+            let params: smelt_core::control_api::ConversationImageParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::conversation_image::conversation_image(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::SessionAgentBindings => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,
@@ -1468,6 +1479,22 @@ mod tests {
         let bindings = dispatch_for_test("session.agent_bindings", serde_json::json!({}));
         assert_eq!(bindings["status"], "ok");
         assert!(bindings["result"]["bindings"].is_object());
+    }
+
+    #[test]
+    fn conversation_image_is_dispatched_with_typed_errors() {
+        let missing = dispatch_for_test(
+            "conversation.image",
+            serde_json::json!({"session_id": "acp-nope", "entry": 0, "digest": "abc"}),
+        );
+        assert_eq!(missing["status"], "error");
+        assert_eq!(missing["error"]["code"], "not_found");
+
+        let bad = dispatch_for_test(
+            "conversation.image",
+            serde_json::json!({"session_id": "acp-nope", "digest": "abc"}),
+        );
+        assert_eq!(bad["error"]["code"], "invalid_params");
     }
 
     #[test]

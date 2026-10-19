@@ -715,6 +715,28 @@ mod tests {
     }
 
     #[test]
+    fn conversation_image_max_edge_is_optional() {
+        let params = decode_params::<ConversationImageParams>(serde_json::json!({
+            "session_id": "acp-1",
+            "entry": 41,
+            "digest": "abc",
+        }))
+        .unwrap();
+        assert_eq!(params.entry, 41);
+        assert_eq!(params.max_edge, None);
+        assert!(
+            serde_json::to_value(&params)
+                .unwrap()
+                .get("max_edge")
+                .is_none()
+        );
+        assert!(
+            decode_params::<ConversationImageParams>(serde_json::json!({"session_id": "acp-1"}))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn new_session_catalog_decodes_on_the_client() {
         let wire = serde_json::json!({
             "control_version": CONTROL_API_VERSION,
@@ -905,6 +927,9 @@ pi_calls! {
     SessionDelete => SessionDelete(SessionIdParams) -> EmptyParams;
     /// 会话 id → 它所属的产品智能体定义 id。
     SessionAgentBindings => SessionAgentBindings(EmptyParams) -> SessionAgentBindingsResult;
+    /// 取对话里一张没有内联的图（`acp_watch` / `acp_snapshot` 带 `image_refs` 时帧里只有
+    /// 引用）。条目被回退或压缩改写过、摘要对不上时回 `not_found`。
+    ConversationImage => ConversationImage(ConversationImageParams) -> ConversationImageResult;
     /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录），顺带给出
     /// 会加载的技能。
     SessionLaunchPrepare => SessionLaunchPrepare(crate::agent_definition_store::LaunchPrepareParams)
@@ -969,6 +994,25 @@ pub struct SessionIdParams {
 pub struct SessionAgentBindingsResult {
     /// 会话 id → 智能体定义 id。
     pub bindings: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationImageParams {
+    pub session_id: String,
+    /// 引用里的全局条目下标（`AcpImageRef::entry`）。
+    pub entry: u64,
+    /// 引用里的原图摘要（`AcpImageRef::digest`）。
+    pub digest: String,
+    /// 给了就出缩略图：等比缩到长边不超过它（不裁切），运行时会把它夹到 32..=2048。
+    /// 不给就出可看的原图：base64 不超过 1 MiB 原样返回，否则长边缩到 2560。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_edge: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationImageResult {
+    pub mime: String,
+    pub data_b64: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

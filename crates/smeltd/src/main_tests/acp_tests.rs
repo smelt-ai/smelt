@@ -857,10 +857,7 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
         smelt_core::conversation::ConversationInput {
             submission_id: "submission-3".into(),
             text: "看图".into(),
-            images: vec![smelt_core::acp_chat::AcpImage {
-                mime: "image/png".into(),
-                data_b64: "aW1hZ2U=".into(),
-            }],
+            images: vec![smelt_core::acp_chat::AcpImage::new("image/png", "aW1hZ2U=")],
         },
         &new_event_hub(),
     )
@@ -1182,10 +1179,7 @@ fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn()
         images,
         delivery_id: delivery_id.map(str::to_string),
     };
-    let image = smelt_core::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aW1n".into(),
-    };
+    let image = smelt_core::acp_chat::AcpImage::new("image/png", "aW1n");
 
     apply_acp_user_action(
         &slot.value,
@@ -1510,10 +1504,7 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
     let (slot, _) = acp_sessions.reserve_with("acp-pi-cancel-images", || {
         make_acp_session_value("acp-pi-cancel-images", AcpSessionState::default())
     });
-    let image = smelt_core::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aGk=".into(),
-    };
+    let image = smelt_core::acp_chat::AcpImage::new("image/png", "aGk=");
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
         id: 1,
         text: "看这张".to_string(),
@@ -1558,10 +1549,7 @@ fn real_prompt_failure_restores_the_images_with_the_text() {
         *session.launch_spec.lock().unwrap() = Some(pi_launch());
         session
     });
-    let image = smelt_core::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aGk=".into(),
-    };
+    let image = smelt_core::acp_chat::AcpImage::new("image/png", "aGk=");
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
         id: 1,
         text: "再试一次".to_string(),
@@ -1790,10 +1778,7 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
     reduced.supports_native_queue = true;
     reduced.queued_steering = vec!["但是我想字数一致".into(), "别的".into()];
     reduced.queued_steering_images = vec![
-        vec![smelt_core::acp_chat::AcpImage {
-            mime: "image/png".into(),
-            data_b64: "aGk=".into(),
-        }],
+        vec![smelt_core::acp_chat::AcpImage::new("image/png", "aGk=")],
         Vec::new(),
     ];
     let (slot, _) = acp_sessions.reserve_with("acp-deliver-now", || {
@@ -1833,10 +1818,7 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
 
     let mut texts = vec!["但是我想字数一致".to_string(), "别的".to_string()];
     let mut images = vec![
-        vec![smelt_core::acp_chat::AcpImage {
-            mime: "image/png".into(),
-            data_b64: "aGk=".into(),
-        }],
+        vec![smelt_core::acp_chat::AcpImage::new("image/png", "aGk=")],
         Vec::new(),
     ];
     note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
@@ -3033,6 +3015,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
             SnapshotProjection {
                 history: false,
                 debug: true,
+                image_refs: false,
             },
         )
         .unwrap(),
@@ -3098,6 +3081,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
             SnapshotProjection {
                 history: false,
                 debug: true,
+                image_refs: false,
             },
         )
         .unwrap(),
@@ -4321,4 +4305,334 @@ fn automation_binding_rejects_rewind() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["error"], "automation Run action is daemon-owned");
     assert!(cmd_rx.try_recv().is_err());
+}
+
+/// 超过 64 KiB 的 base64：带 `image_refs` 的连接上只发引用。
+fn big_image(seed: char) -> smelt_core::acp_chat::AcpImage {
+    smelt_core::acp_chat::AcpImage::new(
+        "image/png",
+        seed.to_string()
+            .repeat(smelt_core::acp_chat::IMAGE_INLINE_MAX_B64 + 1),
+    )
+}
+
+fn tool_with_image(id: &str, status: ToolCallStatus, image: char) -> AcpEntry {
+    let mut tool = AcpEntry::tool_call(
+        id,
+        "截图",
+        ToolKind::Read,
+        status,
+        vec![
+            smelt_core::acp_chat::ToolOutputPart::Text("Read image file".into()),
+            smelt_core::acp_chat::ToolOutputPart::Image(big_image(image)),
+        ],
+    );
+    if let AcpEntry::ToolCall { children, .. } = &mut tool {
+        children.push(AcpEntry::UserWithImages {
+            text: "子代理的图".into(),
+            images: vec![big_image(image)],
+        });
+    }
+    tool
+}
+
+/// 这条连接该收到的条目：要图片引用时是替换后的样子。
+fn projected_entries(entries: &[AcpEntry], image_refs: bool) -> Vec<serde_json::Value> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let entry = if image_refs {
+                smelt_core::acp_chat::entry_with_image_refs(entry, index as u64)
+            } else {
+                std::borrow::Cow::Borrowed(entry)
+            };
+            serde_json::to_value(&*entry).unwrap()
+        })
+        .collect()
+}
+
+/// 读一帧，按客户端的做法把它合进手里那份条目。返回这一帧的原始字节数、是不是增量帧、
+/// 还原出的帧。
+fn read_into_view(
+    lines: &mut BufReader<UnixStream>,
+    mirror: &mut smelt_core::acp_wire::FrameMirror,
+    view: &mut Vec<serde_json::Value>,
+) -> (usize, bool, serde_json::Value) {
+    let mut line = String::new();
+    lines.read_line(&mut line).unwrap();
+    let is_delta = serde_json::from_str::<serde_json::Value>(&line)
+        .unwrap()
+        .get("delta")
+        .is_some();
+    let frame = decode_frame(mirror, &line);
+    let offset = frame["snapshot"]["entries_offset"].as_u64().unwrap() as usize;
+    view.truncate(offset);
+    view.extend(
+        frame["snapshot"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    (line.len(), is_delta, frame)
+}
+
+fn watch_frames_follow_the_image_projection(image_refs: bool) {
+    let id = if image_refs {
+        "acp-watch-image-refs"
+    } else {
+        "acp-watch-inline-images"
+    };
+    let mut reduced = AcpSessionState::default();
+    reduced.entries_mut().extend([
+        AcpEntry::UserWithImages {
+            text: "看这张".into(),
+            images: vec![
+                big_image('A'),
+                smelt_core::acp_chat::AcpImage::new("image/png", "iVBORw0KGgo="),
+            ],
+        },
+        tool_with_image("t1", ToolCallStatus::InProgress, 'B'),
+    ]);
+    reduced.composer_restore_images = vec![big_image('Z')];
+    reduced.phase = DaemonPhase::Thinking;
+    reduced.turn_started_at_ms = Some(1);
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with(id, || make_acp_session_value(id, reduced));
+
+    let (server, client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let reader = BufReader::new(server.try_clone().unwrap());
+    let sessions_for_watch = Arc::clone(&acp_sessions);
+    let request = serde_json::json!({"id": id, "include_debug": false, "image_refs": image_refs});
+    let watch = thread::spawn(move || {
+        handle_acp_watch(
+            server,
+            reader,
+            &request,
+            sessions_for_watch,
+            &new_test_workspace_menu(),
+            &new_event_hub(),
+        );
+    });
+    let mut lines = BufReader::new(client.try_clone().unwrap());
+    let mut mirror = smelt_core::acp_wire::FrameMirror::default();
+    let mut view = Vec::new();
+    let current = || slot.value.reduced.lock().unwrap().entries().to_vec();
+    let big = smelt_core::acp_chat::IMAGE_INLINE_MAX_B64;
+
+    // 首帧（整段帧）。
+    let (bytes, is_delta, frame) = read_into_view(&mut lines, &mut mirror, &mut view);
+    assert!(!is_delta);
+    assert_eq!(view, projected_entries(&current(), image_refs));
+    let restore = frame["snapshot"]["composer_restore_images"]
+        .as_array()
+        .unwrap();
+    if image_refs {
+        assert!(bytes < big, "首帧不能带大图：{bytes} 字节");
+        assert!(restore.is_empty(), "输入框还原图片不发给要引用的连接");
+        let original = &view[1]["ToolCall"]["output"][1]["Image"]["original"];
+        assert_eq!(original["entry"], 1);
+    } else {
+        assert!(bytes > big * 4, "桌面照旧内联：{bytes} 字节");
+        assert_eq!(restore.len(), 1);
+    }
+
+    // 增量帧：工具收尾（含大图的条目改了），再追加一条带新大图的工具和一段回复。
+    {
+        let mut reduced = slot.value.reduced.lock().unwrap();
+        let entries = reduced.entries_mut();
+        entries[1] = tool_with_image("t1", ToolCallStatus::Completed, 'B');
+        entries.push(tool_with_image("t2", ToolCallStatus::Completed, 'C'));
+        entries.push(AcpEntry::Assistant {
+            text: "看完了".into(),
+            thought: false,
+        });
+    }
+    push_acp_snapshot_since(&slot.value, false, Some(1));
+    let (bytes, is_delta, _) = read_into_view(&mut lines, &mut mirror, &mut view);
+    assert!(is_delta);
+    assert_eq!(view, projected_entries(&current(), image_refs));
+    if image_refs {
+        assert!(bytes < big, "增量帧不能带大图：{bytes} 字节");
+        assert_eq!(
+            view[2]["ToolCall"]["output"][1]["Image"]["original"]["entry"],
+            2
+        );
+    }
+
+    // 回复继续长：增量只带新文字，镜像里替换过的条目原样保留。
+    {
+        let mut reduced = slot.value.reduced.lock().unwrap();
+        reduced.entries_mut()[3] = AcpEntry::Assistant {
+            text: "看完了，图里是登录页".into(),
+            thought: false,
+        };
+    }
+    push_acp_snapshot_since(&slot.value, false, Some(0));
+    let (bytes, is_delta, _) = read_into_view(&mut lines, &mut mirror, &mut view);
+    assert!(is_delta);
+    assert_eq!(view, projected_entries(&current(), image_refs));
+    assert!(bytes < 4096, "只该发新增的文字：{bytes} 字节");
+
+    // Refresh 之后的整段帧和其后的增量帧也按同一投影。
+    apply_acp_user_action(
+        &slot.value,
+        smelt_core::acp_session::AcpUserAction::Refresh,
+        &new_event_hub(),
+    )
+    .unwrap();
+    let (bytes, is_delta, _) = read_into_view(&mut lines, &mut mirror, &mut view);
+    assert!(!is_delta);
+    assert_eq!(view, projected_entries(&current(), image_refs));
+    if image_refs {
+        assert!(bytes < big, "整段帧不能带大图：{bytes} 字节");
+    }
+    {
+        let mut reduced = slot.value.reduced.lock().unwrap();
+        reduced.entries_mut()[2] = tool_with_image("t2", ToolCallStatus::Failed, 'C');
+    }
+    push_acp_snapshot_since(&slot.value, false, Some(2));
+    let (_, is_delta, _) = read_into_view(&mut lines, &mut mirror, &mut view);
+    assert!(is_delta);
+    assert_eq!(view, projected_entries(&current(), image_refs));
+
+    drop(lines);
+    drop(client);
+    watch.join().unwrap();
+}
+
+#[test]
+fn image_refs_watch_sends_references_in_full_and_delta_frames() {
+    watch_frames_follow_the_image_projection(true);
+}
+
+#[test]
+fn watch_without_image_refs_still_inlines_images() {
+    watch_frames_follow_the_image_projection(false);
+}
+
+#[test]
+fn conversation_image_finds_the_original_by_reference() {
+    use crate::conversation_image::tests::{dimensions, png_b64};
+    use smelt_core::acp_chat::{AcpImage, image_digest};
+    use smelt_core::control_api::ConversationImageParams;
+    use smelt_runtime_client::protocol::control::ControlErrorCode;
+
+    // 64 KiB 到 1 MiB 之间：原图原样给。
+    let medium = png_b64(300, 200, u8::MAX);
+    // 子代理里嵌的截图：缩略图按长边等比缩。
+    let tall = png_b64(600, 1300, u8::MAX);
+    let mut reduced = AcpSessionState::default();
+    reduced.entries_mut().extend([
+        AcpEntry::User("看图".into()),
+        AcpEntry::UserWithImages {
+            text: "附图".into(),
+            images: vec![AcpImage::new("image/png", medium.clone())],
+        },
+        {
+            let mut tool = AcpEntry::tool_call(
+                "t1",
+                "子代理",
+                ToolKind::Other,
+                ToolCallStatus::Completed,
+                Vec::new(),
+            );
+            if let AcpEntry::ToolCall { children, .. } = &mut tool {
+                children.push(AcpEntry::tool_call(
+                    "t2",
+                    "截图",
+                    ToolKind::Read,
+                    ToolCallStatus::Completed,
+                    vec![smelt_core::acp_chat::ToolOutputPart::Image(AcpImage::new(
+                        "image/png",
+                        tall.clone(),
+                    ))],
+                ));
+            }
+            tool
+        },
+    ]);
+    reduced.composer_restore_images = vec![AcpImage::new("image/png", medium.clone())];
+    let acp_sessions = new_test_acp_sessions();
+    acp_sessions.reserve_with("acp-image", || make_acp_session_value("acp-image", reduced));
+    let fetch = |entry: u64, digest: &str, max_edge: Option<u32>| {
+        crate::conversation_image::conversation_image(
+            ConversationImageParams {
+                session_id: "acp-image".into(),
+                entry,
+                digest: digest.into(),
+                max_edge,
+            },
+            &acp_sessions,
+            &new_event_hub(),
+        )
+    };
+
+    let original = fetch(1, &image_digest(&medium), None).unwrap();
+    assert_eq!(original.mime, "image/png");
+    assert_eq!(original.data_b64, medium);
+
+    let thumb = fetch(2, &image_digest(&tall), Some(100)).unwrap();
+    assert_eq!(thumb.mime, "image/jpeg");
+    assert_eq!(dimensions(&thumb.data_b64), (46, 100));
+    // 太小的边夹到 32。
+    let tiny = fetch(2, &image_digest(&tall), Some(1)).unwrap();
+    assert_eq!(dimensions(&tiny.data_b64), (15, 32));
+
+    // 摘要对不上（条目被改写过）、下标不对、超出末尾、会话不存在。
+    for (entry, digest) in [
+        (2, image_digest("别的图")),
+        (1, image_digest(&tall)),
+        (3, image_digest(&tall)),
+        (u64::MAX, image_digest(&tall)),
+    ] {
+        let error = fetch(entry, &digest, None).unwrap_err();
+        assert_eq!(error.code, ControlErrorCode::NotFound, "entry={entry}");
+    }
+    let error = crate::conversation_image::conversation_image(
+        ConversationImageParams {
+            session_id: "acp-nope".into(),
+            entry: 1,
+            digest: image_digest(&medium),
+            max_edge: None,
+        },
+        &acp_sessions,
+        &new_event_hub(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ControlErrorCode::NotFound);
+
+    // 一次性翻页同样只给引用，引用能直接拿来取图。
+    let (server, client) = UnixStream::pair().unwrap();
+    handle_acp_snapshot(
+        server,
+        &serde_json::json!({"id": "acp-image", "image_refs": true}),
+        &acp_sessions,
+        &new_event_hub(),
+    );
+    let mut line = String::new();
+    BufReader::new(client).read_line(&mut line).unwrap();
+    let page: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(
+        page["snapshot"]["composer_restore_images"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let nested = &page["snapshot"]["entries"][2]["ToolCall"]["children"][0]["ToolCall"]["output"]
+        [0]["Image"];
+    assert_eq!(nested["data_b64"], "");
+    let reference = &nested["original"];
+    assert_eq!(reference["entry"], 2);
+    let again = fetch(
+        reference["entry"].as_u64().unwrap(),
+        reference["digest"].as_str().unwrap(),
+        Some(100),
+    )
+    .unwrap();
+    assert_eq!(again, thumb);
 }

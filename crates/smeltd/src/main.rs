@@ -149,6 +149,7 @@ mod agent_memory_control;
 mod automation_runtime;
 mod desktop;
 mod control;
+mod conversation_image;
 mod devices;
 mod dsh_control;
 mod event_hub;

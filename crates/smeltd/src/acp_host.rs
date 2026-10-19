@@ -41,6 +41,14 @@ use std::collections::{BTreeSet, VecDeque};
 //     `acp_watch` / `acp_snapshot` 可带 `"include_debug": false`：不要工具参数和
 //     runtime debug sidecar。后者含每次模型调用的完整 provider payload（图片会在
 //     每次调用里重复一份），手机这类只看正文的旁观者不该为它付带宽。
+//     还可带 `"image_refs": true`（默认 false，桌面照旧内联）：条目里 base64 超过
+//     64 KiB 的图片不内联，`data_b64` 置空、补 `original: {entry, digest}`，客户端
+//     显示时用 Control 方法 `conversation.image` 按需取；输入框还原图片
+//     （`composer_restore_images`）不发。整段帧和增量帧都按这个投影，这条连接的
+//     发送方镜像记的也是替换后的条目。出帧不解码图片，摘要按图片实例缓存。
+//     `acp_watch` 其余首帧参数：`history_session_id` + `known_entries` +
+//     `snapshot_revision` 三者都对得上时从 `known_entries` 接着发，否则按
+//     `tail_limit` 只发末尾几条，都没给就从头发。
 //   {"op":"acp_kill","id":".."} → 回 {"ok":true}，杀子进程、从表里摘掉、
 //     踢掉所有 client/watcher。
 //
@@ -949,6 +957,8 @@ pub(crate) struct SnapshotProjection {
     pub history: bool,
     /// 工具参数表和 runtime debug sidecar。只给桌面调试面板用。
     pub debug: bool,
+    /// 大图只发引用（见文件头 `image_refs`）。整段帧和增量帧都按它投影。
+    pub image_refs: bool,
 }
 
 #[cfg(test)]
@@ -956,7 +966,34 @@ impl SnapshotProjection {
     pub(crate) const FULL: Self = Self {
         history: true,
         debug: true,
+        image_refs: false,
     };
+}
+
+/// 要图片引用的连接整段帧之前调：在镜像还留着的 `[start, end)` 原条目上把大图摘要算好。
+/// 随后克隆出去的副本带着缓存，同一张图之后的整段帧、增量帧都不再重算。
+fn prepare_image_refs(
+    reduced: &smelt_core::acp_session::AcpSessionState,
+    start: usize,
+    end: usize,
+) {
+    let base = reduced.entries_base();
+    let entries = reduced.entries();
+    let local_start = start.saturating_sub(base).min(entries.len());
+    let local_end = end.saturating_sub(base).clamp(local_start, entries.len());
+    for entry in &entries[local_start..local_end] {
+        smelt_core::acp_chat::prepare_image_refs(entry);
+    }
+}
+
+/// 要图片引用的连接：快照里的大图换成引用，输入框还原图片不发（只有桌面输入框用）。
+/// 快照里的条目已经是副本，就地改。
+pub(crate) fn apply_image_refs(snapshot: &mut smelt_core::acp_session::ConversationSnapshot) {
+    snapshot.composer_restore_images.clear();
+    let offset = snapshot.entries_offset as u64;
+    for (index, entry) in snapshot.entries.iter_mut().enumerate() {
+        smelt_core::acp_chat::replace_large_images(entry, offset + index as u64);
+    }
 }
 
 /// `initial` 是首帧（整段帧），`mirror` 和它一起建：见 [`full_frame`]。
@@ -1186,6 +1223,7 @@ pub(crate) fn encode_acp_snapshot(
     let SnapshotProjection {
         history: include_history,
         debug: include_debug,
+        image_refs,
     } = projection;
     let (mirror, full) = match frame_kind {
         SnapshotFrameKind::Full(mirror) => (mirror, true),
@@ -1227,16 +1265,28 @@ pub(crate) fn encode_acp_snapshot(
             } else {
                 from.min(history_len)
             };
+            if image_refs {
+                prepare_image_refs(&reduced, start, window_end);
+            }
             (range(start), None)
         } else {
             // 条目不进快照，只发相对对方镜像的变化。已收尾的回合不会再长，
             // 双方都不必再为它留镜像。
-            let delta = mirror.encode_entries(
+            // 要图片引用的连接，镜像记的是替换后的条目：只有含大图的条目才克隆替换，
+            // 摘要缓存在原图上，同一张图不会每帧重算。
+            let delta = mirror.encode_entries_with(
                 reduced.entries_base(),
                 reduced.entries(),
                 from,
                 window_end,
                 history_len.min(from),
+                |index, entry| {
+                    if image_refs {
+                        smelt_core::acp_chat::entry_with_image_refs(entry, index as u64)
+                    } else {
+                        std::borrow::Cow::Borrowed(entry)
+                    }
+                },
             );
             (range(window_end), Some(delta))
         };
@@ -1262,6 +1312,10 @@ pub(crate) fn encode_acp_snapshot(
     };
     if include_envelope {
         set_conversation_snapshot(sess, &mut snap);
+    }
+    if image_refs {
+        // 整段帧的条目在上面已经算好摘要，这里只是就地替换副本。增量帧这里没有条目。
+        apply_image_refs(&mut snap);
     }
     let provider_pid = sess
         .handle
@@ -3513,6 +3567,7 @@ pub(crate) fn handle_acp_open(
                 SnapshotProjection {
                     history: !req.omit_history,
                     debug: true,
+                    image_refs: false,
                 },
             ) else {
                 return;
@@ -3914,6 +3969,7 @@ pub(crate) fn handle_acp_watch(
         return;
     }
     let include_debug = request_includes_debug(v);
+    let image_refs = request_image_refs(v);
     let slot = match acp_sessions.get(&id) {
         Some(slot) => slot,
         None => match wake_dormant_conversation(
@@ -3973,14 +4029,27 @@ pub(crate) fn handle_acp_watch(
             asked_host = true;
             let end = entries_total.max(offset.saturating_add(1));
             host_page = host.and_then(|host| host.read_snapshot_covering(offset, end).ok());
+            if image_refs && let Some(page) = &host_page {
+                // 宿主补来的那一截没有摘要缓存。趁还没拿锁先算好，下面克隆时带上。
+                for entry in &page.entries {
+                    smelt_core::acp_chat::prepare_image_refs(entry);
+                }
+            }
             continue;
         }
         let Ok(c) = conn.try_clone() else { return };
         let tool_debug_generation = reduced.tool_debug_generation;
+        if image_refs {
+            prepare_image_refs(&reduced, offset, entries_total);
+        }
         let mut snapshot = reduced.snapshot_with_older_page(offset, host_page.as_ref());
         drop(reduced);
         if !include_debug {
             omit_debug_sidecars(&mut snapshot);
+        }
+        if image_refs {
+            // 摘要上面都已算好，这里只是就地替换副本。
+            apply_image_refs(&mut snapshot);
         }
         snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
         set_conversation_snapshot(sess, &mut snapshot);
@@ -3996,6 +4065,7 @@ pub(crate) fn handle_acp_watch(
             SnapshotProjection {
                 history: true,
                 debug: include_debug,
+                image_refs,
             },
         ) else {
             return;
@@ -4065,6 +4135,11 @@ fn request_includes_debug(request: &serde_json::Value) -> bool {
     request["include_debug"].as_bool().unwrap_or(true)
 }
 
+/// 请求没写就照旧内联图片：桌面直接画。
+fn request_image_refs(request: &serde_json::Value) -> bool {
+    request["image_refs"].as_bool().unwrap_or(false)
+}
+
 fn omit_debug_sidecars(snapshot: &mut smelt_core::acp_session::ConversationSnapshot) {
     snapshot.tool_debug = None;
     snapshot.runtime_debug = None;
@@ -4079,13 +4154,6 @@ pub(crate) fn handle_acp_snapshot(
     subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
-    let Some(slot) = acp_sessions.get(id) else {
-        let _ = smelt_runtime_client::protocol::write_json_line(
-            &mut conn,
-            &serde_json::json!({ "ok": false, "error": "ACP 会话不存在" }),
-        );
-        return;
-    };
     let before = v["before"]
         .as_u64()
         .map(|n| n as usize)
@@ -4095,7 +4163,59 @@ pub(crate) fn handle_acp_snapshot(
         .map(|n| n as usize)
         .unwrap_or(100)
         .clamp(1, 500);
-    let include_debug = request_includes_debug(v);
+    let page = read_history_page(
+        id,
+        acp_sessions,
+        subscribers,
+        before,
+        limit,
+        request_includes_debug(v),
+    );
+    let mut snapshot = match page {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let error = match error {
+                HistoryReadError::SessionMissing => "ACP 会话不存在".to_string(),
+                HistoryReadError::Failed(error) => error,
+            };
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut conn,
+                &serde_json::json!({ "ok": false, "error": error }),
+            );
+            return;
+        }
+    };
+    if request_image_refs(v) {
+        // 一次性的分页，摘要在副本上（锁外）算，不回填到镜像里的原条目上。
+        apply_image_refs(&mut snapshot);
+    }
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut conn,
+        &serde_json::json!({ "snapshot": snapshot }),
+    );
+}
+
+pub(crate) enum HistoryReadError {
+    /// 没有这个会话，或者读的过程中它被换掉了。
+    SessionMissing,
+    /// 唤醒挂起的会话或向宿主要历史失败。
+    Failed(String),
+}
+
+/// 按页读一段正文：`[before - limit, before)`，`before` 超出末尾时取到末尾。
+/// `acp_snapshot` 往上翻页和 `conversation.image` 定位条目都走这里。挂起的会话镜像
+/// 只剩当前回合，往上翻到镜像之前得先拉起宿主；镜像里已经丢掉的前缀向宿主要。
+pub(crate) fn read_history_page(
+    id: &str,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+    before: usize,
+    limit: usize,
+    include_debug: bool,
+) -> Result<smelt_core::acp_session::ConversationSnapshot, HistoryReadError> {
+    let Some(slot) = acp_sessions.get(id) else {
+        return Err(HistoryReadError::SessionMissing);
+    };
     // 挂起的会话镜像只剩当前回合。往上翻到镜像之前，就得先拉起宿主问它要。
     let needs_host = acp_sessions
         .with_current(id, &slot, |session| {
@@ -4104,15 +4224,9 @@ pub(crate) fn handle_acp_snapshot(
             end.saturating_sub(limit) < reduced.entries_base() && session.idle.is_suspended()
         })
         .unwrap_or(false);
-    if needs_host
-        && let Err(error) =
-            crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
-    {
-        let _ = smelt_runtime_client::protocol::write_json_line(
-            &mut conn,
-            &serde_json::json!({ "ok": false, "error": error }),
-        );
-        return;
+    if needs_host {
+        crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+            .map_err(HistoryReadError::Failed)?;
     }
     let page = acp_sessions.with_current(id, &slot, |session| {
         let _output_gate = session.output_gate.lock().unwrap();
@@ -4124,45 +4238,29 @@ pub(crate) fn handle_acp_snapshot(
         {
             return HistoryRead::AskHost { host, end };
         }
-        let mut snapshot = reduced.to_snapshot_range(false, start, end);
-        snapshot.runtime_debug = None;
+        // 父镜像里的 runtime debug 只是账本，历史页不带；不要调试数据时工具参数表也不克隆。
+        let mut snapshot =
+            reduced.to_snapshot_range_selective(false, start, end, include_debug, false, true);
         snapshot.snapshot_revision = session.snapshot_revision.load(Ordering::SeqCst);
         drop(reduced);
-        if !include_debug {
-            omit_debug_sidecars(&mut snapshot);
-        }
         set_conversation_snapshot(session, &mut snapshot);
         HistoryRead::Ready(Box::new(snapshot))
     });
-    let Some(page) = page else {
-        let _ = smelt_runtime_client::protocol::write_json_line(
-            &mut conn,
-            &serde_json::json!({ "ok": false, "error": "ACP 会话不存在" }),
-        );
-        return;
-    };
-    let snapshot = match page {
-        HistoryRead::Ready(snapshot) => *snapshot,
-        HistoryRead::AskHost { host, end } => match host.request_history_page(end, limit) {
-            Ok(mut snapshot) => {
-                snapshot.runtime_debug = None;
-                snapshot.snapshot_revision = slot.value.snapshot_revision.load(Ordering::SeqCst);
-                set_conversation_snapshot(&slot.value, &mut snapshot);
-                snapshot
+    match page.ok_or(HistoryReadError::SessionMissing)? {
+        HistoryRead::Ready(snapshot) => Ok(*snapshot),
+        HistoryRead::AskHost { host, end } => {
+            let mut snapshot = host
+                .request_history_page(end, limit)
+                .map_err(HistoryReadError::Failed)?;
+            snapshot.runtime_debug = None;
+            if !include_debug {
+                omit_debug_sidecars(&mut snapshot);
             }
-            Err(error) => {
-                let _ = smelt_runtime_client::protocol::write_json_line(
-                    &mut conn,
-                    &serde_json::json!({ "ok": false, "error": error }),
-                );
-                return;
-            }
-        },
-    };
-    let _ = smelt_runtime_client::protocol::write_json_line(
-        &mut conn,
-        &serde_json::json!({ "snapshot": snapshot }),
-    );
+            snapshot.snapshot_revision = slot.value.snapshot_revision.load(Ordering::SeqCst);
+            set_conversation_snapshot(&slot.value, &mut snapshot);
+            Ok(snapshot)
+        }
+    }
 }
 
 enum HistoryRead {

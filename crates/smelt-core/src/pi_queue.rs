@@ -210,10 +210,7 @@ mod tests {
     use super::*;
 
     fn image(data: &str) -> PromptImage {
-        PromptImage {
-            mime: "image/png".into(),
-            data_b64: data.into(),
-        }
+        PromptImage::new("image/png", data)
     }
 
     #[test]

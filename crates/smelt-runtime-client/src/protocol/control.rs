@@ -181,6 +181,7 @@ define_control_methods! {
     SessionCreate => (SESSION_CREATE_METHOD, "session.create"),
     SessionDelete => (SESSION_DELETE_METHOD, "session.delete"),
     SessionAgentBindings => (SESSION_AGENT_BINDINGS_METHOD, "session.agent_bindings"),
+    ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -610,7 +611,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 125);
+        assert_eq!(names.len(), 126);
     }
 
     #[test]

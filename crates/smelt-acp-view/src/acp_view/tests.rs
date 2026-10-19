@@ -439,10 +439,7 @@ fn composer_restore_keeps_only_a_newer_revision() {
     assert_eq!(stale.last_revision, 1);
     assert_eq!(stale.restore_texts, None);
 
-    let image = smelt_model::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aGk=".into(),
-    };
+    let image = smelt_model::acp_chat::AcpImage::new("image/png", "aGk=");
     let images_only = consume_composer_restore(1, 2, Vec::new(), vec![image.clone()]);
     assert_eq!(images_only.restore_texts, None);
     assert_eq!(images_only.restore_images, Some(vec![image]));
@@ -3068,10 +3065,10 @@ fn empty_tool_output_does_not_offer_expandable_content() {
 #[test]
 fn tool_image_output_is_expandable_and_decodes_once() {
     // 1x1 PNG
-    let image = smelt_model::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".into(),
-    };
+    let image = smelt_model::acp_chat::AcpImage::new(
+        "image/png",
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    );
     let output = vec![
         ToolOutputPart::Text("Read image file [image/png]".into()),
         ToolOutputPart::Image(image),

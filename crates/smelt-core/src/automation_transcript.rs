@@ -50,10 +50,7 @@ fn archive_entry(entry: &AcpEntry) -> AcpEntry {
             text: text.clone(),
             images: images
                 .iter()
-                .map(|image| AcpImage {
-                    mime: image.mime.clone(),
-                    data_b64: String::new(),
-                })
+                .map(|image| AcpImage::new(image.mime.clone(), String::new()))
                 .collect(),
         },
         AcpEntry::ToolCall {
@@ -79,10 +76,9 @@ fn archive_entry(entry: &AcpEntry) -> AcpEntry {
 /// base64 会把 SQLite 撑大，长期历史以 agent 自己的 transcript 为准。
 fn archive_tool_output(part: &ToolOutputPart) -> ToolOutputPart {
     match part {
-        ToolOutputPart::Image(image) => ToolOutputPart::Image(AcpImage {
-            mime: image.mime.clone(),
-            data_b64: String::new(),
-        }),
+        ToolOutputPart::Image(image) => {
+            ToolOutputPart::Image(AcpImage::new(image.mime.clone(), String::new()))
+        }
         other => other.clone(),
     }
 }
@@ -168,10 +164,7 @@ mod tests {
             AcpEntry::User("看盘".into()),
             AcpEntry::UserWithImages {
                 text: "附图".into(),
-                images: vec![AcpImage {
-                    mime: "image/png".into(),
-                    data_b64: "iVBORw0KGgo=".into(),
-                }],
+                images: vec![AcpImage::new("image/png", "iVBORw0KGgo=")],
             },
             AcpEntry::Assistant {
                 text: "结论".into(),
@@ -200,10 +193,7 @@ mod tests {
             ToolCallStatus::Completed,
             vec![
                 ToolOutputPart::Text("Read image file [image/png]".into()),
-                ToolOutputPart::Image(AcpImage {
-                    mime: "image/png".into(),
-                    data_b64: "iVBORw0KGgo=".into(),
-                }),
+                ToolOutputPart::Image(AcpImage::new("image/png", "iVBORw0KGgo=")),
             ],
         )];
 

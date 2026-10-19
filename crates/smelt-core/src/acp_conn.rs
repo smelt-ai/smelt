@@ -3592,12 +3592,9 @@ async fn translate_update(
                             Some(ConversationEvent::ToolCallUpdate(u))
                         }
                         SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
-                            ContentBlock::Image(image) => {
-                                Some(ConversationEvent::UserImage(PromptImage {
-                                    mime: image.mime_type,
-                                    data_b64: image.data,
-                                }))
-                            }
+                            ContentBlock::Image(image) => Some(ConversationEvent::UserImage(
+                                PromptImage::new(image.mime_type, image.data),
+                            )),
                             content => Some(ConversationEvent::UserChunk(content_text(&content))),
                         },
                         SessionUpdate::AvailableCommandsUpdate(u) => {
@@ -4443,10 +4440,10 @@ pub fn tool_content_parts(
                 if let agent_client_protocol::schema::v1::ContentBlock::Image(image) =
                     &inner.content
                 {
-                    return Some(ToolOutputPart::Image(crate::acp_chat::AcpImage {
-                        mime: image.mime_type.clone(),
-                        data_b64: image.data.clone(),
-                    }));
+                    return Some(ToolOutputPart::Image(crate::acp_chat::AcpImage::new(
+                        image.mime_type.clone(),
+                        image.data.clone(),
+                    )));
                 }
                 let text = content_text(&inner.content);
                 (!text.trim().is_empty()).then_some(ToolOutputPart::Text(text))

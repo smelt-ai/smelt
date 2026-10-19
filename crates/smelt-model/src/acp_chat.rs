@@ -6,6 +6,9 @@
 //! 协议类型 → 这份类型的转换函数就近放在调用方（那边本来就依赖
 //! agent-client-protocol，这个 crate 不许依赖，也不许引 GPUI）。
 
+use std::borrow::Cow;
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 /// 消息流里的一条。由 agent 会话历史重放，也可随 smeltd 热升级快照交接。
@@ -154,10 +157,164 @@ pub fn auto_title(entries: &[AcpEntry]) -> Option<String> {
 
 /// ACP/app-server 图片的传输与热升级快照表示。长期历史仍以 agent
 /// 自己的 transcript 为准，Smelt 不把图片重复写入工作区快照。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 只能用 [`AcpImage::new`] 构造：摘要缓存是私有字段。构造之后不要原地改
+/// `data_b64`，换图就新建一张，否则缓存的摘要对不上数据。
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcpImage {
     pub mime: String,
     pub data_b64: String,
+    /// 只出现在要图片引用的连接上（`acp_watch` / `acp_snapshot` 带 `image_refs`）：
+    /// 大图不内联，`data_b64` 为空，客户端按这个引用用 `conversation.image` 去取。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<AcpImageRef>,
+    /// `data_b64` 的摘要，第一次用到时算，克隆随身带走。同一张大图每帧都要报
+    /// 摘要，而一张截图的 base64 有 1～2 MB，不能每帧重算。缓存挂在图片实例上，
+    /// 不按数据指针记：指针释放后会被别的图复用，按它记会张冠李戴。
+    #[serde(skip)]
+    digest: OnceLock<String>,
+}
+
+impl PartialEq for AcpImage {
+    fn eq(&self, other: &Self) -> bool {
+        // 摘要缓存只是派生值，算没算过不影响相等。
+        self.mime == other.mime
+            && self.data_b64 == other.data_b64
+            && self.original == other.original
+    }
+}
+
+impl Eq for AcpImage {}
+
+/// 一张没有内联的图在运行时那边的位置。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpImageRef {
+    /// 图片所在顶层条目的全局下标。子代理嵌套条目里的图算在外层那条工具调用上。
+    pub entry: u64,
+    /// 原图 [`AcpImage::digest`]。条目被回退或压缩改写后对不上，取图报 not_found。
+    pub digest: String,
+}
+
+/// 要图片引用的连接上，base64 超过这么长的图只发引用。小图原样内联：
+/// 缩略、往返一次反而更费。
+pub const IMAGE_INLINE_MAX_B64: usize = 64 * 1024;
+
+impl AcpImage {
+    pub fn new(mime: impl Into<String>, data_b64: impl Into<String>) -> Self {
+        Self {
+            mime: mime.into(),
+            data_b64: data_b64.into(),
+            original: None,
+            digest: OnceLock::new(),
+        }
+    }
+
+    /// 图片摘要：SHA-256(`data_b64` 这串 base64 的字节) 的前 16 字节，小写 hex。
+    /// 第一次调用时算，之后取缓存。
+    pub fn digest(&self) -> &str {
+        self.digest.get_or_init(|| image_digest(&self.data_b64))
+    }
+
+    /// 在要图片引用的连接上不内联。
+    fn needs_ref(&self) -> bool {
+        self.data_b64.len() > IMAGE_INLINE_MAX_B64
+    }
+}
+
+/// [`AcpImage::digest`] 的定义。旧手机网关用的也是这个，引用可以跨两边对上。
+pub fn image_digest(data_b64: &str) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    let hash = sha2::Sha256::digest(data_b64.as_bytes());
+    hash[..16]
+        .iter()
+        .fold(String::with_capacity(32), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// 一条消息里的所有图片：用户附图、工具输出图，以及子代理嵌套条目里的。
+pub fn for_each_image<'a>(entry: &'a AcpEntry, f: &mut impl FnMut(&'a AcpImage)) {
+    match entry {
+        AcpEntry::UserWithImages { images, .. } => images.iter().for_each(&mut *f),
+        AcpEntry::ToolCall {
+            output, children, ..
+        } => {
+            for part in output {
+                if let ToolOutputPart::Image(image) = part {
+                    f(image);
+                }
+            }
+            for child in children {
+                for_each_image(child, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`for_each_image`] 的可变版本，遍历顺序相同。
+pub fn for_each_image_mut(entry: &mut AcpEntry, f: &mut impl FnMut(&mut AcpImage)) {
+    match entry {
+        AcpEntry::UserWithImages { images, .. } => images.iter_mut().for_each(&mut *f),
+        AcpEntry::ToolCall {
+            output, children, ..
+        } => {
+            for part in output {
+                if let ToolOutputPart::Image(image) = part {
+                    f(image);
+                }
+            }
+            for child in children {
+                for_each_image_mut(child, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 条目里有没有要换成引用的大图。有的话顺手把摘要算好，缓存在这些图上：在原条目上
+/// 调一次，之后克隆出去的副本都带着摘要。
+pub fn prepare_image_refs(entry: &AcpEntry) -> bool {
+    let mut any = false;
+    for_each_image(entry, &mut |image| {
+        if image.needs_ref() {
+            image.digest();
+            any = true;
+        }
+    });
+    any
+}
+
+/// 就地把大图换成引用：`data_b64` 置空，补上 `original`。`index` 是这条在整段对话里的
+/// 全局下标。小图不动。
+pub fn replace_large_images(entry: &mut AcpEntry, index: u64) {
+    for_each_image_mut(entry, &mut |image| {
+        if !image.needs_ref() {
+            return;
+        }
+        let digest = image
+            .digest
+            .take()
+            .unwrap_or_else(|| image_digest(&image.data_b64));
+        image.data_b64 = String::new();
+        image.original = Some(AcpImageRef {
+            entry: index,
+            digest,
+        });
+    });
+}
+
+/// 发送方逐帧用：没有大图就借用原条目，有才克隆一份换成引用。摘要算在原条目上，
+/// 同一张图下一帧直接取缓存。
+pub fn entry_with_image_refs(entry: &AcpEntry, index: u64) -> Cow<'_, AcpEntry> {
+    if !prepare_image_refs(entry) {
+        return Cow::Borrowed(entry);
+    }
+    let mut replaced = entry.clone();
+    replace_large_images(&mut replaced, index);
+    Cow::Owned(replaced)
 }
 
 /// 工具调用的一段输出：纯文本，文件 diff，或嵌入的 ACP 终端。
@@ -925,10 +1082,7 @@ mod tests {
 
         let entry = AcpEntry::UserWithImages {
             text: "看这里".into(),
-            images: vec![AcpImage {
-                mime: "image/png".into(),
-                data_b64: "QUJD".into(),
-            }],
+            images: vec![AcpImage::new("image/png", "QUJD")],
         };
         let json = serde_json::to_string(&entry).unwrap();
         let restored: AcpEntry = serde_json::from_str(&json).unwrap();
@@ -1256,5 +1410,104 @@ mod tests {
             AcpEntry::ToolCall { children, .. } => children,
             _ => panic!("expected tool call"),
         }
+    }
+
+    /// 一条带大图的工具调用：输出里一张大图一张小图，子代理里再嵌一张大图。
+    fn tool_with_images(big: &str, small: &str) -> AcpEntry {
+        let mut tool = AcpEntry::tool_call(
+            "t1",
+            "截图",
+            ToolKind::Read,
+            ToolCallStatus::Completed,
+            vec![
+                ToolOutputPart::Text("Read image file".into()),
+                ToolOutputPart::Image(AcpImage::new("image/png", big)),
+                ToolOutputPart::Image(AcpImage::new("image/png", small)),
+            ],
+        );
+        if let AcpEntry::ToolCall { children, .. } = &mut tool {
+            children.push(AcpEntry::UserWithImages {
+                text: "nested".into(),
+                images: vec![AcpImage::new("image/jpeg", big)],
+            });
+        }
+        tool
+    }
+
+    fn images_of(entry: &AcpEntry) -> Vec<AcpImage> {
+        let mut images = Vec::new();
+        for_each_image(entry, &mut |image| images.push(image.clone()));
+        images
+    }
+
+    #[test]
+    fn image_digest_is_the_truncated_sha256_of_the_base64_text() {
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        assert_eq!(image_digest("abc"), "ba7816bf8f01cfea414140de5dae2223");
+        let image = AcpImage::new("image/png", "abc");
+        assert_eq!(image.digest(), "ba7816bf8f01cfea414140de5dae2223");
+        // 缓存随克隆带走，不影响相等。
+        let copy = image.clone();
+        assert_eq!(copy.digest(), image.digest());
+        assert_eq!(copy, AcpImage::new("image/png", "abc"));
+    }
+
+    #[test]
+    fn large_images_become_references_and_small_ones_stay_inline() {
+        let big = "A".repeat(IMAGE_INLINE_MAX_B64 + 1);
+        let edge = "B".repeat(IMAGE_INLINE_MAX_B64);
+        let entry = tool_with_images(&big, &edge);
+
+        let replaced = entry_with_image_refs(&entry, 41);
+        assert!(matches!(replaced, Cow::Owned(_)));
+        let images = images_of(&replaced);
+        assert_eq!(images.len(), 3);
+        let reference = AcpImageRef {
+            entry: 41,
+            digest: image_digest(&big),
+        };
+        assert_eq!(images[0].data_b64, "");
+        assert_eq!(images[0].mime, "image/png");
+        assert_eq!(images[0].original.as_ref(), Some(&reference));
+        // 正好 64 KiB 的不算大图。
+        assert_eq!(images[1].data_b64, edge);
+        assert_eq!(images[1].original, None);
+        // 子代理里的图记在外层这条上。
+        assert_eq!(images[2].data_b64, "");
+        assert_eq!(images[2].mime, "image/jpeg");
+        assert_eq!(images[2].original.as_ref(), Some(&reference));
+        // 原条目不动，摘要已经缓存在原图上。
+        assert_eq!(images_of(&entry)[0].data_b64, big);
+
+        let json = serde_json::to_value(&*replaced).unwrap();
+        assert_eq!(
+            json["ToolCall"]["output"][1]["Image"],
+            serde_json::json!({
+                "mime": "image/png",
+                "data_b64": "",
+                "original": {"entry": 41, "digest": image_digest(&big)},
+            })
+        );
+        // 没有引用的图线格式和以前一样。
+        assert_eq!(
+            json["ToolCall"]["output"][2]["Image"],
+            serde_json::json!({"mime": "image/png", "data_b64": edge})
+        );
+        let restored: AcpEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(&restored, &*replaced);
+
+        // 就地替换和逐帧借用替换结果一致。
+        let mut in_place = entry.clone();
+        replace_large_images(&mut in_place, 41);
+        assert_eq!(&in_place, &*replaced);
+    }
+
+    #[test]
+    fn entries_without_large_images_are_borrowed() {
+        let small = tool_with_images("c3k=", "c3k=");
+        assert!(matches!(entry_with_image_refs(&small, 0), Cow::Borrowed(_)));
+        let text = AcpEntry::User("hi".into());
+        assert!(matches!(entry_with_image_refs(&text, 0), Cow::Borrowed(_)));
+        assert!(!prepare_image_refs(&small));
     }
 }

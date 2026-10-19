@@ -42,6 +42,9 @@ agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operati
 smol = "2"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+# `conversation.image`：手机按需取对话里的图，缩略图在运行时这边解码、缩放、重新编码。
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
 smelt-core = { path = "../smelt-core", features = ["test-support"] }
