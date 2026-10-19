@@ -79,6 +79,11 @@ pub enum WorkspaceLayoutNode {
         children: Vec<WorkspaceLayoutNode>,
         sizes: Vec<f64>,
     },
+    /// 叠在同一格里的几个终端，一次显示一个。只有一个终端的格子直接写成 `Leaf`。
+    Tabs {
+        active: usize,
+        children: Vec<WorkspaceLayoutNode>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

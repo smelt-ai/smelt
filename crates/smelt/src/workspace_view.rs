@@ -7,10 +7,9 @@ use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::*;
 
-use crate::resizable_split::{h_resizable, v_resizable};
 use crate::session_history::{HistoryListState, HistoryViewParams, history_view};
 use crate::{
-    CloseConfirm, Pane, RenameTarget, UpdateInstallTrigger, Workspace, request_app_quit, ui_theme,
+    CloseConfirm, RenameTarget, UpdateInstallTrigger, Workspace, request_app_quit, ui_theme,
     updater,
 };
 
@@ -657,73 +656,6 @@ impl Workspace {
             crate::overlay::ModalLayer::UnsavedFile,
             cx,
         )
-    }
-
-    /// 递归渲染分屏布局树：Leaf 渲染一个终端（活动 pane 描边 + 点击聚焦），
-    /// Split 用 h/v_resizable 把子节点排成可拖拽的并排 / 堆叠。
-    pub(crate) fn render_pane(
-        &self,
-        pane: &Pane,
-        path: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match pane {
-            Pane::Leaf(t) => {
-                let active = self.cur().is_some_and(|s| s.anchor_id() == t.entity_id());
-                // 不给任何 pane 描边（iTerm2 也不描，之前的蓝框提醒也拿掉了）：分屏时靠
-                // 「压暗非活动 pane」区分谁是活动的就够了；单 pane 时压根没有别的 pane
-                // 可比，不需要任何叠加层。
-                let multi_pane = self.cur().is_some_and(|s| s.pane_count() > 1);
-                let overlay = if !multi_pane || active {
-                    div().absolute().inset_0()
-                } else {
-                    div().absolute().inset_0().bg(hsla(0., 0., 0., 0.28))
-                };
-                let te = t.clone();
-                div()
-                    .id(SharedString::from(path.to_string()))
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    // 点击 pane 即设为当前会话的活动 pane（终端自身也会抢焦点，二者一致）。
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _ev, window, cx| {
-                            this.activate_pane(&te, window, cx)
-                        }),
-                    )
-                    .child(t.clone())
-                    .child(overlay)
-                    .into_any_element()
-            }
-            Pane::Split {
-                axis,
-                state,
-                children,
-                init_sizes,
-            } => {
-                let id = SharedString::from(path.to_string());
-                let mut group = if matches!(axis, Axis::Horizontal) {
-                    h_resizable(id)
-                } else {
-                    v_resizable(id)
-                }
-                .with_state(state);
-                for (i, c) in children.iter().enumerate() {
-                    let el = self.render_pane(c, &format!("{path}-{i}"), cx);
-                    // 存档尺寸只作 initial_size：拖过之后 panel 自己的 size 会盖过它
-                    //（见 Pane::Split::init_sizes 注释），所以每帧原样传是安全的。
-                    let mut panel = resizable_panel().child(el);
-                    if let Some(s) = init_sizes.get(i).copied().filter(|s| *s > 0.) {
-                        panel = panel.size(px(s));
-                    }
-                    group = group.child(panel);
-                }
-                group.into_any_element()
-            }
-        }
     }
 
     /// 智能体的 space 里只可能有底层引擎自己的历史，别家的在这个目录下不可能

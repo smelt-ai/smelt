@@ -47,6 +47,7 @@ mod sidebar_order;
 mod stage;
 mod status_item;
 mod storage_cleanup;
+mod term_dock;
 mod terminal;
 mod terminal_view;
 mod workspace_attention;
@@ -995,29 +996,12 @@ fn dispatch_pending_attention(current_ws: &Rc<RefCell<Option<MainWindow>>>, cx: 
     }
 }
 
-/// 主区终端分屏布局树：叶子是一个终端，内部 Split 把区域按某轴切成多块。
-/// 每个 Split 各持一个 ResizableState 记住拖动比例；递归即可任意嵌套分屏。
-enum Pane {
-    Leaf(Entity<TerminalView>),
-    Split {
-        axis: Axis,
-        state: Entity<ResizableState>,
-        children: Vec<Pane>,
-        /// 从存档恢复的各子块像素尺寸；新建分屏是空的（均分）。
-        ///
-        /// 渲染时当 `resizable_panel().size()` 的**初始值**传下去。每帧原样传也不会
-        /// 冲掉用户拖出来的比例——gpui-component 里 initial_size 只在 panel 自己还
-        /// 没有 size 时生效，一旦拖过就走 `panel_state.size` 那条分支（panel.rs）。
-        init_sizes: Vec<f32>,
-    },
-}
-
 /// 一个会话的内容形态。Term 是第一通道（PTY 分屏树），Acp 是第二通道（结构化
 /// 消息流，见 docs/archive/project-report.md 第 5 节）——后者不参与分屏，一会话一视图。
 enum SessionKind {
-    /// 终端会话 = 一棵独立分屏树 + 会话内当前活动 pane（终端）。
+    /// 终端会话 = 一棵独立的分屏 Dock + 会话内当前活动 pane（终端）。
     Term {
-        layout: Pane,
+        dock: term_dock::TermDock,
         active: Entity<TerminalView>,
     },
     /// 结构化对话会话：单视图，不参与分屏（ACP / Pi RPC 等运行时都走这里）。
@@ -1051,11 +1035,15 @@ struct Session {
 
 impl Session {
     /// 单终端会话。
-    fn single(view: Entity<TerminalView>) -> Self {
+    fn single(
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Self {
         Self {
             ui_id: next_session_ui_id(),
             kind: SessionKind::Term {
-                layout: Pane::Leaf(view.clone()),
+                dock: term_dock::TermDock::single(view.clone(), window, cx),
                 active: view,
             },
             last_updated_at: unix_now_secs(),
@@ -1135,28 +1123,26 @@ impl Session {
         self.last_updated_at.max(daemon_updated_at)
     }
 
-    /// 终端会话的分屏树；ACP 会话没有。
-    fn term_layout(&self) -> Option<&Pane> {
+    /// 终端会话的分屏 Dock；ACP 会话没有。
+    fn term_dock(&self) -> Option<&term_dock::TermDock> {
         match &self.kind {
-            SessionKind::Term { layout, .. } => Some(layout),
+            SessionKind::Term { dock, .. } => Some(dock),
             SessionKind::Conversation(_) => None,
         }
     }
 
-    fn term_layout_mut(&mut self) -> Option<&mut Pane> {
+    fn term_dock_mut(&mut self) -> Option<&mut term_dock::TermDock> {
         match &mut self.kind {
-            SessionKind::Term { layout, .. } => Some(layout),
+            SessionKind::Term { dock, .. } => Some(dock),
             SessionKind::Conversation(_) => None,
         }
     }
 
-    /// 收集会话内全部终端叶子（ACP 会话得到空列表）。
+    /// 会话内全部终端叶子，深度优先序（ACP 会话得到空列表）。
     fn term_leaves(&self) -> Vec<Entity<TerminalView>> {
-        let mut v = Vec::new();
-        if let Some(layout) = self.term_layout() {
-            collect_leaves(layout, &mut v);
-        }
-        v
+        self.term_dock()
+            .map(|dock| dock.leaves().to_vec())
+            .unwrap_or_default()
     }
 
     /// ACP 会话的 agent 身份；终端会话返回 None。侧栏据此给出标签与图标，
@@ -1483,65 +1469,6 @@ fn pane_status(view: &Entity<TerminalView>, cx: &App) -> AgentStatus {
     smelt_model::agent_status::terminal_agent_status(daemon_state.as_ref())
 }
 
-/// 收集布局树里所有叶子终端（clone 句柄，顺序 = 深度优先遍历序）。
-fn collect_leaves(pane: &Pane, out: &mut Vec<Entity<TerminalView>>) {
-    match pane {
-        Pane::Leaf(t) => out.push(t.clone()),
-        Pane::Split { children, .. } => {
-            for c in children {
-                collect_leaves(c, out);
-            }
-        }
-    }
-}
-
-/// 在布局树里找到 target 终端所在叶子，就地替换成「原叶子 + 新叶子」的二分 Split。
-/// 找到并替换返回 true；未命中返回 false。
-fn split_leaf(
-    pane: &mut Pane,
-    target: EntityId,
-    axis: Axis,
-    state: Entity<ResizableState>,
-    new_leaf: Entity<TerminalView>,
-) -> bool {
-    match pane {
-        Pane::Leaf(t) if t.entity_id() == target => {
-            let old = Pane::Leaf(t.clone());
-            *pane = Pane::Split {
-                axis,
-                state,
-                children: vec![old, Pane::Leaf(new_leaf)],
-                // 新拆出来的分屏没有历史尺寸，均分。
-                init_sizes: Vec::new(),
-            };
-            true
-        }
-        Pane::Leaf(_) => false,
-        Pane::Split { children, .. } => children
-            .iter_mut()
-            .any(|c| split_leaf(c, target, axis, state.clone(), new_leaf.clone())),
-    }
-}
-
-/// 从布局树移除 target 终端的叶子；某 Split 移除后只剩一个子节点则塌缩掉这层。
-fn remove_leaf(pane: &mut Pane, target: EntityId) {
-    if let Pane::Split { children, .. } = pane {
-        if let Some(pos) = children
-            .iter()
-            .position(|c| matches!(c, Pane::Leaf(t) if t.entity_id() == target))
-        {
-            children.remove(pos);
-        } else {
-            for c in children.iter_mut() {
-                remove_leaf(c, target);
-            }
-        }
-        if children.len() == 1 {
-            *pane = children.remove(0);
-        }
-    }
-}
-
 /// 会话侧栏的组织方式。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1721,9 +1648,9 @@ pub(crate) struct LegacyAgentRunState {
 }
 
 /// 可序列化的分屏布局镜像：叶子存该终端 cwd + 守护会话 id，Split 存方向 + 子节点 +
-/// 各子块尺寸。结构 / 嵌套 / 方向 / 拖出来的比例都完整恢复。
-/// id 用于重开 GUI 时 reattach smeltd 里还活着的会话（旧存档无 id → 开新会话）。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// 各子块尺寸，Tabs 存叠在同一格里的终端和当前显示的那个。结构 / 嵌套 / 方向 / 拖出来的
+/// 比例都完整恢复。id 用于重开 GUI 时 reattach smeltd 里还活着的会话（旧存档无 id → 开新会话）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PaneState {
     Leaf {
         cwd: Option<String>,
@@ -1743,10 +1670,16 @@ pub(crate) enum PaneState {
     Split {
         axis: SplitAxis,
         children: Vec<PaneState>,
-        /// 各子块的像素尺寸 —— 存盘那一刻 ResizableState 里的真实值（含用户拖拽结果）。
+        /// 各子块的像素尺寸 —— 存盘那一刻 Dock 上量到的真实值（含用户拖拽结果）。
         /// 旧存档没有这个字段 → 空 vec → 按均分，跟以前行为一致。
         #[serde(default)]
         sizes: Vec<f32>,
+    },
+    /// 叠在同一格里的几个终端（子节点都是叶子），`active` 是正在显示的那个。
+    /// 只有一个终端的格子写成 `Leaf`，不写成一个元素的 `Tabs`。
+    Tabs {
+        active: usize,
+        children: Vec<PaneState>,
     },
 }
 
@@ -1938,7 +1871,9 @@ fn session_state_cwd(s: &SessionState) -> Option<String> {
     fn first_cwd(p: &PaneState) -> Option<String> {
         match p {
             PaneState::Leaf { cwd, .. } => cwd.clone(),
-            PaneState::Split { children, .. } => children.iter().find_map(first_cwd),
+            PaneState::Split { children, .. } | PaneState::Tabs { children, .. } => {
+                children.iter().find_map(first_cwd)
+            }
         }
     }
     first_cwd(&s.layout)
@@ -2015,7 +1950,7 @@ pub(crate) fn pane_state_leaf_ids(pane: &PaneState) -> Vec<String> {
             .filter(|id| !id.is_empty())
             .map(|id| vec![id.to_string()])
             .unwrap_or_default(),
-        PaneState::Split { children, .. } => {
+        PaneState::Split { children, .. } | PaneState::Tabs { children, .. } => {
             children.iter().flat_map(pane_state_leaf_ids).collect()
         }
     }
@@ -2139,7 +2074,7 @@ fn new_sid() -> String {
 }
 
 /// Split 方向的可序列化镜像（gpui::Axis 无法直接序列化）。
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SplitAxis {
     H,
     V,
@@ -2226,21 +2161,34 @@ fn spawn_layout_leaves_rec(
             }
             Ok(())
         }
+        // 标签组里只认叶子，搭 Dock 时也一样跳过（见 `term_dock::dock_layout_from_state`），
+        // 两边的深度优先序才对得上。
+        PaneState::Tabs { children, .. } => {
+            for c in children
+                .iter()
+                .filter(|c| matches!(c, PaneState::Leaf { .. }))
+            {
+                spawn_layout_leaves_rec(runtime, c, out)?;
+            }
+            Ok(())
+        }
     }
 }
 
-/// 用已 spawn 的叶子（DFS 序）重建布局树；**只**在 UI 线程建 Entity。
+/// 用已 spawn 的叶子（DFS 序）搭回分屏 Dock 的布局；**只**在 UI 线程建 Entity。
+/// 建好的终端按同样的顺序推进 `views`，调用方拿它认活动 pane。
 fn rebuild_pane_ready(
     runtime: &crate::runtimes::Runtime,
     ps: &PaneState,
     leaves: &mut std::vec::IntoIter<SpawnedLeaf>,
-    tabs: &mut Vec<Entity<TerminalView>>,
+    views: &mut Vec<Entity<TerminalView>>,
     cx: &mut Context<Workspace>,
-) -> Option<Pane> {
-    match ps {
-        PaneState::Leaf { .. } => {
+) -> Option<gpui_component::dock::DockLayout> {
+    term_dock::dock_layout_from_state(
+        ps,
+        &mut |_: &PaneState, cx: &mut Context<Workspace>| {
             let leaf = leaves.next()?;
-            let v = cx.new(|cx| {
+            let view = cx.new(|cx| {
                 let mut view = TerminalView::from_terminal(
                     cx,
                     runtime.clone(),
@@ -2253,36 +2201,11 @@ fn rebuild_pane_ready(
                 view.set_custom_title(leaf.custom_title);
                 view
             });
-            tabs.push(v.clone());
-            Some(Pane::Leaf(v))
-        }
-        PaneState::Split {
-            axis,
-            children,
-            sizes,
-        } => {
-            let mut kept: Vec<Pane> = children
-                .iter()
-                .filter_map(|c| rebuild_pane_ready(runtime, c, leaves, tabs, cx))
-                .collect();
-            match kept.len() {
-                0 => None,
-                1 => Some(kept.remove(0)),
-                _ => Some(Pane::Split {
-                    axis: (*axis).into(),
-                    state: cx.new(|_| ResizableState::default()),
-                    // 有子块没起来被丢掉时尺寸就对不上号了，宁可整组均分也不能错位——
-                    // 错位会把 A 的宽度套到 B 头上，比均分更糟。
-                    init_sizes: if kept.len() == children.len() && sizes.len() == kept.len() {
-                        sizes.clone()
-                    } else {
-                        Vec::new()
-                    },
-                    children: kept,
-                }),
-            }
-        }
-    }
+            views.push(view.clone());
+            Some(view)
+        },
+        cx,
+    )
 }
 
 /// 工作台根视图：多标签终端管理器。
@@ -3585,6 +3508,7 @@ impl Workspace {
             let title = (!record.title.trim().is_empty()).then_some(record.title.clone());
             let cwd = record.cwd.clone();
             let sid = record.id.clone();
+            let window_handle = self.window_handle;
             cx.spawn(async move |this, cx| {
                 let result = match rx.recv().await {
                     Ok(r) => r,
@@ -3605,44 +3529,46 @@ impl Workspace {
                         return;
                     }
                 };
-                let _ = this.update(cx, |this, cx| {
-                    this.remote_terminal_reattach_pending.remove(&sid);
-                    let local_ids = this
-                        .sessions
-                        .iter()
-                        .filter_map(|session| match &session.kind {
-                            SessionKind::Term { active, .. } => {
-                                Some(active.read(cx).session_id().to_string())
-                            }
-                            SessionKind::Conversation(_) => None,
-                        })
-                        .collect::<HashSet<_>>();
-                    if !smelt_model::session_control::accept_remote_terminal_projection(
-                        &sid,
-                        &this.remote_projected_terminal_ids,
-                        &local_ids,
-                    ) {
-                        return;
-                    }
-                    let view = cx.new(|cx| {
-                        TerminalView::from_terminal(
-                            cx,
-                            crate::runtimes::Runtime::local(),
-                            terminal,
-                            Some(cwd),
-                            sid,
-                            None,
-                            None,
-                        )
-                    });
-                    let mut session = Session::single(view);
-                    session.remote_owned = true;
-                    session.custom_title = title;
-                    this.sessions.push(session);
-                    this.session_list_revision = this.session_list_revision.wrapping_add(1);
-                    this.save_state(cx);
-                    this.schedule_visible_refresh(cx);
-                    cx.notify();
+                let _ = cx.update_window(window_handle, |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.remote_terminal_reattach_pending.remove(&sid);
+                        let local_ids = this
+                            .sessions
+                            .iter()
+                            .filter_map(|session| match &session.kind {
+                                SessionKind::Term { active, .. } => {
+                                    Some(active.read(cx).session_id().to_string())
+                                }
+                                SessionKind::Conversation(_) => None,
+                            })
+                            .collect::<HashSet<_>>();
+                        if !smelt_model::session_control::accept_remote_terminal_projection(
+                            &sid,
+                            &this.remote_projected_terminal_ids,
+                            &local_ids,
+                        ) {
+                            return;
+                        }
+                        let view = cx.new(|cx| {
+                            TerminalView::from_terminal(
+                                cx,
+                                crate::runtimes::Runtime::local(),
+                                terminal,
+                                Some(cwd),
+                                sid,
+                                None,
+                                None,
+                            )
+                        });
+                        let mut session = Session::single(view, window, cx);
+                        session.remote_owned = true;
+                        session.custom_title = title;
+                        this.sessions.push(session);
+                        this.session_list_revision = this.session_list_revision.wrapping_add(1);
+                        this.save_state(cx);
+                        this.schedule_visible_refresh(cx);
+                        cx.notify();
+                    })
                 });
             })
             .detach();

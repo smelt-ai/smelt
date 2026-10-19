@@ -3,7 +3,8 @@
 //! 左栏、舞台、工具面板各是一块停靠面板。开合和宽度仍以原来的字段为准
 //! （`sidebar_open` / `sidebar_w`，以及当前会话的 `tool_panel_open` /
 //! `tool_panel_w`），渲染前写进 Dock，用户拖动分隔条后再写回这些字段。
-//! 布局树本身放进 SQLite 里的工作区快照，下次启动按这棵树把三块面板装回去。
+//! 三块面板的位置固定，Dock 锁住不让拖动和放下，布局树不存，每次启动照原样装。
+//! 终端分屏是舞台里另一个 Dock（`term_dock`），锁住外层它的标签才不会被放进侧栏。
 
 use gpui::{
     AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Pixels, Subscription,
@@ -36,7 +37,7 @@ pub(crate) struct InstalledShell {
     pub(crate) applied_tool: f32,
 }
 
-/// 建好 Dock，摆成左栏 / 舞台 / 右栏。每个停靠区只有一个面板、拖不走，布局固定，
+/// 建好 Dock，摆成左栏 / 舞台 / 右栏并锁住。每个停靠区只有一个面板、拖不走，布局固定，
 /// 不用存；开合和宽度每次渲染前由 `align_shell_dock` 从工作区状态写进来。
 pub(crate) fn install(
     workspace: WeakEntity<Workspace>,
@@ -70,6 +71,8 @@ pub(crate) fn install(
                 window,
                 cx,
             );
+            // 锁住只禁拖动和放下，开合与拖宽照常。
+            area.set_locked(true, window, cx);
         });
     }
 
@@ -536,22 +539,14 @@ impl Workspace {
                         div().flex_1().min_w_0().min_h_0().flex().flex_col().child(
                             div().flex_1().min_w_0().min_h_0().flex().child(
                                 match &self.sessions[self.active_session].kind {
-                                    SessionKind::Term { .. } => div()
+                                    SessionKind::Term { dock, .. } => div()
                                         .flex_1()
                                         .min_w_0()
                                         .min_h_0()
                                         .flex()
                                         .bg(rgb(terminal::default_bg()))
                                         .pt(px(ui_theme::CHROME_ISLAND_BAND_PX))
-                                        .child(
-                                            self.render_pane(
-                                                self.sessions[self.active_session]
-                                                    .term_layout()
-                                                    .expect("Term 会话必有 layout"),
-                                                "pane",
-                                                cx,
-                                            ),
-                                        )
+                                        .child(dock.area().clone())
                                         .into_any_element(),
                                     SessionKind::Conversation(view) => {
                                         let bg_image_opacity =

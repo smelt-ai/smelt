@@ -62,7 +62,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 20;
+pub const STORE_SCHEMA_VERSION: u32 = 21;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -2736,10 +2736,20 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 20 {
+            apply_v21_layout_tabs(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v20 形状：重建完 layout_node 后与当前形状逐字一致，就说明原来正是 v20。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 19 {
             apply_v20_drop_worktree_inherit(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
-            // 没有冻结的 v19 形状：删完两张表后与当前形状逐字一致，就说明原来正是 v19。
+            // 没有冻结的 v19 形状：删完两张表、重建完 layout_node 后与当前形状逐字一致，就说明原来正是 v19。
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
             }
@@ -2749,7 +2759,8 @@ mod imp {
         if current == 18 {
             apply_v19_workspace_catalog_writer(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
-            // 没有冻结的 v18 形状：补完两列、删完两张表后与当前形状逐字一致，就说明原来正是 v18。
+            // 没有冻结的 v18 形状：补完两列、删完两张表、重建完 layout_node 后与当前形状逐字一致，
+            // 就说明原来正是 v18。
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
             }
@@ -3038,7 +3049,7 @@ mod imp {
         apply_v20_drop_worktree_inherit(transaction)
     }
 
-    /// v20 删掉没人读的 worktree 继承两张表。已经没有这两张表的库跳过；
+    /// v20 删掉没人读的 worktree 继承两张表，接着补 v21。已经没有这两张表的库跳过；
     /// 只剩其中一张的库不认，交给后面的形状校验拒绝。
     fn apply_v20_drop_worktree_inherit(
         transaction: &rusqlite::Transaction<'_>,
@@ -3050,6 +3061,17 @@ mod imp {
                 .any(|table| table == "worktree_inherit_skip_pattern")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V19_TO_V20)?;
+        }
+        apply_v21_layout_tabs(transaction)
+    }
+
+    /// v21 让布局树能记标签组：layout_node 整表重建。已经有 `active_index` 列的库跳过。
+    fn apply_v21_layout_tabs(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_columns(transaction, "layout_node")?
+            .iter()
+            .any(|column| column == "active_index")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V20_TO_V21)?;
         }
         Ok(())
     }
@@ -3393,6 +3415,31 @@ mod imp {
         } else {
             (&[], &["root", "position"])
         };
+        // v21 起布局树能记标签组，多一列 `active_index`。
+        let layout_node_columns: &[&str] = if legacy {
+            &[
+                "id",
+                "group_id",
+                "parent_id",
+                "position",
+                "kind",
+                "axis",
+                "session_id",
+                "size_px",
+            ]
+        } else {
+            &[
+                "id",
+                "group_id",
+                "parent_id",
+                "position",
+                "kind",
+                "axis",
+                "session_id",
+                "size_px",
+                "active_index",
+            ]
+        };
         Ok(table_columns(connection, "history_title")?
             == [
                 "agent",
@@ -3404,17 +3451,7 @@ mod imp {
             && table_columns(connection, "kv")? == kv_columns
             && table_columns(connection, "launch_entry")?
                 == ["position", "label", "command", "provider"]
-            && table_columns(connection, "layout_node")?
-                == [
-                    "id",
-                    "group_id",
-                    "parent_id",
-                    "position",
-                    "kind",
-                    "axis",
-                    "session_id",
-                    "size_px",
-                ]
+            && table_columns(connection, "layout_node")? == layout_node_columns
             && table_columns(connection, "project")? == project_columns
             && table_columns(connection, "session")?
                 == [
@@ -7450,6 +7487,146 @@ CREATE TABLE worktree_inherit_skip_pattern (
             "备份里留着删表前的数据"
         );
         drop(backup);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 两个终端叠在左格、右格单独一个终端。
+    fn tabbed_workspace_json() -> serde_json::Value {
+        serde_json::json!({
+            "projects": ["/repo"],
+            "sessions": [{
+                "layout": {"Split": {
+                    "axis": "H",
+                    "children": [
+                        {"Tabs": {
+                            "active": 1,
+                            "children": [
+                                {"Leaf": {"cwd": "/repo", "id": "term-1"}},
+                                {"Leaf": {"cwd": "/repo/src", "id": "term-2"}}
+                            ]
+                        }},
+                        {"Leaf": {"cwd": "/repo", "id": "term-3"}}
+                    ],
+                    "sizes": [400.0, 600.0]
+                }},
+                "active": 2,
+                "last_updated_at": 7
+            }]
+        })
+    }
+
+    #[test]
+    fn tab_groups_round_trip_through_layout_nodes() {
+        let dir = temp_dir("layout-tabs");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        put_workspace_json(
+            &store,
+            &serde_json::to_vec(&tabbed_workspace_json()).unwrap(),
+        );
+
+        let restored = workspace_json(&store);
+        let split = &restored["sessions"][0]["layout"]["Split"];
+        assert_eq!(split["sizes"], serde_json::json!([400.0, 600.0]));
+        let tabs = &split["children"][0]["Tabs"];
+        assert_eq!(tabs["active"], 1);
+        assert_eq!(tabs["children"][0]["Leaf"]["id"], "term-1");
+        assert_eq!(tabs["children"][1]["Leaf"]["id"], "term-2");
+        assert_eq!(split["children"][1]["Leaf"]["id"], "term-3");
+        // 活动终端按深度优先序数，标签组里的终端也算在内。
+        assert_eq!(restored["sessions"][0]["active"], 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v20 的 layout_node：只有 split / leaf 两种节点，没有 `active_index`。
+    const V20_LAYOUT_NODE_TABLE: &str = "
+CREATE TABLE layout_node (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES session_group(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES layout_node(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  kind TEXT NOT NULL CHECK (kind IN ('split', 'leaf')),
+  axis TEXT CHECK (axis IN ('horizontal', 'vertical') OR axis IS NULL),
+  session_id TEXT UNIQUE REFERENCES session(id) ON DELETE CASCADE,
+  size_px REAL CHECK (size_px IS NULL OR size_px >= 0),
+  UNIQUE (group_id, parent_id, position),
+  CHECK (
+    (kind = 'split' AND axis IS NOT NULL AND session_id IS NULL)
+    OR (kind = 'leaf' AND axis IS NULL AND session_id IS NOT NULL)
+  )
+);
+CREATE UNIQUE INDEX layout_node_root_idx
+  ON layout_node(group_id)
+  WHERE parent_id IS NULL;
+";
+
+    /// v20 的库：layout_node 整表重建成能记标签组的形状，已有的分屏树原样留着。
+    #[test]
+    fn migrates_v20_layout_nodes_to_hold_tab_groups() {
+        let dir = temp_dir("migrate-v20-layout-tabs");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let workspace = serde_json::json!({
+            "projects": ["/repo"],
+            "sessions": [{
+                "layout": {"Split": {
+                    "axis": "V",
+                    "children": [
+                        {"Leaf": {"cwd": "/repo", "id": "term-1"}},
+                        {"Leaf": {"cwd": "/repo/src", "id": "term-2"}}
+                    ],
+                    "sizes": [300.0, 500.0]
+                }},
+                "active": 1,
+                "last_updated_at": 7
+            }]
+        });
+        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE layout_node RENAME TO layout_node_v21;
+                 DROP INDEX layout_node_root_idx;
+                 {V20_LAYOUT_NODE_TABLE}
+                 INSERT INTO layout_node
+                   SELECT id, group_id, parent_id, position, kind, axis, session_id, size_px
+                   FROM layout_node_v21;
+                 DROP TABLE layout_node_v21;"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 20).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let restored = workspace_json(&store);
+        let split = &restored["sessions"][0]["layout"]["Split"];
+        assert_eq!(split["axis"], "V");
+        assert_eq!(split["sizes"], serde_json::json!([300.0, 500.0]));
+        assert_eq!(split["children"][1]["Leaf"]["id"], "term-2");
+        assert_eq!(restored["sessions"][0]["active"], 1);
+        // 升上来的库能写标签组。
+        put_workspace_json(
+            &store,
+            &serde_json::to_vec(&tabbed_workspace_json()).unwrap(),
+        );
+        assert_eq!(
+            workspace_json(&store)["sessions"][0]["layout"]["Split"]["children"][0]["Tabs"]["active"],
+            1
+        );
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v20 升上来的库要和新建的库一个形状"
+        );
+        assert!(
+            path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v20"))
+                .exists()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

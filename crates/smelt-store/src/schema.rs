@@ -273,14 +273,16 @@ CREATE TABLE layout_node (
   group_id TEXT NOT NULL REFERENCES session_group(id) ON DELETE CASCADE,
   parent_id TEXT REFERENCES layout_node(id) ON DELETE CASCADE,
   position INTEGER NOT NULL CHECK (position >= 0),
-  kind TEXT NOT NULL CHECK (kind IN ('split', 'leaf')),
+  kind TEXT NOT NULL CHECK (kind IN ('split', 'tabs', 'leaf')),
   axis TEXT CHECK (axis IN ('horizontal', 'vertical') OR axis IS NULL),
   session_id TEXT UNIQUE REFERENCES session(id) ON DELETE CASCADE,
   size_px REAL CHECK (size_px IS NULL OR size_px >= 0),
+  active_index INTEGER CHECK (active_index IS NULL OR active_index >= 0),
   UNIQUE (group_id, parent_id, position),
   CHECK (
-    (kind = 'split' AND axis IS NOT NULL AND session_id IS NULL)
-    OR (kind = 'leaf' AND axis IS NULL AND session_id IS NOT NULL)
+    (kind = 'split' AND axis IS NOT NULL AND session_id IS NULL AND active_index IS NULL)
+    OR (kind = 'tabs' AND axis IS NULL AND session_id IS NULL AND active_index IS NOT NULL)
+    OR (kind = 'leaf' AND axis IS NULL AND session_id IS NOT NULL AND active_index IS NULL)
   )
 );
 CREATE UNIQUE INDEX layout_node_root_idx
@@ -1698,4 +1700,33 @@ ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
 pub const MIGRATE_V19_TO_V20: &str = "
 DROP TABLE worktree_inherit_skip_pattern;
 DROP TABLE worktree_inherit;
+";
+
+/// v20 → v21：终端分屏换成 Dock，同一格可以叠几个终端。布局树多一种 `tabs` 节点，记着叠在
+/// 一起的是哪几个终端、当前显示第几个。改 CHECK 只能整表重建；旧数据只有 split / leaf，原样搬过来。
+pub const MIGRATE_V20_TO_V21: &str = "
+ALTER TABLE layout_node RENAME TO layout_node_v20;
+CREATE TABLE layout_node (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES session_group(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES layout_node(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  kind TEXT NOT NULL CHECK (kind IN ('split', 'tabs', 'leaf')),
+  axis TEXT CHECK (axis IN ('horizontal', 'vertical') OR axis IS NULL),
+  session_id TEXT UNIQUE REFERENCES session(id) ON DELETE CASCADE,
+  size_px REAL CHECK (size_px IS NULL OR size_px >= 0),
+  active_index INTEGER CHECK (active_index IS NULL OR active_index >= 0),
+  UNIQUE (group_id, parent_id, position),
+  CHECK (
+    (kind = 'split' AND axis IS NOT NULL AND session_id IS NULL AND active_index IS NULL)
+    OR (kind = 'tabs' AND axis IS NULL AND session_id IS NULL AND active_index IS NOT NULL)
+    OR (kind = 'leaf' AND axis IS NULL AND session_id IS NOT NULL AND active_index IS NULL)
+  )
+);
+INSERT INTO layout_node(id, group_id, parent_id, position, kind, axis, session_id, size_px)
+  SELECT id, group_id, parent_id, position, kind, axis, session_id, size_px FROM layout_node_v20;
+DROP TABLE layout_node_v20;
+CREATE UNIQUE INDEX layout_node_root_idx
+  ON layout_node(group_id)
+  WHERE parent_id IS NULL;
 ";

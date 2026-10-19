@@ -102,6 +102,22 @@ fn layout_from_value(value: &Value) -> WorkspaceLayoutNode {
                 .collect(),
         };
     }
+    if let Some(tabs) = value.get("Tabs") {
+        return WorkspaceLayoutNode::Tabs {
+            active: tabs
+                .get("active")
+                .and_then(Value::as_u64)
+                .and_then(|active| usize::try_from(active).ok())
+                .unwrap_or(0),
+            children: tabs
+                .get("children")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(layout_from_value)
+                .collect(),
+        };
+    }
     let Some(leaf) = value.get("Leaf") else {
         return empty_leaf();
     };
@@ -194,6 +210,12 @@ fn layout_to_value(layout: &WorkspaceLayoutNode) -> Value {
                 "axis": if *vertical { "V" } else { "H" },
                 "children": children.iter().map(layout_to_value).collect::<Vec<_>>(),
                 "sizes": sizes,
+            }
+        }),
+        WorkspaceLayoutNode::Tabs { active, children } => json!({
+            "Tabs": {
+                "active": active,
+                "children": children.iter().map(layout_to_value).collect::<Vec<_>>(),
             }
         }),
     }

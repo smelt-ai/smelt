@@ -181,14 +181,16 @@ fn write_session_record(
 fn first_leaf_id(layout: &WorkspaceLayoutNode) -> Option<&str> {
     match layout {
         WorkspaceLayoutNode::Leaf { id, .. } => id.as_deref(),
-        WorkspaceLayoutNode::Split { children, .. } => children.iter().find_map(first_leaf_id),
+        WorkspaceLayoutNode::Split { children, .. }
+        | WorkspaceLayoutNode::Tabs { children, .. } => children.iter().find_map(first_leaf_id),
     }
 }
 
 fn first_leaf_cwd(layout: &WorkspaceLayoutNode) -> Option<&str> {
     match layout {
         WorkspaceLayoutNode::Leaf { cwd, .. } => cwd.as_deref(),
-        WorkspaceLayoutNode::Split { children, .. } => children.iter().find_map(first_leaf_cwd),
+        WorkspaceLayoutNode::Split { children, .. }
+        | WorkspaceLayoutNode::Tabs { children, .. } => children.iter().find_map(first_leaf_cwd),
     }
 }
 
@@ -233,6 +235,26 @@ impl LayoutWriter<'_, '_> {
                 for (child_position, child) in children.iter().enumerate() {
                     let child_size = sizes.get(child_position).copied();
                     self.write(Some(&node_id), child_position, child_size, child)?;
+                }
+                Ok(())
+            }
+            WorkspaceLayoutNode::Tabs { active, children } => {
+                self.transaction.execute(
+                    "INSERT INTO layout_node(
+                           id, group_id, parent_id, position, kind, axis, session_id, size_px,
+                           active_index
+                         ) VALUES (?1, ?2, ?3, ?4, 'tabs', NULL, NULL, ?5, ?6)",
+                    params![
+                        node_id,
+                        self.group_id,
+                        parent_id,
+                        position as i64,
+                        size_px,
+                        (*active).min(children.len().saturating_sub(1)) as i64
+                    ],
+                )?;
+                for (child_position, child) in children.iter().enumerate() {
+                    self.write(Some(&node_id), child_position, None, child)?;
                 }
                 Ok(())
             }
@@ -486,6 +508,7 @@ struct LayoutNodeRow {
     axis: Option<String>,
     session_id: Option<String>,
     size_px: Option<f64>,
+    active_index: Option<i64>,
 }
 
 struct SessionRow {
@@ -513,7 +536,8 @@ impl WorkspaceReadCache {
             HashMap::new();
         let mut layout_by_id = HashMap::new();
         let mut statement = connection.prepare(
-            "SELECT id, group_id, parent_id, position, kind, axis, session_id, size_px
+            "SELECT id, group_id, parent_id, position, kind, axis, session_id, size_px,
+                    active_index
              FROM layout_node",
         )?;
         let rows = statement.query_map([], |row| {
@@ -527,6 +551,7 @@ impl WorkspaceReadCache {
                     axis: row.get(5)?,
                     session_id: row.get(6)?,
                     size_px: row.get(7)?,
+                    active_index: row.get(8)?,
                 },
             ))
         })?;
@@ -698,6 +723,19 @@ impl WorkspaceReadCache {
             .layout_children
             .get(&(group_id.to_string(), node_id.to_string()))
             .unwrap_or(&empty);
+        if node.kind == "tabs" {
+            let children = children
+                .iter()
+                .map(|child| self.layout(group_id, &child.id, leaf_ids))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(WorkspaceLayoutNode::Tabs {
+                active: node
+                    .active_index
+                    .and_then(|active| usize::try_from(active).ok())
+                    .unwrap_or(0),
+                children,
+            });
+        }
         // 尺寸要么全有要么全无：缺一个就按均分，免得错位套到别的子块上。
         let all_sized =
             !children.is_empty() && children.iter().all(|child| child.size_px.is_some());

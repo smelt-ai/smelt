@@ -306,15 +306,17 @@ impl Workspace {
                         }
                     };
                     let mut leaf_iter = leaves.into_iter();
-                    let mut tabs = Vec::new();
+                    let mut views = Vec::new();
                     let Some(layout) =
-                        rebuild_pane_ready(&runtime, &ss.layout, &mut leaf_iter, &mut tabs, cx)
+                        rebuild_pane_ready(&runtime, &ss.layout, &mut leaf_iter, &mut views, cx)
                     else {
                         return false;
                     };
-                    let Some(active) = tabs.get(ss.active).or_else(|| tabs.first()).cloned() else {
+                    let Some(active) = views.get(ss.active).or_else(|| views.first()).cloned()
+                    else {
                         return false;
                     };
+                    let dock = crate::term_dock::TermDock::install(layout, window, cx);
                     if this.session_list_revision != restore_revision {
                         restore_order_intact = false;
                     }
@@ -329,7 +331,7 @@ impl Workspace {
                         insert_at,
                         Session {
                             ui_id: next_session_ui_id(),
-                            kind: SessionKind::Term { layout, active },
+                            kind: SessionKind::Term { dock, active },
                             last_updated_at: ss.last_updated_at,
                             custom_title: ss.custom_title,
                             agent_definition_id: None,
@@ -1430,6 +1432,8 @@ impl Workspace {
             })
             .expect("spawn smelt-spawn-session 线程");
 
+        // 分屏 Dock 要在窗口里建，异步回来以后靠窗口句柄重新进窗口。
+        let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
             let result = match rx.recv().await {
                 Ok(r) => r,
@@ -1453,28 +1457,31 @@ impl Workspace {
                     return;
                 }
             };
-            let _ = this.update(cx, |this, cx| {
-                let view = cx.new(|cx| {
-                    TerminalView::from_terminal(
-                        cx,
-                        runtime.clone(),
-                        terminal,
-                        cwd.clone(),
-                        sid,
-                        launch_owned.as_deref(),
-                        label_owned.as_deref(),
-                    )
-                });
-                this.sessions.push(Session::single(view));
-                this.session_list_revision = this.session_list_revision.wrapping_add(1);
-                this.active_session = this.sessions.len() - 1;
-                this.save_state(cx);
-                this.schedule_visible_refresh(cx);
-                eprintln!(
-                    "[workspace] 新建会话成功，当前共 {} 个",
-                    this.sessions.len()
-                );
-                cx.notify();
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    let view = cx.new(|cx| {
+                        TerminalView::from_terminal(
+                            cx,
+                            runtime.clone(),
+                            terminal,
+                            cwd.clone(),
+                            sid,
+                            launch_owned.as_deref(),
+                            label_owned.as_deref(),
+                        )
+                    });
+                    let session = Session::single(view, window, cx);
+                    this.sessions.push(session);
+                    this.session_list_revision = this.session_list_revision.wrapping_add(1);
+                    this.active_session = this.sessions.len() - 1;
+                    this.save_state(cx);
+                    this.schedule_visible_refresh(cx);
+                    eprintln!(
+                        "[workspace] 新建会话成功，当前共 {} 个",
+                        this.sessions.len()
+                    );
+                    cx.notify();
+                })
             });
         })
         .detach();
@@ -1493,12 +1500,13 @@ impl Workspace {
             .read(cx)
             .cwd()
             .or_else(|| runtime.is_local().then(current_dir).flatten());
-        let old = sess.anchor_id();
+        let beside = active.clone();
         let session_ix = self.active_session;
         let sid = new_sid();
         let cwd_bg = cwd.clone();
         let sid_bg = sid.clone();
         let runtime_bg = runtime.clone();
+        let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1513,29 +1521,30 @@ impl Workspace {
                     return;
                 }
             };
-            let _ = this.update(cx, |this, cx| {
-                // 分屏目标会话可能在握手期间被关掉——对不上就丢弃这个终端。
-                if session_ix >= this.sessions.len() {
-                    eprintln!("[workspace] 分屏目标会话已不存在，丢弃");
-                    return;
-                }
-                let view = cx.new(|cx| {
-                    TerminalView::from_terminal(cx, runtime, terminal, cwd, sid, None, None)
-                });
-                let state = cx.new(|_| ResizableState::default());
-                let sess = &mut this.sessions[session_ix];
-                // old 叶子若已被拆掉/关掉，split_leaf 找不到就不动。
-                let Some(layout) = sess.term_layout_mut() else {
-                    eprintln!("[workspace] 分屏目标会话不是终端会话，丢弃");
-                    return;
-                };
-                if !split_leaf(layout, old, axis, state, view.clone()) {
-                    eprintln!("[workspace] 分屏目标 pane 已不存在，丢弃");
-                    return;
-                }
-                sess.set_active_term(view);
-                this.save_state(cx);
-                cx.notify();
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    // 分屏目标会话可能在握手期间被关掉——对不上就丢弃这个终端。
+                    if session_ix >= this.sessions.len() {
+                        eprintln!("[workspace] 分屏目标会话已不存在，丢弃");
+                        return;
+                    }
+                    let view = cx.new(|cx| {
+                        TerminalView::from_terminal(cx, runtime, terminal, cwd, sid, None, None)
+                    });
+                    let sess = &mut this.sessions[session_ix];
+                    let Some(dock) = sess.term_dock_mut() else {
+                        eprintln!("[workspace] 分屏目标会话不是终端会话，丢弃");
+                        return;
+                    };
+                    // 原来那一格若已被关掉，Dock 里找不到就不动。
+                    if !dock.split(&beside, view.clone(), axis, window, cx) {
+                        eprintln!("[workspace] 分屏目标 pane 已不存在，丢弃");
+                        return;
+                    }
+                    sess.set_active_term(view);
+                    this.save_state(cx);
+                    cx.notify();
+                })
             });
         })
         .detach();
@@ -2149,8 +2158,8 @@ impl Workspace {
             AttentionGlobal::remove_session(&closed_session_id, cx);
         }
         let sess = &mut self.sessions[ix];
-        if let Some(layout) = sess.term_layout_mut() {
-            remove_leaf(layout, target);
+        if let Some(dock) = sess.term_dock_mut() {
+            dock.remove(&view, window, cx);
         }
         // 关掉的正是活动 pane 才需要改指向，关别的 pane 时当前视图不该跳走。
         if was_active && let Some(first) = sess.term_leaves().first().cloned() {

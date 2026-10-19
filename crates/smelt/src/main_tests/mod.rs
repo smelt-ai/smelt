@@ -19,4 +19,5 @@ mod session_facts_tests;
 mod session_route_tests;
 mod sidebar_order_tests;
 mod sidebar_width_tests;
+mod term_dock_tests;
 mod workspace_state_tests;

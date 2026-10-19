@@ -1,10 +1,10 @@
 //! 工作区持久化：运行时那份工作区目录（项目、会话组）经 `workspace.*` 读写；客户端
-//! 自己的界面状态（侧栏、当前页、Dock 布局）单独存在客户端。写入走单消费者队列。
+//! 自己的界面状态（侧栏开合、当前页、各栏宽度）单独存在客户端。写入走单消费者队列。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use gpui::{App, Context, EntityId, Window};
+use gpui::{App, Context, Window};
 use smelt_runtime_client::protocol::control::EmptyParams;
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode};
 use smelt_runtime_client::protocol::workspace::{
@@ -17,7 +17,7 @@ use smelt_client_store::{ProjectKey, SessionRouteRecord};
 
 use crate::runtimes::Runtime;
 use crate::{
-    AcpSaved, LegacyAgentRunState, MIN_TOOL_PANEL_WIDTH, Pane, PaneState, RuntimeKey, SessionKind,
+    AcpSaved, LegacyAgentRunState, MIN_TOOL_PANEL_WIDTH, PaneState, RuntimeKey, SessionKind,
     SessionRouteArchive, SessionState, SidebarGrouping, Workspace, WorkspaceRoute, tool_panel,
     unix_now_secs,
 };
@@ -183,38 +183,6 @@ pub(crate) fn persisted_active_position(
     position
 }
 
-/// 把渲染用的布局树导出成可序列化镜像（叶子读取各终端当前 cwd）。
-fn pane_to_state(pane: &Pane, cx: &App) -> PaneState {
-    match pane {
-        Pane::Leaf(t) => {
-            let t = t.read(cx);
-            PaneState::Leaf {
-                cwd: t.cwd(),
-                id: Some(t.session_id().to_string()),
-                custom_title: t.custom_title().map(str::to_string),
-                launch_label: t.launch_label().map(str::to_string),
-                launch_cmd: t.launch_cmd().map(str::to_string),
-            }
-        }
-        Pane::Split {
-            axis,
-            state,
-            children,
-            ..
-        } => PaneState::Split {
-            axis: (*axis).into(),
-            children: children.iter().map(|c| pane_to_state(c, cx)).collect(),
-            // 直接读 ResizableState：用户拖出来的当前尺寸就在里面，不用自己跟着同步一份。
-            sizes: state
-                .read(cx)
-                .sizes()
-                .iter()
-                .map(|p| f32::from(*p))
-                .collect(),
-        },
-    }
-}
-
 /// 把存档里的会话列表规范成 `Vec<SessionState>`（兼容旧 layout / tabs 字段）。
 pub(crate) fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize) {
     let legacy_route = legacy_route_from_workspace(s);
@@ -362,18 +330,6 @@ fn legacy_route_from_workspace(state: &WsState) -> SessionRouteArchive {
         .cloned()
         .collect();
     route
-}
-
-/// 收集布局树所有叶子终端的 EntityId，顺序 = 深度优先遍历序（= 存档 active 基准）。
-fn collect_leaf_ids(pane: &Pane, out: &mut Vec<EntityId>) {
-    match pane {
-        Pane::Leaf(t) => out.push(t.entity_id()),
-        Pane::Split { children, .. } => {
-            for c in children {
-                collect_leaf_ids(c, out);
-            }
-        }
-    }
 }
 
 /// 客户端自己的界面状态。每台设备可以不同（设计文档 D1），不交给运行时。
@@ -1062,11 +1018,16 @@ impl Workspace {
                 };
                 let last_updated_at = s.effective_updated_at(cx);
                 match &s.kind {
-                    SessionKind::Term { layout: l, .. } => {
-                        let layout = pane_to_state(l, cx);
-                        let mut ids = Vec::new();
-                        collect_leaf_ids(l, &mut ids);
-                        let active = ids.iter().position(|x| *x == s.anchor_id()).unwrap_or(0);
+                    SessionKind::Term { dock, active } => {
+                        // 树里一格都没有不会发生：关掉最后一格就关整个会话。真碰上了退回活动终端。
+                        let layout = dock
+                            .pane_state(cx)
+                            .unwrap_or_else(|| crate::term_dock::pane_leaf_state(active, cx));
+                        let active = dock
+                            .leaves()
+                            .iter()
+                            .position(|leaf| leaf == active)
+                            .unwrap_or(0);
                         SessionState {
                             layout,
                             active,

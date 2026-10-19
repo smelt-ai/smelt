@@ -1,4 +1,5 @@
-//! 分屏用 gpui-base 的面板组，分隔条换成和侧栏同一根发丝。
+//! 面板里的左右拆分（Git 面板的提交列表和详情）用 gpui-base 的面板组，分隔条换成
+//! 和侧栏同一根发丝。终端分屏走 Dock，见 `term_dock`。
 //!
 //! 组件库悬停时只在中间亮一小段药丸。侧栏是整根从 `border_dim` 亮到 `text_faint`。
 //! 命中和拖拽仍由组件库负责；这里只换画上去的那一根，面板上不再另叠一条边。
@@ -12,10 +13,6 @@ use crate::ui_theme;
 
 pub(crate) fn h_resizable(id: impl Into<ElementId>) -> ResizablePanelGroup {
     gpui_base::h_resizable(id).with_handle_appearance(hairline_handle())
-}
-
-pub(crate) fn v_resizable(id: impl Into<ElementId>) -> ResizablePanelGroup {
-    gpui_base::v_resizable(id).with_handle_appearance(hairline_handle())
 }
 
 /// 整根发丝。静止是 `border_dim`，指针在带上、按下或拖拽时换成 `text_faint`。
