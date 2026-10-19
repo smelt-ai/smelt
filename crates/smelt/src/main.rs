@@ -20,6 +20,7 @@ pub(crate) use smelt_ui::ui_theme;
 pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
+mod conversation_layout;
 mod desktop_view;
 mod dir_picker;
 mod dock;
@@ -1036,6 +1037,8 @@ enum SessionKind {
 struct Session {
     /// 只用于把运行时 UI 快照稳定地绑到 session；拖拽排序和活动 pane 变化都不改它。
     ui_id: u64,
+    /// 对话的稳定 id：跨进程、跨设备都认它。运行时目录和客户端存的界面状态都按它对上。
+    conversation_id: String,
     kind: SessionKind,
     /// 最近一次会话内容或运行状态变化的 unix 秒时间戳。
     last_updated_at: u64,
@@ -1066,6 +1069,7 @@ impl Session {
     ) -> Self {
         Self {
             ui_id: next_session_ui_id(),
+            conversation_id: new_conversation_id(),
             kind: SessionKind::Term {
                 dock: term_dock::TermDock::single(view.clone(), window, cx),
                 active: view,
@@ -1304,7 +1308,7 @@ impl Session {
             status: self.status(cx),
             updated_at: self.effective_updated_at(cx),
             cwd: self.cwd(cx),
-            session_id: live_session_persist_id(self, cx),
+            session_id: live_daemon_session_id(self, cx),
             icon: self.agent_icon_id(cx),
             model: self
                 .active_acp()
@@ -1378,6 +1382,8 @@ fn next_session_ui_id() -> u64 {
 enum RenameTarget {
     Session(usize),
     Pane(Entity<TerminalView>),
+    /// 侧栏和机器面板里一台远程机器的名字，只在这台电脑上生效。
+    Runtime(String),
     History {
         agent: settings::HistorySourceKind,
         profile_id: Option<String>,
@@ -1513,23 +1519,137 @@ enum SidebarDrag {
     Project(ProjectRef),
 }
 
-/// 单个会话的持久化镜像：分屏树 + 会话内活动叶子（遍历序）+ 用户重命名过的会话名。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// 单个会话（侧栏一条、一段对话）的持久化镜像。
+///
+/// 存档分两处（设计文档 D1）：对话 id、有哪些终端、ACP 会话这些进运行时的工作区目录，
+/// 见 [`SessionStateWire`]；终端怎么分屏、当前看哪个、右侧 route 存在客户端库，读回来
+/// 时由 `workspace_persist` 按对话 id 填进 `layout` / `active` / `route`。
+#[derive(Clone)]
 pub(crate) struct SessionState {
+    /// 对话的稳定 id：新建时生成，之后不再变。客户端按它存这段对话的界面状态。
+    id: String,
+    /// 分屏树。刚从运行时读回来、客户端库还没填之前，是终端的默认摆法。
     layout: PaneState,
+    /// 当前看的终端在 `layout` 里的位置（深度优先序）。
     active: usize,
-    /// 最近一次会话内容变化的 unix 秒时间戳；旧存档缺失时按当前时间迁移。
+    /// 最近一次会话内容变化的 unix 秒时间戳。
+    last_updated_at: u64,
+    custom_title: Option<String>,
+    /// Some = ACP 消息流会话（layout 只是占位叶子）。恢复时建占位视图（会话进程不持久化，
+    /// 见方案「已知不做」）。
+    acp: Option<AcpSaved>,
+    /// 右侧 route，存在客户端库。
+    route: Option<SessionRouteArchive>,
+}
+
+/// 运行时工作区目录里的一段对话：对话 id、有哪些终端（按顺序）、ACP 会话。分屏和当前看
+/// 哪个归客户端，不交给运行时。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionStateWire {
+    #[serde(default)]
+    id: String,
     #[serde(default = "unix_now_secs")]
     last_updated_at: u64,
     #[serde(default)]
     custom_title: Option<String>,
-    /// Some = ACP 消息流会话（layout 只是占位叶子，旧版 smelt 读到会降级开普通
-    /// 终端，不炸档）。恢复时建占位视图（会话进程不持久化，见方案「已知不做」）。
+    #[serde(default)]
+    terminals: Vec<TerminalSaved>,
     #[serde(default)]
     acp: Option<AcpSaved>,
-    /// 右侧 route 自己拥有的跨进程存档；旧 workspace 没有时沿用全局默认布局。
+}
+
+/// 对话里的一个终端在运行时目录里的样子。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TerminalSaved {
     #[serde(default)]
-    route: Option<SessionRouteArchive>,
+    id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
+    #[serde(default)]
+    launch_label: Option<String>,
+    #[serde(default)]
+    launch_cmd: Option<String>,
+}
+
+impl serde::Serialize for SessionState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // ACP 会话的 layout 只是占位叶子，不是终端。
+        let terminals = if self.acp.is_some() {
+            Vec::new()
+        } else {
+            conversation_layout::terminals_of(&self.layout)
+                .into_iter()
+                .filter_map(|leaf| match leaf {
+                    PaneState::Leaf {
+                        cwd,
+                        id,
+                        custom_title,
+                        launch_label,
+                        launch_cmd,
+                    } => Some(TerminalSaved {
+                        id,
+                        cwd,
+                        custom_title,
+                        launch_label,
+                        launch_cmd,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        };
+        let wire = SessionStateWire {
+            id: self.id.clone(),
+            last_updated_at: self.last_updated_at,
+            custom_title: self.custom_title.clone(),
+            terminals,
+            acp: self.acp.clone(),
+        };
+        <SessionStateWire as serde::Serialize>::serialize(&wire, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SessionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <SessionStateWire as serde::Deserialize>::deserialize(deserializer)?;
+        let layout = match &wire.acp {
+            Some(acp) => PaneState::Leaf {
+                cwd: acp.cwd.clone(),
+                id: None,
+                custom_title: None,
+                launch_label: None,
+                launch_cmd: None,
+            },
+            None => conversation_layout::default_layout(
+                wire.terminals
+                    .into_iter()
+                    .map(|terminal| PaneState::Leaf {
+                        cwd: terminal.cwd,
+                        id: terminal.id,
+                        custom_title: terminal.custom_title,
+                        launch_label: terminal.launch_label,
+                        launch_cmd: terminal.launch_cmd,
+                    })
+                    .collect(),
+            ),
+        };
+        Ok(Self {
+            id: wire.id,
+            layout,
+            active: 0,
+            last_updated_at: wire.last_updated_at,
+            custom_title: wire.custom_title,
+            acp: wire.acp,
+            route: None,
+        })
+    }
 }
 
 /// ACP 会话的存档元数据。agent session store 是消息历史的唯一持久化来源；Smelt
@@ -1726,6 +1846,8 @@ pub(crate) enum CloseConfirm {
         title: String,
         pane: Option<Entity<TerminalView>>,
     },
+    /// 移除一台远程机器：这台电脑不再连它。
+    Runtime { runtime_id: String, name: String },
 }
 
 /// 侧栏的一个项目分组。**身份是 root（路径），不是 label**——两个不同目录的末段名
@@ -1982,24 +2104,20 @@ pub(crate) fn pane_state_leaf_ids(pane: &PaneState) -> Vec<String> {
     }
 }
 
-/// 存档里一段会话的稳定身份：ACP 用 `sid`，终端用活动叶子的 smeltd id。
-/// 活动项必须按这个认人，不能按数组下标——ACP 先恢复、终端后到时下标会对到别人。
+/// 存档里一段会话的稳定身份：对话 id。活动项必须按这个认人，不能按数组下标——ACP 先
+/// 恢复、终端后到时下标会对到别人。
 pub(crate) fn session_state_persist_id(state: &SessionState) -> Option<String> {
-    if let Some(sid) = state
-        .acp
-        .as_ref()
-        .and_then(|acp| acp.sid.as_deref())
-        .filter(|sid| !sid.is_empty())
-    {
-        return Some(sid.to_string());
-    }
-    let ids = pane_state_leaf_ids(&state.layout);
-    ids.get(state.active)
-        .cloned()
-        .or_else(|| ids.into_iter().next())
+    (!state.id.is_empty()).then(|| state.id.clone())
 }
 
-pub(crate) fn live_session_persist_id(session: &Session, cx: &App) -> Option<String> {
+/// 新对话的稳定 id。
+pub(crate) fn new_conversation_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// 会话当前在守护里的会话 id：ACP 是对话进程，终端是活动的那一格。侧栏、通知按它找进程；
+/// 落盘认人用对话 id（[`Session::conversation_id`]），不用它。
+pub(crate) fn live_daemon_session_id(session: &Session, cx: &App) -> Option<String> {
     let id = match &session.kind {
         SessionKind::Conversation(view) => view.read(cx).session_id().to_string(),
         SessionKind::Term { active, .. } => active.read(cx).session_id().to_string(),
@@ -2239,13 +2357,14 @@ struct Workspace {
     /// 所有会话；每个会话 = 一棵独立分屏树 + 会话内活动 pane。
     sessions: Vec<Session>,
     /// 当前活动会话的**运行时下标**（主区显示它、侧栏高亮它）。
-    /// 跨进程身份在 `saved_active_session_id` / 各会话 sid，不能靠这个下标落盘认人。
+    /// 跨进程身份在 `saved_active_session_id` / 各会话的对话 id，不能靠这个下标落盘认人。
     active_session: usize,
-    /// 冷启动要恢复的活动会话稳定 id。恢复完成前 `active_session` 还不是活列表下标。
+    /// 冷启动要恢复的活动会话（对话 id）。恢复完成前 `active_session` 还不是活列表下标。
     saved_active_session_id: Option<String>,
-    /// 客户端库里记着、还没认领的会话界面路由。运行时的目录到了，按会话 id 填回待恢复
-    /// 的会话；目录还没到的运行时，保存时原样写回。
-    saved_session_routes: HashMap<workspace_persist::SessionRouteKey, SessionRouteArchive>,
+    /// 客户端库里记着、还没认领的对话界面状态（分屏、当前终端、右侧 route）。运行时的目录
+    /// 到了，按对话 id 填回待恢复的会话；目录还没到的运行时，保存时原样写回。
+    saved_conversation_ui:
+        HashMap<workspace_persist::ConversationKey, workspace_persist::SavedConversationUi>,
     /// 一级 Tab：智能体 / 自动化 / 任务 / 会话。
     nav: WorkspaceNav,
     /// 智能体 / 自动化各自持有编辑器和瞬时错误；Workspace 只组合，不理解控件。
@@ -2454,6 +2573,8 @@ struct Workspace {
     pi_config_error: Option<String>,
     /// 读取的代数：晚回来的旧读取不能盖掉更新的快照。
     pi_config_generation: u64,
+    /// 能力库在配哪台机器，以及那台机器（不是本机时）的快照。
+    pi_library: settings::PiLibrary,
     /// 交互式原生 Pi 模型表单错误。
     pi_model_editor_error: Option<String>,
     /// 正在等二次确认删除的插件 id。
@@ -3050,6 +3171,7 @@ impl Workspace {
             pi_mcp_error: None,
             pi_config: None,
             pi_config_error: None,
+            pi_library: Default::default(),
             pi_config_generation: 0,
             pi_model_editor_error: None,
             pi_plugin_pending_delete: None,
@@ -3102,7 +3224,7 @@ impl Workspace {
             session_manager_tombstones: HashSet::new(),
             workspace_window_active: false,
             saved_active_session_id,
-            saved_session_routes: workspace_persist::load_session_routes(),
+            saved_conversation_ui: workspace_persist::load_conversation_ui(),
             _remote_sessions_sub: None,
             _runtime_hub_sub: None,
             _agent_host_sub: None,
@@ -3440,6 +3562,7 @@ impl Workspace {
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
+            conversation_id: new_conversation_id(),
             kind: SessionKind::Conversation(view),
             last_updated_at: unix_now_secs(),
             custom_title: stored_title
@@ -4008,8 +4131,7 @@ fn placeholder_view(text: &str, muted: Hsla) -> Div {
 
 /// 旧存档没记 agent 种类时，从启动命令反推一把（命令里出现过 copilot / codex
 /// 字样就归给它们）；认不出当 Claude——多 agent 之前的存档只可能是它。判断本体
-/// 是 `ConversationAgentKind::from_command_loose`，跟 `smelt_remote_gateway::agent_from_launch`
-/// （mobile 网关展示名）共用同一份「命令里出现哪家关键字就算哪家」逻辑。
+/// 是 `ConversationAgentKind::from_command_loose`。
 fn acp_agent_from_cmd(cmd: &str) -> settings::ConversationAgentKind {
     settings::ConversationAgentKind::from_command_loose(cmd)
         .unwrap_or(settings::ConversationAgentKind::Claude)

@@ -86,14 +86,18 @@ impl ProjectKey {
     }
 }
 
-/// 一个会话的界面路由：舞台覆盖页、工具面板、文件树、Git 页的开合与选中。枚举类字段
-/// 存 serde 名，由界面转换。路径列表按原顺序存取。
+/// 一段对话在这台设备上的界面状态：终端怎么分屏、当前看哪个，舞台覆盖页、工具面板、
+/// 文件树、Git 页的开合与选中。枚举类字段存 serde 名，由界面转换。路径列表按原顺序存取。
 #[derive(Clone, Debug, PartialEq)]
-pub struct SessionRouteRecord {
+pub struct ConversationRouteRecord {
     /// `None` 是本机运行时。
     pub runtime_id: Option<String>,
-    /// 会话的稳定 id：对话的 sid，终端是活动叶子在守护里的 id。
-    pub session_id: String,
+    /// 对话的稳定 id，和运行时工作区目录里的一致。
+    pub conversation_id: String,
+    /// 当前看的终端（守护里的会话 id）。
+    pub active_terminal_id: Option<String>,
+    /// 终端的分屏布局。格式归界面定义并带版本号，这里只当一段 JSON 存取。
+    pub dock_layout: Option<String>,
     pub stage_cover: Option<String>,
     pub tool_panel_tab: String,
     pub tool_panel_open: bool,
@@ -115,6 +119,7 @@ pub struct SessionRouteRecord {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceUiRecord {
     pub active_session: usize,
+    /// 当前看的那段对话的稳定 id。
     pub active_session_id: Option<String>,
     pub route: String,
     pub selected_agent_id: Option<String>,
@@ -327,7 +332,7 @@ fn read_project_list(connection: &Connection, table: &str) -> Result<Vec<Project
     rows.collect::<Result<_, _>>().map_err(sql)
 }
 
-/// 会话路由里的几类路径列表，在 `session_route_path.kind` 里的名字。
+/// 对话界面状态里的几类路径列表，在 `conversation_route_path.kind` 里的名字。
 const ROUTE_PATH_KINDS: [&str; 4] = [
     "expanded",
     "pinned_root",
@@ -335,7 +340,7 @@ const ROUTE_PATH_KINDS: [&str; 4] = [
     "git_tree_collapsed",
 ];
 
-fn route_paths<'a>(record: &'a SessionRouteRecord, kind: &str) -> &'a [String] {
+fn route_paths<'a>(record: &'a ConversationRouteRecord, kind: &str) -> &'a [String] {
     match kind {
         "expanded" => &record.expanded,
         "pinned_root" => &record.pinned_roots,
@@ -344,7 +349,7 @@ fn route_paths<'a>(record: &'a SessionRouteRecord, kind: &str) -> &'a [String] {
     }
 }
 
-fn route_paths_mut<'a>(record: &'a mut SessionRouteRecord, kind: &str) -> &'a mut Vec<String> {
+fn route_paths_mut<'a>(record: &'a mut ConversationRouteRecord, kind: &str) -> &'a mut Vec<String> {
     match kind {
         "expanded" => &mut record.expanded,
         "pinned_root" => &mut record.pinned_roots,
@@ -353,24 +358,26 @@ fn route_paths_mut<'a>(record: &'a mut SessionRouteRecord, kind: &str) -> &'a mu
     }
 }
 
-fn write_session_routes(
+fn write_conversation_routes(
     connection: &Connection,
-    records: &[SessionRouteRecord],
+    records: &[ConversationRouteRecord],
 ) -> Result<(), String> {
     connection
-        .execute_batch("DELETE FROM session_route_path; DELETE FROM session_route;")
+        .execute_batch("DELETE FROM conversation_route_path; DELETE FROM conversation_route;")
         .map_err(sql)?;
     let mut route = connection
         .prepare(
-            "INSERT OR REPLACE INTO session_route (runtime_id, session_id, stage_cover,
-               tool_panel_tab, tool_panel_open, tool_panel_w, file_tree_selected, open_file_path,
-               file_tree_w, file_tree_open, git_tab, diff_split, diff_scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT OR REPLACE INTO conversation_route (runtime_id, conversation_id,
+               active_terminal_id, dock_layout, stage_cover, tool_panel_tab, tool_panel_open,
+               tool_panel_w, file_tree_selected, open_file_path, file_tree_w, file_tree_open,
+               git_tab, diff_split, diff_scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )
         .map_err(sql)?;
     let mut path = connection
         .prepare(
-            "INSERT OR IGNORE INTO session_route_path (runtime_id, session_id, kind, path, position)
+            "INSERT OR IGNORE INTO conversation_route_path
+               (runtime_id, conversation_id, kind, path, position)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .map_err(sql)?;
@@ -379,7 +386,9 @@ fn write_session_routes(
         route
             .execute(params![
                 runtime_id,
-                record.session_id,
+                record.conversation_id,
+                record.active_terminal_id,
+                record.dock_layout,
                 record.stage_cover,
                 record.tool_panel_tab,
                 record.tool_panel_open,
@@ -397,7 +406,7 @@ fn write_session_routes(
             for (position, item) in route_paths(record, kind).iter().enumerate() {
                 path.execute(params![
                     runtime_id,
-                    record.session_id,
+                    record.conversation_id,
                     kind,
                     item,
                     position as i64
@@ -409,36 +418,40 @@ fn write_session_routes(
     Ok(())
 }
 
-fn read_session_routes(connection: &Connection) -> Result<Vec<SessionRouteRecord>, String> {
+fn read_conversation_routes(
+    connection: &Connection,
+) -> Result<Vec<ConversationRouteRecord>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT runtime_id, session_id, stage_cover, tool_panel_tab, tool_panel_open,
-               tool_panel_w, file_tree_selected, open_file_path, file_tree_w, file_tree_open,
-               git_tab, diff_split, diff_scope
-             FROM session_route ORDER BY runtime_id, session_id",
+            "SELECT runtime_id, conversation_id, active_terminal_id, dock_layout, stage_cover,
+               tool_panel_tab, tool_panel_open, tool_panel_w, file_tree_selected, open_file_path,
+               file_tree_w, file_tree_open, git_tab, diff_split, diff_scope
+             FROM conversation_route ORDER BY runtime_id, conversation_id",
         )
         .map_err(sql)?;
     let mut records = statement
         .query_map([], |row| {
             let runtime_id: String = row.get(0)?;
-            Ok(SessionRouteRecord {
+            Ok(ConversationRouteRecord {
                 runtime_id: (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id),
-                session_id: row.get(1)?,
-                stage_cover: row.get(2)?,
-                tool_panel_tab: row.get(3)?,
-                tool_panel_open: row.get(4)?,
-                tool_panel_w: row.get(5)?,
+                conversation_id: row.get(1)?,
+                active_terminal_id: row.get(2)?,
+                dock_layout: row.get(3)?,
+                stage_cover: row.get(4)?,
+                tool_panel_tab: row.get(5)?,
+                tool_panel_open: row.get(6)?,
+                tool_panel_w: row.get(7)?,
                 expanded: Vec::new(),
-                file_tree_selected: row.get(6)?,
-                open_file_path: row.get(7)?,
-                file_tree_w: row.get(8)?,
-                file_tree_open: row.get(9)?,
+                file_tree_selected: row.get(8)?,
+                open_file_path: row.get(9)?,
+                file_tree_w: row.get(10)?,
+                file_tree_open: row.get(11)?,
                 pinned_roots: Vec::new(),
                 collapsed_roots: Vec::new(),
-                git_tab: row.get(10)?,
-                diff_split: row.get(11)?,
+                git_tab: row.get(12)?,
+                diff_split: row.get(13)?,
                 git_tree_collapsed: Vec::new(),
-                diff_scope: row.get(12)?,
+                diff_scope: row.get(14)?,
             })
         })
         .map_err(sql)?
@@ -446,8 +459,8 @@ fn read_session_routes(connection: &Connection) -> Result<Vec<SessionRouteRecord
         .map_err(sql)?;
     let mut paths = connection
         .prepare(
-            "SELECT runtime_id, session_id, kind, path FROM session_route_path
-             ORDER BY runtime_id, session_id, kind, position",
+            "SELECT runtime_id, conversation_id, kind, path FROM conversation_route_path
+             ORDER BY runtime_id, conversation_id, kind, position",
         )
         .map_err(sql)?;
     let rows = paths
@@ -461,12 +474,11 @@ fn read_session_routes(connection: &Connection) -> Result<Vec<SessionRouteRecord
         })
         .map_err(sql)?;
     for row in rows {
-        let (runtime_id, session_id, kind, path) = row.map_err(sql)?;
+        let (runtime_id, conversation_id, kind, path) = row.map_err(sql)?;
         let runtime_id = (runtime_id != LOCAL_RUNTIME_ID).then_some(runtime_id);
-        if let Some(record) = records
-            .iter_mut()
-            .find(|record| record.runtime_id == runtime_id && record.session_id == session_id)
-        {
+        if let Some(record) = records.iter_mut().find(|record| {
+            record.runtime_id == runtime_id && record.conversation_id == conversation_id
+        }) {
             route_paths_mut(record, &kind).push(path);
         }
     }
@@ -755,16 +767,16 @@ impl ClientStore {
     }
 
     #[track_caller]
-    pub fn session_routes(&self) -> Result<Vec<SessionRouteRecord>, ClientStoreError> {
-        self.with(|connection| read_session_routes(connection))
+    pub fn conversation_routes(&self) -> Result<Vec<ConversationRouteRecord>, ClientStoreError> {
+        self.with(|connection| read_conversation_routes(connection))
     }
 
-    /// 整份换掉：不在里面的会话（关掉了）的路由一并删掉。
-    pub fn put_session_routes(
+    /// 整份换掉：不在里面的对话（关掉了）的界面状态一并删掉。
+    pub fn put_conversation_routes(
         &self,
-        records: &[SessionRouteRecord],
+        records: &[ConversationRouteRecord],
     ) -> Result<(), ClientStoreError> {
-        self.write(|connection| write_session_routes(connection, records))
+        self.write(|connection| write_conversation_routes(connection, records))
     }
 
     #[track_caller]

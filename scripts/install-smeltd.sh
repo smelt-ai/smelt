@@ -54,6 +54,10 @@ FLAGS=()
 ((PAIR)) || FLAGS+=(--no-pair)
 
 say() { echo "==> $*"; }
+
+# 新开的机器上常有自动更新或初始化脚本正在跑 apt，占着 dpkg 的锁。等它放锁（最多 10 分钟），
+# 不要一见锁就失败。
+apt_get() { apt-get -o DPkg::Lock::Timeout=600 "$@"; }
 warn() { echo "install.sh：$*" >&2; }
 die() { warn "$*"; exit 1; }
 
@@ -91,7 +95,7 @@ install_browser() {
         curl -fsSL --retry 3 -o "$download/chrome.deb" \
           https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
         # 包里自带 Google 的 apt 源，以后跟着 apt upgrade 升级。
-        apt-get install -y --no-install-recommends "$download/chrome.deb"
+        apt_get install -y --no-install-recommends "$download/chrome.deb"
         rm -rf "$download"
       fi
       policy_dir=/etc/opt/chrome/policies/managed
@@ -102,7 +106,7 @@ install_browser() {
       fi
       if [[ -n "$(missing_packages chromium)" ]]; then
         say "安装 Chromium"
-        apt-get install -y --no-install-recommends chromium
+        apt_get install -y --no-install-recommends chromium
       fi
       policy_dir=/etc/chromium/policies/managed
       ;;
@@ -124,8 +128,8 @@ system_phase() {
   if ((${#missing[@]})); then
     say "安装系统包：${missing[*]}"
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y --no-install-recommends "${missing[@]}"
+    apt_get update -qq
+    apt_get install -y --no-install-recommends "${missing[@]}"
   fi
   ((WITH_DESKTOP)) && install_browser
   return 0

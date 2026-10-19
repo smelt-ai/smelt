@@ -56,34 +56,27 @@ pub enum WorkspaceCatalogCommit {
     },
 }
 
+/// 一段对话：侧栏里的一条。里面有哪些终端、是不是一段 ACP 对话归运行时；终端怎么分屏、
+/// 当前看的是哪个，是每台设备自己的界面状态，归客户端（设计文档 D1）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceSessionRecord {
+    /// 对话的稳定 id，由新建它的客户端生成，之后不再变。客户端按它存这段对话的界面状态。
+    pub id: String,
     pub custom_title: Option<String>,
     pub last_updated_at: i64,
-    pub active: usize,
-    pub layout: WorkspaceLayoutNode,
+    /// 这段对话里的终端，按客户端给的顺序。
+    pub terminals: Vec<WorkspaceTerminalRecord>,
     pub acp: Option<WorkspaceAcpRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum WorkspaceLayoutNode {
-    Leaf {
-        cwd: Option<String>,
-        id: Option<String>,
-        custom_title: Option<String>,
-        launch_label: Option<String>,
-        launch_cmd: Option<String>,
-    },
-    Split {
-        vertical: bool,
-        children: Vec<WorkspaceLayoutNode>,
-        sizes: Vec<f64>,
-    },
-    /// 叠在同一格里的几个终端，一次显示一个。只有一个终端的格子直接写成 `Leaf`。
-    Tabs {
-        active: usize,
-        children: Vec<WorkspaceLayoutNode>,
-    },
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceTerminalRecord {
+    /// 守护里的终端会话 id；还没起过的终端没有。
+    pub id: Option<String>,
+    pub cwd: Option<String>,
+    pub custom_title: Option<String>,
+    pub launch_label: Option<String>,
+    pub launch_cmd: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -13,7 +13,7 @@ use smelt_runtime_client::protocol::workspace::{
 
 use std::collections::HashMap;
 
-use smelt_client_store::{ProjectKey, SessionRouteRecord};
+use smelt_client_store::{ConversationRouteRecord, ProjectKey};
 
 use crate::runtimes::Runtime;
 use crate::{
@@ -194,11 +194,16 @@ pub(crate) fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize
             if session.route.is_none() {
                 session.route = Some(legacy_route.clone());
             }
+            // 运行时目录里的对话都带 id；没有的（读不出 id 的旧存档）从这里起才有。
+            if session.id.is_empty() {
+                session.id = crate::new_conversation_id();
+            }
         }
         (sessions, s.active_session)
     } else if let Some(ps) = &s.layout {
         (
             vec![SessionState {
+                id: crate::new_conversation_id(),
                 layout: ps.clone(),
                 active: s.active,
                 last_updated_at: unix_now_secs(),
@@ -213,6 +218,7 @@ pub(crate) fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize
             s.tabs
                 .iter()
                 .map(|cwd| SessionState {
+                    id: crate::new_conversation_id(),
                     layout: PaneState::Leaf {
                         cwd: cwd.clone(),
                         id: None,
@@ -249,6 +255,7 @@ pub(crate) fn normalize_saved_sessions(s: &WsState) -> (Vec<SessionState>, usize
         let mut acp = run.acp.clone();
         acp.agent_definition_id = Some(run.definition_id.clone());
         sessions.push(SessionState {
+            id: crate::new_conversation_id(),
             layout: PaneState::Leaf {
                 cwd: acp.cwd.clone(),
                 id: None,
@@ -404,8 +411,47 @@ impl WorkspaceUiState {
     }
 }
 
-/// 会话路由在客户端库里的身份：哪个运行时上的哪个会话。
-pub(crate) type SessionRouteKey = (RuntimeKey, String);
+/// 一段对话在客户端库里的身份：哪个运行时上的哪段对话（对话 id）。
+pub(crate) type ConversationKey = (RuntimeKey, String);
+
+/// 客户端存的一段对话的界面状态（设计文档 D1）：终端怎么分屏、当前看哪个，右侧 route。
+#[derive(Clone, Default)]
+pub(crate) struct SavedConversationUi {
+    pub(crate) route: SessionRouteArchive,
+    /// 分屏布局，格式见 [`crate::conversation_layout`]。ACP 对话没有。
+    pub(crate) dock_layout: Option<String>,
+    pub(crate) active_terminal_id: Option<String>,
+}
+
+impl SavedConversationUi {
+    /// 一段还没恢复上来、或恢复失败的会话现在的样子。
+    fn of_state(state: &SessionState) -> Self {
+        let is_terminal = state.acp.is_none();
+        Self {
+            route: state.route.clone().unwrap_or_default(),
+            dock_layout: is_terminal
+                .then(|| crate::conversation_layout::encode(&state.layout))
+                .flatten(),
+            active_terminal_id: is_terminal
+                .then(|| crate::conversation_layout::terminal_id_at(&state.layout, state.active))
+                .flatten(),
+        }
+    }
+
+    /// 把它填回刚从运行时读回来的会话：终端按存下的布局摆，以运行时的终端为准。
+    fn apply_to(self, state: &mut SessionState) {
+        state.route = Some(self.route);
+        if state.acp.is_none() {
+            let terminals = crate::conversation_layout::terminals_of(&state.layout);
+            state.layout =
+                crate::conversation_layout::restore(self.dock_layout.as_deref(), terminals);
+            state.active = crate::conversation_layout::terminal_position(
+                &state.layout,
+                self.active_terminal_id.as_deref(),
+            );
+        }
+    }
+}
 
 fn sorted_paths(paths: &std::collections::HashSet<String>) -> Vec<String> {
     let mut paths: Vec<String> = paths.iter().cloned().collect();
@@ -413,11 +459,17 @@ fn sorted_paths(paths: &std::collections::HashSet<String>) -> Vec<String> {
     paths
 }
 
-fn route_record(key: &SessionRouteKey, route: &SessionRouteArchive) -> SessionRouteRecord {
+fn conversation_record(
+    key: &ConversationKey,
+    saved: &SavedConversationUi,
+) -> ConversationRouteRecord {
     use crate::settings::enum_name;
-    SessionRouteRecord {
+    let route = &saved.route;
+    ConversationRouteRecord {
         runtime_id: project_key(&key.0, "").runtime_id,
-        session_id: key.1.clone(),
+        conversation_id: key.1.clone(),
+        active_terminal_id: saved.active_terminal_id.clone(),
+        dock_layout: saved.dock_layout.clone(),
         stage_cover: route.stage_cover.as_ref().map(enum_name),
         tool_panel_tab: enum_name(&route.tool_panel_tab),
         tool_panel_open: route.tool_panel_open,
@@ -437,7 +489,9 @@ fn route_record(key: &SessionRouteKey, route: &SessionRouteArchive) -> SessionRo
 }
 
 /// 认不出的枚举名（别的版本写的）用出厂值。
-fn route_from_record(record: SessionRouteRecord) -> (SessionRouteKey, SessionRouteArchive) {
+fn conversation_from_record(
+    record: ConversationRouteRecord,
+) -> (ConversationKey, SavedConversationUi) {
     use crate::settings::enum_from_name;
     let defaults = SessionRouteArchive::default();
     let runtime = record
@@ -462,15 +516,22 @@ fn route_from_record(record: SessionRouteRecord) -> (SessionRouteKey, SessionRou
         diff_scope: enum_from_name(&record.diff_scope).unwrap_or(defaults.diff_scope),
         ..defaults
     };
-    ((runtime, record.session_id), route)
+    (
+        (runtime, record.conversation_id),
+        SavedConversationUi {
+            route,
+            dock_layout: record.dock_layout,
+            active_terminal_id: record.active_terminal_id,
+        },
+    )
 }
 
-/// 启动时同步读各会话的界面路由（客户端库，本地，很快）。
-pub(crate) fn load_session_routes() -> HashMap<SessionRouteKey, SessionRouteArchive> {
-    match smelt_client_store::client_store().and_then(|store| store.session_routes()) {
-        Ok(records) => records.into_iter().map(route_from_record).collect(),
+/// 启动时同步读各对话的界面状态（客户端库，本地，很快）。
+pub(crate) fn load_conversation_ui() -> HashMap<ConversationKey, SavedConversationUi> {
+    match smelt_client_store::client_store().and_then(|store| store.conversation_routes()) {
+        Ok(records) => records.into_iter().map(conversation_from_record).collect(),
         Err(error) => {
-            eprintln!("[workspace] 读取会话界面状态失败，使用默认值：{error}");
+            eprintln!("[workspace] 读取对话界面状态失败，使用默认值：{error}");
             HashMap::new()
         }
     }
@@ -584,10 +645,10 @@ impl WorkspaceCatalogSync {
 struct SnapshotJob {
     runtime: Runtime,
     /// 客户端界面状态只有一份，跟本机那份目录一起写；各会话的路由同。
-    ui: Option<(WorkspaceUiState, Vec<SessionRouteRecord>)>,
+    ui: Option<(WorkspaceUiState, Vec<ConversationRouteRecord>)>,
     document: serde_json::Value,
     catalog: WorkspaceCatalogSync,
-    /// 同步发给 smeltd 的侧栏菜单。网关只消费 daemon 订阅，不读工作区快照。
+    /// 同步发给 smeltd 的侧栏菜单。远程客户端只消费 daemon 订阅，不读工作区快照。
     menu: smelt_model::workspace_menu::WorkspaceMenuSnapshot,
 }
 
@@ -643,10 +704,10 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> Option<String> {
         if let Err(error) = save_workspace_ui(ui) {
             eprintln!("[workspace] 保存界面状态失败：{error}");
         }
-        if let Err(error) =
-            smelt_client_store::client_store().and_then(|store| store.put_session_routes(routes))
+        if let Err(error) = smelt_client_store::client_store()
+            .and_then(|store| store.put_conversation_routes(routes))
         {
-            eprintln!("[workspace] 保存会话界面状态失败：{error}");
+            eprintln!("[workspace] 保存对话界面状态失败：{error}");
         }
     }
     let mut notice = None;
@@ -862,16 +923,17 @@ impl Workspace {
             state.active_session_id = self.saved_active_session_id.clone();
         }
         let (mut pending, active) = normalize_saved_sessions(&state);
-        // 会话的界面路由存在客户端：按会话 id 填回来。这个运行时剩下没认领的是关掉的
-        // 会话留下的，丢掉。
+        // 对话的界面状态（分屏、当前看哪个、右侧 route）存在客户端：按对话 id 填回来。
+        // 这个运行时剩下没认领的是关掉的对话留下的，丢掉。
         for session in &mut pending {
-            if let Some(id) = crate::session_state_persist_id(session)
-                && let Some(route) = self.saved_session_routes.remove(&(key.clone(), id))
+            if let Some(saved) = self
+                .saved_conversation_ui
+                .remove(&(key.clone(), session.id.clone()))
             {
-                session.route = Some(route);
+                saved.apply_to(session);
             }
         }
-        self.saved_session_routes
+        self.saved_conversation_ui
             .retain(|(runtime, _), _| runtime != key);
         let saved_active_session_id = if is_local {
             state
@@ -1029,6 +1091,7 @@ impl Workspace {
                             .position(|leaf| leaf == active)
                             .unwrap_or(0);
                         SessionState {
+                            id: s.conversation_id.clone(),
                             layout,
                             active,
                             last_updated_at,
@@ -1040,7 +1103,8 @@ impl Workspace {
                     SessionKind::Conversation(view) => {
                         let v = view.read(cx);
                         SessionState {
-                            // 占位叶子：旧版 smelt 读到降级开普通终端，不炸档。
+                            id: s.conversation_id.clone(),
+                            // 占位叶子，ACP 对话不交终端给运行时。
                             layout: PaneState::Leaf {
                                 cwd: v.cwd(),
                                 id: None,
@@ -1077,8 +1141,7 @@ impl Workspace {
             active_session_id: self
                 .sessions
                 .get(self.active_session)
-                .and_then(|session| crate::live_session_persist_id(session, cx))
-                .filter(|id| !id.is_empty())
+                .map(|session| session.conversation_id.clone())
                 .or_else(|| self.saved_active_session_id.clone())
                 .filter(|id| !id.is_empty()),
             route: self.nav.persist(),
@@ -1093,7 +1156,7 @@ impl Workspace {
         let ui = (*key == RuntimeKey::Local).then(|| {
             (
                 self.workspace_ui_state(&state),
-                self.session_route_records(cx),
+                self.conversation_route_records(cx),
             )
         });
         let document = serde_json::to_value(catalog_document(state)).ok()?;
@@ -1129,38 +1192,54 @@ impl Workspace {
         ui
     }
 
-    /// 各会话的界面路由：开着的会话、还没恢复上来的会话，以及目录还没读到的运行时上
-    /// 记着的那些（不能因为它离线就把路由冲掉）。
-    fn session_route_records(&self, cx: &App) -> Vec<SessionRouteRecord> {
-        let mut records: HashMap<SessionRouteKey, SessionRouteRecord> = HashMap::new();
-        for (key, route) in &self.saved_session_routes {
-            records.insert(key.clone(), route_record(key, route));
+    /// 各对话的界面状态：开着的、还没恢复上来的，以及目录还没读到的运行时上记着的那些
+    /// （不能因为它离线就把界面状态冲掉）。
+    fn conversation_route_records(&self, cx: &App) -> Vec<ConversationRouteRecord> {
+        let mut records: HashMap<ConversationKey, ConversationRouteRecord> = HashMap::new();
+        for (key, saved) in &self.saved_conversation_ui {
+            records.insert(key.clone(), conversation_record(key, saved));
         }
         for space_key in self.space_keys() {
             let Some(space) = self.space(&space_key) else {
                 continue;
             };
             for (_, session) in &space.restore_pending {
-                if let (Some(id), Some(route)) =
-                    (crate::session_state_persist_id(session), &session.route)
-                {
-                    let key = (space_key.clone(), id);
-                    records.insert(key.clone(), route_record(&key, route));
-                }
+                let key = (space_key.clone(), session.id.clone());
+                records.insert(
+                    key.clone(),
+                    conversation_record(&key, &SavedConversationUi::of_state(session)),
+                );
             }
         }
         for session in &self.sessions {
-            let Some(id) = crate::live_session_persist_id(session, cx).filter(|id| !id.is_empty())
-            else {
-                continue;
-            };
             let route = if self.ui_session_id == Some(session.ui_id) {
                 self.active_session_ui.archive()
             } else {
                 session.ui_state.archive()
             };
-            let key = (session.runtime(cx).key().clone(), id);
-            records.insert(key.clone(), route_record(&key, &route));
+            let (dock_layout, active_terminal_id) = match &session.kind {
+                SessionKind::Term { dock, active } => (
+                    dock.pane_state(cx)
+                        .and_then(|layout| crate::conversation_layout::encode(&layout)),
+                    Some(active.read(cx).session_id().to_string()).filter(|id| !id.is_empty()),
+                ),
+                SessionKind::Conversation(_) => (None, None),
+            };
+            let key = (
+                session.runtime(cx).key().clone(),
+                session.conversation_id.clone(),
+            );
+            records.insert(
+                key.clone(),
+                conversation_record(
+                    &key,
+                    &SavedConversationUi {
+                        route,
+                        dock_layout,
+                        active_terminal_id,
+                    },
+                ),
+            );
         }
         records.into_values().collect()
     }
@@ -1251,9 +1330,9 @@ mod workspace_snapshot_write_queue_tests {
 #[cfg(test)]
 mod agent_conversation_persist_tests {
     use super::{
-        RuntimeKey, WorkspaceUiState, WsState, catalog_document, persist_in_workspace_snapshot,
-        project_key, project_roots_of, route_from_record, route_record,
-        unproject_acp_when_remote_catalog_drops,
+        RuntimeKey, SavedConversationUi, WorkspaceUiState, WsState, catalog_document,
+        conversation_from_record, conversation_record, persist_in_workspace_snapshot, project_key,
+        project_roots_of, unproject_acp_when_remote_catalog_drops,
     };
     use std::path::PathBuf;
 
@@ -1310,7 +1389,7 @@ mod agent_conversation_persist_tests {
         let json = format!(
             r#"{{
                 "sessions": [{{
-                    "layout": {{"Leaf": {{"cwd": "{cwd}"}}}},
+                    "id": "conv-space",
                     "acp": {{
                         "sid": "acp-global-1",
                         "cwd": "{cwd}",
@@ -1333,6 +1412,7 @@ mod agent_conversation_persist_tests {
         .unwrap();
         let restored: WsState = serde_json::from_slice(&raw).expect("应读出智能体对话");
         assert_eq!(restored.sessions.len(), 1);
+        assert_eq!(restored.sessions[0].id, "conv-space");
         let acp = restored.sessions[0].acp.as_ref().expect("ACP 细节");
         assert_eq!(acp.cwd.as_deref(), Some(cwd));
         assert_eq!(acp.agent_definition_id.as_deref(), Some("space-agent"));
@@ -1372,9 +1452,10 @@ mod agent_conversation_persist_tests {
         assert_eq!(restored.active_session_id.as_deref(), Some("acp-1"));
     }
 
-    /// 会话路由存进客户端库再读回来一样不少；交给运行时的文档里不带路由。
+    /// 对话的界面状态存进客户端库再读回来一样不少；交给运行时的文档里只有对话 id 和
+    /// 终端，不带路由、分屏和当前看哪个。
     #[test]
-    fn session_routes_live_in_the_client_store() {
+    fn conversation_ui_lives_in_the_client_store() {
         let mut route = crate::SessionRouteArchive {
             stage_cover: Some(crate::StageCover::ToolPanel),
             tool_panel_tab: crate::tool_panel::ToolPanelTab::Git,
@@ -1390,25 +1471,38 @@ mod agent_conversation_persist_tests {
         };
         route.expanded.insert("/srv/app/src".into());
         route.git_tree_collapsed.insert("src".into());
-        let key = (RuntimeKey::Remote("rt-linux".into()), "acp-1".to_string());
+        let key = (RuntimeKey::Remote("rt-linux".into()), "conv-1".to_string());
+        let saved = SavedConversationUi {
+            route: route.clone(),
+            dock_layout: Some(r#"{"v":1,"center":{"terminal":"t-1"}}"#.into()),
+            active_terminal_id: Some("t-1".into()),
+        };
 
-        let (back_key, back) = route_from_record(route_record(&key, &route));
+        let (back_key, back) = conversation_from_record(conversation_record(&key, &saved));
         assert_eq!(back_key, key);
         assert_eq!(
-            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(&back.route).unwrap(),
             serde_json::to_value(&route).unwrap()
         );
+        assert_eq!(back.dock_layout, saved.dock_layout);
+        assert_eq!(back.active_terminal_id.as_deref(), Some("t-1"));
 
+        let leaf = |id: &str| crate::PaneState::Leaf {
+            cwd: Some("/srv/app".into()),
+            id: Some(id.into()),
+            custom_title: None,
+            launch_label: None,
+            launch_cmd: None,
+        };
         let state = WsState {
             sessions: vec![crate::SessionState {
-                layout: crate::PaneState::Leaf {
-                    cwd: Some("/srv/app".into()),
-                    id: Some("t-1".into()),
-                    custom_title: None,
-                    launch_label: None,
-                    launch_cmd: None,
+                id: "conv-1".into(),
+                layout: crate::PaneState::Split {
+                    axis: crate::SplitAxis::H,
+                    children: vec![leaf("t-1"), leaf("t-2")],
+                    sizes: vec![300.0, 500.0],
                 },
-                active: 0,
+                active: 1,
                 last_updated_at: 0,
                 custom_title: None,
                 acp: None,
@@ -1416,7 +1510,14 @@ mod agent_conversation_persist_tests {
             }],
             ..Default::default()
         };
-        assert!(catalog_document(state).sessions[0].route.is_none());
+        let document = serde_json::to_value(catalog_document(state)).unwrap();
+        let session = &document["sessions"][0];
+        assert_eq!(session["id"], "conv-1");
+        assert_eq!(session["terminals"][0]["id"], "t-1");
+        assert_eq!(session["terminals"][1]["id"], "t-2");
+        for key in ["route", "layout", "active"] {
+            assert!(session.get(key).is_none(), "{key} 归客户端");
+        }
     }
 
     /// 折叠、置顶的项目按运行时存：同一个路径在两台机器上是两个项目。

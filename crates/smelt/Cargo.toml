@@ -13,7 +13,6 @@ smelt-sys = { path = "../smelt-sys" }
 smelt-model = { path = "../smelt-model" }
 smelt-client = { path = "../smelt-client" }
 smelt-paths = { path = "../smelt-paths" }
-# GUI/守护共用的无 UI 逻辑（终端文本、OSC 扫描、权限菜单解析、远程网关）。
 smelt-pairing = { path = "../smelt-pairing" }
 smelt-iroh = { path = "../smelt-iroh" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
@@ -36,20 +35,20 @@ futures-util = { version = "0.3", features = ["sink", "async-await"] }
 # 组件库跟 longbridge/gpui-kit 上游 main，不用 fork。两边必须同一套，
 # 不能只改其中一个。gpui_platform 开 runtime_shaders 免装完整 Xcode。
 gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 # tree-sitter-languages：文件树打开文件用组件自带的 Editor（CodeEditor 模式），
 # 语法高亮 + 行号 + 搜索都是组件自己做的，不再需要 syntect。
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9", features = ["tree-sitter-languages"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6", features = ["tree-sitter-languages"] }
 # 组件库自带图标资源（Sidebar 等组件的 IconName 需要注册它才能渲染 svg）。
 # 上游已把包名从 gpui-component-assets 改成 gpui-kit-assets。
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9" }
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6" }
 # 调试 HUD（Cmd+Shift+F）：帧耗时取自 GPUI 自己的帧追踪，不靠连续重绘去量。
-gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9" }
+gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6" }
 # 插件：gpui-shell 脚本应用（见 src/plugins）。JS 写界面，GPUI 原生绘制，
 # 引擎 QuickJS 跑在 UI 线程。`components` 把 gpui-component 的控件登记进脚本运行时。
 # 不开默认的 `webview`：它会把整个运行时切到 gpui-fast，而 smelt 用 gpui-pre。
-gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9", default-features = false, features = ["quickjs", "components"] }
+gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6", default-features = false, features = ["quickjs", "components"] }
 # 内嵌终端网格仍由 alacritty_terminal 驱动；PTY 子进程已迁到 smeltd。
 libc = "0.2"
 alacritty_terminal = { version = "0.26", default-features = false }
@@ -62,9 +61,12 @@ agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operati
 # 设置页跨网分享链接二维码
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# 远程桌面页：noVNC 跑在原生网页视图里。gpui-wry 0.7.3 默认跑在 gpui-pre 上（不开 gpui-fast）；
+# 远程桌面页：noVNC 跑在原生网页视图里。gpui-webview 和上面的组件库同一个 rev，一起升级；
+# crates.io 上的 gpui-wry 是它改名前的旧名字，钉死了 gpui-pre 版本，会卡住升级。
+# 不开 gpui-fast：跟着 gpui-kit 用默认的 gpui-pre，代价是网页视图盖住同一块区域里的 GPUI
+# 弹层。gpui-shell 也不能开它的 webview 特性，那会把整个应用切到 GPUI Fast。
 # wry 必须和它用同一份。
-gpui-wry = "0.7.3"
+gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6" }
 wry = { package = "lb-wry", version = "0.53.3" }
 # 生成 agent hook 命令时按 shell 规则引用 smelt-notify 路径。
 # macOS：菜单栏 status item 需要直接操作 AppKit（GPUI 没有 status item 概念），

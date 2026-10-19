@@ -195,8 +195,8 @@ pub(super) fn handle_action(conn: UnixStream, v: &serde_json::Value, sessions: &
 }
 
 pub(super) fn handle_raw_input(conn: UnixStream, v: &serde_json::Value, sessions: &Sessions) {
-    // 原始输入：工作延续，无 phase 门闩。权限在网关 write_enabled，这里只做
-    // 「会话在不在 + 载荷非空 + 写进 master」。
+    // 原始输入：工作延续，无 phase 门闩。权限在连接身份（未配对的设备进不来），这里
+    // 只做「会话在不在 + 载荷非空 + 写进 master」。
     let id = v["id"].as_str().unwrap_or_default();
     let mut c = conn;
     let Some(payload) = input_payload(v) else {
@@ -730,7 +730,7 @@ pub(crate) fn handle_watch(
         return;
     }
     let controls_geometry = v["controls_geometry"].as_bool().unwrap_or(false);
-    // 消费端声明的 scrollback 预算。不传 = 要全量（桌面、老网关），行为不变。
+    // 消费端声明的 scrollback 预算。不传 = 要全量（桌面），行为不变。
     let max_scrollback_lines = v["max_scrollback_lines"]
         .as_u64()
         .map(|lines| lines.min(SNAPSHOT_MAX_LINES as u64) as usize)

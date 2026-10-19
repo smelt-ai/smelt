@@ -40,6 +40,13 @@ impl Workspace {
                 ),
                 "关闭项目",
             ),
+            CloseConfirm::Runtime { name, .. } => (
+                "确定移除这台机器吗？",
+                format!(
+                    "这台电脑不再连「{name}」，侧栏里它的项目和会话会一起移走。那台机器上的会话照常运行，重新配对后还能回来。"
+                ),
+                "移除",
+            ),
             CloseConfirm::Session { title, pane, .. } => (
                 if pane.is_some() {
                     "这个分屏还在运行，确定关闭吗？"
@@ -446,20 +453,19 @@ impl Workspace {
             return div().into_any_element();
         };
         // 会话行和分屏子行共用这个弹窗，标题得说清改的是哪个。
-        let heading = match self.rename_target {
-            Some(RenameTarget::Pane(_)) => "重命名终端",
-            Some(RenameTarget::History { .. }) => "重命名历史会话",
-            _ => "重命名会话",
+        let (heading, hint) = match self.rename_target {
+            Some(RenameTarget::Pane(_)) => ("重命名终端", "留空则恢复自动识别的标题。"),
+            Some(RenameTarget::History { .. }) => ("重命名历史会话", "留空则恢复自动识别的标题。"),
+            Some(RenameTarget::Runtime(_)) => (
+                "重命名机器",
+                "侧栏和机器面板里显示这个名字，只在这台电脑上生效。",
+            ),
+            _ => ("重命名会话", "留空则恢复自动识别的标题。"),
         };
 
         let content = v_flex()
             .child(Self::modal_title(fg, heading))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("留空则恢复自动识别的标题。"),
-            )
+            .child(div().text_sm().text_color(muted).child(hint))
             .child(Input::new(input))
             .child(
                 h_flex()

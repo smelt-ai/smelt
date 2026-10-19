@@ -6,7 +6,7 @@ edition.workspace = true
 [lints]
 workspace = true
 
-# 桌面客户端（和移动端网关）访问运行时的部分：状态订阅、ACP 会话连接、会话与自动化
+# 桌面客户端访问运行时的部分：状态订阅、ACP 会话连接、会话与自动化
 # 的守护操作。只走协议，不依赖 smelt-core 和运行时的库（设计文档 P1）。
 
 [dependencies]

@@ -8,17 +8,17 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SM
 ~/.smelt/smelt.sqlite3
 ```
 
-这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 21`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
+这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 22`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
 
 建库只发生在主文件和 sidecar 都不存在时。主文件没了但 sidecar 还在时拒绝建空库。非空的 `user_version = 0`、形状不符或版本过新的库只拒绝打开，不删表、不重建。以后改已发布结构必须加版本号并写迁移。
 
-通用 `kv` 表在 v18 删掉。v19→v20 删掉 worktree 继承表（smelt 不管 worktree）。v20→v21 的 `layout_node` 增加 `tabs`，同一格可以叠多个终端。
+通用 `kv` 表在 v18 删掉。v19→v20 删掉 worktree 继承表（smelt 不管 worktree）。v20→v21 的 `layout_node` 增加 `tabs`，同一格可以叠多个终端。v21→v22 删掉 `layout_node`：对话的终端平铺成 `session.position`，分屏布局归客户端（下面的 `conversation_route.dock_layout`）。
 
 现行表（`crates/smelt-store/src/schema.rs` 的 `CREATE_SCHEMA`）按职责：
 
 | 范围 | 表 |
 | --- | --- |
-| 工作区与分屏 | `project`、`session_group`、`session`、`layout_node`、`acp_detail`、`acp_launch_env`、`acp_config_value`、`workspace_catalog`、`workspace_menu` 及项目/会话行 |
+| 工作区 | `project`、`session_group`、`session`、`acp_detail`、`acp_launch_env`、`acp_config_value`、`workspace_catalog`、`workspace_menu` 及项目/会话行 |
 | 自动化 | `automation`、`automation_state`、`automation_run`、`automation_run_transcript`、`automation_meta` |
 | 智能体 | `agent_definition`、`agent_profile`、`agent_host_pref`、`agent_acp_command`、`agent_acp_env`、`agent_acp_config_memory`、`agent_memory_usage`、`agent_memory_provenance`、`default_conversation_agent` |
 | 启动与历史 | `launch_entry`、`launch_settings`、`new_session_pin`、`history_title`、`history_agent_binding` |
@@ -36,7 +36,7 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SM
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，schema 版本 2（`crates/smelt-client-store/src/schema.rs`）。
+只属于这台桌面，schema 版本 3（`crates/smelt-client-store/src/schema.rs`）。
 
 | 表 | 内容 |
 | --- | --- |
@@ -45,11 +45,11 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SM
 | `notify_prefs` | 通知开关 |
 | `workspace_ui` | 当前路由、侧栏宽度和开合 |
 | `collapsed_project` / `pinned_project` / `collapsed_agent` | 按 `runtime_id` 记住折叠和置顶 |
-| `session_route` / `session_route_path` | 某个运行时上某场会话的工具面板、打开的文件、Git 视图 |
+| `conversation_route` / `conversation_route_path` | 某个运行时上某段对话的终端分屏布局（带版本号的 JSON）、当前终端、工具面板、打开的文件、Git 视图 |
 | `runtime_connection` | 这台桌面连过哪些运行时（endpoint、relay、名字） |
 | `runtime_migration` | 客户端数据迁出运行时库的标记 |
 
-分屏树在运行时库的 `layout_node`，不在这张库里。
+从旧版本迁移前，旧库整份留成 `client.sqlite3.bak-v<旧版本>`。
 
 ## 手机缓存
 

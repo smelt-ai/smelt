@@ -19,6 +19,7 @@ fn leaf(cwd: &str) -> crate::PaneState {
 
 fn session(cwd: &str) -> SessionState {
     SessionState {
+        id: "conv-test".into(),
         layout: leaf(cwd),
         active: 0,
         last_updated_at: 0,

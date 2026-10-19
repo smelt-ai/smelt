@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 51] = [
+pub const TABLES: [&str; 50] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -42,7 +42,6 @@ pub const TABLES: [&str; 51] = [
     "history_title",
     "launch_entry",
     "launch_settings",
-    "layout_node",
     "memory_settings",
     "new_session_pin",
     "paired_device",
@@ -252,7 +251,6 @@ CREATE TABLE session_group (
   id TEXT PRIMARY KEY,
   project_root TEXT REFERENCES project(root) ON DELETE SET NULL,
   position INTEGER NOT NULL UNIQUE CHECK (position >= 0),
-  active_session_id TEXT REFERENCES session(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,
   custom_title TEXT,
   last_updated_at INTEGER NOT NULL DEFAULT 0
 );
@@ -264,30 +262,10 @@ CREATE TABLE session (
   cwd TEXT,
   custom_title TEXT,
   launch_label TEXT,
-  launch_command TEXT
+  launch_command TEXT,
+  position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0)
 );
-CREATE INDEX session_group_id_idx ON session(group_id);
-
-CREATE TABLE layout_node (
-  id TEXT PRIMARY KEY,
-  group_id TEXT NOT NULL REFERENCES session_group(id) ON DELETE CASCADE,
-  parent_id TEXT REFERENCES layout_node(id) ON DELETE CASCADE,
-  position INTEGER NOT NULL CHECK (position >= 0),
-  kind TEXT NOT NULL CHECK (kind IN ('split', 'tabs', 'leaf')),
-  axis TEXT CHECK (axis IN ('horizontal', 'vertical') OR axis IS NULL),
-  session_id TEXT UNIQUE REFERENCES session(id) ON DELETE CASCADE,
-  size_px REAL CHECK (size_px IS NULL OR size_px >= 0),
-  active_index INTEGER CHECK (active_index IS NULL OR active_index >= 0),
-  UNIQUE (group_id, parent_id, position),
-  CHECK (
-    (kind = 'split' AND axis IS NOT NULL AND session_id IS NULL AND active_index IS NULL)
-    OR (kind = 'tabs' AND axis IS NULL AND session_id IS NULL AND active_index IS NOT NULL)
-    OR (kind = 'leaf' AND axis IS NULL AND session_id IS NOT NULL AND active_index IS NULL)
-  )
-);
-CREATE UNIQUE INDEX layout_node_root_idx
-  ON layout_node(group_id)
-  WHERE parent_id IS NULL;
+CREATE UNIQUE INDEX session_group_position_idx ON session(group_id, position);
 
 CREATE TABLE acp_detail (
   session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
@@ -1729,4 +1707,18 @@ DROP TABLE layout_node_v20;
 CREATE UNIQUE INDEX layout_node_root_idx
   ON layout_node(group_id)
   WHERE parent_id IS NULL;
+";
+
+/// v21 → v22：终端怎么分屏归客户端（设计文档 D1），运行时只记对话里有哪些终端、按什么顺序。
+/// 删掉布局树和「当前看的是哪个」，终端改按 `position` 排。顺序由迁移代码先按旧布局树的
+/// 深度优先序填好，再建唯一索引。`active_session_id` 带着外键，SQLite 的 DROP COLUMN 能删。
+pub const MIGRATE_V21_TO_V22_ADD_POSITION: &str = "
+ALTER TABLE session ADD COLUMN position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0);
+";
+
+pub const MIGRATE_V21_TO_V22_FINISH: &str = "
+DROP TABLE layout_node;
+DROP INDEX session_group_id_idx;
+CREATE UNIQUE INDEX session_group_position_idx ON session(group_id, position);
+ALTER TABLE session_group DROP COLUMN active_session_id;
 ";

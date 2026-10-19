@@ -126,6 +126,7 @@ fn trailing_slashes_are_ignored() {
 #[test]
 fn legacy_archive_cwd_comes_from_first_leaf() {
     let ss = SessionState {
+        id: "conv-test".into(),
         layout: PaneState::Split {
             axis: SplitAxis::H,
             children: vec![leaf("/a/proj"), leaf("/b/other")],
@@ -144,6 +145,7 @@ fn legacy_archive_cwd_comes_from_first_leaf() {
 #[test]
 fn acp_archive_cwd_comes_from_acp_meta() {
     let ss = SessionState {
+        id: "conv-test".into(),
         layout: leaf("/placeholder"),
         active: 0,
         last_updated_at: 0,

@@ -15,7 +15,7 @@ mod event_client;
 
 pub use event_client::{DaemonEventClientError, DaemonStateEventClient, SubscriptionShape};
 
-/// 断线后快速首试、连续失败逐步退让，避免 daemon 正在升级/尚未启动时 GUI 和网关
+/// 断线后快速首试、连续失败逐步退让，避免 daemon 正在升级/尚未启动时各个客户端
 /// 同步地每两秒撞一次 socket。上限保证守护恢复后不会长期不可见。
 const DAEMON_RECONNECT_BASE: Duration = Duration::from_millis(250);
 
@@ -48,7 +48,7 @@ pub struct DaemonSessionState {
     pub pending_question: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
-    /// 守护下发的启动命令；远程网关在菜单快照缺少 agent 信息时用它兜底识别 provider。
+    /// 守护下发的启动命令；远程客户端在菜单快照缺少 agent 信息时用它兜底识别 provider。
     #[serde(default)]
     pub launch: Option<String>,
     /// 结构化 hook 实际检测到的 provider；明确的启动类型仍由 UI 优先采用。
@@ -262,7 +262,7 @@ pub enum DaemonPhase {
     Dead,
 }
 
-/// `event_subscribe`/`subscribe` 连接映射到桌面和网关现有状态模型后的事件。
+/// `event_subscribe`/`subscribe` 连接映射到客户端状态模型后的事件。
 pub enum DaemonStateEvent {
     /// 首帧：全量快照。
     Snapshot {
@@ -270,7 +270,7 @@ pub enum DaemonStateEvent {
         /// daemon 持有的远程目录复用同一条订阅连接下发，但与 agent runtime phase
         /// 分开，避免消费者把“所有权”误当成“运行状态”。
         remote_sessions: Option<RemoteSessionSnapshot>,
-        /// 桌面发布的侧栏菜单。网关只消费这一份，不读工作区快照。
+        /// 桌面发布的侧栏菜单。远程客户端只消费这一份，不读工作区快照。
         workspace_menu: Option<WorkspaceMenuSnapshot>,
         /// daemon 唯一 owner 的自动化定义、状态与 Run 投影。
         automations: Option<AutomationFile>,

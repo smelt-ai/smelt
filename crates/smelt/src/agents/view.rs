@@ -1195,6 +1195,48 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// 能力库在配哪台机器：一个按钮，点开选本机或别的机器。离线的照样能选，选了会说
+    /// 读不到。
+    fn render_pi_library_picker(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let current = self.pi_library_runtime().clone();
+        let entity = cx.entity();
+        Button::new("capabilities-runtime")
+            .quiet()
+            .compact()
+            .label(format!(
+                "机器：{}",
+                crate::runtimes::runtime_name(&current, cx)
+            ))
+            .icon(IconName::ChevronDown)
+            .dropdown_menu(move |menu, _window, cx| {
+                let mut runtimes = vec![crate::RuntimeKey::Local];
+                if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
+                    runtimes.extend(
+                        hub.remotes
+                            .iter()
+                            .map(|remote| remote.runtime.key().clone()),
+                    );
+                }
+                runtimes.into_iter().fold(menu, |menu, key| {
+                    let mut label = crate::runtimes::runtime_name(&key, cx);
+                    if let Some(unavailable) = crate::runtimes::runtime_unavailable_label(&key, cx)
+                    {
+                        label = format!("{label}（{unavailable}）");
+                    }
+                    let entity = entity.clone();
+                    let checked = key == current;
+                    menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, _window, cx| {
+                            let key = key.clone();
+                            entity.update(cx, |workspace, cx| {
+                                workspace.select_pi_library_runtime(key, cx)
+                            });
+                        },
+                    ))
+                })
+            })
+    }
+
     /// 能力库：页头和智能体、自动化同一条，左边页名接三个页签。正文是独立的设置内容视图，
     /// 自己节流刷新快照，终端输出这类高频通知不会让它每帧重读 Pi 配置。
     pub(crate) fn render_capabilities_page(
@@ -1226,9 +1268,16 @@ impl Workspace {
                     .child("能力库"),
             )
             .child(tabs)
-            // Pi 的模型、MCP、插件、记忆都读写本机运行时上的配置。
+            // 挂了别的机器，才需要选在配哪台。记忆只在本机运行时上，切到别的机器时说清楚。
             .when(crate::runtimes::has_remote_runtimes(cx), |header| {
-                header.child(crate::runtimes::local_runtime_scope_chip())
+                header
+                    .child(div().flex_1())
+                    .when(
+                        current == CapabilitiesTab::Memory
+                            && *self.pi_library_runtime() != crate::RuntimeKey::Local,
+                        |header| header.child(crate::runtimes::local_runtime_scope_chip()),
+                    )
+                    .child(self.render_pi_library_picker(cx))
             });
 
         div()

@@ -82,28 +82,24 @@ impl Workspace {
             pi_auth_error: self.pi_auth_error.clone(),
             pi_auth_show_all: self.pi_auth_show_all,
             pi_mcp_servers: self
-                .pi_config
-                .as_ref()
+                .pi_library_config()
                 .map(|config| config.mcp_servers.clone())
-                .unwrap_or_else(|| Err(self.pi_config_pending_text())),
+                .unwrap_or_else(|| Err(self.pi_library_pending_text())),
             pi_mcp_login: self.pi_mcp_login.clone(),
             pi_mcp_pending_remove: self.pi_mcp_pending_remove.clone(),
             pi_mcp_error: self.pi_mcp_error.clone(),
             pi_model_editor_error: self.pi_model_editor_error.clone(),
             pi_model_settings: self.pi_model_settings_view(),
             pi_settings: self
-                .pi_config
-                .as_ref()
+                .pi_library_config()
                 .map(|config| config.settings_summary.clone())
-                .unwrap_or_else(|| Err(self.pi_config_pending_text())),
+                .unwrap_or_else(|| Err(self.pi_library_pending_text())),
             pi_plugins: self
-                .pi_config
-                .as_ref()
+                .pi_library_config()
                 .map(|config| config.plugins.clone())
                 .unwrap_or_default(),
             pi_paths: self
-                .pi_config
-                .as_ref()
+                .pi_library_config()
                 .map(|config| config.paths.clone())
                 .unwrap_or_default(),
             pi_plugin_pending_delete: self.pi_plugin_pending_delete.clone(),
@@ -176,7 +172,7 @@ impl Workspace {
         if self.capabilities_view.is_some() {
             return;
         }
-        self.refresh_pi_config(cx);
+        self.refresh_pi_library(cx);
         let snapshot = self.settings_render_snapshot(cx);
         let workspace = cx.entity();
         self.capabilities_view = Some(cx.new(|cx| {

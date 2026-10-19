@@ -5,7 +5,7 @@
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -63,9 +63,11 @@ CREATE TABLE pinned_project (
   position INTEGER NOT NULL,
   PRIMARY KEY (runtime_id, root)
 ) WITHOUT ROWID;
-CREATE TABLE session_route (
+CREATE TABLE conversation_route (
   runtime_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  active_terminal_id TEXT,
+  dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
   stage_cover TEXT,
   tool_panel_tab TEXT NOT NULL,
   tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
@@ -77,15 +79,15 @@ CREATE TABLE session_route (
   git_tab TEXT NOT NULL,
   diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
   diff_scope TEXT NOT NULL,
-  PRIMARY KEY (runtime_id, session_id)
+  PRIMARY KEY (runtime_id, conversation_id)
 ) WITHOUT ROWID;
-CREATE TABLE session_route_path (
+CREATE TABLE conversation_route_path (
   runtime_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
   path TEXT NOT NULL,
   position INTEGER NOT NULL,
-  PRIMARY KEY (runtime_id, session_id, kind, path)
+  PRIMARY KEY (runtime_id, conversation_id, kind, path)
 ) WITHOUT ROWID;
 CREATE TABLE update_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -172,6 +174,40 @@ DROP TABLE pinned_project;
 ALTER TABLE pinned_project_v2 RENAME TO pinned_project;
 ";
 
+/// v2 → v3：界面状态改按对话存，键从「活动终端的 id」（切一下终端就变）换成对话的稳定 id，
+/// 并加上这段对话的分屏布局（JSON 字段，见 AGENTS.md 的例外）和当前看的终端。旧路由的键
+/// 对不上新 id，直接丢掉，各对话回到默认界面状态。
+const MIGRATE_V2_TO_V3: &str = "
+DROP TABLE session_route_path;
+DROP TABLE session_route;
+CREATE TABLE conversation_route (
+  runtime_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  active_terminal_id TEXT,
+  dock_layout TEXT CHECK (dock_layout IS NULL OR json_valid(dock_layout)),
+  stage_cover TEXT,
+  tool_panel_tab TEXT NOT NULL,
+  tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
+  tool_panel_w REAL NOT NULL,
+  file_tree_selected TEXT,
+  open_file_path TEXT,
+  file_tree_w REAL NOT NULL,
+  file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+  git_tab TEXT NOT NULL,
+  diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+  diff_scope TEXT NOT NULL,
+  PRIMARY KEY (runtime_id, conversation_id)
+) WITHOUT ROWID;
+CREATE TABLE conversation_route_path (
+  runtime_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('expanded', 'pinned_root', 'collapsed_root', 'git_tree_collapsed')),
+  path TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (runtime_id, conversation_id, kind, path)
+) WITHOUT ROWID;
+";
+
 /// 打开时把库带到当前版本。
 pub(crate) fn migrate(connection: &mut Connection) -> Result<(), String> {
     let transaction = connection
@@ -194,7 +230,10 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<(), String> {
             }
         }
         1 => transaction
-            .execute_batch(MIGRATE_V1_TO_V2)
+            .execute_batch(&format!("{MIGRATE_V1_TO_V2}\n{MIGRATE_V2_TO_V3}"))
+            .map_err(|error| error.to_string())?,
+        2 => transaction
+            .execute_batch(MIGRATE_V2_TO_V3)
             .map_err(|error| error.to_string())?,
         newer => return Err(format!("客户端库版本 {newer} 比这个程序新，不认识")),
     }

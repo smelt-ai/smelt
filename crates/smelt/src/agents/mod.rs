@@ -589,7 +589,7 @@ fn excerpt_text(value: &str, limit: usize) -> String {
     compact
 }
 
-/// 产品智能体的执行引擎注册点在 `smelt_core`：移动端网关也要照同一份名单产出
+/// 产品智能体的执行引擎注册点在 `smelt_core`：运行时也要照同一份名单给手机产出
 /// 新建对话选项，注册表留在 GUI crate 里两边就会各注册各的。
 pub(crate) use smelt_model::agent_definition::agent_engine_kinds;
 

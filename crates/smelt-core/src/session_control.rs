@@ -779,19 +779,6 @@ pub fn list_sessions() -> Result<Vec<String>, String> {
         .unwrap_or_default())
 }
 
-/// Fetch the daemon-owned remote catalog. GUI and gateway callers only project this snapshot;
-/// they must never fall back to reading the historical documents directly.
-pub fn remote_session_snapshot() -> Result<RemoteSessionSnapshot, String> {
-    let response = daemon_request(serde_json::json!({
-        "op": DaemonOperation::RemoteSessions
-    }))?;
-    response
-        .get("remote_sessions")
-        .cloned()
-        .ok_or_else(|| "smeltd returned no remote session catalog".to_string())
-        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))
-}
-
 pub fn publish_automation_event(
     event: &crate::automation::AutomationInboundEvent,
 ) -> Result<serde_json::Value, String> {

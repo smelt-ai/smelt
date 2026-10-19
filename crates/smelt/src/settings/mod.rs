@@ -52,7 +52,7 @@ pub(super) use agent_hooks::{
     uninstall_agent_hooks,
 };
 pub(super) use bundled_helpers::{sync_bundled_smelt_agent_mcp, sync_bundled_smelt_notify};
-pub(crate) use pi_config::pi_model_choice_groups;
+pub(crate) use pi_config::{PiLibrary, pi_model_choice_groups};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -370,7 +370,7 @@ fn sync_theme_fonts(cx: &mut App) {
     });
 }
 
-/// 把「当前生效的终端配色」落盘给守护/网关，转发给移动端。
+/// 把「当前生效的终端配色」发给守护：它拿来应答 OSC 颜色查询，以后也由它转给移动端。
 ///
 /// 移动端渲染的是同一份 PTY 字节流，而 TUI 会用 OSC 11 查背景色来决定用哪档灰
 /// （应答见 `terminal::EventProxy::resolve_color`）。手机若用自己写死的配色，

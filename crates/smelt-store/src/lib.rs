@@ -49,8 +49,8 @@ pub use snapshots::{
     QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
     RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
     RemoteTerminalSessionRecord, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogCommit,
-    WorkspaceCatalogWriter, WorkspaceLayoutNode, WorkspaceMenuProjectRecord,
-    WorkspaceMenuSessionRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceCatalogWriter, WorkspaceMenuProjectRecord, WorkspaceMenuSessionRecord,
+    WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -62,7 +62,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 21;
+pub const STORE_SCHEMA_VERSION: u32 = 22;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -2736,10 +2736,20 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 21 {
+            apply_v22_conversation_terminals(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v21 形状：删完布局树、会话补完位置后与当前形状逐字一致，就说明原来正是 v21。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 20 {
             apply_v21_layout_tabs(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
-            // 没有冻结的 v20 形状：重建完 layout_node 后与当前形状逐字一致，就说明原来正是 v20。
+            // 没有冻结的 v20 形状：重建完 layout_node 再升到 v22 后与当前形状逐字一致，就说明原来正是 v20。
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
             }
@@ -3073,7 +3083,111 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V20_TO_V21)?;
         }
+        apply_v22_conversation_terminals(transaction)
+    }
+
+    /// v22 把终端分屏交给客户端：按旧布局树给对话里的会话排好位置，再删掉布局树和
+    /// 「当前看的是哪个」。已经没有 layout_node 的库跳过。
+    fn apply_v22_conversation_terminals(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "layout_node")
+        {
+            return Ok(());
+        }
+        transaction.execute_batch(crate::schema::MIGRATE_V21_TO_V22_ADD_POSITION)?;
+        for (session_id, position) in v21_session_positions(transaction)? {
+            transaction.execute(
+                "UPDATE session SET position = ?1 WHERE id = ?2",
+                params![position, session_id],
+            )?;
+        }
+        transaction.execute_batch(crate::schema::MIGRATE_V21_TO_V22_FINISH)?;
         Ok(())
+    }
+
+    /// 旧库里每段对话的会话顺序：ACP 会话在前，终端按布局树深度优先，布局树里没挂上的
+    /// 终端（正常不会有）排在最后。
+    fn v21_session_positions(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<Vec<(String, i64)>, StoreError> {
+        use std::collections::HashMap;
+
+        let mut leaf_session: HashMap<String, String> = HashMap::new();
+        let mut children: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+        let mut roots = Vec::new();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT id, parent_id, position, session_id FROM layout_node ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, parent_id, position, session_id) = row?;
+                if let Some(session_id) = session_id {
+                    leaf_session.insert(id.clone(), session_id);
+                }
+                match parent_id {
+                    Some(parent_id) => children.entry(parent_id).or_default().push((position, id)),
+                    None => roots.push(id),
+                }
+            }
+        }
+        let mut layout_rank: HashMap<String, usize> = HashMap::new();
+        for root in roots {
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                if let Some(session_id) = leaf_session.get(&node) {
+                    let rank = layout_rank.len();
+                    layout_rank.entry(session_id.clone()).or_insert(rank);
+                }
+                if let Some(kids) = children.get_mut(&node) {
+                    kids.sort_by_key(|(position, _)| *position);
+                    stack.extend(kids.iter().rev().map(|(_, id)| id.clone()));
+                }
+            }
+        }
+
+        // (不是 ACP, 布局树里的序, 落库顺序, id)：排序后就是对话里的位置。
+        let mut by_group: HashMap<String, Vec<(bool, usize, usize, String)>> = HashMap::new();
+        {
+            let mut statement =
+                transaction.prepare("SELECT id, group_id, kind FROM session ORDER BY rowid")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for (index, row) in rows.enumerate() {
+                let (id, group_id, kind) = row?;
+                let rank = layout_rank.get(&id).copied().unwrap_or(usize::MAX);
+                by_group
+                    .entry(group_id)
+                    .or_default()
+                    .push((kind != "acp", rank, index, id));
+            }
+        }
+        let mut positions = Vec::new();
+        for (_, mut sessions) in by_group {
+            sessions.sort();
+            positions.extend(
+                sessions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, (_, _, _, id))| (id, position as i64)),
+            );
+        }
+        Ok(positions)
     }
 
     fn unrecognized_schema_error(version: u32) -> StoreError {
@@ -3415,30 +3529,63 @@ mod imp {
         } else {
             (&[], &["root", "position"])
         };
-        // v21 起布局树能记标签组，多一列 `active_index`。
-        let layout_node_columns: &[&str] = if legacy {
-            &[
-                "id",
-                "group_id",
-                "parent_id",
-                "position",
-                "kind",
-                "axis",
-                "session_id",
-                "size_px",
-            ]
+        // v22 起布局树归客户端：没有 layout_node，会话多一列 `position`，会话组去掉
+        // `active_session_id`。v17 及更早的形状里都还在。
+        let (layout_node_columns, session_columns, session_group_columns): (
+            &[&str],
+            &[&str],
+            &[&str],
+        ) = if legacy {
+            (
+                &[
+                    "id",
+                    "group_id",
+                    "parent_id",
+                    "position",
+                    "kind",
+                    "axis",
+                    "session_id",
+                    "size_px",
+                ],
+                &[
+                    "id",
+                    "group_id",
+                    "kind",
+                    "cwd",
+                    "custom_title",
+                    "launch_label",
+                    "launch_command",
+                ],
+                &[
+                    "id",
+                    "project_root",
+                    "position",
+                    "active_session_id",
+                    "custom_title",
+                    "last_updated_at",
+                ],
+            )
         } else {
-            &[
-                "id",
-                "group_id",
-                "parent_id",
-                "position",
-                "kind",
-                "axis",
-                "session_id",
-                "size_px",
-                "active_index",
-            ]
+            (
+                &[],
+                &[
+                    "id",
+                    "group_id",
+                    "kind",
+                    "cwd",
+                    "custom_title",
+                    "launch_label",
+                    "launch_command",
+                    "position",
+                ],
+                &[
+                    "id",
+                    "project_root",
+                    "position",
+                    "custom_title",
+                    "last_updated_at",
+                ],
+            )
         };
         Ok(table_columns(connection, "history_title")?
             == [
@@ -3453,25 +3600,8 @@ mod imp {
                 == ["position", "label", "command", "provider"]
             && table_columns(connection, "layout_node")? == layout_node_columns
             && table_columns(connection, "project")? == project_columns
-            && table_columns(connection, "session")?
-                == [
-                    "id",
-                    "group_id",
-                    "kind",
-                    "cwd",
-                    "custom_title",
-                    "launch_label",
-                    "launch_command",
-                ]
-            && table_columns(connection, "session_group")?
-                == [
-                    "id",
-                    "project_root",
-                    "position",
-                    "active_session_id",
-                    "custom_title",
-                    "last_updated_at",
-                ])
+            && table_columns(connection, "session")? == session_columns
+            && table_columns(connection, "session_group")? == session_group_columns)
     }
 
     fn v1_schema_objects(connection: &Connection) -> Result<Vec<SchemaObject>, StoreError> {
@@ -6633,28 +6763,23 @@ mod tests {
             "collapsed_agents": ["agent-def-1"],
             "sessions": [
                 {
-                    "layout": {"Split": {
-                        "axis": "H",
-                        "children": [
-                            {"Leaf": {"cwd": "/repo", "id": "term-1"}},
-                            {"Leaf": {
-                                "cwd": "/repo/src",
-                                "id": "term-2",
-                                "custom_title": "tests",
-                                "launch_label": "Codex",
-                                "launch_cmd": "codex"
-                            }}
-                        ],
-                        "sizes": [420.0, 580.0]
-                    }},
-                    "active": 1,
+                    "id": "conv-terminals",
+                    "terminals": [
+                        {"cwd": "/repo", "id": "term-1"},
+                        {
+                            "cwd": "/repo/src",
+                            "id": "term-2",
+                            "custom_title": "tests",
+                            "launch_label": "Codex",
+                            "launch_cmd": "codex"
+                        }
+                    ],
                     "last_updated_at": 42,
                     "custom_title": "terminal group",
                     "route": {"expanded": ["/repo/src"], "tool_panel_open": true}
                 },
                 {
-                    "layout": {"Leaf": {"cwd": "/repo", "id": null}},
-                    "active": 0,
+                    "id": "conv-acp",
                     "last_updated_at": 84,
                     "custom_title": "agent group",
                     "acp": {
@@ -6685,7 +6810,6 @@ mod tests {
             ("project", 1i64),
             ("session_group", 2),
             ("session", 3),
-            ("layout_node", 4),
             ("acp_detail", 1),
         ] {
             let count: i64 = connection
@@ -6724,8 +6848,12 @@ mod tests {
         assert_eq!(old_payload_tables, 0);
 
         let restored: serde_json::Value = workspace_json(&store);
-        assert_eq!(restored["sessions"][0]["layout"]["Split"]["axis"], "H");
-        assert_eq!(restored["sessions"][0]["active"], 1);
+        assert_eq!(restored["sessions"][0]["id"], "conv-terminals");
+        assert_eq!(restored["sessions"][0]["terminals"][1]["id"], "term-2");
+        assert_eq!(
+            restored["sessions"][0]["terminals"][1]["launch_cmd"],
+            "codex"
+        );
         assert_eq!(restored["sessions"][1]["acp"]["sid"], "acp-1");
         assert_eq!(
             restored["sessions"][1]["acp"]["config_values"][0][1],
@@ -6810,7 +6938,7 @@ mod tests {
         };
         serde_json::to_vec(&serde_json::json!({
             "sessions": [{
-                "layout": {"Leaf": {"cwd": "/repo"}},
+                "id": "conv-acp",
                 "acp": {
                     "sid": "acp-1",
                     "cwd": "/repo",
@@ -7347,7 +7475,9 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
+                "{V21_SESSION_TABLES}
+                 {V21_LAYOUT_NODE_TABLE}
+                 ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
                  ALTER TABLE workspace_catalog DROP COLUMN writer;
                  INSERT INTO workspace_catalog(id, revision) VALUES (1, 41);
                  {V19_WORKTREE_INHERIT_TABLES}
@@ -7413,7 +7543,9 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V19_WORKTREE_INHERIT_TABLES}
+                "{V21_SESSION_TABLES}
+                 {V21_LAYOUT_NODE_TABLE}
+                 {V19_WORKTREE_INHERIT_TABLES}
                  INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);
                  INSERT INTO worktree_inherit_skip_pattern(position, pattern)
                  VALUES (0, 'node_modules'), (1, 'target');"
@@ -7490,52 +7622,126 @@ CREATE TABLE worktree_inherit_skip_pattern (
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// 两个终端叠在左格、右格单独一个终端。
-    fn tabbed_workspace_json() -> serde_json::Value {
+    /// 一段终端对话、一段 ACP 对话。终端对话里三个终端故意不按 id 排。
+    fn conversations_json() -> serde_json::Value {
         serde_json::json!({
             "projects": ["/repo"],
-            "sessions": [{
-                "layout": {"Split": {
-                    "axis": "H",
-                    "children": [
-                        {"Tabs": {
-                            "active": 1,
-                            "children": [
-                                {"Leaf": {"cwd": "/repo", "id": "term-1"}},
-                                {"Leaf": {"cwd": "/repo/src", "id": "term-2"}}
-                            ]
-                        }},
-                        {"Leaf": {"cwd": "/repo", "id": "term-3"}}
-                    ],
-                    "sizes": [400.0, 600.0]
-                }},
-                "active": 2,
-                "last_updated_at": 7
-            }]
+            "sessions": [
+                {
+                    "id": "conv-terminals",
+                    "custom_title": "terminal group",
+                    "last_updated_at": 7,
+                    "terminals": [
+                        {"id": "term-3", "cwd": "/repo"},
+                        {"id": "term-1", "cwd": "/repo/src", "custom_title": "tests",
+                         "launch_label": "Codex", "launch_cmd": "codex"},
+                        {"id": "term-2", "cwd": "/repo"}
+                    ]
+                },
+                {
+                    "id": "conv-acp",
+                    "last_updated_at": 8,
+                    "acp": {"sid": "acp-1", "cwd": "/repo", "agent": "pi",
+                            "launch": {"command": "smelt-pi-agent"}}
+                }
+            ]
         })
     }
 
     #[test]
-    fn tab_groups_round_trip_through_layout_nodes() {
-        let dir = temp_dir("layout-tabs");
+    fn conversations_keep_their_id_and_terminal_order() {
+        let dir = temp_dir("conversation-terminals");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        put_workspace_json(
-            &store,
-            &serde_json::to_vec(&tabbed_workspace_json()).unwrap(),
-        );
+        put_workspace_json(&store, &serde_json::to_vec(&conversations_json()).unwrap());
 
         let restored = workspace_json(&store);
-        let split = &restored["sessions"][0]["layout"]["Split"];
-        assert_eq!(split["sizes"], serde_json::json!([400.0, 600.0]));
-        let tabs = &split["children"][0]["Tabs"];
-        assert_eq!(tabs["active"], 1);
-        assert_eq!(tabs["children"][0]["Leaf"]["id"], "term-1");
-        assert_eq!(tabs["children"][1]["Leaf"]["id"], "term-2");
-        assert_eq!(split["children"][1]["Leaf"]["id"], "term-3");
-        // 活动终端按深度优先序数，标签组里的终端也算在内。
-        assert_eq!(restored["sessions"][0]["active"], 2);
+        let terminals = &restored["sessions"][0];
+        assert_eq!(terminals["id"], "conv-terminals");
+        assert_eq!(terminals["custom_title"], "terminal group");
+        let ids = terminals["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|terminal| terminal["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["term-3", "term-1", "term-2"], "顺序是客户端给的");
+        assert_eq!(terminals["terminals"][1]["launch_cmd"], "codex");
+        assert_eq!(restored["sessions"][1]["id"], "conv-acp");
+        assert_eq!(restored["sessions"][1]["acp"]["sid"], "acp-1");
+        assert!(
+            restored["sessions"][1]["terminals"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // 分屏和当前看的是哪个归客户端，运行时不收也不吐。
+        assert!(terminals.get("layout").is_none());
+        assert!(terminals.get("active").is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn documents_without_a_stable_conversation_id_are_rejected() {
+        let mut missing = conversations_json();
+        missing["sessions"][1].as_object_mut().unwrap().remove("id");
+        assert!(matches!(
+            Store::workspace_snapshot_from_json(&serde_json::to_vec(&missing).unwrap()),
+            Err(StoreError::ConversationMissingId { position: 1 })
+        ));
+
+        let mut duplicate = conversations_json();
+        duplicate["sessions"][1]["id"] = "conv-terminals".into();
+        assert!(matches!(
+            Store::workspace_snapshot_from_json(&serde_json::to_vec(&duplicate).unwrap()),
+            Err(StoreError::DuplicateConversationId { id }) if id == "conv-terminals"
+        ));
+
+        let dir = temp_dir("empty-conversation");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let mut empty = conversations_json();
+        empty["sessions"][0]["terminals"] = serde_json::json!([]);
+        let snapshot =
+            Store::workspace_snapshot_from_json(&serde_json::to_vec(&empty).unwrap()).unwrap();
+        assert!(matches!(
+            store.put_workspace_snapshot(&snapshot),
+            Err(StoreError::EmptyConversation { id }) if id == "conv-terminals"
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v21 的会话和会话组：会话还没有 `position`，会话组还记着当前看的是哪个。从新建的库
+    /// 倒回去用。
+    const V21_SESSION_TABLES: &str = "
+DROP INDEX session_group_position_idx;
+ALTER TABLE session DROP COLUMN position;
+CREATE INDEX session_group_id_idx ON session(group_id);
+ALTER TABLE session_group ADD COLUMN active_session_id TEXT
+  REFERENCES session(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+";
+
+    /// v21 的布局树：能记标签组。
+    const V21_LAYOUT_NODE_TABLE: &str = "
+CREATE TABLE layout_node (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES session_group(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES layout_node(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  kind TEXT NOT NULL CHECK (kind IN ('split', 'tabs', 'leaf')),
+  axis TEXT CHECK (axis IN ('horizontal', 'vertical') OR axis IS NULL),
+  session_id TEXT UNIQUE REFERENCES session(id) ON DELETE CASCADE,
+  size_px REAL CHECK (size_px IS NULL OR size_px >= 0),
+  active_index INTEGER CHECK (active_index IS NULL OR active_index >= 0),
+  UNIQUE (group_id, parent_id, position),
+  CHECK (
+    (kind = 'split' AND axis IS NOT NULL AND session_id IS NULL AND active_index IS NULL)
+    OR (kind = 'tabs' AND axis IS NULL AND session_id IS NULL AND active_index IS NOT NULL)
+    OR (kind = 'leaf' AND axis IS NULL AND session_id IS NOT NULL AND active_index IS NULL)
+  )
+);
+CREATE UNIQUE INDEX layout_node_root_idx
+  ON layout_node(group_id)
+  WHERE parent_id IS NULL;
+";
 
     /// v20 的 layout_node：只有 split / leaf 两种节点，没有 `active_index`。
     const V20_LAYOUT_NODE_TABLE: &str = "
@@ -7559,75 +7765,90 @@ CREATE UNIQUE INDEX layout_node_root_idx
   WHERE parent_id IS NULL;
 ";
 
-    /// v20 的库：layout_node 整表重建成能记标签组的形状，已有的分屏树原样留着。
+    /// 旧库里的两段对话：终端那段是「左格上下分 term-1、term-2，右格 term-3」，三个终端落库的
+    /// 顺序故意打乱成 3、1、2；另一段是 ACP 对话。
+    const OLD_LAYOUT_ROWS: &str = "
+INSERT INTO project(root, position) VALUES ('/repo', 0);
+INSERT INTO session_group(id, project_root, position, custom_title, last_updated_at, active_session_id)
+VALUES ('group:0:term-1', '/repo', 0, 'terminal group', 7, 'term-2'),
+       ('group:1:acp-1', '/repo', 1, NULL, 8, 'acp-1');
+INSERT INTO session(id, group_id, kind, cwd)
+VALUES ('term-3', 'group:0:term-1', 'terminal', '/repo'),
+       ('term-1', 'group:0:term-1', 'terminal', '/repo'),
+       ('term-2', 'group:0:term-1', 'terminal', '/repo/src'),
+       ('acp-1', 'group:1:acp-1', 'acp', '/repo');
+INSERT INTO acp_detail(session_id, agent, launch_command) VALUES ('acp-1', 'pi', 'smelt-pi-agent');
+INSERT INTO layout_node(id, group_id, parent_id, position, kind, axis, session_id, size_px)
+VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
+       ('g0:1', 'group:0:term-1', 'g0:0', 0, 'split', 'vertical', NULL, 400.0),
+       ('g0:2', 'group:0:term-1', 'g0:1', 0, 'leaf', NULL, 'term-1', 300.0),
+       ('g0:3', 'group:0:term-1', 'g0:1', 1, 'leaf', NULL, 'term-2', 300.0),
+       ('g0:4', 'group:0:term-1', 'g0:0', 1, 'leaf', NULL, 'term-3', 600.0),
+       ('g1:0', 'group:1:acp-1', NULL, 0, 'leaf', NULL, 'acp-1', NULL);
+";
+
+    /// v21 和 v20 的库：布局树删掉，对话里的终端按原来布局树的深度优先序排（不看落库顺序），
+    /// 老对话的 id 原样留下当作稳定 id，ACP 对话原样留着。升完和新建的库一个形状，升级前
+    /// 留一份备份。
     #[test]
-    fn migrates_v20_layout_nodes_to_hold_tab_groups() {
-        let dir = temp_dir("migrate-v20-layout-tabs");
-        let path = dir.join(DATABASE_FILE_NAME);
-        let store = Store::open_or_create(&path).unwrap();
-        let workspace = serde_json::json!({
-            "projects": ["/repo"],
-            "sessions": [{
-                "layout": {"Split": {
-                    "axis": "V",
-                    "children": [
-                        {"Leaf": {"cwd": "/repo", "id": "term-1"}},
-                        {"Leaf": {"cwd": "/repo/src", "id": "term-2"}}
-                    ],
-                    "sizes": [300.0, 500.0]
-                }},
-                "active": 1,
-                "last_updated_at": 7
-            }]
-        });
-        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
-        drop(store);
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(&format!(
-                "ALTER TABLE layout_node RENAME TO layout_node_v21;
-                 DROP INDEX layout_node_root_idx;
-                 {V20_LAYOUT_NODE_TABLE}
-                 INSERT INTO layout_node
-                   SELECT id, group_id, parent_id, position, kind, axis, session_id, size_px
-                   FROM layout_node_v21;
-                 DROP TABLE layout_node_v21;"
-            ))
-            .unwrap();
-        connection.pragma_update(None, "user_version", 20).unwrap();
-        drop(connection);
+    fn migrates_layout_trees_into_terminal_order() {
+        for (version, layout_node_table) in
+            [(21u32, V21_LAYOUT_NODE_TABLE), (20, V20_LAYOUT_NODE_TABLE)]
+        {
+            let dir = temp_dir(&format!("migrate-v{version}-terminal-order"));
+            let path = dir.join(DATABASE_FILE_NAME);
+            drop(Store::open_or_create(&path).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "{V21_SESSION_TABLES}
+                     {layout_node_table}
+                     BEGIN;
+                     {OLD_LAYOUT_ROWS}
+                     COMMIT;"
+                ))
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            drop(connection);
 
-        let store = Store::open_or_create(&path).unwrap();
-        let restored = workspace_json(&store);
-        let split = &restored["sessions"][0]["layout"]["Split"];
-        assert_eq!(split["axis"], "V");
-        assert_eq!(split["sizes"], serde_json::json!([300.0, 500.0]));
-        assert_eq!(split["children"][1]["Leaf"]["id"], "term-2");
-        assert_eq!(restored["sessions"][0]["active"], 1);
-        // 升上来的库能写标签组。
-        put_workspace_json(
-            &store,
-            &serde_json::to_vec(&tabbed_workspace_json()).unwrap(),
-        );
-        assert_eq!(
-            workspace_json(&store)["sessions"][0]["layout"]["Split"]["children"][0]["Tabs"]["active"],
-            1
-        );
-        drop(store);
+            let store = Store::open_or_create(&path).unwrap();
+            let workspace = store.get_workspace_snapshot().unwrap().unwrap();
+            assert_eq!(workspace.sessions.len(), 2, "v{version}");
+            let terminals = &workspace.sessions[0];
+            assert_eq!(terminals.id, "group:0:term-1", "v{version}");
+            assert_eq!(terminals.custom_title.as_deref(), Some("terminal group"));
+            assert_eq!(
+                terminals
+                    .terminals
+                    .iter()
+                    .map(|terminal| terminal.id.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                ["term-1", "term-2", "term-3"],
+                "v{version}：按布局树深度优先，不按落库顺序"
+            );
+            assert_eq!(terminals.terminals[1].cwd.as_deref(), Some("/repo/src"));
+            let acp = &workspace.sessions[1];
+            assert_eq!(acp.id, "group:1:acp-1");
+            assert!(acp.terminals.is_empty());
+            assert_eq!(acp.acp.as_ref().unwrap().sid.as_deref(), Some("acp-1"));
+            drop(store);
 
-        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
-        let fresh = dir.join("fresh.sqlite3");
-        drop(Store::open_or_create(&fresh).unwrap());
-        assert_eq!(
-            normalized_schema(&path),
-            normalized_schema(&fresh),
-            "从 v20 升上来的库要和新建的库一个形状"
-        );
-        assert!(
-            path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v20"))
-                .exists()
-        );
-        std::fs::remove_dir_all(dir).unwrap();
+            assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+            let fresh = dir.join("fresh.sqlite3");
+            drop(Store::open_or_create(&fresh).unwrap());
+            assert_eq!(
+                normalized_schema(&path),
+                normalized_schema(&fresh),
+                "从 v{version} 升上来的库要和新建的库一个形状"
+            );
+            assert!(
+                path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v{version}"))
+                    .exists()
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

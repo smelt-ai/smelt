@@ -53,7 +53,7 @@ cargo run --bin smelt
   主库入口（`sqlite_state.rs`，关系表在 `smelt-store`）。`daemon_state` 和 `agent_status`
   的定义在 `smelt-model`，这里只再导出。
 - **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
-  `~/.smelt/client.sqlite3`（外观、会话界面路由、连过哪些运行时）。
+  `~/.smelt/client.sqlite3`（外观、每段对话的界面状态和分屏布局、连过哪些运行时）。
 - **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（unix socket 与 iroh）。
 - **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify` / `smelt-agent-mcp`）：
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
@@ -64,7 +64,7 @@ cargo run --bin smelt
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
 - **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
-- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 21，按字段建表，没有通用 kv）。
+- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 22，按字段建表，没有通用 kv）。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
 - **`crates/smelt-mobile`** —— 手机 Rust 内核（身份、连接、目录、对话、终端、离线缓存），经 flutter_rust_bridge 给 Flutter。
@@ -279,7 +279,7 @@ smeltd status
 
 ### 终端 Dock
 
-`Cmd+D` / `Cmd+Shift+D` 仍是左右或上下分屏。同一格还可以叠几个终端，布局树多一种 `tabs` 节点（运行时库 schema v21，`layout_node.kind` 为 `split`、`tabs` 或 `leaf`）。分屏几何存在运行时库，不在客户端库。客户端库存的是每台运行时上的界面路由（工具面板、打开的文件、侧栏宽度）。
+`Cmd+D` / `Cmd+Shift+D` 仍是左右或上下分屏。同一格还可以叠几个终端（标签组）。运行时只记一段对话里有哪些终端、按什么顺序（`session.position`，运行时库 schema v22 起没有 `layout_node`）；怎么分屏是每台设备自己的界面状态，存在客户端库的 `conversation_route.dock_layout`（带版本号的 JSON，见 `crates/smelt/src/conversation_layout.rs`），和工具面板、打开的文件等放在一起。
 
 ### 闲置挂起
 

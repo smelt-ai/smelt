@@ -254,6 +254,7 @@ impl Workspace {
                             insert_at,
                             Session {
                                 ui_id: next_session_ui_id(),
+                                conversation_id: ss.id.clone(),
                                 kind: SessionKind::Conversation(view),
                                 last_updated_at: ss.last_updated_at,
                                 custom_title: ss.custom_title,
@@ -331,6 +332,7 @@ impl Workspace {
                         insert_at,
                         Session {
                             ui_id: next_session_ui_id(),
+                            conversation_id: ss.id.clone(),
                             kind: SessionKind::Term { dock, active },
                             last_updated_at: ss.last_updated_at,
                             custom_title: ss.custom_title,
@@ -374,7 +376,7 @@ impl Workspace {
                     let live_ids = this
                         .sessions
                         .iter()
-                        .map(|session| crate::live_session_persist_id(session, cx))
+                        .map(|session| Some(session.conversation_id.clone()))
                         .collect::<Vec<_>>();
                     this.active_session = crate::resolve_restored_active_session(
                         &live_ids,
@@ -1087,6 +1089,7 @@ impl Workspace {
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
+            conversation_id: crate::new_conversation_id(),
             kind: SessionKind::Conversation(view.clone()),
             last_updated_at: unix_now_secs(),
             custom_title: None,
@@ -1194,6 +1197,7 @@ impl Workspace {
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
+            conversation_id: crate::new_conversation_id(),
             kind: SessionKind::Conversation(view.clone()),
             last_updated_at: unix_now_secs(),
             custom_title: None,
@@ -1339,6 +1343,7 @@ impl Workspace {
         let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
         self.sessions.push(Session {
             ui_id: next_session_ui_id(),
+            conversation_id: crate::new_conversation_id(),
             kind: SessionKind::Conversation(view),
             last_updated_at: unix_now_secs(),
             custom_title,
@@ -1732,6 +1737,15 @@ impl Workspace {
         }
     }
 
+    /// 机器菜单里的「移除…」：先确认。移除后这台电脑不再连它，侧栏里它的项目和会话一起
+    /// 移走。
+    pub(crate) fn request_remove_runtime(&mut self, runtime_id: String, cx: &mut Context<Self>) {
+        let name =
+            crate::runtimes::runtime_name(&crate::RuntimeKey::Remote(runtime_id.clone()), cx);
+        self.close_confirm = Some(CloseConfirm::Runtime { runtime_id, name });
+        cx.notify();
+    }
+
     pub(crate) fn cancel_close_confirm(&mut self, cx: &mut Context<Self>) {
         self.close_confirm = None;
         cx.notify();
@@ -1740,6 +1754,14 @@ impl Workspace {
     pub(crate) fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.close_confirm.take() {
             Some(CloseConfirm::Project { project, .. }) => self.close_project(&project, cx),
+            Some(CloseConfirm::Runtime { runtime_id, .. }) => {
+                // 能力库正配着这台机器的话，退回本机。
+                if *self.pi_library_runtime() == crate::RuntimeKey::Remote(runtime_id.clone()) {
+                    self.select_pi_library_runtime(crate::RuntimeKey::Local, cx);
+                }
+                crate::runtimes::remove_runtime(runtime_id, cx);
+                cx.notify();
+            }
             Some(CloseConfirm::Session { ui_id, pane, .. }) => {
                 // 弹窗开着时会话可能已经自己结束、被关掉或换了位置，按 ui_id 重新找。
                 let Some(ix) = self.sessions.iter().position(|s| s.ui_id == ui_id) else {
@@ -2457,6 +2479,9 @@ impl Workspace {
             }
             RenameTarget::Pane(view) => pane_title(view, cx),
             RenameTarget::History { current_title, .. } => current_title.clone(),
+            RenameTarget::Runtime(runtime_id) => {
+                crate::runtimes::runtime_name(&crate::RuntimeKey::Remote(runtime_id.clone()), cx)
+            }
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
@@ -2584,6 +2609,12 @@ impl Workspace {
                         );
                     }
                     None => view.update(cx, |t, _| t.set_custom_title(custom_title)),
+                }
+            }
+            // 留空不改：机器总得有个名字。
+            RenameTarget::Runtime(runtime_id) => {
+                if let Some(name) = custom_title {
+                    crate::runtimes::rename_runtime(runtime_id, name, cx);
                 }
             }
             RenameTarget::History {

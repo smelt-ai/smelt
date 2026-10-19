@@ -295,7 +295,9 @@ pub(super) fn remote_page(
                 let runtime_id = remote.connection.runtime_id.clone();
                 let (status, is_online) = match &remote.status {
                     crate::runtimes::RuntimeStatus::Connecting => ("正在连接…".to_string(), false),
-                    crate::runtimes::RuntimeStatus::Online { version, platform } => (
+                    crate::runtimes::RuntimeStatus::Online {
+                        version, platform, ..
+                    } => (
                         match platform {
                             Some(platform) => format!("在线 · {version} · {platform}"),
                             None => format!("在线 · {version}"),

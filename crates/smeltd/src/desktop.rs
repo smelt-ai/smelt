@@ -20,6 +20,13 @@ const DEFAULT_VNC_ENDPOINT: &str = "127.0.0.1:5999";
 /// 那块虚拟屏幕的 X 显示号，注入文字用。别的用 `SMELT_DESKTOP_DISPLAY` 指定。
 const DEFAULT_DISPLAY: &str = ":99";
 
+/// 装没装远程桌面：`install.sh --with-desktop` 会把虚拟屏幕的启动脚本放进
+/// `~/.smelt/desktop/bin`。只认 Linux，macOS 上的本机运行时没有这套。
+pub(crate) fn installed() -> bool {
+    cfg!(target_os = "linux")
+        && smelt_paths::smelt_home().is_some_and(|home| home.join("desktop/bin/display").is_file())
+}
+
 pub(crate) fn vnc_endpoint() -> String {
     std::env::var("SMELT_DESKTOP_VNC").unwrap_or_else(|_| DEFAULT_VNC_ENDPOINT.to_string())
 }

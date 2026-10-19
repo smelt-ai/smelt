@@ -4,7 +4,8 @@
 //! 格式；界面状态（侧栏、当前页、会话 route 等）归客户端，读到也不收。
 
 use crate::{
-    StoreError, WorkspaceAcpRecord, WorkspaceLayoutNode, WorkspaceSessionRecord, WorkspaceSnapshot,
+    StoreError, WorkspaceAcpRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceTerminalRecord,
 };
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
@@ -17,16 +18,25 @@ pub(crate) fn workspace_from_document(value: &Value) -> Result<WorkspaceSnapshot
             projects.push(root);
         }
     }
-    Ok(WorkspaceSnapshot {
-        projects,
-        sessions: value
-            .get("sessions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(session_from_value)
-            .collect(),
-    })
+    let mut sessions = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for (position, session) in value
+        .get("sessions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let session = session_from_value(session);
+        if session.id.trim().is_empty() {
+            return Err(StoreError::ConversationMissingId { position });
+        }
+        if !seen_ids.insert(session.id.clone()) {
+            return Err(StoreError::DuplicateConversationId { id: session.id });
+        }
+        sessions.push(session);
+    }
+    Ok(WorkspaceSnapshot { projects, sessions })
 }
 
 pub(crate) fn json_from_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Value {
@@ -35,10 +45,10 @@ pub(crate) fn json_from_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Valu
         .iter()
         .map(|session| {
             json!({
+                "id": session.id,
                 "custom_title": session.custom_title,
                 "last_updated_at": session.last_updated_at,
-                "active": session.active,
-                "layout": layout_to_value(&session.layout),
+                "terminals": session.terminals.iter().map(terminal_to_value).collect::<Vec<_>>(),
                 "acp": session.acp.as_ref().map(acp_to_value),
             })
         })
@@ -51,20 +61,19 @@ pub(crate) fn json_from_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Valu
 
 fn session_from_value(value: &Value) -> WorkspaceSessionRecord {
     WorkspaceSessionRecord {
+        id: as_str(value.get("id")).unwrap_or_default().to_string(),
         custom_title: as_str(value.get("custom_title")).map(str::to_string),
         last_updated_at: value
             .get("last_updated_at")
             .and_then(Value::as_i64)
             .unwrap_or(0),
-        active: value
-            .get("active")
-            .and_then(Value::as_u64)
-            .and_then(|active| usize::try_from(active).ok())
-            .unwrap_or(0),
-        layout: value
-            .get("layout")
-            .map(layout_from_value)
-            .unwrap_or_else(empty_leaf),
+        terminals: value
+            .get("terminals")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(terminal_from_value)
+            .collect(),
         acp: value
             .get("acp")
             .and_then(Value::as_object)
@@ -72,63 +81,25 @@ fn session_from_value(value: &Value) -> WorkspaceSessionRecord {
     }
 }
 
-fn empty_leaf() -> WorkspaceLayoutNode {
-    WorkspaceLayoutNode::Leaf {
-        cwd: None,
-        id: None,
-        custom_title: None,
-        launch_label: None,
-        launch_cmd: None,
-    }
-}
-
-fn layout_from_value(value: &Value) -> WorkspaceLayoutNode {
-    if let Some(split) = value.get("Split") {
-        return WorkspaceLayoutNode::Split {
-            vertical: as_str(split.get("axis")) == Some("V"),
-            children: split
-                .get("children")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(layout_from_value)
-                .collect(),
-            sizes: split
-                .get("sizes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_f64)
-                .collect(),
-        };
-    }
-    if let Some(tabs) = value.get("Tabs") {
-        return WorkspaceLayoutNode::Tabs {
-            active: tabs
-                .get("active")
-                .and_then(Value::as_u64)
-                .and_then(|active| usize::try_from(active).ok())
-                .unwrap_or(0),
-            children: tabs
-                .get("children")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(layout_from_value)
-                .collect(),
-        };
-    }
-    let Some(leaf) = value.get("Leaf") else {
-        return empty_leaf();
-    };
-    let text = |key: &str| as_str(leaf.get(key)).map(str::to_string);
-    WorkspaceLayoutNode::Leaf {
-        cwd: text("cwd"),
+fn terminal_from_value(value: &Value) -> WorkspaceTerminalRecord {
+    let text = |key: &str| as_str(value.get(key)).map(str::to_string);
+    WorkspaceTerminalRecord {
         id: text("id"),
+        cwd: text("cwd"),
         custom_title: text("custom_title"),
         launch_label: text("launch_label"),
         launch_cmd: text("launch_cmd"),
     }
+}
+
+fn terminal_to_value(terminal: &WorkspaceTerminalRecord) -> Value {
+    json!({
+        "id": terminal.id,
+        "cwd": terminal.cwd,
+        "custom_title": terminal.custom_title,
+        "launch_label": terminal.launch_label,
+        "launch_cmd": terminal.launch_cmd,
+    })
 }
 
 fn acp_from_object(acp: &Map<String, Value>) -> WorkspaceAcpRecord {
@@ -181,43 +152,6 @@ fn acp_from_object(acp: &Map<String, Value>) -> WorkspaceAcpRecord {
         binding_automation_run_id,
         pending_agent_preset: text("pending_agent_preset"),
         session_title: text("session_title"),
-    }
-}
-
-fn layout_to_value(layout: &WorkspaceLayoutNode) -> Value {
-    match layout {
-        WorkspaceLayoutNode::Leaf {
-            cwd,
-            id,
-            custom_title,
-            launch_label,
-            launch_cmd,
-        } => json!({
-            "Leaf": {
-                "cwd": cwd,
-                "id": id,
-                "custom_title": custom_title,
-                "launch_label": launch_label,
-                "launch_cmd": launch_cmd,
-            }
-        }),
-        WorkspaceLayoutNode::Split {
-            vertical,
-            children,
-            sizes,
-        } => json!({
-            "Split": {
-                "axis": if *vertical { "V" } else { "H" },
-                "children": children.iter().map(layout_to_value).collect::<Vec<_>>(),
-                "sizes": sizes,
-            }
-        }),
-        WorkspaceLayoutNode::Tabs { active, children } => json!({
-            "Tabs": {
-                "active": active,
-                "children": children.iter().map(layout_to_value).collect::<Vec<_>>(),
-            }
-        }),
     }
 }
 

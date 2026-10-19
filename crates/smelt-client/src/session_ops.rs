@@ -40,7 +40,7 @@ pub fn rename_history_title(
     Ok(())
 }
 
-/// 桌面发布侧栏菜单。smeltd 是唯一持有者；网关只消费 subscribe，不读工作区快照。
+/// 桌面发布侧栏菜单。smeltd 是唯一持有者；远程客户端只消费 subscribe，不读工作区快照。
 pub fn publish_workspace_menu(
     runtime: &RuntimeClient,
     menu: &WorkspaceMenuSnapshot,

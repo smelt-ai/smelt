@@ -188,6 +188,7 @@ mod tests {
                 os: Some("linux".to_string()),
                 arch: Some("x86_64".to_string()),
                 hostname: None,
+                desktop: None,
             },
             events: Some(EventProtocolDescription {
                 protocol_version: EVENT_BUS_PROTOCOL_VERSION,

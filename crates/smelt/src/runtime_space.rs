@@ -21,6 +21,9 @@ pub(crate) struct RuntimeSpace {
     pub(crate) collapsed_projects: HashSet<String>,
     /// 侧栏被固定的项目根。固定后即使开了「隐藏无会话」也留在列表里。
     pub(crate) pinned_projects: HashSet<String>,
+    /// 侧栏里这台机器的分段，用户这次运行里亲手折起（`Some(true)`）或展开过。不落盘：
+    /// 下次启动回到默认，见 [`crate::Workspace::runtime_folded`]。
+    pub(crate) folded: Option<bool>,
     /// 这个运行时那份工作区目录（项目、会话组）是否已经读到。读到之前不保存：内存里
     /// 的空列表不代表用户关光了会话。
     pub(crate) catalog_loaded: bool,
@@ -45,6 +48,7 @@ impl RuntimeSpace {
             projects: Vec::new(),
             collapsed_projects: HashSet::new(),
             pinned_projects: HashSet::new(),
+            folded: None,
             catalog_loaded: false,
             catalog: WorkspaceCatalogSync::default(),
             write_queue: WorkspaceSnapshotWriteQueue::default(),
@@ -56,6 +60,26 @@ impl RuntimeSpace {
 }
 
 impl crate::Workspace {
+    /// 侧栏里这台机器的分段折没折。用户这次点过就按他点的；没点过的，远程机器折起、本机
+    /// 展开：日常干活在本机，别的机器有事时标题上挂着状态点，要看再点开。
+    pub(crate) fn runtime_folded(&self, key: &crate::runtimes::RuntimeKey) -> bool {
+        self.space(key)
+            .and_then(|space| space.folded)
+            .unwrap_or(*key != crate::runtimes::RuntimeKey::Local)
+    }
+
+    pub(crate) fn toggle_runtime_fold(
+        &mut self,
+        key: &crate::runtimes::RuntimeKey,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let folded = !self.runtime_folded(key);
+        if let Some(space) = self.space_mut(key) {
+            space.folded = Some(folded);
+        }
+        cx.notify();
+    }
+
     /// 某个运行时的空间。远程运行时被移除后就没有了。
     pub(crate) fn space(&self, key: &crate::runtimes::RuntimeKey) -> Option<&RuntimeSpace> {
         if *key == crate::runtimes::RuntimeKey::Local {

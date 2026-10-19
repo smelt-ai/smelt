@@ -65,11 +65,14 @@ pub enum StoreError {
     #[error("未知 KV value_type: {value_type}")]
     UnknownKvValueType { value_type: String },
 
-    #[error("会话组 {group_id} 没有布局叶子")]
-    SessionGroupMissingLeaf { group_id: String },
+    #[error("工作区第 {position} 段对话缺少 id")]
+    ConversationMissingId { position: usize },
 
-    #[error("布局叶子 {node_id} 缺少 session")]
-    LayoutLeafMissingSession { node_id: String },
+    #[error("工作区里有两段对话用了同一个 id：{id}")]
+    DuplicateConversationId { id: String },
+
+    #[error("对话 {id} 里既没有终端也不是 ACP 对话")]
+    EmptyConversation { id: String },
 
     #[error("KV 数字 {path} 无效: {source}")]
     InvalidKvNumber {

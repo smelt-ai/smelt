@@ -15,8 +15,11 @@ use super::daemon::DaemonOperation;
 /// 控制协议版本。只加方法不升它：客户端按 `system.describe` 的方法清单看运行时有没有
 /// 自己要用的方法。删方法、改已有方法的参数或结果才升，同时抬
 /// [`CONTROL_API_MIN_SUPPORTED_VERSION`]，旧客户端据此知道该升级自己。
-pub const CONTROL_API_VERSION: u16 = 1;
-pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 1;
+///
+/// v2：`workspace.load` / `workspace.save` 的文档改了形状（对话带稳定 id，终端平铺，
+/// 分屏归客户端）。旧桌面读写新文档、新桌面读写旧文档都会把终端对话存坏，两边都得拦住。
+pub const CONTROL_API_VERSION: u16 = 2;
+pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 2;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
 
 macro_rules! define_control_methods {
@@ -241,6 +244,10 @@ pub struct DaemonRuntimeInfo {
     /// 运行时所在机器的主机名，客户端添加运行时时拿它当默认名字。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// 这台机器装没装远程桌面（`install.sh --with-desktop`）。装了，客户端才给「远程桌面」
+    /// 入口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
 }
 
 /// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：版本对不上，
@@ -593,7 +600,7 @@ mod tests {
             request,
             serde_json::json!({
                 "op": "control",
-                "control_version": 1,
+                "control_version": CONTROL_API_VERSION,
                 "request_id": "request-1",
                 "method": "system.describe",
                 "params": {},

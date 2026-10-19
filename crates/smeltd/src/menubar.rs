@@ -207,8 +207,8 @@ extern "C" fn on_open(_this: &Object, _cmd: Sel, _sender: *mut Object) {
 }
 
 /// 点「退出 smelt」：整个守护进程退出。注意这会关掉所有 PTY——所有会话（含正在
-/// 跑的 agent）随之结束。后果已写进菜单项文案里。先清 iroh 隧道与远程网关，
-/// 避免端口残留。
+/// 跑的 agent）随之结束。后果已写进菜单项文案里。先关 iroh endpoint，免得已连上的
+/// 远程设备挂在一个已死的运行时上。
 extern "C" fn on_quit(_this: &Object, _cmd: Sel, _sender: *mut Object) {
     crate::cleanup_sidecar_services();
     std::process::exit(0);

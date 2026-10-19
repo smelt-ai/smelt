@@ -99,16 +99,27 @@ impl Workspace {
         ]);
         cx.notify();
         let started_id = provider_id;
+        // 登录在能力库眼下那台机器上跑，整条事件流都问它。
+        let client = self.pi_library_client(cx);
         cx.spawn(async move |this, cx| {
+            let Some(client) = client else {
+                let _ = this.update(cx, |this, cx| {
+                    this.pi_auth_error = Some("这台机器已经移除".to_string());
+                    cx.notify();
+                });
+                return;
+            };
             let params = LoginStartParams {
                 provider_id: started_id.clone(),
                 method,
                 ask_all,
             };
+            let start_client = client.clone();
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::runtime_call::call::<PiAuthLoginStart>(params, AUTH_CALL_TIMEOUT)
+                    start_client
+                        .call::<PiAuthLoginStart>(&params, AUTH_CALL_TIMEOUT)
                         .map_err(crate::runtime_call::error_text)
                 })
                 .await;
@@ -148,14 +159,16 @@ impl Workspace {
                     login_id: login_id.clone(),
                     after,
                 };
+                let poll_client = client.clone();
                 let polled = cx
                     .background_executor()
                     .spawn(async move {
-                        crate::runtime_call::call::<PiAuthLoginEvents>(
-                            params,
-                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                        )
-                        .map_err(crate::runtime_call::error_text)
+                        poll_client
+                            .call::<PiAuthLoginEvents>(
+                                &params,
+                                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                            )
+                            .map_err(crate::runtime_call::error_text)
                     })
                     .await;
                 let batch = match polled {

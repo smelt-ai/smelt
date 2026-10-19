@@ -193,6 +193,7 @@ mod restore_order_tests {
 
     fn state(name: &str, acp: bool) -> SessionState {
         SessionState {
+            id: format!("conv-{name}"),
             layout: PaneState::Leaf {
                 cwd: Some(format!("/{name}")),
                 id: None,
@@ -323,7 +324,7 @@ mod restore_order_tests {
                 .iter()
                 .map(|session| session_state_persist_id(session).unwrap())
                 .collect::<Vec<_>>(),
-            vec!["sid-acp-1", "sid-acp-2"]
+            vec!["conv-acp-1", "conv-acp-2"]
         );
         // 当时停在被丢掉的那条上，就改停在它的双胞胎上，而不是滑到邻居。
         assert_eq!(active, 0);
@@ -343,7 +344,7 @@ mod restore_order_tests {
         assert_eq!(sessions.len(), 2);
         assert_eq!(
             session_state_persist_id(&sessions[active]).unwrap(),
-            "sid-acp-2"
+            "conv-acp-2"
         );
     }
 
@@ -379,22 +380,26 @@ mod restore_order_tests {
         assert_eq!(restored, vec![1, 3]);
     }
 
+    /// 认人只认对话 id：切一下活动终端、ACP 换了会话进程，都不能换掉它。
     #[test]
-    fn session_state_persist_id_prefers_acp_sid_then_terminal_leaf() {
+    fn session_state_persist_id_is_the_conversation_id() {
         assert_eq!(
             session_state_persist_id(&state("acp-1", true)).as_deref(),
-            Some("sid-acp-1")
+            Some("conv-acp-1")
         );
 
         let mut term = state("term-0", false);
-        if let crate::PaneState::Leaf { id, .. } = &mut term.layout {
-            *id = Some("term-leaf-0".into());
-        }
+        term.layout = PaneState::Tabs {
+            active: 1,
+            children: vec![term.layout.clone(), term.layout.clone()],
+        };
+        term.active = 1;
         assert_eq!(
             session_state_persist_id(&term).as_deref(),
-            Some("term-leaf-0")
+            Some("conv-term-0")
         );
-        assert_eq!(session_state_persist_id(&state("term-0", false)), None);
+        term.id = String::new();
+        assert_eq!(session_state_persist_id(&term), None);
     }
 
     #[test]

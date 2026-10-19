@@ -282,6 +282,21 @@ fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
     result
 }
 
+/// 下载 Bun 的 curl。连不上、或者连上了却半天不动（走代理、跨地区连 GitHub 常见）都要
+/// 放弃，不能一直等：没有超时的话，第一次用 Pi 的对话会一直停在「正在想」，还占着准备
+/// 运行时的锁，后面的对话也跟着等。两种超时 curl 都当可重试的错误，重试完仍失败就报出来。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn bun_download_command(archive: &Path, url: &str) -> Command {
+    let mut download = Command::new("curl");
+    download
+        .args(["-fsSL", "--retry", "2", "--connect-timeout", "20"])
+        // 连续 60 秒低于 1 KB/s 就当卡住了。
+        .args(["--speed-limit", "1024", "--speed-time", "60", "-o"])
+        .arg(archive)
+        .arg(url);
+    download
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn install_bun_generation(
     staging: &Path,
@@ -290,11 +305,7 @@ fn install_bun_generation(
 ) -> Result<(), String> {
     let (url, expected_archive_sha) = BUN_DOWNLOAD;
     let archive = staging.join("download.zip");
-    let mut download = Command::new("curl");
-    download
-        .args(["-fsSL", "--retry", "2", "-o"])
-        .arg(&archive)
-        .arg(url);
+    let mut download = bun_download_command(&archive, url);
     manager.inherit_into(&mut download);
     let output = download
         .output()
@@ -556,6 +567,33 @@ mod tests {
     }
 
     use super::*;
+
+    /// 复现：远程 Linux 上下载 Bun 卡住，curl 没有超时，对话一直停在「正在想」。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_stalled_bun_download_gives_up_instead_of_waiting_forever() {
+        let command =
+            bun_download_command(Path::new("/tmp/bun.zip"), "https://example.com/bun.zip");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let value_of = |flag: &str| {
+            args.iter()
+                .position(|arg| arg == flag)
+                .and_then(|index| args.get(index + 1))
+                .map(String::as_str)
+        };
+        assert_eq!(value_of("--connect-timeout"), Some("20"));
+        assert_eq!(value_of("--speed-limit"), Some("1024"));
+        assert_eq!(value_of("--speed-time"), Some("60"));
+        assert_eq!(value_of("--retry"), Some("2"));
+        assert_eq!(value_of("-o"), Some("/tmp/bun.zip"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://example.com/bun.zip")
+        );
+    }
 
     #[test]
     fn bun_launcher_follows_the_latest_generation() {

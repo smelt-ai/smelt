@@ -17,8 +17,8 @@ smelt-client = { path = "../smelt-client" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-ui = { path = "../smelt-ui" }
 gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9", features = ["tree-sitter-languages"] }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6", features = ["tree-sitter-languages"] }
 # 仅用于 SessionId 这一个类型（acp_session_id 字段/存档边界），协议本身的连接
 # 驱动已经不在这层了。
 agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }

@@ -74,7 +74,7 @@ pub struct WorkspaceMenuSession {
     pub id: String,
     pub kind: WorkspaceMenuSessionKind,
     pub title: String,
-    /// true 表示用户在 PC 侧手动重命名，网关不得用自动标题覆盖。
+    /// true 表示用户在 PC 侧手动重命名，远程客户端不得用自动标题覆盖。
     #[serde(default)]
     pub custom_title: bool,
     pub cwd: Option<String>,

@@ -19,6 +19,7 @@ use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
@@ -75,72 +76,327 @@ fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
     (ElementId::from(name), key).into()
 }
 
-/// 侧栏里一段运行时的标题：名字、在线状态，hover 出「在这台机器上打开项目」。
+/// 侧栏里一台机器的分段标题：点整行折起或展开；名字后面只在需要注意时写连接状态
+/// （离线、连接中、走中继，慢了用警告色）；折起时组里有对话在跑或在等你，挂一个状态点，
+/// 免得「需要你」被折没了。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
+/// 「打开项目」的快捷按钮。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
+    folded: bool,
+    alert: Option<AgentStatus>,
     cx: &App,
-) -> Stateful<Div> {
+) -> impl IntoElement + use<> {
     let key = runtime.key().clone();
     let name = crate::runtimes::runtime_name(&key, cx);
-    let unavailable = crate::runtimes::runtime_unavailable_label(&key, cx);
+    let attention = crate::runtimes::runtime_attention(&key, cx);
     let group = SharedString::from(format!("runtime-header-{key:?}"));
+    let toggle_workspace = workspace.clone();
+    let toggle_key = key.clone();
+    let menu_runtime = runtime.clone();
+    let menu_workspace = workspace.clone();
+    let context_runtime = runtime.clone();
+    let context_workspace = workspace.clone();
     div()
         .id(ElementId::from(group.clone()))
         .group(group.clone())
         .mx_2()
         .mt_3()
-        .px_3()
+        .pl_1()
+        .pr_1()
+        .h(ui_theme::height::sm())
         .flex()
         .items_center()
-        .gap_1p5()
-        .text_xs()
-        .text_color(rgb(ui_theme::text_faint()))
+        .gap_1()
+        .rounded(ui_theme::row_radius())
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
+        .on_click(move |_ev, _window, cx| {
+            toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
+        })
+        .child(
+            Icon::new(if folded {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            })
+            .size(px(12.))
+            .text_color(rgb(ui_theme::text_faint())),
+        )
         .child(
             div()
-                .size(px(6.))
-                .rounded_full()
-                .bg(rgb(if unavailable.is_none() {
-                    ui_theme::session_dot_color(AgentStatus::Idle).into()
-                } else {
-                    ui_theme::text_faint()
-                })),
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .font_medium()
+                .text_color(rgb(ui_theme::text_mid()))
+                .child(name),
         )
-        .child(name)
-        .when_some(unavailable, |d, label| d.child(format!("· {label}")))
+        .when_some(attention, |d, (text, tone)| {
+            d.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(match tone {
+                        crate::runtimes::LinkTone::Warning => ui_theme::yellow(),
+                        crate::runtimes::LinkTone::Muted => ui_theme::text_faint(),
+                    }))
+                    .child(text),
+            )
+        })
+        .when_some(alert.filter(|_| folded), |d, status| {
+            d.child(
+                div()
+                    .flex_none()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(ui_theme::session_dot_color(status)),
+            )
+        })
         .child(div().flex_1())
         .child({
             let runtime = runtime.clone();
             let workspace = workspace.clone();
             Button::new(ElementId::from(SharedString::from(format!(
-                "runtime-desktop-{key:?}"
-            ))))
-            .quiet()
-            .icon_size()
-            .icon(Icon::empty().path("smelt-icons/monitor.svg"))
-            .icon_action("远程桌面")
-            .opacity(0.0)
-            .group_hover(group.clone(), |style| style.opacity(1.0))
-            .on_click(move |_ev, window, cx| {
-                let runtime = runtime.clone();
-                workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
-            })
-        })
-        .child(
-            Button::new(ElementId::from(SharedString::from(format!(
                 "runtime-open-project-{key:?}"
             ))))
             .quiet()
             .icon_size()
-            .icon(IconName::Plus)
+            .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
             .icon_action("打开项目")
             .opacity(0.0)
             .group_hover(group, |style| style.opacity(1.0))
             .on_click(move |_ev, _window, cx| {
+                cx.stop_propagation();
                 let runtime = runtime.clone();
                 workspace.update(cx, |ws, cx| ws.open_project_on(runtime, cx));
-            }),
+            })
+        })
+        // 点 `⋯` 只开菜单，不能顺带把分段折起来：在外面包一层截住冒泡。
+        .child(
+            div()
+                .id(ElementId::from(SharedString::from(format!(
+                    "runtime-menu-wrap-{key:?}"
+                ))))
+                .on_click(|_ev, _window, cx| cx.stop_propagation())
+                .child(
+                    Button::new(ElementId::from(SharedString::from(format!(
+                        "runtime-menu-{key:?}"
+                    ))))
+                    .quiet()
+                    .icon_size()
+                    .icon(IconName::Ellipsis)
+                    .icon_action("这台机器")
+                    .dropdown_menu(move |menu, _window, cx| {
+                        machine_menu(menu, menu_runtime.clone(), menu_workspace.clone(), cx)
+                    }),
+                ),
         )
+        .context_menu(move |menu, _window, cx| {
+            machine_menu(menu, context_runtime.clone(), context_workspace.clone(), cx)
+        })
+}
+
+/// 一台机器能做的事。侧栏标题的 `⋯`、右键和机器面板里每一行用的都是这一份：同一件事
+/// 在哪儿点都是同样的字、同样的结果。
+pub(crate) fn machine_menu(
+    menu: PopupMenu,
+    runtime: crate::runtimes::Runtime,
+    workspace: Entity<Workspace>,
+    cx: &App,
+) -> PopupMenu {
+    let key = runtime.key().clone();
+    let open_runtime = runtime.clone();
+    let open_workspace = workspace.clone();
+    let library_key = key.clone();
+    let library_workspace = workspace.clone();
+    let mut menu = menu
+        .item(
+            PopupMenuItem::new("打开项目…")
+                .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
+                .on_click(move |_ev, _window, cx| {
+                    let runtime = open_runtime.clone();
+                    open_workspace.update(cx, |ws, cx| ws.open_project_on(runtime, cx));
+                }),
+        )
+        .item(
+            PopupMenuItem::new("能力库")
+                .icon(IconName::LayoutDashboard)
+                .on_click(move |_ev, window, cx| {
+                    let key = library_key.clone();
+                    library_workspace.update(cx, |ws, cx| ws.open_capabilities_on(key, window, cx));
+                }),
+        );
+    // 只有装了远程桌面、眼下连着的机器才有。
+    if crate::runtimes::runtime_has_desktop(&key, cx) {
+        let desktop_runtime = runtime.clone();
+        let desktop_workspace = workspace.clone();
+        menu = menu.item(
+            PopupMenuItem::new("远程桌面")
+                .icon(Icon::empty().path("smelt-icons/monitor.svg"))
+                .on_click(move |_ev, window, cx| {
+                    let runtime = desktop_runtime.clone();
+                    desktop_workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
+                }),
+        );
+    }
+    let RuntimeKey::Remote(runtime_id) = key else {
+        return menu;
+    };
+    let rename_id = runtime_id.clone();
+    let rename_workspace = workspace.clone();
+    menu.separator()
+        .item(
+            PopupMenuItem::new("重命名…")
+                .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
+                .on_click(move |_ev, window, cx| {
+                    let target = RenameTarget::Runtime(rename_id.clone());
+                    rename_workspace.update(cx, |ws, cx| ws.start_rename(target, window, cx));
+                }),
+        )
+        .item(
+            PopupMenuItem::new("移除…")
+                .icon(Icon::empty().path("smelt-icons/trash.svg"))
+                .on_click(move |_ev, _window, cx| {
+                    let runtime_id = runtime_id.clone();
+                    workspace.update(cx, |ws, cx| ws.request_remove_runtime(runtime_id, cx));
+                }),
+        )
+}
+
+/// 侧栏底部「设置」旁边的机器按钮：点开是所有机器的连接情况和机器菜单，「添加机器」也在
+/// 这里。有机器离线、版本不对、走中继还很慢时按钮上挂个点，平时不打扰。
+fn machines_button(workspace: Entity<Workspace>, cx: &App) -> impl IntoElement + use<> {
+    let needs_attention = crate::runtimes::any_runtime_needs_attention(cx);
+    let trigger = Button::new("sidebar-machines-btn")
+        .quiet()
+        .compact()
+        .icon(Icon::empty().path("icons/server.svg"))
+        .icon_action("机器");
+    div()
+        .relative()
+        .flex_none()
+        .child(
+            Popover::new("sidebar-machines")
+                .anchor(Anchor::BottomLeft)
+                .w(px(320.))
+                .trigger(trigger)
+                .content(move |_, _window, cx| machines_panel(workspace.clone(), cx)),
+        )
+        .when(needs_attention, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top(px(4.))
+                    .right(px(4.))
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(ui_theme::yellow())),
+            )
+        })
+}
+
+/// 机器面板：本机在前，远程机器按添加顺序。每行是名字、完整的连接说明和机器菜单。
+fn machines_panel(workspace: Entity<Workspace>, cx: &App) -> Div {
+    let mut runtimes = vec![crate::runtimes::Runtime::local()];
+    let mut any_relay = false;
+    if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
+        for remote in &hub.remotes {
+            any_relay |= matches!(
+                remote.link.as_ref().map(|link| &link.kind),
+                Some(crate::runtimes::LinkKind::Relay(_))
+            );
+            runtimes.push(remote.runtime.clone());
+        }
+    }
+    let add_workspace = workspace.clone();
+    let mut panel = v_flex().p_2().gap_1().child(
+        h_flex()
+            .px_1()
+            .pb_1()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .text_color(rgb(ui_theme::text_bright()))
+                    .child("机器"),
+            )
+            .child(
+                Button::new("machines-add")
+                    .quiet()
+                    .icon_size()
+                    .label("添加机器")
+                    .on_click(move |_ev, _window, cx| {
+                        add_workspace.update(cx, |ws, cx| {
+                            ws.open_settings_section(
+                                crate::settings::SettingsSection::CollaborationRemote,
+                                cx,
+                            );
+                        });
+                    }),
+            ),
+    );
+    for runtime in runtimes {
+        let key = runtime.key().clone();
+        let name = crate::runtimes::runtime_name(&key, cx);
+        let (detail, tone) = crate::runtimes::runtime_link_detail(&key, cx);
+        let menu_workspace = workspace.clone();
+        panel = panel.child(
+            h_flex()
+                .px_1()
+                .py_1()
+                .gap_2()
+                .items_center()
+                .rounded(ui_theme::row_radius())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .text_color(rgb(ui_theme::text_mid()))
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgb(match tone {
+                                    crate::runtimes::LinkTone::Warning => ui_theme::yellow(),
+                                    crate::runtimes::LinkTone::Muted => ui_theme::text_faint(),
+                                }))
+                                .child(detail),
+                        ),
+                )
+                .child(
+                    Button::new(ElementId::from(SharedString::from(format!(
+                        "machines-menu-{key:?}"
+                    ))))
+                    .quiet()
+                    .icon_size()
+                    .icon(IconName::Ellipsis)
+                    .icon_action("这台机器")
+                    .dropdown_menu(move |menu, _window, cx| {
+                        machine_menu(menu, runtime.clone(), menu_workspace.clone(), cx)
+                    }),
+                ),
+        );
+    }
+    if any_relay {
+        panel = panel.child(
+            div()
+                .px_1()
+                .pt_1()
+                .text_xs()
+                .text_color(rgb(ui_theme::text_faint()))
+                .child("走中继会慢：给 Smelt 设 UDP 直连规则，或者自建一个离两边都近的中继。"),
+        );
+    }
+    panel
 }
 
 /// 远程项目的右键菜单：复制路径、置顶、关闭。
@@ -546,6 +802,39 @@ impl Workspace {
         // ---- 运行时标题行：挂了远程运行时才分段 ----
         // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
         // 「打开项目」就在上面。
+        let runtime_sections = !self.remote_spaces.is_empty();
+        // 折起的机器分段挂上组里最要紧的状态：在跑、在等你，折起来也看得见。
+        let mut runtime_alerts: std::collections::HashMap<RuntimeKey, AgentStatus> =
+            Default::default();
+        for group in groups.iter() {
+            for status in group
+                .sessions
+                .iter()
+                .filter_map(|&i| statuses.get(i).copied())
+            {
+                runtime_alerts
+                    .entry(group.runtime.clone())
+                    .and_modify(|current| {
+                        if status.rank() < current.rank() {
+                            *current = status;
+                        }
+                    })
+                    .or_insert(status);
+            }
+        }
+        let header_for = |runtime: crate::runtimes::Runtime, cx: &App| {
+            let key = runtime.key().clone();
+            runtime_section_header(
+                runtime,
+                this.clone(),
+                self.runtime_folded(&key),
+                runtime_alerts
+                    .get(&key)
+                    .copied()
+                    .filter(|status| *status != AgentStatus::Idle),
+                cx,
+            )
+        };
         let mut headers_left: std::collections::VecDeque<crate::runtimes::Runtime> =
             if self.remote_spaces.is_empty() {
                 Default::default()
@@ -565,11 +854,15 @@ impl Workspace {
             {
                 while let Some(runtime) = headers_left.pop_front() {
                     let reached = runtime.key() == &group.runtime;
-                    rows = rows.child(runtime_section_header(runtime, this.clone(), cx));
+                    rows = rows.child(header_for(runtime, cx));
                     if reached {
                         break;
                     }
                 }
+            }
+            // 机器分段折起来了，它下面的项目和会话都不画。
+            if runtime_sections && self.runtime_folded(&group.runtime) {
+                continue;
             }
             let is_project_group = grouping == SidebarGrouping::Project;
             // ---- 项目分组标题行 ----
@@ -1651,7 +1944,7 @@ impl Workspace {
         }
 
         for runtime in headers_left {
-            rows = rows.child(runtime_section_header(runtime, this.clone(), cx));
+            rows = rows.child(header_for(runtime, cx));
         }
 
         if hidden_empty > 0 {
@@ -1790,6 +2083,8 @@ impl Workspace {
             .py_2()
             .border_t_1()
             .border_color(ui_theme::hairline())
+            .gap_1()
+            .child(machines_button(this.clone(), cx))
             .child(
                 div()
                     .id("sidebar-settings")

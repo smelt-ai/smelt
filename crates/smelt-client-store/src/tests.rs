@@ -106,10 +106,12 @@ fn records_round_trip_and_start_empty() {
     cleanup(&path);
 }
 
-fn route(runtime_id: Option<&str>, session_id: &str) -> SessionRouteRecord {
-    SessionRouteRecord {
+fn route(runtime_id: Option<&str>, conversation_id: &str) -> ConversationRouteRecord {
+    ConversationRouteRecord {
         runtime_id: runtime_id.map(str::to_string),
-        session_id: session_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        active_terminal_id: Some("term-2".to_string()),
+        dock_layout: Some(r#"{"v":1,"center":{"terminal":"term-2"}}"#.to_string()),
         stage_cover: Some("inspector".to_string()),
         tool_panel_tab: "git".to_string(),
         tool_panel_open: true,
@@ -128,30 +130,113 @@ fn route(runtime_id: Option<&str>, session_id: &str) -> SessionRouteRecord {
     }
 }
 
-/// 会话路由整份换：关掉的会话不留；两个运行时上同一个会话 id 各算各的。
+/// 对话的界面状态整份换：关掉的对话不留；两个运行时上同一个对话 id 各算各的。
 #[test]
-fn session_routes_are_replaced_as_a_whole() {
+fn conversation_routes_are_replaced_as_a_whole() {
     let (store, path) = temp_store();
-    assert!(store.session_routes().unwrap().is_empty());
+    assert!(store.conversation_routes().unwrap().is_empty());
 
     let routes = vec![
-        route(None, "s-1"),
-        route(Some("rt-linux"), "s-1"),
-        SessionRouteRecord {
+        route(None, "conv-1"),
+        route(Some("rt-linux"), "conv-1"),
+        ConversationRouteRecord {
+            active_terminal_id: None,
+            dock_layout: None,
             stage_cover: None,
             expanded: Vec::new(),
-            ..route(None, "s-2")
+            ..route(None, "conv-2")
         },
     ];
-    store.put_session_routes(&routes).unwrap();
-    let mut read = store.session_routes().unwrap();
-    read.sort_by(|a, b| (&a.runtime_id, &a.session_id).cmp(&(&b.runtime_id, &b.session_id)));
+    store.put_conversation_routes(&routes).unwrap();
+    let key = |record: &ConversationRouteRecord| {
+        (record.runtime_id.clone(), record.conversation_id.clone())
+    };
+    let mut read = store.conversation_routes().unwrap();
+    read.sort_by_key(key);
     let mut expected = routes.clone();
-    expected.sort_by(|a, b| (&a.runtime_id, &a.session_id).cmp(&(&b.runtime_id, &b.session_id)));
+    expected.sort_by_key(key);
     assert_eq!(read, expected);
 
-    store.put_session_routes(&routes[1..2]).unwrap();
-    assert_eq!(store.session_routes().unwrap(), routes[1..2].to_vec());
+    store.put_conversation_routes(&routes[1..2]).unwrap();
+    assert_eq!(store.conversation_routes().unwrap(), routes[1..2].to_vec());
+    cleanup(&path);
+}
+
+/// 分屏布局只当 JSON 存：不是合法 JSON 的写不进去，整份写入跟着回滚。
+#[test]
+fn a_dock_layout_must_be_json() {
+    let (store, path) = temp_store();
+    store
+        .put_conversation_routes(&[route(None, "conv-1")])
+        .unwrap();
+    let broken = ConversationRouteRecord {
+        dock_layout: Some("{not json".to_string()),
+        ..route(None, "conv-2")
+    };
+    assert!(store.put_conversation_routes(&[broken]).is_err());
+    assert_eq!(
+        store.conversation_routes().unwrap(),
+        vec![route(None, "conv-1")]
+    );
+    cleanup(&path);
+}
+
+/// v2 的会话路由按活动终端的 id 存，对不上对话的稳定 id，升到 v3 时丢掉；别的界面状态留着。
+#[test]
+fn v2_session_routes_are_dropped() {
+    let path = temp_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let v2 = Connection::open(&path).unwrap();
+    v2.execute_batch(schema::CREATE_SCHEMA).unwrap();
+    v2.execute_batch(
+        "DROP TABLE conversation_route;
+         DROP TABLE conversation_route_path;
+         CREATE TABLE session_route (
+           runtime_id TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           stage_cover TEXT,
+           tool_panel_tab TEXT NOT NULL,
+           tool_panel_open INTEGER NOT NULL CHECK (tool_panel_open IN (0, 1)),
+           tool_panel_w REAL NOT NULL,
+           file_tree_selected TEXT,
+           open_file_path TEXT,
+           file_tree_w REAL NOT NULL,
+           file_tree_open INTEGER NOT NULL CHECK (file_tree_open IN (0, 1)),
+           git_tab TEXT NOT NULL,
+           diff_split INTEGER NOT NULL CHECK (diff_split IN (0, 1)),
+           diff_scope TEXT NOT NULL,
+           PRIMARY KEY (runtime_id, session_id)
+         ) WITHOUT ROWID;
+         CREATE TABLE session_route_path (
+           runtime_id TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           kind TEXT NOT NULL,
+           path TEXT NOT NULL,
+           position INTEGER NOT NULL,
+           PRIMARY KEY (runtime_id, session_id, kind, path)
+         ) WITHOUT ROWID;
+         INSERT INTO session_route VALUES
+           ('', 'term-1', NULL, 'git', 1, 420.0, NULL, NULL, 240.0, 1, 'changes', 0, 'all');
+         INSERT INTO session_route_path VALUES ('', 'term-1', 'expanded', '/repo/src', 0);
+         INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);
+         PRAGMA user_version = 2;",
+    )
+    .unwrap();
+    drop(v2);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert!(store.conversation_routes().unwrap().is_empty());
+    assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
+    store
+        .put_conversation_routes(&[route(None, "conv-1")])
+        .unwrap();
+    assert_eq!(store.conversation_routes().unwrap().len(), 1);
+    drop(store);
+    let version: u32 = Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, schema::SCHEMA_VERSION);
     cleanup(&path);
 }
 
@@ -299,8 +384,8 @@ fn v1_projects_become_local_projects() {
     v1.execute_batch(
         "DROP TABLE collapsed_project;
          DROP TABLE pinned_project;
-         DROP TABLE session_route;
-         DROP TABLE session_route_path;
+         DROP TABLE conversation_route;
+         DROP TABLE conversation_route_path;
          CREATE TABLE collapsed_project (root TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
          CREATE TABLE pinned_project (root TEXT PRIMARY KEY, position INTEGER NOT NULL) WITHOUT ROWID;
          INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);

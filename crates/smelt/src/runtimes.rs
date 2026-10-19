@@ -87,6 +87,8 @@ pub(crate) enum RuntimeStatus {
     Online {
         version: String,
         platform: Option<String>,
+        /// 装了远程桌面，侧栏和机器面板才给「远程桌面」。
+        desktop: bool,
     },
     Offline(String),
     /// 连得上，但版本和这个桌面对不上（见 `smelt_client::compat`），说明里写着该升级
@@ -106,6 +108,152 @@ pub(crate) struct RemoteRuntime {
     pub(crate) connection: smelt_client_store::RuntimeConnection,
     pub(crate) runtime: Runtime,
     pub(crate) status: RuntimeStatus,
+    /// 读它眼下连接路径的把手，和它的连接器共用。
+    probe: PathProbe,
+    /// 最近一次读到的连接路径和延迟。只在连着时有。
+    pub(crate) link: Option<RuntimeLink>,
+}
+
+/// 到一个远程运行时的连接走哪条路。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LinkKind {
+    /// 两边打通了，点对点直连。
+    Direct,
+    /// 打洞没成，经中继转发。带着给人看的中继名。
+    Relay(String),
+    /// 别的传输（iroh 的自定义传输），不多说。
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeLink {
+    pub(crate) kind: LinkKind,
+    pub(crate) rtt_ms: u32,
+}
+
+impl RuntimeLink {
+    fn from_path(path: &smelt_iroh::PathStatus) -> Self {
+        Self {
+            kind: match path.kind {
+                smelt_iroh::PathKind::Direct => LinkKind::Direct,
+                smelt_iroh::PathKind::Relay => LinkKind::Relay(relay_name(&path.address)),
+                smelt_iroh::PathKind::Custom => LinkKind::Other,
+            },
+            rtt_ms: u32::try_from(path.rtt.as_millis()).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+/// 中继地址（`relay:https://usw1-1.relay.n0.iroh.link./`）里给人看的那段：n0 的公共中继
+/// 只留地区（`n0 usw1-1`），自建的留主机名。
+fn relay_name(address: &str) -> String {
+    let url = address.strip_prefix("relay:").unwrap_or(address);
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.');
+    match host.strip_suffix(".relay.n0.iroh.link") {
+        Some(region) => format!("n0 {region}"),
+        None => host.to_string(),
+    }
+}
+
+/// 延迟到了这个数，中继就值得提醒：终端敲一个字要等这么久才回显。
+const SLOW_RTT_MS: u32 = 200;
+
+/// 换一次就让看着运行时列表的界面重画一次，所以延迟小幅抖动不算变。
+fn link_changed(old: Option<&RuntimeLink>, new: Option<&RuntimeLink>) -> bool {
+    match (old, new) {
+        (Some(old), Some(new)) => {
+            old.kind != new.kind || old.rtt_ms.abs_diff(new.rtt_ms) >= (old.rtt_ms / 5).max(20)
+        }
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+/// 状态文字的轻重。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkTone {
+    Muted,
+    Warning,
+}
+
+/// 一台机器的连接状态写成字。`compact` 给侧栏标题：一切正常（直连、在线还没测出路径）
+/// 时不写，只在需要注意时给一小段；否则是机器面板里的完整说明。
+fn link_text(
+    status: &RuntimeStatus,
+    link: Option<&RuntimeLink>,
+    compact: bool,
+) -> Option<(String, LinkTone)> {
+    match status {
+        RuntimeStatus::Connecting => Some(("连接中".to_string(), LinkTone::Muted)),
+        RuntimeStatus::Offline(_) => Some(("离线".to_string(), LinkTone::Muted)),
+        RuntimeStatus::Incompatible { .. } => Some(("版本不兼容".to_string(), LinkTone::Warning)),
+        RuntimeStatus::Upgrading(_) if compact => Some(("升级中".to_string(), LinkTone::Muted)),
+        RuntimeStatus::Upgrading(progress) => Some((progress.clone(), LinkTone::Muted)),
+        RuntimeStatus::Online { .. } => {
+            let Some(link) = link else {
+                return (!compact).then(|| ("在线".to_string(), LinkTone::Muted));
+            };
+            let tone = if link.rtt_ms >= SLOW_RTT_MS {
+                LinkTone::Warning
+            } else {
+                LinkTone::Muted
+            };
+            match &link.kind {
+                LinkKind::Relay(_) if compact => Some((format!("中继 · {}ms", link.rtt_ms), tone)),
+                LinkKind::Relay(relay) => Some((format!("中继 {relay} · {}ms", link.rtt_ms), tone)),
+                _ if compact => None,
+                LinkKind::Direct => Some((format!("直连 · {}ms", link.rtt_ms), tone)),
+                LinkKind::Other => Some((format!("在线 · {}ms", link.rtt_ms), tone)),
+            }
+        }
+    }
+}
+
+fn remote_of<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RemoteRuntime> {
+    cx.try_global::<RuntimeHub>()?
+        .remotes
+        .iter()
+        .find(|remote| remote.runtime.key() == key)
+}
+
+/// 侧栏标题上的连接状态，见 [`link_text`]。本机不写。
+pub(crate) fn runtime_attention(key: &RuntimeKey, cx: &gpui::App) -> Option<(String, LinkTone)> {
+    let remote = remote_of(key, cx)?;
+    link_text(&remote.status, remote.link.as_ref(), true)
+}
+
+/// 机器面板里的完整连接说明。
+pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, LinkTone) {
+    match key {
+        RuntimeKey::Local => ("这台 Mac".to_string(), LinkTone::Muted),
+        RuntimeKey::Remote(_) => remote_of(key, cx)
+            .and_then(|remote| link_text(&remote.status, remote.link.as_ref(), false))
+            .unwrap_or_else(|| ("离线".to_string(), LinkTone::Muted)),
+    }
+}
+
+/// 这台机器装了远程桌面、眼下也连着。本机（macOS）没有这套。
+pub(crate) fn runtime_has_desktop(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    remote_of(key, cx)
+        .is_some_and(|remote| matches!(remote.status, RuntimeStatus::Online { desktop: true, .. }))
+}
+
+/// 有没有哪台机器离线、版本不对，或者走中继还很慢：机器按钮上挂个点提醒。
+pub(crate) fn any_runtime_needs_attention(cx: &gpui::App) -> bool {
+    cx.try_global::<RuntimeHub>().is_some_and(|hub| {
+        hub.remotes.iter().any(|remote| {
+            link_text(&remote.status, remote.link.as_ref(), true)
+                .is_some_and(|(_, tone)| tone == LinkTone::Warning)
+                || matches!(remote.status, RuntimeStatus::Offline(_))
+        })
+    })
 }
 
 /// 桌面挂着的远程运行时，以及「添加运行时」的输入和进度。设置页只读它。
@@ -138,12 +286,30 @@ pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohCl
     Ok(client)
 }
 
+type ConnectorSlot =
+    std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::RuntimeConnector>>>>;
+
 /// 远程运行时的连接器。iroh 要起 tokio，不能在主线程绑，所以第一次连接（总在后台）时
 /// 才绑；之后复用同一个，同一条 QUIC 连接上开流。
 struct LazyRemoteConnector {
     endpoint: smelt_iroh::EndpointId,
     relay: Option<smelt_iroh::RelaySettings>,
-    connector: std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::RuntimeConnector>>>,
+    connector: ConnectorSlot,
+}
+
+/// 读一个远程运行时眼下的连接路径。和它的连接器共用一个槽：还没拨过号就读不到，也不会
+/// 为了读而去拨号。
+#[derive(Clone, Default)]
+struct PathProbe(ConnectorSlot);
+
+impl PathProbe {
+    /// 阻塞，只在后台调。
+    fn read(&self) -> Option<RuntimeLink> {
+        let connector = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+        connector
+            .path_status()
+            .map(|path| RuntimeLink::from_path(&path))
+    }
 }
 
 impl smelt_runtime_client::Connector for LazyRemoteConnector {
@@ -168,7 +334,7 @@ impl smelt_runtime_client::Connector for LazyRemoteConnector {
 /// 只解析地址，不碰网络，主线程可以调。
 fn remote_client(
     connection: &smelt_client_store::RuntimeConnection,
-) -> Result<RuntimeClient, String> {
+) -> Result<(RuntimeClient, PathProbe), String> {
     let endpoint: smelt_iroh::EndpointId = connection
         .endpoint_id
         .parse()
@@ -179,11 +345,13 @@ fn remote_client(
         .map(smelt_iroh::RelaySettings::parse)
         .transpose()
         .map_err(|error| format!("relay 地址不合法：{error:#}"))?;
-    Ok(RuntimeClient::new(LazyRemoteConnector {
+    let probe = PathProbe::default();
+    let client = RuntimeClient::new(LazyRemoteConnector {
         endpoint,
         relay,
-        connector: std::sync::Mutex::new(None),
-    }))
+        connector: probe.0.clone(),
+    });
+    Ok((client, probe))
 }
 
 /// 问一次运行时并对版本。阻塞，只在后台调。
@@ -281,6 +449,7 @@ fn described_status(
         return incompatible_status(&incompatible);
     }
     RuntimeStatus::Online {
+        desktop: described.daemon.desktop.unwrap_or(false),
         version: described.daemon.version,
         platform: described
             .daemon
@@ -327,10 +496,12 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
             hub.remotes = connections
                 .into_iter()
                 .map(|connection| match remote_client(&connection) {
-                    Ok(client) => RemoteRuntime {
+                    Ok((client, probe)) => RemoteRuntime {
                         runtime: remote_runtime(&connection.runtime_id, client),
                         connection,
                         status: RuntimeStatus::Connecting,
+                        probe,
+                        link: None,
                     },
                     Err(error) => RemoteRuntime {
                         runtime: remote_runtime(
@@ -341,6 +512,8 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                         ),
                         connection,
                         status: RuntimeStatus::Offline(error),
+                        probe: PathProbe::default(),
+                        link: None,
                     },
                 })
                 .collect();
@@ -349,6 +522,68 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
     }
     cx.set_global(hub);
     refresh_runtime_status(cx);
+    watch_runtime_links(cx);
+}
+
+/// 隔一会儿读一次各台机器的连接路径和延迟。只读已经连着的，不为此拨号；没变化就不动
+/// hub，免得看着它的侧栏跟着重画。
+fn watch_runtime_links(cx: &mut gpui::App) {
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+    cx.spawn(async move |cx| {
+        loop {
+            let probes = cx.update(|cx| {
+                cx.try_global::<RuntimeHub>()
+                    .map(|hub| {
+                        hub.remotes
+                            .iter()
+                            .map(|remote| {
+                                (
+                                    remote.connection.runtime_id.clone(),
+                                    matches!(remote.status, RuntimeStatus::Online { .. })
+                                        .then(|| remote.probe.clone()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
+            let links = cx
+                .background_executor()
+                .spawn(async move {
+                    probes
+                        .into_iter()
+                        .map(|(runtime_id, probe)| (runtime_id, probe.and_then(|p| p.read())))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            cx.update(|cx| {
+                let changed = cx.try_global::<RuntimeHub>().is_some_and(|hub| {
+                    links.iter().any(|(runtime_id, link)| {
+                        hub.remotes.iter().any(|remote| {
+                            remote.connection.runtime_id == *runtime_id
+                                && link_changed(remote.link.as_ref(), link.as_ref())
+                        })
+                    })
+                });
+                if changed {
+                    update_hub(cx, |hub| {
+                        for (runtime_id, link) in links {
+                            if let Some(remote) = hub
+                                .remotes
+                                .iter_mut()
+                                .find(|remote| remote.connection.runtime_id == runtime_id)
+                                && link_changed(remote.link.as_ref(), link.as_ref())
+                            {
+                                remote.link = link;
+                            }
+                        }
+                    });
+                }
+            });
+            cx.background_executor().timer(INTERVAL).await;
+        }
+    })
+    .detach();
 }
 
 /// 重新探一遍每个远程运行时（打开设置窗口时调）。
@@ -442,7 +677,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
             .map(|elapsed| elapsed.as_millis() as i64)
             .unwrap_or_default(),
     };
-    let client = remote_client(&connection)?;
+    let (client, probe) = remote_client(&connection)?;
     client
         .call::<DevicePair>(
             &PairParams {
@@ -472,7 +707,36 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         runtime: remote_runtime(&connection.runtime_id, client),
         status: described_status(described),
         connection,
+        probe,
+        link: None,
     })
+}
+
+/// 改一台机器在这台电脑上的显示名：先改 hub，侧栏和机器面板立刻换上；客户端库在后台写。
+pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::App) {
+    let mut renamed = None;
+    update_hub(cx, |hub| {
+        if let Some(remote) = hub
+            .remotes
+            .iter_mut()
+            .find(|remote| remote.connection.runtime_id == runtime_id)
+        {
+            remote.connection.name = name;
+            renamed = Some(remote.connection.clone());
+        }
+    });
+    let Some(connection) = renamed else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(error) = smelt_client_store::client_store()
+                .and_then(|store| store.put_runtime_connection(&connection))
+            {
+                eprintln!("[runtimes] 保存机器名字失败：{error}");
+            }
+        })
+        .detach();
 }
 
 /// 配对要走公网拨号，比本机调用慢得多。
@@ -525,6 +789,88 @@ pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
 mod tests {
     use super::*;
 
+    fn link(kind: LinkKind, rtt_ms: u32) -> RuntimeLink {
+        RuntimeLink { kind, rtt_ms }
+    }
+
+    fn online() -> RuntimeStatus {
+        RuntimeStatus::Online {
+            version: "0.9.0".into(),
+            platform: None,
+            desktop: false,
+        }
+    }
+
+    #[test]
+    fn relay_names_keep_only_what_helps() {
+        assert_eq!(
+            relay_name("relay:https://usw1-1.relay.n0.iroh.link./"),
+            "n0 usw1-1"
+        );
+        assert_eq!(
+            relay_name("relay:https://216-75-75-181.sslip.io/"),
+            "216-75-75-181.sslip.io"
+        );
+    }
+
+    /// 延迟抖一下就让侧栏重画不值得；换了路径、或者变化够大才算变。
+    #[test]
+    fn small_latency_jitter_is_not_a_change() {
+        let relay = |rtt| Some(link(LinkKind::Relay("n0 usw1-1".into()), rtt));
+        assert!(!link_changed(relay(437).as_ref(), relay(450).as_ref()));
+        assert!(link_changed(relay(437).as_ref(), relay(720).as_ref()));
+        assert!(link_changed(
+            relay(437).as_ref(),
+            Some(link(LinkKind::Direct, 437)).as_ref()
+        ));
+        assert!(link_changed(relay(437).as_ref(), None));
+        assert!(!link_changed(None, None));
+    }
+
+    /// 侧栏只在需要注意时写字：直连不写，中继写延迟，慢了用警告色。
+    #[test]
+    fn the_sidebar_only_speaks_up_when_it_matters() {
+        let status = online();
+        assert_eq!(
+            link_text(&status, Some(&link(LinkKind::Direct, 12)), true),
+            None
+        );
+        assert_eq!(link_text(&status, None, true), None);
+        assert_eq!(
+            link_text(
+                &status,
+                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437)),
+                true
+            ),
+            Some(("中继 · 437ms".into(), LinkTone::Warning))
+        );
+        assert_eq!(
+            link_text(
+                &status,
+                Some(&link(LinkKind::Relay("relay.example".into()), 60)),
+                true
+            ),
+            Some(("中继 · 60ms".into(), LinkTone::Muted))
+        );
+        assert_eq!(
+            link_text(&RuntimeStatus::Offline("断了".into()), None, true),
+            Some(("离线".into(), LinkTone::Muted))
+        );
+        // 机器面板里说全。
+        assert_eq!(
+            link_text(&status, Some(&link(LinkKind::Direct, 12)), false),
+            Some(("直连 · 12ms".into(), LinkTone::Muted))
+        );
+        assert_eq!(
+            link_text(
+                &status,
+                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437)),
+                false
+            ),
+            Some(("中继 n0 usw1-1 · 437ms".into(), LinkTone::Warning))
+        );
+    }
+
     /// 每次连接都用 `respond` 回一条 `system.describe`，模拟另一个版本的运行时。
     fn runtime_answering(
         respond: impl Fn(&str) -> serde_json::Value + Send + Sync + Clone + 'static,
@@ -576,6 +922,7 @@ mod tests {
                     os: Some("linux".to_string()),
                     arch: Some("x86_64".to_string()),
                     hostname: None,
+                    desktop: None,
                 },
                 events: Some(EventProtocolDescription {
                     protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
@@ -752,7 +1099,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored, vec![remote.connection]);
 
-        let again = remote_client(&stored[0]).unwrap().describe().unwrap();
+        let again = remote_client(&stored[0]).unwrap().0.describe().unwrap();
         assert_eq!(
             again.daemon.runtime_id.as_deref(),
             Some(stored[0].runtime_id.as_str())

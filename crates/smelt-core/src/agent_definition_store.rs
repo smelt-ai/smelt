@@ -93,7 +93,7 @@ pub fn load_agent_execution_definition(
 
 /// 智能体定义清单，按存档顺序返回。
 ///
-/// 只读投影用（远程网关把它下发给移动端排查「它为什么这么干」）。这里**不**过滤
+/// 只读投影用（新建对话选项、按 id 取定义，调用方各自决定过滤什么）。这里**不**过滤
 /// `is_ready()`：定义不完整恰恰是用户要在列表里看见并回桌面补的东西，悄悄藏起来
 /// 只会让人对着一份缺条目的清单猜。配置缺失返回空表而不是错误——没建过智能体是
 /// 正常状态，不是故障。
@@ -987,12 +987,14 @@ mod tests {
     fn a_conversation_started_inside_a_plain_repo_still_resolves_its_agent() {
         let workspace = serde_json::json!({
             "sessions": [
-                {"acp": {"sid": "acp-1", "cwd": "/Users/me/Desktop/novel",
+                {"id": "conv-1",
+                 "acp": {"sid": "acp-1", "cwd": "/Users/me/Desktop/novel",
                          "agent_definition_id": "writer"}},
-                {"acp": {"sid": "acp-2", "cwd": "/Users/me/.smelt/agents/quant",
+                {"id": "conv-2",
+                 "acp": {"sid": "acp-2", "cwd": "/Users/me/.smelt/agents/quant",
                          "agent_definition_id": "quant"}},
-                {"acp": {"sid": "acp-3", "cwd": "/repo"}},
-                {"layout": {"cwd": "/repo"}}
+                {"id": "conv-3", "acp": {"sid": "acp-3", "cwd": "/repo"}},
+                {"id": "conv-4", "terminals": [{"cwd": "/repo"}]}
             ]
         });
 
@@ -1011,8 +1013,8 @@ mod tests {
     fn blank_bindings_are_not_treated_as_an_agent() {
         let workspace = serde_json::json!({
             "sessions": [
-                {"acp": {"sid": "acp-1", "agent_definition_id": "  "}},
-                {"acp": {"sid": "   ", "agent_definition_id": "writer"}}
+                {"id": "conv-1", "acp": {"sid": "acp-1", "agent_definition_id": "  "}},
+                {"id": "conv-2", "acp": {"sid": "   ", "agent_definition_id": "writer"}}
             ]
         });
 

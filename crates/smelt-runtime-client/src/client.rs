@@ -174,6 +174,7 @@ mod tests {
                 os: Some("linux".to_string()),
                 arch: Some("aarch64".to_string()),
                 hostname: Some("linux-box".to_string()),
+                desktop: None,
             },
             events: None,
         }

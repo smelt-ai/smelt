@@ -1,7 +1,7 @@
 //! PC 侧栏对外暴露的纯数据快照。
 //!
 //! GPUI 和 Flutter 不共享控件，但必须共享项目分组、会话类型、显示标题和顺序。
-//! 桌面经 smeltd `workspace_menu` op 发布；网关只消费 event_subscribe，不读工作区快照。
+//! 桌面经 smeltd `workspace_menu` op 发布；远程客户端只消费 event_subscribe，不读工作区快照。
 
 pub use smelt_model::workspace_menu::*;
 

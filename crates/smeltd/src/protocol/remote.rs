@@ -1,4 +1,4 @@
-//! 远程会话目录、网关与 iroh 隧道 op。
+//! 远程会话目录与对话改名 op。
 
 use super::super::*;
 use std::os::unix::net::UnixStream;

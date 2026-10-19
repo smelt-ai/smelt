@@ -205,7 +205,7 @@ pub(crate) fn observe_selected_paths(
     });
 }
 
-/// 连接当前选中的传输路径。还没选出路径（刚握手）时为 None。
+/// 这条连接眼下选中的路径。还没选出来（刚连上、正在迁移）时为 `None`。
 pub(crate) fn selected_path(conn: &Connection, remote: &str) -> Option<PathStatus> {
     let paths = conn.paths();
     let path = paths.iter().find(|path| path.is_selected())?;

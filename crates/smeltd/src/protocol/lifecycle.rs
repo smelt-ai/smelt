@@ -66,8 +66,8 @@ pub(super) fn handle_shutdown(conn: UnixStream, event_hub: &EventHubHandle) {
     let _ =
         smelt_runtime_client::protocol::write_json_line(&mut c, &serde_json::json!({ "ok": true }));
     let _ = c.shutdown(Shutdown::Both);
-    // 先收 iroh 隧道与远程网关，再 exit——否则手机侧的连接会继续转发到一个
-    // 已死的端口。PTY 随本进程死、shell 收 SIGHUP，这是「重启守护」的代价。
+    // 先关 iroh endpoint 再 exit，远程设备立刻知道连接断了，而不是等超时。
+    // PTY 随本进程死、shell 收 SIGHUP，这是「重启守护」的代价。
     cleanup_sidecar_services();
     // 正常退出：清空身份落盘，下次启动视为干净退出。
     // 保持到 process::exit：不能让已等待的 state/remove 在删除后重新落盘。

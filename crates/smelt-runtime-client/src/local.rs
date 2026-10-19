@@ -1,4 +1,4 @@
-//! 本机运行时：`$SMELT_HOME/smeltd.sock` 上的 smeltd。桌面、命令行、网关连本机运行时
+//! 本机运行时：`$SMELT_HOME/smeltd.sock` 上的 smeltd。桌面、命令行连本机运行时
 //! 都从这里拿客户端；多运行时之前只有这一个。
 
 use std::path::PathBuf;

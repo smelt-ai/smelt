@@ -13,7 +13,7 @@ impl Workspace {
     pub(crate) fn refresh_dsh_config(&mut self, cx: &mut Context<Self>) {
         self.dsh_config_generation += 1;
         let generation = self.dsh_config_generation;
-        self.run_pi_call::<DshConfigGet>(
+        self.run_local_call::<DshConfigGet>(
             EmptyParams::default(),
             DSH_CALL_TIMEOUT,
             cx,

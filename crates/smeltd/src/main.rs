@@ -32,19 +32,6 @@
 //!                                                              整包覆盖把旧守护 SIGKILL、会话全灭）
 //!   {"op":"runtime_upgrade","version":"0.9.1"}               → 回 {"state":"accepted"}，从 GitHub Release
 //!                                                              下载该版本装好再交接；见 runtime_upgrade.rs
-//!   {"op":"remote_start","bind":"..","port":0,"write":false}  → 回 {"ok":true,"token":"..","addr":"..","write":bool}，
-//!                                                              见下「内嵌远程网关」（bind/port/write 都可省，
-//!                                                              默认回环随机口 + 只读）
-//!   {"op":"remote_stop"}                                     → 回 {"ok":true} 后关闭
-//!   {"op":"remote_set_write","write":true}                 → 热更新已连接远程 ACP 的写权限
-//!   {"op":"remote_rotate_token"}                              → 停止远程服务、持久化新 token，旧配对失效
-//!   {"op":"remote_status"}                                   → 回 {"running":bool,"token":"..","addr":"..","write":bool} 后关闭
-//!   {"op":"iroh_start","write":false}                         → 回 {"ok":true,"endpoint_id":"..","token":"..",
-//!                                                              "addr":"..","write":bool}，把远程网关经 iroh
-//!                                                              P2P 暴露出去（见下「iroh 隧道」）
-//!   {"op":"iroh_stop"}                                       → 回 {"ok":true} 后关闭
-//!   {"op":"iroh_status"}                                     → 回 {"running":bool,"endpoint_id":"..","token":"..",
-//!                                                              "write":bool} 后关闭
 //!   {"op":"agent_event","id":"..","event":{...}}             → 回 {"ok":true} 后关闭，归一化 hook 事件
 //!   {"op":"action","id":"..","kind":"approve|deny|reply","text":".."}
 //!                                                            → 回 {"ok":true}/{"ok":false,"err":".."} 后关闭，
@@ -100,7 +87,7 @@
 //! 4. spawn successor（暂存 `.next` 先扶正），传 manifest → fd（dup，原件保持
 //!    CLOEXEC 全程不动）→ grid；successor 恢复会话后报 READY；
 //! 5. predecessor 刷 EventHub → 发 COMMIT → 停 sidecars → 回 {"ok":true}
-//!    → exit(0)。successor 收到 COMMIT 后开始服务（accept/网关自启）。
+//!    → exit(0)。successor 收到 COMMIT 后开始服务（accept/远程访问按配置自启）。
 //!
 //! 回滚（COMMIT 发出前）：杀 successor，drop guards 恢复服务，回 {"ok":false}，
 //! sidecar 全程没动过。客户端连接随老进程退出断开，GUI 按会话 id 重连即
@@ -139,9 +126,8 @@
 //! - `deny` → `\x1b`（Esc，不管菜单形状直接取消/拒绝）
 //! - `reply` → 文本 + `\r`（便捷回复；自由输入更推荐走 `input`）
 //!
-//! 授权模型：链接本身就是授权；写权限（action + input）由生成链接时的开关决定
-//! （GUI 的"允许写入"），网关侧 `write_enabled` 把关，smeltd 的 action 门闩只管
-//! 时机、不管权限。
+//! 授权模型：按设备。已配对的设备和本机同权，没配对的连接到不了这两个 op（见上
+//! 「远程访问」）。smeltd 的 action 门闩只管时机、不管权限。
 
 mod acp_host;
 mod acp_idle;

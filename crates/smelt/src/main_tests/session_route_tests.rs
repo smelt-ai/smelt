@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 fn session_state_with_route(route: Option<SessionRouteArchive>) -> SessionState {
     SessionState {
+        id: "conv-test".into(),
         layout: PaneState::Leaf {
             cwd: None,
             id: None,

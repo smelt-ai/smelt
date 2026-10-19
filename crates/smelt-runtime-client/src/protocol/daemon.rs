@@ -1,7 +1,7 @@
 //! smeltd 首帧 JSON 协议的共享信封。
 //!
 //! 各操作的 payload 仍由对应 handler 拥有；这里只收拢所有客户端都必须共享的
-//! `op` 名称，避免 GUI、远程网关和 daemon 各自维护字符串常量。
+//! `op` 名称，避免 GUI、手机和 daemon 各自维护字符串常量。
 
 /// smeltd 支持的操作名。序列化值是稳定的 wire contract。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

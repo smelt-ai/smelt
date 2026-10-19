@@ -1530,19 +1530,18 @@ impl Workspace {
     pub(super) fn pi_model_settings_view(
         &self,
     ) -> Result<smelt_model::pi_model_settings::PiModelSettings, String> {
-        match &self.pi_config {
+        match self.pi_library_config() {
             Some(config) => config.model_settings.clone(),
-            None => Err(self
-                .pi_config_error
-                .clone()
-                .unwrap_or_else(|| "正在读取 Pi 配置…".to_string())),
+            None => Err(self.pi_library_pending_text()),
         }
     }
 
-    /// 凭据或模型目录在别处变了（登录、登出）：重新取快照，并告知活着的会话。
+    /// 凭据或模型目录在别处变了（登录、登出）：重新取快照；是本机的，还要告知活着的会话。
     pub(super) fn reload_pi_model_settings(&mut self, cx: &mut Context<Self>) {
-        smelt_ui::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
-        self.refresh_pi_config(cx);
+        if *self.pi_library_runtime() == crate::RuntimeKey::Local {
+            smelt_ui::provider_status_global::ProviderStatus::bump_pi_catalog(cx);
+        }
+        self.refresh_pi_library(cx);
     }
 
     pub fn edit_pi_model_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1767,8 +1766,7 @@ impl Workspace {
         // 标记为「自动」的 provider 打开时不回填模型行：配置里那份是我们刷进去的，
         // 回填等于让用户一保存就把它变回手工维护。留空即代表「继续自动」。
         let auto = previous_id.as_deref().is_some_and(|id| {
-            self.pi_config
-                .as_ref()
+            self.pi_library_config()
                 .is_some_and(|config| config.auto_provider_ids.iter().any(|auto| auto == id))
         });
         let mut models = if auto {
@@ -2079,6 +2077,14 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 文件在那台机器上，这台电脑的编辑器打不开；照路径开还可能开到本机同名的另一份。
+        if let crate::RuntimeKey::Remote(_) = self.pi_library_runtime() {
+            crate::status_item::notify_error(format!(
+                "配置文件在「{}」上，这台电脑打不开。可以在那台机器的终端里改。",
+                crate::runtimes::runtime_name(self.pi_library_runtime(), cx)
+            ));
+            return;
+        }
         let file = match file_kind {
             PiConfigFileKind::Settings => smelt_model::pi_service::PiConfigFile::Settings,
             PiConfigFileKind::Models => smelt_model::pi_service::PiConfigFile::Models,
@@ -2115,7 +2121,7 @@ impl Workspace {
 
     pub(super) fn refresh_pi_plugins(&mut self, cx: &mut Context<Self>) {
         self.pi_plugin_pending_delete = None;
-        self.refresh_pi_config(cx);
+        self.refresh_pi_library(cx);
         cx.notify();
     }
 
@@ -2153,7 +2159,7 @@ impl Workspace {
                 }
                 Err(error) => {
                     this.pi_plugin_error = Some(error);
-                    this.refresh_pi_config(cx);
+                    this.refresh_pi_library(cx);
                 }
             },
         );

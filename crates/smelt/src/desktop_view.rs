@@ -53,7 +53,7 @@ fn page_event(body: &str) -> Option<PageEvent> {
 pub(crate) struct DesktopView {
     runtime: Runtime,
     proxy: Option<DesktopProxy>,
-    webview: Option<Entity<gpui_wry::WebView>>,
+    webview: Option<Entity<gpui_webview::WebView>>,
     status: Status,
     controlling: bool,
     /// 要打到远端的文字，按收到的顺序一段一段打，不并发，免得前后颠倒。
@@ -141,7 +141,7 @@ impl DesktopView {
                 return;
             }
         };
-        self.webview = Some(cx.new(|cx| gpui_wry::WebView::new(native, window, cx)));
+        self.webview = Some(cx.new(|cx| gpui_webview::WebView::new(native, window, cx)));
         self.proxy = Some(proxy);
         self._page_events = Some(cx.spawn_in(window, async move |this, cx| {
             while let Ok(body) = inbox.recv().await {

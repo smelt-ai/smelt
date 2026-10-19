@@ -165,6 +165,7 @@ fn dispatch_control(
                     os: Some(std::env::consts::OS.to_string()),
                     arch: Some(std::env::consts::ARCH.to_string()),
                     hostname: smelt_sys::hostname(),
+                    desktop: Some(crate::desktop::installed()),
                 },
                 events: Some(EventProtocolDescription {
                     protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
