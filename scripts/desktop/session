@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 远程桌面的 XFCE 会话，跑在 display 起的那块虚拟屏幕上。精简过的设置（只留顶部任务栏、
+# 最大化不画标题栏、关合成器……）在安装时写进 ~/.config/xfce4，见 install.sh。
+set -euo pipefail
+
+source "$(dirname "$0")/common.sh"
+
+# 终端里开的 shell 跟着 SHELL 走。用户的登录 shell 可能是 nologin，不设的话终端一打开就退出。
+export SHELL=/bin/bash
+
+wait_for_display
+exec dbus-launch --exit-with-session xfce4-session

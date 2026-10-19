@@ -84,6 +84,9 @@ stage_package() {
     install -m 0755 "target/release/$program" "$staging/$program"
   done
   install -m 0755 scripts/install-smeltd.sh "$staging/install.sh"
+  install -m 0755 scripts/smelt-up.sh "$staging/smelt-up"
+  # 远程桌面（install.sh --with-desktop）的启动脚本、XFCE 设置、Chrome 策略。
+  cp -R scripts/desktop "$staging/desktop"
   tar -C dist -czf "dist/$name.tar.gz" "$name"
   rm -rf "$staging"
   ok "产物：dist/$name.tar.gz"

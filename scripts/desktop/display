@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# 远程桌面的虚拟屏幕（设计文档 D9）。TigerVNC 的 Xvnc 本身就是一个只在内存里的 X 服务器，
+# 机器没有显示器也行。
+#
+# VNC 只听本机 5999（smeltd 转发的默认地址），外面只能经过运行时，也就是只有配对过的设备
+# 能连。X 用 MIT cookie 鉴权，cookie 写进 ~/.Xauthority：同一个用户的进程（桌面、Chrome、
+# smeltd 注入文字用的 xdotool）默认就读这份，别的用户连不上这块屏幕。
+set -euo pipefail
+
+source "$(dirname "$0")/common.sh"
+
+# 宿主机上 /tmp/.X11-unix 由 systemd-tmpfiles 建，容器里没人建。自己建出来的归当前用户，
+# Xvnc 只提示属主不是 root，照常能用。
+mkdir -p /tmp/.X11-unix
+
+# 被杀掉的 Xvnc 会留下锁文件和 socket，下次以为 :99 被占了起不来。容器重启后 pid 会被
+# 别的进程复用，所以要看进程名而不只看 pid 在不在。
+lock="/tmp/.X$DISPLAY_NUMBER-lock"
+if [[ -e "$lock" ]]; then
+  pid="$(tr -d ' \n' <"$lock")"
+  if [[ "$(cat "/proc/$pid/comm" 2>/dev/null)" != Xvnc ]]; then
+    rm -f "$lock" "$X_SOCKET"
+  fi
+fi
+
+# 每次起都换一个 cookie：Xvnc 重启时连着的客户端本来就全断了，重连时读新的。
+cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+xauth -q -f "$HOME/.Xauthority" add "$DISPLAY" MIT-MAGIC-COOKIE-1 "$cookie"
+
+exec Xvnc "$DISPLAY" \
+  -auth "$HOME/.Xauthority" \
+  -geometry 1440x900 \
+  -depth 24 \
+  -rfbport 5999 \
+  -localhost \
+  -SecurityTypes None \
+  -AlwaysShared \
+  -nolisten tcp \
+  -desktop Smelt

@@ -363,6 +363,35 @@ mod tests {
     }
 
     #[test]
+    fn adding_desktop_chrome_connects_to_the_local_debugging_port() {
+        let dir = temp_dir();
+        add_pi_mcp_preset_at(&dir, "desktop-chrome").unwrap();
+
+        let chrome = &read(&dir)["mcpServers"]["desktop-chrome"];
+        assert_eq!(chrome["command"], "~/.smelt/runtime/bin/bun");
+        assert_eq!(
+            chrome["args"],
+            serde_json::json!([
+                "x",
+                "--bun",
+                "@playwright/mcp@0.0.83",
+                "--cdp-endpoint",
+                "http://127.0.0.1:9222"
+            ]),
+            "接 smelt-chrome 只绑本机的调试端口，和人在远程桌面里看的是同一个 Chrome"
+        );
+        assert_eq!(chrome["exposure"], "deferred");
+        assert!(
+            find_preset("desktop-chrome")
+                .unwrap()
+                .extension_url
+                .is_none(),
+            "走调试端口，不需要扩展"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn preset_ids_are_unique_valid_server_names() {
         let mut seen = HashSet::new();
         for preset in PI_MCP_PRESETS {
