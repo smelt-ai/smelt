@@ -1,6 +1,6 @@
 # 状态与通知架构
 
-> 定位:当前实现(领域模型、出口规则、扩展约束)。设计动机与状态语义推导见 [`agent-state-notification-design.md`](agent-state-notification-design.md)。
+> 定位:当前实现(领域模型、出口规则、扩展约束)。设计动机与状态语义推导见 [`archive/agent-state-notification-design.md`](archive/agent-state-notification-design.md)。
 
 ## 目标
 

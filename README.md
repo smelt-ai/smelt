@@ -77,7 +77,11 @@ The workspace contains `smelt` (the main GUI), `smeltd` (the runtime daemon: PTY
 The mobile client lives in `mobile/` (Flutter). `crates/smelt-mobile` is its Rust core — device identity, pairing, catalog, conversation, terminal, and an offline SQLite cache — and uses the same `smelt-runtime-client` as the desktop. It is not published yet; build it locally, see [`mobile/README.md`](mobile/README.md).
 
 For architecture, directory layout, Linux install, multi-runtime windows, remote desktop, and the idle-suspend behavior, see [`docs/workspace.md`](docs/workspace.md).
-For the product roadmap, see [`docs/product-roadmap.md`](docs/product-roadmap.md); for the miscellaneous backlog, see [`docs/roadmap.md`](docs/roadmap.md). [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md) describes the removed JSON-WS gateway and is not the current protocol.
+For the product roadmap, see [`docs/product-roadmap.md`](docs/product-roadmap.md); for the miscellaneous backlog, see [`docs/roadmap.md`](docs/roadmap.md).
+
+## Documentation
+
+Start at [`docs/README.md`](docs/README.md). Current guides: [`workspace`](docs/workspace.md), [`local storage`](docs/local-storage.md), [`iroh relay`](docs/iroh-relay-deployment.md), [`product roadmap`](docs/product-roadmap.md), [`miscellaneous backlog`](docs/roadmap.md), [`UI design language`](docs/ui-design-language.md), and the [mobile client](mobile/README.md).
 
 ## Contributing
 

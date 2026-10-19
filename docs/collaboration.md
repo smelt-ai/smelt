@@ -295,7 +295,7 @@ Tailscale / SSH 隧道）——unix 哲学，且**代码永远不出用户自己
 > **和现行远程的差异**（这一节上面仍是未动工的多人协作设想）：
 > 单人遥控已经落地，但不是这里写的 HTTP/WebSocket，也不是后来那版「长期 token + 允许远程写入」。
 > 现行是 iroh 直连运行时、一次性配对码（10 分钟、用一次）、已配对设备白名单；没有网关进程，没有 `write_enabled`。配对即把该用户的 shell 交给设备。见 [`workspace.md`](workspace.md)。
-> [`remote-ops-roadmap.md`](remote-ops-roadmap.md) 里的网关契约已废弃。
+> [`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md) 里的网关契约已废弃。
 
 ---
 

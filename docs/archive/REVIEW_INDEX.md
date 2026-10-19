@@ -1,8 +1,8 @@
 # Smelt 架构审查文档索引
 
 > 历史快照，不是当前实施说明。正文仍按已删除的 gateway、`remote-token` 和旧模块划分来写，不要从这里开工。
-> 现行说明：[`docs/workspace.md`](docs/workspace.md)、[`docs/local-storage.md`](docs/local-storage.md)、[`docs/iroh-relay-deployment.md`](docs/iroh-relay-deployment.md)。
-> 产品待做见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
+> 现行说明：[`docs/workspace.md`](../workspace.md)、[`docs/local-storage.md`](../local-storage.md)、[`docs/iroh-relay-deployment.md`](../iroh-relay-deployment.md)。
+> 产品待做见 [`docs/product-roadmap.md`](../product-roadmap.md)。
 
 ## 📚 快速导航
 
@@ -13,7 +13,7 @@
   - 10 项改进建议
 
 ### 📖 想深度学习？
-- **[docs/ARCHITECTURE_REVIEW.md](./docs/ARCHITECTURE_REVIEW.md)** ← 完整分析（30 分钟读完）
+- **[ARCHITECTURE_REVIEW.md](./ARCHITECTURE_REVIEW.md)** ← 完整分析（30 分钟读完）
   - 分层架构详析
   - 关键决策评价
   - 跨层设计评价
@@ -21,7 +21,7 @@
   - 1000+ 字的详细建议
 
 ### 🛠️ 想看实施计划？
-- **[docs/IMPLEMENTATION_ROADMAP.md](./docs/IMPLEMENTATION_ROADMAP.md)** ← 执行方案（60 分钟读完）
+- **[IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md)** ← 执行方案（60 分钟读完）
   - 13 周的改进计划
   - 每个改进的详细步骤
   - 代码示例
@@ -168,7 +168,7 @@ Week 10-13: P2 日志/发版/Metrics
 资源：最多 3 个工程师并行
 ```
 
-详细时间表和代码示例见：[IMPLEMENTATION_ROADMAP.md](./docs/IMPLEMENTATION_ROADMAP.md)
+详细时间表和代码示例见：[IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md)
 
 ---
 
@@ -180,12 +180,12 @@ Week 10-13: P2 日志/发版/Metrics
 → 了解：现状、优缺点、改进建议、时间表
 
 ### 🏗️ 对架构师 / 技术负责人
-→ 精读 **docs/ARCHITECTURE_REVIEW.md**（30 分钟）
+→ 精读 **ARCHITECTURE_REVIEW.md**（30 分钟）
 → 了解：每项决策的权衡分析
 → 制定详细的实施计划
 
 ### 👨‍💻 对工程师（implementer）
-→ 查看 **docs/IMPLEMENTATION_ROADMAP.md**（需要时查阅）
+→ 查看 **IMPLEMENTATION_ROADMAP.md**（需要时查阅）
 → 找到相关章节的代码示例
 → 按步骤执行改进任务
 
@@ -219,10 +219,10 @@ A: 建议每个 quarter 更新一次，或有重大架构决策时立即更新�
 ## 🔗 相关资源
 
 ### Smelt 项目文档
-- [README.md](./README.md) - 项目概览
-- [docs/workspace.md](./docs/workspace.md) - 功能与架构
-- [docs/product-roadmap.md](./docs/product-roadmap.md) - 产品方向
-- [AGENTS.md](./AGENTS.md) - 工作原则
+- [README.md](../../README.md) - 项目概览
+- [docs/workspace.md](../workspace.md) - 功能与架构
+- [docs/product-roadmap.md](../product-roadmap.md) - 产品方向
+- [AGENTS.md](../../AGENTS.md) - 工作原则
 
 ### 最佳实践参考
 - **SOLID 原则** - https://en.wikipedia.org/wiki/SOLID
@@ -281,4 +281,4 @@ A: 建议每个 quarter 更新一次，或有重大架构决策时立即更新�
 → 读完本文件 + ARCHITECTURE_REVIEW_SUMMARY.md
 
 **💡 如果你要做决策：**
-→ 精读 docs/ARCHITECTURE_REVIEW.md + IMPLEMENTATION_ROADMAP.md
+→ 精读 ARCHITECTURE_REVIEW.md + IMPLEMENTATION_ROADMAP.md

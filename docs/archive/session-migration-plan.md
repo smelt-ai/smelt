@@ -7,7 +7,7 @@
 把一段已归档的对话，从一家 agent 交到另一家手上继续干活：
 Claude → Codex、Grok → Claude、Claude 默认 workspace → Claude Quant profile。
 
-配套 [workspace.md](workspace.md) 的会话模型。这份讲「为什么只能这么做」和「改哪些函数」。
+配套 [workspace.md](../workspace.md) 的会话模型。这份讲「为什么只能这么做」和「改哪些函数」。
 
 ---
 

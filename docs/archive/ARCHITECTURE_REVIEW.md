@@ -1,7 +1,7 @@
 # Smelt 项目架构综合审查报告
 
 > 历史快照，不是当前实施说明。文中的模块划分、文件路径、gateway 和风险清单已与仓库脱节。
-> 现行说明：[`workspace.md`](workspace.md)、[`local-storage.md`](local-storage.md)。产品待做见 [`product-roadmap.md`](product-roadmap.md)。
+> 现行说明：[`workspace.md`](../workspace.md)、[`local-storage.md`](../local-storage.md)。产品待做见 [`product-roadmap.md`](../product-roadmap.md)。
 
 ## 执行摘要
 
