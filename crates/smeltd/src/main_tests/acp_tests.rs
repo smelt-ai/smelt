@@ -938,6 +938,61 @@ fn submitted_direct_input_delivers_to_acp() {
 }
 
 #[test]
+fn resubmitted_input_with_the_same_submission_id_is_delivered_once() {
+    let session = make_acp_session("acp-direct-resubmit", AcpSessionState::default());
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: false,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: false,
+    });
+    let input = |id: &str, text: &str| smelt_core::conversation::ConversationInput {
+        submission_id: id.into(),
+        text: text.into(),
+        images: Vec::new(),
+    };
+    let hub = new_event_hub();
+
+    // 客户端没等到回包就重发同一条：第二次直接回成功，不再提交，也不进排队。
+    dispatch_conversation_input(&session, input("phone-1", "第一条"), &hub).unwrap();
+    dispatch_conversation_input(&session, input("phone-1", "第一条"), &hub).unwrap();
+
+    let prompts: Vec<String> = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+        .filter_map(|command| match command {
+            smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts, ["第一条"]);
+    assert!(
+        session.pending_prompts.lock().unwrap().is_empty(),
+        "重发不该变成排队的第二条"
+    );
+}
+
+#[test]
+fn recent_submissions_only_recognize_ids_actually_seen() {
+    let mut recent = crate::acp_host::RecentSubmissions::default();
+    recent.remember("a".into());
+    assert!(recent.contains("a"));
+    assert!(!recent.contains("b"), "不同的输入照常提交");
+    recent.remember(String::new());
+    assert!(!recent.contains(""), "没带 id 的输入不参与去重");
+    for i in 0..64 {
+        recent.remember(format!("n{i}"));
+    }
+    assert!(!recent.contains("a"), "只记最近一段");
+    assert!(recent.contains("n63"));
+}
+
+#[test]
 fn prompt_submitted_while_turn_active_is_deferred_until_turn_end() {
     let acp_sessions = new_test_acp_sessions();
     let mut reduced = AcpSessionState::default();

@@ -201,7 +201,9 @@ pub(crate) struct AcpSession {
     /// 不读取它，只由 `acp_submit_input` 使用。
     pub(crate) conversation_binding: Mutex<Option<smelt_core::conversation::ConversationBinding>>,
     /// 串行化所有交互式输入。没有这把门时两个客户端会同时把同一个首轮预设各带一次。
-    pub(crate) conversation_submit: Mutex<()>,
+    /// 门里同时记着最近接受过的 submission_id：客户端没等到回包就重发同一条输入时，
+    /// 认出来直接回成功，不再提交第二遍。
+    pub(crate) conversation_submit: Mutex<RecentSubmissions>,
     /// 只装饰下一条成功路由的交互输入。Task/Peer delivery 不读取也不消费它。
     pub(crate) pending_agent_preset: Mutex<Option<String>>,
     /// 已经写进 `acp_detail.history_session_id` 的身份。
@@ -1340,7 +1342,9 @@ pub(crate) fn encode_acp_snapshot(
                 fields: mirror.encode_header(&frame),
                 entries,
             };
-            let mut bytes = serde_json::json!({ "delta": delta }).to_string().into_bytes();
+            let mut bytes = serde_json::json!({ "delta": delta })
+                .to_string()
+                .into_bytes();
             bytes.push(b'\n');
             bytes
         }
@@ -2236,7 +2240,7 @@ pub(crate) fn make_acp_session(
         restore_state: Mutex::new(AcpRestoreState::Fresh),
         ephemeral_env: Mutex::new(BTreeMap::new()),
         conversation_binding: Mutex::new(conversation_binding),
-        conversation_submit: Mutex::new(()),
+        conversation_submit: Mutex::new(RecentSubmissions::default()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
         durable_history_session_id: Mutex::new(None),
         idle: Default::default(),
@@ -2705,8 +2709,7 @@ pub(crate) fn note_immediate_queue_restore(
         return;
     }
     delivery.awaiting_clear = false;
-    let claimed =
-        smelt_core::acp_session::take_claimed_queue_text(texts, images, &delivery.text);
+    let claimed = smelt_core::acp_session::take_claimed_queue_text(texts, images, &delivery.text);
     delivery.send = claimed.is_some();
     match claimed {
         // 驱动按发出时的原样记着附图；follow-up 的图只有这里有。
@@ -2780,7 +2783,12 @@ fn send_acp_clear_queue(sess: &AcpSession) -> Result<(), &'static str> {
 }
 
 fn send_acp_stop_background_task(sess: &AcpSession, id: String) -> Result<(), &'static str> {
-    let cmd_tx = sess.handle.lock().unwrap().as_ref().map(|h| h.cmd_tx.clone());
+    let cmd_tx = sess
+        .handle
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|h| h.cmd_tx.clone());
     let Some(cmd_tx) = cmd_tx else {
         return Err("ACP session is not running");
     };
@@ -3224,6 +3232,29 @@ pub(crate) fn submit_acp_elicitation(
 
 /// 用户输入与 Task/Peer/Automation delivery 的分界。Direct 绑定进入 ACP；
 /// 自动化 Run 拒绝额外 composer 输入。
+/// 最近接受过的交互输入的 submission_id，用来认出重发。只留最近一小段：重发只发生在
+/// 客户端没等到回包的那几十秒里。
+#[derive(Default)]
+pub(crate) struct RecentSubmissions(std::collections::VecDeque<String>);
+
+impl RecentSubmissions {
+    const CAPACITY: usize = 64;
+
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        !id.is_empty() && self.0.iter().any(|seen| seen == id)
+    }
+
+    pub(crate) fn remember(&mut self, id: String) {
+        if id.is_empty() {
+            return;
+        }
+        if self.0.len() == Self::CAPACITY {
+            self.0.pop_front();
+        }
+        self.0.push_back(id);
+    }
+}
+
 pub(crate) fn dispatch_conversation_input(
     sess: &AcpSession,
     mut input: smelt_core::conversation::ConversationInput,
@@ -3231,7 +3262,10 @@ pub(crate) fn dispatch_conversation_input(
 ) -> Result<(), smelt_core::conversation::ConversationSubmitError> {
     use smelt_core::conversation::ConversationBinding;
 
-    let _submit = sess.conversation_submit.lock().unwrap();
+    let mut submitted = sess.conversation_submit.lock().unwrap();
+    if submitted.contains(&input.submission_id) {
+        return Ok(());
+    }
     let pending_preset = sess.pending_agent_preset.lock().unwrap().clone();
     let binding = sess.conversation_binding.lock().unwrap().clone();
     match binding.unwrap_or_default() {
@@ -3242,6 +3276,7 @@ pub(crate) fn dispatch_conversation_input(
             ));
         }
     }
+    let input_submission_id = input.submission_id.clone();
     input.text =
         smelt_core::conversation::merge_agent_preset(pending_preset.as_deref(), &input.text);
     if !sess.reduced.lock().unwrap().supports_image && !input.images.is_empty() {
@@ -3266,6 +3301,7 @@ pub(crate) fn dispatch_conversation_input(
         subscribers,
     )
     .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
+    submitted.remember(input_submission_id);
     if pending_preset.is_some() {
         *sess.pending_agent_preset.lock().unwrap() = None;
         // 显式发布消费状态，确保所有客户端同步，并让 workspace 在进程退出前清掉

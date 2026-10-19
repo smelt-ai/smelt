@@ -129,3 +129,14 @@ resize 在同一连接写 type 1 帧；输入走 `input` op。终端配色由手
 - 删除旧 Dart 协议代码与假网关测试，补 Rust 单测与 Dart 层测试。
 - iOS / Android 构建，真机验证配对、对话、终端。
 - 更新 `docs/remote-runtime.html` 的 P4 进度。
+
+## 实施中发现的运行时遗留
+
+- `acp_submit_input` 不认 `submission_id`，同一请求重发会提交两次（P4.3 发送重试依赖它）。随 P4 修。
+- 订阅流里的自动化投影带 webhook 地址与密钥。已配对设备本来就有全部能力（`automation.get` 也能取到），
+  手机侧不暴露给界面；是否在投影里脱敏另议。
+- 改名只有首帧 op `history_rename`，回包不带展示标题，手机多一次 `history.list`。可加 `history.rename` 直接返回。
+- `acp_action` 的错误是裸字符串，手机只能归为 Other。
+- `Refresh` 会让所有旁观连接从第 0 条重发，长对话代价大。
+- 终端 watch 的 EOF 分不清「会话结束」与「链路断」，手机多一次 `system.describe` 探测才报 Closed；
+  watch 流若带结束标记可省掉。
