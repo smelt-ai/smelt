@@ -10770,14 +10770,19 @@ name = "smelt_mobile"
 version = "0.1.0"
 dependencies = [
  "android_logger 0.14.1",
+ "base64",
  "flutter_rust_bridge",
  "iroh",
  "log",
+ "rusqlite",
+ "serde",
  "serde_json",
+ "smelt-event-protocol",
  "smelt-iroh",
  "smelt-model",
  "smelt-pairing",
  "smelt-runtime-client",
+ "uuid",
 ]
 
 [[package]]

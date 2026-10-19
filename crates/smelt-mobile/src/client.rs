@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::cache::Cache;
 use crate::connection::{ConnectionHub, Timing};
 use crate::iroh_dialer::IrohDialer;
 
@@ -17,6 +18,7 @@ struct Identity {
     data_dir: PathBuf,
     endpoint_id: String,
     dialer: Arc<IrohDialer>,
+    cache: Option<Arc<Cache>>,
 }
 
 static IDENTITY: Mutex<Option<Identity>> = Mutex::new(None);
@@ -48,10 +50,16 @@ pub(crate) fn init(data_dir: PathBuf) -> Result<String, SmeltError> {
         .map_err(|e| error(SmeltErrorKind::Other, format!("读取设备身份失败：{e:#}")))?;
     let endpoint_id = secret.public().to_string();
     log::info!("设备身份：{endpoint_id}");
+    // 缓存打不开不影响连接，只是离线时没有旧数据可看。
+    let cache = Cache::open(&data_dir.join(crate::cache::DATABASE_FILE))
+        .map(Arc::new)
+        .map_err(|e| log::warn!("离线缓存打不开：{e}"))
+        .ok();
     *slot = Some(Identity {
         data_dir,
         endpoint_id: endpoint_id.clone(),
         dialer: Arc::new(IrohDialer::new(secret)),
+        cache,
     });
     Ok(endpoint_id)
 }
@@ -80,4 +88,14 @@ pub(crate) fn current_runtime() -> Option<crate::connection::CurrentRuntime> {
 #[allow(dead_code)]
 pub(crate) fn subscribe(listener: crate::connection::Listener) {
     HUB.subscribe(listener);
+}
+
+/// 离线缓存。还没初始化身份或库打不开时为 None。
+#[allow(dead_code)]
+pub(crate) fn cache() -> Option<Arc<Cache>> {
+    IDENTITY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|identity| identity.cache.clone())
 }
