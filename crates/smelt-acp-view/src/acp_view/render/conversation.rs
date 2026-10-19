@@ -687,18 +687,21 @@ impl AcpView {
                             || matches!(kind, ToolKind::Collaborate)
                             || has_nested_transcript;
                         let has_expandable_content = if is_pi_dispatch {
-                            // 派发卡片不折叠：子智能体就是卡片的内容，点行打开侧边视图。
-                            false
+                            // 几个子智能体时，标题行能收起下面那几行；点行打开侧边视图。
+                            subagents.len() > 1
                         } else {
                             is_subagent || tool_output_has_content(output) || has_nested_transcript
                         };
-                        let default_expanded = !is_pi_dispatch
-                            && (tool_has_live_children(children)
+                        let default_expanded = if is_pi_dispatch {
+                            subagents.len() > 1
+                        } else {
+                            tool_has_live_children(children)
                                 || (is_subagent
                                     && matches!(
                                         status,
                                         ToolCallStatus::Pending | ToolCallStatus::InProgress
-                                    )));
+                                    ))
+                        };
                         let card_expanded =
                             this.tool_card_is_expanded(id, has_expandable_content, default_expanded);
                         let compact_in_process = process_expanded
@@ -1767,19 +1770,23 @@ impl AcpView {
         card.into_any_element()
     }
 
-    /// Pi 子智能体派发。一个子智能体就是一行；并行、串联时标题行下面每个子智能体一行。
-    /// 点一行在侧边看它的过程，运行中的能就地停下。过程在各自的子会话里，不在父对话里展开。
-    /// 状态按子智能体 id 取（`subagent_status`）。
+    /// Pi 子智能体派发。一个子智能体就是一行；并行、串联时标题行下面每个子智能体一行，
+    /// 点标题行收起或展开。点子智能体那一行在侧边看它的过程，运行中的能就地停下。过程在
+    /// 各自的子会话里，不在父对话里展开。状态按子智能体 id 取（`subagent_status`）。
     fn render_dispatch_card(
         &self,
         card: SubagentCard<'_>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let SubagentCard {
+            index: i,
             id,
             title,
             status,
             subagents,
+            has_expandable_content,
+            default_expanded,
+            card_expanded,
             animate_ambient,
             muted,
             border,
@@ -1825,7 +1832,14 @@ impl AcpView {
             .min_h(px(24.))
             .gap_2()
             .items_center()
-            .child(Icon::new(IconName::Bot).size(px(14.)).text_color(ink))
+            .child(if has_expandable_content {
+                expandable_lead_icon(IconName::Bot, card_expanded, ink).into_any_element()
+            } else {
+                Icon::new(IconName::Bot)
+                    .size(px(14.))
+                    .text_color(ink)
+                    .into_any_element()
+            })
             .child(
                 div()
                     .flex_1()
@@ -1870,7 +1884,28 @@ impl AcpView {
                 }))
                 .into_any_element()
         } else {
-            header.into_any_element()
+            let id_for_toggle = id.to_string();
+            Button::new(owner_id("acp-subagent-toggle", &owner))
+                .quiet()
+                .w_full()
+                .justify_start()
+                .group(EXPAND_ICON_GROUP)
+                .accessibility_label(if card_expanded {
+                    format!("收起 {headline}")
+                } else {
+                    format!("展开 {headline}")
+                })
+                .child(header)
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    this.toggle_tool_card(
+                        i,
+                        id_for_toggle.clone(),
+                        has_expandable_content,
+                        default_expanded,
+                        cx,
+                    );
+                }))
+                .into_any_element()
         };
         let mut card = v_flex()
             .id(owner_id("acp-subagent-card", &owner))
@@ -1883,7 +1918,7 @@ impl AcpView {
             .py_2()
             .gap_1()
             .child(header);
-        if !single {
+        if !single && card_expanded {
             for (index, (run, run_status)) in subagents.iter().zip(&statuses).enumerate() {
                 card = card.child(self.render_subagent_run_row(
                     &owner,
