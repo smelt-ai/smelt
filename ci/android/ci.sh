@@ -17,6 +17,9 @@
 #   SMELT_ANDROID_KEY_ALIAS
 #   SMELT_ANDROID_KEY_PASSWORD
 #   SMELT_ANDROID_ABIS             要编的 ABI，逗号分隔，默认 android-arm64
+#   SMELT_BUILD_NAME               版本名（versionName），不设就用 pubspec.yaml 的
+#   SMELT_BUILD_NUMBER             版本号（versionCode），必须逐版递增，手机才能覆盖安装
+#   SMELT_REQUIRE_RELEASE_SIGNING=1  没配签名就失败（发版用，防止发出 debug 签名的包）
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
@@ -115,6 +118,8 @@ stage_build() {
     trap cleanup_keystore_config EXIT
     info "Android：编译 release ${artifact}（正式签名）"
   else
+    [[ "${SMELT_REQUIRE_RELEASE_SIGNING:-}" == 1 ]] \
+      && die "发版要求正式签名，但没设置 SMELT_ANDROID_KEYSTORE"
     # 默认不带签名配置。构建机上放证书是持久的机器状态改动，不该由脚本代劳；
     # 而验证「代码能不能编过」并不需要正式签名——此时 build.gradle.kts 会退回
     # debug 签名，产物能装但不可分发。
@@ -122,13 +127,17 @@ stage_build() {
   fi
 
   info "目标 ABI：$ANDROID_ABIS"
+  local version_args=()
+  [[ -n "${SMELT_BUILD_NAME:-}" ]] && version_args+=(--build-name "$SMELT_BUILD_NAME")
+  [[ -n "${SMELT_BUILD_NUMBER:-}" ]] && version_args+=(--build-number "$SMELT_BUILD_NUMBER")
+  [[ ${#version_args[@]} -gt 0 ]] && info "版本：${version_args[*]}"
   case "$artifact" in
     apk)
-      (cd "$MOBILE_DIR" && flutter build apk --release --target-platform "$ANDROID_ABIS")
+      (cd "$MOBILE_DIR" && flutter build apk --release --target-platform "$ANDROID_ABIS" ${version_args[@]+"${version_args[@]}"})
       ok "产物已生成在 mobile/build/app/outputs/flutter-apk/"
       ;;
     aab)
-      (cd "$MOBILE_DIR" && flutter build appbundle --release --target-platform "$ANDROID_ABIS")
+      (cd "$MOBILE_DIR" && flutter build appbundle --release --target-platform "$ANDROID_ABIS" ${version_args[@]+"${version_args[@]}"})
       ok "产物已生成在 mobile/build/app/outputs/bundle/"
       ;;
     *) die "未知产物类型：$artifact" ;;

@@ -201,3 +201,105 @@ jobs:
             dist/SHA256SUMS
             dist/install.sh
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # 手机 App 的安装包。正式签名的 keystore 存在 secrets 里，没配就失败（发出 debug 签名的
+  # 包，以后换正式签名时用户只能卸载重装）。versionCode 用这条流水线的 run_number：
+  # 逐次递增，新包总能覆盖旧包；versionName 就是 tag 去掉 v（含 -rc.N）。
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 版本要求同 ci.yml 的 android-build。
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install NDK
+        run: sdkmanager "ndk;28.2.13676358"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/smelt-mobile
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Write keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SMELT_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" ]]; then
+            echo "✗ 没配置 SMELT_ANDROID_KEYSTORE_BASE64，发版的 APK 必须正式签名。"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          echo "SMELT_ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        env:
+          SMELT_CI_SKIP_ENV: "1"
+          SMELT_REQUIRE_RELEASE_SIGNING: "1"
+          SMELT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.SMELT_ANDROID_KEYSTORE_PASSWORD }}
+          SMELT_ANDROID_KEY_ALIAS: ${{ secrets.SMELT_ANDROID_KEY_ALIAS }}
+          SMELT_ANDROID_KEY_PASSWORD: ${{ secrets.SMELT_ANDROID_KEY_PASSWORD }}
+          SMELT_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          export SMELT_BUILD_NAME="${GITHUB_REF_NAME#v}"
+          ./ci/android/ci.sh build
+          mkdir -p dist
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk \
+            "dist/Smelt-${SMELT_BUILD_NAME}-android-arm64.apk"
+          ls -lh dist/
+
+      # 签名必须是正式证书：apksigner 打出证书指纹，debug 证书的主题是 "CN=Android Debug"。
+      - name: Verify signature
+        run: |
+          apksigner="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          "$apksigner" verify --print-certs dist/Smelt-*-android-arm64.apk | tee "$RUNNER_TEMP/certs.txt"
+          if grep -q "CN=Android Debug" "$RUNNER_TEMP/certs.txt"; then
+            echo "✗ APK 是 debug 签名"
+            exit 1
+          fi
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: smelt-android
+          path: dist/Smelt-*-android-arm64.apk
+          if-no-files-found: error
+
+  # 同 linux-release：等 dmg 那边建好 Release 再往上加。
+  android-release:
+    needs: [build, android]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v8
+        with:
+          name: smelt-android
+          path: dist
+
+      - name: Add to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/Smelt-*-android-arm64.apk
+          prerelease: ${{ contains(github.ref_name, '-') }}
