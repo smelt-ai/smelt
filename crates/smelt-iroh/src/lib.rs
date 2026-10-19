@@ -20,10 +20,6 @@ mod system_dns;
 /// 客户端解析配对串、拼拨号地址要用到，免得各自直接依赖 iroh。
 pub use iroh::EndpointId;
 
-/// 旧的手机隧道 ALPN。运行时已经不再接收它，手机改走 [`runtime::RUNTIME_ALPN`]
-/// 时一并删除（设计文档 P4）。
-pub const ALPN: &[u8] = b"smelt/tunnel/1";
-
 /// 用户配置的 relay。Smelt 不提供默认值，避免在未告知用户时访问第三方基础设施。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelaySettings {
@@ -209,22 +205,10 @@ pub(crate) fn observe_selected_paths(
     });
 }
 
-fn report_selected_path(
-    conn: &Connection,
-    remote: &str,
-    observer: Option<&PathObserver>,
-    last_address: &mut Option<String>,
-) {
+/// 连接当前选中的传输路径。还没选出路径（刚握手）时为 None。
+pub(crate) fn selected_path(conn: &Connection, remote: &str) -> Option<PathStatus> {
     let paths = conn.paths();
-    let Some(path) = paths.iter().find(|path| path.is_selected()) else {
-        return;
-    };
-    let address = path.remote_addr().to_string();
-    if last_address.as_ref() == Some(&address) {
-        return;
-    }
-    *last_address = Some(address.clone());
-
+    let path = paths.iter().find(|path| path.is_selected())?;
     let kind = if path.is_ip() {
         PathKind::Direct
     } else if path.is_relay() {
@@ -232,12 +216,27 @@ fn report_selected_path(
     } else {
         PathKind::Custom
     };
-    let status = PathStatus {
+    Some(PathStatus {
         remote: remote.to_string(),
         kind,
-        address,
+        address: path.remote_addr().to_string(),
         rtt: path.rtt(),
+    })
+}
+
+fn report_selected_path(
+    conn: &Connection,
+    remote: &str,
+    observer: Option<&PathObserver>,
+    last_address: &mut Option<String>,
+) {
+    let Some(status) = selected_path(conn, remote) else {
+        return;
     };
+    if last_address.as_ref() == Some(&status.address) {
+        return;
+    }
+    *last_address = Some(status.address.clone());
     info!(
         remote = %status.remote,
         path = %status.kind,

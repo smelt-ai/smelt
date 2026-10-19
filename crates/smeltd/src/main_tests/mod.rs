@@ -86,7 +86,7 @@ fn make_acp_session_value(
         conversation_binding: Mutex::new(Some(
             smelt_core::conversation::ConversationBinding::Direct,
         )),
-        conversation_submit: Mutex::new(()),
+        conversation_submit: Mutex::new(crate::acp_host::RecentSubmissions::default()),
         pending_agent_preset: Mutex::new(None),
         durable_history_session_id: Mutex::new(None),
         idle: Default::default(),

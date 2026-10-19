@@ -3385,10 +3385,8 @@ fn content_images(content: Option<&serde_json::Value>) -> Vec<crate::acp_chat::A
                 .get("mimeType")
                 .or_else(|| block.get("mime_type"))
                 .and_then(serde_json::Value::as_str)?;
-            (!data.is_empty()).then(|| crate::acp_chat::AcpImage {
-                mime: mime.to_string(),
-                data_b64: data.to_string(),
-            })
+            (!data.is_empty())
+                .then(|| crate::acp_chat::AcpImage::new(mime.to_string(), data.to_string()))
         })
         .collect()
 }
@@ -3642,10 +3640,7 @@ fn replay_user_content(
                     block.get("mimeType").and_then(serde_json::Value::as_str),
                 ) {
                     let _ = event_tx.try_send(ConversationEvent::UserImage(
-                        crate::acp_chat::AcpImage {
-                            mime: mime.to_string(),
-                            data_b64: data.to_string(),
-                        },
+                        crate::acp_chat::AcpImage::new(mime.to_string(), data.to_string()),
                     ));
                 }
             }
@@ -4953,10 +4948,10 @@ mod tests {
         smol::block_on(handle_command(
             ConversationCommand::Prompt {
                 text: "describe".to_string(),
-                images: vec![crate::acp_chat::AcpImage {
-                    mime: "image/png".to_string(),
-                    data_b64: "aGVsbG8=".to_string(),
-                }],
+                images: vec![crate::acp_chat::AcpImage::new(
+                    "image/png".to_string(),
+                    "aGVsbG8=".to_string(),
+                )],
             },
             &mut writer,
             &event_tx,
@@ -7914,10 +7909,7 @@ mod tests {
         state.active_turn = true;
         state.provider_busy = true;
         let in_flight = AtomicUsize::new(3);
-        let image = crate::acp_chat::AcpImage {
-            mime: "image/png".into(),
-            data_b64: "aGk=".into(),
-        };
+        let image = crate::acp_chat::AcpImage::new("image/png", "aGk=");
 
         let mut writer = futures::io::Cursor::new(Vec::new());
         smol::block_on(handle_command(
@@ -8018,10 +8010,7 @@ mod tests {
         smol::block_on(handle_command(
             ConversationCommand::Steer {
                 text: String::new(),
-                images: vec![crate::acp_chat::AcpImage {
-                    mime: "image/png".into(),
-                    data_b64: "aGk=".into(),
-                }],
+                images: vec![crate::acp_chat::AcpImage::new("image/png", "aGk=")],
             },
             &mut writer,
             &event_tx,

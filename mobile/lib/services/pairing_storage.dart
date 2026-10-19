@@ -2,140 +2,145 @@ import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-import '../models/pairing_config.dart';
-import '../models/saved_desktop.dart';
+import '../models/runtime_models.dart';
+import '../models/saved_runtime.dart';
 
+/// 配对过的运行时列表。存在系统钥匙串里；新配对、切换、改名、忘记都返回整份
+/// 最新列表，调用方直接拿它刷新界面。
 abstract interface class PairingStorage {
-  Future<SavedDesktopCollection> load();
-  Future<SavedDesktopCollection> save(PairingConfig pairing);
-  Future<SavedDesktopCollection> setActive(String desktopId);
-  Future<SavedDesktopCollection> rename(String desktopId, String name);
-  Future<SavedDesktopCollection> remove(String desktopId);
+  Future<SavedRuntimeCollection> load();
+
+  /// 配对成功后记下这个运行时并设为当前。同一个运行时再配对一次只更新地址，
+  /// 保留用户起的名字。
+  Future<SavedRuntimeCollection> save(RuntimeInfo info);
+  Future<SavedRuntimeCollection> setActive(String runtimeId);
+  Future<SavedRuntimeCollection> rename(String runtimeId, String name);
+
+  /// 只删本机记录。运行时那边的设备授权由运行时管理。
+  Future<SavedRuntimeCollection> remove(String runtimeId);
 }
 
 class SecurePairingStorage implements PairingStorage {
   SecurePairingStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
-  static const _endpointKey = 'smelt.gateway.endpoint';
-  static const _tokenKey = 'smelt.gateway.token';
-  static const _collectionKey = 'smelt.gateway.desktops.v1';
+  static const _collectionKey = 'smelt.runtimes.v1';
+
+  /// 旧网关配对（token）留下的数据。新协议用不上，读到就删，不迁移。
+  static const _retiredKeys = [
+    'smelt.gateway.endpoint',
+    'smelt.gateway.token',
+    'smelt.gateway.desktops.v1',
+  ];
 
   final FlutterSecureStorage _storage;
+  bool _retiredKeysDeleted = false;
 
   @override
-  Future<SavedDesktopCollection> load() async {
+  Future<SavedRuntimeCollection> load() async {
+    if (!_retiredKeysDeleted) {
+      await Future.wait(_retiredKeys.map((key) => _storage.delete(key: key)));
+      _retiredKeysDeleted = true;
+    }
     final encoded = await _storage.read(key: _collectionKey);
-    if (encoded != null) {
-      final decoded = jsonDecode(encoded);
-      if (decoded is! Map) {
-        throw const FormatException('Invalid saved desktop data');
-      }
-      return SavedDesktopCollection.fromJson(
-        decoded.map((key, value) => MapEntry(key.toString(), value)),
-      );
+    if (encoded == null) return const SavedRuntimeCollection();
+    final decoded = jsonDecode(encoded);
+    if (decoded is! Map) {
+      throw const FormatException('Invalid saved runtime data');
     }
-
-    final values = await Future.wait([
-      _storage.read(key: _endpointKey),
-      _storage.read(key: _tokenKey),
-    ]);
-    final endpoint = values[0];
-    final token = values[1];
-    if (endpoint == null || token == null) {
-      return const SavedDesktopCollection();
-    }
-
-    final desktop = SavedDesktop.create(
-      PairingConfig.fromFields(endpoint, token),
+    return SavedRuntimeCollection.fromJson(
+      decoded.map((key, value) => MapEntry(key.toString(), value)),
     );
-    final migrated = SavedDesktopCollection(
-      desktops: [desktop],
-      activeDesktopId: desktop.id,
-    );
-    await _write(migrated);
-    await Future.wait([
-      _storage.delete(key: _endpointKey),
-      _storage.delete(key: _tokenKey),
-    ]);
-    return migrated;
   }
 
   @override
-  Future<SavedDesktopCollection> save(PairingConfig pairing) async {
+  Future<SavedRuntimeCollection> save(RuntimeInfo info) async {
     final current = await load();
-    final id = desktopIdFor(pairing);
     final now = DateTime.now().toUtc();
-    final existing = current.desktops
-        .where((item) => item.id == id)
+    final existing = current.runtimes
+        .where((item) => item.runtimeId == info.runtimeId)
         .firstOrNull;
-    final saved = existing == null
-        ? SavedDesktop.create(pairing, lastUsedAt: now)
-        : existing.copyWith(pairing: pairing, lastUsedAt: now);
-    final updated = SavedDesktopCollection(
-      desktops: [saved, ...current.desktops.where((item) => item.id != id)],
-      activeDesktopId: id,
-    ).normalized();
-    await _write(updated);
-    return updated;
-  }
-
-  @override
-  Future<SavedDesktopCollection> setActive(String desktopId) async {
-    final current = await load();
-    final desktop = current.desktops
-        .where((item) => item.id == desktopId)
-        .firstOrNull;
-    if (desktop == null) return current;
-    final updated = SavedDesktopCollection(
-      desktops: [
-        desktop.copyWith(lastUsedAt: DateTime.now().toUtc()),
-        ...current.desktops.where((item) => item.id != desktopId),
-      ],
-      activeDesktopId: desktopId,
-    ).normalized();
-    await _write(updated);
-    return updated;
-  }
-
-  @override
-  Future<SavedDesktopCollection> rename(String desktopId, String name) async {
-    final trimmedName = name.trim();
-    if (trimmedName.isEmpty) return load();
-    final current = await load();
-    final updated = SavedDesktopCollection(
-      desktops: current.desktops
-          .map(
-            (item) =>
-                item.id == desktopId ? item.copyWith(name: trimmedName) : item,
-          )
-          .toList(),
-      activeDesktopId: current.activeDesktopId,
-    ).normalized();
-    await _write(updated);
-    return updated;
-  }
-
-  @override
-  Future<SavedDesktopCollection> remove(String desktopId) async {
-    final current = await load();
-    final remaining = current.desktops
-        .where((item) => item.id != desktopId)
-        .toList();
-    final updated = SavedDesktopCollection(
-      desktops: remaining,
-      activeDesktopId: current.activeDesktopId == desktopId
-          ? remaining.firstOrNull?.id
-          : current.activeDesktopId,
-    ).normalized();
-    await _write(updated);
-    return updated;
-  }
-
-  Future<void> _write(SavedDesktopCollection collection) {
-    return _storage.write(
-      key: _collectionKey,
-      value: jsonEncode(collection.toJson()),
+    final saved = SavedRuntime(
+      runtimeId: info.runtimeId,
+      name: existing?.name ?? defaultRuntimeName(info),
+      endpointId: info.endpointId,
+      relayUrl: info.relayUrl,
+      lastUsedAt: now,
     );
+    return _write(
+      SavedRuntimeCollection(
+        runtimes: [
+          saved,
+          ...current.runtimes.where(
+            (item) => item.runtimeId != saved.runtimeId,
+          ),
+        ],
+        activeRuntimeId: saved.runtimeId,
+      ),
+    );
+  }
+
+  @override
+  Future<SavedRuntimeCollection> setActive(String runtimeId) async {
+    final current = await load();
+    final runtime = current.runtimes
+        .where((item) => item.runtimeId == runtimeId)
+        .firstOrNull;
+    if (runtime == null) return current;
+    return _write(
+      SavedRuntimeCollection(
+        runtimes: [
+          runtime.copyWith(lastUsedAt: DateTime.now().toUtc()),
+          ...current.runtimes.where((item) => item.runtimeId != runtimeId),
+        ],
+        activeRuntimeId: runtimeId,
+      ),
+    );
+  }
+
+  @override
+  Future<SavedRuntimeCollection> rename(String runtimeId, String name) async {
+    final trimmed = name.trim();
+    final current = await load();
+    if (trimmed.isEmpty) return current;
+    return _write(
+      SavedRuntimeCollection(
+        runtimes: current.runtimes
+            .map(
+              (item) => item.runtimeId == runtimeId
+                  ? item.copyWith(name: trimmed)
+                  : item,
+            )
+            .toList(),
+        activeRuntimeId: current.activeRuntimeId,
+      ),
+    );
+  }
+
+  @override
+  Future<SavedRuntimeCollection> remove(String runtimeId) async {
+    final current = await load();
+    final remaining = current.runtimes
+        .where((item) => item.runtimeId != runtimeId)
+        .toList();
+    return _write(
+      SavedRuntimeCollection(
+        runtimes: remaining,
+        activeRuntimeId: current.activeRuntimeId == runtimeId
+            ? remaining.firstOrNull?.runtimeId
+            : current.activeRuntimeId,
+      ),
+    );
+  }
+
+  Future<SavedRuntimeCollection> _write(
+    SavedRuntimeCollection collection,
+  ) async {
+    final normalized = collection.normalized();
+    await _storage.write(
+      key: _collectionKey,
+      value: jsonEncode(normalized.toJson()),
+    );
+    return normalized;
   }
 }

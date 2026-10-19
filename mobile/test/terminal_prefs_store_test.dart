@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/pages/terminal_session_page.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/services/runtime_service.dart';
 import 'package:smelt_mobile/services/terminal_prefs_store.dart';
 import 'package:xterm/xterm.dart';
 
@@ -9,8 +9,11 @@ const _session = SessionSummary(
   id: 'terminal-1',
   kind: SessionKind.terminal,
   title: 'Shell',
-  phase: 'running',
+  phase: SessionPhase.idle,
+  status: SessionStatus.running,
   agent: 'terminal',
+  projectOrder: 0,
+  updatedAt: 0,
 );
 
 class _FakeTerminalPrefsStore implements TerminalPrefsStore {

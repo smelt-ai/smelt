@@ -224,6 +224,15 @@ impl AutomationOwner {
         self.file.clone()
     }
 
+    /// 这个会话是不是某次 Run 的执行现场。Run 的会话归运行时管（claim / 投递 / 对账 /
+    /// 回收），客户端不能从旁边删掉它。
+    pub fn is_run_session(&self, session_id: &str) -> bool {
+        self.file
+            .runs
+            .iter()
+            .any(|run| run.session_id.as_deref() == Some(session_id))
+    }
+
     /// 存储被锁死后重新读盘。热路径不以磁盘为准；只有 fail-closed 时才走这条恢复入口。
     pub fn recover_if_locked<Tz>(&mut self, now: DateTime<Tz>, timezone_fingerprint: String) -> bool
     where

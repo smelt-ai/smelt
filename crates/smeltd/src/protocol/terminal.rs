@@ -45,6 +45,21 @@ pub(super) fn handle_kill(
     event_hub: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
+    let response = match kill_terminal_session(id, sessions, remote_sessions, event_hub) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    };
+    let mut c = conn;
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
+}
+
+/// 杀终端会话并清理它的远程目录记录。`kill` op 与控制方法 `session.delete` 共用。
+pub(crate) fn kill_terminal_session(
+    id: &str,
+    sessions: &Sessions,
+    remote_sessions: &RemoteSessions,
+    event_hub: &EventHubHandle,
+) -> Result<(), String> {
     let slot = sessions.get(id);
     let mut removed = None;
     let mut removed_instance = None;
@@ -57,32 +72,16 @@ pub(super) fn handle_kill(
             let remote_owned =
                 is_known_remote_session(remote_sessions, RemoteSessionKind::Terminal, id)
                     == Some(true);
-            if remote_owned {
-                match set_remote_lifecycle(
+            if remote_owned
+                && !set_remote_lifecycle(
                     remote_sessions,
                     event_hub,
                     RemoteSessionKind::Terminal,
                     id,
                     RemoteSessionLifecycle::Closing,
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        let mut c = conn;
-                        let _ = smelt_runtime_client::protocol::write_json_line(
-                            &mut c,
-                            &serde_json::json!({ "ok": false, "error": "remote session disappeared" }),
-                        );
-                        return;
-                    }
-                    Err(error) => {
-                        let mut c = conn;
-                        let _ = smelt_runtime_client::protocol::write_json_line(
-                            &mut c,
-                            &serde_json::json!({ "ok": false, "error": error }),
-                        );
-                        return;
-                    }
-                }
+                )?
+            {
+                return Err("remote session disappeared".to_string());
             }
             if let Some(s) = sessions.live_in_slot(&slot) {
                 removed_instance = Some(s.instance);
@@ -133,37 +132,19 @@ pub(super) fn handle_kill(
         let remote_owned =
             is_known_remote_session(remote_sessions, RemoteSessionKind::Terminal, id) == Some(true);
         if remote_owned {
-            match set_remote_lifecycle(
+            set_remote_lifecycle(
                 remote_sessions,
                 event_hub,
                 RemoteSessionKind::Terminal,
                 id,
                 RemoteSessionLifecycle::Closing,
-            ) {
-                Ok(true) => {}
-                Ok(false) => {}
-                Err(error) => {
-                    let mut c = conn;
-                    let _ = smelt_runtime_client::protocol::write_json_line(
-                        &mut c,
-                        &serde_json::json!({ "ok": false, "error": error }),
-                    );
-                    return;
-                }
-            }
-            if let Err(error) = remove_remote_session_if_unbound(
+            )?;
+            remove_remote_session_if_unbound(
                 remote_sessions,
                 event_hub,
                 RemoteSessionKind::Terminal,
                 id,
-            ) {
-                let mut c = conn;
-                let _ = smelt_runtime_client::protocol::write_json_line(
-                    &mut c,
-                    &serde_json::json!({ "ok": false, "error": error }),
-                );
-                return;
-            }
+            )?;
         }
     }
     if let Some(session) = removed {
@@ -171,12 +152,7 @@ pub(super) fn handle_kill(
     } else {
         forget_session(event_hub, id, 0);
     }
-    let mut c = conn;
-    let response = match cleanup_error {
-        Some(error) => serde_json::json!({ "ok": false, "error": error }),
-        None => serde_json::json!({ "ok": true }),
-    };
-    let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
+    cleanup_error.map_or(Ok(()), Err)
 }
 
 pub(super) fn handle_action(conn: UnixStream, v: &serde_json::Value, sessions: &Sessions) {
@@ -319,132 +295,104 @@ pub(crate) fn runtime_id_taken_by_other_kind(
     }
 }
 
-pub(crate) fn handle_open(
-    conn: UnixStream,
-    mut reader: BufReader<UnixStream>,
-    v: &serde_json::Value,
-    sessions: Sessions,
-    acp_sessions: AcpSessions,
-    event_hub: EventHubHandle,
-    remote_sessions: RemoteSessions,
-) {
-    let id = v["id"].as_str().unwrap_or_default().to_string();
-    if id.is_empty() {
-        return;
+/// 打开（或新建）一个终端 runtime 的参数。`open` op 与控制方法 `session.create`
+/// 共用，两条路径在 slot 生命周期、远程目录事务上不能各写一套。
+pub(crate) struct TerminalOpenRequest {
+    pub(crate) id: String,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) cwd: Option<String>,
+    /// 新建 PTY 时先跑的命令。reattach 已有会话时忽略。
+    pub(crate) launch: Option<String>,
+    pub(crate) create_if_missing: bool,
+    pub(crate) remote_session: Option<RemoteTerminalSession>,
+}
+
+/// 确保终端 runtime 在跑：已有就复用（远程目录里的同类记录重新激活），没有就创建、
+/// 登记远程目录并起 PTY 泵。`attach` 在同一把 slot 生命周期锁里执行，kill 因此要么
+/// 看到挂好的 attachment，要么等它挂完；第二个参数表示复用的是已有 runtime。
+pub(crate) fn open_terminal_runtime<R>(
+    request: TerminalOpenRequest,
+    sessions: &Sessions,
+    acp_sessions: &AcpSessions,
+    event_hub: &EventHubHandle,
+    remote_sessions: &RemoteSessions,
+    attach: impl FnOnce(&Arc<Session>, bool) -> R,
+) -> Result<(Arc<TerminalSlot<Session>>, R), String> {
+    let TerminalOpenRequest {
+        id,
+        cols,
+        rows,
+        cwd,
+        launch,
+        create_if_missing,
+        mut remote_session,
+    } = request;
+    if let Some(session) = &remote_session
+        && session.id != id
+    {
+        return Err("远程目录会话 id 不匹配".to_string());
     }
-    let cols = v["cols"].as_u64().unwrap_or(80) as u16;
-    let rows = v["rows"].as_u64().unwrap_or(24) as u16;
-    let cwd = v["cwd"].as_str().map(String::from);
-    let launch = v["initial_launch"].as_str().map(String::from);
-    let create_if_missing = v["create_if_missing"].as_bool().unwrap_or(true);
-    let mut remote_session = match v.get("remote_session") {
-        Some(value) => match serde_json::from_value::<RemoteTerminalSession>(value.clone()) {
-            Ok(session) if session.id == id => Some(session),
-            Ok(_) => {
-                write_terminal_error(&conn, "远程目录会话 id 不匹配", rows, cols);
-                return;
-            }
-            Err(error) => {
-                write_terminal_error(&conn, &format!("远程目录会话无效：{error}"), rows, cols);
-                return;
-            }
-        },
-        None => None,
-    };
 
     // 一个 slot 覆盖 Starting -> Live -> Removed 的全部转换。创建和 kill 都先取得这把
     // 同 ID 生命周期锁，因此目录、runtime 与状态发布不会再出现半提交窗口。
     let (slot, created) = sessions.reserve(&id);
     if let Some(error) =
-        runtime_id_taken_by_other_kind(&id, &sessions, &acp_sessions, RemoteSessionKind::Terminal)
+        runtime_id_taken_by_other_kind(&id, sessions, acp_sessions, RemoteSessionKind::Terminal)
     {
         if created {
             let _ = sessions.remove_if_same(&id, &slot);
         }
-        write_terminal_error(&conn, &error, rows, cols);
-        return;
+        return Err(error);
     }
     let lifecycle = slot.lifecycle.lock().unwrap();
     if !sessions.is_current(&id, &slot) {
-        drop(lifecycle);
-        write_terminal_error(&conn, "终端会话正在收尾，请重试", rows, cols);
-        return;
+        return Err("终端会话正在收尾，请重试".to_string());
     }
 
     let existing = sessions.live_in_slot(&slot);
     if !created && existing.is_none() {
-        drop(lifecycle);
-        write_terminal_error(&conn, "终端会话正在收尾，请重试", rows, cols);
-        return;
+        return Err("终端会话正在收尾，请重试".to_string());
     }
     let mut remote_snapshots = Vec::new();
     let mut pty_pump = None;
 
+    let reattached = existing.is_some();
     let sess = match existing {
         Some(s) => {
             // 不允许远程请求借同 ID 把本地会话变成远程所有；只有目录中已有同类记录的
             // 重试/reattach 才能继续激活。
             if remote_session.is_some() {
-                if is_known_remote_session(&remote_sessions, RemoteSessionKind::Terminal, &id)
+                if is_known_remote_session(remote_sessions, RemoteSessionKind::Terminal, &id)
                     != Some(true)
                 {
-                    drop(lifecycle);
-                    write_terminal_error(
-                        &conn,
-                        "terminal id already belongs to a local session",
-                        rows,
-                        cols,
-                    );
-                    return;
+                    return Err("terminal id already belongs to a local session".to_string());
                 }
-                match activate_remote_session_instance(
-                    &remote_sessions,
+                let snapshot = activate_remote_session_instance(
+                    remote_sessions,
                     RemoteSessionKind::Terminal,
                     &id,
                     s.instance,
-                ) {
-                    Ok(snapshot) => remote_snapshots.push(snapshot),
-                    Err(error) => {
-                        drop(lifecycle);
-                        write_terminal_error(
-                            &conn,
-                            &format!("无法激活远程会话：{error}"),
-                            rows,
-                            cols,
-                        );
-                        return;
-                    }
-                }
+                )
+                .map_err(|error| format!("无法激活远程会话：{error}"))?;
+                remote_snapshots.push(snapshot);
             }
-            // reattach：只挂 jolt 旗，等客户端首帧 type-1 resize（含真实 cell
-            // 像素）再消费。attach 当下不 SIGWINCH：GUI 仍是旧几何，错尺寸重画
-            // 才是「显示不全」的根因。
-            s.ctl.lock().unwrap().jolt = true;
             s
         }
         None if !create_if_missing => {
             let _ = sessions.remove_if_same(&id, &slot);
-            drop(lifecycle);
-            write_terminal_error(&conn, "终端会话不存在", rows, cols);
-            return;
+            return Err("终端会话不存在".to_string());
         }
         None => {
             if let Some(session) = &mut remote_session {
                 session.lifecycle = RemoteSessionLifecycle::Creating;
-                let snapshot = match mutate_remote_catalog(&remote_sessions, |catalog| {
+                let snapshot = match mutate_remote_catalog(remote_sessions, |catalog| {
                     catalog.upsert_terminal(session.clone())
                 }) {
                     Ok(((), snapshot)) => snapshot,
                     Err(error) => {
                         let _ = sessions.remove_if_same(&id, &slot);
-                        drop(lifecycle);
-                        write_terminal_error(
-                            &conn,
-                            &format!("无法记录远程会话：{error}"),
-                            rows,
-                            cols,
-                        );
-                        return;
+                        return Err(format!("无法记录远程会话：{error}"));
                     }
                 };
                 remote_snapshots.push(snapshot);
@@ -458,27 +406,25 @@ pub(crate) fn handle_open(
                 cols,
                 cwd.as_deref(),
                 launch.as_deref(),
-                &event_hub,
+                event_hub,
             );
             let (sess, pty_reader) = match result {
                 Ok(result) => result,
                 Err(error) => {
                     if remote_session.is_some() {
                         let _ = remove_remote_session_if_unbound(
-                            &remote_sessions,
-                            &event_hub,
+                            remote_sessions,
+                            event_hub,
                             RemoteSessionKind::Terminal,
                             &id,
                         );
                     }
                     let _ = sessions.remove_if_same(&id, &slot);
-                    drop(lifecycle);
                     smelt_core::app_log::error(
                         "session",
                         &format!("会话 {id} 启动失败：{error:#}"),
                     );
-                    write_terminal_error(&conn, &format!("终端启动失败：{error:#}"), rows, cols);
-                    return;
+                    return Err(format!("终端启动失败：{error:#}"));
                 }
             };
             smelt_core::app_log::info("session", &format!("会话 {id} 已创建"));
@@ -495,19 +441,17 @@ pub(crate) fn handle_open(
                 }
                 if remote_session.is_some() {
                     let _ = remove_remote_session_if_unbound(
-                        &remote_sessions,
-                        &event_hub,
+                        remote_sessions,
+                        event_hub,
                         RemoteSessionKind::Terminal,
                         &id,
                     );
                 }
-                drop(lifecycle);
-                write_terminal_error(&conn, "终端会话创建已取消", rows, cols);
-                return;
+                return Err("终端会话创建已取消".to_string());
             }
             if remote_session.is_some() {
                 match activate_remote_session_instance(
-                    &remote_sessions,
+                    remote_sessions,
                     RemoteSessionKind::Terminal,
                     &id,
                     sess.instance,
@@ -521,20 +465,13 @@ pub(crate) fn handle_open(
                             ));
                         }
                         let _ = remove_remote_session_if_unbound(
-                            &remote_sessions,
-                            &event_hub,
+                            remote_sessions,
+                            event_hub,
                             RemoteSessionKind::Terminal,
                             &id,
                         );
                         let _ = sessions.remove_if_same(&id, &slot);
-                        drop(lifecycle);
-                        write_terminal_error(
-                            &conn,
-                            &format!("无法激活远程会话目录：{error}"),
-                            rows,
-                            cols,
-                        );
-                        return;
+                        return Err(format!("无法激活远程会话目录：{error}"));
                     }
                 }
             }
@@ -543,42 +480,87 @@ pub(crate) fn handle_open(
                 bump_state_revision(&mut state);
                 state.clone()
             };
-            broadcast_state(&event_hub, &opened_state);
+            broadcast_state(event_hub, &opened_state);
             pty_pump = Some((Arc::clone(&sess), pty_reader));
             sess
         }
     };
 
     for snapshot in remote_snapshots {
-        broadcast_remote_sessions(&event_hub, &snapshot);
+        broadcast_remote_sessions(event_hub, &snapshot);
     }
     if let Some((pump_session, pty_reader)) = pty_pump {
         start_pty_pump(
             pump_session,
             pty_reader,
             id.clone(),
-            Arc::clone(&sessions),
-            Arc::clone(&event_hub),
-            Some(Arc::clone(&remote_sessions)),
+            Arc::clone(sessions),
+            Arc::clone(event_hub),
+            Some(Arc::clone(remote_sessions)),
             Arc::clone(&slot),
         );
     }
+    let attached = attach(&sess, reattached);
+    drop(lifecycle);
+    Ok((slot, attached))
+}
+
+pub(crate) fn handle_open(
+    conn: UnixStream,
+    mut reader: BufReader<UnixStream>,
+    v: &serde_json::Value,
+    sessions: Sessions,
+    acp_sessions: AcpSessions,
+    event_hub: EventHubHandle,
+    remote_sessions: RemoteSessions,
+) {
+    let id = v["id"].as_str().unwrap_or_default().to_string();
+    if id.is_empty() {
+        return;
+    }
+    let cols = v["cols"].as_u64().unwrap_or(80) as u16;
+    let rows = v["rows"].as_u64().unwrap_or(24) as u16;
+    let remote_session = match v.get("remote_session") {
+        Some(value) => match serde_json::from_value::<RemoteTerminalSession>(value.clone()) {
+            Ok(session) => Some(session),
+            Err(error) => {
+                write_terminal_error(&conn, &format!("远程目录会话无效：{error}"), rows, cols);
+                return;
+            }
+        },
+        None => None,
+    };
+    let request = TerminalOpenRequest {
+        id: id.clone(),
+        cols,
+        rows,
+        cwd: v["cwd"].as_str().map(String::from),
+        launch: v["initial_launch"].as_str().map(String::from),
+        create_if_missing: v["create_if_missing"].as_bool().unwrap_or(true),
+        remote_session,
+    };
 
     // attach：回报 PTY 当前尺寸 → 网格 ANSI 快照 → 接管转发。
     //
     // 输出闸门保证 snapshot 与挂载之间不被泵插入。header + keyframe 会先进入该
     // attachment 的专属写队列；若先释放闸门再注册，泵可能 advance(D) 后发现还没
     // client 而丢弃 D，新客户端的网格就永久缺字节（正是「吐快照」要避免的错位）。
-    let attached_fd = {
+    let attach = |sess: &Arc<Session>, reattached: bool| {
+        if reattached {
+            // reattach：只挂 jolt 旗，等客户端首帧 type-1 resize（含真实 cell
+            // 像素）再消费。attach 当下不 SIGWINCH：GUI 仍是旧几何，错尺寸重画
+            // 才是「显示不全」的根因。
+            sess.ctl.lock().unwrap().jolt = true;
+        }
         let _output_gate = sess.output_gate.lock().unwrap();
-        let Ok(c) = conn.try_clone() else { return };
+        let c = conn.try_clone().ok()?;
 
         let (cur_cols, cur_rows) = {
             let ctl = sess.ctl.lock().unwrap();
             (ctl.cols, ctl.rows)
         };
         // 和流控合并后补的是同一种关键帧；快照分流只看真实 ALT_SCREEN。
-        let snapshot = terminal_keyframe(&sess, KeyframeNeed::Full);
+        let snapshot = terminal_keyframe(sess, KeyframeNeed::Full);
 
         // replay_len = 快照字节数：客户端仍用它划「历史/实时」边界，跳过快照里的
         // 历史 OSC 9（网格快照本身不含旧通知序列，但边界语义保留兼容）。
@@ -594,14 +576,26 @@ pub(crate) fn handle_open(
             })
         )
         .into_bytes();
-        let Ok(attachment) = OutputAttachment::interactive(c, header, snapshot, &id) else {
-            return;
-        };
+        let attachment = OutputAttachment::interactive(c, header, snapshot, &id).ok()?;
         let fd = attachment.fd;
         sess.out.lock().unwrap().clients.push(attachment);
-        fd
+        Some((Arc::clone(sess), fd))
     };
-    drop(lifecycle);
+    let (slot, sess, attached_fd) = match open_terminal_runtime(
+        request,
+        &sessions,
+        &acp_sessions,
+        &event_hub,
+        &remote_sessions,
+        attach,
+    ) {
+        Ok((slot, Some((sess, fd)))) => (slot, sess, fd),
+        Ok((_, None)) => return,
+        Err(error) => {
+            write_terminal_error(&conn, &error, rows, cols);
+            return;
+        }
+    };
     // 终端控制连接活着：headless 自升级让路，交给 GUI 空闲门控。
     let _viewer = super::auth::ViewerLease::acquire();
 

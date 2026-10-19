@@ -215,8 +215,12 @@ async fn pump(mut send: SendStream, mut recv: RecvStream, unix: tokio::net::Unix
 const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// 客户端这一侧的 iroh endpoint，所有远程运行时共用一个：运行时按客户端密钥的公钥认
-/// 设备，同一把密钥同时绑几个 endpoint 会让 relay 上出现重复的节点。用 n0 的公共 relay
-/// 和地址发现；目标运行时用了自建 relay 时，拨号地址里带上它即可。
+/// 设备，同一把密钥同时绑几个 endpoint 会让 relay 上出现重复的节点。
+///
+/// 不给 relay 时用 n0 的公共 relay 和地址发现；目标运行时用了自建 relay 时，拨号地址里
+/// 带上它即可（桌面就是这样，一个客户端连几台运行时）。给了 relay 时只用它，域名交给系统
+/// 解析器：手机只连一台运行时，而 iOS 上 iroh 自带的 DNS 会绕开系统代理，见
+/// [`crate::system_dns`]。
 pub struct IrohClient {
     runtime: tokio::runtime::Runtime,
     endpoint: Endpoint,
@@ -224,14 +228,14 @@ pub struct IrohClient {
 
 impl IrohClient {
     /// `secret` 是这台客户端自己的身份，必须持久。
-    pub fn new(secret: SecretKey) -> Result<Arc<Self>> {
+    pub fn new(secret: SecretKey, relay: Option<&RelaySettings>) -> Result<Arc<Self>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("smelt-iroh-client")
             .enable_all()
             .build()
             .context("起不了 iroh 客户端的 tokio 运行时")?;
-        let endpoint = runtime.block_on(bind_runtime_endpoint(secret, Vec::new(), None))?;
+        let endpoint = runtime.block_on(bind_runtime_endpoint(secret, Vec::new(), relay))?;
         Ok(Arc::new(Self { runtime, endpoint }))
     }
 
@@ -301,6 +305,21 @@ impl RuntimeConnector {
         {
             *slot = None;
         }
+    }
+}
+
+impl RuntimeConnector {
+    /// 当前连接选中的传输路径和 RTT。还没连上、连接已断或还没选出路径时为 None。
+    /// 不会为此拨号。和 [`smelt_runtime_client::Connector::connect`] 一样不能在 tokio
+    /// 运行时里调用。
+    pub fn path_status(&self) -> Option<crate::PathStatus> {
+        self.client.runtime.block_on(async {
+            let conn = self.conn.lock().await.clone()?;
+            if conn.close_reason().is_some() {
+                return None;
+            }
+            crate::selected_path(&conn, &self.target.id.to_string())
+        })
     }
 }
 

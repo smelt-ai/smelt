@@ -1,7 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/models/acp_snapshot.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/services/message_draft_store.dart';
 
 void main() {
@@ -16,16 +17,19 @@ void main() {
 
     await store.save(
       'session/with unsafe characters',
-      const MessageDraft(
+      MessageDraft(
         content: 'Check this image',
-        images: [AcpImageData(mimeType: 'image/png', base64: 'aW1hZ2U=')],
+        images: [
+          ImageInput(mime: 'image/png', bytes: Uint8List.fromList([1, 2, 3])),
+        ],
         requestId: 'request-1',
       ),
     );
 
     final pending = await store.load('session/with unsafe characters');
     expect(pending?.content, 'Check this image');
-    expect(pending?.images.single.mimeType, 'image/png');
+    expect(pending?.images.single.mime, 'image/png');
+    expect(pending?.images.single.bytes, [1, 2, 3]);
     expect(pending?.requestId, 'request-1');
 
     await store.save(

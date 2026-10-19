@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../models/acp_snapshot.dart';
+import '../models/runtime_models.dart';
 import 'approval_card.dart';
 
 /// 审批详情 sheet（设计稿 B）。
@@ -15,7 +15,7 @@ import 'approval_card.dart';
 /// 拒错了再点一次就是了，允许错了命令已经跑完。
 Future<void> showApprovalSheet(
   BuildContext context, {
-  required PendingPermission permission,
+  required PermissionRequest permission,
   required void Function(String optionId) onRespond,
   String? subtitle,
 }) {
@@ -41,7 +41,7 @@ class _ApprovalSheet extends StatelessWidget {
     this.subtitle,
   });
 
-  final PendingPermission permission;
+  final PermissionRequest permission;
   final void Function(String optionId) onRespond;
   final String? subtitle;
 
@@ -154,19 +154,22 @@ class _ApprovalSheet extends StatelessWidget {
   /// 「判断依据」表。只渲染协议真给了的字段——设计稿上的「影响范围」在 command
   /// 类型里并没有对应数据，与其编一个，不如不显示。
   List<Widget> _facts(BuildContext context, ApprovalDetails details) {
-    return switch (details) {
-      ApprovalDetailsCommand(cwd: final cwd, reason: final reason) => [
-        if (cwd?.isNotEmpty == true)
-          _FactRow(label: 'Working directory', value: cwd!, mono: true),
-        if (reason?.isNotEmpty == true) _FactRow(label: 'Why', value: reason!),
+    final cwd = details.cwd;
+    final root = details.grantRoot;
+    final reason = details.reason;
+    return switch (details.kind) {
+      ApprovalKind.command => [
+        if (cwd != null && cwd.isNotEmpty)
+          _FactRow(label: 'Working directory', value: cwd, mono: true),
+        if (reason != null && reason.isNotEmpty)
+          _FactRow(label: 'Why', value: reason),
       ],
-      ApprovalDetailsFileChange(grantRoot: final root, reason: final reason) =>
-        [
-          if (root?.isNotEmpty == true)
-            _FactRow(label: 'Grants access to', value: root!, mono: true),
-          if (reason?.isNotEmpty == true)
-            _FactRow(label: 'Why', value: reason!),
-        ],
+      ApprovalKind.fileChange => [
+        if (root != null && root.isNotEmpty)
+          _FactRow(label: 'Grants access to', value: root, mono: true),
+        if (reason != null && reason.isNotEmpty)
+          _FactRow(label: 'Why', value: reason),
+      ],
       _ => const <Widget>[],
     };
   }

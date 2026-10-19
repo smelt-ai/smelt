@@ -177,6 +177,11 @@ define_control_methods! {
     SkillsSyncControl => (SKILLS_SYNC_CONTROL_METHOD, "skills.sync_control"),
     WorkspaceBrowseDirs => (WORKSPACE_BROWSE_DIRS_METHOD, "workspace.browse_dirs"),
     ConversationCreateForAgent => (CONVERSATION_CREATE_FOR_AGENT_METHOD, "conversation.create_for_agent"),
+    NewSessionCatalog => (NEW_SESSION_CATALOG_METHOD, "new_session.catalog"),
+    SessionCreate => (SESSION_CREATE_METHOD, "session.create"),
+    SessionDelete => (SESSION_DELETE_METHOD, "session.delete"),
+    SessionAgentBindings => (SESSION_AGENT_BINDINGS_METHOD, "session.agent_bindings"),
+    ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
 }
 
 pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
@@ -606,7 +611,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 121);
+        assert_eq!(names.len(), 126);
     }
 
     #[test]

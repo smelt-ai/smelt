@@ -1,20 +1,34 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/models/acp_snapshot.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/widgets/elicitation_card.dart';
 
-PendingElicitation _elicitationWith(int fieldCount) {
-  return PendingElicitation(
+ElicitationField _field(
+  String key, {
+  ElicitationFieldKind kind = ElicitationFieldKind.text,
+  bool required = false,
+  List<String> options = const [],
+  List<int> chosen = const [],
+  String? textValue,
+}) => ElicitationField(
+  key: key,
+  title: key,
+  required_: required,
+  allowCustomInput: false,
+  kind: kind,
+  options: options,
+  secret: false,
+  chosen: Uint32List.fromList(chosen),
+  textValue: textValue,
+);
+
+Elicitation _elicitationWith(int fieldCount) {
+  return Elicitation(
     message: 'Fill these in before I continue.',
-    fields: [
-      for (var i = 0; i < fieldCount; i++)
-        ElicitationField(
-          key: 'f$i',
-          title: 'Field $i',
-          required: false,
-          kind: const ElicitationText(secret: false),
-        ),
-    ],
+    fields: [for (var i = 0; i < fieldCount; i++) _field('Field $i')],
+    isReady: true,
   );
 }
 
@@ -116,19 +130,17 @@ void main() {
     await tester.pumpWidget(
       _host(
         ElicitationCard(
-          elicitation: const PendingElicitation(
+          elicitation: Elicitation(
             message: 'Pick one',
             fields: [
-              ElicitationField(
-                key: 'channel',
-                title: 'Channel',
+              _field(
+                'Channel',
+                kind: ElicitationFieldKind.select,
                 required: true,
-                kind: ElicitationSelect([
-                  ElicitationOption('Email'),
-                  ElicitationOption('SMS'),
-                ]),
+                options: const ['Email', 'SMS'],
               ),
             ],
+            isReady: false,
           ),
           textValues: const {},
           onTextChanged: (_, _) {},
@@ -142,5 +154,67 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Submit'), findsNothing);
     await tester.tap(find.text('SMS'));
     expect(chosen, [0, 1]);
+  });
+
+  group('作答是否就绪', () {
+    test('可选的文字框不挡住已选好的必选项', () {
+      final elicitation = Elicitation(
+        message: '',
+        fields: [
+          _field(
+            'channel',
+            kind: ElicitationFieldKind.select,
+            required: true,
+            options: const ['Email'],
+            chosen: const [0],
+          ),
+          _field('note'),
+        ],
+        isReady: true,
+      );
+      expect(elicitation.isReadyWith(const {}), isTrue);
+    });
+
+    test('必填文字框要么本地填了，要么运行时记着非空值', () {
+      Elicitation withText(String? value) => Elicitation(
+        message: '',
+        fields: [_field('name', required: true, textValue: value)],
+        isReady: value?.trim().isNotEmpty == true,
+      );
+      expect(withText(null).isReadyWith(const {}), isFalse);
+      expect(withText(null).isReadyWith(const {0: '  '}), isFalse);
+      expect(withText(null).isReadyWith(const {0: 'Ada'}), isTrue);
+      expect(withText('Ada').isReadyWith(const {}), isTrue);
+      // 本地把运行时记着的值清空了，就是没填。
+      expect(withText('Ada').isReadyWith(const {0: ''}), isFalse);
+    });
+
+    testWidgets('选中的选项来自运行时记下的下标', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          ElicitationCard(
+            elicitation: Elicitation(
+              message: '',
+              fields: [
+                _field(
+                  'Channel',
+                  kind: ElicitationFieldKind.multiSelect,
+                  options: const ['Email', 'SMS'],
+                  chosen: const [1],
+                ),
+              ],
+              isReady: true,
+            ),
+            textValues: const {},
+            onTextChanged: (_, _) {},
+            onChoose: (_, _) {},
+            onSubmit: () {},
+            onDismiss: () {},
+          ),
+        ),
+      );
+      final chips = tester.widgetList<ChoiceChip>(find.byType(ChoiceChip));
+      expect(chips.map((chip) => chip.selected), [false, true]);
+    });
   });
 }

@@ -252,10 +252,7 @@ fn replayed_user_image_is_kept_with_its_text() {
     apply_event(&mut s, ConversationEvent::UserChunk("看这里".into()));
     apply_event(
         &mut s,
-        ConversationEvent::UserImage(crate::acp_chat::AcpImage {
-            mime: "image/png".into(),
-            data_b64: "QUJD".into(),
-        }),
+        ConversationEvent::UserImage(crate::acp_chat::AcpImage::new("image/png", "QUJD")),
     );
 
     assert!(matches!(
@@ -2864,10 +2861,7 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
 
 #[test]
 fn claimed_queue_text_is_removed_once_and_only_if_returned() {
-    let image = |data: &str| crate::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: data.into(),
-    };
+    let image = |data: &str| crate::acp_chat::AcpImage::new("image/png", data);
     let mut texts = vec![
         "别的".to_string(),
         "但是我想字数一致".to_string(),
@@ -2891,10 +2885,7 @@ fn claimed_queue_text_is_removed_once_and_only_if_returned() {
 
     let mut state = fresh_state();
     state.queued_steering = vec!["带图".into()];
-    state.queued_steering_images = vec![vec![crate::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aGk=".into(),
-    }]];
+    state.queued_steering_images = vec![vec![crate::acp_chat::AcpImage::new("image/png", "aGk=")]];
     state.queued_follow_up = vec!["下一回合".into()];
     let (images, follow_up) = queued_item_images(&state, "带图").unwrap();
     assert!(!follow_up);
@@ -2937,10 +2928,7 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
     assert_eq!(state.composer_restore_revision, 2);
     assert_eq!(state.composer_restore_texts, ["新草稿"]);
 
-    let image = crate::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aGk=".into(),
-    };
+    let image = crate::acp_chat::AcpImage::new("image/png", "aGk=");
     apply_event(
         &mut state,
         ConversationEvent::ComposerRestore {
@@ -3728,10 +3716,7 @@ fn garbage_has_no_action_name() {
 fn undo_prompt_sent_rolls_back_the_turn_it_opened() {
     let mut state = AcpSessionState::default();
     state.phase = DaemonPhase::Idle;
-    let image = crate::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aGk=".into(),
-    };
+    let image = crate::acp_chat::AcpImage::new("image/png", "aGk=");
     crate::acp_session::note_prompt_sent_with_delivery(
         &mut state,
         "发出去了".to_string(),

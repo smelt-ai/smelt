@@ -5189,10 +5189,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 fn encode_prompt_images(images: &[std::sync::Arc<gpui::Image>]) -> Vec<AcpImage> {
     images
         .iter()
-        .map(|im| AcpImage {
-            mime: image_mime(im.format).to_string(),
-            data_b64: base64_encode(&im.bytes),
-        })
+        .map(|im| AcpImage::new(image_mime(im.format).to_string(), base64_encode(&im.bytes)))
         .collect()
 }
 

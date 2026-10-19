@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/smelt_theme.dart';
 import 'package:flutter/services.dart';
 
-import '../models/acp_snapshot.dart';
+import '../models/runtime_models.dart';
 import 'approval_sheet.dart';
 
 /// 一张可以就地决策的审批卡。
@@ -12,7 +12,7 @@ import 'approval_sheet.dart';
 ///
 ///   1. **长命令换行，不横滚。** 原来命令用单行 `SelectableText`，手机上超宽就
 ///      得横向拖，最需要看清的东西反而看不全。
-///   2. **补上判断依据。** 工作目录和理由本来就在 `ApprovalDetailsCommand` 里，
+///   2. **补上判断依据。** 工作目录和理由本来就在命令类审批的详情里，
 ///      只是没渲染——没有它们，用户是在盲批。
 ///   3. **允许不再是最抢眼的落点。** 原来 Allow 是绿色实心按钮、位于拇指热区、
 ///      无二次确认；「总是允许」还跟「仅此一次」平权并排。这里把允许改成描边，
@@ -28,7 +28,7 @@ class ApprovalCard extends StatelessWidget {
     this.showWorkspacePath = true,
   });
 
-  final PendingPermission permission;
+  final PermissionRequest permission;
 
   /// 回调带上 optionId；调用方自己知道是哪个会话，卡片不关心。
   final void Function(String optionId) onRespond;
@@ -208,46 +208,42 @@ class ApprovalDetailsView extends StatelessWidget {
       color: theme.colorScheme.onSurfaceVariant,
     );
 
-    return switch (details) {
-      ApprovalDetailsCommand(
-        command: final command,
-        cwd: final cwd,
-        reason: final reason,
-      ) =>
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _CommandBlock(command: command),
-            if (showInlineFacts && reason?.isNotEmpty == true)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(reason!, style: muted),
-              ),
-            if (showInlineFacts && showWorkspacePath && cwd?.isNotEmpty == true)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('Working directory: $cwd', style: muted),
-              ),
-          ],
-        ),
-      ApprovalDetailsFileChange(reason: final reason, grantRoot: final root) =>
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (showInlineFacts && reason?.isNotEmpty == true)
-              Text(reason!, style: muted),
-            if (showInlineFacts && root?.isNotEmpty == true)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('Grants access to: $root', style: muted),
-              ),
-          ],
-        ),
-      ApprovalDetailsPermissions(summary: final summary) => Text(
-        summary,
-        style: muted,
+    final cwd = details.cwd;
+    final reason = details.reason;
+    return switch (details.kind) {
+      ApprovalKind.command => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _CommandBlock(command: details.command ?? ''),
+          if (showInlineFacts && reason?.isNotEmpty == true)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(reason!, style: muted),
+            ),
+          if (showInlineFacts && showWorkspacePath && cwd?.isNotEmpty == true)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Working directory: $cwd', style: muted),
+            ),
+        ],
       ),
-      ApprovalDetailsGeneric() => const SizedBox.shrink(),
+      ApprovalKind.fileChange => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (showInlineFacts && reason?.isNotEmpty == true)
+            Text(reason!, style: muted),
+          if (showInlineFacts && details.grantRoot?.isNotEmpty == true)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'Grants access to: ${details.grantRoot}',
+                style: muted,
+              ),
+            ),
+        ],
+      ),
+      ApprovalKind.permissions => Text(details.summary ?? '', style: muted),
+      ApprovalKind.generic => const SizedBox.shrink(),
     };
   }
 }

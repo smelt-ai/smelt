@@ -1,24 +1,33 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/models/acp_snapshot.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/widgets/approval_card.dart';
 
-PendingPermission _permission({
-  ApprovalDetails details = const ApprovalDetailsCommand(
+PermissionRequest _permission({
+  ApprovalDetails details = const ApprovalDetails(
+    kind: ApprovalKind.command,
     command: 'cargo test -p smelt-ui --no-fail-fast',
     cwd: '/Users/me/code/smelt',
     reason: '改完 ui_theme 后要跑一遍单测',
   ),
   List<PermissionOption> options = const [
-    PermissionOption(optionId: 'once', name: 'Allow once', kind: 'allow_once'),
+    PermissionOption(
+      optionId: 'once',
+      name: 'Allow once',
+      kind: PermissionOptionKind.allowOnce,
+    ),
     PermissionOption(
       optionId: 'always',
       name: 'Always allow',
-      kind: 'allow_always',
+      kind: PermissionOptionKind.allowAlways,
     ),
-    PermissionOption(optionId: 'no', name: 'Reject', kind: 'reject_once'),
+    PermissionOption(
+      optionId: 'no',
+      name: 'Reject',
+      kind: PermissionOptionKind.rejectOnce,
+    ),
   ],
-}) => PendingPermission(
+}) => PermissionRequest(
   toolCallId: 'tc-1',
   question: 'Run a command?',
   options: options,
@@ -27,7 +36,7 @@ PendingPermission _permission({
 
 Future<void> _pumpCard(
   WidgetTester tester, {
-  required PendingPermission permission,
+  required PermissionRequest permission,
   required void Function(String) onRespond,
 }) async {
   await tester.pumpWidget(
@@ -119,7 +128,10 @@ void main() {
     await _pumpCard(
       tester,
       permission: _permission(
-        details: const ApprovalDetailsCommand(command: 'ls', cwd: null),
+        details: const ApprovalDetails(
+          kind: ApprovalKind.command,
+          command: 'ls',
+        ),
       ),
       onRespond: (_) {},
     );

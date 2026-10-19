@@ -3,8 +3,12 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
-import '../models/acp_snapshot.dart';
+import '../models/runtime_models.dart';
 
+/// 一条还没发出去（或还没等到确认）的消息草稿。
+///
+/// [requestId] 有值表示这份草稿发过、但运行时没确认收到：重发时必须用同一个 id，
+/// 运行时按它去重；用户改了内容就不再是同一次提交，id 随之清掉。
 class MessageDraft {
   const MessageDraft({
     required this.content,
@@ -13,7 +17,7 @@ class MessageDraft {
   });
 
   final String content;
-  final List<AcpImageData> images;
+  final List<ImageInput> images;
   final String? requestId;
 
   bool get isEmpty => content.trim().isEmpty && images.isEmpty;
@@ -30,16 +34,35 @@ class MessageDraft {
     content: json['content'] as String? ?? '',
     images: (json['images'] as List<dynamic>? ?? const [])
         .whereType<Map<String, dynamic>>()
-        .map(AcpImageData.fromJson)
+        .map(_imageFromJson)
+        .nonNulls
         .toList(),
     requestId: json['requestId'] as String?,
   );
 
   Map<String, dynamic> toJson() => {
     'content': content,
-    'images': images.map((image) => image.toJson()).toList(),
+    'images': images
+        .map(
+          (image) => {
+            'mime': image.mime,
+            'data_b64': base64Encode(image.bytes),
+          },
+        )
+        .toList(),
     if (requestId != null) 'requestId': requestId,
   };
+}
+
+ImageInput? _imageFromJson(Map<String, dynamic> json) {
+  try {
+    return ImageInput(
+      mime: json['mime'] as String? ?? 'image/png',
+      bytes: base64Decode(json['data_b64'] as String? ?? ''),
+    );
+  } on FormatException {
+    return null;
+  }
 }
 
 abstract interface class MessageDraftStore {

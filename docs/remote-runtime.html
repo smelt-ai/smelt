@@ -641,9 +641,9 @@
   <div>
     <p><b>手机收敛</b></p>
     <ul>
-      <li><code>smelt-mobile</code> 改为包 <code>smelt-runtime-client</code>，以 FRB 接口暴露给 Dart；Flutter 数据层从 WebSocket 换成 FRB。走 P3 的 iroh 流和设备配对。</li>
+      <li><code>smelt-mobile</code> 改为包 <code>smelt-runtime-client</code>，以 FRB 接口暴露给 Dart；Flutter 数据层从 WebSocket 换成 FRB。走 P3 的 iroh 流和设备配对。<span class="chip chip-done">已完成</span>，2026-10-19 真机（iPhone，经自建 relay）配对并收发对话。手机内核分身份与连接、会话目录、对话、终端、离线缓存（SQLite）几块；网关原来在本机替手机做的事挪进运行时：<code>new_session.catalog</code>、<code>session.create</code> / <code>session.delete</code>、<code>session.agent_bindings</code>、<code>conversation.image</code>（手机连接上的帧只带大图引用，按需取缩略图或原图），<code>acp_submit_input</code> 按 <code>submission_id</code> 去重。会话列表投影与 attention 在手机本地算。拆分与接口见 <code>docs/mobile-runtime-p4.md</code>，实施中发现的运行时遗留也记在那里。</li>
       <li>删掉 gateway 的协议翻译层、JSON-WS、长期共享 token 和 <code>write_enabled</code> 只读开关。<span class="chip chip-done">已完成</span>（随 P3 的 iroh 直连提前删掉：没发版，不留过渡路径）</li>
-      <li>手机可以连任何运行时，包括 Linux。</li>
+      <li>手机可以连任何运行时，包括 Linux。代码已支持（没有桌面发布的菜单时按空目录处理，只显示运行时上的远程会话），还没在 Linux 运行时上实测。</li>
     </ul>
     <p class="exit"><b>完成标准：</b><code>smelt-remote-gateway</code> 里不再有 <code>/acp/ws</code>、<code>/terminal/{id}/ws</code> 的处理代码，<code>~/.smelt/remote-token</code> 不再存在；<code>smelt-mobile</code> 不再开本地端口，Dart 里没有协议解析代码。</p>
   </div>

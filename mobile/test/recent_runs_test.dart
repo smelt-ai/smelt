@@ -4,27 +4,37 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/models/session_filters.dart';
 import 'package:smelt_mobile/pages/console_page.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/pending_actions_controller.dart';
+import 'package:smelt_mobile/services/runtime_service.dart';
 import 'package:smelt_mobile/theme/smelt_theme.dart';
 import 'package:smelt_mobile/widgets/agent_icon.dart';
 import 'package:smelt_mobile/widgets/project_avatar.dart';
 
+import 'support/runtime_fixtures.dart' as fixtures;
+
 SessionSummary _session(
   String id, {
-  String phase = 'succeeded',
-  String status = 'idle',
+  SessionPhase phase = SessionPhase.succeeded,
+  SessionStatus status = SessionStatus.idle,
   int updatedAt = 1000,
   String? title,
   bool unread = false,
-}) => SessionSummary(
+}) => fixtures.session(
   id: id,
   title: title ?? id,
   phase: phase,
   status: status,
-  agent: 'codex',
   updatedAt: updatedAt,
-  unread: unread,
+  attention: unread ? fixtures.attention(id, AttentionKind.success) : null,
+);
+
+PendingActionsController _controller(
+  List<SessionSummary> initial, {
+  Stream<List<SessionSummary>> sessions = const Stream.empty(),
+}) => PendingActionsController(
+  sessions: sessions,
+  initialSessions: initial,
+  fetchDetails: (_) async => const PendingActions(permissions: []),
 );
 
 void main() {
@@ -37,8 +47,8 @@ void main() {
   });
 
   group('sessionRecentlyRan', () {
-    // phase 和 status 是两个独立字段：读过之后只有 status 退回 idle，
-    // phase 仍然是 succeeded。这就是「跑完且已读」的现成信号。
+    // phase 和未读提醒是两个独立字段：读过之后提醒清掉，phase 仍然是
+    // succeeded。这就是「跑完且已读」的现成信号。
     test('跑完并且已经看过', () {
       expect(sessionRecentlyRan(_session('a')), isTrue);
     });
@@ -51,43 +61,44 @@ void main() {
 
     test('在等我或者在跑的都不算', () {
       expect(
-        sessionRecentlyRan(_session('a', status: 'waiting_approval')),
+        sessionRecentlyRan(_session('a', status: SessionStatus.needsYou)),
         isFalse,
       );
-      expect(sessionRecentlyRan(_session('a', status: 'running')), isFalse);
-      expect(sessionRecentlyRan(_session('a', phase: 'thinking')), isFalse);
+      expect(
+        sessionRecentlyRan(_session('a', status: SessionStatus.running)),
+        isFalse,
+      );
+      expect(
+        sessionRecentlyRan(_session('a', phase: SessionPhase.thinking)),
+        isFalse,
+      );
     });
 
-    // 运行时没了的话 phase 只是历史残留。不排除的话桌面一重启，
-    // 这一段会被一批陈年会话灌满。
-    test('运行时已断开的不算', () {
+    // 运行时已结束的会话 phase 是 dead。不排除的话桌面一重启，这一段会被一批
+    // 陈年会话灌满。
+    test('运行时已结束的不算', () {
       expect(
-        sessionRecentlyRan(_session('a', status: 'disconnected')),
+        sessionRecentlyRan(_session('a', phase: SessionPhase.dead)),
         isFalse,
       );
     });
 
     test('从没跑过的空闲会话不算', () {
-      expect(sessionRecentlyRan(_session('a', phase: 'idle')), isFalse);
+      expect(
+        sessionRecentlyRan(_session('a', phase: SessionPhase.idle)),
+        isFalse,
+      );
     });
   });
 
   group('PendingActionsController.recentRuns', () {
     late StreamController<List<SessionSummary>> sessions;
-    late StreamController<String> snapshots;
 
     PendingActionsController build(List<SessionSummary> initial) =>
-        PendingActionsController(
-          sessions: sessions.stream,
-          initialSessions: initial,
-          snapshotUpdates: snapshots.stream,
-          lookupSnapshot: (_) => null,
-          requestDetails: (_) => true,
-        );
+        _controller(initial, sessions: sessions.stream);
 
     setUp(() {
       sessions = StreamController<List<SessionSummary>>.broadcast();
-      snapshots = StreamController<String>.broadcast();
     });
 
     test('按最后活动时间倒序——最近跑的排最前', () {
@@ -114,7 +125,13 @@ void main() {
     // 三段里只有 items 是算出来的，其余直接读 _sessions。只比 items 会漏掉
     // 「跑完了但没有任何待办变化」这类更新。
     test('会话跑完但待办没变化时也会通知', () async {
-      final controller = build([_session('a', phase: 'thinking')]);
+      final controller = build([
+        _session(
+          'a',
+          phase: SessionPhase.thinking,
+          status: SessionStatus.running,
+        ),
+      ]);
       addTearDown(controller.dispose);
       expect(controller.recentRuns, isEmpty);
 
@@ -150,13 +167,7 @@ void main() {
     );
 
     testWidgets('画出「Recently ran」并列出已看过的完成会话', (tester) async {
-      final controller = PendingActionsController(
-        sessions: const Stream.empty(),
-        initialSessions: [_session('a', title: 'Ran earlier')],
-        snapshotUpdates: const Stream.empty(),
-        lookupSnapshot: (_) => null,
-        requestDetails: (_) => true,
-      );
+      final controller = _controller([_session('a', title: 'Ran earlier')]);
       addTearDown(controller.dispose);
       await tester.pumpWidget(host(controller));
       expect(find.text('RECENTLY RAN'), findsOneWidget);
@@ -164,15 +175,9 @@ void main() {
     });
 
     testWidgets('全部列出，不再有「更多在 Projects」的截断提示', (tester) async {
-      final controller = PendingActionsController(
-        sessions: const Stream.empty(),
-        initialSessions: [
-          for (var i = 0; i < 5; i++) _session('s$i', updatedAt: i),
-        ],
-        snapshotUpdates: const Stream.empty(),
-        lookupSnapshot: (_) => null,
-        requestDetails: (_) => true,
-      );
+      final controller = _controller([
+        for (var i = 0; i < 5; i++) _session('s$i', updatedAt: i),
+      ]);
       addTearDown(controller.dispose);
       await tester.pumpWidget(host(controller));
       expect(find.text('5'), findsOneWidget);
@@ -180,13 +185,7 @@ void main() {
     });
 
     testWidgets('四段都空时仍然是空状态', (tester) async {
-      final controller = PendingActionsController(
-        sessions: const Stream.empty(),
-        initialSessions: [_session('a', phase: 'idle')],
-        snapshotUpdates: const Stream.empty(),
-        lookupSnapshot: (_) => null,
-        requestDetails: (_) => true,
-      );
+      final controller = _controller([_session('a', phase: SessionPhase.idle)]);
       addTearDown(controller.dispose);
       await tester.pumpWidget(host(controller));
       expect(find.text('RECENTLY RAN'), findsNothing);
@@ -195,16 +194,14 @@ void main() {
 }
 
 // 这几条钉住的是「项目名什么时候画」。原来的规则是「标题里包含项目名就不画」，
-// 建立在一个错误前提上：服务端从不给标题追加项目名（title 依次取 custom_title →
+// 建立在一个错误前提上：运行时从不给标题追加项目名（title 依次取 custom_title →
 // launch_label → 路径名）。结果是用户碰巧把项目名写进自定义标题时，那一行就
 // 莫名其妙少一段，行结构随机。
 void _projectLineTests() {
-  SessionSummary s(String title, {String? project}) => SessionSummary(
+  SessionSummary s(String title, {String? project}) => fixtures.session(
     id: 'x',
     title: title,
-    phase: 'succeeded',
-    status: 'idle',
-    agent: 'codex',
+    phase: SessionPhase.succeeded,
     projectTitle: project,
     updatedAt: 1,
   );
@@ -214,13 +211,7 @@ void _projectLineTests() {
     home: Scaffold(
       body: ConsolePage(
         onOpenSession: (_) {},
-        controller: PendingActionsController(
-          sessions: const Stream.empty(),
-          initialSessions: [session],
-          snapshotUpdates: const Stream.empty(),
-          lookupSnapshot: (_) => null,
-          requestDetails: (_) => true,
-        ),
+        controller: _controller([session]),
       ),
     ),
   );
@@ -251,10 +242,10 @@ void _projectLineTests() {
 void _agentIconTests() {
   SessionSummary s({
     String agent = 'codex',
-    String phase = 'succeeded',
-    String status = 'idle',
+    SessionPhase phase = SessionPhase.succeeded,
+    SessionStatus status = SessionStatus.idle,
     SessionKind kind = SessionKind.acp,
-  }) => SessionSummary(
+  }) => fixtures.session(
     id: 'x',
     kind: kind,
     title: 'demo',
@@ -269,13 +260,7 @@ void _agentIconTests() {
     home: Scaffold(
       body: ConsolePage(
         onOpenSession: (_) {},
-        controller: PendingActionsController(
-          sessions: const Stream.empty(),
-          initialSessions: [session],
-          snapshotUpdates: const Stream.empty(),
-          lookupSnapshot: (_) => null,
-          requestDetails: (_) => true,
-        ),
+        controller: _controller([session]),
       ),
     ),
   );
@@ -288,7 +273,9 @@ void _agentIconTests() {
     });
 
     testWidgets('「正在跑」的行也用 agent 图标', (tester) async {
-      await tester.pumpWidget(host(s(phase: 'thinking', status: 'running')));
+      await tester.pumpWidget(
+        host(s(phase: SessionPhase.thinking, status: SessionStatus.running)),
+      );
       await tester.pump();
       expect(find.byType(AgentIcon), findsOneWidget);
     });
@@ -298,7 +285,9 @@ void _agentIconTests() {
     // MaterialPageRoute 的转场就是一个。两个方向各起一个 tester：同一棵树上
     // 二次 pumpWidget 会复用 ConsolePage 的 element，换不掉 controller。
     testWidgets('「正在跑」的图标会呼吸', (tester) async {
-      await tester.pumpWidget(host(s(phase: 'thinking', status: 'running')));
+      await tester.pumpWidget(
+        host(s(phase: SessionPhase.thinking, status: SessionStatus.running)),
+      );
       await tester.pump();
       expect(find.byKey(const Key('console-pulse')), findsOneWidget);
     });

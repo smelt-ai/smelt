@@ -14,16 +14,22 @@ crate-type = ["cdylib", "staticlib"]
 # Flutter Rust Bridge
 flutter_rust_bridge = "=2.12.0"
 
-# iroh 隧道：直接复用桌面侧的 ALPN 与 endpoint 构建，避免两端各写一份而悄悄连不上
+# 与桌面共用的协议客户端、iroh 传输、配对串格式与 Control API 类型。
 smelt-iroh = { path = "../smelt-iroh" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-model = { path = "../smelt-model" }
+smelt-pairing = { path = "../smelt-pairing" }
+smelt-event-protocol = { path = "../smelt-event-protocol" }
+# 只为在设备身份里存 `iroh::SecretKey`，版本跟 smelt-iroh 走同一个。
 iroh = "1"
 
-# Async
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "net", "io-util"] }
-once_cell = "1.19"
-
-# Error handling
-anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+# 离线缓存（会话列表、最近对话的尾部）。业务持久化统一用 SQLite；bundled 自带源码，
+# iOS / Android 都能编，不依赖系统库版本。
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Logging
 log = "0.4"
@@ -34,5 +40,3 @@ log = "0.4"
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
 
-[build-dependencies]
-# flutter_rust_bridge_codegen = "2.12"  # Use CLI instead

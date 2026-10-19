@@ -2,99 +2,70 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/models/acp_snapshot.dart';
 import 'package:smelt_mobile/models/session_filters.dart';
 import 'package:smelt_mobile/pages/console_page.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/pending_actions_controller.dart';
+import 'package:smelt_mobile/services/runtime_service.dart';
 import 'package:smelt_mobile/theme/smelt_theme.dart';
 import 'package:smelt_mobile/widgets/session_row.dart';
 
+import 'support/runtime_fixtures.dart';
+
 const _source = AutomationSource(
-  automationId: 'automation-1',
   automationName: 'Daily digest',
-  runId: 'run-1',
-  runStatus: 'awaiting_approval',
-  runSource: 'scheduled',
+  runStatus: AutomationRunStatus.awaitingApproval,
+  runSource: AutomationRunSource.scheduled,
   prompt: 'Summarise yesterday\'s pull requests',
   startedAt: 1,
 );
 
-SessionSummary _runSession({AutomationSource? automation = _source}) =>
-    SessionSummary(
-      id: 'acp-automation-1',
-      title: 'Daily digest · Morning agent',
-      phase: 'awaiting_approval',
-      status: 'waiting_approval',
-      agent: 'pi',
-      cwd: '/home/me/.smelt/workspaces/automations/automation-1',
-      updatedAt: 1,
-      automation: automation,
-    );
+SessionSummary _runSession({AutomationSource? automation = _source}) => session(
+  id: 'acp-automation-1',
+  title: 'Daily digest · Morning agent',
+  phase: SessionPhase.awaitingApproval,
+  status: SessionStatus.needsYou,
+  agent: 'pi',
+  cwd: '/home/me/.smelt/workspaces/automations/automation-1',
+  updatedAt: 1,
+  automation: automation,
+);
 
 const _managedWorkspace =
     '/home/me/.smelt/workspaces/automations/497d023dc33a0a893b4cb7a28208e598';
 
-AcpSnapshot _pushApproval() => AcpSnapshot(
-  entries: const [],
-  phase: const AcpPhaseAwaitingApproval(),
-  pendingPermissions: const [
-    PendingPermission(
+const _pushApproval = PendingActions(
+  permissions: [
+    PermissionRequest(
       toolCallId: 'tool-1',
       question: 'Run git push?',
-      details: ApprovalDetailsCommand(
+      details: ApprovalDetails(
+        kind: ApprovalKind.command,
         command: 'git push origin main',
         cwd: _managedWorkspace,
       ),
       options: [
-        PermissionOption(optionId: 'allow', name: 'Allow', kind: 'AllowOnce'),
-        PermissionOption(optionId: 'deny', name: 'Deny', kind: 'RejectOnce'),
+        PermissionOption(
+          optionId: 'allow',
+          name: 'Allow',
+          kind: PermissionOptionKind.allowOnce,
+        ),
+        PermissionOption(
+          optionId: 'deny',
+          name: 'Deny',
+          kind: PermissionOptionKind.rejectOnce,
+        ),
       ],
     ),
   ],
 );
 
-Widget _host(Widget child) =>
-    MaterialApp(theme: smeltTheme(Brightness.dark), home: Scaffold(body: child));
+Widget _host(Widget child) => MaterialApp(
+  theme: smeltTheme(Brightness.dark),
+  home: Scaffold(body: child),
+);
 
 void main() {
   group('automation projection', () {
-    test('会话摘要带上来源、触发方式和这次固化的输入', () {
-      final summary = SessionSummary.fromJson({
-        'id': 'acp-automation-1',
-        'kind': 'acp',
-        'title': 'Daily digest · Morning agent',
-        'phase': 'awaiting_approval',
-        'status': 'waiting_approval',
-        'agent': 'pi',
-        'automation': {
-          'automation_id': 'automation-1',
-          'automation_name': 'Daily digest',
-          'run_id': 'run-1',
-          'run_status': 'awaiting_approval',
-          'run_source': 'scheduled',
-          'prompt': 'Summarise yesterday\'s pull requests',
-          'started_at': 1,
-        },
-      });
-
-      final automation = summary.automation;
-      expect(automation, isNotNull);
-      expect(automation!.automationName, 'Daily digest');
-      expect(automation.runSource, 'scheduled');
-      expect(automation.prompt, 'Summarise yesterday\'s pull requests');
-    });
-
-    test('普通会话没有来源字段，不被误判成自动化', () {
-      final summary = SessionSummary.fromJson({
-        'id': 'acp-1',
-        'title': 'fix login',
-        'phase': 'idle',
-        'agent': 'codex',
-      });
-      expect(summary.automation, isNull);
-    });
-
     // Run 的工作区是 daemon 分配的目录。放进项目树会按 cwd 兜底出一个用户从没
     // 打开过的「项目」——那正是这条谓词存在的唯一理由。
     test('自动化 Run 不进项目树，普通会话进', () {
@@ -110,14 +81,10 @@ void main() {
     testWidgets('审批卡说明是哪条自动化、怎么触发的、这次输入是什么', (tester) async {
       final sessions = StreamController<List<SessionSummary>>.broadcast();
       addTearDown(sessions.close);
-      final snapshots = StreamController<String>.broadcast();
-      addTearDown(snapshots.close);
       final controller = PendingActionsController(
         sessions: sessions.stream,
         initialSessions: [_runSession()],
-        snapshotUpdates: snapshots.stream,
-        lookupSnapshot: (_) => _pushApproval(),
-        requestDetails: (_) => true,
+        fetchDetails: (_) async => _pushApproval,
       );
       addTearDown(controller.dispose);
 
@@ -157,11 +124,7 @@ void main() {
     testWidgets('自动化 Run 的行标出是哪条自动化起的', (tester) async {
       await tester.pumpWidget(
         _host(
-          SessionRow(
-            session: _runSession(),
-            onTap: () {},
-            showProject: true,
-          ),
+          SessionRow(session: _runSession(), onTap: () {}, showProject: true),
         ),
       );
 

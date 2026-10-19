@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../models/saved_desktop.dart';
-import '../services/gateway_service.dart';
+import '../models/runtime_models.dart';
+import '../models/saved_runtime.dart';
 import '../services/terminal_prefs_store.dart';
 import '../theme/smelt_theme.dart';
 
@@ -13,21 +13,24 @@ import '../theme/smelt_theme.dart';
 class SettingsPage extends StatelessWidget {
   const SettingsPage({
     super.key,
-    required this.desktops,
+    required this.runtimes,
     required this.connectionState,
+    this.link,
     required this.connectionBar,
     required this.themeMode,
     required this.onThemeModeChanged,
     required this.terminalFontSize,
     required this.onTerminalFontSizeChanged,
-    required this.onSwitchDesktop,
+    required this.onSwitchRuntime,
     required this.onPair,
     required this.onDisconnect,
-    this.gateway,
   });
 
-  final SavedDesktopCollection desktops;
-  final WsState connectionState;
+  final SavedRuntimeCollection runtimes;
+  final RuntimeConnectionState connectionState;
+
+  /// 当前链路。只有连上时才有。
+  final LinkMetrics? link;
 
   /// 连接异常时的横幅由 home 提供——设置页不重复实现一遍连接错误的表达。
   /// **正常联通时不画**：那条信息已经在下面的连接卡里，画两遍是噪音。
@@ -38,42 +41,36 @@ class SettingsPage extends StatelessWidget {
   final double terminalFontSize;
   final ValueChanged<double> onTerminalFontSizeChanged;
 
-  final VoidCallback onSwitchDesktop;
+  final VoidCallback onSwitchRuntime;
   final VoidCallback onPair;
   final VoidCallback onDisconnect;
 
-  /// 全局单例不可替换，测试需要注入。
-  final GatewayService? gateway;
-
-  GatewayService get _service => gateway ?? gatewayService;
-
   @override
   Widget build(BuildContext context) {
-    final active = desktops.activeDesktop;
+    final active = runtimes.activeRuntime;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
       children: [
         const _GroupHeader('Connection'),
-        if (connectionState != WsState.connected) connectionBar,
+        if (connectionState != RuntimeConnectionState.connected) connectionBar,
         if (active != null) ...[
           _ConnectionCard(
-            desktop: active,
+            runtime: active,
             state: connectionState,
-            metricsStream: _service.metricsStream,
-            initialMetrics: _service.metrics,
-            canSwitch: desktops.desktops.length > 1,
-            onSwitch: onSwitchDesktop,
+            link: link,
+            canSwitch: runtimes.runtimes.length > 1,
+            onSwitch: onSwitchRuntime,
             onPair: onPair,
           ),
         ],
         const SizedBox(height: 4),
         _SettingRow(
-          title: 'Pair with desktop',
-          subtitle: 'Scan the QR code shown by Smelt on desktop',
+          title: 'Pair with runtime',
+          subtitle: pairingGuidance,
           onTap: onPair,
           trailing: const Icon(Icons.chevron_right, size: 20),
         ),
-        if (connectionState != WsState.disconnected)
+        if (connectionState != RuntimeConnectionState.disconnected)
           _SettingRow(
             title: 'Disconnect',
             subtitle: 'Keeps the pairing so you can reconnect later',
@@ -143,25 +140,28 @@ class _FieldLabel extends StatelessWidget {
   }
 }
 
-/// 连接卡：状态点 + 设备名 + 链路 chip + 链路明细 + 两个动作。
+/// 去哪儿拿配对码。配对页、设置页共用这一句。
+const pairingGuidance =
+    'Generate a pairing code in Smelt on your computer (Settings → Remote '
+    'Access), or run `smeltd pair` on the runtime machine.';
+
+/// 连接卡：状态点 + 运行时名 + 链路 chip + 链路明细 + 两个动作。
 ///
 /// chip 和明细都只画协议**真的**给了的东西：链路类型未知或没测出延迟时那一段
 /// 直接不画，不填「—」也不猜。
 class _ConnectionCard extends StatelessWidget {
   const _ConnectionCard({
-    required this.desktop,
+    required this.runtime,
     required this.state,
-    required this.metricsStream,
-    required this.initialMetrics,
+    required this.link,
     required this.canSwitch,
     required this.onSwitch,
     required this.onPair,
   });
 
-  final SavedDesktop desktop;
-  final WsState state;
-  final Stream<ConnectionMetrics> metricsStream;
-  final ConnectionMetrics initialMetrics;
+  final SavedRuntime runtime;
+  final RuntimeConnectionState state;
+  final LinkMetrics? link;
   final bool canSwitch;
   final VoidCallback onSwitch;
   final VoidCallback onPair;
@@ -171,10 +171,13 @@ class _ConnectionCard extends StatelessWidget {
     final theme = Theme.of(context);
     final colors = theme.extension<SmeltColors>()!;
     final dotColor = switch (state) {
-      WsState.connected => colors.done,
-      WsState.connecting || WsState.reconnecting => colors.running,
-      WsState.disconnected => colors.idle,
+      RuntimeConnectionState.connected => colors.done,
+      RuntimeConnectionState.connecting ||
+      RuntimeConnectionState.reconnecting => colors.running,
+      RuntimeConnectionState.disconnected => colors.idle,
     };
+    final chip = connectionChipLabel(state, link);
+    final detail = connectionPathDetail(state, link);
 
     return Container(
       padding: const EdgeInsets.fromLTRB(13, 12, 13, 12),
@@ -183,93 +186,78 @@ class _ConnectionCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: theme.dividerColor),
       ),
-      child: StreamBuilder<ConnectionMetrics>(
-        stream: metricsStream,
-        initialData: initialMetrics,
-        builder: (context, snapshot) {
-          final metrics = snapshot.data ?? initialMetrics;
-          final chip = connectionChipLabel(state, metrics);
-          final detail = connectionPathDetail(state, metrics);
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: dotColor,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      desktop.name,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                  if (chip != null) ...[const SizedBox(width: 8), _Chip(chip)],
-                ],
-              ),
-              if (detail != null) ...[
-                const SizedBox(height: 10),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: 46,
-                      child: Text(
-                        'Path',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: Text(detail, style: theme.textTheme.bodySmall),
-                    ),
-                  ],
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: dotColor,
+                  shape: BoxShape.circle,
                 ),
-              ],
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  if (canSwitch)
-                    OutlinedButton(
-                      onPressed: onSwitch,
-                      child: const Text('Switch device'),
-                    ),
-                  if (canSwitch) const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed: onPair,
-                    child: const Text('Re-pair'),
-                  ),
-                ],
               ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  runtime.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              if (chip != null) ...[const SizedBox(width: 8), _Chip(chip)],
             ],
-          );
-        },
+          ),
+          if (detail != null) ...[
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 46,
+                  child: Text(
+                    'Path',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                Expanded(child: Text(detail, style: theme.textTheme.bodySmall)),
+              ],
+            ),
+          ],
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              if (canSwitch)
+                OutlinedButton(
+                  onPressed: onSwitch,
+                  child: const Text('Switch runtime'),
+                ),
+              if (canSwitch) const SizedBox(width: 8),
+              OutlinedButton(onPressed: onPair, child: const Text('Re-pair')),
+            ],
+          ),
+        ],
       ),
     );
   }
 }
 
 /// 链路 chip 的文案。没连上、或既认不出链路又没有延迟时返回 null（不画）。
-String? connectionChipLabel(WsState state, ConnectionMetrics metrics) {
-  if (state != WsState.connected) return null;
-  final kind = switch (metrics.kind) {
-    ConnectionPathKind.lan => 'LAN',
-    ConnectionPathKind.p2p => 'P2P',
-    ConnectionPathKind.relay => 'Relay',
-    ConnectionPathKind.direct => 'Direct',
-    ConnectionPathKind.unknown => null,
+String? connectionChipLabel(RuntimeConnectionState state, LinkMetrics? link) {
+  if (state != RuntimeConnectionState.connected || link == null) return null;
+  final kind = switch (link.path) {
+    LinkPath.lan => 'LAN',
+    LinkPath.peerToPeer => 'P2P',
+    LinkPath.relay => 'Relay',
+    LinkPath.unknown => null,
   };
-  final latency = metrics.latencyMs;
+  final latency = link.rttMs;
   if (kind == null && latency == null) return null;
   if (kind == null) return '${latency}ms';
   if (latency == null) return kind;
@@ -277,14 +265,13 @@ String? connectionChipLabel(WsState state, ConnectionMetrics metrics) {
 }
 
 /// 链路明细。认不出就不画——「未知」这个词对用户没有信息量。
-String? connectionPathDetail(WsState state, ConnectionMetrics metrics) {
-  if (state != WsState.connected) return null;
-  return switch (metrics.kind) {
-    ConnectionPathKind.lan => 'Direct over LAN',
-    ConnectionPathKind.p2p => 'iroh direct · no relay',
-    ConnectionPathKind.relay => 'Forwarded by iroh relay',
-    ConnectionPathKind.direct => 'Direct',
-    ConnectionPathKind.unknown => null,
+String? connectionPathDetail(RuntimeConnectionState state, LinkMetrics? link) {
+  if (state != RuntimeConnectionState.connected || link == null) return null;
+  return switch (link.path) {
+    LinkPath.lan => 'Direct over LAN',
+    LinkPath.peerToPeer => 'iroh direct · no relay',
+    LinkPath.relay => 'Forwarded by iroh relay',
+    LinkPath.unknown => null,
   };
 }
 

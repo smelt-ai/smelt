@@ -24,7 +24,7 @@ use smelt_runtime_client::protocol::control::{
 };
 
 use super::session_catalog::published_session_states;
-use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions};
+use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceMenuStore};
 
 fn error_value(
     control_version: u16,
@@ -114,6 +114,7 @@ fn dispatch_control(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
+    workspace_menu: &WorkspaceMenuStore,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -407,7 +408,7 @@ fn dispatch_control(
             success_value(
                 control_version,
                 &request_id,
-                smelt_core::acp_conn::inspect_acp_runtime(),
+                super::session_control::inspect_runtime(),
             )
         }
         ControlMethod::AgentCliInstall => {
@@ -433,7 +434,7 @@ fn dispatch_control(
                     &request_id,
                     smelt_core::control_api::AgentCliInstallResult {
                         installer: report.installer.to_string(),
-                        diagnostics: smelt_core::acp_conn::inspect_acp_runtime(),
+                        diagnostics: super::session_control::inspect_runtime(),
                     },
                 ),
                 Err(error) => error_value(
@@ -497,6 +498,76 @@ fn dispatch_control(
                     ControlError::new(ControlErrorCode::OperationFailed, error),
                 ),
             }
+        }
+        ControlMethod::NewSessionCatalog => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                super::session_control::new_session_catalog(),
+            )
+        }
+        ControlMethod::SessionCreate => {
+            let params: smelt_core::control_api::SessionCreateParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::session_control::create_session(
+                params,
+                sessions,
+                acp_sessions,
+                remote_sessions,
+                workspace_menu,
+                event_hub,
+            ) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::SessionDelete => {
+            let params: smelt_core::control_api::SessionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::session_control::delete_session(
+                &params.session_id,
+                sessions,
+                acp_sessions,
+                remote_sessions,
+                workspace_menu,
+                automations,
+                event_hub,
+            ) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::ConversationImage => {
+            let params: smelt_core::control_api::ConversationImageParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::conversation_image::conversation_image(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::SessionAgentBindings => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                super::session_control::agent_bindings(),
+            )
         }
         ControlMethod::AgentSpaceEnsure => {
             let params: AgentDefinitionIdParams =
@@ -1224,23 +1295,13 @@ fn create_agent_conversation(
     remote_sessions: &RemoteSessions,
 ) -> Result<smelt_core::session_control::CreatedAgentConversation, String> {
     let session = smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
-    let request = serde_json::json!({
-        "id": session.id,
-        "cwd": session.cwd,
-        "launch": session.launch,
-        "agent": session.agent,
-        "resume_id": session.resume_id,
-    });
-    let open = super::acp_host::parse_acp_open_request(&request)
-        .ok_or_else(|| "invalid ACP create request".to_string())?;
     let created = smelt_core::session_control::CreatedAgentConversation {
         session_id: session.id.clone(),
         agent_definition_id: agent_definition_id.trim().to_string(),
         cwd: session.cwd.clone(),
     };
-    super::acp_host::create_daemon_acp_session(
-        &open,
-        Some(session),
+    super::session_control::create_remote_acp_session(
+        session,
         sessions,
         acp_sessions,
         event_hub,
@@ -1257,6 +1318,7 @@ pub(crate) fn handle_control(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
+    workspace_menu: &WorkspaceMenuStore,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -1268,6 +1330,7 @@ pub(crate) fn handle_control(
             sessions,
             acp_sessions,
             remote_sessions,
+            workspace_menu,
             automations,
             event_hub,
             exe_mtime,
@@ -1313,6 +1376,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
+            &super::super::new_test_workspace_menu(),
             &automations,
             &event_hub,
             123,
@@ -1361,6 +1425,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
+            &super::super::new_test_workspace_menu(),
             &automations,
             &event_hub,
             0,
@@ -1369,6 +1434,67 @@ mod tests {
         assert_eq!(response["control_version"], 2);
         assert_eq!(response["request_id"], "version-2");
         assert_eq!(response["status"], "ok");
+    }
+
+    fn dispatch_for_test(method: &str, params: serde_json::Value) -> serde_json::Value {
+        let envelope = decode_request_envelope(serde_json::json!({
+            "control_version": CONTROL_API_VERSION,
+            "request_id": "session-1",
+            "method": method,
+            "params": params,
+        }))
+        .unwrap();
+        dispatch_control(
+            envelope,
+            &crate::devices::Principal::Local,
+            &super::super::new_sessions(),
+            &super::super::new_test_acp_sessions(),
+            &super::super::new_test_remote_sessions(),
+            &super::super::new_test_workspace_menu(),
+            &smelt_core::automation_store::new_automation_store(),
+            &super::super::new_event_hub(),
+            0,
+        )
+    }
+
+    #[test]
+    fn session_lifecycle_methods_are_dispatched_with_typed_errors() {
+        let created = dispatch_for_test(
+            "session.create",
+            serde_json::json!({"project_root": "/not/in/menu", "kind": "terminal"}),
+        );
+        assert_eq!(created["status"], "error");
+        assert_eq!(created["error"]["code"], "failed_precondition");
+
+        let bad_kind = dispatch_for_test(
+            "session.create",
+            serde_json::json!({"project_root": "/repo", "kind": "vnc"}),
+        );
+        assert_eq!(bad_kind["error"]["code"], "invalid_params");
+
+        let deleted =
+            dispatch_for_test("session.delete", serde_json::json!({"session_id": "nope"}));
+        assert_eq!(deleted["error"]["code"], "not_found");
+
+        let bindings = dispatch_for_test("session.agent_bindings", serde_json::json!({}));
+        assert_eq!(bindings["status"], "ok");
+        assert!(bindings["result"]["bindings"].is_object());
+    }
+
+    #[test]
+    fn conversation_image_is_dispatched_with_typed_errors() {
+        let missing = dispatch_for_test(
+            "conversation.image",
+            serde_json::json!({"session_id": "acp-nope", "entry": 0, "digest": "abc"}),
+        );
+        assert_eq!(missing["status"], "error");
+        assert_eq!(missing["error"]["code"], "not_found");
+
+        let bad = dispatch_for_test(
+            "conversation.image",
+            serde_json::json!({"session_id": "acp-nope", "digest": "abc"}),
+        );
+        assert_eq!(bad["error"]["code"], "invalid_params");
     }
 
     #[test]
@@ -1391,6 +1517,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
+            &super::super::new_test_workspace_menu(),
             &automations,
             &event_hub,
             0,
@@ -1426,6 +1553,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
+            &super::super::new_test_workspace_menu(),
             &automations,
             &event_hub,
             0,

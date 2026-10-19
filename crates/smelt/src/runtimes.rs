@@ -125,7 +125,7 @@ pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohCl
     let secret = smelt_iroh::default_client_secret_path()
         .and_then(|path| smelt_iroh::load_or_create_secret(&path))
         .map_err(|error| format!("读取本机设备身份失败：{error:#}"))?;
-    let client = smelt_iroh::runtime::IrohClient::new(secret)
+    let client = smelt_iroh::runtime::IrohClient::new(secret, None)
         .map_err(|error| format!("起不了 iroh：{error:#}"))?;
     *slot = Some(std::sync::Arc::clone(&client));
     Ok(client)

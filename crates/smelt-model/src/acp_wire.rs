@@ -15,6 +15,7 @@
 //! 完整的帧再照常解析。镜像对不上增量帧时（例如守护交接后接手的读端）这一帧作废，
 //! 等下一份整段帧。
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,23 @@ impl EntryMirror {
         end: usize,
         keep_from: usize,
     ) -> EntriesDelta {
+        self.encode_with(base, entries, from, end, keep_from, |_, entry| {
+            Cow::Borrowed(entry)
+        })
+    }
+
+    /// 同 [`Self::encode`]，但对方收到的是按连接投影过的条目（例如大图换成引用）。
+    /// `project` 拿绝对下标和原条目，只在 `[from, end)` 上调用。镜像记的是投影后的
+    /// 样子，这条连接的整段帧也必须带投影后的条目，否则 keep/tail 会错位。
+    pub fn encode_with<'e>(
+        &mut self,
+        base: usize,
+        entries: &'e [AcpEntry],
+        from: usize,
+        end: usize,
+        keep_from: usize,
+        project: impl Fn(usize, &'e AcpEntry) -> Cow<'e, AcpEntry>,
+    ) -> EntriesDelta {
         let end = end.clamp(base, base + entries.len());
         // 对方没有的都算变化：镜像末尾之后的条目即使没被记脏也要发，不能留空洞。
         let from = if self.json.is_empty() {
@@ -115,7 +133,7 @@ impl EntryMirror {
         .clamp(base, end);
         let patches = (from..end)
             .filter_map(|index| {
-                let new = entry_json(&entries[index - base]);
+                let new = entry_json(&project(index, &entries[index - base]));
                 let keep = match self.get(index) {
                     Some(old) if old == new => return None,
                     Some(old) => common_prefix(old, &new),
@@ -310,6 +328,20 @@ impl FrameMirror {
         keep_from: usize,
     ) -> EntriesDelta {
         self.entries.encode(base, entries, from, end, keep_from)
+    }
+
+    /// [`Self::encode_entries`] 的按连接投影版本，见 [`EntryMirror::encode_with`]。
+    pub fn encode_entries_with<'e>(
+        &mut self,
+        base: usize,
+        entries: &'e [AcpEntry],
+        from: usize,
+        end: usize,
+        keep_from: usize,
+        project: impl Fn(usize, &'e AcpEntry) -> Cow<'e, AcpEntry>,
+    ) -> EntriesDelta {
+        self.entries
+            .encode_with(base, entries, from, end, keep_from, project)
     }
 
     /// 发送方第二步：快照头里变了的字段。

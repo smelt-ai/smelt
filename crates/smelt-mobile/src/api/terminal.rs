@@ -1,0 +1,155 @@
+//! 终端：附着一个终端会话的字节流、输入与尺寸。实现见 `crate::terminal`。
+//!
+//! 这里的入口全是 `#[frb(sync)]`，函数体只改内存状态、起线程，不做网络 IO：
+//! Dart 在 UI 线程上按调用顺序执行它们。普通 `pub fn` 会被丢进 FRB 线程池并发执行，
+//! 连续两次按键、两次 resize、attach 紧跟 detach 都可能乱序，而终端对顺序敏感。
+//! 网络收发在每个附着自己的线程上做，失败从事件流推回来。
+
+use flutter_rust_bridge::frb;
+
+use crate::api::error::SmeltError;
+use crate::frb_generated::StreamSink;
+use crate::terminal::TerminalUpdate;
+
+/// 终端视口：行列与单元格像素尺寸。客户端先按运行时的上限夹一下
+/// （行列 1..=1000，单元格 ≤256 像素）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalGeometry {
+    pub cols: u32,
+    pub rows: u32,
+    /// 单元格宽（像素）。不知道时给 0。
+    pub cell_width: u32,
+    /// 单元格高（像素）。不知道时给 0。
+    pub cell_height: u32,
+}
+
+/// 终端事件的种类，决定 [`TerminalEvent`] 里哪些字段有值。
+///
+/// 不用带数据的枚举：FRB 会把它生成成 freezed 类，本项目不用 freezed。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalEventKind {
+    /// 附着成功（含自动重新附着），`ready` 有值。之后先来 `replay_bytes` 字节的关键帧（`Data`），
+    /// 再来 `ReplayComplete`，然后是实时输出。每次 `Ready` 都是一整帧新画面，界面要重建终端。
+    Ready,
+    /// 终端字节在 `data`：关键帧和实时输出都走这个，一块不超过 64 KB，两者不会混在同一块里。
+    Data,
+    /// 关键帧放完了。
+    ReplayComplete,
+    /// 终端会话已结束（shell 退出或被关掉）。流随之结束。
+    Closed,
+    /// `message` 与 `fatal` 有值。`fatal` 时流随之结束：会话不存在、运行时已切换或断开、
+    /// 运行时回包不对。非 fatal 是断线或输入发送失败，后台按退避自动重新附着，成功后再来 `Ready`。
+    Error,
+}
+
+/// 附着成功时的终端尺寸与历史预算。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalReady {
+    /// 运行时 PTY 当前的列数，按它建终端再喂关键帧。
+    pub cols: u32,
+    pub rows: u32,
+    /// 关键帧字节数。为 0 时紧跟 `ReplayComplete`。
+    pub replay_bytes: u32,
+    /// 会话侧总共有多少行可取。大于 `scrollback_lines` 说明上面还有更老的内容。
+    pub history_lines: u32,
+    /// 这次附着实际要的 scrollback 行数（没传预算时是运行时的上限 10000）。
+    pub scrollback_lines: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalEvent {
+    pub kind: TerminalEventKind,
+    pub ready: Option<TerminalReady>,
+    pub data: Option<Vec<u8>>,
+    pub message: Option<String>,
+    pub fatal: bool,
+}
+
+impl From<TerminalUpdate> for TerminalEvent {
+    fn from(update: TerminalUpdate) -> Self {
+        let event = |kind| Self {
+            kind,
+            ready: None,
+            data: None,
+            message: None,
+            fatal: false,
+        };
+        match update {
+            TerminalUpdate::Ready {
+                cols,
+                rows,
+                replay_bytes,
+                history_lines,
+                scrollback_lines,
+            } => Self {
+                ready: Some(TerminalReady {
+                    cols,
+                    rows,
+                    replay_bytes,
+                    history_lines,
+                    scrollback_lines,
+                }),
+                ..event(TerminalEventKind::Ready)
+            },
+            TerminalUpdate::Data(bytes) => Self {
+                data: Some(bytes),
+                ..event(TerminalEventKind::Data)
+            },
+            TerminalUpdate::ReplayComplete => event(TerminalEventKind::ReplayComplete),
+            TerminalUpdate::Closed => event(TerminalEventKind::Closed),
+            TerminalUpdate::Error { message, fatal } => Self {
+                message: Some(message),
+                fatal,
+                ..event(TerminalEventKind::Error)
+            },
+        }
+    }
+}
+
+/// 附着一个终端会话，事件从返回的流推出。
+///
+/// 同一会话再次附着会替换旧的（旧流随之结束），用来换 scrollback 预算重取历史。
+/// `max_scrollback_lines` 为空表示要运行时上限（10000 行），否则夹到 1..=10000。
+/// 断线且运行时没换时按 500ms 起、翻倍、封顶 8s 的退避自动重新附着；运行时切换或断开就停。
+/// 只有行列为 0、会话 id 为空这类调用错误同步返回错误。
+#[frb(sync)]
+pub fn terminal_attach(
+    session_id: String,
+    geometry: TerminalGeometry,
+    max_scrollback_lines: Option<u32>,
+    sink: StreamSink<TerminalEvent>,
+) -> Result<(), SmeltError> {
+    crate::terminal::hub().attach(
+        session_id,
+        geometry,
+        max_scrollback_lines,
+        Box::new(move |update| sink.add(TerminalEvent::from(update)).is_ok()),
+    )
+}
+
+/// 改终端尺寸：在附着连接上写 resize 帧，只在尺寸变了时写。正在重连时记下来，
+/// 下次附着按它来。没有附着这个会话时报错。
+#[frb(sync)]
+pub fn terminal_resize(session_id: String, geometry: TerminalGeometry) -> Result<(), SmeltError> {
+    crate::terminal::hub().resize(&session_id, geometry)
+}
+
+/// 发终端输入。空串忽略。按调用顺序发出，在途时到达的输入合并成一次发送，
+/// 超过 64 KB 按 UTF-8 字符边界切开。发送失败从事件流推非 fatal 的 `Error`，
+/// 并丢掉还没发出的输入。没有附着这个会话时报错。
+#[frb(sync)]
+pub fn terminal_input(session_id: String, data: String) -> Result<(), SmeltError> {
+    crate::terminal::hub().input(&session_id, data)
+}
+
+/// 断开附着：关掉连接（运行时据此进入几何租约的宽限期），不再重连，流随之结束。
+#[frb(sync)]
+pub fn terminal_detach(session_id: String) {
+    crate::terminal::hub().detach(&session_id);
+}
+
+/// 断开所有附着（切后台时用）。
+#[frb(sync)]
+pub fn terminal_detach_all() {
+    crate::terminal::hub().detach_all();
+}

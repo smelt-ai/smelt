@@ -13,7 +13,9 @@ use crate::workspace_menu::{
     WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
 };
 
-#[derive(Clone, Debug, serde::Serialize)]
+/// 可开对话的 agent 选项。出线（`new_session.catalog`）只带展示与回传用的字段；
+/// 启动规格和历史目录只在运行时那台机器上有意义，不出线，客户端解出来是空的。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentOption {
     pub id: String,
@@ -24,9 +26,9 @@ pub struct AcpAgentOption {
     /// 见 [`agent_definition_id_from_option_id`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_definition_id: Option<String>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub launch: ConversationLaunchSpec,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub history_dir: Option<String>,
 }
 

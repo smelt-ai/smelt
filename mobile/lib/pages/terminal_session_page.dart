@@ -7,10 +7,10 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
 
-import '../services/gateway_service.dart';
+import '../models/runtime_models.dart' show SessionSummary;
 import '../services/terminal_prefs_store.dart';
 import '../services/terminal_stream_service.dart';
-import '../theme/terminal_theme_wire.dart';
+import '../theme/terminal_theme.dart';
 import '../utils/terminal_links.dart';
 import '../utils/terminal_paste.dart';
 import '../utils/xterm_input_filter.dart';
@@ -58,14 +58,8 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   final FocusNode _terminalFocusNode = FocusNode();
   final ScrollController _terminalScrollController = ScrollController();
 
-  TerminalStreamState _streamState = TerminalStreamState.waitingForGateway;
+  TerminalStreamState _streamState = TerminalStreamState.connecting;
   String? _error;
-
-  /// 终端配色：连上后由那台设备下发（见 `terminalReady.theme`），在此之前用兜底深色。
-  /// PC 主题可配置，而且一部手机可以连多台设备，客户端不能写死色板。
-  TerminalTheme _theme = SmeltTerminalTheme.fallbackDark;
-  bool _themeIsDark = true;
-  bool _writeEnabled = false;
   bool _softwareKeyboardEnabled = false;
   bool _softwareKeyboardWasVisible = false;
   bool _terminalGeometryLocked = false;
@@ -97,11 +91,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     _terminalController = TerminalController();
     _terminalController.addListener(_onSelectionChanged);
     _stream =
-        widget.stream ??
-        TerminalStreamService(
-          gateway: gatewayService,
-          sessionId: widget.session.id,
-        );
+        widget.stream ?? TerminalStreamService(sessionId: widget.session.id);
     _terminal = _newTerminal();
     _terminalViewKey = GlobalKey<TerminalViewState>();
     _resetDecoder();
@@ -109,19 +99,22 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     _prefsStore = widget.prefsStore ?? FileTerminalPrefsStore();
     unawaited(_loadPrefs());
     _eventSubscription = _stream.events.listen(_handleTerminalEvent);
+    _streamState = _stream.state;
     _stateSubscription = _stream.stateStream.listen((state) {
       if (!mounted) return;
-      if (state != TerminalStreamState.connected) {
-        _closeSoftwareKeyboard();
-      }
-      setState(() {
-        _streamState = state;
-        if (state != TerminalStreamState.connected) {
-          _writeEnabled = false;
-        }
-      });
+      if (!_canWriteIn(state)) _closeSoftwareKeyboard();
+      setState(() => _streamState = state);
     });
   }
+
+  /// 已配对的设备都能写。重连期间也放行：非 fatal 错误也可能只是一次输入没发出去，
+  /// 附着本身还在，不能因此把键盘收掉、把人锁在外面；真重连上了会来 `Ready`，那时
+  /// 页面本来就要重建终端、收键盘。
+  static bool _canWriteIn(TerminalStreamState state) =>
+      state == TerminalStreamState.connected ||
+      state == TerminalStreamState.reconnecting;
+
+  bool get _canWrite => _canWriteIn(_streamState);
 
   Terminal _newTerminal({int cols = 80, int rows = 24}) {
     late final Terminal terminal;
@@ -133,8 +126,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       onPrivateOSC: (code, args) => _links.onOsc(terminal, code, args),
       wordSeparators: cliWordSeparators,
     );
-    // A daemon snapshot contains cursor-addressed output for the dimensions in
-    // terminalReady. Establish that grid before any replay byte is decoded.
+    // 关键帧是按 Ready 里的行列做光标寻址的，喂第一个字节之前先把网格定成那个尺寸。
     terminal.resize(cols.clamp(1, 300), rows.clamp(1, 200));
     terminal.onResize = _handleTerminalResize;
     return terminal;
@@ -188,12 +180,6 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
 
   void _handleTerminalEvent(TerminalStreamEvent event) {
     switch (event) {
-      case TerminalConnectedEvent():
-        // attach 还没发。先把快捷键栏摆上去，让终端视口在 attach 之前就收敛到最终
-        // 高度——否则回放完成后栏子上屏又要改一次行数，那就是一次多余的 PTY
-        // resize，而主屏 CLI 每收一次 SIGWINCH 就把整段对话重印一遍。
-        if (!mounted || _writeEnabled == event.writeEnabled) return;
-        setState(() => _writeEnabled = event.writeEnabled);
       case TerminalReadyEvent():
         _closeSoftwareKeyboard();
         // 快照换了一整帧，旧缓冲上的 OSC 8 锚点和选区都不再指向这帧。
@@ -204,16 +190,11 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         _resetDecoder();
         if (!mounted) return;
         setState(() {
-          _writeEnabled = event.writeEnabled;
           _softwareKeyboardEnabled = false;
           _replayGeometryLocked = true;
           // 快照换了一整帧，上一帧的「离开尾巴」结论跟着作废。
           _awayFromTail = false;
           _error = null;
-          // 配色由这台设备下发（可能深色也可能浅色，还可能是用户自选底色）；
-          // 老网关不下发时沿用兜底深色。
-          _theme = event.theme ?? SmeltTerminalTheme.fallbackDark;
-          _themeIsDark = event.themeIsDark;
         });
       case TerminalDataEvent():
         final bytes = _inputFilter.add(event.bytes);
@@ -223,11 +204,11 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
           setState(() {
             _replayGeometryLocked = false;
             // 重建视图，逼 xterm 重新量一次视口。锁着的这段时间里视口很可能已经
-            // 变矮了——`terminalReady` 一到就把快捷键栏(48px)推上屏，错误条也可
-            // 能出现——而 RenderTerminal 只在「量出来的格子数和上次不同」时才通
-            // 知终端，那次不同恰好落在锁里被丢掉，解锁后就再也不会重算。终端于
-            // 是停在偏高的行数上：全屏 TUI（alt buffer）没有回滚，多出来的行直
-            // 接变成外层滚动量，手势全被它吃掉，TUI 内部就再也滚不动了。
+            // 变了——`Ready` 一到就收掉错误条，回放中途也可能弹出错误条——而
+            // RenderTerminal 只在「量出来的格子数和上次不同」时才通知终端，那次
+            // 不同恰好落在锁里被丢掉，解锁后就再也不会重算。终端于是停在不对的
+            // 行数上：全屏 TUI（alt buffer）没有回滚，多出来的行直接变成外层滚动
+            // 量，手势全被它吃掉，TUI 内部就再也滚不动了。
             _terminalViewKey = GlobalKey<TerminalViewState>();
           });
         }
@@ -247,7 +228,6 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         setState(() {
           _error = event.message;
           if (event.fatal) {
-            _writeEnabled = false;
             _replayGeometryLocked = false;
             _loadingMoreHistory = false;
             _pendingScrollDistanceFromBottom = null;
@@ -257,7 +237,6 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         if (!mounted) return;
         _closeSoftwareKeyboard();
         setState(() {
-          _writeEnabled = false;
           _replayGeometryLocked = false;
           _loadingMoreHistory = false;
           _pendingScrollDistanceFromBottom = null;
@@ -366,7 +345,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   }
 
   void _toggleSoftwareKeyboard() {
-    if (!_writeEnabled) return;
+    if (!_canWrite) return;
     if (_softwareKeyboardEnabled) {
       _closeSoftwareKeyboard();
       return;
@@ -376,7 +355,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   }
 
   void _enableSoftwareKeyboard() {
-    if (!_writeEnabled || _softwareKeyboardEnabled) return;
+    if (!_canWrite || _softwareKeyboardEnabled) return;
 
     setState(() {
       _softwareKeyboardEnabled = true;
@@ -471,12 +450,12 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     final title = widget.session.title.trim().isEmpty
         ? 'Terminal'
         : widget.session.title;
+    final terminalTheme = SmeltTerminalTheme.displayOf(
+      Theme.of(context).brightness,
+    );
     return Scaffold(
-      // 页面底色跟着设备的终端配色走：PC 切成浅色主题后，浅色终端嵌在纯黑页面里
-      // 会在边缘炸出刺眼的对比。
-      backgroundColor: _themeIsDark
-          ? const Color(0xff0b0d0f)
-          : _theme.background,
+      // 页面底色跟终端底色一致：终端视口按整格排，边上留下的几像素不能露出另一种颜色。
+      backgroundColor: terminalTheme.background,
       appBar: AppBar(
         title: Text(title),
         actions: [
@@ -489,12 +468,12 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
           ),
           _buildFontSizeButton(),
           IconButton(
-            tooltip: !_writeEnabled
+            tooltip: !_canWrite
                 ? 'Keyboard unavailable'
                 : _softwareKeyboardEnabled
                 ? 'Hide keyboard'
                 : 'Show keyboard',
-            onPressed: _writeEnabled ? _toggleSoftwareKeyboard : null,
+            onPressed: _canWrite ? _toggleSoftwareKeyboard : null,
             icon: Icon(
               _softwareKeyboardEnabled
                   ? Icons.keyboard_hide_outlined
@@ -515,7 +494,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
             Expanded(
               child: Stack(
                 children: [
-                  Positioned.fill(child: _buildTerminalView()),
+                  Positioned.fill(child: _buildTerminalView(terminalTheme)),
                   // 补历史的进度条只能浮在上面：放进 Column 会把终端视口压矮几像素，
                   // 行数变了就是一次 PTY resize，主屏 CLI 会因此重印整段对话。
                   if (_loadingMoreHistory)
@@ -558,10 +537,13 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
                 ],
               ),
             ),
-            // 快捷键栏只要能写就常驻：最高频的动作是「看着 agent 跑、按 ^C 打断」，
-            // 那时并不需要软键盘。挂在键盘上会逼用户先唤起键盘遮掉半屏，而且键盘
-            // 开合还会连带改变终端视口高度，白白触发一轮 cols/rows 重算。
-            if (_writeEnabled)
+            // 快捷键栏从进页面起就常驻，直到会话结束：最高频的动作是「看着 agent 跑、
+            // 按 ^C 打断」，那时并不需要软键盘。挂在键盘上会逼用户先唤起键盘遮掉半屏，
+            // 而且键盘开合还会连带改变终端视口高度，白白触发一轮 cols/rows 重算。
+            // 也不能等连上才出现：它得在 attach 之前就把终端视口压到最终高度，否则回放
+            // 完成后栏子上屏又要改一次行数，那就是一次多余的 PTY resize，而主屏 CLI
+            // 每收一次 SIGWINCH 就把整段对话重印一遍。重连期间同理，不能让它闪一下。
+            if (_streamState != TerminalStreamState.ended)
               TerminalShortcutBar(onKey: _sendKey, onPaste: _pasteClipboard),
           ],
         ),
@@ -569,7 +551,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
     );
   }
 
-  Widget _buildTerminalView() {
+  Widget _buildTerminalView(TerminalTheme theme) {
     return TerminalView(
       _terminal,
       key: _terminalViewKey,
@@ -577,14 +559,14 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       focusNode: _terminalFocusNode,
       scrollController: _terminalScrollController,
       autofocus: false,
-      readOnly: !_writeEnabled,
+      readOnly: !_canWrite,
       hardwareKeyboardOnly: !_softwareKeyboardEnabled,
       autoResize: !_terminalGeometryLocked && !_replayGeometryLocked,
       deleteDetection: true,
       simulateScroll: true,
       claimTap: _claimLinkTap,
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      theme: SmeltTerminalTheme.forDisplay(_theme),
+      theme: theme,
       textStyle: TerminalStyle(
         fontSize: _prefs.fontSize,
         height: 1.15,
@@ -677,7 +659,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
   /// cursor 模式（决定方向键发 CSI 还是 SS3），也和蓝牙键盘走的是同一条路径，
   /// 两边不会各编各的。`onOutput` 已经接到守护，所以这里不用再自己发。
   Future<void> _pasteClipboard() async {
-    if (!_writeEnabled) return;
+    if (!_canWrite) return;
     final String? text;
     try {
       text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
@@ -685,7 +667,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       if (mounted) _showMessage('Could not paste');
       return;
     }
-    if (!mounted || !_writeEnabled) return;
+    if (!mounted || !_canWrite) return;
     if (text == null || text.isEmpty) {
       _showMessage('Nothing to paste');
       return;
@@ -763,7 +745,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
       TerminalStreamState.connected => 'Connected',
       TerminalStreamState.ended => 'Session ended',
       TerminalStreamState.connecting => 'Connecting',
-      TerminalStreamState.waitingForGateway => 'Waiting for the desktop',
+      TerminalStreamState.reconnecting => 'Reconnecting',
     };
     return Tooltip(
       message: label,
@@ -786,7 +768,7 @@ class _TerminalSessionPageState extends State<TerminalSessionPage>
         dimension: 16,
         child: CircularProgressIndicator(strokeWidth: 2),
       ),
-      TerminalStreamState.waitingForGateway => const Icon(
+      TerminalStreamState.reconnecting => const Icon(
         Icons.cloud_off_outlined,
         size: 18,
       ),

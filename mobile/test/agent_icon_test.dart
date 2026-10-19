@@ -1,22 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/theme/smelt_theme.dart';
 import 'package:smelt_mobile/widgets/agent_icon.dart';
+
+import 'support/runtime_fixtures.dart';
 
 SessionSummary _session({
   String agent = 'claude',
   SessionKind kind = SessionKind.acp,
-  String status = 'idle',
-}) => SessionSummary(
-  id: 's',
-  kind: kind,
-  title: 't',
-  phase: 'idle',
-  status: status,
-  agent: agent,
-);
+  SessionStatus status = SessionStatus.idle,
+}) => session(id: 's', kind: kind, title: 't', status: status, agent: agent);
 
 Future<void> _pump(WidgetTester tester, SessionSummary session) {
   return tester.pumpWidget(
@@ -135,7 +130,7 @@ void main() {
     testWidgets('图标颜色由会话状态驱动，跟桌面一致', (tester) async {
       await _pump(
         tester,
-        _session(agent: 'claude', status: 'waiting_approval'),
+        _session(agent: 'claude', status: SessionStatus.needsYou),
       );
       final svg = tester.widget<SvgPicture>(find.byType(SvgPicture));
       expect(

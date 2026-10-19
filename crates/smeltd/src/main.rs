@@ -149,6 +149,7 @@ mod agent_memory_control;
 mod automation_runtime;
 mod desktop;
 mod control;
+mod conversation_image;
 mod devices;
 mod dsh_control;
 mod event_hub;
@@ -168,6 +169,7 @@ mod remote;
 mod runtime_identity;
 mod service;
 mod session_catalog;
+mod session_control;
 mod session_directory;
 mod session_state;
 mod terminal_output;
@@ -2973,7 +2975,7 @@ fn resume_hosted_acp_handoff_item(
         restore_state: Mutex::new(AcpRestoreState::Fresh),
         ephemeral_env: Mutex::new(BTreeMap::new()),
         conversation_binding: Mutex::new(conversation_binding),
-        conversation_submit: Mutex::new(()),
+        conversation_submit: Mutex::new(crate::acp_host::RecentSubmissions::default()),
         pending_agent_preset: Mutex::new(pending_agent_preset),
         durable_history_session_id: Mutex::new(None),
         idle: Default::default(),
@@ -3549,7 +3551,7 @@ pub(crate) fn resume_from_value(
             // potentially secret 的网页变量写入 handoff 文件。
             ephemeral_env: Mutex::new(BTreeMap::new()),
             conversation_binding: Mutex::new(conversation_binding),
-            conversation_submit: Mutex::new(()),
+            conversation_submit: Mutex::new(crate::acp_host::RecentSubmissions::default()),
             pending_agent_preset: Mutex::new(pending_agent_preset),
             durable_history_session_id: Mutex::new(None),
             idle: Default::default(),

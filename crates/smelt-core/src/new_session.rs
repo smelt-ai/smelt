@@ -5,7 +5,7 @@
 //! 分别置顶。两端都读同一份 SQLite 偏好与同一套 key，桌面 Pin 完手机立刻同序。
 //!
 //! 这里只负责「有哪些动作、叫什么、怎么分组」。真正怎么把动作跑起来由各端自己
-//! 决定：桌面走 GUI 的会话工作区，移动端走网关的 createSession。
+//! 决定：桌面走 GUI 的会话工作区，远程客户端走运行时的 `session.create`。
 
 pub use smelt_model::new_session::*;
 
@@ -71,16 +71,27 @@ pub fn stored_conversation_options() -> Vec<AcpAgentOption> {
     options
 }
 
-/// 守护/移动端侧的完整目录：读同一份落盘配置与同一份 Pin 偏好。
+/// 守护侧的完整目录：读同一份落盘配置与同一份 Pin 偏好。`conversation_options`
+/// 由调用方读一次传进来（[`stored_conversation_options`]），和它一起下发的选项清单
+/// 才是同一份快照。
 pub fn stored_new_session_sections(
+    conversation_options: &[AcpAgentOption],
     diagnostics: Option<&AcpRuntimeDiagnostics>,
 ) -> NewSessionSections {
+    let actions = new_session_actions(conversation_options, &stored_launch_entries(), diagnostics);
+    build_sections(&actions, &load_preferences())
+}
+
+/// 按 key 找一条启动动作。客户端只回传 key，命令永远在这台机器上解析——别让远程
+/// 设备决定跑什么进程。探测状态不参与解析：目录里还在的启动项就能起，免得探测缓存
+/// 过期让刚点下的那一行变成「未知启动项」。
+pub fn find_stored_action(key: &str) -> Option<NewSessionAction> {
     let actions = new_session_actions(
         &stored_conversation_options(),
         &stored_launch_entries(),
-        diagnostics,
+        None,
     );
-    build_sections(&actions, &load_preferences())
+    find_action(&actions, key).cloned()
 }
 
 #[cfg(test)]

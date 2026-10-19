@@ -2,20 +2,56 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:smelt_mobile/pages/agents_page.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/util/relative_time.dart';
 import 'package:smelt_mobile/widgets/automation_source.dart';
+
+AutomationSchedule _schedule(
+  ScheduleKind kind, {
+  int hour = 0,
+  int minute = 0,
+  int minutes = 0,
+  int hours = 0,
+  int days = 0,
+  int endHour = 0,
+  int endMinute = 0,
+}) => AutomationSchedule(
+  kind: kind,
+  hour: hour,
+  minute: minute,
+  minutes: minutes,
+  hours: hours,
+  days: days,
+  endHour: endHour,
+  endMinute: endMinute,
+);
+
+AgentDefinitionSummary _agent({
+  required String id,
+  required String name,
+  required String engine,
+  String prompt = '',
+  List<String> plugins = const [],
+  List<String> contextFolders = const [],
+}) => AgentDefinitionSummary(
+  id: id,
+  name: name,
+  description: '',
+  engineKindId: engine,
+  prompt: prompt,
+  plugins: plugins,
+  contextFolders: contextFolders,
+  contextLinks: const [],
+);
 
 AutomationSummary _automation({
   String id = 'automation-1',
   String name = 'Morning digest',
   bool enabled = true,
-  List<AutomationSchedule> schedules = const [
-    AutomationSchedule(type: 'daily', hour: 9, minute: 0),
-  ],
+  List<AutomationSchedule>? schedules,
   List<String> eventTopics = const [],
   bool webhook = false,
-  String actionKind = 'agent',
+  AutomationActionKind action = AutomationActionKind.agent,
   String? agentName = 'Digest agent',
   int? nextRunAt,
   AutomationRunSummary? lastRun,
@@ -23,17 +59,18 @@ AutomationSummary _automation({
   id: id,
   name: name,
   enabled: enabled,
-  schedules: schedules,
+  schedules: schedules ?? [_schedule(ScheduleKind.daily, hour: 9)],
   eventTopics: eventTopics,
   webhook: webhook,
-  actionKind: actionKind,
+  action: action,
   agentName: agentName,
   nextRunAt: nextRunAt,
   lastRun: lastRun,
 );
 
-Widget _host(Widget child) =>
-    MaterialApp(home: Scaffold(body: SizedBox(height: 800, child: child)));
+Widget _host(Widget child) => MaterialApp(
+  home: Scaffold(body: SizedBox(height: 800, child: child)),
+);
 
 Widget _view({
   AutomationCatalog? catalog,
@@ -45,7 +82,7 @@ Widget _view({
 }) => _host(
   AgentsView(
     catalog: catalog,
-    onRefresh: () {},
+    onRefresh: () async {},
     onSetEnabled: onSetEnabled ?? (_, _) {},
     onRunOnce: onRunOnce ?? (_) {},
     onOpenSession: onOpenSession ?? (_) {},
@@ -55,78 +92,76 @@ Widget _view({
 );
 
 void main() {
-  test('automation summary parses the sanitized gateway payload', () {
-    final summary = AutomationSummary.fromJson({
-      'id': 'automation-1',
-      'name': '每日晨报',
-      'enabled': true,
-      'schedules': [
-        {'type': 'weekly', 'days': 0x1f, 'hour': 9, 'minute': 30},
+  test('mixed triggers are all listed instead of being folded', () {
+    final summary = _automation(
+      schedules: [
+        _schedule(ScheduleKind.weekly, days: 0x1f, hour: 9, minute: 30),
       ],
-      'event_topics': ['deploy'],
-      'webhook': true,
-      'action_kind': 'agent',
-      'agent_name': '晨报助手',
-      'next_run_at': 1000,
-      'last_run': {
-        'run_id': 'run-1',
-        'status': 'awaiting_approval',
-        'source': 'scheduled',
-        'started_at': 900,
-        'session_id': 'acp-automation-1',
-      },
-    });
-
-    expect(summary.schedules.single.days, 0x1f);
+      eventTopics: const ['deploy'],
+      webhook: true,
+    );
     // 混排的时机全部列出来，不折叠——手机上要能一眼核对「它什么时候跑」。
     expect(
       automationTriggerSummary(summary),
       'Weekdays 09:30 · On deploy · External trigger',
     );
-    expect(summary.lastRun!.sessionId, 'acp-automation-1');
   });
 
   test('schedule labels cover every desktop schedule shape', () {
     expect(
       automationScheduleLabel(
-        const AutomationSchedule(type: 'daily', hour: 7, minute: 5),
+        _schedule(ScheduleKind.daily, hour: 7, minute: 5),
       ),
       'Daily 07:05',
     );
     expect(
       automationScheduleLabel(
-        const AutomationSchedule(type: 'every_minutes', minutes: 15),
+        _schedule(ScheduleKind.everyMinutes, minutes: 15),
       ),
       'Every 15 min',
     );
     expect(
-      automationScheduleLabel(
-        const AutomationSchedule(type: 'every_hours', hours: 2),
-      ),
+      automationScheduleLabel(_schedule(ScheduleKind.everyHours, hours: 2)),
       'Every 2 h',
     );
     // bit0 = 周一，与桌面 SCHEDULE_DAY_* 对齐；全选说成 Daily 而不是罗列七天。
     expect(
       automationScheduleLabel(
-        const AutomationSchedule(
-          type: 'weekly',
-          days: 0x7f,
-          hour: 9,
-          minute: 0,
-        ),
+        _schedule(ScheduleKind.weekly, days: 0x7f, hour: 9),
       ),
       'Daily 09:00',
     );
     expect(
       automationScheduleLabel(
-        const AutomationSchedule(
-          type: 'weekly',
-          days: 0x05,
-          hour: 9,
-          minute: 0,
-        ),
+        _schedule(ScheduleKind.weekly, days: 0x05, hour: 9),
       ),
       'Mon Wed 09:00',
+    );
+    // 时段内按间隔：星期、起止和间隔缺一不可。
+    expect(
+      automationScheduleLabel(
+        _schedule(
+          ScheduleKind.during,
+          days: 0x1f,
+          hour: 9,
+          endHour: 18,
+          endMinute: 30,
+          minutes: 30,
+        ),
+      ),
+      'Weekdays 09:00–18:30, every 30 min',
+    );
+    expect(
+      automationScheduleLabel(
+        _schedule(
+          ScheduleKind.during,
+          days: 0x60,
+          hour: 10,
+          endHour: 12,
+          minutes: 45,
+        ),
+      ),
+      'Sat Sun 10:00–12:00, every 45 min',
     );
   });
 
@@ -154,12 +189,12 @@ void main() {
     await tester.pumpWidget(
       _view(
         catalog: AutomationCatalog(
+          agents: const [],
           automations: [
             _automation(
               lastRun: const AutomationRunSummary(
-                runId: 'run-1',
-                status: 'awaiting_approval',
-                source: 'scheduled',
+                status: AutomationRunStatus.awaitingApproval,
+                source: AutomationRunSource.scheduled,
                 startedAt: 900,
                 sessionId: 'acp-automation-1',
               ),
@@ -181,7 +216,10 @@ void main() {
     final calls = <(String, bool)>[];
     await tester.pumpWidget(
       _view(
-        catalog: AutomationCatalog(automations: [_automation()]),
+        catalog: AutomationCatalog(
+          automations: [_automation()],
+          agents: const [],
+        ),
         onSetEnabled: (id, enabled) => calls.add((id, enabled)),
       ),
     );
@@ -198,6 +236,7 @@ void main() {
     await tester.pumpWidget(
       _view(
         catalog: AutomationCatalog(
+          agents: const [],
           automations: [_automation(agentName: null)],
         ),
       ),
@@ -214,12 +253,12 @@ void main() {
     await tester.pumpWidget(
       _view(
         catalog: AutomationCatalog(
+          agents: const [],
           automations: [
             _automation(
               lastRun: const AutomationRunSummary(
-                runId: 'run-1',
-                status: 'failed',
-                source: 'scheduled',
+                status: AutomationRunStatus.failed,
+                source: AutomationRunSource.scheduled,
                 finishedAt: 900,
                 sessionId: 'acp-automation-1',
                 error: 'agent exited with status 1',
@@ -252,15 +291,16 @@ void main() {
   ) async {
     await tester.pumpWidget(
       _view(
-        catalog: const AutomationCatalog(
+        catalog: AutomationCatalog(
+          automations: const [],
           agents: [
-            AgentDefinitionSummary(
+            _agent(
               id: 'agent-1',
               name: 'Digest agent',
-              agentId: 'pi',
+              engine: 'pi',
               prompt: 'Summarise yesterday and flag blockers.',
-              plugins: ['skill:research'],
-              contextFolders: ['/home/me/notes'],
+              plugins: const ['skill:research'],
+              contextFolders: const ['/home/me/notes'],
             ),
           ],
         ),
@@ -275,10 +315,7 @@ void main() {
     await tester.tap(find.text('Digest agent'));
     await tester.pumpAndSettle();
 
-    expect(
-      find.text('Summarise yesterday and flag blockers.'),
-      findsOneWidget,
-    );
+    expect(find.text('Summarise yesterday and flag blockers.'), findsOneWidget);
     expect(find.text('/home/me/notes'), findsOneWidget);
     // 手机是展示层：定义页不能出现任何写入口。
     expect(find.byType(TextField), findsNothing);
@@ -291,19 +328,9 @@ void main() {
   group('starting a conversation from the Agents tab', () {
     final catalog = AutomationCatalog(
       automations: const [],
-      agents: const [
-        AgentDefinitionSummary(
-          id: 'agent-1',
-          name: 'Digest agent',
-          agentId: 'pi',
-          prompt: '',
-        ),
-        AgentDefinitionSummary(
-          id: 'agent-2',
-          name: 'Claude agent',
-          agentId: 'claude',
-          prompt: '',
-        ),
+      agents: [
+        _agent(id: 'agent-1', name: 'Digest agent', engine: 'pi'),
+        _agent(id: 'agent-2', name: 'Claude agent', engine: 'claude'),
       ],
     );
 

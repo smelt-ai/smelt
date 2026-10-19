@@ -65,7 +65,7 @@ pub fn launch_entry_detected(command: &str, diagnostics: Option<&AcpRuntimeDiagn
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NewSessionActionKind {
     Terminal,
@@ -83,7 +83,7 @@ impl NewSessionActionKind {
 
 /// 动作要启动的东西。移动端只认 `agentOptionId` / `key`，命令行永远在这台机器上
 /// 拼；`command` 只是给桌面直接复用，手机不会把它回传当参数用。
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "target", rename_all = "camelCase")]
 pub enum NewSessionTarget {
     #[serde(rename_all = "camelCase")]
@@ -94,14 +94,14 @@ pub enum NewSessionTarget {
     },
     Terminal {
         command: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
     },
     BlankTerminal,
 }
 
 /// 新建选择器里的一行。
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionAction {
     /// Pin 与跨端引用的稳定标识。终端项用 provider + 命令（改名后 Pin 仍有效）。
@@ -126,7 +126,7 @@ impl NewSessionAction {
 }
 
 /// 三个分组。常用不额外占一层，和终端 / 对话同级。
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewSessionSections {
     pub common: Vec<NewSessionAction>,
     pub terminal: Vec<NewSessionAction>,
