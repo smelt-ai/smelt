@@ -10,12 +10,12 @@
 use gpui::{
     App, AppContext as _, Axis, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, hsla, prelude::FluentBuilder as _,
+    Styled as _, Subscription, WeakEntity, Window, div, hsla, prelude::FluentBuilder as _, rgb,
 };
 use gpui_component::Placement;
 use gpui_component::dock::{
     BasePanel, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, InsertTarget, Panel,
-    PanelEvent, PanelId, PanelInfo, PanelState, panel_handle,
+    PanelControl, PanelEvent, PanelId, PanelInfo, PanelState, panel_handle,
 };
 
 use crate::terminal_view::TerminalView;
@@ -277,11 +277,14 @@ fn collapse(
     }
 }
 
-/// 存档布局树 → Dock 布局。`next_view` 按深度优先序给出每个叶子的终端，`None` 表示
-/// 这一格没起来；分屏里丢了子块就整组均分（同 [`pane_state_from_dock`]）。
+/// 按深度优先序给出每个叶子的终端，`None` 表示这一格没起来。
+type NextView<'a> =
+    dyn FnMut(&PaneState, &mut Context<Workspace>) -> Option<Entity<TerminalView>> + 'a;
+
+/// 存档布局树 → Dock 布局。分屏里丢了子块就整组均分（同 [`pane_state_from_dock`]）。
 pub(crate) fn dock_layout_from_state(
     state: &PaneState,
-    next_view: &mut dyn FnMut(&PaneState, &mut Context<Workspace>) -> Option<Entity<TerminalView>>,
+    next_view: &mut NextView<'_>,
     cx: &mut Context<Workspace>,
 ) -> Option<DockLayout> {
     match state {
@@ -401,8 +404,22 @@ impl Panel for TermPane {
         Some(crate::pane_title(&self.view, cx).into())
     }
 
+    /// 小字、淡色，不跟终端内容抢眼；活动格稍亮，和压暗非活动格一个意思。
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        SharedString::from(crate::pane_title(&self.view, cx))
+        let (_, active) = self.role(cx);
+        div()
+            .text_xs()
+            .text_color(rgb(if active {
+                crate::ui_theme::text_mid()
+            } else {
+                crate::ui_theme::text_faint()
+            }))
+            .child(SharedString::from(crate::pane_title(&self.view, cx)))
+    }
+
+    /// 不放大格子，标题栏也就没有那个只装着「放大」的「···」菜单。
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        None
     }
 
     /// 标题条是拖动格子的把手。没分屏时没有别的格子可去，不画。
