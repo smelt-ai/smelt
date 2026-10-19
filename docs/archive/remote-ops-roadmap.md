@@ -1,18 +1,18 @@
 # 远程操作 Roadmap
 
 > **历史路线图，不是现行协议。** 文中的 `/acp/ws`、`/terminal/{id}/ws`、长期共享 token、`write_enabled`、`smelt-remote-gateway` 和 `smelt-iroh-host` 已删除（2026-10-17 起运行时直接收 iroh 流，按设备配对）。
-> 现行行为见 [`workspace.md`](workspace.md) 的「运行时、多机与手机」，自建 relay 见 [`iroh-relay-deployment.md`](iroh-relay-deployment.md)，设计记录见 [`remote-runtime.html`](remote-runtime.html)。不要按下面的网关契约实现。
+> 现行行为见 [`workspace.md`](../workspace.md) 的「运行时、多机与手机」，自建 relay 见 [`iroh-relay-deployment.md`](../iroh-relay-deployment.md)，设计记录见 [`remote-runtime.html`](remote-runtime.html)。不要按下面的网关契约实现。
 
 **产品概念：远程操作**——对 smeltd 里仍存活的 agent 会话，在**任意客户端**上查看、知情、操控与协作。
 
 客户端可以是桌面浏览器、手机 H5、飞书机器人卡片等。  
 「完整终端画面」「状态元数据」「可写输入」是远程操作的**能力分层**；**xterm.js 只是其中一种呈现**，不是远程操作本身。
 
-> **产品主航道里的「手机与远程」见 [product-roadmap.md §6](product-roadmap.md)**（目标体验与交付切片）。  
+> **产品主航道里的「手机与远程」见 [product-roadmap.md §6](../product-roadmap.md)**（目标体验与交付切片）。  
 > 本文展开协议分层、网关契约与 phase 细节。
 
-配套：[collaboration.md](collaboration.md)、[state-channel-plan.md](archive/state-channel-plan.md)。  
-其它 backlog 见 [roadmap.md](roadmap.md)。
+配套：[collaboration.md](../collaboration.md)、[state-channel-plan.md](state-channel-plan.md)。  
+其它 backlog 见 [roadmap.md](../roadmap.md)。
 
 ---
 
@@ -191,7 +191,7 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 > 以下两段保留为方案演化的历史记录，实现以 `crates/smelt-iroh` 为准。
 
 **（历史）为什么一度改用 Cloudflare Tunnel、不再自己搭信令 + WebRTC**（原方案见
-[collaboration.md](collaboration.md)「点对点连接」一节）：
+[collaboration.md](../collaboration.md)「点对点连接」一节）：
 
 1. 自己实现 WebRTC 信令，需要一个双方都能连出去的公网信令服务器——这意味着**必须
    有人运营一个公网服务**，不是纯客户端方案，跟"个人项目不做账号体系/运维"这条
@@ -220,7 +220,7 @@ Phase 4/5/6（状态/手机 UI/可写），纯粹是传输层，可以插在这�
 **明确不做：**
 - 自己实现 WebRTC 信令服务器 / ICE 状态机（上面第 1、2 点已经说明原因）
 - 维护 Smelt 专有的信令、TURN 或 Relay 协议；自建服务直接使用上游 iroh-relay，部署见
-  [`docs/iroh-relay-deployment.md`](iroh-relay-deployment.md)
+  [`docs/iroh-relay-deployment.md`](../iroh-relay-deployment.md)
 - 浏览器接入。跨网只服务手机 App，`remote-web` 已删除。
 
 **验收（已通过）：** 手机关掉 Wi-Fi、纯用蜂窝数据，扫码即可连上本机 agent 会话；
@@ -231,7 +231,7 @@ iroh 隧道握手超时；移动端 `GatewayService` 的连接层超时默认 10
 
 ## Phase 4 — 远程知情（状态）✅ 已完成
 
-函数级改动见 [state-channel-plan.md](archive/state-channel-plan.md)。  
+函数级改动见 [state-channel-plan.md](state-channel-plan.md)。  
 状态是远程操作的**知情层**，服务 B/C 与侧栏灯。
 
 | 交付 | 说明 |

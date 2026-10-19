@@ -275,7 +275,7 @@ smeltd status
 
 ### 远程桌面
 
-配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。中文直接打在画面上。安装包里的 `--with-desktop`（把 Xvnc、桌面环境和常驻浏览器一并装上）还没做，现有机器上的显示栈是单独配的。见 `docs/remote-runtime.html` 的 D9。
+配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。中文直接打在画面上。安装包里的 `--with-desktop`（把 Xvnc、桌面环境和常驻浏览器一并装上）还没做，现有机器上的显示栈是单独配的。见 `docs/archive/remote-runtime.html` 的 D9。
 
 ### 终端 Dock
 
@@ -287,10 +287,10 @@ smeltd status
 
 ### 手机
 
-`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。内核负责设备密钥、配对、每个运行时一条连接、会话目录投影、对话（增量帧）和终端字节流。离线时读 App 数据目录里的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每个运行时最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端配色由手机按明暗自己定，不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`mobile-runtime-p4.md`](mobile-runtime-p4.md)。
+`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。内核负责设备密钥、配对、每个运行时一条连接、会话目录投影、对话（增量帧）和终端字节流。离线时读 App 数据目录里的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每个运行时最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端配色由手机按明暗自己定，不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`archive/mobile-runtime-p4.md`](archive/mobile-runtime-p4.md)。
 
 ## 路线图
 
 产品待做见 [`product-roadmap.md`](product-roadmap.md)，主航道外的点子见 [`roadmap.md`](roadmap.md)。
 会话状态不靠解析 `~/.claude/projects/*.jsonl`。用量按 provider 查账户。
-[`remote-ops-roadmap.md`](remote-ops-roadmap.md) 是已删除的 JSON-WS 网关路线图，不是现行协议。
+[`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md) 是已删除的 JSON-WS 网关路线图，不是现行协议。

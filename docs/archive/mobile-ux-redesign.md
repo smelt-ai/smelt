@@ -7,11 +7,11 @@
 > 2026-10-19：`smelt-remote-gateway`、`remote_gateway.rs`、`gateway_service` 已删除。
 > 状态投影在 `crates/smelt-mobile/src/catalog.rs`。下文引用这些路径的地方是当时的代码。
 
-配套：[`product-roadmap.md §6`](product-roadmap.md)（目标体验）·
+配套：[`product-roadmap.md §6`](../product-roadmap.md)（目标体验）·
 [`remote-ops-roadmap.md`](remote-ops-roadmap.md)（A/B/C 三种客户端形态）·
-[`ui-design-language.md`](ui-design-language.md)（桌面视觉语言，**未覆盖移动端**）
+[`ui-design-language.md`](../ui-design-language.md)（桌面视觉语言，**未覆盖移动端**）
 
-**设计稿：[`assets/mobile-ux-redesign-v1.html`](assets/mobile-ux-redesign-v1.html)**
+**设计稿：[`assets/mobile-ux-redesign-v1.html`](../assets/mobile-ux-redesign-v1.html)**
 ——浏览器直接打开，自包含无外部依赖。6 屏：指挥台 / 审批详情 / 项目 / 会话详情 /
 终端 / 设置，外加 IA 现状与目标的对比。配色直接取自
 `crates/smelt-ui/src/ui_theme.rs` 的 `DARK` 色板，表面层级沿用桌面同一条规则

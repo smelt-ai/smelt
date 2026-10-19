@@ -1,8 +1,8 @@
 # 移动端智能体 · UX 设计
 
-> 配套：[`workspace.md §产品级智能体`](workspace.md)（桌面真源）·
+> 配套：[`workspace.md §产品级智能体`](../workspace.md)（桌面真源）·
 > [`mobile-ux-redesign.md`](mobile-ux-redesign.md)（移动端 IA 与设计 token）·
-> [`product-roadmap.md §6`](product-roadmap.md)（手机 = 指挥台）
+> [`product-roadmap.md §6`](../product-roadmap.md)（手机 = 指挥台）
 
 状态：分片 1–4、6 已落地（智能体页在 `mobile/lib/pages/agents_page.dart`）。分片 5 只有最近一次 Run，没有完整历史。分片 7 的 `agent_definition_id` 已在会话摘要里，手机上主动新开对话还没做。
 

@@ -1,6 +1,6 @@
 # Agent 状态与通知统一设计
 
-> 定位：设计稿与动机(目标、状态语义、参考实现)。当前实现以 [`notification-architecture.md`](notification-architecture.md) 为准——两篇不是重复,是「为什么这么设计」与「现在怎么实现」的分工。
+> 定位：设计稿与动机(目标、状态语义、参考实现)。当前实现以 [`notification-architecture.md`](../notification-architecture.md) 为准——两篇不是重复,是「为什么这么设计」与「现在怎么实现」的分工。
 
 ## 目标
 

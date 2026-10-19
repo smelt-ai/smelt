@@ -176,7 +176,7 @@ smeltd status
 - **App 上架**
 - **`--with-desktop`**：远程桌面的显示栈还要自己装
 
-[`remote-ops-roadmap.md`](https://github.com/smelt-ai/smelt/blob/main/docs/remote-ops-roadmap.md)
+[`remote-ops-roadmap.md`](https://github.com/smelt-ai/smelt/blob/main/docs/archive/remote-ops-roadmap.md)
 是已删除的 JSON-WS 网关路线图，不是现行协议。
 
 明确不打算做的：在飞书里内嵌完整终端、自建 WebRTC 信令或 WireGuard 中转、重新做浏览器面板、

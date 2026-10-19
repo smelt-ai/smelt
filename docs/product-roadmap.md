@@ -7,7 +7,7 @@ JSONL RPC，不经 ACP。其它 CLI 可走 custom，不保证体验。）
 对标 Codex Desktop：**多 provider 结构化对话 · App 工作面 · Review · 手机远程 · 体验增强**
 约束：PTY/结构化对话二选一 · 权限门不关 · 引擎在本机 · 远程只指挥不搬服务器
 
-杂项点子 → [`roadmap.md`](roadmap.md) · 远程细节 → [`remote-ops-roadmap.md`](remote-ops-roadmap.md)
+杂项点子 → [`roadmap.md`](roadmap.md) · 已删除的 JSON-WS 网关记录 → [`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md)
 
 ---
 
@@ -221,7 +221,7 @@ flowchart LR
 
 **给谁用：** 开会、通勤、下班后 agent 还在跑，不能坐回 Mac 的人。
 
-配套分层与协议细节见 [`remote-ops-roadmap.md`](remote-ops-roadmap.md)（L1 查看 · L2 知情 · L3 操控 · L4 协作）。
+已删除的 JSON-WS 网关分层记录见 [`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md)，不是现行协议。
 
 ### 手机端（主入口）
 

@@ -155,7 +155,7 @@
 <div class="kicker">设计文档 · 草案</div>
 <h1>运行时与界面分离</h1>
 <p class="lede">把 smeltd 变成可以独立部署的「运行时」，可以跑在 Mac 上，也可以无头跑在 Linux 上。桌面 GUI 和手机 App 都只是客户端，一个桌面窗口可以同时挂上多台机器的运行时。</p>
-<p class="meta">2026-10-17 · 状态：待评审 · 相关：<a href="remote-ops-roadmap.md">remote-ops-roadmap.md</a>、<a href="control-api.md">control-api.md</a>、<a href="event-bus-architecture.md">event-bus-architecture.md</a>、<a href="local-storage.md">local-storage.md</a></p>
+<p class="meta">2026-10-17 · 状态：待评审 · 相关：<a href="remote-ops-roadmap.md">remote-ops-roadmap.md</a>、<a href="../control-api.md">control-api.md</a>、<a href="../event-bus-architecture.md">event-bus-architecture.md</a>、<a href="../local-storage.md">local-storage.md</a></p>
 
 <ol class="toc">
   <li>目标与非目标</li>
@@ -283,7 +283,7 @@
     <li>iroh 能穿过 NAT：同一局域网或有公网地址时直连，否则先打洞，失败再走 relay。家里或办公室里没有公网地址的 Linux 机器也能连上，这一点 SSH 做不到。</li>
     <li>运行时<b>不新增 TCP 监听端口</b>，只有 iroh endpoint，符合 control-api.md 里「不轻易加网络服务」的约束。</li>
     <li>每个操作开一条 QUIC 流，流之间互不阻塞，终端输出不会把文件读取堵在后面（队头阻塞）。</li>
-    <li><b>默认使用 n0 的公共 relay 和 DNS 地址发现</b>，即 iroh 的默认预设，替换现在的 <code>Minimal</code>（<code>smelt-iroh/src/lib.rs:165-172</code>）。这样跨网连接开箱可用，运行时 IP 变了也能重新找到它。数据端到端加密；n0 看得到的是元数据：DNS 发现会公布每个 endpoint id 当前的地址，relay 看得到哪两个 endpoint、什么时候、流量多大。设置里仍然可以换成自建 relay（<a href="iroh-relay-deployment.md">iroh-relay-deployment.md</a>）。</li>
+    <li><b>默认使用 n0 的公共 relay 和 DNS 地址发现</b>，即 iroh 的默认预设，替换现在的 <code>Minimal</code>（<code>smelt-iroh/src/lib.rs:165-172</code>）。这样跨网连接开箱可用，运行时 IP 变了也能重新找到它。数据端到端加密；n0 看得到的是元数据：DNS 发现会公布每个 endpoint id 当前的地址，relay 看得到哪两个 endpoint、什么时候、流量多大。设置里仍然可以换成自建 relay（<a href="../iroh-relay-deployment.md">iroh-relay-deployment.md</a>）。</li>
   </ul>
 </div>
 <h3>iroh 流怎么接进现有分发器</h3>
@@ -646,7 +646,7 @@
   <div>
     <p><b>手机收敛</b></p>
     <ul>
-      <li><code>smelt-mobile</code> 改为包 <code>smelt-runtime-client</code>，以 FRB 接口暴露给 Dart；Flutter 数据层从 WebSocket 换成 FRB。走 P3 的 iroh 流和设备配对。<span class="chip chip-done">已完成</span>，2026-10-19 真机（iPhone，经自建 relay）配对并收发对话。手机内核分身份与连接、会话目录、对话、终端、离线缓存（SQLite）几块；网关原来在本机替手机做的事挪进运行时：<code>new_session.catalog</code>、<code>session.create</code> / <code>session.delete</code>、<code>session.agent_bindings</code>、<code>conversation.image</code>（手机连接上的帧只带大图引用，按需取缩略图或原图），<code>acp_submit_input</code> 按 <code>submission_id</code> 去重。会话列表投影与 attention 在手机本地算。拆分与接口见 <code>docs/mobile-runtime-p4.md</code>，实施中发现的运行时遗留也记在那里。</li>
+      <li><code>smelt-mobile</code> 改为包 <code>smelt-runtime-client</code>，以 FRB 接口暴露给 Dart；Flutter 数据层从 WebSocket 换成 FRB。走 P3 的 iroh 流和设备配对。<span class="chip chip-done">已完成</span>，2026-10-19 真机（iPhone，经自建 relay）配对并收发对话。手机内核分身份与连接、会话目录、对话、终端、离线缓存（SQLite）几块；网关原来在本机替手机做的事挪进运行时：<code>new_session.catalog</code>、<code>session.create</code> / <code>session.delete</code>、<code>session.agent_bindings</code>、<code>conversation.image</code>（手机连接上的帧只带大图引用，按需取缩略图或原图），<code>acp_submit_input</code> 按 <code>submission_id</code> 去重。会话列表投影与 attention 在手机本地算。拆分与接口见 <code>docs/archive/mobile-runtime-p4.md</code>，实施中发现的运行时遗留也记在那里。</li>
       <li>删掉 gateway 的协议翻译层、JSON-WS、长期共享 token 和 <code>write_enabled</code> 只读开关。<span class="chip chip-done">已完成</span>（随 P3 的 iroh 直连提前删掉：没发版，不留过渡路径）</li>
       <li>手机可以连任何运行时，包括 Linux。代码已支持（没有桌面发布的菜单时按空目录处理，只显示运行时上的远程会话），还没在 Linux 运行时上实测。</li>
     </ul>

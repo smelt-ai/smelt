@@ -1,7 +1,7 @@
 # Smelt 架构改进路线图（Implementation Roadmap）
 
 > 历史快照，不是当前实施说明。13 周计划和里面的代码片段不要按字面执行。正文里的 `~/.smelt/remote-token` 和网关加固步骤对应已删除的远程令牌，不是现行配对。
-> 现行说明：[`workspace.md`](workspace.md)、[`local-storage.md`](local-storage.md)、[`iroh-relay-deployment.md`](iroh-relay-deployment.md)。产品待做见 [`product-roadmap.md`](product-roadmap.md)。
+> 现行说明：[`workspace.md`](../workspace.md)、[`local-storage.md`](../local-storage.md)、[`iroh-relay-deployment.md`](../iroh-relay-deployment.md)。产品待做见 [`product-roadmap.md`](../product-roadmap.md)。
 
 ## 概览
 

@@ -1,6 +1,6 @@
 # 手机接入运行时（P4）实施计划
 
-设计依据见 `docs/remote-runtime.html`（「协议客户端：桌面和手机共用一份 Rust 实现」与 P4「手机收敛」）。
+设计依据见 `docs/archive/remote-runtime.html`（「协议客户端：桌面和手机共用一份 Rust 实现」与 P4「手机收敛」）。
 本文只记实施拆分和每一步的接口约定。
 
 ## 现状
@@ -123,7 +123,7 @@ resize 在同一连接写 type 1 帧；输入走 `input` op。终端配色由手
 - 离线缓存：快照模型已在 Rust，缓存随之挪到 Rust；存储方式（SQLite）单独确认后再做。
 - 删除旧 Dart 协议代码与假网关测试，补 Rust 单测与 Dart 层测试。
 - iOS / Android 构建，真机验证配对、对话、终端。
-- 更新 `docs/remote-runtime.html` 的 P4 进度。
+- 更新 `docs/archive/remote-runtime.html` 的 P4 进度。
 
 ## 实施中发现的运行时遗留
 

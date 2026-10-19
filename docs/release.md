@@ -5,7 +5,7 @@
 | 产物 | job | 说明 |
 |---|---|---|
 | `Smelt.dmg` | `build`（macos-14） | `make dist-build`，用 secrets 里的自签名证书签名（`CODESIGN_P12_*`） |
-| `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`SHA256SUMS`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/remote-runtime.html` 的 D7 |
+| `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`SHA256SUMS`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
 
 ## 打 RC
