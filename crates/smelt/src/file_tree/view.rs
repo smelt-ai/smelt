@@ -475,6 +475,10 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
 
     // 滚动条是 absolute inset_0。父级必须 relative，否则它会对齐到文件面板
     // （含左侧编辑器）那个定位祖先：滑块按整页高度算，滚到底看起来还停在上面。
+    //
+    // FileTree 和下面的 on_action 挂在同一块可聚焦区域上。宿主只在文件页可见、
+    // 树展开、搜索框为空时才被挂上（见 tool_panel），方向键绑定本身不含 Cmd/Ctrl，
+    // 所以原来那几道门槛还在，不再在 Workspace 上做字符串匹配。
     div()
         .id("file-tree-host")
         .relative()
@@ -484,7 +488,27 @@ pub fn file_tree(params: FileTreeParams<'_>, cx: &mut Context<Workspace>) -> Any
         .overflow_hidden()
         .flex()
         .flex_col()
+        .key_context("FileTree")
         .track_focus(&focus_handle)
+        .on_action(cx.listener(|this, _: &crate::FileTreeMoveUp, _, cx| {
+            this.file_tree_move_selection(-1, cx);
+        }))
+        .on_action(cx.listener(|this, _: &crate::FileTreeMoveDown, _, cx| {
+            this.file_tree_move_selection(1, cx);
+        }))
+        .on_action(cx.listener(|this, _: &crate::FileTreeMoveLeft, _, cx| {
+            this.file_tree_key_left(cx);
+        }))
+        .on_action(
+            cx.listener(|this, _: &crate::FileTreeMoveRight, window, cx| {
+                this.file_tree_key_right(window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &crate::FileTreeActivate, window, cx| {
+                this.file_tree_key_enter(window, cx);
+            }),
+        )
         .on_mouse_down(MouseButton::Left, {
             let focus_handle = focus_handle.clone();
             move |_ev, window, cx| {

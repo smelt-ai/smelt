@@ -73,9 +73,18 @@ pub(super) fn shortcuts_page(
                                     fg,
                                 )],
                             ),
-                            fixed("打开命令面板", &["cmd-k"]),
-                            // 新建任务没有对应的 Action，按固定键位画。
-                            fixed("新建任务", &["shift-cmd-n"]),
+                            row(
+                                "打开命令面板",
+                                vec![bound_key(
+                                    window,
+                                    &crate::ToggleCommandPalette,
+                                    Some("Workspace"),
+                                    "⌘K",
+                                    border,
+                                    popover,
+                                    fg,
+                                )],
+                            ),
                             row(
                                 "退出 Smelt",
                                 vec![bound_key(
@@ -140,24 +149,157 @@ pub(super) fn shortcuts_page(
                                     ),
                                 ],
                             ),
-                            // 区间写法不是一个键位，Kbd 表达不了，原样画键帽。
                             row(
                                 "切换到第 1–9 个会话",
-                                vec![keycap("⌘1…9", border, popover, fg)],
+                                (0..9)
+                                    .map(|index| {
+                                        bound_key(
+                                            window,
+                                            &crate::ActivateSession { index },
+                                            Some("Workspace"),
+                                            SESSION_KEY_FALLBACK[index],
+                                            border,
+                                            popover,
+                                            fg,
+                                        )
+                                    })
+                                    .collect(),
                             ),
-                            fixed("上一个 / 下一个分屏", &["cmd-[", "cmd-]"]),
-                            fixed("左右分屏 / 上下分屏", &["cmd-d", "shift-cmd-d"]),
-                            fixed("关闭当前分屏或会话", &["cmd-w"]),
+                            row(
+                                "上一个 / 下一个分屏",
+                                vec![
+                                    bound_key(
+                                        window,
+                                        &crate::CyclePanePrev,
+                                        Some("Workspace"),
+                                        "⌘[",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                    bound_key(
+                                        window,
+                                        &crate::CyclePaneNext,
+                                        Some("Workspace"),
+                                        "⌘]",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                ],
+                            ),
+                            row(
+                                "左右分屏 / 上下分屏",
+                                vec![
+                                    bound_key(
+                                        window,
+                                        &crate::SplitBeside,
+                                        Some("Workspace"),
+                                        "⌘D",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                    bound_key(
+                                        window,
+                                        &crate::SplitBelow,
+                                        Some("Workspace"),
+                                        "⇧⌘D",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                ],
+                            ),
+                            row(
+                                "关闭当前分屏或会话",
+                                vec![bound_key(
+                                    window,
+                                    &crate::ClosePane,
+                                    Some("Workspace"),
+                                    "⌘W",
+                                    border,
+                                    popover,
+                                    fg,
+                                )],
+                            ),
                         ],
                     ))
                     .child(section(
                         "编辑与导航",
                         vec![
+                            // Cmd+F 留在终端自己的按键监听里（复制/粘贴也是），不进键位表。
                             fixed("终端内搜索", &["cmd-f"]),
-                            fixed("保存当前文件", &["cmd-s"]),
-                            fixed("上一个 / 下一个差异", &["shift-f7", "f7"]),
-                            fixed("关闭预览或返回", &["escape"]),
-                            fixed("终端补全 / 反向补全", &["tab", "shift-tab"]),
+                            row(
+                                "保存当前文件",
+                                vec![bound_key(
+                                    window,
+                                    &crate::SaveFile,
+                                    Some("Files"),
+                                    "⌘S",
+                                    border,
+                                    popover,
+                                    fg,
+                                )],
+                            ),
+                            row(
+                                "上一个 / 下一个差异",
+                                vec![
+                                    bound_key(
+                                        window,
+                                        &crate::PrevHunk,
+                                        Some("GitChanges"),
+                                        "⇧F7",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                    bound_key(
+                                        window,
+                                        &crate::NextHunk,
+                                        Some("GitChanges"),
+                                        "F7",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                ],
+                            ),
+                            row(
+                                "关闭预览或返回",
+                                vec![bound_key(
+                                    window,
+                                    &crate::DismissWorkspace,
+                                    Some("Workspace"),
+                                    "Esc",
+                                    border,
+                                    popover,
+                                    fg,
+                                )],
+                            ),
+                            row(
+                                "终端补全 / 反向补全",
+                                vec![
+                                    bound_key(
+                                        window,
+                                        &crate::terminal_view::TerminalTab,
+                                        Some("Terminal"),
+                                        "Tab",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                    bound_key(
+                                        window,
+                                        &crate::terminal_view::TerminalBackTab,
+                                        Some("Terminal"),
+                                        "⇧Tab",
+                                        border,
+                                        popover,
+                                        fg,
+                                    ),
+                                ],
+                            ),
                         ],
                     ))
                     .into_any_element()
@@ -166,6 +308,8 @@ pub(super) fn shortcuts_page(
         ),
     )
 }
+
+const SESSION_KEY_FALLBACK: [&str; 9] = ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "⌘9"];
 
 fn keycap(key: &'static str, border: Hsla, popover: Hsla, fg: Hsla) -> gpui::AnyElement {
     div()
@@ -186,7 +330,7 @@ fn keycap(key: &'static str, border: Hsla, popover: Hsla, fg: Hsla) -> gpui::Any
         .into_any_element()
 }
 
-/// 固定键位按 gpui 键位写法（`shift-cmd-n`）交给 Kbd，按平台显示键名。
+/// 固定键位按 gpui 键位写法（`cmd-f`）交给 Kbd，按平台显示键名。
 /// 写错解析不了时原样画出来，不留空键帽。
 fn fixed_key(spec: &'static str, border: Hsla, popover: Hsla, fg: Hsla) -> gpui::AnyElement {
     match gpui::Keystroke::parse(spec) {

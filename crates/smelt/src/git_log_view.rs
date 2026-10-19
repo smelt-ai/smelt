@@ -11,6 +11,7 @@
 //! `cx.entity()` 本身只是拿句柄，安全；危险的是紧跟着的 `.read(cx)`。
 //! 同样的教训见 file_tree 模块里 context_menu 那段注释。
 
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
@@ -55,89 +56,112 @@ pub fn graph_width(rows: &[GraphRow]) -> f32 {
     GRAPH_PAD * 2.0 + max as f32 * LANE_W
 }
 
-/// 把整张分支图画在一个 canvas 上。
-///
-/// 一次画完所有行而不是每行一个 canvas：线段跨行（上一行的下边缘就是下一行的上
-/// 边缘），分行画的话每段都要自己算邻居状态，还容易在行边界留缝。
-///
-/// canvas 与提交列表（uniform_list）共用同一个滚动句柄，二者逐帧同步滚动。
-/// canvas 自身盖在列表视口上（`inset_0`，不随内容滚），行位置靠「视口顶 − 滚动
-/// 偏移」换算成窗口坐标，与文字行逐帧对齐。
-///
-/// 只画落在可视区里的行：一屏几十行，而列表有几百条，全量画等于每帧构造上千条
-/// 路径。可视区就是 canvas 自己的 bounds（= 列表视口），裁剪直接拿它比。
-pub fn graph_canvas(
+/// 装饰层要多画可视区外面各一行：跨行贝塞尔的控制点在邻行，只画 `visible_range`
+/// 会在视口边缘断头。`uniform_list` 给出的范围已经夹在 `item_count` 内。
+pub(crate) fn graph_rows_to_draw(visible: Range<usize>, count: usize) -> Range<usize> {
+    if count == 0 || visible.start >= count {
+        return 0..0;
+    }
+    let start = visible.start.saturating_sub(1);
+    let end = visible.end.saturating_add(1).min(count);
+    start..end
+}
+
+/// 分支图装饰。`compute` 拿到的 `bounds.origin` 已经是内容顶（含 scroll_offset），
+/// 行坐标直接用它，不能再加一次滚动偏移。
+struct GitGraphDecoration {
     rows: Rc<Vec<GraphRow>>,
-    width: f32,
-    scroll: UniformListScrollHandle,
-) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _cx| {
-            let ox = bounds.origin.x + px(GRAPH_PAD);
-            // 列表内容顶（第 0 行的顶）在窗口里的 y：视口顶 − 纵向滚动偏移。
-            // uniform_list 的滚动偏移向下为负，内容顶会随滚动往上移出视口。
-            let off_y = scroll.0.borrow().base_handle.offset().y;
-            let content_top = bounds.origin.y + off_y;
-            // 列中心的 x。
-            let lane_x = |l: usize| ox + px(l as f32 * LANE_W + LANE_W / 2.0);
-            // 可视区 = canvas 自己的 bounds（它就是列表视口）。
-            let vis_top = bounds.origin.y;
-            let vis_bottom = bounds.origin.y + bounds.size.height;
+}
 
-            for (ri, row) in rows.iter().enumerate() {
-                let top = content_top + px(ri as f32 * ROW_H);
-                // 整行都在可视区外就跳过。留一行余量，免得跨行的线在边界处断头。
-                if top + px(ROW_H * 2.0) < vis_top || top - px(ROW_H) > vis_bottom {
-                    continue;
-                }
-                let mid = top + px(ROW_H / 2.0);
-                let bottom = top + px(ROW_H);
-                let node_x = lane_x(row.node);
+impl UniformListDecoration for GitGraphDecoration {
+    fn compute(
+        &self,
+        visible_range: Range<usize>,
+        _bounds: Bounds<Pixels>,
+        _scroll_offset: Point<Pixels>,
+        item_height: Pixels,
+        item_count: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> AnyElement {
+        let rows = self.rows.clone();
+        let range = graph_rows_to_draw(visible_range, item_count);
+        // 不注册 hitbox：点击要落在提交行上。线条画在行背景之后（decoration 的绘制
+        // 顺序），所以选中/悬停的整行底色盖不住图；文字从槽位右边开始，不会被线压住。
+        canvas(
+            |_, _, _| (),
+            move |canvas_bounds, _, window, _cx| {
+                paint_git_graph(
+                    canvas_bounds.origin,
+                    &rows,
+                    range.clone(),
+                    item_height,
+                    window,
+                );
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
+}
 
-                for edge in &row.edges {
-                    // 每段线的颜色跟着它所在的列走，分支才好用颜色区分。
-                    let (from_x, from_y, to_x, to_y, color) = match *edge {
-                        Edge::Through { from, to } => {
-                            (lane_x(from), top, lane_x(to), bottom, lane_color(from))
-                        }
-                        Edge::In { from } => (lane_x(from), top, node_x, mid, lane_color(from)),
-                        Edge::Out { to } => (node_x, mid, lane_x(to), bottom, lane_color(to)),
-                    };
-                    let mut pb = PathBuilder::stroke(px(1.5));
-                    pb.move_to(point(from_x, from_y));
-                    if (from_x - to_x).abs() < px(0.5) {
-                        // 同一列：直线。
-                        pb.line_to(point(to_x, to_y));
-                    } else {
-                        // 换列：用一段二次贝塞尔拐过去，控制点放在起点正下方，
-                        // 线就会先沿原列走一小段再平滑地拐进新列（gitk / JetBrains
-                        // 都是这个观感），比直接斜拉过去干净。
-                        let ctrl = point(from_x, to_y);
-                        pb.curve_to(point(to_x, to_y), ctrl);
-                    }
-                    if let Ok(path) = pb.build() {
-                        window.paint_path(path, color);
-                    }
-                }
+/// 在内容顶的窗口坐标上画 `range` 里的行。`content_top` 就是装饰层原点。
+fn paint_git_graph(
+    content_top: Point<Pixels>,
+    rows: &[GraphRow],
+    range: Range<usize>,
+    item_height: Pixels,
+    window: &mut Window,
+) {
+    let ox = content_top.x + px(GRAPH_PAD);
+    let lane_x = |lane: usize| ox + px(lane as f32 * LANE_W + LANE_W / 2.0);
+    for ri in range {
+        let Some(row) = rows.get(ri) else {
+            continue;
+        };
+        let top = content_top.y + item_height * (ri as f32);
+        let mid = top + item_height / 2.0;
+        let bottom = top + item_height;
+        let node_x = lane_x(row.node);
 
-                // 提交圆点画在连线之上，避免被线压住。
-                let mut dot = PathBuilder::fill();
-                let c = point(node_x, mid);
-                let r = px(DOT_R);
-                // 用四段圆弧拼一个圆。
-                dot.move_to(point(c.x - r, c.y));
-                dot.arc_to(point(r, r), px(0.), false, true, point(c.x + r, c.y));
-                dot.arc_to(point(r, r), px(0.), false, true, point(c.x - r, c.y));
-                if let Ok(path) = dot.build() {
-                    window.paint_path(path, lane_color(row.node));
+        for edge in &row.edges {
+            // 每段线的颜色跟着它所在的列走，分支才好用颜色区分。
+            let (from_x, from_y, to_x, to_y, color) = match *edge {
+                Edge::Through { from, to } => {
+                    (lane_x(from), top, lane_x(to), bottom, lane_color(from))
                 }
+                Edge::In { from } => (lane_x(from), top, node_x, mid, lane_color(from)),
+                Edge::Out { to } => (node_x, mid, lane_x(to), bottom, lane_color(to)),
+            };
+            let mut pb = PathBuilder::stroke(px(1.5));
+            pb.move_to(point(from_x, from_y));
+            if (from_x - to_x).abs() < px(0.5) {
+                // 同一列：直线。
+                pb.line_to(point(to_x, to_y));
+            } else {
+                // 换列：用一段二次贝塞尔拐过去，控制点放在起点正下方，
+                // 线就会先沿原列走一小段再平滑地拐进新列（gitk / JetBrains
+                // 都是这个观感），比直接斜拉过去干净。
+                let ctrl = point(from_x, to_y);
+                pb.curve_to(point(to_x, to_y), ctrl);
             }
-        },
-    )
-    .w(px(width))
-    // 与行高严格对齐，同滚动容器同步移动。
-    .h_full()
+            if let Ok(path) = pb.build() {
+                window.paint_path(path, color);
+            }
+        }
+
+        // 提交圆点画在连线之上，避免被线压住。
+        let mut dot = PathBuilder::fill();
+        let c = point(node_x, mid);
+        let r = px(DOT_R);
+        // 用四段圆弧拼一个圆。
+        dot.move_to(point(c.x - r, c.y));
+        dot.arc_to(point(r, r), px(0.), false, true, point(c.x + r, c.y));
+        dot.arc_to(point(r, r), px(0.), false, true, point(c.x - r, c.y));
+        if let Ok(path) = dot.build() {
+            window.paint_path(path, lane_color(row.node));
+        }
+    }
 }
 
 /// 单条提交行：分支图占位 + 引用标签 + 标题 + 作者 + 时间。
@@ -255,7 +279,7 @@ pub fn git_log_view(
 
     // 提交列表：uniform_list 只构造可视区附近的行元素（每行等高 ROW_H），
     // 之前用 v_flex + children() 把 ~500 条提交每帧全量建一遍，是本页 FPS 崩到
-    // 个位数的主因。分支图 canvas 与列表共用同一个滚动句柄，随列表同步滚动。
+    // 个位数的主因。分支图是列表的 decoration，原点已含滚动偏移，不用再读句柄。
     let ws_rows = ws;
     let root_rows = Rc::new(root);
     let list = uniform_list("git-log-list", count, move |range, _window, _app| {
@@ -276,17 +300,11 @@ pub fn git_log_view(
             })
             .collect::<Vec<_>>()
     })
+    .with_decoration(GitGraphDecoration { rows })
     .w_full()
     .flex_1()
     .min_h_0()
     .track_scroll(&scroll);
-
-    // 分支图铺在列表底层（absolute + z-0），文字行浮在上面。canvas 不注册 hitbox，
-    // 不会拦住提交行的点击。整页只有一层 uniform_list 滚动。
-    let graph = div()
-        .absolute()
-        .inset_0()
-        .child(graph_canvas(rows, gw, scroll));
 
     let list = div()
         .flex_1()
@@ -297,14 +315,10 @@ pub fn git_log_view(
         .min_w_0()
         .overflow_hidden()
         // flex + flex_col 不能省：默认的 row 方向下，`uniform_list` 拿不到纵向的
-        // 尺寸约束，算出来的可见行数是 0，一行都不会构造；而分支图 canvas 是
-        // `absolute inset_0`，照样铺满照样画点——表现就是「只剩一列圆点，提交
-        // 信息全没了」。行内的 `w_full` / `flex_1` 也靠它才有参照，否则作者、
-        // 时间列不再各自成列。
+        // 尺寸约束，算出来的可见行数是 0，一行都不会构造——表现就是提交信息全没了。
+        // 行内的 `w_full` / `flex_1` 也靠它才有参照，否则作者、时间列不再各自成列。
         .flex()
         .flex_col()
-        .relative()
-        .child(graph)
         .child(list);
 
     v_flex()
@@ -827,4 +841,18 @@ pub fn branch_tree(
             root,
             true,
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graph_rows_to_draw;
+
+    #[test]
+    fn decoration_range_includes_one_row_outside_the_viewport() {
+        assert_eq!(graph_rows_to_draw(0..10, 100), 0..11);
+        assert_eq!(graph_rows_to_draw(5..10, 100), 4..11);
+        assert_eq!(graph_rows_to_draw(98..100, 100), 97..100);
+        assert_eq!(graph_rows_to_draw(0..0, 0), 0..0);
+        assert_eq!(graph_rows_to_draw(100..100, 100), 0..0);
+    }
 }

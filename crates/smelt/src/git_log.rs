@@ -180,7 +180,7 @@ pub struct GitLogState {
     pub detail_body: Option<gpui::Entity<crate::git_log_view::GitLogDiffBody>>,
     /// 已加载的仓库根，切项目时用来判断要不要重拉。
     pub loaded_root: Option<String>,
-    /// 提交列表（uniform_list）的滚动句柄；分支图 canvas 也用它同步滚动。
+    /// 提交列表（uniform_list）的滚动句柄。分支图是列表装饰，不再读这个偏移。
     pub scroll: gpui::UniformListScrollHandle,
 }
 
