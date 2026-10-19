@@ -64,7 +64,7 @@ app-server = smelt 直接消费 Codex 的原生 JSONL 协议
 
 ### 适配器：统一走受管 bun（帮用户下载安装）
 
-沿用现有 Claude 路径（`acp.rs`：`ensure_bun` → `~/.smelt/runtime/bun-v*`）：
+沿用现有 Claude 路径（受管 Bun 在 `~/.smelt/runtime/store/bun/<generation>/`，不是 `bun-v*` 目录）：
 
 1. **首次**用适配器会话 → 若无受管 bun，自动下载锁定版本 bun  
 2. `bunx <adapter>@<锁版本>` 由受管 bun 解析/缓存，**用户不必自己装 node/npx/适配器**  
@@ -215,7 +215,9 @@ flowchart LR
 ## 6 · 手机与远程
 
 **目标体验：** 人不在电脑前，也能知道 agent 卡在哪、一点允许/拒绝、必要时短回复——**手机是指挥台，不是第二块小终端。**  
-引擎与会话仍在本机 smeltd；手机 / 飞书只连网关。
+引擎与会话仍在那台机器的 smeltd。手机和另一台桌面都是运行时的客户端，走 iroh，不经过网关。飞书卡片还没做。
+
+已落地（细节在 [`workspace.md`](workspace.md)）：Flutter 手机 App 看对话和终端、批权限、离线 SQLite 缓存；一次性配对码；Linux 无头 `smeltd`；一个桌面窗口挂多台运行时；远程桌面（noVNC）能看能接管。下面未勾的仍是未做或不按原设想走的（没有做手机 H5 / PWA）。
 
 **给谁用：** 开会、通勤、下班后 agent 还在跑，不能坐回 Mac 的人。
 
@@ -223,20 +225,21 @@ flowchart LR
 
 ### 手机端（主入口）
 
-- [ ] **会话列表**：各会话相位（跑着 / 等批准 / 等输入 / 完成）· 角标 · 一键进详情
-- [ ] **操作台（默认，非 xterm）**：问题摘要 + 允许 / 拒绝 / 短回复；最近输出可折叠看
-- [ ] **ACP 会话**：结构化消息流只读 + 权限/选择题原生按钮（比解析 TUI 稳）
-- [ ] **PTY 会话**：操作台为主；完整终端画面作二级（小屏慎用）
+- [x] **会话列表**：各会话相位 · 角标 · 进详情（Flutter App，不是 H5）
+- [ ] **操作台（默认，非 xterm）**：问题摘要 + 允许 / 拒绝 / 短回复。审批卡片有了，首屏仍不是这份信息架构
+- [x] **ACP 会话**：结构化消息、权限/选择题、可发消息
+- [x] **PTY 会话**：手机渲染运行时转发的终端流。原设想「操作台为主、完整终端作二级」没有按这个层次落地
 - [ ] 推送通知：等批准 / 等输入 / 失败（可配置；勿扰）
-- [ ] 深链：通知一点进对应会话；鉴权 token / 过期 / 吊销
-- [ ] 弱网：断线提示、自动重连、操作失败可重试
-- [ ] 形态：先 **手机 H5 / PWA** 可装主屏；原生壳（若需要）后置，API 同一套
+- [ ] 深链：通知一点进对应会话。鉴权已是设备配对，不是长期 token
+- [x] 弱网：断线提示、自动重连；离线先读手机本地 SQLite 缓存
+- [ ] ~~形态：先手机 H5 / PWA~~ 没走这条。现行客户端是仓库 `mobile/` 的 Flutter App
 
 ### 连接与托管（本机侧）
 
-- [ ] smeltd 托管 **ACP** 子进程 + 事件落盘；GUI / 手机均可 reattach
-- [ ] 远程网关：stream / state / input / **action** 契约稳定（手机主走 action）
-- [x] 公网可达：iroh P2P 一键开、状态可见、可关（配对码永久有效）
+- [x] smeltd 托管 **ACP** 子进程；GUI / 手机均可再连上
+- [x] 桌面和手机共用 `smelt-runtime-client`（iroh 或本机 socket）。JSON-WS 网关已删除
+- [x] 公网可达：iroh P2P，默认可走 n0 公共 relay，也可自建；一次性配对码（10 分钟、用一次），设备可撤销
+- [x] Linux 无头运行时（systemd 用户服务，`smeltd install` / `pair` / `devices`）与桌面多运行时
 - [ ] 多端同时看不顶掉桌面 GUI；权限操作幂等、可审计
 
 ### 飞书（轻量通道，与手机共用 action）
@@ -247,12 +250,10 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  subgraph local["本机"]
+  subgraph local["本机或 Linux 运行时"]
     GUI["桌面 smelt"]
-    Daemon["smeltd 活会话"]
-    GW["远程网关"]
+    Daemon["smeltd（iroh）"]
     GUI --> Daemon
-    Daemon --> GW
   end
 
   subgraph mobile["手机"]
@@ -267,12 +268,11 @@ flowchart TB
     Card["状态卡片"]
   end
 
-  GW --> List
-  GW --> Console
-  GW --> Card
-  Console -->|action| GW
-  Card -->|action| GW
-  GW --> Daemon
+  Daemon --> List
+  Daemon --> Console
+  Daemon --> Card
+  Console -->|action| Daemon
+  Card -->|action| Daemon
 ```
 
 ---

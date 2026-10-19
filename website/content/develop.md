@@ -26,17 +26,16 @@ cargo build --bin smeltd
 
 核心两个二进制（另有若干辅助二进制）：
 
-- **smelt**（`crates/smelt/`）—— GUI 本体，多项目 × 多标签的外壳，负责
-  渲染、文件树、git diff、任务编排、桌面宠物这些"看得见"的部分。
+- **smelt**（`crates/smelt/`）—— GUI 本体：多项目 × 多标签、文件树、Git、智能体和自动化。
 - **smeltd**（`crates/smeltd/`）—— 后台守护，管 PTY / ACP 子进程生命周期，跟 GUI
   之间靠 Unix socket 通信（attach 时先回报真实尺寸，再发网格 keyframe 快照与
   增量输出，重放区间按 `replay_len` 划界）。就算 GUI 挂了，`smeltd` 照样把 shell
-  养着；重开 GUI 按会话 id 自动 reattach。
+  养着；重开 GUI 按会话 id 自动 reattach。手机和另一台桌面经 iroh 连的也是它。
 
-辅助二进制（同仓库、同打包进 `Smelt.app`）：`gateway`（远程网关独立版）、
-`smelt-notify`（agent hook 状态上报）、`smelt-task`（agent 自循环任务 CLI）、
-`smelt-iroh-host` / `smelt-iroh-connect`（P2P 隧道调试）。`crates/smelt-mobile`
-是给 Flutter 手机端用的 FFI crate。
+辅助二进制：`smelt-notify`（agent hook 状态上报）、`smelt-agent-mcp`（都在
+`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-iroh-connect`
+（iroh 调试）。没有 `gateway`、`smelt-task`、`smelt-iroh-host`。`crates/smelt-mobile`
+是给 Flutter 手机端用的 Rust 内核，经 `smelt-runtime-client` 连运行时，不是隧道。
 
 两者解耦：`smelt` 可以单独跑（这时终端会话就跟着 GUI 生命周期走），也可以接上
 `smeltd` 拿到跨重启的会话持久化。打包发布时核心二进制会被塞进同一个
@@ -47,14 +46,15 @@ cargo build --bin smeltd
 ## 技术栈
 
 - Rust 2024，tokio async
-- GPUI + gpui-component（桌面 UI，GPU 渲染）
+- GPUI（`gpui-pre` 0.3.9）+ gpui-component（桌面 UI，GPU 渲染；组件 crate 名仍是 gpui-component）
 - portable-pty + alacritty_terminal（内嵌终端：PTY + ANSI 状态机）
-- reqwest（桌面宠物 LLM 大脑等场景调用模型 API）
 
 ## 打包发布
 
 ```sh
 ./scripts/package-mac.sh --build
+# 或
+make dist-build
 ```
 
 会先 `cargo build --release` 编译核心二进制，再组装成 `dist/Smelt.app`，最后打成
@@ -65,22 +65,30 @@ cargo build --bin smeltd
 
 ## 目录结构
 
-- `crates/smelt/` —— GUI：多标签终端、文件树、git diff 视图、任务编排、桌面宠物
-- `crates/smeltd/` —— 终端持久化守护（含 gateway / smelt-notify / smelt-task 等辅助二进制）
-- `crates/smelt-core/` —— GUI 与守护共用的无 UI 逻辑（会话状态、ACP 协议、任务模型）
+- `crates/smelt/` —— GUI
+- `crates/smeltd/` —— 运行时守护（含 `smelt-notify`、`smelt-agent-mcp`）
+- `crates/smelt-model/` —— 桌面、守护、手机共用的类型（Control API、会话状态）
+- `crates/smelt-core/` —— GUI 与守护共用的无 UI 逻辑；`daemon_state` / `agent_status` / `control_api` 从 `smelt-model` 再导出
+- `crates/smelt-client/`、`crates/smelt-client-store/` —— 这台桌面自己的状态（`client.sqlite3`）
+- `crates/smelt-runtime-client/` —— 桌面和手机共用的运行时协议客户端
+- `crates/smelt-store/` —— 运行时库 `smelt.sqlite3`
+- `crates/smelt-sys/` —— 进程等待、日志、守护映像、主机名
+- `crates/smelt-pairing/` —— 一次性配对串
+- `crates/smelt-git/` —— Git 领域层（不管 worktree）
+- `crates/smelt-event-bus/`、`crates/smelt-event-protocol/` —— 进程间事件
 - `crates/smelt-acp-view/` —— ACP 结构化对话界面
-- `crates/smelt-ui/` —— 共享 UI 组件（Markdown / Mermaid 渲染等）
-- `crates/smelt-iroh/`、`crates/smelt-mobile/` —— 远程 P2P 隧道与手机端 FFI
-- `mobile/` —— Flutter 手机 App
-- `scripts/package-mac.sh` —— 打包脚本
-- `docs/workspace.md` —— GUI 已实现功能与架构（仓库内文档）
-- `docs/roadmap.md` —— 待做点子存档
+- `crates/smelt-ui/` —— 共享 UI 组件
+- `crates/smelt-iroh/` —— iroh 传输，另有调试二进制 `smelt-iroh-connect`
+- `crates/smelt-mobile/`、`mobile/` —— 手机 Rust 内核与 Flutter App
+- `scripts/package-mac.sh` —— macOS 打包；`make dist` / `make dist-build` 是入口
+- `docs/workspace.md` —— 现行架构
+- `docs/local-storage.md` —— 两份 SQLite 各存什么
 
 ## 原则
 
 - 每步 `cargo check` 通过再继续
-- 配置放 `~/.smelt/` 下的本地 JSON 文件（`workspace.json` / `appearance.json` /
-  `launch.json` / `collab.json` 等），不建数据库
+- 业务状态进 SQLite：运行时 `~/.smelt/smelt.sqlite3`，这台桌面 `~/.smelt/client.sqlite3`。
+  JSON 只用于配置传输或临时交换，不当数据库
 
 ## 反馈与贡献
 

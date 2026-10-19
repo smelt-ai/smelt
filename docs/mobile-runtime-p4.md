@@ -5,14 +5,9 @@
 
 ## 现状
 
-9505f375 删掉了 `smelt-remote-gateway`、长期 token 和 `smelt/tunnel/1`。手机还在走旧路：
+已按此计划落地（2026-10-19，PR #46）。`smelt-remote-gateway`、长期 token 和 `smelt/tunnel/1` 已删除。手机经 `smelt-mobile` + `smelt-runtime-client` 走 `smelt/runtime/1`，配对串是 `smelt+iroh://<endpoint>/?code=<一次性码>[&relay=…]`，设备密钥落在 App 数据目录的 `client-iroh-secret`。下面的分步是当时的接口约定，不是待办。
 
-- `crates/smelt-mobile` 拨 `smelt/tunnel/1`，在 127.0.0.1 开端口，Dart 自己说 JSON-WS（`/acp/ws`、`/terminal/{id}/ws`）。
-  运行时只认 `smelt/runtime/1`，握手直接失败（TLS alert 120，no_application_protocol）。
-- 配对串要 `token`，新格式是 `smelt+iroh://<endpoint>/?code=<一次性码>[&relay=…]`。
-- 每次启动随机生成 iroh 密钥。新协议里设备身份就是这把密钥对应的 EndpointId，必须持久化。
-
-网关原来替手机做的事，现在要分到两处：
+网关原来替手机做的事，分到了两处：
 
 | 网关做的事 | 新归属 |
 |---|---|
@@ -132,9 +127,8 @@ resize 在同一连接写 type 1 帧；输入走 `input` op。终端配色由手
 
 ## 实施中发现的运行时遗留
 
-- `acp_submit_input` 不认 `submission_id`，同一请求重发会提交两次（P4.3 发送重试依赖它）。随 P4 修。
-- 订阅流里的自动化投影带 webhook 地址与密钥。已配对设备本来就有全部能力（`automation.get` 也能取到），
-  手机侧不暴露给界面；是否在投影里脱敏另议。
+- ~~`acp_submit_input` 不认 `submission_id`，同一请求重发会提交两次。~~ 已修：`crates/smeltd/src/acp_host.rs` 记住最近接受过的 `submission_id`，同一条只投递一次。
+- 手机目录投影在 `crates/smelt-mobile`（`api/catalog.rs` 的自动化条目只有 `webhook: bool`，不含地址和密钥）。旧 JSON-WS 订阅里把凭据一并下发的做法已经不存在。
 - 改名只有首帧 op `history_rename`，回包不带展示标题，手机多一次 `history.list`。可加 `history.rename` 直接返回。
 - `acp_action` 的错误是裸字符串，手机只能归为 Other。
 - `Refresh` 会让所有旁观连接从第 0 条重发，长对话代价大。

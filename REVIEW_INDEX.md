@@ -1,12 +1,13 @@
 # Smelt 架构审查文档索引
 
-> 历史快照，不是当前实施说明。文中的周计划、文件路径和「从这里开始」都已过时。
-> 现状见 [`docs/workspace.md`](docs/workspace.md)，产品待做见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
+> 历史快照，不是当前实施说明。正文仍按已删除的 gateway、`remote-token` 和旧模块划分来写，不要从这里开工。
+> 现行说明：[`docs/workspace.md`](docs/workspace.md)、[`docs/local-storage.md`](docs/local-storage.md)、[`docs/iroh-relay-deployment.md`](docs/iroh-relay-deployment.md)。
+> 产品待做见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
 
 ## 📚 快速导航
 
 ### 🎯 想快速了解？
-- **[ARCHITECTURE_REVIEW_SUMMARY.md](./ARCHITECTURE_REVIEW_SUMMARY.md)** ← 从这里开始（2 分钟读完）
+- **[ARCHITECTURE_REVIEW_SUMMARY.md](./ARCHITECTURE_REVIEW_SUMMARY.md)** ← 历史两分钟摘要，不是现状入口
   - 核心得分 8.5/10
   - 3 大优点 + 3 大缺陷
   - 10 项改进建议

@@ -83,10 +83,11 @@
 
 <p class="kicker">技术方案</p>
 <h1>装满窗口，或者取到第一条</h1>
+<p class="note"><strong>2026-10-19：</strong>独立的 gateway 进程已删除。手机路径是 <code>smelt-mobile</code> + <code>smelt-runtime-client</code>，直连 <code>smeltd</code>。下图里标成 Gateway / WebSocket 的格子是当时的进程边界，不是现行拓扑。</p>
 <p class="lede">Mac 和手机都从最近内容开始，只加载当前窗口需要的历史；画完按真实高度判断是否还要往前取。历史页与实时更新属于同一段对话，但走不同的交付规则：历史必须连续，未发送的实时状态可以合并。不要假设所有 agent 都把历史存成同一种 JSONL。</p>
 
 <h2>先看现状：数据实际上怎么走</h2>
-<p>下图上半部是逐段对照代码后的当前实现，下半部是尚未实现的目标设计。Smelt 把 ACP 内容事件归约成服务端内存投影，再把连续区间包装成 <code>ConversationSnapshot</code>；当前同步单位是 <code>AcpEntry</code> 下标，不是对话轮次。虚线框表示进程边界，因此可以看清每个队列究竟属于发送 daemon、Gateway 还是客户端。</p>
+<p>下图上半部是逐段对照代码后的当时实现，下半部是尚未实现的目标设计。Smelt 把 ACP 内容事件归约成服务端内存投影，再把连续区间包装成 <code>ConversationSnapshot</code>；同步单位是 <code>AcpEntry</code> 下标，不是对话轮次。虚线框表示当时的进程边界：发送 daemon、已删除的 Gateway，以及客户端。</p>
 <div class="diagram" aria-label="按进程分区的 ACP 当前链路、问题位置和目标改造">
 <svg viewBox="0 0 1120 1535" xmlns="http://www.w3.org/2000/svg">
   <defs>
@@ -216,7 +217,7 @@
   <text class="s" x="586" y="691">空队列允许一个超过 8 MiB 的首包，因此 8 MiB 不是单帧硬上限</text>
   <path class="arrow" d="M760 528 V544 H280 V558"/>
   <path class="arrow" d="M916 528 V544 H823 V558"/>
-  <text class="s" x="30" y="718">结论：两个 8 MiB 都在发送方 smeltd；不在 Mac GUI、Gateway 或手机进程。Hosted 模式上游还会先经过 session-host 自己的 8 MiB FIFO。</text>
+  <text class="s" x="30" y="718">结论：两个 8 MiB 都在发送方 smeltd；不在 Mac GUI 或手机进程。Hosted 模式上游还会先经过 session-host 自己的 8 MiB FIFO。</text>
 
   <!-- Desktop client process -->
   <rect class="lane" x="14" y="748" width="536" height="194" rx="10"/>
@@ -238,13 +239,13 @@
 
   <!-- Gateway and phone -->
   <rect class="lane" x="570" y="748" width="536" height="108" rx="10"/>
-  <text class="h" x="586" y="773">smelt-remote-gateway 进程</text>
+  <text class="h" x="586" y="773">旧网关进程（已删除）</text>
   <rect class="bad" x="586" y="790" width="244" height="50" rx="8"/>
   <text class="problem" x="602" y="813">问题 P6</text>
   <text class="t" x="674" y="813">mpsc&lt;String&gt;(64)</text>
   <text class="s" x="602" y="832">原始 JSON 行，不做快照语义合并</text>
   <rect class="node" x="860" y="790" width="230" height="50" rx="8"/>
-  <text class="t" x="876" y="813">WebSocket 逐帧 await 发送</text>
+  <text class="t" x="876" y="813">直连 smeltd 逐帧发送</text>
   <text class="s" x="876" y="832">64 条满后才向 smeltd 反压</text>
   <path class="arrow" d="M823 700 V732 H708 V790"/>
   <path class="arrow" d="M830 815 H860"/>
@@ -254,7 +255,7 @@
   <rect class="bad" x="586" y="916" width="292" height="54" rx="8"/>
   <text class="problem" x="602" y="939">问题 P7</text>
   <text class="s" x="674" y="939">AcpSnapshot.fromJson 解析本帧全部 entries</text>
-  <text class="s" x="602" y="960">GatewayService 缓存窗口 merge</text>
+  <text class="s" x="602" y="960">smelt-mobile 合并窗口</text>
   <rect class="node" x="910" y="916" width="180" height="54" rx="8"/>
   <text class="t" x="926" y="940">ListView.builder</text>
   <text class="s" x="926" y="960">仅行组件懒创建</text>
@@ -295,7 +296,7 @@
   <text class="s" x="30" y="1307">应用位置：Direct 的 main smeltd、Hosted 的 session-host 内部 acp_open，以及 Hosted 镜像向外分发处。</text>
 
   <text class="target-label" x="30" y="1338">T2 · 清掉下游隐藏积压点</text>
-  <text class="s" x="214" y="1338">Hosted snapshot_rx、Mac snapshot_rx、Gateway mpsc(64) 都不能继续囤积过时快照。</text>
+  <text class="s" x="214" y="1338">Hosted snapshot_rx、Mac snapshot_rx、手机侧队列都不能继续囤积过时快照。</text>
   <text class="s" x="30" y="1360">改成 ACP 专用的有界状态槽/归约器；只有覆盖范围可证明连续时才合并，否则请求 offset=0 resync。统一桌面与 Hosted 的 revision 规则。</text>
 
   <text class="target-label" x="30" y="1391">T3 · 降低客户端单帧成本</text>
@@ -303,12 +304,12 @@
 
   <text class="target-label" x="30" y="1422">T4 · 历史初始化先测量</text>
   <text class="s" x="214" y="1422">比较全量、分块全量、尾部优先分页；不把“100 entries”当成一屏，也不未经实测写死分页。</text>
-  <text class="s" x="30" y="1453">必须验证：慢 writer、GUI 卡顿、Gateway/网络变慢、Hosted revision 缺口、旧工具 entry 迟到更新、纯状态帧、rewind/reset。</text>
+  <text class="s" x="30" y="1453">必须验证：慢 writer、GUI 卡顿、手机网络变慢、Hosted revision 缺口、旧工具 entry 迟到更新、纯状态帧、rewind/reset。</text>
   <text class="s" x="30" y="1477">验收边界：每个异步跳点最多保留一个不可变在途帧和一个可合并待发状态；无法安全合并时明确 resync，不能静默丢内容。</text>
   <text class="s" x="30" y="1501">8 MiB 仍可作为异常单帧/总资源保护，但不再靠“排满后断开”处理正常 ACP 流式更新。</text>
 </svg>
 </div>
-<p class="note"><strong>8 MiB <code>OutputMailbox</code> 在发送方 daemon 的数据分发层，不在 Mac GUI 或手机 UI。</strong>Direct 模式的 <code>acp_open</code> / 每个 <code>acp_watch</code> attachment 由 main <code>smeltd</code> 持有；Hosted 模式还会先经过 session-host 内部 <code>acp_open</code> 的同款邮箱。红色问题也不止这一层：Hosted reader、Mac 客户端和 Gateway 当前分别还有无界或有界的下游队列，都会延后反压并保留过时帧。</p>
+<p class="note"><strong>8 MiB <code>OutputMailbox</code> 在发送方 daemon 的数据分发层，不在 Mac GUI 或手机 UI。</strong>Direct 模式的 <code>acp_open</code> / 每个 <code>acp_watch</code> attachment 由 main <code>smeltd</code> 持有；Hosted 模式还会先经过 session-host 内部 <code>acp_open</code> 的同款邮箱。红色问题也不止这一层：Hosted reader、Mac 客户端和手机客户端各自还有无界或有界的下游队列，都会延后反压并保留过时帧。</p>
 <p>Smelt <strong>知道自己正处于历史恢复阶段</strong>：generic ACP 会在 <code>session/load</code> 前产生 <code>HistoryReplayStarted</code>，投影里有 <code>replaying_history</code>，恢复 Ready 也有专门类型；部分驱动还有显式结束标记。但 <code>AgentChunk</code>、<code>ToolCall</code> 等内容事件本身仍走同一种通道，不能仅凭“历史”身份丢弃，它们就是重建投影的数据。</p>
 <p><code>ConversationSnapshot</code> 的状态字段描述当前会话，但其中的 <code>entries</code> 只是带全局位置的连续区间。实时更新通常发送“本批最早变化的 entry 到当前末尾”；纯 phase 或审批状态更新可以不带 entries。当前实现也没有稳定的 turn 容器，迟到的工具终态可能修改旧 entry，因此现状图不能画成只追加轮次。</p>
 <p>“虚拟列表”目前只代表行组件按需创建，不代表所有工作都懒做：Mac 对变化区间仍会建 Markdown 缓存、解码图片；手机 <code>AcpSnapshot.fromJson</code> 也会把本帧携带的 entries 全部解析成对象。</p>
@@ -396,7 +397,7 @@
     <tr><td>实时更新</td><td>历史页不进实时邮箱。每连接只保留正在写的帧和一份待发变更摘要；摘要按最早变更位置合并，从当前投影重新生成。</td></tr>
     <tr><td>版本与重置</td><td>更新携带投影代数和 revision。正常合并允许 revision 跳号；清空、重放、分叉切代数并发全量同步。</td></tr>
     <tr><td>慢客户端</td><td>积压帧被合并，不作为断线理由。持续写入停滞或真实 I/O 错误时可摘掉该 observer；provider 会话不能因普通 observer 背压而结束。</td></tr>
-    <tr><td>移动端</td><td>按手机视口和传输预算分页；后台冻结期间不追补每个中间帧，恢复时重新订阅并同步当前状态。网关内部队列也必须支持合并或 resync。</td></tr>
+    <tr><td>移动端</td><td>按手机视口和传输预算分页；后台冻结期间不追补每个中间帧，恢复时重新订阅并同步当前状态。手机侧队列也必须支持合并或 resync。</td></tr>
     <tr><td>单帧大小</td><td>历史页同时限制条目数和编码字节数。单条超大图片/工具负载另设上限或资源引用；“队列只有一帧”不等于内存有界。</td></tr>
     <tr><td>终端</td><td>终端原样保留自己的 8MB 有界 FIFO；ACP 使用独立的状态快照邮箱，不改变终端字节流语义。</td></tr>
   </tbody>
@@ -416,7 +417,7 @@
   <li>短历史一次补到第一条；长历史首屏达到真实高度目标后停止，向上翻可连续取完，滚动锚点不跳。</li>
   <li>分页与实时追加、旧工具状态更新并发时，没有缺条、重复条或静默丢页；过期代数明确触发重新对齐。</li>
   <li>对同一慢读端持续产生超过 8MB 的 ACP 更新，待发内存保持有界，收到的最终投影完整；其他 observer 与 provider 不受影响。</li>
-  <li>覆盖 hosted host → daemon、桌面控制连接、手机 watcher 和 gateway 队列；验证慢连接、真实断开、前后台恢复及重连 resync。</li>
+  <li>覆盖 hosted host → daemon、桌面控制连接和手机 watcher；验证慢连接、真实断开、前后台恢复及重连 resync。</li>
   <li>构造更新覆盖已写帧中的旧条目、清空/重放/分叉、runtime debug 变更、持久化标记，以及单个超大条目的测试。</li>
 </ul>
 
@@ -425,7 +426,7 @@
   <li><strong>先定协议不变量。</strong>明确 ACP 投影下标、投影代数、revision 覆盖范围、重置语义，以及哪些状态允许合并、哪些事件必须可靠送达；先写出旧条目更新和重置的失败测试。</li>
   <li><strong>再改实时出口。</strong>把 ACP 邮箱与终端 FIFO 分开；待发区保存变更摘要而非多份 JSON 字节，writer 在取帧时从 reducer 物化当前状态。覆盖直接连接和 hosted host → daemon 镜像连接。</li>
   <li><strong>实现客户端按高度补页。</strong>沿用 ACP 投影范围读取，先让 Mac 首屏与 prepend 锚点正确，再接入手机相同的接口；页面布局决定是否继续取，页失败显示并允许重试。</li>
-  <li><strong>打通远端恢复。</strong>网关和 WebSocket 的积压队列采用同样的状态合并 / resync 语义；手机前后台切换后根据投影代数和 revision 重新订阅，而不是追补所有中间快照。</li>
+  <li><strong>打通远端恢复。</strong>手机连接上的积压队列采用同样的状态合并 / resync 语义；手机前后台切换后根据投影代数和 revision 重新订阅，而不是追补所有中间快照。</li>
   <li><strong>最后压测资源边界。</strong>测量典型与极端条目的序列化大小、并发 watcher 数和阻塞写时长，再定单帧字节上限、停滞超时和总内存预算；不通过增大 FIFO 上限来掩盖过载。</li>
 </ol>
 

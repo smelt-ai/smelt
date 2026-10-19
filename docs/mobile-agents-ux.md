@@ -4,7 +4,7 @@
 > [`mobile-ux-redesign.md`](mobile-ux-redesign.md)（移动端 IA 与设计 token）·
 > [`product-roadmap.md §6`](product-roadmap.md)（手机 = 指挥台）
 
-状态：分片 1、2 已落地；3-6 未开工。
+状态：分片 1–4、6 已落地（智能体页在 `mobile/lib/pages/agents_page.dart`）。分片 5 只有最近一次 Run，没有完整历史。分片 7 的 `agent_definition_id` 已在会话摘要里，手机上主动新开对话还没做。
 
 ---
 
@@ -298,12 +298,15 @@ claim、投递、对账、回收）。移动端**不复制任何一条**，只�
 
 ---
 
-## 7. 这份设计需要网关补什么
+## 7. 网关契约（已删除）
 
-移动端是展示层，但改造前**网关根本没投影自动化**
-（`smelt-remote-gateway` 把 `DaemonStateEvent::Automations` 直接丢掉，`WorkspaceCatalog`
-只有 `projects` + provider 级 `agents`）。所以这一版必然要动契约。补充的都是投影和幂等
-命令，不下沉任何逻辑。
+这一节原来写的是 `smelt-remote-gateway` 的 JSON-WS 方法（`listAutomations`、`setAutomationEnabled`、`write_enabled`）。那个进程和这些方法名在 2026-10-19 删掉了。
+
+现行投影在 `crates/smelt-mobile/src/catalog.rs`，给 Flutter 的类型在 `crates/smelt-mobile/src/api/catalog.rs`。读写走 Control API（`crates/smelt-runtime-client/src/protocol/control.rs`），例如 `automation.set_enabled`、`automation.run_once`、`conversation.create_for_agent`。没有「允许远程写入」开关，配对即这台机器上当前用户的 shell。自动化条目只有 `webhook: bool`，不含地址和密钥。会话上的 `agent_definition_id` 来自运行时库，不是 `workspace.json`。
+
+下面保留当时的分片说明，里面的网关方法名不要再当现行接口。
+
+移动端是展示层。改造前网关没投影自动化，所以这一版要补的是投影和幂等命令，不下沉逻辑。
 
 ### 分片 1 已落地的部分
 
@@ -363,7 +366,7 @@ claim、投递、对账、回收）。移动端**不复制任何一条**，只�
 出去（记为 7）：当时会话摘要上还没有 `agent_definition_id`，没法把对话归到
 智能体名下。现在归属已经从桌面存档投下来了，这一片的前置依赖具备。
 
-落地时补充的契约（都在 `crates/smelt-remote-gateway/src/lib.rs`）：
+落地时补充的契约（方法名属于已删除的网关；现行投影见本节开头）：
 
 - `listAutomations` → `{type: "automations", automations: [...], agents: [...]}`。
   自动化和定义**一起**下发，目录行才能把 `agent_id` 解析成展示名。

@@ -13,9 +13,9 @@ Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, Crush, DSH
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey)](https://github.com/smelt-ai/smelt/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20desktop%20%2B%20Linux%20runtime-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **Status**: working prototype, under active development.
+> **Status**: working prototype, under active development. The desktop app is macOS (Apple Silicon). The runtime (`smeltd`) also runs headless on Linux.
 
 </div>
 
@@ -32,7 +32,7 @@ What is needed then is not a smarter editor, but a **cockpit** for keeping an ey
 Download `Smelt.dmg` from [Releases](https://github.com/smelt-ai/smelt/releases) and drag it into Applications.
 The app checks for updates on launch and on demand (stable/beta channel), showing a prompt when a newer version is available.
 
-> Currently supports **macOS (Apple Silicon)** only.
+> The desktop app currently supports **macOS (Apple Silicon)**. A Linux machine can run headless `smeltd` and be paired from the Mac app or the mobile app.
 
 ## Features
 
@@ -42,9 +42,9 @@ The app checks for updates on launch and on demand (stable/beta channel), showin
 - **Persistent agents and automations**: The top-level Agents workspace manages reusable definitions, while Automations independently manages triggers, per-run input, and run history. Agent automations get a stable directory under that agent's space (`~/.smelt/agents/<id>/automations/`); shell automations stay in `~/.smelt/workspaces/automations`. Triggers are schedule or an external trigger: schedules cover weekday/daily/interval, while an external trigger is a loopback HTTP URL (`127.0.0.1`) that other programs on the same machine can POST to. The catalog shows “external trigger” without exposing the token. Pi is the first registered engine, and `smeltd` owns scheduled, external-trigger, and manual run lifecycles. Automations run with full access; there is no separate permission policy
 - **Read and edit code**: File tree and search, built-in editor, Git diff view, and Markdown/Mermaid rendering
 - **Usage and history**: Account usage is queried per provider (Claude, Copilot, Codex, Cursor, Grok) and is not read from transcripts. Historical sessions read each agent's local transcripts; Claude Code is not the only source
-- **Remote access** (off by default): Use the Smelt mobile app to view and control local structured agent conversations and live terminal/CLI-agent sessions. Terminal views render the daemon PTY stream directly and resize the shared PTY to the active mobile viewport. Connections always use iroh P2P: peers on the same network may connect directly, while cross-network connections use hole punching and fall back to a user-configured relay. The app does not expose a regular LAN listener. Pairing tokens persist across restarts until rotated.
-  **The pairing code grants access. Read the [remote access documentation](docs/remote-ops-roadmap.md) before enabling it.**
-- **More**: Persistent terminal sessions that survive GUI exits and crashes and automatically reattach on restart
+- **Remote access** (off by default): Pair another Smelt desktop or the Smelt mobile app to this machine's runtime over iroh. Peers on the same network connect directly; otherwise the connection hole-punches and then uses a relay. Leave the relay blank to use n0's public relay, or fill in your own. The pairing string is `smelt+iroh://<endpoint_id>/?code=<one-time code>` and works once, within 10 minutes. There is no long-lived shared token and no separate "allow write" switch: pairing hands this user's shell to that device. Revoke a device from Settings, or with `smeltd devices revoke`. The app does not open a regular LAN listener.
+  **The pairing code grants access. Read the [relay notes](docs/iroh-relay-deployment.md) before turning it on.**
+- **More**: Terminal sessions survive GUI exits and crashes and reattach on restart. A terminal cell can stack several terminals (a dock) as well as split. An idle structured conversation suspends its host after 30 minutes and wakes with the previous model, permission mode, and reasoning effort. One window can attach several runtimes, including a headless Linux machine, and open that machine's desktop through noVNC. Details are in [`docs/workspace.md`](docs/workspace.md).
 
 See [`docs/workspace.md`](docs/workspace.md) for the complete feature list, keyboard shortcuts, and architecture details.
 See [`docs/product-roadmap.md`](docs/product-roadmap.md) for the product direction.
@@ -71,14 +71,13 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 ## Architecture
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed) (`gpui-pre` 0.3.9) / [gpui-kit](https://github.com/longbridge/gpui-kit) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, axum for the remote gateway, and iroh for P2P tunnels.
-Configuration is stored in `~/.smelt/`.
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed) (`gpui-pre` 0.3.9) / [gpui-kit](https://github.com/longbridge/gpui-kit) for the GUI, portable-pty + alacritty_terminal for embedded terminals, tokio, and iroh for remote connections. axum only serves the loopback webhook that starts an automation. Structured state is SQLite under `~/.smelt/`: `smelt.sqlite3` for the runtime and `client.sqlite3` for this desktop. See [`docs/local-storage.md`](docs/local-storage.md).
 
-The workspace contains `smelt` (the main GUI), `smeltd` (a terminal persistence daemon, similar to tmux, launched on demand by the GUI), `gateway` (a standalone executable for developing and debugging the remote gateway), `smelt-notify` (a small status-reporting utility called by supported agent hooks and plugins), and the `smelt-iroh-host` / `smelt-iroh-connect` helpers for developing and debugging P2P tunnels. Most users only interact with `smelt`; the GUI manages `smeltd` as needed.
-The mobile client lives in `mobile/` (Flutter), reuses the iroh tunnel from the Rust side through `crates/smelt-mobile`, and runs on both iOS and Android. It is not published yet — it must be built locally; see [`mobile/README.md`](mobile/README.md).
+The workspace contains `smelt` (the main GUI), `smeltd` (the runtime daemon: PTY sessions, ACP hosts, and automations; launched on demand by the GUI, or installed as a systemd user service on Linux), `smelt-notify` (status reports from agent hooks), `smelt-agent-mcp` (the stdio MCP adapter for cross-agent messages), and `smelt-installer` (the helper that swaps the app in after quit). `smelt-iroh-connect` debugs the runtime's iroh path. Most users only interact with `smelt`; the GUI manages the local `smeltd`.
+The mobile client lives in `mobile/` (Flutter). `crates/smelt-mobile` is its Rust core — device identity, pairing, catalog, conversation, terminal, and an offline SQLite cache — and uses the same `smelt-runtime-client` as the desktop. It is not published yet; build it locally, see [`mobile/README.md`](mobile/README.md).
 
-For detailed architecture, directory structure, and the implemented feature list, see [`docs/workspace.md`](docs/workspace.md).
-For the main product roadmap, see [`docs/product-roadmap.md`](docs/product-roadmap.md); for the miscellaneous backlog, see [`docs/roadmap.md`](docs/roadmap.md); and for remote protocol details, see [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md).
+For architecture, directory layout, Linux install, multi-runtime windows, remote desktop, and the idle-suspend behavior, see [`docs/workspace.md`](docs/workspace.md).
+For the product roadmap, see [`docs/product-roadmap.md`](docs/product-roadmap.md); for the miscellaneous backlog, see [`docs/roadmap.md`](docs/roadmap.md). [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md) describes the removed JSON-WS gateway and is not the current protocol.
 
 ## Contributing
 

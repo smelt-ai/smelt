@@ -16,9 +16,10 @@ cargo run --bin smelt
 ```
 
 > 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除。
-> 工作区现含多个二进制：`smelt`（GUI 主程序）、`smeltd`（终端持久化守护，另含
-> `gateway` / `smelt-notify` 等辅助二进制，见 `crates/smeltd/src/bin/`），以及随 App 分发的
-> 插件（`plugins/`，gpui-shell 脚本应用），详见根目录 `Cargo.toml` 的 workspace 注释与成员列表。
+> 工作区二进制：`smelt`（GUI）、`smeltd`（运行时守护）、`smelt-notify` 与 `smelt-agent-mcp`
+> （`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-iroh-connect`（iroh 调试）。
+> 没有独立的 `gateway` 或 `smelt-iroh-host`。随 App 分发的插件在 `plugins/`（gpui-shell 脚本应用）。
+> 成员列表见根目录 `Cargo.toml`。
 
 ---
 
@@ -45,24 +46,28 @@ cargo run --bin smelt
   文件树 / Git 面板 / 插件（`plugins/`，gpui-shell 脚本应用）等。`terminal.rs` 是内嵌终端前端
   （连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
   （渲染/输入/IME/选区/滚动/resize）。PTY 与 shell 在 `smeltd`。
+- **`crates/smelt-model`** —— 桌面、守护、手机共用的类型：Control API、会话状态、事件订阅解码。
+  不许引 GPUI，要能编进 iOS / Android。
 - **`crates/smelt-core`** —— GUI 与守护共用的无 UI 逻辑（不许引 GPUI）：
-  ACP 连接层（`acp_conn.rs`）、agent 注册/身份（`agent_kind/`）、会话状态
-  （`agent_status.rs`/`daemon_state.rs`）、主库入口（`sqlite_state.rs`，关系表在 `smelt-store`）、
-  通用项目注册等。
-- **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `gateway` / `smelt-notify`）：
-  终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）与远程网关。
+  ACP 连接层（`acp_conn.rs`）、agent 注册/身份（`agent_kind/`）、
+  主库入口（`sqlite_state.rs`，关系表在 `smelt-store`）。`daemon_state` 和 `agent_status`
+  的定义在 `smelt-model`，这里只再导出。
+- **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
+  `~/.smelt/client.sqlite3`（外观、会话界面路由、连过哪些运行时）。
+- **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（unix socket 与 iroh）。
+- **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify` / `smelt-agent-mcp`）：
+  终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
 - **`crates/smelt-paths`** —— 统一环境路径推导（`~/.smelt`）与单用例测试隔离沙箱。
-- **`crates/smelt-git`** —— 独立的 Git 领域层（多仓库发现/状态解析/diff/写操作，不含 UI）。
+- **`crates/smelt-sys`** —— 桌面和运行时共用的底层工具（进程等待、日志、守护映像、主机名）。没有单独的 `smelt-process-wait` crate，等待进程在这里。
+- **`crates/smelt-git`** —— 独立的 Git 领域层（多仓库发现/状态解析/diff/写操作，不含 UI）。smelt 不管 worktree。
 - **`crates/smelt-event-bus`** —— 系统内部进程间事件总线（EventHub）。
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
 - **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
-- **`crates/smelt-process-wait`** —— 等待进程退出：没有退出事件时睡到截止，不轮询。
-- **`crates/smelt-store`** —— 桌面 SQLite/KV 存储与 legacy 导入原语（移动端不编 native SQLite）。
-- **`crates/smelt-pairing`** —— 桌面/移动共用的配对码格式。
-- **`crates/smelt-remote-gateway`** —— 移动端远程 ACP/终端网关（不含 GPUI）。
-- **`crates/smelt-iroh`** —— P2P 隧道（iroh）封装。
-- **`crates/smelt-mobile`** —— 移动端复用 Rust 侧 iroh 隧道的桥（cargokit）。
+- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 21，按字段建表，没有通用 kv）。
+- **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
+- **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
+- **`crates/smelt-mobile`** —— 手机 Rust 内核（身份、连接、目录、对话、终端、离线缓存），经 flutter_rust_bridge 给 Flutter。
 
 终端数据流：后台线程读守护 socket → `vte` 解析器 → 更新共享的 alacritty `Term` 网格；
 UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
@@ -141,7 +146,8 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 | 快捷键 | 作用 |
 |---|---|
 | `Cmd+K` | 命令面板 |
-| `Cmd+B` | 切换右侧 Tool Panel（Files / Git / History，以及插件的 tab） |
+| `Cmd+B` | 切换左侧栏 |
+| `Opt+Cmd+B` | 切换右侧 Tool Panel（Files / Git / History，以及插件的 tab） |
 | `Esc` | 收起舞台上的全屏覆盖页（总览/文件树/Git/历史），回到当前会话 |
 | `Cmd+[` / `Cmd+]` | 循环切换当前会话内的 pane（分屏） |
 | `Cmd+1` ~ `Cmd+9` | 跳到会话列表里第 N 个会话（按显示顺序，跨项目连续数） |
@@ -167,7 +173,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。**DSH** 是
 > profile-only 的第九种 ACP 引擎；终端通道另有 **Antigravity** 与 **Crush**
 > （`settings::TerminalAgentKind`）。
-> 各条启动命令可在设置 →「Agent 集成」页改。provider 支持历史恢复时，
+> 各条启动命令可在设置 →「Agent 运行环境」和「对话与工作区」改。provider 支持历史恢复时，
 > 「重新开始」是协议级续接而非摆样子的新对话（Pi 使用自身 session id）。
 >
 > 各家实测差异（决定了下面几个 UI 决策）：首块响应 Claude ~2.6s / Copilot ~7s /
@@ -241,7 +247,50 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 ---
 
+## 运行时、多机与手机
+
+桌面 GUI 和手机都是客户端。机器上的会话、项目、智能体、自动化在那台机器的 `smeltd` 里。
+一个桌面窗口可以同时挂上本机和多台远程运行时：侧栏按运行时分块，Git、文件、历史和额度打到会话所在的那一台。
+添加远程运行时是把一次性配对串粘进桌面。设置里标了「只作用于本机运行时」的页面不改远程机器。
+
+### Linux 无头运行时
+
+发布包是 `smeltd-<版本>-linux-<架构>.tar.gz`（`ci/linux/ci.sh package`）。在机器上解包后：
+
+```bash
+./install.sh           # 装 systemd 用户服务、启动，并打印配对串
+./install.sh --no-pair # 只安装并启动
+```
+
+脚本要求 Linux 和 systemd。它把 `smelt-notify`、`smelt-agent-mcp` 放进 `~/.smelt/bin`，再执行 `smeltd install`（不可变映像；已经在跑就交接，会话保留）。之后：
+
+```bash
+smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码
+smeltd devices                   # 列出已配对设备
+smeltd devices revoke <endpoint> # 撤销并立刻断开
+smeltd status
+```
+
+`pair` 会把远程访问打开（保留已填写的自建 relay）。配对串 10 分钟、用一次。配对等于把这台机器上当前用户的 shell 交给对方。macOS 上守护仍由桌面拉起，`smeltd install` 只在 Linux 注册 systemd 单元。细节在 `crates/smeltd/src/service.rs` 和 `scripts/install-smeltd.sh`。
+
+### 远程桌面
+
+配对之后，桌面可以打开那台 Linux 的整块屏幕：运行时转发 VNC，`smelt-runtime-client` 在本机随机端口提供 noVNC 页面，桌面用网页视图打开。打开即接管；切到「只看」后不再发送键鼠。中文直接打在画面上。安装包里的 `--with-desktop`（把 Xvnc、桌面环境和常驻浏览器一并装上）还没做，现有机器上的显示栈是单独配的。见 `docs/remote-runtime.html` 的 D9。
+
+### 终端 Dock
+
+`Cmd+D` / `Cmd+Shift+D` 仍是左右或上下分屏。同一格还可以叠几个终端，布局树多一种 `tabs` 节点（运行时库 schema v21，`layout_node.kind` 为 `split`、`tabs` 或 `leaf`）。分屏几何存在运行时库，不在客户端库。客户端库存的是每台运行时上的界面路由（工具面板、打开的文件、侧栏宽度）。
+
+### 闲置挂起
+
+结构化对话闲置 30 分钟后，`smeltd` 停掉那场会话的宿主进程（`crates/smeltd/src/acp_idle.rs` 的 `ACP_IDLE_SUSPEND_AFTER`）。会话还在目录里，界面仍显示空闲。发消息、改配置、翻历史或跨智能体投递时先唤醒，并把挂起前的模型、权限模式和推理强度写回新进程。有进行中的回合、待审批、排队输入、后台任务，或属于自动化 / 远程手机建的会话，不会挂起。
+
+### 手机
+
+`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。内核负责设备密钥、配对、每个运行时一条连接、会话目录投影、对话（增量帧）和终端字节流。离线时读 App 数据目录里的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每个运行时最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端配色由手机按明暗自己定，不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`mobile-runtime-p4.md`](mobile-runtime-p4.md)。
+
 ## 路线图
 
 产品待做见 [`product-roadmap.md`](product-roadmap.md)，主航道外的点子见 [`roadmap.md`](roadmap.md)。
-分屏已经有（`Cmd+D` / `Cmd+Shift+D`）。会话状态不靠解析 `~/.claude/projects/*.jsonl`。
+会话状态不靠解析 `~/.claude/projects/*.jsonl`。用量按 provider 查账户。
+[`remote-ops-roadmap.md`](remote-ops-roadmap.md) 是已删除的 JSON-WS 网关路线图，不是现行协议。

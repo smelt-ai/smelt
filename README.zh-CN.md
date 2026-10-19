@@ -13,9 +13,9 @@ Claude Code、GitHub Copilot、Codex、Grok、Cursor、OpenCode、Kiro、Pi、Cr
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
-[![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey)](https://github.com/smelt-ai/smelt/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20desktop%20%2B%20Linux%20runtime-lightgrey)](https://github.com/smelt-ai/smelt/releases)
 
-> **状态**：working prototype，持续迭代中。
+> **状态**：working prototype，持续迭代中。桌面 App 是 macOS（Apple Silicon）；运行时 `smeltd` 也可以无头跑在 Linux 上。
 
 </div>
 
@@ -32,7 +32,7 @@ AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agen
 从 [Releases](https://github.com/smelt-ai/smelt/releases) 下载 `Smelt.dmg`，拖进 Applications 即可。
 应用在启动时与手动检查更新（stable/beta 渠道），有新版本时会提示。
 
-> 目前仅支持 **macOS（Apple Silicon）**。
+> 桌面 App 目前支持 **macOS（Apple Silicon）**。Linux 机器可以无头跑 `smeltd`，再从 Mac 或手机配对过去。
 
 ## 功能
 
@@ -42,9 +42,9 @@ AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agen
 - **持久化智能体与自动化**：左侧「智能体」管理可复用定义，「自动化」独立管理时机、每次运行的输入与结果历史。智能体自动化在该智能体 space 下分配稳定目录（`~/.smelt/agents/<id>/automations/`）；Shell 自动化留在 `~/.smelt/workspaces/automations`。时机是定时或外部触发：定时仍是工作日/每天/按间隔；外部触发是本机 `127.0.0.1` 上的接收地址，同机程序 POST JSON 即可开 Run。目录只显示「外部触发」，不展示令牌。当前引擎只开放 Pi，定时、外部触发和手动 Run 均由 `smeltd` 托管。自动化固定全权限跑，不另存一套权限策略
 - **读写代码**：文件树 + 搜索、内置编辑器、Git diff 视图、Markdown/Mermaid 渲染
 - **用量与历史**：用量按 provider 查账户（Claude、Copilot、Codex、Cursor、Grok），不读 transcript。历史会话读各家本机存档，不只 Claude Code
-- **远程访问**（默认关闭）：用 Smelt 手机 App 查看/操控本机结构化 agent 对话与实时终端/CLI agent 会话。终端页直接渲染守护转发的 PTY 流，并按当前手机视口调整共享 PTY 尺寸。连接统一走 iroh P2P：同网设备可以直连，跨网先打洞，失败后回退到用户配置的 relay。应用不会暴露普通局域网监听端口。配对 Token 会跨重启保留，直到手动刷新。
-  **配对码即权限，务必先读[远程访问文档](docs/remote-ops-roadmap.md)再开**
-- **其它**：终端会话持久化（GUI 退出/崩溃不影响 shell，重开自动 reattach）
+- **远程访问**（默认关闭）：把另一台 Smelt 桌面或手机 App 配对到这台机器的运行时，连接走 iroh。同网直连，否则打洞，再走 relay。relay 留空用 n0 的公共 relay，也可以填自建地址。配对串是 `smelt+iroh://<endpoint_id>/?code=<一次性码>`，10 分钟内、只能用一次。没有长期共享 token，也没有单独的「允许远程写入」开关：配对就是把这台机器上当前用户的 shell 交给那台设备。在设置里撤销设备，或执行 `smeltd devices revoke`。应用不开放普通局域网监听端口。
+  **配对码即权限，开之前先读 [relay 说明](docs/iroh-relay-deployment.md)**
+- **其它**：终端会话持久化（GUI 退出/崩溃不影响 shell，重开自动 reattach）。同一格终端可以叠成 Dock，也可以分屏。结构化对话闲置 30 分钟会挂起宿主进程，再用时唤醒，并恢复挂起前的模型、权限模式和推理强度。一个窗口可以挂多台运行时，包括无头 Linux，并能经 noVNC 看那台机器的桌面。细节见 [`docs/workspace.md`](docs/workspace.md)。
 
 完整功能清单、快捷键与架构细节见 [`docs/workspace.md`](docs/workspace.md)；产品方向见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
 
@@ -70,13 +70,12 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 ## 架构
 
-Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.9）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、axum（远程网关）、iroh（P2P 隧道）。
-配置放 `~/.smelt/`。
+Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.9）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、iroh（远程连接）。axum 只负责本机回环上的自动化 webhook。结构化状态在 `~/.smelt/` 的 SQLite：运行时库 `smelt.sqlite3`，这台桌面的客户端库 `client.sqlite3`。见 [`docs/local-storage.md`](docs/local-storage.md)。
 
-工作区包含 `smelt`（GUI 主程序）、`smeltd`（终端持久化守护，类 tmux，由 GUI 按需拉起）、`gateway`（远程网关的独立可执行版，用于开发调试）、`smelt-notify`（已接入的 agent hook 与插件调用的状态上报小工具），以及用于开发和调试 P2P 隧道的 `smelt-iroh-host` / `smelt-iroh-connect`。普通用户主要使用 `smelt`，守护进程由 GUI 按需管理。
-移动端在 `mobile/`（Flutter），经 `crates/smelt-mobile` 复用 Rust 侧的 iroh 隧道，iOS 与 Android 均可运行，目前尚未上架，需要自行构建，见 [`mobile/README.md`](mobile/README.md)。
+工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、ACP 宿主、自动化；由 GUI 按需拉起，在 Linux 上则装成 systemd 用户服务）、`smelt-notify`（agent hook 的状态上报）、`smelt-agent-mcp`（跨 agent 消息的 stdio MCP 适配器）、`smelt-installer`（退出后替换 App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
+移动端在 `mobile/`（Flutter）。`crates/smelt-mobile` 是它的 Rust 内核（设备身份、配对、目录、对话、终端、离线 SQLite 缓存），走和桌面同一套 `smelt-runtime-client`。目前尚未上架，需要自行构建，见 [`mobile/README.md`](mobile/README.md)。
 
-详细架构、目录结构与已实现功能清单见 [`docs/workspace.md`](docs/workspace.md)，产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)，远程协议细节见 [`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md)。
+架构、目录、Linux 安装、多运行时窗口、远程桌面和闲置挂起见 [`docs/workspace.md`](docs/workspace.md)。产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)。[`docs/remote-ops-roadmap.md`](docs/remote-ops-roadmap.md) 写的是已经删除的 JSON-WS 网关，不是现行协议。
 
 ## 贡献
 

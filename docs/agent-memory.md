@@ -8,8 +8,8 @@
 工作上的事实、外部资源在哪。同一个智能体不管在自己的目录、自动化目录还是用户项目里
 运行，读写的都是同一份记忆。
 
-非目标（第一阶段不做）：后台自动提炼与合并、向量检索、团队共享记忆、git 版本记录、
-手机端编辑。
+非目标（第一阶段不做）：后台自动提炼与合并、团队共享记忆、git 版本记录、
+手机端编辑。向量检索已做成可选的 embeddings 服务，见 5.2。
 
 ## 2. 调研结论
 
@@ -366,9 +366,9 @@ capability）。daemon 校验令牌、会话未结束后，从该会话的启动
 | `packages/pi-agent/src/memory-host.ts` | 新增：`agent.memory.*` 控制方法的客户端 |
 | `packages/pi-agent/src/memory-recall.ts` | 新增：中文分词、BM25、RRF、模型重排、重排模型选择 |
 | `packages/pi-agent/src/memory-embedding.ts` | 新增：向量服务客户端、缓存、余弦相似度 |
-| `smelt-core/src/memory_settings.rs` | 新增：向量检索配置（主库 kv `memory` 作用域） |
+| `smelt-core/src/memory_settings.rs` | 向量检索配置。存在运行时库 `memory_settings` 表（`crates/smelt-store/src/schema.rs`），不是 kv。键名在 `smelt-model/src/memory_settings.rs` |
 | `smelt-store`（schema v13） | 新增 `agent_memory_usage`、`agent_memory_provenance` 及仓储方法 |
-| `smelt-core/src/control_api.rs` | 新增 `agent.memory.*` 三个控制方法 |
+| `smelt-model` 的 `control_api`（`smelt-core` 再导出；没有 `smelt-core/src/control_api.rs`） | `agent.memory.*`。方法名在 `crates/smelt-runtime-client/src/protocol/control.rs` 的 `define_control_methods!` |
 | `smeltd/src/agent_memory_control.rs` | 新增：认证会话并代 Pi 读写记忆元数据 |
 | `smeltd/src/automation_runtime.rs` | 自动化启动带 `SMELT_AGENT_UNATTENDED=1` |
 | `smelt-store`（schema v14） | `agent_definition.memory_enabled` |
