@@ -41,10 +41,12 @@ jobs:
           [[ "$missing" == 0 ]] || { echo "打包链路文件不完整，终止。"; exit 1; }
           echo "✅ 打包所需文件齐全"
 
-      # tag 去掉 v 前缀，必须与 Cargo.toml 的 version 一致，避免版本号漂移。
+      # tag 去掉 v 前缀，必须与 Cargo.toml 的 version 一致，避免版本号漂移。预发布的
+      # tag 带 -rc.1 这类后缀（见 prerelease），比对时只看后缀前面的部分。
       - name: Check tag matches Cargo.toml version
         run: |
           tag="${GITHUB_REF_NAME#v}"
+          tag="${tag%%-*}"
           crate="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           echo "tag=$tag  Cargo.toml=$crate"
           if [[ "$tag" != "$crate" ]]; then
@@ -117,11 +119,14 @@ jobs:
         run: |
           [[ -n "${KEYCHAIN_PATH:-}" ]] && security delete-keychain "$KEYCHAIN_PATH" || true
 
+      # tag 带 - 后缀（v0.9.0-rc.1）就发成预发布：不成为 Latest，一键安装默认装的
+      # releases/latest 也不会指向它（要装它得设 SMELT_VERSION）。
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: dist/Smelt.dmg
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # Linux 运行时的包（设计文档 D7「一键安装」）：两种架构各在对应架构的 runner 上原生构建，
   # 不交叉编译。在 Ubuntu 22.04 容器里编，链接的 glibc 是 2.35，Debian 12+、Ubuntu 22.04+
@@ -193,3 +198,4 @@ jobs:
             dist/smeltd-*.tar.gz
             dist/SHA256SUMS
             dist/install.sh
+          prerelease: ${{ contains(github.ref_name, '-') }}
