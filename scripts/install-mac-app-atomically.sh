@@ -140,7 +140,7 @@ main() {
     echo "✗ 拒绝非 .app 或 /Applications 之外的安装目标：$TARGET" >&2
     exit 2
   fi
-  for executable in smelt smeltd smelt-notify smelt-agent-mcp; do
+  for executable in smelt smeltd smelt-notify; do
     if [[ ! -x "$SOURCE/Contents/MacOS/$executable" ]]; then
       echo "✗ App 缺少可执行文件：Contents/MacOS/$executable" >&2
       exit 1

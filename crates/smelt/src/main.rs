@@ -4696,9 +4696,6 @@ fn main() {
         if let Err(error) = settings::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
-        if let Err(error) = settings::sync_bundled_smelt_agent_mcp() {
-            eprintln!("[workspace] 同步 smelt-agent-mcp 失败：{error}");
-        }
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
         settings::start_agent_host_load(cx, |cx| {

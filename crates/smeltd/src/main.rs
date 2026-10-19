@@ -147,7 +147,6 @@ mod handoff_v2;
 mod history_control;
 #[cfg(target_os = "macos")]
 mod menubar;
-mod peer_messaging;
 mod pi_control;
 use devices::Principal;
 mod program_status;
@@ -820,7 +819,7 @@ fn new_test_workspace_menu() -> WorkspaceMenuStore {
 
 #[cfg(test)]
 pub(crate) fn new_event_hub() -> EventHubHandle {
-    event_hub::DaemonEventHub::in_memory()
+    event_hub::DaemonEventHub::new().unwrap()
 }
 
 /// 已发布身份目录。只在 main() 里初始化一次；测试默认不初始化，
@@ -2110,9 +2109,8 @@ fn main() {
     }
 
     let path = sock_path();
-    // EventHub 的实时连接列表不参与无缝升级交接；每个进程从空列表开始，
-    // durable log/cursor 则复用 smelt.sqlite3。
-    let event_hub = match event_hub::DaemonEventHub::open_default() {
+    // EventHub 的实时连接列表不参与无缝升级交接；每个进程从空列表开始。
+    let event_hub = match event_hub::DaemonEventHub::new() {
         Ok(event_hub) => event_hub,
         Err(error) => {
             eprintln!("[event-hub] 初始化失败，守护退出：{error}");
@@ -2224,10 +2222,8 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
     // SAFETY：fd 有效性刚校验过，且该号只属于这次 import（predecessor 传参保证）。
     let sock = unsafe { UnixStream::from_raw_fd(sock_fd) };
 
-    // store 照常 open（含迁移——tripwire 在 predecessor 侧守回滚，见
-    // store_migrated_since）。open 失败则直接 exit（ABORT 都发不出，
-    // predecessor 见 EOF 回滚；store 未被动过，无迁移之忧）。
-    let event_hub = match event_hub::DaemonEventHub::open_default() {
+    // 建不起来则直接 exit（ABORT 都发不出，predecessor 见 EOF 回滚）。
+    let event_hub = match event_hub::DaemonEventHub::new() {
         Ok(event_hub) => event_hub,
         Err(error) => {
             eprintln!("[event-hub] import 初始化失败，退出：{error}");
@@ -2522,7 +2518,6 @@ struct ValidatedHostedAcpHandoff {
     cwd: Option<String>,
     launch: smelt_core::agent_kind::ConversationLaunchSpec,
     runtime_spec_fingerprint: Option<String>,
-    agent_mcp: bool,
     agent_token: String,
     conversation_binding: Option<smelt_core::conversation::ConversationBinding>,
     pending_host_bytes: Vec<u8>,
@@ -2710,10 +2705,6 @@ fn validate_hosted_acp_handoff_item(
         .filter(|token| !token.is_empty())
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-    let agent_mcp = item["agent_mcp"].as_bool().unwrap_or(false)
-        && item["agent_token"]
-            .as_str()
-            .is_some_and(|token| !token.is_empty());
     let pending_host_bytes = match item.get("pending_host_bytes") {
         None | Some(serde_json::Value::Null) => Vec::new(),
         Some(value) => {
@@ -2738,7 +2729,6 @@ fn validate_hosted_acp_handoff_item(
             .as_str()
             .filter(|value| !value.is_empty())
             .map(String::from),
-        agent_mcp,
         agent_token,
         conversation_binding: item
             .get("conversation_binding")
@@ -2921,7 +2911,6 @@ fn resume_hosted_acp_handoff_item(
         cwd,
         launch,
         runtime_spec_fingerprint,
-        agent_mcp,
         agent_token,
         conversation_binding,
         pending_host_bytes,
@@ -2953,7 +2942,6 @@ fn resume_hosted_acp_handoff_item(
         instance,
         cwd: cwd.clone(),
         launch: Some(launch.command.clone()),
-        agent_mcp,
         agent_token,
         ..Default::default()
     }));
@@ -3292,10 +3280,6 @@ pub(crate) fn resume_from_value(
             .filter(|token| !token.is_empty())
             .map(String::from)
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        let agent_mcp = item["agent_mcp"].as_bool().unwrap_or(false)
-            && item["agent_token"]
-                .as_str()
-                .is_some_and(|token| !token.is_empty());
         // handoff 文件理论上不会有重复 ID，但它属于可损坏的外部输入。沿用正常
         // open 的 reserve/commit 协议，后一个条目绝不能覆盖已经恢复的 runtime。
         let (slot, created) = sessions.reserve(id);
@@ -3316,7 +3300,6 @@ pub(crate) fn resume_from_value(
             instance,
             cwd: cwd.clone(),
             launch: launch.clone(),
-            agent_mcp,
             agent_token,
             ..Default::default()
         }));
@@ -3512,17 +3495,12 @@ pub(crate) fn resume_from_value(
             .filter(|token| !token.is_empty())
             .map(String::from)
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        let agent_mcp = item["agent_mcp"].as_bool().unwrap_or(false)
-            && item["agent_token"]
-                .as_str()
-                .is_some_and(|token| !token.is_empty());
         let instance = next_session_instance();
         let state = Arc::new(Mutex::new(SessionState {
             id: id.clone(),
             instance,
             cwd: cwd.clone(),
             launch: Some(launch.command.clone()),
-            agent_mcp,
             agent_token,
             ..Default::default()
         }));
@@ -3749,7 +3727,6 @@ fn handle_upgrade(
     req: &serde_json::Value,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    event_hub: &EventHubHandle,
     listen_fd: RawFd,
 ) {
     let mut c = conn;
@@ -3757,24 +3734,6 @@ fn handle_upgrade(
     // （不返回）或失败回滚结束。这样快照里不会漏掉已经 fork、但尚未把 pid/fd
     // 发布到 ConversationHandle.stdio 的 ACP 子进程。
     let _spawn_gate = acquire_upgrade_spawn_gate(&SPAWN_GATE);
-
-    // 跨会话消息投递不能跨 exec；升级期间封住新的总线操作，已经进入投递的消息
-    // 完成后再升级，避免 MCP helper 的 socket 响应落到已替换的 daemon 上。
-    let _peer_messaging_upgrade = match peer_messaging::begin_upgrade() {
-        Ok(guard) => guard,
-        Err(active_operations) => {
-            let _ = smelt_runtime_client::protocol::write_json_line(
-                &mut c,
-                &serde_json::json!({
-                    "ok": false,
-                    "busy": true,
-                    "err": "cross-agent 请求仍在进行，请等待其完成后重试升级",
-                    "peer_messaging_operations": active_operations,
-                }),
-            );
-            return;
-        }
-    };
 
     // 独立 session host 的 SDK future 不穿过 exec，只交接控制 socket，所以活跃
     // 回合不会出现在 blockers。这里的屏障仅服务从旧版 handoff 恢复、尚未迁入
@@ -3825,7 +3784,7 @@ fn handle_upgrade(
     let pre_schema = handoff_v2::predecessor::store_schema_before();
     let outcome =
         handoff_v2::predecessor::with_snapshot(sessions, acp_sessions, listen_fd, |snapshot| {
-            handoff_v2::predecessor::run_transaction(&exe, &snapshot.staged, event_hub)
+            handoff_v2::predecessor::run_transaction(&exe, &snapshot.staged)
         });
     match outcome {
         handoff_v2::predecessor::TransactionOutcome::Committed => {
@@ -3989,12 +3948,6 @@ fn launch_program(launch: &str) -> Option<&str> {
     None
 }
 
-fn launch_agent_kind(launch: &str) -> Option<smelt_core::agent_kind::ConversationAgentKind> {
-    let program = launch_program(launch)?;
-    smelt_core::agent_kind::ConversationAgentKind::from_id(program)
-        .or_else(|| smelt_core::agent_kind::ConversationAgentKind::from_command_loose(program))
-}
-
 fn launch_terminal_agent_kind(launch: &str) -> Option<smelt_core::agent_kind::TerminalAgentKind> {
     let program = launch_program(launch)?;
     smelt_core::agent_kind::TerminalAgentKind::ALL
@@ -4025,150 +3978,6 @@ fn launch_with_terminal_status_bridge(launch: &str, extension: &std::path::Path)
     }
 }
 
-fn launch_with_agent_mcp(launch: &str, session_id: &str, agent_token: &str) -> (String, bool) {
-    if !smelt_core::agent_bus::cross_agent_enabled() {
-        return (launch.to_string(), false);
-    }
-    let Some(agent) = launch_agent_kind(launch) else {
-        return (launch.to_string(), false);
-    };
-    let executable_path = smelt_core::agent_bus::mcp_executable_path();
-    if !executable_path.is_file() {
-        return (launch.to_string(), false);
-    }
-    let executable = executable_path.to_string_lossy().into_owned();
-    let socket = sock_path().to_string_lossy().into_owned();
-    match agent.terminal_mcp_inject() {
-        smelt_core::agent_kind::TerminalMcpInject::McpConfigJson => {
-            let config =
-                smelt_mcp_server_json(&executable, session_id, agent_token, &socket, false);
-            (
-                format!("{launch} --mcp-config {}", shell_quote(&config.to_string())),
-                true,
-            )
-        }
-        smelt_core::agent_kind::TerminalMcpInject::CodexToml => {
-            let executable = serde_json::to_string(&executable)
-                .unwrap_or_else(|_| "\"smelt-agent-mcp\"".to_string());
-            let session_id =
-                serde_json::to_string(session_id).unwrap_or_else(|_| "\"\"".to_string());
-            let agent_token =
-                serde_json::to_string(agent_token).unwrap_or_else(|_| "\"\"".to_string());
-            let socket = serde_json::to_string(&socket).unwrap_or_else(|_| "\"\"".to_string());
-            let config = format!(
-                "{{ command = {executable}, env = {{ SMELT_SESSION_ID = {session_id}, SMELT_AGENT_TOKEN = {agent_token}, SMELT_SOCK = {socket} }}, tool_timeout_sec = 610 }}"
-            );
-            (
-                format!(
-                    "{launch} -c {}",
-                    shell_quote(&format!("mcp_servers.smelt={config}"))
-                ),
-                true,
-            )
-        }
-        smelt_core::agent_kind::TerminalMcpInject::AdditionalMcpConfigJson => {
-            let config = smelt_mcp_server_json(&executable, session_id, agent_token, &socket, true);
-            (
-                format!(
-                    "{launch} --additional-mcp-config {}",
-                    shell_quote(&config.to_string())
-                ),
-                true,
-            )
-        }
-        smelt_core::agent_kind::TerminalMcpInject::OpenCodeConfigContent => (
-            launch_with_opencode_mcp(launch, &executable, session_id, agent_token, &socket),
-            true,
-        ),
-        smelt_core::agent_kind::TerminalMcpInject::None => (launch.to_string(), false),
-    }
-}
-
-fn launch_with_opencode_mcp(
-    launch: &str,
-    executable: &str,
-    session_id: &str,
-    agent_token: &str,
-    socket: &str,
-) -> String {
-    let config = opencode_mcp_config_json(executable, session_id, agent_token, socket);
-    format!(
-        "OPENCODE_CONFIG_CONTENT={} {launch}",
-        shell_quote(&config.to_string())
-    )
-}
-
-/// OpenCode 的进程级配置覆盖层。不能复用 `smelt_mcp_server_json`：OpenCode
-/// 使用自己的 `mcp.<name>` schema，且把 stdio 命令表达为 argv 数组。配置只会
-/// 放进当前启动命令的 `OPENCODE_CONFIG_CONTENT`，不会写入用户或项目配置文件。
-fn opencode_mcp_config_json(
-    executable: impl serde::Serialize,
-    session_id: &str,
-    agent_token: &str,
-    socket: impl serde::Serialize,
-) -> serde_json::Value {
-    serde_json::json!({
-        "mcp": {
-            "smelt": {
-                "type": "local",
-                "command": [executable],
-                "enabled": true,
-                "environment": {
-                    "SMELT_SESSION_ID": session_id,
-                    "SMELT_AGENT_TOKEN": agent_token,
-                    "SMELT_SOCK": socket,
-                },
-                "timeout": 610_000,
-            }
-        }
-    })
-}
-
-fn smelt_mcp_server_json(
-    executable: impl serde::Serialize,
-    session_id: &str,
-    agent_token: &str,
-    socket: impl serde::Serialize,
-    copilot_extras: bool,
-) -> serde_json::Value {
-    let mut server = serde_json::json!({
-        "type": "stdio",
-        "command": executable,
-        "args": [],
-        "env": {
-            "SMELT_SESSION_ID": session_id,
-            "SMELT_AGENT_TOKEN": agent_token,
-            "SMELT_SOCK": socket,
-        }
-    });
-    if copilot_extras {
-        server["tools"] = serde_json::json!(["*"]);
-        server["timeout"] = serde_json::json!(610_000);
-    }
-    serde_json::json!({ "mcpServers": { "smelt": server } })
-}
-
-/// 不接受 ACP `session/new` stdio MCP 的 adapter（见 `acp_accepts_session_mcp`）
-/// 把 Smelt MCP 放进独立 argv，避免 JSON 被空白分词拆开。
-fn acp_agent_mcp_cli_args(
-    launch: &smelt_core::agent_kind::ConversationLaunchSpec,
-    session_id: &str,
-    agent_token: &str,
-) -> Vec<String> {
-    let Some(agent) = launch_agent_kind(&launch.command) else {
-        return Vec::new();
-    };
-    if agent.acp_accepts_session_mcp() {
-        return Vec::new();
-    }
-    let executable_path = smelt_core::agent_bus::mcp_executable_path();
-    if !executable_path.is_file() {
-        return Vec::new();
-    }
-    let config = smelt_mcp_server_json(executable_path, session_id, agent_token, sock_path(), true);
-    vec!["--additional-mcp-config".to_string(), config.to_string()]
-}
-
 fn spawn_session(
     id: &str,
     instance: u64,
@@ -4192,17 +4001,13 @@ fn spawn_session(
     // 写进 .zshrc，只用 `-lc` 读不到，Dock 启动的 smeltd 又只有系统 PATH。
     let agent_token = uuid::Uuid::new_v4().simple().to_string();
     let status_extension = pi_status_extension_path();
-    let (injected_launch, agent_mcp) = launch
-        .map(|launch| {
-            let launch = if status_extension.is_file() {
-                launch_with_terminal_status_bridge(launch, &status_extension)
-            } else {
-                launch.to_string()
-            };
-            launch_with_agent_mcp(&launch, id, &agent_token)
-        })
-        .map(|(launch, supported)| (Some(launch), supported))
-        .unwrap_or((None, false));
+    let injected_launch = launch.map(|launch| {
+        if status_extension.is_file() {
+            launch_with_terminal_status_bridge(launch, &status_extension)
+        } else {
+            launch.to_string()
+        }
+    });
     for arg in shell_launch_args(&shell, injected_launch.as_deref()) {
         cmd.arg(arg);
     }
@@ -4247,7 +4052,6 @@ fn spawn_session(
         instance,
         cwd: cwd.map(String::from),
         launch: launch.map(String::from),
-        agent_mcp,
         agent_token,
         ..Default::default()
     }));

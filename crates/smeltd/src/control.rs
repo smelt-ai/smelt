@@ -12,8 +12,8 @@ use smelt_core::automation::{Automation, AutomationCommand, redact_automation_cr
 use smelt_core::automation_store::AutomationStore;
 use smelt_core::control_api::{
     AgentDefinitionGetResult, AgentDefinitionIdParams, AgentDefinitionListResult,
-    AgentDefinitionUpdateParams, AgentListParams, AgentMemoryRecordReadParams,
-    AgentMemoryRecordWriteParams, AgentMemorySessionParams, AgentSendParams, AutomationGetResult,
+    AgentDefinitionUpdateParams, AgentMemoryRecordReadParams,
+    AgentMemoryRecordWriteParams, AgentMemorySessionParams, AutomationGetResult,
     AutomationListResult, AutomationRunOnceResult, AutomationSetEnabledParams, SessionListResult,
 };
 use smelt_runtime_client::protocol::control::{
@@ -64,47 +64,6 @@ fn params_or_error<T: serde::de::DeserializeOwned>(
     params: serde_json::Value,
 ) -> Result<T, serde_json::Value> {
     decode_params(params).map_err(|error| error_value(control_version, request_id, error))
-}
-
-fn control_error_for_peer_messaging(
-    error: super::peer_messaging::PeerMessagingError,
-) -> ControlError {
-    let code = match error {
-        super::peer_messaging::PeerMessagingError::InvalidArgument(_) => {
-            ControlErrorCode::InvalidParams
-        }
-        super::peer_messaging::PeerMessagingError::PermissionDenied(_) => {
-            ControlErrorCode::PermissionDenied
-        }
-        super::peer_messaging::PeerMessagingError::NotFound(_) => ControlErrorCode::NotFound,
-        super::peer_messaging::PeerMessagingError::FailedPrecondition(_) => {
-            ControlErrorCode::FailedPrecondition
-        }
-        super::peer_messaging::PeerMessagingError::Conflict(_) => ControlErrorCode::Conflict,
-        super::peer_messaging::PeerMessagingError::Busy(_) => ControlErrorCode::Busy,
-        super::peer_messaging::PeerMessagingError::TemporarilyUnavailable(_) => {
-            ControlErrorCode::TemporarilyUnavailable
-        }
-        super::peer_messaging::PeerMessagingError::ResultUnknown(_) => {
-            ControlErrorCode::ResultUnknown
-        }
-        super::peer_messaging::PeerMessagingError::OperationFailed(_) => {
-            ControlErrorCode::OperationFailed
-        }
-    };
-    ControlError::new(code, error.to_string())
-}
-
-fn operation_error(
-    control_version: u16,
-    request_id: &str,
-    error: super::peer_messaging::PeerMessagingError,
-) -> serde_json::Value {
-    error_value(
-        control_version,
-        request_id,
-        control_error_for_peer_messaging(error),
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -872,17 +831,6 @@ fn dispatch_control(
                 },
             )
         }
-        ControlMethod::AgentList => {
-            let params: AgentListParams =
-                match params_or_error(control_version, &request_id, params) {
-                    Ok(params) => params,
-                    Err(response) => return response,
-                };
-            match super::peer_messaging::list_agents(&params, sessions, acp_sessions) {
-                Ok(result) => success_value(control_version, &request_id, result),
-                Err(error) => operation_error(control_version, &request_id, error),
-            }
-        }
         ControlMethod::AgentMemoryMeta => {
             let params: AgentMemorySessionParams =
                 match params_or_error(control_version, &request_id, params) {
@@ -914,17 +862,6 @@ fn dispatch_control(
             match super::agent_memory_control::record_write(&params, acp_sessions) {
                 Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
                 Err(error) => error_value(control_version, request_id, error),
-            }
-        }
-        ControlMethod::AgentSend => {
-            let params: AgentSendParams =
-                match params_or_error(control_version, &request_id, params) {
-                    Ok(params) => params,
-                    Err(response) => return response,
-                };
-            match super::peer_messaging::send_message(&params, sessions, acp_sessions, event_hub) {
-                Ok(result) => success_value(control_version, &request_id, result),
-                Err(error) => operation_error(control_version, &request_id, error),
             }
         }
         ControlMethod::AgentDefinitionList => {
@@ -1567,50 +1504,5 @@ mod tests {
             panic!("unknown method should fail");
         };
         assert_eq!(error.code, ControlErrorCode::MethodNotFound);
-    }
-
-    #[test]
-    fn peer_messaging_errors_keep_machine_readable_categories() {
-        let cases = [
-            (
-                super::super::peer_messaging::PeerMessagingError::InvalidArgument(
-                    "bad input".into(),
-                ),
-                ControlErrorCode::InvalidParams,
-            ),
-            (
-                super::super::peer_messaging::PeerMessagingError::PermissionDenied(
-                    "bad token".into(),
-                ),
-                ControlErrorCode::PermissionDenied,
-            ),
-            (
-                super::super::peer_messaging::PeerMessagingError::NotFound("missing target".into()),
-                ControlErrorCode::NotFound,
-            ),
-            (
-                super::super::peer_messaging::PeerMessagingError::Busy("target busy".into()),
-                ControlErrorCode::Busy,
-            ),
-            (
-                super::super::peer_messaging::PeerMessagingError::TemporarilyUnavailable(
-                    "daemon upgrading".into(),
-                ),
-                ControlErrorCode::TemporarilyUnavailable,
-            ),
-            (
-                super::super::peer_messaging::PeerMessagingError::ResultUnknown(
-                    "delivery result unknown".into(),
-                ),
-                ControlErrorCode::ResultUnknown,
-            ),
-        ];
-
-        for (domain_error, expected_code) in cases {
-            assert_eq!(
-                control_error_for_peer_messaging(domain_error).code,
-                expected_code
-            );
-        }
     }
 }

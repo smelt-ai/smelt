@@ -4,8 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use std::{fmt, str::FromStr};
 
-pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 1;
-pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 1;
+/// v2：跨 Agent 消息下线，持久投递随之删掉（它是唯一的使用者）：订阅不再声明 `delivery`、
+/// 不带 `cursor`，没有 ack / nack 和 `cursor` 消息，`SessionStateChanged` 去掉 `agent_mcp`。
+/// 载荷都是 `deny_unknown_fields`，新旧两边谁也解不了谁，所以整条事件协议升版，在订阅
+/// 握手时就拦住。
+pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 2;
+pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 2;
 
 pub const CORE_PROJECTION_VERSION: u16 = 1;
 /// v2 起 SessionStateChanged 带 hook 检测到的 provider，v3 起再带 provider 自己的
@@ -20,7 +24,6 @@ pub const CORE_TOPIC_SESSION_REMOVED: &str = "session.removed";
 pub const CORE_TOPIC_REMOTE_SESSIONS_CHANGED: &str = "remote_sessions.changed";
 pub const CORE_TOPIC_WORKSPACE_MENU_CHANGED: &str = "workspace_menu.changed";
 pub const CORE_TOPIC_AUTOMATIONS_CHANGED: &str = "automations.changed";
-pub const CORE_TOPIC_AGENT_MESSAGE_DELIVERED: &str = "agent.message_delivered";
 /// 有人要看一段 daemon 里还没在跑的对话（典型是 daemon 冷重启后手机点开）。
 /// 对话的启动规格归桌面端所有，daemon 只能把请求转给它。
 pub const CORE_TOPIC_CONVERSATION_WAKE_REQUESTED: &str = "conversation.wake_requested";
@@ -40,7 +43,6 @@ pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_REMOTE_SESSIONS_READ: &str = "remote_sessions.read";
 pub const CORE_CAPABILITY_WORKSPACE_READ: &str = "workspace.read";
 pub const CORE_CAPABILITY_AUTOMATION_READ: &str = "automation.read";
-pub const CORE_CAPABILITY_AGENT_MESSAGE_READ: &str = "agent.message.read";
 /// 接收对话唤醒请求。只有持有对话启动规格的一方（桌面端）该拿这项能力：
 /// daemon 靠「有没有人订阅」判断请求能不能被兑现。
 pub const CORE_CAPABILITY_CONVERSATION_WAKE: &str = "conversation.wake";
@@ -103,7 +105,6 @@ macro_rules! string_id {
 
 string_id!(EventId);
 string_id!(CorrelationId);
-string_id!(CommandId);
 string_id!(PluginId);
 string_id!(SubscriptionId);
 
@@ -326,13 +327,6 @@ pub struct EventEnvelope<P> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeliveryClass {
-    Durable,
-    Ephemeral,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum DataSensitivity {
     Public,
     Internal,
@@ -348,7 +342,6 @@ pub struct SnapshotKind(pub String);
 pub struct TopicDescriptor {
     pub topic: Topic,
     pub schema_version: u16,
-    pub delivery: DeliveryClass,
     pub required_subscribe_capability: Capability,
     pub required_publish_capability: Option<Capability>,
     pub sensitivity: DataSensitivity,
@@ -389,7 +382,6 @@ pub struct SessionStateChanged {
     /// 客户端据此把会话对上 provider 的历史存档（改名、显示名跟随对话）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
-    pub agent_mcp: bool,
     pub title: Option<String>,
     pub phase: CoreSessionPhase,
     #[serde(rename = "phase_since")]
@@ -486,19 +478,9 @@ pub struct AppearanceChangeRequested {
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentMessageDelivered {
-    pub message_id: String,
-    pub source_session_id: String,
-    pub target_session_id: String,
-    pub delivered_at_ms: u64,
-}
-
 pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError> {
     fn descriptor(
         topic: &str,
-        delivery: DeliveryClass,
         capability: &str,
         snapshot: Option<&str>,
         max_payload_bytes: usize,
@@ -506,7 +488,6 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
         Ok(TopicDescriptor {
             topic: Topic::new(topic)?,
             schema_version: core_topic_schema_version(topic),
-            delivery,
             required_subscribe_capability: Capability::new(capability)?,
             required_publish_capability: None,
             sensitivity: DataSensitivity::Internal,
@@ -518,63 +499,48 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
     Ok(vec![
         descriptor(
             CORE_TOPIC_SESSION_STATE_CHANGED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_SESSION_READ,
             Some(CORE_SNAPSHOT_SESSIONS),
             64 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_SESSION_REMOVED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_SESSION_READ,
             Some(CORE_SNAPSHOT_SESSIONS),
             16 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_REMOTE_SESSIONS_READ,
             Some(CORE_SNAPSHOT_REMOTE_SESSIONS),
             512 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_WORKSPACE_MENU_CHANGED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_WORKSPACE_READ,
             Some(CORE_SNAPSHOT_WORKSPACE_MENU),
             1024 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_AUTOMATIONS_CHANGED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_AUTOMATION_READ,
             Some(CORE_SNAPSHOT_AUTOMATIONS),
             1024 * 1024,
         )?,
         descriptor(
-            CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-            DeliveryClass::Durable,
-            CORE_CAPABILITY_AGENT_MESSAGE_READ,
-            None,
-            16 * 1024,
-        )?,
-        descriptor(
             CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_CONVERSATION_WAKE,
             None,
             4 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_APPEARANCE_CONTROL,
             None,
             4 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_PROJECT_CHANGED,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_WORKSPACE_READ,
             None,
             4 * 1024,
@@ -582,14 +548,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
         // 正文最多 4096 字节（扫描器上限），JSON 转义后可能翻倍。
         descriptor(
             CORE_TOPIC_TERMINAL_NOTIFICATION,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_SESSION_READ,
             None,
             16 * 1024,
         )?,
         descriptor(
             CORE_TOPIC_TERMINAL_PROGRESS,
-            DeliveryClass::Ephemeral,
             CORE_CAPABILITY_SESSION_READ,
             None,
             4 * 1024,
@@ -635,7 +599,6 @@ impl ProtocolRange {
 pub struct SubscriptionDeclaration {
     pub id: SubscriptionId,
     pub topics: Vec<Topic>,
-    pub delivery: DeliveryClass,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -643,8 +606,6 @@ pub struct SubscriptionDeclaration {
 pub struct SubscribeRequest {
     pub protocol: ProtocolRange,
     pub subscription: SubscriptionDeclaration,
-    #[serde(default)]
-    pub cursor: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -679,51 +640,9 @@ pub enum SubscribeMessage<P = serde_json::Value> {
         dropped: u64,
         resume_after: Option<u64>,
     },
-    Cursor {
-        last_acked_sequence: u64,
-    },
     Error {
         code: SubscribeErrorCode,
         message: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Ack {
-    pub subscription_id: SubscriptionId,
-    pub sequence: u64,
-    pub event_id: EventId,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NackDisposition {
-    Retryable,
-    Permanent,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Nack {
-    pub subscription_id: SubscriptionId,
-    pub sequence: u64,
-    pub event_id: EventId,
-    pub disposition: NackDisposition,
-    pub error_code: String,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SubscribeControlMessage {
-    Ack {
-        #[serde(flatten)]
-        ack: Ack,
-    },
-    Nack {
-        #[serde(flatten)]
-        nack: Nack,
     },
 }
 
@@ -794,83 +713,42 @@ mod tests {
     }
 
     #[test]
-    fn core_descriptors_are_stable_and_durable_is_explicit() {
+    fn core_descriptors_are_stable() {
         let descriptors = core_topic_descriptors().unwrap();
         let expected = [
             (
                 CORE_TOPIC_SESSION_STATE_CHANGED,
-                DeliveryClass::Ephemeral,
                 Some(CORE_SNAPSHOT_SESSIONS),
                 CORE_SESSION_STATE_SCHEMA_VERSION,
             ),
-            (
-                CORE_TOPIC_SESSION_REMOVED,
-                DeliveryClass::Ephemeral,
-                Some(CORE_SNAPSHOT_SESSIONS),
-                1,
-            ),
+            (CORE_TOPIC_SESSION_REMOVED, Some(CORE_SNAPSHOT_SESSIONS), 1),
             (
                 CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
-                DeliveryClass::Ephemeral,
                 Some(CORE_SNAPSHOT_REMOTE_SESSIONS),
                 1,
             ),
             (
                 CORE_TOPIC_WORKSPACE_MENU_CHANGED,
-                DeliveryClass::Ephemeral,
                 Some(CORE_SNAPSHOT_WORKSPACE_MENU),
                 1,
             ),
             (
                 CORE_TOPIC_AUTOMATIONS_CHANGED,
-                DeliveryClass::Ephemeral,
                 Some(CORE_SNAPSHOT_AUTOMATIONS),
                 1,
             ),
-            (
-                CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-                DeliveryClass::Durable,
-                None,
-                1,
-            ),
-            (
-                CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
-                DeliveryClass::Ephemeral,
-                None,
-                1,
-            ),
-            (
-                CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
-                DeliveryClass::Ephemeral,
-                None,
-                1,
-            ),
-            (
-                CORE_TOPIC_PROJECT_CHANGED,
-                DeliveryClass::Ephemeral,
-                None,
-                1,
-            ),
-            (
-                CORE_TOPIC_TERMINAL_NOTIFICATION,
-                DeliveryClass::Ephemeral,
-                None,
-                1,
-            ),
-            (
-                CORE_TOPIC_TERMINAL_PROGRESS,
-                DeliveryClass::Ephemeral,
-                None,
-                1,
-            ),
+            (CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, None, 1),
+            (CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED, None, 1),
+            (CORE_TOPIC_PROJECT_CHANGED, None, 1),
+            (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
+            (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
         ];
         assert_eq!(descriptors.len(), expected.len());
-        for (topic, delivery, snapshot, schema_version) in expected {
+        for (topic, snapshot, schema_version) in expected {
             let descriptor = descriptors
                 .iter()
                 .find(|descriptor| descriptor.topic.as_str() == topic)
                 .unwrap_or_else(|| panic!("missing core topic descriptor {topic}"));
-            assert_eq!(descriptor.delivery, delivery, "{topic}");
             assert_eq!(descriptor.schema_version, schema_version, "{topic}");
             assert_eq!(
                 descriptor
@@ -881,21 +759,6 @@ mod tests {
                 "{topic}"
             );
         }
-    }
-
-    #[test]
-    fn subscribe_control_messages_are_versioned_wire_values() {
-        let value = json!({
-            "type": "ack",
-            "subscription_id": "sessions",
-            "sequence": 7,
-            "event_id": "event-7"
-        });
-        let message: SubscribeControlMessage = serde_json::from_value(value).unwrap();
-        assert!(matches!(
-            message,
-            SubscribeControlMessage::Ack { ack } if ack.sequence == 7
-        ));
     }
 
     #[test]

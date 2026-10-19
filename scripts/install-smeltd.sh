@@ -20,7 +20,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROGRAMS=(smeltd smelt-notify smelt-agent-mcp)
+PROGRAMS=(smeltd smelt-notify)
 # 准备受管 Pi 运行时要调系统的 curl、unzip。
 BASE_PACKAGES=(ca-certificates curl unzip)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
@@ -319,10 +319,10 @@ user_phase() {
   SMELT_HOME="${SMELT_HOME:-$HOME/.smelt}"
   BIN="$SMELT_HOME/bin"
   mkdir -p "$BIN"
-  for program in smelt-notify smelt-agent-mcp; do
-    put 0755 "$HERE/$program" "$BIN/$program"
-  done
+  put 0755 "$HERE/smelt-notify" "$BIN/smelt-notify"
   put 0755 "$HERE/smelt-up" "$BIN/smelt-up"
+  # 跨 Agent 消息下线后留下的旧 helper。
+  rm -f "$BIN/smelt-agent-mcp"
 
   # 发布不可变映像、拨启动名（已经在跑就交接到新版本，会话保留）；有 systemd 时写用户单元
   # 并启动。

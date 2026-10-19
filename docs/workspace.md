@@ -16,7 +16,7 @@ cargo run --bin smelt
 ```
 
 > 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除。
-> 工作区二进制：`smelt`（GUI）、`smeltd`（运行时守护）、`smelt-notify` 与 `smelt-agent-mcp`
+> 工作区二进制：`smelt`（GUI）、`smeltd`（运行时守护）、`smelt-notify`
 > （`crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-iroh-connect`（iroh 调试）。
 > 没有独立的 `gateway` 或 `smelt-iroh-host`。随 App 分发的插件在 `plugins/`（gpui-shell 脚本应用）。
 > 成员列表见根目录 `Cargo.toml`。
@@ -55,7 +55,7 @@ cargo run --bin smelt
 - **`crates/smelt-client`** / **`crates/smelt-client-store`** —— 桌面客户端。后者是
   `~/.smelt/client.sqlite3`（外观、每段对话的界面状态和分屏布局、连过哪些运行时）。
 - **`crates/smelt-runtime-client`** —— 桌面和手机共用的运行时协议客户端（unix socket 与 iroh）。
-- **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify` / `smelt-agent-mcp`）：
+- **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `smelt-notify`）：
   终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、设备配对。远程不再经过网关进程。
 - **`crates/smelt-paths`** —— 统一环境路径推导（`~/.smelt`）与单用例测试隔离沙箱。
 - **`crates/smelt-sys`** —— 桌面和运行时共用的底层工具（进程等待、日志、守护映像、主机名）。没有单独的 `smelt-process-wait` crate，等待进程在这里。
@@ -64,7 +64,7 @@ cargo run --bin smelt
 - **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
 - **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
-- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 22，按字段建表，没有通用 kv）。
+- **`crates/smelt-store`** —— 运行时库 `~/.smelt/smelt.sqlite3`（schema 23，按字段建表，没有通用 kv）。
 - **`crates/smelt-pairing`** —— 桌面/移动共用的一次性配对串格式。
 - **`crates/smelt-iroh`** —— 运行时协议的 iroh 传输，另有调试二进制 `smelt-iroh-connect`。
 - **`crates/smelt-mobile`** —— 手机 Rust 内核（身份、连接、目录、对话、终端、离线缓存），经 flutter_rust_bridge 给 Flutter。
@@ -262,7 +262,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 ./install.sh --no-pair # 只安装并启动
 ```
 
-脚本要求 Linux 和 systemd。它把 `smelt-notify`、`smelt-agent-mcp` 放进 `~/.smelt/bin`，再执行 `smeltd install`（不可变映像；已经在跑就交接，会话保留）。之后：
+脚本要求 Linux 和 systemd。它把 `smelt-notify`、`smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`（不可变映像；已经在跑就交接，会话保留）。之后：
 
 ```bash
 smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码

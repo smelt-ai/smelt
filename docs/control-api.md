@@ -89,8 +89,6 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 |---|---|---|
 | `system.describe` | 只读 | 返回版本范围、方法列表和 daemon 运行信息 |
 | `session.list` | 只读 | 返回 smeltd 已发布的终端与 ACP 会话 ID |
-| `agent.list` | 只读、需能力令牌 | 返回当前 agent 可见的跨 Agent 目标 |
-| `agent.send` | 有副作用、需能力令牌 | 向目标 Agent 投递一次消息 |
 | `agent.definition.list` | 只读 | 返回产品智能体定义清单，不是运行中会话 |
 | `agent.definition.get` | 只读 | 按 id 读取一条定义 |
 | `agent.definition.create` | 有副作用 | 新建定义。可带稳定 `id`；缺省生成 UUID。重复 id 返回 `conflict` |
@@ -119,17 +117,6 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 
 CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用的 skill 安装到 `~/.agents/skills/smelt/SKILL.md`。无头机器上的安装和配对是 `smeltd install` / `smeltd pair` / `smeltd devices`，不是这组 CLI。
 
-`agent.list/send` 的 `source_session_id` 与 `source_token` 放在类型化 params 内；领域层仍会
-在提交前重新校验当前 runtime 代际和能力令牌，Control API 不绕过原有授权边界。
-`agent.send` 还要求调用方提供稳定 `command_id`。smeltd 以
-`source_session_id + command_id` 查找已完成结果。同一 ID 会绑定到
-`source_session_id + 请求的 target 原文 + message` 的 SHA-256 指纹；改变目标别名原文
-或消息后复用 ID 会返回 `conflict`，且首次查重发生在目标解析之前。
-
-`smelt_send_message` MCP tool 的 `command_id` 是可选输入。省略时 MCP server 在任何参数
-校验或传输前生成一次；显式传入时原样复用。成功、领域错误和 `result_unknown` 的
-`structuredContent` 都返回该 ID，调用方可用它查询不确定结果。内部传输重试不会换 ID。
-
 ## 版本与重试
 
 1. 服务端接受 `min_supported_version..=max_supported_version` 内的请求，并使用请求版本
@@ -138,15 +125,12 @@ CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令
    或在提升版本的同时提升 `min_supported_version`，不能假装继续兼容旧 DTO。2026-10-18
    移除 worktree 功能时删掉了 `git.worktree.*`、`git.is_dirty`，`git.repo_info` 只回当前
    分支，版本仍是 1：客户端按 `system.describe` 的方法清单判断运行时有没有要用的方法，
-   旧桌面连新运行时的 Git 面板需要升级桌面。
-2. `agent.send` 在发送前生成一次 `command_id`。响应丢失后允许用相同 ID 查询/重试；
-   不得换一个新 ID 自动重放。
-3. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
+   旧桌面连新运行时的 Git 面板需要升级桌面。v2 改了 `workspace.load` / `workspace.save`
+   的文档形状，同时删掉跨 Agent 消息的 `agent.list` / `agent.send`，两边最低版本都抬到 2。
+2. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置
    条件、冲突、忙碌和临时不可用分别返回 `invalid_params`、`permission_denied`、
    `not_found`、`failed_precondition`、`conflict`、`busy`、
-   `temporarily_unavailable`。外部 PTY/provider 副作用已发生、但 SQLite 的命令结果与
-   outbox 事实尚未提交时返回非自动重试的 `result_unknown`；无法进一步分类的投递失败
-   才使用 `operation_failed`。
+   `temporarily_unavailable`。无法进一步分类的失败才使用 `operation_failed`。
 
 ## 扩展规则
 

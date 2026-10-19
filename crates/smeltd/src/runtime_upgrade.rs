@@ -126,7 +126,7 @@ mod linux {
     use std::process::Command;
 
     /// 包里随 smeltd 一起装进 `~/.smelt/bin` 的东西，同安装脚本。smeltd 自己另走映像。
-    const HELPERS: [&str; 3] = ["smelt-notify", "smelt-agent-mcp", "smelt-up"];
+    const HELPERS: [&str; 2] = ["smelt-notify", "smelt-up"];
 
     /// 下载、解包用的临时目录，用完删掉。放在 `~/.smelt` 下：和 `~/.smelt/bin` 同一个
     /// 文件系统，`/tmp` 常是容量很小的 tmpfs。名字固定、每次先清空：交接成功时旧进程

@@ -11,20 +11,18 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 pub(crate) fn read_agent_ui_snapshot(
     connection: &Connection,
 ) -> Result<Option<AgentUiSnapshot>, StoreError> {
-    let prefs: Option<(bool, bool)> = connection
+    let hooks_enabled: Option<bool> = connection
         .query_row(
-            "SELECT hooks_enabled, cross_agent_enabled FROM agent_host_pref WHERE id = 1",
+            "SELECT hooks_enabled FROM agent_host_pref WHERE id = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .optional()?;
-    if prefs.is_none() && !agent_definitions_exist(connection)? {
+    if hooks_enabled.is_none() && !agent_definitions_exist(connection)? {
         return Ok(None);
     }
-    let (agent_hooks_enabled, cross_agent_enabled) = prefs.unwrap_or((true, true));
     Ok(Some(AgentUiSnapshot {
-        agent_hooks_enabled,
-        cross_agent_enabled,
+        agent_hooks_enabled: hooks_enabled.unwrap_or(true),
         commands: query_commands(connection)?,
         env: query_env(connection)?,
         config_memory: query_config_memory(connection)?,
@@ -54,11 +52,9 @@ pub(crate) fn write_agent_ui_prefs(
     transaction.execute("DELETE FROM agent_acp_config_memory", [])?;
     transaction.execute("DELETE FROM agent_profile", [])?;
     transaction.execute(
-        "INSERT INTO agent_host_pref(id, hooks_enabled, cross_agent_enabled) VALUES (1, ?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET
-           hooks_enabled = excluded.hooks_enabled,
-           cross_agent_enabled = excluded.cross_agent_enabled",
-        params![snapshot.agent_hooks_enabled, snapshot.cross_agent_enabled],
+        "INSERT INTO agent_host_pref(id, hooks_enabled) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET hooks_enabled = excluded.hooks_enabled",
+        params![snapshot.agent_hooks_enabled],
     )?;
     for command in &snapshot.commands {
         transaction.execute(

@@ -29,10 +29,10 @@ use agent_client_protocol::schema::v1::{
     ClientSessionCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
     ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
-    ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities, EnvVariable,
+    ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities,
     FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, McpServer as SchemaMcpServer,
-    McpServerStdio, MultiSelectItems, NewSessionRequest, Plan, PlanCapabilities, PlanEntry,
+    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest,
+    MultiSelectItems, NewSessionRequest, Plan, PlanCapabilities, PlanEntry,
     PlanEntryPriority, PlanEntryStatus, PlanUpdate, PlanUpdateContent, PromptRequest,
     PromptResponse, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
     ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
@@ -69,15 +69,8 @@ pub struct ConversationLaunch {
     /// GUI 侧会话 id，约定 `acp-` 前缀——DaemonStates 全局 map 里靠这个前缀
     /// 与 smeltd 会话共存（见 main.rs 状态转发循环的 retain）。
     pub sid: String,
-    /// daemon 为该 Smelt 会话生成的能力令牌，只注入本会话的 MCP helper。
+    /// daemon 为该 Smelt 会话生成的能力令牌，会话里的 agent 进程凭它向守护证明身份。
     pub agent_token: String,
-    /// 当前 daemon 已确认 cross-agent MCP helper 可执行；通常会把它写进 ACP
-    /// session/new / session/load，Copilot 则改走 `agent_mcp_cli_args`。
-    pub agent_mcp: bool,
-    /// 某些 ACP agent 不接受协议层的 stdio MCP（目前是 Copilot），需要把
-    /// 会话级 MCP 配置作为原样 CLI 参数传给 agent。单独保存参数，避免 JSON
-    /// 被启动命令的空白分词拆坏。
-    pub agent_mcp_cli_args: Vec<String>,
     /// 上一次连接的 agent 侧 session id：有就用 `session/load` 让 agent 重放
     /// 完整历史，重建 smeltd 的运行时消息投影。若 agent 明确报告历史不存在，
     /// 恢复 supervisor 只会对空白本地投影降级为新会话。
@@ -1123,8 +1116,6 @@ pub fn spawn_acp(
                 cwd,
                 sid,
                 agent_token,
-                agent_mcp,
-                agent_mcp_cli_args,
                 resume_session_id,
                 fork_session_id,
                 fork_cut,
@@ -1138,8 +1129,6 @@ pub fn spawn_acp(
                 cwd,
                 sid,
                 agent_token,
-                agent_mcp,
-                agent_mcp_cli_args,
                 resume_session_id,
                 fork_session_id,
                 fork_cut,
@@ -1624,11 +1613,7 @@ async fn run_connection(
         in_flight_rpc,
         shutdown_requested,
     } = sync;
-    let agent = build_agent(
-        &launch.launch,
-        &launch.ephemeral_env,
-        &launch.agent_mcp_cli_args,
-    )?;
+    let agent = build_agent(&launch.launch, &launch.ephemeral_env)?;
     let spawned = with_spawn_gate(spawn_gate.as_ref(), || {
         let mut stdio = stdio_out.lock().unwrap();
         if shutdown_requested.load(Ordering::SeqCst) {
@@ -1674,28 +1659,6 @@ async fn run_connection(
                 .map(|p| p.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "/".to_string());
-    let smelt_mcp_servers = || {
-        use_acp_mcp_servers(launch.agent_mcp, &launch.launch.command)
-            .then(|| {
-                SchemaMcpServer::Stdio(
-                    McpServerStdio::new("smelt", crate::agent_bus::mcp_executable_path()).env(
-                        vec![
-                            EnvVariable::new("SMELT_SESSION_ID", launch.sid.clone()),
-                            EnvVariable::new("SMELT_AGENT_TOKEN", launch.agent_token.clone()),
-                            EnvVariable::new(
-                                "SMELT_SOCK",
-                                crate::daemon_state::smeltd_sock_path()
-                                    .to_string_lossy()
-                                    .into_owned(),
-                            ),
-                        ],
-                    ),
-                )
-            })
-            .into_iter()
-            .collect::<Vec<_>>()
-    };
-
     let perm_tx = channels.event_tx.clone();
     let elicit_tx = channels.event_tx.clone();
     let perm_last_line = Arc::clone(&last_stdout_line);
@@ -1974,8 +1937,7 @@ async fn run_connection(
                     // session 路由，Claude 在响应前同步重放的历史不会被丢掉。
                     // 清空事件必须排在请求之前，不能等到 Ready 再清。
                     let _ = channels.event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-                    let mut load_request = LoadSessionRequest::new(sid.clone(), cwd.clone())
-                        .mcp_servers(smelt_mcp_servers());
+                    let mut load_request = LoadSessionRequest::new(sid.clone(), cwd.clone());
                     if let Some(meta) = claude_raw_sdk_meta(&launch.launch.command) {
                         load_request = load_request.meta(meta);
                     }
@@ -2029,10 +1991,7 @@ async fn run_connection(
             // 2.1 的 ActiveSession 已保留 config_options，走官方 builder
             // 就能同时拿到模型档位和 session 路由。
             let session = connection
-                .build_session_from(
-                    NewSessionRequest::new(std::path::Path::new(&cwd))
-                        .mcp_servers(smelt_mcp_servers()),
-                )
+                .build_session_from(NewSessionRequest::new(std::path::Path::new(&cwd)))
                 .block_task()
                 .start_session()
                 .await?;
@@ -2078,7 +2037,7 @@ pub fn list_acp_sessions(
             command,
             env: launch.env.clone(),
         };
-        let agent = build_agent(&resolved_launch, &BTreeMap::new(), &[])
+        let agent = build_agent(&resolved_launch, &BTreeMap::new())
             .map_err(|error| format!("构建 ACP 历史查询进程失败：{error}"))?;
         let (child_stdin, child_stdout, child_stderr, child) =
             spawn_agent_process(&agent, None, managed_bun.as_ref())
@@ -3656,7 +3615,6 @@ async fn translate_update(
 fn build_agent(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,
-    extra_args: &[String],
 ) -> Result<AcpAgentConfig, agent_client_protocol::Error> {
     // 查找命令用 login PATH + 一批常见 CLI 安装目录兜底。为什么要兜底：
     // login_env 的探测走 `-ilc`（交互 login，能读到 ~/.zshrc 里的 PATH），但
@@ -3673,8 +3631,7 @@ fn build_agent(
     // 这里的 PATH 注入用的正是同一条路。真正要做的是"先把这些前缀跳过去找到
     // 真正的程序名"，不然会把 `CLAUDE_CONFIG_DIR=...` 整个当成程序名去查 PATH，
     // 报"未找到命令"（这是之前真实的行为，不是假设）。
-    let args =
-        build_agent_args_with_ephemeral_env(launch, ephemeral_env, &search_path, extra_args)?;
+    let args = build_agent_args_with_ephemeral_env(launch, ephemeral_env, &search_path)?;
     Ok(AcpAgent::from_args(args.iter().map(String::as_str))?.into_config())
 }
 
@@ -3759,14 +3716,13 @@ fn build_agent_args(
     launch: &ConversationLaunchSpec,
     search_path: &str,
 ) -> Result<Vec<String>, agent_client_protocol::Error> {
-    build_agent_args_with_ephemeral_env(launch, &BTreeMap::new(), search_path, &[])
+    build_agent_args_with_ephemeral_env(launch, &BTreeMap::new(), search_path)
 }
 
 fn build_agent_args_with_ephemeral_env(
     launch: &ConversationLaunchSpec,
     ephemeral_env: &BTreeMap<String, String>,
     search_path: &str,
-    extra_args: &[String],
 ) -> Result<Vec<String>, agent_client_protocol::Error> {
     let mut tokens = launch.command.split_whitespace();
     let mut user_env = BTreeMap::<String, String>::new();
@@ -3837,20 +3793,7 @@ fn build_agent_args_with_ephemeral_env(
             .map(|(name, value)| format!("{name}={value}")),
     );
     args.extend(resolved);
-    args.extend(extra_args.iter().cloned());
     Ok(args)
-}
-
-fn is_copilot_launch(command: &str) -> bool {
-    crate::agent_kind::ConversationAgentKind::from_command_loose(command)
-        == Some(crate::agent_kind::ConversationAgentKind::Copilot)
-}
-
-fn use_acp_mcp_servers(agent_mcp: bool, command: &str) -> bool {
-    // Copilot rejects stdio MCP servers supplied in ACP session/new; its supported
-    // path is --additional-mcp-config on the process. Codex ACP receives the
-    // protocol-level config and forwards it to its own app-server session config.
-    agent_mcp && !is_copilot_launch(command)
 }
 
 /// 官方 ACP 适配器有时会携带自己的 agent 运行时；优先使用扩展 PATH 中找到的
@@ -5623,7 +5566,7 @@ mod spawn_gate_tests {
 mod path_resolve_tests {
     use super::{
         build_agent_args, build_agent_args_with_ephemeral_env, inject_local_adapter_cli_path,
-        is_copilot_launch, resolve_in_path, use_acp_mcp_servers,
+        resolve_in_path,
     };
     use crate::agent_kind::ConversationLaunchSpec;
     use std::collections::BTreeMap;
@@ -5703,39 +5646,12 @@ mod path_resolve_tests {
         let ephemeral =
             BTreeMap::from([("PLUGIN_TOKEN".to_string(), "remote-task-value".to_string())]);
 
-        let args = build_agent_args_with_ephemeral_env(&launch, &ephemeral, "/bin:/usr/bin", &[])
+        let args = build_agent_args_with_ephemeral_env(&launch, &ephemeral, "/bin:/usr/bin")
             .expect("launch args");
 
         assert!(args.contains(&"PLUGIN_TOKEN=remote-task-value".to_string()));
         assert!(args.contains(&"UNCHANGED=yes".to_string()));
         assert_eq!(launch.env["PLUGIN_TOKEN"], "stored-value");
-    }
-
-    #[test]
-    fn extra_agent_args_remain_single_argv_values() {
-        let config =
-            r#"{"mcpServers":{"smelt":{"type":"stdio","command":"/tmp/smelt-agent-mcp"}}}"#;
-        let args = build_agent_args_with_ephemeral_env(
-            &ConversationLaunchSpec::from_command("sh --version"),
-            &BTreeMap::new(),
-            "/bin:/usr/bin",
-            &["--additional-mcp-config".into(), config.into()],
-        )
-        .expect("launch args");
-        assert_eq!(args[args.len() - 2], "--additional-mcp-config");
-        assert_eq!(args.last().map(String::as_str), Some(config));
-    }
-
-    #[test]
-    fn copilot_uses_cli_mcp_injection_instead_of_acp_stdio_servers() {
-        assert!(is_copilot_launch("copilot --acp"));
-        assert!(use_acp_mcp_servers(true, "claude --acp"));
-        assert!(!use_acp_mcp_servers(true, "copilot --acp"));
-        assert!(use_acp_mcp_servers(
-            true,
-            "bunx @agentclientprotocol/codex-acp"
-        ));
-        assert!(!use_acp_mcp_servers(false, "copilot --acp"));
     }
 
     #[cfg(unix)]
@@ -6975,8 +6891,6 @@ mod session_load_replay_tests {
                 cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
                 sid: "acp-load-order".to_string(),
                 agent_token: String::new(),
-                agent_mcp: false,
-                agent_mcp_cli_args: Vec::new(),
                 resume_session_id: Some(SessionId::new("session-from-disk")),
                 fork_session_id: None,
                 fork_cut: None,
@@ -7087,8 +7001,6 @@ mod dsh_live_tests {
                 cwd: Some("/tmp".to_string()),
                 sid: "acp-live-test".to_string(),
                 agent_token: String::new(),
-                agent_mcp: false,
-                agent_mcp_cli_args: Vec::new(),
                 resume_session_id: None,
                 fork_session_id: None,
                 fork_cut: None,
@@ -7176,8 +7088,6 @@ mod dsh_live_tests {
                 cwd: Some("/tmp".to_string()),
                 sid: "acp-live-order".to_string(),
                 agent_token: String::new(),
-                agent_mcp: false,
-                agent_mcp_cli_args: Vec::new(),
                 resume_session_id: None,
                 fork_session_id: None,
                 fork_cut: None,

@@ -2,31 +2,22 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    thread,
-    time::Duration,
+    sync::{Arc, Mutex},
 };
 
 use smelt_event_bus::{
-    Delivery, EventBusError, EventHub, MemoryEventStore, Snapshot, SnapshotProvider, StoredEvent,
-    TopicRegistry,
+    Delivery, EventBusError, EventHub, Snapshot, SnapshotProvider, StoredEvent, TopicRegistry,
 };
 use smelt_event_protocol::{
-    AgentMessageDelivered, AggregateRef, CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION,
+    AggregateRef, CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION,
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
-    CORE_SNAPSHOT_WORKSPACE_MENU, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+    CORE_SNAPSHOT_WORKSPACE_MENU, CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
     CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_MENU_CHANGED, Capability,
-    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId, DeliveryClass,
+    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
     EventEnvelope, EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged,
     SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
-use smelt_store::{PeerMessageCommandResult, PeerMessageCommitOutcome};
 
 use super::{
     AutomationFile, DaemonProjectionSeed, Phase, RemoteSessionSnapshot, SessionState,
@@ -34,8 +25,6 @@ use super::{
 };
 
 const MAILBOX_CAPACITY: usize = 256;
-const DISPATCH_BACKOFF_START: Duration = Duration::from_millis(250);
-const DISPATCH_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
 pub(crate) type EventHubHandle = Arc<DaemonEventHub>;
 
@@ -113,84 +102,13 @@ fn projection_value(projection: &Option<CoreProjectionEvent>) -> (u64, serde_jso
     }
 }
 
-struct DurableDispatcher {
-    stop: Arc<AtomicBool>,
-    wake: mpsc::Sender<()>,
-    thread: Mutex<Option<thread::JoinHandle<()>>>,
-}
-
-#[derive(Clone)]
-struct PeerMessageLedgerEntry {
-    result: PeerMessageCommandResult,
-    event: EventEnvelope<serde_json::Value>,
-    persisted: bool,
-}
-
 pub(crate) struct DaemonEventHub {
     hub: Arc<EventHub>,
     projection: Arc<Mutex<ProjectionState>>,
-    store: Option<Arc<smelt_store::Store>>,
-    dispatcher: Option<DurableDispatcher>,
-    peer_messages:
-        Arc<Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>>,
-    allow_in_memory_peer_messages: bool,
 }
 
 impl DaemonEventHub {
-    pub(crate) fn open_default() -> Result<EventHubHandle, String> {
-        let store = match smelt_paths::smelt_home() {
-            Some(root) => match std::fs::create_dir_all(&root) {
-                Ok(()) => {
-                    let database = root.join(smelt_store::DATABASE_FILE_NAME);
-                    match smelt_store::Store::open_or_create(&database) {
-                        Ok(store) => Some(Arc::new(store)),
-                        Err(error) => {
-                            log_durable_unavailable(format!(
-                                "EventHub Store 打开失败（{}）：{error}",
-                                database.display()
-                            ));
-                            None
-                        }
-                    }
-                }
-                Err(error) => {
-                    log_durable_unavailable(format!(
-                        "EventHub Store 目录创建失败（{}）：{error}",
-                        root.display()
-                    ));
-                    None
-                }
-            },
-            None => {
-                log_durable_unavailable(
-                    "无法定位 home 目录，不能打开 ~/.smelt/smelt.sqlite3".to_string(),
-                );
-                None
-            }
-        };
-        Self::build(store)
-    }
-
-    pub(crate) fn in_memory() -> EventHubHandle {
-        let mut registry = TopicRegistry::default();
-        for descriptor in smelt_event_protocol::core_topic_descriptors().unwrap() {
-            registry.register(descriptor).unwrap();
-        }
-        let projection = Arc::new(Mutex::new(ProjectionState::default()));
-        let store = Arc::new(MemoryEventStore::default());
-        let hub = Arc::new(EventHub::new(registry, Some(store)));
-        register_snapshot_providers(&hub, &projection).unwrap();
-        Arc::new(Self {
-            hub,
-            projection,
-            store: None,
-            dispatcher: None,
-            peer_messages: Arc::new(Mutex::new(BTreeMap::new())),
-            allow_in_memory_peer_messages: true,
-        })
-    }
-
-    fn build(store: Option<Arc<smelt_store::Store>>) -> Result<EventHubHandle, String> {
+    pub(crate) fn new() -> Result<EventHubHandle, String> {
         let mut registry = TopicRegistry::default();
         for descriptor in smelt_event_protocol::core_topic_descriptors()
             .map_err(|error| format!("invalid core topic descriptor: {error}"))?
@@ -199,47 +117,11 @@ impl DaemonEventHub {
                 .register(descriptor)
                 .map_err(|error| format!("register core topic: {error}"))?;
         }
-        let event_store = store
-            .as_ref()
-            .map(|store| Arc::clone(store) as Arc<dyn smelt_event_bus::EventStore>);
-        let hub = Arc::new(EventHub::new(registry, event_store));
+        let hub = Arc::new(EventHub::new(registry));
         let projection = Arc::new(Mutex::new(ProjectionState::default()));
-        let peer_messages = Arc::new(Mutex::new(BTreeMap::new()));
         register_snapshot_providers(&hub, &projection)
             .map_err(|error| format!("register core snapshot provider: {error}"))?;
-
-        let dispatcher = store.as_ref().map(|store| {
-            let stop = Arc::new(AtomicBool::new(false));
-            let (wake, wake_rx) = mpsc::channel();
-            store.set_durable_notify(wake.clone());
-            hub.set_work_notify(wake.clone());
-            let worker_stop = Arc::clone(&stop);
-            let worker_store = Arc::clone(store);
-            let worker_hub = Arc::clone(&hub);
-            let worker_peer_messages = Arc::clone(&peer_messages);
-            let worker = thread::spawn(move || {
-                durable_dispatch_loop(
-                    worker_stop,
-                    wake_rx,
-                    worker_store,
-                    worker_hub,
-                    worker_peer_messages,
-                );
-            });
-            DurableDispatcher {
-                stop,
-                wake,
-                thread: Mutex::new(Some(worker)),
-            }
-        });
-        Ok(Arc::new(Self {
-            hub,
-            projection,
-            store,
-            dispatcher,
-            peer_messages,
-            allow_in_memory_peer_messages: false,
-        }))
+        Ok(Arc::new(Self { hub, projection }))
     }
 
     pub(crate) fn runtime(&self) -> &Arc<EventHub> {
@@ -596,104 +478,6 @@ impl DaemonEventHub {
         Ok(true)
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish_agent_message_delivered(
-        &self,
-        message_id: &str,
-        source_session_id: &str,
-        target_session_id: &str,
-    ) -> Result<Arc<StoredEvent>, EventBusError> {
-        let delivered_at_ms = now_ms();
-        let payload = AgentMessageDelivered {
-            message_id: message_id.to_string(),
-            source_session_id: source_session_id.to_string(),
-            target_session_id: target_session_id.to_string(),
-            delivered_at_ms,
-        };
-        self.publish_core(
-            CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-            serde_json::to_value(payload).map_err(|error| {
-                EventBusError::new(format!("serialize agent delivery event: {error}"))
-            })?,
-            None,
-        )
-    }
-
-    pub(crate) fn supports_peer_message_persistence(&self) -> bool {
-        self.store.is_some() || self.allow_in_memory_peer_messages
-    }
-
-    pub(crate) fn peer_message_result(
-        &self,
-        source_session_id: &str,
-        command_id: &smelt_event_protocol::CommandId,
-    ) -> Result<Option<PeerMessageCommandResult>, EventBusError> {
-        let key = (source_session_id.to_string(), command_id.clone());
-        if self.peer_messages.lock().unwrap().contains_key(&key) {
-            persist_peer_message(
-                self.store.as_deref(),
-                &self.hub,
-                &self.peer_messages,
-                &key,
-                self.allow_in_memory_peer_messages,
-            )
-            .map_err(EventBusError::new)?;
-            let result = self
-                .peer_messages
-                .lock()
-                .unwrap()
-                .get(&key)
-                .map(|entry| entry.result.clone());
-            if self.store.is_some() {
-                self.peer_messages.lock().unwrap().remove(&key);
-            }
-            return Ok(result);
-        }
-        let Some(store) = &self.store else {
-            return Ok(None);
-        };
-        store
-            .get_peer_message_command_result(source_session_id, command_id)
-            .map_err(EventBusError::new)
-    }
-
-    pub(crate) fn record_peer_message_delivery(
-        &self,
-        result: PeerMessageCommandResult,
-    ) -> Result<PeerMessageCommandResult, EventBusError> {
-        let key = (result.source_session_id.clone(), result.command_id.clone());
-        let event = agent_message_delivered_envelope(&result)?;
-        self.peer_messages
-            .lock()
-            .unwrap()
-            .entry(key.clone())
-            .or_insert(PeerMessageLedgerEntry {
-                result,
-                event,
-                persisted: false,
-            });
-        persist_peer_message(
-            self.store.as_deref(),
-            &self.hub,
-            &self.peer_messages,
-            &key,
-            self.allow_in_memory_peer_messages,
-        )
-        .map_err(EventBusError::new)?;
-        let result = self
-            .peer_messages
-            .lock()
-            .unwrap()
-            .get(&key)
-            .expect("peer message ledger entry must remain present")
-            .result
-            .clone();
-        if self.store.is_some() {
-            self.peer_messages.lock().unwrap().remove(&key);
-        }
-        Ok(result)
-    }
-
     fn publish_core(
         &self,
         topic: &str,
@@ -720,14 +504,12 @@ impl DaemonEventHub {
         plugin_id: PluginId,
         subscription_id: SubscriptionId,
         topics: BTreeSet<Topic>,
-        delivery: DeliveryClass,
         capabilities: &BTreeSet<Capability>,
     ) -> Result<smelt_event_bus::Subscription, EventBusError> {
         self.hub.subscribe(
             plugin_id,
             subscription_id,
             topics,
-            delivery,
             capabilities,
             MAILBOX_CAPACITY,
         )
@@ -735,10 +517,9 @@ impl DaemonEventHub {
 
     #[cfg(test)]
     pub(crate) fn legacy_snapshot(&self) -> Result<serde_json::Value, EventBusError> {
-        let sessions = self.hub.snapshot(
-            &SnapshotKind(CORE_SNAPSHOT_SESSIONS.to_string()),
-            DeliveryClass::Ephemeral,
-        )?;
+        let sessions = self
+            .hub
+            .snapshot(&SnapshotKind(CORE_SNAPSHOT_SESSIONS.to_string()))?;
         let sessions: SessionStatesSnapshot = serde_json::from_value(sessions.payload)
             .map_err(|error| EventBusError::new(format!("decode session snapshot: {error}")))?;
         let mut root = serde_json::Map::from_iter([(
@@ -751,9 +532,7 @@ impl DaemonEventHub {
             ("workspace_menu", CORE_SNAPSHOT_WORKSPACE_MENU),
             ("automations", CORE_SNAPSHOT_AUTOMATIONS),
         ] {
-            let snapshot = self
-                .hub
-                .snapshot(&SnapshotKind(kind.to_string()), DeliveryClass::Ephemeral)?;
+            let snapshot = self.hub.snapshot(&SnapshotKind(kind.to_string()))?;
             let projection: CoreProjectionEvent = serde_json::from_value(snapshot.payload)
                 .map_err(|error| EventBusError::new(format!("decode {field} snapshot: {error}")))?;
             if !projection.data.is_null() {
@@ -761,28 +540,6 @@ impl DaemonEventHub {
             }
         }
         Ok(serde_json::Value::Object(root))
-    }
-
-    pub(crate) fn flush_for_shutdown(&self) -> Result<(), EventBusError> {
-        persist_pending_peer_messages(
-            self.store.as_deref(),
-            &self.hub,
-            &self.peer_messages,
-            self.allow_in_memory_peer_messages,
-        )
-        .map_err(EventBusError::new)?;
-        self.hub.flush_durable()?;
-        if let Some(store) = &self.store {
-            loop {
-                let dispatched =
-                    dispatch_outbox_once(store, &self.hub).map_err(EventBusError::new)?;
-                if dispatched == 0 {
-                    break;
-                }
-            }
-        }
-        self.hub.flush_cursors()?;
-        Ok(())
     }
 }
 
@@ -813,117 +570,6 @@ fn core_envelope(
     }
 }
 
-fn agent_message_delivered_envelope(
-    result: &PeerMessageCommandResult,
-) -> Result<EventEnvelope<serde_json::Value>, EventBusError> {
-    let payload = AgentMessageDelivered {
-        message_id: result.message_id.clone(),
-        source_session_id: result.source_session_id.clone(),
-        target_session_id: result.target_session_id.clone(),
-        delivered_at_ms: result.completed_at_ms,
-    };
-    Ok(EventEnvelope {
-        event_id: EventId::new(format!("event-{}", uuid::Uuid::new_v4().simple()))
-            .expect("generated event id is valid"),
-        topic: Topic::new(CORE_TOPIC_AGENT_MESSAGE_DELIVERED)
-            .expect("registered core topic is valid"),
-        schema_version: 1,
-        occurred_at_ms: result.completed_at_ms,
-        aggregate: None,
-        aggregate_revision: None,
-        source: EventSource::Core,
-        correlation_id: CorrelationId::new(result.command_id.as_str().to_string())
-            .map_err(|error| EventBusError::new(error.to_string()))?,
-        causation_id: None,
-        hop_count: 0,
-        payload: serde_json::to_value(payload)
-            .map_err(|error| EventBusError::new(error.to_string()))?,
-    })
-}
-
-fn persist_peer_message(
-    store: Option<&smelt_store::Store>,
-    hub: &EventHub,
-    ledger: &Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>,
-    key: &(String, smelt_event_protocol::CommandId),
-    allow_in_memory: bool,
-) -> Result<(), String> {
-    let mut ledger = ledger
-        .lock()
-        .map_err(|_| "peer message ledger lock poisoned".to_string())?;
-    let Some(entry) = ledger.get_mut(key) else {
-        return Ok(());
-    };
-    if entry.persisted {
-        return Ok(());
-    }
-    match store {
-        Some(store) => match store.commit_peer_message_delivery(&entry.result, &entry.event)? {
-            PeerMessageCommitOutcome::Inserted => {}
-            PeerMessageCommitOutcome::Existing(existing)
-            | PeerMessageCommitOutcome::Conflict(existing) => entry.result = existing,
-        },
-        None if allow_in_memory => {
-            hub.publish(
-                &PublisherIdentity::Core,
-                entry.event.clone(),
-                &BTreeSet::new(),
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        None => return Err("durable peer message store is unavailable".to_string()),
-    }
-    entry.persisted = true;
-    Ok(())
-}
-
-fn persist_pending_peer_messages(
-    store: Option<&smelt_store::Store>,
-    hub: &EventHub,
-    ledger: &Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>,
-    allow_in_memory: bool,
-) -> Result<(), String> {
-    let keys = ledger
-        .lock()
-        .map_err(|_| "peer message ledger lock poisoned".to_string())?
-        .iter()
-        .filter(|(_, entry)| !entry.persisted)
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    let mut first_error = None;
-    for key in keys {
-        if let Err(error) = persist_peer_message(store, hub, ledger, &key, allow_in_memory)
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
-}
-
-fn log_durable_unavailable(reason: String) {
-    let message = format!("{reason}；durable 事件能力已关闭");
-    eprintln!("[event-hub] {message}");
-    smelt_core::app_log::error("smeltd", &message);
-}
-
-impl Drop for DaemonEventHub {
-    fn drop(&mut self) {
-        if let Some(dispatcher) = &self.dispatcher {
-            dispatcher.stop.store(true, Ordering::Release);
-            let _ = dispatcher.wake.send(());
-            if let Ok(mut worker) = dispatcher.thread.lock()
-                && let Some(worker) = worker.take()
-            {
-                let _ = worker.join();
-            }
-        }
-        if let Err(error) = self.flush_for_shutdown() {
-            eprintln!("[event-hub] final durable flush failed: {error}");
-        }
-    }
-}
-
 enum ProjectionTarget {
     RemoteSessions,
     WorkspaceMenu,
@@ -949,94 +595,6 @@ fn register_snapshot_providers(
         )?;
     }
     Ok(())
-}
-
-/// 这一轮把已经到期的重试交了出去，才立刻再跑。
-/// 交不出、失败、或者下一次重试还在未来，都要停下来等。
-fn due_retry_delivered(failed: bool, pumped: usize, next_retry: Option<Duration>) -> bool {
-    !failed && pumped > 0 && next_retry == Some(Duration::ZERO)
-}
-
-fn durable_dispatch_loop(
-    stop: Arc<AtomicBool>,
-    wake: mpsc::Receiver<()>,
-    store: Arc<smelt_store::Store>,
-    hub: Arc<EventHub>,
-    peer_messages: Arc<
-        Mutex<BTreeMap<(String, smelt_event_protocol::CommandId), PeerMessageLedgerEntry>>,
-    >,
-) {
-    let mut backoff = DISPATCH_BACKOFF_START;
-    loop {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        let mut failed = false;
-        if let Err(error) = persist_pending_peer_messages(Some(&store), &hub, &peer_messages, false)
-        {
-            eprintln!("[event-hub] peer message fact persistence failed: {error}");
-            failed = true;
-        }
-        loop {
-            match dispatch_outbox_once(&store, &hub) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("[event-hub] durable outbox dispatch failed: {error}");
-                    failed = true;
-                    break;
-                }
-            }
-        }
-        let pumped = match hub.pump_durable_subscribers() {
-            Ok(count) => count,
-            Err(error) => {
-                eprintln!("[event-hub] durable subscriber pump failed: {error}");
-                failed = true;
-                0
-            }
-        };
-        if let Err(error) = hub.flush_cursors() {
-            eprintln!("[event-hub] durable cursor flush failed: {error}");
-            failed = true;
-        }
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        let next_retry = hub.next_durable_retry_delay();
-        // 到期的重试这一轮真的交出去了，马上再看下一条。
-        // 邮箱满了交不出（pumped == 0）就等下一次确认来叫醒，不能空转。
-        if due_retry_delivered(failed, pumped, next_retry) {
-            continue;
-        }
-        let wait = if failed {
-            let current = backoff;
-            backoff = backoff.saturating_mul(2).min(DISPATCH_BACKOFF_CAP);
-            Some(current)
-        } else {
-            backoff = DISPATCH_BACKOFF_START;
-            next_retry.filter(|delay| !delay.is_zero())
-        };
-        match wait {
-            None => {
-                let _ = wake.recv();
-            }
-            Some(delay) => {
-                let _ = wake.recv_timeout(delay);
-            }
-        }
-        while wake.try_recv().is_ok() {}
-    }
-}
-
-fn dispatch_outbox_once(store: &smelt_store::Store, hub: &EventHub) -> Result<usize, String> {
-    let events = store.dispatch_pending_outbox(smelt_event_bus::DEFAULT_DURABLE_LOAD_BATCH)?;
-    let count = events.len();
-    for event in events {
-        hub.dispatch_stored(event)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(count)
 }
 
 fn projection_event<T: serde::Serialize>(value: T) -> CoreProjectionEvent {
@@ -1098,7 +656,6 @@ fn session_dto(state: &SessionState) -> SessionStateChanged {
         launch: state.launch.clone(),
         provider: state.provider.clone(),
         conversation_id: state.conversation_id.clone(),
-        agent_mcp: state.agent_mcp,
         title: state.title.clone(),
         phase: match state.phase {
             Phase::Connecting => CoreSessionPhase::Connecting,
@@ -1159,54 +716,9 @@ pub(crate) fn delivery_to_subscribe_message(
 mod tests {
     use super::*;
 
-    fn durable_envelope(id: &str) -> EventEnvelope<serde_json::Value> {
-        EventEnvelope {
-            event_id: EventId::new(id).unwrap(),
-            topic: Topic::new(CORE_TOPIC_AGENT_MESSAGE_DELIVERED).unwrap(),
-            schema_version: 1,
-            occurred_at_ms: 1,
-            aggregate: None,
-            aggregate_revision: None,
-            source: EventSource::Core,
-            correlation_id: CorrelationId::new(format!("correlation-{id}")).unwrap(),
-            causation_id: None,
-            hop_count: 0,
-            payload: serde_json::json!({
-                "message_id": id,
-                "source_session_id": "source",
-                "target_session_id": "target",
-                "delivered_at_ms": 1,
-            }),
-        }
-    }
-
-    #[test]
-    fn full_mailbox_does_not_spin_on_a_due_retry() {
-        assert!(
-            !due_retry_delivered(false, 0, Some(Duration::ZERO)),
-            "邮箱满了交不出时，到期也不能空转"
-        );
-        assert!(due_retry_delivered(false, 1, Some(Duration::ZERO)));
-        assert!(!due_retry_delivered(true, 1, Some(Duration::ZERO)));
-        assert!(!due_retry_delivered(
-            false,
-            1,
-            Some(Duration::from_millis(250))
-        ));
-        assert!(!due_retry_delivered(false, 1, None));
-    }
-
-    fn wait_for(timeout: Duration, mut condition: impl FnMut() -> bool) {
-        let started = std::time::Instant::now();
-        while !condition() {
-            assert!(started.elapsed() < timeout, "condition timed out");
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     #[test]
     fn automation_projection_is_available_to_snapshot_recovery() {
-        let event_hub = DaemonEventHub::in_memory();
+        let event_hub = DaemonEventHub::new().unwrap();
         let snapshot = AutomationFile {
             revision: 7,
             ..Default::default()
@@ -1222,7 +734,7 @@ mod tests {
 
     #[test]
     fn automation_live_projection_omits_run_bodies() {
-        let event_hub = DaemonEventHub::in_memory();
+        let event_hub = DaemonEventHub::new().unwrap();
         let mut snapshot = AutomationFile {
             revision: 4,
             ..Default::default()
@@ -1263,78 +775,5 @@ mod tests {
         assert!(run["context"].get("trigger_payload").is_none());
         assert!(run["context"].get("agent_instructions").is_none());
         assert_eq!(run["context"]["prompt"], "Go");
-    }
-
-    #[test]
-    fn dispatcher_moves_startup_and_runtime_outbox_events() {
-        let parent = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/smeltd-event-hub-tests");
-        let root = parent.join(uuid::Uuid::new_v4().simple().to_string());
-        std::fs::create_dir_all(&root).unwrap();
-        let store = Arc::new(
-            smelt_store::Store::open_or_create(root.join(smelt_store::DATABASE_FILE_NAME)).unwrap(),
-        );
-        store
-            .append_outbox_batch(&[durable_envelope("startup-event")])
-            .unwrap();
-        let event_hub = DaemonEventHub::build(Some(Arc::clone(&store))).unwrap();
-        wait_for(Duration::from_secs(2), || {
-            event_hub.runtime().high_watermark().unwrap() == 1
-                && store.load_pending_outbox(10).unwrap().is_empty()
-        });
-
-        let plugin_id = PluginId::new("test.outbox-dispatcher").unwrap();
-        let subscription_id = SubscriptionId::new("delivered").unwrap();
-        let subscription = event_hub
-            .subscribe(
-                plugin_id.clone(),
-                subscription_id.clone(),
-                BTreeSet::from([Topic::new(CORE_TOPIC_AGENT_MESSAGE_DELIVERED).unwrap()]),
-                DeliveryClass::Durable,
-                &BTreeSet::from([Capability::new(
-                    smelt_event_protocol::CORE_CAPABILITY_AGENT_MESSAGE_READ,
-                )
-                .unwrap()]),
-            )
-            .unwrap();
-        assert_eq!(
-            event_hub
-                .runtime()
-                .dispatch_durable(&plugin_id, &subscription_id, 10)
-                .unwrap(),
-            1
-        );
-        let Delivery::Event(startup) = subscription.recv().unwrap() else {
-            panic!("expected startup outbox event");
-        };
-        assert_eq!(startup.envelope.event_id.as_str(), "startup-event");
-        event_hub
-            .runtime()
-            .ack(
-                &plugin_id,
-                &smelt_event_protocol::Ack {
-                    subscription_id,
-                    sequence: startup.sequence,
-                    event_id: startup.envelope.event_id.clone(),
-                },
-            )
-            .unwrap();
-
-        store
-            .append_outbox_batch(&[durable_envelope("runtime-event")])
-            .unwrap();
-        wait_for(Duration::from_secs(2), || {
-            matches!(
-                subscription.try_recv(),
-                Ok(Delivery::Event(ref event))
-                    if event.envelope.event_id.as_str() == "runtime-event"
-            )
-        });
-        event_hub.flush_for_shutdown().unwrap();
-        drop(subscription);
-        drop(event_hub);
-        drop(store);
-        std::fs::remove_dir_all(root).unwrap();
-        let _ = std::fs::remove_dir(parent);
     }
 }

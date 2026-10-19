@@ -60,10 +60,10 @@ pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 check-all: fmt-check lint lint-sh lint-paths test pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
 
 build: ## 编译 release 二进制（GUI + 守护 + helpers）
-	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
+	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
 
 run: ## 本地直接跑 GUI（开发用）
-	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
+	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
 	cargo run --bin $(BIN)
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
@@ -81,7 +81,7 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 	@# 检查 plugins 的源内容（按 .gitignore 排除编辑器生成文件和本地 clone 的外部仓库）。
 	@# codesign -dv 不打印证书名，Authority= 从 -dvv 才出现。少这一级时已签好的包也会被当成签名不对。
 	@[ -f target/release/$(BIN) ] && [ -f target/release/$(DAEMON) ] \
-		&& [ -f target/release/smelt-notify ] && [ -f target/release/smelt-agent-mcp ] \
+		&& [ -f target/release/smelt-notify ] \
 		&& [ -f target/release/smelt-installer ] || { \
 		echo "✗ 缺少 release 产物，先 make build"; exit 1; }
 	@if [ -d dist/Smelt.app/Contents/Resources/plugins ]; then \
@@ -103,12 +103,10 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(DAEMON) ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/$(BIN) ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-notify ] \
-		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-agent-mcp ] \
 		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-installer ] \
 		|| [ target/release/$(DAEMON) -nt dist/Smelt.app/Contents/MacOS/$(DAEMON) ] \
 		|| [ target/release/$(BIN) -nt dist/Smelt.app/Contents/MacOS/$(BIN) ] \
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
-		|| [ target/release/smelt-agent-mcp -nt dist/Smelt.app/Contents/MacOS/smelt-agent-mcp ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
 		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \

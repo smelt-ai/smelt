@@ -28,7 +28,6 @@ fn recovered_state(id: &str) -> SessionState {
         launch: Some("claude".to_string()),
         provider: Some("claude".to_string()),
         conversation_id: Some("conv-1".to_string()),
-        agent_mcp: true,
         agent_token: "should-not-persist".to_string(),
         title: Some("崩溃前的会话".to_string()),
         phase: Phase::AwaitingApproval,

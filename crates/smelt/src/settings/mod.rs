@@ -51,7 +51,7 @@ pub(super) use agent_hooks::{
     AgentHooksCache, install_agent_hooks, reconcile_agent_hooks, refresh_agent_hooks_status,
     uninstall_agent_hooks,
 };
-pub(super) use bundled_helpers::{sync_bundled_smelt_agent_mcp, sync_bundled_smelt_notify};
+pub(super) use bundled_helpers::sync_bundled_smelt_notify;
 pub(crate) use pi_config::{PiLibrary, pi_model_choice_groups};
 
 // ===================== 外观 / 启动 配置类型 =====================

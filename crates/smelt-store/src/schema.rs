@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 50] = [
+pub const TABLES: [&str; 43] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -32,12 +32,7 @@ pub const TABLES: [&str; 50] = [
     "automation_run",
     "automation_run_transcript",
     "automation_state",
-    "command_dedupe",
     "default_conversation_agent",
-    "event_dead_letter",
-    "event_delivery_retry",
-    "event_log",
-    "event_outbox",
     "history_agent_binding",
     "history_title",
     "launch_entry",
@@ -45,7 +40,6 @@ pub const TABLES: [&str; 50] = [
     "memory_settings",
     "new_session_pin",
     "paired_device",
-    "peer_message_command",
     "project",
     "published_session",
     "quota_cache",
@@ -58,7 +52,6 @@ pub const TABLES: [&str; 50] = [
     "runtime_identity",
     "session",
     "session_group",
-    "subscription_cursor",
     "terminal_theme",
     "terminal_theme_palette",
     "workspace_catalog",
@@ -306,88 +299,6 @@ CREATE TABLE history_title (
   PRIMARY KEY (agent, profile_id, resume_id)
 ) WITHOUT ROWID;
 
-CREATE TABLE event_log (
-  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id TEXT NOT NULL UNIQUE,
-  topic TEXT NOT NULL,
-  aggregate_kind TEXT,
-  aggregate_id TEXT,
-  aggregate_revision INTEGER,
-  occurred_at_ms INTEGER NOT NULL,
-  envelope_json BLOB NOT NULL,
-  CHECK (
-    (aggregate_kind IS NULL AND aggregate_id IS NULL AND aggregate_revision IS NULL)
-    OR (aggregate_kind IS NOT NULL AND aggregate_id IS NOT NULL AND aggregate_revision IS NOT NULL)
-  )
-);
-CREATE INDEX event_log_topic_sequence_idx ON event_log(topic, sequence);
-CREATE INDEX event_log_aggregate_sequence_idx
-  ON event_log(aggregate_kind, aggregate_id, sequence);
-
-CREATE TABLE event_outbox (
-  outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id TEXT NOT NULL UNIQUE,
-  envelope_json BLOB NOT NULL,
-  created_at_ms INTEGER NOT NULL,
-  dispatched_sequence INTEGER REFERENCES event_log(sequence)
-);
-CREATE INDEX event_outbox_pending_idx
-  ON event_outbox(dispatched_sequence, outbox_id);
-
-CREATE TABLE subscription_cursor (
-  plugin_id TEXT NOT NULL,
-  subscription_id TEXT NOT NULL,
-  last_acked_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_acked_sequence >= 0),
-  declaration_fingerprint TEXT NOT NULL,
-  updated_at_ms INTEGER NOT NULL,
-  PRIMARY KEY (plugin_id, subscription_id)
-) WITHOUT ROWID;
-
-CREATE TABLE event_dead_letter (
-  dead_letter_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  plugin_id TEXT NOT NULL,
-  subscription_id TEXT NOT NULL,
-  sequence INTEGER NOT NULL,
-  event_id TEXT NOT NULL,
-  attempts INTEGER NOT NULL CHECK (attempts > 0),
-  reason TEXT NOT NULL,
-  failed_at_ms INTEGER NOT NULL,
-  UNIQUE(plugin_id, subscription_id, sequence)
-);
-CREATE INDEX event_dead_letter_subscription_idx
-  ON event_dead_letter(plugin_id, subscription_id, dead_letter_id);
-
-CREATE TABLE event_delivery_retry (
-  plugin_id TEXT NOT NULL,
-  subscription_id TEXT NOT NULL,
-  sequence INTEGER NOT NULL REFERENCES event_log(sequence),
-  event_id TEXT NOT NULL,
-  attempts INTEGER NOT NULL CHECK (attempts > 0),
-  next_attempt_at_ms INTEGER NOT NULL,
-  reason TEXT NOT NULL,
-  PRIMARY KEY (plugin_id, subscription_id),
-  FOREIGN KEY (plugin_id, subscription_id)
-    REFERENCES subscription_cursor(plugin_id, subscription_id) ON DELETE CASCADE
-) WITHOUT ROWID;
-
-CREATE TABLE command_dedupe (
-  plugin_id TEXT NOT NULL,
-  command_id TEXT NOT NULL,
-  completed_at_ms INTEGER NOT NULL,
-  result_json BLOB NOT NULL,
-  PRIMARY KEY (plugin_id, command_id)
-) WITHOUT ROWID;
-
-CREATE TABLE peer_message_command (
-  source_session_id TEXT NOT NULL,
-  command_id TEXT NOT NULL,
-  request_fingerprint TEXT NOT NULL,
-  completed_at_ms INTEGER NOT NULL,
-  message_id TEXT NOT NULL,
-  target_session_id TEXT NOT NULL,
-  PRIMARY KEY (source_session_id, command_id)
-) WITHOUT ROWID;
-
 CREATE TABLE automation (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -434,8 +345,7 @@ CREATE TABLE automation_run_transcript (
 ) WITHOUT ROWID;
 CREATE TABLE agent_host_pref (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  hooks_enabled INTEGER NOT NULL CHECK (hooks_enabled IN (0, 1)),
-  cross_agent_enabled INTEGER NOT NULL CHECK (cross_agent_enabled IN (0, 1))
+  hooks_enabled INTEGER NOT NULL CHECK (hooks_enabled IN (0, 1))
 );
 CREATE TABLE agent_acp_command (
   command_key TEXT PRIMARY KEY,
@@ -1721,4 +1631,17 @@ DROP TABLE layout_node;
 DROP INDEX session_group_id_idx;
 CREATE UNIQUE INDEX session_group_position_idx ON session(group_id, position);
 ALTER TABLE session_group DROP COLUMN active_session_id;
+";
+
+/// v23 删掉跨 Agent 消息：投递记账表、设置里的开关，以及只为它服务的持久事件投递
+/// （事件日志、outbox、订阅游标、死信、重试、命令去重）。先删引用别人的表。
+pub const MIGRATE_V22_TO_V23: &str = "
+DROP TABLE peer_message_command;
+ALTER TABLE agent_host_pref DROP COLUMN cross_agent_enabled;
+DROP TABLE event_delivery_retry;
+DROP TABLE event_dead_letter;
+DROP TABLE subscription_cursor;
+DROP TABLE event_outbox;
+DROP TABLE event_log;
+DROP TABLE command_dedupe;
 ";

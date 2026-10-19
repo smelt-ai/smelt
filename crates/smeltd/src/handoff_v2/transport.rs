@@ -565,7 +565,6 @@ mod tests {
                 rows: 24,
                 cwd: None,
                 launch: None,
-                agent_mcp: false,
                 agent_token: String::new(),
                 alt_screen: false,
             }],

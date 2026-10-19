@@ -9,8 +9,6 @@ use std::collections::BTreeMap;
 pub struct AgentHostSettings {
     /// 是否由 Smelt 管理各 CLI agent 的结构化 hooks。
     pub hooks_enabled: bool,
-    /// 是否允许 Smelt 会话通过内置 MCP 相互发消息。
-    pub cross_agent_enabled: bool,
     /// agent id → 启动命令。没有的按该 agent 的出厂命令。
     pub commands: BTreeMap<String, String>,
     /// agent id → 额外注入的环境变量。
@@ -27,11 +25,10 @@ pub struct AgentHostSettings {
 }
 
 impl AgentHostSettings {
-    /// 新装：每家都按出厂命令填一份，hook 与跨会话消息默认开启。
+    /// 新装：每家都按出厂命令填一份，hook 默认开启。
     pub fn fresh() -> Self {
         Self {
             hooks_enabled: true,
-            cross_agent_enabled: true,
             commands: CONVERSATION_AGENTS
                 .iter()
                 .map(|d| (d.id.to_string(), (d.default_cmd)()))

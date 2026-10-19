@@ -1,7 +1,7 @@
 //! 运行时客户端：桌面、手机连 smeltd 都走这一个入口。
 //!
 //! 只做连接和一问一答的帧收发，不做自动重试。有副作用的请求结果未知时能否重放，
-//! 只有调用方知道（例如 `agent.send` 要复用同一个 `command_id`）。
+//! 只有调用方知道。
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};

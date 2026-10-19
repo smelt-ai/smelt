@@ -52,23 +52,6 @@ impl CliResumeSyntax {
     }
 }
 
-/// 快捷终端 / 裸 CLI 如何注入 Smelt cross-agent MCP。ACP 会话另走 `session/new`
-/// 的 mcpServers；这里只描述启动命令那条路。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TerminalMcpInject {
-    /// 没有会话级 CLI 参数，或不该改用户全局 MCP 配置。
-    None,
-    /// `--mcp-config '{"mcpServers":{...}}'`
-    McpConfigJson,
-    /// Codex：`-c mcp_servers.smelt={ toml }`
-    CodexToml,
-    /// Copilot：`--additional-mcp-config '{...}'`，JSON 带 tools/timeout。
-    AdditionalMcpConfigJson,
-    /// OpenCode：`OPENCODE_CONFIG_CONTENT='{...}'`。这是只对当前进程生效的
-    /// 内联配置层，不写用户级或项目级 `opencode.json`。
-    OpenCodeConfigContent,
-}
-
 /// 快捷终端如何把 CLI 的结构化生命周期接入 smeltd。全局 hook/plugin 由设置页
 /// 管理；只有支持进程级扩展的 CLI 才需要在启动边界注入。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,10 +275,6 @@ pub struct ConversationAgentDescriptor {
     /// 能否作为裸种类出现在新建菜单 / 历史 tab / 启动命令设置里。
     /// `false` 表示必须走 workspace profile（dsh 原生 profile），不要再列一个空槽。
     pub bare_kind: bool,
-    /// 终端 CLI 注入 cross-agent MCP 的方式。
-    pub terminal_mcp_inject: TerminalMcpInject,
-    /// ACP `session/new` 是否接受 stdio MCP。false 时必须走 CLI 参数（Copilot）。
-    pub acp_accepts_session_mcp: bool,
     /// 全自动任务要改启动命令时的补丁；多数 adapter 只靠 session config。
     pub task_cli: TaskCliPatch,
 }
@@ -323,8 +302,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::Flag),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::McpConfigJson,
-        acp_accepts_session_mcp: true,
         task_cli: TaskCliPatch::None,
     },
     ConversationAgentDescriptor {
@@ -347,8 +324,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::FlagEquals),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::AdditionalMcpConfigJson,
-        acp_accepts_session_mcp: false,
         task_cli: TaskCliPatch::Append {
             full_access: "--allow-all",
             full_access_aliases: &["--yolo"],
@@ -374,8 +349,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::Subcommand),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::CodexToml,
-        acp_accepts_session_mcp: true,
         task_cli: TaskCliPatch::None,
     },
     ConversationAgentDescriptor {
@@ -398,8 +371,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::Flag),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::None,
-        acp_accepts_session_mcp: true,
         task_cli: TaskCliPatch::AfterMarker {
             marker: "grok agent",
             full_access: "--always-approve",
@@ -426,8 +397,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::Flag),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::None,
-        acp_accepts_session_mcp: true,
         // `--force` / `--yolo` 是顶层 flag，必须插在 `acp` 子命令前，否则
         // 否则无人值守任务会停在 ACP 审批卡上。
         task_cli: TaskCliPatch::AfterMarker {
@@ -459,8 +428,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::SessionFlag),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::OpenCodeConfigContent,
-        acp_accepts_session_mcp: true,
         // `--auto` 只属于 TUI 默认命令：`opencode --auto acp` 会把 `acp` 当项目名，
         // `opencode acp --auto` 会被 yargs 拒绝。全权限由上面的进程级配置表达，
         // 这里不再给命令行叠一个无效 flag。
@@ -491,8 +458,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::ResumeIdFlag),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::None,
-        acp_accepts_session_mcp: true,
         task_cli: TaskCliPatch::Append {
             full_access: "--trust-all-tools",
             full_access_aliases: &["-a"],
@@ -521,8 +486,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: Some(CliResumeSyntax::SessionFlag),
         bare_kind: true,
-        terminal_mcp_inject: TerminalMcpInject::None,
-        acp_accepts_session_mcp: true,
         task_cli: TaskCliPatch::None,
     },
     ConversationAgentDescriptor {
@@ -551,8 +514,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         },
         cli_resume: None,
         bare_kind: false,
-        terminal_mcp_inject: TerminalMcpInject::None,
-        acp_accepts_session_mcp: true,
         task_cli: TaskCliPatch::None,
     },
 ];
@@ -687,16 +648,6 @@ impl ConversationAgentKind {
     /// 侧栏/菜单用的本地 SVG 资源路径，约定 `smelt-icons/agent-<id>.svg`。
     pub fn icon_asset(self) -> String {
         format!("smelt-icons/agent-{}.svg", self.id())
-    }
-
-    /// 快捷终端注入 cross-agent MCP 的方式。
-    pub fn terminal_mcp_inject(self) -> TerminalMcpInject {
-        self.descriptor().terminal_mcp_inject
-    }
-
-    /// ACP `session/new` 是否接受 stdio MCP。
-    pub fn acp_accepts_session_mcp(self) -> bool {
-        self.descriptor().acp_accepts_session_mcp
     }
 
     /// 全自动任务对启动命令的最小权限补丁。
@@ -1616,38 +1567,6 @@ mod tests {
                 assert!(kind.is_bare_kind());
             }
         }
-    }
-
-    #[test]
-    fn terminal_mcp_inject_is_a_capability_not_a_vendor_name() {
-        assert_eq!(
-            ConversationAgentKind::Claude.terminal_mcp_inject(),
-            TerminalMcpInject::McpConfigJson
-        );
-        assert_eq!(
-            ConversationAgentKind::Copilot.terminal_mcp_inject(),
-            TerminalMcpInject::AdditionalMcpConfigJson
-        );
-        assert_eq!(
-            ConversationAgentKind::Codex.terminal_mcp_inject(),
-            TerminalMcpInject::CodexToml
-        );
-        assert_eq!(
-            ConversationAgentKind::OpenCode.terminal_mcp_inject(),
-            TerminalMcpInject::OpenCodeConfigContent
-        );
-        for kind in [
-            ConversationAgentKind::Grok,
-            ConversationAgentKind::Cursor,
-            ConversationAgentKind::Kiro,
-            ConversationAgentKind::Pi,
-            ConversationAgentKind::Dsh,
-        ] {
-            assert_eq!(kind.terminal_mcp_inject(), TerminalMcpInject::None);
-            assert!(kind.acp_accepts_session_mcp());
-        }
-        assert!(!ConversationAgentKind::Copilot.acp_accepts_session_mcp());
-        assert!(ConversationAgentKind::Claude.acp_accepts_session_mcp());
     }
 
     #[test]

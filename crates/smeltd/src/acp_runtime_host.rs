@@ -870,7 +870,7 @@ pub(crate) fn run_session_host() {
 
     let sessions = new_sessions();
     let acp_sessions = new_acp_sessions();
-    let event_hub = event_hub::DaemonEventHub::in_memory();
+    let event_hub = event_hub::DaemonEventHub::new().unwrap();
 
     // 主 daemon 的镜像作为启动种子：既保留本地历史与投递去重表，也让
     // FreshOnMissing/Strict 的恢复判断与拆进程前完全一致。

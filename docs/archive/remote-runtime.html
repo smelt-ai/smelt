@@ -229,7 +229,7 @@
     <div class="boxes">
       <div class="box"><b>桌面 GUI</b>（macOS）<div class="sub">RuntimeHub → N × RuntimeClient<br>客户端库 client.sqlite3：主题、界面路由、连接列表。分屏树在运行时库</div></div>
       <div class="box"><b>手机 App</b>（iOS / Android）<div class="sub">Flutter 界面 + Rust 侧的同一个 RuntimeClient（经 FRB 调用）</div></div>
-      <div class="box"><b>CLI / MCP 适配器</b><div class="sub"><code>smelt agent</code>、<code>smelt-agent-mcp</code>，只走 Control API</div></div>
+      <div class="box"><b>CLI</b><div class="sub"><code>smelt agent</code>，只走 Control API</div></div>
     </div>
   </div>
   <div class="lane lane-transport">同一套运行时协议 · 一个操作一条连接<br>本机 unix socket · 远程 iroh QUIC stream</div>
@@ -476,7 +476,7 @@
 <div class="decision">
   <div class="label">决定：桌面让运行时升到自己的版本，运行时自己从 GitHub 下载</div>
   <ul>
-    <li>桌面连上远程运行时，版本协商判定运行时旧（<code>smelt_client::compat</code>），就发 <code>{"op":"runtime_upgrade","version":"&lt;桌面版本&gt;"}</code>。运行时回 <code>accepted</code>，自己去 GitHub Release <code>v&lt;版本&gt;</code> 下载 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，对着同一个 Release 的 <code>SHA256SUMS</code> 校验，解包后先跑一次新 smeltd 的 <code>--version</code>（架构、glibc 不对在这一步暴露），再把 <code>smelt-notify</code>、<code>smelt-agent-mcp</code>、<code>smelt-up</code> 原子替换进 <code>~/.smelt/bin</code>，smeltd 发布成不可变映像后用 <code>handoff_v2</code> 交接（和 <code>smeltd install</code> 共用一份）。交接成功时旧进程退出、连接断开，桌面重新探测；正忙就回 <code>staged</code>，新映像挂在 <code>smeltd.pending</code>，没人订阅时 headless 自升级在空闲时换过去。</li>
+    <li>桌面连上远程运行时，版本协商判定运行时旧（<code>smelt_client::compat</code>），就发 <code>{"op":"runtime_upgrade","version":"&lt;桌面版本&gt;"}</code>。运行时回 <code>accepted</code>，自己去 GitHub Release <code>v&lt;版本&gt;</code> 下载 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，对着同一个 Release 的 <code>SHA256SUMS</code> 校验，解包后先跑一次新 smeltd 的 <code>--version</code>（架构、glibc 不对在这一步暴露），再把 <code>smelt-notify</code>、<code>smelt-up</code> 原子替换进 <code>~/.smelt/bin</code>，smeltd 发布成不可变映像后用 <code>handoff_v2</code> 交接（和 <code>smeltd install</code> 共用一份）。交接成功时旧进程退出、连接断开，桌面重新探测；正忙就回 <code>staged</code>，新映像挂在 <code>smeltd.pending</code>，没人订阅时 headless 自升级在空闲时换过去。</li>
     <li>桌面不传字节、安装包不附带 Linux 二进制：远程机器本来就是从 GitHub 一键安装的，连得上。版本对齐靠版本号：<b>release 的 tag 必须就是 <code>v&lt;工作区版本号&gt;</code></b>（<code>release.yml</code> 校验），预发布也一样先改版本号再打 tag。</li>
     <li><b>只升不降</b>：运行时比桌面新时，桌面不请它升级，标成 <code>incompatible</code> 并提示更新桌面；运行时收到比自己旧的版本也拒绝。两台不同版本的桌面连同一个运行时时，运行时最终跟随较新的那台。</li>
     <li>每条订阅线程只请一次。升了还对不上（开发构建的版本号还没发布、GitHub 上没有这个版本、下载失败），照常标不兼容，说明里写上原因。早于这个 op 的运行时一行不回就断开，桌面提示到那台机器上执行一次 <code>curl … | SMELT_VERSION=&lt;桌面版本&gt; bash</code>，之后就能自动升级。</li>

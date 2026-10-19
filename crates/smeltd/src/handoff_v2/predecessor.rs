@@ -8,7 +8,7 @@
 //! 相对 exec-self 删除的东西：CLOEXEC 手术（`SCM_RIGHTS` 直接 dup 描述符，
 //! 发送方原件保持 CLOEXEC 全程不动）、交接文件、二次 exec。
 //!
-//! 保留的拒绝项（Bus you can't drain）：peer_messaging 在途投递与
+//! 保留的拒绝项（Bus you can't drain）：
 //! `acp_upgrade_blockers`——hosted 会话永不进 blockers，只有 direct-fd
 //! 遗留连接 mid-turn 才拦（SDK future 穿不过进程边界）；它们经
 //! legacy_rehome 自迁移到 hosted，有界收敛。Busy 只拦升级、不拦安装
@@ -134,7 +134,6 @@ pub(crate) fn with_snapshot<R>(
             rows: ctl.rows,
             cwd: ctl.cwd.clone(),
             launch: state.launch.clone(),
-            agent_mcp: state.agent_mcp,
             agent_token: state.agent_token.clone(),
             alt_screen: term.mode().contains(TermMode::ALT_SCREEN),
         });
@@ -190,7 +189,6 @@ pub(crate) fn with_snapshot<R>(
 pub(crate) fn run_transaction(
     exe: &std::path::Path,
     staged: &StagedHandoff,
-    event_hub: &crate::event_hub::EventHubHandle,
 ) -> TransactionOutcome {
     let rollback = |reason: String| {
         crate::dlog(&format!("handoff: 事务回滚，原地继续服务：{reason}"));
@@ -251,11 +249,6 @@ pub(crate) fn run_transaction(
         ready.restored_terminals, ready.restored_acp, ready.dropped_grids
     ));
 
-    // 提交前最后的可回滚点：EventHub 落盘。失败则 ABANDON（successor 退出），
-    // sidecar 全程没动过，回滚即恢复。
-    if let Err(error) = event_hub.flush_for_shutdown() {
-        return abort_and_kill(&ours, &mut child, format!("EventHub flush 失败：{error}"));
-    }
     if transport::send_commit(&ours).is_err() {
         // successor 死在 READY~COMMIT 的毫秒窗口：它没开始服务，回滚安全。
         // sidecars 还没停，无需重启——这就是 stop 放在 COMMIT 之后的原因。

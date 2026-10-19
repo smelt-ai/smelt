@@ -18,6 +18,7 @@ use super::daemon::DaemonOperation;
 ///
 /// v2：`workspace.load` / `workspace.save` 的文档改了形状（对话带稳定 id，终端平铺，
 /// 分屏归客户端）。旧桌面读写新文档、新桌面读写旧文档都会把终端对话存坏，两边都得拦住。
+/// 同一版删掉跨 Agent 消息的 `agent.list` / `agent.send`。
 pub const CONTROL_API_VERSION: u16 = 2;
 pub const CONTROL_API_MIN_SUPPORTED_VERSION: u16 = 2;
 pub const MAX_CONTROL_REQUEST_ID_BYTES: usize = 128;
@@ -61,8 +62,6 @@ macro_rules! define_control_methods {
 define_control_methods! {
     SystemDescribe => (SYSTEM_DESCRIBE_METHOD, "system.describe"),
     SessionList => (SESSION_LIST_METHOD, "session.list"),
-    AgentList => (AGENT_LIST_METHOD, "agent.list"),
-    AgentSend => (AGENT_SEND_METHOD, "agent.send"),
     AgentMemoryMeta => (AGENT_MEMORY_META_METHOD, "agent.memory.meta"),
     AgentMemoryRecordRead => (AGENT_MEMORY_RECORD_READ_METHOD, "agent.memory.record_read"),
     AgentMemoryRecordWrite => (AGENT_MEMORY_RECORD_WRITE_METHOD, "agent.memory.record_write"),
@@ -286,7 +285,6 @@ pub enum ControlErrorCode {
     Conflict,
     Busy,
     TemporarilyUnavailable,
-    ResultUnknown,
     OperationFailed,
     Internal,
     #[serde(other)]
@@ -618,7 +616,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 126);
+        assert_eq!(names.len(), 124);
     }
 
     #[test]

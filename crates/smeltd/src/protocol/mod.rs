@@ -164,13 +164,11 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
             handle_conversation_rename(conn, &v, &acp_sessions, &remote_sessions, &event_hub)
         }
         DaemonOperation::Kill => handle_kill(conn, &v, &sessions, &remote_sessions, &event_hub),
-        DaemonOperation::Upgrade => {
-            handle_upgrade(conn, &v, &sessions, &acp_sessions, &event_hub, listen_fd)
-        }
+        DaemonOperation::Upgrade => handle_upgrade(conn, &v, &sessions, &acp_sessions, listen_fd),
         DaemonOperation::Version => {
             handle_version(conn, &sessions, exe_mtime, daemon_fingerprint.as_deref())
         }
-        DaemonOperation::Shutdown => handle_shutdown(conn, &event_hub),
+        DaemonOperation::Shutdown => handle_shutdown(conn),
         DaemonOperation::AgentEvent => handle_agent_event_op(conn, &v, &sessions, &event_hub),
         DaemonOperation::Action => handle_action(conn, &v, &sessions),
         DaemonOperation::Input => handle_raw_input(conn, &v, &sessions),

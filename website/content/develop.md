@@ -32,7 +32,7 @@ cargo build --bin smeltd
   增量输出，重放区间按 `replay_len` 划界）。就算 GUI 挂了，`smeltd` 照样把 shell
   养着；重开 GUI 按会话 id 自动 reattach。手机和另一台桌面经 iroh 连的也是它。
 
-辅助二进制：`smelt-notify`（agent hook 状态上报）、`smelt-agent-mcp`（都在
+辅助二进制：`smelt-notify`（agent hook 状态上报，在
 `crates/smeltd/src/bin/`）、`smelt-installer`（打包进 App）、`smelt-iroh-connect`
 （iroh 调试）。没有 `gateway`、`smelt-task`、`smelt-iroh-host`。`crates/smelt-mobile`
 是给 Flutter 手机端用的 Rust 内核，经 `smelt-runtime-client` 连运行时，不是隧道。
@@ -66,7 +66,7 @@ make dist-build
 ## 目录结构
 
 - `crates/smelt/` —— GUI
-- `crates/smeltd/` —— 运行时守护（含 `smelt-notify`、`smelt-agent-mcp`）
+- `crates/smeltd/` —— 运行时守护（含 `smelt-notify`）
 - `crates/smelt-model/` —— 桌面、守护、手机共用的类型（Control API、会话状态）
 - `crates/smelt-core/` —— GUI 与守护共用的无 UI 逻辑；`daemon_state` / `agent_status` / `control_api` 从 `smelt-model` 再导出
 - `crates/smelt-client/`、`crates/smelt-client-store/` —— 这台桌面自己的状态（`client.sqlite3`）

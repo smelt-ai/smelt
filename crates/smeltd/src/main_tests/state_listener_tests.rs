@@ -1,8 +1,8 @@
 use super::*;
 use smelt_event_bus::Delivery;
 use smelt_event_protocol::{
-    CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, DeliveryClass, PluginId,
-    SessionStateChanged, SubscriptionId, Topic,
+    CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, PluginId, SessionStateChanged,
+    SubscriptionId, Topic,
 };
 use std::collections::BTreeSet;
 
@@ -19,7 +19,6 @@ fn session_events(event_hub: &EventHubHandle) -> smelt_event_bus::Subscription {
                 .into_iter()
                 .map(|topic| Topic::new(topic).unwrap())
                 .collect::<BTreeSet<_>>(),
-            DeliveryClass::Ephemeral,
             &core_read_capabilities(),
         )
         .unwrap()

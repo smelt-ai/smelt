@@ -116,10 +116,6 @@ pub struct AgentHostState {
     /// 迁移会将其开启并写回；用户明确保存 false 后，后续升级不会重新开启。
     #[serde(default)]
     pub agent_hooks_enabled: bool,
-    /// 是否允许 Smelt 会话通过内置 MCP 相互发消息。旧配置缺少此字段时保持开启，
-    /// 避免升级后悄悄改变既有会话的能力。
-    #[serde(default = "default_true")]
-    pub cross_agent_enabled: bool,
     #[serde(default = "default_true", alias = "notify_awaiting")]
     pub notify_approval: bool,
     #[serde(default = "default_true")]
@@ -448,7 +444,6 @@ impl Default for AgentHostState {
     fn default() -> Self {
         Self {
             agent_hooks_enabled: true,
-            cross_agent_enabled: true,
             notify_approval: true,
             notify_input: true,
             notify_success: true,
@@ -492,7 +487,6 @@ impl AgentHostState {
     pub fn runtime_settings(&self) -> AgentHostSettings {
         AgentHostSettings {
             hooks_enabled: self.agent_hooks_enabled,
-            cross_agent_enabled: self.cross_agent_enabled,
             commands: self
                 .acp_cmds
                 .0
@@ -511,7 +505,6 @@ impl AgentHostState {
     /// 用运行时给的权威配置替换缓存里运行时那部分，并标记为已加载。
     pub fn apply_runtime_settings(&mut self, settings: AgentHostSettings) {
         self.agent_hooks_enabled = settings.hooks_enabled;
-        self.cross_agent_enabled = settings.cross_agent_enabled;
         self.acp_cmds = ConversationCommands(
             CONVERSATION_AGENTS
                 .iter()
@@ -1230,21 +1223,6 @@ mod tests {
                 descriptor.config_key
             );
         }
-    }
-
-    #[test]
-    fn cross_agent_messaging_defaults_to_enabled_for_legacy_config() {
-        let legacy: AgentHostState = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(legacy.cross_agent_enabled);
-
-        let disabled = AgentHostState {
-            cross_agent_enabled: false,
-            ..Default::default()
-        };
-        assert_eq!(
-            serde_json::to_value(disabled).unwrap()["cross_agent_enabled"],
-            serde_json::json!(false)
-        );
     }
 
     #[test]

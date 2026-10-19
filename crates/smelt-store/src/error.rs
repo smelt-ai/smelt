@@ -81,27 +81,6 @@ pub enum StoreError {
         source: serde_json::Error,
     },
 
-    #[error("duplicate event_id")]
-    DuplicateEventId,
-
-    #[error("event_id {event_id} already exists with a different envelope")]
-    EventIdConflict { event_id: String },
-
-    #[error("aggregate revision moved backwards: {kind}:{id}")]
-    AggregateRevisionMovedBackwards { kind: String, id: String },
-
-    #[error("cursor declaration must be bound before it is stored")]
-    CursorUnboundOnStore,
-
-    #[error("cursor declaration must be bound before dead-lettering")]
-    CursorUnboundOnDeadLetter,
-
-    #[error("failed to append outbox event")]
-    OutboxAppendFailed,
-
-    #[error("durable subscription declaration conflicts with its stored cursor")]
-    CursorDeclarationConflict,
-
     #[error("当前移动端构建未启用 SQLite store")]
     SqliteDisabledOnMobile,
 
@@ -109,9 +88,6 @@ pub enum StoreError {
         "数据库未初始化（空文件或空 schema），拒绝建空库。若这是主库丢失后的残留，请从备份恢复。"
     )]
     UninitializedDatabase,
-
-    #[error(transparent)]
-    EventProtocol(#[from] smelt_event_protocol::ValidationError),
 
     #[error("事务已中止")]
     TransactionAborted,

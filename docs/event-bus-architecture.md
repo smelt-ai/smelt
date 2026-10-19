@@ -2,6 +2,11 @@
 
 > 2026-10 更新：Bun 插件宿主、插件 SDK 已删除，`smelt-plugin-api` 裁掉插件部分后改名
 > `smelt-event-protocol`。下文涉及插件进程、插件发布者的部分是当时的设计，现已不存在。
+>
+> 2026-10-19 更新：持久投递（durable）随跨 Agent 消息一起删除，它是唯一的使用者。
+> 现在只有进程内的 ephemeral 投递：不落盘、没有 ack / nack / cursor / dead-letter /
+> outbox / command 幂等，库里对应的表在 schema v23 删掉，事件协议升到 v2。下文讲这些的
+> 部分是当时的设计。
 
 ## 状态
 
@@ -49,7 +54,6 @@ Smelt 正在从内建功能集合转向插件化架构。插件需要观察会�
 
 ```text
 session.state_changed
-agent.message_delivered
 attention.created
 ```
 
@@ -106,7 +110,7 @@ GPUI、SQLite 或 `smelt-core`。
 - 核心事件的稳定 DTO。
 - topic 和 payload schema 版本。
 - 插件 manifest、capability 和订阅声明。
-- subscribe、ack、nack、cursor 和 lag 协议。
+- subscribe 和 lag 协议。
 - Action/Command 请求、响应、错误码和幂等键。
 - 协议版本协商。
 
@@ -121,15 +125,13 @@ GPUI、SQLite 或 `smelt-core`。
 
 - topic descriptor registry。
 - payload schema 和命名空间校验。
-- durable/ephemeral 两种 QoS。
 - 每订阅者独立的有界 mailbox。
 - aggregate 内有序调度。
-- ack、重试、cursor 和 dead-letter。
-- 背压、限流、lag 检测和循环检测。
+- 背压、lag 检测和循环检测。
 - snapshot provider 注册。
 - capability-aware subscription filter。
-- `EventStore` trait。
-- 基于 `smelt-store` 的 SQLite EventStore/outbox 实现。
+
+事件只在内存里编号、投递，不落盘。
 
 该 crate 不负责：
 
@@ -246,7 +248,6 @@ schema 校验的 JSON payload，但只能位于自己的命名空间。
 ```text
 session.state_changed
 session.removed
-agent.message_delivered
 attention.created
 attention.cleared
 remote_sessions.changed
@@ -295,121 +296,13 @@ pub struct TopicDescriptor {
 
 ## 可靠性模型
 
-### Delivery class
+只有一种投递：进程内、尽力而为。发布时在一把锁里按顺序编号并送到每个订阅者的有界
+mailbox，同一聚合的修订号不会倒序到达。mailbox 满了就记一次 lag，订阅方收到 `Lag` 后
+丢掉缓冲的增量，由运行时补发相关快照，客户端按快照收敛。守护重启或连接断开不重放：重新
+订阅时先收到快照。
 
-```rust
-pub enum DeliveryClass {
-    Durable,
-    Ephemeral,
-}
-```
-
-`Durable` 用于会影响插件自动化决策的领域事实。事件先进入持久化 event log/outbox，再进入
-订阅者 mailbox。
-
-`Ephemeral` 用于允许丢失且可从当前状态恢复的提示或观测数据。它仍使用有界队列和显式 lag
-报告，不能静默丢弃。该类事件只进入内存队列，不写 SQLite。
-
-### 投递语义
-
-- durable 事件提供 at-least-once。
-- 插件必须按 `event_id` 实现幂等。
-- EventHub 不承诺 exactly-once。
-- Action/Command 必须携带 `command_id`，服务端记录执行结果并拒绝重复副作用。
-- 同一 `(aggregate.kind, aggregate.id)` 按 `aggregate_revision` 有序。
-- 不提供跨 aggregate 的全局顺序保证。
-
-### Outbox
-
-SQLite 在本架构中不是给人排障的文本日志，而是保证系统恢复正确性的 `EventStore` /
-`DeliveryStore`。它保存 outbox、durable event、subscription cursor、重试状态、
-dead-letter 和 command 幂等结果。
-
-现有 `app_log`、`log` 或 `tracing` 只用于可观测性：它们允许轮转、采样或写入失败，不能作为
-可靠投递的真源。EventStore 写入失败必须显式返回错误，不能像诊断日志一样静默丢弃。
-
-持久领域变更必须尽量与 outbox 在同一 SQLite 事务中提交：
-
-```text
-BEGIN
-  update domain state
-  insert event_outbox
-COMMIT
-```
-
-dispatcher 读取 outbox，将事件写入 event log 并投递，成功后标记已分发。这样可以避免状态已
-提交但 daemon 在发布前崩溃导致事件永久丢失。
-
-这不是“每个事件额外执行一次独立 commit”：领域事务本来就要提交，outbox 只在同一事务中
-增加一条 `INSERT`，不会增加第二次 fsync。
-
-纯运行时事件无法与外部进程状态形成数据库原子事务。需要 durable 语义时，它们先进入
-EventStore 单写者队列，由 writer 按以下任一条件触发微批提交：
-
-- 队列累计到 64 条。
-- 最早待写事件等待达到 10ms。
-- 调用方显式要求 `flush`，例如 daemon 准备退出或执行无缝升级。
-
-`64 / 10ms` 是初始默认值，应作为内部配置和基准测试参数，而不是 wire contract。writer 在
-一个事务中使用 prepared statement 批量插入，生产者等待的是该批次的 durability 结果，不为
-每条事件单独创建连接、开启事务和 fsync。
-
-如果纯运行时事件可以通过 snapshot、revision 或启动对账恢复，应定义为 `Ephemeral`，完全
-不进入 EventStore。会话 phase、attention 展示和 UI 投影默认走该路径；不能为了“以后也许
-有用”全部落盘。
-
-### SQLite 写入模型
-
-EventStore 复用已有 `smelt-store` 和同一数据库迁移体系，不新增第二个日志文件或数据库。
-桌面端数据库使用：
-
-- WAL 模式。
-- `synchronous=NORMAL`，除非某类数据明确要求更强的 durability。
-- 单写者，避免多个插件各持一条写连接争抢 SQLite writer lock。
-- 长寿命连接和 prepared statement。
-- 短事务；事务内禁止 socket I/O、插件调用和等待 mailbox。
-- 按 sequence、topic、subscription cursor 所需查询建立复合索引。
-
-写入分为三条明确路径：
-
-| 数据 | SQLite 行为 | 延迟路径 |
-|---|---|---|
-| Ephemeral event | 不写 | 内存直接分发 |
-| 持久领域变更产生的 durable event | 与领域数据同事务写 outbox | 原事务只多一次插入 |
-| 无领域事务的 durable event | 单写者微批提交 | 最多等待批次窗口 |
-
-EventHub 必须暴露批次大小、等待时间、提交耗时和队列深度指标，以便基准测试后调整默认值。
-
-### Cursor、ack 与重试
-
-每个 durable subscription 保存独立 cursor：
-
-```text
-(plugin_id, subscription_id) -> last_acked_sequence
-```
-
-- 只有 ack 后才能推进 cursor。
-- nack 可声明 retryable 或 permanent。
-- retryable 使用有上限的指数退避。
-- permanent 或超过重试上限的事件进入 dead-letter。
-- 每个 durable subscription 同时最多投递一条未确认事件，retryable nack 完成重投前不会
-  投递后继事件。
-- 投递并行性来自不同 subscription；单个 subscription 内严格保持顺序。mailbox 仍可容纳
-  初始化快照，但扩大 mailbox 不会增加该订阅的 durable 并行度。
-
-dispatcher 从 EventStore 分页批量读取，初始建议每批最多 128 条。插件可以逐条 ack，但
-EventHub 在内存中累计连续水位，只将“已连续确认到 sequence N”写入 cursor：
-
-- 连续确认达到 50 条时刷盘。
-- 距离上次 cursor 持久化达到 100ms 时刷盘。
-- 插件断开、daemon 退出或无缝升级前强制刷盘。
-
-`128 / 50 / 100ms` 同样是可基准调整的内部默认值。cursor 尚未刷盘时 daemon 崩溃，允许重启
-后重复投递少量已处理事件；插件必须通过 `event_id` 幂等。不能为了避免这种可接受的重复而
-对每个 ack 单独提交 SQLite。
-
-dead-letter、永久 nack 和 command 幂等结果属于低频正确性数据，可在对应领域事务中直接
-写入，不需要人为等待微批。
+需要「必须送达、可确认、可重放」的场景（例如以后 Pi 会话之间的消息）不走事件总线，由
+对应领域自己记账，参照 PI-Desktop 的投递账本设计。
 
 ## 背压与故障隔离
 
@@ -458,7 +351,7 @@ EventHub 支持按 `SnapshotKind` 注册 snapshot provider。新订阅或发生 
   "subscriptions": [
     {
       "id": "review-sessions",
-      "topics": ["session.state_changed", "agent.message_delivered"],
+      "topics": ["session.state_changed"],
       "delivery": "durable"
     }
   ],
@@ -605,15 +498,10 @@ EventHub 至少提供以下指标和诊断：
 
 删除。其状态快照、增量广播和 lag recovery 由 EventHub snapshot projection 统一提供。
 
-### `agent_bus`
+### `agent_bus` / `peer_messaging`
 
-改名为 `peer_messaging`。Agent 消息投递是带副作用的 command，不属于事件总线。
-`source + command_id` 提供 daemon/store 幂等，ACP/Terminal 目标也按稳定 delivery ID
-去重。投递成功后的 command result 与 `agent.message_delivered` outbox 在同一 SQLite
-事务提交。PTY/provider 外部副作用无法与 SQLite exactly-once 原子化；事务失败时返回
-`result_unknown`，daemon 保留结果和待持久化事实并后台重试，而不是返回普通可重试错误。
-command ID 还绑定请求的 SHA-256 指纹（source、请求 target 原文、message）；同 ID 改参
-返回 `conflict`，不会因 provider alias 后续解析到别的会话而复用旧结果。
+已删除（2026-10-19）。跨 Agent 消息靠往对方终端粘贴文字投递，接收方分不出是不是用户说的；
+会话之间的协作改为只在 Smelt 托管的 Pi 会话之间做，见后续设计。
 
 durable cursor 同时保存 delivery + 排序后 topics 的 SHA-256 declaration fingerprint。
 相同 plugin/subscription ID 重连时声明必须一致，cursor flush 只更新水位，不覆盖指纹。

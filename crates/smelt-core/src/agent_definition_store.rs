@@ -1183,7 +1183,6 @@ mod tests {
     fn typed_snapshot_supplies_agents_command_and_env() {
         let snapshot = smelt_store::AgentUiSnapshot {
             agent_hooks_enabled: true,
-            cross_agent_enabled: true,
             commands: vec![smelt_store::AgentConversationCommandRecord {
                 command_key: ConversationAgentKind::Pi
                     .descriptor()

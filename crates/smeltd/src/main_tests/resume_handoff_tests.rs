@@ -812,7 +812,6 @@ fn connecting_hosted_handoff_does_not_keep_the_process() {
             cwd: None,
             launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("/usr/bin/true"),
             runtime_spec_fingerprint: None,
-            agent_mcp: false,
             agent_token: String::new(),
             conversation_binding: None,
             pending_host_bytes: Vec::new(),
@@ -851,7 +850,6 @@ fn hosted_handoff_accepts_an_active_snapshot_without_sdk_reconstruction() {
         "snapshot": snapshot,
         "cmd": "provider --acp",
         "agent_token": "token",
-        "agent_mcp": true,
     });
 
     let HostedAcpHandoffItemValidation::Restore(validated) =

@@ -80,6 +80,9 @@ fn obsolete_home_files(home: &Path) -> Vec<PathBuf> {
         home.join("smelt-bridge.log"),
         home.join("app.log.1"),
         home.join("bin").join("smeltd.install.lock"),
+        // 跨 Agent 消息下线后的 MCP helper。
+        home.join("bin").join("smelt-agent-mcp"),
+        home.join("bin").join("smelt-agent-mcp.next"),
     ];
     if let Ok(entries) = fs::read_dir(home.join("bin")) {
         for entry in entries.flatten() {

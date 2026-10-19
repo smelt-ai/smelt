@@ -8,11 +8,11 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SM
 ~/.smelt/smelt.sqlite3
 ```
 
-这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 22`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
+这台机器上的会话、项目、智能体、自动化、配对设备和远程开关。schema 版本是 `user_version`，当前 `STORE_SCHEMA_VERSION = 23`（`crates/smelt-store/src/lib.rs`）。WAL，5 秒 busy timeout，库文件和 `-wal`/`-shm` 在 Unix 上收紧为 `0600`。
 
 建库只发生在主文件和 sidecar 都不存在时。主文件没了但 sidecar 还在时拒绝建空库。非空的 `user_version = 0`、形状不符或版本过新的库只拒绝打开，不删表、不重建。以后改已发布结构必须加版本号并写迁移。
 
-通用 `kv` 表在 v18 删掉。v19→v20 删掉 worktree 继承表（smelt 不管 worktree）。v20→v21 的 `layout_node` 增加 `tabs`，同一格可以叠多个终端。v21→v22 删掉 `layout_node`：对话的终端平铺成 `session.position`，分屏布局归客户端（下面的 `conversation_route.dock_layout`）。
+通用 `kv` 表在 v18 删掉。v19→v20 删掉 worktree 继承表（smelt 不管 worktree）。v20→v21 的 `layout_node` 增加 `tabs`，同一格可以叠多个终端。v21→v22 删掉 `layout_node`：对话的终端平铺成 `session.position`，分屏布局归客户端（下面的 `conversation_route.dock_layout`）。v22→v23 删掉跨 Agent 消息的 `peer_message_command` 和 `agent_host_pref.cross_agent_enabled`，以及只为它服务的持久事件表（`event_log`、`event_outbox`、`subscription_cursor`、`event_dead_letter`、`event_delivery_retry`、`command_dedupe`）。事件只在内存里投递。
 
 现行表（`crates/smelt-store/src/schema.rs` 的 `CREATE_SCHEMA`）按职责：
 
@@ -24,7 +24,6 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（可用 `SM
 | 启动与历史 | `launch_entry`、`launch_settings`、`new_session_pin`、`history_title`、`history_agent_binding` |
 | 远程 | `paired_device`、`remote_config`、`runtime_identity`、`remote_acp_session`、`remote_terminal_session`、`published_session` |
 | 配置缓存 | `memory_settings`、`terminal_theme`、`terminal_theme_palette`、`auto_model_provider`、`quota_cache` 及额度明细 |
-| 事件 | `event_log`、`event_outbox`、`subscription_cursor`、`event_dead_letter`、`event_delivery_retry`、`command_dedupe`、`peer_message_command` |
 
 嵌套配置可以放在 JSON 列里（例如自动化的 trigger）。那是列，不是一份 `*.json` 活文件。
 

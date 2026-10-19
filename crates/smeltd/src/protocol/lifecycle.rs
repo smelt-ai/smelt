@@ -36,33 +36,8 @@ pub(super) fn handle_version(
     );
 }
 
-pub(super) fn handle_shutdown(conn: UnixStream, event_hub: &EventHubHandle) {
+pub(super) fn handle_shutdown(conn: UnixStream) {
     let mut c = conn;
-    let _peer_messaging_shutdown = match peer_messaging::begin_upgrade() {
-        Ok(guard) => guard,
-        Err(active_operations) => {
-            let _ = smelt_runtime_client::protocol::write_json_line(
-                &mut c,
-                &serde_json::json!({
-                    "ok": false,
-                    "busy": true,
-                    "error": "peer messaging operations are still active",
-                    "peer_messaging_operations": active_operations,
-                }),
-            );
-            return;
-        }
-    };
-    if let Err(error) = event_hub.flush_for_shutdown() {
-        let _ = smelt_runtime_client::protocol::write_json_line(
-            &mut c,
-            &serde_json::json!({
-                "ok": false,
-                "error": format!("EventHub durable flush failed before shutdown: {error}")
-            }),
-        );
-        return;
-    }
     let _ =
         smelt_runtime_client::protocol::write_json_line(&mut c, &serde_json::json!({ "ok": true }));
     let _ = c.shutdown(Shutdown::Both);

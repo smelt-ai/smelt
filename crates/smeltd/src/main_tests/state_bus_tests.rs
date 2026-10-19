@@ -1,10 +1,9 @@
 use super::*;
 use smelt_event_bus::Delivery;
 use smelt_event_protocol::{
-    Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
     CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_TERMINAL_NOTIFICATION, Capability,
-    CoreProjectionEvent, DeliveryClass, PluginId, SessionStateRemoved, SubscriptionId, Topic,
+    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_TERMINAL_NOTIFICATION, CoreProjectionEvent,
+    PluginId, SessionStateRemoved, SubscriptionId, Topic,
 };
 use std::collections::BTreeSet;
 
@@ -17,7 +16,6 @@ fn subscribe(event_hub: &EventHubHandle, topics: &[&str]) -> smelt_event_bus::Su
                 .iter()
                 .map(|topic| Topic::new(*topic).unwrap())
                 .collect::<BTreeSet<_>>(),
-            DeliveryClass::Ephemeral,
             &core_read_capabilities(),
         )
         .unwrap()
@@ -207,65 +205,6 @@ fn projection_synchronization_cannot_regress_published_revisions() {
     let snapshot = event_hub.legacy_snapshot().unwrap();
     assert_eq!(snapshot["sessions"][0]["revision"], 8);
     assert_eq!(snapshot["remote_sessions"]["revision"], 7);
-}
-
-#[test]
-fn upgrade_flush_persists_durable_cursor() {
-    let event_hub = new_event_hub();
-    let plugin_id = PluginId::new("test.upgrade-flush").unwrap();
-    let subscription_id = SubscriptionId::new("agent-messages").unwrap();
-    let topics = BTreeSet::from([Topic::new(CORE_TOPIC_AGENT_MESSAGE_DELIVERED).unwrap()]);
-    let capabilities =
-        BTreeSet::from([Capability::new(CORE_CAPABILITY_AGENT_MESSAGE_READ).unwrap()]);
-    let subscription = event_hub
-        .subscribe(
-            plugin_id.clone(),
-            subscription_id.clone(),
-            topics.clone(),
-            DeliveryClass::Durable,
-            &capabilities,
-        )
-        .unwrap();
-    let published = event_hub
-        .publish_agent_message_delivered("message-1", "source", "target")
-        .unwrap();
-    let Delivery::Event(delivered) = subscription.recv().unwrap() else {
-        panic!("expected durable event");
-    };
-    event_hub
-        .runtime()
-        .ack(
-            &plugin_id,
-            &Ack {
-                subscription_id: subscription_id.clone(),
-                sequence: delivered.sequence,
-                event_id: delivered.envelope.event_id.clone(),
-            },
-        )
-        .unwrap();
-
-    event_hub.flush_for_shutdown().unwrap();
-    event_hub
-        .runtime()
-        .unsubscribe(&plugin_id, &subscription_id)
-        .unwrap();
-    let replacement = event_hub
-        .subscribe(
-            plugin_id.clone(),
-            subscription_id.clone(),
-            topics,
-            DeliveryClass::Durable,
-            &capabilities,
-        )
-        .unwrap();
-    assert_eq!(
-        event_hub
-            .runtime()
-            .subscription_cursor(&plugin_id, &subscription_id)
-            .unwrap(),
-        published.sequence
-    );
-    drop(replacement);
 }
 
 #[test]

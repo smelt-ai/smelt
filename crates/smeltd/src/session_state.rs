@@ -33,11 +33,8 @@ pub(crate) struct SessionState {
     /// 结构化 hook 实际上报并经终端 agent 注册表确认的 provider。它描述当前在
     /// shell 中运行的 agent，与不可变的启动命令 `launch` 分开。
     pub(crate) provider: Option<String>,
-    /// 该活体 agent 进程是否在启动时拿到了 Smelt cross-agent MCP。不能只看 launch
-    /// 猜：从旧版 daemon handoff 过来的 Claude/Codex 进程并没有这组工具。
-    pub(crate) agent_mcp: bool,
-    /// cross-agent daemon op 的会话能力令牌。只进受控子进程环境和 handoff，不进
-    /// list/subscribe，因此其它 agent 即使知道 session id 也不能冒充它回复。
+    /// 会话里的 agent 进程向守护证明身份用的令牌（智能体记忆等 daemon op 要它）。只进
+    /// 受控子进程环境和 handoff，不进 list/subscribe，其它 agent 知道 session id 也冒充不了。
     #[serde(skip)]
     pub(crate) agent_token: String,
     /// 会话名。非空的 provider 标题（`SessionTitleChanged`，或 ACP 的
@@ -91,7 +88,6 @@ impl Default for SessionState {
             cwd: None,
             launch: None,
             provider: None,
-            agent_mcp: false,
             agent_token: String::new(),
             title: None,
             conversation_id: None,
@@ -358,7 +354,6 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
                 state.pending_question = None;
                 state.active_blocker = None;
             }
-            state.agent_mcp = false;
             state.agent_token = uuid::Uuid::new_v4().simple().to_string();
         }
     }

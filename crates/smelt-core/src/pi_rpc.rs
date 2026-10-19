@@ -4323,8 +4323,6 @@ mod tests {
             cwd: Some("/workspace".to_string()),
             sid: "acp-pi-test".to_string(),
             agent_token: String::new(),
-            agent_mcp: false,
-            agent_mcp_cli_args: Vec::new(),
             resume_session_id: None,
             fork_session_id: None,
             fork_cut: None,

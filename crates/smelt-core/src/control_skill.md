@@ -46,4 +46,4 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16 appearan
 
 允许的设置：`appearance.theme`（主题名，例如 `Default Dark`、`Ayu Light`）、`appearance.theme_mode`（dark|light，把当前主题拨到同一族的另一侧）、`appearance.ui_font_px`（14–26）、`appearance.ui_font_family`、`appearance.font_px`（9–22）、`appearance.font_family`、`appearance.opacity`（0.3–1.0）。外观存在桌面客户端里：改动经 smeltd 转给打开着的桌面，立刻生效；桌面没开时 `set` 外观会报错。`settings get` 只列记忆这类存在 smeltd 里的设置。
 
-先 list 再 update。不要和 `smelt_list_agents`（跨会话发消息）搞混。
+先 list 再 update。

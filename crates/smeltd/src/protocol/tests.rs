@@ -7,13 +7,12 @@ use super::*;
 #[cfg(target_os = "macos")]
 use smelt_event_protocol::FirstPartyClientKind;
 use smelt_event_protocol::{
-    Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_CAPABILITY_AUTOMATION_READ,
-    CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
-    CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ,
-    CORE_TOPIC_AGENT_MESSAGE_DELIVERED, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
-    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, Nack,
-    NackDisposition, PluginId, ProtocolRange, SubscribeControlMessage, SubscribeErrorCode,
-    SubscribeMessage, SubscribeRequest, SubscriptionDeclaration, SubscriptionId,
+    CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
+    CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
+    CORE_CAPABILITY_WORKSPACE_READ, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
+    EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, PluginId, ProtocolRange,
+    SubscribeErrorCode, SubscribeMessage, SubscribeRequest, SubscriptionDeclaration,
+    SubscriptionId,
 };
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
@@ -111,12 +110,7 @@ fn identity(capabilities: &[&str]) -> AuthenticatedEventClient {
     }
 }
 
-fn request(
-    id: &str,
-    topic: &str,
-    delivery: DeliveryClass,
-    cursor: Option<u64>,
-) -> serde_json::Value {
+fn request(id: &str, topic: &str) -> serde_json::Value {
     serde_json::to_value(SubscribeRequest {
         protocol: ProtocolRange {
             min: EVENT_BUS_PROTOCOL_VERSION,
@@ -125,9 +119,7 @@ fn request(
         subscription: SubscriptionDeclaration {
             id: SubscriptionId::new(id).unwrap(),
             topics: vec![smelt_event_protocol::Topic::new(topic).unwrap()],
-            delivery,
         },
-        cursor,
     })
     .unwrap()
 }
@@ -142,12 +134,7 @@ fn read_message(reader: &mut BufReader<UnixStream>) -> SubscribeMessage<serde_js
 #[test]
 fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
     let event_hub = super::super::new_event_hub();
-    let request = request(
-        "sessions",
-        CORE_TOPIC_SESSION_STATE_CHANGED,
-        DeliveryClass::Ephemeral,
-        None,
-    );
+    let request = request("sessions", CORE_TOPIC_SESSION_STATE_CHANGED);
     let (server, client) = UnixStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -190,7 +177,6 @@ fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
             PluginId::new("test.protocol").unwrap(),
             SubscriptionId::new("sessions").unwrap(),
             topics,
-            DeliveryClass::Ephemeral,
             &BTreeSet::from([Capability::new(CORE_CAPABILITY_SESSION_READ).unwrap()]),
         )
         .expect("disconnect must remove the prior subscription");
@@ -200,13 +186,11 @@ fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
 #[test]
 fn version_and_capability_rejections_are_explicit() {
     let event_hub = super::super::new_event_hub();
-    let mut unsupported = request(
-        "sessions",
-        CORE_TOPIC_SESSION_STATE_CHANGED,
-        DeliveryClass::Ephemeral,
-        None,
-    );
-    unsupported["protocol"] = serde_json::json!({"min": 2, "max": 3});
+    let mut unsupported = request("sessions", CORE_TOPIC_SESSION_STATE_CHANGED);
+    unsupported["protocol"] = serde_json::json!({
+        "min": EVENT_BUS_PROTOCOL_VERSION + 1,
+        "max": EVENT_BUS_PROTOCOL_VERSION + 2,
+    });
     for (request, identity, expected) in [
         (
             unsupported,
@@ -214,12 +198,7 @@ fn version_and_capability_rejections_are_explicit() {
             "unsupported event protocol range",
         ),
         (
-            request(
-                "sessions",
-                CORE_TOPIC_SESSION_STATE_CHANGED,
-                DeliveryClass::Ephemeral,
-                None,
-            ),
+            request("sessions", CORE_TOPIC_SESSION_STATE_CHANGED),
             identity(&[]),
             "missing subscribe capability",
         ),
@@ -230,33 +209,6 @@ fn version_and_capability_rejections_are_explicit() {
         BufReader::new(client).read_line(&mut line).unwrap();
         assert!(line.contains(expected), "{line}");
     }
-}
-
-#[test]
-fn cursor_mismatch_is_written_as_a_structured_error_before_close() {
-    let event_hub = super::super::new_event_hub();
-    let request = request(
-        "agent-messages",
-        CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-        DeliveryClass::Durable,
-        Some(99),
-    );
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_event_subscribe(
-        server,
-        Some(&request),
-        Ok(identity(&[CORE_CAPABILITY_AGENT_MESSAGE_READ])),
-        &event_hub,
-    );
-
-    let mut reader = BufReader::new(client);
-    let SubscribeMessage::Error { code, message } = read_message(&mut reader) else {
-        panic!("cursor mismatch should be a structured protocol error");
-    };
-    assert_eq!(code, SubscribeErrorCode::Rejected);
-    assert!(message.contains("requested cursor does not match"));
-    let mut eof = String::new();
-    assert_eq!(reader.read_line(&mut eof).unwrap(), 0);
 }
 
 #[test]
@@ -1068,17 +1020,9 @@ fn wire_auth_rejects_capability_escalation_and_removed_plugin_auth() {
 }
 
 #[test]
-fn durable_subscription_processes_retryable_nack_and_ack() {
+fn client_message_after_subscribe_closes_socket_and_reclaims_reader_worker() {
     let event_hub = super::super::new_event_hub();
-    let published = event_hub
-        .publish_agent_message_delivered("message-1", "source", "target")
-        .unwrap();
-    let request = request(
-        "agent-messages",
-        CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-        DeliveryClass::Durable,
-        None,
-    );
+    let request = request("sessions", CORE_TOPIC_SESSION_STATE_CHANGED);
     let (server, mut client) = UnixStream::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -1088,117 +1032,21 @@ fn durable_subscription_processes_retryable_nack_and_ack() {
         handle_event_subscribe(
             server,
             Some(&request),
-            Ok(identity(&[CORE_CAPABILITY_AGENT_MESSAGE_READ])),
+            Ok(identity(&[CORE_CAPABILITY_SESSION_READ])),
             &worker_hub,
         )
     });
     let mut reader = BufReader::new(client.try_clone().unwrap());
     assert!(matches!(
         read_message(&mut reader),
-        SubscribeMessage::Cursor {
-            last_acked_sequence: 0
-        }
+        SubscribeMessage::Snapshot { .. }
     ));
-    let SubscribeMessage::Event {
-        sequence: Some(sequence),
-        envelope,
-    } = read_message(&mut reader)
-    else {
-        panic!("expected durable event");
+    // 订阅建立后客户端不该再说话：以前的 ack 现在也只是一行多余的输入。
+    writeln!(client, r#"{{"type":"ack"}}"#).unwrap();
+    let SubscribeMessage::Error { code, .. } = read_message(&mut reader) else {
+        panic!("unexpected client input should be a structured protocol error");
     };
-    let nack = SubscribeControlMessage::Nack {
-        nack: Nack {
-            subscription_id: SubscriptionId::new("agent-messages").unwrap(),
-            sequence,
-            event_id: envelope.event_id,
-            disposition: NackDisposition::Retryable,
-            error_code: "busy".to_string(),
-            message: "retry".to_string(),
-        },
-    };
-    writeln!(client, "{}", serde_json::to_string(&nack).unwrap()).unwrap();
-    thread::sleep(Duration::from_millis(300));
-    event_hub.runtime().pump_durable_subscribers().unwrap();
-    let SubscribeMessage::Event {
-        sequence: Some(redelivered),
-        envelope,
-    } = read_message(&mut reader)
-    else {
-        panic!("expected retry");
-    };
-    assert_eq!(redelivered, sequence);
-    let ack = SubscribeControlMessage::Ack {
-        ack: Ack {
-            subscription_id: SubscriptionId::new("agent-messages").unwrap(),
-            sequence,
-            event_id: envelope.event_id,
-        },
-    };
-    writeln!(client, "{}", serde_json::to_string(&ack).unwrap()).unwrap();
-
-    let plugin_id = PluginId::new("test.protocol").unwrap();
-    let subscription_id = SubscriptionId::new("agent-messages").unwrap();
-    for _ in 0..100 {
-        if event_hub
-            .runtime()
-            .subscription_cursor(&plugin_id, &subscription_id)
-            .ok()
-            == Some(published.sequence)
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(
-        event_hub
-            .runtime()
-            .subscription_cursor(&plugin_id, &subscription_id)
-            .unwrap(),
-        published.sequence
-    );
-    client.shutdown(Shutdown::Both).unwrap();
-    worker.join().unwrap();
-}
-
-#[test]
-fn invalid_ack_closes_socket_and_reclaims_reader_worker() {
-    let event_hub = super::super::new_event_hub();
-    let request = request(
-        "agent-messages",
-        CORE_TOPIC_AGENT_MESSAGE_DELIVERED,
-        DeliveryClass::Durable,
-        None,
-    );
-    let (server, mut client) = UnixStream::pair().unwrap();
-    client
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    let worker_hub = Arc::clone(&event_hub);
-    let worker = thread::spawn(move || {
-        handle_event_subscribe(
-            server,
-            Some(&request),
-            Ok(identity(&[CORE_CAPABILITY_AGENT_MESSAGE_READ])),
-            &worker_hub,
-        )
-    });
-    let mut reader = BufReader::new(client.try_clone().unwrap());
-    assert!(matches!(
-        read_message(&mut reader),
-        SubscribeMessage::Cursor { .. }
-    ));
-    let invalid = SubscribeControlMessage::Ack {
-        ack: Ack {
-            subscription_id: SubscriptionId::new("wrong-subscription").unwrap(),
-            sequence: 1,
-            event_id: smelt_event_protocol::EventId::new("event-1").unwrap(),
-        },
-    };
-    writeln!(client, "{}", serde_json::to_string(&invalid).unwrap()).unwrap();
-    assert!(matches!(
-        read_message(&mut reader),
-        SubscribeMessage::Error { .. }
-    ));
+    assert_eq!(code, SubscribeErrorCode::Rejected);
     let mut eof = String::new();
     assert_eq!(reader.read_line(&mut eof).unwrap(), 0);
     worker

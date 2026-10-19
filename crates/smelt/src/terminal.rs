@@ -1827,7 +1827,7 @@ fn sync_managed_helpers_from_app(app: &std::path::Path) -> std::io::Result<()> {
     let macos = app.join("Contents/MacOS");
     let dest_dir = managed_daemon_dir();
     std::fs::create_dir_all(&dest_dir)?;
-    for name in ["smelt-agent-mcp", "smelt-notify"] {
+    for name in ["smelt-notify"] {
         let src = macos.join(name);
         if !src.is_file() {
             continue;

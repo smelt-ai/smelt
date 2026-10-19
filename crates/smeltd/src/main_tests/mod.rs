@@ -16,7 +16,6 @@ mod acp_idle_tests;
 mod acp_tests;
 mod action_integration_tests;
 mod action_tests;
-mod agent_mcp_tests;
 mod automation_command_tests;
 mod autostart_remote_tests;
 mod daemon_executable_tests;

@@ -69,7 +69,6 @@ fn insert_live_session(
         instance: next_session_instance(),
         cwd: Some("/repo".to_string()),
         launch: Some("fish".to_string()),
-        agent_mcp: false,
         agent_token: "tok".to_string(),
         ..Default::default()
     }));
@@ -370,7 +369,6 @@ fn tiny_live_manifest(session_id: &str, pid: i32) -> HandoffManifest {
             rows: 24,
             cwd: None,
             launch: None,
-            agent_mcp: false,
             agent_token: String::new(),
             alt_screen: false,
         }],
@@ -459,7 +457,6 @@ fn import_isolates_bad_grid() {
         rows: 24,
         cwd: None,
         launch: None,
-        agent_mcp: false,
         agent_token: String::new(),
         alt_screen: false,
     });

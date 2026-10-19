@@ -1332,7 +1332,6 @@ mod tests {
 
         let snapshot = smelt_store::AgentUiSnapshot {
             agent_hooks_enabled: true,
-            cross_agent_enabled: true,
             commands: Vec::new(),
             env: vec![smelt_store::AgentAcpEnvRecord {
                 engine_kind_id: "opencode".into(),

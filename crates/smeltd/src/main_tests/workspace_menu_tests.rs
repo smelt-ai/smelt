@@ -1,8 +1,6 @@
 use super::*;
 use smelt_event_bus::Delivery;
-use smelt_event_protocol::{
-    CORE_TOPIC_WORKSPACE_MENU_CHANGED, DeliveryClass, PluginId, SubscriptionId, Topic,
-};
+use smelt_event_protocol::{CORE_TOPIC_WORKSPACE_MENU_CHANGED, PluginId, SubscriptionId, Topic};
 use std::collections::BTreeSet;
 
 static WORKSPACE_MENU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -88,7 +86,6 @@ fn stale_menu_from_same_desktop_source_is_ignored() {
             PluginId::new("test.workspace-menu").unwrap(),
             SubscriptionId::new("menu").unwrap(),
             BTreeSet::from([Topic::new(CORE_TOPIC_WORKSPACE_MENU_CHANGED).unwrap()]),
-            DeliveryClass::Ephemeral,
             &core_read_capabilities(),
         )
         .unwrap();

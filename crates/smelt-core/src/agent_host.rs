@@ -36,7 +36,6 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
     }
     AgentHostSettings {
         hooks_enabled: snapshot.agent_hooks_enabled,
-        cross_agent_enabled: snapshot.cross_agent_enabled,
         commands,
         env,
         config_memory,
@@ -61,7 +60,6 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
 fn prefs_snapshot(settings: &AgentHostSettings) -> smelt_store::AgentUiSnapshot {
     smelt_store::AgentUiSnapshot {
         agent_hooks_enabled: settings.hooks_enabled,
-        cross_agent_enabled: settings.cross_agent_enabled,
         commands: CONVERSATION_AGENTS
             .iter()
             .filter_map(|descriptor| {
@@ -221,11 +219,6 @@ fn apply_edit_on(
         before.hooks_enabled,
         after.hooks_enabled,
     );
-    merge_flag(
-        &mut current.cross_agent_enabled,
-        before.cross_agent_enabled,
-        after.cross_agent_enabled,
-    );
     merge_map(&mut current.commands, &before.commands, &after.commands);
     merge_map(&mut current.env, &before.env, &after.env);
     merge_map(
@@ -277,7 +270,7 @@ mod tests {
     fn apply_edit_persists_only_the_changed_field() {
         let (store, dir) = temp_store();
         let mut seeded = prefs_snapshot(&AgentHostSettings::fresh());
-        seeded.cross_agent_enabled = false;
+        seeded.agent_hooks_enabled = false;
         store.put_agent_ui_prefs(&seeded).unwrap();
 
         let before = load_on(&store).unwrap();
@@ -289,7 +282,7 @@ mod tests {
 
         assert_eq!(merged.commands["claude"], "claude --edited");
         let stored = store.get_agent_ui_snapshot().unwrap().unwrap();
-        assert!(!stored.cross_agent_enabled, "没改的开关不能被这次提交改掉");
+        assert!(!stored.agent_hooks_enabled, "没改的开关不能被这次提交改掉");
         assert_eq!(load_on(&store).unwrap(), merged);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -318,30 +311,23 @@ mod tests {
         current
             .commands
             .insert("codex".into(), "codex --theirs".into());
-        current.cross_agent_enabled = false;
+        current.hooks_enabled = false;
 
         let mut after = before.clone();
         after
             .commands
             .insert("claude".into(), "claude --mine".into());
-        after.hooks_enabled = false;
 
         merge_flag(
             &mut current.hooks_enabled,
             before.hooks_enabled,
             after.hooks_enabled,
         );
-        merge_flag(
-            &mut current.cross_agent_enabled,
-            before.cross_agent_enabled,
-            after.cross_agent_enabled,
-        );
         merge_map(&mut current.commands, &before.commands, &after.commands);
 
         assert_eq!(current.commands["codex"], "codex --theirs");
         assert_eq!(current.commands["claude"], "claude --mine");
-        assert!(!current.hooks_enabled);
-        assert!(!current.cross_agent_enabled, "没改的开关保留别人的值");
+        assert!(!current.hooks_enabled, "没改的开关保留别人的值");
     }
 
     #[test]

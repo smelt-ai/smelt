@@ -2024,18 +2024,7 @@ pub(crate) fn acp_relaunch(
     *sess.launch_spec.lock().unwrap() = Some(launch.clone());
     *sess.runtime_spec_fingerprint.lock().unwrap() =
         Some(acp_runtime_spec_fingerprint(&launch, &ephemeral_env));
-    let agent_mcp = smelt_core::agent_bus::cross_agent_enabled()
-        && smelt_core::agent_bus::mcp_executable_path().is_file();
-    let agent_token = {
-        let mut state = sess.state.lock().unwrap();
-        state.agent_mcp = agent_mcp;
-        state.agent_token.clone()
-    };
-    let agent_mcp_cli_args = if agent_mcp {
-        acp_agent_mcp_cli_args(&launch, id, &agent_token)
-    } else {
-        Vec::new()
-    };
+    let agent_token = sess.state.lock().unwrap().agent_token.clone();
     sess.state.lock().unwrap().launch = Some(launch.command.clone());
 
     // 会话跑独立宿主还是同进程 direct driver，由注册表在构造时定好，而不是在这里
@@ -2100,8 +2089,6 @@ pub(crate) fn acp_relaunch(
         cwd: sess.cwd.clone(),
         sid: id.to_string(),
         agent_token,
-        agent_mcp,
-        agent_mcp_cli_args,
         resume_session_id: if fork_id.is_some() {
             None
         } else {
@@ -2213,7 +2200,6 @@ pub(crate) fn make_acp_session(
             launch: None,
             provider: None,
             conversation_id: None,
-            agent_mcp: false,
             agent_token: uuid::Uuid::new_v4().simple().to_string(),
             title: None,
             phase: Phase::Idle,
@@ -4642,10 +4628,7 @@ pub(crate) fn collect_acp_handoff_typed(
             let provider_pid = host.provider_pid();
             let host_snapshot_revision = sess.host_snapshot_revision.load(Ordering::SeqCst);
             let launch = recorded_handoff_launch(sess);
-            let (agent_mcp, agent_token) = {
-                let state = sess.state.lock().unwrap();
-                (state.agent_mcp, state.agent_token.clone())
-            };
+            let agent_token = sess.state.lock().unwrap().agent_token.clone();
             let mut snapshot = conversation_snapshot_for_handoff(&sess.reduced.lock().unwrap());
             snapshot.snapshot_revision = sess.snapshot_revision.load(Ordering::SeqCst);
             set_conversation_snapshot(sess, &mut snapshot);
@@ -4656,7 +4639,6 @@ pub(crate) fn collect_acp_handoff_typed(
                 host_snapshot_revision,
                 cwd: sess.cwd.clone(),
                 launch,
-                agent_mcp,
                 agent_token,
                 runtime_spec_fingerprint: sess.runtime_spec_fingerprint.lock().unwrap().clone(),
                 conversation_binding: sess.conversation_binding.lock().unwrap().clone(),
@@ -4679,10 +4661,7 @@ pub(crate) fn collect_acp_handoff_typed(
             .and_then(|h| *h.stdio.lock().unwrap());
         let Some(stdio) = stdio else { continue };
         let launch = recorded_handoff_launch(sess);
-        let (agent_mcp, agent_token) = {
-            let state = sess.state.lock().unwrap();
-            (state.agent_mcp, state.agent_token.clone())
-        };
+        let agent_token = sess.state.lock().unwrap().agent_token.clone();
         let (mut snapshot, pending_raw_line) = {
             let reduced = sess.reduced.lock().unwrap();
             (
@@ -4696,7 +4675,6 @@ pub(crate) fn collect_acp_handoff_typed(
             pid: stdio.pid,
             cwd: sess.cwd.clone(),
             launch,
-            agent_mcp,
             agent_token,
             runtime_spec_fingerprint: sess.runtime_spec_fingerprint.lock().unwrap().clone(),
             conversation_binding: sess.conversation_binding.lock().unwrap().clone(),

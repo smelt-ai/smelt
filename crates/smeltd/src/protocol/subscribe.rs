@@ -8,8 +8,8 @@ use super::{
 };
 use smelt_event_bus::Delivery;
 use smelt_event_protocol::{
-    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID,
-    SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
+    EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, SubscribeErrorCode,
+    SubscribeMessage, SubscribeRequest,
 };
 use std::collections::BTreeSet;
 use std::os::unix::net::UnixStream;
@@ -80,7 +80,8 @@ pub(super) fn write_event_protocol_error(conn: &mut UnixStream, error: impl std:
 const CONNECTION_MAILBOX_LIMIT: usize = 256;
 
 enum ConnectionMail {
-    Control(Result<SubscribeControlMessage, String>),
+    /// 订阅建立后客户端不该再发任何东西；发了就是协议错误，读出错也算。
+    ClientError(String),
     Delivery(Delivery),
 }
 
@@ -142,17 +143,17 @@ impl ConnectionMailbox {
         self.wake.notify_all();
     }
 
-    /// 先交出全部确认，再交出至多一条投递。客户端关掉之后，剩下的投递不再交。
-    /// 订阅通道关掉之后，确认处理完就结束。
+    /// 客户端出错先交，再交出至多一条投递。客户端关掉或订阅通道关掉之后，剩下的投递
+    /// 不再交。
     fn next(&self) -> Option<ConnectionMail> {
         let mut state = self.state.lock().unwrap();
         loop {
             if let Some(index) = state
                 .items
                 .iter()
-                .position(|item| matches!(item, ConnectionMail::Control(_)))
+                .position(|item| matches!(item, ConnectionMail::ClientError(_)))
             {
-                let item = state.items.remove(index).expect("刚找到的确认");
+                let item = state.items.remove(index).expect("刚找到的客户端错误");
                 self.wake.notify_all();
                 return Some(item);
             }
@@ -206,28 +207,12 @@ pub(crate) fn handle_event_subscribe(
                 identity.plugin_id.clone(),
                 request.subscription.id.clone(),
                 topics,
-                request.subscription.delivery,
                 &identity.capabilities,
             )
             .map_err(|error| error.to_string())?;
-        let persisted_cursor = event_hub
-            .runtime()
-            .subscription_cursor(&identity.plugin_id, &request.subscription.id)
-            .map_err(|error| error.to_string())?;
-        if request
-            .cursor
-            .is_some_and(|cursor| cursor != persisted_cursor)
-        {
-            let _ = event_hub
-                .runtime()
-                .unsubscribe(&identity.plugin_id, &request.subscription.id);
-            return Err(format!(
-                "requested cursor does not match authenticated persisted cursor {persisted_cursor}"
-            ));
-        }
-        Ok((identity, request, subscription, persisted_cursor))
+        Ok((identity, request, subscription))
     })();
-    let (identity, request, subscription, persisted_cursor) = match setup {
+    let (identity, request, subscription) = match setup {
         Ok(setup) => setup,
         Err(error) => {
             write_event_protocol_error(&mut conn, error);
@@ -245,21 +230,6 @@ pub(crate) fn handle_event_subscribe(
             .unsubscribe(&identity.plugin_id, &request.subscription.id);
         return;
     }
-    if request.subscription.delivery == DeliveryClass::Durable
-        && write_event_protocol_value(
-            &mut conn,
-            SubscribeMessage::<serde_json::Value>::Cursor {
-                last_acked_sequence: persisted_cursor,
-            },
-        )
-        .is_err()
-    {
-        let _ = event_hub
-            .runtime()
-            .unsubscribe(&identity.plugin_id, &request.subscription.id);
-        return;
-    }
-
     let Ok(reader) = conn.try_clone() else {
         let _ = event_hub
             .runtime()
@@ -316,14 +286,13 @@ pub(crate) fn handle_event_subscribe(
         .name("smelt-subscribe-read".to_string())
         .spawn(move || {
             let reader = BufReader::new(reader);
-            for line in reader.lines() {
-                let message = line.map_err(|error| error.to_string()).and_then(|line| {
-                    serde_json::from_str::<SubscribeControlMessage>(&line)
-                        .map_err(|error| format!("invalid ack/nack: {error}"))
-                });
-                if !reader_mailbox.push(ConnectionMail::Control(message)) {
-                    return;
-                }
+            if let Some(line) = reader.lines().next() {
+                let error = match line {
+                    Ok(_) => "unexpected client message after subscribe".to_string(),
+                    Err(error) => error.to_string(),
+                };
+                reader_mailbox.push(ConnectionMail::ClientError(error));
+                return;
             }
             reader_mailbox.mark_client_closed();
         });
@@ -337,66 +306,14 @@ pub(crate) fn handle_event_subscribe(
         return;
     };
 
-    // 转发线程先跑起来，再灌第一批。订阅通道只有 256 个位子，没人读的时候
-    // 发布方会把后面的增量标成滞后。
-    if request.subscription.delivery == DeliveryClass::Durable
-        && let Err(error) = event_hub.runtime().dispatch_durable(
-            &identity.plugin_id,
-            &request.subscription.id,
-            smelt_event_bus::DEFAULT_DURABLE_LOAD_BATCH,
-        )
-    {
-        write_event_protocol_error(&mut conn, error);
-    }
-
     'connection: loop {
         let Some(mail) = mailbox.next() else {
             break;
         };
         match mail {
-            ConnectionMail::Control(control) => {
-                let result = match control {
-                    Ok(SubscribeControlMessage::Ack { ack })
-                        if ack.subscription_id != request.subscription.id =>
-                    {
-                        Err(smelt_event_bus::EventBusError::new(
-                            "ack subscription_id does not match this connection",
-                        ))
-                    }
-                    Ok(SubscribeControlMessage::Ack { ack }) => {
-                        event_hub.runtime().ack(&identity.plugin_id, &ack)
-                    }
-                    Ok(SubscribeControlMessage::Nack { nack })
-                        if nack.subscription_id != request.subscription.id =>
-                    {
-                        Err(smelt_event_bus::EventBusError::new(
-                            "nack subscription_id does not match this connection",
-                        ))
-                    }
-                    Ok(SubscribeControlMessage::Nack { nack }) => event_hub.runtime().nack(
-                        &identity.plugin_id,
-                        &nack,
-                        crate::event_hub::now_ms(),
-                    ),
-                    Err(error) => {
-                        write_event_protocol_error(&mut conn, error);
-                        break 'connection;
-                    }
-                };
-                if let Err(error) = result {
-                    write_event_protocol_error(&mut conn, error);
-                    break 'connection;
-                }
-                if request.subscription.delivery == DeliveryClass::Durable
-                    && let Err(error) = event_hub.runtime().dispatch_durable(
-                        &identity.plugin_id,
-                        &request.subscription.id,
-                        smelt_event_bus::DEFAULT_DURABLE_LOAD_BATCH,
-                    )
-                {
-                    write_event_protocol_error(&mut conn, error);
-                    break 'connection;
-                }
+            ConnectionMail::ClientError(error) => {
+                write_event_protocol_error(&mut conn, error);
+                break 'connection;
             }
             ConnectionMail::Delivery(Delivery::Lag {
                 dropped,
@@ -456,7 +373,4 @@ pub(crate) fn handle_event_subscribe(
         .unsubscribe(&identity.plugin_id, &request.subscription.id);
     let _ = reader_worker.join();
     let _ = forwarder.join();
-    if let Err(error) = event_hub.runtime().flush_cursors() {
-        eprintln!("[event-hub] disconnect cursor flush failed: {error}");
-    }
 }

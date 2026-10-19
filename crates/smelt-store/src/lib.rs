@@ -8,7 +8,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 mod error;
 pub use error::{OpenSource, StoreError};
@@ -62,7 +61,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 22;
+pub const STORE_SCHEMA_VERSION: u32 = 23;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -161,47 +160,13 @@ pub struct AutomationRunRecord {
     pub context_json: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct OutboxEvent {
-    pub outbox_id: u64,
-    pub envelope: smelt_event_protocol::EventEnvelope<serde_json::Value>,
-    pub created_at_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PeerMessageCommandResult {
-    pub source_session_id: String,
-    pub command_id: smelt_event_protocol::CommandId,
-    pub request_fingerprint: String,
-    pub completed_at_ms: u64,
-    pub message_id: String,
-    pub target_session_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PeerMessageCommitOutcome {
-    Inserted,
-    Existing(PeerMessageCommandResult),
-    Conflict(PeerMessageCommandResult),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CursorDeclaration {
-    pub last_acked_sequence: u64,
-    pub declaration_fingerprint: String,
-}
-
 #[derive(Clone)]
 pub struct Store {
     backend: imp::Backend,
-    durable_notify: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 }
 
 fn store_from_backend(backend: imp::Backend) -> Store {
-    Store {
-        backend,
-        durable_notify: Arc::new(Mutex::new(None)),
-    }
+    Store { backend }
 }
 
 impl std::fmt::Debug for Store {
@@ -241,21 +206,6 @@ impl Store {
         let path = path.into();
         let backend = imp::Backend::open_or_create(&path)?;
         Ok(store_from_backend(backend))
-    }
-
-    pub fn set_durable_notify(&self, sender: std::sync::mpsc::Sender<()>) {
-        if let Ok(mut slot) = self.durable_notify.lock() {
-            *slot = Some(sender);
-        }
-    }
-
-    fn notify_durable(&self) {
-        let Ok(slot) = self.durable_notify.lock() else {
-            return;
-        };
-        if let Some(sender) = slot.as_ref() {
-            let _ = sender.send(());
-        }
     }
 
     /// 只读库的 `user_version`，不建库、不迁移。交接 tripwire 用：
@@ -672,214 +622,6 @@ impl Store {
     ) -> Result<(), StoreError> {
         imp::put_workspace_menu_snapshot(&self.backend, snapshot)
     }
-
-    /// Adds durable events to the domain transaction's outbox in one commit.
-    pub fn append_outbox_batch(
-        &self,
-        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        imp::append_outbox_batch(&self.backend, events)?;
-        if !events.is_empty() {
-            self.notify_durable();
-        }
-        Ok(())
-    }
-
-    pub fn load_pending_outbox(&self, limit: usize) -> Result<Vec<OutboxEvent>, StoreError> {
-        imp::load_pending_outbox(&self.backend, limit)
-    }
-
-    pub fn mark_outbox_dispatched(&self, dispatched: &[(u64, u64)]) -> Result<(), StoreError> {
-        imp::mark_outbox_dispatched(&self.backend, dispatched)
-    }
-
-    /// Atomically inserts pending outbox events into the event log (or reuses an existing
-    /// event_id) and marks the outbox rows dispatched.
-    pub fn dispatch_pending_outbox(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        imp::dispatch_pending_outbox(&self.backend, limit)
-    }
-
-    pub fn bind_cursor_declaration(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-        declaration_fingerprint: &str,
-    ) -> Result<CursorDeclaration, StoreError> {
-        validate_name("declaration fingerprint", declaration_fingerprint)?;
-        imp::bind_cursor_declaration(
-            &self.backend,
-            plugin_id,
-            subscription_id,
-            declaration_fingerprint,
-        )
-    }
-
-    pub fn load_cursor_declaration(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<Option<CursorDeclaration>, StoreError> {
-        imp::load_cursor_declaration(&self.backend, plugin_id, subscription_id)
-    }
-
-    pub fn get_peer_message_command_result(
-        &self,
-        source_session_id: &str,
-        command_id: &smelt_event_protocol::CommandId,
-    ) -> Result<Option<PeerMessageCommandResult>, StoreError> {
-        validate_name("source session id", source_session_id)?;
-        imp::get_peer_message_command_result(&self.backend, source_session_id, command_id)
-    }
-
-    /// Commits the idempotent peer-message result and its durable delivery fact atomically.
-    pub fn commit_peer_message_delivery(
-        &self,
-        result: &PeerMessageCommandResult,
-        event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
-    ) -> Result<PeerMessageCommitOutcome, StoreError> {
-        validate_name("source session id", &result.source_session_id)?;
-        validate_name("request fingerprint", &result.request_fingerprint)?;
-        validate_name("message id", &result.message_id)?;
-        validate_name("target session id", &result.target_session_id)?;
-        let outcome = imp::commit_peer_message_delivery(&self.backend, result, event)?;
-        if outcome == PeerMessageCommitOutcome::Inserted {
-            self.notify_durable();
-        }
-        Ok(outcome)
-    }
-}
-
-impl smelt_event_bus::EventStore for Store {
-    fn append_batch(
-        &self,
-        events: &[smelt_event_bus::StoredEvent],
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, smelt_event_bus::EventBusError> {
-        imp::append_event_batch(&self.backend, events).map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn append_batch_idempotent(
-        &self,
-        events: &[smelt_event_bus::StoredEvent],
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, smelt_event_bus::EventBusError> {
-        imp::append_event_batch_idempotent(&self.backend, events)
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn load_after_topics(
-        &self,
-        sequence: u64,
-        topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
-        limit: usize,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, smelt_event_bus::EventBusError> {
-        imp::load_events_after_topics(&self.backend, sequence, topics, limit)
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn high_watermark(&self) -> Result<u64, smelt_event_bus::EventBusError> {
-        imp::event_high_watermark(&self.backend).map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn bind_cursor_declaration(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-        declaration_fingerprint: &str,
-    ) -> Result<smelt_event_bus::CursorDeclaration, smelt_event_bus::EventBusError> {
-        self.bind_cursor_declaration(plugin_id, subscription_id, declaration_fingerprint)
-            .map(|declaration| smelt_event_bus::CursorDeclaration {
-                last_acked_sequence: declaration.last_acked_sequence,
-                declaration_fingerprint: declaration.declaration_fingerprint,
-            })
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn load_cursor_declaration(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<Option<smelt_event_bus::CursorDeclaration>, smelt_event_bus::EventBusError> {
-        self.load_cursor_declaration(plugin_id, subscription_id)
-            .map(|declaration| {
-                declaration.map(|declaration| smelt_event_bus::CursorDeclaration {
-                    last_acked_sequence: declaration.last_acked_sequence,
-                    declaration_fingerprint: declaration.declaration_fingerprint,
-                })
-            })
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn store_cursors(
-        &self,
-        cursors: &[(
-            smelt_event_protocol::PluginId,
-            smelt_event_protocol::SubscriptionId,
-            u64,
-        )],
-    ) -> Result<(), smelt_event_bus::EventBusError> {
-        imp::store_cursors(&self.backend, cursors).map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn put_dead_letter(
-        &self,
-        dead_letter: &smelt_event_bus::DeadLetter,
-    ) -> Result<(), smelt_event_bus::EventBusError> {
-        imp::put_dead_letter(&self.backend, dead_letter)
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn load_dead_letters(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-        limit: usize,
-    ) -> Result<Vec<smelt_event_bus::DeadLetter>, smelt_event_bus::EventBusError> {
-        imp::load_dead_letters(&self.backend, plugin_id, subscription_id, limit)
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn load_retry(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<Option<smelt_event_bus::DeliveryRetry>, smelt_event_bus::EventBusError> {
-        imp::load_retry(&self.backend, plugin_id, subscription_id)
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn put_retry(
-        &self,
-        retry: &smelt_event_bus::DeliveryRetry,
-    ) -> Result<(), smelt_event_bus::EventBusError> {
-        imp::put_retry(&self.backend, retry).map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn delete_retry(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<(), smelt_event_bus::EventBusError> {
-        imp::delete_retry(&self.backend, plugin_id, subscription_id)
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn get_command_result(
-        &self,
-        plugin_id: &smelt_event_protocol::PluginId,
-        command_id: &smelt_event_protocol::CommandId,
-    ) -> Result<Option<smelt_event_bus::CommandResult>, smelt_event_bus::EventBusError> {
-        imp::get_command_result(&self.backend, plugin_id, command_id)
-            .map_err(smelt_event_bus::EventBusError::new)
-    }
-
-    fn put_command_result(
-        &self,
-        result: &smelt_event_bus::CommandResult,
-    ) -> Result<bool, smelt_event_bus::EventBusError> {
-        imp::put_command_result(&self.backend, result).map_err(smelt_event_bus::EventBusError::new)
-    }
 }
 
 fn validate_name(label: &str, value: &str) -> Result<(), StoreError> {
@@ -931,7 +673,6 @@ mod imp {
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
     const BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
-    const LEGACY_V3_FINGERPRINT: &str = "legacy-v3-unbound";
 
     const OPEN_EXISTING_FLAGS: OpenFlags =
         OpenFlags::SQLITE_OPEN_READ_WRITE.union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
@@ -1717,745 +1458,6 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn append_event_batch(
-        backend: &Backend,
-        events: &[smelt_event_bus::StoredEvent],
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        append_event_batch_mode(backend, events, false)
-    }
-
-    pub(super) fn append_event_batch_idempotent(
-        backend: &Backend,
-        events: &[smelt_event_bus::StoredEvent],
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        append_event_batch_mode(backend, events, true)
-    }
-
-    fn append_event_batch_mode(
-        backend: &Backend,
-        events: &[smelt_event_bus::StoredEvent],
-        idempotent: bool,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transfer_pending_outbox(&transaction, None)?;
-        let appended = if events.is_empty() {
-            Vec::new()
-        } else {
-            insert_event_batch(&transaction, events, idempotent)?
-        };
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(appended)
-    }
-
-    fn insert_event_batch(
-        transaction: &rusqlite::Transaction<'_>,
-        events: &[smelt_event_bus::StoredEvent],
-        idempotent: bool,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        let mut appended = Vec::with_capacity(events.len());
-        let mut statement = transaction.prepare_cached(
-            "INSERT INTO event_log(
-                   event_id, topic, aggregate_kind, aggregate_id, aggregate_revision,
-                   occurred_at_ms, envelope_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
-        for event in events {
-            let existing = transaction
-                .query_row(
-                    "SELECT sequence, envelope_json FROM event_log WHERE event_id = ?1",
-                    [event.envelope.event_id.as_str()],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
-                .optional()?;
-            if let Some((sequence, wire_bytes)) = existing {
-                if !idempotent {
-                    return Err(StoreError::DuplicateEventId);
-                }
-                let envelope = serde_json::from_slice(&wire_bytes)?;
-                if envelope != event.envelope {
-                    return Err(StoreError::EventIdConflict {
-                        event_id: event.envelope.event_id.to_string(),
-                    });
-                }
-                appended.push(smelt_event_bus::StoredEvent {
-                    sequence: sequence as u64,
-                    envelope,
-                    wire_bytes,
-                });
-                continue;
-            }
-            let aggregate = event.envelope.aggregate.as_ref();
-            if let (Some(aggregate), Some(revision)) =
-                (aggregate, event.envelope.aggregate_revision)
-            {
-                let current = transaction.query_row(
-                    "SELECT MAX(aggregate_revision) FROM event_log
-                         WHERE aggregate_kind = ?1 AND aggregate_id = ?2",
-                    params![aggregate.kind, aggregate.id],
-                    |row| row.get::<_, Option<i64>>(0),
-                )?;
-                if current.is_some_and(|current| revision <= current as u64) {
-                    return Err(StoreError::AggregateRevisionMovedBackwards {
-                        kind: aggregate.kind.clone(),
-                        id: aggregate.id.clone(),
-                    });
-                }
-            }
-            statement.execute(params![
-                event.envelope.event_id.as_str(),
-                event.envelope.topic.as_str(),
-                aggregate.map(|value| value.kind.as_str()),
-                aggregate.map(|value| value.id.as_str()),
-                event.envelope.aggregate_revision.map(|value| value as i64),
-                event.envelope.occurred_at_ms as i64,
-                event.wire_bytes,
-            ])?;
-            let mut stored = event.clone();
-            stored.sequence = transaction.last_insert_rowid() as u64;
-            appended.push(stored);
-        }
-        Ok(appended)
-    }
-
-    pub(super) fn load_events_after_topics(
-        backend: &Backend,
-        sequence: u64,
-        topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
-        limit: usize,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        if topics.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let connection = lock_connection(backend)?;
-        let placeholders = std::iter::repeat_n("?", topics.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT sequence, envelope_json FROM event_log
-             WHERE sequence > ? AND topic IN ({placeholders})
-             ORDER BY sequence LIMIT ?"
-        );
-        let mut statement = connection.prepare(&sql)?;
-        let mut parameters = Vec::with_capacity(topics.len() + 2);
-        parameters.push(rusqlite::types::Value::Integer(sequence as i64));
-        parameters.extend(
-            topics
-                .iter()
-                .map(|topic| rusqlite::types::Value::Text(topic.as_str().to_owned())),
-        );
-        parameters.push(rusqlite::types::Value::Integer(limit as i64));
-        let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
-        rows.map(|row| {
-            let (sequence, wire_bytes) = row?;
-            let envelope = serde_json::from_slice(&wire_bytes)?;
-            Ok(smelt_event_bus::StoredEvent {
-                sequence: sequence as u64,
-                envelope,
-                wire_bytes,
-            })
-        })
-        .collect()
-    }
-
-    pub(super) fn event_high_watermark(backend: &Backend) -> Result<u64, StoreError> {
-        let connection = lock_connection(backend)?;
-        connection
-            .query_row(
-                "SELECT COALESCE(MAX(sequence), 0) FROM event_log",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|value| value as u64)
-            .map_err(StoreError::from)
-    }
-
-    pub(super) fn append_outbox_batch(
-        backend: &Backend,
-        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        insert_outbox_events(&transaction, events)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
-    fn insert_outbox_events(
-        transaction: &rusqlite::Transaction<'_>,
-        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        let mut statement = transaction.prepare_cached(
-            "INSERT INTO event_outbox(event_id, envelope_json, created_at_ms)
-                 VALUES (?1, ?2, ?3)",
-        )?;
-        for event in events {
-            let encoded = serde_json::to_vec(event)?;
-            statement.execute(params![event.event_id.as_str(), encoded, now_ms()])?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn get_peer_message_command_result(
-        backend: &Backend,
-        source_session_id: &str,
-        command_id: &smelt_event_protocol::CommandId,
-    ) -> Result<Option<super::PeerMessageCommandResult>, StoreError> {
-        let connection = lock_connection(backend)?;
-        connection
-            .query_row(
-                "SELECT request_fingerprint, completed_at_ms, message_id, target_session_id
-                 FROM peer_message_command
-                 WHERE source_session_id = ?1 AND command_id = ?2",
-                params![source_session_id, command_id.as_str()],
-                |row| {
-                    Ok(super::PeerMessageCommandResult {
-                        source_session_id: source_session_id.to_string(),
-                        command_id: command_id.clone(),
-                        request_fingerprint: row.get(0)?,
-                        completed_at_ms: row.get::<_, i64>(1)? as u64,
-                        message_id: row.get(2)?,
-                        target_session_id: row.get(3)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
-    pub(super) fn commit_peer_message_delivery(
-        backend: &Backend,
-        result: &super::PeerMessageCommandResult,
-        event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
-    ) -> Result<super::PeerMessageCommitOutcome, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let inserted = transaction.execute(
-            "INSERT OR IGNORE INTO peer_message_command(
-                   source_session_id, command_id, request_fingerprint, completed_at_ms,
-                   message_id, target_session_id
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                result.source_session_id.as_str(),
-                result.command_id.as_str(),
-                result.request_fingerprint.as_str(),
-                result.completed_at_ms as i64,
-                result.message_id.as_str(),
-                result.target_session_id.as_str(),
-            ],
-        )? > 0;
-        if inserted {
-            insert_outbox_events(&transaction, std::slice::from_ref(event))?;
-            transaction.commit()?;
-            secure_sidecar_permissions(&backend.path);
-            return Ok(super::PeerMessageCommitOutcome::Inserted);
-        }
-        let existing = transaction.query_row(
-            "SELECT request_fingerprint, completed_at_ms, message_id, target_session_id
-                 FROM peer_message_command
-                 WHERE source_session_id = ?1 AND command_id = ?2",
-            params![
-                result.source_session_id.as_str(),
-                result.command_id.as_str()
-            ],
-            |row| {
-                Ok(super::PeerMessageCommandResult {
-                    source_session_id: result.source_session_id.clone(),
-                    command_id: result.command_id.clone(),
-                    request_fingerprint: row.get(0)?,
-                    completed_at_ms: row.get::<_, i64>(1)? as u64,
-                    message_id: row.get(2)?,
-                    target_session_id: row.get(3)?,
-                })
-            },
-        )?;
-        transaction.commit()?;
-        if existing.request_fingerprint == result.request_fingerprint {
-            Ok(super::PeerMessageCommitOutcome::Existing(existing))
-        } else {
-            Ok(super::PeerMessageCommitOutcome::Conflict(existing))
-        }
-    }
-
-    pub(super) fn load_pending_outbox(
-        backend: &Backend,
-        limit: usize,
-    ) -> Result<Vec<super::OutboxEvent>, StoreError> {
-        let connection = lock_connection(backend)?;
-        let mut statement = connection.prepare_cached(
-            "SELECT outbox_id, envelope_json, created_at_ms FROM event_outbox
-                 WHERE dispatched_sequence IS NULL ORDER BY outbox_id LIMIT ?1",
-        )?;
-        let rows = statement.query_map([limit as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (outbox_id, encoded, created_at_ms) = row?;
-            Ok(super::OutboxEvent {
-                outbox_id: outbox_id as u64,
-                envelope: serde_json::from_slice(&encoded)?,
-                created_at_ms: created_at_ms as u64,
-            })
-        })
-        .collect()
-    }
-
-    pub(super) fn mark_outbox_dispatched(
-        backend: &Backend,
-        dispatched: &[(u64, u64)],
-    ) -> Result<(), StoreError> {
-        if dispatched.is_empty() {
-            return Ok(());
-        }
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        {
-            let mut statement = transaction.prepare_cached(
-                "UPDATE event_outbox SET dispatched_sequence = ?2
-                     WHERE outbox_id = ?1 AND dispatched_sequence IS NULL",
-            )?;
-            for (outbox_id, sequence) in dispatched {
-                statement.execute(params![*outbox_id as i64, *sequence as i64])?;
-            }
-        }
-        transaction.commit().map_err(StoreError::from)
-    }
-
-    pub(super) fn dispatch_pending_outbox(
-        backend: &Backend,
-        limit: usize,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let dispatched = transfer_pending_outbox(&transaction, Some(limit))?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(dispatched)
-    }
-
-    fn transfer_pending_outbox(
-        transaction: &rusqlite::Transaction<'_>,
-        limit: Option<usize>,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        let pending = {
-            let mut statement = transaction.prepare(
-                "SELECT outbox_id, envelope_json FROM event_outbox
-                     WHERE dispatched_sequence IS NULL ORDER BY outbox_id LIMIT ?1",
-            )?;
-            statement
-                .query_map([limit.map_or(i64::MAX, |limit| limit as i64)], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let mut dispatched = Vec::with_capacity(pending.len());
-        for (outbox_id, wire_bytes) in pending {
-            let envelope: smelt_event_protocol::EventEnvelope<serde_json::Value> =
-                serde_json::from_slice(&wire_bytes)?;
-            let existing = transaction
-                .query_row(
-                    "SELECT sequence, envelope_json FROM event_log WHERE event_id = ?1",
-                    [envelope.event_id.as_str()],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
-                .optional()?;
-            let stored = if let Some((sequence, existing_wire)) = existing {
-                let existing_envelope = serde_json::from_slice(&existing_wire)?;
-                if existing_envelope != envelope {
-                    return Err(StoreError::EventIdConflict {
-                        event_id: envelope.event_id.to_string(),
-                    });
-                }
-                smelt_event_bus::StoredEvent {
-                    sequence: sequence as u64,
-                    envelope: existing_envelope,
-                    wire_bytes: existing_wire,
-                }
-            } else {
-                insert_event_batch(
-                    transaction,
-                    std::slice::from_ref(&smelt_event_bus::StoredEvent {
-                        sequence: 0,
-                        envelope,
-                        wire_bytes,
-                    }),
-                    false,
-                )?
-                .pop()
-                .ok_or(StoreError::OutboxAppendFailed)?
-            };
-            transaction.execute(
-                "UPDATE event_outbox SET dispatched_sequence = ?2
-                     WHERE outbox_id = ?1 AND dispatched_sequence IS NULL",
-                params![outbox_id, stored.sequence as i64],
-            )?;
-            dispatched.push(stored);
-        }
-        Ok(dispatched)
-    }
-
-    pub(super) fn bind_cursor_declaration(
-        backend: &Backend,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-        declaration_fingerprint: &str,
-    ) -> Result<super::CursorDeclaration, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing = transaction
-            .query_row(
-                "SELECT last_acked_sequence, declaration_fingerprint
-                 FROM subscription_cursor
-                 WHERE plugin_id = ?1 AND subscription_id = ?2",
-                params![plugin_id.as_str(), subscription_id.as_str()],
-                |row| {
-                    Ok(super::CursorDeclaration {
-                        last_acked_sequence: row.get::<_, i64>(0)? as u64,
-                        declaration_fingerprint: row.get(1)?,
-                    })
-                },
-            )
-            .optional()?;
-        let declaration = match existing {
-            Some(mut declaration)
-                if declaration.declaration_fingerprint == LEGACY_V3_FINGERPRINT =>
-            {
-                transaction.execute(
-                    "UPDATE subscription_cursor
-                         SET last_acked_sequence = 0,
-                             declaration_fingerprint = ?3,
-                             updated_at_ms = ?4
-                         WHERE plugin_id = ?1 AND subscription_id = ?2
-                           AND declaration_fingerprint = ?5",
-                    params![
-                        plugin_id.as_str(),
-                        subscription_id.as_str(),
-                        declaration_fingerprint,
-                        now_ms(),
-                        LEGACY_V3_FINGERPRINT,
-                    ],
-                )?;
-                declaration.last_acked_sequence = 0;
-                declaration.declaration_fingerprint = declaration_fingerprint.to_string();
-                declaration
-            }
-            Some(declaration) if declaration.declaration_fingerprint != declaration_fingerprint => {
-                return Err(StoreError::CursorDeclarationConflict);
-            }
-            Some(declaration) => declaration,
-            None => {
-                transaction.execute(
-                    "INSERT INTO subscription_cursor(
-                           plugin_id, subscription_id, last_acked_sequence,
-                           declaration_fingerprint, updated_at_ms
-                         ) VALUES (?1, ?2, 0, ?3, ?4)",
-                    params![
-                        plugin_id.as_str(),
-                        subscription_id.as_str(),
-                        declaration_fingerprint,
-                        now_ms()
-                    ],
-                )?;
-                super::CursorDeclaration {
-                    last_acked_sequence: 0,
-                    declaration_fingerprint: declaration_fingerprint.to_string(),
-                }
-            }
-        };
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(declaration)
-    }
-
-    pub(super) fn load_cursor_declaration(
-        backend: &Backend,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<Option<super::CursorDeclaration>, StoreError> {
-        let connection = lock_connection(backend)?;
-        connection
-            .query_row(
-                "SELECT last_acked_sequence, declaration_fingerprint
-                 FROM subscription_cursor
-                 WHERE plugin_id = ?1 AND subscription_id = ?2",
-                params![plugin_id.as_str(), subscription_id.as_str()],
-                |row| {
-                    Ok(super::CursorDeclaration {
-                        last_acked_sequence: row.get::<_, i64>(0)? as u64,
-                        declaration_fingerprint: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
-    pub(super) fn store_cursors(
-        backend: &Backend,
-        cursors: &[(
-            smelt_event_protocol::PluginId,
-            smelt_event_protocol::SubscriptionId,
-            u64,
-        )],
-    ) -> Result<(), StoreError> {
-        if cursors.is_empty() {
-            return Ok(());
-        }
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        {
-            let mut statement = transaction.prepare_cached(
-                "UPDATE subscription_cursor SET
-                       last_acked_sequence = MAX(last_acked_sequence, ?3),
-                       updated_at_ms = ?4
-                     WHERE plugin_id = ?1 AND subscription_id = ?2",
-            )?;
-            for (plugin, subscription, sequence) in cursors {
-                let changed = statement.execute(params![
-                    plugin.as_str(),
-                    subscription.as_str(),
-                    *sequence as i64,
-                    now_ms()
-                ])?;
-                if changed == 0 {
-                    return Err(StoreError::CursorUnboundOnStore);
-                }
-            }
-        }
-        transaction.commit().map_err(StoreError::from)
-    }
-
-    pub(super) fn put_dead_letter(
-        backend: &Backend,
-        dead: &smelt_event_bus::DeadLetter,
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO event_dead_letter(
-                   plugin_id, subscription_id, sequence, event_id, attempts, reason, failed_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(plugin_id, subscription_id, sequence) DO UPDATE SET
-                   attempts = excluded.attempts,
-                   reason = excluded.reason,
-                   failed_at_ms = excluded.failed_at_ms",
-            params![
-                dead.plugin_id.as_str(),
-                dead.subscription_id.as_str(),
-                dead.sequence as i64,
-                dead.event_id.as_str(),
-                dead.attempts as i64,
-                dead.reason,
-                dead.failed_at_ms as i64,
-            ],
-        )?;
-        transaction.execute(
-            "DELETE FROM event_delivery_retry
-                 WHERE plugin_id = ?1 AND subscription_id = ?2",
-            params![dead.plugin_id.as_str(), dead.subscription_id.as_str()],
-        )?;
-        let changed = transaction.execute(
-            "UPDATE subscription_cursor SET
-                   last_acked_sequence = MAX(last_acked_sequence, ?3),
-                   updated_at_ms = ?4
-                 WHERE plugin_id = ?1 AND subscription_id = ?2",
-            params![
-                dead.plugin_id.as_str(),
-                dead.subscription_id.as_str(),
-                dead.sequence as i64,
-                now_ms(),
-            ],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::CursorUnboundOnDeadLetter);
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub(super) fn load_dead_letters(
-        backend: &Backend,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-        limit: usize,
-    ) -> Result<Vec<smelt_event_bus::DeadLetter>, StoreError> {
-        let connection = lock_connection(backend)?;
-        let mut statement = connection.prepare_cached(
-            "SELECT sequence, event_id, attempts, reason, failed_at_ms
-                 FROM event_dead_letter
-                 WHERE plugin_id = ?1 AND subscription_id = ?2
-                 ORDER BY dead_letter_id LIMIT ?3",
-        )?;
-        let rows = statement.query_map(
-            params![plugin_id.as_str(), subscription_id.as_str(), limit as i64],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )?;
-        rows.map(|row| {
-            let (sequence, event_id, attempts, reason, failed_at_ms) = row?;
-            Ok(smelt_event_bus::DeadLetter {
-                plugin_id: plugin_id.clone(),
-                subscription_id: subscription_id.clone(),
-                sequence: sequence as u64,
-                event_id: smelt_event_protocol::EventId::new(event_id)?,
-                attempts: attempts as u32,
-                reason,
-                failed_at_ms: failed_at_ms as u64,
-            })
-        })
-        .collect()
-    }
-
-    pub(super) fn load_retry(
-        backend: &Backend,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<Option<smelt_event_bus::DeliveryRetry>, StoreError> {
-        let connection = lock_connection(backend)?;
-        let row = connection
-            .query_row(
-                "SELECT sequence, event_id, attempts, next_attempt_at_ms, reason
-                 FROM event_delivery_retry
-                 WHERE plugin_id = ?1 AND subscription_id = ?2",
-                params![plugin_id.as_str(), subscription_id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        row.map(
-            |(sequence, event_id, attempts, next_attempt_at_ms, reason)| {
-                Ok(smelt_event_bus::DeliveryRetry {
-                    plugin_id: plugin_id.clone(),
-                    subscription_id: subscription_id.clone(),
-                    sequence: sequence as u64,
-                    event_id: smelt_event_protocol::EventId::new(event_id)?,
-                    attempts: attempts as u32,
-                    next_attempt_at_ms: next_attempt_at_ms as u64,
-                    reason,
-                })
-            },
-        )
-        .transpose()
-    }
-
-    pub(super) fn put_retry(
-        backend: &Backend,
-        retry: &smelt_event_bus::DeliveryRetry,
-    ) -> Result<(), StoreError> {
-        let connection = lock_connection(backend)?;
-        connection.execute(
-            "INSERT INTO event_delivery_retry(
-                   plugin_id, subscription_id, sequence, event_id, attempts,
-                   next_attempt_at_ms, reason
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(plugin_id, subscription_id) DO UPDATE SET
-                   sequence = excluded.sequence,
-                   event_id = excluded.event_id,
-                   attempts = excluded.attempts,
-                   next_attempt_at_ms = excluded.next_attempt_at_ms,
-                   reason = excluded.reason",
-            params![
-                retry.plugin_id.as_str(),
-                retry.subscription_id.as_str(),
-                retry.sequence as i64,
-                retry.event_id.as_str(),
-                retry.attempts as i64,
-                retry.next_attempt_at_ms as i64,
-                retry.reason,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub(super) fn delete_retry(
-        backend: &Backend,
-        plugin_id: &smelt_event_protocol::PluginId,
-        subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<(), StoreError> {
-        let connection = lock_connection(backend)?;
-        connection.execute(
-            "DELETE FROM event_delivery_retry
-                 WHERE plugin_id = ?1 AND subscription_id = ?2",
-            params![plugin_id.as_str(), subscription_id.as_str()],
-        )?;
-        Ok(())
-    }
-
-    pub(super) fn get_command_result(
-        backend: &Backend,
-        plugin_id: &smelt_event_protocol::PluginId,
-        command_id: &smelt_event_protocol::CommandId,
-    ) -> Result<Option<smelt_event_bus::CommandResult>, StoreError> {
-        let connection = lock_connection(backend)?;
-        let row = connection
-            .query_row(
-                "SELECT completed_at_ms, result_json FROM command_dedupe
-                 WHERE plugin_id = ?1 AND command_id = ?2",
-                params![plugin_id.as_str(), command_id.as_str()],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()?;
-        row.map(|(completed_at_ms, encoded)| {
-            Ok(smelt_event_bus::CommandResult {
-                plugin_id: plugin_id.clone(),
-                command_id: command_id.clone(),
-                completed_at_ms: completed_at_ms as u64,
-                result: serde_json::from_slice(&encoded)?,
-            })
-        })
-        .transpose()
-    }
-
-    pub(super) fn put_command_result(
-        backend: &Backend,
-        result: &smelt_event_bus::CommandResult,
-    ) -> Result<bool, StoreError> {
-        let encoded = serde_json::to_vec(&result.result)?;
-        let connection = lock_connection(backend)?;
-        connection
-            .execute(
-                "INSERT OR IGNORE INTO command_dedupe(
-                   plugin_id, command_id, completed_at_ms, result_json
-                 ) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    result.plugin_id.as_str(),
-                    result.command_id.as_str(),
-                    result.completed_at_ms as i64,
-                    encoded
-                ],
-            )
-            .map(|changed| changed > 0)
-            .map_err(StoreError::from)
-    }
-
     fn now_ms() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2736,6 +1738,16 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 22 {
+            apply_v23_drop_cross_agent_messaging(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v22 形状：删完跨 Agent 消息的表和列后与当前形状逐字一致，就说明原来正是 v22。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 21 {
             apply_v22_conversation_terminals(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2749,7 +1761,7 @@ mod imp {
         if current == 20 {
             apply_v21_layout_tabs(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
-            // 没有冻结的 v20 形状：重建完 layout_node 再升到 v22 后与当前形状逐字一致，就说明原来正是 v20。
+            // 没有冻结的 v20 形状：重建完 layout_node 再升到当前版本后与当前形状逐字一致，就说明原来正是 v20。
             if !schema_matches_current(&transaction)? {
                 return Err(unrecognized_schema_error(current));
             }
@@ -3091,20 +2103,32 @@ mod imp {
     fn apply_v22_conversation_terminals(
         transaction: &rusqlite::Transaction<'_>,
     ) -> Result<(), StoreError> {
-        if !table_names(transaction)?
+        if table_names(transaction)?
             .iter()
             .any(|table| table == "layout_node")
         {
-            return Ok(());
+            transaction.execute_batch(crate::schema::MIGRATE_V21_TO_V22_ADD_POSITION)?;
+            for (session_id, position) in v21_session_positions(transaction)? {
+                transaction.execute(
+                    "UPDATE session SET position = ?1 WHERE id = ?2",
+                    params![position, session_id],
+                )?;
+            }
+            transaction.execute_batch(crate::schema::MIGRATE_V21_TO_V22_FINISH)?;
         }
-        transaction.execute_batch(crate::schema::MIGRATE_V21_TO_V22_ADD_POSITION)?;
-        for (session_id, position) in v21_session_positions(transaction)? {
-            transaction.execute(
-                "UPDATE session SET position = ?1 WHERE id = ?2",
-                params![position, session_id],
-            )?;
+        apply_v23_drop_cross_agent_messaging(transaction)
+    }
+
+    /// v23 删掉跨 Agent 消息的投递记账表和开关列。已经没有记账表的库跳过。
+    fn apply_v23_drop_cross_agent_messaging(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_names(transaction)?
+            .iter()
+            .any(|table| table == "peer_message_command")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V22_TO_V23)?;
         }
-        transaction.execute_batch(crate::schema::MIGRATE_V21_TO_V22_FINISH)?;
         Ok(())
     }
 
@@ -3357,10 +2381,14 @@ mod imp {
         legacy: bool,
     ) -> Result<bool, StoreError> {
         let tables = table_names(connection)?;
-        Ok(tables == expected_tables
-            && schema_matches_shared_columns(connection, legacy)?
-            && table_columns(connection, "event_log")?
-                == [
+        if tables != expected_tables || !schema_matches_shared_columns(connection, legacy)? {
+            return Ok(false);
+        }
+        // 事件表和跨 Agent 消息表只在旧版本里有（v23 删掉），清单里有才比对。
+        let event_tables: [(&str, &[&str]); 7] = [
+            (
+                "event_log",
+                &[
                     "sequence",
                     "event_id",
                     "topic",
@@ -3369,25 +2397,31 @@ mod imp {
                     "aggregate_revision",
                     "occurred_at_ms",
                     "envelope_json",
-                ]
-            && table_columns(connection, "event_outbox")?
-                == [
+                ],
+            ),
+            (
+                "event_outbox",
+                &[
                     "outbox_id",
                     "event_id",
                     "envelope_json",
                     "created_at_ms",
                     "dispatched_sequence",
-                ]
-            && table_columns(connection, "subscription_cursor")?
-                == [
+                ],
+            ),
+            (
+                "subscription_cursor",
+                &[
                     "plugin_id",
                     "subscription_id",
                     "last_acked_sequence",
                     "declaration_fingerprint",
                     "updated_at_ms",
-                ]
-            && table_columns(connection, "event_dead_letter")?
-                == [
+                ],
+            ),
+            (
+                "event_dead_letter",
+                &[
                     "dead_letter_id",
                     "plugin_id",
                     "subscription_id",
@@ -3396,9 +2430,11 @@ mod imp {
                     "attempts",
                     "reason",
                     "failed_at_ms",
-                ]
-            && table_columns(connection, "event_delivery_retry")?
-                == [
+                ],
+            ),
+            (
+                "event_delivery_retry",
+                &[
                     "plugin_id",
                     "subscription_id",
                     "sequence",
@@ -3406,18 +2442,30 @@ mod imp {
                     "attempts",
                     "next_attempt_at_ms",
                     "reason",
-                ]
-            && table_columns(connection, "command_dedupe")?
-                == ["plugin_id", "command_id", "completed_at_ms", "result_json"]
-            && table_columns(connection, "peer_message_command")?
-                == [
+                ],
+            ),
+            (
+                "command_dedupe",
+                &["plugin_id", "command_id", "completed_at_ms", "result_json"],
+            ),
+            (
+                "peer_message_command",
+                &[
                     "source_session_id",
                     "command_id",
                     "request_fingerprint",
                     "completed_at_ms",
                     "message_id",
                     "target_session_id",
-                ])
+                ],
+            ),
+        ];
+        for (table, columns) in event_tables {
+            if expected_tables.contains(&table) && table_columns(connection, table)? != columns {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn schema_matches_v1(connection: &Connection) -> Result<bool, StoreError> {
@@ -4413,151 +3461,12 @@ mod imp {
         unsupported()
     }
 
-    pub(super) fn append_event_batch(
-        _backend: &Backend,
-        _events: &[smelt_event_bus::StoredEvent],
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn append_event_batch_idempotent(
-        _backend: &Backend,
-        _events: &[smelt_event_bus::StoredEvent],
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn load_events_after_topics(
-        _backend: &Backend,
-        _sequence: u64,
-        _topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
-        _limit: usize,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn event_high_watermark(_backend: &Backend) -> Result<u64, StoreError> {
-        unsupported()
-    }
-    pub(super) fn append_outbox_batch(
-        _backend: &Backend,
-        _events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn load_pending_outbox(
-        _backend: &Backend,
-        _limit: usize,
-    ) -> Result<Vec<super::OutboxEvent>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn mark_outbox_dispatched(
-        _backend: &Backend,
-        _dispatched: &[(u64, u64)],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn dispatch_pending_outbox(
-        _backend: &Backend,
-        _limit: usize,
-    ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_peer_message_command_result(
-        _backend: &Backend,
-        _source_session_id: &str,
-        _command_id: &smelt_event_protocol::CommandId,
-    ) -> Result<Option<super::PeerMessageCommandResult>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn commit_peer_message_delivery(
-        _backend: &Backend,
-        _result: &super::PeerMessageCommandResult,
-        _event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
-    ) -> Result<super::PeerMessageCommitOutcome, StoreError> {
-        unsupported()
-    }
-    pub(super) fn bind_cursor_declaration(
-        _backend: &Backend,
-        _plugin_id: &smelt_event_protocol::PluginId,
-        _subscription_id: &smelt_event_protocol::SubscriptionId,
-        _declaration_fingerprint: &str,
-    ) -> Result<super::CursorDeclaration, StoreError> {
-        unsupported()
-    }
-    pub(super) fn load_cursor_declaration(
-        _backend: &Backend,
-        _plugin_id: &smelt_event_protocol::PluginId,
-        _subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<Option<super::CursorDeclaration>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn store_cursors(
-        _backend: &Backend,
-        _cursors: &[(
-            smelt_event_protocol::PluginId,
-            smelt_event_protocol::SubscriptionId,
-            u64,
-        )],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_dead_letter(
-        _backend: &Backend,
-        _dead: &smelt_event_bus::DeadLetter,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn load_dead_letters(
-        _backend: &Backend,
-        _plugin_id: &smelt_event_protocol::PluginId,
-        _subscription_id: &smelt_event_protocol::SubscriptionId,
-        _limit: usize,
-    ) -> Result<Vec<smelt_event_bus::DeadLetter>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn load_retry(
-        _backend: &Backend,
-        _plugin_id: &smelt_event_protocol::PluginId,
-        _subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<Option<smelt_event_bus::DeliveryRetry>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_retry(
-        _backend: &Backend,
-        _retry: &smelt_event_bus::DeliveryRetry,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn delete_retry(
-        _backend: &Backend,
-        _plugin_id: &smelt_event_protocol::PluginId,
-        _subscription_id: &smelt_event_protocol::SubscriptionId,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_command_result(
-        _backend: &Backend,
-        _plugin_id: &smelt_event_protocol::PluginId,
-        _command_id: &smelt_event_protocol::CommandId,
-    ) -> Result<Option<smelt_event_bus::CommandResult>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_command_result(
-        _backend: &Backend,
-        _result: &smelt_event_bus::CommandResult,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
 }
 
 #[cfg(all(test, not(any(target_os = "ios", target_os = "android"))))]
 mod tests {
     use super::*;
     use serde_json::json;
-    use smelt_event_bus::EventStore;
-    use smelt_event_protocol::{
-        AggregateRef, CommandId, CorrelationId, EventEnvelope, EventId, EventSource, PluginId,
-        SubscriptionId, Topic,
-    };
-    use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -4895,7 +3804,6 @@ mod tests {
         assert!(store.list_paired_devices().unwrap().is_empty());
         let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
         assert!(!prefs.agent_hooks_enabled);
-        assert!(prefs.cross_agent_enabled, "没存过的开关按默认打开");
         drop(store);
 
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
@@ -5375,7 +4283,6 @@ mod tests {
             assert_eq!(store.get_launch_snapshot().unwrap().unwrap().version, 14);
             let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
             assert!(prefs.agent_hooks_enabled);
-            assert!(!prefs.cross_agent_enabled);
 
             let workspace = store.get_workspace_snapshot().unwrap().unwrap();
             assert_eq!(workspace.projects, ["/repo"]);
@@ -5597,7 +4504,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_database_migrates_peer_message_command_table() {
+    fn v2_database_migrates_to_current_with_a_backup() {
         let dir = temp_dir("v2-migration");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -5632,14 +4539,135 @@ mod tests {
                     |row| row.get::<_, u32>(0),
                 )
                 .unwrap(),
-            1
+            0,
+            "v2 建的跨 Agent 消息表在 v23 删掉"
         );
         drop(connection);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn v3_database_resets_cursor_when_legacy_declaration_is_first_bound() {
+    fn v22_database_drops_cross_agent_messaging_and_durable_events() {
+        let dir = temp_dir("v22-migration");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        // 当前形状加回 v22 才有的跨 Agent 消息表、开关列和持久事件表，就是一个 v22 库。
+        connection
+            .execute_batch(
+                "CREATE TABLE event_log (
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   event_id TEXT NOT NULL UNIQUE,
+                   topic TEXT NOT NULL,
+                   aggregate_kind TEXT,
+                   aggregate_id TEXT,
+                   aggregate_revision INTEGER,
+                   occurred_at_ms INTEGER NOT NULL,
+                   envelope_json BLOB NOT NULL
+                 );
+                 CREATE TABLE event_outbox (
+                   outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   event_id TEXT NOT NULL UNIQUE,
+                   envelope_json BLOB NOT NULL,
+                   created_at_ms INTEGER NOT NULL,
+                   dispatched_sequence INTEGER REFERENCES event_log(sequence)
+                 );
+                 CREATE TABLE subscription_cursor (
+                   plugin_id TEXT NOT NULL,
+                   subscription_id TEXT NOT NULL,
+                   last_acked_sequence INTEGER NOT NULL DEFAULT 0,
+                   declaration_fingerprint TEXT NOT NULL,
+                   updated_at_ms INTEGER NOT NULL,
+                   PRIMARY KEY (plugin_id, subscription_id)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE event_dead_letter (
+                   dead_letter_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   plugin_id TEXT NOT NULL,
+                   subscription_id TEXT NOT NULL,
+                   sequence INTEGER NOT NULL,
+                   event_id TEXT NOT NULL,
+                   attempts INTEGER NOT NULL,
+                   reason TEXT NOT NULL,
+                   failed_at_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE event_delivery_retry (
+                   plugin_id TEXT NOT NULL,
+                   subscription_id TEXT NOT NULL,
+                   sequence INTEGER NOT NULL REFERENCES event_log(sequence),
+                   event_id TEXT NOT NULL,
+                   attempts INTEGER NOT NULL,
+                   next_attempt_at_ms INTEGER NOT NULL,
+                   reason TEXT NOT NULL,
+                   PRIMARY KEY (plugin_id, subscription_id),
+                   FOREIGN KEY (plugin_id, subscription_id)
+                     REFERENCES subscription_cursor(plugin_id, subscription_id) ON DELETE CASCADE
+                 ) WITHOUT ROWID;
+                 CREATE TABLE command_dedupe (
+                   plugin_id TEXT NOT NULL,
+                   command_id TEXT NOT NULL,
+                   completed_at_ms INTEGER NOT NULL,
+                   result_json BLOB NOT NULL,
+                   PRIMARY KEY (plugin_id, command_id)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE peer_message_command (
+                   source_session_id TEXT NOT NULL,
+                   command_id TEXT NOT NULL,
+                   request_fingerprint TEXT NOT NULL,
+                   completed_at_ms INTEGER NOT NULL,
+                   message_id TEXT NOT NULL,
+                   target_session_id TEXT NOT NULL,
+                   PRIMARY KEY (source_session_id, command_id)
+                 ) WITHOUT ROWID;
+                 ALTER TABLE agent_host_pref ADD COLUMN
+                   cross_agent_enabled INTEGER NOT NULL DEFAULT 1 CHECK (cross_agent_enabled IN (0, 1));
+                 INSERT INTO agent_host_pref(id, hooks_enabled, cross_agent_enabled) VALUES (1, 0, 0);",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 22).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
+        assert!(!prefs.agent_hooks_enabled, "别的偏好原样保留");
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let peer_tables: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'peer_message_command'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(peer_tables, 0);
+        let pref_columns: Vec<String> = connection
+            .prepare("SELECT name FROM pragma_table_info('agent_host_pref') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(pref_columns, ["id", "hooks_enabled"]);
+        let event_tables: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN
+                   ('event_log', 'event_outbox', 'subscription_cursor', 'event_dead_letter',
+                    'event_delivery_retry', 'command_dedupe')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_tables, 0);
+        drop(connection);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v3_database_with_a_cursor_row_migrates_to_current() {
         let dir = temp_dir("v3-migration");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -5652,60 +4680,26 @@ mod tests {
                 [],
             )
             .unwrap();
-        connection
-            .execute(
-                "INSERT INTO peer_message_command(
-                   source_session_id, command_id, completed_at_ms, message_id, target_session_id
-                 ) VALUES ('source', 'command-1', 10, 'message-1', 'target')",
-                [],
-            )
-            .unwrap();
         connection.pragma_update(None, "user_version", 3).unwrap();
         drop(connection);
 
-        let store = Store::open_or_create(&path).unwrap();
-        let plugin = PluginId::new("com.example").unwrap();
-        let subscription = SubscriptionId::new("tasks").unwrap();
-        assert_eq!(
-            store
-                .load_cursor_declaration(&plugin, &subscription)
-                .unwrap(),
-            Some(CursorDeclaration {
-                last_acked_sequence: 17,
-                declaration_fingerprint: "legacy-v3-unbound".to_string(),
-            })
-        );
-        assert_eq!(
-            store
-                .bind_cursor_declaration(&plugin, &subscription, "sha256:new-declaration")
-                .unwrap(),
-            CursorDeclaration {
-                last_acked_sequence: 0,
-                declaration_fingerprint: "sha256:new-declaration".to_string(),
-            }
-        );
-        assert_eq!(
-            store
-                .load_cursor_declaration(&plugin, &subscription)
-                .unwrap(),
-            Some(CursorDeclaration {
-                last_acked_sequence: 0,
-                declaration_fingerprint: "sha256:new-declaration".to_string(),
-            })
-        );
-        let command = store
-            .get_peer_message_command_result(
-                "source",
-                &smelt_event_protocol::CommandId::new("command-1").unwrap(),
-            )
+        drop(Store::open_or_create(&path).unwrap());
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let cursors: u32 = rusqlite::Connection::open(&path)
             .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'subscription_cursor'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(command.request_fingerprint, "legacy-v3-unbound");
+        assert_eq!(cursors, 0, "持久投递在 v23 整个删掉");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn v4_database_adds_durable_retry_state() {
+    fn v4_database_migrates_to_current() {
         let dir = temp_dir("v4-migration");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -5730,334 +4724,12 @@ mod tests {
                     |row| row.get::<_, u32>(0),
                 )
                 .unwrap(),
-            1
+            0
         );
         drop(connection);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    fn event(id: &str) -> EventEnvelope<serde_json::Value> {
-        EventEnvelope {
-            event_id: EventId::new(id).unwrap(),
-            topic: Topic::new("example.changed").unwrap(),
-            schema_version: 1,
-            occurred_at_ms: 10,
-            aggregate: None,
-            aggregate_revision: None,
-            source: EventSource::Core,
-            correlation_id: CorrelationId::new("chain-1").unwrap(),
-            causation_id: None,
-            hop_count: 0,
-            payload: json!({"id": id}),
-        }
-    }
-
-    fn versioned_event(id: &str, revision: u64) -> EventEnvelope<serde_json::Value> {
-        let mut event = event(id);
-        event.aggregate = Some(AggregateRef::new("example", "item-1").unwrap());
-        event.aggregate_revision = Some(revision);
-        event
-    }
-
-    #[test]
-    fn peer_message_result_and_outbox_fact_commit_atomically_and_dedupe() {
-        let dir = temp_dir("peer-message-command");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let result = PeerMessageCommandResult {
-            source_session_id: "source".to_string(),
-            command_id: CommandId::new("agent-send-1").unwrap(),
-            request_fingerprint: "sha256:request-1".to_string(),
-            completed_at_ms: 10,
-            message_id: "agent-send-1".to_string(),
-            target_session_id: "target".to_string(),
-        };
-        assert_eq!(
-            store
-                .commit_peer_message_delivery(&result, &event("agent-send-event-1"))
-                .unwrap(),
-            PeerMessageCommitOutcome::Inserted
-        );
-        assert_eq!(
-            store
-                .get_peer_message_command_result("source", &result.command_id)
-                .unwrap(),
-            Some(result.clone())
-        );
-        assert_eq!(store.load_pending_outbox(10).unwrap().len(), 1);
-        assert_eq!(
-            store
-                .commit_peer_message_delivery(&result, &event("agent-send-event-2"))
-                .unwrap(),
-            PeerMessageCommitOutcome::Existing(result.clone())
-        );
-        assert_eq!(
-            store.load_pending_outbox(10).unwrap().len(),
-            1,
-            "duplicate command must not enqueue another delivered fact"
-        );
-        let changed = PeerMessageCommandResult {
-            request_fingerprint: "sha256:different-request".to_string(),
-            ..result.clone()
-        };
-        assert_eq!(
-            store
-                .commit_peer_message_delivery(&changed, &event("agent-send-event-3"))
-                .unwrap(),
-            PeerMessageCommitOutcome::Conflict(result)
-        );
-        assert_eq!(store.load_pending_outbox(10).unwrap().len(), 1);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn event_store_batches_cursors_dead_letters_and_commands() {
-        let dir = temp_dir("event-store");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let first = smelt_event_bus::StoredEvent::new(0, event("event-1")).unwrap();
-        let second = smelt_event_bus::StoredEvent::new(0, event("event-2")).unwrap();
-        let appended = store.append_batch(&[first, second]).unwrap();
-        assert_eq!(
-            appended
-                .iter()
-                .map(|event| event.sequence)
-                .collect::<Vec<_>>(),
-            [1, 2]
-        );
-        assert_eq!(
-            store
-                .load_after_topics(
-                    0,
-                    &std::collections::BTreeSet::from([Topic::new("example.changed").unwrap()]),
-                    10,
-                )
-                .unwrap(),
-            appended
-        );
-        assert_eq!(store.high_watermark().unwrap(), 2);
-
-        let plugin = PluginId::new("com.example").unwrap();
-        let subscription = SubscriptionId::new("tasks").unwrap();
-        store
-            .bind_cursor_declaration(&plugin, &subscription, "sha256:tasks-durable")
-            .unwrap();
-        store
-            .store_cursors(&[(plugin.clone(), subscription.clone(), 1)])
-            .unwrap();
-        store
-            .store_cursors(&[(plugin.clone(), subscription.clone(), 0)])
-            .unwrap();
-        assert_eq!(store.load_cursor(&plugin, &subscription).unwrap(), 1);
-
-        let retry = smelt_event_bus::DeliveryRetry {
-            plugin_id: plugin.clone(),
-            subscription_id: subscription.clone(),
-            sequence: 2,
-            event_id: EventId::new("event-2").unwrap(),
-            attempts: 2,
-            next_attempt_at_ms: 25,
-            reason: "temporary".into(),
-        };
-        store.put_retry(&retry).unwrap();
-        assert_eq!(
-            store.load_retry(&plugin, &subscription).unwrap(),
-            Some(retry.clone())
-        );
-        store.delete_retry(&plugin, &subscription).unwrap();
-        assert_eq!(store.load_retry(&plugin, &subscription).unwrap(), None);
-        store.put_retry(&retry).unwrap();
-
-        let dead = smelt_event_bus::DeadLetter {
-            plugin_id: plugin.clone(),
-            subscription_id: subscription.clone(),
-            sequence: 2,
-            event_id: EventId::new("event-2").unwrap(),
-            attempts: 3,
-            reason: "permanent".into(),
-            failed_at_ms: 20,
-        };
-        store.put_dead_letter(&dead).unwrap();
-        assert_eq!(
-            store.load_dead_letters(&plugin, &subscription, 10).unwrap(),
-            [dead]
-        );
-        assert_eq!(store.load_cursor(&plugin, &subscription).unwrap(), 2);
-        assert_eq!(store.load_retry(&plugin, &subscription).unwrap(), None);
-
-        let result = smelt_event_bus::CommandResult {
-            plugin_id: plugin.clone(),
-            command_id: smelt_event_protocol::CommandId::new("command-1").unwrap(),
-            completed_at_ms: 30,
-            result: json!({"created": true}),
-        };
-        assert!(store.put_command_result(&result).unwrap());
-        assert!(!store.put_command_result(&result).unwrap());
-        assert_eq!(
-            store
-                .get_command_result(&plugin, &result.command_id)
-                .unwrap(),
-            Some(result)
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn failed_dead_letter_commit_leaves_no_partial_row() {
-        let dir = temp_dir("dead-letter-rollback");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .append_batch(&[smelt_event_bus::StoredEvent::new(0, event("event-1")).unwrap()])
-            .unwrap();
-        let plugin = PluginId::new("com.example.unbound").unwrap();
-        let subscription = SubscriptionId::new("tasks").unwrap();
-        let dead = smelt_event_bus::DeadLetter {
-            plugin_id: plugin.clone(),
-            subscription_id: subscription.clone(),
-            sequence: 1,
-            event_id: EventId::new("event-1").unwrap(),
-            attempts: 1,
-            reason: "permanent".into(),
-            failed_at_ms: 20,
-        };
-
-        assert!(store.put_dead_letter(&dead).is_err());
-        assert!(
-            store
-                .load_dead_letters(&plugin, &subscription, 10)
-                .unwrap()
-                .is_empty()
-        );
-
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn outbox_transfer_is_atomic_and_idempotent_by_event_id() {
-        let dir = temp_dir("outbox");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let existing = smelt_event_bus::StoredEvent::new(0, event("outbox-1")).unwrap();
-        let existing = store.append_batch(&[existing]).unwrap().remove(0);
-        store
-            .append_outbox_batch(&[event("outbox-1"), event("outbox-2")])
-            .unwrap();
-        let dispatched = store.dispatch_pending_outbox(10).unwrap();
-        assert_eq!(dispatched.len(), 2);
-        assert_eq!(dispatched[0].sequence, existing.sequence);
-        assert!(store.load_pending_outbox(10).unwrap().is_empty());
-        assert!(store.dispatch_pending_outbox(10).unwrap().is_empty());
-        assert_eq!(store.high_watermark().unwrap(), 2);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn direct_append_drains_all_older_outbox_events_before_assigning_sequences() {
-        let dir = temp_dir("outbox-before-direct");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .append_outbox_batch(&[versioned_event("revision-1", 1)])
-            .unwrap();
-
-        let direct = store
-            .append_batch(&[
-                smelt_event_bus::StoredEvent::new(0, versioned_event("revision-2", 2)).unwrap(),
-            ])
-            .unwrap();
-
-        assert_eq!(direct.len(), 1, "only direct events are returned");
-        assert_eq!(direct[0].sequence, 2);
-        let loaded = store
-            .load_after_topics(
-                0,
-                &std::collections::BTreeSet::from([Topic::new("example.changed").unwrap()]),
-                10,
-            )
-            .unwrap();
-        assert_eq!(
-            loaded
-                .iter()
-                .map(|event| event.envelope.event_id.as_str())
-                .collect::<Vec<_>>(),
-            ["revision-1", "revision-2"]
-        );
-        assert!(store.load_pending_outbox(10).unwrap().is_empty());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn durable_revision_survives_restart_and_serializes_publishers() {
-        let dir = temp_dir("durable-revision");
-        let path = dir.join(DATABASE_FILE_NAME);
-        let store = Store::open_or_create(&path).unwrap();
-        store
-            .append_batch(&[
-                smelt_event_bus::StoredEvent::new(0, versioned_event("revision-2", 2)).unwrap(),
-            ])
-            .unwrap();
-        drop(store);
-        let store = Store::open_or_create(&path).unwrap();
-        assert!(
-            store
-                .append_batch(&[smelt_event_bus::StoredEvent::new(
-                    0,
-                    versioned_event("revision-1", 1),
-                )
-                .unwrap()])
-                .is_err()
-        );
-        drop(store);
-
-        let path = Arc::new(path);
-        let barrier = Arc::new(Barrier::new(3));
-        let threads = ["same-revision-a", "same-revision-b"]
-            .into_iter()
-            .map(|id| {
-                let path = path.clone();
-                let barrier = barrier.clone();
-                std::thread::spawn(move || {
-                    let store = Store::open_or_create(path.as_ref()).unwrap();
-                    barrier.wait();
-                    store.append_batch(&[smelt_event_bus::StoredEvent::new(
-                        0,
-                        versioned_event(id, 3),
-                    )
-                    .unwrap()])
-                })
-            })
-            .collect::<Vec<_>>();
-        barrier.wait();
-        let successes = threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .filter(Result::is_ok)
-            .count();
-        assert_eq!(successes, 1);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn topic_filtered_load_skips_unrelated_first_page() {
-        let dir = temp_dir("topic-filtered-load");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let mut events = (0..130)
-            .map(|index| {
-                let mut event = event(&format!("other-{index}"));
-                event.topic = Topic::new("other.changed").unwrap();
-                smelt_event_bus::StoredEvent::new(0, event).unwrap()
-            })
-            .collect::<Vec<_>>();
-        events.push(smelt_event_bus::StoredEvent::new(0, event("wanted")).unwrap());
-        store.append_batch(&events).unwrap();
-        let loaded = store
-            .load_after_topics(
-                0,
-                &std::collections::BTreeSet::from([Topic::new("example.changed").unwrap()]),
-                1,
-            )
-            .unwrap();
-        assert_eq!(loaded[0].envelope.event_id.as_str(), "wanted");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// 迁移前后都在的一行数据：旧版本就有的历史标题表。
     fn kept_history_title(store: &Store) -> String {
         store
             .get_history_title_snapshot()
@@ -6139,7 +4811,6 @@ mod tests {
 
         let store = Store::open_or_create(&path).unwrap();
         assert_eq!(kept_history_title(&store), "keep");
-        assert_eq!(store.high_watermark().unwrap(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -7038,7 +5709,6 @@ mod tests {
         let store = Store::open_or_create(&path).unwrap();
         let agent_ui = AgentUiSnapshot {
             agent_hooks_enabled: true,
-            cross_agent_enabled: false,
             commands: vec![AgentConversationCommandRecord {
                 command_key: "acp_cmd".into(),
                 command: "claude --acp".into(),
@@ -7099,7 +5769,6 @@ mod tests {
         let after_prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
         assert_eq!(after_prefs.agents.len(), 2);
         assert_eq!(after_prefs.agents[1].id, "agent-2");
-        assert!(!after_prefs.cross_agent_enabled);
 
         let renamed = store
             .modify_agent_definition::<StoreError>("agent-2", |record| {

@@ -72,7 +72,7 @@ make test                   # cargo nextest（与 CI 同一运行器）
 
 Rust 2024 + [GPUI](https://github.com/zed-industries/zed)（`gpui-pre` 0.3.9）/ [gpui-kit](https://github.com/longbridge/gpui-kit)（GUI）、portable-pty + alacritty_terminal（内嵌终端）、tokio、iroh（远程连接）。axum 只负责本机回环上的自动化 webhook。结构化状态在 `~/.smelt/` 的 SQLite：运行时库 `smelt.sqlite3`，这台桌面的客户端库 `client.sqlite3`。见 [`docs/local-storage.md`](docs/local-storage.md)。
 
-工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、ACP 宿主、自动化；由 GUI 按需拉起，在 Linux 上则装成 systemd 用户服务）、`smelt-notify`（agent hook 的状态上报）、`smelt-agent-mcp`（跨 agent 消息的 stdio MCP 适配器）、`smelt-installer`（退出后替换 App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
+工作区包含 `smelt`（GUI 主程序）、`smeltd`（运行时守护：PTY、ACP 宿主、自动化；由 GUI 按需拉起，在 Linux 上则装成 systemd 用户服务）、`smelt-notify`（agent hook 的状态上报）、`smelt-installer`（退出后替换 App 的安装助手）。`smelt-iroh-connect` 用来调试运行时的 iroh 路径。普通用户主要使用 `smelt`，本机守护由 GUI 按需管理。
 移动端在 `mobile/`（Flutter）。`crates/smelt-mobile` 是它的 Rust 内核（设备身份、配对、目录、对话、终端、离线 SQLite 缓存），走和桌面同一套 `smelt-runtime-client`。目前尚未上架，需要自行构建，见 [`mobile/README.md`](mobile/README.md)。
 
 架构、目录、Linux 安装、多运行时窗口、远程桌面和闲置挂起见 [`docs/workspace.md`](docs/workspace.md)。产品主航道见 [`docs/product-roadmap.md`](docs/product-roadmap.md)，杂项 backlog 见 [`docs/roadmap.md`](docs/roadmap.md)。

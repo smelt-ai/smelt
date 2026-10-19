@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 # 守护侧无 GUI 二进制：smeltd（运行时守护，src/main.rs）、smelt-notify（agent hook →
-# smeltd 的翻译小工具）、smelt-agent-mcp（给 agent 的 MCP 适配器）。
+# smeltd 的翻译小工具）。
 # 独立成 crate 的意义：依赖树彻底脱离 GPUI，改守护不用等 GUI 依赖编译。
 
 [lints]

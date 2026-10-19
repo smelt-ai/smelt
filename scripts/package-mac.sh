@@ -26,7 +26,6 @@ RES="$APP/Contents/Resources"
 BIN="$ROOT/target/release/$BIN_NAME"
 DAEMON_BIN="$ROOT/target/release/smeltd"   # 终端持久化守护（GUI 按同目录寻址拉起）
 NOTIFY_BIN="$ROOT/target/release/smelt-notify" # Agent hooks → smeltd 状态通道
-AGENT_MCP_BIN="$ROOT/target/release/smelt-agent-mcp" # Agent 间消息的 STDIO MCP 适配器
 INSTALLER_BIN="$ROOT/target/release/smelt-installer" # GUI 退出后提交原子 App 交换
 
 BUILD=0
@@ -63,7 +62,7 @@ fi
 
 if [[ "$BUILD" -eq 1 ]]; then
   echo "▶ 编译 release …"
-  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
+  cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-installer
 fi
 
 if [[ ! -f "$BIN" ]]; then
@@ -76,10 +75,6 @@ if [[ ! -f "$DAEMON_BIN" ]]; then
 fi
 if [[ ! -f "$NOTIFY_BIN" ]]; then
   echo "✗ 找不到 ${NOTIFY_BIN}（Agent hook helper），先：cargo build --release --bin smelt-notify" >&2
-  exit 1
-fi
-if [[ ! -f "$AGENT_MCP_BIN" ]]; then
-  echo "✗ 找不到 ${AGENT_MCP_BIN}（cross-agent MCP helper），先：cargo build --release --bin smelt-agent-mcp" >&2
   exit 1
 fi
 if [[ ! -f "$INSTALLER_BIN" ]]; then
@@ -140,10 +135,6 @@ chmod +x "$MACOS/smeltd"
 # ~/.smelt/bin/smelt-notify；不能让 hook 直接引用可能被 DMG 覆盖的 App 内路径。
 cp "$NOTIFY_BIN" "$MACOS/smelt-notify"
 chmod +x "$MACOS/smelt-notify"
-# ACP 与终端 agent 都从会话级配置启动该 STDIO MCP helper；GUI 启动后还会把它
-# 原子同步到 ~/.smelt/bin，供 managed smeltd 从同目录定位。
-cp "$AGENT_MCP_BIN" "$MACOS/smelt-agent-mcp"
-chmod +x "$MACOS/smelt-agent-mcp"
 # installer 运行前会复制到 ~/.smelt/installer/<attempt-id>/，随后等 GUI 完全退出；
 # 绝不能从即将被交换的 Bundle 内直接运行。
 cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
@@ -309,7 +300,7 @@ if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
   # 否则公证会因某个内层文件缺 runtime 而整体被拒。主程序 smelt 由对 .app 的签名覆盖。
   echo "  … 签内层：smeltd"
   codesign "${standard_sign_opts[@]}" "$MACOS/smeltd"
-  for inner in smelt-notify smelt-agent-mcp smelt-installer; do
+  for inner in smelt-notify smelt-installer; do
     echo "  … 签内层：$inner"
     codesign "${standard_sign_opts[@]}" "$MACOS/$inner"
   done

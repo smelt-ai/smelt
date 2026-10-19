@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use smelt_runtime_client::protocol::control::{ControlCall, ControlMethod, EmptyParams};
 
-use crate::agent_bus::AgentEndpoint;
 use crate::agent_definition::AgentDefinition;
 use crate::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
 use crate::agent_host::{AgentHostEdit, AgentHostSettings};
@@ -252,24 +251,6 @@ impl ControlCall for SessionList {
     const METHOD: ControlMethod = ControlMethod::SessionList;
 }
 
-pub enum AgentList {}
-
-impl ControlCall for AgentList {
-    type Params = AgentListParams;
-    type Result = AgentListResult;
-
-    const METHOD: ControlMethod = ControlMethod::AgentList;
-}
-
-pub enum AgentSend {}
-
-impl ControlCall for AgentSend {
-    type Params = AgentSendParams;
-    type Result = AgentSendResult;
-
-    const METHOD: ControlMethod = ControlMethod::AgentSend;
-}
-
 /// 智能体记忆的元数据（使用统计、来源）在主库，由主 daemon 代 Pi 读写。调用方用会话 id
 /// 和 daemon 发给该会话的 capability token 证明身份；记忆层由 daemon 按会话的启动规格
 /// 决定，调用方只能操作自己这个会话的两层记忆。见 `docs/agent-memory.md`。
@@ -420,32 +401,6 @@ impl ControlCall for AutomationRunOnce {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionListResult {
     pub sessions: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentListParams {
-    pub source_session_id: String,
-    pub source_token: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentListResult {
-    pub agents: Vec<AgentEndpoint>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentSendParams {
-    pub source_session_id: String,
-    pub source_token: String,
-    pub command_id: smelt_event_protocol::CommandId,
-    pub target: String,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentSendResult {
-    pub message_id: String,
-    pub target_session_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -631,12 +586,12 @@ mod tests {
     #[test]
     fn typed_client_decodes_an_error_without_a_result_payload() {
         let response = ControlResponse::<serde_json::Value>::error(
-            "send-1",
-            ControlError::new(ControlErrorCode::OperationFailed, "target is busy"),
+            "list-1",
+            ControlError::new(ControlErrorCode::OperationFailed, "runtime is busy"),
         );
 
-        let error = decode_response::<AgentSend>(
-            "send-1",
+        let error = decode_response::<SessionList>(
+            "list-1",
             serde_json::to_value(response).expect("response should serialize"),
         )
         .expect_err("operation failure must reach the caller");
@@ -683,18 +638,15 @@ mod tests {
 
     #[test]
     fn future_optional_request_fields_are_ignored() {
-        let params = decode_params::<AgentSendParams>(serde_json::json!({
-            "source_session_id": "source",
-            "source_token": "token",
-            "command_id": "agent-send-1",
-            "target": "target",
-            "message": "hello",
+        let params = decode_params::<AgentMemorySessionParams>(serde_json::json!({
+            "session_id": "session-1",
+            "token": "token",
             "future_optional_hint": true,
         }))
         .expect("additive optional fields must not break an older v1 server");
 
-        assert_eq!(params.message, "hello");
-        assert_eq!(params.command_id.as_str(), "agent-send-1");
+        assert_eq!(params.session_id, "session-1");
+        assert_eq!(params.token, "token");
     }
 
     #[test]
@@ -780,7 +732,7 @@ mod tests {
 
     #[test]
     fn future_error_codes_degrade_to_unknown() {
-        let error = decode_response::<AgentSend>(
+        let error = decode_response::<SessionList>(
             "future-error",
             serde_json::json!({
                 "control_version": CONTROL_API_VERSION,

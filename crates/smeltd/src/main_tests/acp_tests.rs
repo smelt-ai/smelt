@@ -2,7 +2,7 @@ use super::*;
 use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind};
 use smelt_core::acp_session::AcpSessionState;
 use smelt_core::daemon_state::DaemonPhase;
-use smelt_event_protocol::{DeliveryClass, PluginId, SubscriptionId, Topic};
+use smelt_event_protocol::{PluginId, SubscriptionId, Topic};
 use std::collections::BTreeSet;
 
 fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
@@ -2481,7 +2481,6 @@ fn subscribe_conversation_wake(subscribers: &EventHubHandle) -> smelt_event_bus:
                 smelt_event_protocol::CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
             )
             .unwrap()]),
-            DeliveryClass::Ephemeral,
             &BTreeSet::from([smelt_event_protocol::Capability::new(
                 smelt_event_protocol::CORE_CAPABILITY_CONVERSATION_WAKE,
             )
@@ -3794,7 +3793,6 @@ fn upgrade_returns_busy_before_touching_handoff_for_active_acp_turn() {
         &serde_json::json!({"op": "upgrade"}),
         &sessions,
         &acp_sessions,
-        &new_event_hub(),
         -1,
     );
 

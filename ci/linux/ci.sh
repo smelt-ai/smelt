@@ -38,7 +38,7 @@ for package in "${RUNTIME_PACKAGES[@]}"; do
 done
 
 # 随运行时一起分发的程序。
-PROGRAMS=(smeltd smelt-notify smelt-agent-mcp)
+PROGRAMS=(smeltd smelt-notify)
 
 stage_lint() {
   info "Rust：格式"

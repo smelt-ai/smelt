@@ -14,7 +14,7 @@ use smelt_event_protocol::{
     CORE_TOPIC_PROJECT_CHANGED, CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_TERMINAL_NOTIFICATION,
     CORE_TOPIC_TERMINAL_PROGRESS, CORE_TOPIC_WORKSPACE_MENU_CHANGED, ConversationWakeRequested,
-    CoreProjectionEvent, CoreSessionPhase, DeliveryClass, EVENT_BUS_PROTOCOL_VERSION,
+    CoreProjectionEvent, CoreSessionPhase, EVENT_BUS_PROTOCOL_VERSION,
     EventClientAuth, EventSource, EventSubscribeRequest, FirstPartyClientKind, ProtocolRange,
     SessionStateChanged, SessionStateRemoved, SessionStatesSnapshot, SubscribeErrorCode,
     SubscribeMessage, SubscribeRequest, SubscriptionDeclaration, SubscriptionId, Topic,
@@ -315,9 +315,7 @@ impl DaemonStateEventClient {
                         .into_iter()
                         .map(|topic| Topic::new(topic).expect("core topic is valid"))
                         .collect(),
-                    delivery: DeliveryClass::Ephemeral,
                 },
-                cursor: None,
             },
         };
         let mut pending = PendingSnapshots::default();
@@ -404,9 +402,6 @@ impl DaemonStateEventClient {
             SubscribeMessage::Error { code, message } => {
                 Err(DaemonEventClientError::Server { code, message })
             }
-            SubscribeMessage::Cursor { .. } => Err(DaemonEventClientError::Protocol(
-                "ephemeral subscription received a durable cursor".to_string(),
-            )),
         }
     }
 
@@ -743,7 +738,6 @@ mod tests {
             launch: Some("agent".to_string()),
             provider: Some("codex".to_string()),
             conversation_id: Some(format!("conv-{id}")),
-            agent_mcp: false,
             title: Some(id.to_string()),
             phase: CoreSessionPhase::Thinking,
             phase_since_unix_seconds: 10,
@@ -903,8 +897,8 @@ mod tests {
                 "kind": "desktop"
             })
         );
-        assert_eq!(line["request"]["subscription"]["delivery"], "ephemeral");
-        assert!(line["request"]["cursor"].is_null());
+        assert!(line["request"]["subscription"].get("delivery").is_none());
+        assert!(line["request"].get("cursor").is_none());
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
@@ -950,7 +944,6 @@ mod tests {
             line["auth"],
             serde_json::json!({ "type": "first_party", "kind": "desktop" })
         );
-        assert_eq!(line["request"]["subscription"]["delivery"], "ephemeral");
         let topics: Vec<&str> = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap()

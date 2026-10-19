@@ -566,25 +566,6 @@ fn agent_groups(
                         .map(acp_cmd_setting_item),
                 )
                 .item(
-                    SettingItem::new(
-                        "跨 Agent 通讯",
-                        SettingField::switch(
-                            |cx: &App| {
-                                cx.try_global::<AgentHostState>()
-                                    .map(|c| c.cross_agent_enabled)
-                                    .unwrap_or(true)
-                            },
-                            |v: bool, cx: &mut App| {
-                                apply_agent_host(|c| c.cross_agent_enabled = v, cx);
-                            },
-                        ),
-                    )
-                    .description(
-                        "允许会话通过 Smelt MCP 相互发送消息。关闭后立即停止收发；关闭期间新建的会话重新开启后需重启才会获得工具。",
-                    )
-                    .keywords(["跨 agent", "消息", "MCP", "协作"]),
-                )
-                .item(
                     SettingItem::render({
                         let profile_editor_entity = entity;
                         let profile_rows = snapshot.profile_rows.clone();
