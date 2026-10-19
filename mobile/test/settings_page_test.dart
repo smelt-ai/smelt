@@ -2,33 +2,33 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/models/pairing_config.dart';
-import 'package:smelt_mobile/models/saved_desktop.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
+import 'package:smelt_mobile/models/saved_runtime.dart';
 import 'package:smelt_mobile/pages/settings_page.dart';
 import 'package:smelt_mobile/services/appearance_prefs_store.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/terminal_prefs_store.dart';
 import 'package:smelt_mobile/theme/smelt_theme.dart';
 
-SavedDesktopCollection _desktops(int count) {
+SavedRuntimeCollection _runtimes(int count) {
   final list = [
     for (var i = 0; i < count; i++)
-      SavedDesktop(
-        id: 'd$i',
+      SavedRuntime(
+        runtimeId: 'r$i',
         name: 'MacBook $i',
-        pairing: const PairingConfig(endpoint: 'ws://x', token: 't'),
+        endpointId: 'endpoint-$i',
         lastUsedAt: DateTime(2026, 1, 1),
       ),
   ];
-  return SavedDesktopCollection(
-    desktops: list,
-    activeDesktopId: list.isEmpty ? null : list.first.id,
+  return SavedRuntimeCollection(
+    runtimes: list,
+    activeRuntimeId: list.isEmpty ? null : list.first.runtimeId,
   );
 }
 
 Widget _host({
-  int desktopCount = 1,
-  WsState state = WsState.connected,
+  int runtimeCount = 1,
+  RuntimeConnectionState state = RuntimeConnectionState.connected,
+  LinkMetrics? link,
   ThemeMode themeMode = ThemeMode.system,
   double fontSize = 13,
   ValueChanged<ThemeMode>? onThemeModeChanged,
@@ -40,14 +40,15 @@ Widget _host({
     theme: smeltTheme(Brightness.dark),
     home: Scaffold(
       body: SettingsPage(
-        desktops: _desktops(desktopCount),
+        runtimes: _runtimes(runtimeCount),
         connectionState: state,
+        link: link,
         connectionBar: connectionBar ?? const SizedBox.shrink(),
         themeMode: themeMode,
         onThemeModeChanged: onThemeModeChanged ?? (_) {},
         terminalFontSize: fontSize,
         onTerminalFontSizeChanged: onFontSizeChanged ?? (_) {},
-        onSwitchDesktop: () {},
+        onSwitchRuntime: () {},
         onPair: () {},
         onDisconnect: onDisconnect ?? () {},
       ),
@@ -60,8 +61,8 @@ void main() {
     test('链路和延迟都有时拼成一个 chip', () {
       expect(
         connectionChipLabel(
-          WsState.connected,
-          const ConnectionMetrics(kind: ConnectionPathKind.p2p, latencyMs: 42),
+          RuntimeConnectionState.connected,
+          const LinkMetrics(path: LinkPath.peerToPeer, rttMs: 42),
         ),
         'P2P · 42ms',
       );
@@ -71,15 +72,15 @@ void main() {
     test('链路认不出但有延迟时只画延迟', () {
       expect(
         connectionChipLabel(
-          WsState.connected,
-          const ConnectionMetrics(latencyMs: 42),
+          RuntimeConnectionState.connected,
+          const LinkMetrics(path: LinkPath.unknown, rttMs: 42),
         ),
         '42ms',
       );
       expect(
         connectionPathDetail(
-          WsState.connected,
-          const ConnectionMetrics(latencyMs: 42),
+          RuntimeConnectionState.connected,
+          const LinkMetrics(path: LinkPath.unknown, rttMs: 42),
         ),
         isNull,
       );
@@ -87,28 +88,50 @@ void main() {
 
     test('什么都没有时整个 chip 不画', () {
       expect(
-        connectionChipLabel(WsState.connected, const ConnectionMetrics()),
+        connectionChipLabel(
+          RuntimeConnectionState.connected,
+          const LinkMetrics(path: LinkPath.unknown),
+        ),
+        isNull,
+      );
+      expect(
+        connectionChipLabel(RuntimeConnectionState.connected, null),
         isNull,
       );
     });
 
     // 没连上的时候延迟是上一次的残值，画出来等于骗人。
     test('没连上时不画链路信息', () {
-      const metrics = ConnectionMetrics(
-        kind: ConnectionPathKind.p2p,
-        latencyMs: 42,
+      const link = LinkMetrics(path: LinkPath.peerToPeer, rttMs: 42);
+      expect(
+        connectionChipLabel(RuntimeConnectionState.disconnected, link),
+        isNull,
       );
-      expect(connectionChipLabel(WsState.disconnected, metrics), isNull);
-      expect(connectionPathDetail(WsState.reconnecting, metrics), isNull);
+      expect(
+        connectionPathDetail(RuntimeConnectionState.reconnecting, link),
+        isNull,
+      );
     });
 
     test('走中继时说清楚是中继', () {
       expect(
         connectionPathDetail(
-          WsState.connected,
-          const ConnectionMetrics(kind: ConnectionPathKind.relay),
+          RuntimeConnectionState.connected,
+          const LinkMetrics(path: LinkPath.relay),
         ),
         'Forwarded by iroh relay',
+      );
+    });
+
+    test('局域网直连标成 LAN', () {
+      const link = LinkMetrics(path: LinkPath.lan, rttMs: 3);
+      expect(
+        connectionChipLabel(RuntimeConnectionState.connected, link),
+        'LAN · 3ms',
+      );
+      expect(
+        connectionPathDetail(RuntimeConnectionState.connected, link),
+        'Direct over LAN',
       );
     });
   });
@@ -129,20 +152,37 @@ void main() {
       await tester.pumpWidget(_host(connectionBar: bar));
       expect(find.text('BAR-SENTINEL'), findsNothing);
       await tester.pumpWidget(
-        _host(state: WsState.reconnecting, connectionBar: bar),
+        _host(state: RuntimeConnectionState.reconnecting, connectionBar: bar),
       );
       expect(find.text('BAR-SENTINEL'), findsOneWidget);
     });
 
-    testWidgets('只有一台设备时不给「切换设备」', (tester) async {
+    testWidgets('只有一个运行时时不给「切换运行时」', (tester) async {
       await tester.pumpWidget(_host());
-      expect(find.text('Switch device'), findsNothing);
-      await tester.pumpWidget(_host(desktopCount: 2));
-      expect(find.text('Switch device'), findsOneWidget);
+      expect(find.text('Switch runtime'), findsNothing);
+      await tester.pumpWidget(_host(runtimeCount: 2));
+      expect(find.text('Switch runtime'), findsOneWidget);
+    });
+
+    testWidgets('连接卡画出运行时名和链路', (tester) async {
+      await tester.pumpWidget(
+        _host(link: const LinkMetrics(path: LinkPath.relay, rttMs: 80)),
+      );
+      expect(find.text('MacBook 0'), findsOneWidget);
+      expect(find.text('Relay · 80ms'), findsOneWidget);
+      expect(find.text('Forwarded by iroh relay'), findsOneWidget);
+    });
+
+    testWidgets('配对入口说清楚去哪儿拿配对码', (tester) async {
+      await tester.pumpWidget(_host());
+      expect(find.text('Pair with runtime'), findsOneWidget);
+      expect(find.text(pairingGuidance), findsOneWidget);
     });
 
     testWidgets('已断开时不给「断开连接」', (tester) async {
-      await tester.pumpWidget(_host(state: WsState.disconnected));
+      await tester.pumpWidget(
+        _host(state: RuntimeConnectionState.disconnected),
+      );
       expect(find.text('Disconnect'), findsNothing);
       await tester.pumpWidget(_host());
       expect(find.text('Disconnect'), findsOneWidget);

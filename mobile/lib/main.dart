@@ -1,11 +1,11 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'models/pairing_config.dart';
-import 'models/saved_desktop.dart';
+import 'package:path_provider/path_provider.dart';
+import 'models/saved_runtime.dart';
 import 'models/session_filters.dart';
 import 'widgets/agent_icon.dart';
 import 'widgets/project_avatar.dart';
@@ -13,13 +13,12 @@ import 'pages/agents_page.dart';
 import 'pages/console_page.dart';
 import 'pages/qr_scanner_page.dart';
 import 'pages/terminal_session_page.dart';
-import 'services/gateway_service.dart';
 import 'services/message_draft_store.dart';
-import 'models/acp_snapshot.dart';
 import 'services/pairing_storage.dart';
 import 'services/pending_actions_controller.dart';
+import 'services/runtime_service.dart';
 import 'rust_lib.dart';
-import 'src/rust/api_iroh.dart';
+import 'src/rust/api/identity.dart' show initClient;
 import 'utils/image_processing.dart';
 import 'pages/settings_page.dart';
 import 'services/appearance_prefs_store.dart';
@@ -47,7 +46,7 @@ bool shouldAutoFollowSnapshot({
 }) => initialLoad || wasAtBottom;
 
 bool shouldShowAttentionNotification({
-  required LifecycleAttention attention,
+  required AttentionItem attention,
   required String? activeSessionId,
   required String? subscribedSessionId,
 }) {
@@ -58,7 +57,7 @@ bool shouldShowAttentionNotification({
   return true;
 }
 
-Future<String?> showDesktopRenameDialog(
+Future<String?> showRuntimeRenameDialog(
   BuildContext context,
   String initialName,
 ) {
@@ -66,7 +65,7 @@ Future<String?> showDesktopRenameDialog(
   return showDialog<String>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: const Text('Rename desktop'),
+      title: const Text('Rename runtime'),
       content: TextFormField(
         initialValue: initialName,
         autofocus: true,
@@ -113,13 +112,11 @@ class _ConsoleTabIcon extends StatelessWidget {
 
 class _ProjectActionsButton extends StatelessWidget {
   const _ProjectActionsButton({
-    required this.canCreate,
     required this.hasAgents,
     required this.onNewSession,
     required this.onHistory,
   });
 
-  final bool canCreate;
   final bool hasAgents;
   final VoidCallback onNewSession;
   final VoidCallback onHistory;
@@ -137,10 +134,9 @@ class _ProjectActionsButton extends StatelessWidget {
       itemBuilder: (context) => [
         // 对话和终端不再是两个入口：具体开哪一种是选择器里那一行的属性，跟桌面
         // 「+」弹层一样。两个入口的时候，用户得先猜「Claude 终端」算哪一类。
-        PopupMenuItem(
+        const PopupMenuItem(
           value: 'session',
-          enabled: canCreate,
-          child: const ListTile(
+          child: ListTile(
             contentPadding: EdgeInsets.zero,
             leading: Icon(Icons.add),
             title: Text('New session'),
@@ -214,13 +210,19 @@ class _TurnElapsedLabelState extends State<TurnElapsedLabel> {
 /// 三个屏幕（指挥台 / 项目 / 会话）共用这一个入口，翻页时不会忽隐忽现；`cached`
 /// 由各屏自己判断，因为「在用缓存」问的是**这一屏**的数据，不是全局。
 Widget buildConnectionBanner({
-  required WsState state,
+  required RuntimeConnectionState state,
   required bool cached,
   DateTime? cachedAt,
   VoidCallback? onRetry,
 }) {
-  if (state == WsState.connected && !cached) return const SizedBox.shrink();
-  return CachedConnectionBar(state: state, cachedAt: cachedAt, onRetry: onRetry);
+  if (state == RuntimeConnectionState.connected && !cached) {
+    return const SizedBox.shrink();
+  }
+  return CachedConnectionBar(
+    state: state,
+    cachedAt: cachedAt,
+    onRetry: onRetry,
+  );
 }
 
 class CachedConnectionBar extends StatelessWidget {
@@ -231,7 +233,7 @@ class CachedConnectionBar extends StatelessWidget {
     this.onRetry,
   });
 
-  final WsState state;
+  final RuntimeConnectionState state;
   final DateTime? cachedAt;
 
   /// 断线时的重试入口。放在这条状态栏上，而不是浮动按钮里：用户是在这里读到
@@ -242,13 +244,13 @@ class CachedConnectionBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final label = switch (state) {
-      WsState.reconnecting => 'Reconnecting',
-      WsState.connecting => 'Connecting',
-      WsState.connected => 'Refreshing',
-      WsState.disconnected => 'Offline',
+      RuntimeConnectionState.reconnecting => 'Reconnecting',
+      RuntimeConnectionState.connecting => 'Connecting',
+      RuntimeConnectionState.connected => 'Refreshing',
+      RuntimeConnectionState.disconnected => 'Offline',
     };
     final age = cachedAt == null ? null : _formatCacheAge(cachedAt!);
-    final offline = state == WsState.disconnected;
+    final offline = state == RuntimeConnectionState.disconnected;
     return Container(
       width: double.infinity,
       constraints: const BoxConstraints(minHeight: 36),
@@ -309,10 +311,15 @@ String _formatCacheAge(DateTime cachedAt) {
   return '${age.inDays}d ago';
 }
 
-bool _isInterruptMarker(String text) {
-  final value = text.trim();
-  return value.startsWith('[Request interrupted by user') &&
-      value.endsWith(']');
+/// 离线缓存的保存时间（Unix 毫秒）转成横幅要的时间。
+DateTime? cachedAtFromMs(int? savedAtMs) =>
+    savedAtMs == null ? null : DateTime.fromMillisecondsSinceEpoch(savedAtMs);
+
+/// 配对时报给运行时的设备名，运行时的设备列表里显示的就是它。
+String defaultDeviceName() {
+  final host = Platform.localHostname.trim();
+  if (host.isNotEmpty && host != 'localhost') return host;
+  return 'Smelt on ${Platform.operatingSystem}';
 }
 
 String _formatElapsed(int milliseconds) {
@@ -335,26 +342,11 @@ Future<void> main() async {
   // 图标名单来自资产清单，读一次缓存住；没读完之前所有 agent 都是兜底图标。
   await loadAgentIcons();
   await initRustLib();
-  // 在组装根接线，而不是让 GatewayService 直接依赖 FFI：服务层保持纯 Dart，
-  // 单测才能不带动态库地跑。
-  gatewayService.irohTunnelOpener = (endpointId, relayUrl) =>
-      irohTunnelStart(endpointId: endpointId, relayUrl: relayUrl);
-  gatewayService.irohTunnelStopper = irohTunnelStop;
-  gatewayService.irohPathProbe = () async {
-    final status = await irohTunnelPathStatus();
-    if (status == null) return null;
-    final kind = switch (status.kind) {
-      'lan' => ConnectionPathKind.lan,
-      'p2p' => ConnectionPathKind.p2p,
-      'relay' => ConnectionPathKind.relay,
-      _ => ConnectionPathKind.unknown,
-    };
-    return IrohPathSample(kind: kind, rttMs: status.rttMs);
-  };
-  gatewayService.irohInboundIdleProbe = () async {
-    final idleMs = await irohTunnelInboundIdleMs();
-    return idleMs == null ? null : Duration(milliseconds: idleMs);
-  };
+  // 设备身份（iroh 密钥）和离线缓存都落在 App Support 目录里，配对和连接之前
+  // 必须先初始化。
+  final dataDir = await getApplicationSupportDirectory();
+  await initClient(dataDir: dataDir.path);
+  runtimeService.start();
   runApp(const SmeltApp());
 }
 
@@ -383,7 +375,8 @@ class _SmeltAppState extends State<SmeltApp> {
   @override
   void initState() {
     super.initState();
-    _appearanceStore = widget.appearancePrefsStore ?? FileAppearancePrefsStore();
+    _appearanceStore =
+        widget.appearancePrefsStore ?? FileAppearancePrefsStore();
     _loadAppearance();
   }
 
@@ -439,26 +432,25 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  WsState _connectionState = WsState.disconnected;
-  List<SessionSummary> _sessions = [];
-  WorkspaceCatalog _workspace = const WorkspaceCatalog(
-    projects: [],
-    agents: [],
-  );
-  late final StreamSubscription<WsState> _stateSubscription;
-  late final StreamSubscription<List<SessionSummary>> _sessionsSubscription;
+  ConnectionEvent _connection = runtimeService.connection;
+  SessionList _sessionList = runtimeService.sessionList;
+  WorkspaceCatalog _workspace = runtimeService.workspace;
+  late final StreamSubscription<ConnectionEvent> _connectionSubscription;
+  late final StreamSubscription<SessionList> _sessionsSubscription;
   late final StreamSubscription<WorkspaceCatalog> _workspaceSubscription;
-  late final StreamSubscription<String> _sessionCreatedSubscription;
-  late final StreamSubscription<LifecycleAttention> _attentionSubscription;
+  late final StreamSubscription<AttentionItem> _attentionSubscription;
   late final StreamSubscription<String> _attentionResolvedSubscription;
   late final StreamSubscription<String> _errorSubscription;
   late final PairingStorage _pairingStorage;
   late final MessageDraftStore _messageDraftStore;
   String? _shownAttentionSessionId;
-  PairingConfig? _pendingPairing;
   bool _restoringPairing = true;
-  SavedDesktopCollection _savedDesktops = const SavedDesktopCollection();
+
+  /// 正在配对。配对失败由配对流程自己报，连接状态流里同一个错误不再报一遍。
+  bool _pairing = false;
+  SavedRuntimeCollection _savedRuntimes = const SavedRuntimeCollection();
   bool _showPairingCode = false;
+
   /// 首屏落在指挥台，不是项目树。`docs/product-roadmap.md §6`：手机是指挥台。
   _HomeTab _tab = _HomeTab.console;
 
@@ -471,10 +463,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late final TerminalPrefsStore _terminalPrefsStore;
   TerminalPrefs _terminalPrefs = const TerminalPrefs();
   bool _acceptConnectionNotifications = true;
+
+  /// 刚建好、等它出现在会话列表里就打开的会话。
   String? _pendingOpenSessionId;
   String? _activeSessionId;
 
   final _pairingCodeController = TextEditingController();
+
+  RuntimeConnectionState get _connectionState => _connection.state;
+  List<SessionSummary> get _sessions => _sessionList.sessions;
 
   @override
   void initState() {
@@ -487,48 +484,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() => _terminalPrefs = prefs);
     });
-    _stateSubscription = gatewayService.stateStream.listen((state) {
+    _connectionSubscription = runtimeService.connectionStream.listen((event) {
       if (!mounted) return;
-      setState(() => _connectionState = state);
-      if (state == WsState.connected && _pendingPairing != null) {
-        unawaited(_savePendingPairing());
+      final previousError = _connection.error;
+      setState(() => _connection = event);
+      final error = event.error;
+      if (error != null &&
+          error != previousError &&
+          event.state == RuntimeConnectionState.disconnected) {
+        _showConnectionError(error);
       }
     });
-    _sessionsSubscription = gatewayService.sessionsStream.listen((sessions) {
+    _sessionsSubscription = runtimeService.sessionListStream.listen((list) {
       if (!mounted) return;
-      setState(() => _sessions = sessions);
-      final pendingId = _pendingOpenSessionId;
-      final created = pendingId == null
-          ? null
-          : sessions.where((session) => session.id == pendingId).firstOrNull;
-      if (created != null) {
-        _pendingOpenSessionId = null;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _openSession(created);
-        });
-      }
+      setState(() => _sessionList = list);
+      _openPendingCreatedSession();
     });
-    _workspaceSubscription = gatewayService.workspaceStream.listen((workspace) {
+    _workspaceSubscription = runtimeService.workspaceStream.listen((workspace) {
       if (!mounted) return;
       setState(() => _workspace = workspace);
     });
-    _sessionCreatedSubscription = gatewayService.sessionCreatedStream.listen((
-      id,
-    ) {
-      if (!mounted) return;
-      _pendingOpenSessionId = id;
-    });
-    _attentionSubscription = gatewayService.attentionStream.listen((item) {
+    _attentionSubscription = runtimeService.attentionStream.listen((item) {
       if (!mounted || !_acceptConnectionNotifications) return;
-      gatewayService.listSessions();
       if (_activeSessionId == item.sessionId) {
-        gatewayService.markRead(item.sessionId);
+        runtimeService.markRead(item.sessionId);
       }
-      final isCurrent = gatewayService.subscribedSessionId == item.sessionId;
+      final watchedSessionId = runtimeService.watchedSessionId;
+      final isCurrent = watchedSessionId == item.sessionId;
       if (!shouldShowAttentionNotification(
         attention: item,
         activeSessionId: _activeSessionId,
-        subscribedSessionId: gatewayService.subscribedSessionId,
+        subscribedSessionId: watchedSessionId,
       )) {
         return;
       }
@@ -557,68 +543,79 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             }
           });
     });
-    _attentionResolvedSubscription = gatewayService.attentionResolvedStream
+    _attentionResolvedSubscription = runtimeService.attentionResolvedStream
         .listen((sessionId) {
-          gatewayService.listSessions();
           if (!mounted || _shownAttentionSessionId != sessionId) return;
           _shownAttentionSessionId = null;
           ScaffoldMessenger.of(context).hideCurrentSnackBar();
         });
-    _errorSubscription = gatewayService.errorStream.listen((error) {
-      if (!mounted || !_acceptConnectionNotifications) return;
-      final messenger = ScaffoldMessenger.of(context);
-      messenger.clearSnackBars();
-      messenger.showSnackBar(SnackBar(content: Text(error)));
-    });
+    _errorSubscription = runtimeService.errorStream.listen(_showMessage);
     unawaited(_restorePairing());
   }
 
-  /// 回到前台立刻确认连接还活着。系统在后台会冻结心跳定时器，这段时间里
-  /// 网络往往已经换过，而半开的 TCP 不会通知我们——不主动探一下，用户看到的
-  /// 就是进后台那一刻的旧会话。
+  /// 回到前台立刻确认连接还活着。系统在后台会冻结心跳，这段时间里网络往往已经
+  /// 换过——不主动探一下，用户看到的就是进后台那一刻的旧会话。
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.resumed) {
-      gatewayService.verifyConnection();
+      runtimeService.verifyConnection();
     }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted || !_acceptConnectionNotifications) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 运行时把这台设备拒在门外时说清楚该怎么办。离线由横幅表达，被新请求取代的
+  /// 连接本来就没人关心，都不弹。
+  void _showConnectionError(SmeltError error) {
+    if (_pairing || !_acceptConnectionNotifications) return;
+    switch (error.kind) {
+      case SmeltErrorKind.offline:
+      case SmeltErrorKind.cancelled:
+        return;
+      case SmeltErrorKind.unpaired:
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.clearSnackBars();
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(_unpairedMessage),
+            duration: const Duration(seconds: 8),
+            action: SnackBarAction(label: 'Scan', onPressed: _scanQrCode),
+          ),
+        );
+      case SmeltErrorKind.invalidPairing:
+      case SmeltErrorKind.incompatible:
+      case SmeltErrorKind.other:
+        _showMessage(error.message);
+    }
+  }
+
+  String get _unpairedMessage {
+    final name = _savedRuntimes.activeRuntime?.name ?? 'this runtime';
+    return 'This device was revoked or is not paired with $name. '
+        'Scan a new pairing code to reconnect.';
   }
 
   Future<void> _restorePairing() async {
     try {
-      final savedDesktops = await _pairingStorage.load();
+      final savedRuntimes = await _pairingStorage.load();
       if (!mounted) return;
       setState(() {
         _restoringPairing = false;
-        _savedDesktops = savedDesktops;
+        _savedRuntimes = savedRuntimes;
       });
-      final active = savedDesktops.activeDesktop;
-      if (active != null) {
-        _connect(active.pairing, saveWhenConnected: false);
-      }
+      final active = savedRuntimes.activeRuntime;
+      if (active != null) _connectRuntime(active);
     } catch (error) {
       if (!mounted) return;
       setState(() => _restoringPairing = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Could not restore pairing: $error')),
-      );
-    }
-  }
-
-  Future<void> _savePendingPairing() async {
-    final pairing = _pendingPairing;
-    if (pairing == null) return;
-    // 只在真正连上的就是这组配对时才落盘，避免自动重连到旧桌面时把新扫的
-    // endpoint/token 写进去。
-    if (!gatewayService.matchesTarget(pairing.endpoint, pairing.token)) return;
-    _pendingPairing = null;
-    try {
-      final savedDesktops = await _pairingStorage.save(pairing);
-      if (mounted) setState(() => _savedDesktops = savedDesktops);
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Connected, but pairing was not saved: $error')),
       );
     }
   }
@@ -680,7 +677,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 还没有任何会话可谈的连接状态。此时不分 tab，整屏只讲连接。
   bool get _showsConnectionTakeover =>
-      _sessions.isEmpty && _connectionState != WsState.connected;
+      _sessions.isEmpty && _connectionState != RuntimeConnectionState.connected;
 
   /// 待办徽标的落点：切到指挥台。会话页里点它会先 pop 回来，两边落到同一处，
   /// 用户不用记「刚才是从哪进来的」。
@@ -695,10 +692,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 跟导航栏用同一个判断，两者不会各说各话。
     if (_showsConnectionTakeover) {
       return switch (_connectionState) {
-        WsState.disconnected => _buildDisconnectedView(),
-        WsState.connecting => _buildConnectingView(),
-        WsState.reconnecting => _buildReconnectingView(),
-        WsState.connected => _buildSessionList(),
+        RuntimeConnectionState.disconnected => _buildDisconnectedView(),
+        RuntimeConnectionState.connecting => _buildConnectingView(),
+        RuntimeConnectionState.reconnecting => _buildReconnectingView(),
+        RuntimeConnectionState.connected => _buildSessionList(),
       };
     }
     return switch (_tab) {
@@ -727,14 +724,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 递进去。见设计稿 F。
   Widget _buildSettings() {
     return SettingsPage(
-      desktops: _savedDesktops,
+      runtimes: _savedRuntimes,
       connectionState: _connectionState,
+      link: _connection.link,
       connectionBar: _buildConnectionBar(),
       themeMode: widget.themeMode,
       onThemeModeChanged: widget.onThemeModeChanged ?? (_) {},
       terminalFontSize: _terminalPrefs.fontSize,
       onTerminalFontSizeChanged: _setTerminalFontSize,
-      onSwitchDesktop: _showDesktopSwitcher,
+      onSwitchRuntime: _showRuntimeSwitcher,
       onPair: _scanQrCode,
       onDisconnect: _disconnect,
     );
@@ -749,12 +747,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _buildConnectionBar() {
     return buildConnectionBanner(
       state: _connectionState,
-      cached: gatewayService.sessionsAreCached,
-      cachedAt: gatewayService.cachedAt,
-      onRetry: _connectionState == WsState.disconnected
-          ? gatewayService.retryCurrentConnection
+      cached: _sessionList.cached,
+      cachedAt: cachedAtFromMs(_sessionList.savedAtMs),
+      onRetry: _connectionState == RuntimeConnectionState.disconnected
+          ? _retry
           : null,
     );
+  }
+
+  /// 重连当前保存的运行时。
+  void _retry() {
+    final active = _savedRuntimes.activeRuntime;
+    if (active != null &&
+        _connectionState == RuntimeConnectionState.disconnected) {
+      _connectRuntime(active);
+    } else {
+      unawaited(runtimeService.retry());
+    }
   }
 
   Widget _buildDisconnectedView() {
@@ -770,7 +779,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 16),
           const Text('Not connected', textAlign: TextAlign.center),
-          if (_savedDesktops.activeDesktop case final active?) ...[
+          if (_connection.error?.kind == SmeltErrorKind.unpaired) ...[
+            const SizedBox(height: 8),
+            Text(
+              _unpairedMessage,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ],
+          if (_savedRuntimes.activeRuntime case final active?) ...[
             const SizedBox(height: 8),
             Text(
               active.name,
@@ -781,9 +798,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: gatewayService.retryCurrentConnection,
+              onPressed: _retry,
               icon: const Icon(Icons.sync),
-              label: const Text('Retry saved desktop'),
+              label: const Text('Retry saved runtime'),
             ),
           ],
           const SizedBox(height: 24),
@@ -798,7 +815,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             decoration:
                 const InputDecoration(
                   labelText: 'Pairing Code',
-                  hintText: 'Paste code from Smelt Desktop',
+                  hintText: 'smelt+iroh://…',
+                  helperText: pairingGuidance,
+                  helperMaxLines: 3,
                   border: OutlineInputBorder(),
                 ).copyWith(
                   suffixIcon: IconButton(
@@ -817,7 +836,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
-            onPressed: _manualConnect,
+            onPressed: _pairing ? null : _manualConnect,
             icon: const Icon(Icons.link),
             label: const Text('Connect'),
           ),
@@ -831,12 +850,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             icon: const Icon(Icons.qr_code_scanner),
             label: const Text('Scan QR Code to Pair'),
           ),
-          if (_savedDesktops.desktops.isNotEmpty) ...[
+          if (_savedRuntimes.runtimes.isNotEmpty) ...[
             const SizedBox(height: 12),
             TextButton.icon(
-              onPressed: _showDesktopSwitcher,
+              onPressed: _showRuntimeSwitcher,
               icon: const Icon(Icons.desktop_mac_outlined),
-              label: const Text('Manage saved desktops'),
+              label: const Text('Manage saved runtimes'),
             ),
           ],
         ],
@@ -845,10 +864,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _buildSessionList() {
+    // 列表已由 Rust 按桌面菜单的顺序排好。
     final orderedSessions = _sessions
         .where(sessionBelongsToProjectTree)
-        .toList()
-      ..sort(compareSessionMenuOrder);
+        .toList();
 
     return Column(
       children: [
@@ -859,18 +878,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// 下拉刷新。手机上「怀疑列表过期了」的第一反应是下拉，而不是去够右下角的
-  /// 浮动按钮。等一次 sessions 推送再收起指示器，超时兜底避免离线时一直转。
+  /// 浮动按钮。会话列表由运行时推送，这里探一次活、重取工作区目录；超时兜底
+  /// 避免离线时一直转。
   Future<void> _refreshSessions() async {
-    if (_connectionState == WsState.disconnected) {
-      await gatewayService.retryCurrentConnection();
+    if (_connectionState == RuntimeConnectionState.disconnected) {
+      _retry();
       return;
     }
-    final next = gatewayService.sessionsStream.first;
-    gatewayService.listSessions();
-    gatewayService.listWorkspace();
+    runtimeService.verifyConnection();
     try {
-      await next.timeout(const Duration(seconds: 5));
-    } on TimeoutException {
+      await runtimeService.refreshWorkspace().timeout(
+        const Duration(seconds: 5),
+      );
+    } catch (_) {
       // 刷新没回来就直接收起指示器：状态栏已经在表达连接情况了。
     }
   }
@@ -923,86 +943,89 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // 滑开一行删除按钮时，自动收起别行敞着的那个。
       child: SessionRowGroup(
         child: ListView(
-        // 底部留一点余量，最后一个项目分组不要贴着导航栏。
-        padding: const EdgeInsets.only(bottom: 16),
-        children: projects.entries.map((entry) {
-          final project = entry.value.project;
-          final sessions = entry.value.sessions;
-          final needing = sessions.where(sessionNeedsAction).length;
-          return ExpansionTile(
-            // ExpansionTile 展开时会把 trailing 的图标染成主色，导致 ⋮ 变蓝、
-            // 跟会话行里的灰 ⋯ 不是一套。这里钉死中性色。
-            iconColor: Theme.of(context).colorScheme.onSurfaceVariant,
-            collapsedIconColor: Theme.of(context).colorScheme.onSurfaceVariant,
-            textColor: Theme.of(context).colorScheme.onSurface,
-            collapsedTextColor: Theme.of(context).colorScheme.onSurface,
-            // 自定义了 leading，内置箭头必须让位——否则它会顶掉项目色块。
-            // 但直接不画箭头等于丢掉「这行可以展开」的提示，所以下面自己画一个
-            // 受控的，跟 ⋮ 并排。
-            controlAffinity: ListTileControlAffinity.trailing,
-            key: PageStorageKey('project-${project.root}'),
-            initiallyExpanded: _expandedProjects.contains(project.root),
-            onExpansionChanged: (expanded) => setState(() {
-              if (expanded) {
-                _expandedProjects.add(project.root);
-              } else {
-                _expandedProjects.remove(project.root);
-              }
-            }),
-            // 项目色块 + 状态点：设计稿 C 点名要补的身份识别。原来项目只有一行
-            // 文字，几个项目并排时全靠读字分辨。
-            leading: ProjectAvatar(
-              title: project.title,
-              identityKey: project.root.isEmpty ? project.title : project.root,
-              status: projectStatusColor(context, sessions),
-            ),
-            title: Text(
-              project.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-            subtitle: Text(
-              _projectSubtitle(sessions.length, needing),
-              style: TextStyle(
-                color: needing > 0
-                    ? context.smeltColors.needsAttention
-                    : Theme.of(context).colorScheme.onSurfaceVariant,
+          // 底部留一点余量，最后一个项目分组不要贴着导航栏。
+          padding: const EdgeInsets.only(bottom: 16),
+          children: projects.entries.map((entry) {
+            final project = entry.value.project;
+            final sessions = entry.value.sessions;
+            final needing = sessions.where(sessionNeedsAction).length;
+            return ExpansionTile(
+              // ExpansionTile 展开时会把 trailing 的图标染成主色，导致 ⋮ 变蓝、
+              // 跟会话行里的灰 ⋯ 不是一套。这里钉死中性色。
+              iconColor: Theme.of(context).colorScheme.onSurfaceVariant,
+              collapsedIconColor: Theme.of(
+                context,
+              ).colorScheme.onSurfaceVariant,
+              textColor: Theme.of(context).colorScheme.onSurface,
+              collapsedTextColor: Theme.of(context).colorScheme.onSurface,
+              // 自定义了 leading，内置箭头必须让位——否则它会顶掉项目色块。
+              // 但直接不画箭头等于丢掉「这行可以展开」的提示，所以下面自己画一个
+              // 受控的，跟 ⋮ 并排。
+              controlAffinity: ListTileControlAffinity.trailing,
+              key: PageStorageKey('project-${project.root}'),
+              initiallyExpanded: _expandedProjects.contains(project.root),
+              onExpansionChanged: (expanded) => setState(() {
+                if (expanded) {
+                  _expandedProjects.add(project.root);
+                } else {
+                  _expandedProjects.remove(project.root);
+                }
+              }),
+              // 项目色块 + 状态点：设计稿 C 点名要补的身份识别。原来项目只有一行
+              // 文字，几个项目并排时全靠读字分辨。
+              leading: ProjectAvatar(
+                title: project.title,
+                identityKey: project.root.isEmpty
+                    ? project.title
+                    : project.root,
+                status: projectStatusColor(context, sessions),
               ),
-            ),
-            // 三个独立 IconButton 要占掉 ~144dp，在 360dp 宽的屏上把项目名挤没了。
-            // 收成一个菜单：这些都是低频动作，标题的可读性更值钱。
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AnimatedRotation(
-                  turns: _expandedProjects.contains(project.root) ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 180),
-                  child: Icon(
-                    Icons.expand_more,
-                    size: 20,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
+              title: Text(
+                project.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(
+                _projectSubtitle(sessions.length, needing),
+                style: TextStyle(
+                  color: needing > 0
+                      ? context.smeltColors.needsAttention
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
-                _ProjectActionsButton(
-                  canCreate: gatewayService.writeEnabled,
-                  hasAgents: _workspace.agents.isNotEmpty,
-                  onNewSession: () => _createSession(project),
-                  onHistory: () => _openHistory(project),
-                ),
-              ],
-            ),
-            children: sessions
-                .map(
-                  (session) => _buildSessionTile(
-                    session,
-                    // 左边缩进到项目色块之后，行才明显是挂在这个项目下的。
-                    padding: const EdgeInsets.fromLTRB(32, 9, 12, 9),
+              ),
+              // 三个独立 IconButton 要占掉 ~144dp，在 360dp 宽的屏上把项目名挤没了。
+              // 收成一个菜单：这些都是低频动作，标题的可读性更值钱。
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AnimatedRotation(
+                    turns: _expandedProjects.contains(project.root) ? 0.5 : 0,
+                    duration: const Duration(milliseconds: 180),
+                    child: Icon(
+                      Icons.expand_more,
+                      size: 20,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
-                )
-                .toList(),
-          );
-        }).toList(),
+                  _ProjectActionsButton(
+                    hasAgents: _workspace.agents.isNotEmpty,
+                    onNewSession: () => _createSession(project),
+                    onHistory: () => _openHistory(project),
+                  ),
+                ],
+              ),
+              children: sessions
+                  .map(
+                    (session) => _buildSessionTile(
+                      session,
+                      // 左边缩进到项目色块之后，行才明显是挂在这个项目下的。
+                      padding: const EdgeInsets.fromLTRB(32, 9, 12, 9),
+                    ),
+                  )
+                  .toList(),
+            );
+          }).toList(),
         ),
       ),
     );
@@ -1020,10 +1043,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       padding:
           padding ?? const EdgeInsets.symmetric(horizontal: 4, vertical: 9),
       onTap: () => _openSession(session),
-      // 只读配对下不给删除入口。手势和无障碍动作都由 SessionRow 自己挂。
-      onDelete: gatewayService.writeEnabled
-          ? () => _deleteSession(session)
-          : null,
+      // 手势和无障碍动作都由 SessionRow 自己挂。
+      onDelete: () => _deleteSession(session),
       trailing: session.unread
           ? Container(
               width: 8,
@@ -1097,27 +1118,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 目录），这里只把「常用 / 终端 / 对话」平铺出来——手机上多一层归类就多一次
   /// 点击，而「常用」本来就是为了少点几下。
   Future<LaunchAction?> _chooseLaunchAction() {
-    const sectionTitles = {
-      LaunchSection.common: 'Pinned',
-      LaunchSection.terminal: 'Terminals',
-      LaunchSection.conversation: 'Conversations',
-    };
+    final sections = _workspace.sections;
+    final grouped = [
+      ('Pinned', sections.common),
+      ('Terminals', sections.terminal),
+      ('Conversations', sections.conversation),
+    ];
     return showModalBottomSheet<LaunchAction>(
       context: context,
       showDragHandle: true,
       builder: (context) {
         final theme = Theme.of(context);
-        final rows = <Widget>[
-          const ListTile(title: Text('New session')),
-        ];
-        for (final section in LaunchSection.values) {
-          final actions = _workspace.actionsIn(section);
+        final rows = <Widget>[const ListTile(title: Text('New session'))];
+        for (final (title, actions) in grouped) {
           if (actions.isEmpty) continue;
           rows.add(
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
               child: Text(
-                sectionTitles[section]!,
+                title,
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                   fontWeight: FontWeight.w600,
@@ -1136,7 +1155,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           );
         }
-        if (_workspace.launchActions.isEmpty) {
+        if (sections.isEmpty) {
           rows.add(
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -1176,7 +1195,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _createSession(WorkspaceProject project) async {
     final action = await _chooseLaunchAction();
     if (!mounted || action == null) return;
-    gatewayService.createSessionFromLaunch(project.root, action.key);
+    await _createAndOpen(
+      runtimeService.createSession(
+        projectRoot: project.root,
+        launchKey: action.key,
+      ),
+    );
+  }
+
+  /// 建好之后等它出现在会话列表里就打开。
+  Future<void> _createAndOpen(Future<String> request) async {
+    try {
+      final sessionId = await request;
+      if (!mounted) return;
+      _pendingOpenSessionId = sessionId;
+      _openPendingCreatedSession();
+    } catch (error) {
+      _showMessage(
+        'Could not start the session: ${describeRuntimeError(error)}',
+      );
+    }
+  }
+
+  void _openPendingCreatedSession() {
+    final pendingId = _pendingOpenSessionId;
+    if (pendingId == null) return;
+    final created = _sessions
+        .where((session) => session.id == pendingId)
+        .firstOrNull;
+    if (created == null) return;
+    _pendingOpenSessionId = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _openSession(created);
+    });
   }
 
   /// 工作区目录里真的能开对话的智能体。目录还没到就是空集——那时「开始对话」
@@ -1185,22 +1236,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     for (final agent in _workspace.agents) ?agent.agentDefinitionId,
   };
 
-  /// 从「智能体」栏开对话：不绑项目，网关把它落在智能体自己的 space，跟桌面
+  /// 从「智能体」栏开对话：不绑项目，运行时把它落在智能体自己的 space，跟桌面
   /// 点智能体开对话是同一条路径。
   void _startAgentConversation(String agentDefinitionId) {
     final option = _workspace.agents
         .where((agent) => agent.agentDefinitionId == agentDefinitionId)
         .firstOrNull;
     if (option == null) return;
-    gatewayService.createSession('', option.id);
+    unawaited(
+      _createAndOpen(
+        runtimeService.createSession(projectRoot: '', agentOptionId: option.id),
+      ),
+    );
   }
 
   Future<void> _openHistory(WorkspaceProject project) async {
-    await Navigator.push<void>(
+    final resume = await Navigator.push<HistoryResume>(
       context,
       MaterialPageRoute(
         builder: (context) =>
             SessionHistoryPage(project: project, agents: _workspace.agents),
+      ),
+    );
+    if (!mounted || resume == null) return;
+    await _createAndOpen(
+      runtimeService.createSession(
+        projectRoot: project.root,
+        agentOptionId: resume.agentOptionId,
+        resumeId: resume.resumeId,
       ),
     );
   }
@@ -1228,7 +1291,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ],
       ),
     );
-    if (confirmed == true) gatewayService.deleteSession(session.id);
+    if (confirmed != true) return;
+    try {
+      await runtimeService.deleteSession(session.id);
+    } catch (error) {
+      _showMessage('Could not delete: ${describeRuntimeError(error)}');
+    }
   }
 
   String _projectName(SessionSummary session) {
@@ -1260,7 +1328,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           const CircularProgressIndicator(),
           const SizedBox(height: 16),
-          const Text('Connecting...', textAlign: TextAlign.center),
+          Text(
+            _pairing ? 'Pairing...' : 'Connecting...',
+            textAlign: TextAlign.center,
+          ),
           const SizedBox(height: 16),
           TextButton.icon(
             onPressed: _disconnect,
@@ -1292,52 +1363,79 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _scanQrCode() async {
-    final pairing = await Navigator.push<PairingConfig>(
+    final uri = await Navigator.push<String>(
       context,
       MaterialPageRoute(builder: (context) => const QrScannerPage()),
     );
-    if (!mounted || pairing == null) return;
-    _connect(pairing);
+    if (!mounted || uri == null) return;
+    await _pair(uri);
   }
 
   void _manualConnect() {
+    final uri = _pairingCodeController.text.trim();
     try {
-      final pairing = PairingConfig.parse(_pairingCodeController.text);
-      _connect(pairing);
-    } on FormatException catch (error) {
+      runtimeService.parsePairing(uri);
+    } on SmeltError catch (error) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(error.message.toString())));
+      ).showSnackBar(SnackBar(content: Text(error.message)));
+      return;
     }
+    unawaited(_pair(uri));
   }
 
-  void _connect(PairingConfig pairing, {bool saveWhenConnected = true}) {
+  /// 用配对串配对。成功后运行时就是当前运行时（已连上），记下来；失败时连回原来
+  /// 的运行时——配对会先断开当前连接，配对码打错不该让人连原来的也丢了。
+  Future<void> _pair(String uri) async {
     _acceptConnectionNotifications = true;
     ScaffoldMessenger.of(context).clearSnackBars();
-    _pendingPairing = saveWhenConnected ? pairing : null;
-    gatewayService.connect(pairing.endpoint, pairing.token);
-    // 重扫同一台桌面时 connect() 是幂等空操作，不会再有 connected 状态变化来
-    // 触发落盘，这里补一次。
-    if (saveWhenConnected && gatewayService.state == WsState.connected) {
-      unawaited(_savePendingPairing());
+    setState(() => _pairing = true);
+    final RuntimeInfo info;
+    try {
+      info = await runtimeService.pair(uri, defaultDeviceName());
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _pairing = false);
+      final previous = _savedRuntimes.activeRuntime;
+      if (previous != null) _connectRuntime(previous);
+      _showMessage('Pairing failed: ${describeRuntimeError(error)}');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _pairing = false;
+      _pairingCodeController.clear();
+    });
+    try {
+      final saved = await _pairingStorage.save(info);
+      if (mounted) setState(() => _savedRuntimes = saved);
+    } catch (error) {
+      _showMessage('Connected, but the runtime was not saved: $error');
     }
   }
 
-  void _disconnect() {
-    _acceptConnectionNotifications = false;
-    _pendingPairing = null;
-    _shownAttentionSessionId = null;
+  void _connectRuntime(SavedRuntime runtime) {
+    _acceptConnectionNotifications = true;
     ScaffoldMessenger.of(context).clearSnackBars();
-    gatewayService.disconnect();
-    setState(() => _sessions = const []);
+    unawaited(runtimeService.connect(runtime.endpointId, runtime.relayUrl));
   }
 
-  Future<void> _showDesktopSwitcher() async {
+  void _disconnect({bool forget = false}) {
+    _acceptConnectionNotifications = false;
+    _shownAttentionSessionId = null;
+    ScaffoldMessenger.of(context).clearSnackBars();
+    unawaited(runtimeService.disconnect(forget: forget));
+    setState(
+      () => _sessionList = const SessionList(sessions: [], cached: true),
+    );
+  }
+
+  Future<void> _showRuntimeSwitcher() async {
     final selected = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) {
-        final activeId = _savedDesktops.activeDesktopId;
+        final activeId = _savedRuntimes.activeRuntimeId;
         return SafeArea(
           child: ConstrainedBox(
             constraints: BoxConstraints(
@@ -1347,30 +1445,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               shrinkWrap: true,
               children: [
                 const ListTile(
-                  title: Text('Desktops'),
-                  subtitle: Text('Switch or manage paired computers'),
+                  title: Text('Runtimes'),
+                  subtitle: Text('Switch or manage paired runtimes'),
                 ),
-                ..._savedDesktops.desktops.map(
-                  (desktop) => ListTile(
+                ..._savedRuntimes.runtimes.map(
+                  (runtime) => ListTile(
                     leading: Icon(
-                      desktop.id == activeId
+                      runtime.runtimeId == activeId
                           ? Icons.desktop_windows
                           : Icons.desktop_windows_outlined,
                     ),
-                    title: Text(desktop.name),
-                    subtitle: Text(
-                      desktop.pairing.isIroh ? 'Remote via iroh' : 'Local',
-                    ),
-                    selected: desktop.id == activeId,
-                    onTap: () => Navigator.pop(sheetContext, desktop.id),
+                    title: Text(runtime.name),
+                    subtitle: Text(_runtimeSubtitle(runtime)),
+                    selected: runtime.runtimeId == activeId,
+                    onTap: () => Navigator.pop(sheetContext, runtime.runtimeId),
                     trailing: PopupMenuButton<String>(
-                      tooltip: 'Desktop actions',
+                      tooltip: 'Runtime actions',
                       onSelected: (action) {
                         Navigator.pop(sheetContext);
                         if (action == 'rename') {
-                          unawaited(_renameDesktop(desktop));
+                          unawaited(_renameRuntime(runtime));
                         } else if (action == 'remove') {
-                          unawaited(_removeDesktop(desktop));
+                          unawaited(_removeRuntime(runtime));
                         }
                       },
                       itemBuilder: (context) => const [
@@ -1397,7 +1493,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Icons.qr_code_scanner),
-                  title: const Text('Pair another desktop'),
+                  title: const Text('Pair another runtime'),
                   onTap: () {
                     Navigator.pop(sheetContext);
                     unawaited(_scanQrCode());
@@ -1410,51 +1506,58 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       },
     );
     if (!mounted || selected == null) return;
-    await _switchDesktop(selected);
+    await _switchRuntime(selected);
   }
 
-  Future<void> _switchDesktop(String desktopId) async {
+  /// 同名的运行时靠 endpoint 前缀分开。
+  String _runtimeSubtitle(SavedRuntime runtime) {
+    final id = runtime.endpointId;
+    return id.length > 12 ? 'Endpoint ${id.substring(0, 12)}…' : 'Endpoint $id';
+  }
+
+  Future<void> _switchRuntime(String runtimeId) async {
     try {
-      final savedDesktops = await _pairingStorage.setActive(desktopId);
+      final savedRuntimes = await _pairingStorage.setActive(runtimeId);
       if (!mounted) return;
-      final active = savedDesktops.activeDesktop;
+      final active = savedRuntimes.activeRuntime;
       setState(() {
-        _savedDesktops = savedDesktops;
-        _pendingPairing = null;
+        _savedRuntimes = savedRuntimes;
         _pairingCodeController.clear();
       });
-      if (active != null) {
-        _connect(active.pairing, saveWhenConnected: false);
-      }
+      if (active != null) _connectRuntime(active);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not switch desktop: $error')),
+        SnackBar(content: Text('Could not switch runtime: $error')),
       );
     }
   }
 
-  Future<void> _renameDesktop(SavedDesktop desktop) async {
-    final name = await showDesktopRenameDialog(context, desktop.name);
+  Future<void> _renameRuntime(SavedRuntime runtime) async {
+    final name = await showRuntimeRenameDialog(context, runtime.name);
     if (!mounted || name == null || name.trim().isEmpty) return;
     try {
-      final savedDesktops = await _pairingStorage.rename(desktop.id, name);
-      if (mounted) setState(() => _savedDesktops = savedDesktops);
+      final savedRuntimes = await _pairingStorage.rename(
+        runtime.runtimeId,
+        name,
+      );
+      if (mounted) setState(() => _savedRuntimes = savedRuntimes);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not rename desktop: $error')),
+        SnackBar(content: Text('Could not rename runtime: $error')),
       );
     }
   }
 
-  Future<void> _removeDesktop(SavedDesktop desktop) async {
+  /// 只删本机记录；运行时那边的设备授权由运行时自己管理。
+  Future<void> _removeRuntime(SavedRuntime runtime) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Forget desktop?'),
+        title: const Text('Forget runtime?'),
         content: Text(
-          '${desktop.name} will be removed from this phone. You can pair it again later.',
+          '${runtime.name} will be removed from this phone. You can pair it again later.',
         ),
         actions: [
           TextButton(
@@ -1471,25 +1574,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted || confirmed != true) return;
 
     try {
-      final wasActive = _savedDesktops.activeDesktopId == desktop.id;
-      final savedDesktops = await _pairingStorage.remove(desktop.id);
+      final wasActive = _savedRuntimes.activeRuntimeId == runtime.runtimeId;
+      final savedRuntimes = await _pairingStorage.remove(runtime.runtimeId);
       if (!mounted) return;
       setState(() {
-        _savedDesktops = savedDesktops;
-        _pendingPairing = null;
+        _savedRuntimes = savedRuntimes;
         _pairingCodeController.clear();
       });
       if (!wasActive) return;
-      final next = savedDesktops.activeDesktop;
+      final next = savedRuntimes.activeRuntime;
       if (next == null) {
-        _disconnect();
+        _disconnect(forget: true);
       } else {
-        _connect(next.pairing, saveWhenConnected: false);
+        _connectRuntime(next);
       }
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not forget desktop: $error')),
+        SnackBar(content: Text('Could not forget runtime: $error')),
       );
     }
   }
@@ -1511,7 +1613,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _openSession(SessionSummary session) {
-    gatewayService.markRead(session.id);
+    runtimeService.markRead(session.id);
     if (_shownAttentionSessionId == session.id) {
       _shownAttentionSessionId = null;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -1564,10 +1666,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pendingActions.dispose();
-    _stateSubscription.cancel();
+    _connectionSubscription.cancel();
     _sessionsSubscription.cancel();
     _workspaceSubscription.cancel();
-    _sessionCreatedSubscription.cancel();
     _attentionSubscription.cancel();
     _attentionResolvedSubscription.cancel();
     _errorSubscription.cancel();
@@ -1575,6 +1676,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.dispose();
   }
 }
+
+/// 历史页选中「续接」时带回去的东西：哪个 agent 选项、哪段历史。
+typedef HistoryResume = ({String agentOptionId, String resumeId});
 
 class SessionHistoryPage extends StatefulWidget {
   const SessionHistoryPage({
@@ -1594,48 +1698,43 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
   late AcpAgentOption _agent;
   List<HistorySessionSummary> _sessions = const [];
   bool _loading = true;
-  late final StreamSubscription<SessionHistoryResult> _historySubscription;
-  late final StreamSubscription<SessionHistoryRenameResult> _renameSubscription;
+  String? _error;
+
+  /// 切 agent 时旧请求的结果要丢掉。
+  int _loadGeneration = 0;
 
   @override
   void initState() {
     super.initState();
     _agent = widget.agents.first;
-    _historySubscription = gatewayService.sessionHistoryStream.listen((result) {
-      if (!mounted ||
-          result.projectRoot != widget.project.root ||
-          result.agentOptionId != _agent.id) {
-        return;
-      }
-      setState(() {
-        _sessions = result.sessions;
-        _loading = false;
-      });
-    });
-    // 改名的结果由 PC 算好回传（恢复默认时要拿回 agent 原始标题），这里就地替换，
-    // 不用为了一个名字重扫一遍历史目录。
-    _renameSubscription = gatewayService.sessionHistoryRenameStream.listen((
-      result,
-    ) {
-      if (!mounted || result.agentOptionId != _agent.id) return;
-      setState(() {
-        _sessions = [
-          for (final session in _sessions)
-            session.resumeId == result.resumeId
-                ? session.withCustomTitle(result.customTitle)
-                : session,
-        ];
-      });
-    });
-    _load();
+    unawaited(_load());
   }
 
-  void _load() {
+  Future<void> _load() async {
+    final generation = ++_loadGeneration;
+    final agentId = _agent.id;
     setState(() {
       _loading = true;
+      _error = null;
       _sessions = const [];
     });
-    gatewayService.listSessionHistory(widget.project.root, _agent.id);
+    try {
+      final sessions = await runtimeService.listHistory(
+        widget.project.root,
+        agentId,
+      );
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() {
+        _sessions = sessions;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() {
+        _loading = false;
+        _error = describeRuntimeError(error);
+      });
+    }
   }
 
   /// 跟 PC 历史页同一套：改过名的会话，副标题前面补一段 agent 原始标题，好让人
@@ -1685,29 +1784,57 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
     if (title == null) return;
     final trimmed = title.trim();
     // 清空 = 恢复默认名称，跟 PC 的「恢复默认名称」落到同一条路径。
-    gatewayService.renameSessionHistory(
-      widget.project.root,
-      _agent.id,
-      session.resumeId,
-      title: trimmed.isEmpty ? null : trimmed,
-    );
+    await _applyRename(session, trimmed.isEmpty ? null : trimmed);
   }
 
-  void _resetName(HistorySessionSummary session) {
-    gatewayService.renameSessionHistory(
-      widget.project.root,
-      _agent.id,
-      session.resumeId,
-    );
+  /// 改名结果由运行时算好回传（恢复默认时要拿回 agent 原始标题），这里就地替换，
+  /// 不用为了一个名字重扫一遍历史目录。
+  Future<void> _applyRename(
+    HistorySessionSummary session,
+    String? title,
+  ) async {
+    final agentId = _agent.id;
+    try {
+      final result = await runtimeService.renameHistory(
+        widget.project.root,
+        agentId,
+        session.resumeId,
+        title: title,
+      );
+      if (!mounted || agentId != _agent.id) return;
+      setState(() {
+        _sessions = [
+          for (final item in _sessions)
+            item.resumeId == session.resumeId
+                ? HistorySessionSummary(
+                    resumeId: item.resumeId,
+                    // 有自定义名时 `result.title` 就是它，agent 原始标题不变；
+                    // 恢复默认时 `result.title` 才是原始标题。
+                    title: result.customTitle == null
+                        ? result.title
+                        : item.title,
+                    customTitle: result.customTitle,
+                    lastActiveAtMs: item.lastActiveAtMs,
+                    messageCount: item.messageCount,
+                  )
+                : item,
+        ];
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not rename: ${describeRuntimeError(error)}'),
+        ),
+      );
+    }
   }
 
   void _resume(HistorySessionSummary session) {
-    gatewayService.createSession(
-      widget.project.root,
-      _agent.id,
+    Navigator.pop<HistoryResume>(context, (
+      agentOptionId: _agent.id,
       resumeId: session.resumeId,
-    );
-    Navigator.pop(context);
+    ));
   }
 
   @override
@@ -1735,17 +1862,24 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
               onChanged: (id) {
                 if (id == null) return;
                 _agent = widget.agents.firstWhere((agent) => agent.id == id);
-                _load();
+                unawaited(_load());
               },
             ),
           ),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(_error!, textAlign: TextAlign.center),
+                    ),
+                  )
                 : _sessions.isEmpty
                 ? const Center(child: Text('No resumable conversations'))
                 : RefreshIndicator(
-                    onRefresh: () async => _load(),
+                    onRefresh: _load,
                     child: ListView.separated(
                       itemCount: _sessions.length,
                       separatorBuilder: (_, _) => const Divider(height: 1),
@@ -1769,16 +1903,13 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
                               IconButton(
                                 tooltip: 'Resume conversation',
                                 icon: const Icon(Icons.play_arrow),
-                                onPressed: gatewayService.writeEnabled
-                                    ? () => _resume(session)
-                                    : null,
+                                onPressed: () => _resume(session),
                               ),
                               PopupMenuButton<String>(
                                 tooltip: 'More',
-                                enabled: gatewayService.writeEnabled,
                                 onSelected: (action) => switch (action) {
                                   'rename' => _rename(session),
-                                  'reset' => _resetName(session),
+                                  'reset' => _applyRename(session, null),
                                   _ => null,
                                 },
                                 itemBuilder: (context) => [
@@ -1795,9 +1926,7 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
                               ),
                             ],
                           ),
-                          onTap: gatewayService.writeEnabled
-                              ? () => _resume(session)
-                              : null,
+                          onTap: () => _resume(session),
                         );
                       },
                     ),
@@ -1806,13 +1935,6 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
         ],
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _historySubscription.cancel();
-    _renameSubscription.cancel();
-    super.dispose();
   }
 }
 
@@ -1835,108 +1957,138 @@ class SessionPage extends StatefulWidget {
   State<SessionPage> createState() => _SessionPageState();
 }
 
+/// 发送没等到确认时的提示：消息可能已经到了，重发前要先看一眼。
+const _unconfirmedDeliveryHint =
+    'Delivery was not confirmed. Review and retry.';
+
 class _SessionPageState extends State<SessionPage> {
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _messageFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
   final ImagePicker _imagePicker = ImagePicker();
-  AcpSnapshot? _snapshot;
+  ConversationView? _view;
+
+  /// 当前视图来自离线缓存，还没收到运行时的实时数据。
+  bool _cached = false;
+  int? _savedAtMs;
   bool _loading = true;
   bool _isAtBottom = true;
   bool _loadingOlder = false;
   bool _isMessageFocused = false;
   bool _restoringDraft = true;
   bool _sendingMessage = false;
-  WsState _connectionState = gatewayService.state;
-  String? _sendRequestId;
+  RuntimeConnectionState _connectionState = runtimeService.state;
+
+  /// 输入框上次的内容。控制器在光标移动时也会通知，只有内容变了才算编辑。
+  String _draftText = '';
+
+  /// 上一次没等到确认的发送。草稿没改过就重发时沿用这个 id，运行时按它去重；
+  /// 改过内容就是一次新的提交，id 随之作废。
+  String? _unconfirmedRequestId;
   String? _sendError;
   String? _permissionSubmittingToolId;
-  final List<AcpImageData> _pendingImages = [];
+  final List<ImageInput> _pendingImages = [];
+
+  /// 询问里用户改过、还没交给运行时的文字，提交时一并带上。
   final Map<int, String> _elicitationTextValues = {};
 
-  /// 这场对话已加载的技能。null = 还没问到（或电脑端不支持），界面就不画入口——
-  /// 与桌面一致：技能是 Pi 的概念，别家 agent 上画一个永远空的列表没有意义。
+  /// 这场对话已加载的技能。null = 还没问到（或引擎没有技能这个概念），界面就不画
+  /// 入口——与桌面一致：技能是 Pi 的概念，别家 agent 上画一个永远空的列表没有意义。
   List<SessionSkill>? _skills;
 
-  /// 电脑接不上这段对话时的原因。非空就别再转圈：没有结果会来。
+  /// 运行时接不上这段对话（或订阅出错）时的原因。非空就别再转圈。
   String? _unavailableReason;
-  late final StreamSubscription<AcpSnapshot> _snapshotSubscription;
-  late final StreamSubscription<SessionUnavailable>
-  _sessionUnavailableSubscription;
-  late final StreamSubscription<String> _attentionResolvedSubscription;
-  late final StreamSubscription<SessionSkills> _sessionSkillsSubscription;
-  late final StreamSubscription<MessageSendResult> _messageSendSubscription;
-  late final StreamSubscription<WsState> _connectionStateSubscription;
+  late final ConversationWatch _watch;
+  late final StreamSubscription<ConversationEvent> _watchSubscription;
+  late final StreamSubscription<ConnectionEvent> _connectionSubscription;
   Timer? _draftSaveTimer;
 
   @override
   void initState() {
     super.initState();
-    _snapshot = gatewayService.cachedSnapshot(widget.session.id);
-    _loading = _snapshot == null;
-    _syncSnapshotControls();
     _messageController.addListener(_handleMessageChanged);
     _messageFocusNode.addListener(_handleMessageFocus);
     _scrollController.addListener(_handleScrollPosition);
-    _attentionResolvedSubscription = gatewayService.attentionResolvedStream
-        .listen((sessionId) {
-          if (!mounted || sessionId != widget.session.id) return;
-          // 重新挂载 watcher 获取完整权威快照，避免本地根据 phase 猜哪张卡已解决。
-          gatewayService.subscribe(widget.session.id);
-        });
-    _messageSendSubscription = gatewayService.messageSendStream.listen(
-      (result) => unawaited(_handleMessageSendResult(result)),
+    _watch = runtimeService.watchConversation(widget.session.id);
+    _watchSubscription = _watch.events.listen(_handleConversationEvent);
+    _connectionSubscription = runtimeService.connectionStream.listen(
+      _handleConnection,
     );
-    _sessionUnavailableSubscription = gatewayService.sessionUnavailableStream
-        .listen((event) {
-          if (!mounted || event.sessionId != widget.session.id) return;
-          setState(() {
-            _unavailableReason = event.reason;
-            _loading = false;
-          });
-        });
-    _connectionStateSubscription = gatewayService.stateStream.listen((state) {
-      if (!mounted) return;
-      setState(() => _connectionState = state);
-      // 技能表在电脑那边算，重连后得重新问：断线期间发出的请求会被丢掉，
-      // 而对方也可能已经换了一台机器。
-      if (state == WsState.connected) {
-        gatewayService.listSessionSkills(widget.session.id);
-      }
-    });
-    _subscribeSession();
-    _sessionSkillsSubscription = gatewayService.sessionSkillsStream.listen((
-      result,
-    ) {
-      if (!mounted) return;
-      // 空 sessionId = 网关/桌面回了「没这个能力」的兜底应答，对任何会话都成立。
-      if (result.sessionId.isNotEmpty &&
-          result.sessionId != widget.session.id) {
-        return;
-      }
-      setState(() => _skills = result.supported ? result.skills : null);
-    });
-    gatewayService.listSessionSkills(widget.session.id);
+    unawaited(_loadSkills());
     unawaited(_restoreDraft());
   }
 
-  Future<void> _restoreDraft() async {
-    var draft = await widget.messageDraftStore.load(widget.session.id);
-    final unconfirmedRequestId = draft?.requestId;
-    var recoveredUnconfirmed = false;
-    if (unconfirmedRequestId != null) {
-      final recovered = await widget.messageDraftStore.resolveRequest(
-        widget.session.id,
-        unconfirmedRequestId,
-        succeeded: false,
-      );
-      if (!recovered) {
-        draft = await widget.messageDraftStore.load(widget.session.id);
-      } else {
-        recoveredUnconfirmed = true;
-        draft = draft!.copyWith(clearRequestId: true);
-      }
+  void _handleConnection(ConnectionEvent event) {
+    if (!mounted) return;
+    final previous = _connectionState;
+    setState(() => _connectionState = event.state);
+    if (event.state != RuntimeConnectionState.connected ||
+        previous == RuntimeConnectionState.connected) {
+      return;
     }
+    // 断开过或换了运行时，Rust 的订阅已经停了，要重新订阅；只是后台重连
+    // （reconnecting）的话它自己会接上。
+    if (previous != RuntimeConnectionState.reconnecting) _watch.restart();
+    // 技能表在运行时那边算，重连后重新问：对方可能已经换了一台机器。
+    unawaited(_loadSkills());
+  }
+
+  void _handleConversationEvent(ConversationEvent event) {
+    if (!mounted) return;
+    switch (event.kind) {
+      case ConversationEventKind.snapshot:
+        final view = event.view;
+        if (view == null) return;
+        final initialLoad = _view == null;
+        final previousOffset = _view?.entriesOffset;
+        final shouldFollowLatest = shouldAutoFollowSnapshot(
+          initialLoad: initialLoad,
+          wasAtBottom: _isAtBottom,
+        );
+        setState(() {
+          _view = view;
+          _cached = event.cached;
+          _savedAtMs = event.savedAtMs;
+          _syncViewControls();
+          if (previousOffset == null ||
+              view.entriesOffset < previousOffset ||
+              !view.hasMoreBefore) {
+            _loadingOlder = false;
+          }
+          _loading = false;
+          _unavailableReason = null;
+        });
+        if (shouldFollowLatest) _scrollToBottom(animate: !initialLoad);
+      case ConversationEventKind.unavailable:
+        setState(() {
+          _unavailableReason =
+              event.message ??
+              'This conversation is not running on the computer.';
+          _loading = false;
+          _loadingOlder = false;
+        });
+      case ConversationEventKind.error:
+        setState(() {
+          _unavailableReason =
+              event.message ?? 'Could not load this conversation.';
+          _loading = false;
+          _loadingOlder = false;
+        });
+    }
+  }
+
+  Future<void> _loadSkills() async {
+    try {
+      final skills = await runtimeService.listSkills(widget.session.id);
+      if (!mounted) return;
+      setState(() => _skills = skills.supported ? skills.skills : null);
+    } catch (_) {
+      // 问不到就不画入口：技能只是辅助信息，不该为它打扰用户。
+    }
+  }
+
+  Future<void> _restoreDraft() async {
+    final draft = await widget.messageDraftStore.load(widget.session.id);
     if (!mounted) return;
     _restoringDraft = true;
     if (draft != null) {
@@ -1944,17 +2096,30 @@ class _SessionPageState extends State<SessionPage> {
       _pendingImages
         ..clear()
         ..addAll(draft.images);
-      if (recoveredUnconfirmed) {
-        _sendError = 'Delivery was not confirmed. Review and retry.';
+      // 草稿上还挂着请求 id：上次发出去没等到确认（可能 App 被杀了）。
+      if (draft.requestId case final requestId?) {
+        _unconfirmedRequestId = requestId;
+        _sendError = _unconfirmedDeliveryHint;
       }
     }
+    _draftText = _messageController.text;
     _restoringDraft = false;
-    if (mounted) setState(() {});
+    setState(() {});
   }
 
   void _handleMessageChanged() {
     if (!mounted || _restoringDraft) return;
-    setState(() => _sendError = null);
+    if (_messageController.text == _draftText) return;
+    _draftText = _messageController.text;
+    _markDraftEdited();
+  }
+
+  /// 草稿被改过：之前的错误提示作废，没确认的请求 id 也不再适用。
+  void _markDraftEdited() {
+    setState(() {
+      _sendError = null;
+      _unconfirmedRequestId = null;
+    });
     _scheduleDraftSave();
   }
 
@@ -1972,43 +2137,10 @@ class _SessionPageState extends State<SessionPage> {
       widget.session.id,
       MessageDraft(
         content: _messageController.text,
-        images: List<AcpImageData>.of(_pendingImages),
-        requestId: requestId,
+        images: List<ImageInput>.of(_pendingImages),
+        requestId: requestId ?? _unconfirmedRequestId,
       ),
     );
-  }
-
-  Future<void> _handleMessageSendResult(MessageSendResult result) async {
-    if (result.requestId != _sendRequestId) return;
-    final resolved = await widget.messageDraftStore.resolveRequest(
-      widget.session.id,
-      result.requestId,
-      succeeded: result.ok,
-    );
-    if (!mounted) {
-      await _messageSendSubscription.cancel();
-      return;
-    }
-    if (!resolved) {
-      setState(() {
-        _sendingMessage = false;
-        _sendRequestId = null;
-      });
-      return;
-    }
-    _restoringDraft = true;
-    setState(() {
-      _sendingMessage = false;
-      _sendRequestId = null;
-      if (result.ok) {
-        _messageController.clear();
-        _pendingImages.clear();
-        _sendError = null;
-      } else {
-        _sendError = result.error ?? 'Message could not be sent';
-      }
-    });
-    _restoringDraft = false;
   }
 
   void _handleMessageFocus() {
@@ -2034,63 +2166,49 @@ class _SessionPageState extends State<SessionPage> {
 
   void _maybeLoadOlder() {
     if (!mounted || !_scrollController.hasClients || _loadingOlder) return;
+    if (_view?.hasMoreBefore != true) return;
     final position = _scrollController.position;
     if (position.maxScrollExtent - position.pixels > 240) return;
-    if (gatewayService.loadOlder(widget.session.id)) {
-      setState(() => _loadingOlder = true);
-    }
+    setState(() => _loadingOlder = true);
+    // 翻到的页从订阅流推回来；没翻（已在翻、前面没了）就把加载圈收掉。
+    runtimeService
+        .loadOlder(widget.session.id)
+        .then(
+          (started) {
+            if (!started && mounted) setState(() => _loadingOlder = false);
+          },
+          onError: (Object _) {
+            if (mounted) setState(() => _loadingOlder = false);
+          },
+        );
   }
 
-  void _syncSnapshotControls() {
-    final activePermission = _snapshot?.pendingPermissions.firstOrNull;
+  void _syncViewControls() {
+    final activePermission = _view?.pendingPermissions.firstOrNull;
     if (activePermission?.toolCallId != _permissionSubmittingToolId) {
       _permissionSubmittingToolId = null;
     }
-    final elicitation = _snapshot?.pendingElicitation;
-    if (elicitation == null) {
-      _elicitationTextValues.clear();
-    } else {
-      for (final entry in elicitation.textValues.entries) {
-        _elicitationTextValues.putIfAbsent(entry.key, () => entry.value);
-      }
-    }
-  }
-
-  void _subscribeSession() {
-    _snapshotSubscription = gatewayService.snapshotStream.listen((snapshot) {
-      if (!mounted || gatewayService.subscribedSessionId != widget.session.id) {
-        return;
-      }
-      final initialLoad = _snapshot == null;
-      final previousOffset = _snapshot?.entriesOffset;
-      final shouldFollowLatest = shouldAutoFollowSnapshot(
-        initialLoad: initialLoad,
-        wasAtBottom: _isAtBottom,
-      );
-      setState(() {
-        _snapshot = snapshot;
-        _syncSnapshotControls();
-        if (previousOffset == null ||
-            snapshot.entriesOffset < previousOffset ||
-            !snapshot.hasMoreBefore) {
-          _loadingOlder = false;
-        }
-        _loading = false;
-        _unavailableReason = null;
-      });
-      if (shouldFollowLatest) {
-        _scrollToBottom(animate: !initialLoad);
-      }
-    });
-    gatewayService.subscribe(widget.session.id);
+    if (_view?.pendingElicitation == null) _elicitationTextValues.clear();
   }
 
   void _retrySubscribe() {
     setState(() {
       _unavailableReason = null;
-      _loading = _snapshot == null;
+      _loading = _view == null;
     });
-    gatewayService.subscribe(widget.session.id);
+    _watch.restart();
+  }
+
+  void _showError(Object error) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(describeRuntimeError(error))));
+  }
+
+  /// 不需要结果的动作（选模型、点选项……）：成功的效果从视图流回来，失败才提示。
+  void _fire(Future<void> request) {
+    request.catchError(_showError);
   }
 
   Widget _buildUnavailable(String reason) {
@@ -2175,7 +2293,7 @@ class _SessionPageState extends State<SessionPage> {
         actions: [
           if (widget.onShowPendingActions case final show?)
             PendingActionBadge(onPressed: show),
-          if (_snapshot != null)
+          if (_view != null)
             Padding(
               padding: const EdgeInsets.only(right: 16),
               child: Center(child: _buildPhaseIndicator()),
@@ -2188,27 +2306,27 @@ class _SessionPageState extends State<SessionPage> {
           children: [
             buildConnectionBanner(
               state: _connectionState,
-              cached: gatewayService.snapshotIsCached(widget.session.id),
-              cachedAt: gatewayService.cachedAt,
-              onRetry: _connectionState == WsState.disconnected
-                  ? gatewayService.retryCurrentConnection
+              cached: _cached,
+              cachedAt: cachedAtFromMs(_savedAtMs),
+              onRetry: _connectionState == RuntimeConnectionState.disconnected
+                  ? () => unawaited(runtimeService.retry())
                   : null,
             ),
-            if (_unavailableReason case final reason? when _snapshot != null)
+            if (_unavailableReason case final reason? when _view != null)
               _buildUnavailableBanner(reason),
-            if (_snapshot case final snapshot?) _buildSessionStatus(snapshot),
-            if (_snapshot?.plan case final plan?) _buildPlanPanel(plan),
-            if (_snapshot?.pendingPermissions
-                case final List<PendingPermission> permissions
+            if (_view case final view?) _buildSessionStatus(view),
+            if (_view?.plan case final plan? when plan.isNotEmpty)
+              _buildPlanPanel(plan),
+            if (_view?.pendingPermissions case final permissions?
                 when permissions.isNotEmpty)
               _buildPermissionBanner(permissions.first, permissions.length),
-            if (_snapshot?.pendingElicitation case final elicitation?)
+            if (_view?.pendingElicitation case final elicitation?)
               _buildElicitationCard(elicitation),
 
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
-                  : _unavailableReason != null && _snapshot == null
+                  : _unavailableReason != null && _view == null
                   ? _buildUnavailable(_unavailableReason!)
                   : Stack(
                       children: [
@@ -2241,89 +2359,94 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildPhaseIndicator() {
-    final phase = _snapshot!.phase;
+    final view = _view!;
+    final phase = view.phase;
     // 图标 + 颜色是这里唯一的信息载体，读屏和色盲都拿不到。补一句文字标签。
     final label = switch (phase) {
-      AcpPhaseConnecting() => 'Starting',
-      AcpPhaseThinking() => 'Thinking',
-      AcpPhaseExecutingTool() => 'Running a tool',
-      AcpPhaseAwaitingApproval() => 'Waiting for your approval',
-      AcpPhaseWaitingForUser() => 'Waiting for your choice',
-      AcpPhaseSucceeded() => 'Completed',
-      AcpPhaseFailed() => 'Failed',
-      AcpPhaseIdle() => 'Idle',
-      AcpPhaseDead() =>
-        _snapshot!.endReason.isEmpty ? 'Ended' : 'Ended: ${_snapshot!.endReason}',
+      ConversationPhase.connecting => 'Starting',
+      ConversationPhase.thinking => 'Thinking',
+      ConversationPhase.executingTool => 'Running a tool',
+      ConversationPhase.awaitingApproval => 'Waiting for your approval',
+      ConversationPhase.waitingForUser => 'Waiting for your choice',
+      ConversationPhase.succeeded => 'Completed',
+      ConversationPhase.failed => 'Failed',
+      ConversationPhase.idle => 'Idle',
+      ConversationPhase.dead =>
+        view.endReason.isEmpty ? 'Ended' : 'Ended: ${view.endReason}',
     };
-    return Semantics(label: label, child: _phaseIcon(phase));
+    return Semantics(label: label, child: _phaseIcon(view));
   }
 
-  Widget _phaseIcon(AcpPhase phase) {
+  Widget _phaseIcon(ConversationView view) {
     final status = context.smeltColors;
-    return switch (phase) {
-      AcpPhaseConnecting() ||
-      AcpPhaseThinking() ||
-      AcpPhaseExecutingTool() => const SizedBox(
+    return switch (view.phase) {
+      ConversationPhase.connecting ||
+      ConversationPhase.thinking ||
+      ConversationPhase.executingTool => const SizedBox(
         width: 20,
         height: 20,
         child: CircularProgressIndicator(strokeWidth: 2),
       ),
-      AcpPhaseAwaitingApproval() => Icon(
+      ConversationPhase.awaitingApproval => Icon(
         Icons.warning_amber,
         color: status.waitingApproval,
       ),
-      AcpPhaseWaitingForUser() => Icon(
+      ConversationPhase.waitingForUser => Icon(
         Icons.help_outline,
         color: status.needsAttention,
       ),
-      AcpPhaseSucceeded() => Icon(Icons.check_circle, color: status.idle),
-      AcpPhaseFailed() || AcpPhaseDead() => Tooltip(
-        message: _snapshot!.endReason,
+      ConversationPhase.succeeded => Icon(
+        Icons.check_circle,
+        color: status.idle,
+      ),
+      ConversationPhase.failed || ConversationPhase.dead => Tooltip(
+        message: view.endReason,
         child: Icon(Icons.stop_circle, color: status.danger),
       ),
-      AcpPhaseIdle() => Icon(Icons.pause_circle, color: status.idle),
+      ConversationPhase.idle => Icon(Icons.pause_circle, color: status.idle),
     };
   }
 
-  Widget _buildSessionStatus(AcpSnapshot snapshot) {
+  Widget _buildSessionStatus(ConversationView view) {
     final colors = Theme.of(context).colorScheme;
     // 运行色用 running token 而不是 primary：指挥台的运行点是蓝的，这里再用蓝紫，
     // 同一个会话换个页面就换个颜色——跟当初 chip 红、指示器橙那处漂移是一回事。
     final running = context.smeltColors.running;
-    final phase = snapshot.phase;
-    if (phase is AcpPhaseIdle ||
-        phase is AcpPhaseAwaitingApproval ||
-        phase is AcpPhaseWaitingForUser) {
+    final phase = view.phase;
+    if (phase == ConversationPhase.idle ||
+        phase == ConversationPhase.awaitingApproval ||
+        phase == ConversationPhase.waitingForUser) {
       return const SizedBox.shrink();
     }
     final (icon, label, color) = switch (phase) {
-      AcpPhaseConnecting() => (
+      ConversationPhase.connecting => (
         Icons.rocket_launch_outlined,
-        snapshot.statusLine ?? 'Starting agent...',
+        view.statusLine ?? 'Starting agent...',
         running,
       ),
-      AcpPhaseThinking() || AcpPhaseExecutingTool() => (
+      ConversationPhase.thinking || ConversationPhase.executingTool => (
         Icons.auto_awesome,
-        snapshot.statusLine ?? 'Agent is working',
+        view.statusLine ?? 'Agent is working',
         running,
       ),
-      AcpPhaseSucceeded() => (
+      ConversationPhase.succeeded => (
         Icons.check_circle_outline,
-        snapshot.statusLine ?? 'Completed',
+        view.statusLine ?? 'Completed',
         running,
       ),
-      AcpPhaseFailed() => (
+      ConversationPhase.failed => (
         Icons.error_outline,
-        snapshot.endReason.isEmpty ? 'Failed' : snapshot.endReason,
+        view.endReason.isEmpty ? 'Failed' : view.endReason,
         colors.error,
       ),
-      AcpPhaseDead() => (
+      ConversationPhase.dead => (
         Icons.error_outline,
-        snapshot.endReason.isEmpty ? 'Session ended' : snapshot.endReason,
+        view.endReason.isEmpty ? 'Session ended' : view.endReason,
         colors.error,
       ),
       _ => (Icons.info_outline, '', colors.onSurfaceVariant),
     };
+    final working = phase.isWorking;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -2331,9 +2454,7 @@ class _SessionPageState extends State<SessionPage> {
       color: color.withAlpha(31),
       child: Row(
         children: [
-          if (phase is AcpPhaseConnecting ||
-              phase is AcpPhaseThinking ||
-              phase is AcpPhaseExecutingTool)
+          if (working || phase == ConversationPhase.connecting)
             SizedBox(
               width: 16,
               height: 16,
@@ -2343,12 +2464,10 @@ class _SessionPageState extends State<SessionPage> {
             Icon(icon, size: 18, color: color),
           const SizedBox(width: 8),
           Expanded(
-            child:
-                (phase is AcpPhaseThinking || phase is AcpPhaseExecutingTool) &&
-                    snapshot.turnStartedAtMs != null
+            child: working && view.turnStartedAtMs != null
                 ? TurnElapsedLabel(
                     label: label,
-                    startedAtMs: snapshot.turnStartedAtMs!,
+                    startedAtMs: view.turnStartedAtMs!,
                     color: color,
                   )
                 : Text(
@@ -2358,12 +2477,12 @@ class _SessionPageState extends State<SessionPage> {
                     style: TextStyle(color: color, fontSize: 12),
                   ),
           ),
-          if ((phase is AcpPhaseThinking || phase is AcpPhaseExecutingTool) &&
-              gatewayService.writeEnabled)
+          if (working)
             IconButton(
               visualDensity: VisualDensity.compact,
               tooltip: 'Stop current turn',
-              onPressed: () => gatewayService.cancelTurn(widget.session.id),
+              onPressed: () =>
+                  _fire(runtimeService.cancelTurn(widget.session.id)),
               icon: const Icon(Icons.stop_circle_outlined),
             ),
         ],
@@ -2371,39 +2490,46 @@ class _SessionPageState extends State<SessionPage> {
     );
   }
 
-  Widget _buildPlanPanel(AcpPlan plan) {
-    if (plan.steps.isEmpty) return const SizedBox.shrink();
-    final completed = plan.steps.where((step) => step.isCompleted).length;
+  Widget _buildPlanPanel(List<PlanStep> plan) {
+    final completed = plan
+        .where((step) => step.status == PlanStepStatus.completed)
+        .length;
     return ExpansionTile(
       dense: true,
-      initiallyExpanded: plan.steps.any((step) => step.isInProgress),
+      initiallyExpanded: plan.any(
+        (step) => step.status == PlanStepStatus.inProgress,
+      ),
       leading: const Icon(Icons.checklist, size: 19),
-      title: Text('Plan · $completed/${plan.steps.length}'),
+      title: Text('Plan · $completed/${plan.length}'),
       shape: const Border(bottom: BorderSide(color: Colors.transparent)),
       collapsedShape: const Border(
         bottom: BorderSide(color: Colors.transparent),
       ),
-      children: plan.steps.map((step) {
-        final (icon, color) = step.isCompleted
-            ? (Icons.check_circle, context.smeltColors.done)
-            : step.isInProgress
-            ? (
-                Icons.radio_button_checked,
-                Theme.of(context).colorScheme.primary,
-              )
-            : (
-                Icons.radio_button_unchecked,
-                Theme.of(context).colorScheme.onSurfaceVariant,
-              );
+      children: plan.map((step) {
+        final done = step.status == PlanStepStatus.completed;
+        final (icon, color) = switch (step.status) {
+          PlanStepStatus.completed => (
+            Icons.check_circle,
+            context.smeltColors.done,
+          ),
+          PlanStepStatus.inProgress => (
+            Icons.radio_button_checked,
+            Theme.of(context).colorScheme.primary,
+          ),
+          PlanStepStatus.pending => (
+            Icons.radio_button_unchecked,
+            Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        };
         return ListTile(
           dense: true,
           visualDensity: VisualDensity.compact,
           leading: Icon(icon, size: 17, color: color),
           title: Text(
-            step.title,
+            step.content,
             style: TextStyle(
               fontSize: 13,
-              decoration: step.isCompleted ? TextDecoration.lineThrough : null,
+              decoration: done ? TextDecoration.lineThrough : null,
             ),
           ),
         );
@@ -2412,7 +2538,7 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildPermissionBanner(
-    PendingPermission permission,
+    PermissionRequest permission,
     int pendingCount,
   ) {
     return Padding(
@@ -2443,35 +2569,39 @@ class _SessionPageState extends State<SessionPage> {
     );
   }
 
-  Widget _buildElicitationCard(PendingElicitation elicitation) {
+  Widget _buildElicitationCard(Elicitation elicitation) {
     return ElicitationCard(
       elicitation: elicitation,
       textValues: _elicitationTextValues,
-      onTextChanged: (index, value) => _elicitationTextValues[index] = value,
-      onChoose: (fieldIndex, optionIndex) => gatewayService.chooseElicitation(
-        widget.session.id,
-        fieldIndex,
-        optionIndex,
+      // 要重建：必填文字框填没填决定 Submit 能不能点。
+      onTextChanged: (index, value) =>
+          setState(() => _elicitationTextValues[index] = value),
+      onChoose: (fieldIndex, optionIndex) => _fire(
+        runtimeService.chooseElicitation(
+          widget.session.id,
+          fieldIndex,
+          optionIndex,
+        ),
       ),
       onSubmit: _submitElicitation,
-      onDismiss: () => gatewayService.dismissElicitation(widget.session.id),
+      onDismiss: () =>
+          _fire(runtimeService.dismissElicitation(widget.session.id)),
     );
   }
 
   void _submitElicitation() {
-    for (final entry in _elicitationTextValues.entries) {
-      gatewayService.updateElicitationText(
-        widget.session.id,
-        entry.key,
-        entry.value,
-      );
-    }
-    gatewayService.submitElicitation(widget.session.id);
+    _fire(
+      runtimeService.submitElicitation(widget.session.id, [
+        for (final entry in _elicitationTextValues.entries)
+          ElicitationTextInput(fieldIndex: entry.key, value: entry.value),
+      ]),
+    );
   }
 
   Widget _buildEntryList() {
-    final entries = _snapshot?.entries ?? [];
-    if (entries.isEmpty) {
+    final view = _view;
+    final entries = view?.entries ?? const <ConversationEntry>[];
+    if (view == null || entries.isEmpty) {
       return const Center(child: Text('No messages yet'));
     }
 
@@ -2479,7 +2609,7 @@ class _SessionPageState extends State<SessionPage> {
       controller: _scrollController,
       reverse: true,
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      itemCount: entries.length + (_snapshot!.hasMoreBefore ? 1 : 0),
+      itemCount: entries.length + (view.hasMoreBefore ? 1 : 0),
       itemBuilder: (context, index) {
         if (index == entries.length) {
           return Padding(
@@ -2500,86 +2630,51 @@ class _SessionPageState extends State<SessionPage> {
           );
         }
         final entryIndex = entries.length - 1 - index;
-        return _buildEntry(entryIndex, entries[entryIndex]);
+        return _buildEntry(view, entryIndex, entries[entryIndex]);
       },
     );
   }
 
-  Widget _buildEntry(int index, AcpEntry entry) {
-    return switch (entry) {
-      AcpEntryUser(text: final text) =>
-        _isInterruptMarker(text)
-            ? _buildDivider('Interrupted')
-            : _buildUserMessage(text),
-      AcpEntryUserWithImages(text: final text, images: final images) =>
-        _buildUserMessage(text, images: images),
-      AcpEntryAssistant(text: final text, thought: final thought) =>
-        AcpAssistantMessage(
-          text: text,
-          thought: thought,
-          isFinal: !thought && _isFinalAnswer(index),
-          durationMs: !thought && _isFinalAnswer(index)
-              ? _snapshot?.lastTurnDurationMs
-              : null,
-        ),
-      AcpEntryToolCall(
-        title: final title,
-        status: final status,
-        output: final output,
-      )
-          when isTaskCompletionToolTitle(title) =>
-        AcpCompletionMessage(
-          output: output,
-          status: status,
-          isFinal: _isFinalAnswer(index),
-        ),
-      AcpEntryToolCall(
-        id: _,
-        title: final title,
-        kind: final kind,
-        status: final status,
-        output: final output,
-      ) =>
-        AcpToolCallCard(
-          title: title,
-          kind: kind,
-          status: status,
-          output: output,
-          loadImage: _loadOriginalImage,
-        ),
-      AcpEntryDivider(label: final label) => _buildDivider(label),
-      final AcpEntryTaskNote note => _buildTaskNote(note),
-      AcpEntryUnknown() => const SizedBox.shrink(),
+  Widget _buildEntry(
+    ConversationView view,
+    int index,
+    ConversationEntry entry,
+  ) {
+    final isFinal = view.finalAnswerIndex == index;
+    final toolCall = entry.toolCall;
+    return switch (entry.kind) {
+      EntryKind.user => _buildUserMessage(entry.text, images: entry.images),
+      EntryKind.interrupted => _buildDivider('Interrupted'),
+      EntryKind.assistant => AcpAssistantMessage(
+        text: entry.text,
+        thought: entry.thought,
+        isFinal: !entry.thought && isFinal,
+        durationMs: !entry.thought && isFinal ? view.lastTurnDurationMs : null,
+      ),
+      EntryKind.completion => AcpCompletionMessage(
+        summary: entry.text,
+        status: toolCall?.status ?? ToolStatus.completed,
+        isFinal: isFinal,
+      ),
+      EntryKind.toolCall when toolCall != null => AcpToolCallCard(
+        title: toolCall.title,
+        kind: toolCall.kind,
+        status: toolCall.status,
+        output: toolCall.output,
+        loadImage: _loadImage,
+      ),
+      EntryKind.toolCall => const SizedBox.shrink(),
+      EntryKind.divider => _buildDivider(entry.text),
+      EntryKind.taskNote => _buildTaskNote(entry),
     };
   }
 
-  bool _isFinalAnswer(int index) {
-    if (_snapshot?.phase.turnFinished != true) {
-      return false;
-    }
-    final entries = _snapshot?.entries ?? const <AcpEntry>[];
-    for (var candidate = entries.length - 1; candidate >= 0; candidate--) {
-      if (entries[candidate] case AcpEntryAssistant(
-        thought: false,
-        text: final text,
-      ) when text.trim().isNotEmpty) {
-        return index == candidate;
-      }
-      if (entries[candidate] case AcpEntryToolCall(
-        title: final title,
-      ) when isTaskCompletionToolTitle(title)) {
-        return index == candidate;
-      }
-    }
-    return false;
-  }
-
-  Future<AcpImageData> _loadOriginalImage(AcpImageOriginal original) =>
-      gatewayService.loadImage(widget.session.id, original);
+  Future<ImageData> _loadImage(ImageRef image, {int? maxEdge}) =>
+      runtimeService.loadImage(widget.session.id, image, maxEdge: maxEdge);
 
   Widget _buildUserMessage(
     String text, {
-    List<AcpImageData> images = const [],
+    List<ConversationImage> images = const [],
   }) {
     return Align(
       alignment: Alignment.centerRight,
@@ -2606,7 +2701,7 @@ class _SessionPageState extends State<SessionPage> {
                     .map(
                       (image) => AcpImageThumbnail(
                         image: image,
-                        loadOriginal: _loadOriginalImage,
+                        loadImage: _loadImage,
                       ),
                     )
                     .toList(),
@@ -2618,22 +2713,21 @@ class _SessionPageState extends State<SessionPage> {
     );
   }
 
-  Widget _buildTaskNote(AcpEntryTaskNote note) {
+  /// 后台任务 / 子智能体结束的说明。一行说明由 Rust 拼好。
+  Widget _buildTaskNote(ConversationEntry entry) {
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    final outputTail = entry.taskNote?.outputTail ?? '';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            note.summary,
-            style: TextStyle(color: muted, fontSize: 12),
-          ),
-          if (note.outputTail.trim().isNotEmpty)
+          Text(entry.text, style: TextStyle(color: muted, fontSize: 12)),
+          if (outputTail.trim().isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: SelectableText(
-                note.outputTail,
+                outputTail,
                 style: TextStyle(color: muted, fontSize: 12),
               ),
             ),
@@ -2665,17 +2759,13 @@ class _SessionPageState extends State<SessionPage> {
   }
 
   Widget _buildInputBar() {
-    final hasSnapshot = _snapshot != null;
-    final acceptsPrompt = _snapshot?.phase.acceptsPrompt ?? false;
-    final canCompose = gatewayService.writeEnabled && !_sendingMessage;
+    final view = _view;
+    final connected = _connectionState == RuntimeConnectionState.connected;
+    final acceptsPrompt = view?.phase.acceptsPrompt ?? false;
+    final canCompose = connected && !_sendingMessage;
     final hasContent =
         _messageController.text.trim().isNotEmpty || _pendingImages.isNotEmpty;
-    final canSend =
-        hasSnapshot &&
-        acceptsPrompt &&
-        gatewayService.writeEnabled &&
-        !_sendingMessage &&
-        hasContent;
+    final canSend = view != null && acceptsPrompt && canCompose && hasContent;
 
     return Container(
       padding: const EdgeInsets.all(8),
@@ -2689,7 +2779,7 @@ class _SessionPageState extends State<SessionPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_snapshot case final snapshot?) _buildComposerMetadata(snapshot),
+          if (view != null) _buildComposerMetadata(view),
           if (_pendingImages.isNotEmpty) _buildPendingImages(),
           if (_sendError case final error?)
             Padding(
@@ -2706,35 +2796,35 @@ class _SessionPageState extends State<SessionPage> {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               IconButton(
-                tooltip: _snapshot?.supportsImage == false
+                tooltip: view?.supportsImage == false
                     ? 'This agent does not support images'
                     : 'Attach images',
-                onPressed: canCompose && (_snapshot?.supportsImage ?? false)
+                onPressed: canCompose && (view?.supportsImage ?? false)
                     ? _pickImages
                     : null,
                 icon: const Icon(Icons.add_photo_alternate_outlined),
               ),
-              if (_snapshot?.availableCommands.isNotEmpty == true)
-                PopupMenuButton<List<String>>(
+              if (view != null && view.availableCommands.isNotEmpty)
+                PopupMenuButton<SlashCommand>(
                   tooltip: 'Insert command',
                   icon: const Icon(Icons.terminal),
                   onSelected: (command) {
-                    _messageController.text = '/${command.first} ';
+                    _messageController.text = '/${command.name} ';
                     _messageController.selection = TextSelection.collapsed(
                       offset: _messageController.text.length,
                     );
                     _messageFocusNode.requestFocus();
                     setState(() {});
                   },
-                  itemBuilder: (context) => _snapshot!.availableCommands
+                  itemBuilder: (context) => view.availableCommands
                       .map(
                         (command) => PopupMenuItem(
                           value: command,
                           child: ListTile(
                             contentPadding: EdgeInsets.zero,
-                            title: Text('/${command.first}'),
-                            subtitle: command.length > 1
-                                ? Text(command[1])
+                            title: Text('/${command.name}'),
+                            subtitle: command.description.isNotEmpty
+                                ? Text(command.description)
                                 : null,
                           ),
                         ),
@@ -2751,13 +2841,11 @@ class _SessionPageState extends State<SessionPage> {
                   textInputAction: TextInputAction.newline,
                   onTapOutside: (_) => _dismissKeyboard(),
                   decoration: InputDecoration(
-                    hintText: !gatewayService.writeEnabled
-                        ? _connectionState == WsState.connected
-                              ? 'Desktop connection is read-only'
-                              : 'Reconnect to send a message'
+                    hintText: !connected
+                        ? 'Reconnect to send a message'
                         : _sendingMessage
                         ? 'Waiting for desktop confirmation...'
-                        : !hasSnapshot
+                        : view == null
                         ? 'Loading session...'
                         : acceptsPrompt
                         ? 'Message the agent...'
@@ -2791,63 +2879,66 @@ class _SessionPageState extends State<SessionPage> {
     );
   }
 
-  Widget _buildComposerMetadata(AcpSnapshot snapshot) {
+  void _setConfig(String configId, String valueId, {bool? boolean}) => _fire(
+    runtimeService.setConfigOption(
+      widget.session.id,
+      configId,
+      valueId,
+      boolean: boolean,
+    ),
+  );
+
+  Widget _buildComposerMetadata(ConversationView view) {
     final items = <Widget>[];
-    if (snapshot.usage case final usage? when usage.contextWindow > 0) {
+    if (view.usage case final usage? when usage.contextWindow > 0) {
       final percent = (usage.usedTokens / usage.contextWindow * 100)
           .clamp(0, 100)
           .round();
       items.add(Chip(label: Text('Context $percent%')));
     }
-    if (snapshot.model case final model? when model.currentName.isNotEmpty) {
+    if (view.model case final model? when model.currentName.isNotEmpty) {
       // 协议按 provider 分组时，先切 provider、再在该组内选模型（桌面输入栏同一套）。
       // 平铺协议没有分组，仍然只出一个模型入口。
-      final provider = model.currentProvider;
+      final providerIndex = model.currentProvider;
+      final provider =
+          providerIndex != null && providerIndex < model.providers.length
+          ? model.providers[providerIndex]
+          : null;
       if (provider != null) {
         items.add(
           PopupMenuButton<String>(
             tooltip: 'Switch provider',
-            enabled:
-                model.providerGroups.length > 1 && gatewayService.writeEnabled,
-            onSelected: (value) => gatewayService.setConfigOption(
-              widget.session.id,
-              model.configId,
-              value,
-            ),
+            enabled: model.providers.length > 1,
+            onSelected: (value) => _setConfig(model.configId, value),
             itemBuilder: (context) => [
-              for (final group in model.providerGroups)
+              for (final group in model.providers)
                 CheckedPopupMenuItem(
                   // 协议只接受模型值，没有「只换 provider」的写法；给不出目标模型
                   // 的空组只列出来，不假装能点。
-                  value: model.switchValueFor(group),
-                  enabled: model.switchValueFor(group) != null,
-                  checked: group.id == provider.id,
-                  child: Text(group.name.isEmpty ? group.id : group.name),
+                  value: group.switchValue,
+                  enabled: group.switchValue != null,
+                  checked: group.selected,
+                  child: Text(group.name),
                 ),
             ],
             child: Chip(
               avatar: const Icon(Icons.hub_outlined, size: 16),
-              label: Text(provider.name.isEmpty ? provider.id : provider.name),
+              label: Text(provider.name),
             ),
           ),
         );
       }
-      final modelOptions = provider?.options ?? model.options;
       items.add(
         PopupMenuButton<String>(
           tooltip: 'Switch model',
-          enabled: modelOptions.length > 1 && gatewayService.writeEnabled,
-          onSelected: (value) => gatewayService.setConfigOption(
-            widget.session.id,
-            model.configId,
-            value,
-          ),
-          itemBuilder: (context) => modelOptions
+          enabled: model.options.length > 1,
+          onSelected: (value) => _setConfig(model.configId, value),
+          itemBuilder: (context) => model.options
               .map(
                 (option) => CheckedPopupMenuItem(
-                  value: option.first,
-                  checked: option.length > 1 && option[1] == model.currentName,
-                  child: Text(option.length > 1 ? option[1] : option.first),
+                  value: option.value,
+                  checked: option.selected,
+                  child: Text(option.name),
                 ),
               )
               .toList(),
@@ -2858,23 +2949,31 @@ class _SessionPageState extends State<SessionPage> {
         ),
       );
     }
-    for (final config in snapshot.configOptions) {
+    for (final config in view.configOptions) {
+      // 开关项：点一下就翻转，写回布尔值。
+      if (config.boolean case final enabled?) {
+        items.add(
+          FilterChip(
+            tooltip: config.description ?? config.name,
+            label: Text(config.name),
+            selected: enabled,
+            onSelected: (next) =>
+                _setConfig(config.configId, '', boolean: next),
+          ),
+        );
+        continue;
+      }
       if (config.options.length < 2) continue;
       items.add(
         PopupMenuButton<String>(
           tooltip: config.description ?? config.name,
-          enabled: gatewayService.writeEnabled,
-          onSelected: (value) => gatewayService.setConfigOption(
-            widget.session.id,
-            config.configId,
-            value,
-          ),
+          onSelected: (value) => _setConfig(config.configId, value),
           itemBuilder: (context) => config.options
               .map(
                 (option) => CheckedPopupMenuItem(
-                  value: option.first,
-                  checked: option.length > 1 && option[1] == config.currentName,
-                  child: Text(option.length > 1 ? option[1] : option.first),
+                  value: option.value,
+                  checked: option.selected,
+                  child: Text(option.name),
                 ),
               )
               .toList(),
@@ -2941,7 +3040,12 @@ class _SessionPageState extends State<SessionPage> {
             SizedBox(
               width: 76,
               height: 68,
-              child: AcpImageThumbnail(image: _pendingImages[index]),
+              child: AcpImageThumbnail(
+                image: ConversationImage(
+                  mime: _pendingImages[index].mime,
+                  bytes: _pendingImages[index].bytes,
+                ),
+              ),
             ),
             Positioned(
               top: -6,
@@ -2950,8 +3054,8 @@ class _SessionPageState extends State<SessionPage> {
                 visualDensity: VisualDensity.compact,
                 tooltip: 'Remove image',
                 onPressed: () {
-                  setState(() => _pendingImages.removeAt(index));
-                  _scheduleDraftSave();
+                  _pendingImages.removeAt(index);
+                  _markDraftEdited();
                 },
                 icon: const Icon(Icons.close, size: 14),
               ),
@@ -2974,7 +3078,7 @@ class _SessionPageState extends State<SessionPage> {
         requestFullMetadata: false,
       );
       var skipped = 0;
-      final images = <AcpImageData>[];
+      final images = <ImageInput>[];
       for (final file in files) {
         var bytes = await file.readAsBytes();
         var mimeType = file.mimeType ?? _imageMimeFromName(file.name);
@@ -2991,13 +3095,11 @@ class _SessionPageState extends State<SessionPage> {
           skipped++;
           continue;
         }
-        images.add(
-          AcpImageData(mimeType: mimeType, base64: base64Encode(bytes)),
-        );
+        images.add(ImageInput(mime: mimeType, bytes: bytes));
       }
       if (!mounted) return;
-      setState(() => _pendingImages.addAll(images));
-      _scheduleDraftSave();
+      _pendingImages.addAll(images);
+      if (images.isNotEmpty) _markDraftEdited();
       if (skipped > 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('$skipped image(s) exceeded the 5 MB limit')),
@@ -3011,58 +3113,132 @@ class _SessionPageState extends State<SessionPage> {
     }
   }
 
+  /// 上一次可能已经送达时，重发前要用户点头。
+  Future<bool> _confirmResend() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Send again?'),
+        content: const Text(
+          'The last attempt may already have reached the agent. Check the '
+          'conversation before sending it again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Send again'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (_sendingMessage || (text.isEmpty && _pendingImages.isEmpty)) return;
+    final unconfirmed = _unconfirmedRequestId;
+    if (unconfirmed != null && !await _confirmResend()) return;
+    if (!mounted) return;
 
     _draftSaveTimer?.cancel();
-    final images = List<AcpImageData>.of(_pendingImages);
-    final requestId = gatewayService.createMessageRequestId();
+    // 没确认的那次沿用原 id：运行时按它去重，真到过的话不会再发一遍。
+    final requestId = unconfirmed ?? runtimeService.newRequestId();
+    final images = List<ImageInput>.of(_pendingImages);
+    final sessionId = widget.session.id;
+    final drafts = widget.messageDraftStore;
     setState(() {
       _sendingMessage = true;
-      _sendRequestId = requestId;
       _sendError = null;
     });
+    // 先把草稿连同请求 id 落盘：App 在等确认时被杀，下次打开还知道这条没确认。
     try {
       await _saveDraft(requestId: requestId);
-      gatewayService.sendMessage(
-        widget.session.id,
-        text,
-        images: images,
-        requestId: requestId,
-      );
     } catch (error) {
-      if (!mounted) {
-        await _messageSendSubscription.cancel();
-        return;
-      }
+      if (!mounted) return;
       setState(() {
         _sendingMessage = false;
-        _sendRequestId = null;
         _sendError = 'Could not save the draft: $error';
       });
+      return;
     }
+
+    try {
+      await runtimeService.sendMessage(sessionId, requestId, text, images);
+    } on SendMessageError catch (error) {
+      if (error.kind == SendFailureKind.rejected) {
+        // 运行时明确没收下：草稿原样留着，下次是一次新的提交。
+        await drafts.resolveRequest(sessionId, requestId, succeeded: false);
+        if (!mounted) return;
+        setState(() {
+          _sendingMessage = false;
+          _unconfirmedRequestId = null;
+          _sendError = 'Message was not sent: ${error.message}';
+        });
+      } else {
+        _markUnconfirmed(requestId);
+      }
+      return;
+    } catch (_) {
+      // 意料之外的失败说不清有没有送到，按「没确认」处理。
+      _markUnconfirmed(requestId);
+      return;
+    }
+
+    final resolved = await drafts.resolveRequest(
+      sessionId,
+      requestId,
+      succeeded: true,
+    );
+    if (!mounted) return;
+    _restoringDraft = true;
+    setState(() {
+      _sendingMessage = false;
+      _unconfirmedRequestId = null;
+      _sendError = null;
+      if (resolved) {
+        _messageController.clear();
+        _draftText = '';
+        _pendingImages.clear();
+      }
+    });
+    _restoringDraft = false;
   }
 
-  void _respondApproval(String toolCallId, String optionKey) {
+  /// 可能已经送达：草稿连同请求 id 留着，重发要先确认。
+  void _markUnconfirmed(String requestId) {
+    if (!mounted) return;
+    setState(() {
+      _sendingMessage = false;
+      _unconfirmedRequestId = requestId;
+      _sendError = _unconfirmedDeliveryHint;
+    });
+  }
+
+  void _respondApproval(String toolCallId, String optionId) {
     if (_permissionSubmittingToolId != null) return;
     // 触感回执由 ApprovalCard 统一负责，这里再打一次会变成双震。
     setState(() => _permissionSubmittingToolId = toolCallId);
-    gatewayService.respondApproval(widget.session.id, toolCallId, optionKey);
+    runtimeService
+        .respondApproval(widget.session.id, toolCallId, optionId)
+        .catchError((Object error) {
+          if (!mounted) return;
+          // 没送到就把按钮还给用户。
+          setState(() => _permissionSubmittingToolId = null);
+          _showError(error);
+        });
   }
 
   @override
   void dispose() {
     _draftSaveTimer?.cancel();
-    if (!_sendingMessage) _messageSendSubscription.cancel();
-    _connectionStateSubscription.cancel();
-    _snapshotSubscription.cancel();
-    _sessionSkillsSubscription.cancel();
-    _sessionUnavailableSubscription.cancel();
-    _attentionResolvedSubscription.cancel();
-    if (gatewayService.subscribedSessionId == widget.session.id) {
-      gatewayService.unsubscribe();
-    }
+    _connectionSubscription.cancel();
+    _watchSubscription.cancel();
+    _watch.close();
     _messageController.dispose();
     _messageFocusNode
       ..removeListener(_handleMessageFocus)

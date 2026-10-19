@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../services/gateway_service.dart';
+import '../services/runtime_service.dart';
 import '../theme/project_accent.dart';
 import '../util/relative_time.dart';
 import '../services/pending_actions_controller.dart';
@@ -26,7 +26,7 @@ class ConsolePage extends StatefulWidget {
 
   final void Function(SessionSummary session) onOpenSession;
 
-  /// 留出注入口，单测不必去动那个 final 全局单例。
+  /// 留出注入口，单测直接喂数据，不经过运行时。
   final PendingActionsController? controller;
   final void Function(String sessionId, String toolCallId, String optionId)?
   onRespond;
@@ -71,11 +71,21 @@ class _ConsolePageState extends State<ConsolePage> {
 
   void _respond(String sessionId, String toolCallId, String optionId) {
     setState(() => _submitting.add(toolCallId));
-    final respond =
-        widget.onRespond ??
-        (String s, String t, String o) =>
-            gatewayService.respondApproval(s, t, o);
-    respond(sessionId, toolCallId, optionId);
+    final respond = widget.onRespond;
+    if (respond != null) {
+      respond(sessionId, toolCallId, optionId);
+      return;
+    }
+    runtimeService.respondApproval(sessionId, toolCallId, optionId).catchError((
+      Object error,
+    ) {
+      if (!mounted) return;
+      // 没送到就把按钮还给用户，并说清楚为什么。
+      setState(() => _submitting.remove(toolCallId));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(describeRuntimeError(error))));
+    });
   }
 
   @override
@@ -211,8 +221,9 @@ class _PendingCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final header = _CardHeader(session: item.session, onTap: onOpen);
 
-    // 详情还没到：先把「谁在等」摆出来，别让整张卡空着。attention 推送是即时的，
-    // 快照要多跑一个来回，这段空窗期用户至少知道有事发生。
+    // 详情还没到：先把「谁在等」摆出来，别让整张卡空着。会话列表推送是即时的，
+    // 详情要多跑一个来回，这段空窗期用户至少知道有事发生。没有审批卡的待办（询问、
+    // 失败）点进会话处理。
     if (item.permission == null) {
       return Card(
         margin: EdgeInsets.zero,
@@ -226,7 +237,7 @@ class _PendingCard extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          trailing: item.elicitation != null
+          trailing: !item.isLoadingDetails
               ? const Icon(Icons.chevron_right)
               : const SizedBox(
                   width: 16,

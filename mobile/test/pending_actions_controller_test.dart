@@ -1,33 +1,34 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/models/acp_snapshot.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/pending_actions_controller.dart';
+import 'package:smelt_mobile/services/runtime_service.dart';
 
-SessionSummary _waiting(String id, {String title = 'session'}) =>
-    SessionSummary(
+import 'support/runtime_fixtures.dart';
+
+SessionSummary _waiting(String id, {int updatedAt = 0, String? detail}) =>
+    session(
       id: id,
-      title: title,
-      phase: 'idle',
-      status: 'waiting_approval',
-      agent: 'codex',
+      title: 'session',
+      phase: SessionPhase.awaitingApproval,
+      status: SessionStatus.needsYou,
+      updatedAt: updatedAt,
+      detail: detail,
     );
 
-AcpSnapshot _withPermission(String question) => AcpSnapshot(
-  entries: const [],
-  phase: const AcpPhaseAwaitingApproval(),
-  pendingPermissions: [
-    PendingPermission(
+PendingActions _withPermission(String question) => PendingActions(
+  permissions: [
+    PermissionRequest(
       toolCallId: 'tool-1',
       question: question,
       options: const [
         PermissionOption(
           optionId: 'allow',
           name: 'Allow',
-          kind: 'AllowOnce',
+          kind: PermissionOptionKind.allowOnce,
         ),
       ],
+      details: const ApprovalDetails(kind: ApprovalKind.generic),
     ),
   ],
 );
@@ -35,50 +36,47 @@ AcpSnapshot _withPermission(String question) => AcpSnapshot(
 void main() {
   group('PendingActionsController', () {
     late StreamController<List<SessionSummary>> sessions;
-    late StreamController<String> snapshots;
-    late Map<String, AcpSnapshot> cache;
+    late Map<String, Completer<PendingActions>> pending;
     late List<String> requests;
-    late bool connected;
 
     setUp(() {
       sessions = StreamController<List<SessionSummary>>.broadcast();
-      snapshots = StreamController<String>.broadcast();
-      cache = {};
+      pending = {};
       requests = [];
-      connected = true;
     });
 
     tearDown(() async {
       await sessions.close();
-      await snapshots.close();
     });
 
     PendingActionsController build() => PendingActionsController(
       sessions: sessions.stream,
       initialSessions: const [],
-      snapshotUpdates: snapshots.stream,
-      lookupSnapshot: (id) => cache[id],
-      requestDetails: (id) {
+      fetchDetails: (id) {
         requests.add(id);
-        return connected;
+        return (pending[id] = Completer<PendingActions>()).future;
       },
     );
 
-    test('surfaces every waiting session without entering any of them', () async {
-      final controller = build();
-      addTearDown(controller.dispose);
+    test(
+      'surfaces every waiting session without entering any of them',
+      () async {
+        final controller = build();
+        addTearDown(controller.dispose);
 
-      sessions.add([_waiting('a'), _waiting('b')]);
-      await pumpEventQueue();
+        sessions.add([_waiting('a'), _waiting('b')]);
+        await pumpEventQueue();
 
-      expect(
-        controller.items.map((item) => item.sessionId),
-        ['a', 'b'],
-        reason: 'the console must show sibling sessions, not just the open one',
-      );
-      expect(requests, ['a', 'b']);
-      expect(controller.items.every((item) => item.isLoadingDetails), isTrue);
-    });
+        expect(
+          controller.items.map((item) => item.sessionId),
+          ['a', 'b'],
+          reason:
+              'the console must show sibling sessions, not just the open one',
+        );
+        expect(requests, ['a', 'b']);
+        expect(controller.items.every((item) => item.isLoadingDetails), isTrue);
+      },
+    );
 
     test('fills in the approval once its details arrive', () async {
       final controller = build();
@@ -87,8 +85,7 @@ void main() {
       sessions.add([_waiting('a')]);
       await pumpEventQueue();
 
-      cache['a'] = _withPermission('run cargo test?');
-      snapshots.add('a');
+      pending['a']!.complete(_withPermission('run cargo test?'));
       await pumpEventQueue();
 
       final item = controller.items.single;
@@ -97,39 +94,81 @@ void main() {
       expect(item.permission?.toolCallId, 'tool-1');
     });
 
-    test('asks for details once per session, not on every rebuild', () async {
+    test(
+      'an attention without an approval stops loading once fetched',
+      () async {
+        final controller = build();
+        addTearDown(controller.dispose);
+
+        sessions.add([_waiting('a')]);
+        await pumpEventQueue();
+        pending['a']!.complete(const PendingActions(permissions: []));
+        await pumpEventQueue();
+
+        final item = controller.items.single;
+        expect(item.permission, isNull);
+        expect(item.isLoadingDetails, isFalse);
+      },
+    );
+
+    test(
+      'asks for details once per session state, not on every push',
+      () async {
+        final controller = build();
+        addTearDown(controller.dispose);
+
+        sessions.add([_waiting('a')]);
+        await pumpEventQueue();
+        pending['a']!.complete(const PendingActions(permissions: []));
+        await pumpEventQueue();
+        // 同一状态再推一遍不能重取：有些提醒本来就没有审批卡，反复取会空转。
+        sessions.add([_waiting('a')]);
+        sessions.add([_waiting('a'), session(id: 'idle')]);
+        await pumpEventQueue();
+
+        expect(requests, ['a']);
+      },
+    );
+
+    test('refetches when the waiting session changes', () async {
       final controller = build();
       addTearDown(controller.dispose);
 
-      sessions.add([_waiting('a')]);
+      sessions.add([_waiting('a', updatedAt: 1, detail: 'git push?')]);
       await pumpEventQueue();
-      // An unrelated session's snapshot must not re-trigger the fetch: some
-      // attentions never carry an approval, and refetching them would spin.
-      snapshots.add('other');
-      snapshots.add('other');
+      pending['a']!.complete(_withPermission('git push?'));
       await pumpEventQueue();
 
-      expect(requests, ['a']);
+      sessions.add([_waiting('a', updatedAt: 2, detail: 'rm -rf build?')]);
+      await pumpEventQueue();
+      expect(requests, ['a', 'a']);
+      // 新详情到之前先留着旧卡，不闪回加载态。
+      expect(controller.items.single.question, 'git push?');
+
+      pending['a']!.complete(_withPermission('rm -rf build?'));
+      await pumpEventQueue();
+      expect(controller.items.single.question, 'rm -rf build?');
     });
 
-    test('retries details after a send failed while offline', () async {
-      connected = false;
+    test('retries details after a fetch failed while offline', () async {
       final controller = build();
       addTearDown(controller.dispose);
 
       sessions.add([_waiting('a')]);
       await pumpEventQueue();
-      expect(requests, ['a']);
+      pending['a']!.completeError(
+        const SmeltError(kind: SmeltErrorKind.offline, message: 'offline'),
+      );
+      await pumpEventQueue();
+      expect(controller.items.single.isLoadingDetails, isTrue);
 
-      connected = true;
-      snapshots.add('a');
+      sessions.add([_waiting('a')]);
       await pumpEventQueue();
 
-      expect(
-        requests,
-        ['a', 'a'],
-        reason: 'a request that never left the device must not be remembered',
-      );
+      expect(requests, [
+        'a',
+        'a',
+      ], reason: 'a fetch that failed must not be remembered as done');
     });
 
     test('drops a card as soon as the session stops waiting', () async {
@@ -140,9 +179,7 @@ void main() {
       await pumpEventQueue();
       expect(controller.items, hasLength(1));
 
-      sessions.add([
-        SessionSummary(id: 'a', title: 'session', phase: 'idle', agent: 'codex'),
-      ]);
+      sessions.add([session(id: 'a', title: 'session')]);
       await pumpEventQueue();
 
       expect(controller.items, isEmpty);

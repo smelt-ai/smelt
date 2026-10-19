@@ -1,535 +1,517 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/terminal_stream_service.dart';
+import 'package:smelt_mobile/src/rust/api/error.dart';
+import 'package:smelt_mobile/src/rust/api/terminal.dart' as rust;
 
-Future<void> _waitFor(bool Function() condition) async {
-  final deadline = DateTime.now().add(const Duration(seconds: 5));
-  while (!condition()) {
-    if (DateTime.now().isAfter(deadline)) {
-      throw TimeoutException('condition was not met');
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+/// 一次 [_FakeBackend.attach]。
+class _Attach {
+  _Attach(this.sessionId, this.geometry, this.maxScrollbackLines);
+
+  final String sessionId;
+  final TerminalGeometry geometry;
+  final int? maxScrollbackLines;
+  final controller = StreamController<rust.TerminalEvent>();
+
+  void add(rust.TerminalEvent event) => controller.add(event);
+}
+
+/// 假的 Rust 内核：记下调用，事件由测试手动推。同一会话再次附着、detach 都会结束
+/// 旧流，与内核一致。
+class _FakeBackend implements TerminalBackend {
+  final attaches = <_Attach>[];
+  final resizes = <TerminalGeometry>[];
+  final inputs = <String>[];
+  final detaches = <String>[];
+  Object? attachError;
+  Object? inputError;
+
+  _Attach get current => attaches.last;
+
+  @override
+  Stream<rust.TerminalEvent> attach({
+    required String sessionId,
+    required TerminalGeometry geometry,
+    int? maxScrollbackLines,
+  }) {
+    final error = attachError;
+    if (error != null) throw error;
+    _endCurrent();
+    final attach = _Attach(sessionId, geometry, maxScrollbackLines);
+    attaches.add(attach);
+    return attach.controller.stream;
+  }
+
+  @override
+  void resize({required String sessionId, required TerminalGeometry geometry}) {
+    resizes.add(geometry);
+  }
+
+  @override
+  void input({required String sessionId, required String data}) {
+    final error = inputError;
+    if (error != null) throw error;
+    inputs.add(data);
+  }
+
+  @override
+  void detach({required String sessionId}) {
+    detaches.add(sessionId);
+    _endCurrent();
+  }
+
+  void _endCurrent() {
+    if (attaches.isEmpty) return;
+    final controller = attaches.last.controller;
+    if (!controller.isClosed) unawaited(controller.close());
   }
 }
 
+const _g40x20 = TerminalGeometry(
+  cols: 40,
+  rows: 20,
+  cellWidth: 8,
+  cellHeight: 16,
+);
+const _g40x32 = TerminalGeometry(
+  cols: 40,
+  rows: 32,
+  cellWidth: 8,
+  cellHeight: 16,
+);
+const _g50x24 = TerminalGeometry(
+  cols: 50,
+  rows: 24,
+  cellWidth: 8,
+  cellHeight: 16,
+);
+
+rust.TerminalEvent _ready({
+  int cols = 40,
+  int rows = 20,
+  int replayBytes = 0,
+  int historyLines = 0,
+  int scrollbackLines = 120,
+}) => rust.TerminalEvent(
+  kind: rust.TerminalEventKind.ready,
+  ready: rust.TerminalReady(
+    cols: cols,
+    rows: rows,
+    replayBytes: replayBytes,
+    historyLines: historyLines,
+    scrollbackLines: scrollbackLines,
+  ),
+  fatal: false,
+);
+
+rust.TerminalEvent _data(List<int> bytes) => rust.TerminalEvent(
+  kind: rust.TerminalEventKind.data,
+  data: Uint8List.fromList(bytes),
+  fatal: false,
+);
+
+const _replayComplete = rust.TerminalEvent(
+  kind: rust.TerminalEventKind.replayComplete,
+  fatal: false,
+);
+
+const _closed = rust.TerminalEvent(
+  kind: rust.TerminalEventKind.closed,
+  fatal: false,
+);
+
+rust.TerminalEvent _error(String message, {bool fatal = false}) =>
+    rust.TerminalEvent(
+      kind: rust.TerminalEventKind.error,
+      message: message,
+      fatal: fatal,
+    );
+
+const _settle = Duration(milliseconds: 150);
+const _debounce = Duration(milliseconds: 120);
+
+class _Harness {
+  _Harness() {
+    _subscriptions
+      ..add(service.events.listen(events.add))
+      ..add(service.stateStream.listen(states.add));
+  }
+
+  final backend = _FakeBackend();
+  late final service = TerminalStreamService(
+    sessionId: 'terminal-1',
+    backend: backend,
+    resizeDebounce: _debounce,
+    attachSettleDelay: _settle,
+  );
+  final events = <TerminalStreamEvent>[];
+  final states = <TerminalStreamState>[];
+  final _subscriptions = <StreamSubscription<Object>>[];
+
+  /// 开流并附着上，收到 Ready + 回放结束。
+  void connect(
+    FakeAsync async, {
+    TerminalGeometry geometry = _g40x20,
+    int historyLines = 0,
+    int scrollbackLines = 120,
+  }) {
+    service.start(geometry);
+    async.elapse(_settle);
+    backend.current
+      ..add(
+        _ready(
+          cols: geometry.cols,
+          rows: geometry.rows,
+          historyLines: historyLines,
+          scrollbackLines: scrollbackLines,
+        ),
+      )
+      ..add(_replayComplete);
+    async.flushMicrotasks();
+  }
+
+  void dispose() {
+    for (final subscription in _subscriptions) {
+      unawaited(subscription.cancel());
+    }
+    unawaited(service.dispose());
+  }
+}
+
+/// 终端服务不碰 widget，用纯 Dart 的 fakeAsync 推时间：debounce、落定延迟都靠它。
+/// 不用 testWidgets——它收尾时的不变量检查会和这里的流卡在一起。
+void testFake(String description, void Function(FakeAsync async) body) {
+  test(description, () => fakeAsync(body));
+}
+
 void main() {
-  test(
-    'terminal stream attaches, forwards bytes, input, resize, and fatal close',
-    () async {
-      final attach = Completer<Map<String, dynamic>>();
-      final input = Completer<Map<String, dynamic>>();
-      final resizes = List.generate(
-        1,
-        (_) => Completer<Map<String, dynamic>>(),
-      );
-      var resizeCount = 0;
-      var terminalConnections = 0;
+  /// attach 必须等页面把 chrome 摆完、行列落定之后再发。先 attach 再改尺寸 = 一次多余的
+  /// PTY resize，而不切备用屏的 CLI 每收一次 SIGWINCH 就把整段对话重印一遍。
+  testFake('attach waits for the settled geometry', (async) {
+    final h = _Harness();
+    expect(h.service.state, TerminalStreamState.connecting);
 
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      addTearDown(() => server.close(force: true));
-      server.listen((request) async {
-        if (request.uri.path == '/acp/ws') {
-          final socket = await WebSocketTransformer.upgrade(request);
-          socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
-          await for (final _ in socket) {}
-          return;
-        }
-        if (request.uri.path == '/terminal/terminal-1/ws') {
-          terminalConnections++;
-          final socket = await WebSocketTransformer.upgrade(request);
-          socket.add(
-            jsonEncode({
-              'type': 'terminalConnected',
-              'sessionId': 'terminal-1',
-              'writeEnabled': true,
-            }),
-          );
-          await for (final raw in socket) {
-            if (raw is! String) continue;
-            final message = jsonDecode(raw) as Map<String, dynamic>;
-            switch (message['method']) {
-              case 'attach':
-                if (!attach.isCompleted) attach.complete(message);
-                socket.add(
-                  jsonEncode({
-                    'type': 'terminalReady',
-                    'sessionId': 'terminal-1',
-                    'cols': 40,
-                    'rows': 20,
-                    'replayBytes': 3,
-                    'writeEnabled': true,
-                  }),
-                );
-                socket.add([0xe4, 0xb8, 0xad]);
-              case 'input':
-                if (!input.isCompleted) input.complete(message);
-              case 'resize':
-                if (resizeCount < resizes.length) {
-                  resizes[resizeCount].complete(message);
-                  resizeCount++;
-                }
-                if (resizeCount == resizes.length) {
-                  socket.add(
-                    jsonEncode({
-                      'type': 'terminalError',
-                      'error': 'terminal session not found',
-                      'fatal': true,
-                    }),
-                  );
-                }
-            }
-          }
-          return;
-        }
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
-      });
+    // 页面第一次量到的几何，随后字号偏好读出来又改了一次。
+    h.service.start(_g40x20);
+    async.elapse(const Duration(milliseconds: 100));
+    expect(h.backend.attaches, isEmpty, reason: '行列未落定之前不能 attach');
+    h.service.updateGeometry(_g40x32);
+    async.elapse(_settle);
 
-      final gateway = GatewayService();
-      addTearDown(gateway.dispose);
-      await gateway.connect('http://127.0.0.1:${server.port}', 'tok');
-      await _waitFor(() => gateway.state == WsState.connected);
-      expect(
-        gateway.terminalWebSocketUri('terminal-1')?.path,
-        '/terminal/terminal-1/ws',
-      );
+    expect(h.backend.attaches, hasLength(1));
+    final attach = h.backend.current;
+    expect(attach.sessionId, 'terminal-1');
+    expect(attach.geometry, _g40x32);
+    expect(
+      attach.maxScrollbackLines,
+      initialTerminalScrollbackLines(32),
+      reason: '首屏预算按视口算：矮终端不该跟高终端要同样多历史',
+    );
+    expect(h.backend.resizes, isEmpty, reason: '落定前的几何变化不该变成 resize');
 
-      final service = TerminalStreamService(
-        gateway: gateway,
-        sessionId: 'terminal-1',
-        resizeDebounce: Duration.zero,
-      );
-      addTearDown(service.dispose);
-      final events = <TerminalStreamEvent>[];
-      final eventSubscription = service.events.listen(events.add);
-      addTearDown(eventSubscription.cancel);
+    // 落定后再量到的同一份几何不应该变成 resize。
+    h.service.updateGeometry(_g40x32);
+    async.elapse(_debounce * 2);
+    expect(h.backend.resizes, isEmpty);
+    h.dispose();
+  });
 
-      service.start(
-        const TerminalGeometry(
-          cols: 40,
-          rows: 20,
-          cellWidth: 8,
-          cellHeight: 16,
-        ),
-      );
-      final attachMessage = await attach.future.timeout(
-        const Duration(seconds: 5),
-      );
-      expect(attachMessage['params']['cols'], 40);
-      await _waitFor(() => events.any((event) => event is TerminalDataEvent));
-      final data = events.whereType<TerminalDataEvent>().single;
-      expect(data.bytes, [0xe4, 0xb8, 0xad]);
-      await _waitFor(
-        () => events.any((event) => event is TerminalReplayCompleteEvent),
-      );
-      expect(events.whereType<TerminalReplayCompleteEvent>(), hasLength(1));
-      expect(
-        events.indexWhere((event) => event is TerminalReplayCompleteEvent),
-        greaterThan(events.indexWhere((event) => event is TerminalDataEvent)),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 150));
-      expect(resizeCount, 0, reason: 'replay completion must not redraw PTY');
+  testFake('forwards kernel events and derives the stream state', (async) {
+    final h = _Harness();
+    h.service.start(_g40x20);
+    async.elapse(_settle);
+    expect(h.service.state, TerminalStreamState.connecting);
 
-      service.sendInput('\x03');
-      final inputMessage = await input.future.timeout(
-        const Duration(seconds: 5),
-      );
-      expect(inputMessage['params']['data'], '\x03');
+    h.backend.current
+      ..add(_ready(replayBytes: 3, historyLines: 500, scrollbackLines: 120))
+      ..add(_data([0xe4, 0xb8, 0xad]))
+      ..add(_replayComplete);
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.connected);
+    final ready = h.events.first as TerminalReadyEvent;
+    expect((ready.cols, ready.rows, ready.replayBytes), (40, 20, 3));
+    expect((ready.scrollbackLines, ready.historyLines), (120, 500));
+    expect((h.events[1] as TerminalDataEvent).bytes, [0xe4, 0xb8, 0xad]);
+    expect(h.events[2], isA<TerminalReplayCompleteEvent>());
 
-      service.updateGeometry(
-        const TerminalGeometry(
-          cols: 50,
-          rows: 24,
-          cellWidth: 8,
-          cellHeight: 16,
-        ),
-      );
-      final resizeMessage = await resizes[0].future.timeout(
-        const Duration(seconds: 5),
-      );
-      expect(resizeMessage['params']['cols'], 50);
-      expect(resizeMessage['params']['rows'], 24);
-      await _waitFor(() => service.state == TerminalStreamState.ended);
-      await Future<void>.delayed(const Duration(milliseconds: 700));
-      expect(terminalConnections, 1);
-    },
-  );
+    // 非 fatal：内核在后台重连。
+    h.backend.current.add(_error('终端连接断开：eof'));
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.reconnecting);
+    final error = h.events.last as TerminalErrorEvent;
+    expect((error.message, error.fatal), ('终端连接断开：eof', false));
 
-  test(
-    'terminal stream discards a mismatched snapshot and reattaches',
-    () async {
-      var terminalConnections = 0;
-      final attachGeometries = <Map<String, dynamic>>[];
+    // 非 fatal 也可能只是一次输入没发出去：流上还有字节来，就没在重连。
+    h.backend.current.add(_data([0x41]));
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.connected);
 
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      addTearDown(() => server.close(force: true));
-      server.listen((request) async {
-        if (request.uri.path == '/acp/ws') {
-          final socket = await WebSocketTransformer.upgrade(request);
-          socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
-          await for (final _ in socket) {}
-          return;
-        }
-        if (request.uri.path == '/terminal/terminal-1/ws') {
-          final connection = ++terminalConnections;
-          final socket = await WebSocketTransformer.upgrade(request);
-          socket.add(
-            jsonEncode({
-              'type': 'terminalConnected',
-              'sessionId': 'terminal-1',
-              'writeEnabled': true,
-            }),
-          );
-          await for (final raw in socket) {
-            if (raw is! String) continue;
-            final message = jsonDecode(raw) as Map<String, dynamic>;
-            if (message['method'] != 'attach') continue;
-            attachGeometries.add(
-              Map<String, dynamic>.from(
-                message['params'] as Map<String, dynamic>,
-              ),
-            );
-            if (connection == 1) {
-              socket.add(
-                jsonEncode({
-                  'type': 'terminalReady',
-                  'sessionId': 'terminal-1',
-                  'cols': 181,
-                  'rows': 59,
-                  'replayBytes': 3,
-                  'writeEnabled': true,
-                }),
-              );
-              socket.add(utf8.encode('OLD'));
-            } else {
-              socket.add(
-                jsonEncode({
-                  'type': 'terminalReady',
-                  'sessionId': 'terminal-1',
-                  'cols': 49,
-                  'rows': 47,
-                  'replayBytes': 3,
-                  'writeEnabled': true,
-                }),
-              );
-              socket.add(utf8.encode('NEW'));
-            }
-          }
-          return;
-        }
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
-      });
+    // 重新附着成功：内核再来一次 Ready。
+    h.backend.current.add(_error('终端连接断开：eof'));
+    async.flushMicrotasks();
+    h.backend.current.add(_ready());
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.connected);
+    expect(h.events.whereType<TerminalReadyEvent>(), hasLength(2));
+    expect(h.backend.attaches, hasLength(1), reason: '重连由内核做，Dart 不再附着');
 
-      final gateway = GatewayService();
-      addTearDown(gateway.dispose);
-      await gateway.connect('http://127.0.0.1:${server.port}', 'tok');
-      await _waitFor(() => gateway.state == WsState.connected);
+    h.backend.current.add(_error('终端会话不存在或已结束', fatal: true));
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.ended);
+    expect((h.events.last as TerminalErrorEvent).fatal, isTrue);
+    expect(h.states, [
+      TerminalStreamState.connected,
+      TerminalStreamState.reconnecting,
+      TerminalStreamState.connected,
+      TerminalStreamState.reconnecting,
+      TerminalStreamState.connected,
+      TerminalStreamState.ended,
+    ]);
 
-      final service = TerminalStreamService(
-        gateway: gateway,
-        sessionId: 'terminal-1',
-      );
-      addTearDown(service.dispose);
-      final events = <TerminalStreamEvent>[];
-      final eventSubscription = service.events.listen(events.add);
-      addTearDown(eventSubscription.cancel);
+    // 结束后不再附着、不再 resize，也不再 detach（内核已经把它摘了）。
+    h.service.suspend();
+    h.service.resume();
+    h.service.updateGeometry(_g50x24);
+    async.elapse(_settle + _debounce);
+    expect(h.backend.attaches, hasLength(1));
+    expect(h.backend.resizes, isEmpty);
+    h.dispose();
+    expect(h.backend.detaches, isEmpty);
+  });
 
-      service.start(
-        const TerminalGeometry(
-          cols: 49,
-          rows: 47,
-          cellWidth: 8,
-          cellHeight: 16,
-        ),
-      );
+  testFake('a closed session ends the stream', (async) {
+    final h = _Harness();
+    h.connect(async);
+    h.backend.current.add(_closed);
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.ended);
+    expect(h.events.last, isA<TerminalClosedEvent>());
+    expect(h.service.canLoadMoreScrollback, isFalse);
+    h.dispose();
+    expect(h.backend.detaches, isEmpty);
+  });
 
-      await _waitFor(() => terminalConnections == 2);
-      await _waitFor(
-        () => events.any((event) => event is TerminalReplayCompleteEvent),
-      );
+  testFake('a rejected attach call is fatal', (async) {
+    final h = _Harness();
+    h.backend.attachError = const SmeltError(
+      kind: SmeltErrorKind.other,
+      message: '终端行列必须大于 0',
+    );
+    h.service.start(_g40x20);
+    async.elapse(_settle);
+    expect(h.service.state, TerminalStreamState.ended);
+    final error = h.events.single as TerminalErrorEvent;
+    expect((error.message, error.fatal), ('终端行列必须大于 0', true));
+    h.dispose();
+  });
 
-      expect(attachGeometries, hasLength(2));
-      expect(attachGeometries.every((geometry) => geometry['cols'] == 49), true);
-      final ready = events.whereType<TerminalReadyEvent>().single;
-      expect((ready.cols, ready.rows), (49, 47));
-      expect(
-        events
-            .whereType<TerminalDataEvent>()
-            .expand((event) => event.bytes)
-            .toList(),
-        utf8.encode('NEW'),
-      );
-      expect(events.whereType<TerminalReplayCompleteEvent>(), hasLength(1));
-    },
-  );
+  testFake('resize is debounced and deduplicated', (async) {
+    final h = _Harness();
+    h.connect(async);
 
-  /// 首屏只要最新的一段，用户往上滚才去要更老的——手机走隧道，不切备用屏的 TUI
+    // 连续几次测量只落最后一次。
+    h.service.updateGeometry(_g40x32);
+    async.elapse(const Duration(milliseconds: 60));
+    h.service.updateGeometry(_g50x24);
+    async.elapse(const Duration(milliseconds: 60));
+    expect(h.backend.resizes, isEmpty);
+    async.elapse(_debounce);
+    expect(h.backend.resizes, [_g50x24]);
+
+    // 跟上次发出的一样：不发。
+    h.service.updateGeometry(_g50x24);
+    async.elapse(_debounce * 2);
+    expect(h.backend.resizes, [_g50x24]);
+
+    // 防抖窗口里改了又改回来：也不发。
+    h.service.updateGeometry(_g40x20);
+    async.elapse(const Duration(milliseconds: 60));
+    h.service.updateGeometry(_g50x24);
+    async.elapse(_debounce * 2);
+    expect(h.backend.resizes, [_g50x24]);
+
+    // 重连期间照样交给内核：它记下来，下次附着按它来。
+    h.backend.current.add(_error('终端连接断开：eof'));
+    async.flushMicrotasks();
+    h.service.updateGeometry(_g40x20);
+    async.elapse(_debounce);
+    expect(h.backend.resizes, [_g50x24, _g40x20]);
+    h.dispose();
+  });
+
+  testFake('input goes to the kernel only while attached', (async) {
+    final h = _Harness();
+    h.service.sendInput('early');
+    h.service.start(_g40x20);
+    h.service.sendInput('before-attach');
+    async.elapse(_settle);
+    h.service.sendInput('');
+    h.service.sendInput('\x03');
+    expect(h.backend.inputs, ['\x03']);
+
+    h.backend.inputError = const SmeltError(
+      kind: SmeltErrorKind.other,
+      message: '没有附着这个终端',
+    );
+    h.service.sendInput('x');
+    async.flushMicrotasks();
+    final error = h.events.last as TerminalErrorEvent;
+    expect((error.message, error.fatal), ('没有附着这个终端', false));
+    expect(h.service.state, TerminalStreamState.connecting);
+    h.dispose();
+  });
+
+  /// 首屏只要最新的一段，用户往上滚才去要更老的——手机走 iroh，不切备用屏的 TUI
   /// history 全推过去就是进页面先干等。
-  test('terminal stream takes the whole scrollback budget at once', () async {
-    final attachParams = <Map<String, dynamic>>[];
-    var terminalConnections = 0;
+  testFake('loading more history re-attaches once with the full budget', (
+    async,
+  ) {
+    final h = _Harness();
+    h.connect(async, historyLines: 4000, scrollbackLines: 120);
+    expect(h.service.canLoadMoreScrollback, isTrue);
 
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(() => server.close(force: true));
-    server.listen((request) async {
-      if (request.uri.path == '/acp/ws') {
-        final socket = await WebSocketTransformer.upgrade(request);
-        socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
-        await for (final _ in socket) {}
-        return;
-      }
-      if (request.uri.path != '/terminal/terminal-1/ws') {
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
-        return;
-      }
-      terminalConnections++;
-      final socket = await WebSocketTransformer.upgrade(request);
-      socket.add(
-        jsonEncode({
-          'type': 'terminalConnected',
-          'sessionId': 'terminal-1',
-          'writeEnabled': true,
-        }),
-      );
-      await for (final raw in socket) {
-        if (raw is! String) continue;
-        final message = jsonDecode(raw) as Map<String, dynamic>;
-        if (message['method'] != 'attach') continue;
-        final params = Map<String, dynamic>.from(
-          message['params'] as Map<String, dynamic>,
-        );
-        attachParams.add(params);
-        socket.add(
-          jsonEncode({
-            'type': 'terminalReady',
-            'sessionId': 'terminal-1',
-            'cols': 40,
-            'rows': 20,
-            'replayBytes': 0,
-            'writeEnabled': true,
-            'scrollbackLines': params['maxScrollbackLines'],
-            // 会话侧还有 4000 行，比任何一次预算都多。
-            'historyLines': 4000,
-          }),
-        );
-      }
-    });
-
-    final gateway = GatewayService();
-    addTearDown(gateway.dispose);
-    await gateway.connect('http://127.0.0.1:${server.port}', 'tok');
-    await _waitFor(() => gateway.state == WsState.connected);
-
-    final service = TerminalStreamService(
-      gateway: gateway,
-      sessionId: 'terminal-1',
-      resizeDebounce: Duration.zero,
-    );
-    addTearDown(service.dispose);
-    final events = <TerminalStreamEvent>[];
-    final subscription = service.events.listen(events.add);
-    addTearDown(subscription.cancel);
-
-    service.start(
-      const TerminalGeometry(cols: 40, rows: 20, cellWidth: 8, cellHeight: 16),
-    );
-    await _waitFor(() => events.whereType<TerminalReadyEvent>().length == 1);
+    expect(h.service.loadMoreScrollback(), isTrue);
+    expect(h.backend.attaches, hasLength(2), reason: '提高预算必须重取一次快照，且不用等布局');
     expect(
-      attachParams.single['maxScrollbackLines'],
-      initialTerminalScrollbackLines(20),
-      reason: '首屏预算按视口算：20 行的终端不该跟 60 行的要同样多历史',
-    );
-    expect(service.canLoadMoreScrollback, isTrue);
-
-    expect(service.loadMoreScrollback(), isTrue);
-    await _waitFor(() => events.whereType<TerminalReadyEvent>().length == 2);
-    expect(
-      attachParams.last['maxScrollbackLines'],
+      h.backend.current.maxScrollbackLines,
       kMaxTerminalScrollbackLines,
       reason: '快照是整帧的，翻倍爬坡等于把同一段历史重传好几遍',
     );
-    expect(terminalConnections, 2, reason: '提高预算必须重取一次快照');
+    expect(h.backend.current.geometry, _g40x20);
+    expect(h.service.state, TerminalStreamState.connecting);
+    expect(h.service.canLoadMoreScrollback, isFalse, reason: '在途时不能再触发一次');
+    expect(h.service.loadMoreScrollback(), isFalse);
+
+    // 旧流被内核结束：那是我们自己换掉的，不能当成意外断开再附着一次。
+    async.flushMicrotasks();
+    expect(h.backend.attaches, hasLength(2));
+
+    h.backend.current.add(
+      _ready(historyLines: 4000, scrollbackLines: kMaxTerminalScrollbackLines),
+    );
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.connected);
     expect(
-      service.canLoadMoreScrollback,
+      h.service.canLoadMoreScrollback,
       isFalse,
       reason: '已经要到客户端能留住的全部，不该再有第二次重取',
     );
-    expect(
-      events.whereType<TerminalReadyEvent>().last.historyLines,
-      4000,
-      reason: '客户端要知道上面还有多少，才能决定还能不能再拉',
-    );
+    expect(h.events.whereType<TerminalReadyEvent>().last.historyLines, 4000);
 
-    // 切后台再切回来：重连不能把「补历史」的大预算一起带上。重连本来就要重建终端、
-    // 回到最新输出，上一次补的历史留不住；把它变成每次切回前台的固定成本，就是每次
-    // 都要在隧道上重传几千行。
-    service.suspend();
-    service.resume();
-    await _waitFor(() => events.whereType<TerminalReadyEvent>().length == 3);
+    // 切后台再切回来：重新附着不能把「补历史」的大预算一起带上。
+    h.service.suspend();
+    h.service.resume();
+    async.elapse(_settle);
+    expect(h.backend.attaches, hasLength(3));
     expect(
-      attachParams.last['maxScrollbackLines'],
+      h.backend.current.maxScrollbackLines,
       initialTerminalScrollbackLines(20),
-      reason: '补历史是「这一次」的动作，不该粘在之后每次重连上',
+      reason: '补历史是「这一次」的动作，不该粘在之后每次附着上',
     );
+    h.dispose();
   });
 
-  /// attach 必须等页面把 chrome 摆完、行列落定之后再发。先 attach 再改尺寸 = 一次多余的
-  /// PTY resize，而不切备用屏的 CLI 每收一次 SIGWINCH 就把整段对话重印一遍。
-  test('attach waits for the settled geometry', () async {
-    final attachParams = <Map<String, dynamic>>[];
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(() => server.close(force: true));
-    server.listen((request) async {
-      if (request.uri.path == '/acp/ws') {
-        final socket = await WebSocketTransformer.upgrade(request);
-        socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
-        await for (final _ in socket) {}
-        return;
-      }
-      if (request.uri.path != '/terminal/terminal-1/ws') {
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
-        return;
-      }
-      final socket = await WebSocketTransformer.upgrade(request);
-      socket.add(
-        jsonEncode({
-          'type': 'terminalConnected',
-          'sessionId': 'terminal-1',
-          'writeEnabled': true,
-        }),
-      );
-      await for (final raw in socket) {
-        if (raw is! String) continue;
-        final message = jsonDecode(raw) as Map<String, dynamic>;
-        if (message['method'] != 'attach') continue;
-        attachParams.add(
-          Map<String, dynamic>.from(message['params'] as Map<String, dynamic>),
-        );
-        socket.add(
-          jsonEncode({
-            'type': 'terminalReady',
-            'sessionId': 'terminal-1',
-            'cols': message['params']['cols'],
-            'rows': message['params']['rows'],
-            'replayBytes': 0,
-            'writeEnabled': true,
-          }),
-        );
-      }
-    });
+  testFake('no history beyond the budget never triggers a refetch', (async) {
+    final h = _Harness();
+    expect(h.service.loadMoreScrollback(), isFalse);
+    h.connect(async, historyLines: 80, scrollbackLines: 120);
+    expect(h.service.canLoadMoreScrollback, isFalse);
+    expect(h.service.loadMoreScrollback(), isFalse);
+    expect(h.backend.attaches, hasLength(1));
 
-    final gateway = GatewayService();
-    addTearDown(gateway.dispose);
-    await gateway.connect('http://127.0.0.1:${server.port}', 'tok');
-    await _waitFor(() => gateway.state == WsState.connected);
+    // 只在连着的时候补：重连期间去重取只会打断内核的重连。
+    final more = _Harness();
+    more.connect(async, historyLines: 4000);
+    more.backend.current.add(_error('终端连接断开：eof'));
+    async.flushMicrotasks();
+    expect(more.service.loadMoreScrollback(), isFalse);
+    expect(more.backend.attaches, hasLength(1));
 
-    final service = TerminalStreamService(
-      gateway: gateway,
-      sessionId: 'terminal-1',
-      resizeDebounce: Duration.zero,
-      attachSettleDelay: const Duration(milliseconds: 80),
-    );
-    addTearDown(service.dispose);
-    final events = <TerminalStreamEvent>[];
-    final subscription = service.events.listen(events.add);
-    addTearDown(subscription.cancel);
-
-    // 页面先按「没有快捷键栏」的高度开流。
-    service.start(
-      const TerminalGeometry(cols: 40, rows: 35, cellWidth: 8, cellHeight: 16),
-    );
-    // 通道一接通，页面就把栏子摆上去，行数落到 32。
-    await _waitFor(() => events.any((event) => event is TerminalConnectedEvent));
-    expect(attachParams, isEmpty, reason: '行列未落定之前不能 attach');
-    service.updateGeometry(
-      const TerminalGeometry(cols: 40, rows: 32, cellWidth: 8, cellHeight: 16),
-    );
-
-    await _waitFor(() => events.whereType<TerminalReadyEvent>().isNotEmpty);
-    expect(attachParams, hasLength(1));
-    expect(attachParams.single['rows'], 32);
-
-    // 落定后再量到的同一份几何不应该变成 resize 帧。
-    service.updateGeometry(
-      const TerminalGeometry(cols: 40, rows: 32, cellWidth: 8, cellHeight: 16),
-    );
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    expect(events.whereType<TerminalReadyEvent>(), hasLength(1));
+    h.dispose();
+    more.dispose();
   });
 
+  testFake('suspend detaches and resume re-attaches at the latest size', (
+    async,
+  ) {
+    final h = _Harness();
+    h.connect(async);
+    final before = h.backend.current;
 
-  /// 对端不下发 historyLines（老网关）时，手机不能去拉一个它根本不支持的东西。
-  test('a gateway that reports no history never triggers a refetch', () async {
-    var terminalConnections = 0;
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    addTearDown(() => server.close(force: true));
-    server.listen((request) async {
-      if (request.uri.path == '/acp/ws') {
-        final socket = await WebSocketTransformer.upgrade(request);
-        socket.add(jsonEncode({'type': 'connected', 'writeEnabled': true}));
-        await for (final _ in socket) {}
-        return;
-      }
-      if (request.uri.path != '/terminal/terminal-1/ws') {
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
-        return;
-      }
-      terminalConnections++;
-      final socket = await WebSocketTransformer.upgrade(request);
-      socket.add(
-        jsonEncode({
-          'type': 'terminalConnected',
-          'sessionId': 'terminal-1',
-          'writeEnabled': true,
-        }),
-      );
-      await for (final raw in socket) {
-        if (raw is! String) continue;
-        final message = jsonDecode(raw) as Map<String, dynamic>;
-        if (message['method'] != 'attach') continue;
-        socket.add(
-          jsonEncode({
-            'type': 'terminalReady',
-            'sessionId': 'terminal-1',
-            'cols': 40,
-            'rows': 20,
-            'replayBytes': 0,
-            'writeEnabled': true,
-          }),
-        );
-      }
-    });
+    h.service.suspend();
+    expect(h.backend.detaches, ['terminal-1']);
+    expect(h.service.state, TerminalStreamState.connecting);
+    // 后台期间：几何只记下，不 resize；输入丢掉；旧流的事件不再转发。
+    h.service.updateGeometry(_g50x24);
+    h.service.sendInput('x');
+    async.elapse(_debounce * 2);
+    expect(h.backend.resizes, isEmpty);
+    expect(h.backend.inputs, isEmpty);
+    expect(before.controller.isClosed, isTrue);
+    final eventsBefore = h.events.length;
 
-    final gateway = GatewayService();
-    addTearDown(gateway.dispose);
-    await gateway.connect('http://127.0.0.1:${server.port}', 'tok');
-    await _waitFor(() => gateway.state == WsState.connected);
+    h.service.resume();
+    expect(h.backend.attaches, hasLength(1), reason: '切回前台也等布局落定');
+    async.elapse(_settle);
+    expect(h.backend.attaches, hasLength(2));
+    expect(h.backend.current.geometry, _g50x24);
+    expect(h.events, hasLength(eventsBefore));
 
-    final service = TerminalStreamService(
-      gateway: gateway,
-      sessionId: 'terminal-1',
-      resizeDebounce: Duration.zero,
-    );
-    addTearDown(service.dispose);
-    final events = <TerminalStreamEvent>[];
-    final subscription = service.events.listen(events.add);
-    addTearDown(subscription.cancel);
+    h.backend.current.add(_ready(cols: 50, rows: 24));
+    async.flushMicrotasks();
+    expect(h.service.state, TerminalStreamState.connected);
 
-    service.start(
-      const TerminalGeometry(cols: 40, rows: 20, cellWidth: 8, cellHeight: 16),
-    );
-    await _waitFor(() => events.whereType<TerminalReadyEvent>().isNotEmpty);
-    expect(service.canLoadMoreScrollback, isFalse);
-    expect(service.loadMoreScrollback(), isFalse);
-    await Future<void>.delayed(const Duration(milliseconds: 150));
-    expect(terminalConnections, 1);
+    // suspend 在附着前：不 detach，resume 照样附着。
+    final early = _Harness();
+    early.service.start(_g40x20);
+    early.service.suspend();
+    async.elapse(_settle);
+    expect(early.backend.attaches, isEmpty);
+    expect(early.backend.detaches, isEmpty);
+    early.service.resume();
+    async.elapse(_settle);
+    expect(early.backend.attaches, hasLength(1));
+
+    h.dispose();
+    early.dispose();
+  });
+
+  testFake('a stream ended elsewhere is re-attached, but not forever', (async) {
+    final h = _Harness();
+    h.connect(async);
+
+    // 别处 detach 了这个会话（如 terminalDetachAll）：流悄悄结束。
+    h.backend.current.controller.close();
+    async.flushMicrotasks();
+    async.flushMicrotasks();
+    expect(h.backend.attaches, hasLength(2));
+    expect(h.service.state, TerminalStreamState.connecting);
+
+    // 新附着一个事件都没收到又被结束：再试只会空转。
+    h.backend.current.controller.close();
+    async.flushMicrotasks();
+    async.flushMicrotasks();
+    expect(h.backend.attaches, hasLength(2));
+    expect(h.service.state, TerminalStreamState.ended);
+    expect((h.events.last as TerminalErrorEvent).fatal, isTrue);
+    h.dispose();
+  });
+
+  testFake('dispose detaches a live attachment', (async) {
+    final h = _Harness();
+    h.connect(async);
+    h.dispose();
+    expect(h.backend.detaches, ['terminal-1']);
+
+    // 还没附着就退出：没什么可 detach，也不会在之后附着。
+    final idle = _Harness();
+    idle.service.start(_g40x20);
+    idle.dispose();
+    async.elapse(_settle);
+    expect(idle.backend.attaches, isEmpty);
+    expect(idle.backend.detaches, isEmpty);
   });
 }

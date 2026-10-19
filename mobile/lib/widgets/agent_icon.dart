@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../services/gateway_service.dart';
+import '../models/runtime_models.dart';
 import 'project_avatar.dart';
 
 /// 会话行的身份图标，跟桌面保持一致。
@@ -38,7 +38,7 @@ class AgentIcon extends StatelessWidget {
     final label = agentIconLabel(session);
 
     // 终端会话也可能有 agent 身份：在内嵌终端里跑的 CLI（`codex`、`opencode`…）
-    // 网关会把它认出来下发。桌面就是这么画的（`session_list/row.rs` 的
+    // 运行时会把它认出来下发。桌面就是这么画的（`session_list/row.rs` 的
     // `provider_icon`：认得出画那家，认不出才画终端）——移动端原来一律画终端
     // 图标，等于把「这是 Codex 在干活」这条信息丢掉了。
     if (session.kind == SessionKind.terminal &&

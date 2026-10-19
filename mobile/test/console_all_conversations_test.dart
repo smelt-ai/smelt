@@ -2,40 +2,42 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/models/session_filters.dart';
 import 'package:smelt_mobile/pages/console_page.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
 import 'package:smelt_mobile/services/pending_actions_controller.dart';
+import 'package:smelt_mobile/services/runtime_service.dart';
 import 'package:smelt_mobile/theme/smelt_theme.dart';
 import 'package:smelt_mobile/widgets/session_row.dart';
 
+import 'support/runtime_fixtures.dart' as fixtures;
+
 SessionSummary _session(
   String id, {
-  String phase = 'idle',
-  String status = 'idle',
+  SessionPhase phase = SessionPhase.idle,
+  SessionStatus status = SessionStatus.idle,
   int updatedAt = 1000,
   String? title,
   String? projectTitle,
   String? agentDefinitionId,
   bool unread = false,
-}) => SessionSummary(
+  AutomationSource? automation,
+}) => fixtures.session(
   id: id,
   title: title ?? id,
   phase: phase,
   status: status,
   agent: 'pi',
   updatedAt: updatedAt,
-  unread: unread,
+  attention: unread ? fixtures.attention(id, AttentionKind.success) : null,
   projectTitle: projectTitle,
   projectRoot: projectTitle == null ? null : '/tmp/$projectTitle',
   agentDefinitionId: agentDefinitionId,
+  automation: automation,
 );
 
 PendingActionsController _controller(List<SessionSummary> sessions) =>
     PendingActionsController(
       sessions: const Stream.empty(),
       initialSessions: sessions,
-      snapshotUpdates: const Stream.empty(),
-      lookupSnapshot: (_) => null,
-      requestDetails: (_) => true,
+      fetchDetails: (_) async => const PendingActions(permissions: []),
     );
 
 Widget _host(PendingActionsController controller) => MaterialApp(
@@ -58,11 +60,22 @@ void main() {
     });
 
     test('有事的会话不会同时落进闲置段', () {
-      expect(sessionIsIdle(_session('a', phase: 'running')), isFalse);
-      expect(sessionIsIdle(_session('b', status: 'needs_you')), isFalse);
-      expect(sessionIsIdle(_session('c', phase: 'succeeded')), isFalse);
       expect(
-        sessionIsIdle(_session('d', phase: 'succeeded', unread: true)),
+        sessionIsIdle(_session('a', status: SessionStatus.running)),
+        isFalse,
+      );
+      expect(
+        sessionIsIdle(_session('b', status: SessionStatus.needsYou)),
+        isFalse,
+      );
+      expect(
+        sessionIsIdle(_session('c', phase: SessionPhase.succeeded)),
+        isFalse,
+      );
+      expect(
+        sessionIsIdle(
+          _session('d', phase: SessionPhase.succeeded, unread: true),
+        ),
         isFalse,
       );
     });
@@ -85,7 +98,7 @@ void main() {
       expect(controller.idle.map((s) => s.id), ['a', 'b']);
     });
 
-    test('同为零时间的会话回落到名册序，而不是随机顺序', () {
+    test('同为零时间的会话回落到列表原序，而不是随机顺序', () {
       final controller = _controller([
         _session('never-b', updatedAt: 0, title: 'b'),
         _session('ran', updatedAt: 5),
@@ -93,31 +106,23 @@ void main() {
       ]);
       addTearDown(controller.dispose);
 
-      // 跑过的排在最前（时间倒序），没跑过的沉底并按名册序稳定排列。
-      expect(controller.idle.map((s) => s.id), [
-        'ran',
-        'never-a',
-        'never-b',
-      ]);
+      // 跑过的排在最前（时间倒序），没跑过的沉底并按列表原序（Rust 已按桌面
+      // 菜单排好）稳定排列。
+      expect(controller.idle.map((s) => s.id), ['ran', 'never-b', 'never-a']);
     });
 
     test('每一段都按最后活动时间倒序', () {
       final controller = _controller([
-        _session('old', phase: 'running', updatedAt: 100),
-        _session('newest', phase: 'running', updatedAt: 900),
-        _session('mid', phase: 'running', updatedAt: 500),
+        _session('old', status: SessionStatus.running, updatedAt: 100),
+        _session('newest', status: SessionStatus.running, updatedAt: 900),
+        _session('mid', status: SessionStatus.running, updatedAt: 500),
         _session('idle-old', updatedAt: 10),
         _session('idle-new', updatedAt: 800),
       ]);
       addTearDown(controller.dispose);
 
-      // 原来 running 段沿用网关的项目序——那是给项目树用的，在跨项目的分诊
-      // 列表里没有意义。
-      expect(controller.running.map((s) => s.id), [
-        'newest',
-        'mid',
-        'old',
-      ]);
+      // 不能沿用列表的项目序——那是给项目树用的，在跨项目的分诊列表里没有意义。
+      expect(controller.running.map((s) => s.id), ['newest', 'mid', 'old']);
       expect(controller.idle.map((s) => s.id), ['idle-new', 'idle-old']);
     });
 
@@ -187,32 +192,20 @@ void main() {
     });
   });
 
-  test('会话摘要解析网关下发的智能体归属', () {
-    final session = SessionSummary.fromJson({
-      'id': 'acp-1',
-      'title': '周报怎么写',
-      'phase': 'idle',
-      'agent': 'pi',
-      'agent_definition_id': 'agent-1',
-    });
-    expect(session.agentDefinitionId, 'agent-1');
-    expect(session.isAgentConversation, isTrue);
+  test('有智能体定义的对话才算智能体对话，自动化 Run 不算', () {
+    final chat = _session('acp-1', agentDefinitionId: 'agent-1');
+    expect(chat.isAgentConversation, isTrue);
 
     // 自动化 Run 有自己的来源标注，不算智能体对话。
-    final run = SessionSummary.fromJson({
-      'id': 'acp-automation-1',
-      'title': '汇总昨日 PR',
-      'phase': 'running',
-      'agent': 'pi',
-      'agent_definition_id': 'agent-1',
-      'automation': {
-        'automation_id': 'automation-1',
-        'automation_name': '每日晨报',
-        'run_id': 'run-1',
-        'run_status': 'running',
-        'run_source': 'scheduled',
-      },
-    });
+    final run = _session(
+      'acp-automation-1',
+      agentDefinitionId: 'agent-1',
+      automation: const AutomationSource(
+        automationName: '每日晨报',
+        runStatus: AutomationRunStatus.running,
+        runSource: AutomationRunSource.scheduled,
+      ),
+    );
     expect(run.isAgentConversation, isFalse);
   });
 }

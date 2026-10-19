@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/session_filters.dart';
-import '../services/gateway_service.dart';
+import '../models/runtime_models.dart';
 import '../theme/project_accent.dart';
 import '../theme/smelt_theme.dart';
 

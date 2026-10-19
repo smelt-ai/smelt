@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/session_filters.dart';
-import '../services/gateway_service.dart';
+import '../services/runtime_service.dart';
 
 /// 全局待办徽标：任何页面都要能看到「还有几件事等我」，并一键回到它们。
 ///
@@ -17,15 +17,15 @@ class PendingActionBadge extends StatelessWidget {
 
   final VoidCallback onPressed;
 
-  /// 默认接全局网关；留出注入口，是为了单测不用去动那个 final 单例。
+  /// 默认接全局运行时服务；留出注入口，单测可以直接喂会话列表。
   final Stream<List<SessionSummary>>? sessions;
   final List<SessionSummary>? initialSessions;
 
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<List<SessionSummary>>(
-      stream: sessions ?? gatewayService.sessionsStream,
-      initialData: initialSessions ?? gatewayService.lastSessions,
+      stream: sessions ?? runtimeService.sessionsStream,
+      initialData: initialSessions ?? runtimeService.sessions,
       builder: (context, snapshot) {
         final count = (snapshot.data ?? const <SessionSummary>[])
             .where(sessionNeedsAction)

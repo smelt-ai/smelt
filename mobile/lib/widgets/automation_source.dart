@@ -1,46 +1,51 @@
 import 'package:flutter/material.dart';
 
-import '../services/gateway_service.dart';
+import '../models/runtime_models.dart';
 import '../theme/smelt_theme.dart';
 import '../util/relative_time.dart';
 
-/// 触发方式。与桌面 `AgentRunSource` 一一对应，值由网关按 snake_case 下发，
-/// 文案在这一层落地——移动端不接收服务端拼好的自然语言。
-String automationTriggerLabel(String runSource) => switch (runSource) {
-  'scheduled' => 'Scheduled',
-  'webhook' => 'External trigger',
-  'event' => 'Event',
-  'manual' => 'Run once',
-  _ => 'Automation',
-};
+/// 触发方式。与桌面 `AgentRunSource` 一一对应，文案在这一层落地——移动端不接收
+/// 服务端拼好的自然语言。
+String automationTriggerLabel(AutomationRunSource runSource) =>
+    switch (runSource) {
+      AutomationRunSource.scheduled => 'Scheduled',
+      AutomationRunSource.webhook => 'External trigger',
+      AutomationRunSource.event => 'Event',
+      AutomationRunSource.manual => 'Run once',
+    };
 
 /// 桌面 `AgentRunStatus` 十态在手机上收成五档颜色。映射只此一处——移动端已经因为
 /// 「同一个概念两种颜色」踩过一次坑，不再让第二处自己调色。
-Color automationStatusColor(BuildContext context, String runStatus) {
+Color automationStatusColor(
+  BuildContext context,
+  AutomationRunStatus runStatus,
+) {
   final colors = context.smeltColors;
   return switch (runStatus) {
-    'awaiting_approval' => colors.waitingApproval,
-    'waiting_for_user' => colors.needsAttention,
-    'running' => colors.running,
-    'completed' => colors.done,
-    'failed' => colors.danger,
+    AutomationRunStatus.awaitingApproval => colors.waitingApproval,
+    AutomationRunStatus.waitingForUser => colors.needsAttention,
+    AutomationRunStatus.running => colors.running,
+    AutomationRunStatus.completed => colors.done,
+    AutomationRunStatus.failed => colors.danger,
     _ => colors.idle,
   };
 }
 
-/// Run 状态文案。与 `automationStatusColor` 覆盖同一组机器码，改一处就得改另一处，
+/// Run 状态文案。与 `automationStatusColor` 覆盖同一组状态，改一处就得改另一处，
 /// 所以两者贴在一起放。
-String automationRunStatusLabel(String runStatus) => switch (runStatus) {
-  'starting' || 'queued' || 'dispatching' => 'Queued',
-  'running' => 'Running',
-  'awaiting_approval' => 'Awaiting approval',
-  'waiting_for_user' => 'Needs input',
-  'completed' => 'Succeeded',
-  'failed' => 'Failed',
-  'cancelled' => 'Cancelled',
-  'skipped' => 'Skipped',
-  _ => runStatus,
-};
+String automationRunStatusLabel(AutomationRunStatus runStatus) =>
+    switch (runStatus) {
+      AutomationRunStatus.starting ||
+      AutomationRunStatus.queued ||
+      AutomationRunStatus.dispatching => 'Queued',
+      AutomationRunStatus.running => 'Running',
+      AutomationRunStatus.awaitingApproval => 'Awaiting approval',
+      AutomationRunStatus.waitingForUser => 'Needs input',
+      AutomationRunStatus.completed => 'Succeeded',
+      AutomationRunStatus.failed => 'Failed',
+      AutomationRunStatus.cancelled => 'Cancelled',
+      AutomationRunStatus.skipped => 'Skipped',
+    };
 
 const _weekdayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const _weekdayMask = 0x1f;
@@ -49,27 +54,37 @@ const _allDaysMask = 0x7f;
 String _clock(int hour, int minute) =>
     '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
 
-/// 单条调度规则的文案。位掩码 bit0 = 周一，与桌面 `SCHEDULE_DAY_*` 一致。
+/// 星期位掩码的文案，bit0 = 周一，与桌面 `SCHEDULE_DAY_*` 一致。
+String _daysLabel(int mask) {
+  final days = mask & _allDaysMask;
+  if (days == _weekdayMask) return 'Weekdays';
+  if (days == _allDaysMask) return 'Daily';
+  final picked = [
+    for (var i = 0; i < 7; i++)
+      if (days & (1 << i) != 0) _weekdayNames[i],
+  ];
+  return picked.isEmpty ? 'Never' : picked.join(' ');
+}
+
+/// 单条调度规则的文案。
 String automationScheduleLabel(AutomationSchedule schedule) {
-  switch (schedule.type) {
-    case 'daily':
+  switch (schedule.kind) {
+    case ScheduleKind.daily:
       return 'Daily ${_clock(schedule.hour, schedule.minute)}';
-    case 'every_minutes':
+    case ScheduleKind.everyMinutes:
       return 'Every ${schedule.minutes} min';
-    case 'every_hours':
+    case ScheduleKind.everyHours:
       return 'Every ${schedule.hours} h';
-    case 'weekly':
+    case ScheduleKind.weekly:
       final time = _clock(schedule.hour, schedule.minute);
-      final days = schedule.days & _allDaysMask;
-      if (days == _weekdayMask) return 'Weekdays $time';
-      if (days == _allDaysMask) return 'Daily $time';
-      final picked = [
-        for (var i = 0; i < 7; i++)
-          if (days & (1 << i) != 0) _weekdayNames[i],
-      ];
-      return picked.isEmpty ? 'Never $time' : '${picked.join(' ')} $time';
-    default:
-      return schedule.type;
+      return '${_daysLabel(schedule.days)} $time';
+    case ScheduleKind.during:
+      // 「工作日 09:00–18:00 每 30 分钟」：时段和间隔缺一不可，少了哪个用户都
+      // 判断不出它今天会跑几次。
+      final start = _clock(schedule.hour, schedule.minute);
+      final end = _clock(schedule.endHour, schedule.endMinute);
+      return '${_daysLabel(schedule.days)} $start–$end, '
+          'every ${schedule.minutes} min';
   }
 }
 
@@ -106,7 +121,9 @@ class AutomationSourceHeader extends StatelessWidget {
     final theme = Theme.of(context);
     final muted = theme.colorScheme.onSurfaceVariant;
     final startedAt = source.startedAt;
-    final age = startedAt == null ? null : formatRelativeEpochSeconds(startedAt);
+    final age = startedAt == null
+        ? null
+        : formatRelativeEpochSeconds(startedAt);
 
     return InkWell(
       onTap: onTap,

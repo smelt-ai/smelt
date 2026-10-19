@@ -6,23 +6,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/pages/terminal_session_page.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/services/runtime_service.dart';
+
+import 'support/runtime_fixtures.dart' as fixtures;
 import 'package:smelt_mobile/services/terminal_stream_service.dart';
-import 'package:smelt_mobile/theme/terminal_theme_wire.dart';
+import 'package:smelt_mobile/theme/terminal_theme.dart';
 import 'package:xterm/xterm.dart';
 
 class _FakeTerminalStream implements TerminalStreamClient {
   final _events = StreamController<TerminalStreamEvent>.broadcast(sync: true);
   final _states = StreamController<TerminalStreamState>.broadcast(sync: true);
 
-  TerminalStreamState _state = TerminalStreamState.waitingForGateway;
+  TerminalStreamState _state = TerminalStreamState.connecting;
   final geometries = <TerminalGeometry>[];
 
   void emit(TerminalStreamEvent event) => _events.add(event);
 
-  void connect() {
-    _state = TerminalStreamState.connected;
-    _states.add(_state);
+  void connect() => setState(TerminalStreamState.connected);
+
+  void setState(TerminalStreamState state) {
+    _state = state;
+    _states.add(state);
   }
 
   @override
@@ -33,9 +37,6 @@ class _FakeTerminalStream implements TerminalStreamClient {
 
   @override
   TerminalStreamState get state => _state;
-
-  @override
-  bool get writeEnabled => true;
 
   bool historyAvailable = false;
   int loadMoreCalls = 0;
@@ -76,16 +77,19 @@ class _FakeTerminalStream implements TerminalStreamClient {
 
 void main() {
   testWidgets('terminal page starts in browse mode', (tester) async {
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
 
+    final stream = _FakeTerminalStream();
     await tester.pumpWidget(
-      const MaterialApp(home: TerminalSessionPage(session: session)),
+      MaterialApp(
+        home: TerminalSessionPage(session: session, stream: stream),
+      ),
     );
 
     final terminalView = tester.widget<TerminalView>(find.byType(TerminalView));
@@ -93,8 +97,57 @@ void main() {
     expect(terminalView.hardwareKeyboardOnly, isTrue);
     expect(terminalView.scrollController, isNotNull);
     expect(terminalView.focusNode?.hasFocus, isFalse);
+    expect(terminalView.readOnly, isTrue, reason: '还没附着上，不收键盘输入');
     expect(find.byIcon(Icons.keyboard_outlined), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(
+            find.ancestor(
+              of: find.byIcon(Icons.keyboard_outlined),
+              matching: find.byType(IconButton),
+            ),
+          )
+          .onPressed,
+      isNull,
+    );
+    // 快捷键栏从一开始就在：它得在 attach 之前把终端视口压到最终高度。
+    expect(find.byType(TerminalShortcutBar), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('the shortcut bar goes away once the session ends', (
+    tester,
+  ) async {
+    final stream = _FakeTerminalStream();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalSessionPage(session: _session, stream: stream),
+      ),
+    );
+    await _ready(tester, stream);
+    expect(find.byType(TerminalShortcutBar), findsOneWidget);
+
+    // 重连期间不收栏子（会改行数），键盘也照样能开。
+    stream.setState(TerminalStreamState.reconnecting);
+    stream.emit(const TerminalErrorEvent('终端连接断开：eof'));
+    await tester.pump();
+    expect(find.byType(TerminalShortcutBar), findsOneWidget);
+    expect(
+      tester.widget<TerminalView>(find.byType(TerminalView)).readOnly,
+      isFalse,
+    );
+    expect(find.text('终端连接断开：eof'), findsOneWidget);
+
+    stream.setState(TerminalStreamState.ended);
+    stream.emit(const TerminalClosedEvent());
+    await tester.pump();
     expect(find.byType(TerminalShortcutBar), findsNothing);
+    expect(find.text('Terminal session ended'), findsOneWidget);
+    expect(
+      tester.widget<TerminalView>(find.byType(TerminalView)).readOnly,
+      isTrue,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -103,11 +156,11 @@ void main() {
     tester,
   ) async {
     final stream = _FakeTerminalStream();
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
 
@@ -117,14 +170,7 @@ void main() {
       ),
     );
     stream.connect();
-    stream.emit(
-      const TerminalReadyEvent(
-        cols: 40,
-        rows: 20,
-        replayBytes: 0,
-        writeEnabled: true,
-      ),
-    );
+    stream.emit(const TerminalReadyEvent(cols: 40, rows: 20, replayBytes: 0));
     stream.emit(const TerminalReplayCompleteEvent());
     await tester.pump();
     await tester.pump();
@@ -178,11 +224,11 @@ void main() {
     tester,
   ) async {
     final stream = _FakeTerminalStream();
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
     await tester.pumpWidget(
@@ -199,12 +245,7 @@ void main() {
       ),
     );
     stream.emit(
-      TerminalReadyEvent(
-        cols: 40,
-        rows: 20,
-        replayBytes: replay.length,
-        writeEnabled: true,
-      ),
+      TerminalReadyEvent(cols: 40, rows: 20, replayBytes: replay.length),
     );
     stream.emit(TerminalDataEvent(replay));
     stream.emit(const TerminalReplayCompleteEvent());
@@ -231,11 +272,11 @@ void main() {
     tester,
   ) async {
     final stream = _FakeTerminalStream();
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
     await tester.pumpWidget(
@@ -244,10 +285,10 @@ void main() {
       ),
     );
     expect(stream.geometries, isNotEmpty);
+    // 快捷键栏从第一帧就在，行数在 attach 之前就落定。
+    expect(find.byType(TerminalShortcutBar), findsOneWidget);
 
     stream.connect();
-    // 通道接通、attach 未发：快捷键栏先上屏，行数在 attach 之前就落定。
-    stream.emit(const TerminalConnectedEvent(writeEnabled: true));
     await tester.pump();
     final mobileGeometry = stream.geometries.last;
     final geometryUpdatesAtAttach = stream.geometries.length;
@@ -264,7 +305,6 @@ void main() {
         cols: mobileGeometry.cols,
         rows: mobileGeometry.rows,
         replayBytes: replay.length,
-        writeEnabled: true,
       ),
     );
     stream.emit(TerminalDataEvent(replay));
@@ -313,11 +353,11 @@ void main() {
     (tester) async {
       addTearDown(() => tester.view.viewInsets = FakeViewPadding.zero);
       final stream = _FakeTerminalStream();
-      const session = SessionSummary(
+      final session = fixtures.session(
         id: 'terminal-1',
         kind: SessionKind.terminal,
         title: 'Shell',
-        phase: 'running',
+        phase: SessionPhase.thinking,
         agent: 'terminal',
       );
       await tester.pumpWidget(
@@ -333,12 +373,7 @@ void main() {
         ),
       );
       stream.emit(
-        TerminalReadyEvent(
-          cols: 40,
-          rows: 20,
-          replayBytes: replay.length,
-          writeEnabled: true,
-        ),
+        TerminalReadyEvent(cols: 40, rows: 20, replayBytes: replay.length),
       );
       stream.emit(TerminalDataEvent(replay));
       stream.emit(const TerminalReplayCompleteEvent());
@@ -452,13 +487,13 @@ void main() {
     },
   );
 
-  testWidgets('快捷键栏出现后，全屏 TUI 仍然正好铺满视口', (tester) async {
+  testWidgets('回放期间视口变矮，回放完全屏 TUI 仍然正好铺满视口', (tester) async {
     final stream = _FakeTerminalStream();
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
     await tester.pumpWidget(
@@ -467,7 +502,7 @@ void main() {
       ),
     );
 
-    // 首次测量发生在浏览模式：那时还不知道能不能写，快捷键栏没上屏。
+    // 附着时的几何：那时还没有错误条。
     final attached = stream.geometries.last;
 
     stream.connect();
@@ -483,14 +518,13 @@ void main() {
         cols: attached.cols,
         rows: attached.rows,
         replayBytes: replay.length,
-        // 可写 => 快捷键栏上屏 => 终端视口当场变矮。
-        writeEnabled: true,
       ),
     );
     stream.emit(TerminalDataEvent(replay));
-    // 回放期间要先过一帧：这一帧里快捷键栏已经上屏，终端却还锁着尺寸。
+    // 回放中途弹出错误条（比如一次输入没发出去）：终端视口当场变矮，而终端还锁着尺寸。
+    stream.emit(const TerminalErrorEvent('终端输入发送失败'));
     await tester.pump();
-    expect(find.byType(TerminalShortcutBar), findsOneWidget);
+    expect(find.text('终端输入发送失败'), findsOneWidget);
 
     stream.emit(const TerminalReplayCompleteEvent());
     await tester.pump();
@@ -520,11 +554,11 @@ void main() {
     tester,
   ) async {
     final stream = _FakeTerminalStream();
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
     await tester.pumpWidget(
@@ -543,7 +577,6 @@ void main() {
         cols: mobileGeometry.cols - 1,
         rows: mobileGeometry.rows,
         replayBytes: 0,
-        writeEnabled: true,
       ),
     );
     await tester.pump();
@@ -645,11 +678,11 @@ void main() {
 
   testWidgets('Shift+Tab 跟随对端的 kitty keyboard 模式切换编码', (tester) async {
     final stream = _FakeTerminalStream();
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-kitty',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
     await tester.pumpWidget(
@@ -658,19 +691,12 @@ void main() {
       ),
     );
     stream.connect();
-    stream.emit(
-      const TerminalReadyEvent(
-        cols: 40,
-        rows: 20,
-        replayBytes: 0,
-        writeEnabled: true,
-      ),
-    );
+    stream.emit(const TerminalReadyEvent(cols: 40, rows: 20, replayBytes: 0));
     stream.emit(const TerminalReplayCompleteEvent());
     await tester.pump();
     await tester.pump();
 
-    // 打开软键盘，快捷键栏才会出现。
+    // 打开软键盘：快捷键栏一直都在，开不开键盘都一样能按。
     await tester.tap(find.byIcon(Icons.keyboard_outlined));
     await tester.pump();
     await tester.pump();
@@ -698,56 +724,35 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('terminal adopts the theme sent by the connected device', (
-    tester,
-  ) async {
+  testWidgets('terminal palette follows the app brightness', (tester) async {
     final stream = _FakeTerminalStream();
-    const session = SessionSummary(
-      id: 'terminal-1',
-      kind: SessionKind.terminal,
-      title: 'Shell',
-      phase: 'running',
-      agent: 'terminal',
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        home: TerminalSessionPage(session: session, stream: stream),
-      ),
+    Widget app(Brightness brightness) => MaterialApp(
+      theme: ThemeData(brightness: brightness),
+      home: TerminalSessionPage(session: _session, stream: stream),
     );
 
-    // 连上之前只能用兜底深色（= PC 出厂主题）。
-    expect(
-      tester.widget<TerminalView>(find.byType(TerminalView)).theme.background,
-      SmeltTerminalTheme.fallbackDark.background,
-    );
-
-    stream.connect();
-    // PC 端切了浅色主题：手机必须跟着换。否则 TUI 按 OSC 11 查到的浅底挑灰度，
-    // 手机上却渲染在深底上，直接是对比度问题。
-    stream.emit(
-      TerminalReadyEvent(
-        cols: 40,
-        rows: 20,
-        replayBytes: 0,
-        writeEnabled: true,
-        theme: SmeltTerminalTheme.fromWire(const {
-          'dark': false,
-          'background': '#ffffff',
-          'foreground': '#24292e',
-        }),
-        themeIsDark: false,
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-
-    final view = tester.widget<TerminalView>(find.byType(TerminalView));
-    expect(view.theme.background, const Color(0xffffffff));
-    expect(view.theme.foreground, const Color(0xff24292e));
+    await tester.pumpWidget(app(Brightness.light));
+    await _ready(tester, stream);
+    var view = tester.widget<TerminalView>(find.byType(TerminalView));
+    expect(view.theme.background, SmeltTerminalTheme.light.background);
+    expect(view.theme.foreground, SmeltTerminalTheme.light.foreground);
+    expect(view.theme.blue, SmeltTerminalTheme.light.blue);
     expect(
       tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
-      const Color(0xffffffff),
-      reason: '浅色终端不该嵌在纯黑页面里',
+      SmeltTerminalTheme.light.background,
+      reason: '页面底色跟终端底色一致，视口边上不露出另一种颜色',
+    );
+
+    // 用户切到深色：同一个终端当场换色板，不用重新附着。MaterialApp 换主题有过渡动画，
+    // 明暗在动画过半时才翻转，等它走完再看。
+    await tester.pumpWidget(app(Brightness.dark));
+    await tester.pump(const Duration(milliseconds: 400));
+    view = tester.widget<TerminalView>(find.byType(TerminalView));
+    expect(view.theme.background, SmeltTerminalTheme.dark.background);
+    expect(view.theme.foreground, SmeltTerminalTheme.dark.foreground);
+    expect(
+      tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
+      SmeltTerminalTheme.dark.background,
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -756,11 +761,11 @@ void main() {
   /// 首屏只带最新的一段；滚到顶就该去补更老的，并且不能把用户弹回底部。
   testWidgets('滚到顶触发补加载历史，补完后停在原来的内容上', (tester) async {
     final stream = _FakeTerminalStream()..historyAvailable = true;
-    const session = SessionSummary(
+    final session = fixtures.session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: 'Shell',
-      phase: 'running',
+      phase: SessionPhase.thinking,
       agent: 'terminal',
     );
 
@@ -775,7 +780,6 @@ void main() {
         cols: 40,
         rows: 20,
         replayBytes: 0,
-        writeEnabled: true,
         scrollbackLines: 120,
         historyLines: 4000,
       ),
@@ -823,7 +827,6 @@ void main() {
         cols: 40,
         rows: 20,
         replayBytes: 0,
-        writeEnabled: true,
         scrollbackLines: kMaxTerminalScrollbackLines,
         historyLines: 4000,
       ),
@@ -1117,24 +1120,17 @@ void main() {
   });
 }
 
-const _session = SessionSummary(
+final _session = fixtures.session(
   id: 'terminal-1',
   kind: SessionKind.terminal,
   title: 'Shell',
-  phase: 'running',
+  phase: SessionPhase.thinking,
   agent: 'terminal',
 );
 
 Future<void> _ready(WidgetTester tester, _FakeTerminalStream stream) async {
   stream.connect();
-  stream.emit(
-    const TerminalReadyEvent(
-      cols: 40,
-      rows: 20,
-      replayBytes: 0,
-      writeEnabled: true,
-    ),
-  );
+  stream.emit(const TerminalReadyEvent(cols: 40, rows: 20, replayBytes: 0));
   stream.emit(const TerminalReplayCompleteEvent());
   await tester.pump();
   await tester.pump();

@@ -1,15 +1,17 @@
-import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
-import 'package:smelt_mobile/models/acp_snapshot.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/widgets/acp_content.dart';
 
 Widget _host(Widget child) => MaterialApp(
   theme: ThemeData.dark(useMaterial3: true),
   home: Scaffold(body: SingleChildScrollView(child: child)),
 );
+
+Uint8List _png(int width) => img.encodePng(img.Image(width: width, height: 1));
 
 void main() {
   testWidgets('completion summaries are not rendered as tool cards', (
@@ -18,8 +20,8 @@ void main() {
     await tester.pumpWidget(
       _host(
         const AcpCompletionMessage(
-          output: [ToolOutputText(text: 'All done')],
-          status: ToolCallStatus.completed,
+          summary: 'All done',
+          status: ToolStatus.completed,
           isFinal: true,
         ),
       ),
@@ -28,6 +30,19 @@ void main() {
     expect(find.text('Completed'), findsOneWidget);
     expect(find.text('All done'), findsOneWidget);
     expect(find.text('Tool'), findsNothing);
+  });
+
+  testWidgets('an empty completion summary still says it finished', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        const AcpCompletionMessage(summary: '  ', status: ToolStatus.failed),
+      ),
+    );
+
+    expect(find.text('Completion failed'), findsOneWidget);
+    expect(find.text('Task completed.'), findsOneWidget);
   });
 
   testWidgets('thought blocks are collapsed until opened', (tester) async {
@@ -56,12 +71,17 @@ void main() {
         const AcpToolCallCard(
           title: 'Update config',
           kind: ToolKind.edit,
-          status: ToolCallStatus.completed,
+          status: ToolStatus.completed,
           output: [
-            ToolOutputDiff(
-              path: 'lib/config.dart',
-              oldText: 'before\n',
-              newText: 'after\n',
+            ToolOutput(
+              kind: ToolOutputKind.diff,
+              text: '',
+              diff: DiffView(
+                path: 'lib/config.dart',
+                oldText: 'before\n',
+                newText: 'after\n',
+              ),
+              truncated: false,
             ),
           ],
         ),
@@ -77,18 +97,59 @@ void main() {
     expect(find.text('-1'), findsOneWidget);
   });
 
+  testWidgets('embedded terminal output notes the exit code and truncation', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        const AcpToolCallCard(
+          title: 'cargo test',
+          kind: ToolKind.execute,
+          status: ToolStatus.failed,
+          output: [
+            ToolOutput(
+              kind: ToolOutputKind.terminal,
+              text: 'test failed',
+              exitCode: 101,
+              truncated: true,
+            ),
+          ],
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('cargo test'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('test failed'), findsOneWidget);
+    expect(find.text('Exit code 101 · Output truncated'), findsOneWidget);
+  });
+
   testWidgets('image provider is retained across parent rebuilds', (
     tester,
   ) async {
-    final image = AcpImageData(
-      mimeType: 'image/png',
-      base64: base64Encode(img.encodePng(img.Image(width: 1, height: 1))),
-    );
+    final bytes = _png(1);
 
-    await tester.pumpWidget(_host(AcpImageThumbnail(image: image)));
+    await tester.pumpWidget(
+      _host(
+        AcpImageThumbnail(
+          image: ConversationImage(mime: 'image/png', bytes: bytes),
+        ),
+      ),
+    );
     final firstProvider = tester.widget<Image>(find.byType(Image)).image;
 
-    await tester.pumpWidget(_host(AcpImageThumbnail(image: image)));
+    // 每次快照都是新对象，但内容没变就不该换 provider（否则图片会闪）。
+    await tester.pumpWidget(
+      _host(
+        AcpImageThumbnail(
+          image: ConversationImage(
+            mime: 'image/png',
+            bytes: Uint8List.fromList(bytes),
+          ),
+        ),
+      ),
+    );
     final secondProvider = tester.widget<Image>(find.byType(Image)).image;
 
     expect(identical(firstProvider, secondProvider), isTrue);
@@ -97,24 +158,27 @@ void main() {
   testWidgets('opening a thumbnail loads the original and offers retry', (
     tester,
   ) async {
-    String png(int width) =>
-        base64Encode(img.encodePng(img.Image(width: width, height: 1)));
-    final requests = <AcpImageOriginal>[];
+    final requests = <(ImageRef, int?)>[];
     var fail = true;
-    const original = AcpImageOriginal(entry: 3, digest: 'abc');
+    const original = ImageRef(entry: 3, digest: 'retry');
 
     await tester.pumpWidget(
       _host(
         AcpImageThumbnail(
-          image: AcpImageData(
-            mimeType: 'image/png',
-            base64: png(1),
+          image: ConversationImage(
+            mime: 'image/png',
+            bytes: _png(1),
             original: original,
           ),
-          loadOriginal: (ref) async {
-            requests.add(ref);
-            if (fail) throw StateError('offline');
-            return AcpImageData(mimeType: 'image/png', base64: png(2));
+          loadImage: (ref, {maxEdge}) async {
+            requests.add((ref, maxEdge));
+            if (fail) {
+              throw const SmeltError(
+                kind: SmeltErrorKind.offline,
+                message: 'offline',
+              );
+            }
+            return ImageData(mime: 'image/png', bytes: _png(2));
           },
         ),
       ),
@@ -122,13 +186,13 @@ void main() {
 
     await tester.tap(find.byType(AcpImageThumbnail));
     await tester.pumpAndSettle();
-    expect(requests, [original]);
+    expect(requests, [(original, null)], reason: '点开取的是原图');
     expect(find.textContaining('offline'), findsOneWidget);
 
     fail = false;
     await tester.tap(find.text('重试'));
     await tester.pumpAndSettle();
-    expect(requests, [original, original]);
+    expect(requests, [(original, null), (original, null)]);
     expect(find.textContaining('offline'), findsNothing);
     final shown = tester
         .widgetList<Image>(find.byType(Image))
@@ -136,37 +200,63 @@ void main() {
         .whereType<MemoryImage>()
         .map((image) => image.bytes)
         .toList();
-    expect(shown, anyElement(equals(base64Decode(png(2)))));
+    expect(shown, anyElement(equals(_png(2))));
+  });
+
+  testWidgets('a reference-only image fetches a thumbnail for the list', (
+    tester,
+  ) async {
+    final edges = <int?>[];
+    await tester.pumpWidget(
+      _host(
+        AcpImageThumbnail(
+          image: const ConversationImage(
+            mime: 'image/png',
+            original: ImageRef(entry: 0, digest: 'thumbnail'),
+          ),
+          loadImage: (_, {maxEdge}) async {
+            edges.add(maxEdge);
+            return ImageData(mime: 'image/png', bytes: _png(3));
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(edges, [thumbnailMaxEdge]);
+    final shown = tester.widget<Image>(find.byType(Image)).image;
+    expect((shown as MemoryImage).bytes, _png(3));
   });
 
   testWidgets('a reference without a thumbnail still opens the original', (
     tester,
   ) async {
-    var loads = 0;
+    final edges = <int?>[];
     await tester.pumpWidget(
       _host(
         AcpImageThumbnail(
-          image: const AcpImageData(
-            mimeType: 'image/heic',
-            base64: '',
-            original: AcpImageOriginal(entry: 0, digest: 'x'),
+          image: const ConversationImage(
+            mime: 'image/heic',
+            original: ImageRef(entry: 0, digest: 'no-thumbnail'),
           ),
-          loadOriginal: (_) async {
-            loads++;
-            return AcpImageData(
-              mimeType: 'image/png',
-              base64: base64Encode(
-                img.encodePng(img.Image(width: 1, height: 1)),
-              ),
-            );
+          loadImage: (_, {maxEdge}) async {
+            edges.add(maxEdge);
+            if (maxEdge != null) {
+              throw const SmeltError(
+                kind: SmeltErrorKind.other,
+                message: 'cannot decode',
+              );
+            }
+            return ImageData(mime: 'image/png', bytes: _png(1));
           },
         ),
       ),
     );
+    await tester.pumpAndSettle();
 
     expect(find.byIcon(Icons.image_outlined), findsOneWidget);
     await tester.tap(find.byType(AcpImageThumbnail));
     await tester.pumpAndSettle();
-    expect(loads, 1);
+    expect(edges, [thumbnailMaxEdge, null]);
   });
 }

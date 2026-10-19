@@ -1,17 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../models/acp_snapshot.dart';
+import '../models/runtime_models.dart';
 import '../theme/smelt_theme.dart';
 
 /// Agent 主动发问时的作答卡（elicitation）。
 ///
-/// 从会话页里抽出来，一是为了让「Submit 按钮会被滚出视野」这个缺陷可以被测到
-/// ——会话页依赖全局 `gatewayService` 单例，测试里替换不掉；二是这张卡除了几个
-/// 回调之外并不需要知道网关的存在。
+/// 从会话页里抽出来，一是为了让「Submit 按钮会被滚出视野」这个缺陷可以被测到；
+/// 二是这张卡除了几个回调之外并不需要知道运行时的存在。
 ///
-/// 文本框的值由调用方持有（[textValues]）：快照刷新时页面会用远端值补齐本地
-/// 未编辑的字段，那份合并逻辑留在页面里。
+/// 文本框的值由调用方持有（[textValues]），提交时连同提交一起交给运行时；没编辑
+/// 过的字段显示运行时记下的值。
 class ElicitationCard extends StatelessWidget {
   const ElicitationCard({
     super.key,
@@ -23,7 +22,7 @@ class ElicitationCard extends StatelessWidget {
     required this.onDismiss,
   });
 
-  final PendingElicitation elicitation;
+  final Elicitation elicitation;
   final Map<int, String> textValues;
   final void Function(int fieldIndex, String value) onTextChanged;
   final void Function(int fieldIndex, int optionIndex) onChoose;
@@ -33,11 +32,11 @@ class ElicitationCard extends StatelessWidget {
   /// 单个单选字段时不显示按钮行：点中选项本身就是提交。
   bool get _singleSelect =>
       elicitation.fields.length == 1 &&
-      elicitation.fields.first.kind is ElicitationSelect;
+      elicitation.fields.first.kind == ElicitationFieldKind.select;
 
   @override
   Widget build(BuildContext context) {
-    final ready = elicitation.isReady(localTextValues: textValues);
+    final ready = elicitation.isReadyWith(textValues);
     final accent = context.smeltColors.needsAttention;
 
     // 高度上限按屏幕比例给，不再写死 360px：横屏或小屏上 360 可能已经吃掉整个
@@ -85,7 +84,6 @@ class ElicitationCard extends StatelessWidget {
                   const SizedBox(height: 10),
                   for (final entry in elicitation.fields.asMap().entries)
                     _ElicitationField(
-                      elicitation: elicitation,
                       fieldIndex: entry.key,
                       field: entry.value,
                       textValues: textValues,
@@ -121,7 +119,6 @@ class ElicitationCard extends StatelessWidget {
 
 class _ElicitationField extends StatelessWidget {
   const _ElicitationField({
-    required this.elicitation,
     required this.fieldIndex,
     required this.field,
     required this.textValues,
@@ -129,7 +126,6 @@ class _ElicitationField extends StatelessWidget {
     required this.onChoose,
   });
 
-  final PendingElicitation elicitation;
   final int fieldIndex;
   final ElicitationField field;
   final Map<int, String> textValues;
@@ -138,29 +134,26 @@ class _ElicitationField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final url = field.url ?? '';
     final input = switch (field.kind) {
-      ElicitationSelect(options: final options) ||
-      ElicitationMultiSelect(options: final options) => Wrap(
+      ElicitationFieldKind.select || ElicitationFieldKind.multiSelect => Wrap(
         spacing: 8,
         runSpacing: 6,
-        children: options.asMap().entries.map((entry) {
-          final selected =
-              elicitation.chosen[fieldIndex]?.contains(entry.key) == true;
+        children: field.options.asMap().entries.map((entry) {
           return ChoiceChip(
-            label: Text(entry.value.label),
-            selected: selected,
+            label: Text(entry.value),
+            selected: field.chosen.contains(entry.key),
             onSelected: (_) => onChoose(fieldIndex, entry.key),
           );
         }).toList(),
       ),
-      ElicitationText(secret: final secret) => TextFormField(
-        initialValue:
-            textValues[fieldIndex] ?? elicitation.textValues[fieldIndex] ?? '',
-        obscureText: secret,
+      ElicitationFieldKind.text => TextFormField(
+        initialValue: textValues[fieldIndex] ?? field.textValue ?? '',
+        obscureText: field.secret,
         decoration: const InputDecoration(border: OutlineInputBorder()),
         onChanged: (value) => onTextChanged(fieldIndex, value),
       ),
-      ElicitationExternalUrl(url: final url) => Row(
+      ElicitationFieldKind.externalUrl => Row(
         children: [
           Expanded(child: SelectableText(url)),
           IconButton(

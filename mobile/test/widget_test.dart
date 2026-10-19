@@ -1,69 +1,74 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/main.dart';
-import 'package:smelt_mobile/models/acp_snapshot.dart';
-import 'package:smelt_mobile/models/pairing_config.dart';
-import 'package:smelt_mobile/models/saved_desktop.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/models/saved_runtime.dart';
 import 'package:smelt_mobile/pages/console_page.dart';
+import 'package:smelt_mobile/pages/settings_page.dart';
 import 'package:smelt_mobile/services/pairing_storage.dart';
 import 'package:smelt_mobile/services/pending_actions_controller.dart';
+import 'package:smelt_mobile/services/runtime_service.dart';
 import 'package:smelt_mobile/widgets/approval_card.dart';
 import 'package:smelt_mobile/widgets/session_row.dart';
 
+import 'support/runtime_fixtures.dart';
+
 class MemoryPairingStorage implements PairingStorage {
-  SavedDesktopCollection value = const SavedDesktopCollection();
+  MemoryPairingStorage([this.value = const SavedRuntimeCollection()]);
+
+  SavedRuntimeCollection value;
 
   @override
-  Future<SavedDesktopCollection> load() async => value;
+  Future<SavedRuntimeCollection> load() async => value;
 
   @override
-  Future<SavedDesktopCollection> save(PairingConfig pairing) async {
-    final desktop = SavedDesktop.create(pairing);
-    value = SavedDesktopCollection(
-      desktops: [
-        desktop,
-        ...value.desktops.where((item) => item.id != desktop.id),
+  Future<SavedRuntimeCollection> save(RuntimeInfo info) async {
+    final runtime = SavedRuntime.fromInfo(info);
+    value = SavedRuntimeCollection(
+      runtimes: [
+        runtime,
+        ...value.runtimes.where((item) => item.runtimeId != runtime.runtimeId),
       ],
-      activeDesktopId: desktop.id,
+      activeRuntimeId: runtime.runtimeId,
     );
     return value;
   }
 
   @override
-  Future<SavedDesktopCollection> setActive(String desktopId) async {
-    value = SavedDesktopCollection(
-      desktops: value.desktops,
-      activeDesktopId: desktopId,
+  Future<SavedRuntimeCollection> setActive(String runtimeId) async {
+    value = SavedRuntimeCollection(
+      runtimes: value.runtimes,
+      activeRuntimeId: runtimeId,
     );
     return value;
   }
 
   @override
-  Future<SavedDesktopCollection> rename(String desktopId, String name) async {
-    value = SavedDesktopCollection(
-      desktops: value.desktops
+  Future<SavedRuntimeCollection> rename(String runtimeId, String name) async {
+    value = SavedRuntimeCollection(
+      runtimes: value.runtimes
           .map(
-            (item) => item.id == desktopId ? item.copyWith(name: name) : item,
+            (item) =>
+                item.runtimeId == runtimeId ? item.copyWith(name: name) : item,
           )
           .toList(),
-      activeDesktopId: value.activeDesktopId,
+      activeRuntimeId: value.activeRuntimeId,
     );
     return value;
   }
 
   @override
-  Future<SavedDesktopCollection> remove(String desktopId) async {
-    final remaining = value.desktops
-        .where((item) => item.id != desktopId)
+  Future<SavedRuntimeCollection> remove(String runtimeId) async {
+    final remaining = value.runtimes
+        .where((item) => item.runtimeId != runtimeId)
         .toList();
-    value = SavedDesktopCollection(
-      desktops: remaining,
-      activeDesktopId: value.activeDesktopId == desktopId
-          ? remaining.firstOrNull?.id
-          : value.activeDesktopId,
+    value = SavedRuntimeCollection(
+      runtimes: remaining,
+      activeRuntimeId: value.activeRuntimeId == runtimeId
+          ? remaining.firstOrNull?.runtimeId
+          : value.activeRuntimeId,
     );
     return value;
   }
@@ -73,105 +78,84 @@ void main() {
   test(
     'session list uses ACP conversation text instead of agent CLI label',
     () {
-      const session = SessionSummary(
+      final summary = session(
         id: 'acp-1',
         title: '修复移动端项目列表',
-        phase: 'idle',
-        agent: 'codex',
         detail: '  正在检查列表数据  ',
       );
 
-      expect(sessionListTitle(session), '修复移动端项目列表');
-      expect(sessionListSubtitle(session), '正在检查列表数据');
+      expect(sessionListTitle(summary), '修复移动端项目列表');
+      expect(sessionListSubtitle(summary), '正在检查列表数据');
     },
   );
 
   test('session list omits empty detail and has an ACP fallback title', () {
-    const session = SessionSummary(
+    final summary = session(
       id: 'acp-2',
       title: '  ',
-      phase: 'idle',
       agent: 'other',
       detail: ' ',
     );
 
-    expect(sessionListTitle(session), 'ACP conversation');
-    expect(sessionListSubtitle(session), isNull);
+    expect(sessionListTitle(summary), 'ACP conversation');
+    expect(sessionListSubtitle(summary), isNull);
   });
 
   test('terminal sessions use a terminal fallback title', () {
-    const session = SessionSummary(
+    final summary = session(
       id: 'terminal-1',
       kind: SessionKind.terminal,
       title: ' ',
-      phase: 'idle',
-      agent: 'codex',
     );
 
-    expect(sessionListTitle(session), 'Terminal');
+    expect(sessionListTitle(summary), 'Terminal');
   });
 
   test('session filters separate actionable and running conversations', () {
-    const approval = SessionSummary(
+    final approval = session(
       id: 'approval',
-      title: 'Approve command',
-      phase: 'awaiting_approval',
-      status: 'waiting_approval',
-      agent: 'codex',
+      phase: SessionPhase.awaitingApproval,
+      status: SessionStatus.needsYou,
     );
-    const running = SessionSummary(
+    final running = session(
       id: 'running',
-      title: 'Implement feature',
-      phase: 'running',
-      status: 'running',
-      agent: 'codex',
+      phase: SessionPhase.thinking,
+      status: SessionStatus.running,
     );
-    const idle = SessionSummary(
-      id: 'idle',
-      title: 'Finished task',
-      phase: 'idle',
-      agent: 'codex',
-    );
-    const failed = SessionSummary(
+    final idle = session(id: 'idle');
+    // 状态已经回到空闲，但这台手机上还挂着没处理的失败提醒。
+    final failed = session(
       id: 'failed',
-      title: 'Failed task',
-      phase: 'failed',
-      status: 'done',
-      agent: 'codex',
-      attention: LifecycleAttention(
-        sessionId: 'failed',
-        title: 'Failed',
+      phase: SessionPhase.failed,
+      attention: attention(
+        'failed',
+        AttentionKind.failure,
         message: 'Agent stopped',
-        kind: 'failure',
       ),
     );
-    const sessions = [approval, running, idle, failed];
-
-    expect(
-      sessions.where(sessionNeedsAction).map((s) => s.id),
-      ['approval', 'failed'],
+    final done = session(
+      id: 'done',
+      phase: SessionPhase.succeeded,
+      attention: attention('done', AttentionKind.success),
     );
+    final sessions = [approval, running, idle, failed, done];
+
+    expect(sessions.where(sessionNeedsAction).map((s) => s.id), [
+      'approval',
+      'failed',
+    ]);
     expect(sessions.where(sessionIsRunning).map((s) => s.id), ['running']);
+    expect(sessions.where(sessionRecentlyDone).map((s) => s.id), ['done']);
   });
 
   test('attention notifications stay hidden for the active session', () {
-    const completed = LifecycleAttention(
-      sessionId: 'current',
-      title: 'Completed',
-      message: 'Task completed',
-      kind: 'success',
-    );
-    const input = LifecycleAttention(
-      sessionId: 'current',
-      title: 'Waiting for you',
-      message: 'Agent needs input',
-      kind: 'input',
-    );
+    final completed = attention('current', AttentionKind.success);
+    final input = attention('current', AttentionKind.input);
 
-    for (final attention in [completed, input]) {
+    for (final item in [completed, input]) {
       expect(
         shouldShowAttentionNotification(
-          attention: attention,
+          attention: item,
           activeSessionId: 'current',
           subscribedSessionId: null,
         ),
@@ -181,18 +165,8 @@ void main() {
   });
 
   test('attention notifications still surface for other sessions', () {
-    const completed = LifecycleAttention(
-      sessionId: 'background',
-      title: 'Completed',
-      message: 'Task completed',
-      kind: 'success',
-    );
-    const input = LifecycleAttention(
-      sessionId: 'background',
-      title: 'Waiting for you',
-      message: 'Agent needs input',
-      kind: 'input',
-    );
+    final completed = attention('background', AttentionKind.success);
+    final input = attention('background', AttentionKind.input);
 
     expect(
       shouldShowAttentionNotification(
@@ -224,50 +198,14 @@ void main() {
     tester,
   ) async {
     final sessions = StreamController<List<SessionSummary>>.broadcast();
-    final snapshots = StreamController<String>.broadcast();
     addTearDown(sessions.close);
-    addTearDown(snapshots.close);
-
-    final cache = <String, AcpSnapshot>{
-      'acp-b': AcpSnapshot(
-        entries: const [],
-        phase: const AcpPhaseAwaitingApproval(),
-        pendingPermissions: const [
-          PendingPermission(
-            toolCallId: 'tool-b',
-            question: 'Run this command?',
-            options: [
-              PermissionOption(
-                optionId: 'reject',
-                name: 'Deny',
-                kind: 'RejectOnce',
-              ),
-              PermissionOption(
-                optionId: 'allow',
-                name: 'Allow',
-                kind: 'AllowOnce',
-              ),
-              PermissionOption(
-                optionId: 'always',
-                name: 'Always allow',
-                kind: 'AllowAlways',
-              ),
-            ],
-            details: ApprovalDetailsCommand(
-              command: 'cargo test -p smelt-ui --no-fail-fast',
-              cwd: '~/code/smelt',
-            ),
-          ),
-        ],
-      ),
-    };
 
     final controller = PendingActionsController(
       sessions: sessions.stream,
       initialSessions: const [],
-      snapshotUpdates: snapshots.stream,
-      lookupSnapshot: (id) => cache[id],
-      requestDetails: (_) => true,
+      fetchDetails: (id) async => id == 'acp-b'
+          ? const PendingActions(permissions: [commandApproval])
+          : const PendingActions(permissions: []),
     );
     addTearDown(controller.dispose);
 
@@ -286,15 +224,12 @@ void main() {
     );
 
     sessions.add([
-      const SessionSummary(
+      session(
         id: 'acp-b',
         title: 'refactor gateway',
-        phase: 'idle',
-        status: 'waiting_approval',
-        agent: 'codex',
+        status: SessionStatus.needsYou,
       ),
     ]);
-    snapshots.add('acp-b');
     await tester.pumpAndSettle();
 
     expect(find.text('Run this command?'), findsOneWidget);
@@ -307,11 +242,9 @@ void main() {
 
     await tester.tap(find.text('Allow'));
     await tester.pump();
-    expect(
-      responded,
-      ['acp-b/tool-b/allow'],
-      reason: 'deciding must not require opening the session',
-    );
+    expect(responded, [
+      'acp-b/tool-1/allow',
+    ], reason: 'deciding must not require opening the session');
   });
 
   testWidgets('always-allow is demoted out of the primary button row', (
@@ -322,27 +255,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: ApprovalCard(
-            permission: const PendingPermission(
-              toolCallId: 'tool-1',
-              question: 'Run this command?',
-              options: [
-                PermissionOption(
-                  optionId: 'reject',
-                  name: 'Deny',
-                  kind: 'RejectOnce',
-                ),
-                PermissionOption(
-                  optionId: 'allow',
-                  name: 'Allow',
-                  kind: 'AllowOnce',
-                ),
-                PermissionOption(
-                  optionId: 'always',
-                  name: 'Always allow',
-                  kind: 'AllowAlways',
-                ),
-              ],
-            ),
+            permission: commandApproval,
             onRespond: responded.add,
           ),
         ),
@@ -362,7 +275,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: CachedConnectionBar(
-            state: WsState.reconnecting,
+            state: RuntimeConnectionState.reconnecting,
             cachedAt: DateTime.now().subtract(const Duration(minutes: 3)),
           ),
         ),
@@ -376,19 +289,12 @@ void main() {
   testWidgets('pending action badge tracks sessions that need a decision', (
     tester,
   ) async {
-    const waiting = SessionSummary(
+    final waiting = session(
       id: 'approval',
       title: 'Needs approval',
-      phase: 'running',
-      status: 'waiting_approval',
-      agent: 'codex',
+      status: SessionStatus.needsYou,
     );
-    const idle = SessionSummary(
-      id: 'idle',
-      title: 'Finished task',
-      phase: 'idle',
-      agent: 'codex',
-    );
+    final idle = session(id: 'idle', title: 'Finished task');
     final sessions = StreamController<List<SessionSummary>>.broadcast();
     addTearDown(sessions.close);
     var taps = 0;
@@ -401,7 +307,7 @@ void main() {
               PendingActionBadge(
                 onPressed: () => taps++,
                 sessions: sessions.stream,
-                initialSessions: const [idle],
+                initialSessions: [idle],
               ),
             ],
           ),
@@ -412,14 +318,14 @@ void main() {
     // 没人等我的时候不占地方。
     expect(find.byType(IconButton), findsNothing);
 
-    sessions.add(const [waiting, idle]);
+    sessions.add([waiting, idle]);
     await tester.pump();
     expect(find.text('1'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.notification_important_outlined));
     expect(taps, 1);
 
-    sessions.add(const [idle]);
+    sessions.add([idle]);
     await tester.pump();
     expect(find.byType(IconButton), findsNothing);
   });
@@ -432,7 +338,7 @@ void main() {
       MaterialApp(
         home: Scaffold(
           body: CachedConnectionBar(
-            state: WsState.disconnected,
+            state: RuntimeConnectionState.disconnected,
             cachedAt: DateTime.now().subtract(const Duration(hours: 2)),
             onRetry: () => retries++,
           ),
@@ -449,7 +355,7 @@ void main() {
     expect(retries, 1);
   });
 
-  testWidgets('desktop rename dialog can be saved repeatedly', (tester) async {
+  testWidgets('runtime rename dialog can be saved repeatedly', (tester) async {
     final renamed = <String>[];
     await tester.pumpWidget(
       MaterialApp(
@@ -457,7 +363,7 @@ void main() {
           builder: (context) => Scaffold(
             body: FilledButton(
               onPressed: () async {
-                final name = await showDesktopRenameDialog(context, 'Desktop');
+                final name = await showRuntimeRenameDialog(context, 'Runtime');
                 if (name != null) renamed.add(name);
               },
               child: const Text('Rename'),
@@ -497,31 +403,218 @@ void main() {
     );
   });
 
-  testWidgets('no bottom navigation until there is something to navigate to', (
-    tester,
-  ) async {
-    await tester.pumpWidget(SmeltApp(pairingStorage: MemoryPairingStorage()));
-    await tester.pumpAndSettle();
+  group('home', () {
+    late FakeRuntimeBackend backend;
 
-    // The shell must not offer tabs it cannot render: while disconnected with
-    // no cached sessions every tab collapses to the same connection screen.
-    expect(find.byType(NavigationBar), findsNothing);
-    expect(find.text('Not connected'), findsOneWidget);
+    setUp(() {
+      FlutterSecureStorage.setMockInitialValues({});
+      backend = FakeRuntimeBackend();
+    });
 
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
+    tearDown(() async {
+      await runtimeService.dispose();
+      await backend.close();
+    });
 
-  testWidgets('shows pairing controls while disconnected', (tester) async {
-    await tester.pumpWidget(SmeltApp(pairingStorage: MemoryPairingStorage()));
-    await tester.pumpAndSettle();
+    Future<void> pumpHome(
+      WidgetTester tester, [
+      MemoryPairingStorage? storage,
+    ]) async {
+      // 在测试的 zone 里订阅，事件才会随 pump 送达。
+      runtimeService = RuntimeService(backend)..start();
+      await tester.pumpWidget(
+        SmeltApp(pairingStorage: storage ?? MemoryPairingStorage()),
+      );
+      await tester.pumpAndSettle();
+    }
 
-    expect(find.text('Not connected'), findsOneWidget);
-    expect(find.text('Pairing Code'), findsOneWidget);
-    expect(find.text('Gateway Endpoint'), findsNothing);
-    expect(find.text('Token'), findsNothing);
-    expect(find.text('Connect'), findsOneWidget);
-    expect(find.text('Scan QR Code to Pair'), findsOneWidget);
+    testWidgets('no bottom navigation until there is something to navigate to', (
+      tester,
+    ) async {
+      await pumpHome(tester);
 
-    await tester.pumpWidget(const SizedBox.shrink());
+      // The shell must not offer tabs it cannot render: while disconnected with
+      // no cached sessions every tab collapses to the same connection screen.
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.text('Not connected'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('shows pairing controls while disconnected', (tester) async {
+      await pumpHome(tester);
+
+      expect(find.text('Not connected'), findsOneWidget);
+      expect(find.text('Pairing Code'), findsOneWidget);
+      expect(find.text('Token'), findsNothing);
+      expect(find.text(pairingGuidance), findsOneWidget);
+      expect(find.text('Connect'), findsOneWidget);
+      expect(find.text('Scan QR Code to Pair'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('a pasted pairing link pairs and saves the runtime', (
+      tester,
+    ) async {
+      final storage = MemoryPairingStorage();
+      backend.pairResult = runtimeInfo(
+        runtimeId: 'runtime-a',
+        hostname: 'office-mac',
+        endpointId: 'endpoint-a',
+        relayUrl: 'https://relay.example',
+      );
+      await pumpHome(tester, storage);
+
+      const uri = 'smelt+iroh://endpoint-a/?code=123456';
+      await tester.enterText(find.byType(TextField), uri);
+      await tester.tap(find.text('Connect'));
+      await tester.pumpAndSettle();
+
+      expect(backend.calls, contains('pair $uri'));
+      final saved = storage.value.activeRuntime;
+      expect(saved?.runtimeId, 'runtime-a');
+      expect(saved?.name, 'office-mac');
+      expect(saved?.endpointId, 'endpoint-a');
+      expect(saved?.relayUrl, 'https://relay.example');
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('a malformed pairing code is rejected before dialing', (
+      tester,
+    ) async {
+      await pumpHome(tester);
+
+      await tester.enterText(
+        find.byType(TextField),
+        'https://mac.local/?token=legacy',
+      );
+      await tester.tap(find.text('Connect'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Not a Smelt pairing code'), findsOneWidget);
+      expect(backend.calls.where((call) => call.startsWith('pair')), isEmpty);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('a failed pairing reconnects the previous runtime', (
+      tester,
+    ) async {
+      final storage = MemoryPairingStorage(
+        SavedRuntimeCollection(
+          runtimes: [
+            SavedRuntime.fromInfo(runtimeInfo(endpointId: 'endpoint-old')),
+          ],
+          activeRuntimeId: 'runtime-a',
+        ),
+      );
+      backend.pairError = const SmeltError(
+        kind: SmeltErrorKind.invalidPairing,
+        message: 'The pairing code has expired',
+      );
+      await pumpHome(tester, storage);
+      backend.calls.clear();
+
+      await tester.enterText(
+        find.byType(TextField),
+        'smelt+iroh://endpoint-b/?code=1',
+      );
+      await tester.tap(find.text('Connect'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Pairing failed: The pairing code has expired'),
+        findsOneWidget,
+      );
+      expect(backend.calls.last, 'connect endpoint-old');
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('launching reconnects the last runtime', (tester) async {
+      final storage = MemoryPairingStorage(
+        SavedRuntimeCollection(
+          runtimes: [
+            SavedRuntime.fromInfo(runtimeInfo(endpointId: 'endpoint-a')),
+          ],
+          activeRuntimeId: 'runtime-a',
+        ),
+      );
+      await pumpHome(tester, storage);
+
+      expect(backend.calls, contains('connect endpoint-a'));
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('a revoked device is told to scan a new pairing code', (
+      tester,
+    ) async {
+      final storage = MemoryPairingStorage(
+        SavedRuntimeCollection(
+          runtimes: [SavedRuntime.fromInfo(runtimeInfo())],
+          activeRuntimeId: 'runtime-a',
+        ),
+      );
+      await pumpHome(tester, storage);
+
+      backend.connection.add(
+        const ConnectionEvent(
+          state: RuntimeConnectionState.disconnected,
+          endpointId: 'endpoint-a',
+          error: SmeltError(
+            kind: SmeltErrorKind.unpaired,
+            message: 'device is not paired',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      const message =
+          'This device was revoked or is not paired with office-mac. '
+          'Scan a new pairing code to reconnect.';
+      // 断开页和提示条各说一次：提示条带「扫码」按钮。
+      expect(find.text(message), findsNWidgets(2));
+      expect(find.widgetWithText(SnackBarAction, 'Scan'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets(
+      'cached sessions show the project tree with an offline banner',
+      (tester) async {
+        await pumpHome(tester);
+
+        final savedAt = DateTime.now().subtract(const Duration(minutes: 5));
+        backend.catalog.add(
+          CatalogEvent(
+            kind: CatalogEventKind.sessions,
+            sessions: SessionList(
+              sessions: [
+                session(
+                  id: 'acp-1',
+                  title: 'Fix login',
+                  projectRoot: '/code/smelt',
+                  projectTitle: 'smelt',
+                ),
+              ],
+              cached: true,
+              savedAtMs: savedAt.millisecondsSinceEpoch,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byType(NavigationBar), findsOneWidget);
+        await tester.tap(find.text('Projects'));
+        await tester.pumpAndSettle();
+        expect(find.text('smelt'), findsOneWidget);
+        expect(find.text('Offline · Saved 5m ago'), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
   });
 }

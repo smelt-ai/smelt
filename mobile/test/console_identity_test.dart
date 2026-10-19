@@ -1,21 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smelt_mobile/models/session_filters.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/theme/project_accent.dart';
 import 'package:smelt_mobile/util/relative_time.dart';
 
+import 'support/runtime_fixtures.dart';
+
 SessionSummary _session({
-  String status = 'idle',
-  String phase = 'idle',
-  int updatedAt = 0,
-}) => SessionSummary(
+  SessionStatus status = SessionStatus.idle,
+  SessionPhase phase = SessionPhase.idle,
+  AttentionItem? attention,
+}) => session(
   id: 's',
   title: 't',
   phase: phase,
   status: status,
   agent: 'claude',
-  updatedAt: updatedAt,
+  attention: attention,
 );
 
 void main() {
@@ -55,16 +57,33 @@ void main() {
   });
 
   group('sessionRecentlyDone', () {
-    // done 在协议里自带「未读」语义，所以这一段会自己清空——不需要时间窗。
-    test('只认 done 状态', () {
-      expect(sessionRecentlyDone(_session(status: 'done')), isTrue);
-      expect(sessionRecentlyDone(_session(status: 'idle')), isFalse);
-      expect(sessionRecentlyDone(_session(status: 'disconnected')), isFalse);
+    // 未读的提醒读过就清掉，所以这一段会自己清空——不需要时间窗。
+    test('只认跑完且还挂着提醒的会话', () {
+      final unread = attention('s', AttentionKind.success);
+      expect(
+        sessionRecentlyDone(
+          _session(phase: SessionPhase.succeeded, attention: unread),
+        ),
+        isTrue,
+      );
+      expect(
+        sessionRecentlyDone(_session(phase: SessionPhase.succeeded)),
+        isFalse,
+      );
+      expect(sessionRecentlyDone(_session(attention: unread)), isFalse);
     });
 
     test('三段互斥：要我处理和正在跑的不会同时落进刚完成', () {
-      final waiting = _session(status: 'waiting_approval');
-      final running = _session(status: 'running');
+      final waiting = _session(
+        status: SessionStatus.needsYou,
+        phase: SessionPhase.succeeded,
+        attention: attention('s', AttentionKind.success),
+      );
+      final running = _session(
+        status: SessionStatus.running,
+        phase: SessionPhase.succeeded,
+        attention: attention('s', AttentionKind.success),
+      );
       for (final session in [waiting, running]) {
         expect(sessionRecentlyDone(session), isFalse);
       }

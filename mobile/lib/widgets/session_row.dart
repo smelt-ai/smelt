@@ -4,7 +4,7 @@ import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../theme/smelt_theme.dart';
 
-import '../services/gateway_service.dart';
+import '../services/runtime_service.dart';
 import 'agent_icon.dart';
 
 /// 会话行的标题。空标题要给个能读的兜底，而且终端和对话的兜底不一样。
@@ -64,8 +64,7 @@ class SessionRow extends StatelessWidget {
   /// 允许删除」。删除入口原来是行尾一个只有单项的「⋯」菜单，占着 32pt 宽还多一次
   /// 点击；左滑是移动端列表删除的通用手势，也把那一格还给了标题。
   ///
-  /// 传 null 表示不可删（比如只读配对）——那时连手势都不挂，滑不动比滑出一个点
-  /// 不动的按钮更好懂。
+  /// 传 null 表示不可删——那时连手势都不挂，滑不动比滑出一个点不动的按钮更好懂。
   final VoidCallback? onDelete;
 
   /// leading 槽宽。图标是 18pt，槽给 20pt 留出居中余量；两屏共用同一个值，标题
@@ -87,11 +86,10 @@ class SessionRow extends StatelessWidget {
     // 项目名只在 [showProject] 时画，且跟标题完全相同时省掉（终端会话的标题默认取
     // 目录名，常常就等于项目名，那时重复一遍纯属噪音）。
     //
-    // 这里原来用的是「标题里包含项目名就不画」，那是错的：它假设服务端会给标题追加
-    // 项目后缀，但服务端的标题依次取 `custom_title`（用户手打）→ `launch_label` →
-    // 路径名，**从不追加项目名**（见 `crates/smelt-remote-gateway/src/lib.rs`）。
-    // 于是这条规则只在用户碰巧把项目名写进自己起的标题时才触发，行结构随机缺一段；
-    // 而且 `contains` 太松——项目名叫 `api` 之类的话几乎每行都会被误吞。
+    // 不能用「标题里包含项目名就不画」：标题依次取用户手打的名字 → 启动项名 →
+    // 路径名，**从不追加项目名**，这条规则只会在用户碰巧把项目名写进标题时触发，
+    // 行结构随机缺一段；而且 `contains` 太松——项目名叫 `api` 之类的话几乎每行都会
+    // 被误吞。
     final wantsProject =
         showProject &&
         project != null &&
@@ -110,7 +108,7 @@ class SessionRow extends StatelessWidget {
     final automation = session.automation;
     final agentConversation = session.isAgentConversation
         ? (agentName ??
-              gatewayService.agentDefinitionName(session.agentDefinitionId) ??
+              runtimeService.agentDefinitionName(session.agentDefinitionId) ??
               'Agent')
         : null;
     final subtitle = [

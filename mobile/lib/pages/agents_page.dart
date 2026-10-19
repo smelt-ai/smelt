@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../services/gateway_service.dart';
+import '../services/runtime_service.dart';
 import '../theme/smelt_theme.dart';
 import '../util/relative_time.dart';
 import '../widgets/automation_source.dart';
@@ -38,41 +38,53 @@ class AgentsPage extends StatefulWidget {
 
 class _AgentsPageState extends State<AgentsPage> {
   StreamSubscription<AutomationCatalog>? _catalogSubscription;
-  StreamSubscription<WsState>? _stateSubscription;
   AutomationCatalog? _catalog;
 
   @override
   void initState() {
     super.initState();
-    // 先用最近一次的目录铺上，避免每次切回这一栏都闪一下「正在同步」。
-    _catalog = gatewayService.lastAutomationCatalog;
-    _catalogSubscription = gatewayService.automationCatalogStream.listen((
+    // 先用最近一次的目录铺上，避免每次切回这一栏都闪一下「正在同步」。连上运行时
+    // 时 `RuntimeService` 已经拉过一次（会话行也要用这份目录），这里只补「还没拉到」
+    // 的情况。
+    _catalog = runtimeService.automationCatalog;
+    _catalogSubscription = runtimeService.automationCatalogStream.listen((
       catalog,
     ) {
       if (mounted) setState(() => _catalog = catalog);
     });
-    // 连上时 `GatewayService` 已经拉过一次（会话行也要用这份目录），这里只补
-    // 「进这一栏时还没连上过」的情况。
-    _stateSubscription = gatewayService.stateStream.listen((state) {
-      if (state == WsState.connected) gatewayService.listAutomations();
-    });
-    if (_catalog == null) gatewayService.listAutomations();
+    if (_catalog == null &&
+        runtimeService.state == RuntimeConnectionState.connected) {
+      unawaited(_guard(runtimeService.refreshAutomations()));
+    }
   }
 
   @override
   void dispose() {
     _catalogSubscription?.cancel();
-    _stateSubscription?.cancel();
     super.dispose();
+  }
+
+  /// 调用失败时给一句提示；成功的结果已经从目录流回来了。
+  Future<void> _guard(Future<Object?> request) async {
+    try {
+      await request;
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(describeRuntimeError(error))));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return AgentsView(
       catalog: _catalog,
-      onRefresh: gatewayService.listAutomations,
-      onSetEnabled: gatewayService.setAutomationEnabled,
-      onRunOnce: gatewayService.runAutomationOnce,
+      onRefresh: () => _guard(runtimeService.refreshAutomations()),
+      onSetEnabled: (id, enabled) =>
+          unawaited(_guard(runtimeService.setAutomationEnabled(id, enabled))),
+      onRunOnce: (id) =>
+          unawaited(_guard(runtimeService.runAutomationOnce(id))),
       onOpenSession: widget.onOpenSession,
       startableAgentIds: widget.startableAgentIds,
       onStartConversation: widget.onStartConversation,
@@ -96,7 +108,7 @@ class AgentsView extends StatefulWidget {
   /// null = 还没拿到目录（daemon 订阅尚未同步）。空目录和「还没同步」必须分开
   /// 说，否则用户会以为自己的自动化没了。
   final AutomationCatalog? catalog;
-  final VoidCallback onRefresh;
+  final Future<void> Function() onRefresh;
   final void Function(String automationId, bool enabled) onSetEnabled;
   final void Function(String automationId) onRunOnce;
   final void Function(String sessionId) onOpenSession;
@@ -143,7 +155,7 @@ class _AgentsViewState extends State<AgentsView> {
                   detail: 'Automations appear once the daemon reports them.',
                 )
               : RefreshIndicator(
-                  onRefresh: () async => widget.onRefresh(),
+                  onRefresh: widget.onRefresh,
                   child: switch (_segment) {
                     AgentsSegment.automations => _AutomationList(
                       automations: catalog.automations,
@@ -372,7 +384,7 @@ class _AutomationStatusLine extends StatelessWidget {
 
 /// 「谁做」。定义被删掉时说实话，不编一个名字——那正是用户要回桌面修的东西。
 String automationExecutorLabel(AutomationSummary automation) {
-  if (automation.actionKind == 'shell') return 'Shell command';
+  if (automation.action == AutomationActionKind.shell) return 'Shell command';
   return automation.agentName ?? 'Missing agent';
 }
 
@@ -605,7 +617,7 @@ class _AgentList extends StatelessWidget {
 
 String _agentSubtitle(AgentDefinitionSummary agent) {
   final parts = <String>[
-    if (agent.agentId.isNotEmpty) agent.agentId,
+    if (agent.engineKindId.isNotEmpty) agent.engineKindId,
     if (agent.plugins.isNotEmpty) _count(agent.plugins.length, 'plugin'),
     if (agent.contextFolders.isNotEmpty)
       _count(agent.contextFolders.length, 'folder'),
@@ -636,9 +648,7 @@ class AgentDefinitionPage extends StatelessWidget {
     final theme = Theme.of(context);
     final muted = theme.colorScheme.onSurfaceVariant;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(agent.name.isEmpty ? agent.id : agent.name),
-      ),
+      appBar: AppBar(title: Text(agent.name.isEmpty ? agent.id : agent.name)),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
         children: [
@@ -662,7 +672,9 @@ class AgentDefinitionPage extends StatelessWidget {
           _AgentSection(
             title: 'Engine',
             child: Text(
-              agent.agentId.isEmpty ? 'Not configured' : agent.agentId,
+              agent.engineKindId.isEmpty
+                  ? 'Not configured'
+                  : agent.engineKindId,
               style: theme.textTheme.bodyMedium,
             ),
           ),

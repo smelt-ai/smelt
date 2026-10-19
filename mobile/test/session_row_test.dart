@@ -3,7 +3,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/services/gateway_service.dart';
+import 'package:smelt_mobile/models/runtime_models.dart';
 import 'package:smelt_mobile/theme/smelt_theme.dart';
 import 'package:smelt_mobile/widgets/agent_icon.dart';
 import 'package:smelt_mobile/widgets/session_row.dart';
@@ -23,8 +23,8 @@ void main() {
     String title = 'demo',
     String? project = 'smelt',
     String? detail,
-    String phase = 'idle',
-    String status = 'idle',
+    SessionPhase phase = SessionPhase.idle,
+    SessionStatus status = SessionStatus.idle,
     SessionKind kind = SessionKind.acp,
   }) => SessionSummary(
     id: 'x',
@@ -34,6 +34,7 @@ void main() {
     status: status,
     agent: 'codex',
     projectTitle: project,
+    projectOrder: 0,
     detail: detail,
     updatedAt: 1,
   );
@@ -75,7 +76,10 @@ void main() {
       await tester.pumpWidget(
         host(
           SessionRow(
-            session: session(phase: 'thinking', status: 'running'),
+            session: session(
+              phase: SessionPhase.thinking,
+              status: SessionStatus.running,
+            ),
             onTap: () {},
           ),
         ),

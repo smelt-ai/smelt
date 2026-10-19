@@ -3,11 +3,16 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-import '../models/pairing_config.dart';
+import '../services/runtime_service.dart';
 import '../theme/smelt_theme.dart';
 
+/// 扫配对码。认出合法的 `smelt+iroh://` 配对串就把原文返回给调用方去配对；
+/// 解析和校验都在 Rust（[RuntimeService.parsePairing]），这里不自己拆 URL。
 class QrScannerPage extends StatefulWidget {
-  const QrScannerPage({super.key});
+  const QrScannerPage({super.key, this.validate});
+
+  /// 校验配对串，不合法时抛 [SmeltError]。默认用全局运行时服务。
+  final PairingTarget Function(String uri)? validate;
 
   @override
   State<QrScannerPage> createState() => _QrScannerPageState();
@@ -39,17 +44,19 @@ class _QrScannerPageState extends State<QrScannerPage> {
       final raw = barcode.rawValue;
       if (raw == null || raw.isEmpty) continue;
       try {
-        final pairing = PairingConfig.parse(raw);
-        _finishing = true;
-        _errorTimer?.cancel();
-        await _controller.stop();
-        if (mounted) Navigator.pop(context, pairing);
-        return;
-      } on FormatException catch (error) {
-        _showError(error.message.toString());
+        (widget.validate ?? runtimeService.parsePairing)(raw);
+      } on SmeltError catch (error) {
+        _showError(error.message);
+        continue;
       } catch (_) {
         _showError('Invalid Smelt pairing code');
+        continue;
       }
+      _finishing = true;
+      _errorTimer?.cancel();
+      await _controller.stop();
+      if (mounted) Navigator.pop(context, raw.trim());
+      return;
     }
   }
 
@@ -124,7 +131,9 @@ class _QrScannerPageState extends State<QrScannerPage> {
                   _error ?? 'Point the camera at the QR code shown by Smelt',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    color: _error == null ? Colors.white : SmeltColors.dark.danger,
+                    color: _error == null
+                        ? Colors.white
+                        : SmeltColors.dark.danger,
                   ),
                 ),
               ),
