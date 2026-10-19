@@ -62,6 +62,7 @@ dependencies:
     path: rust_builder
   flutter_svg: ^2.3.0
   flutter_slidable: ^4.0.3
+  device_info_plus: ^13.3.0
   
 dev_dependencies:
   fake_async: any
