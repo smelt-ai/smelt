@@ -142,11 +142,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: ubuntu:22.04
     steps:
+      # reqwest 在 Linux 上走 native-tls，openssl-sys 要 OpenSSL 头文件和 pkg-config。
+      # 产物动态链接 libssl3：Debian 12+、Ubuntu 22.04+ 都有，curl 就依赖它。
       - name: Install build dependencies
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git
+            build-essential ca-certificates curl git libssl-dev pkg-config
 
       - name: Checkout
         uses: actions/checkout@v7

@@ -130,8 +130,10 @@ fn pid_is_alive(pid: u32) -> bool {
     if pid <= 0 {
         return false;
     }
-    unsafe { libc::kill(pid, 0) == 0 }
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    // 先落到变量里：`unsafe { … }` 开头的一行会被当成语句，后面的 `||` 就成了闭包。
+    // 紧接着读 errno，中间不能再有系统调用。
+    let signalled = unsafe { libc::kill(pid, 0) } == 0;
+    signalled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// 把当前解析结果显式传给子进程。
