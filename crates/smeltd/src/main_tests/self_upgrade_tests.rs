@@ -1,5 +1,4 @@
 use super::*;
-use std::time::Duration;
 
 #[test]
 fn self_upgrade_reply_ok_is_upgraded() {
@@ -43,32 +42,6 @@ fn pinned_fingerprint_prefers_env() {
     // 空白 env 等同无：回退到磁盘哈希（不断言具体值，只断言不返回空白）。
     let fallback = pinned_daemon_fingerprint(Some("   ".to_string()));
     assert!(fallback.is_none_or(|fp| !fp.trim().is_empty()));
-}
-
-/// predecessor 已退：EOF 立刻返回，不等满超时。
-#[test]
-fn predecessor_exit_returns_on_eof() {
-    let (a, b) = UnixStream::pair().unwrap();
-    drop(b);
-    let start = std::time::Instant::now();
-    wait_for_predecessor_exit(&a, Duration::from_secs(10));
-    assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "EOF 应立刻返回，不应等满超时"
-    );
-}
-
-/// predecessor hung 住：超时兜底返回，插件不能无限等。
-#[test]
-fn predecessor_exit_times_out() {
-    let (a, _b) = UnixStream::pair().unwrap();
-    let start = std::time::Instant::now();
-    wait_for_predecessor_exit(&a, Duration::from_millis(100));
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed >= Duration::from_millis(100) && elapsed < Duration::from_secs(5),
-        "应约 100ms 超时返回，实际 {elapsed:?}"
-    );
 }
 
 /// 活连接挡住 headless 自升级。不能用「最近鉴权过」这种会过期的时间戳：

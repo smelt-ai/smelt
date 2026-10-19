@@ -1,41 +1,10 @@
 use super::{AcpSaved, acp_agent_from_cmd, cli_resume_command, command_matches_agent, shell_quote};
 use crate::settings::{ConversationAgentKind, HistorySourceKind, TerminalAgentKind};
-use crate::workspace_sessions::prepare_agent_definition_launch;
-use smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV;
-
-#[test]
-fn product_agent_instructions_are_pi_system_prompt_input_not_a_user_message() {
-    let definition = crate::settings::AgentDefinition {
-        id: "quant".into(),
-        name: "量化智能体".into(),
-        description: String::new(),
-        engine_kind_id: ConversationAgentKind::Pi.id().into(),
-        prompt: "  先验证行情时间\n再给出结论  ".into(),
-        plugins: Vec::new(),
-        context_folders: Vec::new(),
-        context_links: Vec::new(),
-        ..Default::default()
-    };
-    let launch = smelt_core::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent")
-        .with_env("EXISTING", "keep");
-
-    let launch = prepare_agent_definition_launch(launch, Some(&definition));
-
-    assert_eq!(launch.env.get("EXISTING").map(String::as_str), Some("keep"));
-    assert_eq!(
-        launch
-            .env
-            .get(SMELT_AGENT_INSTRUCTIONS_ENV)
-            .map(String::as_str),
-        Some("先验证行情时间\n再给出结论")
-    );
-    assert_eq!(launch.command, "smelt-pi-agent");
-}
 
 #[test]
 fn automation_run_does_not_require_an_existing_conversation() {
     use crate::settings::{Automation, AutomationSchedule, AutomationTrigger};
-    use smelt_core::automation::{AutomationCommand, AutomationFile, apply_automation_command};
+    use smelt_model::automation::{AutomationCommand, AutomationFile, apply_automation_command};
 
     let automation = Automation {
         id: "open-scan".into(),
@@ -43,7 +12,7 @@ fn automation_run_does_not_require_an_existing_conversation() {
         enabled: true,
         workspace_dir: Some("/tmp".into()),
         trigger: AutomationTrigger::schedule(AutomationSchedule::daily_morning()),
-        action: smelt_core::automation::AutomationAction::Agent {
+        action: smelt_model::automation::AutomationAction::Agent {
             agent_definition_id: "quant".into(),
             prompt: Some("拉取行情并输出".into()),
         },
@@ -97,7 +66,7 @@ fn automation_definition_does_not_require_a_user_selected_workspace() {
         enabled: true,
         workspace_dir: None,
         trigger: AutomationTrigger::schedule(AutomationSchedule::daily_morning()),
-        action: smelt_core::automation::AutomationAction::Agent {
+        action: smelt_model::automation::AutomationAction::Agent {
             agent_definition_id: "quant".into(),
             prompt: Some("拉取行情并输出".into()),
         },
@@ -129,26 +98,9 @@ fn old_acp_archive_without_agent_field_still_loads() {
 
 #[test]
 fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
-    let agent_session: smelt_plugin_api::AgentSessionBinding =
-        serde_json::from_value(serde_json::json!({
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy",
-                "resource_id": "strategy-1"
-            }
-        }))
-        .unwrap();
     let saved = AcpSaved {
         cwd: Some("/repo".into()),
-        launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude")
+        launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude")
             .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
         profile_id: Some("quant".into()),
         agent: Some("claude".into()),
@@ -158,14 +110,9 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
         )),
         sid: Some("acp-1".into()),
         refresh_launch_from_settings: false,
-        conversation_binding: smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("thread-input").unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
+        conversation_binding: smelt_model::conversation::ConversationBinding::Automation {
+            run_id: "run-1".into(),
         },
-        agent_session: Some(agent_session.clone()),
         config_values: vec![
             ("model".into(), "claude-sonnet-4-6".into()),
             ("effort".into(), "high".into()),
@@ -221,15 +168,10 @@ fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
     );
     assert_eq!(
         restored.conversation_binding,
-        smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("thread-input").unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
+        smelt_model::conversation::ConversationBinding::Automation {
+            run_id: "run-1".into()
         }
     );
-    assert_eq!(restored.agent_session, Some(agent_session));
 }
 
 #[test]

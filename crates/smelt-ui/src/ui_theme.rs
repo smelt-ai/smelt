@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{FontFeatures, Hsla, Pixels, Rgba, px, rgb, rgba};
 
-use smelt_core::agent_status::AgentStatus;
+use smelt_model::agent_status::AgentStatus;
 
 /// 一套完整语义色板。字段即语义位，深浅两套必须一一对应填满。
 #[derive(Clone, Copy)]
@@ -138,7 +138,9 @@ pub fn adopt_active_theme(cx: &gpui::App) {
 
 fn install_palette(palette: Palette, light: bool) {
     LIGHT_MODE.store(light, Ordering::Relaxed);
-    *ACTIVE.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(palette);
+    *ACTIVE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(palette);
 }
 
 struct ThemeRoles {
@@ -428,13 +430,17 @@ fn contrast_ratio(a: u32, b: u32) -> f32 {
 
 /// 当前色板。渲染里同步读，不碰数据库。还没装主题时是库 Default 的底色。
 pub fn palette() -> Palette {
-    let guard = ACTIVE.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = ACTIVE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(palette) = *guard {
         return palette;
     }
     drop(guard);
     let palette = builtin_fallback(is_light());
-    *ACTIVE.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(palette);
+    *ACTIVE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(palette);
     palette
 }
 
@@ -799,10 +805,7 @@ mod tests {
         assert_eq!(palette.bg_hover, solid(roles.list_hover, roles.popover));
         assert_ne!(palette.bg_hover, palette.bg_row_hover);
         assert_eq!(palette.bg_selected, 0x3a3a3a);
-        assert_ne!(
-            palette.bg_selected,
-            solid(roles.list_active, roles.sidebar)
-        );
+        assert_ne!(palette.bg_selected, solid(roles.list_active, roles.sidebar));
         assert_eq!(palette.border_dim, 0x262626);
         assert_eq!(palette.border, 0x2a2a2a);
         assert_eq!(palette.border_mid, palette.border);
@@ -811,14 +814,18 @@ mod tests {
         assert_eq!(palette.text, 0xfafafa);
         assert_eq!(palette.text_bright, palette.text);
         assert_eq!(palette.text_muted, 0xa3a3a3);
-        assert_eq!(palette.text_mid, mix(palette.text, palette.text_muted, TEXT_MID_MIX));
+        assert_eq!(
+            palette.text_mid,
+            mix(palette.text, palette.text_muted, TEXT_MID_MIX)
+        );
         assert_ne!(palette.text_mid, palette.text);
         assert_ne!(palette.text_mid, palette.text_muted);
-        assert_eq!(palette.text_faint, faint_text(palette.text_muted, palette.bg_stage));
-        assert_ne!(palette.text_faint, palette.text_muted);
-        assert!(
-            contrast_ratio(palette.text_faint, palette.bg_stage) >= TEXT_FAINT_MIN_CONTRAST
+        assert_eq!(
+            palette.text_faint,
+            faint_text(palette.text_muted, palette.bg_stage)
         );
+        assert_ne!(palette.text_faint, palette.text_muted);
+        assert!(contrast_ratio(palette.text_faint, palette.bg_stage) >= TEXT_FAINT_MIN_CONTRAST);
         assert_eq!(palette.accent, 0x2563eb);
         assert_eq!(palette.green, 0x16a34a);
         assert_eq!(palette.red, 0xdc2626);
@@ -963,7 +970,10 @@ mod tests {
             role_for_status(&palette, AgentStatus::NeedsYou),
             palette.red
         );
-        assert_eq!(role_for_status(&palette, AgentStatus::Running), palette.blue);
+        assert_eq!(
+            role_for_status(&palette, AgentStatus::Running),
+            palette.blue
+        );
         assert_eq!(
             role_for_status(&palette, AgentStatus::Idle),
             palette.text_faint

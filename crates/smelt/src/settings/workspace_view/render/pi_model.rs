@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::settings::workspace::PiConfigFileKind;
-use smelt_core::pi_auth::PiAuthProvider;
-use smelt_core::pi_model_settings::{PiCustomProvider, PiModelSettings};
+use smelt_model::pi_auth::PiAuthProvider;
+use smelt_model::pi_model_settings::{PiCustomProvider, PiModelSettings};
 use smelt_ui::IconAction as _;
 
 /// 宽屏上标签和值隔太远就读不成一行了，正文限宽居中。
@@ -22,8 +22,6 @@ pub(super) struct Palette {
     pub(super) muted: Hsla,
     pub(super) border: Hsla,
     pub(super) danger: Hsla,
-    pub(super) success: Hsla,
-    pub(super) warning: Hsla,
 }
 
 impl Palette {
@@ -34,8 +32,6 @@ impl Palette {
             muted: theme.muted_foreground,
             border: theme.border,
             danger: theme.danger,
-            success: theme.success,
-            warning: theme.warning,
         }
     }
 }
@@ -60,7 +56,7 @@ pub(super) fn pi_model_page(
                 .gap_8()
                 .child(default_model_section(&entity, snapshot, palette))
                 .child(provider_section(&entity, snapshot, palette, cx))
-                .child(config_files_footer(&entity, palette)),
+                .child(config_files_footer(&entity, &snapshot.pi_paths, palette)),
         )
         .into_any_element()
 }
@@ -101,18 +97,6 @@ pub(super) fn card(palette: Palette) -> Div {
         .border_color(palette.border)
 }
 
-pub(super) fn pill(label: impl Into<SharedString>, color: Hsla) -> Div {
-    div()
-        .flex_none()
-        .px_2()
-        .py_0p5()
-        .rounded_full()
-        .bg(color.opacity(0.14))
-        .text_xs()
-        .text_color(color)
-        .child(label.into())
-}
-
 /// 「默认模型」卡片。
 ///
 /// `settings.json` 里没写默认模型时，`load_pi_model_settings` 会填上 Pi 的兜底值
@@ -140,10 +124,12 @@ fn default_model_section(
     let mut status = h_flex().gap_2().items_center().flex_wrap();
     match &snapshot.pi_settings {
         Err(error) => {
-            status = status.child(pill(
-                format!("无法读取 settings.json：{error}"),
-                palette.danger,
-            ));
+            status = status.child(
+                Tag::danger()
+                    .rounded_full()
+                    .flex_none()
+                    .child(format!("无法读取 settings.json：{error}")),
+            );
         }
         Ok(_) if explicit.is_none() => {
             status = status.child(
@@ -157,10 +143,15 @@ fn default_model_section(
     }
     match &snapshot.pi_model_settings {
         Ok(settings) if settings.credential_configured => {
-            status = status.child(pill("凭据已配置", palette.success));
+            status = status.child(
+                Tag::success()
+                    .rounded_full()
+                    .flex_none()
+                    .child("凭据已配置"),
+            );
         }
         Ok(_) => {
-            status = status.child(pill("缺少凭据", palette.warning));
+            status = status.child(Tag::warning().rounded_full().flex_none().child("缺少凭据"));
         }
         Err(error) => {
             status = status.child(
@@ -230,7 +221,7 @@ fn default_model_section(
 /// `settings.json` 里用户真的选过的默认模型；没选过返回 `None`。
 fn explicit_default(
     snapshot: &SettingsRenderSnapshot,
-) -> Option<&smelt_core::pi_model_settings::PiDefaultModelSummary> {
+) -> Option<&smelt_model::pi_model_settings::PiDefaultModelSummary> {
     snapshot
         .pi_settings
         .as_ref()
@@ -258,7 +249,7 @@ fn change_model_button(
         .label("更换模型")
         .disabled(editing)
         .dropdown_menu(move |mut menu, window, cx| {
-            let groups = smelt_core::pi_model_settings::list_pi_model_choice_groups();
+            let groups = crate::settings::pi_model_choice_groups(cx);
             if groups.is_empty() {
                 menu = menu.item(
                     PopupMenuItem::new("还没有可选的模型：先在下面登录或添加 Provider")
@@ -694,8 +685,11 @@ fn custom_provider_row(
                                 .text_color(palette.fg)
                                 .child(name),
                         )
-                        .child(pill("自定义", palette.muted))
-                        .children(is_default.then(|| pill("默认", palette.success))),
+                        .child(Tag::secondary().rounded_full().flex_none().child("自定义"))
+                        .children(
+                            is_default
+                                .then(|| Tag::success().rounded_full().flex_none().child("默认")),
+                        ),
                 )
                 .child(
                     div()
@@ -745,23 +739,25 @@ fn custom_provider_row(
 }
 
 /// 直接改 Pi 原生文件的逃生口。平时用不到，压成一行放在页底。
-fn config_files_footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
-    let file_button = |id: &'static str,
-                       label: &'static str,
-                       kind: PiConfigFileKind,
-                       path: std::path::PathBuf| {
-        let entity = entity.clone();
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .label(label)
-            .tooltip(path.display().to_string())
-            .on_click(move |_, window, cx| {
-                entity.update(cx, |workspace, cx| {
-                    workspace.open_pi_config(kind, window, cx);
-                });
-            })
-    };
+fn config_files_footer(
+    entity: &Entity<Workspace>,
+    paths: &smelt_model::pi_service::PiConfigPaths,
+    palette: Palette,
+) -> Div {
+    let file_button =
+        |id: &'static str, label: &'static str, kind: PiConfigFileKind, path: &str| {
+            let entity = entity.clone();
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .label(label)
+                .tooltip(path.to_string())
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.open_pi_config(kind, window, cx);
+                    });
+                })
+        };
     let refresh_entity = entity.clone();
     h_flex()
         .w_full()
@@ -782,19 +778,19 @@ fn config_files_footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
             "pi-edit-settings-file",
             "settings.json",
             PiConfigFileKind::Settings,
-            smelt_core::pi_model_settings::pi_settings_path(),
+            &paths.settings,
         ))
         .child(file_button(
             "pi-edit-models-file",
             "models.json",
             PiConfigFileKind::Models,
-            smelt_core::pi_model_settings::pi_models_path(),
+            &paths.models,
         ))
         .child(file_button(
             "pi-edit-credentials-file",
             "auth.json",
             PiConfigFileKind::Credentials,
-            smelt_core::pi_model_settings::pi_auth_path(),
+            &paths.auth,
         ))
         .child(div().flex_1())
         .child(
@@ -1098,16 +1094,7 @@ fn custom_provider_form(
                                 "添加自定义 Provider"
                             },
                         ))
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(crate::ui_theme::overlay(0x18))
-                                .text_xs()
-                                .text_color(muted)
-                                .child("原生 Pi"),
-                        ),
+                        .child(Tag::secondary().rounded_full().flex_none().child("原生 Pi")),
                 )
                 .child(div().text_xs().text_color(muted).child(credential_status)),
         )
@@ -1181,7 +1168,7 @@ fn custom_provider_form(
                                 .small()
                                 .label(editor.api.clone())
                                 .dropdown_menu(move |mut menu, _window, _cx| {
-                                    for api in smelt_core::provider_api::PROVIDER_API_PROTOCOLS {
+                                    for api in smelt_model::provider_api::PROVIDER_API_PROTOCOLS {
                                         let api_entity = api_entity.clone();
                                         menu = menu.item(PopupMenuItem::new(*api).on_click(
                                             move |_ev, _window, cx| {
@@ -1322,8 +1309,8 @@ mod tests {
     // 不用 `super::*`：那条 glob 链会带进 `gpui::*` 里的 `test` 属性宏，把这里的
     // `#[test]` 换成 gpui 的版本，展开时撞上递归上限。
     use super::{ProviderEntry, merge_providers};
-    use smelt_core::pi_auth::{PiAuthProvider, PiAuthStatus};
-    use smelt_core::pi_model_settings::PiCustomProvider;
+    use smelt_model::pi_auth::{PiAuthProvider, PiAuthStatus};
+    use smelt_model::pi_model_settings::PiCustomProvider;
 
     fn builtin(id: &str, oauth: bool, status: PiAuthStatus) -> PiAuthProvider {
         PiAuthProvider {

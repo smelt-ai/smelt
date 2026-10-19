@@ -4,7 +4,7 @@
 //! 「终端 / 对话」是动作的属性，不再额外占一层模式切换。Pin 绑定到动作本身，
 //! 所以同一个 Agent 的对话和终端可以分别置顶。
 //!
-//! 「有哪些动作、叫什么、怎么分组、Pin 存哪」全部在 `smelt_core::new_session`，
+//! 「有哪些动作、叫什么、怎么分组、Pin 存哪」全部在 `smelt_model::new_session`，
 //! 移动端读的是同一份；这里只负责画出来，以及把动作接到桌面的会话工作区上。
 
 use gpui::prelude::FluentBuilder;
@@ -15,21 +15,22 @@ use gpui::{
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use smelt_ui::IconAction as _;
 use gpui_component::popover::{Popover, PopoverState};
 use gpui_component::{Icon, IconName, IndexPath, Sizable as _, StyledExt as _};
+use smelt_ui::IconAction as _;
 
 use crate::settings::{
     AcpRuntimeState, AgentDefinition, LaunchEntry, active_launch_entries, icon_for_launch_command,
 };
 use crate::workspace_sessions::NewAcpSessionRequest;
-use crate::{Workspace, ui_theme};
-use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind};
-use smelt_core::new_session::{
-    NewSessionAction, NewSessionPreferences, NewSessionTarget, SECTION_LABELS, build_sections,
-    load_preferences, save_preferences,
+use crate::{RuntimeKey, Workspace, ui_theme};
+use smelt_model::acp_conn::AcpRuntimeDiagnostics;
+use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind};
+use smelt_model::new_session::{
+    NewSessionAction, NewSessionPreferences, NewSessionTarget, PinParams, SECTION_LABELS,
+    build_sections, new_session_actions,
 };
-use smelt_core::session_control::AcpAgentOption;
+use smelt_model::session_control::AcpAgentOption;
 
 use super::row::{acp_provider_icon, provider_icon};
 
@@ -42,28 +43,177 @@ const PICKER_EMPTY_HEIGHT: f32 = 56.;
 const PICKER_FOOTER_HEIGHT: f32 = 24.;
 const PICKER_MAX_VISIBLE_ROWS: usize = 7;
 
-/// Pin 偏好在进程内的缓存。偏好本体是 `smelt-core` 的类型，这里只是给它套一层
-/// 本地 newtype 才能当 gpui 全局用。
+/// Pin 偏好的客户端缓存。偏好存在运行时（桌面和手机共用），第一次用到时异步取回；
+/// 取回之前按没有 Pin 显示。
 #[derive(Clone, Debug, Default)]
-struct NewSessionPins(NewSessionPreferences);
+struct NewSessionPins {
+    preferences: NewSessionPreferences,
+    requested: bool,
+}
 
 impl gpui::Global for NewSessionPins {}
 
-/// 只在第一次打开选择器时读库。这样启动首帧不会因为偏好读取而阻塞。
 fn current_new_session_preferences(cx: &mut App) -> NewSessionPreferences {
-    if let Some(pins) = cx.try_global::<NewSessionPins>() {
-        return pins.0.clone();
+    let pins = cx.default_global::<NewSessionPins>();
+    if !pins.requested {
+        pins.requested = true;
+        cx.spawn(async move |cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async {
+                    crate::runtime_call::call::<smelt_model::control_api::NewSessionPinsGet>(
+                        smelt_runtime_client::protocol::control::EmptyParams::default(),
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                })
+                .await;
+            cx.update(|cx| match fetched {
+                Ok(preferences) => {
+                    cx.default_global::<NewSessionPins>().preferences = preferences;
+                    cx.refresh_windows();
+                }
+                // 下次打开再试。
+                Err(_) => cx.default_global::<NewSessionPins>().requested = false,
+            });
+        })
+        .detach();
     }
-    let preferences = load_preferences();
-    cx.set_global(NewSessionPins(preferences.clone()));
-    preferences
+    cx.global::<NewSessionPins>().preferences.clone()
 }
 
+/// 远程运行时那台机器上的启动项和 CLI 探测结果。启动项按运行时各存一份，装没装
+/// 也只有那台机器说了算，所以不能拿本机的去凑。每次打开菜单从那台机器重新取一次，
+/// 取回之前沿用上一次的。
+#[derive(Clone, Debug, Default)]
+struct RemoteLaunchCatalog {
+    entries: Vec<LaunchEntry>,
+    diagnostics: AcpRuntimeDiagnostics,
+}
+
+/// 一个远程运行时的目录：上次读到的内容，和这次读得怎么样。菜单据此说明眼下看到的
+/// 是什么：还在读、读不到，和那台机器真的什么都没装，看起来都是只剩空白终端。
+#[derive(Clone, Debug, Default)]
+struct RemoteCatalogEntry {
+    catalog: Option<RemoteLaunchCatalog>,
+    reading: CatalogReading,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+enum CatalogReading {
+    #[default]
+    InFlight,
+    Done,
+    Failed,
+}
+
+#[derive(Default)]
+struct RemoteLaunchCatalogs(std::collections::HashMap<RuntimeKey, RemoteCatalogEntry>);
+
+impl gpui::Global for RemoteLaunchCatalogs {}
+
+/// 菜单底部的说明：目录不是最新时说清楚现在显示的是什么，是最新的就不说。
+fn remote_catalog_notice(runtime_name: &str, entry: Option<&RemoteCatalogEntry>) -> Option<String> {
+    let entry = entry?;
+    let have_catalog = entry.catalog.is_some();
+    match (&entry.reading, have_catalog) {
+        (CatalogReading::Done, _) => None,
+        (CatalogReading::InFlight, false) => {
+            Some(format!("正在读取「{runtime_name}」上装了哪些工具…"))
+        }
+        (CatalogReading::InFlight, true) => {
+            Some(format!("正在刷新「{runtime_name}」，先显示上次读到的"))
+        }
+        (CatalogReading::Failed, false) => {
+            Some(format!("连不上「{runtime_name}」，只能开空白终端"))
+        }
+        (CatalogReading::Failed, true) => {
+            Some(format!("连不上「{runtime_name}」，显示的是上次读到的"))
+        }
+    }
+}
+
+fn refresh_remote_launch_catalog(runtime: crate::runtimes::Runtime, cx: &mut App) {
+    if runtime.is_local() {
+        return;
+    }
+    let key = runtime.key().clone();
+    let client = runtime.client().clone();
+    cx.default_global::<RemoteLaunchCatalogs>()
+        .0
+        .entry(key.clone())
+        .or_default()
+        .reading = CatalogReading::InFlight;
+    cx.spawn(async move |cx| {
+        let fetched = cx
+            .background_executor()
+            .spawn(async move {
+                let empty = smelt_runtime_client::protocol::control::EmptyParams::default();
+                let settings = client.call::<smelt_model::control_api::LaunchGet>(
+                    &empty,
+                    crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                )?;
+                let diagnostics = client.call::<smelt_model::control_api::AgentCliInspect>(
+                    &empty,
+                    crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                )?;
+                Ok::<_, smelt_runtime_client::protocol::control::ControlClientError>(
+                    RemoteLaunchCatalog {
+                        entries: settings.entries,
+                        diagnostics,
+                    },
+                )
+            })
+            .await;
+        // 取不到（离线、超时）就留着上一次的，标成读取失败，下次打开再取。
+        cx.update(|cx| {
+            let entry = cx
+                .default_global::<RemoteLaunchCatalogs>()
+                .0
+                .entry(key)
+                .or_default();
+            match fetched {
+                Ok(catalog) => {
+                    entry.catalog = Some(catalog);
+                    entry.reading = CatalogReading::Done;
+                }
+                Err(_) => entry.reading = CatalogReading::Failed,
+            }
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+/// 先在本地切换让菜单立刻有反应，再交给运行时；运行时回来的是切换后的权威值。
 fn toggle_new_session_pin(key: &str, cx: &mut App) {
-    let mut preferences = current_new_session_preferences(cx);
-    preferences.toggle(key);
-    save_preferences(&preferences);
-    cx.set_global(NewSessionPins(preferences));
+    cx.default_global::<NewSessionPins>()
+        .preferences
+        .toggle(key);
+    let params = PinParams {
+        key: key.to_string(),
+    };
+    cx.spawn(async move |cx| {
+        let toggled = cx
+            .background_executor()
+            .spawn(async move {
+                crate::runtime_call::call::<smelt_model::control_api::NewSessionPinsToggle>(
+                    params,
+                    crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                )
+            })
+            .await;
+        cx.update(|cx| match toggled {
+            Ok(preferences) => {
+                cx.default_global::<NewSessionPins>().preferences = preferences;
+                cx.refresh_windows();
+            }
+            Err(error) => crate::status_item::notify_error(format!(
+                "保存常用项失败：{}",
+                crate::runtime_call::error_text(error)
+            )),
+        });
+    })
+    .detach();
 }
 
 fn picker_item_icon(target: &NewSessionTarget) -> Icon {
@@ -86,10 +236,12 @@ fn picker_item_icon(target: &NewSessionTarget) -> Icon {
 /// 桌面这一侧的「有哪些对话入口」：产品智能体在前，裸引擎与 profile 在后。
 /// 只产出身份与显示名，启动规格在真正创建时由 [`conversation_launch`] 解析，
 /// 免得同一份配置被读成两种命令。
-fn conversation_options(cx: &App) -> Vec<AcpAgentOption> {
+/// `local`：项目在本机运行时上。智能体定义和 profile 目前只读本机运行时的配置，远程
+/// 运行时上的项目只给裸引擎，免得拿本机的定义去另一台机器上起。
+fn conversation_options(local: bool, cx: &App) -> Vec<AcpAgentOption> {
     let config = cx.global::<crate::settings::AgentHostState>();
     let mut options = Vec::new();
-    for definition in &config.agents {
+    for definition in config.agents.iter().filter(|_| local) {
         if !definition.is_conversation_ready() {
             continue;
         }
@@ -120,7 +272,7 @@ fn conversation_options(cx: &App) -> Vec<AcpAgentOption> {
             history_dir: None,
         });
     }
-    for profile in config.all_profiles() {
+    for profile in config.all_profiles().filter(|_| local) {
         let Some(kind) = profile.kind() else {
             continue;
         };
@@ -152,7 +304,7 @@ type ConversationLaunchChoice = (
 fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchChoice> {
     let config = cx.global::<crate::settings::AgentHostState>();
     if let Some(definition_id) =
-        smelt_core::session_control::agent_definition_id_from_option_id(option_id)
+        smelt_model::session_control::agent_definition_id_from_option_id(option_id)
     {
         let definition = config
             .agents
@@ -174,15 +326,37 @@ fn conversation_launch(option_id: &str, cx: &App) -> Option<ConversationLaunchCh
 }
 
 /// 探测只在 Popover 打开时执行，避免每次侧栏重绘都重建动态候选集。
-fn available_new_session_actions(cx: &App) -> Vec<NewSessionAction> {
-    let diagnostics = cx
-        .try_global::<AcpRuntimeState>()
-        .and_then(|state| state.diagnostics.clone());
-    smelt_core::new_session::new_session_actions(
-        &conversation_options(cx),
-        active_launch_entries(cx).as_slice(),
-        diagnostics.as_ref(),
-    )
+/// 启动项和装没装都以项目所在的那台机器为准：本机读常驻的配置与探测结果，远程读
+/// [`RemoteLaunchCatalogs`]。
+fn available_new_session_actions(runtime: &RuntimeKey, cx: &App) -> Vec<NewSessionAction> {
+    let local = *runtime == RuntimeKey::Local;
+    let conversations = conversation_options(local, cx);
+    if local {
+        let diagnostics = cx
+            .try_global::<AcpRuntimeState>()
+            .and_then(|state| state.diagnostics.clone());
+        return new_session_actions(
+            &conversations,
+            active_launch_entries(cx).as_slice(),
+            diagnostics.as_ref(),
+        );
+    }
+    let catalog = cx
+        .try_global::<RemoteLaunchCatalogs>()
+        .and_then(|catalogs| catalogs.0.get(runtime))
+        .and_then(|entry| entry.catalog.as_ref());
+    remote_new_session_actions(&conversations, catalog)
+}
+
+/// 远程还没取回过时按「什么都没装」处理，只剩空白终端。放行的话会把本机的清单
+/// 当成那台机器的，点了起不来。
+fn remote_new_session_actions(
+    conversations: &[AcpAgentOption],
+    catalog: Option<&RemoteLaunchCatalog>,
+) -> Vec<NewSessionAction> {
+    let empty = RemoteLaunchCatalog::default();
+    let catalog = catalog.unwrap_or(&empty);
+    new_session_actions(conversations, &catalog.entries, Some(&catalog.diagnostics))
 }
 
 /// 新建菜单的状态与绘制。
@@ -193,6 +367,7 @@ fn available_new_session_actions(cx: &App) -> Vec<NewSessionAction> {
 /// 共用同一棵布局树。
 struct NewSessionPickerState {
     workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
     cwd: Option<String>,
     source_actions: Vec<NewSessionAction>,
     sections: [Vec<NewSessionAction>; 3],
@@ -202,9 +377,15 @@ struct NewSessionPickerState {
 }
 
 impl NewSessionPickerState {
-    fn new(workspace: Entity<Workspace>, cwd: Option<String>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        workspace: Entity<Workspace>,
+        runtime: crate::runtimes::Runtime,
+        cwd: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             workspace,
+            runtime,
             cwd,
             source_actions: Vec::new(),
             sections: [Vec::new(), Vec::new(), Vec::new()],
@@ -306,6 +487,7 @@ impl NewSessionPickerState {
             return;
         };
         let cwd = self.cwd.clone();
+        let runtime = self.runtime.clone();
         let conversation = match &target {
             NewSessionTarget::Conversation {
                 agent_option_id, ..
@@ -328,6 +510,7 @@ impl NewSessionPickerState {
                 };
                 workspace.add_acp_session(
                     NewAcpSessionRequest {
+                        runtime,
                         agent,
                         launch_override,
                         profile_id,
@@ -342,6 +525,7 @@ impl NewSessionPickerState {
                 )
             }
             NewSessionTarget::Terminal { command, provider } => workspace.add_session_with_launch(
+                runtime,
                 cwd,
                 Some(LaunchEntry {
                     label: String::new(),
@@ -350,7 +534,7 @@ impl NewSessionPickerState {
                 }),
                 cx,
             ),
-            NewSessionTarget::BlankTerminal => workspace.add_session(cwd, cx),
+            NewSessionTarget::BlankTerminal => workspace.add_session(runtime, cwd, cx),
         });
         self.dismiss(window, cx);
     }
@@ -539,6 +723,7 @@ impl Render for NewSessionPickerState {
 #[derive(IntoElement)]
 pub(super) struct NewSessionPicker {
     workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
     cwd: Option<String>,
     trigger: Button,
 }
@@ -548,12 +733,14 @@ pub(super) struct NewSessionPicker {
 /// 按钮 id 跟项目路径走。下标会在拖动排序后指到别的项目。
 pub(super) fn new_session_picker(
     workspace: Entity<Workspace>,
+    runtime: crate::runtimes::Runtime,
     cwd: String,
     cx: &App,
 ) -> NewSessionPicker {
     let trigger_id = ElementId::from((ElementId::from("proj-new"), cwd.clone()));
     NewSessionPicker {
         workspace,
+        runtime,
         cwd: (!cwd.is_empty()).then_some(cwd),
         trigger: Button::new(trigger_id)
             .custom(ButtonCustomVariant::new(cx))
@@ -570,15 +757,22 @@ impl RenderOnce for NewSessionPicker {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let workspace = self.workspace;
         let cwd = self.cwd;
-        // 项目排序会改变下标。状态以项目路径为主键，拖动后同一个列表位置
-        // 不能把新会话建到旧项目。
-        let picker_root = cwd.as_deref().unwrap_or("default").to_string();
+        let runtime = self.runtime;
+        let runtime_key = runtime.key().clone();
+        let refresh_runtime = runtime.clone();
+        // 项目排序会改变下标。状态以运行时加项目路径为主键，拖动后同一个列表位置不能
+        // 把新会话建到旧项目，两个运行时上的同名路径也不能共用一份。
+        let picker_root = format!(
+            "{:?}:{}",
+            runtime.key(),
+            cwd.as_deref().unwrap_or("default")
+        );
         let picker_key =
             ElementId::from((ElementId::from("new-session-picker"), picker_root.clone()));
         let picker_state_key =
             ElementId::from((ElementId::from("new-session-picker-state"), picker_root));
         let picker = window.use_keyed_state(picker_state_key, cx, {
-            move |_, cx| NewSessionPickerState::new(workspace, cwd, cx)
+            move |_, cx| NewSessionPickerState::new(workspace, runtime, cwd, cx)
         });
         let focus_handle = picker.read(cx).focus_handle(cx);
 
@@ -588,8 +782,19 @@ impl RenderOnce for NewSessionPicker {
             .p_0()
             .trigger(self.trigger)
             .track_focus(&focus_handle)
+            .on_open_change(move |open, _, cx| {
+                if *open {
+                    refresh_remote_launch_catalog(refresh_runtime.clone(), cx);
+                }
+            })
             .content(move |_, _window, cx| {
-                let actions = available_new_session_actions(cx);
+                let actions = available_new_session_actions(&runtime_key, cx);
+                let footer = remote_catalog_notice(
+                    &crate::runtimes::runtime_name(&runtime_key, cx),
+                    cx.try_global::<RemoteLaunchCatalogs>()
+                        .and_then(|catalogs| catalogs.0.get(&runtime_key)),
+                )
+                .unwrap_or_else(|| "↑↓ 选择 · Enter 创建 · Esc 关闭".to_string());
                 let popover = cx.entity();
                 picker.update(cx, |state, cx| {
                     sync_picker_state(state, &actions, popover.downgrade(), cx)
@@ -647,8 +852,109 @@ impl RenderOnce for NewSessionPicker {
                             .items_center()
                             .text_size(px(9.))
                             .text_color(gpui::rgb(ui_theme::text_faint()))
-                            .child("↑↓ 选择 · Enter 创建 · Esc 关闭"),
+                            .child(footer),
                     )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_model::acp_conn::RuntimeExecutable;
+    use smelt_model::new_session::BLANK_TERMINAL_KEY;
+
+    fn bare_engines() -> Vec<AcpAgentOption> {
+        [ConversationAgentKind::Claude, ConversationAgentKind::Codex]
+            .into_iter()
+            .map(|kind| AcpAgentOption {
+                id: kind.id().to_string(),
+                kind: kind.id().to_string(),
+                label: kind.label().to_string(),
+                profile: false,
+                agent_definition_id: None,
+                launch: kind.default_launch(),
+                history_dir: None,
+            })
+            .collect()
+    }
+
+    fn keys(actions: &[NewSessionAction]) -> Vec<&str> {
+        actions.iter().map(|action| action.key.as_str()).collect()
+    }
+
+    #[test]
+    fn the_footer_says_why_a_remote_menu_is_short() {
+        let reading = |reading, catalog: bool| RemoteCatalogEntry {
+            catalog: catalog.then(RemoteLaunchCatalog::default),
+            reading,
+        };
+        assert_eq!(remote_catalog_notice("Linux", None), None, "本机没有这一说");
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::Done, true))),
+            None
+        );
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::InFlight, false))),
+            Some("正在读取「Linux」上装了哪些工具…".to_string())
+        );
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::Failed, false))),
+            Some("连不上「Linux」，只能开空白终端".to_string())
+        );
+        assert_eq!(
+            remote_catalog_notice("Linux", Some(&reading(CatalogReading::Failed, true))),
+            Some("连不上「Linux」，显示的是上次读到的".to_string())
+        );
+    }
+
+    #[test]
+    fn a_remote_not_yet_inspected_offers_only_a_blank_terminal() {
+        let actions = remote_new_session_actions(&bare_engines(), None);
+        assert_eq!(keys(&actions), vec![BLANK_TERMINAL_KEY]);
+    }
+
+    #[test]
+    fn a_remote_offers_its_own_entries_and_only_what_it_has_installed() {
+        let mut diagnostics = AcpRuntimeDiagnostics::default();
+        diagnostics.record_terminal(
+            TerminalAgentKind::Claude,
+            RuntimeExecutable {
+                program: "claude".into(),
+                path: Some("/root/.local/bin/claude".into()),
+                ..Default::default()
+            },
+        );
+        diagnostics.record_terminal(TerminalAgentKind::Codex, RuntimeExecutable::default());
+        let catalog = RemoteLaunchCatalog {
+            entries: vec![
+                LaunchEntry {
+                    label: "Claude Code".into(),
+                    command: "claude".into(),
+                    provider: Some("claude".into()),
+                },
+                LaunchEntry {
+                    label: "Codex".into(),
+                    command: "codex".into(),
+                    provider: Some("codex".into()),
+                },
+                LaunchEntry {
+                    label: "部署".into(),
+                    command: "./deploy.sh".into(),
+                    provider: None,
+                },
+            ],
+            diagnostics,
+        };
+        let actions = remote_new_session_actions(&bare_engines(), Some(&catalog));
+        assert_eq!(
+            keys(&actions),
+            vec![
+                "terminal:claude:claude",
+                "terminal::./deploy.sh",
+                BLANK_TERMINAL_KEY,
+                "conversation:claude",
+            ]
+        );
     }
 }

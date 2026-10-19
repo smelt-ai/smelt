@@ -7,51 +7,11 @@
 //! daemon 的 `agent.memory.*` 控制方法，由主 daemon 调这里的 [`launch_memory_meta`] 等函数。
 //! 设计见 `docs/agent-memory.md`。
 
+pub use smelt_model::agent_memory::*;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// 事实类记忆这么久既没被读过也没更新过，就在界面上标成"长期未用"，由用户决定删不删。
-/// 规则类（user / feedback）是用户给的约束，不按使用情况淘汰。
-pub const MEMORY_STALE_AFTER: Duration = Duration::from_secs(60 * 24 * 60 * 60);
-
-/// 与 `memory-files.ts` 的 `CORE_MEMORY_MAX_BYTES` 一致：每层 user / feedback 规则正文的总预算。
-pub const CORE_MEMORY_MAX_BYTES: usize = 3_000;
-const CORE_MEMORY_TYPES: [&str; 2] = ["user", "feedback"];
-
-/// 规则类记忆（用户本人的情况、用户纠正过的做法）：常驻注入、占规则预算、不按使用情况淘汰。
-/// 其余类型是按需召回的事实。
-pub fn is_rule_memory_kind(kind: Option<&str>) -> bool {
-    kind.is_some_and(|kind| CORE_MEMORY_TYPES.contains(&kind))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemoryEntry {
-    pub file_name: String,
-    pub name: String,
-    pub description: String,
-    /// frontmatter 的 type；手改坏了就是 None，照样列出来让用户能删。
-    pub kind: Option<String>,
-    pub path: PathBuf,
-    /// 模型 read 过这条记忆的次数。
-    pub read_count: u64,
-    /// 最近一次被读或被修改的时间。
-    pub last_used: Option<SystemTime>,
-    /// 事实类且超过 [`MEMORY_STALE_AFTER`] 没用过。
-    pub stale: bool,
-    /// 待确认的原因：读过外部内容的那一轮或无人值守的运行写的。待确认的记忆不注入、不召回，
-    /// 用户采纳（[`approve_memory`]）后才生效。
-    pub pending_reason: Option<String>,
-    /// 去掉 frontmatter 的正文，卡片展开时看；frontmatter 坏了就是整个文件。
-    pub body: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MemoryListing {
-    pub entries: Vec<MemoryEntry>,
-    /// 已生效的规则正文超出常驻预算（通常是手改的），启动时只会注入一部分。
-    pub core_over_budget: bool,
-}
 
 /// 记忆文件名：小写字母、数字、连字符组成的 slug 加 `.md`，最长 64 个字符。
 pub fn is_memory_file_name(name: &str) -> bool {
@@ -255,7 +215,57 @@ fn delete_memory_with(
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
-/// 用户采纳一条待确认的记忆：之后照常注入和召回。
+fn layer_scope_and_dir(
+    agent_id: &str,
+    layer: crate::control_api::AgentMemoryLayer,
+) -> Option<(MemoryScope, PathBuf)> {
+    use crate::control_api::AgentMemoryLayer;
+    match layer {
+        AgentMemoryLayer::Agent => Some((
+            MemoryScope::Agent(agent_id.to_string()),
+            crate::agent_definition_store::agent_memory_dir(agent_id)?,
+        )),
+        AgentMemoryLayer::User => Some((
+            MemoryScope::User,
+            crate::agent_definition_store::user_memory_dir()?,
+        )),
+    }
+}
+
+/// 列出某个智能体的两层记忆。目录在运行时那台机器上。
+pub fn list_for_agent(agent_id: &str) -> AgentMemories {
+    use crate::control_api::AgentMemoryLayer;
+    let list = |layer| {
+        layer_scope_and_dir(agent_id, layer)
+            .map(|(scope, dir)| list_memories(&dir, &scope))
+            .unwrap_or_default()
+    };
+    AgentMemories {
+        agent: list(AgentMemoryLayer::Agent),
+        user: list(AgentMemoryLayer::User),
+    }
+}
+
+pub fn delete_for_agent(
+    agent_id: &str,
+    layer: crate::control_api::AgentMemoryLayer,
+    file_name: &str,
+) -> std::io::Result<()> {
+    let (scope, dir) = layer_scope_and_dir(agent_id, layer)
+        .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+    delete_memory(&dir, &scope, file_name)
+}
+
+pub fn approve_for_agent(
+    agent_id: &str,
+    layer: crate::control_api::AgentMemoryLayer,
+    file_name: &str,
+) -> std::io::Result<()> {
+    let (scope, _) = layer_scope_and_dir(agent_id, layer)
+        .ok_or_else(|| std::io::Error::other("找不到记忆目录"))?;
+    approve_memory(&scope, file_name)
+}
+
 pub fn approve_memory(scope: &MemoryScope, file_name: &str) -> std::io::Result<()> {
     ensure_memory_file_name(file_name)?;
     store()?

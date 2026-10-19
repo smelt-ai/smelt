@@ -1,6 +1,6 @@
 use super::{accepts_remote_catalog_incremental, recognized_remote_acp_sessions};
-use smelt_core::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
-use smelt_core::session_control::{RemoteAcpSession, RemoteSessionSnapshot};
+use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+use smelt_model::session_control::{RemoteAcpSession, RemoteSessionSnapshot};
 
 #[test]
 fn legacy_unversioned_catalog_updates_are_not_deduplicated() {

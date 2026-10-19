@@ -49,7 +49,7 @@ fn link_fg() -> u32 {
 
 // 终端字体族配置：搬进 smelt-core（跟 markdown_mermaid 的代码块渲染共用同一份，
 // 见 font_config.rs），这里重导出成原来的裸名字。
-pub(crate) use smelt_core::font_config::{DEFAULT_FONT_FAMILY, font_family, set_font_family};
+pub(crate) use smelt_model::font_config::{DEFAULT_FONT_FAMILY, font_family, set_font_family};
 
 /// 兜底等宽字体：macOS 系统自带，必定存在。放在 fallback 链末尾做最后防线，
 /// 保证 cell_w 与实际字形宽度同源——否则测量和渲染各自 fallback 到不同字体，
@@ -129,6 +129,8 @@ const PAGE_LINES: i32 = 20;
 
 /// 一个内嵌终端视图。
 pub struct TerminalView {
+    /// 会话所在的运行时。断线重连、关闭都找它。
+    runtime: crate::runtimes::Runtime,
     terminal: Terminal,
     /// 每次替换底层连接递增。旧连接的 redraw 任务退出时只能重连自己的 generation，
     /// 避免显式重启/其它成功重连已经装上新 Terminal 后又被迟到任务覆盖。
@@ -211,6 +213,9 @@ pub struct TerminalView {
     pty_kick_pending: bool,
     /// 断线自动重连是否已在跑（防并发：多个触发点同时 schedule 时只起一个后台任务）。
     reconnecting: bool,
+    /// 断线超过一个退避间隔还没接回来：终端上方显示提示。瞬间就接回的（本机守护
+    /// 无缝升级）不提示，免得闪一下。
+    reconnect_notice: bool,
     /// attachment 已断开但尚未重连时的用户输入。这里只收「明确没有进入旧写队列」
     /// 的输入，重连后按原顺序补发，不能把用户键入当成一次可丢的 UI 事件。
     recovery_input: VecDeque<RecoveryInput>,
@@ -258,21 +263,12 @@ fn terminal_event_needs_redraw(grid_damaged: bool, daemon_geometry_changed: bool
     grid_damaged || daemon_geometry_changed
 }
 
-fn fallback_attention(
-    bell_due: bool,
-    osc: Option<String>,
-) -> Option<(AttentionKind, &'static str, String)> {
-    if bell_due {
-        return Some((AttentionKind::Bell, "响铃", "🔔 响铃".to_string()));
-    }
-    osc.map(|message| (AttentionKind::Notice, "终端通知", message))
-}
-
 fn daemon_agent_state(
+    runtime: &crate::runtimes::Runtime,
     session_id: &str,
     cx: &App,
-) -> Option<smelt_core::daemon_state::DaemonSessionState> {
-    smelt_ui::daemon_states_global::DaemonStates::get(session_id, cx)
+) -> Option<smelt_client::daemon_state::DaemonSessionState> {
+    smelt_ui::daemon_states_global::DaemonStates::get(runtime.key(), session_id, cx)
 }
 
 fn terminal_bell_notifications_enabled(cx: &App) -> bool {
@@ -317,8 +313,9 @@ impl TerminalView {
     /// 便捷构造：所有调用方都在 GPUI 的 ObjC 回调栈上（启动
     /// did_finish_launching / 用户事件），panic 不能跨 FFI unwind，一炸就是
     /// 整个 app abort——历史上「重启就崩」「拖文件夹就崩」都是它。
-    pub fn from_terminal(
+    pub(crate) fn from_terminal(
         cx: &mut Context<Self>,
+        runtime: crate::runtimes::Runtime,
         terminal: Terminal,
         cwd: Option<String>,
         session_id: String,
@@ -346,6 +343,7 @@ impl TerminalView {
             .to_string();
 
         let mut view = Self {
+            runtime,
             terminal,
             terminal_generation: 0,
             focus_handle: cx.focus_handle(),
@@ -382,12 +380,13 @@ impl TerminalView {
             launch_cmd,
             pty_kick_pending: true,
             reconnecting: false,
+            reconnect_notice: false,
             recovery_input: VecDeque::new(),
             recovery_input_bytes: 0,
             write_error: None,
             session_runtime_gone: false,
         };
-        if let Some(state) = daemon_agent_state(&view.session_id, cx) {
+        if let Some(state) = daemon_agent_state(&view.runtime, &view.session_id, cx) {
             view.handle_daemon_state(&state, cx);
         }
         view
@@ -409,6 +408,11 @@ impl TerminalView {
     }
 
     /// 守护里的会话 id（关 pane 时用它让守护真正杀掉 shell）。
+    /// 会话所在的运行时。
+    pub(crate) fn runtime(&self) -> &crate::runtimes::Runtime {
+        &self.runtime
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -436,14 +440,14 @@ impl TerminalView {
         .detach();
     }
 
-    /// PTY 读线程每批输出只唤醒一次。终端内容与信息性 OSC/BEL 通知都在这里消费。
+    /// PTY 读线程每批输出只唤醒一次。终端内容与 BEL 提醒在这里消费；OSC 通知由运行时
+    /// 扫好走事件总线，不经过这里。
     fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
-        let daemon_state = daemon_agent_state(&self.session_id, cx);
+        let daemon_state = daemon_agent_state(&self.runtime, &self.session_id, cx);
         let structured_events = daemon_state
             .as_ref()
             .is_some_and(|state| state.structured_events);
         let bell_received = self.terminal.take_bell_notification().is_some();
-        let osc = self.terminal.take_notification();
         let now = Instant::now();
         let bell_notifications_enabled = terminal_bell_notifications_enabled(cx);
 
@@ -455,17 +459,8 @@ impl TerminalView {
             self.bell_timer_generation = self.bell_timer_generation.wrapping_add(1);
             self.schedule_bell_timer(cx);
         }
-        let bell_due = !structured_events
-            && bell_notifications_enabled
-            && bell_notification_due(self.pending_bell_at, now);
-        if let Some((kind, title, message)) =
-            fallback_attention(bell_due, (!structured_events).then_some(osc).flatten())
-        {
-            if kind == AttentionKind::Bell {
-                self.invalidate_bell_timer();
-            }
-            self.publish_attention(kind, title, message, cx);
-        }
+        // 上面已按结构化事件和设置清掉了待发的响铃，这里只剩到点的那种。
+        self.flush_bell_if_due(now, cx);
 
         self.handle_structured_state(daemon_state.as_ref(), cx);
 
@@ -493,7 +488,7 @@ impl TerminalView {
                 if this.bell_timer_generation != generation {
                     return;
                 }
-                let structured = daemon_agent_state(&this.session_id, cx)
+                let structured = daemon_agent_state(&this.runtime, &this.session_id, cx)
                     .as_ref()
                     .is_some_and(|state| state.structured_events);
                 if structured || !terminal_bell_notifications_enabled(cx) {
@@ -520,7 +515,7 @@ impl TerminalView {
 
     fn handle_structured_state(
         &mut self,
-        daemon_state: Option<&smelt_core::daemon_state::DaemonSessionState>,
+        daemon_state: Option<&smelt_client::daemon_state::DaemonSessionState>,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = daemon_state.filter(|state| state.phase_is_authoritative()) else {
@@ -536,7 +531,7 @@ impl TerminalView {
     /// 由 daemon 状态订阅直接分发，独立于该 pane 当前是否正在渲染。
     pub fn handle_daemon_state(
         &mut self,
-        state: &smelt_core::daemon_state::DaemonSessionState,
+        state: &smelt_client::daemon_state::DaemonSessionState,
         cx: &mut Context<Self>,
     ) {
         if state.id != self.session_id {
@@ -567,6 +562,7 @@ impl TerminalView {
         self.reconnecting = true;
         let sid = self.session_id.clone();
         let cwd = self.cwd.clone();
+        let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             // 退避：500ms 起步，翻倍到 10s 封顶，重到成功或会话消失为止。
             let mut delay = Duration::from_millis(500);
@@ -579,26 +575,32 @@ impl TerminalView {
                 if !still_current {
                     return;
                 }
-                // 1) 守护活着吗？exec 期间 socket 短暂不可连 / 守护还没起来时，
+                // 1) 运行时活着吗？exec 期间 socket 短暂不可连 / 守护还没起来 / 网络断了，
                 //    都不能判「会话没了」——那是要等的，不是要放弃的。
+                let probe = runtime.client().clone();
                 let daemon_up = cx
                     .background_executor()
-                    .spawn(async { terminal::daemon_info().is_some() })
+                    .spawn(async move { probe.describe().is_ok() })
                     .await;
                 let sid2 = sid.clone();
                 let alive = this
-                    .update(cx, |_, cx| {
-                        smelt_ui::daemon_states_global::DaemonStates::runtime_alive(&sid2, cx)
+                    .update(cx, |this, cx| {
+                        smelt_ui::daemon_states_global::DaemonStates::runtime_alive(
+                            this.runtime.key(),
+                            &sid2,
+                            cx,
+                        )
                     })
                     .ok()
                     .flatten();
-                match smelt_core::daemon_state::terminal_reconnect_action(daemon_up, alive) {
-                    smelt_core::daemon_state::TerminalReconnectAction::Wait => {
+                match smelt_client::daemon_state::terminal_reconnect_action(daemon_up, alive) {
+                    smelt_client::daemon_state::TerminalReconnectAction::Wait => {
+                        let _ = this.update(cx, |this, cx| this.show_reconnect_notice(cx));
                         cx.background_executor().timer(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(10));
                         continue;
                     }
-                    smelt_core::daemon_state::TerminalReconnectAction::GiveUp => {
+                    smelt_client::daemon_state::TerminalReconnectAction::GiveUp => {
                         let _ = this.update(cx, |this, cx| {
                             if this.terminal_generation == generation {
                                 this.mark_session_runtime_gone(TERMINAL_SESSION_ENDED_MESSAGE);
@@ -607,16 +609,19 @@ impl TerminalView {
                         });
                         break;
                     }
-                    smelt_core::daemon_state::TerminalReconnectAction::Reattach => {}
+                    smelt_client::daemon_state::TerminalReconnectAction::Reattach => {}
                 }
                 // 3) 重连（reattach：守护按 id 重放历史画面，输出不丢）。
                 // 镜像未知时也立刻 attach：tmux 式，attach 本人才是还活着的权威答案。
                 let sid3 = sid.clone();
                 let cwd3 = cwd.clone();
-                let term = cx
-                    .background_executor()
-                    .spawn(async move { Terminal::reattach(24, 80, cwd3.as_deref(), &sid3) })
-                    .await;
+                let runtime3 = runtime.clone();
+                let term =
+                    cx.background_executor()
+                        .spawn(async move {
+                            Terminal::reattach(&runtime3, 24, 80, cwd3.as_deref(), &sid3)
+                        })
+                        .await;
                 match term {
                     Ok(t) => {
                         // 主线程挂回：adopt_terminal 换 Terminal、清 attention、
@@ -634,19 +639,31 @@ impl TerminalView {
                         break;
                     }
                     Err(_) => {
+                        let _ = this.update(cx, |this, cx| this.show_reconnect_notice(cx));
                         cx.background_executor().timer(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(10));
                     }
                 }
             }
-            // 会话消失（shell 退出）或视图销毁：复位标志，下次断线还能再触发。
-            let _ = this.update(cx, |this, _| {
+            // 接回、会话消失（shell 退出）或视图销毁：复位标志，下次断线还能再触发。
+            let _ = this.update(cx, |this, cx| {
+                if this.reconnect_notice {
+                    this.reconnect_notice = false;
+                    cx.notify();
+                }
                 if this.terminal_generation == generation {
                     this.reconnecting = false;
                 }
             });
         })
         .detach();
+    }
+
+    fn show_reconnect_notice(&mut self, cx: &mut Context<Self>) {
+        if !self.reconnect_notice {
+            self.reconnect_notice = true;
+            cx.notify();
+        }
     }
 
     /// 用已经在后台线程建好的 [`Terminal`] 替换当前连接（硬重启守护后批量重连用）。
@@ -668,7 +685,7 @@ impl TerminalView {
         self.pty_kick_pending = true;
         self.session_runtime_gone = false;
         self.flush_recovery_input(cx);
-        if let Some(state) = daemon_agent_state(&self.session_id, cx) {
+        if let Some(state) = daemon_agent_state(&self.runtime, &self.session_id, cx) {
             self.handle_daemon_state(&state, cx);
         }
         cx.notify();
@@ -970,14 +987,14 @@ impl TerminalView {
     /// 因为正好卡在断行处就点出被截断的错误地址（#21）。
     fn url_at(&self, (r, c): (usize, usize)) -> Option<String> {
         let frame = self.last_frame.as_ref()?;
-        link_at(frame, r, c).map(|(_, url)| url)
+        link_at(frame, r, c, self.runtime.is_local()).map(|(_, url)| url)
     }
 
     /// 单元处链接跨越的所有物理行区间 [(行, 起列, 止列), ...]，用于悬停高亮——软换行的
     /// 链接可能横跨好几行，每行各给一段列区间。
     fn link_range_at(&self, (r, c): (usize, usize)) -> Option<Vec<(usize, usize, usize)>> {
         let frame = self.last_frame.as_ref()?;
-        link_at(frame, r, c).map(|(segs, _)| segs)
+        link_at(frame, r, c, self.runtime.is_local()).map(|(segs, _)| segs)
     }
 }
 
@@ -1010,7 +1027,9 @@ fn wrapped_line_range(frame: &terminal::Frame, r: usize) -> (usize, usize) {
 type LinkRowRange = (usize, usize, usize);
 type TerminalLink = (Vec<LinkRowRange>, String);
 
-fn link_at(frame: &terminal::Frame, r: usize, c: usize) -> Option<TerminalLink> {
+/// `local_files`：终端的 shell 是不是在本机。远程终端里的路径和 `file:` 链接指向
+/// 另一台机器，本机既判断不了存不存在，打开的也是本机同路径的文件，所以只认网址。
+fn link_at(frame: &terminal::Frame, r: usize, c: usize, local_files: bool) -> Option<TerminalLink> {
     let (first, last) = wrapped_line_range(frame, r);
     let mut buf: Vec<terminal::Cell> = Vec::new();
     let mut starts: Vec<usize> = Vec::with_capacity(last - first + 2);
@@ -1040,11 +1059,17 @@ fn link_at(frame: &terminal::Frame, r: usize, c: usize) -> Option<TerminalLink> 
         }
         (a, b, uri.to_string())
     } else {
-        let (a, b, url) = find_links(&buf)
-            .into_iter()
-            .find(|&(a, b, _)| idx >= a && idx <= b)?;
+        let links = if local_files {
+            find_links(&buf)
+        } else {
+            find_urls(&buf)
+        };
+        let (a, b, url) = links.into_iter().find(|&(a, b, _)| idx >= a && idx <= b)?;
         (a, b, url)
     };
+    if !local_files && url.starts_with("file:") {
+        return None;
+    }
 
     // 把缓冲区下标区间 [a, b] 切回各物理行的列区间，供悬停高亮逐行绘制。
     let mut segs = Vec::new();
@@ -1822,6 +1847,28 @@ impl Render for TerminalView {
             // 滚动条：有 scrollback 时画在右侧；拖 thumb / 点轨道跳转。
             .when(scroll_info.max_offset > 0, |root| {
                 root.child(self.render_scrollbar(scroll_info, cx))
+            })
+            // 断线提示：画面停在断开前，不说明的话像是卡死了。
+            .when(self.reconnect_notice, |root| {
+                let runtime = crate::runtimes::runtime_name(self.runtime.key(), cx);
+                root.child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .left_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(crate::ui_theme::bg_card()))
+                        .border_1()
+                        .border_color(rgb(crate::ui_theme::border_mid()))
+                        .shadow_md()
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_muted()))
+                        .child(format!(
+                            "与「{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出"
+                        )),
+                )
             })
     }
 }
@@ -2762,13 +2809,12 @@ mod tests {
     // 不能 `use super::*`：那会把 gpui 的 `test` 属性宏一起带进来，盖掉标准 #[test]。
     use super::{
         BELL_NOTIFICATION_GRACE, CellStyle, LaunchKind, SCROLLBAR_THUMB_MIN, bell_notification_due,
-        bg_spans, cells_to_token, classify_launch, fallback_attention, keystroke_to_bytes, link_at,
-        scrollbar_thumb, terminal_event_needs_redraw, text_batches, visible_end,
+        bg_spans, cells_to_token, classify_launch, keystroke_to_bytes, link_at, scrollbar_thumb,
+        terminal_event_needs_redraw, text_batches, visible_end,
     };
     use crate::terminal;
     use crate::terminal::Cell;
     use gpui::{Keystroke, Modifiers};
-    use smelt_core::attention::AttentionKind;
     use std::time::{Duration, Instant};
 
     /// 默认样式：bg = None 表示「终端默认底色」（不画底色矩形）。
@@ -2820,17 +2866,6 @@ mod tests {
             received_at + BELL_NOTIFICATION_GRACE
         ));
         assert!(!bell_notification_due(None, received_at));
-    }
-
-    #[test]
-    fn terminal_notifications_are_informational() {
-        let bell = fallback_attention(true, Some("ignored".into())).unwrap();
-        assert_eq!(bell.0, AttentionKind::Bell);
-        assert_eq!(bell.2, "🔔 响铃");
-
-        let notice = fallback_attention(false, Some("turn complete".into())).unwrap();
-        assert_eq!(notice.0, AttentionKind::Notice);
-        assert!(fallback_attention(false, None).is_none());
     }
 
     /// 造一行 cell：宽字符（中文）自动补一个 '\0' 占位格，跟 alacritty 的网格一致。
@@ -2985,19 +3020,46 @@ mod tests {
         let frame = single_row_frame(cells);
 
         assert_eq!(
-            link_at(&frame, 0, 3),
+            link_at(&frame, 0, 3, true),
             Some((vec![(0, 3, 4)], "https://example.com/notes".to_string())),
             "命中 OSC 8：范围覆盖挂着同一 URI 的连续格子"
         );
         assert_eq!(
-            link_at(&frame, 0, 4),
-            link_at(&frame, 0, 3),
+            link_at(&frame, 0, 4, true),
+            link_at(&frame, 0, 3, true),
             "同一链接内任意一格结果相同"
         );
         assert_eq!(
-            link_at(&frame, 0, 0),
+            link_at(&frame, 0, 0, true),
             None,
             "没挂链接、可见文本也不是 URL 的格子：没有链接"
+        );
+    }
+
+    /// 远程终端：路径和 `file:` 链接在另一台机器上，不能当本机文件打开；网址照常。
+    #[test]
+    fn remote_terminals_only_link_urls() {
+        use std::sync::Arc;
+        let mut cells = row("/tmp https://a.b/c x");
+        // 「x」挂着远程 `eza` 这类程序给的文件超链接。
+        let last = cells.len() - 1;
+        cells[last].link = Some(Arc::from("file://gs-wynn/etc/hosts"));
+        let frame = single_row_frame(cells);
+
+        assert!(
+            link_at(&frame, 0, 1, true).is_some(),
+            "本机终端：存在的路径可点"
+        );
+        assert_eq!(link_at(&frame, 0, 1, false), None, "远程终端：路径不可点");
+        assert_eq!(
+            link_at(&frame, 0, 6, false).map(|(_, url)| url),
+            Some("https://a.b/c".to_string()),
+            "远程终端：网址照常可点"
+        );
+        assert_eq!(
+            link_at(&frame, 0, last, false),
+            None,
+            "远程终端：file 超链接不可点"
         );
     }
 
@@ -3019,7 +3081,7 @@ mod tests {
 
         let full = "https://a.b/c123".to_string();
         // 点在第 0 行最后一格（断行前）
-        let (segs, url) = link_at(&frame, 0, 7).expect("软换行前半截也应命中链接");
+        let (segs, url) = link_at(&frame, 0, 7, true).expect("软换行前半截也应命中链接");
         assert_eq!(url, full, "拼接后应是完整 URL，而不是被换行切断的前半截");
         assert_eq!(
             segs,
@@ -3028,7 +3090,7 @@ mod tests {
         );
 
         // 点在第 1 行开头（断行后）结果应完全一致
-        assert_eq!(link_at(&frame, 1, 0), Some((segs, full)));
+        assert_eq!(link_at(&frame, 1, 0, true), Some((segs, full)));
     }
 
     /// 零宽字符（变体选择器 U+FE0F、组合变音符等）挂在基字符那一格上（alacritty 的

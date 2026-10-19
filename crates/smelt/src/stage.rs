@@ -8,13 +8,14 @@
 //!
 //! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
-use gpui::prelude::FluentBuilder;
 use gpui::StatefulInteractiveElement;
 use gpui::*;
+use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
 
 use crate::{StageCover, Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
+use smelt_ui::IconAction as _;
 
 /// 共用顶栏标题槽。目录/编辑器/自动化钻取都有页头，那些面必须是 `Hidden`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,8 +60,10 @@ pub(crate) fn stage_has_page_header(
     }
     match route {
         WorkspaceRoute::Agents => !agent_conversation_open,
-        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => true,
-        WorkspaceRoute::Session | WorkspaceRoute::Plugin { .. } => false,
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities | WorkspaceRoute::Desktop => {
+            true
+        }
+        WorkspaceRoute::Session => false,
     }
 }
 
@@ -98,7 +101,6 @@ pub(crate) fn chrome_title_for_stage(
     route: &WorkspaceRoute,
     agent_conversation: Option<ChromeSessionTitle>,
     project_session: Option<ChromeSessionTitle>,
-    plugin_title: Option<String>,
     tool_panel_fills_stage: bool,
 ) -> ChromeTitle {
     // 右栏铺满舞台时，页签就是标题。会话胶囊会压在那条页签上。
@@ -108,15 +110,9 @@ pub(crate) fn chrome_title_for_stage(
     match route {
         WorkspaceRoute::Session => ChromeTitle::from_session(project_session),
         WorkspaceRoute::Agents => ChromeTitle::from_session(agent_conversation),
-        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities => ChromeTitle::Hidden,
-        WorkspaceRoute::Plugin { .. } => match plugin_title {
-            Some(title) if !title.trim().is_empty() => ChromeTitle::Visible {
-                title,
-                model: None,
-                conversation: None,
-            },
-            _ => ChromeTitle::Hidden,
-        },
+        WorkspaceRoute::Automations | WorkspaceRoute::Capabilities | WorkspaceRoute::Desktop => {
+            ChromeTitle::Hidden
+        }
     }
 }
 
@@ -422,7 +418,7 @@ impl Workspace {
         let agent_conversation =
             self.selected_agent_conversation_view(cx)
                 .map(|(ix, view)| ChromeSessionTitle {
-                    title: self.sessions[ix].title(cx),
+                    title: Self::title_with_runtime(&self.sessions[ix], cx),
                     model: view.read(cx).model_name(),
                     conversation: Some(view),
                 });
@@ -432,22 +428,17 @@ impl Workspace {
             }
             let conversation = session.active_acp().cloned();
             Some(ChromeSessionTitle {
-                title: session.title(cx),
+                title: Self::title_with_runtime(session, cx),
                 model: conversation
                     .as_ref()
                     .and_then(|view| view.read(cx).model_name()),
                 conversation,
             })
         });
-        let plugin_title = match self.active_tab() {
-            WorkspaceRoute::Plugin { key } => Some(self.workspace_surface_display_title(key)),
-            _ => None,
-        };
         chrome_title_for_stage(
             self.active_tab(),
             agent_conversation,
             project_session,
-            plugin_title,
             self.tool_panel_promoted(),
         )
     }
@@ -537,107 +528,59 @@ impl Workspace {
     pub(crate) fn render_window_trailing_toggles(&self, cx: &mut Context<Self>) -> Div {
         let promoted = self.tool_panel_promoted();
         let panel_visible = self.tool_panel_open || promoted;
-        let fullscreen_toggle = cx.entity().downgrade();
-        let panel_toggle = cx.entity().downgrade();
         let fullscreen_label = if promoted {
             "收回右侧面板"
         } else {
             "全屏显示右侧面板"
         };
+        let round = ButtonRounded::Size(px(9999.));
         h_flex()
             .flex_none()
             .items_center()
             .gap_1()
+            // 挂在拖窗口的顶栏上：按下先拦住，不让它变成拖窗口。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children((promoted || self.tool_panel_open).then(|| {
-                div()
-                    .id("tool-panel-fullscreen-toggle")
-                    .role(Role::Button)
-                    .aria_label(fullscreen_label)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size_6()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .when(promoted, |s| s.bg(ui_theme::overlay(0x18)))
-                    .hover(|s| s.bg(ui_theme::overlay(0x18)))
-                    .child(
-                        Icon::new(if promoted {
-                            IconName::Minimize
+                Button::new("tool-panel-fullscreen-toggle")
+                    .ghost()
+                    .small()
+                    .rounded(round)
+                    .selected(promoted)
+                    .toggled(promoted)
+                    .icon(if promoted {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    })
+                    .icon_action(fullscreen_label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if promoted {
+                            this.set_stage_cover(None, window, cx);
+                            this.set_tool_panel_open(true, cx);
                         } else {
-                            IconName::Maximize
-                        })
-                        .size_4(),
-                    )
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(fullscreen_label).build(window, cx)
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            if promoted {
-                                this.set_stage_cover(None, window, cx);
-                                this.set_tool_panel_open(true, cx);
-                            } else {
-                                this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
-                            }
-                            this.save_state(cx);
-                            cx.notify();
-                        }),
-                    )
-                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
-                        let _ = fullscreen_toggle.update(cx, |this, cx| {
-                            if promoted {
-                                this.set_stage_cover(None, window, cx);
-                                this.set_tool_panel_open(true, cx);
-                            } else {
-                                this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
-                            }
-                            this.save_state(cx);
-                            cx.notify();
-                        });
-                    })
+                            this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
+                        }
+                        this.save_state(cx);
+                        cx.notify();
+                    }))
             }))
             .child(
-                div()
-                    .id("tool-panel-toggle")
-                    .role(Role::Button)
-                    .aria_label("切换右侧面板")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size_6()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .when(panel_visible, |s| s.bg(ui_theme::overlay(0x18)))
-                    .hover(|s| s.bg(ui_theme::overlay(0x18)))
-                    .child(
-                        if panel_visible {
-                            Icon::empty().path("smelt-icons/panel-right-filled.svg")
-                        } else {
-                            Icon::new(IconName::PanelRight)
-                        }
-                        .size_4(),
-                    )
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("切换右侧面板")
-                            .action(&crate::ToggleToolPanel, None)
-                            .build(window, cx)
+                Button::new("tool-panel-toggle")
+                    .ghost()
+                    .small()
+                    .rounded(round)
+                    .selected(panel_visible)
+                    .toggled(panel_visible)
+                    .icon(if panel_visible {
+                        Icon::empty().path("smelt-icons/panel-right-filled.svg")
+                    } else {
+                        Icon::new(IconName::PanelRight)
                     })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.toggle_tool_panel(window, cx);
-                        }),
-                    )
-                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
-                        let _ = panel_toggle
-                            .update(cx, |this, cx| this.toggle_tool_panel(window, cx));
-                    }),
+                    .accessibility_label("切换右侧面板")
+                    .tooltip_with_action("切换右侧面板", &crate::ToggleToolPanel, None)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_tool_panel(window, cx);
+                    })),
             )
     }
 }
@@ -670,7 +613,7 @@ mod tests {
     #[test]
     fn leaving_a_session_for_the_agent_catalog_clears_the_chrome_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None, false),
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), false),
             ChromeTitle::Hidden,
         );
     }
@@ -678,13 +621,7 @@ mod tests {
     #[test]
     fn automations_do_not_keep_the_previous_session() {
         assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Automations,
-                None,
-                Some(grok()),
-                None,
-                false
-            ),
+            chrome_title_for_stage(&WorkspaceRoute::Automations, None, Some(grok()), false),
             ChromeTitle::Hidden,
         );
     }
@@ -696,7 +633,6 @@ mod tests {
                 &WorkspaceRoute::Agents,
                 Some(agent_chat()),
                 Some(grok()),
-                None,
                 false,
             ),
             ChromeTitle::Visible {
@@ -710,7 +646,7 @@ mod tests {
     #[test]
     fn project_stage_still_shows_the_session_title() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None, false),
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), false),
             ChromeTitle::Visible {
                 title: grok().title,
                 model: None,
@@ -718,45 +654,7 @@ mod tests {
             },
         );
         assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Session,
-                Some(agent_chat()),
-                None,
-                None,
-                false
-            ),
-            ChromeTitle::Hidden,
-        );
-    }
-
-    #[test]
-    fn plugin_surface_does_not_fall_back_to_the_previous_session() {
-        assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Plugin {
-                    key: "com.example/board".into(),
-                },
-                None,
-                Some(grok()),
-                Some("看板".into()),
-                false,
-            ),
-            ChromeTitle::Visible {
-                title: "看板".into(),
-                model: None,
-                conversation: None,
-            },
-        );
-        assert_eq!(
-            chrome_title_for_stage(
-                &WorkspaceRoute::Plugin {
-                    key: "com.example/board".into(),
-                },
-                None,
-                Some(grok()),
-                None,
-                false,
-            ),
+            chrome_title_for_stage(&WorkspaceRoute::Session, Some(agent_chat()), None, false),
             ChromeTitle::Hidden,
         );
     }
@@ -772,7 +670,6 @@ mod tests {
                     model: None,
                     conversation: None,
                 }),
-                None,
                 false,
             ),
             ChromeTitle::Hidden,
@@ -782,11 +679,11 @@ mod tests {
     #[test]
     fn promoted_tool_panel_hides_the_session_capsule() {
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), None, true),
+            chrome_title_for_stage(&WorkspaceRoute::Session, None, Some(grok()), true),
             ChromeTitle::Hidden,
         );
         assert_eq!(
-            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), None, true),
+            chrome_title_for_stage(&WorkspaceRoute::Agents, None, Some(grok()), true),
             ChromeTitle::Hidden,
         );
     }
@@ -829,12 +726,5 @@ mod tests {
             false
         ));
         assert!(stage_has_page_header(&WorkspaceRoute::Session, false, true));
-        assert!(!stage_has_page_header(
-            &WorkspaceRoute::Plugin {
-                key: "files".into()
-            },
-            false,
-            false
-        ));
     }
 }

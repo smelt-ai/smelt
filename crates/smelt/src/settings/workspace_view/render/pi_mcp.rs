@@ -1,10 +1,10 @@
 //! 能力库「MCP」页签：内置服务器一键添加，`~/.pi/agent/mcp.json` 里的服务器启停、
 //! 登录、移除。排版和模型页签同一套（居中限宽、行内按钮 xsmall）。
 
-use super::pi_model::{Palette, card, pill, section};
+use super::pi_model::{Palette, card, section};
 use super::*;
 use crate::settings::workspace::PiConfigFileKind;
-use smelt_core::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
+use smelt_model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
 use smelt_ui::IconAction as _;
 
 const PAGE_MAX_WIDTH: f32 = 760.;
@@ -30,7 +30,7 @@ pub(super) fn pi_mcp_page(
                 .gap_8()
                 .child(presets_section(&entity, servers, palette))
                 .child(servers_section(&entity, snapshot, servers, palette))
-                .child(footer(&entity, palette)),
+                .child(footer(&entity, &snapshot.pi_paths.mcp, palette)),
         )
         .into_any_element()
 }
@@ -76,7 +76,11 @@ fn preset_row(
     palette: Palette,
 ) -> Div {
     let action = if added {
-        pill("已添加", palette.muted).into_any_element()
+        Tag::secondary()
+            .rounded_full()
+            .flex_none()
+            .child("已添加")
+            .into_any_element()
     } else {
         let entity = entity.clone();
         Button::new(format!("pi-mcp-add-{}", preset.id))
@@ -94,6 +98,15 @@ fn preset_row(
             })
             .into_any_element()
     };
+    // 加没加都留着：先添加、后装扩展也是常见顺序。
+    let install = preset.extension_url.map(|url| {
+        Button::new(format!("pi-mcp-extension-{}", preset.id))
+            .ghost()
+            .xsmall()
+            .label("安装扩展")
+            .tooltip("打开 Chrome 应用商店里的扩展页")
+            .on_click(move |_, _, cx| cx.open_url(url))
+    });
     h_flex()
         .w_full()
         .items_center()
@@ -112,7 +125,14 @@ fn preset_row(
                         .child(preset.summary),
                 ),
         )
-        .child(div().flex_none().child(action))
+        .child(
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .items_center()
+                .children(install)
+                .child(action),
+        )
 }
 
 fn servers_section(
@@ -187,9 +207,9 @@ fn server_row(
         .items_center()
         .child(row_title(server.name.clone(), palette));
     if !server.enabled {
-        badges = badges.child(pill("已停用", palette.muted));
+        badges = badges.child(Tag::secondary().rounded_full().flex_none().child("已停用"));
     } else if server.signed_in {
-        badges = badges.child(pill("已登录", palette.success));
+        badges = badges.child(Tag::success().rounded_full().flex_none().child("已登录"));
     }
 
     let login = (server.is_http() && server.enabled).then(|| {
@@ -312,7 +332,7 @@ fn confirm_remove(entity: &Entity<Workspace>, name: &str, palette: Palette) -> D
 }
 
 /// 原生文件入口，以及「改了要怎样才生效」的提示：Pi 只在会话启动时读 mcp.json。
-fn footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
+fn footer(entity: &Entity<Workspace>, mcp_path: &str, palette: Palette) -> Div {
     let open_entity = entity.clone();
     v_flex()
         .w_full()
@@ -338,7 +358,7 @@ fn footer(entity: &Entity<Workspace>, palette: Palette) -> Div {
                         .ghost()
                         .xsmall()
                         .label("mcp.json")
-                        .tooltip(smelt_core::pi_mcp::pi_mcp_path().display().to_string())
+                        .tooltip(mcp_path.to_string())
                         .on_click(move |_, window, cx| {
                             open_entity.update(cx, |workspace, cx| {
                                 workspace.open_pi_config(PiConfigFileKind::Mcp, window, cx);

@@ -121,7 +121,10 @@ CLI：`smelt agent` / `smelt automation` / `smelt settings`。教模型用的 sk
 1. 服务端接受 `min_supported_version..=max_supported_version` 内的请求，并使用请求版本
    回包；客户端可根据 `unsupported_version.supported_versions` 选择双方共有版本。留在
    同一支持范围内的版本必须保持 method payload 可加性兼容；破坏性变更应新增 method，
-   或在提升版本的同时提升 `min_supported_version`，不能假装继续兼容旧 DTO。
+   或在提升版本的同时提升 `min_supported_version`，不能假装继续兼容旧 DTO。2026-10-18
+   移除 worktree 功能时删掉了 `git.worktree.*`、`git.is_dirty`，`git.repo_info` 只回当前
+   分支，版本仍是 1：客户端按 `system.describe` 的方法清单判断运行时有没有要用的方法，
+   旧桌面连新运行时的 Git 面板需要升级桌面。
 2. `agent.send` 在发送前生成一次 `command_id`。响应丢失后允许用相同 ID 查询/重试；
    不得换一个新 ID 自动重放。
 3. 调用方必须根据稳定错误码分支，不能解析自然语言文案：参数、授权、目标缺失、前置

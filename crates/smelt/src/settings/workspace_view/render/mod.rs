@@ -9,6 +9,7 @@
 use super::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::sidebar::{Sidebar, SidebarItem, SidebarMenuItem};
+use gpui_component::tag::Tag;
 
 mod agent;
 mod appearance;
@@ -20,33 +21,7 @@ mod pi_mcp;
 mod pi_memory;
 mod pi_model;
 mod pi_plugin;
-mod plugins;
 mod shortcuts;
-
-/// 设置页里 26px 的小按钮。悬停色由各页自己挂：多数跟边框色走，维护页有的按钮要单独指定。
-fn settings_chip_button(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    fg: Hsla,
-    popover: Hsla,
-    border: Hsla,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(26.))
-        .px_3()
-        .flex()
-        .flex_none()
-        .items_center()
-        .rounded_md()
-        .cursor_pointer()
-        .text_xs()
-        .text_color(fg)
-        .bg(popover)
-        .border_1()
-        .border_color(border)
-        .child(label.into())
-}
 
 /// 渲染独立设置页面：左侧两级菜单切换内容页，右侧只显示当前选中项。
 pub(super) fn render_settings_content(
@@ -106,19 +81,9 @@ impl RenderOnce for SettingsShell {
             InputState::new(window, cx).placeholder("搜索设置、功能或命令")
         });
         let query = search.read(cx).value().to_string();
-        let plugins = cx
-            .try_global::<PluginEnablementState>()
-            .map(|state| state.catalog.clone())
-            .unwrap_or_default();
-        let full_nav = settings_nav(&plugins);
-        let nav = filter_settings_nav(&full_nav, &query);
-        // 选中的插件页可能已经被卸载；侧栏没有对应项时回到首页，别画一页侧栏里找不到的内容。
-        let selected = if nav_contains(&full_nav, &self.snapshot.settings_section) {
-            self.snapshot.settings_section.clone()
-        } else {
-            SettingsSection::default()
-        };
-        let page = section_page(self.entity.clone(), &self.snapshot, &selected, &plugins, cx);
+        let nav = filter_settings_nav(&settings_nav(), &query);
+        let selected = self.snapshot.settings_section.clone();
+        let page = section_page(self.entity.clone(), &self.snapshot, &selected, cx);
 
         h_flex()
             .size_full()
@@ -262,10 +227,17 @@ fn section_page(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
     selected: &SettingsSection,
-    plugins: &[InstalledPlugin],
     cx: &App,
 ) -> SettingPage {
-    match selected {
+    // 这几页改的是本机运行时上的配置（引擎、启动项、对话命令、CLI）。
+    let local_runtime_only = matches!(
+        selected,
+        SettingsSection::DshModel
+            | SettingsSection::AgentRuntime
+            | SettingsSection::AgentLaunch
+            | SettingsSection::AgentWorkspace
+    );
+    let page = match selected {
         SettingsSection::AppearanceTheme => appearance::theme_page(entity, snapshot, cx),
         SettingsSection::AppearanceTerminal => appearance::terminal_page(entity, snapshot, cx),
         SettingsSection::AppearanceWindow => appearance::window_page(entity, snapshot, cx),
@@ -276,10 +248,14 @@ fn section_page(
         SettingsSection::AgentNotify => agent::notify_page(entity, snapshot, cx),
         SettingsSection::AgentHooks => agent::hooks_page(entity, snapshot, cx),
         SettingsSection::CollaborationRemote => collaboration::remote_page(entity, snapshot, cx),
-        SettingsSection::Plugin { id } => plugins::plugin_page(entity, snapshot, id, plugins, cx),
         SettingsSection::MaintenanceUpdate => maintenance::update_page(entity, snapshot, cx),
         SettingsSection::MaintenanceDaemon => maintenance::daemon_page(entity, snapshot, cx),
         SettingsSection::MaintenanceStorage => maintenance::storage_page(entity, snapshot, cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
+    };
+    if local_runtime_only && crate::runtimes::has_remote_runtimes(cx) {
+        page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())
+    } else {
+        page
     }
 }

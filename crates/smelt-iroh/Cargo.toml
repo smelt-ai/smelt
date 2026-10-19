@@ -2,11 +2,7 @@
 name = "smelt-iroh"
 version.workspace = true
 edition.workspace = true
-description = "Mac 侧 iroh 隧道：手机按 EndpointId 拨号，直连/打洞/中继自动回退，转发到本机 remote_gateway"
-
-[[bin]]
-name = "smelt-iroh-host"
-path = "src/bin/host.rs"
+description = "运行时协议的 iroh 传输：客户端按 EndpointId 拨号运行时，直连/打洞/中继自动回退"
 
 [[bin]]
 name = "smelt-iroh-connect"
@@ -17,13 +13,18 @@ workspace = true
 
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-model = { path = "../smelt-model" }
+smelt-pairing = { path = "../smelt-pairing" }
 iroh = "1"
 iroh-relay = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal"] }
+# 构造 iroh::dns::DnsError 要用它的 AnyError（iroh 本身已依赖，不增新包）。
+n0-error = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "time"] }
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 data-encoding = "2"
+serde_json = "1"
 futures-util = "0.3"
 
 # 命令行宿主/客户端只在桌面编。移动端只链 lib，不能把 clap 带进 iOS/Android。

@@ -27,8 +27,11 @@ use crate::acp_session::{
     RuntimeDebugModelCall,
 };
 use crate::agent_kind::{ConversationLaunchSpec, SMELT_PI_AGENT_COMMAND};
+use crate::pi_queue::QueueLane;
 
 const PI_RPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 关会话时等 Pi 自己退出（关 MCP 服务器、杀它跟踪的子进程）最多这么久。
+const PI_EXIT_GRACE: Duration = Duration::from_secs(3);
 const SMELT_PERMISSION_TITLE: &str = "smelt.permission.v1";
 const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
@@ -93,6 +96,11 @@ struct PiState {
 
     /// `clear_queue` 回执后是否要把 in_flight 还回去（ClearQueue 动作才要）。
     pending_clear: Option<(String, bool)>,
+    /// 送进 Pi 队列的输入。停止时附图要跟着文字还回输入框。
+    queue: crate::pi_queue::PiQueueMirror,
+    /// 会话宿主里的后台任务。`clear_queue` 会把排在 Pi 队列里的结果一起清掉，要告诉
+    /// 宿主重发；用户在界面上停任务也走它。
+    background: Option<crate::background_tasks::BackgroundControl>,
     composer_restore_seq: u64,
     pending_configs: HashMap<String, PendingConfig>,
     partial_tool_output: HashMap<String, String>,
@@ -370,6 +378,7 @@ async fn run_connection(
         let mut lines = futures::io::BufReader::new(child_stdout).lines();
         let mut state = PiState::new();
         state.sid = launch.sid.clone();
+        state.background = Some(background.control());
         let initialize = initialize_session(
             &mut lines,
             &mut writer,
@@ -606,25 +615,36 @@ impl PiProcessGuard {
         }
     }
 
-    fn kill_process_tree(&mut self) {
-        unsafe {
-            libc::kill(-self.pid, libc::SIGKILL);
-        }
-        // 子进程理论上仍是组长；即便它异常改了进程组，也要保证直属 child 会死。
-        let _ = self.child.kill();
-    }
-
     /// 用 `waitpid` 确认直属子进程已经退出。`Child::try_status()` 只是问一句
     /// 「现在死了没有」；信号被掩码挡住时，隔 10ms 再杀一次也等不来结果。
-    /// 先标上已收，避免这个 Child 析构时再进来一次。杀一次，然后堵住等到
-    /// `waitpid` 把直属子进程收回。
+    /// 先标上已收，避免这个 Child 析构时再进来一次。
+    ///
+    /// 先 SIGTERM，让 Pi 自己收尾：它起的 stdio MCP 服务器各在自己的进程组里，
+    /// 不在 Pi 的组里，只有 Pi 的退出流程会关掉它们。直接 SIGKILL 会把它们留在
+    /// launchd 下面。到时限还没退才 SIGKILL 整组。
     fn reap_now(&mut self) {
         if self.reaped {
             return;
         }
         self.reaped = true;
-        self.kill_process_tree();
-        let _ = crate::process_wait::reap_direct_child(self.pid);
+        let pid = self.pid;
+        // 组长收尸之后组号可能被复用，所以只在等的时候按组发信号，收完不再动这个组。
+        let reaped = crate::process_wait::wait_for_pid(
+            pid,
+            PI_EXIT_GRACE,
+            || unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            },
+            move || unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            },
+            PI_EXIT_GRACE,
+        );
+        if !reaped {
+            // 子进程理论上仍是组长；即便它异常改了进程组，也要保证直属 child 会死。
+            let _ = self.child.kill();
+            let _ = crate::process_wait::reap_direct_child(pid);
+        }
     }
 
     fn kill_and_reap(&mut self) {
@@ -1361,7 +1381,7 @@ async fn consume_session_slash<W: AsyncWrite + Unpin>(
     match slash {
         PiSessionSlash::Reload => {
             finish_in_flight(in_flight_rpc);
-            let _ = event_tx.try_send(ConversationEvent::Status(
+            let _ = event_tx.try_send(ConversationEvent::Notice(
                 "当前协议不支持 /reload，不会发给模型".to_string(),
             ));
             if !turn_is_active {
@@ -1371,7 +1391,7 @@ async fn consume_session_slash<W: AsyncWrite + Unpin>(
         }
         PiSessionSlash::Shake if turn_is_active => {
             finish_in_flight(in_flight_rpc);
-            let _ = event_tx.try_send(ConversationEvent::Status(
+            let _ = event_tx.try_send(ConversationEvent::Notice(
                 "回合进行中，结束后再 /shake".to_string(),
             ));
             Ok(true)
@@ -1386,6 +1406,8 @@ async fn consume_session_slash<W: AsyncWrite + Unpin>(
     }
 }
 
+/// Pi 报的队列原文。不 trim、不丢空串：只有图的插话文字就是空串，丢了它，
+/// 投影会以为它已经交给模型，停止时它的图也还不回来。要和发出时的原文逐字对得上。
 fn json_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
     value
         .get(key)
@@ -1393,8 +1415,6 @@ fn json_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
         .map(str::to_string)
         .collect()
 }
@@ -1521,6 +1541,12 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             }
             let id = state.request_id("steer");
             state.steer_request_ids.insert(id.clone());
+            state.queue.sent(
+                QueueLane::Steering,
+                id.clone(),
+                text.clone(),
+                images.clone(),
+            );
             let mut request = serde_json::json!({
                 "id": id,
                 "type": "steer",
@@ -1548,6 +1574,12 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             }
             let id = state.request_id("follow-up");
             state.follow_up_request_ids.insert(id.clone());
+            state.queue.sent(
+                QueueLane::FollowUp,
+                id.clone(),
+                text.clone(),
+                images.clone(),
+            );
             let mut request = serde_json::json!({
                 "id": id,
                 "type": "follow_up",
@@ -1573,13 +1605,13 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             truncate_from,
         } => {
             if state.active_turn {
-                let _ = event_tx.try_send(ConversationEvent::Status(
+                let _ = event_tx.try_send(ConversationEvent::Notice(
                     "回退失败：回合还在运行，请先停止".to_string(),
                 ));
                 return Ok(());
             }
             if state.pending_rewind.is_some() {
-                let _ = event_tx.try_send(ConversationEvent::Status(
+                let _ = event_tx.try_send(ConversationEvent::Notice(
                     "回退失败：已有一次回退在进行中".to_string(),
                 ));
                 return Ok(());
@@ -1645,6 +1677,17 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 state.models_request_id = None;
             }
         }
+        ConversationCommand::StopBackgroundTask { id } => {
+            let result = match &state.background {
+                Some(background) => background.stop(&id),
+                None => Err("后台任务服务还没就绪".to_string()),
+            };
+            if let Err(error) = result {
+                let _ = event_tx.try_send(ConversationEvent::Notice(format!(
+                    "停止后台任务失败：{error}"
+                )));
+            }
+        }
         ConversationCommand::SetSessionTitle(title) => {
             let title = title.trim().to_string();
             // Pi 的 set_session_name 拒绝空名字；清空标题只在本地生效。
@@ -1695,21 +1738,29 @@ async fn send_clear_queue<W: AsyncWrite + Unpin>(
     .await
 }
 
+/// 是 Pi 自己确认收进队列的 steer / follow_up。被输入处理器接走的不算。
+fn queued_by_pi(response: &serde_json::Value) -> bool {
+    ensure_response_success(response).is_ok()
+        && response
+            .get("data")
+            .and_then(|data| data.get("disposition"))
+            .and_then(serde_json::Value::as_str)
+            != Some("handled")
+}
+
 fn emit_queue_restore(
     event_tx: &smol::channel::Sender<ConversationEvent>,
     state: &mut PiState,
-    steering: Vec<String>,
-    follow_up: Vec<String>,
+    restore: Vec<(String, Vec<crate::acp_conn::PromptImage>)>,
 ) {
-    let mut texts = steering;
-    texts.extend(follow_up);
+    let (texts, images): (Vec<_>, Vec<_>) = restore.into_iter().unzip();
     state.composer_restore_seq = state.composer_restore_seq.saturating_add(1);
     // 只发还原，不清空队列当「已插入」。否则 apply 会把撤回的 steering
     // 写成会话气泡，和还回输入框叠在一起。
     let _ = event_tx.try_send(ConversationEvent::ComposerRestore {
         revision: state.composer_restore_seq,
         texts,
-        images: Vec::new(),
+        images,
     });
 }
 
@@ -1963,15 +2014,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         return Ok(());
     }
     if state.steer_request_ids.remove(&id) {
-        if let Err(error) = ensure_response_success(&response) {
-            let _ = event_tx.try_send(ConversationEvent::Status(format!("插入消息失败：{error}")));
+        let result = ensure_response_success(&response);
+        state.queue.acknowledged(&id, queued_by_pi(&response));
+        if let Err(error) = result {
+            let _ = event_tx.try_send(ConversationEvent::Notice(format!("插入消息失败：{error}")));
         }
         finish_in_flight(in_flight_rpc);
         return Ok(());
     }
     if state.follow_up_request_ids.remove(&id) {
-        if let Err(error) = ensure_response_success(&response) {
-            let _ = event_tx.try_send(ConversationEvent::Status(format!(
+        let result = ensure_response_success(&response);
+        state.queue.acknowledged(&id, queued_by_pi(&response));
+        if let Err(error) = result {
+            let _ = event_tx.try_send(ConversationEvent::Notice(format!(
                 "排队后续消息失败：{error}"
             )));
         }
@@ -1980,7 +2035,7 @@ async fn handle_response<W: AsyncWrite + Unpin>(
     }
     if state.compact_request_ids.remove(&id) {
         if let Err(error) = ensure_response_success(&response) {
-            let _ = event_tx.try_send(ConversationEvent::Status(format!(
+            let _ = event_tx.try_send(ConversationEvent::Notice(format!(
                 "压缩上下文失败：{error}"
             )));
         }
@@ -1995,17 +2050,19 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         let then_abort = state.pending_clear.take().is_some_and(|(_, abort)| abort);
         match ensure_response_success(&response) {
             Ok(()) => {
+                if let Some(background) = &state.background {
+                    background.queue_cleared();
+                }
                 let data = response.get("data").cloned().unwrap_or_default();
-                emit_queue_restore(
-                    event_tx,
-                    state,
+                let restore = state.queue.cleared(
                     json_string_list(&data, "steering"),
                     json_string_list(&data, "followUp"),
                 );
+                emit_queue_restore(event_tx, state, restore);
             }
             Err(error) => {
                 let _ =
-                    event_tx.try_send(ConversationEvent::Status(format!("清空队列失败：{error}")));
+                    event_tx.try_send(ConversationEvent::Notice(format!("清空队列失败：{error}")));
             }
         }
         if then_abort {
@@ -2247,6 +2304,8 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
         state.active_turn = false;
         state.cancel_requested = false;
     }
+    // 换到了新分叉，旧会话的队列跟着作废。
+    state.queue.reset();
     let truncate_from = pending.truncate_from;
     let _ = event_tx.try_send(ConversationEvent::Rewound { truncate_from });
     let prefill = data
@@ -2267,10 +2326,10 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     {
         // 身份刷不上新 id 只是“下次重连恢复到旧分支”的退化，回退本身已成功。
         state.rewind_state_request_id = None;
-        emit_queue_restore(event_tx, state, vec![prefill], Vec::new());
+        emit_queue_restore(event_tx, state, vec![(prefill, Vec::new())]);
         finish_in_flight(in_flight_rpc);
     } else {
-        emit_queue_restore(event_tx, state, vec![prefill], Vec::new());
+        emit_queue_restore(event_tx, state, vec![(prefill, Vec::new())]);
     }
     Ok(())
 }
@@ -2280,7 +2339,7 @@ fn abort_rewind(
     in_flight_rpc: &AtomicUsize,
     message: String,
 ) {
-    let _ = event_tx.try_send(ConversationEvent::Status(message));
+    let _ = event_tx.try_send(ConversationEvent::Notice(message));
     finish_in_flight(in_flight_rpc);
 }
 
@@ -2484,6 +2543,49 @@ fn handle_event(
                 _ => {}
             }
         }
+        Some("agent_start") => {
+            // Smelt 发的 prompt 发出时就开了本地回合，Pi 也一直忙到 settled。两样都不是，
+            // 就是 Pi 自己起的一轮：后台任务、后台子智能体的结果带 triggerTurn 时会这样。
+            // 停止后 Pi 还没 settled 时 provider_busy 仍为真，那时的迟到运行不算新回合。
+            if state.active_turn || state.provider_busy || prompt_admission_unresolved(state) {
+                return;
+            }
+            state.active_turn = true;
+            state.prompt_accepted = true;
+            state.provider_busy = true;
+            state.cancel_requested = false;
+            state.last_stop_reason = None;
+            state.last_error = None;
+            let _ = event_tx.try_send(ConversationEvent::ProviderTurnStarted);
+        }
+        Some("message_start") => {
+            let Some(message) = event.get("message") else {
+                return;
+            };
+            if message.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+                return;
+            }
+            let content = message.get("content");
+            let has_image = content
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block.get("type").and_then(serde_json::Value::as_str) == Some("image")
+                    })
+                });
+            let Some((steering, follow_up)) = state
+                .queue
+                .user_message_started(&content_text(content), has_image)
+            else {
+                return;
+            };
+            if state.pending_clear.is_none() {
+                let _ = event_tx.try_send(ConversationEvent::PromptQueue {
+                    steering,
+                    follow_up,
+                });
+            }
+        }
         Some("message_end") => {
             // 后台子智能体的结果是自定义消息（`display: false`），实时到达时只有这里能看到。
             // 只认子智能体：后台任务的状态行由守护进程自己发（`smelt_background_notify`），
@@ -2650,23 +2752,41 @@ fn handle_event(
                 .get("error")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("Pi Extension 执行失败");
-            let _ = event_tx.try_send(ConversationEvent::Status(format!(
+            let _ = event_tx.try_send(ConversationEvent::Notice(format!(
                 "Pi Extension：{message}"
             )));
         }
         Some("auto_retry_start") => {
-            let _ = event_tx.try_send(ConversationEvent::Status(
-                "Pi 正在重试模型请求…".to_string(),
-            ));
+            let number = |key: &str| event.get(key).and_then(serde_json::Value::as_u64);
+            let _ = event_tx.try_send(ConversationEvent::ProviderRetry(Some(
+                crate::acp_session::ProviderRetryView {
+                    attempt: number("attempt").unwrap_or(1) as u32,
+                    max_attempts: number("maxAttempts").unwrap_or(0) as u32,
+                    delay_ms: number("delayMs").unwrap_or(0),
+                    error: event
+                        .get("errorMessage")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                },
+            )));
+        }
+        Some("auto_retry_end") => {
+            let _ = event_tx.try_send(ConversationEvent::ProviderRetry(None));
         }
         Some("queue_update") => {
             if state.pending_clear.is_some() {
                 // clear_queue 进行中：接下来会 ComposerRestore。空队列不能当成已插入。
                 return;
             }
+            let (steering, follow_up) = state.queue.reported(
+                json_string_list(&event, "steering"),
+                json_string_list(&event, "followUp"),
+            );
             let _ = event_tx.try_send(ConversationEvent::PromptQueue {
-                steering: json_string_list(&event, "steering"),
-                follow_up: json_string_list(&event, "followUp"),
+                steering,
+                follow_up,
             });
         }
         Some("compaction_start") => {
@@ -3059,14 +3179,29 @@ fn entries_from_subagent_result(
     Vec<AcpEntry>,
     BTreeMap<String, crate::acp_session::ToolCallDebug>,
 ) {
-    if let Some(messages) = result.get("messages").and_then(serde_json::Value::as_array) {
-        return entries_from_subagent_messages(Some(messages), id_prefix, running);
+    let (mut entries, debug) =
+        if let Some(messages) = result.get("messages").and_then(serde_json::Value::as_array) {
+            entries_from_subagent_messages(Some(messages), id_prefix, running)
+        } else {
+            entries_from_subagent_items(
+                result.get("items").and_then(serde_json::Value::as_array),
+                id_prefix,
+                running,
+            )
+        };
+    // 定稿的结果只存结果、不带子会话消息：没有过程可画时用最终输出当卡片内容，不留空卡。
+    if entries.is_empty()
+        && let Some(output) = result
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .filter(|output| !output.trim().is_empty())
+    {
+        entries.push(AcpEntry::Assistant {
+            text: output.to_string(),
+            thought: false,
+        });
     }
-    entries_from_subagent_items(
-        result.get("items").and_then(serde_json::Value::as_array),
-        id_prefix,
-        running,
-    )
+    (entries, debug)
 }
 
 fn entries_from_subagent_items(
@@ -3554,48 +3689,6 @@ fn replay_assistant_content(
     }
 }
 
-fn normalized_sensitive_key(key: &str) -> String {
-    key.chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn is_sensitive_payload_key(key: &str) -> bool {
-    let normalized = normalized_sensitive_key(key);
-    matches!(
-        normalized.as_str(),
-        "authorization"
-            | "proxyauthorization"
-            | "auth"
-            | "headers"
-            | "apikey"
-            | "accesstoken"
-            | "refreshtoken"
-            | "token"
-            | "clientsecret"
-            | "secret"
-            | "password"
-            | "passwd"
-            | "cookie"
-            | "setcookie"
-            | "credential"
-            | "credentials"
-    ) || [
-        "authorization",
-        "auth",
-        "apikey",
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "cookie",
-        "credential",
-    ]
-    .iter()
-    .any(|suffix| normalized.ends_with(suffix))
-}
-
 fn redact_runtime_payload(value: &mut serde_json::Value, path: &str, paths: &mut Vec<String>) {
     match value {
         serde_json::Value::String(text) if text.to_ascii_lowercase().starts_with("data:image/") => {
@@ -3616,14 +3709,14 @@ fn redact_runtime_payload(value: &mut serde_json::Value, path: &str, paths: &mut
                 .is_some_and(|kind| matches!(kind, "image" | "input_image" | "image_url"));
             for (key, child) in fields {
                 let child_path = format!("{path}.{key}");
-                if is_sensitive_payload_key(key) {
+                if smelt_model::redact::is_sensitive_key(key) {
                     *child = serde_json::Value::String("[REDACTED]".to_string());
                     if !paths.contains(&child_path) {
                         paths.push(child_path);
                     }
                 } else if image_like
                     && matches!(
-                        normalized_sensitive_key(key).as_str(),
+                        smelt_model::redact::normalized_sensitive_key(key).as_str(),
                         "data" | "base64" | "bytes"
                     )
                 {
@@ -3899,8 +3992,12 @@ fn handle_extension_ui(
             handle_generic_elicitation(request, id, method, event_tx, outbound_tx, state)
         }
         "notify" => {
+            // 扩展发给用户看的通知，走对话里的提示。Pi 的通知会带上连接错误（如 MCP
+            // 服务器连不上时的 HTTP 错误体），先打码。
             if let Some(message) = request.get("message").and_then(serde_json::Value::as_str) {
-                let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
+                let _ = event_tx.try_send(ConversationEvent::Notice(
+                    smelt_model::redact::redact_secrets(message),
+                ));
             }
         }
         "setStatus" => {
@@ -4264,6 +4361,62 @@ mod tests {
             Some(libc::ESRCH),
             "guard 返回前必须已回收直属子进程"
         );
+    }
+
+    /// Pi 的 stdio MCP 服务器不在它的进程组里，只有 Pi 自己的退出流程会关掉它们。
+    /// 关会话必须先让它收尾，不能上来就 SIGKILL。
+    #[cfg(unix)]
+    #[test]
+    fn pi_process_guard_lets_pi_clean_up_before_killing() {
+        use std::os::unix::process::CommandExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("cleaned");
+        let mut command = std::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                "trap 'echo done > \"$MARKER\"; exit 0' TERM; while :; do sleep 1; done",
+            ])
+            .env("MARKER", &marker)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let child = async_process::Command::from(command)
+            .spawn()
+            .expect("spawn guarded process");
+        let pid = child.id() as i32;
+        // 等 trap 装好。
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut guard = PiProcessGuard::new(child);
+        guard.kill_and_reap();
+
+        assert!(marker.exists(), "退出前的收尾没有跑");
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_process_guard_kills_a_process_that_ignores_term() {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let child = async_process::Command::from(command)
+            .spawn()
+            .expect("spawn guarded process");
+        let pid = child.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut guard = PiProcessGuard::new(child);
+        guard.kill_and_reap();
+
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "到时限必须强杀");
     }
 
     /// 被拉起来跑探针的那个测试进程认这个变量；平时跑 `cargo test` 时探针直接返回。
@@ -5010,6 +5163,71 @@ mod tests {
             &children[2],
             AcpEntry::Assistant { thought: false, text } if text == "latest child result"
         ));
+    }
+
+    #[test]
+    fn replayed_result_only_subagent_details_show_each_final_output() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        // 定稿的 details 只存结果、不带子会话消息。
+        let messages = [
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "parallel-call",
+                    "name": "subagent",
+                    "arguments": {"tasks": [{"task": "a"}, {"task": "b"}]}
+                }]
+            }),
+            serde_json::json!({
+                "role": "toolResult",
+                "toolCallId": "parallel-call",
+                "toolName": "subagent",
+                "content": [{"type": "text", "text": "Parallel: 1/2 succeeded"}],
+                "details": {
+                    "mode": "parallel",
+                    "results": [
+                        {"agent": "审计 a", "exitCode": 0, "stopReason": "stop", "output": "a 没问题"},
+                        {"agent": "审计 b", "exitCode": 1, "stopReason": "error", "output": ""}
+                    ]
+                }
+            }),
+        ];
+
+        replay_history(&messages, &event_tx, &mut state);
+
+        let mut restored_children = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let ConversationEvent::ToolChildren { id, children, .. } = event {
+                assert_eq!(id, "parallel-call");
+                restored_children = Some(children);
+            }
+        }
+        let children = restored_children.expect("result-only subagent details should replay");
+        let AcpEntry::ToolCall {
+            status,
+            children: first,
+            ..
+        } = &children[0]
+        else {
+            panic!("each parallel result is a card");
+        };
+        assert_eq!(*status, ToolCallStatus::Completed);
+        assert!(matches!(
+            first.as_slice(),
+            [AcpEntry::Assistant { thought: false, text }] if text == "a 没问题"
+        ));
+        let AcpEntry::ToolCall {
+            status,
+            children: second,
+            ..
+        } = &children[1]
+        else {
+            panic!("each parallel result is a card");
+        };
+        assert_eq!(*status, ToolCallStatus::Failed);
+        assert!(second.is_empty());
     }
 
     #[test]
@@ -6102,6 +6320,32 @@ mod tests {
     }
 
     #[test]
+    fn notify_request_reaches_the_notice_redacted() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let state = PiState::new();
+        handle_extension_ui(
+            &serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "notify-1",
+                "method": "notify",
+                "message": "MCP servers need attention:\n  docs: failed: Error POSTing to https://u:p@mcp.example.com/mcp?api_key=k1 (HTTP 401): {\"access_token\":\"t1\"}\nRun /mcp to fix.",
+                "notifyType": "warning"
+            }),
+            &event_tx,
+            &outbound_tx,
+            &state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Notice(message)) if message
+                == "MCP servers need attention:\n  docs: failed: Error POSTing to https://***@mcp.example.com/mcp?api_key=*** (HTTP 401): {\"access_token\":\"***\"}\nRun /mcp to fix."
+        ));
+    }
+
+    #[test]
     fn permission_payload_is_fail_closed_and_keeps_structured_command() {
         let launch = test_launch(SMELT_PI_AGENT_COMMAND);
         let (event_tx, event_rx) = smol::channel::unbounded();
@@ -7021,7 +7265,7 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("不支持 /reload")
+            Ok(ConversationEvent::Notice(text)) if text.contains("不支持 /reload")
         ));
         assert!(matches!(
             event_rx.try_recv(),
@@ -7060,7 +7304,7 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("不支持 /reload")
+            Ok(ConversationEvent::Notice(text)) if text.contains("不支持 /reload")
         ));
     }
 
@@ -7180,7 +7424,7 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(text)) if text.contains("结束后再")
+            Ok(ConversationEvent::Notice(text)) if text.contains("结束后再")
         ));
     }
 
@@ -7247,7 +7491,7 @@ mod tests {
                 assert_eq!(in_flight.load(Ordering::SeqCst), 0);
                 assert!(matches!(
                     event_rx.try_recv(),
-                    Ok(ConversationEvent::Status(text)) if status_fragment.is_some_and(|fragment| text.contains(fragment))
+                    Ok(ConversationEvent::Notice(text)) if status_fragment.is_some_and(|fragment| text.contains(fragment))
                 ));
             }
         }
@@ -7437,6 +7681,107 @@ mod tests {
     }
 
     #[test]
+    fn pi_auto_retry_becomes_a_structured_retry_state() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        handle_event(
+            serde_json::json!({
+                "type": "auto_retry_start",
+                "attempt": 2,
+                "maxAttempts": 3,
+                "delayMs": 4000,
+                "errorMessage": " 429 rate limited "
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        match event_rx.try_recv() {
+            Ok(ConversationEvent::ProviderRetry(Some(retry))) => {
+                assert_eq!(retry.attempt, 2);
+                assert_eq!(retry.max_attempts, 3);
+                assert_eq!(retry.delay_ms, 4000);
+                assert_eq!(retry.error, "429 rate limited");
+            }
+            _ => panic!("expected a retry state"),
+        }
+        handle_event(
+            serde_json::json!({"type": "auto_retry_end", "success": true, "attempt": 2}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::ProviderRetry(None))
+        ));
+    }
+
+    #[test]
+    fn the_user_can_stop_a_background_task_from_the_ui() {
+        let (event_tx, _event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _outbound_rx) = smol::channel::unbounded();
+        let supervisor = crate::background_tasks::BackgroundSupervisor::start(
+            "test-ui-stop-bg",
+            None,
+            event_tx.clone(),
+            outbound_tx,
+        )
+        .unwrap();
+
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+        stream
+            .write_all(b"{\"op\":\"start\",\"command\":\"sleep 30\",\"title\":\"task\"}\n")
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let started: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        let id = started["id"].as_str().unwrap().to_string();
+
+        let mut state = PiState::new();
+        state.background = Some(supervisor.control());
+        let in_flight = AtomicUsize::new(0);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::StopBackgroundTask { id: id.clone() },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(
+            String::from_utf8(writer.into_inner()).unwrap().is_empty(),
+            "停后台任务不经过 Pi"
+        );
+
+        let started_at = std::time::Instant::now();
+        let status = loop {
+            let mut stream = UnixStream::connect(supervisor.socket_path()).unwrap();
+            let wait = serde_json::json!({"op": "wait", "id": id});
+            stream.write_all(format!("{wait}\n").as_bytes()).unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            let snapshot: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            let status = snapshot["tasks"][0]["status"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if status != "running" || started_at.elapsed() > std::time::Duration::from_secs(5) {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(status, "stopped");
+    }
+
+    #[test]
     fn queue_update_during_clear_is_not_treated_as_insert() {
         let launch = test_launch(SMELT_PI_AGENT_COMMAND);
         let (event_tx, event_rx) = smol::channel::unbounded();
@@ -7457,6 +7802,281 @@ mod tests {
         );
 
         assert!(event_rx.try_recv().is_err(), "清空中的空队列不能当成已插入");
+    }
+
+    #[test]
+    fn a_run_pi_starts_on_its_own_opens_and_settles_a_turn() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+
+        // 后台任务结束，扩展带 triggerTurn 送回结果。
+        handle_event(
+            serde_json::json!({"type": "agent_start"}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(state.active_turn);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::ProviderTurnStarted)
+        ));
+        // 同一次运行里的重试、续跑还会再报 agent_start。
+        handle_event(
+            serde_json::json!({"type": "agent_start"}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(event_rx.try_recv().is_err(), "一次运行只开一轮");
+
+        let in_flight = AtomicUsize::new(0);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Prompt {
+                text: "顺便看看日志".to_string(),
+                images: Vec::new(),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let request: serde_json::Value =
+            serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap();
+        assert_eq!(request["type"], "steer", "Pi 正在跑，裸 prompt 会被拒");
+
+        handle_event(
+            serde_json::json!({"type": "agent_settled", "aborted": false}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(!state.active_turn);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::EndTurn))
+        ));
+    }
+
+    #[test]
+    fn a_run_still_winding_down_after_stop_is_not_a_new_turn() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        state.provider_busy = true;
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Cancel,
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::TurnEnded(StopReason::Cancelled))
+        ));
+
+        // 停止前发出的 prompt，Pi 这才开跑，随后就会被 abort。
+        handle_event(
+            serde_json::json!({"type": "agent_start"}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+
+        assert!(!state.active_turn);
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    fn sent_request(writer: futures::io::Cursor<Vec<u8>>) -> serde_json::Value {
+        serde_json::from_str(String::from_utf8(writer.into_inner()).unwrap().trim()).unwrap()
+    }
+
+    #[test]
+    fn stopping_returns_queued_images_with_their_text() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        state.provider_busy = true;
+        let in_flight = AtomicUsize::new(3);
+        let image = crate::acp_chat::AcpImage {
+            mime: "image/png".into(),
+            data_b64: "aGk=".into(),
+        };
+
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Steer {
+                text: "看这张".to_string(),
+                images: vec![image.clone()],
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let steer_id = sent_request(writer)["id"].as_str().unwrap().to_string();
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::FollowUp {
+                text: String::new(),
+                images: vec![image.clone()],
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let follow_up_id = sent_request(writer)["id"].as_str().unwrap().to_string();
+        handle_event(
+            serde_json::json!({"type": "queue_update", "steering": ["看这张"], "followUp": [""]}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        for id in [steer_id, follow_up_id] {
+            smol::block_on(handle_response(
+                serde_json::json!({
+                    "id": id,
+                    "type": "response",
+                    "success": true,
+                    "data": {"disposition": "queued"}
+                }),
+                &mut futures::io::Cursor::new(Vec::new()),
+                &event_tx,
+                &mut state,
+                &in_flight,
+            ))
+            .unwrap();
+        }
+        while event_rx.try_recv().is_ok() {}
+
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Cancel,
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let sent = String::from_utf8(writer.into_inner()).unwrap();
+        let clear: serde_json::Value = serde_json::from_str(sent.lines().next().unwrap()).unwrap();
+        while event_rx.try_recv().is_ok() {}
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": clear["id"],
+                "type": "response",
+                "command": "clear_queue",
+                "success": true,
+                "data": {"steering": ["看这张"], "followUp": [""]}
+            }),
+            &mut futures::io::Cursor::new(Vec::new()),
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        match event_rx.try_recv() {
+            Ok(ConversationEvent::ComposerRestore { texts, images, .. }) => {
+                assert_eq!(texts, ["看这张".to_string(), String::new()]);
+                assert_eq!(images, vec![vec![image.clone()], vec![image]]);
+            }
+            _ => panic!("expected a composer restore"),
+        }
+    }
+
+    #[test]
+    fn an_image_only_steer_leaves_the_queue_once_pi_delivers_it() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        state.provider_busy = true;
+        let in_flight = AtomicUsize::new(2);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::Steer {
+                text: String::new(),
+                images: vec![crate::acp_chat::AcpImage {
+                    mime: "image/png".into(),
+                    data_b64: "aGk=".into(),
+                }],
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        handle_event(
+            serde_json::json!({"type": "queue_update", "steering": [""], "followUp": []}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::PromptQueue { steering, .. }) if steering == [String::new()]
+        ));
+
+        // Pi 交给模型，但因为文字是空串，不出队也不报 queue_update。
+        handle_event(
+            serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": ""},
+                        {"type": "image", "data": "aGk=", "mimeType": "image/png"}
+                    ]
+                }
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::PromptQueue { steering, follow_up })
+                if steering.is_empty() && follow_up.is_empty()
+        ));
+
+        // 之后 Pi 报的队列仍带着那个空串，不能再冒出来。
+        handle_event(
+            serde_json::json!({"type": "queue_update", "steering": ["", "再补一句"], "followUp": []}),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::PromptQueue { steering, .. })
+                if steering == ["再补一句".to_string()]
+        ));
     }
 
     #[test]
@@ -7740,7 +8360,7 @@ mod tests {
         assert_eq!(writer.get_ref().len(), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(_))
+            Ok(ConversationEvent::Notice(_))
         ));
 
         // 回合结束了，但一次回退已在途：同文本第二次请求直接拒绝。
@@ -7767,7 +8387,7 @@ mod tests {
         assert_eq!(writer.get_ref().len(), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(_))
+            Ok(ConversationEvent::Notice(_))
         ));
     }
 
@@ -8175,7 +8795,7 @@ mod tests {
         assert_eq!(writer.get_ref().len(), 0);
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Status(_))
+            Ok(ConversationEvent::Notice(_))
         ));
         assert!(state.pending_rewind.is_none());
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);

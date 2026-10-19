@@ -106,7 +106,7 @@ impl Workspace {
             // 可能仍按旧存档活动项把刚跳到的会话覆盖掉。
             self.active_session_revision = self.active_session_revision.wrapping_add(1);
         }
-        if should_defer_notification_session_jump(self.sessions_restored, target_found) {
+        if should_defer_notification_session_jump(self.local.sessions_restored, target_found) {
             self.pending_notification_session_id = Some(session_id);
         }
     }
@@ -127,11 +127,11 @@ impl Workspace {
                 SessionKind::Conversation(view) if view.read(cx).session_id() == notification.session_id
             );
             if matches_acp {
-                session_title = Some(session.title(cx));
+                session_title = Some(Self::title_with_runtime(session, cx));
             }
             for leaf in session.term_leaves() {
                 if leaf.read(cx).session_id() == notification.session_id {
-                    session_title = Some(session.title(cx));
+                    session_title = Some(Self::title_with_runtime(session, cx));
                 }
             }
         }
@@ -215,7 +215,7 @@ impl Workspace {
                 };
                 Some(status_item::SessionEntry {
                     session_id,
-                    title: self.sessions[ix].title(cx),
+                    title: Self::title_with_runtime(&self.sessions[ix], cx),
                     status_text,
                     color: ui_theme::agent_status_rgb8(color_status),
                     agent: self.sessions[ix].agent_icon_id(cx),

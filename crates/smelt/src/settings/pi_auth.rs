@@ -1,14 +1,26 @@
 //! 设置页：Pi 内置 provider 的登录与注销。
 //!
-//! 这些操作全部落到 [`smelt_core::pi_auth`] 的子进程上——理由见那边的模块头。
-//! 本文件只做两件事：把子进程的事件流搬进 `Workspace` 的状态，以及把用户在面板
-//! 上的动作写回子进程的 stdin。
+//! 凭据助手跑在运行时那台机器上（`pi.auth.*`，见 [`smelt_model::pi_auth_service`]）。
+//! 本文件只做两件事：把登录事件搬进 `Workspace` 的状态，以及把用户在面板上的动作
+//! 发回运行时。
 //!
 //! **为什么登录是一条常驻的事件流而不是一次异步调用。** OAuth 中途要把授权链接
 //! 或 device code 推给用户看，用户粘回来的 code 又要送回流程，浏览器回调和手工
-//! 粘贴还会互相抢跑。所以这里持有会话对象，边跑边把事件 fold 进视图状态。
+//! 粘贴还会互相抢跑。所以这里拿着登录 id 长轮询事件，边取边 fold 进视图状态。
 
 use super::*;
+use smelt_model::control_api::{
+    PiAuthLoginAnswer, PiAuthLoginCancel, PiAuthLoginEvents, PiAuthLoginStart, PiAuthLogout,
+    PiAuthModels, PiAuthProviders,
+};
+use smelt_model::pi_auth_service::{
+    LoginAnswerParams, LoginEventsParams, LoginIdParams, LoginStartParams,
+};
+use smelt_model::pi_service::ProviderIdParams;
+use smelt_runtime_client::protocol::control::EmptyParams;
+
+/// 凭据助手首次使用可能要装运行时，给得宽一些。
+const AUTH_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 impl Workspace {
     /// 打开凭据面板时问一次：有哪些 provider、各自登录了没有。
@@ -21,20 +33,18 @@ impl Workspace {
         self.pi_auth_error = None;
         self.pi_auth_providers = Some(PiAuthProvidersState::Loading);
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { smelt_core::pi_auth::list_providers(&|_| {}) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        self.run_pi_call::<PiAuthProviders>(
+            EmptyParams::default(),
+            AUTH_CALL_TIMEOUT,
+            cx,
+            |this, outcome, cx| {
                 this.pi_auth_providers = Some(match outcome {
-                    Ok(providers) => PiAuthProvidersState::Ready(providers),
+                    Ok(result) => PiAuthProvidersState::Ready(result.providers),
                     Err(error) => PiAuthProvidersState::Failed(error),
                 });
                 cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 在「只看能订阅登录的」和「全部内置 provider」之间切换。
@@ -48,7 +58,7 @@ impl Workspace {
         &mut self,
         provider_id: String,
         provider_name: String,
-        method: smelt_core::pi_auth::PiLoginMethod,
+        method: smelt_model::pi_auth::PiLoginMethod,
         ask_all: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -90,15 +100,20 @@ impl Workspace {
         cx.notify();
         let started_id = provider_id;
         cx.spawn(async move |this, cx| {
-            let spawn_id = started_id.clone();
+            let params = LoginStartParams {
+                provider_id: started_id.clone(),
+                method,
+                ask_all,
+            };
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_core::pi_auth::PiLoginSession::start(&spawn_id, method, ask_all, &|_| {})
+                    crate::runtime_call::call::<PiAuthLoginStart>(params, AUTH_CALL_TIMEOUT)
+                        .map_err(crate::runtime_call::error_text)
                 })
                 .await;
-            let (session, mut events) = match outcome {
-                Ok(started) => started,
+            let login_id = match outcome {
+                Ok(started) => started.login_id,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
                         this.pi_auth_error = Some(error);
@@ -111,7 +126,7 @@ impl Workspace {
                 this.pi_login = Some(PiLoginView {
                     provider_id: started_id.clone(),
                     provider_name,
-                    session: std::sync::Arc::new(session),
+                    login_id: login_id.clone(),
                     messages: Vec::new(),
                     auth_url: None,
                     instructions: None,
@@ -125,16 +140,45 @@ impl Workspace {
                 });
                 cx.notify();
             });
-            // 事件流一直读到子进程结束。窗口先关掉时 update 失败，循环随之退出，
-            // 会话对象也就跟着被丢掉、子进程被杀。
-            while let Some(event) = futures_util::StreamExt::next(&mut events).await {
-                let applied = this.update(cx, |this, cx| {
-                    this.apply_pi_login_event(&started_id, event, cx)
-                });
-                match applied {
-                    Ok(true) => {}
-                    // 面板已经换到别的 provider 或者已经关了。
-                    Ok(false) | Err(_) => break,
+            // 一直取到登录结束。面板换了 provider、关了，或窗口没了，就不再取：运行时
+            // 那边没人来取事件，过一会儿会自己杀掉子进程。
+            let mut after = 0;
+            loop {
+                let params = LoginEventsParams {
+                    login_id: login_id.clone(),
+                    after,
+                };
+                let polled = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::runtime_call::call::<PiAuthLoginEvents>(
+                            params,
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .map_err(crate::runtime_call::error_text)
+                    })
+                    .await;
+                let batch = match polled {
+                    Ok(batch) => batch,
+                    Err(error) => smelt_model::pi_auth_service::LoginEventsResult {
+                        events: vec![smelt_model::pi_auth::PiLoginEvent::Error { message: error }],
+                        finished: true,
+                    },
+                };
+                after += batch.events.len();
+                let mut wanted = true;
+                for event in batch.events {
+                    wanted = matches!(
+                        this.update(cx, |this, cx| this
+                            .apply_pi_login_event(&login_id, event, cx)),
+                        Ok(true)
+                    );
+                    if !wanted {
+                        break;
+                    }
+                }
+                if !wanted || batch.finished {
+                    break;
                 }
             }
         })
@@ -144,16 +188,16 @@ impl Workspace {
     /// 把一个登录事件 fold 进面板状态。返回 false 表示这条流已经没人要了。
     fn apply_pi_login_event(
         &mut self,
-        provider_id: &str,
-        event: smelt_core::pi_auth::PiLoginEvent,
+        login_id: &str,
+        event: smelt_model::pi_auth::PiLoginEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        use smelt_core::pi_auth::PiLoginEvent;
+        use smelt_model::pi_auth::PiLoginEvent;
 
         let Some(view) = self.pi_login.as_mut() else {
             return false;
         };
-        if view.provider_id != provider_id {
+        if view.login_id != login_id {
             return false;
         }
         match event {
@@ -225,13 +269,14 @@ impl Workspace {
     /// 结果同时喂给登录面板和模型选择器：两处问的是同一件事，各自起一次子进程
     /// 只是让用户多等一遍。谁还开着就更新谁。
     fn load_pi_models_for(&mut self, provider_id: String, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let query_id = provider_id.clone();
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { smelt_core::pi_auth::list_models(&query_id, &|_| {}) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        self.run_pi_call::<PiAuthModels>(
+            ProviderIdParams {
+                provider_id: provider_id.clone(),
+            },
+            AUTH_CALL_TIMEOUT,
+            cx,
+            move |this, outcome, cx| {
+                let outcome = outcome.map(|result| result.models);
                 if let Some(view) = this.pi_login.as_mut()
                     && view.provider_id == provider_id
                 {
@@ -243,9 +288,8 @@ impl Workspace {
                     picker.models = Some(outcome);
                 }
                 cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 为一个已配置的 provider 打开模型选择器。
@@ -294,7 +338,7 @@ impl Workspace {
             return;
         };
         let value = input.read(cx).value().trim().to_string();
-        view.session.answer(&prompt.id, &value);
+        self.answer_pi_login(view.login_id.clone(), prompt.id.clone(), value, cx);
         // 输入框是整场登录共用的，答完就清空：下一个提问不该带着上一个的内容。
         input.update(cx, |state, cx| state.set_value("", window, cx));
         if let Some(view) = self.pi_login.as_mut() {
@@ -311,17 +355,48 @@ impl Workspace {
         let Some(prompt) = view.prompt.as_ref() else {
             return;
         };
-        view.session.answer(&prompt.id, &option_id);
+        self.answer_pi_login(view.login_id.clone(), prompt.id.clone(), option_id, cx);
         if let Some(view) = self.pi_login.as_mut() {
             view.prompt = None;
         }
         cx.notify();
     }
 
-    /// 取消（或关掉）登录面板。
+    fn answer_pi_login(
+        &mut self,
+        login_id: String,
+        prompt_id: String,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_pi_call::<PiAuthLoginAnswer>(
+            LoginAnswerParams {
+                login_id,
+                prompt_id,
+                value,
+            },
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            |this, result, cx| {
+                if let Err(error) = result {
+                    this.pi_auth_error = Some(error);
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    /// 取消（或关掉）登录面板。运行时撤掉回调服务器、杀掉子进程。
     pub fn cancel_pi_login(&mut self, cx: &mut Context<Self>) {
         if let Some(view) = self.pi_login.take() {
-            view.session.cancel();
+            self.run_pi_call::<PiAuthLoginCancel>(
+                LoginIdParams {
+                    login_id: view.login_id,
+                },
+                crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                cx,
+                |_, _, _| {},
+            );
         }
         cx.notify();
     }
@@ -333,26 +408,33 @@ impl Workspace {
         model_id: String,
         cx: &mut Context<Self>,
     ) {
-        let config = smelt_core::pi_model_settings::PiDefaultModelConfig {
-            provider: provider_id,
-            model: model_id,
-            base_url: String::new(),
-            thinking_level: String::new(),
+        let label = format!("{provider_id} / {model_id}");
+        let params = smelt_model::pi_service::SaveDefaultModelParams {
+            config: smelt_model::pi_model_settings::PiDefaultModelConfig {
+                provider: provider_id,
+                model: model_id,
+                base_url: String::new(),
+                thinking_level: String::new(),
+            },
+            api_key: None,
+            reset_base_url: false,
         };
-        match smelt_core::pi_model_settings::save_pi_default_model(&config, None) {
-            Ok(()) => {
-                self.reload_pi_model_settings(cx);
-                self.pi_auth_model_picker = None;
-                crate::status_item::notify_success(format!(
-                    "已设为默认模型：{} / {}",
-                    config.provider, config.model
-                ));
-            }
-            Err(error) => {
-                self.pi_auth_error = Some(error.clone());
-                crate::status_item::notify_error(&error);
-            }
-        }
+        self.run_pi_call::<smelt_model::control_api::PiModelsSaveDefault>(
+            params,
+            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+            cx,
+            move |this, result, cx| match result {
+                Ok(config) => {
+                    this.pi_auth_model_picker = None;
+                    this.adopt_pi_config(config, true, cx);
+                    crate::status_item::notify_success(format!("已设为默认模型：{label}"));
+                }
+                Err(error) => {
+                    this.pi_auth_error = Some(error.clone());
+                    crate::status_item::notify_error(&error);
+                }
+            },
+        );
         cx.notify();
     }
 
@@ -360,13 +442,13 @@ impl Workspace {
     pub fn logout_pi_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
         self.pi_auth_error = None;
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let target = provider_id.clone();
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { smelt_core::pi_auth::logout(&target, &|_| {}) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
+        self.run_pi_call::<PiAuthLogout>(
+            ProviderIdParams {
+                provider_id: provider_id.clone(),
+            },
+            AUTH_CALL_TIMEOUT,
+            cx,
+            move |this, outcome, cx| {
                 if let Err(error) = outcome {
                     this.pi_auth_error = Some(error);
                 } else {
@@ -382,8 +464,7 @@ impl Workspace {
                 }
                 this.refresh_pi_auth_providers(cx);
                 cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 }

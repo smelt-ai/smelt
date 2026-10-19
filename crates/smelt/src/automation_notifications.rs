@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use smelt_core::automation::{AutomationRun, AutomationRunStatus};
-use smelt_core::daemon_state::DaemonPhase;
+use smelt_model::automation::{AutomationRun, AutomationRunStatus};
+use smelt_client::daemon_state::DaemonPhase;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomationProjectionOrigin {
@@ -139,7 +139,7 @@ pub(crate) fn suppress_runtime_terminal_attention(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::automation::{AutomationAction, AutomationRunContext, AutomationRunSource};
+    use smelt_model::automation::{AutomationAction, AutomationRunContext, AutomationRunSource};
 
     fn run(status: AutomationRunStatus) -> AutomationRun {
         AutomationRun {

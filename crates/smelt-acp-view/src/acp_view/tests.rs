@@ -2,9 +2,10 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot, OwnerIdCache,
-    ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, ViewHistoryIdentity, append_prompt_text,
-    apply_pending_config_selection, background_task_one_line, background_task_output_lines,
+    CachedDiff, ComposerMenuSection, FileLinks, LoadedSkillsRefresh, LoadedSkillsSnapshot,
+    OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction,
+    ViewHistoryIdentity, append_prompt_text, apply_pending_config_selection,
+    background_task_elapsed, background_task_one_line, background_task_output_lines,
     background_task_running_for, background_task_summary, build_conversation_layout,
     build_conversation_layout_with_timings, build_markdown_cache, build_tool_image_parts,
     cached_diff_stats, can_load_older_history, classify_attached_paths, compact_token_count,
@@ -16,36 +17,36 @@ use super::{
     current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
     diff_stats_for_output, entries_to_fade_in, escape_html_tags_for_markdown,
     external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
-    is_active_permission_selection, is_dispatch_in_flight, is_fresh_conversation_start,
-    is_match_count_line, is_new_conversation_command, is_stale_blank_history_id,
-    latest_user_message_index, loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd,
-    markdown_user_text_for_cwd, merge_rejected_prompt, merge_snapshot_entries,
-    model_label_with_provider, move_queue_item_to_front, native_queue_item_kind_label,
-    next_snapshot_prompt_gate, overlay_model_state, overlay_pending_initial_config,
-    overlay_session_configs, pending_config_choice_names, plan_current_step, preformatted_html,
-    process_group_header_label, process_group_label, progress_has_details, progress_summary,
-    provider_menu_label, provider_switch_value, reconcile_pending_config_values,
-    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt, rows_with_changed_shape,
-    running_background_tasks, search_summary_text, selected_provider_group,
-    session_trajectory_events, settled_thought_elapsed, settled_thought_label,
-    should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
+    is_active_permission_selection, is_fresh_conversation_start, is_match_count_line,
+    is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
+    loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd, markdown_user_text_for_cwd,
+    merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
+    native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
+    overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
+    pending_config_choice_names, plan_current_step, preformatted_html, process_group_header_label,
+    process_group_label, progress_has_details, progress_summary, provider_menu_label,
+    provider_retry_label, provider_switch_value, reconcile_pending_config_values,
+    refresh_markdown_cache, resolve_restart_launch, restorable_gui_prompt, returned_to_latest,
+    rows_with_changed_shape, running_background_tasks, search_summary_text,
+    selected_provider_group, session_trajectory_events, settled_thought_elapsed,
+    settled_thought_label, should_apply_snapshot_revision, should_cancel_for_immediate_prompt,
     should_clear_history_session_id_after_snapshot, should_seed_restored_height_hints,
     task_body_from_selection, tool_card_default_expanded, tool_image_cache_matches_output,
     tool_output_has_content, tool_result_summary, tool_uses_compact_process_row, trajectory_counts,
-    usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
+    turn_outcome_card, usage_percent, usage_ring_color, usage_warn_color, user_bubble_enter_ready,
     view_history_identity, working_status_label,
 };
 use gpui::{ClipboardEntry, ExternalPaths, FollowMode, ListAlignment, ListState, px};
-use smelt_core::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
-use smelt_core::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
-use smelt_core::acp_session::{
+use smelt_client::daemon_state::DaemonPhase;
+use smelt_model::acp_chat::{AcpEntry, TaskNote, ToolCallStatus, ToolKind, ToolOutputPart};
+use smelt_model::acp_conn::{ModelProviderGroup, ModelState, SessionConfigState};
+use smelt_model::acp_session::{
     AcpTurnOutcome, ApprovalDetailsView, BackgroundTaskStatus, BackgroundTaskView,
     ElicitFieldKindView, ElicitFieldView, ElicitOptionView, PendingElicitation, PendingPermission,
     PermissionOptionKindView, PermissionOptionView, PlanEntryStatusView, PlanEntryView, PlanView,
     RuntimeDebug, RuntimeDebugModel, RuntimeDebugModelCall, RuntimeDebugTool, TurnTiming,
 };
-use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
-use smelt_core::daemon_state::DaemonPhase;
+use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind, ConversationLaunchSpec};
 use smelt_ui::provider_status_global::{ProviderStatus, QuotaStatus, QuotaTarget};
 use smelt_ui::ui_theme;
 
@@ -438,7 +439,7 @@ fn composer_restore_keeps_only_a_newer_revision() {
     assert_eq!(stale.last_revision, 1);
     assert_eq!(stale.restore_texts, None);
 
-    let image = smelt_core::acp_chat::AcpImage {
+    let image = smelt_model::acp_chat::AcpImage {
         mime: "image/png".into(),
         data_b64: "aGk=".into(),
     };
@@ -497,7 +498,7 @@ fn composer_usage_is_readonly_and_only_warns_when_high() {
     assert_eq!(conversation[0].label, "Conversation");
     assert_eq!(conversation[0].tokens, 12_400);
     assert_eq!(conversation.len(), 1);
-    let buckets = smelt_core::acp_conn::ContextUsageBreakdown {
+    let buckets = smelt_model::acp_conn::ContextUsageBreakdown {
         system_prompt: 1_200,
         tools_definition: 11_800,
         rules: 302,
@@ -593,10 +594,10 @@ fn provider_group(id: &str) -> ModelProviderGroup {
     }
 }
 
-fn published_quota(used_percent: f64) -> smelt_core::provider_quota::ProviderQuotaData {
-    smelt_core::provider_quota::ProviderQuotaData::Windows(
-        smelt_core::provider_quota::ProviderQuota {
-            windows: vec![smelt_core::provider_quota::ProviderQuotaWindow {
+fn published_quota(used_percent: f64) -> smelt_model::provider_quota::ProviderQuotaData {
+    smelt_model::provider_quota::ProviderQuotaData::Windows(
+        smelt_model::provider_quota::ProviderQuota {
+            windows: vec![smelt_model::provider_quota::ProviderQuotaWindow {
                 label: "5h".to_string(),
                 used_percent,
                 resets_at_ms: None,
@@ -673,7 +674,6 @@ fn missing_global_degrades_to_the_plain_name(cx: &mut gpui::TestAppContext) {
     });
 }
 use smelt_ui::agent_host_state::AgentHostState;
-use std::collections::VecDeque;
 
 #[test]
 fn legacy_delivery_prompt_is_not_restored_by_the_gui() {
@@ -1076,20 +1076,6 @@ fn starting_status_copy_explains_resume_and_wait() {
 }
 
 #[test]
-fn queued_prompt_can_be_moved_next_without_dropping_any_message() {
-    let mut queue = VecDeque::from(["first", "second", "third"]);
-    assert!(move_queue_item_to_front(&mut queue, 2));
-    assert_eq!(
-        queue.into_iter().collect::<Vec<_>>(),
-        vec!["third", "first", "second"]
-    );
-
-    let mut queue = VecDeque::from(["only"]);
-    assert!(!move_queue_item_to_front(&mut queue, 1));
-    assert_eq!(queue.into_iter().collect::<Vec<_>>(), vec!["only"]);
-}
-
-#[test]
 fn immediate_send_cancels_only_after_the_user_chooses_it() {
     assert!(!should_cancel_for_immediate_prompt(
         &DaemonPhase::Connecting,
@@ -1119,53 +1105,51 @@ fn immediate_send_cancels_only_after_the_user_chooses_it() {
 }
 
 #[test]
-fn immediate_send_idle_releases_stuck_dispatch_pending() {
-    // 上一条 prompt 已发出但 Running 尚未回来，用户点了排队消息的立即发送。
-    // 取消后的 Idle 必须放开 dispatch 闸门，否则队首永远 flush 不出去，
-    // 后续输入会一直堆在排队条里。
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Idle, None, true, true, false, None);
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
-}
-
-#[test]
 fn stale_idle_does_not_clear_unconfirmed_dispatch() {
-    // 没有立即发送时，旧 Idle 快照不能清掉 pending——那是防并发派发的闸门。
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Idle, None, true, false, true, None);
-    assert!(gate.prompt_dispatch_pending);
-    assert!(!gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
+    // 旧 Idle 快照不能清掉 pending——那是防并发派发的闸门。
+    assert!(next_prompt_dispatch_pending(
+        &DaemonPhase::Idle,
+        None,
+        true,
+        None
+    ));
 }
 
 #[test]
 fn failed_idle_releases_stuck_dispatch_pending() {
-    let gate = next_snapshot_prompt_gate(
+    assert!(!next_prompt_dispatch_pending(
         &DaemonPhase::Idle,
         None,
         true,
-        false,
-        true,
         Some(AcpTurnOutcome::Failed),
-    );
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(!gate.should_flush_queue);
+    ));
 }
 
 #[test]
-fn running_snapshot_confirms_dispatch_and_does_not_flush() {
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Thinking, Some(1), true, false, false, None);
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(!gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
+fn running_snapshot_confirms_dispatch() {
+    assert!(!next_prompt_dispatch_pending(
+        &DaemonPhase::Thinking,
+        Some(1),
+        true,
+        None
+    ));
 }
 
 #[test]
-fn settled_idle_after_immediate_send_flushes_queue() {
-    let gate = next_snapshot_prompt_gate(&DaemonPhase::Idle, None, false, true, false, None);
-    assert!(!gate.prompt_dispatch_pending);
-    assert!(gate.should_flush_queue);
-    assert!(!gate.immediate_cancel_pending);
+fn dismissed_notice_stays_hidden_until_a_new_one_arrives() {
+    use smelt_model::acp_session::AcpNoticeView;
+    let first = AcpNoticeView {
+        id: 10,
+        text: "压缩上下文失败：busy".into(),
+    };
+    assert_eq!(notice_to_show(Some(&first), None), Some(&first));
+    assert_eq!(notice_to_show(Some(&first), Some(10)), None);
+    let second = AcpNoticeView {
+        id: 11,
+        text: "Pi Extension：boom".into(),
+    };
+    assert_eq!(notice_to_show(Some(&second), Some(10)), Some(&second));
+    assert_eq!(notice_to_show(None, None), None);
 }
 
 #[test]
@@ -1179,7 +1163,7 @@ fn rejected_submission_restores_without_erasing_new_draft_text() {
 
 #[test]
 fn unknown_plugin_submission_reuses_its_id_only_for_the_unchanged_draft() {
-    let previous = smelt_core::conversation::ConversationInput {
+    let previous = smelt_model::conversation::ConversationInput {
         submission_id: "stable-submission".into(),
         text: "继续处理".into(),
         images: Vec::new(),
@@ -1191,13 +1175,6 @@ fn unknown_plugin_submission_reuses_its_id_only_for_the_unchanged_draft() {
     let edited =
         conversation_input_for_submit("换一种方式处理".into(), Vec::new(), Some(&previous));
     assert_ne!(edited.submission_id, "stable-submission");
-}
-
-#[test]
-fn dispatch_stays_in_flight_until_the_prompt_and_cancel_both_settle() {
-    assert!(is_dispatch_in_flight(true, false));
-    assert!(is_dispatch_in_flight(false, true));
-    assert!(!is_dispatch_in_flight(false, false));
 }
 
 #[test]
@@ -1445,7 +1422,10 @@ fn state_only_snapshot_does_not_rebuild_loaded_entries() {
 fn markdown_local_files_become_internal_file_urls() {
     let rendered = markdown_text_for_cwd(
         "看 [workspace.md](docs/workspace.md)、[源码](/tmp/source.rs#L42) 和 [官网](https://example.com)",
-        Some("/tmp/project"),
+        FileLinks {
+            cwd: Some("/tmp/project"),
+            runtime: None,
+        },
     );
     assert!(rendered.contains("[workspace.md](smelt-file:///tmp/project/docs/workspace.md)"));
     assert!(rendered.contains("[源码](smelt-file:///tmp/source.rs#L42)"));
@@ -1456,7 +1436,7 @@ fn markdown_local_files_become_internal_file_urls() {
 fn markdown_absolute_files_resolve_without_session_cwd() {
     let rendered = markdown_text_for_cwd(
         "无弹窗：[截图](/tmp/smelt-current-notification-final.png)",
-        None,
+        FileLinks::default(),
     );
     assert_eq!(
         rendered,
@@ -1471,7 +1451,10 @@ fn markdown_absolute_files_resolve_without_session_cwd() {
 fn markdown_colon_line_refs_resolve_to_fragment() {
     let rendered = markdown_text_for_cwd(
         "见 [acp_view.rs](crates/smelt-acp-view/src/acp_view.rs:2765)",
-        Some("/tmp/project"),
+        FileLinks {
+            cwd: Some("/tmp/project"),
+            runtime: None,
+        },
     );
     assert!(rendered.contains(
         "[acp_view.rs](smelt-file:///tmp/project/crates/smelt-acp-view/src/acp_view.rs#L2765)"
@@ -1481,8 +1464,32 @@ fn markdown_colon_line_refs_resolve_to_fragment() {
 /// `path:行号:列号` 形式（列号可选的第二段）也只取行号，列号丢弃。
 #[test]
 fn markdown_colon_line_col_refs_take_line_not_col() {
-    let rendered = markdown_text_for_cwd("见 [x](src/main.rs:10:5)", Some("/tmp/project"));
+    let rendered = markdown_text_for_cwd(
+        "见 [x](src/main.rs:10:5)",
+        FileLinks {
+            cwd: Some("/tmp/project"),
+            runtime: None,
+        },
+    );
     assert!(rendered.contains("[x](smelt-file:///tmp/project/src/main.rs#L10)"));
+}
+
+/// 远程对话里的文件在另一台机器上：链接带上运行时 id，桌面不会去打开本机同路径的文件。
+#[test]
+fn markdown_files_in_remote_conversations_carry_the_runtime() {
+    let rendered = markdown_text_for_cwd(
+        "看 [main.rs](src/main.rs:3) 和 [hosts](/etc/hosts)",
+        FileLinks {
+            cwd: Some("/root/project"),
+            runtime: Some("39fafd41-9942-49b0-b9ec-7eb670d2711e"),
+        },
+    );
+    assert!(rendered.contains(
+        "[main.rs](smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/root/project/src/main.rs#L3)"
+    ));
+    assert!(
+        rendered.contains("[hosts](smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/etc/hosts)")
+    );
 }
 
 #[test]
@@ -1497,7 +1504,8 @@ fn user_markdown_keeps_html_tags_literal() {
              ```html\n<div>代码</div>\n```\n"
     );
 
-    let rendered = markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", None);
+    let rendered =
+        markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", FileLinks::default());
     assert!(rendered.contains("\\<panel>"));
 }
 
@@ -1540,7 +1548,11 @@ fn markdown_cache_reuses_prefix_and_refreshes_changed_tail() {
             thought: false,
         },
     ];
-    let mut cache = build_markdown_cache(&entries, Some("/tmp/project"));
+    let links = FileLinks {
+        cwd: Some("/tmp/project"),
+        runtime: None,
+    };
+    let mut cache = build_markdown_cache(&entries, links);
     let unchanged_prefix = cache[0].clone();
 
     entries.truncate(1);
@@ -1549,7 +1561,7 @@ fn markdown_cache_reuses_prefix_and_refreshes_changed_tail() {
         thought: false,
     });
     entries.push(AcpEntry::Divider("next".into()));
-    refresh_markdown_cache(&entries, 1, Some("/tmp/project"), &mut cache);
+    refresh_markdown_cache(&entries, 1, links, &mut cache);
 
     assert_eq!(cache.len(), entries.len());
     assert_eq!(cache[0], unchanged_prefix);
@@ -2166,6 +2178,7 @@ fn restart_uses_updated_profile_launch_spec_when_profile_still_exists() {
     let mut config =
         AgentHostState::default().with_acp_cmd(ConversationAgentKind::Claude, "claude --current");
     config.profiles.push(AcpProfile {
+        native_launch: None,
         id: "quant".into(),
         kind_id: "claude".into(),
         label: "Quant".into(),
@@ -2213,6 +2226,7 @@ fn restart_keeps_persisted_launch_when_profile_agent_is_unknown() {
         .with_env("FUTURE_HOME", "~/.future-agent");
     let mut config = AgentHostState::default();
     config.profiles.push(AcpProfile {
+        native_launch: None,
         id: "future-profile".into(),
         kind_id: "future-agent".into(),
         label: "Future Agent".into(),
@@ -2248,7 +2262,7 @@ fn restart_refreshes_ordinary_session_from_current_agent_command() {
 #[test]
 fn restart_refresh_preserves_product_agent_instructions() {
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent --stale").with_env(
-        smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV,
+        smelt_model::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV,
         "Review every change carefully",
     );
     let config =
@@ -2260,7 +2274,7 @@ fn restart_refresh_preserves_product_agent_instructions() {
     assert_eq!(
         resolved
             .env
-            .get(smelt_core::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV)
+            .get(smelt_model::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV)
             .map(String::as_str),
         Some("Review every change carefully")
     );
@@ -2268,7 +2282,7 @@ fn restart_refresh_preserves_product_agent_instructions() {
 
 #[test]
 fn restart_refresh_preserves_product_agent_plugin_and_mcp_selection() {
-    use smelt_core::agent_kind::{SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV};
+    use smelt_model::agent_kind::{SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV};
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent --stale")
         .with_env(SMELT_AGENT_PLUGIN_ARGS_ENV, "[\"--no-extensions\"]")
         .with_env(SMELT_AGENT_MCP_SERVERS_ENV, "[\"rea\"]");
@@ -2297,7 +2311,7 @@ fn restart_refresh_preserves_product_agent_plugin_and_mcp_selection() {
 
 #[test]
 fn restart_refresh_preserves_product_agent_memory_directories() {
-    use smelt_core::agent_kind::{SMELT_AGENT_MEMORY_DIR_ENV, SMELT_USER_MEMORY_DIR_ENV};
+    use smelt_model::agent_kind::{SMELT_AGENT_MEMORY_DIR_ENV, SMELT_USER_MEMORY_DIR_ENV};
     let current = ConversationLaunchSpec::from_command("smelt-pi-agent")
         .with_env(
             SMELT_AGENT_MEMORY_DIR_ENV,
@@ -2405,7 +2419,7 @@ fn runtime_debug_contexts_show_request_config_and_multiple_turn_linked_calls() {
                 api: Some("responses".into()),
                 thinking_level: Some("high".into()),
             },
-            request_config: smelt_core::acp_session::RuntimeDebugRequestConfig {
+            request_config: smelt_model::acp_session::RuntimeDebugRequestConfig {
                 system_prompt: "prompt for call #3".into(),
                 tools: vec![RuntimeDebugTool {
                     name: "bash".into(),
@@ -2477,7 +2491,7 @@ fn compaction_traces_show_the_observed_boundary_without_joining_the_fake_timelin
     let contexts = runtime_debug_contexts(&RuntimeDebug {
         version: 3,
         source: "pi_runtime_debug".into(),
-        compactions: vec![smelt_core::acp_session::RuntimeDebugCompaction {
+        compactions: vec![smelt_model::acp_session::RuntimeDebugCompaction {
             sequence: 1,
             turn: Some(3),
             status: "completed".into(),
@@ -2488,7 +2502,7 @@ fn compaction_traces_show_the_observed_boundary_without_joining_the_fake_timelin
             first_kept_entry_id: Some("entry-20".into()),
             tokens_before: Some(90_000),
             summarized_message_count: Some(12),
-            source_messages: vec![smelt_core::acp_session::RuntimeDebugCompactionMessage {
+            source_messages: vec![smelt_model::acp_session::RuntimeDebugCompactionMessage {
                 segment: "summarized".into(),
                 role: "user".into(),
                 preview: "retain the auth constraint".into(),
@@ -2571,7 +2585,7 @@ fn nested_subagent_entries_are_independent_trajectory_events() {
     ];
     let tool_debug = std::collections::BTreeMap::from([(
         "sa-1-child-1".to_string(),
-        smelt_core::acp_session::ToolCallDebug {
+        smelt_model::acp_session::ToolCallDebug {
             name: Some("read".into()),
             raw_input: Some(serde_json::json!({"path": "config.rs"})),
         },
@@ -2623,7 +2637,7 @@ fn session_trajectory_events_keep_debug_sources_and_model_thinking() {
     }];
     let tool_debug = std::collections::BTreeMap::from([(
         "s1".to_string(),
-        smelt_core::acp_session::ToolCallDebug {
+        smelt_model::acp_session::ToolCallDebug {
             name: Some("grep".into()),
             raw_input: Some(serde_json::json!({"pattern": "IconName", "path": "src"})),
         },
@@ -2819,6 +2833,73 @@ fn compact_tool_headlines_use_verbs_like_opened_page() {
     );
 }
 
+/// 没正常结束的回合在末尾给卡：出错、被拒重试，截断、到上限接着说。
+/// 成功和用户自己停的不给。
+#[test]
+fn only_an_unfinished_turn_gets_a_card_with_the_right_action() {
+    use smelt_model::acp_session::AcpTurnOutcome;
+
+    assert_eq!(turn_outcome_card(None), None);
+    assert_eq!(turn_outcome_card(Some(AcpTurnOutcome::Succeeded)), None);
+    assert_eq!(turn_outcome_card(Some(AcpTurnOutcome::Cancelled)), None);
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::Failed)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Retry)
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::Refused)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Retry)
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::MaxTokens)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Continue)
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::MaxTurnRequests)).map(|(_, action)| action),
+        Some(TurnOutcomeAction::Continue)
+    );
+}
+
+#[test]
+fn provider_retry_label_says_which_attempt_and_when() {
+    let retry = smelt_model::acp_session::ProviderRetryView {
+        attempt: 2,
+        max_attempts: 3,
+        delay_ms: 4_200,
+        error: "429 rate limited".into(),
+    };
+    assert_eq!(
+        provider_retry_label(&retry),
+        "模型请求出错，5 秒后第 2/3 次重试"
+    );
+    let now = smelt_model::acp_session::ProviderRetryView {
+        delay_ms: 0,
+        max_attempts: 0,
+        ..retry
+    };
+    assert_eq!(provider_retry_label(&now), "模型请求出错，正在第 2 次重试");
+}
+
+/// 往上翻着看历史时到的完成不算已读；滚回最新位置那一下才补标。
+#[test]
+fn only_scrolling_back_to_the_latest_counts_as_seeing_it() {
+    assert!(returned_to_latest(true, false));
+    assert!(!returned_to_latest(false, true), "往上翻不是看到最新");
+    assert!(!returned_to_latest(false, false));
+    assert!(!returned_to_latest(true, true));
+}
+
+#[test]
+fn background_task_elapsed_counts_from_the_start() {
+    assert_eq!(background_task_elapsed(1_000, 193_000), "已运行 3m 12s");
+    assert_eq!(background_task_elapsed(1_000, 1_500), "已运行 0s");
+    assert_eq!(
+        background_task_elapsed(5_000, 1_000),
+        "已运行 0s",
+        "时钟往回拨时不能下溢"
+    );
+}
+
 #[test]
 fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
     let running = BackgroundTaskView {
@@ -2885,14 +2966,17 @@ fn background_task_summary_counts_running_tasks_and_output_keeps_the_tail() {
 #[test]
 fn subagent_headline_strips_spawn_prefixes() {
     assert_eq!(
-        smelt_core::acp_chat::subagent_visible_title("Start subagent explorer"),
+        smelt_model::acp_chat::subagent_visible_title("Start subagent explorer"),
         "explorer"
     );
-    assert_eq!(smelt_core::acp_chat::subagent_visible_title("Task"), "");
-    assert_eq!(smelt_core::acp_chat::subagent_visible_title("subagent"), "");
-    assert_eq!(smelt_core::acp_chat::subagent_visible_title(""), "");
+    assert_eq!(smelt_model::acp_chat::subagent_visible_title("Task"), "");
     assert_eq!(
-        smelt_core::acp_chat::subagent_visible_title("查登录"),
+        smelt_model::acp_chat::subagent_visible_title("subagent"),
+        ""
+    );
+    assert_eq!(smelt_model::acp_chat::subagent_visible_title(""), "");
+    assert_eq!(
+        smelt_model::acp_chat::subagent_visible_title("查登录"),
         "查登录"
     );
 }
@@ -2984,7 +3068,7 @@ fn empty_tool_output_does_not_offer_expandable_content() {
 #[test]
 fn tool_image_output_is_expandable_and_decodes_once() {
     // 1x1 PNG
-    let image = smelt_core::acp_chat::AcpImage {
+    let image = smelt_model::acp_chat::AcpImage {
         mime: "image/png".into(),
         data_b64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".into(),
     };
@@ -3138,6 +3222,8 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3191,6 +3277,8 @@ fn text_elicitation_inputs_are_ready_before_paint(cx: &mut gpui::TestAppContext)
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3236,6 +3324,8 @@ fn acp_view_render_multiselect_elicitation_is_a_stacked_choice_list(cx: &mut gpu
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3314,6 +3404,8 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Claude,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3353,37 +3445,18 @@ fn single_select_with_custom_answer_renders_a_submit_button(cx: &mut gpui::TestA
 }
 
 #[gpui::test]
-fn snapshot_agent_session_becomes_the_views_persisted_product_identity(
-    cx: &mut gpui::TestAppContext,
-) {
+fn snapshot_binding_becomes_the_views_persisted_binding(cx: &mut gpui::TestAppContext) {
     use gpui::VisualTestContext;
     use smelt_core::acp_session::AcpSessionState;
-    use smelt_core::conversation::ConversationStateSnapshot;
-    use smelt_plugin_api::{
-        AgentSessionBinding, ContributionId, PluginContributionRef, PluginId, PluginResourceId,
-        PluginResourceRef, PluginResourceType,
-    };
+    use smelt_model::conversation::{ConversationBinding, ConversationStateSnapshot};
 
     cx.update(gpui_component::init);
-    let binding = AgentSessionBinding {
-        agent: PluginContributionRef {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            contribution_id: ContributionId::new("quant-agent").unwrap(),
-        },
-        controller: PluginContributionRef {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            contribution_id: ContributionId::new("quant-session").unwrap(),
-        },
-        instance: PluginResourceRef {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            resource_type: PluginResourceType::new("strategy").unwrap(),
-            resource_id: PluginResourceId::new("strategy-1").unwrap(),
-        },
-    };
     let (view, cx) = cx.add_window_view(|_window, cx| {
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Codex,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3392,37 +3465,27 @@ fn snapshot_agent_session_becomes_the_views_persisted_product_identity(
                 reason: "test placeholder".into(),
                 entries: Vec::new(),
                 resume_session_id: None,
-                saved_sid: Some("acp-agent-session-test".into()),
+                saved_sid: Some("acp-binding-test".into()),
             },
         )
     });
     let cx: &mut VisualTestContext = cx;
     let mut snapshot = AcpSessionState::default().to_snapshot(false);
     snapshot.snapshot_revision = 1;
+    let binding = ConversationBinding::Automation {
+        run_id: "run-1".into(),
+    };
     snapshot.conversation_state = Some(ConversationStateSnapshot {
-        binding: Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: PluginId::new("com.example.quant").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: ContributionId::new("quant-input").unwrap(),
-                context: serde_json::json!({"strategy_id": "strategy-1"}),
-            },
-        }),
-        agent_session: Some(binding.clone()),
-        pending_agent_preset: None,
+        binding: Some(binding.clone()),
+        ..Default::default()
     });
     cx.update(|_window, cx| {
         view.update(cx, |view, cx| view.apply_snapshot(snapshot, cx));
     });
 
     assert_eq!(
-        view.read_with(cx, |view, _| view.agent_session_for_save()),
-        Some(binding)
-    );
-    assert_eq!(
-        view.read_with(cx, |view, _| view.session_action_payload())
-            .unwrap()
-            .context["strategy_id"],
-        "strategy-1"
+        view.read_with(cx, |view, _| view.conversation_binding_for_save()),
+        binding
     );
 }
 
@@ -3435,6 +3498,8 @@ fn stop_button_click_requests_cancel_then_force_restarts_on_second_click(
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3557,6 +3622,8 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3623,6 +3690,8 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3694,6 +3763,8 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3717,7 +3788,10 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
         view.update(cx, |view, cx| {
             view.entries = vec![AcpEntry::User("已经写好的那一句".into())];
             view.loaded_entries_offset = 0;
-            view.rendered_markdown = build_markdown_cache(&view.entries, view.cwd.as_deref());
+            view.rendered_markdown = build_markdown_cache(
+                &view.entries,
+                FileLinks::of(&view.runtime, view.cwd.as_deref()),
+            );
             super::reveal_first_history_page(&view.list_state, view.entries.len());
             cx.notify();
         });
@@ -3766,6 +3840,8 @@ fn revealing_the_pinned_prompt_parks_it_below_the_title_island(cx: &mut gpui::Te
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3832,6 +3908,8 @@ fn background_task_popover_closes_when_the_last_task_finishes(cx: &mut gpui::Tes
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3952,6 +4030,8 @@ fn open_conversation<'a>(
         let mut view = super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Pi,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -3975,7 +4055,7 @@ fn tail_snapshot(
     entries_offset: usize,
     entries: Vec<AcpEntry>,
     phase: DaemonPhase,
-) -> smelt_core::acp_session::ConversationSnapshot {
+) -> smelt_model::acp_session::ConversationSnapshot {
     let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
     snapshot.snapshot_revision = revision;
     snapshot.entries_total = entries_offset + entries.len();
@@ -4285,6 +4365,8 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
         super::AcpView::placeholder(
             cx,
             super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
                 agent: ConversationAgentKind::Codex,
                 launch: ConversationLaunchSpec::from_command("true"),
                 refresh_launch_from_settings: false,
@@ -4303,4 +4385,62 @@ fn dropped_session_releases_its_view(cx: &mut gpui::TestAppContext) {
         weak.upgrade().is_none(),
         "关掉会话后消息流不能再把 AcpView 留住"
     );
+}
+
+/// 空闲会话重开时，首帧不带已提交的正文（桌面连接只订阅进行中的一轮），正文靠往前
+/// 翻页补上。补上之后就不再是在等首帧：之后的帧（后台任务多了一行输出、已读状态变了）
+/// 只带快照头，按增量合并，不能把翻出来的对话整个换成那一帧的空尾片。
+#[gpui::test]
+fn frames_after_the_first_history_page_keep_the_loaded_conversation(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        super::AcpView::placeholder(
+            cx,
+            super::AcpViewOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Pi,
+                launch: ConversationLaunchSpec::from_command("true"),
+                refresh_launch_from_settings: false,
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "restored".into(),
+                entries: Vec::new(),
+                resume_session_id: None,
+                saved_sid: Some("acp-idle-reopen".into()),
+            },
+        )
+    });
+    let history = vec![
+        AcpEntry::User("截一张图给我看".into()),
+        AcpEntry::Assistant {
+            text: "图在 http://example.com/shot.png".into(),
+            thought: false,
+        },
+    ];
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.apply_snapshot(tail_snapshot(1, 2, Vec::new(), DaemonPhase::Idle), cx);
+            view.prepend_history_page(
+                tail_snapshot(0, 0, history.clone(), DaemonPhase::Idle),
+                cx,
+            );
+            view.apply_snapshot(tail_snapshot(2, 2, Vec::new(), DaemonPhase::Idle), cx);
+        });
+    });
+
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.entries, history, "只带快照头的帧不能清空已翻出的对话");
+        assert_eq!(view.loaded_entries_offset, 0);
+    });
+}
+
+/// 测试里的视图不连任何运行时：一连就失败，和运行时离线时一样。
+fn offline_runtime() -> smelt_client::runtime::Runtime {
+    smelt_client::runtime::Runtime::new(
+        smelt_client::runtime::RuntimeKey::Remote("test".to_string()),
+        smelt_runtime_client::RuntimeClient::new(|| Err(std::io::Error::other("测试里不连运行时"))),
+    )
 }

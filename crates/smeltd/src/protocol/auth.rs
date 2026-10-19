@@ -1,4 +1,4 @@
-//! 事件订阅与插件 UI 的连接身份校验。
+//! 事件订阅的连接身份校验。
 //!
 //! 身份原语只问内核，不问磁盘：team + signing-id 经 `csops_audittoken` 从
 //! 进程的代码目录读（audit token 绑定，无 TOCTOU），自更新把磁盘文件换掉后
@@ -29,11 +29,11 @@
 //!   我们只认"谁签的"，这是身份问题不是有效性问题（同 Apple team 要求的口径）。
 
 use super::super::*;
-use smelt_plugin_api::{
-    CORE_CAPABILITY_AUTOMATION_READ, CORE_CAPABILITY_CONVERSATION_WAKE,
-    CORE_CAPABILITY_REMOTE_SESSIONS_READ, CORE_CAPABILITY_SESSION_READ,
-    CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth, FIRST_PARTY_DESKTOP_PLUGIN_ID,
-    FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind, PluginId,
+use smelt_event_protocol::{
+    CORE_CAPABILITY_APPEARANCE_CONTROL, CORE_CAPABILITY_AUTOMATION_READ,
+    CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
+    CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ, Capability, EventClientAuth,
+    FIRST_PARTY_DESKTOP_PLUGIN_ID, FirstPartyClientKind, PluginId,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -597,31 +597,6 @@ pub(crate) fn viewer_is_present() -> bool {
     LIVE_VIEWERS.load(std::sync::atomic::Ordering::SeqCst) > 0
 }
 
-pub(super) fn authenticate_desktop_connection(
-    value: &serde_json::Value,
-    conn: &UnixStream,
-) -> Result<AuthenticatedEventClient, String> {
-    let executable = daemon_executable_path()
-        .map_err(|error| format!("cannot determine smeltd executable: {error}"))?;
-    let identity = authenticate_event_connection(
-        value,
-        conn,
-        &SystemPeerIdentityProvider,
-        std::process::id(),
-        &executable,
-    )?;
-    require_desktop_identity(identity)
-}
-
-pub(super) fn require_desktop_identity(
-    identity: AuthenticatedEventClient,
-) -> Result<AuthenticatedEventClient, String> {
-    if identity.plugin_id.as_str() != FIRST_PARTY_DESKTOP_PLUGIN_ID {
-        return Err("plugin UI operation requires authenticated desktop".to_string());
-    }
-    Ok(identity)
-}
-
 #[cfg(all(target_os = "macos", test))]
 pub(super) fn authenticate_event_connection_with_verifier(
     value: &serde_json::Value,
@@ -643,9 +618,10 @@ pub(super) fn authenticate_first_party_macos(
     daemon_executable: &Path,
     verifier: &dyn PeerCodeIdentity,
 ) -> Result<AuthenticatedEventClient, String> {
-    let actual = if peer.pid == daemon_pid {
-        FirstPartyClientKind::RemoteGateway
-    } else {
+    if peer.pid == daemon_pid {
+        return Err("smeltd itself is not an event client".to_string());
+    }
+    let actual = {
         // 分类问内核：signing identifier 是身份，不受磁盘替换影响。
         // 内核签名身份在场即是唯一分类依据——命中表内签名 id → kind；
         // 有签名 id 但不在表内 → 明确非第一方，直接拒绝，basename 无权翻案
@@ -694,9 +670,10 @@ pub(super) fn authenticate_first_party_sibling(
     daemon_pid: u32,
     daemon_executable: &Path,
 ) -> Result<AuthenticatedEventClient, String> {
-    let actual = if peer.pid == daemon_pid {
-        FirstPartyClientKind::RemoteGateway
-    } else {
+    if peer.pid == daemon_pid {
+        return Err("smeltd itself is not an event client".to_string());
+    }
+    let actual = {
         let executable = peer
             .executable
             .as_deref()
@@ -728,18 +705,11 @@ struct FirstPartyExecutable {
     signing_id: &'static str,
 }
 
-const FIRST_PARTY_EXECUTABLES: &[FirstPartyExecutable] = &[
-    FirstPartyExecutable {
-        kind: FirstPartyClientKind::Desktop,
-        basename: "smelt",
-        signing_id: "com.zzfn.smelt",
-    },
-    FirstPartyExecutable {
-        kind: FirstPartyClientKind::RemoteGateway,
-        basename: "gateway",
-        signing_id: "gateway",
-    },
-];
+const FIRST_PARTY_EXECUTABLES: &[FirstPartyExecutable] = &[FirstPartyExecutable {
+    kind: FirstPartyClientKind::Desktop,
+    basename: "smelt",
+    signing_id: "com.zzfn.smelt",
+}];
 
 pub(super) fn executable_kind(executable: &Path) -> Option<FirstPartyClientKind> {
     let basename = executable.file_name()?.to_str()?;
@@ -857,40 +827,6 @@ pub(super) fn trusted_macos_executable(
     }
 }
 
-pub(crate) fn verify_plugin_process(
-    _package: &smelt_plugin_host::PluginPackage,
-    program: &std::path::Path,
-    plugin_pid: u32,
-) -> Result<(), smelt_plugin_host::HostError> {
-    let running_executable =
-        process_executable(plugin_pid).map_err(smelt_plugin_host::HostError::new)?;
-    let expected = program
-        .canonicalize()
-        .map_err(|error| smelt_plugin_host::HostError::new(error.to_string()))?;
-    let running = running_executable
-        .canonicalize()
-        .map_err(|error| smelt_plugin_host::HostError::new(error.to_string()))?;
-    if running != expected {
-        return Err(smelt_plugin_host::HostError::new(format!(
-            "plugin pid {plugin_pid} runs {}, expected {}",
-            running.display(),
-            expected.display()
-        )));
-    }
-    let managed = smelt_core::managed_runtime::managed_bun_path_if_ready()
-        .and_then(|path| path.canonicalize().ok())
-        .ok_or_else(|| {
-            smelt_plugin_host::HostError::new("managed script runtime is unavailable")
-        })?;
-    if expected != managed {
-        return Err(smelt_plugin_host::HostError::new(format!(
-            "plugin pid {plugin_pid} runs an unmanaged script runtime {}",
-            expected.display()
-        )));
-    }
-    Ok(())
-}
-
 pub(super) fn first_party_event_client(kind: FirstPartyClientKind) -> AuthenticatedEventClient {
     let (plugin_id, capabilities): (&str, &[&str]) = match kind {
         FirstPartyClientKind::Desktop => (
@@ -902,17 +838,8 @@ pub(super) fn first_party_event_client(kind: FirstPartyClientKind) -> Authentica
                 CORE_CAPABILITY_AUTOMATION_READ,
                 // 冷恢复对话的启动规格只在桌面端，唤醒请求只投给它。
                 CORE_CAPABILITY_CONVERSATION_WAKE,
-            ],
-        ),
-        FirstPartyClientKind::RemoteGateway => (
-            FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID,
-            &[
-                CORE_CAPABILITY_SESSION_READ,
-                CORE_CAPABILITY_REMOTE_SESSIONS_READ,
-                CORE_CAPABILITY_WORKSPACE_READ,
-                // 自动化 Run 停下来等审批时，手机往往是唯一在场的客户端：没有这条
-                // 读能力，那一刻在移动端根本不存在。
-                CORE_CAPABILITY_AUTOMATION_READ,
+                // 外观归桌面端，CLI 发来的外观改动只能交给它。
+                CORE_CAPABILITY_APPEARANCE_CONTROL,
             ],
         ),
     };

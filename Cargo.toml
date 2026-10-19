@@ -1,7 +1,8 @@
 # 虚拟 workspace：所有代码住 crates/ 下，根不再有 package。
 # - crates/smelt-store  —— 桌面 SQLite/KV 与 legacy 导入事务原语（移动端不编 native SQLite）
 # - crates/smelt-pairing —— 桌面/移动端共用的配对码格式
-# - crates/smelt-remote-gateway —— 移动端远程 ACP/终端网关（不含 GPUI）
+# - crates/smelt-runtime-client —— smeltd wire 契约与协议客户端（桌面/移动端共用，能编进移动端）
+# - crates/smelt-client-store —— 桌面客户端自己的库 client.sqlite3（外观、界面状态等）
 # - crates/smelt-core   —— GUI 与守护共用的无 UI 逻辑（不许引 GPUI）
 # - crates/smelt-git    —— Git 领域层（仓库发现/状态/diff/写操作，不含 UI）
 # - crates/smeltd       —— 守护侧三个二进制（smeltd / gateway / smelt-notify）
@@ -9,18 +10,19 @@
 [workspace]
 members = [
     "crates/smelt-paths",
-    "crates/smelt-plugin-api",
-    "crates/smelt-plugin-host",
-    "crates/smelt-process-wait",
+    "crates/smelt-sys",
+    "crates/smelt-model",
+    "crates/smelt-client",
+    "crates/smelt-event-protocol",
     "crates/smelt-event-bus",
     "crates/smelt-store",
     "crates/smelt-pairing",
-    "crates/smelt-remote-gateway",
+    "crates/smelt-runtime-client",
+    "crates/smelt-client-store",
     "crates/smelt-core",
     "crates/smelt-git",
     "crates/smeltd",
     "crates/smelt-ui",
-    "crates/smelt-webview",
     "crates/smelt-acp-view",
     "crates/smelt",
     "crates/smelt-iroh",
@@ -41,25 +43,12 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 
 [patch.crates-io]
-# GPUI 用 crates.io 的 gpui-pre =0.3.9，即 gpui-kit 钉的快照。先不用 gpui-fast。
 # gpui-shell 的标准库（LLRT 模块）依赖 crates.io 的 `rquickjs`，gpui-kit 在它自己的
 # 工作区里把它 patch 成转发到 quickjs-jit 的兼容包，两边才是同一套类型和 VM。
-# patch 不随依赖传递，所以这里照抄一份，来源必须和下面的 gpui-kit 一致。
-rquickjs = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
-
-# gpui-kit 临时换成 fork：zzfn/gpui-kit 的 `smelt` 分支 = 上游 1e7ffaa + gpui-shell
-# 嵌入宿主需要的改动（PluginManager::load_with_policy、set_editor_files、退出时
-# 任务表已销毁则跳过取消），待提上游。
-# 各 crate 的依赖声明不动，切换只在这一处；上游合并后删掉整段、把 rev 升到合并后的上游。
-# 用到的 gpui-kit 包必须整套一起换，混用会出现两份 gpui_base。
-# 本地改 fork 时可临时把这里换成 path = "../../wawa/gpui-kit/crates/..."，别提交。
-[patch."https://github.com/longbridge/gpui-kit"]
-gpui-base = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
-gpui-component = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
-gpui-fps = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
-gpui-kit-assets = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
-gpui-shell = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
-gpui-component-shell = { git = "https://github.com/zzfn/gpui-kit", rev = "073a87951971a9f7be8587942861b8692525d8de" }
+# patch 不随依赖传递，所以这里照抄一份，rev 必须和各 crate 里的 gpui-kit 一致。
+# 去掉会让 crates.io 的 rquickjs-core 和 quickjs-jit 同时进依赖图，gpui-shell 编不过
+# （2026-10-16 在 8a83be7e 上验证）。上游官方仓库，不是 fork。
+rquickjs = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

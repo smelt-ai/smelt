@@ -1,14 +1,12 @@
 //! Workspace-owned layers rendered in the main GPUI window.
-//!
-//! Plugin panels remain native AppKit child windows. Whenever a GPUI modal,
-//! popover, or drag preview must be visible, the host temporarily hides
-//! those WebViews instead of creating another GPUI window above them.
 
 use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
     Window, canvas, div,
 };
-use gpui_component::WindowExt;
+
+use gpui_component::button::{Button, ButtonRounded};
+use smelt_ui::IconAction as _;
 
 use super::*;
 
@@ -16,12 +14,9 @@ use super::*;
 /// 这样不会共用一个 `dialog-host` 和焦点句柄。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModalLayer {
-    WorktreeList,
-    NewWorktree,
-    DeleteWorktree,
     Rename,
     Quit,
-    CloseProject,
+    CloseConfirm,
     DiscardHunk,
     DiscardFile,
     DiscardAll,
@@ -34,29 +29,29 @@ pub(crate) enum ModalLayer {
     UnsavedFile,
     SessionManager,
     DaemonRestart,
+    DirPicker,
 }
 
 impl ModalLayer {
     pub(crate) fn rank(self) -> u8 {
         match self {
-            Self::WorktreeList => 1,
-            Self::NewWorktree => 2,
-            Self::DeleteWorktree => 3,
-            Self::Rename => 4,
-            Self::Quit => 5,
-            Self::CloseProject => 6,
-            Self::DiscardHunk => 7,
-            Self::DiscardFile => 8,
-            Self::DiscardAll => 9,
-            Self::DeleteBranch => 10,
-            Self::DeleteFile => 11,
-            Self::DeleteHistory => 12,
-            Self::DeleteAgentMemory => 13,
-            Self::DeleteAgent => 14,
-            Self::DeleteAutomation => 15,
-            Self::UnsavedFile => 16,
+            Self::Rename => 1,
+            Self::Quit => 2,
+            Self::CloseConfirm => 3,
+            Self::DiscardHunk => 4,
+            Self::DiscardFile => 5,
+            Self::DiscardAll => 6,
+            Self::DeleteBranch => 7,
+            Self::DeleteFile => 8,
+            Self::DeleteHistory => 9,
+            Self::DeleteAgentMemory => 10,
+            Self::DeleteAgent => 11,
+            Self::DeleteAutomation => 12,
+            Self::UnsavedFile => 13,
             Self::SessionManager => 1,
             Self::DaemonRestart => 2,
+            // 选目录盖在所有主窗口确认框之上：它总是从一次明确的点击打开。
+            Self::DirPicker => 14,
         }
     }
 
@@ -66,64 +61,7 @@ impl ModalLayer {
 }
 
 impl Workspace {
-    /// Mark a library ContextMenu as active. ContextMenu stores its open bit in
-    /// element-local state, so it cannot be observed through GlobalState.
-    pub(crate) fn begin_context_menu_suppression(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu_suppressed = true;
-        self.context_menu_generation = self.context_menu_generation.wrapping_add(1);
-        let generation = self.context_menu_generation;
-        cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                // ContextMenu does not emit a host-visible state transition. Keep the
-                // lease long enough for a user to choose an item; input events and
-                // Escape release it immediately, while this is only a lost-event guard.
-                .timer(std::time::Duration::from_secs(30))
-                .await;
-            let _ = this.update_in(cx, |workspace, _window, cx| {
-                if workspace.context_menu_generation == generation {
-                    workspace.context_menu_suppressed = false;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// A click outside or a handled Escape is enough to release the bounded
-    /// ContextMenu lease immediately. The timeout above is only a lost-event guard.
-    pub(crate) fn end_context_menu_suppression(&mut self, cx: &mut Context<Self>) {
-        if self.context_menu_suppressed {
-            self.context_menu_suppressed = false;
-            self.context_menu_generation = self.context_menu_generation.wrapping_add(1);
-            cx.notify();
-        }
-    }
-
-    /// Schedule one post-event pass after deferred popovers and context menus have
-    /// updated their element state. The boolean keeps high-frequency pointer events
-    /// from installing an unbounded callback list.
-    pub(crate) fn schedule_plugin_surface_sync(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.plugin_surface_sync_scheduled {
-            return;
-        }
-        self.plugin_surface_sync_scheduled = true;
-        cx.on_next_frame(window, |workspace, window, cx| {
-            workspace.plugin_surface_sync_scheduled = false;
-            workspace.sync_plugin_panels(window, cx);
-        });
-    }
-
     /// 当前最上层主窗口确认框。数字大的盖住数字小的。
-    /// Worktree 列表是底，新建在其上，删除再在其上。
     pub(crate) fn main_modal_rank(&self) -> Option<u8> {
         let mut rank = None;
         let raise = |rank: &mut Option<u8>, open: bool, value: u8| {
@@ -133,18 +71,8 @@ impl Workspace {
         };
         raise(
             &mut rank,
-            self.worktree_list.is_some(),
-            ModalLayer::WorktreeList.rank(),
-        );
-        raise(
-            &mut rank,
-            self.new_worktree.is_some(),
-            ModalLayer::NewWorktree.rank(),
-        );
-        raise(
-            &mut rank,
-            self.delete_worktree_target.is_some(),
-            ModalLayer::DeleteWorktree.rank(),
+            self.dir_picker.is_some(),
+            ModalLayer::DirPicker.rank(),
         );
         raise(
             &mut rank,
@@ -154,8 +82,8 @@ impl Workspace {
         raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
         raise(
             &mut rank,
-            self.close_project_target.is_some(),
-            ModalLayer::CloseProject.rank(),
+            self.close_confirm.is_some(),
+            ModalLayer::CloseConfirm.rank(),
         );
         raise(
             &mut rank,
@@ -230,7 +158,7 @@ impl Workspace {
         current == Some(layer.rank())
     }
 
-    /// 在改名框、新建 worktree 的输入框拿到焦点之前调用。
+    /// 在改名框这类输入框拿到焦点之前调用。
     /// 渲染时再记焦点会把那个输入框当成「打开前的焦点」，关弹窗时又抢回来。
     /// `hold` 让紧接着的 sync 不要因为层级变化把焦点从输入框抢回对话框。
     pub(crate) fn begin_main_modal_focus(&mut self, window: &mut Window, cx: &mut App) {
@@ -329,27 +257,6 @@ impl Workspace {
         }
     }
 
-    fn has_workspace_overlay(&self) -> bool {
-        self.palette.is_some()
-            || self.show_quit_confirm
-            || self.rename_target.is_some()
-            || self.delete_worktree_target.is_some()
-            || self.worktree_list.is_some()
-            || self.new_worktree.is_some()
-            || self.close_project_target.is_some()
-            || self.discard_hunk_target.is_some()
-            || self.discard_file_target.is_some()
-            || self.discard_all_target.is_some()
-            || self.delete_branch_target.is_some()
-            || self.delete_file_target.is_some()
-            || self.delete_history_target.is_some()
-            || self.agent_surface.pending_delete.is_some()
-            || self.agent_surface.pending_memory_delete.is_some()
-            || self.automation_surface.pending_delete.is_some()
-            || self.pending_file_switch.is_some()
-            || self.acp_image_preview.is_some()
-    }
-
     /// Dismiss the topmost Workspace-owned surface on Escape. Returns whether the
     /// key was consumed so the main key handler does not also change the active pane.
     pub(crate) fn dismiss_workspace_overlay(
@@ -366,20 +273,15 @@ impl Workspace {
         } else if self.rename_target.is_some() {
             self.cancel_rename(cx);
             true
+        } else if self.dir_picker.is_some() {
+            self.dir_picker = None;
+            cx.notify();
+            true
         } else if self.show_quit_confirm {
             self.show_quit_confirm = false;
             cx.notify();
             true
-        } else if self.delete_worktree_target.is_some()
-            || self.worktree_list.is_some()
-            || self.new_worktree.is_some()
-        {
-            self.delete_worktree_target = None;
-            self.worktree_list = None;
-            self.new_worktree = None;
-            cx.notify();
-            true
-        } else if self.close_project_target.is_some()
+        } else if self.close_confirm.is_some()
             || self.discard_hunk_target.is_some()
             || self.discard_file_target.is_some()
             || self.discard_all_target.is_some()
@@ -391,7 +293,7 @@ impl Workspace {
             || self.automation_surface.pending_delete.is_some()
             || self.pending_file_switch.is_some()
         {
-            self.close_project_target = None;
+            self.close_confirm = None;
             self.discard_hunk_target = None;
             self.discard_file_target = None;
             self.discard_all_target = None;
@@ -531,26 +433,14 @@ impl Workspace {
                         .child(preview_canvas),
                 )
                 .child(
-                    div()
-                        .id("workspace-image-preview-close")
-                        .role(gpui::Role::Button)
-                        .aria_label("关闭预览")
+                    Button::new("workspace-image-preview-close")
+                        .icon(IconName::Close)
+                        .icon_action("关闭预览")
+                        .with_size(px(34.))
+                        .rounded(ButtonRounded::Size(px(9999.)))
                         .absolute()
                         .top(px(48.))
                         .right(px(48.))
-                        .size(px(34.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(ui_theme::card_stroke())
-                        .bg(rgb(ui_theme::bg_card()))
-                        .text_color(rgb(ui_theme::text()))
-                        .text_lg()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
-                        .child("×")
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.acp_image_preview = None;
                             cx.notify();
@@ -569,24 +459,14 @@ impl Workspace {
                     .then(|| self.render_rename_session(cx)),
             )
             .children(
-                self.delete_worktree_target
+                self.dir_picker
                     .is_some()
-                    .then(|| self.render_delete_worktree_confirm(cx)),
+                    .then(|| self.render_dir_picker(cx)),
             )
             .children(
-                self.worktree_list
+                self.close_confirm
                     .is_some()
-                    .then(|| self.render_worktree_list(cx)),
-            )
-            .children(
-                self.new_worktree
-                    .is_some()
-                    .then(|| self.render_new_worktree(cx)),
-            )
-            .children(
-                self.close_project_target
-                    .is_some()
-                    .then(|| self.render_close_project_confirm(cx)),
+                    .then(|| self.render_close_confirm(cx)),
             )
             .children(
                 self.discard_hunk_target
@@ -657,30 +537,4 @@ pub(crate) fn debug_hud(window: &mut Window, cx: &mut App) -> Div {
         .right_0()
         .bottom_0()
         .child(gpui_fps::fps_monitor(window, cx))
-}
-
-/// Whether GPUI content currently needs plugin WebViews removed from the native
-/// child-window stack. The policy never examines a plugin identity.
-pub(crate) fn should_suppress_plugin_content(
-    workspace: &Workspace,
-    window: &mut Window,
-    cx: &mut App,
-) -> bool {
-    let workspace_overlay = workspace.has_workspace_overlay();
-    let root_overlay = window.has_active_sheet(cx) || window.has_active_dialog(cx);
-    let deferred_popup = cx.has_global::<gpui_component::GlobalState>()
-        && gpui_component::GlobalState::is_in_deferred_context(cx);
-    let stage_cover = workspace.stage_cover.is_some();
-    let drag = cx.has_active_drag();
-    let context_menu = workspace.context_menu_suppressed;
-
-    // WebViews are AppKit child windows and therefore outrank the parent's Metal
-    // surface. Hide them while any GPUI layer must paint or receive input above them.
-    workspace_overlay
-        || workspace.debug_hud
-        || root_overlay
-        || deferred_popup
-        || stage_cover
-        || drag
-        || context_menu
 }

@@ -4,320 +4,19 @@
 //! discovery and smeltd lifecycle operations belong here. Mobile clients only send stable ids;
 //! launch commands and local paths never need to be assembled on the phone.
 
+pub use smelt_model::session_control::*;
+pub use smelt_runtime_client::local::daemon_request;
+
 use crate::agent_kind::{
     AcpProfile, ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind,
 };
-use crate::control_api::{EmptyParams, SessionList};
-use crate::daemon_protocol::DaemonOperation;
-use crate::workspace_menu::{
-    WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
-};
-use chrono::{DateTime, Utc};
+use crate::control_api::SessionList;
 use serde_json::{Value, json};
+use smelt_runtime_client::protocol::control::EmptyParams;
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use std::collections::{BTreeMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
-
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AcpAgentOption {
-    pub id: String,
-    pub kind: String,
-    pub label: String,
-    pub profile: bool,
-    /// 产品智能体选项：会话归属的定义 id。由 option id 的 `agent:` 前缀派生，
-    /// 见 [`agent_definition_id_from_option_id`]。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_definition_id: Option<String>,
-    #[serde(skip_serializing)]
-    pub launch: ConversationLaunchSpec,
-    #[serde(skip_serializing)]
-    pub history_dir: Option<String>,
-}
-
-impl AcpAgentOption {
-    /// 手动添加的 workspace profile 在 option id 里带 `profile:` 前缀，而
-    /// `session_metadata` 的身份三元组要的是裸 profile id——两边不是同一个字符串，
-    /// 转换只此一处，别在调用方各切各的。
-    pub fn profile_id(&self) -> Option<&str> {
-        self.id.strip_prefix("profile:")
-    }
-
-    /// 产品智能体的选项在 id 里带 `agent:` 前缀。归属只编码在 id 里，不另存一份：
-    /// 会话落盘时 `agent_option_id` 就够还原「这是哪个智能体的对话」。
-    pub fn agent_definition_id(&self) -> Option<&str> {
-        agent_definition_id_from_option_id(&self.id)
-    }
-}
-
-/// 「这个 agent option 属于哪个产品智能体」的唯一判据。选项、落盘的会话记录、
-/// 桌面接管移动端会话时都走这一条，别在调用方各切各的前缀。
-pub fn agent_definition_id_from_option_id(option_id: &str) -> Option<&str> {
-    option_id
-        .strip_prefix("agent:")
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistorySessionSummary {
-    #[serde(skip)]
-    pub path: PathBuf,
-    pub resume_id: String,
-    /// agent transcript / summary 自己生成的标题，永远是原始值。
-    pub title: String,
-    /// 用户在 Smelt 里手动改的名字（`session_metadata` 那份覆盖层）。PC 和移动端
-    /// 读的是同一份存储，所以列表要展示哪个名字必须在这里就算好，不能各端各判。
-    pub custom_title: Option<String>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub last_active_at: Option<DateTime<Utc>>,
-    pub message_count: usize,
-    #[serde(skip)]
-    pub total_tokens: u64,
-}
-
-impl HistorySessionSummary {
-    /// 实际展示的标题：用户改过名就用用户的，否则用 agent 原始标题。
-    pub fn display_title(&self) -> &str {
-        self.custom_title.as_deref().unwrap_or(&self.title)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteSessionLifecycle {
-    /// 目录已占坑，runtime 还没就绪。客户端不投影；提交失败或启动对账会删掉。
-    Creating,
-    #[default]
-    Active,
-    /// A close request is durably recorded while daemon tears down the runtime.
-    Closing,
-    /// 当次拆卸没完成（例如 ACP 未能证明进程已退出）。冷启动对账会删掉无 runtime 的记录。
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteSessionKind {
-    Acp,
-    Terminal,
-}
-
-/// A transport-safe, unified projection of a remote-owned session. The daemon publishes these
-/// through `subscribe`; clients never use it as a write model.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RemoteSessionRecord {
-    pub kind: RemoteSessionKind,
-    pub id: String,
-    pub cwd: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub agent_option_id: Option<String>,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub launch: Option<ConversationLaunchSpec>,
-    #[serde(default)]
-    pub resume_id: Option<String>,
-    pub created_at: i64,
-    #[serde(default)]
-    pub lifecycle: RemoteSessionLifecycle,
-    /// daemon 后台执行（自动化 Run）不进侧栏；用户显式打开后再投影。
-    #[serde(default)]
-    pub hidden: bool,
-}
-
-impl RemoteSessionRecord {
-    pub fn is_active(&self) -> bool {
-        self.lifecycle == RemoteSessionLifecycle::Active
-    }
-
-    /// Active 正常投影；Closing 也要可见，否则目录删除失败后用户没法从 UI 再 kill。
-    /// hidden 的后台会话始终不进侧栏。
-    pub fn is_visible(&self) -> bool {
-        !self.hidden
-            && matches!(
-                self.lifecycle,
-                RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-            )
-    }
-
-    pub fn is_present(&self) -> bool {
-        matches!(
-            self.lifecycle,
-            RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-        )
-    }
-
-    pub fn as_acp(&self) -> Option<RemoteAcpSession> {
-        if self.kind != RemoteSessionKind::Acp {
-            return None;
-        }
-        Some(RemoteAcpSession {
-            id: self.id.clone(),
-            cwd: self.cwd.clone(),
-            title: self.title.clone(),
-            agent_option_id: self.agent_option_id.clone()?,
-            agent: self.agent.clone()?,
-            launch: self.launch.clone()?,
-            resume_id: self.resume_id.clone(),
-            created_at: self.created_at,
-            lifecycle: self.lifecycle,
-            hidden: self.hidden,
-        })
-    }
-
-    pub fn as_terminal(&self) -> Option<RemoteTerminalSession> {
-        (self.kind == RemoteSessionKind::Terminal).then(|| RemoteTerminalSession {
-            id: self.id.clone(),
-            cwd: self.cwd.clone(),
-            title: self.title.clone(),
-            created_at: self.created_at,
-            lifecycle: self.lifecycle,
-        })
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RemoteAcpSession {
-    pub id: String,
-    pub cwd: String,
-    #[serde(default)]
-    pub title: String,
-    pub agent_option_id: String,
-    pub agent: String,
-    pub launch: ConversationLaunchSpec,
-    #[serde(default)]
-    pub resume_id: Option<String>,
-    pub created_at: i64,
-    #[serde(default)]
-    pub lifecycle: RemoteSessionLifecycle,
-    #[serde(default)]
-    pub hidden: bool,
-}
-
-pub fn is_background_acp_session_id(id: &str) -> bool {
-    id.starts_with("acp-automation-")
-}
-
-/// 产品级智能体对话：侧栏「对话」栏，不进项目会话列表。
-///
-/// 分组跟工作目录走，不跟「用了哪个智能体定义」走。项目里点 + 选一个智能体，
-/// 只是让它来做这件项目上的事，对话仍属于那个项目；从智能体页开的对话 cwd
-/// 才是托管 space / 旧版工作台目录，那才进「对话」栏。
-///
-/// `agent_definition_id` 只在还没有 cwd 时当归属（冷恢复占位、测试夹具）。
-/// 有 cwd 时，托管目录本身就是判据：归属字段缺失（旧库没落盘）也不会掉进「项目」。
-pub fn is_agent_conversation(
-    automation_id: Option<&str>,
-    agent_definition_id: Option<&str>,
-    cwd: Option<&str>,
-) -> bool {
-    if automation_id.is_some() {
-        return false;
-    }
-    match cwd {
-        Some(cwd) => is_agent_conversation_cwd(cwd),
-        None => agent_definition_id.is_some(),
-    }
-}
-
-/// cwd 落在 Smelt 为智能体托管的目录下：智能体自己的 space
-/// （`~/.smelt/agents/<id>`）或旧版每会话一个的对话目录。两者结构上都不可能
-/// 是用户项目。
-pub fn is_agent_conversation_cwd(cwd: &str) -> bool {
-    let path = std::path::Path::new(cwd);
-    crate::agent_definition_store::is_agent_space(path)
-        || crate::agent_definition_store::is_workbench_conversation_workspace(path)
-}
-
-/// 不进项目会话列表：智能体对话、自动化 Run，以及旧档里的后台自动化 session。
-pub fn is_product_conversation(
-    automation_id: Option<&str>,
-    agent_definition_id: Option<&str>,
-    acp_session_id: Option<&str>,
-    cwd: Option<&str>,
-) -> bool {
-    is_agent_conversation(automation_id, agent_definition_id, cwd)
-        || automation_id.is_some()
-        || acp_session_id.is_some_and(is_background_acp_session_id)
-}
-
-impl RemoteAcpSession {
-    /// 移动端建的智能体对话：归属编码在 `agent_option_id` 里，桌面接管时靠它
-    /// 把会话放回「对话」栏，而不是当成一场普通项目会话。
-    pub fn agent_definition_id(&self) -> Option<&str> {
-        agent_definition_id_from_option_id(&self.agent_option_id)
-    }
-
-    pub fn is_visible(&self) -> bool {
-        !self.hidden
-            && matches!(
-                self.lifecycle,
-                RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-            )
-    }
-
-    pub fn is_present(&self) -> bool {
-        matches!(
-            self.lifecycle,
-            RemoteSessionLifecycle::Active | RemoteSessionLifecycle::Closing
-        )
-    }
-}
-
-impl From<RemoteAcpSession> for RemoteSessionRecord {
-    fn from(session: RemoteAcpSession) -> Self {
-        Self {
-            kind: RemoteSessionKind::Acp,
-            id: session.id,
-            cwd: session.cwd,
-            title: session.title,
-            agent_option_id: Some(session.agent_option_id),
-            agent: Some(session.agent),
-            launch: Some(session.launch),
-            resume_id: session.resume_id,
-            created_at: session.created_at,
-            lifecycle: session.lifecycle,
-            hidden: session.hidden,
-        }
-    }
-}
-
-/// 手机端远程新建的终端会话（不依赖 PC GUI 写工作区快照才能显示/管理）。
-/// 跟 `RemoteAcpSession` 是同一套思路，见文件顶部注释。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RemoteTerminalSession {
-    pub id: String,
-    pub cwd: String,
-    #[serde(default)]
-    pub title: String,
-    pub created_at: i64,
-    #[serde(default)]
-    pub lifecycle: RemoteSessionLifecycle,
-}
-
-impl From<RemoteTerminalSession> for RemoteSessionRecord {
-    fn from(session: RemoteTerminalSession) -> Self {
-        Self {
-            kind: RemoteSessionKind::Terminal,
-            id: session.id,
-            cwd: session.cwd,
-            title: session.title,
-            agent_option_id: None,
-            agent: None,
-            launch: None,
-            resume_id: None,
-            created_at: session.created_at,
-            lifecycle: session.lifecycle,
-            hidden: false,
-        }
-    }
-}
 
 /// The daemon-owned durable catalog for remote-created sessions.
 ///
@@ -330,14 +29,6 @@ pub struct RemoteSessionCatalog {
     acp_sessions: Vec<RemoteAcpSession>,
     terminal_sessions: Vec<RemoteTerminalSession>,
     revision: u64,
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct RemoteSessionSnapshot {
-    #[serde(default)]
-    pub revision: u64,
-    #[serde(default)]
-    pub sessions: Vec<RemoteSessionRecord>,
 }
 
 fn smelt_path(name: &str) -> PathBuf {
@@ -420,6 +111,7 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
                 .profiles
                 .iter()
                 .map(|profile| AcpProfile {
+                    native_launch: None,
                     id: profile.id.clone(),
                     kind_id: profile.kind_id.clone(),
                     label: profile.label.clone(),
@@ -517,39 +209,6 @@ pub fn find_agent_option_for(
     agent_options()
         .into_iter()
         .find(|option| option.kind == kind.id() && option.profile_id() == profile_id)
-}
-
-/// 历史自定义标题的唯一写入口。smeltd 写 overlay 并同步远程目录。
-pub fn rename_history_title(
-    kind: HistorySourceKind,
-    profile_id: Option<&str>,
-    resume_id: &str,
-    title: Option<&str>,
-    cwd: Option<&str>,
-) -> Result<(), String> {
-    let mut request = json!({
-        "op": DaemonOperation::HistoryRename,
-        "agent": kind.id(),
-        "resume_id": resume_id,
-    });
-    if let Some(profile_id) = profile_id {
-        request["profile_id"] = json!(profile_id);
-    }
-    match title {
-        Some(title) => request["title"] = json!(title),
-        None => request["title"] = Value::Null,
-    }
-    if let Some(cwd) = cwd {
-        request["cwd"] = json!(cwd);
-    }
-    daemon_request(request)?;
-    Ok(())
-}
-
-pub fn workspace_projects(menu: &WorkspaceMenuSnapshot) -> Vec<WorkspaceMenuProject> {
-    let mut projects = menu.projects.clone();
-    projects.sort_by_key(|project| project.order);
-    projects
 }
 
 fn remote_sessions_path() -> PathBuf {
@@ -1102,7 +761,9 @@ fn remote_lifecycle_from_name(name: &str) -> Result<RemoteSessionLifecycle, Stri
 pub fn list_sessions() -> Result<Vec<String>, String> {
     // 只读探测可以安全回退：老守护不认识 `control` 会关闭第一条连接，第二条连接仍走
     // 稳定的 legacy `list`。有副作用的调用绝不能使用这种“失败后换协议重试”。
-    if let Ok(result) = crate::control_client::call::<SessionList>(&EmptyParams::default()) {
+    if let Ok(result) = crate::daemon_state::local_runtime()
+        .call::<SessionList>(&EmptyParams::default(), Duration::from_secs(5))
+    {
         return Ok(result.sessions);
     }
     let response = daemon_request(json!({ "op": DaemonOperation::List }))?;
@@ -1118,65 +779,6 @@ pub fn list_sessions() -> Result<Vec<String>, String> {
         .unwrap_or_default())
 }
 
-const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// 向 smeltd 发一个短请求并等待一行 JSON 回包。适合所有 daemon-owned 小型领域命令；
-/// 长连接流式协议（terminal / ACP / subscribe）仍各自管理 socket 生命周期。
-pub fn daemon_request(request: Value) -> Result<Value, String> {
-    daemon_request_with_timeout(request, DAEMON_REQUEST_TIMEOUT)
-}
-
-fn daemon_request_with_timeout(request: Value, timeout: Duration) -> Result<Value, String> {
-    let response = daemon_response_with_timeout(request, timeout)?;
-    if response.get("ok").and_then(Value::as_bool) == Some(false) {
-        return Err(response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("session operation failed")
-            .to_string());
-    }
-    Ok(response)
-}
-
-fn daemon_response_with_timeout(request: Value, timeout: Duration) -> Result<Value, String> {
-    let mut stream = UnixStream::connect(crate::daemon_state::smeltd_sock_path())
-        .map_err(|error| format!("smeltd unavailable: {error}"))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| format!("configure smeltd write timeout: {error}"))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| format!("configure smeltd read timeout: {error}"))?;
-    writeln!(stream, "{request}").map_err(|error| error.to_string())?;
-    let mut line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut line)
-        .map_err(|error| error.to_string())?;
-    if line.trim().is_empty() {
-        return Err("smeltd returned no response".into());
-    }
-    let response: Value = serde_json::from_str(line.trim()).map_err(|error| error.to_string())?;
-    Ok(response)
-}
-
-/// 延迟 reattach 完成时是否还该插入桌面投影。目录已经撤回，或本地已有同 id，都丢弃。
-pub fn accept_remote_terminal_projection(
-    id: &str,
-    projected_ids: &HashSet<String>,
-    local_ids: &HashSet<String>,
-) -> bool {
-    projected_ids.contains(id) && !local_ids.contains(id)
-}
-
-/// 桌面发布侧栏菜单。smeltd 是唯一持有者；网关只消费 subscribe，不读工作区快照。
-pub fn publish_workspace_menu(menu: &WorkspaceMenuSnapshot) -> Result<(), String> {
-    daemon_request(serde_json::json!({
-        "op": DaemonOperation::WorkspaceMenu,
-        "menu": menu,
-    }))?;
-    Ok(())
-}
-
 /// Fetch the daemon-owned remote catalog. GUI and gateway callers only project this snapshot;
 /// they must never fall back to reading the historical documents directly.
 pub fn remote_session_snapshot() -> Result<RemoteSessionSnapshot, String> {
@@ -1190,32 +792,6 @@ pub fn remote_session_snapshot() -> Result<RemoteSessionSnapshot, String> {
         .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))
 }
 
-pub fn submit_automation_command(
-    command: &crate::automation::AutomationCommand,
-) -> Result<
-    (
-        crate::automation::AutomationCommandResult,
-        crate::automation::AutomationFile,
-    ),
-    String,
-> {
-    let response = daemon_request(serde_json::json!({
-        "op": DaemonOperation::AutomationCommand,
-        "command": command,
-    }))?;
-    let result = response
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "smeltd returned no automation command result".to_string())
-        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-    let snapshot = response
-        .get("automations")
-        .cloned()
-        .ok_or_else(|| "smeltd returned no automation snapshot".to_string())
-        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-    Ok((result, snapshot))
-}
-
 pub fn publish_automation_event(
     event: &crate::automation::AutomationInboundEvent,
 ) -> Result<serde_json::Value, String> {
@@ -1225,17 +801,9 @@ pub fn publish_automation_event(
     }))
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct CreatedAgentConversation {
-    pub session_id: String,
-    pub agent_definition_id: String,
-    pub cwd: String,
-}
-
-/// 用产品智能体定义开一场对话。会话进 daemon 远程目录，桌面会投影到「对话」栏。
-pub fn create_agent_conversation(
-    agent_definition_id: &str,
-) -> Result<CreatedAgentConversation, String> {
+/// 运行时开一场产品智能体对话之前，按定义组好它在远程目录里的那一条：校验定义能开
+/// 对话、建好智能体的 space 作为工作目录、按定义解析启动规格。
+pub fn agent_conversation_session(agent_definition_id: &str) -> Result<RemoteAcpSession, String> {
     let agent_definition_id = agent_definition_id.trim();
     if agent_definition_id.is_empty() {
         return Err("智能体 id 不能为空".into());
@@ -1251,7 +819,6 @@ pub fn create_agent_conversation(
         .ok_or_else(|| "智能体不可开对话".to_string())?;
     let cwd = crate::agent_definition_store::ensure_agent_space(agent_definition_id)
         .ok_or_else(|| "无法创建智能体工作区".to_string())?;
-    let session_id = format!("acp-{}", uuid::Uuid::new_v4());
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
@@ -1261,8 +828,8 @@ pub fn create_agent_conversation(
     } else {
         definition.name
     };
-    create_remote_acp_session(&RemoteAcpSession {
-        id: session_id.clone(),
+    Ok(RemoteAcpSession {
+        id: format!("acp-{}", uuid::Uuid::new_v4()),
         cwd: cwd.to_string_lossy().into_owned(),
         title,
         agent_option_id: option.id,
@@ -1272,63 +839,17 @@ pub fn create_agent_conversation(
         created_at,
         lifecycle: RemoteSessionLifecycle::default(),
         hidden: false,
-    })?;
-    Ok(CreatedAgentConversation {
-        session_id,
-        agent_definition_id: agent_definition_id.to_string(),
-        cwd: cwd.to_string_lossy().into_owned(),
     })
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct AgentConversationSummary {
-    pub session_id: String,
-    pub title: String,
-    pub agent_definition_id: Option<String>,
-    pub cwd: String,
-}
-
-/// 列出侧栏「对话」栏里的产品对话。需要 smeltd。
-pub fn list_agent_conversations() -> Result<Vec<AgentConversationSummary>, String> {
-    let response = daemon_request(serde_json::json!({
-        "op": DaemonOperation::RemoteSessions,
-    }))?;
-    let snapshot: RemoteSessionSnapshot = response
-        .get("remote_sessions")
-        .cloned()
-        .ok_or_else(|| "smeltd 没有返回对话目录".to_string())
-        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-    let mut conversations = snapshot
-        .sessions
-        .into_iter()
-        .filter(|session| session.kind == RemoteSessionKind::Acp && session.is_visible())
-        .filter(|session| !is_background_acp_session_id(&session.id))
-        .filter(|session| {
-            is_agent_conversation(
-                None,
-                agent_definition_id_from_option_id(
-                    session.agent_option_id.as_deref().unwrap_or(""),
-                ),
-                Some(&session.cwd),
-            )
-        })
-        .map(|session| AgentConversationSummary {
-            agent_definition_id: agent_definition_id_from_option_id(
-                session.agent_option_id.as_deref().unwrap_or(""),
-            )
-            .map(str::to_string),
-            session_id: session.id,
-            title: session.title,
-            cwd: session.cwd,
-        })
-        .collect::<Vec<_>>();
-    conversations.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    Ok(conversations)
 }
 
 /// 把已经写进工作区快照的对话标题改掉。GUI 没开时，下次冷启动靠这份标题，
 /// 而不是远程目录里的种子标题。没有这份快照或这场对话还没落盘时返回 false。
 pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Result<bool, String> {
+    // 不推进版本：GUI 开着时也会收到同一个改名并在下次保存时写同样的标题，推进版本
+    // 只会让它的保存无谓地冲突。但读改写要和 workspace.save 互斥。
+    let _guard = crate::workspace_catalog::CATALOG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let store = crate::sqlite_state::default_sqlite_store()?;
     let Some(mut snapshot) = store
         .get_workspace_snapshot()
@@ -1336,7 +857,6 @@ pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Re
     else {
         return Ok(false);
     };
-    let encoded = serde_json::to_vec(title).map_err(|error| error.to_string())?;
     let mut changed = false;
     for session in &mut snapshot.sessions {
         let Some(acp) = session.acp.as_mut() else {
@@ -1349,8 +869,8 @@ pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Re
             session.custom_title = Some(title.to_string());
             changed = true;
         }
-        if acp.session_title_json.as_deref() != Some(encoded.as_slice()) {
-            acp.session_title_json = Some(encoded.clone());
+        if acp.session_title.as_deref() != Some(title) {
+            acp.session_title = Some(title.to_string());
             changed = true;
         }
     }
@@ -1360,174 +880,6 @@ pub fn persist_workspace_conversation_title(session_id: &str, title: &str) -> Re
             .map_err(|error| error.to_string())?;
     }
     Ok(changed)
-}
-
-/// 重命名一场产品对话。目录、已保存的工作区标题和正在跑的 agent 会话名一起改。
-pub fn rename_agent_conversation(
-    session_id: &str,
-    title: &str,
-) -> Result<AgentConversationSummary, String> {
-    let session_id = session_id.trim();
-    let title = title.trim();
-    if session_id.is_empty() {
-        return Err("对话 id 不能为空".into());
-    }
-    if title.is_empty() {
-        return Err("对话标题不能为空".into());
-    }
-    let response = daemon_request(serde_json::json!({
-        "op": DaemonOperation::ConversationRename,
-        "id": session_id,
-        "title": title,
-    }))?;
-    serde_json::from_value(
-        response
-            .get("conversation")
-            .cloned()
-            .ok_or_else(|| "smeltd 没有返回改名结果".to_string())?,
-    )
-    .map_err(|error| error.to_string())
-}
-
-pub fn create_remote_acp_session(session: &RemoteAcpSession) -> Result<(), String> {
-    daemon_request(serde_json::json!({
-        "op": DaemonOperation::AcpCreate,
-        "id": session.id,
-        "cwd": session.cwd,
-        "launch": session.launch,
-        "agent": session.agent,
-        "resume_id": session.resume_id,
-        "remote_session": session,
-    }))?;
-    Ok(())
-}
-
-/// The catalog is removed by `smeltd` only after the provider has actually exited.
-pub fn delete_acp_session(id: &str) -> Result<(), String> {
-    daemon_request(serde_json::json!({
-        "op": DaemonOperation::AcpKill,
-        "id": id
-    }))?;
-    Ok(())
-}
-
-/// 提交一次交互式会话输入。路由由 smeltd 保存的 ConversationBinding 决定；
-/// 调用方不能在失败后自行改走 ACP，否则远端请求结果不确定时会重复执行。
-///
-/// `config_values` 是用户刚点、agent 还没回包确认的会话配置（尤其是模型）。
-/// 必须和正文走同一条 `acp_submit_input`：切模型走 acp_open action 流、发消息
-/// 走这条短 RPC，两条通道没有顺序，空闲时一切就发会让 prompt 先开回合，
-/// 模型切换被排到下一轮，看起来像没生效。
-pub fn submit_conversation_input(
-    id: &str,
-    input: &crate::conversation::ConversationInput,
-    config_values: &[(String, String)],
-) -> Result<crate::conversation::ConversationInputRoute, crate::conversation::ConversationSubmitError>
-{
-    // 插件路由可能包含上传与一次远端 HTTP 请求，必须覆盖 daemon 侧 30s
-    // invocation deadline；超时后结果不明，调用方会恢复草稿但不会改路由重发。
-    let mut request = serde_json::json!({
-        "op": DaemonOperation::AcpSubmitInput,
-        "id": id,
-        "input": input,
-    });
-    if !config_values.is_empty() {
-        request["config_values"] = serde_json::to_value(config_values)
-            .expect("config_values 是 String 对，序列化不会失败");
-    }
-    let response = daemon_response_with_timeout(request, Duration::from_secs(35))
-        .map_err(crate::conversation::ConversationSubmitError::unknown)?;
-    parse_conversation_submit_response(response)
-}
-
-pub fn parse_conversation_submit_response(
-    response: Value,
-) -> Result<crate::conversation::ConversationInputRoute, crate::conversation::ConversationSubmitError>
-{
-    use crate::conversation::ConversationSubmitError;
-
-    if response.get("ok").and_then(Value::as_bool) == Some(false) {
-        let error = response.get("error").cloned().unwrap_or(Value::Null);
-        return Err(serde_json::from_value(error.clone()).unwrap_or_else(|_| {
-            ConversationSubmitError::unknown(
-                error
-                    .as_str()
-                    .unwrap_or("smeltd returned an invalid conversation submit error"),
-            )
-        }));
-    }
-    response
-        .get("route")
-        .cloned()
-        .ok_or_else(|| ConversationSubmitError::unknown("smeltd returned no input route"))
-        .and_then(|value| {
-            serde_json::from_value(value).map_err(|error| {
-                ConversationSubmitError::unknown(format!(
-                    "smeltd returned an invalid input route: {error}"
-                ))
-            })
-        })
-}
-
-/// 新建一个终端 PTY 会话。走 smeltd 的 `open` op：会话在守护里落地（进程已
-/// spawn、已存进 sessions map）发生在它回第一行 JSON 之前，所以这条请求/响应
-/// 一来一回就够——不需要像交互 attach 那样占住连接进流模式，回完这行 socket
-/// 直接丢掉，PTY 照样常驻（同一套"GUI 退出会话不死"的保证）。
-///
-/// `launch`：新建时先跑的命令（`None` = 干净的 shell）。守护只在真正新建 PTY 时用它，
-/// reattach 会忽略——所以它是创建参数，不进会话目录，重试时由调用方原样再带一次。
-pub fn create_remote_terminal_session(
-    session: &RemoteTerminalSession,
-    launch: Option<&str>,
-) -> Result<(), String> {
-    daemon_request(serde_json::json!({
-        "op": DaemonOperation::Open,
-        "id": session.id,
-        "cwd": session.cwd,
-        "cols": 100,
-        "rows": 32,
-        "initial_launch": launch,
-        "remote_session": session,
-    }))?;
-    Ok(())
-}
-
-pub fn delete_terminal_session(id: &str) -> Result<(), String> {
-    daemon_request(serde_json::json!({
-        "op": DaemonOperation::Kill,
-        "id": id
-    }))?;
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionDeleteKind {
-    Terminal,
-    Acp,
-}
-
-/// 远程目录里的 kind 是所有权真相；菜单只覆盖未进目录的本地会话。
-/// 两边都没有就失败，不要默认当 ACP 杀——会把远程终端的目录摘掉却留下 PTY。
-pub fn resolve_session_delete_kind(
-    catalog_kind: Option<RemoteSessionKind>,
-    menu_kind: Option<WorkspaceMenuSessionKind>,
-) -> Result<SessionDeleteKind, String> {
-    match catalog_kind {
-        Some(RemoteSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
-        Some(RemoteSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
-        None => match menu_kind {
-            Some(WorkspaceMenuSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
-            Some(WorkspaceMenuSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
-            None => Err("session not found".to_string()),
-        },
-    }
-}
-
-pub fn delete_session(id: &str, kind: SessionDeleteKind) -> Result<(), String> {
-    match kind {
-        SessionDeleteKind::Terminal => delete_terminal_session(id),
-        SessionDeleteKind::Acp => delete_acp_session(id),
-    }
 }
 
 pub fn list_history(option: &AcpAgentOption, cwd: &str) -> Vec<HistorySessionSummary> {
@@ -1643,10 +995,11 @@ pub fn list_history_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_menu::WorkspaceMenuSessionKind;
 
     #[test]
-    fn create_agent_conversation_rejects_a_missing_definition() {
-        let error = create_agent_conversation("missing-agent").unwrap_err();
+    fn agent_conversation_rejects_a_missing_definition() {
+        let error = agent_conversation_session("missing-agent").unwrap_err();
         assert!(error.contains("不存在"), "{error}");
     }
 
@@ -1990,14 +1343,19 @@ mod tests {
             Some(r#"{"permission":"allow"}"#)
         );
 
-        let snapshot = smelt_store::Store::agent_ui_snapshot_from_json(&serde_json::json!({
-            "acp_env": {
-                "opencode": {
-                    "OPENCODE_CONFIG_CONTENT": "{\"permission\":\"ask\"}"
-                }
-            }
-        }))
-        .unwrap();
+        let snapshot = smelt_store::AgentUiSnapshot {
+            agent_hooks_enabled: true,
+            cross_agent_enabled: true,
+            commands: Vec::new(),
+            env: vec![smelt_store::AgentAcpEnvRecord {
+                engine_kind_id: "opencode".into(),
+                name: "OPENCODE_CONFIG_CONTENT".into(),
+                value: r#"{"permission":"ask"}"#.into(),
+            }],
+            config_memory: Vec::new(),
+            agents: Vec::new(),
+            profiles: Vec::new(),
+        };
         let configured = configured_launch(Some(&snapshot), ConversationAgentKind::OpenCode);
         assert_eq!(
             configured

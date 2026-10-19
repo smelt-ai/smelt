@@ -1,21 +1,20 @@
 //! `smelt agent …`：产品智能体定义的 CLI。
 //!
-//! 无子命令时仍启动 GUI。这里只拦截明确的控制命令，经领域函数读写 SQLite，
-//! 不经过 GUI 内存快照，也不要求 smeltd 正在跑。
+//! 无子命令时仍启动 GUI。这里只拦截明确的控制命令，一律经 smeltd 的 Control API
+//! 读写：库只有运行时一个写入者，CLI 不绕过它。smeltd 没在跑时直接报错。
 
-use smelt_core::agent_definition_store::{
-    AgentDefinitionCreate, AgentDefinitionError, AgentDefinitionPatch, create_agent_definition,
-    delete_agent_definition, get_agent_definition_on, list_agent_definitions_on,
-    update_agent_definition,
-};
-use smelt_core::appearance_settings::{self, SettingsError, SettingsPatch};
-use smelt_core::automation::{
+use smelt_model::agent_definition_store::{AgentDefinitionCreate, AgentDefinitionPatch};
+use smelt_model::appearance_settings::SettingsPatch;
+use smelt_model::automation::{
     Automation, AutomationAction, AutomationCommand, AutomationSchedule, AutomationTrigger,
     redact_automation_credentials,
 };
-use smelt_core::automation_store::AutomationOwner;
-use smelt_core::session_control;
-use smelt_core::sqlite_state;
+use smelt_model::control_api::{
+    AgentDefinitionCreateCall, AgentDefinitionDelete, AgentDefinitionGet, AgentDefinitionIdParams,
+    AgentDefinitionList, AgentDefinitionUpdateCall, AgentDefinitionUpdateParams, AutomationGet,
+    AutomationList, SettingsGet, SettingsUpdate,
+};
+use smelt_runtime_client::protocol::control::{ControlCall, ControlClientError, EmptyParams};
 use std::collections::BTreeMap;
 
 pub fn maybe_run<I, S>(args: I) -> Option<i32>
@@ -36,7 +35,8 @@ where
 }
 
 fn run(args: &[String]) -> i32 {
-    let _ = sync_control_skill();
+    // 技能写在运行时那台机器上；运行时没在跑时后面的命令也会报连不上，这里不另报。
+    let _ = control::<smelt_model::control_api::SkillsSyncControl>(EmptyParams::default());
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -89,28 +89,25 @@ stdout 为 JSON。
 }
 
 fn run_agent(args: &[String]) -> i32 {
-    smelt_core::sqlite_state::enable_sqlite_state();
     match args.first().map(String::as_str) {
-        Some("list") => with_store(|store| {
-            print_json(&serde_json::json!({
-                "agents": list_agent_definitions_on(store)?,
-            }))?;
-            Ok(())
-        }),
+        Some("list") => match control::<AgentDefinitionList>(EmptyParams::default()) {
+            Ok(result) => print_ok(&serde_json::json!({ "agents": result.agents })),
+            Err(error) => fail(&error),
+        },
         Some("get") => {
             let Some(id) = args.get(1).map(String::as_str).filter(|id| !id.is_empty()) else {
                 return usage("smelt agent get <id>");
             };
-            with_store(|store| {
-                print_json(&get_agent_definition_on(store, id)?)?;
-                Ok(())
-            })
+            match control::<AgentDefinitionGet>(AgentDefinitionIdParams { id: id.to_string() }) {
+                Ok(result) => print_ok(&result.agent),
+                Err(error) => fail(&error),
+            }
         }
         Some("create") => match parse_create(&args[1..]) {
-            Ok(input) => with_store(|_| {
-                print_json(&create_agent_definition(input)?)?;
-                Ok(())
-            }),
+            Ok(input) => match control::<AgentDefinitionCreateCall>(input) {
+                Ok(result) => print_ok(&result.agent),
+                Err(error) => fail(&error),
+            },
             Err(message) => usage(&message),
         },
         Some("update") => {
@@ -118,10 +115,15 @@ fn run_agent(args: &[String]) -> i32 {
                 return usage("smelt agent update <id> [--name ...] [--prompt ...]");
             };
             match parse_patch(&args[2..]) {
-                Ok(patch) => with_store(|_| {
-                    print_json(&update_agent_definition(id, patch)?)?;
-                    Ok(())
-                }),
+                Ok(patch) => {
+                    match control::<AgentDefinitionUpdateCall>(AgentDefinitionUpdateParams {
+                        id: id.to_string(),
+                        patch,
+                    }) {
+                        Ok(result) => print_ok(&result.agent),
+                        Err(error) => fail(&error),
+                    }
+                }
                 Err(message) => usage(&message),
             }
         }
@@ -129,22 +131,25 @@ fn run_agent(args: &[String]) -> i32 {
             let Some(id) = args.get(1).map(String::as_str).filter(|id| !id.is_empty()) else {
                 return usage("smelt agent delete <id>");
             };
-            with_store(|_| {
-                delete_agent_definition(id)?;
-                print_json(&serde_json::json!({ "id": id }))?;
-                Ok(())
-            })
+            match control::<AgentDefinitionDelete>(AgentDefinitionIdParams { id: id.to_string() }) {
+                Ok(_) => print_ok(&serde_json::json!({ "id": id })),
+                Err(error) => fail(&error),
+            }
         }
         Some("chat") => {
             let Some(id) = args.get(1).map(String::as_str).filter(|id| !id.is_empty()) else {
                 return usage("smelt agent chat <id>");
             };
-            match smelt_core::session_control::create_agent_conversation(id) {
+            match control::<smelt_model::control_api::ConversationCreateForAgent>(
+                AgentDefinitionIdParams { id: id.to_string() },
+            ) {
                 Ok(created) => print_ok(&created),
                 Err(error) => fail(&error),
             }
         }
-        Some("conversations") => match smelt_core::session_control::list_agent_conversations() {
+        Some("conversations") => match smelt_client::session_ops::list_agent_conversations(
+            &smelt_runtime_client::local::local_runtime(),
+        ) {
             Ok(conversations) => print_ok(&serde_json::json!({ "conversations": conversations })),
             Err(error) => fail(&error),
         },
@@ -156,12 +161,19 @@ fn run_agent(args: &[String]) -> i32 {
                 Ok(title) => title,
                 Err(message) => return usage(&message),
             };
-            match smelt_core::session_control::rename_agent_conversation(id, &title) {
+            match smelt_client::session_ops::rename_agent_conversation(
+                &smelt_runtime_client::local::local_runtime(),
+                id,
+                &title,
+            ) {
                 Ok(renamed) => print_ok(&renamed),
                 Err(error) => fail(&error),
             }
         }
-        Some("plugins") => print_ok(&plugin_catalog()),
+        Some("plugins") => match plugin_catalog() {
+            Ok(catalog) => print_ok(&catalog),
+            Err(error) => fail(&error),
+        },
         Some(command) => usage(&format!("未知子命令: {command}")),
         None => {
             print_help();
@@ -170,18 +182,20 @@ fn run_agent(args: &[String]) -> i32 {
     }
 }
 
-fn with_store(body: impl FnOnce(&smelt_store::Store) -> Result<(), AgentDefinitionError>) -> i32 {
-    match sqlite_state::default_sqlite_store() {
-        Ok(store) => match body(&store) {
-            Ok(()) => 0,
-            Err(error) => fail(&error.to_string()),
-        },
-        Err(error) => fail(&error),
-    }
+/// 一次 Control API 调用。smeltd 没在跑时给出能看懂的原因。
+fn control<C: ControlCall>(params: C::Params) -> Result<C::Result, String> {
+    smelt_client::daemon_state::local_runtime()
+        .call::<C>(&params, std::time::Duration::from_secs(10))
+        .map_err(|error| match error {
+            ControlClientError::Protocol(error) => error.message,
+            ControlClientError::Transport(message) => {
+                format!("连不上 smeltd（需要它在运行）：{message}")
+            }
+            other => other.to_string(),
+        })
 }
 
 fn run_automation(args: &[String]) -> i32 {
-    smelt_core::sqlite_state::enable_sqlite_state();
     match args.first().map(String::as_str) {
         Some("list") => match list_automations() {
             Ok(value) => print_ok(&value),
@@ -260,18 +274,15 @@ fn run_automation(args: &[String]) -> i32 {
 }
 
 fn run_settings(args: &[String]) -> i32 {
-    smelt_core::sqlite_state::enable_sqlite_state();
     match args.first().map(String::as_str) {
-        Some("get") => match appearance_settings::get_settings() {
+        Some("get") => match control::<SettingsGet>(EmptyParams::default()) {
             Ok(result) => print_ok(&result),
-            Err(error) => fail(&error.to_string()),
+            Err(error) => fail(&error),
         },
         Some("set") => match parse_settings_patch(&args[1..]) {
-            Ok(patch) => match appearance_settings::update_settings(patch) {
+            Ok(patch) => match control::<SettingsUpdate>(patch) {
                 Ok(result) => print_ok(&result),
-                Err(SettingsError::Invalid(message) | SettingsError::Store(message)) => {
-                    fail(&message)
-                }
+                Err(error) => fail(&error),
             },
             Err(message) => usage(&message),
         },
@@ -280,23 +291,20 @@ fn run_settings(args: &[String]) -> i32 {
 }
 
 fn list_automations() -> Result<serde_json::Value, String> {
-    let snapshot = redact_automation_credentials(AutomationOwner::load_default().snapshot());
-    serde_json::to_value(serde_json::json!({ "automations": snapshot.automations }))
-        .map_err(|error| error.to_string())
+    let result = control::<AutomationList>(EmptyParams::default())?;
+    Ok(serde_json::json!({ "automations": result.automations }))
 }
 
 fn get_automation(id: &str) -> Result<serde_json::Value, String> {
-    let snapshot = redact_automation_credentials(AutomationOwner::load_default().snapshot());
-    snapshot
-        .automations
-        .into_iter()
-        .find(|automation| automation.id == id)
-        .ok_or_else(|| format!("自动化不存在: {id}"))
-        .and_then(|automation| serde_json::to_value(automation).map_err(|error| error.to_string()))
+    let result = control::<AutomationGet>(AgentDefinitionIdParams { id: id.to_string() })?;
+    serde_json::to_value(result.automation).map_err(|error| error.to_string())
 }
 
 fn submit_automation(command: AutomationCommand) -> Result<serde_json::Value, String> {
-    let (result, snapshot) = session_control::submit_automation_command(&command)?;
+    let (result, snapshot) = smelt_client::session_ops::submit_automation_command(
+        &smelt_runtime_client::local::local_runtime(),
+        &command,
+    )?;
     let snapshot = redact_automation_credentials(snapshot);
     serde_json::to_value(serde_json::json!({
         "result": result,
@@ -495,17 +503,17 @@ fn automation_trigger(
     Err("缺少触发条件".into())
 }
 
+/// 运行时给的是去掉 webhook 令牌的投影；提交回去时运行时按位置换回真令牌。
 fn load_automation_raw(id: &str) -> Result<Automation, String> {
-    AutomationOwner::load_default()
-        .snapshot()
-        .automations
-        .into_iter()
-        .find(|automation| automation.id == id)
-        .ok_or_else(|| format!("自动化不存在: {id}"))
+    control::<AutomationGet>(AgentDefinitionIdParams { id: id.to_string() })
+        .map(|result| result.automation)
 }
 
-fn plugin_catalog() -> serde_json::Value {
-    let plugins: Vec<serde_json::Value> = smelt_core::pi_plugin_catalog::discover_plugins()
+/// 插件在运行时那台机器上，由运行时扫描。
+fn plugin_catalog() -> Result<serde_json::Value, String> {
+    let config = control::<smelt_model::control_api::PiConfigGet>(EmptyParams::default())?;
+    let plugins: Vec<serde_json::Value> = config
+        .plugins
         .into_iter()
         .map(|plugin| {
             serde_json::json!({
@@ -518,7 +526,7 @@ fn plugin_catalog() -> serde_json::Value {
             })
         })
         .collect();
-    serde_json::json!({ "plugins": plugins })
+    Ok(serde_json::json!({ "plugins": plugins }))
 }
 
 fn parse_clock(value: &str) -> Result<(u8, u8), String> {
@@ -555,31 +563,12 @@ fn parse_settings_patch(args: &[String]) -> Result<SettingsPatch, String> {
 fn print_ok(value: &impl serde::Serialize) -> i32 {
     match print_json(value) {
         Ok(()) => 0,
-        Err(error) => fail(&error.to_string()),
+        Err(error) => fail(&error),
     }
 }
 
 fn json_id(id: &str) -> serde_json::Value {
     serde_json::json!({ "id": id })
-}
-
-pub(crate) fn sync_control_skill() -> std::io::Result<()> {
-    if cfg!(test) {
-        return Ok(());
-    }
-    let Some(home) = dirs::home_dir() else {
-        return Ok(());
-    };
-    let dir = home.join(".agents").join("skills").join("smelt");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("SKILL.md");
-    let contents = include_str!("control_skill.md");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(contents) {
-        let staged = dir.join("SKILL.md.next");
-        std::fs::write(&staged, contents)?;
-        std::fs::rename(staged, path)?;
-    }
-    Ok(())
 }
 
 fn parse_create(args: &[String]) -> Result<AgentDefinitionCreate, String> {
@@ -702,9 +691,8 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
     Ok(flags)
 }
 
-fn print_json(value: &impl serde::Serialize) -> Result<(), AgentDefinitionError> {
-    let json = serde_json::to_string_pretty(value)
-        .map_err(|error| AgentDefinitionError::Store(error.to_string()))?;
+fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
     println!("{json}");
     Ok(())
 }

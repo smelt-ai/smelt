@@ -184,7 +184,6 @@ crates/
 | isolated_workspace | smelt-project-core/ | P1.5 |
 | workspace_menu | smelt-project-core/ | P1.5 |
 | workspace_override | smelt-project-core/ | P1.5 |
-| worktree_inherit | smelt-project-core/ | P1.5 |
 | **远程操控** |  |  |
 | control_api | smelt-remote-core/ | P1.6 |
 | control_client | smelt-remote-core/ | P1.6 |

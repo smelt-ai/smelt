@@ -6,7 +6,9 @@ import { keepsForegroundTimeout, watchHostCommand } from "../src/bash-run.ts";
 import {
 	attachBackgroundTask,
 	callBackgroundHost,
+	completionMessage,
 	completionSendOptions,
+	deliveredResultId,
 	detachedShellCommand,
 	reconnectAfterClose,
 	taskNotificationText,
@@ -222,6 +224,31 @@ describe("background task host client", () => {
 		expect(JSON.stringify(completionSendOptions(true))).not.toContain("followUp");
 	});
 
+	test("a subagent result comes back as its own message, queued after the current tool calls", () => {
+		const notice = {
+			id: "bg-sub",
+			kind: "subagent" as const,
+			title: "审计",
+			status: "stopped",
+			exitCode: null,
+			output: "查完了一半",
+			outputTail: "查完了一半",
+			wake: false,
+		};
+		const { message, options } = completionMessage(notice);
+		expect(message.customType).toBe("smelt.subagent_result");
+		expect(JSON.stringify(message.content)).toContain("查完了一半");
+		expect(options).toEqual({ triggerTurn: false, deliverAs: "followUp" });
+		expect(completionMessage({ ...notice, kind: "command", wake: true }).options).toEqual({ triggerTurn: true });
+	});
+
+	test("only the two host result messages are acknowledged", () => {
+		expect(deliveredResultId({ role: "custom", customType: "smelt.background_task", details: { id: "bg-1" } })).toBe("bg-1");
+		expect(deliveredResultId({ role: "custom", customType: "smelt.subagent_result", details: { id: "bg-2" } })).toBe("bg-2");
+		expect(deliveredResultId({ role: "custom", customType: "other", details: { id: "bg-3" } })).toBeUndefined();
+		expect(deliveredResultId({ role: "user", content: "bg-4" })).toBeUndefined();
+	});
+
 	test("reports a missing socket instead of spawning locally", async () => {
 		const response = await callBackgroundHost(undefined, { op: "start", command: "npm test" });
 		expect(response.ok).toBe(false);
@@ -317,12 +344,12 @@ describe("attached background task", () => {
 			await Bun.sleep(50);
 			expect(stops).toBe(1);
 
-			task!.finish("stopped");
+			task!.finish("stopped", "做到一半");
 			task!.finish("failed");
 			await host.connectionClosed;
 			expect(host.lines.slice(1)).toEqual([
 				{ op: "progress", text: "2/8 done" },
-				{ op: "finish", status: "stopped" },
+				{ op: "finish", status: "stopped", result: "做到一半" },
 			]);
 		} finally {
 			await host.close();

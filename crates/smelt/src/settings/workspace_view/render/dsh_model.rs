@@ -30,8 +30,10 @@ pub(super) fn dsh_model_page(
             (settings.path.display().to_string(), status)
         }
         Err(error) => (
-            smelt_core::agent_kind::dsh_settings_path()
-                .map(|path| path.display().to_string())
+            snapshot
+                .dsh_paths
+                .settings
+                .clone()
                 .unwrap_or_else(|| "~/.dsh/settings.yaml".into()),
             format!("无法读取模型设置：{error}"),
         ),
@@ -70,6 +72,8 @@ pub(super) fn dsh_model_page(
                     let model_editor_error = snapshot.dsh_model_editor_error.clone();
                     let native_model_settings = snapshot.native_dsh_model_settings.clone();
                     let plugin_manager = snapshot.dsh_plugin_manager.clone();
+                    let profiles = snapshot.dsh_profiles.clone();
+                    let missing_profiles = snapshot.dsh_missing_profiles.clone();
                     move |_, _window, cx: &mut App| {
                         let (fg, muted, border, danger_fg) = {
                             let theme = cx.theme();
@@ -80,14 +84,8 @@ pub(super) fn dsh_model_page(
                                 theme.danger_foreground,
                             )
                         };
-                        let profiles = smelt_core::agent_kind::native_dsh_profiles();
-                        let profile_names = smelt_core::agent_kind::dsh_profile_names();
-                        let missing_profiles = profile_names
-                            .into_iter()
-                            .filter(|name| {
-                                !profiles.iter().any(|profile| profile.workspace_dir == *name)
-                            })
-                            .collect::<Vec<_>>();
+                        let profiles = profiles.clone();
+                        let missing_profiles = missing_profiles.clone();
                         let settings_entity = manage_entity.clone();
                         let configure_model_entity = manage_entity.clone();
                         let add_custom_entity = manage_entity.clone();
@@ -120,19 +118,7 @@ pub(super) fn dsh_model_page(
                                                                     .child("DeepSeek"),
                                                             )
                                                             .child(
-                                                                div()
-                                                                    .px_2()
-                                                                    .py_0p5()
-                                                                    .rounded_full()
-                                                                    .bg(crate::ui_theme::tint(
-                                                                        crate::ui_theme::green(),
-                                                                        0x22,
-                                                                    ))
-                                                                    .text_xs()
-                                                                    .text_color(rgb(
-                                                                        crate::ui_theme::green(),
-                                                                    ))
-                                                                    .child("官方 Provider"),
+                                                                Tag::success().rounded_full().flex_none().child("官方 Provider"),
                                                             ),
                                                     )
                                                     .child(
@@ -311,36 +297,11 @@ pub(super) fn dsh_model_page(
                                                                             ),
                                                                     )
                                                                     .child(
-                                                                        div()
-                                                                            .px_2()
-                                                                            .py_0p5()
-                                                                            .rounded_full()
-                                                                            .bg(
-                                                                                crate::ui_theme::overlay(
-                                                                                    0x18,
-                                                                                ),
-                                                                            )
-                                                                            .text_xs()
-                                                                            .text_color(muted)
-                                                                            .child("自定义"),
+                                                                        Tag::secondary().rounded_full().flex_none().child("自定义"),
                                                                     )
                                                                     .children(is_default.then(
                                                                         || {
-                                                                            div()
-                                                                                .px_2()
-                                                                                .py_0p5()
-                                                                                .rounded_full()
-                                                                                .bg(
-                                                                                    crate::ui_theme::tint(
-                                                                                        crate::ui_theme::purple(),
-                                                                                        0x22,
-                                                                                    ),
-                                                                                )
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    crate::ui_theme::purple(),
-                                                                                ))
-                                                                                .child("当前默认")
+                                                                            Tag::success().rounded_full().flex_none().child("当前默认")
                                                                         },
                                                                     )),
                                                             )
@@ -759,14 +720,7 @@ pub(super) fn dsh_model_page(
                                                             }),
                                                     )
                                                     .child(
-                                                        div()
-                                                            .px_2()
-                                                            .py_0p5()
-                                                            .rounded_full()
-                                                            .bg(crate::ui_theme::overlay(0x18))
-                                                            .text_xs()
-                                                            .text_color(muted)
-                                                            .child("原生 DSH"),
+                                                        Tag::secondary().rounded_full().flex_none().child("原生 DSH"),
                                                     ),
                                             )
                                             .child(
@@ -848,7 +802,7 @@ pub(super) fn dsh_model_page(
                                                         .small()
                                                         .label(editor.api.clone())
                                                         .dropdown_menu(move |mut menu, _window, _cx| {
-                                                            for api in smelt_core::provider_api::PROVIDER_API_PROTOCOLS {
+                                                            for api in smelt_model::provider_api::PROVIDER_API_PROTOCOLS {
                                                                 let api_entity = api_entity.clone();
                                                                 menu = menu.item(
                                                                     PopupMenuItem::new(*api).on_click(
@@ -1301,13 +1255,10 @@ pub(super) fn dsh_model_page(
 
                                 content = content.child(card);
                             }
-                            for profile_name in missing_profiles {
+                            for missing in missing_profiles {
+                                let profile_name = missing.name;
                                 let install_entity = manage_entity.clone();
-                                let install_hint = if smelt_core::agent_kind::dsh_bridge_entry(
-                                    &profile_name,
-                                )
-                                .is_some()
-                                {
+                                let install_hint = if missing.has_bridge {
                                     "检测到旧版或未注册的 Smelt Host；安装会升级并注册它。"
                                 } else {
                                     "尚未安装 Smelt Host bundle"

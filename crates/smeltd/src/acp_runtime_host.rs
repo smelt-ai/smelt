@@ -634,6 +634,7 @@ fn reap_host_tasks(host_pid: i32) {
 
 fn dispatch_snapshot_line(
     line: &[u8],
+    mirror: &mut smelt_core::acp_wire::FrameMirror,
     tx: &smol::channel::Sender<HostedSnapshotEnvelope>,
     provider_pid: &AtomicI32,
     history_waiters: &Mutex<
@@ -663,6 +664,23 @@ fn dispatch_snapshot_line(
         }
         return true;
     }
+    // 增量帧经镜像还原成完整的快照帧，和整段帧一样交给合并。镜像接不上只会发生在
+    // 交接后接手的读端上，父进程这时已经要了整段帧，丢掉这一帧等它即可。
+    let value = match value.get("delta") {
+        Some(delta) => {
+            let restored = serde_json::from_value(delta.clone())
+                .ok()
+                .and_then(|delta| mirror.apply(&delta).ok());
+            match restored {
+                Some(frame) => frame,
+                None => return true,
+            }
+        }
+        None => {
+            mirror.full(&value);
+            value
+        }
+    };
     let parsed = match serde_json::from_value::<HostedSnapshotLine>(value) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -707,6 +725,8 @@ fn start_snapshot_reader(
         .spawn(move || {
             let mut reader = BufReader::with_capacity(8192, PrefixedRead::new(prefix, stream));
             let mut pending: Vec<u8> = Vec::new();
+            // 宿主发来的增量帧要靠这份镜像还原。交接后接手的读端从空镜像开始。
+            let mut mirror = smelt_core::acp_wire::FrameMirror::default();
             loop {
                 // 半行还没超限就可以立刻停。超限的半行继续读到换行，避免把残行交出去。
                 if handoff.stopped() && pending.len() <= HOST_HANDOFF_RESIDUAL_LIMIT {
@@ -750,6 +770,7 @@ fn start_snapshot_reader(
                         if !pending.is_empty()
                             && !dispatch_snapshot_line(
                                 &pending,
+                                &mut mirror,
                                 &tx,
                                 &provider_pid,
                                 &history_waiters,
@@ -776,6 +797,7 @@ fn start_snapshot_reader(
                             if !pending.is_empty()
                                 && !dispatch_snapshot_line(
                                     &pending,
+                                    &mut mirror,
                                     &tx,
                                     &provider_pid,
                                     &history_waiters,
@@ -786,7 +808,7 @@ fn start_snapshot_reader(
                             reap_host_tasks(host_pid);
                             return;
                         }
-                        if !dispatch_snapshot_line(&pending, &tx, &provider_pid, &history_waiters) {
+                        if !dispatch_snapshot_line(&pending, &mut mirror, &tx, &provider_pid, &history_waiters) {
                             return;
                         }
                         pending.clear();
@@ -864,7 +886,6 @@ pub(crate) fn run_session_host() {
             &req.id,
             req.cwd.clone(),
             req.conversation_binding.clone(),
-            req.agent_session.clone(),
             req.pending_agent_preset.clone(),
         );
         if let Some(seed) = seed {

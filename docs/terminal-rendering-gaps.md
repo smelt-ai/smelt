@@ -55,6 +55,8 @@
 | PtyWrite / ColorRequest | EventProxy 写回守护帧 | `EventListener` |
 | damage 节流 | `take_damage` 滤掉「仅静止光标格」 | `take_damage` + 定时刷新 |
 | IME | preedit、行内拼音、`bounds_for_range` | `EntityInputHandler` |
+| 程序改色（OSC 4 / 10 / 11 / 12 及 104 / 110–112 复位） | 渲染和守护的颜色查询应答都优先用 `Term` 记下的覆盖色；关键帧先复位再写回覆盖色（alacritty 的 RIS 不复位颜色），重连、热交接不丢 | `terminal.rs` `resolve`，`terminal_snapshot.rs` `append_color_overrides`，`smeltd` `write_terminal_color_replies` |
+| OSC 9;4 进度 | smeltd 扫，变了就推 `terminal.progress`，进度条还在时每 5 秒重发、15 秒没新报告就清（同 Ghostty）；侧栏会话行底部 2px 细条，不确定进度画淡色满条、不做动画 | `smeltd/src/terminal_progress.rs`，`session_list/row.rs` `session_progress_bar` |
 
 **渲染侧相对 Zed 的主清单可以收工。** 下文只列仍开放的差距。
 
@@ -74,7 +76,7 @@
 | **中/右键** | button 1/2 转发给应用；中键未开鼠标时粘贴剪贴板 |
 | **MOUSE_MOTION 悬停** | 无键时 button 35（仅 `MOUSE_MOTION` 全开） |
 | **resize 像素** | type 1 帧 16 字节：cols/rows/cell_w/cell_h；smeltd 写 `ws_xpixel=cols*cw` |
-| **OSC 52** | `ClipboardStore` → `pbcopy`；`ClipboardLoad` → `pbpaste` + format 写回 PTY（macOS） |
+| **OSC 52** | 只写：`ClipboardStore` → `pbcopy`（macOS）。读取在 `term_config` 里显式设 `Osc52::OnlyCopy` 关掉，有意不做：任何程序（含远程运行时上的）都能借它静默读走本机剪贴板 |
 | **TextAreaSizeRequest** | EventProxy 用共享 `TermMetrics` 应答 |
 | **take_damage 光标** | 记上一帧光标；静止滤「仅光标格」，移动不算吞 |
 | **终端内搜索** | Cmd+F；字面量 RegexSearch；全部命中暗高亮 + 当前亮高亮；`3/12` 计数；Enter/Shift+Enter |
@@ -99,7 +101,7 @@
 | **双线/点/虚线下划线** | 折叠为「有下划线」；仅 undercurl → wavy | 可忽略 |
 | **emoji+VS16 spacer skip** | Zed 有 `previous_cell_had_extras` | 可忽略 |
 | **Vi mode** | 驾驶舱低价值 | 不做 |
-| **OSC 52 非 macOS** | 仅 `pbcopy`/`pbpaste` | 平台 |
+| **OSC 52 非 macOS** | 仅 `pbcopy` | 平台 |
 | **搜索正则模式** | 目前固定字面量 | 增强 |
 
 ---

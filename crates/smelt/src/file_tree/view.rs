@@ -6,6 +6,7 @@ use gpui::ElementId;
 use gpui::InteractiveElement;
 use gpui::StatefulInteractiveElement;
 use gpui::prelude::FluentBuilder;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
@@ -15,6 +16,7 @@ use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
 use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
+use smelt_ui::IconAction as _;
 
 use super::*;
 
@@ -669,9 +671,10 @@ fn render_file_tree_row(paint: FileTreeRowPaint<'_>) -> AnyElement {
                     let this_del = menu_view.clone();
                     let p_del = menu_path.clone();
                     menu.item(
-                        PopupMenuItem::new("发送到终端").on_click(move |_ev, _window, cx| {
-                            this_term
-                                .update(cx, |ws, cx| ws.send_path_to_terminal(p_term.clone(), cx));
+                        PopupMenuItem::new("发送到会话").on_click(move |_ev, window, cx| {
+                            this_term.update(cx, |ws, cx| {
+                                ws.send_path_to_session(p_term.clone(), window, cx)
+                            });
                         }),
                     )
                     .item(
@@ -785,19 +788,6 @@ pub(super) fn editor_language_for_path(path: &str) -> String {
     }
 }
 
-/// 内置文件查看器可以直接预览的图片格式。ICNS 不在 GPUI 的图片解码格式里，
-/// 仍按二进制文件处理，避免显示一个加载失败的空白画布。
-pub(super) fn is_previewable_image(path: &str) -> bool {
-    matches!(
-        Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "svg")
-    )
-}
-
 /// 打开的文件内容拆成路径栏和内容体，供 Tool Panel 把路径栏放在文件树分栏上方。
 pub struct FileContentParts {
     pub header: Option<AnyElement>,
@@ -825,7 +815,7 @@ pub fn file_content_parts(
             // 面包屑：项目名（根目录名）> 中间目录 > 文件名，参考 Codex App——
             // 光看文件名分不清「这是哪个项目/哪层目录下的文件」，尤其多根工作区。
             let breadcrumb_segs = breadcrumb_segments(&of.path, roots);
-            let is_image = is_previewable_image(&of.path);
+            let is_image = smelt_runtime_client::protocol::files::is_previewable_image(&of.path);
             let dirty = of.readable
                 && !is_image
                 && of.editor.read(cx).value().as_ref() != of.saved_content.as_str();
@@ -902,62 +892,43 @@ pub fn file_content_parts(
                         ),
                 )
                 .when(is_md, |el| {
-                    let markdown_label = if preview { "查看原始码" } else { "查看预览" };
+                    let markdown_label = if preview {
+                        "查看原始码"
+                    } else {
+                        "查看预览"
+                    };
                     el.child(
-                        div()
-                            .id("markdown-view-toggle")
-                            .role(gpui::Role::Button)
-                            .aria_label(markdown_label)
+                        Button::new("markdown-view-toggle")
+                            .ghost()
+                            .xsmall()
                             .flex_shrink_0()
-                            .text_xs()
-                            .text_color(fg)
-                            .cursor_pointer()
-                            .hover(|el| el.opacity(0.75))
-                            .child(markdown_label)
+                            .label(markdown_label)
                             .on_click(cx.listener(move |ws, _ev, _window, cx| {
                                 ws.set_file_preview(!preview, cx)
                             })),
                     )
                 })
                 .child(
-                    div()
-                        .id("file-tree-toggle")
-                        .role(gpui::Role::Button)
-                        .aria_label(if file_tree_open {
+                    Button::new("file-tree-toggle")
+                        .ghost()
+                        .small()
+                        .flex_shrink_0()
+                        .icon(if file_tree_open {
+                            IconName::PanelRight
+                        } else {
+                            IconName::PanelLeft
+                        })
+                        .icon_action(if file_tree_open {
                             "收起文件树"
                         } else {
                             "展开文件树"
-                        })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size_6()
-                        .rounded_md()
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .text_color(fg)
-                        .hover(|el| el.bg(border))
-                        .child(
-                            Icon::new(if file_tree_open {
-                                IconName::PanelRight
-                            } else {
-                                IconName::PanelLeft
-                            })
-                            .size_4(),
-                        )
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(if file_tree_open {
-                                "收起文件树"
-                            } else {
-                                "展开文件树"
-                            })
-                            .build(window, cx)
                         })
                         .on_click(cx.listener(|ws, _ev, _window, cx| {
                             ws.toggle_file_tree(cx);
                         })),
                 );
-            let body: AnyElement = if is_image {
+            // 图片过大、读不出来时没有字节，落到编辑器分支显示原因。
+            let body: AnyElement = if let Some(image) = of.image.as_ref() {
                 div()
                     .id("image-file-preview")
                     .flex_1()
@@ -969,10 +940,9 @@ pub fn file_content_parts(
                     .justify_center()
                     .bg(rgb(crate::ui_theme::bg_stage()))
                     .child({
-                        let path = std::path::Path::new(&of.path);
                         // 栅格图只画降采样预览。未完成时是空盒子，不把原图交给 `img()`。
-                        smelt_ui::image::ensure_file_preview(path, cx);
-                        smelt_ui::image::file_surface(path, smelt_ui::image::FileFit::Contain)
+                        smelt_ui::image::ensure_preview(image, cx);
+                        smelt_ui::image::image_surface(image)
                     })
                     .into_any_element()
             } else if preview {
@@ -1018,7 +988,7 @@ pub fn file_content_parts(
                                     .separator()
                                     .menu("全选", Box::new(gpui_component::input::SelectAll))
                                     .separator()
-                                    .menu("发送选中内容到终端", Box::new(SendSelectionToTerminal))
+                                    .menu("发送选中内容到会话", Box::new(SendSelectionToTerminal))
                             }),
                     )
                     .into_any_element()

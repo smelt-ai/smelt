@@ -435,7 +435,6 @@ impl Driver {
             conversation_binding: Some(ConversationBinding::Automation {
                 run_id: run.id.clone(),
             }),
-            agent_session: None,
             pending_agent_preset: None,
             omit_history: false,
         };
@@ -1037,9 +1036,6 @@ fn ensure_run_conversation_binding(
     run_id: &str,
 ) -> Result<bool, String> {
     let mut binding = session.conversation_binding.lock().unwrap();
-    if session.agent_session.lock().unwrap().is_some() {
-        return Err("自动化 ACP 会话带有不兼容的插件智能体绑定".to_string());
-    }
     match binding.as_ref() {
         Some(ConversationBinding::Automation { run_id: bound }) if bound == run_id => Ok(false),
         None | Some(ConversationBinding::Direct) => {
@@ -1050,9 +1046,6 @@ fn ensure_run_conversation_binding(
         }
         Some(ConversationBinding::Automation { run_id: bound }) => {
             Err(format!("自动化 ACP 会话已属于其他 Run: {bound}"))
-        }
-        Some(ConversationBinding::Plugin { .. }) => {
-            Err("自动化 ACP 会话带有不兼容的插件输入绑定".to_string())
         }
     }
 }
@@ -1288,7 +1281,6 @@ mod lifecycle_tests {
                 "session-1",
                 Some("/tmp".into()),
                 Some(ConversationBinding::Direct),
-                None,
                 None,
             )
         });
@@ -1569,7 +1561,6 @@ mod lifecycle_tests {
             Some("/tmp".into()),
             Some(ConversationBinding::Automation { run_id: run.id }),
             None,
-            None,
         );
 
         let delivered = dispatch_if_still_queued(
@@ -1651,7 +1642,6 @@ mod lifecycle_tests {
                 "session-1",
                 Some("/tmp".into()),
                 Some(ConversationBinding::Direct),
-                None,
                 None,
             )
         });

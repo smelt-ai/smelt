@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-mcp";
 import lockfile from "proper-lockfile";
 import { GATEWAY_PROTOCOL, readStdioServerSpecs, type StdioServerSpec } from "./mcp-gateway.ts";
+import { mcpServerEnvironment } from "./pi-mcp-runtime.ts";
 
 /**
  * Pi side of the shared MCP gateway: find it, start it when it is not running, and connect stdio
@@ -88,20 +89,6 @@ export function removeGatewayStateIfOwned(dir: string, pid: number): void {
 	if (readGatewayState(dir)?.pid === pid) rmSync(gatewayStatePath(dir), { force: true });
 }
 
-/**
- * Environment of the gateway and so of every shared server. Smelt's per-conversation variables
- * (`SMELT_SESSION_ID`, `SMELT_AGENT_TOKEN`, …) belong to the conversation that happened to start the
- * gateway and must not leak into servers every conversation uses.
- */
-export function gatewayEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-	const result: NodeJS.ProcessEnv = {};
-	for (const [name, value] of Object.entries(environment)) {
-		if (name.startsWith("SMELT_") && name !== "SMELT_HOME") continue;
-		result[name] = value;
-	}
-	return result;
-}
-
 export function endpointOf(state: GatewayState): GatewayEndpoint {
 	return { base: `http://127.0.0.1:${state.port}`, token: state.token, pid: state.pid };
 }
@@ -141,7 +128,8 @@ function spawnGateway(dir: string): number {
 			detached: true,
 			stdio: ["ignore", output, output],
 			cwd: homedir(),
-			env: { ...gatewayEnvironment(process.env), SMELT_MCP_GATEWAY_DIR: dir },
+			// 网关和它起的共享 server 不属于哪一条会话：拉起网关的那条会话的 Smelt 变量不能带进去。
+			env: { ...mcpServerEnvironment(process.env), SMELT_MCP_GATEWAY_DIR: dir },
 		});
 		child.unref();
 		if (child.pid === undefined) throw new Error("MCP gateway did not start");

@@ -35,7 +35,7 @@ pub(super) fn shortcuts_page(
                         label,
                         keys.iter()
                             .copied()
-                            .map(|key| keycap(key, border, popover, fg))
+                            .map(|key| fixed_key(key, border, popover, fg))
                             .collect(),
                     )
                 };
@@ -73,9 +73,9 @@ pub(super) fn shortcuts_page(
                                     fg,
                                 )],
                             ),
-                            fixed("打开命令面板", &["⌘K"]),
-                            // 新建任务没有对应的 Action，不能交给 Kbd，否则键帽是空的。
-                            fixed("新建任务", &["⇧⌘N"]),
+                            fixed("打开命令面板", &["cmd-k"]),
+                            // 新建任务没有对应的 Action，按固定键位画。
+                            fixed("新建任务", &["shift-cmd-n"]),
                             row(
                                 "退出 Smelt",
                                 vec![bound_key(
@@ -140,20 +140,24 @@ pub(super) fn shortcuts_page(
                                     ),
                                 ],
                             ),
-                            fixed("切换到第 1–9 个会话", &["⌘1…9"]),
-                            fixed("上一个 / 下一个分屏", &["⌘[", "⌘]"]),
-                            fixed("左右分屏 / 上下分屏", &["⌘D", "⇧⌘D"]),
-                            fixed("关闭当前分屏或会话", &["⌘W"]),
+                            // 区间写法不是一个键位，Kbd 表达不了，原样画键帽。
+                            row(
+                                "切换到第 1–9 个会话",
+                                vec![keycap("⌘1…9", border, popover, fg)],
+                            ),
+                            fixed("上一个 / 下一个分屏", &["cmd-[", "cmd-]"]),
+                            fixed("左右分屏 / 上下分屏", &["cmd-d", "shift-cmd-d"]),
+                            fixed("关闭当前分屏或会话", &["cmd-w"]),
                         ],
                     ))
                     .child(section(
                         "编辑与导航",
                         vec![
-                            fixed("终端内搜索", &["⌘F"]),
-                            fixed("保存当前文件", &["⌘S"]),
-                            fixed("上一个 / 下一个差异", &["⇧F7", "F7"]),
-                            fixed("关闭预览或返回", &["Esc"]),
-                            fixed("终端补全 / 反向补全", &["Tab", "⇧Tab"]),
+                            fixed("终端内搜索", &["cmd-f"]),
+                            fixed("保存当前文件", &["cmd-s"]),
+                            fixed("上一个 / 下一个差异", &["shift-f7", "f7"]),
+                            fixed("关闭预览或返回", &["escape"]),
+                            fixed("终端补全 / 反向补全", &["tab", "shift-tab"]),
                         ],
                     ))
                     .into_any_element()
@@ -182,6 +186,15 @@ fn keycap(key: &'static str, border: Hsla, popover: Hsla, fg: Hsla) -> gpui::Any
         .into_any_element()
 }
 
+/// 固定键位按 gpui 键位写法（`shift-cmd-n`）交给 Kbd，按平台显示键名。
+/// 写错解析不了时原样画出来，不留空键帽。
+fn fixed_key(spec: &'static str, border: Hsla, popover: Hsla, fg: Hsla) -> gpui::AnyElement {
+    match gpui::Keystroke::parse(spec) {
+        Ok(stroke) => kbd_cap(gpui_component::kbd::Kbd::new(stroke), border, popover, fg),
+        Err(_) => keycap(spec, border, popover, fg),
+    }
+}
+
 /// 读当前键位。`context` 用 Key Context 声明，不用 predicate。
 /// 没有绑定时退回原来的字，避免键帽是空的。
 fn bound_key(
@@ -194,22 +207,31 @@ fn bound_key(
     fg: Hsla,
 ) -> gpui::AnyElement {
     match gpui_component::kbd::Kbd::binding_for_action(action, context, window) {
-        Some(kbd) => kbd
-            .min_w(px(34.))
-            .h(crate::ui_theme::height::xs())
-            .px_2()
-            .py_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .border_1()
-            .border_color(border)
-            .bg(popover)
-            .font_family(crate::terminal_view::font_family())
-            .text_xs()
-            .text_color(fg)
-            .into_any_element(),
+        Some(kbd) => kbd_cap(kbd, border, popover, fg),
         None => keycap(fallback, border, popover, fg),
     }
+}
+
+/// Kbd 套上和兜底键帽一样的外框，两种来源的键帽并排时看不出差别。
+fn kbd_cap(
+    kbd: gpui_component::kbd::Kbd,
+    border: Hsla,
+    popover: Hsla,
+    fg: Hsla,
+) -> gpui::AnyElement {
+    kbd.min_w(px(34.))
+        .h(crate::ui_theme::height::xs())
+        .px_2()
+        .py_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .bg(popover)
+        .font_family(crate::terminal_view::font_family())
+        .text_xs()
+        .text_color(fg)
+        .into_any_element()
 }

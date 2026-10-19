@@ -180,14 +180,14 @@ hook 接入 + 文件级 diff，smelt 三样都有（或差一点点）。
 
 smelt 不做任务的**存储层**（那是 Linear / GitHub 的活），做任务的**执行层**：
 
-> 一个 GitHub Issue → 点一下「我来」→ 自动建 worktree + 开会话 + 把 issue 内容喂给 agent
+> 一个 GitHub Issue → 点一下「我来」→ 开会话 + 把 issue 内容喂给 agent
 > → 跑完出 PR
 
 任务从哪来无所谓（issue / Linear / 一个 markdown 队列），smelt 负责的是**从任务到 agent
 的那一跳**，以及跑起来之后的全部可见性。
 
-**与前面架构的咬合：每个任务一个 worktree** —— 撞车预警从「事后拦」升级为「结构上不可
-能撞」。（worktree 集成本就在 roadmap 里躺着。）
+~~**与前面架构的咬合：每个任务一个 worktree** —— 撞车预警从「事后拦」升级为「结构上不可
+能撞」。~~（已放弃（2026-10-18 移除 worktree 功能）：smelt 不建、不管 worktree，用户自己建的 worktree 当普通项目打开。）
 
 #### 统一抽象：认领池，不是任务列表
 

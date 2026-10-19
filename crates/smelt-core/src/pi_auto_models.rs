@@ -11,18 +11,18 @@
 
 pub use crate::auto_model_store::AutoModelStore as PiAutoModelStore;
 
-const STORE_FILE: &str = "pi-auto-models.json";
+const HARNESS: smelt_store::AutoModelHarness = smelt_store::AutoModelHarness::Pi;
 
 pub fn load() -> PiAutoModelStore {
-    crate::auto_model_store::load(STORE_FILE)
+    crate::auto_model_store::load(HARNESS)
 }
 
 pub fn save(store: &PiAutoModelStore) {
-    crate::auto_model_store::save(STORE_FILE, store);
+    crate::auto_model_store::save(HARNESS, store);
 }
 
 pub fn update(mutate: impl FnOnce(&mut PiAutoModelStore)) {
-    crate::auto_model_store::update(STORE_FILE, mutate);
+    crate::auto_model_store::update(HARNESS, mutate);
 }
 
 /// 一个 provider 的刷新结果。

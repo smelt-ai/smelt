@@ -5,8 +5,8 @@
 //! 反序列化放进 render 会把整个窗口拖卡。
 use std::collections::HashSet;
 
-use smelt_core::acp_chat::{AcpEntry, DiffLineTag, ToolCallStatus, ToolOutputPart};
-use smelt_core::automation::{AutomationRun, AutomationRunStatus};
+use smelt_model::acp_chat::{AcpEntry, DiffLineTag, ToolCallStatus, ToolOutputPart};
+use smelt_model::automation::{AutomationRun, AutomationRunStatus};
 
 use super::*;
 
@@ -119,13 +119,17 @@ impl Workspace {
             let (archived, transcript) = cx
                 .background_executor()
                 .spawn(async move {
-                    let archived = need_archive
-                        .then(|| smelt_core::automation_store::load_run(&run_id))
-                        .flatten();
-                    let transcript =
-                        smelt_core::automation_transcript::load_run_transcript(&run_id)
-                            .unwrap_or_default();
-                    (archived, transcript)
+                    // 运行记录在运行时库里；读不到时按「没有归档、没有对话记录」显示。
+                    let detail =
+                        crate::runtime_call::call::<smelt_model::control_api::AutomationRunDetail>(
+                            smelt_model::control_api::AutomationRunDetailParams {
+                                run_id,
+                                include_archived_run: need_archive,
+                            },
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                        .unwrap_or_default();
+                    (detail.archived_run, detail.transcript)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -534,7 +538,7 @@ fn render_transcript(
                 let preview = text.lines().next().unwrap_or_default().to_string();
                 transcript_step(
                     &key,
-                    process_icon(&smelt_core::acp_chat::ToolKind::Think),
+                    process_icon(&smelt_model::acp_chat::ToolKind::Think),
                     format!("思考  {preview}"),
                     None,
                     detail,
@@ -633,7 +637,7 @@ fn render_transcript(
     column.into_any_element()
 }
 
-fn process_icon(kind: &smelt_core::acp_chat::ToolKind) -> IconName {
+fn process_icon(kind: &smelt_model::acp_chat::ToolKind) -> IconName {
     acp_view::process_timeline_icon(kind)
 }
 
@@ -794,7 +798,7 @@ fn tool_output_view(id: String, parts: &[ToolOutputPart]) -> AnyElement {
                 old_text,
                 new_text,
             } => {
-                let lines = smelt_core::acp_chat::diff_lines(
+                let lines = smelt_model::acp_chat::diff_lines(
                     old_text.as_deref().unwrap_or_default(),
                     new_text,
                 );

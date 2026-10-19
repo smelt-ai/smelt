@@ -1,4 +1,4 @@
-use smelt_core::agent_kind::{ConversationAgentKind, TerminalAgentKind};
+use smelt_model::agent_kind::{ConversationAgentKind, TerminalAgentKind};
 
 use super::resolve_terminal_provider;
 

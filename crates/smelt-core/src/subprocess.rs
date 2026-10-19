@@ -1,7 +1,7 @@
 //! 子进程执行能力接缝（Service Definition + Provider + Consumer）。
 //!
 //! **为什么要这层间接**：smelt 现在有 78 处直接 `Command::new`，等价于把「进程
-//! 住在本机」这条假设焊死在每个调用点上。远程访问（iroh）、worktree 沙箱、
+//! 住在本机」这条假设焊死在每个调用点上。远程访问（iroh）
 //! 以及将来的云端执行环境，都需要同一套命令换一个执行世界；没有这层，每加
 //! 一个世界就得再抄一遍所有调用点。
 //!
@@ -247,7 +247,7 @@ impl Subprocess for MockSubprocess {
 /// 调用方拿到的就是原样 UTF-8 路径。需要严格分隔的场景（status）另外用 `-z`。
 ///
 /// 这是 Consumer 的样板——**只认 [`Subprocess`]，不认 `std::process`**，所以
-/// 本地面板和将来的远程 worktree 用的是同一份 git 调用逻辑，不会各自漂移。
+/// 本地面板和远程运行时用的是同一份 git 调用逻辑，不会各自漂移。
 pub fn run_git(sp: &dyn Subprocess, root: &Path, args: &[&str]) -> io::Result<Output> {
     let mut full_args = vec![
         "-C",

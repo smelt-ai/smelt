@@ -1,19 +1,19 @@
-use super::auth::first_party_event_client;
 #[cfg(target_os = "macos")]
 use super::auth::{
     KernelCodeIdentity, PeerAuditToken, PeerCodeIdentity, SystemPeerCodeIdentity,
-    authenticate_event_connection_with_verifier, self_audit_token,
+    authenticate_event_connection_with_verifier, first_party_event_client, self_audit_token,
 };
 use super::*;
-use smelt_plugin_api::{
+#[cfg(target_os = "macos")]
+use smelt_event_protocol::FirstPartyClientKind;
+use smelt_event_protocol::{
     Ack, CORE_CAPABILITY_AGENT_MESSAGE_READ, CORE_CAPABILITY_AUTOMATION_READ,
     CORE_CAPABILITY_CONVERSATION_WAKE, CORE_CAPABILITY_REMOTE_SESSIONS_READ,
     CORE_CAPABILITY_SESSION_READ, CORE_CAPABILITY_WORKSPACE_READ,
     CORE_TOPIC_AGENT_MESSAGE_DELIVERED, CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
-    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID,
-    FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID, FirstPartyClientKind, Nack, NackDisposition, PluginId,
-    ProtocolRange, SubscribeControlMessage, SubscribeErrorCode, SubscribeMessage, SubscribeRequest,
-    SubscriptionDeclaration, SubscriptionId,
+    DeliveryClass, EVENT_BUS_PROTOCOL_VERSION, FIRST_PARTY_DESKTOP_PLUGIN_ID, Nack,
+    NackDisposition, PluginId, ProtocolRange, SubscribeControlMessage, SubscribeErrorCode,
+    SubscribeMessage, SubscribeRequest, SubscriptionDeclaration, SubscriptionId,
 };
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
@@ -124,7 +124,7 @@ fn request(
         },
         subscription: SubscriptionDeclaration {
             id: SubscriptionId::new(id).unwrap(),
-            topics: vec![smelt_plugin_api::Topic::new(topic).unwrap()],
+            topics: vec![smelt_event_protocol::Topic::new(topic).unwrap()],
             delivery,
         },
         cursor,
@@ -182,7 +182,9 @@ fn versioned_subscription_streams_snapshot_and_event_and_cleans_up() {
     client.shutdown(Shutdown::Both).unwrap();
     worker.join().unwrap();
     let topics =
-        BTreeSet::from([smelt_plugin_api::Topic::new(CORE_TOPIC_SESSION_STATE_CHANGED).unwrap()]);
+        BTreeSet::from([
+            smelt_event_protocol::Topic::new(CORE_TOPIC_SESSION_STATE_CHANGED).unwrap(),
+        ]);
     let replacement = event_hub
         .subscribe(
             PluginId::new("test.protocol").unwrap(),
@@ -313,36 +315,10 @@ fn first_party_auth_assigns_fixed_minimum_capabilities_from_peer_facts() {
             Capability::new(CORE_CAPABILITY_WORKSPACE_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap(),
             Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap(),
+            Capability::new(smelt_event_protocol::CORE_CAPABILITY_APPEARANCE_CONTROL).unwrap(),
         ])
     );
 
-    let gateway = authenticate_event_client(
-        &serde_json::json!({
-            "auth": {
-                "type": "first_party",
-                "kind": "remote_gateway"
-            }
-        }),
-        &peer(42, Some(PathBuf::from("/untrusted/smeltd"))),
-        42,
-        &daemon_executable,
-    )
-    .unwrap();
-    assert_eq!(
-        gateway.plugin_id.as_str(),
-        FIRST_PARTY_REMOTE_GATEWAY_PLUGIN_ID
-    );
-    assert!(
-        gateway
-            .capabilities
-            .contains(&Capability::new(CORE_CAPABILITY_AUTOMATION_READ).unwrap())
-    );
-    assert!(
-        !gateway
-            .capabilities
-            .contains(&Capability::new(CORE_CAPABILITY_CONVERSATION_WAKE).unwrap()),
-        "网关兑现不了唤醒请求，不能订阅它，否则 daemon 会误以为有桌面端在场"
-    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -359,12 +335,15 @@ fn first_party_auth_rejects_kind_spoofing_and_untrusted_peers() {
         &daemon_executable,
     )
     .unwrap_err();
-    assert!(error.contains("does not match Unix peer identity"));
+    assert!(
+        error.contains("smeltd itself is not an event client"),
+        "{error}"
+    );
 
     #[cfg(target_os = "macos")]
     let error = authenticate_event_client_with_verifier(
         &serde_json::json!({
-            "auth": {"type": "first_party", "kind": "remote_gateway"}
+            "auth": {"type": "first_party", "kind": "desktop"}
         }),
         &peer(7, Some(PathBuf::from("/usr/local/bin/smelt"))),
         42,
@@ -384,7 +363,7 @@ fn first_party_auth_rejects_kind_spoofing_and_untrusted_peers() {
     #[cfg(not(target_os = "macos"))]
     let error = authenticate_event_client(
         &serde_json::json!({
-            "auth": {"type": "first_party", "kind": "remote_gateway"}
+            "auth": {"type": "first_party", "kind": "desktop"}
         }),
         &peer(7, Some(PathBuf::from("/usr/local/bin/smelt"))),
         42,
@@ -400,17 +379,15 @@ fn first_party_auth_rejects_kind_spoofing_and_untrusted_peers() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_auth_accepts_signed_app_desktop_and_standalone_gateway_but_not_basename_alone() {
+fn macos_auth_accepts_the_signed_app_desktop_but_not_basename_alone() {
     let daemon = PathBuf::from("/Users/test/.smelt/bin/smeltd");
     let desktop = PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smelt");
-    let gateway = PathBuf::from("/opt/smelt/gateway");
     let impostor = PathBuf::from("/untrusted/smelt");
     let renamed_team_binary = PathBuf::from("/Applications/Other.app/Contents/MacOS/smelt");
     let verifier = FakePeerCodeIdentity {
         kernel: BTreeMap::from([
             (42, Ok(kernel(Some("SMELTTEAM"), Some("smeltd")))),
             (7, Ok(kernel(Some("SMELTTEAM"), Some("com.zzfn.smelt")))),
-            (8, Ok(kernel(Some("SMELTTEAM"), Some("gateway")))),
             (
                 9,
                 Ok(kernel(Some("EVILTEAM"), Some("com.example.impostor"))),
@@ -422,28 +399,23 @@ fn macos_auth_accepts_signed_app_desktop_and_standalone_gateway_but_not_basename
         ]),
         certs: BTreeMap::new(),
     };
-    for (kind, pid, executable) in [
-        (FirstPartyClientKind::Desktop, 7, desktop),
-        (FirstPartyClientKind::RemoteGateway, 8, gateway),
-    ] {
-        let authenticated = authenticate_event_client_with_verifier(
-            &serde_json::json!({
-                "auth": {
-                    "type": "first_party",
-                    "kind": match kind {
-                        FirstPartyClientKind::Desktop => "desktop",
-                        FirstPartyClientKind::RemoteGateway => "remote_gateway",
-                    }
-                }
-            }),
-            &peer(pid, Some(executable)),
-            42,
-            &daemon,
-            &verifier,
-        )
-        .unwrap();
-        assert_eq!(authenticated, first_party_event_client(kind));
-    }
+    let authenticated = authenticate_event_client_with_verifier(
+        &serde_json::json!({
+            "auth": {
+                "type": "first_party",
+                "kind": "desktop"
+            }
+        }),
+        &peer(7, Some(desktop)),
+        42,
+        &daemon,
+        &verifier,
+    )
+    .unwrap();
+    assert_eq!(
+        authenticated,
+        first_party_event_client(FirstPartyClientKind::Desktop)
+    );
 
     let error = authenticate_event_client_with_verifier(
         &serde_json::json!({
@@ -483,32 +455,26 @@ fn macos_auth_classifies_by_kernel_identity_when_path_is_unavailable() {
         kernel: BTreeMap::from([
             (42, Ok(kernel(Some("SMELTTEAM"), Some("smeltd")))),
             (7, Ok(kernel(Some("SMELTTEAM"), Some("com.zzfn.smelt")))),
-            (8, Ok(kernel(Some("SMELTTEAM"), Some("gateway")))),
         ]),
         certs: BTreeMap::new(),
     };
-    for (kind, pid) in [
-        (FirstPartyClientKind::Desktop, 7),
-        (FirstPartyClientKind::RemoteGateway, 8),
-    ] {
-        let authenticated = authenticate_event_client_with_verifier(
-            &serde_json::json!({
-                "auth": {
-                    "type": "first_party",
-                    "kind": match kind {
-                        FirstPartyClientKind::Desktop => "desktop",
-                        FirstPartyClientKind::RemoteGateway => "remote_gateway",
-                    }
-                }
-            }),
-            &peer(pid, None),
-            42,
-            &daemon,
-            &verifier,
-        )
-        .unwrap();
-        assert_eq!(authenticated, first_party_event_client(kind));
-    }
+    let authenticated = authenticate_event_client_with_verifier(
+        &serde_json::json!({
+            "auth": {
+                "type": "first_party",
+                "kind": "desktop"
+            }
+        }),
+        &peer(7, None),
+        42,
+        &daemon,
+        &verifier,
+    )
+    .unwrap();
+    assert_eq!(
+        authenticated,
+        first_party_event_client(FirstPartyClientKind::Desktop)
+    );
 
     // 无 token 且无路径 → 无从判定身份，拒绝。
     let no_identity = PeerIdentity {
@@ -1075,7 +1041,7 @@ fn wire_auth_rejects_capability_escalation_and_removed_plugin_auth() {
         &serde_json::json!({
             "auth": {
                 "type": "first_party",
-                "kind": "remote_gateway",
+                "kind": "desktop",
                 "capabilities": ["task.read"]
             }
         }),
@@ -1225,7 +1191,7 @@ fn invalid_ack_closes_socket_and_reclaims_reader_worker() {
         ack: Ack {
             subscription_id: SubscriptionId::new("wrong-subscription").unwrap(),
             sequence: 1,
-            event_id: smelt_plugin_api::EventId::new("event-1").unwrap(),
+            event_id: smelt_event_protocol::EventId::new("event-1").unwrap(),
         },
     };
     writeln!(client, "{}", serde_json::to_string(&invalid).unwrap()).unwrap();
@@ -1238,102 +1204,4 @@ fn invalid_ack_closes_socket_and_reclaims_reader_worker() {
     worker
         .join()
         .expect("subscription and reader workers must exit");
-}
-
-#[test]
-fn plugin_invoke_timeout_caps_at_thirty_seconds() {
-    assert_eq!(
-        plugin_invoke_timeout(10_000),
-        std::time::Duration::from_secs(10)
-    );
-    assert_eq!(
-        plugin_invoke_timeout(300_000),
-        std::time::Duration::from_millis(MAX_PLUGIN_INVOKE_MS)
-    );
-}
-
-#[test]
-fn plugin_ui_operations_require_authenticated_desktop() {
-    let remote_gateway = first_party_event_client(FirstPartyClientKind::RemoteGateway);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_contributions(server, Ok(remote_gateway.clone()));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_invoke(server, &serde_json::json!({}), Ok(remote_gateway));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_contributions(server, Err("missing auth".to_string()));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["error"], "missing auth");
-
-    let desktop = first_party_event_client(FirstPartyClientKind::Desktop);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_contributions(server, Ok(desktop));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], true);
-}
-
-#[test]
-fn plugin_set_enabled_requires_authenticated_desktop() {
-    let remote_gateway = first_party_event_client(FirstPartyClientKind::RemoteGateway);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_set_enabled(
-        server,
-        &serde_json::json!({
-            "plugin_id": "com.example.plugin",
-            "enabled": false
-        }),
-        Ok(remote_gateway),
-    );
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let desktop = first_party_event_client(FirstPartyClientKind::Desktop);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_set_enabled(
-        server,
-        &serde_json::json!({
-            "plugin_id": "com.example.plugin",
-            "enabled": false
-        }),
-        Ok(desktop),
-    );
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], true);
-}
-
-#[test]
-fn plugin_reload_requires_authenticated_desktop() {
-    let remote_gateway = first_party_event_client(FirstPartyClientKind::RemoteGateway);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_reload(server, Ok(remote_gateway));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], false);
-    assert_eq!(
-        response["error"],
-        "plugin UI operation requires authenticated desktop"
-    );
-
-    let desktop = first_party_event_client(FirstPartyClientKind::Desktop);
-    let (server, client) = UnixStream::pair().unwrap();
-    handle_plugin_reload(server, Ok(desktop));
-    let response: serde_json::Value = serde_json::from_reader(BufReader::new(client)).unwrap();
-    assert_eq!(response["ok"], true);
 }

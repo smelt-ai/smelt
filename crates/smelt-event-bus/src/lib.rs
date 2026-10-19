@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     Capability, CommandId, DeliveryClass, EventEnvelope, EventId, PluginId, PublisherIdentity,
     SnapshotKind, SubscriptionId, Topic, TopicDescriptor,
 };
@@ -339,7 +339,7 @@ struct InflightEvent {
 
 #[derive(Clone)]
 struct CausalMetadata {
-    correlation_id: smelt_plugin_api::CorrelationId,
+    correlation_id: smelt_event_protocol::CorrelationId,
     hop_count: u16,
     envelope_fingerprint: [u8; 32],
 }
@@ -1271,7 +1271,7 @@ impl EventHub {
     pub fn ack(
         &self,
         plugin_id: &PluginId,
-        ack: &smelt_plugin_api::Ack,
+        ack: &smelt_event_protocol::Ack,
     ) -> Result<(), EventBusError> {
         let key = (plugin_id.clone(), ack.subscription_id.clone());
         let contiguous = {
@@ -1335,7 +1335,7 @@ impl EventHub {
     pub fn nack(
         &self,
         plugin_id: &PluginId,
-        nack: &smelt_plugin_api::Nack,
+        nack: &smelt_event_protocol::Nack,
         failed_at_ms: u64,
     ) -> Result<(), EventBusError> {
         let key = (plugin_id.clone(), nack.subscription_id.clone());
@@ -1372,7 +1372,7 @@ impl EventHub {
                 .unwrap_or(0)
                 .saturating_add(1);
             let reason = format!("{}: {}", nack.error_code, nack.message);
-            if nack.disposition == smelt_plugin_api::NackDisposition::Retryable
+            if nack.disposition == smelt_event_protocol::NackDisposition::Retryable
                 && attempts < MAX_DURABLE_DELIVERY_ATTEMPTS
             {
                 let retry = DeliveryRetry {
@@ -1412,7 +1412,7 @@ impl EventHub {
         self.permanent_nack(dead_letter)?;
         self.ack(
             plugin_id,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: nack.subscription_id.clone(),
                 sequence: nack.sequence,
                 event_id: nack.event_id.clone(),
@@ -1990,7 +1990,7 @@ impl EventStore for MemoryEventStore {
 mod tests {
     use super::*;
     use serde_json::json;
-    use smelt_plugin_api::{AggregateRef, CorrelationId, DataSensitivity, EventSource};
+    use smelt_event_protocol::{AggregateRef, CorrelationId, DataSensitivity, EventSource};
     use std::sync::Barrier;
 
     fn capability(value: &str) -> Capability {
@@ -2230,7 +2230,7 @@ mod tests {
         let plugin = PluginId::new("com.example").unwrap();
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: 1,
                 event_id: event.envelope.event_id.clone(),
@@ -2270,7 +2270,7 @@ mod tests {
                 delivery: DeliveryClass::Durable,
                 required_subscribe_capability: capability("session.read"),
                 required_publish_capability: None,
-                sensitivity: smelt_plugin_api::DataSensitivity::Internal,
+                sensitivity: smelt_event_protocol::DataSensitivity::Internal,
                 max_payload_bytes: 4096,
                 snapshot_kind: None,
             })
@@ -2340,7 +2340,7 @@ mod tests {
         assert_eq!(first.sequence, 1);
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: first.sequence,
                 event_id: first.envelope.event_id.clone(),
@@ -2358,7 +2358,7 @@ mod tests {
         assert_eq!(second.sequence, 2);
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: second.sequence,
                 event_id: second.envelope.event_id.clone(),
@@ -2415,7 +2415,7 @@ mod tests {
         assert_eq!(first.sequence, 1);
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: first.sequence,
                 event_id: first.envelope.event_id.clone(),
@@ -2430,7 +2430,7 @@ mod tests {
         assert_eq!(second.sequence, 3);
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: second.sequence,
                 event_id: second.envelope.event_id.clone(),
@@ -2588,7 +2588,7 @@ mod tests {
         assert!(
             hub.ack(
                 &plugin,
-                &smelt_plugin_api::Ack {
+                &smelt_event_protocol::Ack {
                     subscription_id: subscription_id.clone(),
                     sequence: first.sequence,
                     event_id: second_published.envelope.event_id.clone(),
@@ -2598,7 +2598,7 @@ mod tests {
         );
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: first.sequence,
                 event_id: first.envelope.event_id.clone(),
@@ -2621,7 +2621,7 @@ mod tests {
         assert_eq!(second.sequence, second_published.sequence);
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: second.sequence,
                 event_id: second.envelope.event_id.clone(),
@@ -2674,7 +2674,7 @@ mod tests {
 
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: first.sequence,
                 event_id: first.envelope.event_id.clone(),
@@ -3016,7 +3016,7 @@ mod tests {
         assert_eq!(first.sequence, 1);
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id,
                 sequence: first.sequence,
                 event_id: first.envelope.event_id.clone(),
@@ -3097,11 +3097,11 @@ mod tests {
         assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
         hub.nack(
             &plugin,
-            &smelt_plugin_api::Nack {
+            &smelt_event_protocol::Nack {
                 subscription_id: subscription_id.clone(),
                 sequence: first.sequence,
                 event_id: first.envelope.event_id.clone(),
-                disposition: smelt_plugin_api::NackDisposition::Retryable,
+                disposition: smelt_event_protocol::NackDisposition::Retryable,
                 error_code: "temporary".into(),
                 message: "retry".into(),
             },
@@ -3134,7 +3134,7 @@ mod tests {
         );
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: retry.sequence,
                 event_id: retry.envelope.event_id.clone(),
@@ -3157,7 +3157,7 @@ mod tests {
         assert_eq!(third.sequence, 2);
         hub.ack(
             &plugin,
-            &smelt_plugin_api::Ack {
+            &smelt_event_protocol::Ack {
                 subscription_id: subscription_id.clone(),
                 sequence: third.sequence,
                 event_id: third.envelope.event_id.clone(),
@@ -3204,11 +3204,11 @@ mod tests {
         };
         hub.nack(
             &plugin,
-            &smelt_plugin_api::Nack {
+            &smelt_event_protocol::Nack {
                 subscription_id: subscription_id.clone(),
                 sequence: first.sequence,
                 event_id: first.envelope.event_id.clone(),
-                disposition: smelt_plugin_api::NackDisposition::Retryable,
+                disposition: smelt_event_protocol::NackDisposition::Retryable,
                 error_code: "temporary".into(),
                 message: "retry".into(),
             },
@@ -3274,11 +3274,11 @@ mod tests {
             };
             hub.nack(
                 &plugin,
-                &smelt_plugin_api::Nack {
+                &smelt_event_protocol::Nack {
                     subscription_id: subscription_id.clone(),
                     sequence: event.sequence,
                     event_id: event.envelope.event_id.clone(),
-                    disposition: smelt_plugin_api::NackDisposition::Retryable,
+                    disposition: smelt_event_protocol::NackDisposition::Retryable,
                     error_code: "temporary".into(),
                     message: "retry".into(),
                 },

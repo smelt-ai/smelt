@@ -45,6 +45,11 @@ stage_analyze() {
   info "Flutter：静态分析"
   (cd "$MOBILE_DIR" && flutter analyze)
   ok "静态分析通过"
+  info "Rust：协议客户端按移动端 target 检查"
+  # smelt-runtime-client 桌面和手机共用，依赖必须能编进移动端（不许引 GPUI、
+  # 原生 SQLite 或 smelt-core）。cargo check 不链接，用不到 NDK。
+  cargo check -p smelt-runtime-client --target aarch64-linux-android --locked
+  ok "协议客户端可编进 Android"
 }
 
 stage_test() {

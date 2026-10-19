@@ -5,9 +5,8 @@ use std::time::Instant;
 use super::view::{
     BreadcrumbSeg, FileTreeRow, breadcrumb_segments, collect_file_tree_rows, file_tree_row_id,
 };
-use super::{DirCache, SearchHit, build_search_tree, search_project};
+use super::{DirCache, SearchHit, build_search_tree};
 use crate::git_panel::GitStatusData;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
 fn breadcrumb_segments_split_path_under_workspace_root() {
@@ -242,71 +241,4 @@ fn search_tree_keeps_matching_files_under_their_ancestor_directories() {
         .expect("crate ancestor exists");
     assert_eq!(core.dirs["src"].files, vec![0]);
     assert_eq!(tree.dirs["mobile"].dirs["lib"].dirs["pages"].files, vec![1]);
-}
-
-#[test]
-fn search_project_respects_gitignore_and_matches_content() {
-    let temp = std::env::temp_dir().join(format!("smelt-search-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp).unwrap();
-    let src_dir = temp.join("src");
-    let target_dir = temp.join("target");
-    let venv_dir = temp.join(".venv");
-    std::fs::create_dir_all(&src_dir).unwrap();
-    std::fs::create_dir_all(&target_dir).unwrap();
-    std::fs::create_dir_all(&venv_dir).unwrap();
-
-    std::fs::write(temp.join(".gitignore"), "target/\n.venv/\nignored.txt\n").unwrap();
-    std::fs::write(
-        src_dir.join("main.rs"),
-        "fn main() {\n    println!(\"hello smelt_search\");\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        temp.join("README.md"),
-        "# Welcome to smelt_search project\n",
-    )
-    .unwrap();
-    std::fs::write(target_dir.join("build.rs"), "smelt_search target file\n").unwrap();
-    std::fs::write(venv_dir.join("lib.py"), "smelt_search venv file\n").unwrap();
-    std::fs::write(temp.join("ignored.txt"), "smelt_search ignored text\n").unwrap();
-
-    let (hits, truncated) = search_project(
-        temp.to_str().unwrap(),
-        "smelt_search",
-        &AtomicBool::new(false),
-    );
-    assert!(!truncated);
-
-    let hit_paths: Vec<_> = hits.iter().map(|h| h.rel.as_str()).collect();
-    assert!(
-        hit_paths.contains(&"README.md"),
-        "README.md should be matched"
-    );
-    assert!(
-        hit_paths.contains(&"src/main.rs"),
-        "src/main.rs should be matched"
-    );
-    assert!(
-        !hit_paths.iter().any(|p| p.starts_with("target/")),
-        "target should be ignored"
-    );
-    assert!(
-        !hit_paths.iter().any(|p| p.starts_with(".venv/")),
-        ".venv should be ignored"
-    );
-    assert!(
-        !hit_paths.contains(&"ignored.txt"),
-        "ignored.txt should be ignored"
-    );
-
-    let _ = std::fs::remove_dir_all(&temp);
-}
-
-#[test]
-fn search_project_returns_without_walking_when_cancelled() {
-    let cancel = AtomicBool::new(true);
-    let (hits, truncated) = search_project("/no/such/smelt-search-root", "smelt_search", &cancel);
-    assert!(hits.is_empty());
-    assert!(!truncated);
-    assert!(cancel.load(Ordering::Relaxed));
 }

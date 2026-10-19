@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,12 +18,14 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Direction, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{
-    Config, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport, viewport_to_point,
+    Config, Osc52, SEMANTIC_ESCAPE_CHARS, Term, TermDamage, TermMode, point_to_viewport,
+    viewport_to_point,
 };
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
-use smelt_core::daemon_protocol::DaemonOperation;
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 type SearchMatch = (Point, Point);
 type SearchResult = (u64, String, i32, Vec<SearchMatch>);
@@ -227,12 +229,18 @@ pub struct Frame {
 }
 
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
-fn resolve(color: Color, is_fg: bool) -> u32 {
+/// 程序用 OSC 4 / 10 / 11 改过的颜色（alacritty 记在 `overrides` 里）优先于主题色，
+/// 跟主流终端一致：base16-shell 这类主题脚本、TUI 自己换底色都靠它。
+fn resolve(color: Color, is_fg: bool, overrides: &Colors) -> u32 {
     match color {
-        Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32,
-        Color::Indexed(i) => indexed_rgb(i),
-        Color::Named(n) => named_rgb(n, is_fg),
+        Color::Spec(rgb) => rgb_u32(rgb),
+        Color::Indexed(i) => overrides[i as usize].map_or_else(|| indexed_rgb(i), rgb_u32),
+        Color::Named(n) => overrides[n].map_or_else(|| named_rgb(n, is_fg), rgb_u32),
     }
+}
+
+fn rgb_u32(rgb: Rgb) -> u32 {
+    ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
 }
 
 fn named_rgb(n: NamedColor, is_fg: bool) -> u32 {
@@ -302,7 +310,7 @@ impl Dimensions for TermSize {
     }
 }
 
-/// OSC 9/99/777 普通通知槽；UI 侧轮询后用于横幅/通知记录，不参与 Agent 状态。
+/// BEL 普通提醒槽；UI 侧轮询后用于通知记录，不参与 Agent 状态。
 type NotifySlot = Arc<Mutex<Option<String>>>;
 
 /// 网格行列 + 单元格像素尺寸，给 OSC/CSI 查询（TextAreaSizeRequest）和 PTY resize 用。
@@ -318,7 +326,7 @@ struct TermMetrics {
 #[derive(Default)]
 struct DaemonGeometrySignal {
     generation: u64,
-    geometry: Option<smelt_core::osc::TerminalGeometryOsc>,
+    geometry: Option<smelt_model::osc::TerminalGeometryOsc>,
 }
 
 /// smeltd 对单帧的硬上限；大输入由 writer 线程按这个值流式切分后再写 socket。
@@ -333,6 +341,9 @@ enum TerminalWrite {
     Frame { ty: u8, payload: Vec<u8> },
     /// 用户/终端输入；writer 线程消费时再按单帧上限切分，保持请求内顺序。
     Input(Vec<u8>),
+    /// 输出确认。不带数值：writer 发的时候读最新的累计字节数，排队期间的多次确认
+    /// 自然合并成一帧，读线程每批都确认也不会把写队列塞满。
+    Ack,
 }
 
 /// GUI / PTY 读线程到 smeltd attachment 的单写端。
@@ -346,6 +357,10 @@ struct TerminalWriter {
     tx: smol::channel::Sender<TerminalWrite>,
     queued_bytes: Arc<AtomicUsize>,
     pending_input_bytes: Arc<AtomicUsize>,
+    /// 读线程已处理的累计输出字节数（从快照第一个字节算起），守护按它做流控。
+    consumed: Arc<AtomicU64>,
+    /// 已经有一个 `Ack` 在写队列里，后来的确认只需更新 `consumed`。
+    ack_queued: Arc<AtomicBool>,
     shutdown: Arc<UnixStream>,
     closed: Arc<AtomicBool>,
 }
@@ -359,6 +374,8 @@ impl TerminalWriter {
             tx,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
             pending_input_bytes: Arc::new(AtomicUsize::new(0)),
+            consumed: Arc::new(AtomicU64::new(0)),
+            ack_queued: Arc::new(AtomicBool::new(false)),
             shutdown,
             closed: Arc::new(AtomicBool::new(false)),
         };
@@ -388,6 +405,12 @@ impl TerminalWriter {
                                 .pending_input_bytes
                                 .fetch_sub(byte_len, Ordering::AcqRel);
                             result
+                        }
+                        TerminalWrite::Ack => {
+                            // 先清标记再读数：读之后才到的确认会再排一帧，不会漏。
+                            worker.ack_queued.store(false, Ordering::Release);
+                            let consumed = worker.consumed.load(Ordering::Acquire);
+                            write_frame(&mut stream, 2, &consumed.to_be_bytes())
                         }
                     };
                     if result.is_err() {
@@ -448,6 +471,19 @@ impl TerminalWriter {
             }
         }
         true
+    }
+
+    /// 确认已处理到第 `consumed` 个输出字节。不确认，守护就会认为这个客户端跟不上，
+    /// 把后续输出合并成关键帧。
+    fn acknowledge(&self, consumed: u64) {
+        self.consumed.store(consumed, Ordering::Release);
+        if self.ack_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.tx.try_send(TerminalWrite::Ack).is_err() {
+            // 写队列满说明 writer 已经卡死，和输入排不进去同样处理：断开走重连。
+            self.close();
+        }
     }
 
     fn send_input(&self, bytes: &[u8]) -> bool {
@@ -519,7 +555,7 @@ impl TerminalWriter {
 
 /// 事件代理：alacritty 的 EventListener。BEL 只产生普通终端通知，不参与 Agent 状态。
 /// OSC 0/2 标题直接忽略：它不是会话名，这里也不保存。
-/// PtyWrite / Clipboard* / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
+/// PtyWrite / ClipboardStore / TextAreaSizeRequest → 写回 PTY 或系统剪贴板；颜色查询由新守护处理，
 /// 旧守护没有声明该能力时才在客户端兜底。
 /// 其余事件仍忽略（重绘走 UI 定时快照）。
 #[derive(Clone)]
@@ -578,14 +614,10 @@ impl EventListener for EventProxy {
                 self.write_pty(format(Self::resolve_color(index)).as_bytes())
             }
             Event::ColorRequest(_, _) => {}
-            // OSC 52：应用把文本写到系统剪贴板 / 从剪贴板读回。远程会话、嵌套
-            // tmux、部分 CLI 复制都靠它。读写走系统工具（见 os_clipboard_*），不必
-            // 绕到 UI 线程——EventProxy 跑在 PTY 读线程上。
+            // OSC 52：应用把文本写到系统剪贴板。远程会话、嵌套 tmux、部分 CLI 复制都靠
+            // 它。走系统工具，不必绕到 UI 线程——EventProxy 跑在 PTY 读线程上。读剪贴板
+            // 在 `term_config` 里关掉了，alacritty 不会发 ClipboardLoad。
             Event::ClipboardStore(_ty, data) => os_clipboard_write(&data),
-            Event::ClipboardLoad(_ty, format) => {
-                let text = os_clipboard_read();
-                self.write_pty(format(&text).as_bytes());
-            }
             Event::TextAreaSizeRequest(format) => {
                 let m = self.metrics.lock().ok().map(|g| *g).unwrap_or(TermMetrics {
                     rows: 24,
@@ -625,24 +657,18 @@ fn os_clipboard_write(text: &str) {
     }
 }
 
-/// OSC 52 读系统剪贴板。macOS 用 `pbpaste`；失败 / 其它平台返回空串（format 仍会写出
-/// 空应答，对端不至于卡死等回包）。
-fn os_clipboard_read() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(out) = std::process::Command::new("pbpaste").output() {
-            return String::from_utf8_lossy(&out.stdout).into_owned();
-        }
-    }
-    String::new()
-}
-
-// OSC 9/99/777 扫描（`OscScan`）在 crate::osc，跟守护共用；含 Kitty OSC 99。
+// OSC 9/99/777 通知由 smeltd 在 PTY 输出泵里扫，走事件总线推来，客户端不扫。
 
 // ===================== smeltd 守护连接层 =====================
 
+/// 本机运行时 socket 的路径。只用于生命周期管理：拉起后的错误提示、按 socket 反查
+/// 守护进程、清理残留文件。连守护一律走 [`local_runtime`]。
 fn sock_path() -> std::path::PathBuf {
-    smelt_core::daemon_state::smeltd_sock_path()
+    smelt_client::daemon_state::smeltd_sock_path()
+}
+
+fn local_runtime() -> smelt_runtime_client::RuntimeClient {
+    smelt_client::daemon_state::local_runtime()
 }
 
 /// 守护常驻路径：与 `.app` 解耦。装 DMG / 覆盖 App 不会 cp 到正在跑的二进制，
@@ -658,7 +684,7 @@ fn managed_daemon_dir() -> std::path::PathBuf {
 }
 
 pub fn managed_daemon_path() -> std::path::PathBuf {
-    managed_daemon_dir().join(smelt_core::daemon_image::LAUNCH_NAME)
+    managed_daemon_dir().join(smelt_sys::daemon_image::LAUNCH_NAME)
 }
 
 /// 路径是否落在某个 `.app` 包内（装 DMG 会被覆盖/删除）。
@@ -715,7 +741,7 @@ fn daemon_ready_timeout() -> Duration {
     }
 }
 
-/// 查找分发物（smeltd、bundled 插件包）时应当参照的可执行文件位置。
+/// 查找分发物（smeltd 等）时应当参照的可执行文件位置。
 ///
 /// cargo 把测试二进制放在 `target/<profile>/deps/`，而分发物都在上一级的 profile
 /// 目录。不抹掉 `deps` 这一层，用例就只能去捞开发者真实安装的 `~/.smelt`，既污染
@@ -735,336 +761,6 @@ fn bundled_daemon_path() -> Option<std::path::PathBuf> {
     distribution_exe()
         .map(|e| e.with_file_name("smeltd"))
         .filter(|p| p.is_file())
-}
-
-fn bundled_plugin_root() -> Option<std::path::PathBuf> {
-    bundled_plugin_root_for(&distribution_exe()?)
-}
-
-/// 已安装或不存在则现场 stage 一份 bundled 插件包，供设置页列出开关。
-pub fn ensure_bundled_plugin_packages() -> Option<std::path::PathBuf> {
-    bundled_plugin_root()
-}
-
-fn bundled_plugin_root_for(executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    if let Some(root) = app_bundle_plugin_root(executable) {
-        return Some(root);
-    }
-    stage_workspace_plugins(executable.parent()?).ok()
-}
-
-/// 已安装 bundled 插件包的根目录，只发现不重新 stage。
-pub fn bundled_plugin_package_root() -> Option<std::path::PathBuf> {
-    bundled_plugin_package_root_for(&distribution_exe()?)
-}
-
-/// GUI 侧统一发现应用自带与用户安装的插件。tab 注册表、设置页清单必须走同一条，
-/// 否则会出现“设置里装上了，但 tab 看不见”这种双真相。
-pub fn discover_installed_plugin_packages()
--> Vec<Result<smelt_plugin_host::PluginPackage, smelt_plugin_host::HostError>> {
-    let Some(root) = smelt_paths::smelt_home() else {
-        return vec![Err(smelt_plugin_host::HostError::new(
-            "cannot determine home directory",
-        ))];
-    };
-    let bundled = bundled_plugin_package_root().or_else(ensure_bundled_plugin_packages);
-    smelt_plugin_host::discover_all_plugins(bundled.as_deref(), &root)
-}
-
-fn bundled_plugin_package_root_for(executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    if let Some(root) = app_bundle_plugin_root(executable) {
-        return root.is_dir().then_some(root);
-    }
-    let packages = executable.parent()?.join("plugin-packages");
-    packages.is_dir().then_some(packages)
-}
-
-/// 把设置页的插件开关同步给守护：关掉则停进程，打开则拉起。
-pub fn plugin_set_enabled(plugin_id: &str, enabled: bool) -> Result<(), String> {
-    let Ok(mut stream) = connect_daemon_control() else {
-        return Ok(());
-    };
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginSetEnabled,
-            "plugin_id": plugin_id,
-            "enabled": enabled,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(response.trim()).unwrap_or_default();
-    if value["ok"].as_bool() == Some(true) {
-        Ok(())
-    } else {
-        Err(value["error"]
-            .as_str()
-            .unwrap_or("设置插件开关失败")
-            .to_string())
-    }
-}
-
-/// 通知守护重新发现磁盘上的插件包。安装/卸载本身由 GUI 做，进程生命周期仍只归
-/// 守护管理，避免同一个插件跑出两个实例。
-pub fn plugin_reload() -> Result<(), String> {
-    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginReload,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
-    if value["ok"].as_bool() == Some(true) {
-        Ok(())
-    } else {
-        Err(value["error"]
-            .as_str()
-            .unwrap_or("重新加载插件失败")
-            .to_string())
-    }
-}
-
-/// 查询守护里各插件的运行状态。阻塞 IO，调用方放后台执行器。
-pub fn plugin_statuses() -> Result<Vec<smelt_plugin_host::PluginStatus>, String> {
-    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginStatuses,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
-    if value["ok"].as_bool() != Some(true) {
-        return Err(value["error"]
-            .as_str()
-            .unwrap_or("查询插件状态失败")
-            .to_string());
-    }
-    serde_json::from_value(value["statuses"].clone()).map_err(|error| error.to_string())
-}
-
-/// 把一次面板 invocation 转给守护里的插件进程。
-///
-/// GUI 不自己拉起插件进程：那会和守护各管一份，同一个插件跑出两个实例。
-/// 这是阻塞 IO，调用方必须放在后台执行器上。
-pub fn plugin_invoke(
-    plugin_id: &str,
-    request: &smelt_plugin_api::InvocationRequest,
-) -> Result<serde_json::Value, String> {
-    let mut stream = connect_daemon_control().map_err(|error| error.to_string())?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::PluginInvoke,
-            "plugin_id": plugin_id,
-            "request": request,
-            "auth": { "type": "first_party", "kind": "desktop" },
-        })
-    )
-    .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let value: serde_json::Value =
-        serde_json::from_str(response.trim()).map_err(|error| error.to_string())?;
-    if value["ok"].as_bool() != Some(true) {
-        return Err(value["error"]
-            .as_str()
-            .unwrap_or("插件调用失败")
-            .to_string());
-    }
-    // 守护把插件的应答原样回传：Success 取 result，Error 转成 Err。
-    match &value["response"] {
-        serde_json::Value::Object(map) if map.contains_key("result") => Ok(map["result"].clone()),
-        serde_json::Value::Object(map) if map.contains_key("message") => Err(map["message"]
-            .as_str()
-            .unwrap_or("插件拒绝了这次调用")
-            .to_string()),
-        other => Err(format!("插件应答无法识别: {other}")),
-    }
-}
-
-/// `.app` 内 first-party 插件包目录，相对 Contents。
-///
-/// 不能用 `PlugIns`：codesign 把那里的子目录当成嵌套 bundle，没有 Info.plist
-/// 会直接 "bundle format unrecognized"。
-const APP_BUNDLE_PLUGIN_PACKAGES: &str = "Resources/plugin-packages";
-
-fn app_bundle_plugin_root(executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    let macos = executable.parent()?;
-    if macos.file_name()? != "MacOS" {
-        return None;
-    }
-    let contents = macos.parent()?;
-    if contents.file_name()? != "Contents" {
-        return None;
-    }
-    Some(contents.join(APP_BUNDLE_PLUGIN_PACKAGES))
-}
-
-/// 开发模式下把 workspace 里的插件源码目录 stage 成插件包。
-///
-/// 扫盘而不是写死名单：新增一个插件只要在 `plugins/<name>/` 放好
-/// `plugin.json` 与它声明的入口，就会自动出现在应用里——宿主不需要为此改任何代码。
-/// Shared Bun 入口直接取 package 数据。
-fn stage_workspace_plugins(bin_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let dest = bin_dir.join("plugin-packages");
-    // target/debug -> target -> workspace root
-    let Some(sources) = bin_dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(|root| root.join("plugins"))
-        .filter(|path| path.is_dir())
-    else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "找不到 workspace 的 plugins 目录",
-        ));
-    };
-
-    let mut staged = 0usize;
-    for entry in std::fs::read_dir(&sources)? {
-        let source = entry?.path();
-        let manifest_path = source.join("plugin.json");
-        if !manifest_path.is_file() {
-            continue;
-        }
-        let manifest_json = std::fs::read_to_string(&manifest_path)?;
-        let Ok(manifest) = serde_json::from_str::<smelt_plugin_api::PluginManifest>(&manifest_json)
-        else {
-            eprintln!(
-                "[plugin] 跳过无法解析的 manifest：{}",
-                manifest_path.display()
-            );
-            continue;
-        };
-        if !manifest.bundled {
-            // 只为测试存在的 package 不进产物，也不在开发期占一个运行时槽位。
-            continue;
-        }
-        let entrypoint = source.join(&manifest.entrypoint);
-        if !entrypoint.is_file() {
-            continue;
-        }
-        // sidecar 和 web 目录都一并装进包里，声明与资源缺一不可。
-        let web = source.join("web");
-        let package_assets = source.join("assets");
-        let ui_manifest = source.join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE);
-        let input_manifest = source.join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE);
-        let agent_manifest = source.join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE);
-        let mut assets: Vec<(&str, &std::path::Path)> = Vec::new();
-        if web.is_dir() {
-            assets.push(("web", web.as_path()));
-        }
-        if package_assets.is_dir() {
-            assets.push(("assets", package_assets.as_path()));
-        }
-        if ui_manifest.is_file() {
-            assets.push((
-                smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE,
-                ui_manifest.as_path(),
-            ));
-        }
-        if input_manifest.is_file() {
-            assets.push((
-                smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE,
-                input_manifest.as_path(),
-            ));
-        }
-        if agent_manifest.is_file() {
-            assets.push((
-                smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE,
-                agent_manifest.as_path(),
-            ));
-        }
-        match smelt_plugin_host::stage_plugin_package_with_assets(
-            &dest,
-            &manifest_json,
-            &entrypoint,
-            &assets,
-        ) {
-            Ok(_) => staged += 1,
-            Err(error) => eprintln!("[plugin] stage {} 失败：{error}", manifest.id),
-        }
-    }
-
-    if staged == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "没有可用的插件包（package entrypoint 缺失）",
-        ));
-    }
-    Ok(dest)
-}
-
-fn sync_bundled_plugins(daemon: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let smelt_root = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
-    let source = bundled_plugin_root().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "找不到 bundled 插件包；请先构建 bundled plugins",
-        )
-    })?;
-    if !source.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("bundled 插件目录不存在：{}", source.display()),
-        ));
-    }
-    let dest = smelt_plugin_host::sync_bundled_plugin_set(Some(&source), &smelt_root, daemon)
-        .map_err(std::io::Error::other)?;
-    // 只对齐磁盘。这里绝不能 plugin_reload：冷启动 restore 紧接着 Open 终端，
-    // 而 reload 会杀掉并重启 shared bun，控制通道只有 5s 超时，失败还被忽略。
-    // 会话挂上之后由 workspace 再发 reload。
-    Ok(dest)
-}
-
-fn prepare_bundled_release(
-    app: &std::path::Path,
-    smelt_root: &std::path::Path,
-) -> std::io::Result<std::path::PathBuf> {
-    let daemon = app.join("Contents/MacOS/smeltd");
-    if !daemon.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("候选 App 缺少守护程序：{}", daemon.display()),
-        ));
-    }
-    let plugin_root = app.join("Contents").join(APP_BUNDLE_PLUGIN_PACKAGES);
-    if !plugin_root.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("候选 App 缺少插件目录：{}", plugin_root.display()),
-        ));
-    }
-    smelt_plugin_host::sync_bundled_plugin_set(Some(&plugin_root), smelt_root, &daemon)
-        .map_err(std::io::Error::other)?;
-    Ok(daemon)
 }
 
 fn file_mtime_secs(p: &std::path::Path) -> Option<u64> {
@@ -1171,7 +867,7 @@ unsafe extern "C" {
 }
 
 fn reap_managed_daemon_images(dir: &std::path::Path) {
-    if let Err(error) = smelt_core::daemon_image::reap_unused_images(dir) {
+    if let Err(error) = smelt_sys::daemon_image::reap_unused_images(dir) {
         eprintln!("[workspace] 回收旧守护映像失败：{error}");
     }
 }
@@ -1184,9 +880,9 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     let managed = managed_daemon_path();
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
-        let image = smelt_core::daemon_image::publish_image(&dir, src)?;
+        let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
         if managed.is_file() && path_is_live_executable(&managed) {
-            smelt_core::daemon_image::retarget_pending_symlink(&dir, &image)?;
+            smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image)?;
             eprintln!(
                 "[workspace] {} 仍被进程映射，不改启动名，已挂上 smeltd.pending",
                 managed.display()
@@ -1194,7 +890,7 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
             reap_managed_daemon_images(&dir);
             return Ok(managed);
         }
-        smelt_core::daemon_image::retarget_launch_after_commit(&image)?;
+        smelt_sys::daemon_image::retarget_launch_after_commit(&image)?;
         eprintln!(
             "[workspace] 已同步守护 {} → {}",
             src.display(),
@@ -1225,8 +921,8 @@ fn stage_daemon_update_in(
     src: &std::path::Path,
 ) -> std::io::Result<std::path::PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let image = smelt_core::daemon_image::publish_image(dir, src)?;
-    smelt_core::daemon_image::retarget_pending_symlink(dir, &image)?;
+    let image = smelt_sys::daemon_image::publish_image(dir, src)?;
+    smelt_sys::daemon_image::retarget_pending_symlink(dir, &image)?;
     reap_managed_daemon_images(dir);
     eprintln!(
         "[workspace] 已暂存守护更新 {} → {}",
@@ -1237,7 +933,7 @@ fn stage_daemon_update_in(
 }
 
 fn pending_upgrade_exe() -> Option<std::path::PathBuf> {
-    smelt_core::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
+    smelt_sys::daemon_image::pending_image(&managed_daemon_dir()).or_else(bundled_daemon_path)
 }
 
 fn handoff_daemon_to_managed(src: &std::path::Path) -> UpgradeOutcome {
@@ -1263,7 +959,7 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
         return UpgradeOutcome::Failed;
     }
 
-    let image = match smelt_core::daemon_image::publish_image(&dir, src) {
+    let image = match smelt_sys::daemon_image::publish_image(&dir, src) {
         Ok(image) => image,
         Err(e) => {
             eprintln!("[workspace] 发布守护映像失败：{e}");
@@ -1271,7 +967,7 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
             return UpgradeOutcome::Failed;
         }
     };
-    if let Err(e) = smelt_core::daemon_image::retarget_pending_symlink(&dir, &image) {
+    if let Err(e) = smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image) {
         eprintln!("[workspace] 挂上 smeltd.pending 失败：{e}");
         reap_managed_daemon_images(&dir);
         return UpgradeOutcome::Failed;
@@ -1280,7 +976,7 @@ fn handoff_daemon_to_managed_once(src: &std::path::Path) -> UpgradeOutcome {
     let outcome = upgrade_daemon_exe(Some(&image));
     match outcome {
         UpgradeOutcome::Upgraded => {
-            if let Err(e) = smelt_core::daemon_image::retarget_launch_after_commit(&image) {
+            if let Err(e) = smelt_sys::daemon_image::retarget_launch_after_commit(&image) {
                 eprintln!(
                     "[workspace] 完成 managed 安装失败：{e}（目标：{}）",
                     managed.display()
@@ -1417,8 +1113,6 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
         };
     };
 
-    sync_bundled_plugins(&bundled)?;
-
     match probe_daemon_detail() {
         DaemonProbe::NotRunning => {
             install_managed_daemon_from(&bundled)?;
@@ -1500,11 +1194,11 @@ static CONNECT_MANAGED_ENSURED: AtomicBool = AtomicBool::new(false);
 /// 连不上则拉起 `~/.smelt/bin/smeltd`（独立进程组）再重试。
 ///
 /// **这里绝不删 sock 文件。**（僵尸 sock 由 smeltd bind 方清理，见 smeltd。）
-fn connect_daemon() -> std::io::Result<UnixStream> {
+pub(crate) fn connect_daemon() -> std::io::Result<UnixStream> {
     let path = sock_path();
 
     // 已有守护：进程内只 ensure 一次。
-    if UnixStream::connect(&path).is_ok() {
+    if local_runtime().connect().is_ok() {
         if !CONNECT_MANAGED_ENSURED.load(Ordering::Relaxed) {
             let _ = ensure_managed_daemon_for_connect(
                 &CONNECT_MANAGED_ENSURED,
@@ -1512,7 +1206,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
                 ensure_managed_daemon_current,
             );
         }
-        if let Ok(s) = UnixStream::connect(&path) {
+        if let Ok(s) = local_runtime().connect() {
             return Ok(s);
         }
         // handoff 后短暂窗口：下面走拉起/轮询
@@ -1530,7 +1224,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
             let fallback = exe.with_file_name("smeltd");
             if fallback.is_file() {
                 eprintln!(
-                    "[plugin-host] managed daemon sync failed ({e}); falling back to {}",
+                    "[daemon] managed daemon sync failed ({e}); falling back to {}",
                     fallback.display()
                 );
                 fallback
@@ -1541,7 +1235,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     };
 
     // 二次确认：若 sock 已因 handoff 起来，直接连
-    if let Ok(s) = UnixStream::connect(&path) {
+    if let Ok(s) = local_runtime().connect() {
         return Ok(s);
     }
 
@@ -1555,7 +1249,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         let spawn_at = std::fs::canonicalize(&daemon).unwrap_or_else(|_| daemon.clone());
         let mut cmd = std::process::Command::new(&spawn_at);
         smelt_paths::export_to(&mut cmd);
-        smelt_core::tty_color::clear_command(&mut cmd);
+        smelt_sys::tty_color::clear_command(&mut cmd);
         cmd.process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1565,9 +1259,9 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
         }
         // 把 spawn 目标的指纹传给子进程：它启动时直接钉死，不用再哈希磁盘——
         // 关闭“spawn 与守护启动哈希之间磁盘被替换”的竞态窗口（与 handoff 经
-        // SMELTD_PLUGIN_DAEMON_FINGERPRINT 传指纹同一机制）。
-        if let Ok(fingerprint) = smelt_plugin_host::executable_fingerprint(&spawn_at) {
-            cmd.env("SMELTD_PLUGIN_DAEMON_FINGERPRINT", fingerprint);
+        // SMELTD_DAEMON_FINGERPRINT 传指纹同一机制）。
+        if let Ok(fingerprint) = smelt_sys::daemon_image::content_fingerprint(&spawn_at) {
+            cmd.env("SMELTD_DAEMON_FINGERPRINT", fingerprint);
         }
         match cmd.spawn() {
             Ok(child) => {
@@ -1587,7 +1281,7 @@ fn connect_daemon() -> std::io::Result<UnixStream> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         thread::sleep(Duration::from_millis(100));
-        if let Ok(s) = UnixStream::connect(&path) {
+        if let Ok(s) = local_runtime().connect() {
             return Ok(s);
         }
     }
@@ -1629,10 +1323,7 @@ fn probe_daemon() -> DaemonProbe {
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn connect_daemon_control() -> std::io::Result<UnixStream> {
-    let s = UnixStream::connect(sock_path())?;
-    s.set_read_timeout(Some(DAEMON_CONTROL_TIMEOUT))?;
-    s.set_write_timeout(Some(DAEMON_CONTROL_TIMEOUT))?;
-    Ok(s)
+    local_runtime().connect_with_timeout(DAEMON_CONTROL_TIMEOUT)
 }
 
 fn probe_daemon_detail() -> DaemonProbe {
@@ -1778,7 +1469,7 @@ fn outdated_by_fingerprint(pinned: &str, expected: Option<&std::path::Path>) -> 
     let Some(path) = expected else {
         return false;
     };
-    match smelt_plugin_host::executable_fingerprint(path) {
+    match smelt_sys::daemon_image::content_fingerprint(path) {
         Ok(disk) => disk != pinned,
         Err(_) => false,
     }
@@ -1854,7 +1545,7 @@ pub fn upgrade_daemon() -> UpgradeOutcome {
 /// 暂存包里的 smeltd，会话不丢，再替换 .app）；`None` 则 exec `current_exe`。
 pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     let predecessor = daemon_info();
-    let Ok(mut s) = UnixStream::connect(sock_path()) else {
+    let Ok(mut s) = local_runtime().connect() else {
         // 守护没跑：拉起磁盘上最新的等于升级完成，但要探测确认它真的起来了再报
         // 成功——ensure_daemon_running 的失败是静默的，不确认就报 Upgraded 会让
         // UI 显示"已升级"而守护其实没起来。
@@ -1914,13 +1605,13 @@ pub fn upgrade_daemon_exe(new_exe: Option<&std::path::Path>) -> UpgradeOutcome {
     }
 }
 
-/// 候选 `.app` 安装的公共前半段：先把 bundled 插件目录绑到该 smeltd 指纹，
-/// 再把守护交到 `~/.smelt/bin`。在线更新、DMG 后的 GUI ensure、`make install`
-/// 都必须是这个顺序；先 exec 再写映射会让插件永远起不来。
-/// 拷贝不跑当前版插件 schema：新字段由新守护 load。
+/// 候选 `.app` 安装的公共前半段：取出候选包里的守护程序，再交到 `~/.smelt/bin`。
 fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    let smelt_root = smelt_paths::smelt_home().unwrap_or_else(|| "/tmp/.smelt".into());
-    prepare_bundled_release(candidate_app, &smelt_root).map_err(anyhow::Error::from)
+    let daemon = candidate_app.join("Contents/MacOS/smeltd");
+    if !daemon.is_file() {
+        anyhow::bail!("候选 App 缺少守护程序：{}", daemon.display());
+    }
+    Ok(daemon)
 }
 
 /// 安装时对运行中守护的处置决策。
@@ -2048,11 +1739,11 @@ where
     match install_local_app_bundle(&source, &target) {
         Ok(AppInstallOutcome::Installed) => {
             let dir = managed_daemon_dir();
-            if let Some(pending) = smelt_core::daemon_image::pending_image(&dir) {
+            if let Some(pending) = smelt_sys::daemon_image::pending_image(&dir) {
                 match upgrade_daemon_exe(Some(&pending)) {
                     UpgradeOutcome::Upgraded => {
                         if let Err(error) =
-                            smelt_core::daemon_image::retarget_launch_after_commit(&pending)
+                            smelt_sys::daemon_image::retarget_launch_after_commit(&pending)
                         {
                             eprintln!("[workspace] 升级后改写启动名失败：{error}");
                         }
@@ -2075,7 +1766,7 @@ where
                     match upgrade_daemon_exe(Some(&image)) {
                         UpgradeOutcome::Upgraded => {
                             if let Err(error) =
-                                smelt_core::daemon_image::retarget_launch_after_commit(&image)
+                                smelt_sys::daemon_image::retarget_launch_after_commit(&image)
                             {
                                 eprintln!("[workspace] 升级后改写启动名失败：{error}");
                             }
@@ -2168,14 +1859,11 @@ fn sync_managed_helpers_from_app(app: &std::path::Path) -> std::io::Result<()> {
 /// 监听 socket 的进程直接 SIGKILL，这条路径不依赖守护认不认识任何协议。
 pub fn restart_daemon() {
     let path = sock_path();
-    let daemon_pid = daemon_pid_with_timeout(&path);
+    let daemon_pid = daemon_pid_with_timeout();
     // 硬重启后必须重新验证托管文件；此前的成功缓存不能跨 daemon 生命周期。
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
-    if let Ok(s) = UnixStream::connect(&path) {
-        // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
-        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-        let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
-        let mut s = s;
+    // 无超时 read_line 会在守护卡死/不回包时永久挂起（设置页「重启守护」假死根因）。
+    if let Ok(mut s) = local_runtime().connect_with_timeout(Duration::from_secs(2)) {
         let _ = writeln!(
             s,
             "{}",
@@ -2186,7 +1874,7 @@ pub fn restart_daemon() {
     }
     // 等守护退出（最多 ~1s）；socket 仍能连上再强杀，**不要**提前 return 漏掉残留 sock。
     for _ in 0..10 {
-        if UnixStream::connect(&path).is_err() {
+        if local_runtime().connect().is_err() {
             break;
         }
         thread::sleep(Duration::from_millis(100));
@@ -2205,22 +1893,22 @@ pub fn restart_daemon() {
                 thread::sleep(Duration::from_millis(50));
             }
         }
-    } else if UnixStream::connect(&path).is_ok() {
+    } else if local_runtime().connect().is_ok() {
         // 老守护的 version 响应没有 pid，只能保留按 socket 反查的兼容兜底。
         force_kill_socket_owner(&path);
         thread::sleep(Duration::from_millis(150));
     }
     // 残留 sock 文件会让下一次 connect 误判/卡住；尽量清掉。
-    if UnixStream::connect(&path).is_err() {
+    if local_runtime().connect().is_err() {
         let _ = std::fs::remove_file(&path);
     }
     CONNECT_MANAGED_ENSURED.store(false, Ordering::Relaxed);
 }
 
-fn daemon_pid_with_timeout(path: &std::path::Path) -> Option<u32> {
-    let mut s = UnixStream::connect(path).ok()?;
-    s.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
-    s.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
+fn daemon_pid_with_timeout() -> Option<u32> {
+    let mut s = local_runtime()
+        .connect_with_timeout(Duration::from_millis(500))
+        .ok()?;
     writeln!(
         s,
         "{}",
@@ -2264,7 +1952,7 @@ fn force_kill_socket_owner(path: &std::path::Path) {
         }
     };
     if let Ok(Some(output)) =
-        smelt_core::process_wait::wait_child_stdout(child, Duration::from_secs(2))
+        smelt_sys::process_wait::wait_child_stdout(child, Duration::from_secs(2))
     {
         for pid in String::from_utf8_lossy(&output).split_whitespace() {
             let _ = std::process::Command::new("kill")
@@ -2282,312 +1970,26 @@ pub fn ensure_daemon_running() {
     let _ = connect_daemon();
 }
 
-/// 让守护杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
-pub fn kill_remote(id: &str) {
-    let Ok(mut s) = connect_daemon_control() else {
-        return;
-    };
-    let _ = writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::Kill, "id": id })
+/// 让运行时杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
+/// 等回执再返回，确保 kill 落地后再继续（避免关 pane 后立刻退出时丢命令）。
+pub(crate) fn kill_remote(runtime: &crate::runtimes::Runtime, id: &str) {
+    let _ = runtime.client().request(
+        &serde_json::json!({ "op": DaemonOperation::Kill, "id": id }),
+        smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
     );
-    // 等守护回执，确保 kill 落地后再继续（避免关 pane 后立刻退出时丢命令）。
-    let mut resp = String::new();
-    let _ = BufReader::new(s).read_line(&mut resp);
-}
-
-/// 内嵌远程网关（见 smeltd「内嵌远程网关」一节）的最小运行状态。
-#[derive(Clone, Debug, Default)]
-pub struct RemoteStatus {
-    pub running: bool,
-    pub token: Option<String>,
-}
-
-/// 让守护开启内嵌远程网关（幂等：已经开着直接回现状原 token/write，不重启不换
-/// token——`write` 传入值在这种情况下会被忽略，见 smeltd `start_remote_gateway`）。
-/// 绑定非法地址/端口绑不上时把守护回的错误原样透传出去。
-pub fn remote_start(bind: &str, write: bool) -> Result<RemoteStatus, String> {
-    let Ok(mut s) = connect_daemon_control() else {
-        return Err("连不上守护".to_string());
-    };
-    if writeln!(
-        s,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::RemoteStart,
-            "bind": bind,
-            "write": write
-        })
-    )
-    .is_err()
-    {
-        return Err("发送请求失败".to_string());
-    }
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return Err("守护没有响应".to_string());
-    }
-    let v: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
-    if v["ok"].as_bool() == Some(true) {
-        Ok(RemoteStatus {
-            running: true,
-            token: v["token"].as_str().map(String::from),
-        })
-    } else {
-        Err(v["err"].as_str().unwrap_or("未知错误").to_string())
-    }
-}
-
-/// 关掉内嵌远程网关。
-pub fn remote_stop() {
-    let Ok(mut s) = connect_daemon_control() else {
-        return;
-    };
-    let _ = writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::RemoteStop })
-    );
-    let mut resp = String::new();
-    let _ = BufReader::new(s).read_line(&mut resp);
-}
-
-/// 热更新内嵌远程网关的 ACP/终端写权限，不断开已经建立的 WebSocket。
-pub fn remote_set_write(write: bool) -> Result<(), String> {
-    let Ok(mut s) = connect_daemon_control() else {
-        return Err("连不上守护".to_string());
-    };
-    if writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::RemoteSetWrite, "write": write })
-    )
-    .is_err()
-    {
-        return Err("发送请求失败".to_string());
-    }
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return Err("守护没有响应".to_string());
-    }
-    let value: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
-    if value["ok"].as_bool() == Some(true) {
-        Ok(())
-    } else {
-        Err(value["err"]
-            .as_str()
-            .unwrap_or("更新远程写权限失败")
-            .to_string())
-    }
-}
-
-/// 显式轮换持久化的远程配对 Token。守护会先停止 iroh 和本机网关，保证旧配对
-/// 立即失效；调用方成功后需按当前配置重新启动两者。
-pub fn remote_rotate_token() -> Result<(), String> {
-    let Ok(mut s) = connect_daemon_control() else {
-        return Err("连不上守护".to_string());
-    };
-    if writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::RemoteRotateToken })
-    )
-    .is_err()
-    {
-        return Err("发送请求失败".to_string());
-    }
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return Err("守护没有响应".to_string());
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(resp.trim()).map_err(|error| error.to_string())?;
-    if value["ok"].as_bool() == Some(true) {
-        Ok(())
-    } else {
-        Err(value["err"]
-            .as_str()
-            .unwrap_or("刷新远程配对 Token 失败")
-            .to_string())
-    }
-}
-
-/// 查当前内嵌远程网关的状态——GUI 刚启动时用它对齐"设置里记的开关"和"守护实际
-/// 是不是真开着"（比如上次异常退出、守护单独重启过）。
-pub fn remote_status() -> RemoteStatus {
-    let Ok(mut s) = connect_daemon_control() else {
-        return RemoteStatus::default();
-    };
-    if writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::RemoteStatus })
-    )
-    .is_err()
-    {
-        return RemoteStatus::default();
-    }
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return RemoteStatus::default();
-    }
-    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
-    RemoteStatus {
-        running: v["running"].as_bool().unwrap_or(false),
-        token: v["token"].as_str().map(String::from),
-    }
-}
-
-/// iroh 隧道（见 smeltd「iroh 隧道」一节）的运行状态。
-///
-/// `endpoint_id` **重启不变**，所以基于它生成的配对二维码可以一次扫、长期用。
-#[derive(Clone, Debug, Default)]
-pub struct IrohStatus {
-    pub endpoint_id: Option<String>,
-    /// 网关 token。`endpoint_id` 只让人连得上，能不能操作仍由它决定，
-    /// 所以配对码必须两者一起给。
-    pub token: Option<String>,
-    pub relay: Option<String>,
-    pub write: bool,
-}
-
-/// 让守护开启 iroh 隧道（幂等）。绑定要连接用户配置的 relay，**可能耗时数秒**，
-/// 跟 `tunnel_start` 一样必须扔进后台任务，别在 UI 线程同步调。
-pub fn iroh_start(write: bool, relay: &str) -> Result<IrohStatus, String> {
-    let Ok(mut s) = connect_daemon_control() else {
-        return Err("连不上守护".to_string());
-    };
-    if writeln!(
-        s,
-        "{}",
-        serde_json::json!({
-            "op": DaemonOperation::IrohStart, "write": write,
-            "relay": relay
-        })
-    )
-    .is_err()
-    {
-        return Err("发送请求失败".to_string());
-    }
-    // 守护那边就绪超时 30s，这里留余量。
-    let _ = s.set_read_timeout(Some(Duration::from_secs(35)));
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return Err("守护没有响应（等 iroh 绑定超时）".to_string());
-    }
-    let v: serde_json::Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
-    if v["ok"].as_bool() == Some(true) {
-        Ok(IrohStatus {
-            endpoint_id: v["endpoint_id"].as_str().map(String::from),
-            token: v["token"].as_str().map(String::from),
-            relay: v["relay"].as_str().map(String::from),
-            write: v["write"].as_bool().unwrap_or(false),
-        })
-    } else {
-        Err(v["err"].as_str().unwrap_or("未知错误").to_string())
-    }
-}
-
-/// 关掉 iroh 隧道（不影响本机远程网关本身）。
-pub fn iroh_stop() {
-    let Ok(mut s) = connect_daemon_control() else {
-        return;
-    };
-    let _ = writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::IrohStop })
-    );
-    let mut resp = String::new();
-    let _ = BufReader::new(s).read_line(&mut resp);
-}
-
-/// 查 iroh 隧道当前是否真的在守护里跑着。
-///
-/// 存在的理由：GUI 里的 `IrohRuntimeState` 只是一次 `iroh_start` 的结果快照，
-/// 守护换进程后它照样显示着一个早已失效的二维码。看门狗靠这条 op 拿到事实。
-/// 返回 `None` = 没跑（含守护根本连不上）。
-pub fn iroh_status() -> Option<IrohStatus> {
-    let Ok(mut s) = connect_daemon_control() else {
-        return None;
-    };
-    if writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::IrohStatus })
-    )
-    .is_err()
-    {
-        return None;
-    }
-    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
-    if v["running"].as_bool() != Some(true) {
-        return None;
-    }
-    Some(IrohStatus {
-        endpoint_id: v["endpoint_id"].as_str().map(String::from),
-        token: v["token"].as_str().map(String::from),
-        relay: v["relay"].as_str().map(String::from),
-        write: v["write"].as_bool().unwrap_or(false),
-    })
-}
-
-/// 单个已连接的移动端设备信息。
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-pub struct IrohConnection {
-    /// iroh 节点 ID（公钥的十六进制表示）。
-    pub remote_id: String,
-    /// 连接建立的时间戳（Unix 秒）。
-    pub connected_at: u64,
-}
-
-/// 查询当前通过 iroh 隧道连接的移动端设备列表。
-pub fn iroh_connections() -> Vec<IrohConnection> {
-    let Ok(mut s) = connect_daemon_control() else {
-        return Vec::new();
-    };
-    if writeln!(
-        s,
-        "{}",
-        serde_json::json!({ "op": DaemonOperation::IrohConnections })
-    )
-    .is_err()
-    {
-        return Vec::new();
-    }
-    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut resp = String::new();
-    if BufReader::new(s).read_line(&mut resp).is_err() {
-        return Vec::new();
-    }
-    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap_or_default();
-    v["connections"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| serde_json::from_value(item.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 // ===================== 状态通道（见 docs/archive/state-channel-plan.md） =====================
 //
 // 纯数据结构 + 阻塞 socket 通信，已经搬进 smelt-core（本身不碰 GPUI，未来 ACP
 // 视图独立成 crate 后也要用同一份），这里重导出成原来的裸名字。
-pub(crate) use smelt_core::daemon_state::{
+pub(crate) use smelt_client::daemon_state::{
     DaemonPhase, DaemonSessionState, DaemonStateEvent, daemon_reconnect_backoff,
     subscribe_daemon_states_blocking,
 };
 
 /// alacritty Term 的统一配置（生产 spawn 与测试共用，防两边漂移）：
-/// - 解析语义（kitty_keyboard 等）来自 `smelt_core::term_config`，与 smeltd 的权威
+/// - 解析语义（kitty_keyboard 等）来自 `smelt_model::term_config`，与 smeltd 的权威
 ///   Term 同源；GUI 不得在这里单独改解析语义。
 /// - semantic_escape_chars：双击选词的断词字符。默认集合只有半角标点，中文场景下
 ///   全角标点也该断词（双击「数据层：字段」不该整段连选），追加常用全角标点。
@@ -2596,11 +1998,15 @@ fn term_config() -> Config {
         semantic_escape_chars: format!(
             "{SEMANTIC_ESCAPE_CHARS}：，。；！？、（）「」『』【】《》“”‘’"
         ),
-        ..smelt_core::term_config::emulation_config()
+        // OSC 52 只许写、不许读：终端里任何程序（包括远程运行时上的）都能发读请求，
+        // 放开就等于让它们静默读走本机剪贴板。主流终端默认也是关着或逐次询问。
+        osc52: Osc52::OnlyCopy,
+        ..smelt_model::term_config::emulation_config()
     }
 }
 
-/// 客户端 → 守护的帧：`[type:u8][len:u32 BE][payload]`。type 0=输入，1=resize。
+/// 客户端 → 守护的帧：`[type:u8][len:u32 BE][payload]`。type 0=输入，1=resize，
+/// 2=输出确认（已处理的累计字节数，u64 BE）。
 fn write_frame(w: &mut UnixStream, ty: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(ty);
@@ -2808,9 +2214,7 @@ pub struct Terminal {
     daemon_geometry: Arc<Mutex<DaemonGeometrySignal>>,
     daemon_geometry_generation: u64,
     remote_geometry_locked: bool,
-    /// 普通 OSC 9/99/777 通知槽（UI 在 PTY 唤醒事件中取走）。
-    notify: NotifySlot,
-    /// BEL 普通提醒槽，与 OSC 分开，结构化 agent 激活后仍可独立提醒。
+    /// BEL 普通提醒槽，结构化 agent 激活后仍可独立提醒。
     bell_notify: NotifySlot,
     /// `take_damage` 用来识别「光标真的动了」——alacritty 每帧都会把当前光标格标脏，
     /// 静止时要滤掉；但光标移动后若只标了新位置那一格，也得算变化（见 take_damage）。
@@ -2869,7 +2273,7 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// 最多让 writer 线程等约一秒，随后断开 attachment 并由 UI 的重连路径恢复。
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
-fn open_request(
+pub(crate) fn open_request(
     rows: usize,
     cols: usize,
     cwd: Option<&str>,
@@ -2899,26 +2303,34 @@ fn finalize_reattach_term(term: &mut Term<EventProxy>) {
 
 impl Terminal {
     /// 打开（或重连）守护里 id 对应的会话：shell 环境由 smeltd 负责（-l / TERM /
-    /// iTerm2 伪装 / LANG 兜底，见 smeltd）。id 已存在 → attach，守护先重放输出
+    /// 自报 Ghostty / LANG 兜底，见 smeltd）。id 已存在 → attach，守护先重放输出
     /// 缓冲恢复画面，再实时转发。`launch`：新建会话时要先跑的命令（编进 shell 启动
     /// 命令行，见 `smeltd::terminal_registry`），只在新建时生效，reattach 会被忽略。
-    pub fn spawn(
+    pub(crate) fn spawn(
+        runtime: &crate::runtimes::Runtime,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
         id: &str,
         launch: Option<&str>,
     ) -> anyhow::Result<Self> {
-        Self::spawn_inner(rows, cols, cwd, id, launch, true)
+        Self::spawn_inner(runtime, rows, cols, cwd, id, launch, true)
     }
 
     /// 只重新附着守护中仍存在的 PTY。用于实时流异常断开后的自动恢复；会话已经
     /// 正常退出时返回错误，绝不创建一个同 id 的新 shell 冒充原会话。
-    pub fn reattach(rows: usize, cols: usize, cwd: Option<&str>, id: &str) -> anyhow::Result<Self> {
-        Self::spawn_inner(rows, cols, cwd, id, None, false)
+    pub(crate) fn reattach(
+        runtime: &crate::runtimes::Runtime,
+        rows: usize,
+        cols: usize,
+        cwd: Option<&str>,
+        id: &str,
+    ) -> anyhow::Result<Self> {
+        Self::spawn_inner(runtime, rows, cols, cwd, id, None, false)
     }
 
     fn spawn_inner(
+        runtime: &crate::runtimes::Runtime,
         rows: usize,
         cols: usize,
         cwd: Option<&str>,
@@ -2951,7 +2363,7 @@ impl Terminal {
                 // 阻塞（重试 × 每次再拉一遍守护），启动恢复 8 个会话就是 3 分钟
                 // beachball。重试只留给握手层：连上了但读到 EOF/坏行，那才是
                 // upgrade 交接的百毫秒抖动，重连一次就好。
-                let writer = connect_daemon()?;
+                let writer = crate::runtimes::connect_terminal(runtime)?;
                 match Self::handshake_on(writer, rows, cols, cwd, id, launch, create_if_missing) {
                     Ok(x) => {
                         result = Some(x);
@@ -2969,7 +2381,6 @@ impl Terminal {
 
         // 2) alacritty 终端状态机。EventProxy 把 PTY 自动应答写回共享写端。
         //    OSC 0/2 不保存。
-        let notify: NotifySlot = Arc::new(Mutex::new(None));
         let bell_notify: NotifySlot = Arc::new(Mutex::new(None));
         let metrics = Arc::new(Mutex::new(TermMetrics {
             rows: size.rows as u16,
@@ -2990,7 +2401,7 @@ impl Terminal {
         );
         let term = Arc::new(Mutex::new(term));
 
-        // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫 OSC 9/99/777。
+        // 3) 后台读线程：守护转发的 PTY 字节 → vte 解析更新 Term 网格 + 扫几何标记。
         //    EOF = shell 退出或守护离线（网格冻结，重开会话即恢复）。
         //    复用尺寸行的 BufReader：重放字节可能已在其内部缓冲里。
         // 重绘唤醒通道：读线程 → UI。bounded(1) 合并突发（已有待处理唤醒时后续 try_send
@@ -3000,27 +2411,18 @@ impl Terminal {
 
         let mut reader = buffered;
         let term_reader = Arc::clone(&term);
-        let notify_reader = notify.clone();
         let metrics_reader = Arc::clone(&metrics);
         let daemon_geometry_reader = Arc::clone(&daemon_geometry);
         let dead_reader = Arc::clone(&dead);
+        let ack_writer = writer.clone();
         thread::spawn(move || {
             // Processor<T = StdSyncHandler>：默认类型参数不参与 ::new() 推断，需显式标注。
             let mut parser: Processor = Processor::new();
-            let mut osc = crate::osc::OscScan::default();
             let mut geometry_osc = geometry_token
-                .map(smelt_core::osc::TerminalGeometryOscScan::new)
+                .map(smelt_model::osc::TerminalGeometryOscScan::new)
                 .unwrap_or_default();
             let mut buf = [0u8; 4096];
             let mut bytes_seen: usize = 0;
-            // 重放缓冲里的历史字节可能藏着早就处理完的 OSC 9/99/777 通知（比如 Claude
-            // 之前问过的权限确认，用户当时已经批准、任务也跑完了）——reattach 时如果
-            // 原样喂给通知扫描，会把它们当成刚发生的事件重新弹出来，把明明已完成的
-            // 会话错误标红（"重开 app 状态变红"那个 bug）。sink 接住落在 replay_len
-            // 范围内关闭的 OSC 序列，只有真正在重放边界之后关闭的才写进 notify_reader；
-            // 每个字节仍然逐一喂给 osc（状态机不断流），只是根据这个字节的绝对位置
-            // 决定它触发的通知该进哪个槽，边界处不会解析错位。
-            let sink: Mutex<Option<String>> = Mutex::new(None);
             // reattach 快照是否已整段喂完；越过边界时贴底一次。
             let mut replay_finalized = replay_len == 0;
             loop {
@@ -3028,18 +2430,7 @@ impl Terminal {
                     Ok(0) => break, // EOF：shell 退出
                     Ok(n) => {
                         let mut geometry_updates = Vec::new();
-                        // OSC 9/99/777 通知：alacritty 不解析，自己扫字节提取
                         for (i, &b) in buf[..n].iter().enumerate() {
-                            let target = if bytes_seen + i < replay_len {
-                                &sink
-                            } else {
-                                &notify_reader
-                            };
-                            if let Some(msg) = osc.feed(b)
-                                && let Ok(mut g) = target.lock()
-                            {
-                                *g = Some(msg);
-                            }
                             if let Some(geometry) = geometry_osc.feed(b)
                                 && let Ok(mut signal) = daemon_geometry_reader.lock()
                             {
@@ -3085,6 +2476,9 @@ impl Terminal {
                         // 关键性质：最后一批喂完后必有一次待处理唤醒 → UI 必定再画一帧，
                         // 与 reattach 快照喂完这个场景精确对应。
                         let _ = redraw_tx.try_send(());
+                        // 解析完才确认：守护按它判断我们跟不跟得上。每批都确认，最后一批
+                        // 一定会被确认到，合并才结束得了；多次确认在写端合并成一帧。
+                        ack_writer.acknowledge(bytes_seen as u64);
                     }
                     Err(_) => break,
                 }
@@ -3107,7 +2501,6 @@ impl Terminal {
             daemon_geometry,
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            notify,
             bell_notify,
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
@@ -3183,11 +2576,6 @@ impl Terminal {
             geometry_token,
             daemon_handles_color_requests,
         ))
-    }
-
-    /// 取走最新普通通知消息（读并清）：OSC 9/99/777 上报的文本。
-    pub fn take_notification(&self) -> Option<String> {
-        self.notify.lock().ok().and_then(|mut g| g.take())
     }
 
     /// 取走一次普通终端 BEL 提醒；它不携带 Agent 状态语义。
@@ -3443,6 +2831,7 @@ impl Terminal {
         let content = term.renderable_content();
         let cursor_pt = content.cursor.point;
         let display_offset = content.display_offset;
+        let overrides = content.colors;
         // 选区范围由 alacritty 维护（滚动跟随、新输出漂移、宽字符边界都是它处理），
         // 这里只做逐 cell 的 contains 判定——indexed.point 与 SelectionRange 坐标同源，直接比。
         let sel_range = content.selection;
@@ -3462,11 +2851,13 @@ impl Terminal {
             let flags = cell.flags;
             row_wraps = flags.contains(Flags::WRAPLINE);
             let inverse = flags.contains(Flags::INVERSE);
-            let mut fg = resolve(cell.fg, true);
-            let mut bg = resolve(cell.bg, false);
+            let mut fg = resolve(cell.fg, true, overrides);
+            let mut bg = resolve(cell.bg, false, overrides);
             // 反色（SGR 7）后真正当底色用的是**前景那个颜色**，默认底色的判定也得跟着换。
+            // 程序用 OSC 11 改过底色时，默认底色的格子也要画成它改的颜色，不再留空。
             let bg_color = if inverse { cell.fg } else { cell.bg };
-            let bg_default = matches!(bg_color, Color::Named(NamedColor::Background));
+            let bg_default = matches!(bg_color, Color::Named(NamedColor::Background))
+                && overrides[NamedColor::Background].is_none();
             if inverse {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -3974,7 +3365,15 @@ mod damage_gate_tests {
                  （`make test` 会一并构建）"
             );
         }
-        Terminal::spawn(24, 80, dir.to_str(), id, None).expect("spawn 失败")
+        Terminal::spawn(
+            &crate::runtimes::Runtime::local(),
+            24,
+            80,
+            dir.to_str(),
+            id,
+            None,
+        )
+        .expect("spawn 失败")
     }
 
     /// 一次性测试会话的自动清理：Drop 无论函数正常返回还是中途 panic（assert
@@ -3990,7 +3389,7 @@ mod damage_gate_tests {
     struct TestSessionGuard(String);
     impl Drop for TestSessionGuard {
         fn drop(&mut self) {
-            kill_remote(&self.0);
+            kill_remote(&crate::runtimes::Runtime::local(), &self.0);
         }
     }
 
@@ -4010,7 +3409,7 @@ mod damage_gate_tests {
 
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
         thread::sleep(Duration::from_millis(500));
-        kill_remote(&id);
+        kill_remote(&crate::runtimes::Runtime::local(), &id);
 
         // 守护 remove 会话并 shutdown client → 读线程 EOF → dead 置位。
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -4472,7 +3871,7 @@ mod install_commit_tests {
         assert_eq!(std::fs::metadata(&launch).unwrap().ino(), launch_inode);
         assert_eq!(std::fs::read(&dest).unwrap(), b"pending-image");
         assert_eq!(
-            smelt_core::daemon_image::pending_image(&dir).as_deref(),
+            smelt_sys::daemon_image::pending_image(&dir).as_deref(),
             Some(std::fs::canonicalize(&dest).unwrap().as_path()),
             "空闲升级必须 exec 新映像，不能再 exec 正在跑的旧文件"
         );
@@ -4506,7 +3905,7 @@ mod outdated_fingerprint_tests {
     fn staged_disk_with_old_process_is_outdated() {
         let disk_new = fixture(b"new-binary-bytes");
         let disk_old = fixture(b"old-binary-bytes");
-        let pinned_old = smelt_plugin_host::executable_fingerprint(&disk_old).unwrap();
+        let pinned_old = smelt_sys::daemon_image::content_fingerprint(&disk_old).unwrap();
         assert!(
             outdated_by_fingerprint(&pinned_old, Some(&disk_new)),
             "磁盘新了、进程还是老的，必须判旧"
@@ -4519,7 +3918,7 @@ mod outdated_fingerprint_tests {
     #[test]
     fn same_content_is_not_outdated() {
         let disk = fixture(b"same-binary-bytes");
-        let pinned = smelt_plugin_host::executable_fingerprint(&disk).unwrap();
+        let pinned = smelt_sys::daemon_image::content_fingerprint(&disk).unwrap();
         assert!(!outdated_by_fingerprint(&pinned, Some(&disk)));
         std::fs::remove_file(disk).ok();
     }
@@ -4762,61 +4161,6 @@ mod managed_daemon_ensure_tests {
     }
 
     #[test]
-    fn app_bundle_plugins_are_not_in_codesign_nested_bundle_dirs() {
-        let root = app_bundle_plugin_root(std::path::Path::new(
-            "/Applications/Smelt.app/Contents/MacOS/smelt",
-        ))
-        .expect("GUI 在 .app/Contents/MacOS 下必须能定位 bundled 插件");
-        assert_eq!(
-            root,
-            std::path::PathBuf::from("/Applications/Smelt.app/Contents/Resources/plugin-packages")
-        );
-        assert!(
-            !root.components().any(|c| c.as_os_str() == "PlugIns"),
-            "Contents/PlugIns 会被 codesign 当成嵌套 bundle：{root:?}"
-        );
-    }
-
-    #[test]
-    fn candidate_release_selects_its_plugin_set_before_handoff() {
-        let root = managed_test_file("candidate-release");
-        let candidate = root.join("Smelt.app");
-        let daemon = candidate.join("Contents/MacOS/smeltd");
-        let package = candidate
-            .join("Contents")
-            .join(APP_BUNDLE_PLUGIN_PACKAGES)
-            .join("com.example");
-        let entrypoint = package.join("bin/main.ts");
-        let smelt_root = root.join("state");
-        std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
-        std::fs::write(&daemon, b"candidate-daemon").unwrap();
-        std::fs::write(&entrypoint, b"export default {};\n").unwrap();
-        std::fs::write(
-            package.join("plugin.json"),
-            serde_json::json!({
-                "id": "com.example",
-                "name": "Example",
-                "version": "1.0.0",
-                "api_version": 1,
-                "entrypoint": "bin/main.ts",
-                "capabilities": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let prepared_daemon = prepare_bundled_release(&candidate, &smelt_root).unwrap();
-
-        assert_eq!(prepared_daemon, daemon);
-        let selected = smelt_plugin_host::active_plugin_set_root(&smelt_root, &prepared_daemon)
-            .unwrap()
-            .expect("handoff 前必须已经选中插件集合");
-        assert!(selected.join("com.example/plugin.json").is_file());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn install_app_cli_is_opt_in() {
         assert!(maybe_run_install_app(["smelt"]).is_none());
         assert!(maybe_run_install_app(["smelt", "--help"]).is_none());
@@ -4825,169 +4169,12 @@ mod managed_daemon_ensure_tests {
     }
 
     #[test]
-    fn cargo_layout_stages_every_bundled_plugin_it_finds() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // 复刻 cargo 的布局：<root>/plugins 是插件源，<root>/target/debug 是产物。
-        let root = managed_test_file("dev-plugins");
-        let bin_dir = root.join("target/debug");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let gui = bin_dir.join("smelt");
-        std::fs::write(&gui, b"gui").unwrap();
-
-        let write_manifest = |name: &str, id: &str, entrypoint: &str, bundled: bool| {
-            let dir = root.join("plugins").join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("plugin.json"),
-                serde_json::json!({
-                    "id": id,
-                    "name": name,
-                    "version": "1.0.0",
-                    "api_version": 1,
-                    "entrypoint": format!("bin/{entrypoint}"),
-                    "capabilities": [],
-                    "bundled": bundled,
-                })
-                .to_string(),
-            )
-            .unwrap();
-            dir
-        };
-        let write_entrypoint = |dir: &std::path::Path, name: &str| {
-            let path = dir.join("bin").join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"export default {};\n").unwrap();
-        };
-
-        // 有入口、带 web 的插件：整包（含网页）都要被装进去。
-        let alpha = write_manifest("alpha", "com.example.alpha", "alpha-bin", true);
-        std::fs::create_dir_all(alpha.join("web")).unwrap();
-        std::fs::write(alpha.join("web/index.html"), b"<!doctype html>").unwrap();
-        std::fs::write(
-            alpha.join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE),
-            serde_json::json!({ "contributions": [] }).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            alpha.join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE),
-            serde_json::json!({ "contributions": [] }).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            alpha.join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE),
-            serde_json::json!({ "contributions": [] }).to_string(),
-        )
-        .unwrap();
-        std::fs::create_dir_all(alpha.join("assets")).unwrap();
-        std::fs::write(alpha.join("assets/icon.svg"), b"<svg/>").unwrap();
-        write_entrypoint(&alpha, "alpha-bin");
-        // 测试用插件：不进产物。
-        let beta = write_manifest("beta", "com.example.beta", "beta-bin", false);
-        write_entrypoint(&beta, "beta-bin");
-        // 缺入口的插件：跳过而不是让整个启动失败。
-        write_manifest("gamma", "com.example.gamma", "gamma-bin", true);
-        // Shared Bun 的入口是包内数据，不能要求 target/debug 里存在同名二进制。
-        let bun = root.join("plugins/bun");
-        std::fs::create_dir_all(bun.join("bin")).unwrap();
-        std::fs::write(
-            bun.join("plugin.json"),
-            serde_json::json!({
-                "id": "com.example.bun",
-                "name": "Bun",
-                "version": "1.0.0",
-                "api_version": 1,
-                "entrypoint": "bin/main.ts",
-                "capabilities": [],
-                "contributions": [],
-                "bundled": true,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            bun.join("bin/main.ts"),
-            "export { default } from './api.ts';",
-        )
-        .unwrap();
-        std::fs::write(
-            bun.join("bin/api.ts"),
-            "export default { invoke() { return null; } };",
-        )
-        .unwrap();
-        std::fs::write(bun.join("bin/api.test.ts"), "throw new Error('test');").unwrap();
-
-        let staged = bundled_plugin_root_for(&gui).expect("开发态必须能组装插件包");
-        assert!(staged.join("com.example.alpha/plugin.json").is_file());
-        assert!(staged.join("com.example.alpha/bin/alpha-bin").is_file());
-        assert!(
-            staged
-                .join("com.example.alpha")
-                .join(smelt_plugin_api::PLUGIN_UI_MANIFEST_FILE)
-                .is_file(),
-            "UI sidecar 必须跟包一起 stage"
-        );
-        assert!(
-            staged
-                .join("com.example.alpha")
-                .join(smelt_plugin_api::PLUGIN_INPUT_MANIFEST_FILE)
-                .is_file(),
-            "输入路由 sidecar 必须跟包一起 stage"
-        );
-        assert!(
-            staged
-                .join("com.example.alpha")
-                .join(smelt_plugin_api::PLUGIN_AGENT_MANIFEST_FILE)
-                .is_file(),
-            "智能体 sidecar 必须跟包一起 stage"
-        );
-        assert!(
-            staged.join("com.example.alpha/assets/icon.svg").is_file(),
-            "智能体等 contribution 的包内资源必须跟包一起 stage"
-        );
-        assert!(
-            staged.join("com.example.alpha/web/index.html").is_file(),
-            "面板资源必须跟包一起 stage，否则装了也打不开"
-        );
-        assert!(
-            !staged.join("com.example.beta").exists(),
-            "bundled=false 的插件不该进产物"
-        );
-        assert!(
-            !staged.join("com.example.gamma").exists(),
-            "缺少 package entrypoint 的插件应当跳过"
-        );
-        assert!(
-            staged.join("com.example.bun/bin/main.ts").is_file(),
-            "Shared Bun 入口必须从 package 源目录 stage"
-        );
-        assert!(
-            staged.join("com.example.bun/bin/api.ts").is_file(),
-            "Bun 入口旁边的模块必须一起 stage，否则运行时 import 会失败"
-        );
-        assert!(
-            !staged.join("com.example.bun/bin/api.test.ts").exists(),
-            "测试文件不能进运行时插件包"
-        );
-        assert_eq!(
-            std::fs::metadata(staged.join("com.example.bun/bin/main.ts"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o111,
-            0,
-            "Shared Bun module must stay non-executable package data"
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn daemon_spawn_strips_host_color_suppression() {
         let mut cmd = std::process::Command::new("/bin/true");
         cmd.env("NO_COLOR", "1");
         cmd.env("FORCE_COLOR", "0");
         smelt_paths::export_to(&mut cmd);
-        smelt_core::tty_color::clear_command(&mut cmd);
+        smelt_sys::tty_color::clear_command(&mut cmd);
         let present: Vec<String> = cmd
             .get_envs()
             .filter_map(|(key, value)| {
@@ -4995,7 +4182,7 @@ mod managed_daemon_ensure_tests {
                 key.to_str().map(str::to_string)
             })
             .collect();
-        for key in smelt_core::tty_color::SUPPRESSION_VARS {
+        for key in smelt_sys::tty_color::SUPPRESSION_VARS {
             assert!(
                 !present.iter().any(|k| k == key),
                 "拉起 smeltd 不得带上 {key}，实际: {present:?}"
@@ -5267,7 +4454,6 @@ mod resize_tests {
                 daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
                 daemon_geometry_generation: 0,
                 remote_geometry_locked: false,
-                notify: Arc::new(Mutex::new(None)),
                 bell_notify: Arc::new(Mutex::new(None)),
                 last_damage_cursor: Mutex::new(None),
                 search_query: Mutex::new(String::new()),
@@ -5341,6 +4527,59 @@ mod paste_encode_tests {
     fn bracketed_paste_wraps_and_strips_esc() {
         let out = encode_paste("hi\x1b[31m", true);
         assert_eq!(out, b"\x1b[200~hi[31m\x1b[201~");
+    }
+}
+
+#[cfg(test)]
+mod color_override_tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+
+    #[test]
+    fn colors_set_by_the_program_win_over_the_theme() {
+        let _guard = lock_theme_globals();
+        let size = TermSize { rows: 2, cols: 10 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        assert_eq!(
+            resolve(Color::Indexed(1), true, term.colors()),
+            palette()[1]
+        );
+
+        let mut parser: Processor = Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1b]4;1;rgb:ff/00/80\x07\x1b]11;rgb:01/02/03\x1b\\",
+        );
+        let overrides = term.colors();
+        assert_eq!(resolve(Color::Indexed(1), true, overrides), 0x00ff_0080);
+        assert_eq!(
+            resolve(Color::Named(NamedColor::Red), true, overrides),
+            0x00ff_0080,
+            "OSC 4 改的是 0~15 号槽，具名色也跟着变"
+        );
+        assert_eq!(
+            resolve(Color::Named(NamedColor::Background), false, overrides),
+            0x0001_0203
+        );
+        assert_eq!(
+            resolve(
+                Color::Spec(Rgb {
+                    r: 0,
+                    g: 0,
+                    b: 0x10
+                }),
+                true,
+                overrides
+            ),
+            0x10,
+            "直接给的 RGB 不受影响"
+        );
+
+        parser.advance(&mut term, b"\x1b]104\x07\x1b]111\x07");
+        assert_eq!(
+            resolve(Color::Indexed(1), true, term.colors()),
+            palette()[1]
+        );
     }
 }
 
@@ -5441,7 +4680,6 @@ mod search_resync_tests {
             daemon_geometry: Arc::new(Mutex::new(DaemonGeometrySignal::default())),
             daemon_geometry_generation: 0,
             remote_geometry_locked: false,
-            notify: Arc::new(Mutex::new(None)),
             bell_notify: Arc::new(Mutex::new(None)),
             last_damage_cursor: Mutex::new(None),
             search_query: Mutex::new(String::new()),
@@ -5477,7 +4715,7 @@ mod search_resync_tests {
         {
             let mut signal = terminal.daemon_geometry.lock().unwrap();
             signal.generation = 1;
-            signal.geometry = Some(smelt_core::osc::TerminalGeometryOsc {
+            signal.geometry = Some(smelt_model::osc::TerminalGeometryOsc {
                 cols: 49,
                 rows: 47,
                 cell_width: 8,
@@ -5645,7 +4883,7 @@ mod scroll_wheel_plan_tests {
     }
 }
 
-// OSC 通知解析单测见 crate::osc（workspace 与 smeltd 共用）。
+// OSC 通知解析单测见 smelt_model::osc。
 
 #[cfg(test)]
 mod search_literal_tests {

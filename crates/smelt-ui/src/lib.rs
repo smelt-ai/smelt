@@ -13,7 +13,6 @@ pub mod image;
 pub mod markdown_mermaid;
 pub mod motion;
 pub mod provider_status_global;
-pub mod segmented;
 pub mod theme_catalog;
 pub mod theme_files;
 pub mod ui_theme;

@@ -473,6 +473,22 @@ pub fn file_surface(path: &Path, fit: FileFit) -> AnyElement {
     }
 }
 
+/// 把内存里的图片完整放进调用方给的盒子（contain）。栅格图只画降采样预览，
+/// 还没解好或解不开时是空盒子；调用方另行 [`ensure_preview`]。文件查看器用它：
+/// 图片字节由运行时给，不在客户端按路径读盘。
+pub fn image_surface(image: &Arc<gpui::Image>) -> AnyElement {
+    match thumb_paint(image) {
+        ThumbPaint::Preview(render) => contain_canvas(Some(render), 0.)
+            .size_full()
+            .into_any_element(),
+        ThumbPaint::Placeholder => div().size_full().into_any_element(),
+        ThumbPaint::Svg => img(Arc::clone(image))
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+    }
+}
+
 /// cover 时图片相对盒子左上角的位置和尺寸。多出来的部分由绘制时的盒子裁掉。
 fn cover_placement(box_w: f32, box_h: f32, image_w: f32, image_h: f32) -> (f32, f32, f32, f32) {
     let scale = (box_w / image_w).max(box_h / image_h);

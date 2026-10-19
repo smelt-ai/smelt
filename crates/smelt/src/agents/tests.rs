@@ -2,10 +2,11 @@ use super::{
     MemoryFilter, agent_catalog_monogram, bound_agent_definition_id, conversation_agent_mark,
     conversation_icon_color, conversation_row_title, memory_summary_text,
     new_conversation_row_label, recent_conversation_order, session_phase_settled, visible_memories,
+    visible_recent_conversations,
 };
 use crate::AgentStatus;
 use gpui::rgb;
-use smelt_core::agent_memory::MemoryEntry;
+use smelt_model::agent_memory::MemoryEntry;
 use std::time::{Duration, SystemTime};
 
 #[test]
@@ -102,7 +103,7 @@ fn memory_summary_is_one_line_of_counts() {
 /// 记忆卡片在会话停下时重扫：模型还在想、工具还在跑时，元数据可能还没落库。
 #[test]
 fn memory_card_rescans_only_when_the_session_is_between_steps() {
-    use smelt_core::daemon_state::DaemonPhase;
+    use smelt_client::daemon_state::DaemonPhase;
     for phase in [
         DaemonPhase::Connecting,
         DaemonPhase::Thinking,
@@ -129,6 +130,29 @@ fn recent_conversations_put_the_newest_first() {
         recent_conversation_order(&[5, 5]),
         vec![0, 1],
         "同一秒保持原来的顺序"
+    );
+}
+
+#[test]
+fn sidebar_recent_conversations_cap_but_keep_the_selected_one() {
+    assert_eq!(visible_recent_conversations(3, None, false), vec![0, 1, 2]);
+    assert_eq!(
+        visible_recent_conversations(8, None, false),
+        vec![0, 1, 2, 3, 4],
+        "收起时只列前几条，不能把下面的项目挤没"
+    );
+    assert_eq!(
+        visible_recent_conversations(8, Some(6), false),
+        vec![0, 1, 2, 3, 4, 6],
+        "当前打开的对话排在后面也要补上"
+    );
+    assert_eq!(
+        visible_recent_conversations(8, Some(2), false),
+        vec![0, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        visible_recent_conversations(8, Some(6), true),
+        (0..8).collect::<Vec<_>>()
     );
 }
 
@@ -200,7 +224,7 @@ mod schedule_editor_tests {
         webhook_curl_example,
     };
     use crate::settings;
-    use smelt_core::automation::{SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK};
+    use smelt_model::automation::{SCHEDULE_DAY_FRI, SCHEDULE_DAY_MON, SCHEDULE_WEEKDAYS_MASK};
 
     #[test]
     fn clock_editor_accepts_partial_valid_values_without_accepting_impossible_times() {
@@ -477,7 +501,7 @@ mod agent_definition_ui_tests {
     };
     use crate::settings::{AgentDefinition, ConversationAgentKind};
     use gpui_component::input::InputEvent;
-    use smelt_core::automation::AutomationRunStatus;
+    use smelt_model::automation::AutomationRunStatus;
 
     fn definition(name: &str, prompt: &str, engine_kind_id: &str) -> AgentDefinition {
         AgentDefinition {

@@ -1,16 +1,9 @@
-//! iroh 隧道：手机按**持久 EndpointId** 拨号 Mac，同网 mDNS 直连、跨网打洞、
-//! 打洞失败自动回退中继（网络变好还会自己升级回直连）。
+//! iroh：客户端按运行时的**持久 EndpointId** 拨号，同网直连、跨网打洞，打洞失败
+//! 自动回退中继（网络变好还会自己升级回直连）。
 //!
-//! 刻意**不发明新协议**：一条 iroh 双向流对应一条到本机 `remote_gateway` 的 TCP
-//! 连接，逐字节转发。上层 HTTP / WebSocket / token 鉴权原样复用，`/acp/ws` 那套
-//! 手机端代码一行都不用改。这也是为什么这里没有任何业务帧的概念——业务在网关里。
-//!
-//! 这是**唯一**的公网通路。早先还有 Cloudflare quick tunnel 和自建信令 + WebRTC
-//! 两条路，都已下线：前者 URL 每次重启都变、二维码活不过一晚，后者要维护信令 +
-//! coturn，且只对浏览器面板有意义，而浏览器面板本身也一并去掉了。
+//! 运行时协议怎么跑在 iroh 上见 [`runtime`]。这是唯一的远程通路。
 
 use std::fmt;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,12 +12,16 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt as _;
 use iroh::{Endpoint, RelayMode, RelayUrl, SecretKey, endpoint::Connection};
 use iroh_relay::{RelayConfig, RelayMap};
-use tokio::io::AsyncWriteExt as _;
-use tokio::net::TcpStream;
-use tracing::{info, warn};
+use tracing::info;
 
-/// 隧道的 ALPN。换协议语义时必须同步改两端，否则 iroh 会直接拒绝握手——
-/// 这正是我们要的：宁可连不上，也不要两端对协议理解不一致还硬跑。
+pub mod runtime;
+mod system_dns;
+
+/// 客户端解析配对串、拼拨号地址要用到，免得各自直接依赖 iroh。
+pub use iroh::EndpointId;
+
+/// 旧的手机隧道 ALPN。运行时已经不再接收它，手机改走 [`runtime::RUNTIME_ALPN`]
+/// 时一并删除（设计文档 P4）。
 pub const ALPN: &[u8] = b"smelt/tunnel/1";
 
 /// 用户配置的 relay。Smelt 不提供默认值，避免在未告知用户时访问第三方基础设施。
@@ -114,6 +111,13 @@ pub fn default_secret_path() -> Result<PathBuf> {
     Ok(root.join("iroh-secret"))
 }
 
+/// 客户端自己的身份：`~/.smelt/client-iroh-secret`。运行时按它的公钥认设备，所以
+/// 必须持久；和本机运行时的 `iroh-secret` 分开，桌面连本机运行时也是两个身份。
+pub fn default_client_secret_path() -> Result<PathBuf> {
+    let root = smelt_paths::smelt_home().context("找不到 $HOME")?;
+    Ok(root.join("client-iroh-secret"))
+}
+
 /// 读取密钥；不存在就生成并落盘（0600）。
 pub fn load_or_create_secret(path: &Path) -> Result<SecretKey> {
     if let Ok(text) = std::fs::read_to_string(path) {
@@ -164,6 +168,9 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 ///
 /// `Minimal` 不安装 n0 relay 或 n0 DNS 地址发现；双方的配对码显式携带同一个
 /// relay URL，仍可借它交换地址、打洞，并在直连失败时中继。
+///
+/// 域名交给操作系统解析，理由见 `system_dns` 模块。它只解析 A/AAAA，所以只用在这里：
+/// 没配自建 relay 时的 n0 预设要用 DNS 的 TXT 记录做地址发现，不能换。
 pub async fn bind_endpoint(
     secret: SecretKey,
     alpns: Vec<Vec<u8>>,
@@ -173,127 +180,18 @@ pub async fn bind_endpoint(
         .secret_key(secret)
         .alpns(alpns)
         .relay_mode(RelayMode::Custom(relay.relay_map()))
+        .dns_resolver(iroh::dns::DnsResolver::custom(system_dns::SystemResolver))
         .bind()
         .await
         .context("iroh Endpoint 绑定失败")?;
     Ok(endpoint)
 }
 
-/// 跑转发循环直到 `shutdown` 完成：每条进来的 iroh 双向流对应一条到 `gateway`
-/// 的 TCP 连接。
-///
-/// 提到 lib 里是因为有两个调用方——`smelt-iroh-host` 命令行和 smeltd 的
-/// `iroh_start` op。两份实现迟早会漂移，转发逻辑这种地方漂移了很难查。
-pub async fn serve_tunnel(
-    endpoint: Endpoint,
-    gateway: SocketAddr,
-    shutdown: impl std::future::Future<Output = ()> + Send,
+pub(crate) fn observe_selected_paths(
+    conn: Connection,
+    remote: String,
+    observer: Option<PathObserver>,
 ) {
-    serve_tunnel_inner(endpoint, gateway, shutdown, None, None).await;
-}
-
-/// 与 [`serve_tunnel`] 相同，但同时监听传输路径和连接事件（设备连接/断开）。
-pub async fn serve_tunnel_with_observers(
-    endpoint: Endpoint,
-    gateway: SocketAddr,
-    shutdown: impl std::future::Future<Output = ()> + Send,
-    path_observer: PathObserver,
-    conn_observer: ConnectionObserver,
-) {
-    serve_tunnel_inner(
-        endpoint,
-        gateway,
-        shutdown,
-        Some(path_observer),
-        Some(conn_observer),
-    )
-    .await;
-}
-
-async fn serve_tunnel_inner(
-    endpoint: Endpoint,
-    gateway: SocketAddr,
-    shutdown: impl std::future::Future<Output = ()> + Send,
-    path_observer: Option<PathObserver>,
-    conn_observer: Option<ConnectionObserver>,
-) {
-    tokio::pin!(shutdown);
-    loop {
-        let incoming = tokio::select! {
-            _ = &mut shutdown => break,
-            incoming = endpoint.accept() => match incoming {
-                Some(i) => i,
-                None => break,
-            },
-        };
-        let path_observer = path_observer.clone();
-        let conn_observer = conn_observer.clone();
-        tokio::spawn(async move {
-            if let Err(e) = serve_conn(incoming, gateway, path_observer, conn_observer).await {
-                warn!("iroh 连接处理失败：{e:#}");
-            }
-        });
-    }
-    // 通知对端「是我主动关的」，否则手机侧只能靠超时才发现，会白等一轮重连。
-    endpoint.close().await;
-}
-
-async fn serve_conn(
-    incoming: iroh::endpoint::Incoming,
-    gateway: SocketAddr,
-    path_observer: Option<PathObserver>,
-    conn_observer: Option<ConnectionObserver>,
-) -> Result<()> {
-    let conn = incoming.await.context("握手失败")?;
-    let connection_id = conn.stable_id();
-    let remote = conn.remote_id();
-    let remote_id = remote.to_string();
-    info!(%remote, "iroh 已接受连接");
-
-    // 通知连接事件
-    if let Some(ref obs) = conn_observer {
-        let connected_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        obs(ConnectionEvent::Connected {
-            connection_id,
-            remote_id: remote_id.clone(),
-            connected_at,
-        });
-    }
-
-    observe_selected_paths(conn.clone(), remote_id.clone(), path_observer);
-
-    // 一条连接可以开多条流（手机上多个会话各占一条），每条流独立转发。
-    let result = loop {
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(pair) => pair,
-            // 对端正常关闭时 accept_bi 会返回错误，这里不算异常。
-            Err(e) => {
-                info!(%remote, "iroh 连接结束：{e}");
-                break Ok(());
-            }
-        };
-        tokio::spawn(async move {
-            if let Err(e) = pump(send, recv, gateway).await {
-                warn!("iroh 流转发失败：{e:#}");
-            }
-        });
-    };
-
-    // 通知断开事件
-    if let Some(obs) = conn_observer {
-        obs(ConnectionEvent::Disconnected {
-            connection_id,
-            remote_id,
-        });
-    }
-
-    result
-}
-
-fn observe_selected_paths(conn: Connection, remote: String, observer: Option<PathObserver>) {
     tokio::spawn(async move {
         let mut events = conn.path_events();
         let mut last_address = None;
@@ -350,34 +248,6 @@ fn report_selected_path(
     if let Some(observer) = observer {
         observer(status);
     }
-}
-
-async fn pump(
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
-    gateway: SocketAddr,
-) -> Result<()> {
-    let tcp = TcpStream::connect(gateway)
-        .await
-        .with_context(|| format!("连不上本机网关 {gateway}"))?;
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
-
-    let up = async {
-        tokio::io::copy(&mut recv, &mut tcp_write).await?;
-        tcp_write.shutdown().await
-    };
-    let down = async {
-        tokio::io::copy(&mut tcp_read, &mut send).await?;
-        send.finish().map_err(std::io::Error::other)
-    };
-
-    // 任一方向结束就收摊：HTTP/WS 半关闭的语义交给网关和客户端自己处理，
-    // 隧道这层只保证不泄漏 task。
-    tokio::select! {
-        r = up => r?,
-        r = down => r?,
-    }
-    Ok(())
 }
 
 #[cfg(test)]

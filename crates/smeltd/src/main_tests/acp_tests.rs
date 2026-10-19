@@ -2,11 +2,31 @@ use super::*;
 use smelt_core::acp_chat::{AcpEntry, ToolCallStatus, ToolKind};
 use smelt_core::acp_session::AcpSessionState;
 use smelt_core::daemon_state::DaemonPhase;
-use smelt_plugin_api::{DeliveryClass, PluginId, SubscriptionId, Topic};
+use smelt_event_protocol::{DeliveryClass, PluginId, SubscriptionId, Topic};
 use std::collections::BTreeSet;
 
 fn make_acp_session(id: &str, reduced: AcpSessionState) -> Arc<AcpSession> {
     Arc::new(make_acp_session_value(id, reduced))
+}
+
+/// 没发首帧的连接：对方手里什么都没有，之后的增量帧会把快照头和条目整个带过去。
+fn nothing_sent() -> smelt_core::acp_wire::FrameMirror {
+    full_frame(&serde_json::json!({ "snapshot": { "entries": [] } })).1
+}
+
+/// 像客户端那样读一帧：增量帧经这条连接的接收方镜像还原成完整的快照帧，条目是从
+/// 第一个变化的那条到末尾；整段帧顺手重建镜像。同一条连接上的帧要共用一份镜像。
+fn decode_frame(mirror: &mut smelt_core::acp_wire::FrameMirror, line: &str) -> serde_json::Value {
+    let frame: serde_json::Value = serde_json::from_str(line).unwrap();
+    match frame.get("delta") {
+        Some(delta) => mirror
+            .apply(&serde_json::from_value(delta.clone()).unwrap())
+            .unwrap(),
+        None => {
+            mirror.full(&frame);
+            frame
+        }
+    }
 }
 
 fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> AcpSnapshotLink {
@@ -16,11 +36,13 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
     spawn_acp_snapshot_link(
         stream,
         Vec::new(),
+        nothing_sent(),
         tool_debug_generation_sent,
         id,
         "acp-test",
         Arc::new(
-            move |from,
+            move |frame_kind,
+                  from,
                   should_persist,
                   include_envelope,
                   include_runtime_debug,
@@ -29,6 +51,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: UnixStream, id: &str) -> 
                 let sess = encode_sess.upgrade()?;
                 Some(encode_acp_snapshot(
                     &sess,
+                    frame_kind,
                     from,
                     should_persist,
                     include_envelope,
@@ -215,12 +238,8 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
         supports_rewind: false,
     });
     *slot.value.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.current").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("current-input").unwrap(),
-                context: serde_json::json!({"thread_id": "current-thread"}),
-            },
+        Some(smelt_core::conversation::ConversationBinding::Automation {
+            run_id: "run-current".into(),
         });
 
     let (server, client) = UnixStream::pair().unwrap();
@@ -251,15 +270,14 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
     assert_eq!(response["snapshot"]["entries_total"], 5);
     assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 5);
     assert_eq!(
-        response["snapshot"]["conversation_state"]["binding"]["plugin_id"],
-        "com.example.current"
+        response["snapshot"]["conversation_state"]["binding"]["run_id"],
+        "run-current"
     );
     assert!(slot.value.handle.lock().unwrap().is_some());
     assert!(matches!(
         &*slot.value.conversation_binding.lock().unwrap(),
-        Some(smelt_core::conversation::ConversationBinding::Plugin { plugin_id, route })
-            if plugin_id.as_str() == "com.example.current"
-                && route.context["thread_id"] == "current-thread"
+        Some(smelt_core::conversation::ConversationBinding::Automation { run_id })
+            if run_id == "run-current"
     ));
 
     drop(reader);
@@ -268,7 +286,7 @@ fn reopening_live_session_neither_relaunches_nor_trims_history() {
 }
 
 #[test]
-fn reopening_live_session_adopts_client_plugin_binding_when_unknown() {
+fn reopening_live_session_adopts_client_binding_when_unknown() {
     let mut reduced = AcpSessionState::default();
     reduced.phase = DaemonPhase::Idle;
 
@@ -302,12 +320,8 @@ fn reopening_live_session_adopts_client_plugin_binding_when_unknown() {
                 "id": "acp-unknown",
                 "launch": {"command": "/must/not-be-launched"},
                 "conversation_binding": {
-                    "type": "plugin",
-                    "plugin_id": "com.example.restored",
-                    "route": {
-                        "contribution_id": "issue-comment-input",
-                        "context": {"issue_id": "issue-1"}
-                    }
+                    "type": "automation",
+                    "run_id": "run-restored"
                 }
             }),
             new_sessions(),
@@ -321,14 +335,13 @@ fn reopening_live_session_adopts_client_plugin_binding_when_unknown() {
     reader.read_line(&mut line).unwrap();
     let response: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(
-        response["snapshot"]["conversation_state"]["binding"]["plugin_id"],
-        "com.example.restored"
+        response["snapshot"]["conversation_state"]["binding"]["run_id"],
+        "run-restored"
     );
     assert!(matches!(
         &*slot.value.conversation_binding.lock().unwrap(),
-        Some(smelt_core::conversation::ConversationBinding::Plugin { plugin_id, route })
-            if plugin_id.as_str() == "com.example.restored"
-                && route.context["issue_id"] == "issue-1"
+        Some(smelt_core::conversation::ConversationBinding::Automation { run_id })
+            if run_id == "run-restored"
     ));
 
     drop(reader);
@@ -420,6 +433,7 @@ fn one_shot_action_keeps_existing_control_client_attached() {
             &slot,
             control_server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-action",
             "acp-test",
@@ -786,52 +800,6 @@ fn automation_run_keeps_elicitation_actions() {
 }
 
 #[test]
-fn submitted_plugin_input_never_falls_back_to_local_acp() {
-    let session = make_acp_session("acp-plugin-route", AcpSessionState::default());
-    *session.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("conversation-input")
-                    .unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
-        });
-    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
-    let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
-        cmd_tx,
-        event_rx,
-        stdio: Arc::new(Mutex::new(None)),
-        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        supports_mid_turn_input: false,
-        supports_compaction: false,
-        supports_native_queue: false,
-        supports_rewind: false,
-    });
-
-    let result = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-1".into(),
-            text: "remote only".to_string(),
-            images: Vec::new(),
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            Err(smelt_core::conversation::ConversationSubmitError::rejected(
-                "remote rejected",
-            ))
-        },
-    );
-
-    assert_eq!(result.unwrap_err().message, "remote rejected");
-    assert!(cmd_rx.try_recv().is_err(), "失败时不能偷偷投递给本地 ACP");
-    assert!(session.reduced.lock().unwrap().entries().is_empty());
-}
-
-#[test]
 fn automation_run_rejects_freeform_conversation_input() {
     let session = make_acp_session("acp-automation", AcpSessionState::default());
     *session.conversation_binding.lock().unwrap() =
@@ -839,13 +807,10 @@ fn automation_run_rejects_freeform_conversation_input() {
             run_id: "run-1".into(),
         });
 
-    let result = dispatch_conversation_input_with(
+    let result = dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput::new("second prompt".into(), Vec::new()),
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("automation input must not invoke a plugin")
-        },
     );
 
     assert_eq!(
@@ -869,46 +834,6 @@ fn conversation_submit_response_preserves_rejected_and_unknown_errors() {
 }
 
 #[test]
-fn plugin_input_keeps_images_even_when_the_local_agent_does_not_support_them() {
-    let mut reduced = AcpSessionState::default();
-    reduced.supports_image = false;
-    let session = make_acp_session("acp-plugin-images", reduced);
-    *session.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("conversation-input")
-                    .unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
-        });
-    let image = smelt_core::acp_chat::AcpImage {
-        mime: "image/png".into(),
-        data_b64: "aW1hZ2U=".into(),
-    };
-
-    let route = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-2".into(),
-            text: "看图".into(),
-            images: vec![image.clone()],
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, input, _agent_preset, _agent_session| {
-            assert_eq!(input.images, vec![image]);
-            Ok(())
-        },
-    )
-    .unwrap();
-
-    assert_eq!(
-        route,
-        smelt_core::conversation::ConversationInputRoute::Plugin
-    );
-}
-
-#[test]
 fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
     let mut reduced = AcpSessionState::default();
     reduced.supports_image = false;
@@ -927,7 +852,7 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
         supports_rewind: false,
     });
 
-    dispatch_conversation_input_with(
+    dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput {
             submission_id: "submission-3".into(),
@@ -938,9 +863,6 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
             }],
         },
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("direct input must not invoke a plugin")
-        },
     )
     .unwrap();
 
@@ -949,64 +871,6 @@ fn direct_input_drops_images_only_after_the_direct_route_is_selected() {
         smelt_core::acp_conn::ConversationCommand::Prompt { text, images }
             if text.contains("当前智能体不支持图片输入") && images.is_empty()
     ));
-}
-
-#[test]
-fn agent_preset_is_consumed_only_after_the_first_input_is_routed() {
-    let session = make_acp_session("acp-agent-preset", AcpSessionState::default());
-    *session.conversation_binding.lock().unwrap() =
-        Some(smelt_core::conversation::ConversationBinding::Plugin {
-            plugin_id: smelt_plugin_api::PluginId::new("com.example.chat").unwrap(),
-            route: smelt_plugin_api::PluginInputRouteBinding {
-                contribution_id: smelt_plugin_api::ContributionId::new("conversation-input")
-                    .unwrap(),
-                context: serde_json::json!({"thread_id": "thread-1"}),
-            },
-        });
-    *session.pending_agent_preset.lock().unwrap() = Some("你是严谨的代码审查者".into());
-
-    let rejected = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-4".into(),
-            text: "检查这次改动".into(),
-            images: Vec::new(),
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, input, agent_preset, _agent_session| {
-            assert_eq!(input.text, "检查这次改动");
-            assert_eq!(agent_preset, Some("你是严谨的代码审查者"));
-            Err(smelt_core::conversation::ConversationSubmitError::rejected(
-                "remote rejected",
-            ))
-        },
-    );
-    assert_eq!(rejected.unwrap_err().message, "remote rejected");
-    assert_eq!(
-        session.pending_agent_preset.lock().unwrap().as_deref(),
-        Some("你是严谨的代码审查者"),
-        "路由失败不能消费预设"
-    );
-
-    let routed = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput {
-            submission_id: "submission-5".into(),
-            text: "检查这次改动".into(),
-            images: Vec::new(),
-        },
-        &new_event_hub(),
-        |_plugin_id, _route, input, agent_preset, _agent_session| {
-            assert_eq!(input.text, "检查这次改动");
-            assert_eq!(agent_preset, Some("你是严谨的代码审查者"));
-            Ok(())
-        },
-    );
-    assert_eq!(
-        routed.unwrap(),
-        smelt_core::conversation::ConversationInputRoute::Plugin
-    );
-    assert!(session.pending_agent_preset.lock().unwrap().is_none());
 }
 
 #[test]
@@ -1027,13 +891,10 @@ fn direct_agent_preset_remains_part_of_the_first_acp_prompt() {
         supports_rewind: false,
     });
 
-    dispatch_conversation_input_with(
+    dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput::new("分析组合风险".into(), Vec::new()),
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("direct input must not invoke a plugin")
-        },
     )
     .unwrap();
 
@@ -1046,7 +907,7 @@ fn direct_agent_preset_remains_part_of_the_first_acp_prompt() {
 }
 
 #[test]
-fn submitted_direct_input_delivers_to_acp_without_invoking_a_plugin() {
+fn submitted_direct_input_delivers_to_acp() {
     let session = make_acp_session("acp-direct-route", AcpSessionState::default());
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
     let (_event_tx, event_rx) = smol::channel::unbounded();
@@ -1062,7 +923,7 @@ fn submitted_direct_input_delivers_to_acp_without_invoking_a_plugin() {
         supports_rewind: false,
     });
 
-    let route = dispatch_conversation_input_with(
+    dispatch_conversation_input(
         &session,
         smelt_core::conversation::ConversationInput {
             submission_id: "submission-6".into(),
@@ -1070,16 +931,9 @@ fn submitted_direct_input_delivers_to_acp_without_invoking_a_plugin() {
             images: Vec::new(),
         },
         &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("direct input must not invoke a plugin")
-        },
     )
     .unwrap();
 
-    assert_eq!(
-        route,
-        smelt_core::conversation::ConversationInputRoute::Direct
-    );
     assert!(matches!(
         cmd_rx.try_recv().unwrap(),
         smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } if text == "local"
@@ -1266,6 +1120,7 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
         .lock()
         .unwrap()
         .push_back(QueuedAcpPrompt {
+            id: 1,
             text: "下一句".to_string(),
             images: Vec::new(),
             delivery_id: None,
@@ -1300,6 +1155,141 @@ fn pi_cancel_does_not_admit_the_next_prompt_until_the_provider_is_idle() {
     assert_eq!(
         unaccepted.as_ref().map(|prompt| prompt.text.as_str()),
         Some("下一句")
+    );
+}
+
+#[test]
+fn turn_based_agent_queue_is_in_the_snapshot_and_user_prompts_can_be_withdrawn() {
+    use smelt_core::acp_session::AcpUserAction;
+    let acp_sessions = new_test_acp_sessions();
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    let (slot, _) = acp_sessions.reserve_with("acp-withdraw-queued", || {
+        make_acp_session_value("acp-withdraw-queued", reduced)
+    });
+    let cmd_rx = attach_prompt_handle(&slot.value);
+    // Claude / Codex 这类通用 ACP agent 不能中途插话，回合在跑时只能排在 daemon 闸门后面。
+    slot.value
+        .handle
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .supports_mid_turn_input = false;
+    let subscribers = new_event_hub();
+    let prompt = |text: &str, images, delivery_id: Option<&str>| AcpUserAction::Prompt {
+        text: text.to_string(),
+        images,
+        delivery_id: delivery_id.map(str::to_string),
+    };
+    let image = smelt_core::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: "aW1n".into(),
+    };
+
+    apply_acp_user_action(
+        &slot.value,
+        prompt("第一句", Vec::new(), None),
+        &subscribers,
+    )
+    .unwrap();
+    assert!(matches!(
+        cmd_rx.try_recv().unwrap(),
+        smelt_core::acp_conn::ConversationCommand::Prompt { .. }
+    ));
+    apply_acp_user_action(
+        &slot.value,
+        prompt("第二句", vec![image.clone()], None),
+        &subscribers,
+    )
+    .unwrap();
+    apply_acp_user_action(
+        &slot.value,
+        prompt("任务投递", Vec::new(), Some("run-1")),
+        &subscribers,
+    )
+    .unwrap();
+    assert!(cmd_rx.try_recv().is_err(), "回合在跑，不能并发派发");
+
+    // 排队的消息在快照里：客户端看得见，不会以为发丢了。
+    let queued = slot
+        .value
+        .reduced
+        .lock()
+        .unwrap()
+        .to_snapshot(false)
+        .pending_prompts;
+    assert_eq!(
+        queued
+            .iter()
+            .map(|item| (item.text.as_str(), item.image_count, item.withdrawable))
+            .collect::<Vec<_>>(),
+        vec![("第二句", 1, true), ("任务投递", 0, false)]
+    );
+    assert_ne!(queued[0].id, queued[1].id);
+
+    // 外部投递归守护进程，输入框撤不走。
+    assert!(
+        apply_acp_user_action(
+            &slot.value,
+            AcpUserAction::WithdrawPendingPrompt { id: queued[1].id },
+            &subscribers,
+        )
+        .is_err()
+    );
+    apply_acp_user_action(
+        &slot.value,
+        AcpUserAction::WithdrawPendingPrompt { id: queued[0].id },
+        &subscribers,
+    )
+    .unwrap();
+    {
+        let state = slot.value.reduced.lock().unwrap();
+        assert_eq!(
+            state
+                .pending_prompts
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["任务投递"]
+        );
+        // 正文和附图回到输入框，消息流里没有这条。
+        assert_eq!(state.composer_restore_texts, vec!["第二句".to_string()]);
+        assert_eq!(state.composer_restore_images, vec![image]);
+        assert!(!state.entries().iter().any(|entry| matches!(
+            entry,
+            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } if text == "第二句"
+        )));
+    }
+    // 撤过的不能再撤第二次，也不会在回合结束后发出去。
+    assert!(
+        apply_acp_user_action(
+            &slot.value,
+            AcpUserAction::WithdrawPendingPrompt { id: queued[0].id },
+            &subscribers,
+        )
+        .is_err()
+    );
+    {
+        let mut state = slot.value.reduced.lock().unwrap();
+        state.phase = DaemonPhase::Idle;
+        state.turn_started_at_ms = None;
+    }
+    settle_acp_turn_locked(&slot.value, true, false, false, &subscribers);
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, .. } => {
+            assert_eq!(text, "任务投递");
+        }
+        _ => panic!("回合结束只放出队首一条"),
+    }
+    assert!(cmd_rx.try_recv().is_err());
+    assert!(
+        slot.value
+            .reduced
+            .lock()
+            .unwrap()
+            .pending_prompts
+            .is_empty()
     );
 }
 
@@ -1387,6 +1377,7 @@ fn pi_refusal_and_idle_in_the_same_batch_sends_once_without_a_spinner() {
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再问一句".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1481,6 +1472,7 @@ fn real_prompt_failure_returns_the_text_instead_of_retrying() {
         session
     });
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再试一次".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1523,6 +1515,7 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
         data_b64: "aGk=".into(),
     };
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "看这张".to_string(),
         images: vec![image.clone()],
         delivery_id: None,
@@ -1543,6 +1536,7 @@ fn cancel_before_accept_restores_the_images_with_the_text() {
     assert_eq!(user_bubbles(&slot.value, "看这张"), 0);
 
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "   ".to_string(),
         images: vec![image.clone()],
         delivery_id: None,
@@ -1569,6 +1563,7 @@ fn real_prompt_failure_restores_the_images_with_the_text() {
         data_b64: "aGk=".into(),
     };
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再试一次".to_string(),
         images: vec![image.clone()],
         delivery_id: None,
@@ -1595,6 +1590,7 @@ fn cancel_before_accept_restores_user_text() {
         make_acp_session_value("acp-pi-cancel-unaccepted", AcpSessionState::default())
     });
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "用户刚发的".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1627,6 +1623,7 @@ fn pi_queue_hold_clears_when_the_provider_becomes_idle() {
     });
     let cmd_rx = attach_prompt_handle(&slot.value);
     *slot.value.unaccepted_prompt.lock().unwrap() = Some(QueuedAcpPrompt {
+        id: 1,
         text: "再问一句".to_string(),
         images: Vec::new(),
         delivery_id: None,
@@ -1835,14 +1832,22 @@ fn deliver_queued_now_sends_the_claimed_item_once_after_the_provider_is_idle() {
     assert!(cmd_rx.try_recv().is_err(), "还原没到不能发");
 
     let mut texts = vec!["但是我想字数一致".to_string(), "别的".to_string()];
-    note_immediate_queue_restore(&slot.value, &mut texts);
+    let mut images = vec![
+        vec![smelt_core::acp_chat::AcpImage {
+            mime: "image/png".into(),
+            data_b64: "aGk=".into(),
+        }],
+        Vec::new(),
+    ];
+    note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
     assert_eq!(texts, vec!["别的".to_string()]);
+    assert_eq!(images, vec![Vec::new()], "认领那条的图不能再还回输入框");
     smelt_core::acp_session::apply_event(
         &mut slot.value.reduced.lock().unwrap(),
         smelt_core::acp_conn::ConversationEvent::ComposerRestore {
             revision: 1,
             texts,
-            images: Vec::new(),
+            images,
         },
     );
     slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
@@ -1898,7 +1903,8 @@ fn deliver_queued_now_does_not_resend_when_the_provider_already_took_the_item() 
     ));
 
     let mut texts = vec!["别的".to_string()];
-    note_immediate_queue_restore(&slot.value, &mut texts);
+    let mut images = vec![Vec::new()];
+    note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
     assert_eq!(texts, vec!["别的".to_string()]);
     slot.value.reduced.lock().unwrap().phase = DaemonPhase::Idle;
     let _turn = slot.value.turn_completion.lock().unwrap();
@@ -1942,8 +1948,10 @@ fn deliver_queued_now_while_idle_waits_for_the_queue_clear_before_sending() {
     assert!(!slot.value.prompt_in_flight.load(Ordering::SeqCst));
 
     let mut texts = vec!["总结".to_string()];
-    note_immediate_queue_restore(&slot.value, &mut texts);
+    let mut images = vec![Vec::new()];
+    note_immediate_queue_restore(&slot.value, &mut texts, &mut images);
     assert!(texts.is_empty());
+    assert!(images.is_empty());
     try_flush_immediate_delivery(&slot.value, &subscribers);
     assert!(matches!(
         cmd_rx.try_recv(),
@@ -2115,6 +2123,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         .lock()
         .unwrap()
         .push_back(QueuedAcpPrompt {
+            id: 1,
             text: "prompt B".to_string(),
             images: Vec::new(),
             delivery_id: None,
@@ -2232,6 +2241,7 @@ fn cancelled_turn_releases_prompt_gate_without_a_timer() {
         .lock()
         .unwrap()
         .push_back(QueuedAcpPrompt {
+            id: 1,
             text: "send now".to_string(),
             images: Vec::new(),
             delivery_id: None,
@@ -2430,12 +2440,13 @@ fn subscribe_conversation_wake(subscribers: &EventHubHandle) -> smelt_event_bus:
         .subscribe(
             PluginId::new("test.desktop").unwrap(),
             SubscriptionId::new("wake").unwrap(),
-            BTreeSet::from([
-                Topic::new(smelt_plugin_api::CORE_TOPIC_CONVERSATION_WAKE_REQUESTED).unwrap(),
-            ]),
+            BTreeSet::from([Topic::new(
+                smelt_event_protocol::CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+            )
+            .unwrap()]),
             DeliveryClass::Ephemeral,
-            &BTreeSet::from([smelt_plugin_api::Capability::new(
-                smelt_plugin_api::CORE_CAPABILITY_CONVERSATION_WAKE,
+            &BTreeSet::from([smelt_event_protocol::Capability::new(
+                smelt_event_protocol::CORE_CAPABILITY_CONVERSATION_WAKE,
             )
             .unwrap()]),
         )
@@ -2855,7 +2866,8 @@ fn push_snapshot_reaches_control_client_and_watchers_and_drops_dead_ones() {
 
     let mut line = String::new();
     BufReader::new(w_client).read_line(&mut line).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let mut mirror = nothing_sent();
+    let v = decode_frame(&mut mirror, &line);
     assert!(v.get("snapshot").is_some());
 }
 
@@ -2932,7 +2944,8 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     push_acp_snapshot_since(&sess, false, None);
     let mut incremental = String::new();
     reader.read_line(&mut incremental).unwrap();
-    let incremental: serde_json::Value = serde_json::from_str(&incremental).unwrap();
+    let mut mirror = nothing_sent();
+    let incremental = decode_frame(&mut mirror, &incremental);
     assert!(
         incremental["snapshot"].get("runtime_debug").is_none(),
         "普通流式帧不应重复携带完整 provider payload"
@@ -2941,7 +2954,7 @@ fn runtime_debug_sidecar_is_sent_only_on_changed_frames() {
     push_acp_snapshot_with_runtime_debug_for_test(&sess);
     let mut changed = String::new();
     reader.read_line(&mut changed).unwrap();
-    let changed: serde_json::Value = serde_json::from_str(&changed).unwrap();
+    let changed = decode_frame(&mut mirror, &changed);
     assert_eq!(
         changed["snapshot"]["runtime_debug"]["modelCalls"][0]["payload"]["messages"][0]["content"],
         "hello"
@@ -2980,7 +2993,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let response = decode_frame(&mut nothing_sent(), &line);
     assert_eq!(response["snapshot"]["entries_offset"], 0);
     assert_eq!(response["snapshot"]["entries"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -3013,6 +3026,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
             &slot,
             server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-turn-failed",
             "acp-client",
@@ -3032,7 +3046,7 @@ fn window_link_carries_entries_written_as_the_turn_closes() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let frame = decode_frame(&mut nothing_sent(), &line);
     assert_eq!(frame["live"]["history_len"], 2);
     assert!(frame["live"]["open_turn"].as_array().unwrap().is_empty());
     assert_eq!(frame["snapshot"]["entries_offset"], 1);
@@ -3077,6 +3091,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
             &slot,
             server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-hosted-turn-failed",
             "acp-client",
@@ -3105,7 +3120,7 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
 
     let mut line = String::new();
     BufReader::new(client).read_line(&mut line).unwrap();
-    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let frame = decode_frame(&mut nothing_sent(), &line);
     assert_eq!(frame["snapshot"]["entries_offset"], 3);
     assert_eq!(frame["snapshot"]["entries_total"], 4);
     let entries = frame["snapshot"]["entries"].as_array().unwrap();
@@ -3123,7 +3138,8 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     push_acp_snapshot_since(&sess, false, None);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
-    let first: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let mut mirror = nothing_sent();
+    let first = decode_frame(&mut mirror, &line);
     assert!(
         first["snapshot"].get("tool_debug").is_none(),
         "没变过的工具参数表不该出现在增量帧里"
@@ -3143,7 +3159,7 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     push_acp_snapshot_since(&sess, false, Some(0));
     line.clear();
     reader.read_line(&mut line).unwrap();
-    let changed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let changed = decode_frame(&mut mirror, &line);
     assert_eq!(
         changed["snapshot"]["tool_debug"]["tool-1"]["raw_input"]["cmd"],
         "ls"
@@ -3152,7 +3168,7 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     push_acp_snapshot_since(&sess, false, None);
     line.clear();
     reader.read_line(&mut line).unwrap();
-    let later: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let later = decode_frame(&mut mirror, &line);
     assert!(
         later["snapshot"].get("tool_debug").is_none(),
         "参数表没再变时，下一帧必须省略整表"
@@ -3174,6 +3190,7 @@ fn kill_removes_session_and_closes_connections() {
             &slot,
             c_server,
             Vec::new(),
+            nothing_sent(),
             0,
             "acp-3",
             "acp-test",
@@ -3206,7 +3223,7 @@ fn kill_removes_session_and_closes_connections() {
     let mut tail = String::new();
     BufReader::new(c_client).read_to_string(&mut tail).unwrap();
     let mut lines = tail.lines();
-    let payload: serde_json::Value = serde_json::from_str(lines.next().expect("终态快照")).unwrap();
+    let payload = decode_frame(&mut nothing_sent(), lines.next().expect("终态快照"));
     let final_snapshot: smelt_core::acp_session::ConversationSnapshot =
         serde_json::from_value(payload["snapshot"].clone()).unwrap();
     assert_eq!(
@@ -3793,6 +3810,35 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
 }
 
 #[test]
+fn daemon_phase_keeps_working_while_background_work_outlives_the_turn() {
+    use smelt_core::acp_session::{AcpTurnOutcome, BackgroundTaskStatus, BackgroundTaskView};
+
+    let mut state = AcpSessionState::default();
+    state.phase = DaemonPhase::Idle;
+    state.turn_outcome = Some(AcpTurnOutcome::Succeeded);
+    state.background_tasks = vec![BackgroundTaskView {
+        id: "bg-1".into(),
+        title: "测试".into(),
+        command: "npm test".into(),
+        status: BackgroundTaskStatus::Running,
+        exit_code: None,
+        output: String::new(),
+        started_at_ms: 10,
+        finished_at_ms: None,
+        tool_call_id: None,
+    }];
+    assert_eq!(
+        compute_acp_daemon_phase(&state),
+        Phase::ExecutingTool,
+        "回合说完了但后台还在跑，对外不能是空闲或完成"
+    );
+
+    state.background_tasks[0].status = BackgroundTaskStatus::Stopped;
+    state.completed_unread = true;
+    assert_eq!(compute_acp_daemon_phase(&state), Phase::Succeeded);
+}
+
+#[test]
 fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
     use smelt_core::acp_session::AcpTurnOutcome;
 
@@ -3915,36 +3961,6 @@ fn acp_open_request_rejects_legacy_cmd() {
 }
 
 #[test]
-fn acp_open_request_keeps_agent_session_identity_separate_from_execution_provider() {
-    let req = parse_acp_open_request(&serde_json::json!({
-        "id": "acp-agent-session",
-        "launch": {"command": "codex"},
-        "agent": "codex",
-        "agent_session": {
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy-run",
-                "resource_id": "run-1"
-            }
-        }
-    }))
-    .unwrap();
-
-    assert_eq!(req.launch.command, "codex");
-    let binding = req.agent_session.unwrap();
-    assert_eq!(binding.agent.contribution_id.as_str(), "quant-agent");
-    assert_eq!(binding.controller.contribution_id.as_str(), "quant-session");
-}
-
-#[test]
 fn acp_open_invalid_request_still_returns_ended_snapshot() {
     let (server, client) = UnixStream::pair().unwrap();
     let reader = BufReader::new(server.try_clone().unwrap());
@@ -3981,191 +3997,9 @@ fn acp_open_rejects_malformed_conversation_state_instead_of_erasing_it() {
     let malformed_binding = parse_acp_open_request(&serde_json::json!({
         "id": "acp-malformed-binding",
         "launch": {"command": "codex"},
-        "conversation_binding": {"type": "plugin"}
+        "conversation_binding": {"type": "automation"}
     }));
     assert!(malformed_binding.is_none());
-
-    let malformed_agent = parse_acp_open_request(&serde_json::json!({
-        "id": "acp-malformed-agent",
-        "launch": {"command": "codex"},
-        "agent_session": {
-            "agent": {"plugin_id": "com.example.quant"}
-        }
-    }));
-    assert!(malformed_agent.is_none());
-}
-
-#[test]
-fn agent_session_without_plugin_binding_never_falls_through_to_local_acp() {
-    let session = make_acp_session("acp-agent-without-route", AcpSessionState::default());
-    *session.agent_session.lock().unwrap() = Some(
-        serde_json::from_value(serde_json::json!({
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy-run",
-                "resource_id": "run-1"
-            }
-        }))
-        .unwrap(),
-    );
-    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
-    let (_event_tx, event_rx) = smol::channel::unbounded();
-    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
-        cmd_tx,
-        event_rx,
-        stdio: Arc::new(Mutex::new(None)),
-        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        supports_mid_turn_input: false,
-        supports_compaction: false,
-        supports_native_queue: false,
-        supports_rewind: false,
-    });
-
-    let result = dispatch_conversation_input_with(
-        &session,
-        smelt_core::conversation::ConversationInput::new("do not send locally".into(), Vec::new()),
-        &new_event_hub(),
-        |_plugin_id, _route, _input, _agent_preset, _agent_session| {
-            panic!("missing binding must not invent a plugin route")
-        },
-    );
-
-    assert!(result.is_err());
-    assert!(cmd_rx.try_recv().is_err());
-}
-
-#[test]
-fn restored_agent_session_must_match_the_declared_contribution_graph() {
-    use smelt_plugin_api::{
-        Contribution, ContributionId, InvocationOperation, PluginContributionSet, PluginId,
-    };
-
-    let plugin_id = PluginId::new("com.example.quant").unwrap();
-    let input_id = ContributionId::new("quant-input").unwrap();
-    let controller_id = ContributionId::new("quant-session").unwrap();
-    let agent_id = ContributionId::new("quant-agent").unwrap();
-    let set = PluginContributionSet {
-        plugin_id: plugin_id.clone(),
-        name: "Quant".into(),
-        version: "1.0.0".into(),
-        contributions: vec![
-            Contribution::InputRoute {
-                id: input_id.clone(),
-                operation: InvocationOperation::new("submit").unwrap(),
-            },
-            Contribution::SessionController {
-                id: controller_id.clone(),
-                input_route: input_id.clone(),
-            },
-            Contribution::Agent {
-                id: agent_id,
-                name: "Quant".into(),
-                icon: None,
-                controller: controller_id,
-            },
-        ],
-    };
-    let binding = smelt_core::conversation::ConversationBinding::Plugin {
-        plugin_id,
-        route: smelt_plugin_api::PluginInputRouteBinding {
-            contribution_id: input_id,
-            context: serde_json::json!({"strategy_id": "strategy-1"}),
-        },
-    };
-    let mut agent_session: smelt_plugin_api::AgentSessionBinding =
-        serde_json::from_value(serde_json::json!({
-            "agent": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-agent"
-            },
-            "controller": {
-                "plugin_id": "com.example.quant",
-                "contribution_id": "quant-session"
-            },
-            "instance": {
-                "plugin_id": "com.example.quant",
-                "resource_type": "strategy",
-                "resource_id": "strategy-1"
-            }
-        }))
-        .unwrap();
-
-    assert!(
-        validate_conversation_state(
-            Some(&binding),
-            Some(&agent_session),
-            std::slice::from_ref(&set)
-        )
-        .is_ok()
-    );
-    agent_session.controller.contribution_id = ContributionId::new("other-session").unwrap();
-    assert!(validate_conversation_state(Some(&binding), Some(&agent_session), &[set]).is_err());
-}
-
-#[test]
-fn direct_conversation_must_not_touch_plugin_runtime() {
-    use smelt_core::conversation::ConversationBinding;
-
-    assert!(!conversation_needs_plugin_contributions(None, None));
-    assert!(!conversation_needs_plugin_contributions(
-        Some(&ConversationBinding::Direct),
-        None
-    ));
-    assert!(!conversation_needs_plugin_contributions(
-        Some(&ConversationBinding::Automation {
-            run_id: "run-1".into()
-        }),
-        None
-    ));
-    assert!(validate_conversation_state(Some(&ConversationBinding::Direct), None, &[]).is_ok());
-}
-
-#[test]
-fn plugin_conversation_requires_contribution_identity() {
-    use smelt_core::conversation::ConversationBinding;
-    use smelt_plugin_api::{ContributionId, PluginId};
-
-    let binding = ConversationBinding::Plugin {
-        plugin_id: PluginId::new("com.example.quant").unwrap(),
-        route: smelt_plugin_api::PluginInputRouteBinding {
-            contribution_id: ContributionId::new("quant-input").unwrap(),
-            context: serde_json::json!({}),
-        },
-    };
-    assert!(conversation_needs_plugin_contributions(
-        Some(&binding),
-        None
-    ));
-    assert!(conversation_needs_plugin_contributions(
-        Some(&ConversationBinding::Direct),
-        Some(
-            &serde_json::from_value(serde_json::json!({
-                "agent": {
-                    "plugin_id": "com.example.quant",
-                    "contribution_id": "quant-agent"
-                },
-                "controller": {
-                    "plugin_id": "com.example.quant",
-                    "contribution_id": "quant-session"
-                },
-                "instance": {
-                    "plugin_id": "com.example.quant",
-                    "resource_type": "strategy",
-                    "resource_id": "strategy-1"
-                }
-            }))
-            .unwrap()
-        )
-    ));
 }
 
 #[test]

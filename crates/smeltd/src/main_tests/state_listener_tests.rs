@@ -1,6 +1,6 @@
 use super::*;
 use smelt_event_bus::Delivery;
-use smelt_plugin_api::{
+use smelt_event_protocol::{
     CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, DeliveryClass, PluginId,
     SessionStateChanged, SubscriptionId, Topic,
 };
@@ -37,10 +37,9 @@ fn next_session_event(
     }
 }
 
-/// Grok 会在启动时查询 `OSC 11`。这个用例刻意不创建任何 desktop client：守护
-/// 先解析该查询、再由泵在网格锁释放后写回 PTY，覆盖首个 attachment 尚未挂上的竞态。
-#[test]
-fn osc11_is_answered_before_any_client_attaches() {
+/// 一个输出接到管道的会话：先把 `script` 喂给守护的终端，再按泵的顺序写回颜色查询，
+/// 返回写回 PTY 的全部字节。
+fn color_replies_for(script: &[u8]) -> String {
     let mut fds = [0i32; 2];
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() 失败");
     let mut probe = unsafe { std::fs::File::from_raw_fd(fds[0]) };
@@ -55,7 +54,7 @@ fn osc11_is_answered_before_any_client_attaches() {
     let mut term = new_daemon_term(24, 80, listener);
     let mut parser: Processor = Processor::new();
 
-    parser.advance(&mut term, b"\x1b]11;?\x07");
+    parser.advance(&mut term, script);
 
     let session = Session {
         instance: next_session_instance(),
@@ -86,11 +85,28 @@ fn osc11_is_answered_before_any_client_attaches() {
     flush_terminal_color_replies(&session);
 
     let mut bytes = [0u8; 128];
-    let n = probe.read(&mut bytes).expect("应收到 OSC 11 回应");
-    let reply = String::from_utf8_lossy(&bytes[..n]);
+    let n = probe.read(&mut bytes).expect("应收到颜色查询的回应");
+    String::from_utf8_lossy(&bytes[..n]).into_owned()
+}
+
+/// Grok 会在启动时查询 `OSC 11`。这个用例刻意不创建任何 desktop client：守护
+/// 先解析该查询、再由泵在网格锁释放后写回 PTY，覆盖首个 attachment 尚未挂上的竞态。
+#[test]
+fn osc11_is_answered_before_any_client_attaches() {
+    let reply = color_replies_for(b"\x1b]11;?\x07");
     assert!(
         reply.starts_with("\x1b]11;rgb:"),
         "应为 OSC 11 RGB 回应，实际: {reply:?}"
+    );
+}
+
+/// 程序自己用 OSC 11 换了底色再查，要回它换的那个色，不是主题色。
+#[test]
+fn color_query_reports_the_color_the_program_set() {
+    let reply = color_replies_for(b"\x1b]11;rgb:01/02/03\x07\x1b]11;?\x07");
+    assert!(
+        reply.starts_with("\x1b]11;rgb:0101/0202/0303"),
+        "应回程序改过的底色，实际: {reply:?}"
     );
 }
 
@@ -276,7 +292,7 @@ fn send_event_broadcasts_to_subscribers() {
     let state: SessionStateChanged =
         serde_json::from_value(event.envelope.payload.clone()).unwrap();
     assert_eq!(state.session_id, "t");
-    assert_eq!(state.phase, smelt_plugin_api::CoreSessionPhase::Idle);
+    assert_eq!(state.phase, smelt_event_protocol::CoreSessionPhase::Idle);
     assert_eq!(state.title, None);
     assert!(state.updated_at_unix_seconds > 0);
 }
@@ -337,7 +353,10 @@ fn broadcast_rejects_an_older_revision_after_a_newer_one() {
     let event = next_session_event(&events);
     let state: SessionStateChanged =
         serde_json::from_value(event.envelope.payload.clone()).unwrap();
-    assert_eq!(state.phase, smelt_plugin_api::CoreSessionPhase::Succeeded);
+    assert_eq!(
+        state.phase,
+        smelt_event_protocol::CoreSessionPhase::Succeeded
+    );
     assert!(
         matches!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
         "旧 revision 不应再广播"

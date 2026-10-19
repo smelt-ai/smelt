@@ -64,7 +64,7 @@ make help                   # 查看全部构建目标
 跑测试与类型检查：
 
 ```sh
-make check-all              # rustfmt + clippy + 测试 + 插件 SDK
+make check-all              # rustfmt + clippy + 测试 + Pi Agent
 make test                   # cargo nextest（与 CI 同一运行器）
 ```
 

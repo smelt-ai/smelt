@@ -15,9 +15,11 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::diff::Diff;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::{ActiveTheme, h_flex, v_flex};
+use gpui_component::tag::Tag;
+use gpui_component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 
 use crate::git_log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
 use crate::ui_theme;
@@ -180,16 +182,11 @@ fn commit_row(
         // 引用标签（分支 / tag）。最多两个、每个限宽——CI 生成的
         // tag 名能长到 `3242.67318.0.f5206a4c`，不限宽会把标题挤没。
         .children(commit.refs.iter().take(2).map(|r| {
-            div()
+            Tag::info()
+                .small()
                 .flex_none()
                 .max_w(px(120.))
-                .truncate()
-                .px_1()
-                .rounded_sm()
-                .text_xs()
-                .bg(ui_theme::tint(ui_theme::blue(), 0x33))
-                .text_color(rgb(ui_theme::text_mid()))
-                .child(r.clone())
+                .child(div().min_w_0().truncate().child(r.clone()))
         }))
         .child(
             div()
@@ -335,23 +332,17 @@ pub fn git_log_view(
                         .child(filter_summary(state, head_branch.as_deref())),
                 )
                 .child(
-                    div()
-                        .id("git-log-reload")
-                        .px_3()
-                        .py(px(4.))
-                        .rounded_full()
-                        .cursor_pointer()
-                        .text_xs()
-                        .bg(rgb(ui_theme::action_fill()))
-                        .text_color(rgb(ui_theme::action_on()))
-                        .hover(|d| d.opacity(0.8))
+                    Button::new("git-log-reload")
+                        .primary()
+                        .xsmall()
+                        .rounded(px(999.))
+                        .label("刷新")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let root = this.cur().and_then(|s| s.cwd(cx));
+                            let root = this.current_local_cwd(cx);
                             if let Some(r) = root {
                                 this.reload_git_log(r, cx);
                             }
-                        }))
-                        .child("刷新"),
+                        })),
                 ),
         )
         .child(div().flex_1().min_h_0().flex().child(list))

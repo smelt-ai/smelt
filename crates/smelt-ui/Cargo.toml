@@ -11,13 +11,18 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-smelt-core = { path = "../smelt-core" }
-smelt-store = { path = "../smelt-store" }
+smelt-sys = { path = "../smelt-sys" }
+smelt-model = { path = "../smelt-model" }
+smelt-client = { path = "../smelt-client" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-client-store = { path = "../smelt-client-store" }
+# 智能体配置的修改按顺序排队提交给运行时（agent_host_state）。
+smol = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "1e7ffaa6d1c0c230cb84099584e6c057531d5a5d" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "1e7ffaa6d1c0c230cb84099584e6c057531d5a5d", features = ["tree-sitter-languages"] }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "eec1208dd57d8bc8abc769fd833d181d297790f9", features = ["tree-sitter-languages"] }
 # mermaid 代码块画图，见 markdown_mermaid.rs 文件头注释；版本锁定理由同处。
 rusty-mermaid = { version = "=0.2.0", features = ["svg"] }
 sha2 = "0.10"
@@ -27,5 +32,8 @@ sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
+# 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
+smelt-core = { path = "../smelt-core" }
+smelt-store = { path = "../smelt-store" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }

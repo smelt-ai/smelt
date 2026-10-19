@@ -191,29 +191,32 @@ fn import_loopback_restores_live_session() {
     assert_eq!(sess.ctl.lock().unwrap().cols, 80);
     drop(term);
 
-    // fd 接管：往写端写，adopt 的 master 能读出来。按住 output_gate 让 pump
-    // 暂停（门闩的本来用途），排除 pump 抢读 race，断言完全确定。
+    // fd 接管：往 predecessor 的写端写，字节要从 adopt 的 master 出来。接管后的会话
+    // 已经有 PTY 泵在读同一个 fd，泵先 read 再拿 output_gate，按住门闩挡不住它抢读；
+    // 所以两条路都认：测试直接从 master 读到，或者泵已经把它画进了终端网格。
     live.write_end.write_all(b"ping").unwrap();
-    let _pump_hold = sess.output_gate.lock().unwrap();
     let master = sess.ctl.lock().unwrap().master.try_clone().unwrap();
     let mut buf = [0u8; 4];
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         match (&master).read(&mut buf) {
-            Ok(4) => break,
-            Ok(_) => panic!("pipe 字节不应被拆读"),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "adopt 的 master 读不到 predecessor 写端的字节"
-                );
-                std::thread::sleep(Duration::from_millis(10));
+            Ok(4) => {
+                assert_eq!(&buf, b"ping");
+                break;
             }
+            Ok(_) => panic!("pipe 字节不应被拆读"),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => panic!("adopt 的 master 读失败：{error}"),
         }
+        if visible_text(&sess.term.lock().unwrap()).contains("ping") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "adopt 的 master 读不到 predecessor 写端的字节"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(&buf, b"ping");
-    drop(_pump_hold);
     drop(sess);
 
     // listener 接管：新连接能进 backlog 且被 adopt 的 fd accept。

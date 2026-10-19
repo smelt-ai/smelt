@@ -79,7 +79,8 @@ pub(crate) fn acp_runtime_available(sess: &AcpSession) -> bool {
 
 /// 这个动作要不要真正的 runtime。只读镜像的动作不必为它拉起进程。取消闲置会话
 /// 本来就没有可取消的。刷新模型目录由 GUI 在登录新 provider 后广播给所有对话，
-/// 挂起的会话醒来时本就会重新取一遍，不值得为它全部唤醒。
+/// 挂起的会话醒来时本就会重新取一遍，不值得为它全部唤醒。有后台任务在跑的会话
+/// 不会被挂起，所以挂起的会话也没有后台任务可停。
 pub(crate) fn acp_action_needs_runtime(action: &smelt_core::acp_session::AcpUserAction) -> bool {
     use smelt_core::acp_session::AcpUserAction;
     !matches!(
@@ -88,6 +89,7 @@ pub(crate) fn acp_action_needs_runtime(action: &smelt_core::acp_session::AcpUser
             | AcpUserAction::HistoryPage { .. }
             | AcpUserAction::Cancel
             | AcpUserAction::RefreshModels
+            | AcpUserAction::StopBackgroundTask { .. }
     )
 }
 
@@ -137,10 +139,7 @@ pub(crate) fn acp_suspend_blocker(
     }
     if matches!(
         &*sess.conversation_binding.lock().unwrap(),
-        Some(
-            smelt_core::conversation::ConversationBinding::Automation { .. }
-                | smelt_core::conversation::ConversationBinding::Plugin { .. }
-        )
+        Some(smelt_core::conversation::ConversationBinding::Automation { .. })
     ) {
         return Some("daemon-owned binding");
     }

@@ -3,7 +3,7 @@
 use super::*;
 use crate::settings::memory::{MemorySettingsForm, rerank_model_label};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
-use smelt_core::memory_settings::RerankModel;
+use smelt_model::memory_settings::RerankModel;
 
 const DESCRIPTION: &str = "按问题把相关的记忆附到对话里。关键词检索总是开着；重排模型和向量检索都可选，不可用时自动退回。";
 
@@ -49,7 +49,7 @@ fn render_rerank_model(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyEle
                         auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
                     }),
             );
-            let groups = smelt_core::pi_model_settings::list_pi_model_choice_groups();
+            let groups = crate::settings::pi_model_choice_groups(cx);
             if !groups.is_empty() {
                 menu = menu.separator();
             }

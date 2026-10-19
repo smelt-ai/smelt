@@ -1,0 +1,121 @@
+<!doctype html>
+<!--
+  Smelt 远程桌面页：noVNC 的 RFB 客户端，经本机转发口（见 smelt-runtime-client 的 desktop 模块）
+  连到运行时那台机器的 VNC。宿主调 window.smelt.setControl(on) 切换接管和只看。
+  事件经 window.ipc.postMessage 报给宿主（wry 的 IPC），没有宿主时静默：
+    connected / disconnected：连接状态；clipboard：远端复制的文字；
+    text：本机输入法上屏的文字，宿主交给运行时整段注入。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>远程桌面</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+  #screen { width: 100%; height: 100%; }
+  #status {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #9a9a9a; font: 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    pointer-events: none;
+  }
+  /* 接键盘的输入元素：看不见，但跟着最后一次点击走，输入法候选窗就出在那附近。 */
+  #ime {
+    position: fixed; left: 0; top: 0; width: 1px; height: 18px; padding: 0; border: 0;
+    opacity: 0; resize: none; overflow: hidden; outline: none; caret-color: transparent;
+    font-size: 16px;
+  }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="status">正在连接远程桌面…</div>
+<textarea id="ime" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+<script type="module">
+import RFB from './core/rfb.js';
+
+const params = new URLSearchParams(location.search);
+const url = `ws://${location.host}/ws?token=${encodeURIComponent(params.get('token') || '')}`;
+const screen = document.getElementById('screen');
+const status = document.getElementById('status');
+const ime = document.getElementById('ime');
+let controlling = params.get('control') === '1';
+
+function post(message) {
+  try {
+    if (window.ipc) window.ipc.postMessage(JSON.stringify(message));
+  } catch (_) {}
+}
+
+const rfb = new RFB(screen, url, { shared: true });
+rfb.scaleViewport = true;
+rfb.resizeSession = false;
+rfb.showDotCursor = true;
+rfb.qualityLevel = 6;
+rfb.compressionLevel = 2;
+// 点画面时焦点给 #ime，不给画布（见下）。
+rfb.focusOnClick = false;
+// noVNC 的键盘只能挂在画布上，而画布不是可编辑元素，本机输入法没法在上面拼字。把它改挂到
+// #ime 上：普通按键照旧由 noVNC 换成 keysym 发出去，拼字交给输入法。改的是 noVNC 1.6.0 的
+// 私有字段，noVNC 固定在仓库里，升级时要回来看一眼。
+rfb._keyboard._target = ime;
+rfb.viewOnly = !controlling;
+
+rfb.addEventListener('connect', () => {
+  status.style.display = 'none';
+  post({ event: 'connected' });
+  if (controlling) ime.focus({ preventScroll: true });
+});
+rfb.addEventListener('disconnect', (event) => {
+  status.style.display = 'flex';
+  status.textContent = event.detail.clean ? '远程桌面已断开' : '和远程桌面的连接断了';
+  post({ event: 'disconnected', clean: event.detail.clean });
+});
+rfb.addEventListener('clipboard', (event) => post({ event: 'clipboard', text: event.detail.text }));
+
+// 点哪里，输入元素就挪到哪里并拿到焦点；鼠标本身照常由 noVNC 发给远端。
+screen.addEventListener('pointerdown', (event) => {
+  if (!controlling) return;
+  ime.style.left = `${event.clientX}px`;
+  ime.style.top = `${event.clientY}px`;
+  setTimeout(() => ime.focus({ preventScroll: true }), 0);
+}, true);
+
+// 拼字中的按键归输入法：抢在 noVNC 之前截下，不往远端发、也不阻止默认行为，
+// 否则输入法会被打断，拼音原样发过去。
+function composing(event) {
+  return event.isComposing || event.keyCode === 229;
+}
+// Cmd+V 粘的是本机剪贴板：同样绕开 noVNC，让浏览器把文字粘进 #ime，再整段交出去。
+function pasting(event) {
+  return event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'v';
+}
+for (const type of ['keydown', 'keyup']) {
+  window.addEventListener(type, (event) => {
+    if (event.target === ime && (composing(event) || pasting(event))) event.stopPropagation();
+  }, true);
+}
+
+function sendText(text) {
+  ime.value = '';
+  if (controlling && text) post({ event: 'text', text });
+}
+// 输入法上屏的整段文字交给宿主，由运行时注入远端当前聚焦的窗口。
+ime.addEventListener('compositionend', (event) => sendText(event.data));
+// 不经拼字直接写进来的文字（表情、听写），同样整段交出去。
+ime.addEventListener('input', (event) => {
+  if (!event.isComposing && ime.value) sendText(ime.value);
+});
+
+window.smelt = {
+  /** 接管或交还。只看时鼠标键盘都不发。 */
+  setControl(on) {
+    controlling = on;
+    rfb.viewOnly = !on;
+    if (on) ime.focus({ preventScroll: true });
+    else ime.blur();
+  },
+};
+</script>
+</body>
+</html>

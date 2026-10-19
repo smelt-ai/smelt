@@ -1,0 +1,34 @@
+[package]
+name = "smelt-client"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+# 桌面客户端（和移动端网关）访问运行时的部分：状态订阅、ACP 会话连接、会话与自动化
+# 的守护操作。只走协议，不依赖 smelt-core 和运行时的库（设计文档 P1）。
+
+[dependencies]
+smelt-client-store = { path = "../smelt-client-store" }
+smelt-sys = { path = "../smelt-sys" }
+anyhow = "1"
+dirs = "5"
+libc = "0.2"
+reqwest = { version = "0.12", features = ["json"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+url = "2"
+smelt-event-protocol = { path = "../smelt-event-protocol" }
+smelt-model = { path = "../smelt-model" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+smelt-paths = { path = "../smelt-paths" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# 测试要用运行时的归约器造快照，只在测试里依赖。
+smelt-core = { path = "../smelt-core", features = ["test-support"] }
+tempfile = "3"

@@ -187,8 +187,8 @@ impl Workspace {
         entity: Entity<Workspace>,
         cx: &App,
     ) -> AnyElement {
-        let stored = stored_default_conversation_agent();
-        let resolution = smelt_core::default_conversation::resolve_new_conversation(
+        let stored = stored_default_conversation_agent(cx);
+        let resolution = smelt_model::default_conversation::resolve_new_conversation(
             &cx.global::<settings::AgentHostState>().agents,
             stored.as_deref(),
             self.agent_surface.conversation_draft_id.as_deref(),
@@ -199,7 +199,7 @@ impl Workspace {
             .as_deref()
             .map(|name| conversation_agent_mark(Some(name)));
         match resolution.intent {
-            smelt_core::default_conversation::NewConversationIntent::PickAgent => self
+            smelt_model::default_conversation::NewConversationIntent::PickAgent => self
                 .render_new_conversation_picker(
                     entity,
                     label,
@@ -207,14 +207,14 @@ impl Workspace {
                     resolution.clear_stored_default,
                     cx,
                 ),
-            smelt_core::default_conversation::NewConversationIntent::Start { agent_id } => self
+            smelt_model::default_conversation::NewConversationIntent::Start { agent_id } => self
                 .render_new_conversation_action(
                     entity,
                     label,
                     mark,
                     Some((agent_id, resolution.ready)),
                 ),
-            smelt_core::default_conversation::NewConversationIntent::CreateAgent => {
+            smelt_model::default_conversation::NewConversationIntent::CreateAgent => {
                 self.render_new_conversation_action(entity, label, mark, None)
             }
         }
@@ -227,7 +227,7 @@ impl Workspace {
         mark: Option<String>,
         switch: Option<(
             String,
-            Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+            Vec<smelt_model::default_conversation::ConversationAgentChoice>,
         )>,
     ) -> AnyElement {
         let click_entity = entity.clone();
@@ -285,7 +285,7 @@ impl Workspace {
         &self,
         entity: Entity<Workspace>,
         label: String,
-        ready: Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+        ready: Vec<smelt_model::default_conversation::ConversationAgentChoice>,
         clear_stored: bool,
         cx: &App,
     ) -> AnyElement {
@@ -305,9 +305,9 @@ impl Workspace {
                     .accessibility_label(label.clone())
                     .child(new_conversation_row_body(label, None).w_full())
                     // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
-                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
                         if clear_stored {
-                            clear_default_conversation_agent();
+                            clear_default_conversation_agent(cx);
                         }
                         fill_conversation_agent_menu(
                             menu,
@@ -321,11 +321,11 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn render_product_conversation_nav(
+    /// 侧栏「最近对话」。跟项目在同一个滚动区里，收起时只列几条。
+    pub(crate) fn render_product_conversation_nav(
         &self,
         entity: Entity<Workspace>,
         statuses: &[AgentStatus],
-        _animate_running: bool,
         cx: &App,
     ) -> AnyElement {
         let config = cx.global::<settings::AgentHostState>();
@@ -340,12 +340,28 @@ impl Workspace {
             .iter()
             .map(|&ix| self.sessions[ix].effective_updated_at(cx))
             .collect();
-        let ixes: Vec<usize> = recent_conversation_order(&updated)
+        let ordered: Vec<(usize, u64)> = recent_conversation_order(&updated)
             .into_iter()
-            .map(|order| product[order])
+            .map(|order| (product[order], updated[order]))
             .collect();
+        let selected_sid = if self.active_tab() == &WorkspaceRoute::Agents {
+            self.nav.agents().conversation_sid()
+        } else {
+            None
+        };
+        let selected_pos = selected_sid.and_then(|sid| {
+            ordered.iter().position(|&(ix, _)| {
+                self.sessions[ix]
+                    .active_acp()
+                    .is_some_and(|view| view.read(cx).session_id().to_string() == sid)
+            })
+        });
+        let expanded = self.sidebar_recent_conversations_expanded;
+        let shown = visible_recent_conversations(ordered.len(), selected_pos, expanded);
+        let hidden = ordered.len() - shown.len();
+        let now = chrono::Local::now();
         let mut rows = Vec::new();
-        for &ix in &ixes {
+        for (ix, updated_at) in shown.into_iter().map(|pos| ordered[pos]) {
             let Some(session) = self.sessions.get(ix) else {
                 continue;
             };
@@ -353,8 +369,8 @@ impl Workspace {
                 continue;
             };
             let sid = view.read(cx).session_id().to_string();
-            let selected = self.active_tab() == &WorkspaceRoute::Agents
-                && self.nav.agents().conversation_sid() == Some(sid.as_str());
+            let selected = selected_sid == Some(sid.as_str());
+            let updated_text = crate::session_list::row::session_updated_at_text(updated_at, &now);
             let title = conversation_row_title(
                 session.custom_title.as_deref(),
                 view.read(cx).auto_title().as_deref(),
@@ -380,8 +396,8 @@ impl Workspace {
                 div()
                     .id(format!("product-conversation-{sid}"))
                     .group("product-conv-row")
-                    .h(crate::ui_theme::height::md())
                     .px_2()
+                    .py(px(6.))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -408,18 +424,36 @@ impl Workspace {
                             .text_color(conversation_icon_color(status, None))
                             .child(mark),
                     )
+                    // 跟项目下的会话行一样两行：标题，下面是最近活动时间。
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .text_color(rgb(if selected {
-                                crate::ui_theme::text_bright()
-                            } else {
-                                crate::ui_theme::text()
-                            }))
-                            .truncate()
-                            .child(title),
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .line_height(px(16.))
+                                    .text_sm()
+                                    .text_color(rgb(if selected {
+                                        crate::ui_theme::text_bright()
+                                    } else {
+                                        crate::ui_theme::text()
+                                    }))
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .line_height(px(14.))
+                                    .text_xs()
+                                    .text_color(rgb(crate::ui_theme::text_faint()))
+                                    .truncate()
+                                    .child(updated_text),
+                            ),
                     )
                     .children(
                         crate::session_list::row::session_row_status_label(status).map(|label| {
@@ -450,10 +484,10 @@ impl Workspace {
                                         cx.stop_propagation()
                                     })
                                     .child(Icon::new(IconName::Close).size(px(14.)))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
                                         close_entity.update(cx, |workspace, cx| {
-                                            workspace.close_session(open_ix, cx)
+                                            workspace.request_close_session(open_ix, window, cx)
                                         });
                                     }),
                             ),
@@ -482,18 +516,27 @@ impl Workspace {
                     .into_any_element(),
             );
         }
+        let toggle_label = (ordered.len() > SIDEBAR_RECENT_CONVERSATION_LIMIT).then(|| {
+            if expanded {
+                "收起".to_string()
+            } else {
+                format!("显示其余 {hidden} 个")
+            }
+        });
         div()
+            .px_2()
             .pt_1()
+            .pb_1()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(1.))
             .child(
                 div()
                     .px_2()
                     .pb_1()
-                    .text_sm()
+                    .text_xs()
                     .font_medium()
-                    .text_color(rgb(crate::ui_theme::text_faint()))
+                    .text_color(rgb(crate::ui_theme::text_muted()))
                     .child("最近对话"),
             )
             .map(|section| {
@@ -511,6 +554,29 @@ impl Workspace {
                 } else {
                     section.children(rows)
                 }
+            })
+            .when_some(toggle_label, |section, label| {
+                section.child(
+                    div()
+                        .id("recent-conversations-toggle")
+                        .px_2()
+                        .h(crate::ui_theme::height::sm())
+                        .flex()
+                        .items_center()
+                        .rounded(crate::ui_theme::row_radius())
+                        .cursor_pointer()
+                        .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
+                        .text_xs()
+                        .text_color(rgb(crate::ui_theme::text_faint()))
+                        .child(label)
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |workspace, cx| {
+                                workspace.sidebar_recent_conversations_expanded =
+                                    !workspace.sidebar_recent_conversations_expanded;
+                                cx.notify();
+                            });
+                        }),
+                )
             })
             .into_any_element()
     }
@@ -575,29 +641,24 @@ impl Workspace {
         name: &str,
         entity: Entity<Workspace>,
         left_guard: Pixels,
-        cx: &App,
     ) -> AnyElement {
         let draft = self.editing_conversation_draft();
         let back_entity = entity.clone();
         let tabs = self.agent_surface.editor.as_ref().map(|editor| {
-            segmented_track(cx).children([AgentEditorTab::Config, AgentEditorTab::Memory].map(
-                |tab| {
-                    let selected = tab == editor.tab;
-                    let entity = entity.clone();
-                    compact_chip(match tab {
-                        AgentEditorTab::Config => "agent-editor-tab-config",
-                        AgentEditorTab::Memory => "agent-editor-tab-memory",
-                    })
-                    .label(agent_editor_tab_label(tab, editor))
-                    .selected(selected)
-                    .toggled(selected)
-                    .on_click(move |_, _, cx| {
+            const TABS: [AgentEditorTab; 2] = [AgentEditorTab::Config, AgentEditorTab::Memory];
+            let entity = entity.clone();
+            choice_tabs(
+                "agent-editor-tabs",
+                TABS.iter().position(|tab| *tab == editor.tab),
+                TABS.map(|tab| Tab::new().label(agent_editor_tab_label(tab, editor))),
+                move |ix, cx| {
+                    if let Some(tab) = TABS.get(ix).copied() {
                         entity.update(cx, |workspace, cx| {
                             workspace.select_agent_editor_tab(tab, cx)
                         });
-                    })
+                    }
                 },
-            ))
+            )
         });
         let start_entity = entity;
         product_page_chrome(left_guard)
@@ -1147,7 +1208,7 @@ impl Workspace {
             let selected = agents.iter().find(|agent| agent.id == editor_id).cloned();
             match (selected, self.agent_surface.editor.as_ref()) {
                 (Some(agent), Some(editor)) => (
-                    self.render_agent_editor_header(&agent.name, entity.clone(), left_guard, cx),
+                    self.render_agent_editor_header(&agent.name, entity.clone(), left_guard),
                     self.render_agent_config_panel(agent, editor, entity, cx),
                 ),
                 _ => (
@@ -1186,21 +1247,18 @@ impl Workspace {
     ) -> AnyElement {
         let entity = cx.entity();
         let current = self.nav.capabilities_tab();
-        // 选中块从上一个页签滑到这一个，而不是两格之间瞬间换底色。
-        let tabs = smelt_ui::segmented::segmented_track(
+        let tabs = choice_tabs(
             "capabilities-tabs",
-            smelt_ui::segmented::SegmentedVariant::Pill,
             CapabilitiesTab::ALL.iter().position(|tab| *tab == current),
-        )
-        .children(CapabilitiesTab::ALL.into_iter().map(|tab| {
-            let entity = entity.clone();
-            smelt_ui::segmented::pill_segment(tab.element_id(), tab.label(), tab == current)
-                .on_click(move |_, _, cx| {
+            CapabilitiesTab::ALL.map(|tab| Tab::new().label(tab.label())),
+            move |ix, cx| {
+                if let Some(tab) = CapabilitiesTab::ALL.get(ix).copied() {
                     entity.update(cx, |workspace, cx| {
                         workspace.select_capabilities_tab(tab, cx)
                     });
-                })
-        }));
+                }
+            },
+        );
         let header = product_page_chrome(self.chrome_left_guard(window))
             .gap_3()
             .child(
@@ -1210,7 +1268,11 @@ impl Workspace {
                     .text_color(rgb(crate::ui_theme::text_bright()))
                     .child("能力库"),
             )
-            .child(tabs);
+            .child(tabs)
+            // Pi 的模型、MCP、插件、记忆都读写本机运行时上的配置。
+            .when(crate::runtimes::has_remote_runtimes(cx), |header| {
+                header.child(crate::runtimes::local_runtime_scope_chip())
+            });
 
         div()
             .flex_1()
@@ -1297,7 +1359,7 @@ fn new_conversation_row_body(label: String, mark: Option<String>) -> Div {
 
 fn fill_conversation_agent_menu(
     mut menu: PopupMenu,
-    ready: Vec<smelt_core::default_conversation::ConversationAgentChoice>,
+    ready: Vec<smelt_model::default_conversation::ConversationAgentChoice>,
     current_id: Option<String>,
     start: bool,
     entity: Entity<Workspace>,

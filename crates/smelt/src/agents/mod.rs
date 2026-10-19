@@ -7,23 +7,25 @@
 //! 字段仍声明在 `main.rs` 的 `Workspace` 里。数据修改在 `workspace.rs`，
 //! 智能体页面在 `view.rs`，自动化页面在 `automation_view.rs`。
 
-use std::sync::Mutex;
-
 use chrono::{Local, TimeZone, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_component::button::{
+    Button, ButtonCustomVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+};
 use gpui_component::input::{Input, InputEvent, InputState, NumberInput, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::switch::Switch;
+use gpui_component::tab::{Tab, TabBar};
+use gpui_component::tag::Tag;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Selectable as _,
-    Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Sizable as _,
+    StyledExt as _,
 };
 
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
-use smelt_core::pi_plugin_catalog::{PiPlugin, discover_plugins};
+use smelt_model::pi_plugin_catalog::PiPlugin;
 use smelt_ui::IconAction as _;
 
 /// 智能体面的瞬时 UI。导航页在 [`crate::WorkspaceNav`]；这里只放选中项和编辑器。
@@ -126,10 +128,10 @@ pub(crate) struct AgentEditor {
     instructions: Entity<TextareaState>,
     /// 绑定参考链接用的输入框。目录走原生选择框，链接只能手输。
     context_link: Entity<InputState>,
-    /// 打开编辑器时扫一次磁盘的插件目录；不在渲染里扫，避免每次输入都读文件。
+    /// 运行时扫出的插件目录，取自 Workspace 的 Pi 配置快照；快照更新时跟着换。
     plugins: Vec<PiPlugin>,
-    /// `~/.pi/agent/mcp.json` 里的服务器，同样只在打开编辑器和点刷新时读。
-    mcp_servers: Vec<smelt_core::pi_mcp::PiMcpServer>,
+    /// 运行时那台机器上 `~/.pi/agent/mcp.json` 里的服务器，同上。
+    mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
     /// 同理，记忆不在渲染里扫：打开编辑器、记忆目录有变化、有对话停下来、
     /// 点刷新或删除后才重扫。
     memories: AgentMemories,
@@ -142,31 +144,25 @@ pub(crate) struct AgentEditor {
     expanded_memory: Option<(MemoryLayer, String)>,
     /// 监听两层记忆目录，智能体或外部编辑器改了文件，卡片自己刷新。跟着编辑器走：
     /// 关掉或换一个智能体时 drop，监听随之停止。
-    _memory_watcher: Option<notify::RecommendedWatcher>,
+    /// 编辑器开着时定时重取记忆的任务。
+    _memory_poll: gpui::Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
-/// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。
-#[derive(Default)]
-pub(crate) struct AgentMemories {
-    agent: smelt_core::agent_memory::MemoryListing,
-    user: smelt_core::agent_memory::MemoryListing,
-}
-
-impl AgentMemories {
-    pub(crate) fn scan(agent_id: &str) -> Self {
-        let list = |layer: MemoryLayer| {
-            layer
-                .dir(agent_id)
-                .map(|dir| smelt_core::agent_memory::list_memories(&dir, &layer.scope(agent_id)))
-                .unwrap_or_default()
-        };
-        Self {
-            agent: list(MemoryLayer::Agent),
-            user: list(MemoryLayer::User),
-        }
+impl AgentEditor {
+    /// 换上运行时新给的插件和 MCP 目录。
+    pub(crate) fn set_pi_catalog(
+        &mut self,
+        plugins: Vec<PiPlugin>,
+        mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
+    ) {
+        self.plugins = plugins;
+        self.mcp_servers = mcp_servers;
     }
 }
+
+/// 记忆卡片的两层数据：智能体自己的，和所有智能体共享的用户全局层。由运行时列出。
+pub(crate) use smelt_model::agent_memory::AgentMemories;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryLayer {
@@ -175,25 +171,18 @@ pub(crate) enum MemoryLayer {
 }
 
 impl MemoryLayer {
-    pub(crate) fn scope(self, agent_id: &str) -> smelt_core::agent_memory::MemoryScope {
+    pub(crate) fn wire(self) -> smelt_model::control_api::AgentMemoryLayer {
         match self {
-            Self::Agent => smelt_core::agent_memory::MemoryScope::Agent(agent_id.to_string()),
-            Self::User => smelt_core::agent_memory::MemoryScope::User,
-        }
-    }
-
-    pub(crate) fn dir(self, agent_id: &str) -> Option<std::path::PathBuf> {
-        match self {
-            Self::Agent => smelt_core::agent_definition_store::agent_memory_dir(agent_id),
-            Self::User => smelt_core::agent_definition_store::user_memory_dir(),
+            Self::Agent => smelt_model::control_api::AgentMemoryLayer::Agent,
+            Self::User => smelt_model::control_api::AgentMemoryLayer::User,
         }
     }
 }
 
 /// 会话是否停在两步之间。记忆的读写元数据在工具结果里落库，模型还在想或工具还在跑
 /// 时重扫可能赶在写文件之后、记元数据之前。
-pub(crate) fn session_phase_settled(phase: smelt_core::daemon_state::DaemonPhase) -> bool {
-    use smelt_core::daemon_state::DaemonPhase;
+pub(crate) fn session_phase_settled(phase: smelt_client::daemon_state::DaemonPhase) -> bool {
+    use smelt_client::daemon_state::DaemonPhase;
     !matches!(
         phase,
         DaemonPhase::Connecting | DaemonPhase::Thinking | DaemonPhase::ExecutingTool
@@ -239,17 +228,8 @@ impl MemoryFilter {
         }
     }
 
-    fn element_id(self) -> &'static str {
-        match self {
-            Self::All => "agent-memory-filter-all",
-            Self::Pending => "agent-memory-filter-pending",
-            Self::Rules => "agent-memory-filter-rules",
-            Self::Facts => "agent-memory-filter-facts",
-        }
-    }
-
-    fn matches(self, entry: &smelt_core::agent_memory::MemoryEntry) -> bool {
-        let rule = smelt_core::agent_memory::is_rule_memory_kind(entry.kind.as_deref());
+    fn matches(self, entry: &smelt_model::agent_memory::MemoryEntry) -> bool {
+        let rule = smelt_model::agent_memory::is_rule_memory_kind(entry.kind.as_deref());
         match self {
             Self::All => true,
             Self::Pending => entry.pending_reason.is_some(),
@@ -262,10 +242,10 @@ impl MemoryFilter {
 /// 记忆页签里一层要显示的记忆。搜索不分大小写，名字、描述、文件名、正文任一命中即可。
 /// 待确认要用户处理，排最前；其余按最近用过排，没用过的垫底，同档按名字。
 pub(crate) fn visible_memories<'a>(
-    entries: &'a [smelt_core::agent_memory::MemoryEntry],
+    entries: &'a [smelt_model::agent_memory::MemoryEntry],
     query: &str,
     filter: MemoryFilter,
-) -> Vec<&'a smelt_core::agent_memory::MemoryEntry> {
+) -> Vec<&'a smelt_model::agent_memory::MemoryEntry> {
     let query = query.trim().to_lowercase();
     let mut visible: Vec<_> = entries
         .iter()
@@ -323,15 +303,6 @@ impl ScheduleKind {
         }
     }
 
-    fn id_name(self) -> &'static str {
-        match self {
-            Self::Daily => "daily",
-            Self::Weekdays => "weekdays",
-            Self::Weekly => "weekly",
-            Self::Interval => "interval",
-        }
-    }
-
     fn is_interval(self) -> bool {
         matches!(self, Self::Interval)
     }
@@ -348,13 +319,6 @@ impl IntervalUnit {
         match self {
             Self::Minutes => "分钟",
             Self::Hours => "小时",
-        }
-    }
-
-    fn id_name(self) -> &'static str {
-        match self {
-            Self::Minutes => "minutes",
-            Self::Hours => "hours",
         }
     }
 }
@@ -379,19 +343,11 @@ impl IntervalDayScope {
         }
     }
 
-    fn id_name(self) -> &'static str {
-        match self {
-            Self::Everyday => "everyday",
-            Self::Weekdays => "weekdays",
-            Self::Weekly => "weekly",
-        }
-    }
-
     fn from_days(days: u8) -> Self {
-        let days = days & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
-        if days == 0 || days == smelt_core::automation::SCHEDULE_ALL_DAYS_MASK {
+        let days = days & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
+        if days == 0 || days == smelt_model::automation::SCHEDULE_ALL_DAYS_MASK {
             Self::Everyday
-        } else if days == smelt_core::automation::SCHEDULE_WEEKDAYS_MASK {
+        } else if days == smelt_model::automation::SCHEDULE_WEEKDAYS_MASK {
             Self::Weekdays
         } else {
             Self::Weekly
@@ -477,11 +433,6 @@ fn render_identity_name(input: &Entity<InputState>) -> AnyElement {
         .into_any_element()
 }
 
-fn ensure_agent_conversation_cwd(agent_definition_id: &str) -> Option<String> {
-    let dir = smelt_core::agent_definition_store::ensure_agent_space(agent_definition_id)?;
-    Some(dir.to_string_lossy().into_owned())
-}
-
 /// 侧栏「新对话」的文案。有默认时带上名字，没有就只写动作。
 fn new_conversation_row_label(agent_name: Option<&str>) -> String {
     match agent_name.map(str::trim).filter(|name| !name.is_empty()) {
@@ -490,55 +441,23 @@ fn new_conversation_row_label(agent_name: Option<&str>) -> String {
     }
 }
 
-struct DefaultConversationCache {
-    loaded: bool,
-    agent_id: Option<String>,
+/// 侧栏默认智能体。运行时配置的一部分，读缓存，不碰库。
+fn stored_default_conversation_agent(cx: &App) -> Option<String> {
+    cx.global::<settings::AgentHostState>()
+        .default_conversation_agent
+        .clone()
 }
 
-static DEFAULT_CONVERSATION_CACHE: Mutex<DefaultConversationCache> =
-    Mutex::new(DefaultConversationCache {
-        loaded: false,
-        agent_id: None,
-    });
-
-fn with_default_conversation_cache<T>(f: impl FnOnce(&mut DefaultConversationCache) -> T) -> T {
-    let mut guard = DEFAULT_CONVERSATION_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    f(&mut guard)
-}
-
-/// 侧栏默认智能体。第一次读取才碰 SQLite，之后只看这份缓存。
-fn stored_default_conversation_agent() -> Option<String> {
-    with_default_conversation_cache(|cache| {
-        if !cache.loaded {
-            cache.agent_id = smelt_core::default_conversation::load_default_conversation_agent();
-            cache.loaded = true;
-        }
-        cache.agent_id.clone()
-    })
-}
-
-fn set_default_conversation_agent(agent_id: &str) {
-    if let Err(error) = smelt_core::default_conversation::save_default_conversation_agent(agent_id)
-    {
-        eprintln!("[default-conversation] 保存默认智能体失败: {error}");
-    }
+fn set_default_conversation_agent(agent_id: &str, cx: &mut App) {
     let agent_id = agent_id.trim().to_string();
-    with_default_conversation_cache(|cache| {
-        cache.loaded = true;
-        cache.agent_id = Some(agent_id);
-    });
+    if agent_id.is_empty() {
+        return;
+    }
+    settings::apply_agent_host(move |c| c.default_conversation_agent = Some(agent_id), cx);
 }
 
-fn clear_default_conversation_agent() {
-    if let Err(error) = smelt_core::default_conversation::clear_default_conversation_agent() {
-        eprintln!("[default-conversation] 清除默认智能体失败: {error}");
-    }
-    with_default_conversation_cache(|cache| {
-        cache.loaded = true;
-        cache.agent_id = None;
-    });
+fn clear_default_conversation_agent(cx: &mut App) {
+    settings::apply_agent_host(|c| c.default_conversation_agent = None, cx);
 }
 
 /// 对话行图标色。只跟状态走：选中已经由行底色表达。
@@ -561,6 +480,24 @@ fn bound_agent_definition_id<'a>(
         return None;
     }
     definition_id.map(str::trim).filter(|id| !id.is_empty())
+}
+
+/// 侧栏「最近对话」收起时列几条。它和项目同在一个滚动区，列多了项目就被推到下面。
+const SIDEBAR_RECENT_CONVERSATION_LIMIT: usize = 5;
+
+/// 侧栏「最近对话」要画哪几条：`len` 条已按最近活动排好，返回其中的位置。
+/// 收起时只取前几条；当前打开的那条排在后面也补上，选中的对话不能藏起来。
+fn visible_recent_conversations(len: usize, selected: Option<usize>, expanded: bool) -> Vec<usize> {
+    if expanded || len <= SIDEBAR_RECENT_CONVERSATION_LIMIT {
+        return (0..len).collect();
+    }
+    let mut shown: Vec<usize> = (0..SIDEBAR_RECENT_CONVERSATION_LIMIT).collect();
+    if let Some(selected) =
+        selected.filter(|&ix| (SIDEBAR_RECENT_CONVERSATION_LIMIT..len).contains(&ix))
+    {
+        shown.push(selected);
+    }
+    shown
 }
 
 /// 侧栏「最近对话」：按最近活动排，新的在前。
@@ -655,7 +592,7 @@ fn excerpt_text(value: &str, limit: usize) -> String {
 
 /// 产品智能体的执行引擎注册点在 `smelt_core`：移动端网关也要照同一份名单产出
 /// 新建对话选项，注册表留在 GUI crate 里两边就会各注册各的。
-pub(crate) use smelt_core::agent_definition::agent_engine_kinds;
+pub(crate) use smelt_model::agent_definition::agent_engine_kinds;
 
 fn clock_input_is_editable(value: &str) -> bool {
     if value.len() > 5
@@ -709,7 +646,7 @@ fn schedule_from_values(
             let (hour, minute) =
                 parse_clock(time).ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
             settings::AutomationSchedule::Weekly {
-                days: smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+                days: smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
                 hour,
                 minute,
             }
@@ -717,11 +654,11 @@ fn schedule_from_values(
         ScheduleKind::Weekly => {
             let (hour, minute) =
                 parse_clock(time).ok_or_else(|| "请输入 00:00 到 23:59 之间的时间".to_string())?;
-            let days = weekday_mask & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+            let days = weekday_mask & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
             if days == 0 {
                 return Err("请至少选择一天".to_string());
             }
-            if days == smelt_core::automation::SCHEDULE_ALL_DAYS_MASK {
+            if days == smelt_model::automation::SCHEDULE_ALL_DAYS_MASK {
                 settings::AutomationSchedule::Daily { hour, minute }
             } else {
                 settings::AutomationSchedule::Weekly { days, hour, minute }
@@ -741,9 +678,9 @@ fn schedule_from_values(
                 }
                 _ => return Err("请同时填写开始和结束时间".to_string()),
             };
-            let days = weekday_mask & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+            let days = weekday_mask & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
             let constrained = window.is_some()
-                || (days != 0 && days != smelt_core::automation::SCHEDULE_ALL_DAYS_MASK);
+                || (days != 0 && days != smelt_model::automation::SCHEDULE_ALL_DAYS_MASK);
             match interval_unit {
                 IntervalUnit::Minutes => {
                     let minutes = interval
@@ -760,7 +697,7 @@ fn schedule_from_values(
                         settings::AutomationSchedule::During {
                             minutes,
                             days: if days == 0 {
-                                smelt_core::automation::SCHEDULE_ALL_DAYS_MASK
+                                smelt_model::automation::SCHEDULE_ALL_DAYS_MASK
                             } else {
                                 days
                             },
@@ -786,7 +723,7 @@ fn schedule_from_values(
                         settings::AutomationSchedule::During {
                             minutes: hours.saturating_mul(60),
                             days: if days == 0 {
-                                smelt_core::automation::SCHEDULE_ALL_DAYS_MASK
+                                smelt_model::automation::SCHEDULE_ALL_DAYS_MASK
                             } else {
                                 days
                             },
@@ -823,7 +760,7 @@ fn trigger_from_editor(
             settings::AutomationTriggerKindId::Webhook => {
                 let secret = entry.webhook_secret.trim();
                 let secret = if secret.is_empty() {
-                    smelt_core::automation::new_webhook_secret()
+                    smelt_model::automation::new_webhook_secret()
                 } else {
                     secret.to_string()
                 };
@@ -882,10 +819,10 @@ fn schedule_from_values_for_rule(
 ) -> Result<settings::AutomationSchedule, String> {
     let weekday_mask = if rule.kind == ScheduleKind::Interval {
         match rule.interval_day_scope {
-            IntervalDayScope::Everyday => smelt_core::automation::SCHEDULE_ALL_DAYS_MASK,
-            IntervalDayScope::Weekdays => smelt_core::automation::SCHEDULE_WEEKDAYS_MASK,
+            IntervalDayScope::Everyday => smelt_model::automation::SCHEDULE_ALL_DAYS_MASK,
+            IntervalDayScope::Weekdays => smelt_model::automation::SCHEDULE_WEEKDAYS_MASK,
             IntervalDayScope::Weekly => {
-                let days = rule.weekday_mask & smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+                let days = rule.weekday_mask & smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
                 if days == 0 {
                     return Err("请至少选择一天".to_string());
                 }
@@ -916,7 +853,7 @@ fn new_schedule_rule(
     let mut interval = 15_u32;
     let mut kind = ScheduleKind::Daily;
     let mut interval_unit = IntervalUnit::Minutes;
-    let mut weekday_mask = smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+    let mut weekday_mask = smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
     let mut interval_day_scope = IntervalDayScope::Everyday;
     let mut window_start_value = String::new();
     let mut window_end_value = String::new();
@@ -928,7 +865,7 @@ fn new_schedule_rule(
         }) => {
             hour = *start_hour;
             minute = *start_minute;
-            kind = if *days == smelt_core::automation::SCHEDULE_WEEKDAYS_MASK {
+            kind = if *days == smelt_model::automation::SCHEDULE_WEEKDAYS_MASK {
                 ScheduleKind::Weekdays
             } else {
                 ScheduleKind::Weekly
@@ -971,7 +908,7 @@ fn new_schedule_rule(
             }
             kind = ScheduleKind::Interval;
             weekday_mask = if *days == 0 {
-                smelt_core::automation::SCHEDULE_ALL_DAYS_MASK
+                smelt_model::automation::SCHEDULE_ALL_DAYS_MASK
             } else {
                 *days
             };
@@ -1036,7 +973,7 @@ fn webhook_ingress_secret(webhook: &settings::WebhookIngress) -> String {
             let endpoint = webhook.endpoint.trim();
             (!endpoint.is_empty()).then(|| endpoint.to_string())
         })
-        .unwrap_or_else(smelt_core::automation::new_webhook_secret)
+        .unwrap_or_else(smelt_model::automation::new_webhook_secret)
 }
 
 fn new_trigger_entry(
@@ -1066,7 +1003,7 @@ fn new_trigger_entry(
         schedule,
         webhook_secret: webhook_secret
             .filter(|secret| !secret.trim().is_empty())
-            .unwrap_or_else(smelt_core::automation::new_webhook_secret),
+            .unwrap_or_else(smelt_model::automation::new_webhook_secret),
     }
 }
 
@@ -1392,7 +1329,7 @@ fn render_webhook_entry(
         .global::<settings::AgentHostState>()
         .webhook_base_url
         .clone()
-        .unwrap_or_else(|| smelt_core::automation::DEFAULT_WEBHOOK_BASE_URL.to_string());
+        .unwrap_or_else(|| smelt_model::automation::DEFAULT_WEBHOOK_BASE_URL.to_string());
     let stored = cx
         .global::<settings::AgentHostState>()
         .automations
@@ -1400,7 +1337,7 @@ fn render_webhook_entry(
         .find(|automation| automation.id == editor.automation_id);
     let paused = stored.is_some_and(|automation| !automation.enabled);
     let live_url = (!editor.is_new && !entry.webhook_secret.is_empty())
-        .then(|| smelt_core::automation::webhook_url(&base, &entry.webhook_secret));
+        .then(|| smelt_model::automation::webhook_url(&base, &entry.webhook_secret));
     let row_key = entry.schedule.time.entity_id();
     let copy_id = format!("automation-copy-webhook-{row_key}");
     let curl_id = format!("automation-copy-webhook-curl-{row_key}");
@@ -1525,19 +1462,20 @@ fn render_schedule_rule(
     cx: &App,
 ) -> AnyElement {
     let frequency = (!rule.kind.is_interval()).then(|| {
-        segmented_track(cx).children(ScheduleKind::clock_kinds().into_iter().map(|kind| {
-            let selected = kind == rule.kind;
-            let frequency_entity = entity.clone();
-            compact_chip((ElementId::from("agent-trigger-frequency"), kind.id_name()))
-                .label(kind.label())
-                .selected(selected)
-                .toggled(selected)
-                .on_click(move |_, _, cx| {
+        let kinds = ScheduleKind::clock_kinds();
+        let frequency_entity = entity.clone();
+        choice_tabs(
+            ("agent-trigger-frequency", index),
+            kinds.iter().position(|kind| *kind == rule.kind),
+            kinds.iter().map(|kind| Tab::new().label(kind.label())),
+            move |ix, cx| {
+                if let Some(kind) = kinds.get(ix).copied() {
                     frequency_entity.update(cx, |workspace, cx| {
                         workspace.set_trigger_schedule_kind(index, kind, cx);
                     });
-                })
-        }))
+                }
+            },
+        )
     });
     let clock = |input: &Entity<InputState>, aria: &'static str| {
         framed_text_input(input, aria)
@@ -1550,40 +1488,53 @@ fn render_schedule_rule(
             .text_color(cx.theme().muted_foreground)
             .child(local_timezone_label())
     };
+    // 星期可以多选，用开关组而不是单选的分段页签。
     let weekday_picker = |id_prefix: &'static str| {
-        segmented_track(cx).children((0..7).map(|day_index| {
-            let bit = 1_u8 << day_index;
-            let selected = rule.weekday_mask & bit != 0;
-            let day_entity = entity.clone();
-            compact_chip((id_prefix, day_index))
-                .w(px(32.))
-                .label(smelt_core::automation::SCHEDULE_DAY_LABELS[day_index])
-                .selected(selected)
-                .toggled(selected)
-                .on_click(move |_, _, cx| {
-                    day_entity.update(cx, |workspace, cx| {
-                        workspace.toggle_schedule_weekday(index, bit, cx);
-                    });
-                })
-        }))
+        let mask = rule.weekday_mask;
+        let day_entity = entity.clone();
+        ToggleGroup::new((id_prefix, index))
+            .outline()
+            .segmented()
+            .flex_none()
+            .children((0..7).map(|day_index| {
+                Toggle::new(day_index)
+                    .w(px(32.))
+                    .label(smelt_model::automation::SCHEDULE_DAY_LABELS[day_index])
+                    .checked(mask & (1_u8 << day_index) != 0)
+            }))
+            .on_click(move |checks, _, cx| {
+                // 一次只点一格：和当前不一样的那一格就是被点的。
+                let Some(day_index) = checks
+                    .iter()
+                    .enumerate()
+                    .position(|(day, on)| *on != (mask & (1_u8 << day) != 0))
+                else {
+                    return;
+                };
+                day_entity.update(cx, |workspace, cx| {
+                    workspace.toggle_schedule_weekday(index, 1_u8 << day_index, cx);
+                });
+            })
     };
     let interval_unit = rule.interval_unit;
     let schedule_control = match rule.kind {
         ScheduleKind::Interval => {
-            let day_scope =
-                segmented_track(cx).children(IntervalDayScope::all().into_iter().map(|scope| {
-                    let selected = scope == rule.interval_day_scope;
-                    let scope_entity = entity.clone();
-                    compact_chip((ElementId::from("automation-interval-days"), scope.id_name()))
-                        .label(scope.label())
-                        .selected(selected)
-                        .toggled(selected)
-                        .on_click(move |_, _, cx| {
-                            scope_entity.update(cx, |workspace, cx| {
-                                workspace.set_interval_day_scope(index, scope, cx);
-                            });
-                        })
-                }));
+            let scopes = IntervalDayScope::all();
+            let scope_entity = entity.clone();
+            let day_scope = choice_tabs(
+                ("automation-interval-days", index),
+                scopes
+                    .iter()
+                    .position(|scope| *scope == rule.interval_day_scope),
+                scopes.iter().map(|scope| Tab::new().label(scope.label())),
+                move |ix, cx| {
+                    if let Some(scope) = scopes.get(ix).copied() {
+                        scope_entity.update(cx, |workspace, cx| {
+                            workspace.set_interval_day_scope(index, scope, cx);
+                        });
+                    }
+                },
+            );
             let mut interval_body = div()
                 .flex()
                 .flex_col()
@@ -1598,30 +1549,23 @@ fn render_schedule_rule(
                                 .w(px(120.))
                                 .into_any_element(),
                         )
-                        .child(
-                            segmented_track(cx).children(
-                                [IntervalUnit::Minutes, IntervalUnit::Hours]
-                                    .into_iter()
-                                    .map(|unit| {
-                                        let selected = unit == interval_unit;
-                                        let unit_entity = entity.clone();
-                                        compact_chip((
-                                            ElementId::from("automation-interval-unit"),
-                                            unit.id_name(),
-                                        ))
-                                        .label(unit.label())
-                                        .selected(selected)
-                                        .toggled(selected)
-                                        .on_click(
-                                            move |_, _, cx| {
-                                                unit_entity.update(cx, |workspace, cx| {
-                                                    workspace.set_interval_unit(index, unit, cx);
-                                                });
-                                            },
-                                        )
-                                    }),
-                            ),
-                        ),
+                        .child({
+                            const UNITS: [IntervalUnit; 2] =
+                                [IntervalUnit::Minutes, IntervalUnit::Hours];
+                            let unit_entity = entity.clone();
+                            choice_tabs(
+                                ("automation-interval-unit", index),
+                                UNITS.iter().position(|unit| *unit == interval_unit),
+                                UNITS.iter().map(|unit| Tab::new().label(unit.label())),
+                                move |ix, cx| {
+                                    if let Some(unit) = UNITS.get(ix).copied() {
+                                        unit_entity.update(cx, |workspace, cx| {
+                                            workspace.set_interval_unit(index, unit, cx);
+                                        });
+                                    }
+                                },
+                            )
+                        }),
                 )
                 .child(day_scope);
             if rule.interval_day_scope == IntervalDayScope::Weekly {
@@ -1805,7 +1749,7 @@ fn format_relative_since(ts: i64, now: i64) -> String {
 }
 
 fn format_last_run_cell(
-    last: Option<(smelt_core::automation::AutomationRunStatus, i64)>,
+    last: Option<(smelt_model::automation::AutomationRunStatus, i64)>,
     now: i64,
 ) -> String {
     match last {
@@ -1869,12 +1813,12 @@ fn automation_save_hint(missing: &[&str], is_new: bool) -> Option<String> {
     })
 }
 
-fn run_source_label(source: smelt_core::automation::AutomationRunSource) -> &'static str {
+fn run_source_label(source: smelt_model::automation::AutomationRunSource) -> &'static str {
     source.label()
 }
 
-fn run_status_label(status: smelt_core::automation::AutomationRunStatus) -> &'static str {
-    use smelt_core::automation::AutomationRunStatus;
+fn run_status_label(status: smelt_model::automation::AutomationRunStatus) -> &'static str {
+    use smelt_model::automation::AutomationRunStatus;
     match status {
         AutomationRunStatus::Starting => "启动中",
         AutomationRunStatus::Queued => "等待投递",
@@ -1977,7 +1921,7 @@ fn automation_nav_needs_attention(config: &settings::AgentHostState) -> bool {
             && config
                 .latest_automation_run(&automation.id)
                 .is_some_and(|run| {
-                    run.status == smelt_core::automation::AutomationRunStatus::Failed
+                    run.status == smelt_model::automation::AutomationRunStatus::Failed
                 })
     })
 }
@@ -2009,15 +1953,7 @@ fn agent_surface_card() -> Div {
 }
 
 fn render_agent_error(error: String) -> AnyElement {
-    div()
-        .px_3()
-        .py_2()
-        .rounded(px(10.))
-        .bg(rgb(crate::ui_theme::red()).opacity(0.12))
-        .text_sm()
-        .text_color(rgb(crate::ui_theme::red()))
-        .child(error)
-        .into_any_element()
+    gpui_component::alert::Alert::error("agent-error", error).into_any_element()
 }
 
 fn render_engine_mark(kind: Option<settings::ConversationAgentKind>, size: f32) -> Icon {
@@ -2093,7 +2029,7 @@ fn render_agent_model_control(
                         });
                     }),
             );
-            let groups = smelt_core::pi_model_settings::list_pi_model_choice_groups();
+            let groups = crate::settings::pi_model_choice_groups(cx);
             if !groups.is_empty() {
                 menu = menu.separator();
             }
@@ -2139,21 +2075,12 @@ fn render_agent_model_control(
 }
 
 fn render_engine_chip(label: String, kind: Option<settings::ConversationAgentKind>) -> AnyElement {
-    div()
-        .h(crate::ui_theme::height::xxs())
-        .px_2()
+    Tag::secondary()
         .rounded_full()
-        .bg(rgb(crate::ui_theme::bg_hover()))
-        .flex()
-        .items_center()
+        .flex_none()
         .gap_1()
         .child(render_engine_mark(kind, 12.))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(crate::ui_theme::text_muted()))
-                .child(label),
-        )
+        .child(label)
         .into_any_element()
 }
 
@@ -2174,7 +2101,7 @@ fn product_back_button(
 ///
 /// 最上 `TOP_BAR_HEIGHT` 是空的拖窗口条，和侧栏列表、交通灯对齐。分段、标题和按钮放在这条下面，
 /// 不再塞进 34px 里贴着窗口顶。左侧让开交通灯，右侧让开窗口开关，底边是发丝。按钮自己拦住点击。
-fn product_page_chrome(left_guard: Pixels) -> Div {
+pub(crate) fn product_page_chrome(left_guard: Pixels) -> Div {
     crate::workspace_frame::with_window_drag(
         div()
             .w_full()
@@ -2277,7 +2204,7 @@ fn render_agent_plugin_card(
         if editor.plugins.iter().any(|plugin| plugin.id == *id) {
             continue;
         }
-        let (kind_label, name) = match smelt_core::pi_plugin_catalog::split_plugin_id(id) {
+        let (kind_label, name) = match smelt_model::pi_plugin_catalog::split_plugin_id(id) {
             Some((kind, name)) => (kind.label(), name.to_string()),
             None => ("未知", id.clone()),
         };
@@ -2370,7 +2297,7 @@ fn render_agent_context_card(
     editor: &AgentEditor,
     entity: Entity<Workspace>,
 ) -> AnyElement {
-    let space_root = smelt_core::agent_definition_store::agent_space_root(&agent.id)
+    let space_root = smelt_model::agent_paths::agent_space_root(&agent.id)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
 
@@ -2494,7 +2421,7 @@ fn render_agent_context_card(
                 .text_color(rgb(crate::ui_theme::text_faint()))
                 .child(format!(
                     "工作目录 {space_root}，同一智能体的所有对话共用它。工作目录和绑定目录下的 {} 会自动作为技能加载。",
-                    smelt_core::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
+                    smelt_model::pi_plugin_catalog::WORKSPACE_SKILL_DIRS.join(" / ")
                 )),
         )
         .into_any_element()
@@ -2636,20 +2563,25 @@ fn render_agent_memory_card(
     let query = editor.memory_query.read(cx).value().to_string();
     let filter = editor.memory_filter;
     let narrowed = !query.trim().is_empty() || filter != MemoryFilter::All;
-    let filters = segmented_track(cx).children(MemoryFilter::ALL.into_iter().map(|option| {
-        let selected = option == filter;
-        let entity = entity.clone();
-        compact_chip(option.element_id())
-            .label(option.label())
-            .tooltip(option.tooltip())
-            .selected(selected)
-            .toggled(selected)
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |workspace, cx| {
+    let filter_entity = entity.clone();
+    let filters = choice_tabs(
+        "agent-memory-filters",
+        MemoryFilter::ALL
+            .iter()
+            .position(|option| *option == filter),
+        MemoryFilter::ALL.into_iter().map(|option| {
+            Tab::new().label(option.label()).tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(option.tooltip()).build(window, cx)
+            })
+        }),
+        move |ix, cx| {
+            if let Some(option) = MemoryFilter::ALL.get(ix).copied() {
+                filter_entity.update(cx, |workspace, cx| {
                     workspace.set_agent_memory_filter(option, cx)
                 });
-            })
-    }));
+            }
+        },
+    );
     agent_surface_card()
         .flex()
         .flex_col()
@@ -2747,7 +2679,7 @@ struct AgentMemorySection<'a> {
     layer: MemoryLayer,
     title: &'static str,
     empty_hint: &'static str,
-    listing: &'a smelt_core::agent_memory::MemoryListing,
+    listing: &'a smelt_model::agent_memory::MemoryListing,
     query: &'a str,
     filter: MemoryFilter,
     /// 有搜索词或筛选时，空列表要说「没有匹配」，不能说「还没有记忆」。
@@ -2843,7 +2775,7 @@ fn agent_memory_section(
                     .text_color(rgb(crate::ui_theme::red()))
                     .child(format!(
                         "规则类记忆正文超过 {}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。",
-                        smelt_core::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
+                        smelt_model::agent_memory::CORE_MEMORY_MAX_BYTES / 1000,
                     )),
             )
         })
@@ -2853,7 +2785,7 @@ fn agent_memory_section(
 
 fn memory_section_title(
     title: &str,
-    listing: &smelt_core::agent_memory::MemoryListing,
+    listing: &smelt_model::agent_memory::MemoryListing,
     shown: Option<usize>,
 ) -> String {
     let total = listing.entries.len();
@@ -2884,7 +2816,7 @@ fn memory_kind_label(kind: Option<&str>) -> &'static str {
 }
 
 /// 行尾的状态：待确认和长期没用的标红，提示用户处理；用过的显示次数。
-fn memory_usage_label(entry: &smelt_core::agent_memory::MemoryEntry) -> Option<(String, bool)> {
+fn memory_usage_label(entry: &smelt_model::agent_memory::MemoryEntry) -> Option<(String, bool)> {
     if entry.pending_reason.is_some() {
         return Some(("待确认".to_string(), true));
     }
@@ -2898,7 +2830,7 @@ fn agent_memory_row(
     agent_id: &str,
     layer: MemoryLayer,
     layer_key: &str,
-    entry: &smelt_core::agent_memory::MemoryEntry,
+    entry: &smelt_model::agent_memory::MemoryEntry,
     expanded: bool,
     entity: Entity<Workspace>,
 ) -> AnyElement {
@@ -3149,12 +3081,6 @@ fn agent_context_row(
         .into_any_element()
 }
 
-#[allow(clippy::too_many_arguments)]
-/// 编辑器打开、刷新时读一次 `mcp.json`。读不出来就当没有：错误在能力库「MCP」页签里看。
-fn load_mcp_servers_for_editor() -> Vec<smelt_core::pi_mcp::PiMcpServer> {
-    smelt_core::pi_mcp::load_pi_mcp_servers().unwrap_or_default()
-}
-
 /// 智能体的 MCP 勾选。服务器在能力库里配置，这里只决定这个智能体连哪几台。
 fn render_agent_mcp_card(
     agent: &settings::AgentDefinition,
@@ -3187,11 +3113,11 @@ fn render_agent_mcp_card(
         .iter()
         .map(|server| {
             let (kind_label, detail) = match &server.transport {
-                smelt_core::pi_mcp::PiMcpTransport::Http { url } => ("远程", url.clone()),
-                smelt_core::pi_mcp::PiMcpTransport::Stdio { command, args } => {
+                smelt_model::pi_mcp::PiMcpTransport::Http { url } => ("远程", url.clone()),
+                smelt_model::pi_mcp::PiMcpTransport::Stdio { command, args } => {
                     ("本地", format!("{command} {}", args.join(" ")))
                 }
-                smelt_core::pi_mcp::PiMcpTransport::Unknown => ("未知", String::new()),
+                smelt_model::pi_mcp::PiMcpTransport::Unknown => ("未知", String::new()),
             };
             // 能力库里停用的服务器勾了也不会连：Pi 读到 `enabled: false` 就跳过。
             let broken = (!server.enabled).then(|| "已在能力库停用，勾选也不会连接".to_string());
@@ -3304,6 +3230,7 @@ enum AgentPick {
     McpServer,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_plugin_row(
     pick: AgentPick,
     agent_id: &str,
@@ -3510,17 +3437,19 @@ fn automation_section_label(label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-/// 分段开关：描边跟输入框同一档，选中格铺满，看起来就是能点的控件。
-fn segmented_track(_cx: &App) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .p_0p5()
-        .rounded(px(8.))
-        .border_1()
-        .border_color(rgb(crate::ui_theme::border_loud()))
-        .bg(rgb(crate::ui_theme::bg_column()))
+/// 几个互斥选项的分段开关，选中块在选项之间滑动。`on_select` 拿到被点的下标。
+fn choice_tabs(
+    id: impl Into<ElementId>,
+    selected: Option<usize>,
+    tabs: impl IntoIterator<Item = Tab>,
+    on_select: impl Fn(usize, &mut App) + 'static,
+) -> TabBar {
+    TabBar::new(id)
+        .segmented()
+        .flex_none()
+        .when_some(selected, |bar, ix| bar.selected_index(ix))
+        .on_click(move |ix, _, cx| on_select(*ix, cx))
+        .children(tabs)
 }
 
 mod automation_catalog;

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::{SessionState, WsState, indices_share_group, reorder_vec, session_state_cwd};
 use crate::sidebar_order::{
     apply_pinned_project_drop, is_pinned_project, move_index_near, move_project_root_near,
-    pinned_projects_first, project_header_click_toggles_collapse, project_header_is_faint,
+    pinned_projects_first, project_header_click_toggles_collapse, project_header_is_dimmed,
     same_project_root, sidebar_empty_project_visible, toggle_pinned_project,
 };
 
@@ -151,10 +151,10 @@ fn pin_toggle_is_keyed_by_normalized_root() {
 }
 
 #[test]
-fn empty_project_title_is_faint_unless_it_is_the_active_project() {
-    assert!(project_header_is_faint(false, true));
-    assert!(!project_header_is_faint(true, true));
-    assert!(!project_header_is_faint(false, false));
+fn empty_project_title_is_dimmed_unless_it_is_the_active_project() {
+    assert!(project_header_is_dimmed(false, true));
+    assert!(!project_header_is_dimmed(true, true));
+    assert!(!project_header_is_dimmed(false, false));
 }
 
 #[test]

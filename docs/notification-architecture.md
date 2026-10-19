@@ -11,7 +11,7 @@
 各 provider hook / ACP → AgentEvent v1 生命周期 / v2 会话名
                                       ↓
                                smeltd reducer → DaemonPhase + 会话名 → AgentStatus + AttentionItem
-OSC 9/99/777 / BEL ─────────────────────────→ Informational AttentionItem
+OSC 9/99/777（smeltd 扫）/ BEL（TerminalView）──→ Informational AttentionItem
                                                        ↓
                                             铃铛 / 系统通知 / Dock / 菜单栏
 ```
@@ -61,9 +61,23 @@ provider 工具名只在适配层用于把原始 hook 判定为这些稳定语�
 逻辑。
 
 结构化 hook/ACP 通过 `apply_daemon_transition` 写入 store。终端 OSC 标题不进入会话名；
-会话尚未收到有效结构化事件时，OSC/BEL 可以在 `TerminalView` 中翻译成信息性
-`AttentionItem`，但绝不能改变 phase 或伪造完成。结构化事件一旦接通，低可信终端通知
-永久退出该会话的 agent 通知链路，避免重复投递。
+会话尚未收到有效结构化事件时，OSC/BEL 可以翻译成信息性 `AttentionItem`，但绝不能改变
+phase 或伪造完成。结构化事件一旦接通，低可信终端通知永久退出该会话的 agent 通知链路，
+避免重复投递。
+
+OSC 9/99/777 由 smeltd 在 PTY 输出泵里扫（alacritty 不解析），会话没有结构化事件时发
+`terminal.notification`，桌面收到后进同一个 store。只扫实时输出：reattach / resume 的
+keyframe 不经过这里，历史通知不会被当成新的再弹。这样通知不依赖终端 pane 是否打开、
+终端连接是否 attach、慢客户端是否被流控合并跳过了这段输出。没有任何桌面订阅（应用
+没开）时发生的通知直接丢弃，不补发。BEL 仍由 `TerminalView` 处理（有宽限期，受设置
+开关控制）。
+
+OSC 7501（Program Status Protocol）在同一处扫。smeltd 回应 `OSC 7501 ; ?` 探测（在把
+这批输出交给客户端之前写回 PTY，保证先于客户端回应的 DA），Claude Code、Pi 据此开始
+上报；Codex 不探测、直接发。只认根记录，状态变成 blocked / done / error 时转成一条
+`terminal.notification`（如「codex 等你批准：…」），同一状态重复上报只算一次。它和
+OSC 9 一样只是信息性通知：**不改 phase**，不打开任何需要「正在等待」的操作门闩。
+
 hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在会话状态中，不改写不可变
 的启动命令 `launch`；它与标题通过 `session.state_changed` 的会话投影 v2 下发。客户端仍可
 读取旧 daemon 的 v1 会话投影，其他核心投影继续保持 v1。

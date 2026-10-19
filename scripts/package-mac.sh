@@ -28,7 +28,6 @@ DAEMON_BIN="$ROOT/target/release/smeltd"   # 终端持久化守护（GUI 按同�
 NOTIFY_BIN="$ROOT/target/release/smelt-notify" # Agent hooks → smeltd 状态通道
 AGENT_MCP_BIN="$ROOT/target/release/smelt-agent-mcp" # Agent 间消息的 STDIO MCP 适配器
 INSTALLER_BIN="$ROOT/target/release/smelt-installer" # GUI 退出后提交原子 App 交换
-PLUGIN_SOURCES="$ROOT/plugins"        # 每个子目录一个插件包（基础 manifest + 可选 UI sidecar/web）
 
 BUILD=0
 SKIP_DMG=0
@@ -44,16 +43,14 @@ for arg in "$@"; do
   esac
 done
 
-# 组装 .app 只用 python3 读插件清单，3.9 就够。dmgbuild 1.6.7 才要求 Python >= 3.10。
-PYTHON_COMMAND="${SMELT_PYTHON:-python3}"
-if ! PYTHON="$(command -v "$PYTHON_COMMAND")"; then
-  echo "✗ 找不到 Python 解释器：$PYTHON_COMMAND" >&2
-  if [[ "$SKIP_DMG" -eq 0 ]]; then
-    echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
-  fi
-  exit 1
-fi
+# 只有打 dmg 用 Python：dmgbuild 1.6.7 要求 Python >= 3.10。组装 .app 不需要。
 if [[ "$SKIP_DMG" -eq 0 ]]; then
+  PYTHON_COMMAND="${SMELT_PYTHON:-python3}"
+  if ! PYTHON="$(command -v "$PYTHON_COMMAND")"; then
+    echo "✗ 找不到 Python 解释器：$PYTHON_COMMAND" >&2
+    echo "  请先运行 brew install python，或设置 SMELT_PYTHON=/path/to/python3.10+" >&2
+    exit 1
+  fi
   if ! PYTHON_VERSION="$("$PYTHON" -c \
     'import sys; print(".".join(map(str, sys.version_info[:3]))); sys.exit(sys.version_info < (3, 10))')"; then
     echo "✗ 打包 dmg 需要 Python >= 3.10，当前为 ${PYTHON_VERSION}（${PYTHON}）" >&2
@@ -66,10 +63,6 @@ fi
 
 if [[ "$BUILD" -eq 1 ]]; then
   echo "▶ 编译 release …"
-  if ! "$ROOT/scripts/bundled-plugins.sh" dirs >/dev/null; then
-    echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝继续打包" >&2
-    exit 1
-  fi
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-agent-mcp --bin smelt-installer
 fi
 
@@ -93,36 +86,6 @@ if [[ ! -f "$INSTALLER_BIN" ]]; then
   echo "✗ 找不到 ${INSTALLER_BIN}（App installer helper），先：cargo build --release --bin smelt-installer" >&2
   exit 1
 fi
-# 插件按目录扫描，不写死名单：新增插件只要在 plugins/<name>/ 放好 plugin.json
-# 并准备好 manifest 声明的入口，就会被打进 .app。缺 package 内脚本
-# 都直接报错——发版产物少一个插件必须当场知道，不能悄悄发出去。
-plugin_dirs=()
-if ! bundled_plugin_dirs="$("$ROOT/scripts/bundled-plugins.sh" dirs)"; then
-  echo "✗ bundled plugin manifest 或 entrypoint 无效，拒绝继续打包" >&2
-  exit 1
-fi
-while IFS= read -r candidate; do
-  [[ -n "$candidate" ]] || continue
-  plugin_dirs+=("$candidate/")
-done <<<"$bundled_plugin_dirs"
-if [[ ${#plugin_dirs[@]} -eq 0 ]]; then
-  echo "✗ ${PLUGIN_SOURCES} 下没有发现任何插件包（缺 plugin.json）" >&2
-  exit 1
-fi
-for dir in "${plugin_dirs[@]}"; do
-  if ! manifest_info="$("$PYTHON" "$ROOT/scripts/plugin-manifest-info.py" "${dir}plugin.json")"; then
-    echo "✗ bundled plugin manifest 无效，拒绝继续打包" >&2
-    exit 1
-  fi
-  read -r _plugin_id entrypoint _bundled \
-    <<<"$manifest_info"
-  if [[ ! -f "${dir}${entrypoint}" ]]; then
-    # 脚本插件的 entrypoint 直接来自源目录，缺了同样要当场报错。
-    echo "✗ 找不到 ${dir}${entrypoint}（${dir} 的脚本入口）" >&2
-    exit 1
-  fi
-done
-
 # 校验是 arm64，避免误把 Intel 产物发给 Apple Silicon 同事
 if ! file "$BIN" | grep -q "arm64"; then
   echo "✗ $BIN 不是 arm64，同事的 Apple Silicon Mac 会闪退。请在 Apple Silicon 上编译。" >&2
@@ -185,71 +148,14 @@ chmod +x "$MACOS/smelt-agent-mcp"
 # 绝不能从即将被交换的 Bundle 内直接运行。
 cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
 chmod +x "$MACOS/smelt-installer"
-# first-party 插件与 GUI 一起分发；GUI 启动时把 bundled 插件包同步到
-# ~/.smelt/runtime/plugins，供同构建的 smeltd 拉起。
-#
-# 不能放 Contents/PlugIns：那是 macOS 嵌套 bundle（.appex / .bundle）的位置，
-# codesign 会把子目录当成 bundle 校验 Info.plist，没有就会报
-# "bundle format unrecognized, invalid, or unsuitable"。
-PLUGIN_PACKAGES="$APP/Contents/Resources/plugin-packages"
-# 每个包一份 plugin.json + bin/ + 可选 sidecar / web/ / assets/。
-# sidecar 必须一起进 .app，否则面板、输入路由和智能体声明无法随插件升级。
-for dir in "${plugin_dirs[@]}"; do
-  # Validate before deriving any bundle destination from manifest-controlled strings.
-  if ! manifest_info="$("$PYTHON" "$ROOT/scripts/plugin-manifest-info.py" "${dir}plugin.json")"; then
-    echo "✗ bundled plugin manifest 无效，拒绝继续打包" >&2
-    exit 1
-  fi
-  read -r plugin_id entrypoint _bundled \
-    <<<"$manifest_info"
-  target="$PLUGIN_PACKAGES/$plugin_id"
-  target_entrypoint="$target/$entrypoint"
-  mkdir -p "$(dirname "$target_entrypoint")"
-  cp "${dir}plugin.json" "$target/plugin.json"
-  if [[ -f "${dir}plugin-ui.json" ]]; then
-    cp "${dir}plugin-ui.json" "$target/plugin-ui.json"
-  fi
-  if [[ -f "${dir}plugin-input.json" ]]; then
-    cp "${dir}plugin-input.json" "$target/plugin-input.json"
-  fi
-  if [[ -f "${dir}plugin-agent.json" ]]; then
-    cp "${dir}plugin-agent.json" "$target/plugin-agent.json"
-  fi
-  cp "${dir}${entrypoint}" "$target_entrypoint"
-  entrypoint_src_dir="$(dirname "${dir}${entrypoint}")"
-  entrypoint_dest_dir="$(dirname "$target_entrypoint")"
-  if [[ -d "$entrypoint_src_dir" ]]; then
-    for module in "$entrypoint_src_dir"/*; do
-      [[ -f "$module" ]] || continue
-      [[ "$module" == "${dir}${entrypoint}" ]] && continue
-      base="$(basename "$module")"
-      case "$base" in
-        .*|*.test.ts|*.test.js|*.spec.ts|*.spec.js) continue ;;
-      esac
-      cp "$module" "$entrypoint_dest_dir/$base"
-      chmod 644 "$entrypoint_dest_dir/$base"
-    done
-  fi
-  # 入口权限必须在拷同目录模块之后设。模块一律 644；若入口也在循环里被
-  # 再拷一次，755 会被盖掉。0.8.0 装更新会 load 候选 .app 里的包，入口必须 +x。
-  # bun 运行时仍是 import 源文件，不 exec。
-  chmod 755 "$target_entrypoint"
-  if [[ -d "${dir}web" ]]; then
-    cp -R "${dir}web" "$target/web"
-  fi
-  if [[ -d "${dir}assets" ]]; then
-    cp -R "${dir}assets" "$target/assets"
-  fi
-  echo "  … 打包插件：${plugin_id}"
-done
-
-# gpui-shell 插件（可行性原型，见 crates/smelt/src/shell_plugins）：与上面的 bun
-# 插件体系无关，整目录随 App 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell
-# 加载时写编辑器文件的行为，不会写进已签名的 .app）。
-SHELL_PLUGINS="$RES/shell-plugins"
-for dir in "$ROOT"/shell-plugins/*/; do
+# 插件（gpui-shell 脚本应用，见 crates/smelt/src/plugins）：整目录随 App
+# 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell 加载时写编辑器文件的行为，
+# 不会写进已签名的 .app）。
+PLUGINS="$RES/plugins"
+for dir in "$ROOT"/plugins/*/; do
+  # 没有清单的子目录（比如本地 clone 进来的 dsh 桥）不是插件。
   [[ -f "${dir}gpui-shell.json" ]] || continue
-  target="$SHELL_PLUGINS/$(basename "$dir")"
+  target="$PLUGINS/$(basename "$dir")"
   mkdir -p "$target"
   for file in "$dir"*; do
     case "$(basename "$file")" in
@@ -258,7 +164,7 @@ for dir in "$ROOT"/shell-plugins/*/; do
     esac
     cp -R "$file" "$target/"
   done
-  echo "  … 打包 gpui-shell 插件：$(basename "$dir")"
+  echo "  … 打包插件：$(basename "$dir")"
 done
 
 # 可选：把当前包对应的内部发布地址写进 App。若发布系统是在打包后才生成

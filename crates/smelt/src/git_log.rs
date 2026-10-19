@@ -7,24 +7,14 @@
 //! 分支图为什么要自己算：`git log --graph` 吐的是 ASCII 画好的图，拿来做 GUI 得
 //! 反过来解析字符画，既脆又对不准行高。直接读 parent 关系自己分配列，画多宽多高
 //! 都由我们说了算。
+//!
+//! 提交列表和文件清单由运行时执行 git 后返回（`git.log` 等），这里只做布局和展示。
 
-/// 一条提交记录。
-#[derive(Clone, Debug, PartialEq)]
-pub struct CommitNode {
-    /// 完整 sha，父子关系全靠它对齐。
-    pub hash: String,
-    /// 短 sha，显示用。
-    pub short: String,
-    pub author: String,
-    /// author date，Unix 秒。
-    pub time: i64,
-    /// 提交标题（第一行）。
-    pub subject: String,
-    /// 父提交完整 sha。第一个是主线父，其余是被合并进来的。
-    pub parents: Vec<String>,
-    /// 指向本提交的引用名（分支 / tag），已剥掉 `HEAD -> ` 之类前缀。
-    pub refs: Vec<String>,
-}
+pub use smelt_runtime_client::protocol::git::{CommitNode, LogScope};
+use smelt_runtime_client::protocol::git::{
+    GitCommitFileDiffCall, GitCommitFileParams, GitCommitFilesCall, GitCommitRefParams, GitLogCall,
+    GitLogParams,
+};
 
 /// 一行在分支图里要画的东西。列号从 0 起，0 是最左边那列。
 #[derive(Clone, Debug, PartialEq)]
@@ -47,52 +37,6 @@ pub enum Edge {
     In { from: usize },
     /// 从本行节点出发到下边缘第 `to` 列（本提交的父）。
     Out { to: usize },
-}
-
-/// `git log` 的输出格式：用 \x00 分隔字段、\x1e 分隔记录，免得提交标题里的
-/// 空格换行把解析搞乱。
-pub const LOG_FORMAT: &str = "--pretty=format:%H%x00%h%x00%an%x00%at%x00%s%x00%P%x00%D%x1e";
-
-/// 解析 `git log` 的输出（格式见 [`LOG_FORMAT`]）。
-pub fn parse_log(text: &str) -> Vec<CommitNode> {
-    text.split('\x1e')
-        .map(str::trim_start) // 记录间的换行
-        .filter(|r| !r.is_empty())
-        .filter_map(|rec| {
-            let mut f = rec.split('\x00');
-            let hash = f.next()?.to_string();
-            let short = f.next()?.to_string();
-            let author = f.next()?.to_string();
-            let time = f.next()?.parse().unwrap_or(0);
-            let subject = f.next()?.to_string();
-            let parents = f
-                .next()?
-                .split_whitespace()
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            // %D 形如 "HEAD -> main, origin/main, tag: v1.0"。
-            // 两个前缀都剥掉：`HEAD -> ` 只是说明当前检出的是谁，`tag: ` 在列表里
-            // 是纯噪音（CI 生成的 tag 名本来就长，再顶个前缀更挤）。
-            let refs = f
-                .next()
-                .unwrap_or("")
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.rsplit(" -> ").next().unwrap_or(s))
-                .map(|s| s.strip_prefix("tag: ").unwrap_or(s).to_string())
-                .collect();
-            Some(CommitNode {
-                hash,
-                short,
-                author,
-                time,
-                subject,
-                parents,
-                refs,
-            })
-        })
-        .collect()
 }
 
 /// 给提交序列分配分支图的列。
@@ -203,21 +147,6 @@ pub fn layout_graph(commits: &[CommitNode]) -> Vec<GraphRow> {
     rows
 }
 
-/// 日志看哪一段历史。
-///
-/// 默认是 [`LogScope::Head`]——**当前分支**，跟 JetBrains 一致。一进来就 `--all`
-/// 会把所有分支的提交混在一起按时间排，跟「我这条线上都干了啥」完全是两回事。
-#[derive(Clone, PartialEq, Debug, Default)]
-pub enum LogScope {
-    /// 当前检出的分支（`git log` 不带 ref，默认就是 HEAD）。
-    #[default]
-    Head,
-    /// 所有分支（`--all`），看完整拓扑用。
-    All,
-    /// 指定分支。
-    Branch(String),
-}
-
 /// 「日志」页的全部状态。
 pub struct GitLogState {
     /// 当前载入的提交（已按 git log 给的顺序）。Rc：渲染时每帧要 move 进
@@ -283,46 +212,9 @@ impl Default for GitLogState {
 pub const LOG_LIMIT: usize = 500;
 
 /// 拼 `git log` 的参数。
-pub fn log_args(scope: &LogScope, limit: usize) -> Vec<String> {
-    let mut a = vec![
-        "log".to_string(),
-        LOG_FORMAT.to_string(),
-        format!("--max-count={limit}"),
-    ];
-    match scope {
-        // 不带 ref = HEAD，也就是当前分支。
-        LogScope::Head => {}
-        LogScope::All => a.push("--all".to_string()),
-        LogScope::Branch(b) => a.push(b.clone()),
-    }
-    a
-}
-
-/// 解析 `git show --name-status` 的文件部分：每行 `M\tpath` / `A\tpath` /
-/// `R100\told\tnew`（重命名取新名）。
-pub fn parse_name_status(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|l| {
-            let mut f = l.split('\t');
-            let st = f.next()?.trim();
-            if st.is_empty() {
-                return None;
-            }
-            // 重命名/复制有两个路径，取最后一个（新路径）。
-            let path = f.next_back()?.trim();
-            if path.is_empty() {
-                return None;
-            }
-            // 只取首字母：R100 → R
-            Some((st.chars().next()?.to_string(), path.to_string()))
-        })
-        .collect()
-}
-
 // ===================== Workspace 方法 =====================
-
 use crate::Workspace;
-use crate::git_panel::run_git;
+use crate::git_panel::git_call;
 use gpui::{AppContext, Context};
 
 impl Workspace {
@@ -346,13 +238,12 @@ impl Workspace {
             let commits = cx
                 .background_executor()
                 .spawn(async move {
-                    let args = log_args(&scope, LOG_LIMIT);
-                    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-                    let out = run_git(&r, &argv).ok()?;
-                    if !out.success() {
-                        return None;
-                    }
-                    Some(parse_log(&String::from_utf8_lossy(&out.stdout)))
+                    git_call::<GitLogCall>(GitLogParams {
+                        root: r,
+                        scope,
+                        limit: LOG_LIMIT,
+                    })
+                    .map(|result| result.commits)
                 })
                 .await
                 .unwrap_or_default();
@@ -391,20 +282,8 @@ impl Workspace {
             let files = cx
                 .background_executor()
                 .spawn(async move {
-                    // --name-status 只要文件清单，diff 内容等点了具体文件再拉——
-                    // 一个大提交的完整 diff 可能上万行，全量拉会卡住这一屏。
-                    let out = run_git(
-                        &r,
-                        &[
-                            "show",
-                            "--name-status",
-                            "--pretty=format:",
-                            "--no-color",
-                            &h,
-                        ],
-                    )
-                    .ok()?;
-                    Some(parse_name_status(&String::from_utf8_lossy(&out.stdout)))
+                    git_call::<GitCommitFilesCall>(GitCommitRefParams { root: r, hash: h })
+                        .map(|result| result.files)
                 })
                 .await
                 .unwrap_or_default();
@@ -434,26 +313,13 @@ impl Workspace {
             let loaded = cx
                 .background_executor()
                 .spawn(async move {
-                    // 单个文件在这次提交里的改动。--format= 去掉提交头，只留 diff 本体。
-                    let text = match run_git(&r, &["show", "--format=", "--no-color", &h, "--", &p])
-                    {
-                        Ok(out) => {
-                            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-                            // `git show` 失败时正文在 stderr，stdout 是空的。空成功才是无差异。
-                            if stdout.trim().is_empty() && !out.success() {
-                                let err = String::from_utf8_lossy(&out.stderr);
-                                let err = err.trim();
-                                if err.is_empty() {
-                                    stdout
-                                } else {
-                                    format!("无法执行 git show：{err}")
-                                }
-                            } else {
-                                stdout
-                            }
-                        }
-                        Err(err) => format!("无法执行 git show：{err}"),
-                    };
+                    let text = git_call::<GitCommitFileDiffCall>(GitCommitFileParams {
+                        root: r,
+                        hash: h,
+                        path: p,
+                    })
+                    .map(|result| result.text)
+                    .unwrap_or_else(|err| format!("无法执行 git show：{err}"));
                     let files = gpui_component::diff::DiffFile::parse(&text).map_err(|err| {
                         crate::git_panel::diff_parse_failure(&text, &err.to_string())
                     });
@@ -541,7 +407,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitNode, Edge, layout_graph, parse_log};
+    use super::{CommitNode, Edge, layout_graph};
+    use smelt_runtime_client::protocol::git::parse_log;
 
     fn c(hash: &str, parents: &[&str]) -> CommitNode {
         CommitNode {
@@ -553,24 +420,6 @@ mod tests {
             parents: parents.iter().map(|s| s.to_string()).collect(),
             refs: vec![],
         }
-    }
-
-    #[test]
-    fn parses_log_records_including_refs_and_parents() {
-        let text = "aaa\u{0}aa\u{0}Zoey\u{0}1700000000\u{0}feat: 加个东西\u{0}bbb ccc\u{0}HEAD -> main, origin/main, tag: v1.0\u{1e}\
-                    bbb\u{0}bb\u{0}Matt\u{0}1699999999\u{0}fix: 修一下\u{0}\u{0}\u{1e}";
-        let got = parse_log(text);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].author, "Zoey");
-        assert_eq!(got[0].subject, "feat: 加个东西");
-        assert_eq!(got[0].parents, vec!["bbb", "ccc"], "两个父说明是 merge");
-        assert_eq!(
-            got[0].refs,
-            vec!["main", "origin/main", "v1.0"],
-            "`HEAD -> ` 和 `tag: ` 两个前缀都该被剥掉"
-        );
-        assert_eq!(got[1].time, 1699999999);
-        assert!(got[1].parents.is_empty(), "根提交没有父");
     }
 
     /// 一条直线的历史：所有节点都在第 0 列，中间不该冒出别的列。
@@ -629,28 +478,19 @@ mod tests {
         assert_eq!(ins, 2, "base 应收到两条汇入线：{:?}", rows[3].edges);
     }
 
-    #[test]
-    fn parses_name_status_including_renames() {
-        let text = "M\tsrc/main.rs\nA\tsrc/new.rs\nD\tsrc/old.rs\nR100\tsrc/a.rs\tsrc/b.rs\n";
-        let got = super::parse_name_status(text);
-        assert_eq!(
-            got,
-            vec![
-                ("M".to_string(), "src/main.rs".to_string()),
-                ("A".to_string(), "src/new.rs".to_string()),
-                ("D".to_string(), "src/old.rs".to_string()),
-                // 重命名取新路径，状态取首字母
-                ("R".to_string(), "src/b.rs".to_string()),
-            ]
-        );
-    }
-
     /// 拿真仓库跑一遍：手搓的用例可能和 git 的真实拓扑有出入，这里造一个带真实
     /// merge 的仓库，确认解析和布局都不崩、merge 行确实分出两条线。
     #[test]
     fn layouts_a_real_repo_with_a_merge() {
-        use super::LOG_FORMAT;
-        use crate::git_panel::run_git;
+        use smelt_runtime_client::protocol::git::LOG_FORMAT;
+        // GUI 不再自己起 git；测试里造仓库直接用命令行。
+        let run_git = |dir: &str, args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+        };
 
         let root = std::env::temp_dir().join(format!("smelt-gitlog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

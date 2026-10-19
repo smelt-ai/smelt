@@ -7,16 +7,17 @@ use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::*;
 
-use crate::resizable_split::{h_resizable, v_resizable};
 use crate::session_history::{HistoryListState, HistoryViewParams, history_view};
 use crate::{
-    Pane, RenameTarget, UpdateInstallTrigger, Workspace, request_app_quit, ui_theme, updater,
+    CloseConfirm, RenameTarget, UpdateInstallTrigger, Workspace, request_app_quit, ui_theme,
+    updater,
 };
 
 impl Workspace {
-    /// 「关闭项目」确认弹窗：说清会连带关掉几个会话（视觉同删 Worktree 那套危险配色）。
-    pub(crate) fn render_close_project_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some((label, _, n)) = self.close_project_target.clone() else {
+    /// 关闭确认弹窗：关项目说清会连带关掉几个会话；关正在跑的会话说清这一轮会被终止。
+    /// 用危险配色。
+    pub(crate) fn render_close_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(target) = self.close_confirm.clone() else {
             return div().into_any_element();
         };
         let (fg, muted) = {
@@ -24,32 +25,54 @@ impl Workspace {
             (t.foreground, t.muted_foreground)
         };
         let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
+        let (title, body, confirm_label) = match &target {
+            CloseConfirm::Project {
+                label, sessions, ..
+            } => (
+                "确定关闭这个项目吗？",
+                format!(
+                    "「{label}」下的 {sessions} 个会话会被一起关掉，终端里正在跑的东西会被终止。项目本身只是从工作台移走，磁盘上的目录不动。"
+                ),
+                "关闭项目",
+            ),
+            CloseConfirm::Session { title, pane, .. } => (
+                if pane.is_some() {
+                    "这个分屏还在运行，确定关闭吗？"
+                } else {
+                    "这个会话还在运行，确定关闭吗？"
+                },
+                format!("「{title}」正在跑的这一轮会被终止，关掉之后找不回来。"),
+                if pane.is_some() {
+                    "关闭分屏"
+                } else {
+                    "关闭会话"
+                },
+            ),
+        };
 
         let content = v_flex()
-            .child(Self::modal_title(fg, "确定关闭这个项目吗？"))
-            .child(div().text_sm().text_color(muted).child(format!(
-                "「{label}」下的 {n} 个会话会被一起关掉，终端里正在跑的东西会被终止。项目本身只是从工作台移走，磁盘上的目录不动。"
-            )))
+            .child(Self::modal_title(fg, title))
+            .child(div().text_sm().text_color(muted).child(body))
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
                     .child(Self::modal_button(
-                        "cancel-close-project",
+                        "cancel-close-confirm",
                         "取消",
                         neutral_bg,
                         neutral_hover,
                         fg,
-                        |this, _, _, cx| this.cancel_close_project(cx),
+                        |this, _, _, cx| this.cancel_close_confirm(cx),
                         cx,
                     ))
                     .child(Self::modal_button(
-                        "confirm-close-project",
-                        "关闭项目",
+                        "confirm-close-confirm",
+                        confirm_label,
                         tint,
                         hover,
                         accent_text,
-                        |this, _, _, cx| this.confirm_close_project(cx),
+                        |this, _, window, cx| this.confirm_close(window, cx),
                         cx,
                     )),
             );
@@ -57,7 +80,7 @@ impl Workspace {
             380.,
             true,
             content,
-            crate::overlay::ModalLayer::CloseProject,
+            crate::overlay::ModalLayer::CloseConfirm,
             cx,
         )
     }
@@ -451,7 +474,6 @@ impl Workspace {
         let heading = match self.rename_target {
             Some(RenameTarget::Pane(_)) => "重命名终端",
             Some(RenameTarget::History { .. }) => "重命名历史会话",
-            Some(RenameTarget::WorkspaceSurface(_)) => "重命名",
             _ => "重命名会话",
         };
 
@@ -636,73 +658,6 @@ impl Workspace {
         )
     }
 
-    /// 递归渲染分屏布局树：Leaf 渲染一个终端（活动 pane 描边 + 点击聚焦），
-    /// Split 用 h/v_resizable 把子节点排成可拖拽的并排 / 堆叠。
-    pub(crate) fn render_pane(
-        &self,
-        pane: &Pane,
-        path: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match pane {
-            Pane::Leaf(t) => {
-                let active = self.cur().is_some_and(|s| s.anchor_id() == t.entity_id());
-                // 不给任何 pane 描边（iTerm2 也不描，之前的蓝框提醒也拿掉了）：分屏时靠
-                // 「压暗非活动 pane」区分谁是活动的就够了；单 pane 时压根没有别的 pane
-                // 可比，不需要任何叠加层。
-                let multi_pane = self.cur().is_some_and(|s| s.pane_count() > 1);
-                let overlay = if !multi_pane || active {
-                    div().absolute().inset_0()
-                } else {
-                    div().absolute().inset_0().bg(hsla(0., 0., 0., 0.28))
-                };
-                let te = t.clone();
-                div()
-                    .id(SharedString::from(path.to_string()))
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    // 点击 pane 即设为当前会话的活动 pane（终端自身也会抢焦点，二者一致）。
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _ev, window, cx| {
-                            this.activate_pane(&te, window, cx)
-                        }),
-                    )
-                    .child(t.clone())
-                    .child(overlay)
-                    .into_any_element()
-            }
-            Pane::Split {
-                axis,
-                state,
-                children,
-                init_sizes,
-            } => {
-                let id = SharedString::from(path.to_string());
-                let mut group = if matches!(axis, Axis::Horizontal) {
-                    h_resizable(id)
-                } else {
-                    v_resizable(id)
-                }
-                .with_state(state);
-                for (i, c) in children.iter().enumerate() {
-                    let el = self.render_pane(c, &format!("{path}-{i}"), cx);
-                    // 存档尺寸只作 initial_size：拖过之后 panel 自己的 size 会盖过它
-                    //（见 Pane::Split::init_sizes 注释），所以每帧原样传是安全的。
-                    let mut panel = resizable_panel().child(el);
-                    if let Some(s) = init_sizes.get(i).copied().filter(|s| *s > 0.) {
-                        panel = panel.size(px(s));
-                    }
-                    group = group.child(panel);
-                }
-                group.into_any_element()
-            }
-        }
-    }
-
     /// 智能体的 space 里只可能有底层引擎自己的历史，别家的在这个目录下不可能
     /// 存在。返回 `Some(kind)` 表示当前处在某个智能体的上下文里。
     pub(crate) fn history_engine_override(
@@ -710,9 +665,8 @@ impl Workspace {
         cwd: Option<&str>,
         cx: &App,
     ) -> Option<crate::settings::ConversationAgentKind> {
-        let id = smelt_core::agent_definition_store::agent_definition_id_for_space(
-            std::path::Path::new(cwd?),
-        )?;
+        let id =
+            smelt_model::agent_paths::agent_definition_id_for_space(std::path::Path::new(cwd?))?;
         cx.global::<crate::settings::AgentHostState>()
             .agents
             .iter()
@@ -756,16 +710,34 @@ impl Workspace {
                 ),
             };
         let list_state = match (cwd.as_ref(), sessions) {
-            (None, _) => HistoryListState::NoProject,
+            (None, _) => match self.remote_project_notice(cx) {
+                Some(notice) => HistoryListState::RemoteProject(notice),
+                None => HistoryListState::NoProject,
+            },
             (Some(_), None) => HistoryListState::Loading,
             (Some(_), Some(s)) if s.is_empty() => HistoryListState::Empty,
             (Some(_), Some(s)) => HistoryListState::Ready(s),
         };
         let (source_tabs, launch_override, profile_label, history_agent_ids) = {
             let config = cx.global::<crate::settings::AgentHostState>();
-            let source_tabs = crate::session_history::history_source_tabs(
-                restrict_to_kind,
-                config.all_profiles().cloned(),
+            let source_tabs = crate::session_history::tabs_with_sessions(
+                crate::session_history::history_source_tabs(
+                    restrict_to_kind,
+                    config.all_profiles().cloned(),
+                ),
+                (agent, profile_id.as_deref()),
+                |tab| {
+                    cwd.as_deref().is_some_and(|cwd| {
+                        let key = crate::session_history::session_list_key(
+                            tab.kind,
+                            tab.profile_id.as_deref(),
+                            cwd,
+                        );
+                        self.session_list
+                            .get(&key)
+                            .is_some_and(|(_, list)| !list.sessions.is_empty())
+                    })
+                },
             );
             let launch_override = profile_id.as_deref().and_then(|id| {
                 config

@@ -125,7 +125,7 @@ pub(crate) fn toggle_pinned_project(pinned: &mut HashSet<String>, root: &str) {
 }
 
 /// 空项目标题再降一档；当前项目即使没会话也保持可读（落地页）。
-pub(crate) fn project_header_is_faint(is_active: bool, is_empty: bool) -> bool {
+pub(crate) fn project_header_is_dimmed(is_active: bool, is_empty: bool) -> bool {
     is_empty && !is_active
 }
 

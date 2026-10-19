@@ -4,7 +4,7 @@
 //! 只列全局目录：智能体对话的工作目录是一次性空目录，项目级插件永远扫不到。
 
 use super::*;
-use smelt_core::pi_plugin_catalog::{
+use smelt_model::pi_plugin_catalog::{
     PiPlugin, PiPluginKind, global_extension_root, global_skill_roots,
 };
 

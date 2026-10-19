@@ -12,13 +12,15 @@
 //!   `ConversationEvent::RestoreFailed` 传出，让守护端统一决定是重试、报错还是对空白会话
 //!   安全地开新会话。`spawn_acp` 本身永不阻塞、永不 panic 调用方。
 
+pub use smelt_model::acp_conn::*;
+
 use std::future::Future;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt, channel::mpsc};
 
@@ -91,15 +93,6 @@ pub struct ConversationLaunch {
     pub fork_cut: Option<AcpForkCut>,
 }
 
-/// 「分叉副本的切点」：见 `ConversationLaunch::fork_cut`。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AcpForkCut {
-    /// 切点用户消息原文。
-    pub text: String,
-    /// 同文本消息中的第几条（从 0 数起），与 `Rewind` 的 occurrence 同语义。
-    pub occurrence: usize,
-}
-
 /// 随 prompt 一起发出去的一张图（剪贴板粘进来的截图等）。
 ///
 /// 协议要的就是 base64 + mime，所以在进这条通道前就编码好——连接线程不碰
@@ -169,6 +162,8 @@ pub enum ConversationCommand {
     /// 改会话名。用户在侧栏重命名后同步给 agent，让 agent 侧的会话档也叫这个名字。
     /// 不是所有 agent 都支持，不支持的静默忽略——重命名对本地侧栏始终生效。
     SetSessionTitle(String),
+    /// 用户在界面上停一个后台任务。只有会话宿主管着后台任务的驱动（Pi）会处理。
+    StopBackgroundTask { id: String },
     /// 关闭会话：退出连接循环，随连接 drop 杀掉子进程。
     Shutdown,
 }
@@ -223,79 +218,13 @@ where
     .await
 }
 
-/// 当前窗口里各桶的 token 估数。Pi 用 chars/4，GUI 再对齐到账单 `used`。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextUsageBreakdown {
-    #[serde(default)]
-    pub system_prompt: u64,
-    #[serde(default)]
-    pub tools_definition: u64,
-    #[serde(default)]
-    pub rules: u64,
-    #[serde(default)]
-    pub skills: u64,
-    #[serde(default)]
-    pub mcp_dynamic: u64,
-    #[serde(default)]
-    pub subagent: u64,
-    #[serde(default)]
-    pub summarized: u64,
-    #[serde(default)]
-    pub conversation: u64,
-}
-
-impl ContextUsageBreakdown {
-    pub fn occupied(&self) -> u64 {
-        self.system_prompt
-            + self.tools_definition
-            + self.rules
-            + self.skills
-            + self.mcp_dynamic
-            + self.subagent
-            + self.summarized
-            + self.conversation
-    }
-
-    /// 各桶加起来对齐到账单 used：少了补 Conversation，多了按比例缩。
-    pub fn aligned_to_used(mut self, used: u64) -> Self {
-        let occupied = self.occupied();
-        if occupied == 0 {
-            self.conversation = used;
-            return self;
-        }
-        if occupied == used {
-            return self;
-        }
-        if occupied < used {
-            self.conversation += used - occupied;
-            return self;
-        }
-        let scale = used as f64 / occupied as f64;
-        let mut next = Self {
-            system_prompt: (self.system_prompt as f64 * scale).round() as u64,
-            tools_definition: (self.tools_definition as f64 * scale).round() as u64,
-            rules: (self.rules as f64 * scale).round() as u64,
-            skills: (self.skills as f64 * scale).round() as u64,
-            mcp_dynamic: (self.mcp_dynamic as f64 * scale).round() as u64,
-            subagent: (self.subagent as f64 * scale).round() as u64,
-            summarized: (self.summarized as f64 * scale).round() as u64,
-            conversation: (self.conversation as f64 * scale).round() as u64,
-        };
-        let aligned = next.occupied();
-        if aligned < used {
-            next.conversation += used - aligned;
-        } else if aligned > used {
-            next.conversation = next.conversation.saturating_sub(aligned - used);
-        }
-        next
-    }
-}
-
 /// 连接线程 → UI 的事件。schema 类型（ToolCall 等）原样透传，不造平行模型。
 pub enum ConversationEvent {
     /// 启动阶段的进度文案（下载运行时 / 拉取适配器等），Starting 横幅显示。
     Status(String),
+    /// 用户该看到的一次性提示（插话、压缩、停后台任务失败等）。显示在输入框上方，
+    /// 下一回合开始时清掉；不能走 `Status`，那条只在启动横幅里显示。
+    Notice(String),
     /// 冷恢复即将由 agent 重放完整历史。必须先清空 daemon 中的旧投影；Ready
     /// 到达时历史可能已经同步回放完，不能再在那里清空。
     HistoryReplayStarted,
@@ -432,6 +361,8 @@ pub enum ConversationEvent {
         used: Option<u64>,
         size: Option<u64>,
     },
+    /// Provider 开始（`Some`）或结束（`None`）自动重试这一轮的模型请求。
+    ProviderRetry(Option<crate::acp_session::ProviderRetryView>),
     /// Provider 侧 steering / follow-up 队列快照。
     PromptQueue {
         steering: Vec<String>,
@@ -439,10 +370,12 @@ pub enum ConversationEvent {
     },
     /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加；客户端处理后
     /// 发送 `AcknowledgeComposerRestore`，服务端清掉文本和图片，但保留 revision 水位。
+    /// `images[i]` 是 `texts[i]` 的附图：「立即发送」认领其中一条时，图片要跟着它走。
+    /// 只有图的那条，文字是空串。
     ComposerRestore {
         revision: u64,
         texts: Vec<String>,
-        images: Vec<PromptImage>,
+        images: Vec<Vec<PromptImage>>,
     },
     /// agent 的选择题 / 表单（AskUserQuestion 类）：UI 渲染字段，凭 responder 回填。
     Elicitation {
@@ -459,6 +392,10 @@ pub enum ConversationEvent {
     /// Pi 现在能接受一条不带 streamingBehavior 的 prompt。
     /// 只有这条信号才打开 Pi 会话的发送闸门；界面上的回合结束不算。
     ProviderIdle,
+    /// Provider 自己开了一轮，不是宿主发的 prompt。Pi 的后台任务、后台子智能体
+    /// 结果带 `triggerTurn` 时就是这样。没有它，这一轮的输出落在已结束的回合上：
+    /// 界面不转圈、不能停，结束也没有完成提示。
+    ProviderTurnStarted,
     /// 一轮 prompt 结束（含被取消）。
     TurnEnded(StopReason),
     /// 一轮 prompt 以 JSON-RPC 错误收场（agent 明确回了 error，而不是断线）。
@@ -507,57 +444,6 @@ pub enum ReadyKind {
     ResumedKeepHistory,
 }
 
-/// 一组模型候选。ACP 的 `select` 允许按 provider/厂商分组，保留这个边界让
-/// 客户端能分别呈现 Provider 与 Model，而不是把两者压扁成一条难找的菜单。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ModelProviderGroup {
-    /// 协议分组 id；仅作稳定识别，切换仍写模型选项值。
-    pub id: String,
-    /// 用户可见的 provider/分组名。
-    pub name: String,
-    /// 此 provider 下的 `(值 id, 模型名)`。
-    pub options: Vec<(String, String)>,
-}
-
-/// 模型选择状态：UI 拿它渲染「当前模型」胶囊和下拉候选。全是纯 String/Vec
-/// 字段，没有 agent_client_protocol 的 schema 类型，直接可以序列化进
-/// acp_session 的 wire 快照，不用另造一份 View 类型。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ModelState {
-    /// ACP 配置项 id。写回时必须用它，不能假定各 adapter 都叫 `model`。
-    pub config_id: String,
-    /// 当前模型的协议值。部分 agent 用 `provider/model` 编码，UI 需要它区分同名模型。
-    #[serde(default)]
-    pub current_value: String,
-    /// 当前模型的人类可读名（`Claude Sonnet 4.5`）。
-    pub current_name: String,
-    /// 可选模型：(值 id, 人类可读名)。空 = agent 没给候选，UI 就只显示不给切。
-    pub options: Vec<(String, String)>,
-    /// ACP 提供的 provider/模型分组。旧 adapter 的平铺候选为空，UI 回退单一模型入口。
-    #[serde(default)]
-    pub provider_groups: Vec<ModelProviderGroup>,
-}
-
-/// 一项由 ACP agent 声明的可选会话配置。模型单独显示，避免和输入栏的模型入口重复。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct SessionConfigState {
-    pub config_id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub current_name: String,
-    pub options: Vec<(String, String)>,
-    /// `Some` 表示这是布尔开关；`None` 表示 select。旧快照缺这个字段按 select 读。
-    #[serde(default)]
-    pub boolean: Option<bool>,
-}
-
-/// 写入 `session/set_config_option` 的值。select 走值 id，开关走 bool。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConfigValue {
-    Select(String),
-    Boolean(bool),
-}
-
 /// 权限回执守卫：UI 点按钮时消费；**被 drop（视图关闭、卡片被弃置）自动回
 /// Cancelled**，保证 agent 侧永远等得到答案、不会挂起。
 enum PermissionResponderInner {
@@ -604,36 +490,6 @@ impl Drop for PermissionResponder {
             None => {}
         }
     }
-}
-
-/// 表单字段的 UI 无关简化模型（schema 细节收在本模块，视图只见这个）。
-pub struct ElicitField {
-    /// accept 回填时的 key（schema properties 的键名）。
-    pub key: String,
-    pub title: String,
-    /// 只有 schema 的 required 字段才会阻塞整张表单提交。
-    pub required: bool,
-    /// 允许用户不点任何选项、自己输入答案。只对宿主「选择题」卡片开启：
-    /// 题目工具的合同是「答案必须来自人类」，选项只是便利，不能把人锁死
-    /// 在预设里。ACP schema 的 enum 字段受 agent 侧约束，恒为 false。
-    pub allow_custom_input: bool,
-    pub kind: ElicitFieldKind,
-}
-
-pub enum ElicitFieldKind {
-    /// 单选：点一个按钮。布尔字段也翻译成 是/否 两个选项。
-    Select(Vec<ElicitOption>),
-    /// 多选：可切换多个再提交。
-    MultiSelect(Vec<ElicitOption>),
-    /// 自由文本。secret 只影响客户端显示，协议回填仍是字符串。
-    Text { secret: bool },
-    /// 需要用户在浏览器完成的外部步骤。
-    ExternalUrl(String),
-}
-
-pub struct ElicitOption {
-    pub value: ElicitationContentValue,
-    pub label: String,
 }
 
 /// 外部（非 ACP）回执处理函数：接收回填的 elicitation 内容，None 表示取消。
@@ -1036,25 +892,69 @@ fn process_start_time_inner(pid: i32) -> Option<std::time::SystemTime> {
     ))
 }
 
+/// 启动时刻：开机时刻 + 启动 tick。精度是一个 tick（通常 10ms）。
+///
+/// 开机时刻不用 `/proc/stat` 的 `btime`：它只到整秒，会把所有进程的启动时刻往前挪
+/// 最多一秒，快照之后才复用这个 pid 的进程就可能被当成快照前出生的原进程杀掉。
+/// 改用 `CLOCK_REALTIME - CLOCK_BOOTTIME`，进程内只算一次。
 #[cfg(target_os = "linux")]
 fn process_start_time_inner(pid: i32) -> Option<std::time::SystemTime> {
-    // /proc/<pid>/stat 第 22 字段：启动时刻（clock tick，自 boot 起）。
+    static BOOTED_AT: std::sync::OnceLock<Option<std::time::SystemTime>> =
+        std::sync::OnceLock::new();
+    let booted_at = (*BOOTED_AT.get_or_init(|| {
+        let mut boottime: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut boottime) } != 0 {
+            return None;
+        }
+        let since_boot = std::time::Duration::new(boottime.tv_sec as u64, boottime.tv_nsec as u32);
+        std::time::SystemTime::now().checked_sub(since_boot)
+    }))?;
+    let ticks_per_sec = linux_ticks_per_sec()?;
+    let start_ticks = linux_start_ticks(pid)?;
+    booted_at.checked_add(std::time::Duration::from_nanos(
+        (u128::from(start_ticks) * 1_000_000_000 / u128::from(ticks_per_sec)) as u64,
+    ))
+}
+
+/// `/proc/<pid>/stat` 第 22 字段：自开机起的启动 tick。同一次开机内对一个进程恒定。
+#[cfg(target_os = "linux")]
+fn linux_start_ticks(pid: i32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = stat.rsplit_once(')')?.1;
-    let start_ticks: u64 = after_comm.split_whitespace().nth(20)?.parse().ok()?;
-    let btime: u64 = std::fs::read_to_string("/proc/stat")
-        .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix("btime ")?.parse().ok())?;
-    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
-    if ticks_per_sec == 0 {
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ticks_per_sec() -> Option<u64> {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (ticks > 0).then_some(ticks as u64)
+}
+
+/// 进程的出生标识：同一个进程任何时候、任何进程读都一样，pid 被复用后一定不同。
+/// 跨进程记下来以后比对身份用；要和墙钟比先后用 [`process_start_time`]。
+pub fn process_birth(pid: i32) -> Option<String> {
+    if pid <= 1 {
         return None;
     }
-    std::time::UNIX_EPOCH
-        .checked_add(std::time::Duration::from_secs(btime))
-        .and_then(|boot| {
-            boot.checked_add(std::time::Duration::from_secs(start_ticks / ticks_per_sec))
-        })
+    process_birth_inner(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_birth_inner(pid: i32) -> Option<String> {
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(format!("{}:{}", boot_id.trim(), linux_start_ticks(pid)?))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_birth_inner(pid: i32) -> Option<String> {
+    let started = process_start_time_inner(pid)?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!(
+        "{}.{:09}",
+        started.as_secs(),
+        started.subsec_nanos()
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -3264,6 +3164,8 @@ async fn drive_session<S: SessionDrive>(
             }
             // 通用 ACP 没有改会话名的方法；本地标题已经改好，这里无声跳过。
             Next::Cmd(Some(ConversationCommand::SetSessionTitle(_))) => {}
+            // 通用 ACP 没有宿主里的后台任务，界面也不会给它出停止按钮。
+            Next::Cmd(Some(ConversationCommand::StopBackgroundTask { .. })) => {}
             // 通用 ACP 的模型列表由 agent 在 `session/update` 里自己推，没有「重拉」
             // 这个动作；这条命令是给 Pi 那条路径的。
             Next::Cmd(Some(ConversationCommand::RefreshModels)) => {}
@@ -4698,63 +4600,6 @@ fn cleanup_stale_managed_adapters(status: &dyn Fn(&str)) {
     let removed = cleanup_stale_managed_adapter_cache(&cache_root);
     if removed > 0 {
         status(&format!("已清理 {removed} 个旧 ACP 适配器缓存项"));
-    }
-}
-
-/// 一个 CLI 或运行时可执行文件的本机诊断结果。
-///
-/// `path` 为 `None` 代表 Smelt 无法提供该运行时；找到但 `--version` 失败时仍
-/// 保留路径，并将原因写入 `error`，避免把损坏的 shim 误报成「未安装」。对于
-/// 首次使用才物化的内置运行时，`path` 是它将落盘的目标入口。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RuntimeExecutable {
-    pub program: String,
-    pub path: Option<String>,
-    pub version: Option<String>,
-    pub error: Option<String>,
-}
-
-impl RuntimeExecutable {
-    pub fn is_available(&self) -> bool {
-        self.path.is_some()
-    }
-}
-
-/// Agent CLI 运行环境的只读诊断快照。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AcpRuntimeDiagnostics {
-    terminal: HashMap<TerminalAgentKind, RuntimeExecutable>,
-    acp: HashMap<ConversationAgentKind, RuntimeExecutable>,
-}
-
-impl AcpRuntimeDiagnostics {
-    /// 记录终端 CLI 的探测结果。索引直接使用注册表种类，新增 CLI 不需要再给
-    /// 诊断快照增加字段和匹配分支。
-    pub fn record_terminal(&mut self, agent: TerminalAgentKind, runtime: RuntimeExecutable) {
-        self.terminal.insert(agent, runtime);
-    }
-
-    /// 记录 ACP agent 自己的运行时探测结果。它优先于同名终端 CLI：例如 Smelt
-    /// 可以内置 Pi 对话运行时，同时仍单独探测用户是否安装了 Pi 终端 CLI。
-    pub fn record_agent(&mut self, agent: ConversationAgentKind, runtime: RuntimeExecutable) {
-        self.acp.insert(agent, runtime);
-    }
-
-    /// 按 ACP agent 种类索引诊断信息。
-    ///
-    /// 返回 None 表示这份快照没有记录该 agent。完整探测会覆盖注册表中的每一项；
-    /// 调用方应把缺项视为不可用，而不是把注册遗漏伪装成已安装。
-    pub fn for_agent(&self, agent: ConversationAgentKind) -> Option<&RuntimeExecutable> {
-        self.acp.get(&agent).or_else(|| {
-            agent
-                .terminal()
-                .and_then(|terminal| self.for_terminal(terminal))
-        })
-    }
-
-    /// 按终端 agent 种类索引诊断信息。返回 None 表示快照没有记录该项。
-    pub fn for_terminal(&self, agent: TerminalAgentKind) -> Option<&RuntimeExecutable> {
-        self.terminal.get(&agent)
     }
 }
 
@@ -6658,8 +6503,8 @@ mod model_tests {
 #[cfg(test)]
 mod process_reap_tests {
     use super::{
-        Waitpid, kill_and_reap_process_group, process_start_time, prove_process_group_dead,
-        waitpid_child,
+        Waitpid, kill_and_reap_process_group, process_birth, process_start_time,
+        prove_process_group_dead, waitpid_child,
     };
     use std::os::unix::process::CommandExt as _;
     use std::process::Command;
@@ -6898,6 +6743,32 @@ mod process_reap_tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         let status = child.wait().expect("原来的 wait 必须还能收走这个僵尸");
         assert!(status.success());
+    }
+
+    /// 出生标识：同一进程反复读不变，不同进程不同，死进程读不出。
+    #[test]
+    fn process_birth_is_stable_per_process_and_distinct_across_processes() {
+        let (_a, a) = spawn_sleep();
+        std::thread::sleep(Duration::from_millis(50));
+        let (_b, b) = spawn_sleep();
+        let first = process_birth(a).expect("活进程应读得出");
+        assert_eq!(process_birth(a).as_deref(), Some(first.as_str()));
+        assert_ne!(process_birth(b), Some(first));
+        assert_eq!(process_birth(i32::MAX), None);
+    }
+
+    /// 启动时刻贴着墙钟：刚 spawn 的进程，启动时刻离现在不超过一个 tick 量级。
+    #[test]
+    fn process_start_time_tracks_the_wall_clock() {
+        let before = std::time::SystemTime::now();
+        let (_a, a) = spawn_sleep();
+        let started = process_start_time(a).unwrap();
+        let slack = Duration::from_millis(50);
+        assert!(
+            started + slack >= before,
+            "{started:?} 早于 spawn 前的 {before:?}"
+        );
+        assert!(started <= std::time::SystemTime::now() + slack);
     }
 
     /// 启动时间单调：后 spawn 的更大；死进程读不出。
@@ -7350,5 +7221,35 @@ mod dsh_live_tests {
         );
 
         let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+    }
+}
+
+#[cfg(test)]
+mod runtime_diagnostics_wire_tests {
+    use super::*;
+
+    /// 诊断从运行时传到客户端后，按种类查到的还是同一份结果；对端新加的 agent
+    /// 本端认不出，丢掉而不是整份解析失败。
+    #[test]
+    fn diagnostics_survive_the_wire_and_skip_unknown_agents() {
+        let mut diagnostics = AcpRuntimeDiagnostics::default();
+        let claude = RuntimeExecutable {
+            program: "claude".into(),
+            path: Some("/usr/local/bin/claude".into()),
+            version: Some("2.0.0".into()),
+            error: None,
+        };
+        diagnostics.record_terminal(TerminalAgentKind::Claude, claude.clone());
+        diagnostics.record_agent(ConversationAgentKind::Pi, RuntimeExecutable::default());
+
+        let mut wire = serde_json::to_value(&diagnostics).unwrap();
+        wire["acp"]["future-agent"] = serde_json::json!({"program": "x"});
+        let decoded: AcpRuntimeDiagnostics = serde_json::from_value(wire).unwrap();
+
+        assert_eq!(decoded, diagnostics);
+        assert_eq!(
+            decoded.for_terminal(TerminalAgentKind::Claude),
+            Some(&claude)
+        );
     }
 }

@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(test)]
 mod appearance_tests {
-    use super::Appearance;
+    use super::{Appearance, ThemeMode, liquid_glass};
     use gpui::WindowBackgroundAppearance;
 
     #[test]
@@ -36,6 +36,28 @@ mod appearance_tests {
             super::resolved_ui_font_family(&ap).as_ref(),
             ".SystemUIFont"
         );
+    }
+
+    /// 外观存进客户端库再读回来，枚举字段按名字往返不丢。
+    #[test]
+    fn appearance_survives_the_snapshot_round_trip() {
+        let appearance = Appearance {
+            glass_style: liquid_glass::GlassStyle::Clear,
+            theme_mode: ThemeMode::Light,
+            theme_name: "Ayu Light".to_string(),
+            ui_font_px: 18,
+            bg_image: Some("/tmp/bg.png".to_string()),
+            ..Appearance::default()
+        };
+        let snapshot = super::snapshot_from_appearance(&appearance);
+        assert_eq!(snapshot.glass_style, "clear");
+        assert_eq!(snapshot.theme_mode, "light");
+        let back = super::appearance_from_snapshot(snapshot);
+        assert_eq!(back.glass_style, liquid_glass::GlassStyle::Clear);
+        assert_eq!(back.theme_mode, ThemeMode::Light);
+        assert_eq!(back.theme_name, "Ayu Light");
+        assert_eq!(back.ui_font_px, 18);
+        assert_eq!(back.bg_image.as_deref(), Some("/tmp/bg.png"));
     }
 
     #[test]
@@ -86,40 +108,28 @@ mod update_settings_tests {
 }
 
 #[cfg(test)]
-mod iroh_pairing_tests {
-    use super::{RemoteConfig, qr_png_for_url};
-    use smelt_pairing::iroh_pairing_uri;
-
-    #[test]
-    fn old_config_with_retired_remote_fields_still_loads() {
-        // serde 默认忽略旧版的多通路开关；升级后 enabled 是唯一远程开关。
-        let json = r#"{"enabled":true,"iroh_enabled":true,"tunnel_enabled":false,"webrtc_enabled":true,
-                       "signal_http":"https://s.example.com","write_enabled":true}"#;
-        let c: RemoteConfig = serde_json::from_str(json).expect("旧配置必须还能解析");
-        assert!(c.enabled);
-        assert!(c.write_enabled);
-    }
+mod pairing_qr_tests {
+    use super::qr_png_for_url;
 
     #[test]
     fn pairing_uri_renders_to_a_qr() {
-        // 配对码比 http 链接长（endpoint_id 是 64 个十六进制字符），
-        // 这里钉住「它确实能编成二维码」——超长内容会让 QrCode::new 失败。
-        let uri = iroh_pairing_uri(
+        // endpoint id 有 64 个十六进制字符，钉住「配对串确实能编成二维码」：
+        // 超长内容会让 QrCode::new 失败。
+        let uri = smelt_pairing::pairing_uri(
             &"a".repeat(64),
-            &"b".repeat(32),
-            "https://relay.example.test",
+            "ABCD-EFGH",
+            Some("https://relay.example.test"),
         );
-        let png = qr_png_for_url(&uri).expect("配对码必须能生成二维码");
+        let png = qr_png_for_url(&uri).expect("配对串必须能生成二维码");
         assert!(!png.is_empty());
-        assert_eq!(&png[1..4], b"PNG", "应当是 PNG 字节流");
     }
 }
 
 #[cfg(test)]
 mod daemon_info_tests {
-    use super::{acp_cmd_setting_value, command_uses_smelt_notify, daemon_info_line, fmt_uptime};
+    use super::{acp_cmd_setting_value, daemon_info_line, fmt_uptime};
     use crate::terminal::DaemonInfo;
-    use smelt_core::agent_kind::ConversationAgentKind;
+    use smelt_model::agent_kind::ConversationAgentKind;
 
     #[test]
     fn builtin_agent_command_is_hidden_in_settings() {
@@ -186,142 +196,11 @@ mod daemon_info_tests {
         };
         assert!(daemon_info_line(&info).contains("已运行 0 秒"));
     }
-
-    #[test]
-    fn hook_ownership_requires_smelt_notify_as_the_executable() {
-        assert!(command_uses_smelt_notify(
-            "SMELT_HOOK_PROVIDER=copilot /Users/test/.smelt/bin/smelt-notify"
-        ));
-        assert!(command_uses_smelt_notify(
-            "'/Applications/Smelt App/smelt-notify'"
-        ));
-        assert!(!command_uses_smelt_notify("echo smelt-notify"));
-        assert!(!command_uses_smelt_notify(
-            "if test -x /tmp/smelt-notify; then /tmp/other-hook; fi"
-        ));
-    }
-
-    #[test]
-    fn removing_smelt_hook_preserves_third_party_handlers() {
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-hook-remove-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("hooks.json");
-        std::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "hooks": {
-                    "PreToolUse": [{
-                        "matcher": "*",
-                        "hooks": [
-                            {"type":"command","command":"/tmp/smelt-notify"},
-                            {"type":"command","command":"/tmp/orca-hook"}
-                        ]
-                    }]
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        super::uninstall_hook_file(Some(path.clone()), &["PreToolUse"]).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let handlers = value["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
-        assert_eq!(handlers.len(), 1);
-        assert_eq!(handlers[0]["command"], "/tmp/orca-hook");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_json_write_keeps_dotfile_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-hook-symlink-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("managed-settings.json");
-        let link = dir.join("settings.json");
-        std::fs::write(&target, "{}").unwrap();
-        symlink(&target, &link).unwrap();
-
-        super::write_json_atomic(&link, &serde_json::json!({"hooks":{"Stop":[]}})).unwrap();
-        assert!(
-            std::fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
-        assert_eq!(value["hooks"]["Stop"], serde_json::json!([]));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }
 
 #[cfg(test)]
 mod antigravity_terminal_tests {
-    use super::{
-        ANTIGRAVITY_HOOK_EVENTS, ANTIGRAVITY_HOOK_NAME, LAUNCH_CONFIG_VERSION, LaunchConfig,
-        LaunchEntry, antigravity_event_installed, command_uses_smelt_notify,
-        default_launch_entries, load_launch_config_from_path, merge_antigravity_hooks,
-        remove_launch_entry_at, uninstall_antigravity_hooks_at, write_json_atomic,
-    };
-
-    fn seed_launch(dir: &std::path::Path, value: serde_json::Value) -> std::path::PathBuf {
-        let database = dir.join(smelt_store::DATABASE_FILE_NAME);
-        let store = smelt_store::Store::open_or_create(&database).unwrap();
-        store
-            .put("json", "launch.json", &serde_json::to_vec(&value).unwrap())
-            .unwrap();
-        database
-    }
-
-    fn temp_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "smelt-{label}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn smelt_handler_count(definition: &serde_json::Value, event: &str) -> usize {
-        let Some(handlers) = definition.get(event).and_then(|value| value.as_array()) else {
-            return 0;
-        };
-        if event == "PostToolUse" {
-            handlers
-                .iter()
-                .filter_map(|group| group.get("hooks").and_then(|value| value.as_array()))
-                .flatten()
-                .filter(|handler| {
-                    handler
-                        .get("command")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(command_uses_smelt_notify)
-                })
-                .count()
-        } else {
-            handlers
-                .iter()
-                .filter(|handler| {
-                    handler
-                        .get("command")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(command_uses_smelt_notify)
-                })
-                .count()
-        }
-    }
+    use super::{LaunchConfig, LaunchEntry, default_launch_entries, remove_launch_entry_at};
 
     #[test]
     fn default_terminal_entries_include_registered_full_permission_launches() {
@@ -370,75 +249,6 @@ mod antigravity_terminal_tests {
     }
 
     #[test]
-    fn current_launch_config_gains_the_registered_crush_entry() {
-        let dir = temp_dir("launch-crush-registration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": LAUNCH_CONFIG_VERSION,
-                "entries": [
-                    {"label":"My shell","command":"zsh","provider":null}
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        let crush = config
-            .entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("crush"))
-            .expect("当前版本的已有配置也应从注册表补入 Crush");
-        assert_eq!(crush.command, "crush --yolo");
-
-        let store = smelt_core::sqlite_state::open_sqlite_store(&path).unwrap();
-        let snapshot = store.get_launch_snapshot().unwrap().unwrap();
-        let persisted = serde_json::json!({
-            "version": snapshot.version,
-            "entries": snapshot.entries.iter().map(|entry| serde_json::json!({
-                "label": entry.label,
-                "command": entry.command,
-                "provider": entry.provider,
-            })).collect::<Vec<_>>(),
-        });
-        assert!(persisted["entries"].as_array().is_some_and(|entries| {
-            entries
-                .iter()
-                .any(|entry| entry["provider"] == "crush" && entry["command"] == "crush --yolo")
-        }));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn released_pi_command_upgrades_to_full_project_trust() {
-        let dir = temp_dir("launch-pi-full-access-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 13,
-                "entries": [
-                    {"label":"Pi","command":"pi","provider":"pi"},
-                    {"label":"My Pi","command":"pi --model custom","provider":null}
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        let builtin = config
-            .entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("pi"))
-            .expect("迁移后内置 Pi 项应保留");
-        assert_eq!(builtin.command, "pi --approve");
-        assert!(
-            config
-                .entries
-                .iter()
-                .any(|entry| { entry.label == "My Pi" && entry.command == "pi --model custom" })
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn builtin_launch_entries_are_fixed_but_custom_entries_can_be_removed() {
         let mut config = LaunchConfig::default();
         let builtin_count = config.entries.len();
@@ -454,470 +264,6 @@ mod antigravity_terminal_tests {
         assert!(remove_launch_entry_at(&mut config, builtin_count));
         assert_eq!(config.entries.len(), builtin_count);
     }
-
-    #[test]
-    fn released_kiro_v2_default_moves_to_v3_without_touching_custom_agents() {
-        let dir = temp_dir("launch-kiro-v3-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 10,
-                "entries": [
-                    {
-                        "label": "Kiro",
-                        "command": "kiro-cli chat --trust-all-tools",
-                        "provider": "kiro"
-                    },
-                    {
-                        "label": "My Kiro",
-                        "command": "kiro-cli chat --agent personal",
-                        "provider": "kiro"
-                    }
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        assert_eq!(config.version, LAUNCH_CONFIG_VERSION);
-        assert_eq!(
-            config.entries[0].command,
-            "kiro-cli chat --v3 --trust-all-tools"
-        );
-        assert_eq!(
-            config.entries[1].command, "kiro-cli chat --agent personal",
-            "用户自定义 Kiro 命令不能被出厂迁移覆盖"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn old_default_launch_config_keeps_one_fixed_antigravity_entry() {
-        let dir = temp_dir("launch-antigravity-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "entries": [
-                    {"label":"Claude Code","command":"claude --dangerously-skip-permissions"},
-                    {"label":"Copilot","command":"copilot --allow-all"},
-                    {"label":"Codex","command":"codex --dangerously-bypass-approvals-and-sandbox"},
-                    {"label":"Grok","command":"grok"}
-                ]
-            }),
-        );
-
-        let mut config = load_launch_config_from_path(&path);
-        assert_eq!(config.version, LAUNCH_CONFIG_VERSION);
-        assert_eq!(
-            config
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("antigravity"))
-                .count(),
-            1
-        );
-        config
-            .entries
-            .retain(|entry| entry.provider.as_deref() != Some("antigravity"));
-        super::persist_launch_config_at(&path, &config);
-        let reloaded = load_launch_config_from_path(&path);
-        assert_eq!(
-            reloaded
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("antigravity"))
-                .count(),
-            1,
-            "固定的 Antigravity 启动项缺失时应自动恢复"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn old_antigravity_default_command_is_upgraded_to_full_permissions() {
-        let dir = temp_dir("launch-antigravity-permission-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 2,
-                "entries": [
-                    {"label":"Claude Code","command":"claude --dangerously-skip-permissions"},
-                    {"label":"Copilot","command":"copilot --allow-all"},
-                    {"label":"Codex","command":"codex --dangerously-bypass-approvals-and-sandbox"},
-                    {"label":"Grok","command":"grok"},
-                    {"label":"Antigravity","command":"agy","provider":"antigravity"}
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        assert_eq!(config.version, LAUNCH_CONFIG_VERSION);
-        let antigravity = config
-            .entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("antigravity"))
-            .expect("迁移后 Antigravity 条目应保留");
-        assert_eq!(
-            antigravity.command, "agy --dangerously-skip-permissions",
-            "旧出厂值 `agy` 应升级为全权限启动"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn customized_antigravity_command_survives_migration() {
-        let dir = temp_dir("launch-antigravity-custom-command");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 2,
-                "entries": [
-                    {"label":"Antigravity","command":"agy --mode plan","provider":"antigravity"}
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        let antigravity = config
-            .entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("antigravity"))
-            .expect("Antigravity 条目应保留");
-        assert_eq!(
-            antigravity.command, "agy --mode plan",
-            "用户自定义过的命令不能被迁移覆盖"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn old_grok_default_command_is_upgraded_to_full_permissions() {
-        let dir = temp_dir("launch-grok-permission-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 2,
-                "entries": [
-                    {"label":"Grok","command":"grok"}
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        assert_eq!(config.version, LAUNCH_CONFIG_VERSION);
-        let grok = config
-            .entries
-            .iter()
-            .find(|entry| entry.command.starts_with("grok"))
-            .expect("迁移后 Grok 条目应保留");
-        assert_eq!(
-            grok.command, "grok --always-approve",
-            "旧出厂值 `grok` 应升级为全权限启动"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn forced_codex_thread_title_command_returns_to_the_cli_default() {
-        let dir = temp_dir("launch-codex-terminal-title-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 12,
-                "entries": [
-                    {
-                        "label": "Codex",
-                        "command": concat!(
-                            "codex --dangerously-bypass-approvals-and-sandbox ",
-                            "-c 'tui.terminal_title=[\"thread-title\"]'"
-                        ),
-                        "provider": "codex"
-                    },
-                    {
-                        "label": "My Codex",
-                        "command": "codex --model custom",
-                        "provider": null
-                    }
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        let builtin = config
-            .entries
-            .iter()
-            .find(|entry| entry.provider.as_deref() == Some("codex"))
-            .expect("迁移后内置 Codex 项应保留");
-        assert_eq!(
-            builtin.command,
-            "codex --dangerously-bypass-approvals-and-sandbox"
-        );
-        assert!(
-            config.entries.iter().any(|entry| {
-                entry.label == "My Codex" && entry.command == "codex --model custom"
-            })
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn old_launch_config_keeps_one_fixed_cursor_entry() {
-        let dir = temp_dir("launch-cursor-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 4,
-                "entries": [
-                    {"label":"Claude Code","command":"claude --dangerously-skip-permissions"},
-                    {"label":"Copilot","command":"copilot --allow-all"},
-                    {"label":"Codex","command":"codex --dangerously-bypass-approvals-and-sandbox"},
-                    {"label":"Grok","command":"grok --always-approve"}
-                ]
-            }),
-        );
-
-        let mut config = load_launch_config_from_path(&path);
-        assert_eq!(config.version, LAUNCH_CONFIG_VERSION);
-        assert_eq!(
-            config
-                .entries
-                .iter()
-                .find(|entry| entry.command.contains("copilot"))
-                .map(|entry| entry.label.as_str()),
-            Some("GitHub Copilot"),
-            "终端菜单出厂名应与对话菜单一致"
-        );
-        assert_eq!(
-            config
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("cursor")
-                    || entry.command.contains("cursor-agent"))
-                .count(),
-            1
-        );
-        config
-            .entries
-            .retain(|entry| entry.provider.as_deref() != Some("cursor"));
-        super::persist_launch_config_at(&path, &config);
-        let reloaded = load_launch_config_from_path(&path);
-        assert_eq!(
-            reloaded
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("cursor"))
-                .count(),
-            1,
-            "固定的 Cursor 启动项缺失时应自动恢复"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn old_launch_config_keeps_one_fixed_opencode_entry() {
-        let dir = temp_dir("launch-opencode-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 6,
-                "entries": [
-                    {"label":"Claude Code","command":"claude --dangerously-skip-permissions"},
-                    {"label":"GitHub Copilot","command":"copilot --allow-all"},
-                    {"label":"Codex","command":"codex --dangerously-bypass-approvals-and-sandbox"},
-                    {"label":"Grok","command":"grok --always-approve"},
-                    {"label":"Antigravity","command":"agy --dangerously-skip-permissions","provider":"antigravity"},
-                    {"label":"Cursor Agent","command":"cursor-agent --force","provider":"cursor"}
-                ]
-            }),
-        );
-
-        let mut config = load_launch_config_from_path(&path);
-        assert_eq!(config.version, LAUNCH_CONFIG_VERSION);
-        assert_eq!(
-            config
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("opencode")
-                    || entry.command.contains("opencode"))
-                .count(),
-            1
-        );
-        config
-            .entries
-            .retain(|entry| entry.provider.as_deref() != Some("opencode"));
-        super::persist_launch_config_at(&path, &config);
-        let reloaded = load_launch_config_from_path(&path);
-        assert_eq!(
-            reloaded
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("opencode"))
-                .count(),
-            1,
-            "固定的 OpenCode 启动项缺失时应自动恢复"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn old_launch_config_keeps_one_fixed_kiro_entry() {
-        let dir = temp_dir("launch-kiro-migration");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 7,
-                "entries": [
-                    {"label":"Claude Code","command":"claude --dangerously-skip-permissions"},
-                    {"label":"GitHub Copilot","command":"copilot --allow-all"},
-                    {"label":"Codex","command":"codex --dangerously-bypass-approvals-and-sandbox"},
-                    {"label":"Grok","command":"grok --always-approve"},
-                    {"label":"Antigravity","command":"agy --dangerously-skip-permissions","provider":"antigravity"},
-                    {"label":"Cursor Agent","command":"cursor-agent --force","provider":"cursor"},
-                    {"label":"OpenCode","command":"opencode --auto","provider":"opencode"}
-                ]
-            }),
-        );
-
-        let mut config = load_launch_config_from_path(&path);
-        assert_eq!(config.version, LAUNCH_CONFIG_VERSION);
-        assert_eq!(
-            config
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("kiro")
-                    || entry.command.contains("kiro-cli"))
-                .count(),
-            1
-        );
-        config
-            .entries
-            .retain(|entry| entry.provider.as_deref() != Some("kiro"));
-        super::persist_launch_config_at(&path, &config);
-        let reloaded = load_launch_config_from_path(&path);
-        assert_eq!(
-            reloaded
-                .entries
-                .iter()
-                .filter(|entry| entry.provider.as_deref() == Some("kiro"))
-                .count(),
-            1,
-            "固定的 Kiro 启动项缺失时应自动恢复"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn customized_copilot_label_survives_rename_migration() {
-        let dir = temp_dir("launch-copilot-custom-label");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 5,
-                "entries": [
-                    {"label":"家里的 Copilot","command":"copilot --allow-all","provider":"copilot"}
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        let copilot = config
-            .entries
-            .iter()
-            .find(|entry| entry.command.contains("copilot"))
-            .expect("Copilot 条目应保留");
-        assert_eq!(copilot.label, "家里的 Copilot");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn customized_grok_command_survives_migration() {
-        let dir = temp_dir("launch-grok-custom-command");
-        let path = seed_launch(
-            &dir,
-            serde_json::json!({
-                "version": 2,
-                "entries": [
-                    {"label":"Grok","command":"grok --model xyz"}
-                ]
-            }),
-        );
-
-        let config = load_launch_config_from_path(&path);
-        let grok = config
-            .entries
-            .iter()
-            .find(|entry| entry.command.starts_with("grok"))
-            .expect("Grok 条目应保留");
-        assert_eq!(
-            grok.command, "grok --model xyz",
-            "用户自定义过的命令不能被迁移覆盖"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn antigravity_hook_merge_is_idempotent_and_preserves_other_hooks() {
-        let mut root = serde_json::json!({
-            "third-party": {
-                "Stop": [{"type":"command","command":"/tmp/other-stop-hook"}]
-            },
-            "smelt-status-notifications": {
-                "PostInvocation": [
-                    {"type":"command","command":"/tmp/other-invocation-hook"}
-                ]
-            }
-        });
-        merge_antigravity_hooks(&mut root).unwrap();
-        merge_antigravity_hooks(&mut root).unwrap();
-
-        let definition = &root[ANTIGRAVITY_HOOK_NAME];
-        for event in ANTIGRAVITY_HOOK_EVENTS {
-            assert!(antigravity_event_installed(definition, event));
-            assert_eq!(smelt_handler_count(definition, event), 1);
-        }
-        assert_eq!(
-            definition["PostInvocation"][0]["command"],
-            "/tmp/other-invocation-hook"
-        );
-        assert_eq!(
-            root["third-party"]["Stop"][0]["command"],
-            "/tmp/other-stop-hook"
-        );
-    }
-
-    #[test]
-    fn antigravity_hook_uninstall_removes_only_smelt_handlers() {
-        let dir = temp_dir("antigravity-hook-uninstall");
-        let path = dir.join("hooks.json");
-        let mut root = serde_json::json!({
-            "third-party": {
-                "Stop": [{"type":"command","command":"/tmp/other-stop-hook"}]
-            },
-            "smelt-status-notifications": {
-                "PostInvocation": [
-                    {"type":"command","command":"/tmp/other-invocation-hook"}
-                ]
-            }
-        });
-        merge_antigravity_hooks(&mut root).unwrap();
-        write_json_atomic(&path, &root).unwrap();
-
-        uninstall_antigravity_hooks_at(&path).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let definition = &value[ANTIGRAVITY_HOOK_NAME];
-        for event in ANTIGRAVITY_HOOK_EVENTS {
-            assert_eq!(smelt_handler_count(definition, event), 0);
-        }
-        assert_eq!(
-            definition["PostInvocation"][0]["command"],
-            "/tmp/other-invocation-hook"
-        );
-        assert_eq!(
-            value["third-party"]["Stop"][0]["command"],
-            "/tmp/other-stop-hook"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }
 
 /// 下发给移动端的配色快照必须跟 PC 实际渲染色同源——这里锁住两件事：
@@ -927,7 +273,7 @@ mod antigravity_terminal_tests {
 mod terminal_theme_tests {
     use super::current_terminal_theme;
     use crate::terminal;
-    use smelt_core::terminal_theme::TerminalThemeSnapshot;
+    use smelt_model::terminal_theme::TerminalThemeSnapshot;
 
     #[test]
     fn dark_snapshot_matches_core_fallback() {
@@ -1016,77 +362,6 @@ mod native_dsh_model_settings_tests {
             provider.models.first().expect("model").context_window,
             Some(128000)
         );
-    }
-}
-
-#[cfg(test)]
-mod pi_model_settings_integration_tests {
-    use smelt_core::pi_model_settings::{
-        PiCustomModel, PiCustomProvider, PiDefaultModelConfig, load_pi_model_settings_at,
-        pi_settings_summary_at, remove_pi_custom_provider_at, save_pi_custom_provider_at,
-        save_pi_default_model_at,
-    };
-
-    #[test]
-    fn pi_model_settings_lifecycle_in_isolated_dir() {
-        let temp_dir = std::env::temp_dir().join(format!("smelt-pi-test-{}", uuid::Uuid::new_v4()));
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let temp = temp_dir.as_path();
-        let initial = load_pi_model_settings_at(temp).expect("load initial");
-        assert_eq!(initial.default_model.provider, "deepseek");
-        assert_eq!(initial.default_model.model, "deepseek-chat");
-        assert_eq!(initial.default_model.thinking_level, "medium");
-        let environment_credential_configured =
-            std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.trim().is_empty());
-        assert_eq!(
-            initial.credential_configured,
-            environment_credential_configured
-        );
-        assert!(initial.custom_providers.is_empty());
-
-        let default_config = PiDefaultModelConfig {
-            provider: "deepseek".to_string(),
-            model: "deepseek-chat".to_string(),
-            base_url: "https://api.deepseek.com".to_string(),
-            thinking_level: "low".to_string(),
-        };
-        save_pi_default_model_at(temp, &default_config, Some("sk-official-key"))
-            .expect("save default");
-
-        let custom_provider = PiCustomProvider {
-            id: "local-vllm".to_string(),
-            display_name: "Local vLLM".to_string(),
-            api: "openai-completions".to_string(),
-            base_url: "http://localhost:8000/v1".to_string(),
-            credential_configured: false,
-            models: vec![PiCustomModel {
-                id: "qwen-2.5-coder".to_string(),
-                name: "Qwen 2.5 Coder 32B".to_string(),
-                context_window: Some(65536),
-                max_tokens: Some(4096),
-            }],
-        };
-        save_pi_custom_provider_at(temp, &custom_provider, None, false).expect("save custom");
-
-        let reloaded = load_pi_model_settings_at(temp).expect("reload");
-        assert_eq!(reloaded.default_model.provider, "deepseek");
-        assert_eq!(reloaded.default_model.base_url, "https://api.deepseek.com");
-        assert_eq!(reloaded.default_model.thinking_level, "low");
-        assert!(reloaded.credential_configured);
-        assert_eq!(reloaded.custom_providers.len(), 1);
-        assert_eq!(reloaded.custom_providers[0].id, "local-vllm");
-        assert_eq!(reloaded.custom_providers[0].models[0].id, "qwen-2.5-coder");
-
-        let summary = pi_settings_summary_at(temp).expect("summary");
-        let dm = summary.default_model.expect("default model in summary");
-        assert_eq!(dm.provider.as_deref(), Some("deepseek"));
-        assert_eq!(dm.model.as_deref(), Some("deepseek-chat"));
-        assert_eq!(dm.thinking_level.as_deref(), Some("low"));
-
-        remove_pi_custom_provider_at(temp, "local-vllm").expect("remove custom");
-        let after_removal = load_pi_model_settings_at(temp).expect("after remove");
-        assert!(after_removal.custom_providers.is_empty());
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 

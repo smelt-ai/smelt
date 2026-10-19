@@ -1,10 +1,15 @@
 //! 历史会话的 GPUI 状态、渲染与 Workspace 集成。各家 agent 的数据模型与
-//! 解析器位于 `smelt_core::session_history`，这里 re-export 保持消费者兼容。
+//! 解析器位于 运行时（smelt-core 的 `session_history`）；展示数据在 `smelt_model::session_history`，这里 re-export 保持消费者兼容。
 
-pub use smelt_core::session_history::*;
+pub use smelt_model::session_history::*;
 
-use smelt_core::fs::{FileSystem, LocalFs};
+use smelt_runtime_client::protocol::history::{
+    HistoryDeleteCall, HistoryDeleteParams, HistoryDetailCall, HistoryDetailParams,
+    HistoryListCall, HistoryListParams,
+};
 use std::path::{Path, PathBuf};
+
+use crate::runtime_call::{RUNTIME_CALL_TIMEOUT, call, error_text};
 
 // ===================== GPUI 面板 =====================
 //
@@ -15,11 +20,11 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::scroll::ScrollableElement;
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::acp_view;
 use crate::{Workspace, placeholder_view, ui_theme};
@@ -104,6 +109,8 @@ impl HistoryListSnapshot {
 /// 主行优先显示用户名称，副行保留 Agent 原始标题或时间信息。
 pub enum HistoryListState {
     NoProject,
+    /// 活动项目在远程运行时上，历史页目前只读本机存档。带着给人看的说明。
+    RemoteProject(String),
     Loading,
     Empty,
     Ready(Rc<Vec<SessionSummary>>),
@@ -137,7 +144,7 @@ pub(crate) struct HistorySourceTab {
 /// 取决于本机有没有落盘 transcript，与有没有 ACP 无关。
 pub(crate) fn history_source_tabs(
     restrict_to_kind: Option<ConversationAgentKind>,
-    profiles: impl IntoIterator<Item = smelt_core::agent_kind::AcpProfile>,
+    profiles: impl IntoIterator<Item = smelt_model::agent_kind::AcpProfile>,
 ) -> Vec<HistorySourceTab> {
     let mut tabs = Vec::new();
     for kind in HistorySourceKind::ALL {
@@ -169,6 +176,20 @@ pub(crate) fn history_source_tabs(
     tabs
 }
 
+/// 标签栏只留有历史会话的来源：Cursor、OpenCode 这类还没接入本地历史的，以及在
+/// 这个项目里没用过的 agent，点进去永远是空列表。列表还没扫完的先不显示，扫到有
+/// 会话再出现；否则一排标签会先全亮再陆续消失。当前选中的那个始终保留，哪怕它是
+/// 空的——不然选中态会落在一个看不见的标签上。
+pub(crate) fn tabs_with_sessions(
+    tabs: Vec<HistorySourceTab>,
+    current: (HistorySourceKind, Option<&str>),
+    has_sessions: impl Fn(&HistorySourceTab) -> bool,
+) -> Vec<HistorySourceTab> {
+    tabs.into_iter()
+        .filter(|tab| (tab.kind, tab.profile_id.as_deref()) == current || has_sessions(tab))
+        .collect()
+}
+
 pub(crate) struct HistoryViewParams<'a> {
     pub agent: HistorySourceKind,
     /// 手动添加的 workspace profile；基础 agent 槽位为 `None`。
@@ -183,7 +204,7 @@ pub(crate) struct HistoryViewParams<'a> {
     /// 顶部来源 tab，由 [`history_source_tabs`] 在 Workspace 里算好。
     pub source_tabs: Vec<HistorySourceTab>,
     /// 当前 tab 若是手动 profile，续接要用它的启动规格。
-    pub launch_override: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
+    pub launch_override: Option<smelt_model::agent_kind::ConversationLaunchSpec>,
     /// 当前 tab 的 profile 显示名；迁移文案用。
     pub profile_label: Option<String>,
     /// `resume_id` → 产品智能体定义 id。项目历史里靠它认出「这不是裸引擎会话」。
@@ -229,44 +250,40 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
     } = params;
     // 智能体上下文：只留「继续对话」这一条按智能体续接的路径。
     let agent_context = restrict_to_kind.is_some();
-    let (muted, fg, c_border, accent, secondary) = {
+    let (muted, fg, c_border, accent) = {
         let t = cx.theme();
-        (
-            t.muted_foreground,
-            t.foreground,
-            t.border,
-            t.primary,
-            t.secondary,
-        )
+        (t.muted_foreground, t.foreground, t.border, t.primary)
     };
 
-    let current_profile = profile_id.clone();
-    let tab_colors = HistoryTabColors { accent, fg, muted };
+    let selected_source = source_tabs
+        .iter()
+        .position(|tab| tab.kind == agent && tab.profile_id == profile_id);
+    let targets: Vec<(HistorySourceKind, Option<String>)> = source_tabs
+        .iter()
+        .map(|tab| (tab.kind, tab.profile_id.clone()))
+        .collect();
     let agent_switcher = h_flex()
-        .id("history-agent-switcher")
         .w_full()
         .h(px(38.))
         .min_w_0()
         .flex_none()
-        .overflow_x_scrollbar()
-        .gap_1()
         .px_3()
-        .py_1p5()
         .border_b_1()
         .border_color(c_border)
-        // 空间足够时把来源 tab 推到右侧；内容超出时占位区收缩为零，保留滚动。
+        // 空间足够时把来源 tab 推到右侧；放不下时占位区收缩为零，tab 条自己横向滚动。
         .child(div().flex_1().min_w_0())
-        .children(source_tabs.into_iter().map(|tab| {
-            agent_tab_button(
-                tab.kind,
-                tab.profile_id,
-                tab.label.into(),
-                agent,
-                current_profile.clone(),
-                tab_colors,
-                cx,
-            )
-        }));
+        .child(
+            TabBar::new("history-agent-switcher")
+                .segmented()
+                .min_w_0()
+                .when_some(selected_source, |bar, ix| bar.selected_index(ix))
+                .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                    if let Some((target, profile)) = targets.get(*ix).cloned() {
+                        select_history_source(this, target, profile, cx);
+                    }
+                }))
+                .children(source_tabs.into_iter().map(|tab| Tab::new().label(tab.label))),
+        );
 
     // 选中会话的路径：list 和 detail 各自渲染都要用它判断"这行是不是当前打开的"，
     // 先从 detail 里取出来，避免下面重复解构。
@@ -290,6 +307,9 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
     let list_body: AnyElement = match (&list, &sessions) {
         (HistoryListState::NoProject, _) => {
             placeholder_view("当前没有活动项目", muted).into_any_element()
+        }
+        (HistoryListState::RemoteProject(notice), _) => {
+            placeholder_view(notice, muted).into_any_element()
         }
         (HistoryListState::Loading, _) => placeholder_view("加载中…", muted).into_any_element(),
         (HistoryListState::Empty, _) | (_, None) => {
@@ -554,7 +574,9 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                                         PopupMenuItem::new("恢复默认名称")
                                                             .on_click(move |_ev, _window, cx| {
                                                                 ws.update(cx, |this, cx| {
+                                                                    // 历史页读的是本机运行时的存档。
                                                                     this.set_history_custom_title(
+                                                                        &crate::runtimes::Runtime::local(),
                                                                         agent,
                                                                         reset_profile_id.clone(),
                                                                         reset_cwd.clone(),
@@ -667,22 +689,21 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         }
         Some((_, d)) => {
             let detail = d.clone();
-            let agent_label = agent.short_label();
+            // 和对话页同一套排版：居中限宽的阅读栏，间距算在虚拟项自己身上。
             gpui::list(detail_list_state, move |i, _window, _app| {
                 let turn = &detail.turns[i];
-                div()
+                h_flex()
                     .w_full()
-                    .px_3()
-                    .pb_3()
-                    .child(history_turn(
-                        turn,
-                        i,
-                        agent_label,
-                        muted,
-                        fg,
-                        accent,
-                        secondary,
-                    ))
+                    .justify_center()
+                    .px_4()
+                    .pb(px(16.))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .max_w(ui_theme::conversation_max_width())
+                            .child(history_turn(turn, i, muted, fg, c_border)),
+                    )
                     .into_any_element()
             })
             .w_full()
@@ -750,22 +771,39 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         .child(content)
 }
 
-fn history_turn(
-    turn: &Turn,
-    index: usize,
-    agent_label: &'static str,
-    muted: Hsla,
-    fg: Hsla,
-    accent: Hsla,
-    secondary: Hsla,
-) -> AnyElement {
-    let role = if turn.is_user { "用户" } else { agent_label };
-    let role_color = if turn.is_user { accent } else { fg };
-    let bubble_bg = if turn.is_user {
-        accent.opacity(0.12)
-    } else {
-        secondary
-    };
+/// 一轮对话，排版对齐对话页：用户消息是靠右的气泡，agent 回答是不套卡片的正文。
+fn history_turn(turn: &Turn, index: usize, muted: Hsla, fg: Hsla, border: Hsla) -> AnyElement {
+    // agent 回显的中断标记不是用户说的话，和对话页一样画成分隔线。
+    if turn.is_user && smelt_model::acp_chat::is_interrupt_marker(&turn.text) {
+        return h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .child(div().flex_1().h(px(1.)).bg(border))
+            .child(div().text_xs().text_color(muted).child("已中断"))
+            .child(div().flex_1().h(px(1.)).bg(border))
+            .into_any_element();
+    }
+    let body = crate::markdown_mermaid::markdown_view(("turn-md", index), turn.text.clone());
+    if turn.is_user {
+        // 最小宽度的原因见对话页 `user_message_bubble`：markdown 列表在收缩的气泡里会被裁掉。
+        return h_flex()
+            .w_full()
+            .justify_end()
+            .child(
+                div()
+                    .max_w(relative(0.72))
+                    .min_w(px(160.))
+                    .px_4()
+                    .py_2p5()
+                    .rounded(ui_theme::bubble_radius())
+                    .bg(ui_theme::overlay(0x14))
+                    .text_sm()
+                    .text_color(fg)
+                    .child(body),
+            )
+            .into_any_element();
+    }
     let tool_summary = (!turn.tools.is_empty()).then(|| {
         let mut order: Vec<&String> = Vec::new();
         let mut counts: HashMap<&String, usize> = HashMap::new();
@@ -792,34 +830,9 @@ fn history_turn(
         .w_full()
         .min_w_0()
         .gap_1()
-        .px_3()
-        .py_2()
-        .rounded(ui_theme::card_radius())
-        .bg(bubble_bg)
-        .when(turn.is_user, |element| element.max_w(px(560.)))
-        .child(
-            h_flex()
-                .gap_2()
-                .items_baseline()
-                .child(
-                    div()
-                        .font_semibold()
-                        .text_sm()
-                        .text_color(role_color)
-                        .child(role),
-                )
-                .children(turn.timestamp.map(|timestamp| {
-                    div().text_xs().text_color(muted).child(
-                        timestamp
-                            .with_timezone(&chrono::Local)
-                            .format("%m-%d %H:%M")
-                            .to_string(),
-                    )
-                })),
-        )
-        .child(div().w_full().min_w_0().text_sm().text_color(fg).child(
-            crate::markdown_mermaid::markdown_view(("turn-md", index), turn.text.clone()),
-        ))
+        .text_sm()
+        .text_color(fg)
+        .when(!turn.text.trim().is_empty(), |col| col.child(body))
         .children(tool_summary.map(|summary| {
             div()
                 .text_xs()
@@ -829,59 +842,24 @@ fn history_turn(
         .into_any_element()
 }
 
-/// 会话来源 tab 上的一个按钮，选中态用 accent 底色标出来。
-/// 视觉，但换 agent 时还要顺带清掉右侧详情——不然会显示"上一个 agent 那份会话"
-/// 的残留内容，跟点开新会话前那一瞬间的空白状态不一致）。
-#[derive(Clone, Copy)]
-struct HistoryTabColors {
-    accent: Hsla,
-    fg: Hsla,
-    muted: Hsla,
-}
-
-fn agent_tab_button(
+/// 换会话来源。换了还要顺带清掉右侧详情——不然会显示"上一个 agent 那份会话"
+/// 的残留内容，跟点开新会话前那一瞬间的空白状态不一致。
+fn select_history_source(
+    this: &mut Workspace,
     target: HistorySourceKind,
     target_profile: Option<String>,
-    label: SharedString,
-    current: HistorySourceKind,
-    current_profile: Option<String>,
-    colors: HistoryTabColors,
     cx: &mut Context<Workspace>,
-) -> Stateful<Div> {
-    let HistoryTabColors { accent, fg, muted } = colors;
-    let selected = target == current && target_profile == current_profile;
-    let elem_id: SharedString = target_profile
-        .as_deref()
-        .map(|id| format!("profile:{id}"))
-        .unwrap_or_else(|| target.id().to_string())
-        .into();
-    div()
-        .id(elem_id)
-        .flex_none()
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .text_sm()
-        .text_color(if selected { fg } else { muted })
-        .when(selected, |d| d.bg(accent.opacity(0.18)))
-        .when(!selected, |d| d.hover(|s| s.text_color(fg)))
-        .child(label)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, _, cx| {
-                if this.history_agent != target || this.history_profile != target_profile {
-                    this.history_agent = target;
-                    this.history_profile = target_profile.clone();
-                    this.session_detail_gen = this.session_detail_gen.wrapping_add(1);
-                    this.session_detail = None;
-                    this.history_detail_list_state.reset(0);
-                    // 换来源后立刻排一次刷新：缺缓存或超过 10 秒就重扫这份列表。
-                    this.schedule_visible_refresh(cx);
-                    cx.notify();
-                }
-            }),
-        )
+) {
+    if this.history_agent != target || this.history_profile != target_profile {
+        this.history_agent = target;
+        this.history_profile = target_profile;
+        this.session_detail_gen = this.session_detail_gen.wrapping_add(1);
+        this.session_detail = None;
+        this.history_detail_list_state.reset(0);
+        // 换来源后立刻排一次刷新：缺缓存或超过 10 秒就重扫这份列表。
+        this.schedule_visible_refresh(cx);
+        cx.notify();
+    }
 }
 
 use crate::settings::{ConversationAgentKind, HistorySourceKind};
@@ -899,66 +877,110 @@ pub(crate) fn session_list_key(
     format!("{}:{}:{cwd}", agent.id(), profile_id.unwrap_or("default"))
 }
 
-pub(crate) fn normalized_profile_override_dir(
-    profile: &smelt_core::agent_kind::AcpProfile,
-) -> Option<String> {
-    let launch = profile.launch_spec().ok()?;
-    let env_var = profile.env_var().ok()?;
-    smelt_core::workspace_override::env_override_from_launch(&launch, env_var)
-}
-
 fn current_profile_launch(
     config: &crate::settings::AgentHostState,
-    profile: &smelt_core::agent_kind::AcpProfile,
-) -> Result<smelt_core::agent_kind::ConversationLaunchSpec, String> {
+    profile: &smelt_model::agent_kind::AcpProfile,
+) -> Result<smelt_model::agent_kind::ConversationLaunchSpec, String> {
     config.profile_launch_spec(profile)
 }
 
-fn list_sessions_for(
+/// 向运行时要历史列表。读不到（运行时没起、版本旧）就当没有历史，原因打到日志里。
+fn load_history_list(
     agent: HistorySourceKind,
-    profile_id: Option<&str>,
-    override_dir: Option<&str>,
-    cwd: &str,
-) -> Vec<SessionSummary> {
-    // 自定义名称的覆盖已经在 smelt-core 那层贴好（移动端读的是同一份），这里只做
-    // 结构转换。
-    smelt_core::session_control::list_history_for(agent, profile_id, cwd, override_dir)
-        .into_iter()
-        .map(|session| SessionSummary {
-            title: session.display_title().to_string(),
-            path: session.path,
-            agent_title: session.title,
-            custom_title: session.custom_title,
-            resume_id: session.resume_id,
-            started_at: session.started_at,
-            last_active_at: session.last_active_at,
-            message_count: session.message_count,
-            total_tokens: session.total_tokens,
-        })
-        .collect()
+    profile_id: Option<String>,
+    cwd: String,
+) -> (Vec<SessionSummary>, HashMap<String, String>) {
+    let params = HistoryListParams {
+        agent: agent.id().to_string(),
+        profile_id,
+        cwd,
+    };
+    match call::<HistoryListCall>(params, RUNTIME_CALL_TIMEOUT) {
+        Ok(result) => (
+            result
+                .sessions
+                .into_iter()
+                .map(|session| SessionSummary {
+                    title: session
+                        .custom_title
+                        .clone()
+                        .unwrap_or_else(|| session.title.clone()),
+                    path: PathBuf::from(session.path),
+                    agent_title: session.title,
+                    custom_title: session.custom_title,
+                    resume_id: session.resume_id,
+                    started_at: session
+                        .started_at_ms
+                        .and_then(chrono::DateTime::from_timestamp_millis),
+                    last_active_at: session
+                        .last_active_at_ms
+                        .and_then(chrono::DateTime::from_timestamp_millis),
+                    message_count: session.message_count,
+                    total_tokens: session.total_tokens,
+                })
+                .collect(),
+            result.agent_definition_ids.into_iter().collect(),
+        ),
+        Err(error) => {
+            eprintln!("[history] 读取历史会话失败：{}", error_text(error));
+            (Vec::new(), HashMap::new())
+        }
+    }
 }
 
-/// 删除一份已经由历史列表发现的存档。拒绝符号链接和没有文件名的路径，避免右键
-/// 菜单状态过期后误删到更高层目录。
-fn delete_history_path(path: &Path) -> Result<(), String> {
-    if path.file_name().is_none() || path.parent().is_none() {
-        return Err("历史会话路径无效".into());
-    }
-    let metadata = LocalFs
-        .symlink_metadata(path)
-        .ok_or_else(|| "历史会话已不存在".to_string())?;
-    if metadata.is_symlink {
-        return Err("拒绝删除符号链接形式的历史会话".into());
-    }
-    if metadata.is_dir {
-        LocalFs
-            .remove_dir_all(path)
-            .map_err(|error| format!("删除会话目录失败：{error}"))
-    } else {
-        LocalFs
-            .remove_file(path)
-            .map_err(|error| format!("删除会话文件失败：{error}"))
-    }
+/// 记下一段历史会话属于哪个产品智能体，以后「继续」时按原来的智能体启动。交给
+/// 运行时异步写，失败只记日志：漏记的后果只是继续时退回裸引擎。
+pub(crate) fn remember_history_agent(
+    agent: HistorySourceKind,
+    profile_id: Option<&str>,
+    resume_id: &str,
+    agent_definition_id: &str,
+    cx: &App,
+) {
+    let params = smelt_runtime_client::protocol::history::HistoryRememberAgentParams {
+        agent: agent.id().to_string(),
+        profile_id: profile_id.map(str::to_string),
+        resume_id: resume_id.to_string(),
+        agent_definition_id: agent_definition_id.to_string(),
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(error) = call::<
+                smelt_runtime_client::protocol::history::HistoryRememberAgentCall,
+            >(params, RUNTIME_CALL_TIMEOUT)
+            {
+                eprintln!("[history] 记录会话归属失败：{}", error_text(error));
+            }
+        })
+        .detach();
+}
+
+/// 向运行时要一份历史会话的对话内容。存档被删、格式认不出、或运行时连不上都是 `None`。
+fn load_history_detail(agent: HistorySourceKind, path: &Path) -> Option<SessionDetail> {
+    let params = HistoryDetailParams {
+        agent: agent.id().to_string(),
+        path: path.to_string_lossy().into_owned(),
+    };
+    let detail = call::<HistoryDetailCall>(params, RUNTIME_CALL_TIMEOUT)
+        .map_err(|error| eprintln!("[history] 读取会话内容失败：{}", error_text(error)))
+        .ok()?
+        .detail?;
+    Some(SessionDetail {
+        turns: detail
+            .turns
+            .into_iter()
+            .map(|turn| Turn {
+                is_user: turn.is_user,
+                timestamp: turn
+                    .timestamp_ms
+                    .and_then(chrono::DateTime::from_timestamp_millis),
+                text: turn.text,
+                tools: turn.tools,
+                tool_paths: turn.tool_paths,
+            })
+            .collect(),
+        model: detail.model,
+    })
 }
 
 impl Workspace {
@@ -973,32 +995,45 @@ impl Workspace {
         cwd: String,
         cx: &mut Context<Self>,
     ) {
-        let override_dir = profile_id.as_deref().and_then(|id| {
-            cx.global::<crate::settings::AgentHostState>()
-                .find_profile(id)
-                .and_then(normalized_profile_override_dir)
-        });
+        self.ensure_session_list_within(agent, profile_id, cwd, Duration::from_secs(10), cx);
+    }
+
+    /// 没选中的来源 tab 也要知道有没有会话，标签栏才能把空的藏起来。它们只决定
+    /// 标签显不显示，刷新放慢到一分钟：Codex 的列表要把所有项目的会话都扫一遍，
+    /// 每十秒扫九家太重。
+    pub fn prefetch_session_list(
+        &mut self,
+        agent: HistorySourceKind,
+        profile_id: Option<String>,
+        cwd: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_session_list_within(agent, profile_id, cwd, Duration::from_secs(60), cx);
+    }
+
+    fn ensure_session_list_within(
+        &mut self,
+        agent: HistorySourceKind,
+        profile_id: Option<String>,
+        cwd: String,
+        max_age: Duration,
+        cx: &mut Context<Self>,
+    ) {
         let key = session_list_key(agent, profile_id.as_deref(), &cwd);
         let fresh = self
             .session_list
             .get(&key)
-            .is_some_and(|(t, _)| t.elapsed() < std::time::Duration::from_secs(10));
+            .is_some_and(|(t, _)| t.elapsed() < max_age);
         if fresh || self.session_list_inflight.contains(&key) {
             return;
         }
         self.session_list_inflight.insert(key.clone());
         cx.spawn(async move |this, cx| {
             let c = cwd.clone();
-            let od = override_dir.clone();
             let pid = profile_id.clone();
             let (sessions, bindings) = cx
                 .background_executor()
-                .spawn(async move {
-                    let sessions = list_sessions_for(agent, pid.as_deref(), od.as_deref(), &c);
-                    let bindings =
-                        smelt_core::session_metadata::agent_definition_ids(agent, pid.as_deref());
-                    (sessions, bindings)
-                })
+                .spawn(async move { load_history_list(agent, pid, c) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_list_inflight.remove(&key);
@@ -1036,7 +1071,7 @@ impl Workspace {
             let p = path.clone();
             let detail = cx
                 .background_executor()
-                .spawn(async move { load_agent_session_detail(agent, &p) })
+                .spawn(async move { load_history_detail(agent, &p) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.session_detail_gen != r#gen {
@@ -1090,24 +1125,21 @@ impl Workspace {
         let resume_id = target.resume_id.clone();
         let path = target.path.clone();
         let title = target.title;
-        let delete_profile_id = profile_id.clone();
+        // 运行时确认存档在这个项目的历史列表里才删，并同步清掉自定义标题。
+        let params = HistoryDeleteParams {
+            agent: agent.id().to_string(),
+            profile_id: profile_id.clone(),
+            cwd: cwd.clone(),
+            resume_id,
+            path: path.to_string_lossy().into_owned(),
+        };
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let result = delete_history_path(&path);
-                    if result.is_ok() {
-                        // 标题仓库独立于 agent 的原始存档，删除存档时同步清理，
-                        // 否则同一个 resume id 被复用时会继承旧标题。
-                        let _ = smelt_core::session_control::rename_history_title(
-                            agent,
-                            delete_profile_id.as_deref(),
-                            &resume_id,
-                            None,
-                            None,
-                        );
-                    }
-                    result
+                    call::<HistoryDeleteCall>(params, RUNTIME_CALL_TIMEOUT)
+                        .map(drop)
+                        .map_err(error_text)
                 })
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
@@ -1198,7 +1230,7 @@ impl Workspace {
             let p = path.clone();
             let detail = cx
                 .background_executor()
-                .spawn(async move { load_agent_session_detail(source_agent.into(), &p) })
+                .spawn(async move { load_history_detail(source_agent.into(), &p) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let Some(detail) = detail else {
@@ -1238,7 +1270,7 @@ fn migration_menu(
         }
         let target = acp_view::AcpHandoffTarget {
             agent: target_agent,
-            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command(
+            launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command(
                 config.acp_cmd_for(target_agent),
             ),
             profile_id: None,
@@ -1306,7 +1338,7 @@ fn build_history_handoff_request(
     detail: &SessionDetail,
     target: acp_view::AcpHandoffTarget,
 ) -> acp_view::AcpHandoffRequest {
-    use smelt_core::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
+    use smelt_model::session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt};
 
     let context = HandoffContext {
         turns: handoff_turns_from_history(detail),
@@ -1319,6 +1351,8 @@ fn build_history_handoff_request(
     let prompt = build_handoff_prompt(&context);
 
     acp_view::AcpHandoffRequest {
+        runtime: crate::runtimes::Runtime::local(),
+        launch_prep: None,
         source: Some(acp_view::AcpForkOrigin {
             session_id: source.resume_id.clone(),
             // 源是磁盘上的历史存档，不是当前开着的某条 Smelt 会话。
@@ -1339,8 +1373,7 @@ fn build_history_handoff_request(
         resume_session_id: None,
         fork_session_id: None,
         fork_cut: None,
-        conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-        agent_session: None,
+        conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
     }
 }
 
@@ -1353,12 +1386,11 @@ mod tests {
         HistoryListSnapshot, HistoryMigrationSource, HistorySourceTab, SessionDetail,
         SessionSummary, Turn, build_history_handoff_request, current_profile_launch,
         handoff_turns_from_history, history_continue_label, history_row_is_agent_session,
-        history_source_tabs, list_sessions_for, normalized_profile_override_dir, project_dir,
+        history_source_tabs, tabs_with_sessions,
     };
     use crate::settings::AgentHostState;
-    use smelt_core::agent_kind::{AcpProfile, ConversationAgentKind};
-    use smelt_core::session_handoff::HandoffTurn;
-    use std::path::Path;
+    use smelt_model::agent_kind::{AcpProfile, ConversationAgentKind};
+    use smelt_model::session_handoff::HandoffTurn;
 
     fn summary(title: &str, custom: Option<&str>, agent_title: &str) -> SessionSummary {
         SessionSummary {
@@ -1410,72 +1442,10 @@ mod tests {
         );
     }
 
-    fn write(dir: &Path, name: &str, lines: &[&str]) {
-        std::fs::write(dir.join(name), lines.join("\n")).unwrap();
-    }
-
-    fn test_sandbox(name: &str) -> std::path::PathBuf {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/test-artifacts/session-history")
-            .join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn history_profile_override_dir_preserves_spaces() {
-        let home = test_sandbox("ovh");
-        let workspace_dir = home.join("Claude Workspaces").join("quant");
-        let profile = AcpProfile {
-            id: "quant".into(),
-            kind_id: "claude".into(),
-            label: "Quant".into(),
-            workspace_dir: workspace_dir.display().to_string(),
-        };
-
-        let override_dir = normalized_profile_override_dir(&profile).unwrap();
-
-        assert_eq!(override_dir, workspace_dir.display().to_string());
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    #[test]
-    fn history_reader_finds_workspace_override_with_spaces() {
-        let home = test_sandbox("ovr");
-        let workspace_dir = home.join("Claude Workspaces").join("quant");
-        let profile = AcpProfile {
-            id: "quant".into(),
-            kind_id: "claude".into(),
-            label: "Quant".into(),
-            workspace_dir: workspace_dir.display().to_string(),
-        };
-        let project_root = workspace_dir.join("projects").join(project_dir("/x/y"));
-        std::fs::create_dir_all(&project_root).unwrap();
-        write(
-            &project_root,
-            "quant.jsonl",
-            &[
-                r#"{"type":"user","timestamp":"2026-07-05T00:00:00Z","message":{"content":"with spaces in override path"}}"#,
-            ],
-        );
-
-        let override_dir = normalized_profile_override_dir(&profile).unwrap();
-        let sessions = list_sessions_for(
-            ConversationAgentKind::Claude.into(),
-            None,
-            Some(&override_dir),
-            "/x/y",
-        );
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].title, "with spaces in override path");
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
     #[test]
     fn history_resume_profile_launch_uses_current_agent_command() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
@@ -1491,18 +1461,6 @@ mod tests {
             launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("~/Claude Workspaces/quant")
         );
-    }
-
-    #[test]
-    fn unknown_profile_has_no_history_override() {
-        let profile = AcpProfile {
-            id: "future-profile".into(),
-            kind_id: "future-agent".into(),
-            label: "Future Agent".into(),
-            workspace_dir: "~/.future-agent".into(),
-        };
-
-        assert_eq!(normalized_profile_override_dir(&profile), None);
     }
 
     #[test]
@@ -1581,7 +1539,7 @@ mod tests {
         };
         let target = crate::acp_view::AcpHandoffTarget {
             agent: ConversationAgentKind::Claude,
-            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude"),
+            launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude"),
             profile_id: None,
             profile_label: None,
         };
@@ -1619,6 +1577,20 @@ mod tests {
             == crate::settings::HistorySourceKind::TerminalOnly(
                 crate::settings::TerminalAgentKind::Antigravity
             )));
+    }
+
+    #[test]
+    fn source_tabs_hide_agents_without_sessions_but_keep_selection() {
+        let claude: crate::settings::HistorySourceKind = ConversationAgentKind::Claude.into();
+        let codex: crate::settings::HistorySourceKind = ConversationAgentKind::Codex.into();
+        let tabs = history_source_tabs(None, []);
+
+        // 选中的 Claude 是空的也留着；Codex 有会话；其余没扫到或是空的都藏起来。
+        let shown: Vec<_> = tabs_with_sessions(tabs, (claude, None), |tab| tab.kind == codex)
+            .into_iter()
+            .map(|tab| tab.kind)
+            .collect();
+        assert_eq!(shown, [claude, codex]);
     }
 
     #[test]

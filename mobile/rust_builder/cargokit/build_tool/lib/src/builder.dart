@@ -11,6 +11,7 @@ import 'environment.dart';
 import 'options.dart';
 import 'rustup.dart';
 import 'target.dart';
+import 'toolchain_file.dart';
 import 'util.dart';
 
 final _log = Logger('builder');
@@ -139,7 +140,12 @@ class RustBuilder {
   CargoBuildOptions? get _buildOptions =>
       environment.crateOptions.cargo[environment.configuration];
 
-  String get _toolchain => _buildOptions?.toolchain.name ?? 'stable';
+  /// cargokit.yaml 显式配了 toolchain 就用它；否则跟随 crate 所在仓库的
+  /// rust-toolchain(.toml)，与在仓库里直接跑 cargo 时 rustup 的选择一致。
+  /// 都没有才退回上游默认的 stable。见 toolchain_file.dart。
+  late final String _toolchain = _buildOptions?.toolchain?.name ??
+      findPinnedToolchain(environment.manifestDir) ??
+      'stable';
 
   /// Returns the path of directory containing build artifacts.
   Future<String> build() async {

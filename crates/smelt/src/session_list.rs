@@ -14,6 +14,7 @@
 //!
 //! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
+use crate::{ProjectRef, RuntimeKey};
 use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -25,7 +26,6 @@ use smelt_ui::IconAction as _;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
 
-use crate::git_panel::main_repo_root_from_common_dir;
 // drag.rs / row.rs 作为本模块子模块沿用 `super::*` 读取 ACP 类型。
 use crate::settings::{AgentHostState, ConversationAgentKind};
 use crate::{
@@ -40,6 +40,9 @@ const PROJ_HEADER_GROUP: &str = "proj-header-hover";
 /// 「项目」分组标题行：筛选和打开项目只在 hover 这行时出现，跟 Grok 一样。
 const PROJ_SECTION_GROUP: &str = "proj-section-hover";
 
+/// 会话行：关闭按钮只在 hover 这行时出现。
+const SESSION_ROW_GROUP: &str = "session-row-hover";
+
 /// 侧栏正文走 `text_sm`，辅助信息走 `text_xs`，跟着界面字号缩放。
 /// 层级靠字重和颜色，不靠放大字。
 ///
@@ -48,19 +51,139 @@ const PROJ_SECTION_GROUP: &str = "proj-section-hover";
 const PROJECT_NEW_BUTTON_SIZE: f32 = 28.;
 const PROJECT_ACTION_SLOT_HEIGHT: f32 = 20.;
 const PROJECT_DISCLOSURE_ICON_SIZE: f32 = 15.;
-const PROJECT_SESSION_INDENT: f32 = 22.;
-const PROJECT_GUIDE_LEFT: f32 = 18.;
+/// 项目行左内边距。加上分组外边距，文件夹图标跟侧栏入口图标、分组标题落在同一条左缘。
+const PROJECT_HEADER_PAD_X: f32 = 8.;
+/// 会话图标落在项目名正下方。
+const PROJECT_SESSION_INDENT: f32 = 18.;
+/// 引导线对着文件夹图标的中线。
+const PROJECT_GUIDE_LEFT: f32 = 14.;
 const SESSION_AGENT_ICON_BOX_SIZE: f32 = 18.;
 const SESSION_AGENT_ICON_SIZE: f32 = 17.;
 pub(crate) const SESSION_GLOW_PERIOD: Duration = Duration::from_secs(2);
 
 /// 项目组的重排过渡跟着根路径走。行 id 也用根路径，重排后不会把 hover 留在旧槽位。
-fn project_flip_id(root: &str) -> ElementId {
-    project_element_id("sidebar-flip-project", root)
+fn project_flip_id(project: &ProjectRef) -> ElementId {
+    project_element_id("sidebar-flip-project", project)
 }
 
-fn project_element_id(name: &'static str, root: &str) -> ElementId {
-    (ElementId::from(name), root.to_string()).into()
+/// 两个运行时上可以有同一个路径，元素身份要带上运行时。
+fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
+    let key = match &project.runtime {
+        RuntimeKey::Local => project.root.clone(),
+        RuntimeKey::Remote(id) => format!("{id}:{}", project.root),
+    };
+    (ElementId::from(name), key).into()
+}
+
+/// 侧栏里一段运行时的标题：名字、在线状态，hover 出「在这台机器上打开项目」。
+fn runtime_section_header(
+    runtime: crate::runtimes::Runtime,
+    workspace: Entity<Workspace>,
+    cx: &App,
+) -> Stateful<Div> {
+    let key = runtime.key().clone();
+    let name = crate::runtimes::runtime_name(&key, cx);
+    let unavailable = crate::runtimes::runtime_unavailable_label(&key, cx);
+    let group = SharedString::from(format!("runtime-header-{key:?}"));
+    div()
+        .id(ElementId::from(group.clone()))
+        .group(group.clone())
+        .mx_2()
+        .mt_3()
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .text_xs()
+        .text_color(rgb(ui_theme::text_faint()))
+        .child(
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .bg(rgb(if unavailable.is_none() {
+                    ui_theme::session_dot_color(AgentStatus::Idle).into()
+                } else {
+                    ui_theme::text_faint()
+                })),
+        )
+        .child(name)
+        .when_some(unavailable, |d, label| d.child(format!("· {label}")))
+        .child(div().flex_1())
+        .child({
+            let runtime = runtime.clone();
+            let workspace = workspace.clone();
+            Button::new(ElementId::from(SharedString::from(format!(
+                "runtime-desktop-{key:?}"
+            ))))
+            .ghost()
+            .xsmall()
+            .icon(Icon::empty().path("smelt-icons/monitor.svg"))
+            .icon_action("远程桌面")
+            .opacity(0.0)
+            .group_hover(group.clone(), |style| style.opacity(1.0))
+            .on_click(move |_ev, window, cx| {
+                let runtime = runtime.clone();
+                workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
+            })
+        })
+        .child(
+            Button::new(ElementId::from(SharedString::from(format!(
+                "runtime-open-project-{key:?}"
+            ))))
+            .ghost()
+            .xsmall()
+            .icon(IconName::Plus)
+            .icon_action("打开项目")
+            .opacity(0.0)
+            .group_hover(group, |style| style.opacity(1.0))
+            .on_click(move |_ev, _window, cx| {
+                let runtime = runtime.clone();
+                workspace.update(cx, |ws, cx| ws.open_project_on(runtime, cx));
+            }),
+        )
+}
+
+/// 远程项目的右键菜单：复制路径、置顶、关闭。
+fn remote_project_menu(
+    menu: PopupMenu,
+    project: ProjectRef,
+    session_count: usize,
+    workspace: Entity<Workspace>,
+    cx: &App,
+) -> PopupMenu {
+    let pinned = workspace.read(cx).is_project_pinned(&project);
+    let copy_path = project.root.clone();
+    let pin_project = project.clone();
+    let pin_workspace = workspace.clone();
+    menu.item(
+        PopupMenuItem::new("复制项目路径")
+            .icon(IconName::Copy)
+            .on_click(move |_ev, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" })
+            .icon(IconName::Star)
+            .on_click(move |_ev, _window, cx| {
+                let project = pin_project.clone();
+                pin_workspace.update(cx, |ws, cx| ws.toggle_project_pinned(project, cx));
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(if session_count > 0 {
+            format!("关闭项目（含 {session_count} 个会话）")
+        } else {
+            "关闭项目".to_string()
+        })
+        .icon(IconName::Close)
+        .on_click(move |_ev, _window, cx| {
+            let project = project.clone();
+            workspace.update(cx, |ws, cx| ws.start_close_project(project, cx));
+        }),
+    )
 }
 
 fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
@@ -69,89 +192,6 @@ fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
     } else {
         IconName::FolderOpen
     }
-}
-
-fn shared_project_action_payload(
-    payloads: &[smelt_plugin_api::SessionActionInvocationPayload],
-) -> Option<smelt_plugin_api::SessionActionInvocationPayload> {
-    payloads
-        .first()
-        .cloned()
-        .filter(|first| payloads.iter().all(|candidate| candidate == first))
-}
-
-fn entity_decoration_color(tone: smelt_plugin_api::EntityDecorationTone, cx: &App) -> Hsla {
-    match tone {
-        smelt_plugin_api::EntityDecorationTone::Neutral => cx.theme().muted_foreground,
-        smelt_plugin_api::EntityDecorationTone::Accent => rgb(ui_theme::accent()).into(),
-        smelt_plugin_api::EntityDecorationTone::Positive => rgb(ui_theme::green()).into(),
-        smelt_plugin_api::EntityDecorationTone::Warning => cx.theme().warning,
-        smelt_plugin_api::EntityDecorationTone::Negative => cx.theme().danger,
-    }
-}
-
-pub(crate) fn entity_decoration_chip(
-    id: impl Into<ElementId>,
-    decoration: &crate::plugin_ui::PluginEntityDecorationPresentation,
-    show_icon: bool,
-    cx: &App,
-) -> Stateful<Div> {
-    let color = entity_decoration_color(decoration.tone, cx);
-    let icon = show_icon
-        .then(|| {
-            decoration
-                .icon_asset
-                .as_ref()
-                .map(|path| Icon::empty().path(path.clone()))
-                .or_else(|| {
-                    decoration
-                        .external_url
-                        .as_ref()
-                        .map(|_| Icon::new(IconName::ExternalLink))
-                })
-        })
-        .flatten();
-    let tooltip = decoration.tooltip.clone();
-    let external_url = decoration.external_url.clone().filter(|url| {
-        url::Url::parse(url)
-            .ok()
-            .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
-    });
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_color(color)
-        .children(icon.map(|icon| icon.size(px(12.))))
-        .children(decoration.badge.as_ref().map(|badge| {
-            div()
-                .max_w(px(72.))
-                .truncate()
-                .px_1()
-                .py(px(1.))
-                .rounded(px(3.))
-                .border_1()
-                .border_color(color.opacity(0.45))
-                .bg(color.opacity(0.08))
-                .text_xs()
-                .child(badge.clone())
-        }))
-        .when_some(tooltip, |chip, tooltip| {
-            chip.tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-            })
-        })
-        .when_some(external_url, |chip, url| {
-            chip.cursor_pointer()
-                .hover(|d| d.opacity(0.8))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    cx.open_url(&url);
-                })
-        })
 }
 
 mod drag;
@@ -166,9 +206,9 @@ pub(crate) mod row;
 
 use new_session::new_session_picker;
 use row::{
-    acp_provider_icon, effective_pane_updated_at, plugin_agent_icon, plugin_session_action_icon,
-    project_header_is_selected, provider_icon, provider_quota_row, session_row_is_selected,
-    session_row_status_label, session_updated_at_text, status_text,
+    acp_provider_icon, effective_pane_updated_at, project_header_is_selected, provider_icon,
+    provider_quota_row, session_progress_bar, session_row_is_selected, session_row_status_label,
+    session_updated_at_text, status_text,
 };
 
 /// 工具面板（文件树 / 变更 / 历史 / 技能 / 插件）绑定的上下文根。
@@ -200,14 +240,24 @@ pub(crate) fn tool_panel_context_root(
 }
 
 impl Workspace {
-    /// 当前活动上下文的 **root 路径**：优先用用户点选的 `active_project`，该项目
-    /// 已被关掉则回退到活动会话所在组，再回退第一组。
+    /// 当前活动的项目：优先用用户点选的 `active_project`，该项目已被关掉则回退到活动
+    /// 会话所在组，再回退第一组，都在选中项目（没有就是活动会话）所在的运行时里找。
     ///
     /// 打开智能体对话时会把它的工作目录写进 `active_project`，于是「点项目行」
     /// 与「开对话」共用同一个上下文变量，后操作的那个生效。
-    pub(crate) fn active_project_root(&self, cx: &App) -> Option<String> {
-        let groups = self.project_groups(cx);
-        let selected = self.active_project.as_deref();
+    pub(crate) fn active_project_ref(&self, cx: &App) -> Option<ProjectRef> {
+        let runtime = self
+            .active_project
+            .as_ref()
+            .map(|project| project.runtime.clone())
+            .or_else(|| self.cur().map(|session| session.runtime(cx).key().clone()))
+            .unwrap_or(RuntimeKey::Local);
+        let groups = self.project_groups(&runtime, cx);
+        let selected = self
+            .active_project
+            .as_ref()
+            .filter(|project| project.runtime == runtime)
+            .map(|project| project.root.as_str());
         let selected_group_root = selected.and_then(|root| {
             groups
                 .iter()
@@ -228,11 +278,20 @@ impl Workspace {
                 .map(|g| g.root.as_str()),
             groups.first().map(|g| g.root.as_str()),
         )
+        .map(|root| ProjectRef { runtime, root })
+    }
+
+    /// 工具面板（文件树、变更、历史……）绑定的本机项目根。面板目前只读本机文件，活动
+    /// 项目在远程运行时上就没有。
+    pub(crate) fn active_project_root(&self, cx: &App) -> Option<String> {
+        self.active_project_ref(cx)
+            .filter(|project| project.runtime == RuntimeKey::Local)
+            .map(|project| project.root)
     }
 
     /// `root` 是否是某段仍然开着的智能体对话的工作目录。
     fn agent_conversation_workspace_is_open(&self, root: &str, cx: &App) -> bool {
-        smelt_core::session_control::is_agent_conversation_cwd(root)
+        smelt_model::session_control::is_agent_conversation_cwd(root)
             && self.sessions.iter().any(|session| {
                 session.is_agent_conversation(cx)
                     && session
@@ -265,8 +324,7 @@ impl Workspace {
         let active = self.active_session;
         // 注：项目实体化后允许关到一个会话都不剩（侧栏还有项目行撑着，舞台落到引导页），
         // 所以关闭键不再有「最后一个不许关」那道门槛，全都常显。
-        let project_groups = self.project_groups(cx);
-        let active_root = self.active_project_root(cx);
+        let active_project = self.active_project_ref(cx);
 
         let titles: Vec<(usize, String)> = self
             .sessions
@@ -283,29 +341,42 @@ impl Workspace {
         // 非项目分组会拿掉项目标题，因此把每个会话所属项目的标签摊到行内展示，
         // 否则同名会话按状态混在一起后完全看不出来自哪个项目。
         let mut session_projects = vec![None; self.sessions.len()];
-        for group in &project_groups {
-            let branch = self
-                .repo_info
-                .get(group.root.as_str())
-                .and_then(|(_, info)| info.as_ref())
-                .map(|info| info.branch.clone());
-            for &ix in &group.sessions {
-                session_projects[ix] = Some((group.label.clone(), branch.clone()));
+        // 各运行时依次铺开，每段内按当前分组方式分组。
+        let mut groups = Vec::new();
+        for key in self.space_keys() {
+            let Some(space) = self.space(&key) else {
+                continue;
+            };
+            let project_groups = self.project_groups(&key, cx);
+            for group in &project_groups {
+                // 仓库信息目前只有本机项目有。
+                let branch = self
+                    .repo_info
+                    .get(group.root.as_str())
+                    .filter(|_| key == RuntimeKey::Local)
+                    .and_then(|(_, info)| info.as_ref())
+                    .map(|info| info.branch.clone());
+                for &ix in &group.sessions {
+                    session_projects[ix] = Some((group.label.clone(), branch.clone()));
+                }
             }
-        }
-        let mut groups = crate::sidebar_groups(
-            self.sidebar_grouping,
-            project_groups,
-            statuses,
-            &last_updated_at,
-            self.sessions.len(),
-        );
-        if self.sidebar_grouping == SidebarGrouping::Project {
-            groups = crate::sidebar_order::pinned_projects_first(
-                groups,
-                &self.pinned_projects,
-                |group| group.root.as_str(),
+            let members = self.space_members(&key, cx);
+            let mut space_groups = crate::sidebar_groups(
+                &key,
+                self.sidebar_grouping,
+                project_groups,
+                statuses,
+                &last_updated_at,
+                &members,
             );
+            if self.sidebar_grouping == SidebarGrouping::Project {
+                space_groups = crate::sidebar_order::pinned_projects_first(
+                    space_groups,
+                    &space.pinned_projects,
+                    |group| group.root.as_str(),
+                );
+            }
+            groups.extend(space_groups);
         }
         let session_route_active = self.active_tab().is_session();
 
@@ -323,7 +394,7 @@ impl Workspace {
             _ => None,
         };
         let dragging_project = match &self.sidebar_drag {
-            Some(crate::SidebarDrag::Project(root)) => Some(root.clone()),
+            Some(crate::SidebarDrag::Project(project)) => Some(project.clone()),
             _ => None,
         };
         // 筛选 / 分组收进「项目」行右侧的滑块菜单，参考 Copilot Repositories 头。
@@ -385,6 +456,57 @@ impl Workspace {
                     }),
             );
 
+        // 「项目」分组标题跟「最近对话」一起放进滚动区：两段列表共用一个滚动条，
+        // 对话再多也只是往下推，不会把项目列表压没。
+        let e_open = this.clone();
+        let project_section_header = div()
+            .id("project-section-header")
+            .group(PROJ_SECTION_GROUP)
+            .flex_shrink_0()
+            .child(crate::workspace_frame::with_window_drag(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .px_1()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(rgb(ui_theme::text_muted()))
+                            .child("项目"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .opacity(0.0)
+                            .group_hover(PROJ_SECTION_GROUP, |s| s.opacity(1.0))
+                            .child(grouping_btn)
+                            .child(
+                                div()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .child(
+                                        Button::new("open-project")
+                                            .ghost()
+                                            .size(px(24.))
+                                            .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
+                                            .icon_action("添加项目")
+                                            .on_click(move |_ev, _window, cx| {
+                                                e_open.update(cx, |ws, cx| ws.open_project(cx));
+                                            }),
+                                    ),
+                            ),
+                    ),
+            ));
+
         let e_scroll_sess = this.clone();
         let e_scroll_proj = this.clone();
         // 滚动条必须叠在滚动容器外面：若作为 flex_col 的子节点，即使 absolute
@@ -406,7 +528,9 @@ impl Workspace {
                 e_scroll_proj.update(cx, |ws, cx| {
                     ws.update_sidebar_drag_scroll(ev.event.position, cx);
                 });
-            });
+            })
+            .child(self.render_product_conversation_nav(this.clone(), statuses, cx))
+            .child(project_section_header);
 
         // 拖拽排序生效后，项目组和会话行都从旧位置滑到新位置。
         let reorder_generation = self.sidebar_reorder_generation;
@@ -419,20 +543,53 @@ impl Workspace {
         };
         let mut hidden_empty = 0usize;
         let mut visible_ix = 0usize;
+        // ---- 运行时标题行：挂了远程运行时才分段 ----
+        // 按空间顺序出，还没有分组的运行时（刚添加、还没开项目）也要有标题，它的
+        // 「打开项目」就在上面。
+        let mut headers_left: std::collections::VecDeque<crate::runtimes::Runtime> =
+            if self.remote_spaces.is_empty() {
+                Default::default()
+            } else {
+                self.space_keys()
+                    .iter()
+                    .filter_map(|key| self.space(key).map(|space| space.runtime.clone()))
+                    .collect()
+            };
         for group in groups.iter() {
+            let Some(space) = self.space(&group.runtime) else {
+                continue;
+            };
+            if headers_left
+                .iter()
+                .any(|runtime| runtime.key() == &group.runtime)
+            {
+                while let Some(runtime) = headers_left.pop_front() {
+                    let reached = runtime.key() == &group.runtime;
+                    rows = rows.child(runtime_section_header(runtime, this.clone(), cx));
+                    if reached {
+                        break;
+                    }
+                }
+            }
             let is_project_group = grouping == SidebarGrouping::Project;
             // ---- 项目分组标题行 ----
-            // 分组身份一律用 root 路径（末段同名的两个目录是两个项目，见 ProjectGroup）；
-            // name 只是显示用的。
+            // 分组身份一律用运行时加 root 路径（末段同名的两个目录是两个项目，见
+            // ProjectGroup）；name 只是显示用的。
             let cwd = &group.root;
+            let project = ProjectRef {
+                runtime: group.runtime.clone(),
+                root: group.root.clone(),
+            };
+            let is_local_group = group.runtime == RuntimeKey::Local;
             let name = &group.label;
             let ixs = &group.sessions;
-            let collapsed = self.collapsed_projects.contains(cwd);
-            let is_active_group = active_root
-                .as_deref()
-                .is_some_and(|root| crate::sidebar_order::same_project_root(cwd, root));
+            let collapsed = space.collapsed_projects.contains(cwd);
+            let is_active_group = active_project.as_ref().is_some_and(|active| {
+                active.runtime == group.runtime
+                    && crate::sidebar_order::same_project_root(cwd, &active.root)
+            });
             let empty_group = ixs.is_empty();
-            let is_pinned = is_project_group && self.is_project_pinned(cwd);
+            let is_pinned = is_project_group && self.is_project_pinned(&project);
             if is_project_group
                 && !crate::sidebar_order::sidebar_empty_project_visible(
                     hide_empty,
@@ -458,77 +615,41 @@ impl Workspace {
                 .min_by_key(|s| s.rank())
                 .unwrap_or(AgentStatus::Idle);
 
-            let repo_info_here = self
+            // 分支名：git 仓库都显示，跟项目名并排（淡色）。
+            let branch_label = self
                 .repo_info
                 .get(cwd.as_str())
-                .and_then(|(_, i)| i.clone());
-            let is_worktree_group = repo_info_here.as_ref().is_some_and(|i| i.is_worktree());
-            let worktree_main_root = repo_info_here
-                .as_ref()
-                .and_then(|i| main_repo_root_from_common_dir(&i.common_dir))
-                .unwrap_or_else(|| cwd.clone());
-            let worktree_branch = repo_info_here
-                .as_ref()
-                .map(|i| i.branch.clone())
-                .unwrap_or_default();
-            // 分支名：worktree / 普通仓库都显示，跟项目名并排（淡色）。
-            let branch_label = repo_info_here.as_ref().map(|i| i.branch.clone());
-            let plugin_agent = if is_project_group {
-                ixs.iter()
-                    .find_map(|&session_ix| self.sessions[session_ix].plugin_agent_presentation(cx))
-            } else {
-                None
-            };
-            let project_action_payload = if is_project_group {
-                let payloads = ixs
-                    .iter()
-                    .filter_map(|&session_ix| match &self.sessions[session_ix].kind {
-                        SessionKind::Conversation(view) => view.read(cx).session_action_payload(),
-                        SessionKind::Term { .. } => None,
-                    })
-                    .collect::<Vec<_>>();
-                shared_project_action_payload(&payloads)
-            } else {
-                None
-            };
-            let project_session_actions = project_action_payload
-                .as_ref()
-                .map(|payload| {
-                    crate::plugin_ui::session_actions(
-                        &payload.agent_session,
-                        smelt_plugin_api::SessionActionLocation::ProjectMenu,
-                    )
-                })
-                .unwrap_or_default();
-            let project_decorations = project_action_payload
-                .as_ref()
-                .map(|payload| {
-                    crate::plugin_ui::entity_decorations(&payload.agent_session.instance, cx)
-                })
-                .unwrap_or_default();
+                .filter(|_| is_local_group)
+                .and_then(|(_, info)| info.as_ref())
+                .map(|info| info.branch.clone());
 
             let e_toggle = this.clone();
-            let toggle_root = cwd.clone();
+            let toggle_project = project.clone();
             let e_menu = this.clone();
+            let menu_runtime = space.runtime.clone();
             let menu_cwd = if is_project_group {
                 cwd.clone()
             } else {
-                active_root.clone().unwrap_or_default()
+                active_project
+                    .as_ref()
+                    .filter(|active| active.runtime == group.runtime)
+                    .map(|active| active.root.clone())
+                    .unwrap_or_default()
             };
             let group_name: SharedString = name.clone().into();
-            let drag_root: SharedString = cwd.clone().into();
-            let is_drag_source_project = dragging_project.as_ref().is_some_and(|root| {
-                crate::sidebar_order::normalize_project_root(root)
-                    == crate::sidebar_order::normalize_project_root(cwd)
+            let is_drag_source_project = dragging_project.as_ref().is_some_and(|dragged| {
+                dragged.runtime == project.runtime
+                    && crate::sidebar_order::normalize_project_root(&dragged.root)
+                        == crate::sidebar_order::normalize_project_root(cwd)
             });
             let proj_hint_before = can_drag
                 && !is_drag_source_project
-                && self.proj_drop_hint.as_ref() == Some(&(cwd.clone(), true));
+                && self.proj_drop_hint.as_ref() == Some(&(project.clone(), true));
             let proj_hint_after = can_drag
                 && !is_drag_source_project
-                && self.proj_drop_hint.as_ref() == Some(&(cwd.clone(), false));
+                && self.proj_drop_hint.as_ref() == Some(&(project.clone(), false));
             let mut group_rows = div()
-                .id(project_element_id("proj-group-rows", cwd))
+                .id(project_element_id("proj-group-rows", &project))
                 .flex()
                 .flex_col()
                 .when(is_drag_source_project, |d| d.opacity(0.4))
@@ -539,13 +660,13 @@ impl Workspace {
             if grouping != SidebarGrouping::None {
                 group_rows = group_rows.child(
                     div()
-                        .id(project_element_id("proj-group", cwd))
+                        .id(project_element_id("proj-group", &project))
                         // relative：右端的 + 浮层靠 absolute 定位到这行内。
                         .relative()
                         .flex()
                         .items_center()
                         .gap_1p5()
-                        .px_3()
+                        .px(px(PROJECT_HEADER_PAD_X))
                         .py(px(4.))
                         .rounded(ui_theme::row_radius())
                         .group(PROJ_HEADER_GROUP)
@@ -558,7 +679,7 @@ impl Workspace {
                         })
                         .child(
                             div()
-                                .id(project_element_id("proj-disclosure", cwd))
+                                .id(project_element_id("proj-disclosure", &project))
                                 .w(px(14.))
                                 .flex_shrink_0()
                                 .flex()
@@ -584,18 +705,19 @@ impl Workspace {
                                 .overflow_hidden()
                                 .child(
                                     // 项目名与会话同为 text_sm，再用 semibold 区分结构层级；
-                                    // 空项目继续降到 faint，避免和活跃项目争夺注意力。
+                                    // 空项目降一档到 muted，不和活跃项目抢注意力。不降到 faint：
+                                    // 它仍是能点、能新建会话的条目，faint 读起来像禁用。
                                     div()
                                         .flex_shrink_0()
                                         .text_sm()
                                         .font_semibold()
                                         .text_color(rgb(if is_active_group {
                                             ui_theme::text_bright()
-                                        } else if crate::sidebar_order::project_header_is_faint(
+                                        } else if crate::sidebar_order::project_header_is_dimmed(
                                             is_active_group,
                                             empty_group,
                                         ) {
-                                            ui_theme::text_faint()
+                                            ui_theme::text_muted()
                                         } else {
                                             ui_theme::text_mid()
                                         }))
@@ -604,7 +726,7 @@ impl Workspace {
                                 .when(is_pinned, |row| {
                                     row.child(
                                         div()
-                                            .id(project_element_id("proj-pin", cwd))
+                                            .id(project_element_id("proj-pin", &project))
                                             .flex_shrink_0()
                                             .text_color(rgb(ui_theme::text_faint()))
                                             .child(Icon::new(IconName::Star).size(px(11.))),
@@ -613,55 +735,36 @@ impl Workspace {
                                 .when(agg != AgentStatus::Idle, |row| {
                                     row.child(
                                         div()
-                                            .id(project_element_id("proj-status-dot", cwd))
+                                            .id(project_element_id("proj-status-dot", &project))
                                             .flex_shrink_0()
                                             .size(px(6.))
                                             .rounded_full()
                                             .bg(ui_theme::session_dot_color(agg)),
                                     )
                                 })
-                                .children(plugin_agent.as_ref().map(|agent| {
-                                    let agent_name = agent.name.clone();
-                                    div()
-                                        .id(project_element_id("proj-plugin-agent-logo", cwd))
-                                        .flex_shrink_0()
-                                        .size(px(15.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(gpui::rgb(ui_theme::text_muted()))
-                                        .child(plugin_agent_icon(agent).size(px(14.)))
-                                        .tooltip(move |window, cx| {
-                                            gpui_component::tooltip::Tooltip::new(
-                                                agent_name.clone(),
-                                            )
-                                            .build(window, cx)
-                                        })
-                                }))
-                                .children(project_decorations.iter().take(2).map(|decoration| {
-                                    entity_decoration_chip(
-                                        (
-                                            ElementId::from("proj-entity-decoration"),
-                                            decoration.key.clone(),
-                                        ),
-                                        decoration,
-                                        plugin_agent.is_none(),
-                                        cx,
-                                    )
-                                }))
                                 .children(branch_label.as_ref().map(|b| {
+                                    // 窄侧栏里分支名常被截掉后半段，悬浮看全名。
+                                    let full_branch: SharedString = b.clone().into();
                                     div()
+                                        .id(project_element_id("proj-branch", &project))
                                         .min_w_0()
                                         .truncate()
                                         .text_xs()
                                         .font_family(crate::terminal_view::font_family())
                                         .text_color(rgb(ui_theme::text_faint()))
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                full_branch.clone(),
+                                            )
+                                            .build(window, cx)
+                                        })
                                         .child(b.clone())
                                 })),
                         )
                         .child(
                             // 数字和「+」不是两套右对齐元素，而是同一个方形槽里的
                             // 两个满铺图层；hover 只切透明度，因此字形中心不会横跳。
+                            // 数字只在折叠或空项目时有用：展开后下面的会话一眼就数得出来。
                             div()
                                 .relative()
                                 .flex_shrink_0()
@@ -682,7 +785,9 @@ impl Workspace {
                                         .group_hover(PROJ_HEADER_GROUP, |style| {
                                             style.opacity(0.0)
                                         })
-                                        .child(ixs.len().to_string()),
+                                        .when(collapsed || empty_group, |d| {
+                                            d.child(ixs.len().to_string())
+                                        }),
                                 )
                                 .when(is_project_group, |slot| {
                                     slot.child(
@@ -707,6 +812,7 @@ impl Workspace {
                                             })
                                             .child(new_session_picker(
                                                 e_menu.clone(),
+                                                menu_runtime.clone(),
                                                 menu_cwd.clone(),
                                                 cx,
                                             )),
@@ -717,7 +823,7 @@ impl Workspace {
                             with_project_drag(
                                 header,
                                 ProjectDrag {
-                                    root: drag_root.clone(),
+                                    project: project.clone(),
                                     label: group_name.clone(),
                                     collapsed,
                                     empty: empty_group,
@@ -725,7 +831,6 @@ impl Workspace {
                                         .as_ref()
                                         .map(|branch| SharedString::from(branch.clone())),
                                     agg,
-                                    plugin_agent: plugin_agent.clone(),
                                     session_count: ixs.len(),
                                     grab: Point::default(),
                                 },
@@ -733,63 +838,52 @@ impl Workspace {
                             )
                         })
                         .on_mouse_up(MouseButton::Left, move |_ev, window, cx| {
-                            let root = toggle_root.clone();
+                            let project = toggle_project.clone();
                             e_toggle.update(cx, |ws, cx| {
                                 // 整行也挂了 on_drag：超过阈值起拖后不要再当成点选。
                                 if ws.sidebar_drag.is_some() {
                                     return;
                                 }
-                                ws.select_project(root.clone(), window, cx);
+                                ws.select_project(project.clone(), window, cx);
                                 if crate::sidebar_order::project_header_click_toggles_collapse(
                                     !empty_group,
                                 ) {
-                                    ws.toggle_project_collapsed(&root, cx);
+                                    ws.toggle_project_collapsed(&project, cx);
                                 }
                             });
                         })
                         .context_menu({
-                            // 复制路径人人有份；「删除 Worktree」只给 worktree 分组
-                            //（`when` 的两个分支类型必须一致，所以是菜单项按条件加，
-                            // 不是整个 context_menu 按条件挂）。
-                            let e_del = e_menu.clone();
                             let e_pin = e_menu.clone();
                             let e_sidebar_pin = e_menu.clone();
                             let e_close_proj = e_menu.clone();
-                            let e_plugin_action = e_menu.clone();
-                            let project_action_payload = project_action_payload.clone();
-                            let project_session_actions = project_session_actions.clone();
                             let path = cwd.clone();
-                            let close_root = cwd.clone();
+                            let close_project = project.clone();
+                            let menu_project = project.clone();
                             let sess_n = ixs.len();
-                            let del_main_root = worktree_main_root.clone();
-                            let del_branch = worktree_branch.clone();
                             let copy_branch = branch_label.clone();
                             move |menu, window, cx| {
                                 if !is_project_group {
                                     return menu;
                                 }
+                                // 远程项目的文件不在这台机器上：打开方式、文件树都还做不了，
+                                // 只给通用的几项。
+                                if !is_local_group {
+                                    return remote_project_menu(
+                                        menu,
+                                        menu_project.clone(),
+                                        sess_n,
+                                        e_close_proj.clone(),
+                                        cx,
+                                    );
+                                }
                                 let copy_path = path.clone();
-                                let del_path = path.clone();
                                 let pin_path = path.clone();
-                                let sidebar_pin_path = path.clone();
-                                let wt_root = path.clone();
-                                let e_wt = e_menu.clone();
-                                let e_del = e_del.clone();
+                                let sidebar_pin_project = close_project.clone();
                                 let e_pin = e_pin.clone();
                                 let e_sidebar_pin = e_sidebar_pin.clone();
                                 let e_close_proj = e_close_proj.clone();
-                                let e_plugin_action = e_plugin_action.clone();
-                                let project_action_payload = project_action_payload.clone();
-                                let project_session_actions = project_session_actions.clone();
-                                let close_root = close_root.clone();
-                                let del_main_root = del_main_root.clone();
-                                let del_branch = del_branch.clone();
+                                let close_project = close_project.clone();
                                 let copy_branch = copy_branch.clone();
-                                // 「新增 Worktree」用的主仓库根/基准分支：独立 clone，
-                                // 免得和后面「删除 Worktree」的 when 闭包抢同一个变量。
-                                let nwt_main_root = del_main_root.clone();
-                                let nwt_base_branch = del_branch.clone();
-                                let e_nwt = e_menu.clone();
                                 // 已 pin → 显示「从文件树移除」，否则「加到文件树」（当前活动项目
                                 // 天然在文件树里，pin 它=切走后仍保留，所以照样给这个开关）。
                                 let pinned = e_pin.read(cx).is_file_tree_root_pinned(&pin_path);
@@ -799,44 +893,16 @@ impl Workspace {
                                     "加到文件树"
                                 };
                                 let sidebar_pinned =
-                                    e_sidebar_pin.read(cx).is_project_pinned(&sidebar_pin_path);
+                                    e_sidebar_pin.read(cx).is_project_pinned(&sidebar_pin_project);
                                 let sidebar_pin_label = if sidebar_pinned {
                                     "取消置顶"
                                 } else {
                                     "置顶"
                                 };
-                                // 按「复制 / Worktree / 项目 / 离开」分段；Worktree 是较少用
-                                // 的高级操作，收进二级菜单，避免把常用项目操作挤成一长列。
-                                let mut menu = menu;
-                                if let Some(payload) = project_action_payload {
-                                    let has_actions = !project_session_actions.is_empty();
-                                    for action in project_session_actions {
-                                        let e_action = e_plugin_action.clone();
-                                        let payload = payload.clone();
-                                        let action_for_click = action.clone();
-                                        let mut item = PopupMenuItem::new(action.title.clone());
-                                        if let Some(icon) = plugin_session_action_icon(action.icon) {
-                                            item = item.icon(icon);
-                                        }
-                                        menu = menu.item(item.on_click(move |_ev, window, cx| {
-                                            e_action.update(cx, |ws, cx| {
-                                                ws.run_plugin_session_action(
-                                                    action_for_click.clone(),
-                                                    payload.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        }));
-                                    }
-                                    if has_actions {
-                                        menu = menu.separator();
-                                    }
-                                }
-
+                                // 按「复制 / 项目 / 离开」分段。
                                 let open_root = copy_path.clone();
                                 let e_open = e_menu.clone();
-                                menu = menu
+                                menu
                                     .submenu_with_icon(
                                         Some(IconName::ExternalLink.into()),
                                         "用其他应用打开",
@@ -875,59 +941,13 @@ impl Workspace {
                                         )
                                     })
                                     .separator()
-                                    .submenu_with_icon(
-                                        Some(IconName::HardDrive.into()),
-                                        "Worktree",
-                                        window,
-                                        cx,
-                                        move |menu, _window, _cx| {
-                                            let worktree_root = wt_root.clone();
-                                            let worktree_workspace = e_wt.clone();
-                                            let new_worktree_root = nwt_main_root.clone();
-                                            let new_worktree_branch = nwt_base_branch.clone();
-                                            let new_worktree_workspace = e_nwt.clone();
-                                            menu.item(
-                                                PopupMenuItem::new("查看关联的 Worktree...")
-                                                    .icon(IconName::HardDrive)
-                                                    .on_click(move |_ev, _window, cx| {
-                                                        worktree_workspace.update(cx, |ws, cx| {
-                                                            ws.open_worktree_list(
-                                                                worktree_root.clone(),
-                                                                cx,
-                                                            )
-                                                        });
-                                                    }),
-                                            )
-                                            .item(
-                                                PopupMenuItem::new("新建 Worktree...")
-                                                    .icon(IconName::Plus)
-                                                    .on_click(move |_ev, window, cx| {
-                                                        new_worktree_workspace.update(
-                                                            cx,
-                                                            |ws, cx| {
-                                                                ws.open_new_worktree(
-                                                                    new_worktree_root.clone(),
-                                                                    new_worktree_branch.clone(),
-                                                                    window,
-                                                                    cx,
-                                                                )
-                                                            },
-                                                        );
-                                                    }),
-                                            )
-                                        },
-                                    )
-                                    .separator()
                                     .item(
                                         PopupMenuItem::new(sidebar_pin_label)
                                             .icon(IconName::Star)
                                             .on_click(move |_ev, _window, cx| {
-                                                let sidebar_pin_path = sidebar_pin_path.clone();
+                                                let project = sidebar_pin_project.clone();
                                                 e_sidebar_pin.update(cx, |ws, cx| {
-                                                    ws.toggle_project_pinned(
-                                                        sidebar_pin_path,
-                                                        cx,
-                                                    )
+                                                    ws.toggle_project_pinned(project, cx)
                                                 });
                                             }),
                                     )
@@ -953,39 +973,19 @@ impl Workspace {
                                         .icon(IconName::Close)
                                         .on_click(
                                             move |_ev, _window, cx| {
-                                                let root = close_root.clone();
+                                                let project = close_project.clone();
                                                 e_close_proj.update(cx, |ws, cx| {
-                                                    ws.start_close_project(root, cx)
+                                                    ws.start_close_project(project, cx)
                                                 });
                                             },
                                         ),
-                                    );
-
-                                menu.when(is_worktree_group, move |menu| {
-                                    menu.separator().item(
-                                        PopupMenuItem::new("删除 Worktree")
-                                            .icon(crate::trash_icon())
-                                            .on_click(move |_ev, _window, cx| {
-                                                let del_path = del_path.clone();
-                                                let del_main_root = del_main_root.clone();
-                                                let del_branch = del_branch.clone();
-                                                e_del.update(cx, |ws, cx| {
-                                                    ws.start_delete_worktree(
-                                                        del_path,
-                                                        del_main_root,
-                                                        del_branch,
-                                                        cx,
-                                                    )
-                                                });
-                                            }),
                                     )
-                                })
                             }
                         })
                         .when(can_drag && dragging, |header| {
                             attach_project_drop_layers(
                                 header,
-                                drag_root.clone(),
+                                project.clone(),
                                 proj_hint_before,
                                 proj_hint_after,
                                 this.clone(),
@@ -997,8 +997,8 @@ impl Workspace {
             if collapsed {
                 if grouping != SidebarGrouping::None {
                     rows = rows.child(
-                        flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
-                            .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                        flip_slot(project_flip_id(&project), reorder_generation, group_rows)
+                            .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
                     );
                 }
                 continue;
@@ -1007,8 +1007,8 @@ impl Workspace {
             if ixs.is_empty() {
                 // 空项目不占一行说明。Grok 的空分组就是没有条目，新建走标题上的 +。
                 rows = rows.child(
-                    flip_slot(project_flip_id(cwd), reorder_generation, group_rows)
-                        .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                    flip_slot(project_flip_id(&project), reorder_generation, group_rows)
+                        .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
                 );
                 continue;
             }
@@ -1048,35 +1048,12 @@ impl Workspace {
                     .map(|agent| agent.label())
                     .or_else(|| provider.map(|agent| agent.label()))
                     .unwrap_or("终端");
-                let plugin_agent = self.sessions[ix].plugin_agent_presentation(cx);
                 let agent_mark = crate::agents::bound_agent_mark(
                     self.sessions[ix].agent_definition_id.as_deref(),
                     self.sessions[ix].automation_id.as_deref(),
                     &cx.global::<AgentHostState>().agents,
                 );
-                let identity_label = plugin_agent
-                    .as_ref()
-                    .map(|agent| agent.name.clone())
-                    .unwrap_or_else(|| provider_label.to_string());
-                let session_action_payload = match &self.sessions[ix].kind {
-                    SessionKind::Conversation(view) => view.read(cx).session_action_payload(),
-                    SessionKind::Term { .. } => None,
-                };
-                let session_actions = session_action_payload
-                    .as_ref()
-                    .map(|payload| {
-                        crate::plugin_ui::session_actions(
-                            &payload.agent_session,
-                            smelt_plugin_api::SessionActionLocation::SessionMenu,
-                        )
-                    })
-                    .unwrap_or_default();
-                let session_decorations = session_action_payload
-                    .as_ref()
-                    .map(|payload| {
-                        crate::plugin_ui::entity_decorations(&payload.agent_session.instance, cx)
-                    })
-                    .unwrap_or_default();
+                let identity_label = provider_label.to_string();
                 let project_context_matches = !is_project_group || is_active_group;
                 let is_active = session_row_is_selected(
                     session_route_active,
@@ -1095,6 +1072,18 @@ impl Workspace {
                 // 运行中 / 要人管的状态才配文字。空闲不写——每行都写「空闲」
                 // 等于用一整行高度说一句废话。
                 let status_label = session_row_status_label(status);
+                // 终端程序报的进度（OSC 9;4），看当前那个分屏的。
+                let progress = match &self.sessions[ix].kind {
+                    SessionKind::Term { active, .. } => {
+                        let view = active.read(cx);
+                        smelt_ui::daemon_states_global::DaemonStates::progress(
+                            view.runtime().key(),
+                            view.session_id(),
+                            cx,
+                        )
+                    }
+                    SessionKind::Conversation(_) => None,
+                };
                 let session_updated_at = last_updated_at.get(ix).copied().unwrap_or_default();
                 let updated_text = session_updated_at_text(session_updated_at, &now);
                 let project_context = (grouping != SidebarGrouping::Project)
@@ -1149,7 +1138,6 @@ impl Workspace {
                         })
                         .into_any_element()
                 } else if animate_running && status == AgentStatus::Running {
-                    let plugin_agent = plugin_agent.clone();
                     ambient_animation(
                         ("sess-provider-glow", ui_id),
                         SESSION_GLOW_PERIOD,
@@ -1165,14 +1153,9 @@ impl Workspace {
                                 .justify_center()
                                 .text_color(Self::session_icon_color(status, Some(phase)))
                                 .child(
-                                    plugin_agent
-                                        .as_ref()
-                                        .map(plugin_agent_icon)
-                                        .unwrap_or_else(|| {
-                                            acp_provider
-                                                .map(acp_provider_icon)
-                                                .unwrap_or_else(|| provider_icon(provider))
-                                        })
+                                    acp_provider
+                                        .map(acp_provider_icon)
+                                        .unwrap_or_else(|| provider_icon(provider))
                                         .size(px(SESSION_AGENT_ICON_SIZE)),
                                 )
                                 .tooltip(move |window, cx| {
@@ -1192,14 +1175,9 @@ impl Workspace {
                         .justify_center()
                         .text_color(Self::session_icon_color(status, None))
                         .child(
-                            plugin_agent
-                                .as_ref()
-                                .map(plugin_agent_icon)
-                                .unwrap_or_else(|| {
-                                    acp_provider
-                                        .map(acp_provider_icon)
-                                        .unwrap_or_else(|| provider_icon(provider))
-                                })
+                            acp_provider
+                                .map(acp_provider_icon)
+                                .unwrap_or_else(|| provider_icon(provider))
                                 .size(px(SESSION_AGENT_ICON_SIZE)),
                         )
                         .tooltip(move |window, cx| {
@@ -1212,6 +1190,7 @@ impl Workspace {
                 let row_tooltip = title.clone();
                 let row = div()
                     .id(("sess-row", ui_id))
+                    .group(SESSION_ROW_GROUP)
                     .relative()
                     .flex()
                     .items_center()
@@ -1266,17 +1245,6 @@ impl Workspace {
                                     .child(updated_text),
                             ),
                     )
-                    .children(session_decorations.iter().take(2).map(|decoration| {
-                        entity_decoration_chip(
-                            (
-                                ElementId::from("sess-entity-decoration"),
-                                decoration.key.clone(),
-                            ),
-                            decoration,
-                            plugin_agent.is_none(),
-                            cx,
-                        )
-                    }))
                     // 分屏数继续用行尾小角标；第二行固定留给跨会话可比较的时间。
                     .children(subtitle.as_ref().map(|s| {
                         div()
@@ -1304,6 +1272,7 @@ impl Workspace {
                                     .child(name)
                             }))
                     }))
+                    .children(progress.map(session_progress_bar))
                     // 只要人管才写字，不加色胶囊。
                     .children(status_label.map(|label| {
                         div()
@@ -1313,7 +1282,8 @@ impl Workspace {
                             .child(label)
                     }))
                     .child(
-                        // 关闭是这一行唯一的主操作，一直放在行尾。不用 ghost Button：
+                        // 关闭是这一行唯一的主操作，放在行尾，hover 整行才显出来；用透明度
+                        // 而不是不渲染，位置一直占着，显隐时标题截断不跳。不用 ghost Button：
                         // 它的 hover 底是 secondary(bg_card).lighten(0.1)，压在选中行的
                         // bg_selected 上比底色还暗，且图标色 hover 前后不变。这里自己画，
                         // hover 只把图标转红、不加底。
@@ -1326,14 +1296,16 @@ impl Workspace {
                             .size(px(20.))
                             .rounded(px(4.))
                             .text_color(rgb(ui_theme::text_muted()))
+                            .opacity(0.0)
+                            .group_hover(SESSION_ROW_GROUP, |s| s.opacity(1.0))
                             .hover(|d| d.text_color(rgb(ui_theme::red())))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation()
                             })
                             .child(Icon::new(IconName::Close).size(px(14.)))
-                            .on_click(move |_ev, _w, cx| {
+                            .on_click(move |_ev, window, cx| {
                                 cx.stop_propagation();
-                                e_close.update(cx, |ws, cx| ws.close_session(ix, cx));
+                                e_close.update(cx, |ws, cx| ws.request_close_session(ix, window, cx));
                             }),
                     )
                     .when(can_drag, |row| {
@@ -1345,7 +1317,6 @@ impl Workspace {
                                 acp: acp_provider,
                                 terminal: provider,
                                 status,
-                                plugin_agent: plugin_agent.clone(),
                                 subtitle: subtitle.as_deref().map(SharedString::from),
                                 status_label: status_label.map(SharedString::from),
                                 grab: Point::default(),
@@ -1359,10 +1330,7 @@ impl Workspace {
                     .context_menu(move |menu, _window, _cx| {
                         let e_rename = e_rename.clone();
                         let e_restart = e_restart.clone();
-                        let e_plugin_action = e_rename.clone();
                         let copy_session_id = session_id.clone();
-                        let session_action_payload = session_action_payload.clone();
-                        let session_actions = session_actions.clone();
                         let sess_ix = ix;
                         let mut menu = menu
                             .item(
@@ -1395,30 +1363,6 @@ impl Workspace {
                                         });
                                     }),
                             );
-                        }
-                        if let Some(payload) = session_action_payload {
-                            if !session_actions.is_empty() {
-                                menu = menu.separator();
-                            }
-                            for action in session_actions {
-                                let e_action = e_plugin_action.clone();
-                                let payload = payload.clone();
-                                let action_for_click = action.clone();
-                                let mut item = PopupMenuItem::new(action.title.clone());
-                                if let Some(icon) = plugin_session_action_icon(action.icon) {
-                                    item = item.icon(icon);
-                                }
-                                menu = menu.item(item.on_click(move |_ev, window, cx| {
-                                    e_action.update(cx, |ws, cx| {
-                                        ws.run_plugin_session_action(
-                                            action_for_click.clone(),
-                                            payload.clone(),
-                                            window,
-                                            cx,
-                                        )
-                                    });
-                                }));
-                            }
                         }
                         menu
                     })
@@ -1595,7 +1539,9 @@ impl Workspace {
                                                     cx.stop_propagation();
                                                     let pane = close_pane.clone();
                                                     e_pane_close.update(cx, |ws, cx| {
-                                                        ws.close_session_pane(ix, pane, window, cx)
+                                                        ws.request_close_session_pane(
+                                                            ix, pane, window, cx,
+                                                        )
                                                     });
                                                 }),
                                         ),
@@ -1609,7 +1555,6 @@ impl Workspace {
                                             acp: acp_provider,
                                             terminal: provider,
                                             status,
-                                            plugin_agent: plugin_agent.clone(),
                                             subtitle: subtitle.as_deref().map(SharedString::from),
                                             status_label: status_label.map(SharedString::from),
                                             grab: Point::default(),
@@ -1651,9 +1596,10 @@ impl Workspace {
                                     .item(
                                         PopupMenuItem::new("关闭整个会话（含全部分屏）")
                                             .icon(IconName::Close)
-                                            .on_click(move |_ev, _window, cx| {
-                                                e_close_all
-                                                    .update(cx, |ws, cx| ws.close_session(ix, cx));
+                                            .on_click(move |_ev, window, cx| {
+                                                e_close_all.update(cx, |ws, cx| {
+                                                    ws.request_close_session(ix, window, cx)
+                                                });
                                             }),
                                     )
                                 })
@@ -1705,12 +1651,16 @@ impl Workspace {
             }
             rows = rows.child(
                 flip_slot(
-                    project_flip_id(cwd),
+                    project_flip_id(&project),
                     reorder_generation,
                     group_rows.child(group_body),
                 )
-                .from_top(drop_origin(crate::SidebarDrag::Project(cwd.clone()))),
+                .from_top(drop_origin(crate::SidebarDrag::Project(project.clone()))),
             );
+        }
+
+        for runtime in headers_left {
+            rows = rows.child(runtime_section_header(runtime, this.clone(), cx));
         }
 
         if hidden_empty > 0 {
@@ -1720,7 +1670,7 @@ impl Workspace {
                     .id("hidden-empty-projects")
                     .mx_2()
                     .mt_2()
-                    .px_3()
+                    .px(px(PROJECT_HEADER_PAD_X))
                     .py(px(4.))
                     .rounded(ui_theme::row_radius())
                     .cursor_pointer()
@@ -1740,12 +1690,10 @@ impl Workspace {
         }
 
         // ---- 底部操作条：设置 ----
-        // 「打开项目」已经挪到「项目」标题行右侧，跟 Grok 一样跟分组标题同行。
-        let e_open = this.clone();
+        // 「添加项目」在「项目」标题行右侧，跟 Grok 一样跟分组标题同行。
         let e_settings = this.clone();
         let settings_needs_attention =
             self.update_available() || self.daemon_outdated == Some(true);
-        let account_menu_entries = crate::settings::sidebar_account_menu_entries(cx);
 
         // ---- 底部额度条：provider 账户额度（Codex / Claude / Copilot / Grok / Cursor）----
         // 从舞台头栏迁到这里（底部操作条上方）。只显示「检测到额度」的 provider，
@@ -1902,11 +1850,7 @@ impl Workspace {
                                 move |menu, _window, _cx| {
                                     let e_settings = e_settings.clone();
                                     let e_check_update = e_settings.clone();
-                                    let e_account_settings = e_settings.clone();
-                                    let accounts = account_menu_entries.clone();
-                                    let multiple_accounts = accounts.len() > 1;
-                                    let has_accounts = !accounts.is_empty();
-                                    let mut menu = menu
+                                    let menu = menu
                                         .item(
                                             PopupMenuItem::new("帮助文档")
                                                 .icon(IconName::BookOpen)
@@ -1941,61 +1885,6 @@ impl Workspace {
                                                 }),
                                         )
                                         .separator();
-
-                                    for account in accounts {
-                                        for action in
-                                            account.actions.iter().filter(|action| !action.disabled).cloned()
-                                        {
-                                            let label = if multiple_accounts {
-                                                format!(
-                                                    "{}：{}",
-                                                    account.settings_title, action.label
-                                                )
-                                            } else {
-                                                action.label.clone()
-                                            };
-                                            let plugin_id = account.plugin_id.clone();
-                                            let section_id = account.settings_section_id.clone();
-                                            menu = menu.item(
-                                                PopupMenuItem::new(label)
-                                                    .icon(IconName::User)
-                                                    .on_click(move |_ev, _window, cx| {
-                                                        crate::plugin_ui::run_settings_action(
-                                                            plugin_id.clone(),
-                                                            section_id.clone(),
-                                                            action.clone(),
-                                                            None,
-                                                            cx,
-                                                        );
-                                                    }),
-                                            );
-                                        }
-
-                                        let title = if account.settings_title.trim().is_empty() {
-                                            "插件设置".to_string()
-                                        } else {
-                                            format!("{} 设置", account.settings_title)
-                                        };
-                                        let plugin_id = account.plugin_id;
-                                        let settings_entity = e_account_settings.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new(title)
-                                                .icon(IconName::Settings)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    settings_entity.update(cx, |ws, cx| {
-                                                        ws.open_settings_section(
-                                                            crate::settings::SettingsSection::Plugin {
-                                                                id: plugin_id.clone(),
-                                                            },
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        );
-                                    }
-                                    if has_accounts {
-                                        menu = menu.separator();
-                                    }
 
                                     menu.item(
                                         PopupMenuItem::new("设置...")
@@ -2034,71 +1923,8 @@ impl Workspace {
             // 外层工作区负责玻璃表面、描边与裁切；列表自身保持透明，才能让
             // vibrancy / 半透明底贯穿整个面板而不是只透出四角。
             .bg(gpui::transparent_black())
-            // 工作台（含智能体对话）、插件、项目是三个并列分组。
-            .child(self.render_automation_navigation(
-                this.clone(),
-                statuses,
-                animate_running,
-                cx,
-            ))
-            .children(self.render_workspace_surface_rows(this, cx))
-            .child(
-                div()
-                    .id("project-section-header")
-                    .group(PROJ_SECTION_GROUP)
-                    .flex_shrink_0()
-                    .child(
-                        crate::workspace_frame::with_window_drag(
-                            div()
-                                .px_3()
-                                .pt_2()
-                                .pb_1()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .px_1()
-                                        .flex_shrink_0()
-                                        .text_sm()
-                                        .font_medium()
-                                        .text_color(rgb(ui_theme::text_faint()))
-                                        .child("项目"),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .opacity(0.0)
-                                        .group_hover(PROJ_SECTION_GROUP, |s| s.opacity(1.0))
-                                        .child(grouping_btn)
-                                        .child(
-                                            div()
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                    cx.stop_propagation()
-                                                })
-                                                .child(
-                                                    Button::new("open-project")
-                                                        .ghost()
-                                                        .size(px(24.))
-                                                        .icon(
-                                                            Icon::empty().path(
-                                                                "smelt-icons/folder-plus.svg",
-                                                            ),
-                                                        )
-                                                        .icon_action("打开项目")
-                                                        .on_click(move |_ev, _window, cx| {
-                                                            e_open.update(cx, |ws, cx| {
-                                                                ws.open_project(cx)
-                                                            });
-                                                        }),
-                                                ),
-                                        ),
-                                ),
-                        ),
-                    ),
-            )
+            // 顶部固定的只有几个入口；「最近对话」和项目都在下面的滚动区里。
+            .child(self.render_automation_navigation(this, statuses, cx))
             .child(
                 div()
                     .id("session-rows-pane")
@@ -2111,107 +1937,6 @@ impl Workspace {
             .children(quota_footer)
             .child(footer)
     }
-
-    fn render_workspace_surface_rows(&self, entity: Entity<Workspace>, _cx: &App) -> Option<Div> {
-        let surfaces = crate::plugin_ui::workspace_surfaces();
-        if surfaces.is_empty() {
-            return None;
-        }
-        let active = self.plugin_surface_key().map(str::to_string);
-        Some(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .px_2()
-                .pt_1()
-                .pb_1()
-                .gap_1()
-                .child(
-                    div()
-                        .px_2()
-                        .pb_1()
-                        .text_sm()
-                        .font_medium()
-                        .text_color(rgb(ui_theme::text_faint()))
-                        .child("插件"),
-                )
-                .children(surfaces.into_iter().map(|tab| {
-                    let key = tab.key();
-                    let selected = active.as_deref() == Some(key.as_str());
-                    let title = self.workspace_surface_display_title(&key);
-                    let entity_click = entity.clone();
-                    let entity_rename = entity.clone();
-                    let open_key = key.clone();
-                    let rename_key = key.clone();
-                    div()
-                        .id(SharedString::from(format!("workspace-surface-{key}")))
-                        .h(ui_theme::height::md())
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(ui_theme::row_radius())
-                        .cursor_pointer()
-                        .map(|d| {
-                            if selected {
-                                d.bg(rgb(ui_theme::bg_selected()))
-                            } else {
-                                d.hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                            }
-                        })
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .size(px(18.))
-                                .rounded(px(4.))
-                                .bg(rgb(0x167c80))
-                                .text_color(gpui::white())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(
-                                    title
-                                        .chars()
-                                        .next()
-                                        .unwrap_or('P')
-                                        .to_uppercase()
-                                        .to_string(),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .text_color(rgb(if selected {
-                                    ui_theme::text_bright()
-                                } else {
-                                    ui_theme::text_mid()
-                                }))
-                                .truncate()
-                                .child(title),
-                        )
-                        .on_click(move |ev, window, cx| {
-                            if ev.click_count() >= 2 {
-                                entity_rename.update(cx, |ws, cx| {
-                                    ws.start_rename(
-                                        RenameTarget::WorkspaceSurface(rename_key.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                                return;
-                            }
-                            entity_click.update(cx, |ws, cx| {
-                                ws.open_workspace_surface(open_key.clone(), window, cx);
-                            });
-                        })
-                })),
-        )
-    }
 }
 
 #[cfg(test)]
@@ -2220,8 +1945,7 @@ mod tests {
         PROJECT_ACTION_SLOT_HEIGHT, PROJECT_DISCLOSURE_ICON_SIZE, PROJECT_GUIDE_LEFT,
         PROJECT_NEW_BUTTON_SIZE, PROJECT_SESSION_INDENT, SESSION_AGENT_ICON_BOX_SIZE,
         SESSION_AGENT_ICON_SIZE, project_disclosure_icon, project_header_is_selected,
-        session_row_is_selected, session_row_status_label, shared_project_action_payload,
-        status_text,
+        session_row_is_selected, session_row_status_label, status_text,
     };
     use crate::AgentStatus;
     use gpui_component::IconName;
@@ -2229,7 +1953,7 @@ mod tests {
     const _: () = {
         assert!(PROJECT_NEW_BUTTON_SIZE >= 28.);
         assert!(PROJECT_NEW_BUTTON_SIZE > PROJECT_ACTION_SLOT_HEIGHT);
-        assert!(PROJECT_SESSION_INDENT == 22.);
+        assert!(PROJECT_SESSION_INDENT == 18.);
         assert!(PROJECT_GUIDE_LEFT < PROJECT_SESSION_INDENT);
         assert!(PROJECT_DISCLOSURE_ICON_SIZE >= 15.);
         assert!(SESSION_AGENT_ICON_SIZE >= 17.);
@@ -2300,32 +2024,5 @@ mod tests {
             session_row_status_label(AgentStatus::NeedsYou),
             Some("需要你")
         );
-    }
-
-    #[test]
-    fn project_action_requires_every_session_to_target_the_same_context() {
-        let payload = |issue_id: &str| {
-            serde_json::from_value(serde_json::json!({
-                "agent_session": {
-                    "agent": {
-                        "plugin_id": "com.example.issues",
-                        "contribution_id": "issue-agent"
-                    },
-                    "controller": {
-                        "plugin_id": "com.example.issues",
-                        "contribution_id": "issue-session"
-                    },
-                    "instance": {
-                        "plugin_id": "com.example.issues",
-                        "resource_type": "issue",
-                        "resource_id": "shared-instance"
-                    }
-                },
-                "context": {"issue_id": issue_id}
-            }))
-            .unwrap()
-        };
-
-        assert!(shared_project_action_payload(&[payload("issue-1"), payload("issue-2")]).is_none());
     }
 }

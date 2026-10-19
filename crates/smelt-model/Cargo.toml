@@ -1,0 +1,30 @@
+[package]
+name = "smelt-model"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+# 桌面客户端和运行时共用的纯类型与纯函数：agent 身份、对话模型、自动化定义、主题
+# 索引、OSC 解析……这里不读写文件、不起进程、不碰运行时的库（设计文档 P1）。读写
+# 和执行留在 smelt-core，只有运行时依赖它。
+
+[dependencies]
+smelt-paths = { path = "../smelt-paths" }
+smelt-event-protocol = { path = "../smelt-event-protocol" }
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+agent-client-protocol = { version = "=2.1.0", features = ["unstable_plan_operations"] }
+alacritty_terminal = { version = "0.26", default-features = false }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+chrono-tz = "0.10"
+tempfile = "3"

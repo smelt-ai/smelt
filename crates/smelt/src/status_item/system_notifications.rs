@@ -636,10 +636,6 @@ pub fn notify_success(message: impl AsRef<str>) {
     deliver_app_notification("完成", message.as_ref());
 }
 
-pub fn notify_info(message: impl AsRef<str>) {
-    deliver_app_notification("提示", message.as_ref());
-}
-
 pub fn deliver_automation_notification(
     automation_id: &str,
     run_id: &str,

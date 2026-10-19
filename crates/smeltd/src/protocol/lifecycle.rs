@@ -1,7 +1,6 @@
 //! 守护进程级 op：version / shutdown / hook 状态。
 
 use super::super::*;
-use std::io::Write;
 use std::os::unix::net::UnixStream;
 
 pub(super) fn handle_version(
@@ -21,10 +20,9 @@ pub(super) fn handle_version(
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
     let mut c = conn;
-    let _ = writeln!(
-        c,
-        "{}",
-        serde_json::json!({
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut c,
+        &serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "exe_mtime": exe_mtime,
             "exe": exe_path,
@@ -34,7 +32,7 @@ pub(super) fn handle_version(
             "session_count": session_count,
             // 供其它事件客户端协商；hook helper 只发 `agent_event`。
             "agent_event_version": AGENT_EVENT_VERSION,
-        })
+        }),
     );
 }
 
@@ -43,33 +41,30 @@ pub(super) fn handle_shutdown(conn: UnixStream, event_hub: &EventHubHandle) {
     let _peer_messaging_shutdown = match peer_messaging::begin_upgrade() {
         Ok(guard) => guard,
         Err(active_operations) => {
-            let _ = writeln!(
-                c,
-                "{}",
-                serde_json::json!({
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut c,
+                &serde_json::json!({
                     "ok": false,
                     "busy": true,
                     "error": "peer messaging operations are still active",
                     "peer_messaging_operations": active_operations,
-                })
+                }),
             );
             return;
         }
     };
-    crate::plugin_runtime::stop();
     if let Err(error) = event_hub.flush_for_shutdown() {
-        crate::plugin_runtime::restart_after_failed_exec();
-        let _ = writeln!(
-            c,
-            "{}",
-            serde_json::json!({
+        let _ = smelt_runtime_client::protocol::write_json_line(
+            &mut c,
+            &serde_json::json!({
                 "ok": false,
                 "error": format!("EventHub durable flush failed before shutdown: {error}")
-            })
+            }),
         );
         return;
     }
-    let _ = writeln!(c, "{}", serde_json::json!({ "ok": true }));
+    let _ =
+        smelt_runtime_client::protocol::write_json_line(&mut c, &serde_json::json!({ "ok": true }));
     let _ = c.shutdown(Shutdown::Both);
     // 先收 iroh 隧道与远程网关，再 exit——否则手机侧的连接会继续转发到一个
     // 已死的端口。PTY 随本进程死、shell 收 SIGHUP，这是「重启守护」的代价。
@@ -101,7 +96,10 @@ pub(super) fn handle_agent_event_op(
     // ACK 表示 reducer 已提交。hook helper 收到后才退出，使 provider 的下一
     // 条同步 hook 不会越过本条；广播在 ACK 后进行，慢订阅者不阻塞事件顺序。
     let mut c = conn;
-    let _ = writeln!(c, "{}", serde_json::json!({ "ok": accepted }));
+    let _ = smelt_runtime_client::protocol::write_json_line(
+        &mut c,
+        &serde_json::json!({ "ok": accepted }),
+    );
     if let Some(snapshot) = snapshot {
         broadcast_state(event_hub, &snapshot);
     }

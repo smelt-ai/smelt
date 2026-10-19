@@ -10,19 +10,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if tab.releases_plugin_key() {
-            smelt_webview::release_focus(window);
-        }
         if tab != WorkspaceRoute::Agents {
             self.abandon_new_conversation_create(cx);
         } else if self.agent_surface.conversation_draft_id.is_some() {
             // 侧栏「智能体」回根页。草稿还没提交，离开编辑器就等于取消。
             self.cancel_conversation_draft(cx);
         }
-        self.nav.set_active(tab.clone());
-        if tab.sidebar_opens_root() {
-            self.pop_active_tab_to_root();
+        if tab != WorkspaceRoute::Desktop {
+            self.desktop = None;
         }
+        self.nav.set_active(tab);
+        self.pop_active_tab_to_root();
         if !self.active_tab().is_session() {
             self.stage_cover = None;
         }
@@ -33,6 +31,9 @@ impl Workspace {
     }
 
     pub(super) fn reveal_workspace_tab(&mut self, tab: WorkspaceRoute, cx: &mut Context<Self>) {
+        if tab != WorkspaceRoute::Desktop {
+            self.desktop = None;
+        }
         self.nav.set_active(tab);
         if !self.active_tab().is_session() {
             self.stage_cover = None;
@@ -195,34 +196,17 @@ impl Workspace {
     }
 
     /// 挑一个或多个目录绑定到智能体。Pi 只认单个 cwd，所以这些目录不会变成
-    /// 工作目录，而是以绝对路径写进 system prompt 让它自己去读。
+    /// 工作目录，而是以绝对路径写进 system prompt 让它自己去读。目录在运行时那台
+    /// 机器上，用运行时目录选择器选。
     pub(super) fn pick_agent_context_folders(&mut self, agent_id: String, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: true,
-            prompt: Some("选择要绑定的目录".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let picked: Vec<String> = paths
-                .into_iter()
-                .filter_map(|path| path.to_str().map(String::from))
-                .collect();
-            if picked.is_empty() {
-                return;
-            }
-            this.update(cx, |this, cx| {
-                this.add_agent_context_folders(agent_id, picked, cx)
-            })
-            .ok();
-        })
-        .detach();
+        self.open_dir_picker(
+            crate::runtimes::Runtime::local(),
+            crate::dir_picker::DirPickerPurpose::AgentContextFolders { agent_id },
+            cx,
+        );
     }
 
-    pub(super) fn add_agent_context_folders(
+    pub(crate) fn add_agent_context_folders(
         &mut self,
         agent_id: String,
         folders: Vec<String>,
@@ -315,21 +299,81 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 重新扫描插件目录。用户在设置里装完插件后不用重开编辑器。
+    /// 请运行时重新扫描插件和 MCP。用户在设置里装完插件后不用重开编辑器；新快照到了
+    /// 会顺带更新打开着的编辑器。
     pub(super) fn refresh_agent_plugins(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.agent_surface.editor.as_mut() {
-            editor.plugins = discover_plugins();
-            editor.mcp_servers = load_mcp_servers_for_editor();
-        }
-        cx.notify();
+        self.refresh_pi_config(cx);
     }
 
     /// 重新扫描记忆目录。智能体在对话里写了新记忆后，不用重开编辑器就能看到。
+    /// 向运行时重新取当前编辑器那个智能体的记忆。回来时编辑器已换人就丢掉。
     pub(super) fn refresh_agent_memories(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.agent_surface.editor.as_mut() {
-            editor.memories = AgentMemories::scan(&editor.id);
-        }
-        cx.notify();
+        let Some(agent_id) = self.agent_surface.editor.as_ref().map(|e| e.id.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let id = agent_id.clone();
+            let listed = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<smelt_model::control_api::AgentMemoryList>(
+                        smelt_model::control_api::AgentDefinitionIdParams { id },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match listed {
+                    Ok(memories) => {
+                        // 定时重取大多数时候什么都没变，没变就不重绘。
+                        if let Some(editor) =
+                            this.agent_surface.editor.as_mut().filter(|editor| {
+                                editor.id == agent_id && editor.memories != memories
+                            })
+                        {
+                            editor.memories = memories;
+                            cx.notify();
+                        }
+                    }
+                    Err(error) => {
+                        this.agent_surface.error = Some(format!("读取记忆失败：{error}"));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 删除或采纳一条记忆，完成后重取列表。
+    fn submit_memory_change<C>(
+        &mut self,
+        params: C::Params,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) where
+        C: smelt_runtime_client::protocol::control::ControlCall,
+        C::Params: Send + 'static,
+        C::Result: Send + 'static,
+    {
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<C>(
+                        params,
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_surface.error = result.err().map(|error| format!("{failure}：{error}"));
+                this.refresh_agent_memories(cx);
+            });
+        })
+        .detach();
     }
 
     pub(super) fn select_agent_editor_tab(&mut self, tab: AgentEditorTab, cx: &mut Context<Self>) {
@@ -368,7 +412,7 @@ impl Workspace {
     /// 看不到。有对话停下来时这些已经落库，编辑器开着就重扫一次。
     pub(crate) fn refresh_agent_memories_after_turns(
         &mut self,
-        states: &[smelt_core::daemon_state::DaemonSessionState],
+        states: &[smelt_client::daemon_state::DaemonSessionState],
         cx: &mut Context<Self>,
     ) {
         if self.agent_surface.editor.is_some()
@@ -380,45 +424,13 @@ impl Workspace {
         }
     }
 
-    /// 监听两层记忆目录。回调在 notify 的线程上，只发唤醒信号；一次写入会连着来好几个
-    /// 事件，稍等一下合并成一次重扫。返回的 watcher 一 drop，发送端跟着释放，任务就结束。
-    fn watch_agent_memories(
-        &mut self,
-        agent_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<notify::RecommendedWatcher> {
-        use notify::Watcher as _;
-
-        let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
-                let _ = wake_tx.try_send(());
-            }
-        })
-        .ok()?;
-        let mut watching = false;
-        for layer in [MemoryLayer::Agent, MemoryLayer::User] {
-            // 目录不存在就监听不了；先建好，智能体第一次写记忆时卡片也能刷新。
-            let Some(dir) = layer.dir(agent_id) else {
-                continue;
-            };
-            if std::fs::create_dir_all(&dir).is_ok()
-                && watcher
-                    .watch(&dir, notify::RecursiveMode::NonRecursive)
-                    .is_ok()
-            {
-                watching = true;
-            }
-        }
-        if !watching {
-            return None;
-        }
+    /// 编辑器开着时定时向运行时重取记忆：智能体在对话里写了新记忆、用户在编辑器里
+    /// 改了文件，卡片都能跟上。记忆目录在运行时那台机器上，桌面监听不到它。任务随
+    /// 编辑器一起丢弃。
+    fn poll_agent_memories(&mut self, cx: &mut Context<Self>) -> gpui::Task<()> {
         cx.spawn(async move |this, cx| {
-            while wake_rx.recv().await.is_ok() {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(200))
-                    .await;
-                while wake_rx.try_recv().is_ok() {}
+            loop {
+                cx.background_executor().timer(MEMORY_POLL_INTERVAL).await;
                 if this
                     .update(cx, |this, cx| this.refresh_agent_memories(cx))
                     .is_err()
@@ -427,8 +439,6 @@ impl Workspace {
                 }
             }
         })
-        .detach();
-        Some(watcher)
     }
 
     pub(super) fn open_agent_memory_file(
@@ -446,14 +456,31 @@ impl Workspace {
         layer: MemoryLayer,
         cx: &mut Context<Self>,
     ) {
-        self.agent_surface.error = match layer.dir(&agent_id) {
-            Some(dir) => std::fs::create_dir_all(&dir)
-                .map_err(|error| format!("无法创建记忆目录：{error}"))
-                .and_then(|()| crate::ide::open_in_file_manager(&dir))
-                .err(),
-            None => Some("找不到记忆目录".to_string()),
-        };
-        cx.notify();
+        // 目录在运行时那台机器上：让运行时建好并给出路径，只有本机运行时打得开。
+        cx.spawn(async move |this, cx| {
+            let ensured = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<smelt_model::control_api::AgentMemoryEnsureDir>(
+                        smelt_model::control_api::AgentMemoryDirParams {
+                            agent_id,
+                            layer: layer.wire(),
+                        },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_surface.error = ensured
+                    .and_then(|dir| {
+                        crate::ide::open_in_file_manager(std::path::Path::new(&dir.path))
+                    })
+                    .err();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 点删除只是弹确认；记忆删了就没了，全局记忆还会从所有智能体里消失。
@@ -481,15 +508,15 @@ impl Workspace {
             file_name,
             ..
         } = target;
-        self.agent_surface.error = match layer.dir(&agent_id) {
-            Some(dir) => {
-                smelt_core::agent_memory::delete_memory(&dir, &layer.scope(&agent_id), &file_name)
-            }
-            .map_err(|error| format!("删除记忆失败：{error}"))
-            .err(),
-            None => Some("找不到记忆目录".to_string()),
-        };
-        self.refresh_agent_memories(cx);
+        self.submit_memory_change::<smelt_model::control_api::AgentMemoryDelete>(
+            smelt_model::control_api::AgentMemoryFileParams {
+                agent_id,
+                layer: layer.wire(),
+                file_name,
+            },
+            "删除记忆失败",
+            cx,
+        );
     }
 
     pub(super) fn approve_agent_memory(
@@ -499,11 +526,15 @@ impl Workspace {
         file_name: String,
         cx: &mut Context<Self>,
     ) {
-        self.agent_surface.error =
-            smelt_core::agent_memory::approve_memory(&layer.scope(&agent_id), &file_name)
-                .map_err(|error| format!("采纳记忆失败：{error}"))
-                .err();
-        self.refresh_agent_memories(cx);
+        self.submit_memory_change::<smelt_model::control_api::AgentMemoryApprove>(
+            smelt_model::control_api::AgentMemoryFileParams {
+                agent_id,
+                layer: layer.wire(),
+                file_name,
+            },
+            "采纳记忆失败",
+            cx,
+        );
     }
 
     pub(super) fn finish_automation_name_edit(&mut self, cx: &mut Context<Self>) {
@@ -636,24 +667,34 @@ impl Workspace {
             }
         }));
 
-        let memories = AgentMemories::scan(&id);
-        let memory_watcher = self.watch_agent_memories(&id, cx);
+        let memories = AgentMemories::default();
+        let memory_poll = self.poll_agent_memories(cx);
         self.agent_surface.editor = Some(AgentEditor {
             id,
             name,
             name_editing: false,
             instructions,
             context_link,
-            plugins: discover_plugins(),
-            mcp_servers: load_mcp_servers_for_editor(),
+            plugins: self
+                .pi_config
+                .as_ref()
+                .map(|config| config.plugins.clone())
+                .unwrap_or_default(),
+            mcp_servers: self
+                .pi_config
+                .as_ref()
+                .and_then(|config| config.mcp_servers.clone().ok())
+                .unwrap_or_default(),
             memories,
             tab: AgentEditorTab::default(),
             memory_query,
             memory_filter: MemoryFilter::default(),
             expanded_memory: None,
-            _memory_watcher: memory_watcher,
+            _memory_poll: memory_poll,
             _subscriptions: subscriptions,
         });
+        self.refresh_agent_memories(cx);
+        self.refresh_pi_config(cx);
         window.focus(&self.focus_handle, cx);
     }
 
@@ -693,35 +734,52 @@ impl Workspace {
             return;
         }
         self.agent_surface.error = None;
-        let Some(fallback_cwd) = ensure_agent_conversation_cwd(&agent.id) else {
-            self.agent_surface.error = Some("无法创建智能体工作区".to_string());
-            cx.notify();
-            return;
-        };
-        self.add_acp_session(
-            NewAcpSessionRequest {
-                agent: kind,
-                launch_override: Some(launch),
-                profile_id: None,
-                agent_definition: Some(agent),
-                fallback_cwd: Some(fallback_cwd),
-                pending_prompt: None,
-                automation_id: None,
-                activate: true,
-            },
-            window,
-            cx,
-        );
+        // 对话开在智能体的工作目录里。目录在运行时那台机器上，由运行时建好并给出路径。
+        cx.spawn_in(window, async move |this, cx| {
+            let agent_id = agent.id.clone();
+            let space = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::runtime_call::call::<smelt_model::control_api::AgentSpaceEnsure>(
+                        smelt_model::control_api::AgentDefinitionIdParams { id: agent_id },
+                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                    )
+                    .map_err(crate::runtime_call::error_text)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match space {
+                Ok(space) => this.add_acp_session(
+                    NewAcpSessionRequest {
+                        runtime: crate::runtimes::Runtime::local(),
+                        agent: kind,
+                        launch_override: Some(launch),
+                        profile_id: None,
+                        agent_definition: Some(agent),
+                        fallback_cwd: Some(space.path),
+                        pending_prompt: None,
+                        automation_id: None,
+                        activate: true,
+                    },
+                    window,
+                    cx,
+                ),
+                Err(error) => {
+                    this.agent_surface.error = Some(format!("无法创建智能体工作区：{error}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 侧栏「新对话」。有默认就直接开；没有可对话智能体就去创建；有人但没默认时
     /// 选择器自己处理，这里不猜。
     pub(super) fn begin_new_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let stored = stored_default_conversation_agent();
+        let stored = stored_default_conversation_agent(cx);
         let draft = self.agent_surface.conversation_draft_id.clone();
         let (intent, clear_stored, agents_empty) = {
             let agents = &cx.global::<settings::AgentHostState>().agents;
-            let resolution = smelt_core::default_conversation::resolve_new_conversation(
+            let resolution = smelt_model::default_conversation::resolve_new_conversation(
                 agents,
                 stored.as_deref(),
                 draft.as_deref(),
@@ -733,15 +791,15 @@ impl Workspace {
             )
         };
         if clear_stored {
-            clear_default_conversation_agent();
+            clear_default_conversation_agent(cx);
         }
         match intent {
-            smelt_core::default_conversation::NewConversationIntent::Start { agent_id } => {
+            smelt_model::default_conversation::NewConversationIntent::Start { agent_id } => {
                 self.discard_uncommitted_draft(Some(&agent_id), cx);
                 self.start_agent_conversation(agent_id, window, cx);
             }
-            smelt_core::default_conversation::NewConversationIntent::PickAgent => {}
-            smelt_core::default_conversation::NewConversationIntent::CreateAgent => {
+            smelt_model::default_conversation::NewConversationIntent::PickAgent => {}
+            smelt_model::default_conversation::NewConversationIntent::CreateAgent => {
                 if self.agent_surface.conversation_draft_id.is_some() {
                     self.reveal_workspace_tab(WorkspaceRoute::Agents, cx);
                     window.focus(&self.focus_handle, cx);
@@ -773,15 +831,15 @@ impl Workspace {
             .iter()
             .any(|agent| agent.id == id && agent.is_conversation_ready());
         if !ready {
-            if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
-                clear_default_conversation_agent();
+            if stored_default_conversation_agent(cx).as_deref() == Some(id.as_str()) {
+                clear_default_conversation_agent(cx);
             }
             self.agent_surface.error = Some("这个智能体不能用来开对话".to_string());
             cx.notify();
             return;
         }
         self.discard_uncommitted_draft(Some(&id), cx);
-        set_default_conversation_agent(&id);
+        set_default_conversation_agent(&id, cx);
         if start {
             self.start_agent_conversation(id, window, cx);
         } else {
@@ -809,7 +867,7 @@ impl Workspace {
         }
         self.agent_surface.conversation_draft_id = None;
         self.agent_surface.arm_conversation_on_create = false;
-        set_default_conversation_agent(&id);
+        set_default_conversation_agent(&id, cx);
         self.start_agent_conversation(id, window, cx);
     }
 
@@ -859,8 +917,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
-            clear_default_conversation_agent();
+        if stored_default_conversation_agent(cx).as_deref() == Some(id.as_str()) {
+            clear_default_conversation_agent(cx);
         }
         self.nav.agents_mut().pop_to_root();
         self.agent_surface.selected_id = None;
@@ -905,7 +963,10 @@ impl Workspace {
             .and_then(|session| session.cwd(cx))
             .filter(|cwd| !cwd.is_empty())
         {
-            self.active_project = Some(cwd.trim_end_matches('/').to_string());
+            self.active_project = Some(crate::ProjectRef {
+                runtime: self.sessions[session_ix].runtime(cx).key().clone(),
+                root: cwd.trim_end_matches('/').to_string(),
+            });
         }
         self.nav.agents_mut().open_conversation(sid);
         self.agent_surface.editor = None;
@@ -1088,8 +1149,8 @@ impl Workspace {
             self.agent_surface.conversation_draft_id = None;
             self.agent_surface.arm_conversation_on_create = false;
         }
-        if stored_default_conversation_agent().as_deref() == Some(id.as_str()) {
-            clear_default_conversation_agent();
+        if stored_default_conversation_agent(cx).as_deref() == Some(id.as_str()) {
+            clear_default_conversation_agent(cx);
         }
         if self
             .automation_surface
@@ -1108,7 +1169,7 @@ impl Workspace {
 
     pub(super) fn automation_snapshot_is_current_store(
         &self,
-        snapshot: &smelt_core::automation::AutomationFile,
+        snapshot: &smelt_model::automation::AutomationFile,
         cx: &App,
     ) -> bool {
         let config = cx.global::<settings::AgentHostState>();
@@ -1119,16 +1180,19 @@ impl Workspace {
 
     pub(super) fn submit_automation_command(
         &mut self,
-        command: smelt_core::automation::AutomationCommand,
+        command: smelt_model::automation::AutomationCommand,
         cx: &mut Context<Self>,
     ) {
         self.automation_surface.error = None;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { smelt_core::session_control::submit_automation_command(&command) },
-                )
+                .spawn(async move {
+                    smelt_client::session_ops::submit_automation_command(
+                        &crate::runtimes::local(),
+                        &command,
+                    )
+                })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(_) => {
@@ -1146,14 +1210,14 @@ impl Workspace {
 
     pub(super) fn run_automation_once(&mut self, automation_id: String, cx: &mut Context<Self>) {
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::RunOnce { automation_id },
+            smelt_model::automation::AutomationCommand::RunOnce { automation_id },
             cx,
         );
     }
 
     pub(super) fn cancel_automation_run(&mut self, run_id: String, cx: &mut Context<Self>) {
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::CancelRun { run_id },
+            smelt_model::automation::AutomationCommand::CancelRun { run_id },
             cx,
         );
     }
@@ -1203,6 +1267,8 @@ impl Workspace {
             acp_view::AcpView::placeholder(
                 cx,
                 acp_view::AcpViewOrigin {
+                    runtime: crate::runtimes::Runtime::local(),
+                    launch_prep: None,
                     agent,
                     launch: record.launch,
                     refresh_launch_from_settings: false,
@@ -1222,7 +1288,7 @@ impl Workspace {
         });
         view.update(cx, |view, cx| {
             view.restore_conversation_binding(
-                smelt_core::conversation::ConversationBinding::Automation { run_id: run.id },
+                smelt_model::conversation::ConversationBinding::Automation { run_id: run.id },
             );
             view.maybe_auto_resume(window, cx);
         });
@@ -1464,7 +1530,7 @@ impl Workspace {
             self.automation_surface.live_sub = None;
         }
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::Delete { automation_id },
+            smelt_model::automation::AutomationCommand::Delete { automation_id },
             cx,
         );
     }
@@ -1476,7 +1542,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.submit_automation_command(
-            smelt_core::automation::AutomationCommand::SetEnabled {
+            smelt_model::automation::AutomationCommand::SetEnabled {
                 automation_id,
                 enabled,
             },
@@ -1682,15 +1748,15 @@ impl Workspace {
         {
             rule.kind = kind;
             if kind == ScheduleKind::Weekdays {
-                rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                 rule.interval_day_scope = IntervalDayScope::Weekdays;
             } else if kind == ScheduleKind::Weekly {
                 if rule.weekday_mask == 0 {
-                    rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                    rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                 }
                 rule.interval_day_scope = IntervalDayScope::Weekly;
             } else if kind == ScheduleKind::Daily {
-                rule.weekday_mask = smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+                rule.weekday_mask = smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
                 rule.interval_day_scope = IntervalDayScope::Everyday;
             } else {
                 rule.interval_day_scope = IntervalDayScope::from_days(rule.weekday_mask);
@@ -1733,14 +1799,14 @@ impl Workspace {
             rule.interval_day_scope = scope;
             match scope {
                 IntervalDayScope::Everyday => {
-                    rule.weekday_mask = smelt_core::automation::SCHEDULE_ALL_DAYS_MASK;
+                    rule.weekday_mask = smelt_model::automation::SCHEDULE_ALL_DAYS_MASK;
                 }
                 IntervalDayScope::Weekdays => {
-                    rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                    rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                 }
                 IntervalDayScope::Weekly => {
                     if rule.weekday_mask == 0 {
-                        rule.weekday_mask = smelt_core::automation::SCHEDULE_WEEKDAYS_MASK;
+                        rule.weekday_mask = smelt_model::automation::SCHEDULE_WEEKDAYS_MASK;
                     }
                 }
             }
@@ -1877,7 +1943,7 @@ impl Workspace {
                     "automation-regen-webhook-{}",
                     entry.schedule.time.entity_id()
                 );
-                entry.webhook_secret = smelt_core::automation::new_webhook_secret();
+                entry.webhook_secret = smelt_model::automation::new_webhook_secret();
                 flash_id
             });
         if should_save {
@@ -1983,14 +2049,17 @@ impl Workspace {
         self.automation_surface.error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let command = smelt_core::automation::AutomationCommand::Upsert {
+            let command = smelt_model::automation::AutomationCommand::Upsert {
                 automation: Box::new(automation),
             };
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { smelt_core::session_control::submit_automation_command(&command) },
-                )
+                .spawn(async move {
+                    smelt_client::session_ops::submit_automation_command(
+                        &crate::runtimes::local(),
+                        &command,
+                    )
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let retry = match result {
@@ -2064,3 +2133,6 @@ impl Workspace {
         ) == Some(agent_id)
     }
 }
+
+/// 编辑器开着时多久向运行时重取一次记忆。
+const MEMORY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);

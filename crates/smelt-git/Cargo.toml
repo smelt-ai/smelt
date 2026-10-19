@@ -14,9 +14,10 @@ workspace = true
 
 [dependencies]
 smelt-core = { path = "../smelt-core" }
-serde = { version = "1", features = ["derive"] }
-# 行内词级 diff 高亮（mark_inline）用同一个算法库，跟 ACP 对话的逐行 diff 保持一致。
-similar = "2"
+# git 的结果类型和 diff 解析在协议 crate 里，客户端只依赖那一半。
+smelt-runtime-client = { path = "../smelt-runtime-client" }
+# 丢弃前校验用的工作区内容指纹。
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

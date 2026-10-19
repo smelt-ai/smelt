@@ -1,5 +1,5 @@
 use super::{SidebarGrouping, WsState};
-use smelt_core::workspace_menu::{
+use smelt_model::workspace_menu::{
     WorkspaceMenuSession, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
 };
 
@@ -47,10 +47,11 @@ fn shared_workspace_menu_roundtrips() {
 
 #[cfg(test)]
 mod sidebar_group_tests {
-    use crate::{AgentStatus, ProjectGroup, SidebarGrouping, sidebar_groups};
+    use crate::{AgentStatus, ProjectGroup, RuntimeKey, SidebarGrouping, sidebar_groups};
 
     fn group(root: &str, sessions: &[usize]) -> ProjectGroup {
         ProjectGroup {
+            runtime: RuntimeKey::Local,
             root: root.into(),
             label: root.into(),
             sessions: sessions.to_vec(),
@@ -67,7 +68,14 @@ mod sidebar_group_tests {
             AgentStatus::Idle,
         ];
 
-        let groups = sidebar_groups(SidebarGrouping::Status, projects, &statuses, &[0; 4], 4);
+        let groups = sidebar_groups(
+            &RuntimeKey::Local,
+            SidebarGrouping::Status,
+            projects,
+            &statuses,
+            &[0; 4],
+            &[0, 1, 2, 3],
+        );
         let order = groups
             .iter()
             .flat_map(|group| group.sessions.iter().copied())
@@ -76,16 +84,47 @@ mod sidebar_group_tests {
         assert_eq!(order, vec![2, 1, 0, 3]);
     }
 
+    /// 按状态分组时一个运行时那段只收自己的会话，别的运行时的会话不混进来。
+    #[test]
+    fn status_grouping_only_takes_the_runtime_members() {
+        let remote = RuntimeKey::Remote("rt-linux".to_string());
+        let statuses = vec![
+            AgentStatus::Idle,
+            AgentStatus::Running,
+            AgentStatus::NeedsYou,
+            AgentStatus::Idle,
+        ];
+
+        let groups = sidebar_groups(
+            &remote,
+            SidebarGrouping::Status,
+            Vec::new(),
+            &statuses,
+            &[0; 4],
+            &[1, 3],
+        );
+
+        assert!(groups.iter().all(|group| group.runtime == remote));
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.sessions.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![1], vec![3]]
+        );
+    }
+
     #[test]
     fn project_grouping_keeps_project_order() {
         let projects = vec![group("a", &[2, 0]), group("b", &[1])];
 
         let groups = sidebar_groups(
+            &RuntimeKey::Local,
             SidebarGrouping::Project,
             projects,
             &[AgentStatus::Idle; 3],
             &[0; 3],
-            3,
+            &[0, 1, 2],
         );
 
         assert_eq!(groups[0].sessions, vec![2, 0]);
@@ -115,11 +154,12 @@ mod sidebar_group_tests {
         ];
 
         let groups = sidebar_groups(
+            &RuntimeKey::Local,
             SidebarGrouping::LastUpdated,
             projects,
             &statuses,
             &last_updated_at,
-            4,
+            &[0, 1, 2, 3],
         );
 
         assert_eq!(
@@ -146,10 +186,9 @@ mod restore_order_tests {
     use crate::{
         AcpSaved, PaneState, RESTORE_RETRY_LIMIT, SessionState, merge_restore_pending,
         persisted_active_position, planned_restore_insert_position, record_restored_index,
-        resolve_restored_active_session, restore_error_blocks_remaining, restore_path_is_cancelled,
-        restore_retry_delay, restored_active_position, restored_insert_position,
-        session_state_persist_id, should_auto_resume_active_acp, should_retry_failed_restore,
-        split_indexed_restore_queue,
+        resolve_restored_active_session, restore_error_blocks_remaining, restore_retry_delay,
+        restored_active_position, restored_insert_position, session_state_persist_id,
+        should_auto_resume_active_acp, should_retry_failed_restore, split_indexed_restore_queue,
     };
 
     fn state(name: &str, acp: bool) -> SessionState {
@@ -166,15 +205,14 @@ mod restore_order_tests {
             custom_title: Some(name.into()),
             acp: acp.then(|| AcpSaved {
                 cwd: Some(format!("/{name}")),
-                launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude"),
+                launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude"),
                 profile_id: None,
                 agent: Some("claude".into()),
                 agent_definition_id: None,
                 history_session_id: None,
                 sid: Some(format!("sid-{name}")),
                 refresh_launch_from_settings: false,
-                conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-                agent_session: None,
+                conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
                 config_values: Vec::new(),
                 pending_prompt: None,
                 pending_delivery_id: None,
@@ -409,18 +447,6 @@ mod restore_order_tests {
             2
         );
     }
-
-    #[test]
-    fn deleting_worktree_cancels_nested_pending_restores() {
-        assert!(restore_path_is_cancelled(
-            Some("/repo-worktrees/feature/sub"),
-            &["/repo-worktrees/feature".into()]
-        ));
-        assert!(!restore_path_is_cancelled(
-            Some("/repo-worktrees/feature-old"),
-            &["/repo-worktrees/feature".into()]
-        ));
-    }
 }
 
 #[test]
@@ -460,54 +486,4 @@ fn pinned_projects_and_hide_empty_roundtrip() {
 
     assert_eq!(restored.pinned_projects, state.pinned_projects);
     assert!(restored.sidebar_hide_empty_projects);
-}
-
-#[test]
-fn sqlite_workspace_snapshot_keeps_live_sidebar_fields() {
-    let json = serde_json::json!({
-        "active_session": 1,
-        "active_session_id": "sid-1",
-        "collapsed_agents": ["research"],
-        "pinned_projects": ["/repo/smelt"],
-        "sidebar_hide_empty_projects": true,
-        "projects": ["/repo/smelt"],
-        "sessions": []
-    });
-    let snapshot =
-        smelt_store::Store::workspace_snapshot_from_json(&serde_json::to_vec(&json).unwrap())
-            .unwrap();
-    let restored: WsState =
-        serde_json::from_slice(&smelt_store::Store::workspace_snapshot_to_json(&snapshot).unwrap())
-            .unwrap();
-    assert_eq!(restored.active_session_id.as_deref(), Some("sid-1"));
-    assert_eq!(restored.collapsed_agents, vec!["research".to_string()]);
-    assert_eq!(restored.pinned_projects, vec!["/repo/smelt".to_string()]);
-    assert!(restored.sidebar_hide_empty_projects);
-}
-
-#[test]
-fn load_ws_state_reads_sqlite_snapshot() {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("smelt-ws-sqlite-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let database = dir.join(smelt_store::DATABASE_FILE_NAME);
-    let store = smelt_store::Store::open_or_create(&database).unwrap();
-    let snapshot = smelt_store::Store::workspace_snapshot_from_json(
-        br#"{"active_session_id":"sid-1","pinned_projects":["/repo"],"sidebar_hide_empty_projects":true,"sessions":[]}"#,
-    )
-    .unwrap();
-    store.put_workspace_snapshot(&snapshot).unwrap();
-
-    let crate::workspace_persist::WorkspaceLoad::Loaded(restored) =
-        crate::workspace_persist::load_ws_state_from_database(&database)
-    else {
-        panic!("应读出工作区快照");
-    };
-    assert_eq!(restored.active_session_id.as_deref(), Some("sid-1"));
-    assert_eq!(restored.pinned_projects, vec!["/repo".to_string()]);
-    assert!(restored.sidebar_hide_empty_projects);
-    std::fs::remove_dir_all(dir).unwrap();
 }

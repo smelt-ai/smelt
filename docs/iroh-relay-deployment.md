@@ -1,16 +1,27 @@
 # 自建 iroh Relay
 
-Smelt 不内置公共 Relay。手机与 Mac 会优先尝试局域网或公网打洞直连；直连不可用时，
-才通过用户配置的 iroh Relay 转发端到端加密流量。Relay 能看到连接元数据和流量大小，
+运行时没有配置自建 Relay 时，默认使用 n0（iroh 的开发方）的公共 Relay 和 DNS 地址
+发现：只凭 endpoint id 就能找到运行时，开箱可用。客户端先尝试局域网或公网打洞直连，
+直连不可用时才经 Relay 转发端到端加密的流量。Relay 能看到连接元数据和流量大小，
 但无法解密 Smelt 的 iroh/QUIC 会话内容。
 
-这套配置与 iroh 公共 Relay 一样不要求共享访问令牌。知道 Relay 地址的其他 iroh 客户端
-也可以使用它，因此部署者需要自行监控带宽和连接数，并通过云平台流量告警控制滥用风险。
-Smelt 的业务访问仍由配对码里的网关 token 鉴权，不会因为 Relay 开放而匿名暴露会话。
+什么时候值得自建：
 
-本文使用 iroh 官方的 `iroh-relay` 1.0.2，与仓库当前锁定的 iroh 1.x 协议版本一致。
-部署脚本只管理 iroh Relay 自己的文件和 systemd 服务，不会修改 Nginx、WireGuard、
-UFW 或其他业务。
+- **速度**：公共 Relay 限速。实测 Mac（台湾）到洛杉矶的 Linux，走 n0 公共 Relay 吞吐
+  0.19MB/s、控制往返 450ms 以上、刷屏时其他终端的回显会卡住近 10 秒；在那台 Linux 上
+  自建 Relay 后吞吐 0.5–1.6MB/s、往返 320ms 左右、回显不受刷屏影响。打洞失败时
+  （比如客户端开着 Surge、Clash 的增强模式，见「验证与排障」）流量全走 Relay，
+  这时差别最明显。
+- **元数据**：不想让第三方看到哪两台设备、什么时候连、流量多大。
+
+自建 Relay 与公共 Relay 一样不要求访问令牌。知道地址的其他 iroh 客户端也能用它转发，
+因此部署者需要自行监控带宽和连接数，并通过云平台流量告警控制滥用风险。Smelt 的业务
+访问由设备配对控制（一次性配对码 + 运行时里的已配对设备白名单），Relay 开放不会让
+会话被匿名访问。
+
+一键部署脚本默认使用 iroh 官方的 `iroh-relay` 1.0.2；仓库锁定的是 iroh 1.x，协议兼容
+（与 `iroh-relay` 1.2.0 也实测可用）。脚本只管理 iroh Relay 自己的文件和 systemd 服务，
+不会修改 Nginx、WireGuard、UFW 或其他业务。
 
 ## 准备
 
@@ -30,8 +41,13 @@ UFW 或其他业务。
 | `9090/TCP` | Prometheus metrics，仅监听 `127.0.0.1`，无需放行 |
 
 脚本使用 iroh-relay 内置的 Let's Encrypt 客户端签发和续期证书，所以这套一键流程要求
-Relay 独占公网 `80/443`。如果服务器已经由 Nginx/Caddy 占用这些端口，脚本会报错退出，
-不会覆盖现有配置；这种情况应使用独立主机，或参考后面的「已有反向代理」手动部署。
+Relay 独占公网 `80/443`，并且必须提供联系邮箱（iroh-relay 的 ACME 客户端强制要求）。
+如果服务器已经由 Nginx/Caddy 占用这些端口，脚本会报错退出，不会覆盖现有配置；这种情况
+应使用独立主机，或参考后面的「已有反向代理」手动部署。不想留邮箱，见「手动部署：
+用 certbot 签证书」。
+
+没有域名时，测试可以用 `sslip.io` 这类把 IP 编进域名的公共解析服务，例如
+`216-75-75-181.sslip.io` 解析到 `216.75.75.181`。它是第三方服务，长期使用请换成自己的域名。
 
 ## 一键部署
 
@@ -84,15 +100,70 @@ sudo ./deploy-iroh-relay.sh \
   --email admin@example.com
 ```
 
+## 手动部署：用 certbot 签证书
+
+不想把邮箱交给 Let's Encrypt，或者想用较新的 iroh-relay 版本时，可以手动部署：用 certbot
+免邮箱签证书，iroh-relay 以 `Manual` 模式读证书文件。以下是在一台全新 Debian 13 上的
+实际步骤（以 root 执行，域名以 `relay.example.com` 为例）。
+
+1. 编译 iroh-relay（版本与仓库锁定的一致）并签证书：
+
+   ```bash
+   apt-get install -y build-essential pkg-config certbot
+   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . ~/.cargo/env
+   cargo install iroh-relay@1.2.0 --features server --locked
+   install -m 755 ~/.cargo/bin/iroh-relay /usr/local/bin/iroh-relay
+   certbot certonly --standalone -d relay.example.com \
+     --register-unsafely-without-email --agree-tos -n
+   ```
+
+2. 写配置 `/etc/iroh-relay.toml`：
+
+   ```toml
+   enable_relay = true
+   http_bind_addr = "[::]:80"
+   enable_quic_addr_discovery = true
+   enable_metrics = false
+
+   [tls]
+   https_bind_addr = "[::]:443"
+   hostname = "relay.example.com"
+   cert_mode = "Manual"
+   manual_cert_path = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
+   manual_key_path = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+   ```
+
+3. 写 systemd 服务 `/etc/systemd/system/iroh-relay.service`，`ExecStart` 为
+   `/usr/local/bin/iroh-relay --config-path /etc/iroh-relay.toml`，`Restart=on-failure`，
+   然后 `systemctl enable --now iroh-relay`。
+
+4. 续期钩子：certbot 续期时要占用 `80/TCP`，而 iroh-relay 也监听它，所以续期前先停、
+   续完再启动（`Manual` 模式只在启动时读证书，重启正好加载新证书）：
+
+   ```bash
+   mkdir -p /etc/letsencrypt/renewal-hooks/{pre,post}
+   printf '#!/bin/sh\nsystemctl stop iroh-relay\n' > /etc/letsencrypt/renewal-hooks/pre/iroh-relay.sh
+   printf '#!/bin/sh\nsystemctl start iroh-relay\n' > /etc/letsencrypt/renewal-hooks/post/iroh-relay.sh
+   chmod 755 /etc/letsencrypt/renewal-hooks/{pre,post}/iroh-relay.sh
+   certbot renew --dry-run
+   ```
+
+   演练成功、且演练后 `systemctl is-active iroh-relay` 仍是 `active` 即可。续期期间
+   Relay 会中断几秒。
+
 ## 配置 Smelt
 
-部署完成后，在 Mac 的「设置 → 远程」中填写：
+Relay 配置属于**运行时**：每个运行时自己决定用哪个 Relay，生成的配对串会带上
+`relay=` 参数，客户端照它去连。
 
-- Relay 地址：`relay.example.com`，省略协议时 Smelt 自动使用 `https://`；
-- 开启远程：打开。
+- **Mac 本机运行时**：桌面「设置 → 远程访问」里填 Relay 地址（如 `relay.example.com`，
+  省略协议时自动补 `https://`）并打开远程访问。
+- **Linux 无头运行时**：目前还没有命令行入口，只能通过控制接口
+  `remote.config.set {"enabled": true, "iroh_relay": "https://relay.example.com"}` 设置
+  （待补一个 `smeltd` 子命令）。设好后用 `remote.status` 确认 `relay` 字段已经是新地址。
 
-如果 Relay 地址在远程开启期间发生变化，点击分享卡片中的「重试」生成包含新配置的
-配对二维码，然后让手机重新扫码。
+换 Relay 之后，运行时不再通过 n0 的 DNS 公布地址，**已有的配对会连不上**：在客户端
+移除这个运行时，再用 `smeltd pair` 或设置页生成的新配对串重新添加。
 
 ## 验证与排障
 
@@ -105,11 +176,14 @@ sudo ss -lntup | grep -E ':(80|443|7842|9090)\b'
 curl -I https://relay.example.com/
 ```
 
-Mac 和手机连接后，移动端顶部应显示当前路径：
+客户端连上后，看运行时的 `~/.smelt/daemon.log` 确认实际路径：
 
-- `LAN`：同一局域网直连；
-- `P2P`：打洞后的公网直连；
-- `Relay`：直连失败，正在通过自建 Relay 中继。
+```text
+iroh path remote=<设备 id> kind=relay address=relay:https://relay.example.com/ rtt_ms=288
+iroh path remote=<设备 id> kind=direct address=ip:203.0.113.20:22016 rtt_ms=168
+```
+
+`kind=direct` 是打洞直连，`kind=relay` 是经 Relay 中继；路径变化时会再记一行。
 
 常见问题：
 
@@ -119,6 +193,7 @@ Mac 和手机连接后，移动端顶部应显示当前路径：
 | HTTPS 可访问但一直不能打洞 | `7842/UDP` 是否放行；不放行仍可能中继，但直连成功率会下降 |
 | 服务反复重启 | `journalctl -u iroh-relay -n 100 --no-pager`；检查端口占用和配置格式 |
 | 腾讯云无法访问 GitHub | 使用 `--ssh`，二进制在本机下载后上传；或使用 `--binary` |
+| 一直 `kind=relay`，或者 `kind=direct` 却很慢 | 客户端是否开着 Surge、Clash 的增强模式（TUN）。它接管 UDP 后客户端变成对称 NAT，打洞基本失败；有时 iroh 会打通一条经代理节点转发的「直连」，延迟低但带宽极差（iroh 按延迟选路，不看带宽）。给 Smelt 设 UDP 直连规则，或把它排除出增强模式 |
 
 ## 升级
 

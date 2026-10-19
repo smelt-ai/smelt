@@ -110,10 +110,14 @@ export default function (pi: ExtensionAPI) {
 		lastStopReason = finalAssistantStopReason(event.messages);
 	});
 
-	pi.on("agent_settled", async () => {
+	pi.on("agent_settled", async (event) => {
 		const reason = lastStopReason;
 		lastStopReason = undefined;
-		if (reason && reason !== "stop" && reason !== "toolUse") {
+		// 用户按 Esc 停下不是出错。退避重试时被停，最后一条消息还是 error，所以以
+		// settled 的 aborted 为准。和其他 agent 的用户中断一样报 Stop。
+		if (event.aborted || reason === "aborted") {
+			await report("Stop");
+		} else if (reason && reason !== "stop" && reason !== "toolUse") {
 			await report("StopFailure", { error_type: reason });
 		} else {
 			await report("Stop");

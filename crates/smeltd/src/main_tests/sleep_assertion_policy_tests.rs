@@ -17,33 +17,33 @@ fn assertion_held(state: &RemoteState) -> bool {
     state
         .lock()
         .unwrap()
-        .gateway
+        .endpoint
         .as_ref()
-        .and_then(|gateway| gateway._sleep_assertion.as_ref())
+        .and_then(|endpoint| endpoint.sleep_assertion.as_ref())
         .is_some()
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn battery_gateway_does_not_hold_idle_sleep() {
-    let _lock = lock_remote_gateway_tests();
+fn battery_remote_does_not_hold_idle_sleep() {
+    let _lock = lock_remote_tests();
     set_power_kind_override(Some(PowerKind::Battery));
     let before = SystemSleepAssertion::count_owned();
-    let state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
-    start_remote_gateway(&state, "127.0.0.1", 0, false).expect("start");
+    let state = new_remote_state();
+    install_test_endpoint(&state, "endpoint");
     assert!(!assertion_held(&state), "电池上开远程也不能握防休眠断言");
     assert_eq!(SystemSleepAssertion::count_owned(), before);
-    stop_remote_gateway(&state);
+    apply_remote_config(&state, &Default::default());
     assert_eq!(SystemSleepAssertion::count_owned(), before);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn unplugging_releases_assertion_even_if_a_session_is_active() {
-    let _lock = lock_remote_gateway_tests();
+    let _lock = lock_remote_tests();
     let before = SystemSleepAssertion::count_owned();
-    let state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
-    start_remote_gateway(&state, "127.0.0.1", 0, false).expect("start on ac");
+    let state = new_remote_state();
+    install_test_endpoint(&state, "endpoint");
     assert!(assertion_held(&state), "测试锁默认插电，开远程就应握断言");
     assert_eq!(SystemSleepAssertion::count_owned(), before + 1);
 
@@ -59,6 +59,6 @@ fn unplugging_releases_assertion_even_if_a_session_is_active() {
     sync_remote_sleep_assertion(&state);
     assert!(assertion_held(&state), "插回电源后恢复旧行为，远程随时可连");
     assert_eq!(SystemSleepAssertion::count_owned(), before + 1);
-    stop_remote_gateway(&state);
+    apply_remote_config(&state, &Default::default());
     assert_eq!(SystemSleepAssertion::count_owned(), before);
 }

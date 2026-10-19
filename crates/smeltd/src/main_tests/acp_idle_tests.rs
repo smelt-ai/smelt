@@ -149,6 +149,12 @@ fn reading_the_mirror_does_not_wake_a_conversation() {
     assert!(!acp_idle::acp_action_needs_runtime(
         &AcpUserAction::RefreshModels
     ));
+    assert!(
+        !acp_idle::acp_action_needs_runtime(&AcpUserAction::StopBackgroundTask {
+            id: "bg-1".into()
+        }),
+        "有后台任务在跑的会话不会挂起，挂起的会话没有任务可停"
+    );
     assert!(acp_idle::acp_action_needs_runtime(&AcpUserAction::Prompt {
         text: "hi".into(),
         images: Vec::new(),

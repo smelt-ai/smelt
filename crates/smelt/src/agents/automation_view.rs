@@ -64,7 +64,6 @@ impl Workspace {
         &self,
         entity: Entity<Workspace>,
         statuses: &[AgentStatus],
-        animate_running: bool,
         cx: &App,
     ) -> Div {
         let config = cx.global::<settings::AgentHostState>();
@@ -103,9 +102,8 @@ impl Workspace {
                 IconName::LayoutDashboard,
                 false,
                 WorkspaceRoute::Capabilities,
-                entity.clone(),
+                entity,
             ))
-            .child(self.render_product_conversation_nav(entity, statuses, animate_running, cx))
     }
 
     pub(super) fn render_automation_drill_header(
@@ -250,7 +248,7 @@ impl Workspace {
     /// 编辑器左侧的运行列表。任务行回到表单，运行行在右侧打开详情。
     fn render_automation_run_column(
         &self,
-        runs: &[smelt_core::automation::AutomationRun],
+        runs: &[smelt_model::automation::AutomationRun],
         show_task: bool,
         entity: Entity<Workspace>,
         _cx: &App,
@@ -267,7 +265,7 @@ impl Workspace {
                 let error = run
                     .error
                     .as_deref()
-                    .filter(|_| run.status == smelt_core::automation::AutomationRunStatus::Failed)
+                    .filter(|_| run.status == smelt_model::automation::AutomationRunStatus::Failed)
                     .map(compact_instructions);
                 let open_entity = entity.clone();
                 let run_id = run.id.clone();
@@ -405,24 +403,22 @@ impl Workspace {
                 }
                 menu
             });
-        let action_kind = div().flex().items_center().gap_1().children(
-            settings::BUILTIN_AUTOMATION_ACTIONS.iter().map(|kind| {
-                let selected = *kind == editor.action_kind;
-                let action_entity = entity.clone();
-                let kind = *kind;
-                compact_chip(match kind {
-                    settings::AutomationActionKindId::Agent => "automation-action-agent",
-                    settings::AutomationActionKindId::Shell => "automation-action-shell",
-                })
-                .label(kind.label())
-                .selected(selected)
-                .toggled(selected)
-                .on_click(move |_, _, cx| {
+        let action_entity = entity.clone();
+        let action_kind = choice_tabs(
+            "automation-action-kind",
+            settings::BUILTIN_AUTOMATION_ACTIONS
+                .iter()
+                .position(|kind| *kind == editor.action_kind),
+            settings::BUILTIN_AUTOMATION_ACTIONS
+                .iter()
+                .map(|kind| Tab::new().label(kind.label())),
+            move |ix, cx| {
+                if let Some(kind) = settings::BUILTIN_AUTOMATION_ACTIONS.get(ix).copied() {
                     action_entity.update(cx, |workspace, cx| {
                         workspace.set_automation_action_kind(kind, cx);
                     });
-                })
-            }),
+                }
+            },
         );
         let trigger_field = render_trigger_entries(editor, entity.clone(), cx);
         let is_agent = editor.action_kind == settings::AutomationActionKindId::Agent;
@@ -532,7 +528,7 @@ impl Workspace {
     /// 选中运行的右侧详情。有现场时这里就是对话，否则是这次运行的记录。
     fn render_automation_run_pane(
         &self,
-        run: smelt_core::automation::AutomationRun,
+        run: smelt_model::automation::AutomationRun,
         live_view: Option<Entity<acp_view::AcpView>>,
         entity: Entity<Workspace>,
         cx: &App,

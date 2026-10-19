@@ -1,545 +1,551 @@
-//! 配置/缓存的类型化 kv 作用域。不建新表；活路径不经 `document:*.json`。
+//! 运行时的设置与缓存：每项一张单行表（`id = 1`），列表另放子表，按 `position` 保序。
 
 use crate::{
-    AutoModelSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot, RemoteConfigSnapshot,
-    StoreError, TerminalThemeSnapshot, UpdateSettingsSnapshot, UpdateStateSnapshot,
-    WorktreeInheritSnapshot,
+    AutoModelHarness, MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
+    QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
+    StoreError, TerminalThemeSnapshot, WorkspaceCatalogWriter, WorkspaceMenuProjectRecord,
+    WorkspaceMenuSessionRecord,
 };
-use rusqlite::{Connection, Transaction};
-use serde_json::{Map, Value, json};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-const COLLAB_SCOPE: &str = "collab";
-const COLLAB_DOCUMENT: &str = "collab.json";
-const UPDATE_SETTINGS_SCOPE: &str = "update_settings";
-const UPDATE_SETTINGS_DOCUMENT: &str = "update-settings.json";
-const UPDATE_STATE_SCOPE: &str = "update_state";
-const UPDATE_STATE_DOCUMENT: &str = "update-state.json";
-const WORKTREE_SCOPE: &str = "worktree_inherit";
-const WORKTREE_DOCUMENT: &str = "worktree-inherit.json";
-const TERMINAL_THEME_SCOPE: &str = "terminal_theme";
-const TERMINAL_THEME_DOCUMENT: &str = "terminal-theme.json";
-const QUOTA_CACHE_SCOPE: &str = "quota_cache";
-const QUOTA_CACHE_DOCUMENT: &str = "quota-cache.json";
-const DSH_AUTO_SCOPE: &str = "dsh_auto_models";
-const DSH_AUTO_DOCUMENT: &str = "dsh-auto-models.json";
-const PI_AUTO_SCOPE: &str = "pi_auto_models";
-const PI_AUTO_DOCUMENT: &str = "pi-auto-models.json";
-const WORKSPACE_MENU_SCOPE: &str = "workspace_menu";
-const WORKSPACE_MENU_DOCUMENT: &str = "workspace_menu.json";
-
-fn read_object(
-    connection: &Connection,
-    scope: &str,
-    leftover: &str,
-) -> Result<Option<Map<String, Value>>, StoreError> {
-    if let Some(object) = crate::documents::read_scoped_object(connection, scope)? {
-        return Ok(Some(object));
-    }
-    let Some(raw) = crate::documents::read_generic_document_bytes(connection, leftover)? else {
-        return Ok(None);
-    };
-    let Ok(value) = serde_json::from_slice::<Value>(&raw) else {
-        return Ok(None);
-    };
-    Ok(value.as_object().cloned())
+pub(crate) fn read_runtime_id(connection: &Connection) -> Result<Option<String>, StoreError> {
+    connection
+        .query_row(
+            "SELECT runtime_id FROM runtime_identity WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::from)
 }
 
-fn write_object(
+pub(crate) fn write_runtime_id(
     transaction: &Transaction<'_>,
-    scope: &str,
-    leftover: &str,
-    object: &Map<String, Value>,
+    runtime_id: &str,
 ) -> Result<(), StoreError> {
-    crate::documents::delete_scope(transaction, scope)?;
-    crate::documents::delete_document_scope(transaction, leftover)?;
-    crate::documents::write_scoped_object(transaction, scope, object)
+    transaction.execute(
+        "INSERT INTO runtime_identity(id, runtime_id) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET runtime_id = excluded.runtime_id",
+        [runtime_id],
+    )?;
+    Ok(())
 }
 
-fn bool_field(object: &Map<String, Value>, key: &str, default: bool) -> bool {
-    object.get(key).and_then(Value::as_bool).unwrap_or(default)
+pub(crate) fn read_workspace_catalog_revision(connection: &Connection) -> Result<u64, StoreError> {
+    Ok(read_workspace_catalog_head(connection)?.revision)
 }
 
-fn string_field(object: &Map<String, Value>, key: &str) -> String {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
+pub(crate) fn write_workspace_catalog_revision(
+    transaction: &Transaction<'_>,
+    revision: u64,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO workspace_catalog(id, revision) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET revision = excluded.revision",
+        [i64::try_from(revision).unwrap_or(i64::MAX)],
+    )?;
+    Ok(())
 }
 
-fn u32_field(object: &Map<String, Value>, key: &str, default: u32) -> u32 {
-    object
-        .get(key)
-        .and_then(Value::as_u64)
-        .map(|value| value as u32)
-        .unwrap_or(default)
+/// 工作区目录当前的版本，和提交这个版本的写入方。
+pub(crate) struct WorkspaceCatalogHead {
+    pub(crate) revision: u64,
+    writer: Option<(String, u64)>,
 }
 
-fn u32_aliased(object: &Map<String, Value>, snake: &str, camel: &str) -> u32 {
-    if object.contains_key(snake) {
-        u32_field(object, snake, 0)
-    } else {
-        u32_field(object, camel, 0)
+impl WorkspaceCatalogHead {
+    /// 规则见 [`crate::Store::commit_workspace_snapshot`]。
+    pub(crate) fn accepts(&self, base_revision: u64, writer: &WorkspaceCatalogWriter) -> bool {
+        match &self.writer {
+            Some((id, seq)) if *id == writer.id => {
+                writer.seq > *seq && base_revision <= self.revision
+            }
+            _ => base_revision == self.revision,
+        }
     }
 }
 
-fn i64_field(object: &Map<String, Value>, key: &str, default: i64) -> i64 {
-    object
-        .get(key)
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            object
-                .get(key)
-                .and_then(Value::as_u64)
-                .map(|value| value as i64)
-        })
-        .unwrap_or(default)
+pub(crate) fn read_workspace_catalog_head(
+    connection: &Connection,
+) -> Result<WorkspaceCatalogHead, StoreError> {
+    let row: Option<(i64, Option<String>, Option<i64>)> = connection
+        .query_row(
+            "SELECT revision, writer, writer_seq FROM workspace_catalog WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((revision, writer, writer_seq)) = row else {
+        return Ok(WorkspaceCatalogHead {
+            revision: 0,
+            writer: None,
+        });
+    };
+    Ok(WorkspaceCatalogHead {
+        revision: revision.max(0) as u64,
+        writer: writer.zip(writer_seq.map(|seq| seq.max(0) as u64)),
+    })
 }
 
-fn string_list(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect()
+pub(crate) fn write_workspace_catalog_head(
+    transaction: &Transaction<'_>,
+    revision: u64,
+    writer: &WorkspaceCatalogWriter,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO workspace_catalog(id, revision, writer, writer_seq) VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+           revision = excluded.revision,
+           writer = excluded.writer,
+           writer_seq = excluded.writer_seq",
+        params![
+            i64::try_from(revision).unwrap_or(i64::MAX),
+            writer.id,
+            i64::try_from(writer.seq).unwrap_or(i64::MAX),
+        ],
+    )?;
+    Ok(())
 }
 
-fn json_bytes(value: Option<&Value>, fallback: Value) -> Vec<u8> {
-    serde_json::to_vec(value.unwrap_or(&fallback)).unwrap_or_else(|_| b"null".to_vec())
+pub(crate) fn read_default_conversation_agent(
+    connection: &Connection,
+) -> Result<Option<String>, StoreError> {
+    connection
+        .query_row(
+            "SELECT agent_definition_id FROM default_conversation_agent WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::from)
+}
+
+pub(crate) fn write_default_conversation_agent(
+    transaction: &Transaction<'_>,
+    agent_definition_id: Option<&str>,
+) -> Result<(), StoreError> {
+    match agent_definition_id {
+        Some(id) => transaction.execute(
+            "INSERT INTO default_conversation_agent(id, agent_definition_id) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET agent_definition_id = excluded.agent_definition_id",
+            [id],
+        )?,
+        None => transaction.execute("DELETE FROM default_conversation_agent", [])?,
+    };
+    Ok(())
+}
+
+pub(crate) fn read_new_session_pins(connection: &Connection) -> Result<Vec<String>, StoreError> {
+    let mut statement =
+        connection.prepare("SELECT action_key FROM new_session_pin ORDER BY position")?;
+    let rows = statement.query_map([], |row| row.get(0))?;
+    rows.collect::<Result<Vec<String>, _>>()
+        .map_err(StoreError::from)
+}
+
+pub(crate) fn write_new_session_pins(
+    transaction: &Transaction<'_>,
+    pins: &[String],
+) -> Result<(), StoreError> {
+    transaction.execute("DELETE FROM new_session_pin", [])?;
+    let mut position = 0i64;
+    for pin in pins {
+        // 同一个动作只记一次：重复的 key 撞 UNIQUE 就跳过，位置按第一次出现算。
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO new_session_pin(position, action_key) VALUES (?1, ?2)",
+            params![position, pin],
+        )?;
+        position += inserted as i64;
+    }
+    Ok(())
+}
+
+pub(crate) fn read_memory_settings(
+    connection: &Connection,
+) -> Result<MemorySettingsRecord, StoreError> {
+    let record = connection
+        .query_row(
+            "SELECT embedding_base_url, embedding_model, embedding_api_key,
+                    rerank_model_provider, rerank_model_id
+             FROM memory_settings WHERE id = 1",
+            [],
+            |row| {
+                Ok(MemorySettingsRecord {
+                    embedding_base_url: row.get(0)?,
+                    embedding_model: row.get(1)?,
+                    embedding_api_key: row.get(2)?,
+                    rerank_model_provider: row.get(3)?,
+                    rerank_model_id: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(record.unwrap_or_default())
+}
+
+pub(crate) fn write_memory_settings(
+    transaction: &Transaction<'_>,
+    record: &MemorySettingsRecord,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO memory_settings(
+           id, embedding_base_url, embedding_model, embedding_api_key,
+           rerank_model_provider, rerank_model_id
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+           embedding_base_url = excluded.embedding_base_url,
+           embedding_model = excluded.embedding_model,
+           embedding_api_key = excluded.embedding_api_key,
+           rerank_model_provider = excluded.rerank_model_provider,
+           rerank_model_id = excluded.rerank_model_id",
+        params![
+            record.embedding_base_url,
+            record.embedding_model,
+            record.embedding_api_key,
+            record.rerank_model_provider,
+            record.rerank_model_id,
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn read_remote_config_snapshot(
     connection: &Connection,
 ) -> Result<Option<RemoteConfigSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, COLLAB_SCOPE, COLLAB_DOCUMENT)? else {
-        return Ok(None);
-    };
-    Ok(Some(RemoteConfigSnapshot {
-        enabled: bool_field(&object, "enabled", false),
-        iroh_relay: string_field(&object, "iroh_relay"),
-        write_enabled: bool_field(&object, "write_enabled", false),
-    }))
+    connection
+        .query_row(
+            "SELECT enabled, iroh_relay FROM remote_config WHERE id = 1",
+            [],
+            |row| {
+                Ok(RemoteConfigSnapshot {
+                    enabled: row.get(0)?,
+                    iroh_relay: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
 }
 
 pub(crate) fn write_remote_config_snapshot(
     transaction: &Transaction<'_>,
     snapshot: &RemoteConfigSnapshot,
 ) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        COLLAB_SCOPE,
-        COLLAB_DOCUMENT,
-        &json!({
-            "enabled": snapshot.enabled,
-            "iroh_relay": snapshot.iroh_relay,
-            "write_enabled": snapshot.write_enabled,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    )
-}
-
-pub(crate) fn json_from_remote_config(snapshot: &RemoteConfigSnapshot) -> Value {
-    json!({
-        "enabled": snapshot.enabled,
-        "iroh_relay": snapshot.iroh_relay,
-        "write_enabled": snapshot.write_enabled,
-    })
-}
-
-pub(crate) fn remote_config_from_document(
-    value: &Value,
-) -> Result<RemoteConfigSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(RemoteConfigSnapshot {
-        enabled: bool_field(&object, "enabled", false),
-        iroh_relay: string_field(&object, "iroh_relay"),
-        write_enabled: bool_field(&object, "write_enabled", false),
-    })
-}
-
-pub(crate) fn read_update_settings_snapshot(
-    connection: &Connection,
-) -> Result<Option<UpdateSettingsSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, UPDATE_SETTINGS_SCOPE, UPDATE_SETTINGS_DOCUMENT)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(UpdateSettingsSnapshot {
-        channel: string_field(&object, "channel"),
-        auto_install: bool_field(&object, "auto_install", true),
-    }))
-}
-
-pub(crate) fn write_update_settings_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &UpdateSettingsSnapshot,
-) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        UPDATE_SETTINGS_SCOPE,
-        UPDATE_SETTINGS_DOCUMENT,
-        &json!({
-            "channel": snapshot.channel,
-            "auto_install": snapshot.auto_install,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    )
-}
-
-pub(crate) fn json_from_update_settings(snapshot: &UpdateSettingsSnapshot) -> Value {
-    json!({
-        "channel": snapshot.channel,
-        "auto_install": snapshot.auto_install,
-    })
-}
-
-pub(crate) fn update_settings_from_document(
-    value: &Value,
-) -> Result<UpdateSettingsSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(UpdateSettingsSnapshot {
-        channel: string_field(&object, "channel"),
-        auto_install: bool_field(&object, "auto_install", true),
-    })
-}
-
-pub(crate) fn read_update_state_snapshot(
-    connection: &Connection,
-) -> Result<Option<UpdateStateSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, UPDATE_STATE_SCOPE, UPDATE_STATE_DOCUMENT)? else {
-        return Ok(None);
-    };
-    Ok(Some(UpdateStateSnapshot {
-        current_url: object
-            .get("current_url")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        staged_json: object
-            .get("staged")
-            .filter(|value| !value.is_null())
-            .map(|value| serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec())),
-        cleanup_app: object
-            .get("cleanup_app")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    }))
-}
-
-pub(crate) fn write_update_state_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &UpdateStateSnapshot,
-) -> Result<(), StoreError> {
-    let staged = snapshot
-        .staged_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
-        .unwrap_or(Value::Null);
-    write_object(
-        transaction,
-        UPDATE_STATE_SCOPE,
-        UPDATE_STATE_DOCUMENT,
-        &json!({
-            "current_url": snapshot.current_url,
-            "staged": staged,
-            "cleanup_app": snapshot.cleanup_app,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    )
-}
-
-pub(crate) fn json_from_update_state(snapshot: &UpdateStateSnapshot) -> Result<Value, StoreError> {
-    let staged = match snapshot.staged_json.as_deref() {
-        Some(raw) => serde_json::from_slice(raw)?,
-        None => Value::Null,
-    };
-    Ok(json!({
-        "current_url": snapshot.current_url,
-        "staged": staged,
-        "cleanup_app": snapshot.cleanup_app,
-    }))
-}
-
-pub(crate) fn update_state_from_document(value: &Value) -> Result<UpdateStateSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(UpdateStateSnapshot {
-        current_url: object
-            .get("current_url")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        staged_json: object
-            .get("staged")
-            .filter(|value| !value.is_null())
-            .map(|value| serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec())),
-        cleanup_app: object
-            .get("cleanup_app")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    })
-}
-
-pub(crate) fn read_worktree_inherit_snapshot(
-    connection: &Connection,
-) -> Result<Option<WorktreeInheritSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, WORKTREE_SCOPE, WORKTREE_DOCUMENT)? else {
-        return Ok(None);
-    };
-    Ok(Some(WorktreeInheritSnapshot {
-        enabled: bool_field(&object, "enabled", false),
-        skip_patterns: string_list(object.get("skip_patterns")),
-    }))
-}
-
-pub(crate) fn write_worktree_inherit_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &WorktreeInheritSnapshot,
-) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        WORKTREE_SCOPE,
-        WORKTREE_DOCUMENT,
-        &json!({
-            "enabled": snapshot.enabled,
-            "skip_patterns": snapshot.skip_patterns,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    )
-}
-
-pub(crate) fn json_from_worktree_inherit(snapshot: &WorktreeInheritSnapshot) -> Value {
-    json!({
-        "enabled": snapshot.enabled,
-        "skip_patterns": snapshot.skip_patterns,
-    })
-}
-
-pub(crate) fn worktree_inherit_from_document(
-    value: &Value,
-) -> Result<WorktreeInheritSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(WorktreeInheritSnapshot {
-        enabled: bool_field(&object, "enabled", false),
-        skip_patterns: string_list(object.get("skip_patterns")),
-    })
+    transaction.execute(
+        "INSERT INTO remote_config(id, enabled, iroh_relay) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET
+           enabled = excluded.enabled,
+           iroh_relay = excluded.iroh_relay",
+        params![snapshot.enabled, snapshot.iroh_relay],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn read_terminal_theme_snapshot(
     connection: &Connection,
 ) -> Result<Option<TerminalThemeSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, TERMINAL_THEME_SCOPE, TERMINAL_THEME_DOCUMENT)?
-    else {
+    let theme = connection
+        .query_row(
+            "SELECT version, dark, background, foreground, cursor, selection,
+                    search_hit, search_hit_current
+             FROM terminal_theme WHERE id = 1",
+            [],
+            |row| {
+                Ok(TerminalThemeSnapshot {
+                    version: row.get(0)?,
+                    dark: row.get(1)?,
+                    background: row.get(2)?,
+                    foreground: row.get(3)?,
+                    cursor: row.get(4)?,
+                    selection: row.get(5)?,
+                    palette: Vec::new(),
+                    search_hit: row.get(6)?,
+                    search_hit_current: row.get(7)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(mut theme) = theme else {
         return Ok(None);
     };
-    Ok(Some(terminal_theme_from_object(&object)))
+    let mut statement =
+        connection.prepare("SELECT color FROM terminal_theme_palette ORDER BY position")?;
+    theme.palette = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<u32>, _>>()?;
+    Ok(Some(theme))
 }
 
 pub(crate) fn write_terminal_theme_snapshot(
     transaction: &Transaction<'_>,
     snapshot: &TerminalThemeSnapshot,
 ) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        TERMINAL_THEME_SCOPE,
-        TERMINAL_THEME_DOCUMENT,
-        &terminal_theme_object(snapshot),
-    )
-}
-
-pub(crate) fn json_from_terminal_theme(snapshot: &TerminalThemeSnapshot) -> Value {
-    Value::Object(terminal_theme_object(snapshot))
-}
-
-pub(crate) fn terminal_theme_from_document(
-    value: &Value,
-) -> Result<TerminalThemeSnapshot, StoreError> {
-    Ok(terminal_theme_from_object(
-        &value.as_object().cloned().unwrap_or_default(),
-    ))
-}
-
-fn terminal_theme_from_object(object: &Map<String, Value>) -> TerminalThemeSnapshot {
-    TerminalThemeSnapshot {
-        version: u32_field(object, "version", 1),
-        dark: bool_field(object, "dark", true),
-        background: u32_field(object, "background", 0),
-        foreground: u32_field(object, "foreground", 0),
-        cursor: u32_field(object, "cursor", 0),
-        selection: u32_field(object, "selection", 0),
-        palette: object
-            .get("palette")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_u64)
-            .map(|value| value as u32)
-            .collect(),
-        search_hit: u32_aliased(object, "search_hit", "searchHit"),
-        search_hit_current: u32_aliased(object, "search_hit_current", "searchHitCurrent"),
+    transaction.execute(
+        "INSERT INTO terminal_theme(
+           id, version, dark, background, foreground, cursor, selection,
+           search_hit, search_hit_current
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+           version = excluded.version,
+           dark = excluded.dark,
+           background = excluded.background,
+           foreground = excluded.foreground,
+           cursor = excluded.cursor,
+           selection = excluded.selection,
+           search_hit = excluded.search_hit,
+           search_hit_current = excluded.search_hit_current",
+        params![
+            snapshot.version,
+            snapshot.dark,
+            snapshot.background,
+            snapshot.foreground,
+            snapshot.cursor,
+            snapshot.selection,
+            snapshot.search_hit,
+            snapshot.search_hit_current,
+        ],
+    )?;
+    transaction.execute("DELETE FROM terminal_theme_palette", [])?;
+    for (position, color) in snapshot.palette.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO terminal_theme_palette(position, color) VALUES (?1, ?2)",
+            params![position as i64, color],
+        )?;
     }
+    Ok(())
 }
 
-fn terminal_theme_object(snapshot: &TerminalThemeSnapshot) -> Map<String, Value> {
-    json!({
-        "version": snapshot.version,
-        "dark": snapshot.dark,
-        "background": snapshot.background,
-        "foreground": snapshot.foreground,
-        "cursor": snapshot.cursor,
-        "selection": snapshot.selection,
-        "palette": snapshot.palette,
-        "search_hit": snapshot.search_hit,
-        "search_hit_current": snapshot.search_hit_current,
-    })
-    .as_object()
-    .cloned()
-    .unwrap_or_default()
+pub(crate) fn read_auto_model_providers(
+    connection: &Connection,
+    harness: AutoModelHarness,
+) -> Result<Vec<String>, StoreError> {
+    let mut statement = connection
+        .prepare("SELECT provider FROM auto_model_provider WHERE harness = ?1 ORDER BY provider")?;
+    let rows = statement.query_map([harness.as_str()], |row| row.get(0))?;
+    rows.collect::<Result<Vec<String>, _>>()
+        .map_err(StoreError::from)
+}
+
+pub(crate) fn write_auto_model_providers(
+    transaction: &Transaction<'_>,
+    harness: AutoModelHarness,
+    providers: &[String],
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "DELETE FROM auto_model_provider WHERE harness = ?1",
+        [harness.as_str()],
+    )?;
+    for provider in providers {
+        transaction.execute(
+            "INSERT OR IGNORE INTO auto_model_provider(harness, provider) VALUES (?1, ?2)",
+            params![harness.as_str(), provider],
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn read_quota_cache_snapshot(
     connection: &Connection,
 ) -> Result<Option<QuotaCacheSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, QUOTA_CACHE_SCOPE, QUOTA_CACHE_DOCUMENT)? else {
+    let head: Option<(i64, u32)> = connection
+        .query_row(
+            "SELECT saved_at_ms, schema_version FROM quota_cache WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((saved_at_ms, schema_version)) = head else {
         return Ok(None);
     };
-    Ok(Some(quota_from_object(&object)))
+    let provider_ids = connection
+        .prepare("SELECT provider_id FROM quota_cache_provider ORDER BY provider_id")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    let mut window_statement = connection.prepare(
+        "SELECT label, used_percent, resets_at_ms, reset_after_seconds
+         FROM quota_cache_window WHERE provider_id = ?1 ORDER BY position",
+    )?;
+    let mut status_statement = connection.prepare(
+        "SELECT provider_id, kind, checked_at_ms, error,
+                copilot_unit, copilot_remaining, copilot_limit, copilot_used
+         FROM quota_cache_status ORDER BY provider_id",
+    )?;
+    let rows = status_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<f64>>(5)?,
+                row.get::<_, Option<f64>>(6)?,
+                row.get::<_, Option<f64>>(7)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut statuses = Vec::new();
+    for (provider_id, kind, checked_at_ms, error, unit, remaining, limit, used) in rows {
+        let quota = if kind == "copilot" {
+            QuotaCacheQuota::Copilot {
+                unit: unit.unwrap_or_default(),
+                remaining: remaining.unwrap_or_default(),
+                limit,
+                used,
+            }
+        } else {
+            QuotaCacheQuota::Windows(
+                window_statement
+                    .query_map([&provider_id], |row| {
+                        Ok(QuotaCacheWindowRecord {
+                            label: row.get(0)?,
+                            used_percent: row.get(1)?,
+                            resets_at_ms: row.get(2)?,
+                            reset_after_seconds: row.get(3)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
+        statuses.push(QuotaCacheStatusRecord {
+            provider_id,
+            checked_at_ms,
+            error,
+            quota,
+        });
+    }
+    Ok(Some(QuotaCacheSnapshot {
+        saved_at_ms,
+        schema_version,
+        provider_ids,
+        statuses,
+    }))
 }
 
 pub(crate) fn write_quota_cache_snapshot(
     transaction: &Transaction<'_>,
     snapshot: &QuotaCacheSnapshot,
 ) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        QUOTA_CACHE_SCOPE,
-        QUOTA_CACHE_DOCUMENT,
-        &quota_object(snapshot)?,
-    )
-}
-
-pub(crate) fn json_from_quota_cache(snapshot: &QuotaCacheSnapshot) -> Result<Value, StoreError> {
-    Ok(Value::Object(quota_object(snapshot)?))
-}
-
-pub(crate) fn quota_cache_from_document(value: &Value) -> Result<QuotaCacheSnapshot, StoreError> {
-    Ok(quota_from_object(
-        &value.as_object().cloned().unwrap_or_default(),
-    ))
-}
-
-fn quota_from_object(object: &Map<String, Value>) -> QuotaCacheSnapshot {
-    QuotaCacheSnapshot {
-        saved_at_ms: i64_field(object, "saved_at_ms", 0),
-        schema_version: u32_field(object, "schema_version", 0),
-        provider_ids: string_list(object.get("provider_ids")),
-        providers_json: json_bytes(object.get("providers"), json!({})),
+    transaction.execute(
+        "INSERT INTO quota_cache(id, saved_at_ms, schema_version) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET
+           saved_at_ms = excluded.saved_at_ms,
+           schema_version = excluded.schema_version",
+        params![snapshot.saved_at_ms, snapshot.schema_version],
+    )?;
+    transaction.execute("DELETE FROM quota_cache_provider", [])?;
+    for provider_id in &snapshot.provider_ids {
+        transaction.execute(
+            "INSERT OR IGNORE INTO quota_cache_provider(provider_id) VALUES (?1)",
+            [provider_id],
+        )?;
     }
-}
-
-fn quota_object(snapshot: &QuotaCacheSnapshot) -> Result<Map<String, Value>, StoreError> {
-    let providers: Value = serde_json::from_slice(&snapshot.providers_json)?;
-    Ok(json!({
-        "saved_at_ms": snapshot.saved_at_ms,
-        "schema_version": snapshot.schema_version,
-        "provider_ids": snapshot.provider_ids,
-        "providers": providers,
-    })
-    .as_object()
-    .cloned()
-    .unwrap_or_default())
-}
-
-pub(crate) fn read_dsh_auto_model_snapshot(
-    connection: &Connection,
-) -> Result<Option<AutoModelSnapshot>, StoreError> {
-    read_auto_model(connection, DSH_AUTO_SCOPE, DSH_AUTO_DOCUMENT)
-}
-
-pub(crate) fn write_dsh_auto_model_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &AutoModelSnapshot,
-) -> Result<(), StoreError> {
-    write_auto_model(transaction, DSH_AUTO_SCOPE, DSH_AUTO_DOCUMENT, snapshot)
-}
-
-pub(crate) fn read_pi_auto_model_snapshot(
-    connection: &Connection,
-) -> Result<Option<AutoModelSnapshot>, StoreError> {
-    read_auto_model(connection, PI_AUTO_SCOPE, PI_AUTO_DOCUMENT)
-}
-
-pub(crate) fn write_pi_auto_model_snapshot(
-    transaction: &Transaction<'_>,
-    snapshot: &AutoModelSnapshot,
-) -> Result<(), StoreError> {
-    write_auto_model(transaction, PI_AUTO_SCOPE, PI_AUTO_DOCUMENT, snapshot)
-}
-
-fn read_auto_model(
-    connection: &Connection,
-    scope: &str,
-    leftover: &str,
-) -> Result<Option<AutoModelSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, scope, leftover)? else {
-        return Ok(None);
-    };
-    Ok(Some(AutoModelSnapshot {
-        providers: string_list(object.get("providers")),
-    }))
-}
-
-fn write_auto_model(
-    transaction: &Transaction<'_>,
-    scope: &str,
-    leftover: &str,
-    snapshot: &AutoModelSnapshot,
-) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        scope,
-        leftover,
-        &json!({ "providers": snapshot.providers })
-            .as_object()
-            .cloned()
-            .unwrap_or_default(),
-    )
-}
-
-pub(crate) fn json_from_auto_model(snapshot: &AutoModelSnapshot) -> Value {
-    json!({ "providers": snapshot.providers })
-}
-
-pub(crate) fn auto_model_from_document(value: &Value) -> Result<AutoModelSnapshot, StoreError> {
-    Ok(AutoModelSnapshot {
-        providers: string_list(value.get("providers")),
-    })
+    // 窗口随状态行级联删除。
+    transaction.execute("DELETE FROM quota_cache_status", [])?;
+    for status in &snapshot.statuses {
+        match &status.quota {
+            QuotaCacheQuota::Windows(windows) => {
+                transaction.execute(
+                    "INSERT INTO quota_cache_status(provider_id, kind, checked_at_ms, error)
+                     VALUES (?1, 'windows', ?2, ?3)",
+                    params![status.provider_id, status.checked_at_ms, status.error],
+                )?;
+                for (position, window) in windows.iter().enumerate() {
+                    transaction.execute(
+                        "INSERT INTO quota_cache_window(
+                           provider_id, position, label, used_percent, resets_at_ms,
+                           reset_after_seconds
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            status.provider_id,
+                            position as i64,
+                            window.label,
+                            window.used_percent,
+                            window.resets_at_ms,
+                            window.reset_after_seconds,
+                        ],
+                    )?;
+                }
+            }
+            QuotaCacheQuota::Copilot {
+                unit,
+                remaining,
+                limit,
+                used,
+            } => {
+                transaction.execute(
+                    "INSERT INTO quota_cache_status(
+                       provider_id, kind, checked_at_ms, error,
+                       copilot_unit, copilot_remaining, copilot_limit, copilot_used
+                     ) VALUES (?1, 'copilot', ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        status.provider_id,
+                        status.checked_at_ms,
+                        status.error,
+                        unit,
+                        remaining,
+                        limit,
+                        used,
+                    ],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn read_workspace_menu_snapshot(
     connection: &Connection,
 ) -> Result<Option<PublishedWorkspaceMenuSnapshot>, StoreError> {
-    let Some(object) = read_object(connection, WORKSPACE_MENU_SCOPE, WORKSPACE_MENU_DOCUMENT)?
-    else {
+    let head: Option<(u32, i64, String, i64)> = connection
+        .query_row(
+            "SELECT version, revision, source_id, source_revision FROM workspace_menu WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((version, revision, source_id, source_revision)) = head else {
         return Ok(None);
     };
+    let projects = connection
+        .prepare("SELECT root, title, display_order FROM workspace_menu_project ORDER BY position")?
+        .query_map([], |row| {
+            Ok(WorkspaceMenuProjectRecord {
+                root: row.get(0)?,
+                title: row.get(1)?,
+                order: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let sessions = connection
+        .prepare(
+            "SELECT id, kind, title, custom_title, cwd, project_root, project_title,
+                    project_order, session_order, leaf_order, agent
+             FROM workspace_menu_session ORDER BY position",
+        )?
+        .query_map([], |row| {
+            Ok(WorkspaceMenuSessionRecord {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                title: row.get(2)?,
+                custom_title: row.get(3)?,
+                cwd: row.get(4)?,
+                project_root: row.get(5)?,
+                project_title: row.get(6)?,
+                project_order: row.get(7)?,
+                session_order: row.get(8)?,
+                leaf_order: row.get(9)?,
+                agent: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(PublishedWorkspaceMenuSnapshot {
-        version: u32_field(&object, "version", 0),
-        revision: object.get("revision").and_then(Value::as_u64).unwrap_or(0),
-        source_id: string_field(&object, "source_id"),
-        source_revision: object
-            .get("source_revision")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        projects_json: json_bytes(object.get("projects"), json!([])),
-        sessions_json: json_bytes(object.get("sessions"), json!([])),
+        version,
+        revision: revision.max(0) as u64,
+        source_id,
+        source_revision: source_revision.max(0) as u64,
+        projects,
+        sessions,
     }))
 }
 
@@ -547,159 +553,51 @@ pub(crate) fn write_workspace_menu_snapshot(
     transaction: &Transaction<'_>,
     snapshot: &PublishedWorkspaceMenuSnapshot,
 ) -> Result<(), StoreError> {
-    write_object(
-        transaction,
-        WORKSPACE_MENU_SCOPE,
-        WORKSPACE_MENU_DOCUMENT,
-        &workspace_menu_object(snapshot)?,
-    )
-}
-
-pub(crate) fn json_from_workspace_menu(
-    snapshot: &PublishedWorkspaceMenuSnapshot,
-) -> Result<Value, StoreError> {
-    Ok(Value::Object(workspace_menu_object(snapshot)?))
-}
-
-pub(crate) fn workspace_menu_from_document(
-    value: &Value,
-) -> Result<PublishedWorkspaceMenuSnapshot, StoreError> {
-    let object = value.as_object().cloned().unwrap_or_default();
-    Ok(PublishedWorkspaceMenuSnapshot {
-        version: u32_field(&object, "version", 0),
-        revision: object.get("revision").and_then(Value::as_u64).unwrap_or(0),
-        source_id: string_field(&object, "source_id"),
-        source_revision: object
-            .get("source_revision")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        projects_json: json_bytes(object.get("projects"), json!([])),
-        sessions_json: json_bytes(object.get("sessions"), json!([])),
-    })
-}
-
-fn workspace_menu_object(
-    snapshot: &PublishedWorkspaceMenuSnapshot,
-) -> Result<Map<String, Value>, StoreError> {
-    let projects: Value = serde_json::from_slice(&snapshot.projects_json)?;
-    let sessions: Value = serde_json::from_slice(&snapshot.sessions_json)?;
-    Ok(json!({
-        "version": snapshot.version,
-        "revision": snapshot.revision,
-        "source_id": snapshot.source_id,
-        "source_revision": snapshot.source_revision,
-        "projects": projects,
-        "sessions": sessions,
-    })
-    .as_object()
-    .cloned()
-    .unwrap_or_default())
-}
-
-pub(crate) const CONFIG_DOCUMENTS: &[&str] = &[
-    COLLAB_DOCUMENT,
-    UPDATE_SETTINGS_DOCUMENT,
-    UPDATE_STATE_DOCUMENT,
-    WORKTREE_DOCUMENT,
-    TERMINAL_THEME_DOCUMENT,
-    QUOTA_CACHE_DOCUMENT,
-    DSH_AUTO_DOCUMENT,
-    PI_AUTO_DOCUMENT,
-    WORKSPACE_MENU_DOCUMENT,
-];
-
-pub(crate) fn read_config_document(
-    connection: &Connection,
-    key: &str,
-) -> Result<Option<Vec<u8>>, StoreError> {
-    let value = match key {
-        COLLAB_DOCUMENT => read_remote_config_snapshot(connection)?
-            .map(|snapshot| json_from_remote_config(&snapshot)),
-        UPDATE_SETTINGS_DOCUMENT => read_update_settings_snapshot(connection)?
-            .map(|snapshot| json_from_update_settings(&snapshot)),
-        UPDATE_STATE_DOCUMENT => read_update_state_snapshot(connection)?
-            .map(|snapshot| json_from_update_state(&snapshot))
-            .transpose()?,
-        WORKTREE_DOCUMENT => read_worktree_inherit_snapshot(connection)?
-            .map(|snapshot| json_from_worktree_inherit(&snapshot)),
-        TERMINAL_THEME_DOCUMENT => read_terminal_theme_snapshot(connection)?
-            .map(|snapshot| json_from_terminal_theme(&snapshot)),
-        QUOTA_CACHE_DOCUMENT => read_quota_cache_snapshot(connection)?
-            .map(|snapshot| json_from_quota_cache(&snapshot))
-            .transpose()?,
-        DSH_AUTO_DOCUMENT => read_dsh_auto_model_snapshot(connection)?
-            .map(|snapshot| json_from_auto_model(&snapshot)),
-        PI_AUTO_DOCUMENT => {
-            read_pi_auto_model_snapshot(connection)?.map(|snapshot| json_from_auto_model(&snapshot))
-        }
-        WORKSPACE_MENU_DOCUMENT => read_workspace_menu_snapshot(connection)?
-            .map(|snapshot| json_from_workspace_menu(&snapshot))
-            .transpose()?,
-        _ => return Ok(None),
-    };
-    match value {
-        Some(value) => serde_json::to_vec(&value)
-            .map(Some)
-            .map_err(StoreError::from),
-        None => crate::documents::read_generic_document_bytes(connection, key),
+    transaction.execute(
+        "INSERT INTO workspace_menu(id, version, revision, source_id, source_revision)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+           version = excluded.version,
+           revision = excluded.revision,
+           source_id = excluded.source_id,
+           source_revision = excluded.source_revision",
+        params![
+            snapshot.version,
+            i64::try_from(snapshot.revision).unwrap_or(i64::MAX),
+            snapshot.source_id,
+            i64::try_from(snapshot.source_revision).unwrap_or(i64::MAX),
+        ],
+    )?;
+    transaction.execute("DELETE FROM workspace_menu_project", [])?;
+    for (position, project) in snapshot.projects.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO workspace_menu_project(position, root, title, display_order)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![position as i64, project.root, project.title, project.order],
+        )?;
     }
-}
-
-pub(crate) fn write_config_document(
-    transaction: &Transaction<'_>,
-    key: &str,
-    value: &Value,
-) -> Result<bool, StoreError> {
-    match key {
-        COLLAB_DOCUMENT => {
-            write_remote_config_snapshot(transaction, &remote_config_from_document(value)?)?
-        }
-        UPDATE_SETTINGS_DOCUMENT => {
-            write_update_settings_snapshot(transaction, &update_settings_from_document(value)?)?
-        }
-        UPDATE_STATE_DOCUMENT => {
-            write_update_state_snapshot(transaction, &update_state_from_document(value)?)?
-        }
-        WORKTREE_DOCUMENT => {
-            write_worktree_inherit_snapshot(transaction, &worktree_inherit_from_document(value)?)?
-        }
-        TERMINAL_THEME_DOCUMENT => {
-            write_terminal_theme_snapshot(transaction, &terminal_theme_from_document(value)?)?
-        }
-        QUOTA_CACHE_DOCUMENT => {
-            write_quota_cache_snapshot(transaction, &quota_cache_from_document(value)?)?
-        }
-        DSH_AUTO_DOCUMENT => {
-            write_dsh_auto_model_snapshot(transaction, &auto_model_from_document(value)?)?
-        }
-        PI_AUTO_DOCUMENT => {
-            write_pi_auto_model_snapshot(transaction, &auto_model_from_document(value)?)?
-        }
-        WORKSPACE_MENU_DOCUMENT => {
-            write_workspace_menu_snapshot(transaction, &workspace_menu_from_document(value)?)?
-        }
-        _ => return Ok(false),
+    transaction.execute("DELETE FROM workspace_menu_session", [])?;
+    for (position, session) in snapshot.sessions.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO workspace_menu_session(
+               position, id, kind, title, custom_title, cwd, project_root, project_title,
+               project_order, session_order, leaf_order, agent
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                position as i64,
+                session.id,
+                session.kind,
+                session.title,
+                session.custom_title,
+                session.cwd,
+                session.project_root,
+                session.project_title,
+                session.project_order,
+                session.session_order,
+                session.leaf_order,
+                session.agent,
+            ],
+        )?;
     }
-    Ok(true)
-}
-
-pub(crate) fn delete_config_document(
-    transaction: &Transaction<'_>,
-    key: &str,
-) -> Result<bool, StoreError> {
-    let (scope, leftover) = match key {
-        COLLAB_DOCUMENT => (COLLAB_SCOPE, COLLAB_DOCUMENT),
-        UPDATE_SETTINGS_DOCUMENT => (UPDATE_SETTINGS_SCOPE, UPDATE_SETTINGS_DOCUMENT),
-        UPDATE_STATE_DOCUMENT => (UPDATE_STATE_SCOPE, UPDATE_STATE_DOCUMENT),
-        WORKTREE_DOCUMENT => (WORKTREE_SCOPE, WORKTREE_DOCUMENT),
-        TERMINAL_THEME_DOCUMENT => (TERMINAL_THEME_SCOPE, TERMINAL_THEME_DOCUMENT),
-        QUOTA_CACHE_DOCUMENT => (QUOTA_CACHE_SCOPE, QUOTA_CACHE_DOCUMENT),
-        DSH_AUTO_DOCUMENT => (DSH_AUTO_SCOPE, DSH_AUTO_DOCUMENT),
-        PI_AUTO_DOCUMENT => (PI_AUTO_SCOPE, PI_AUTO_DOCUMENT),
-        WORKSPACE_MENU_DOCUMENT => (WORKSPACE_MENU_SCOPE, WORKSPACE_MENU_DOCUMENT),
-        _ => return Ok(false),
-    };
-    crate::documents::delete_scope(transaction, scope)?;
-    crate::documents::delete_document_scope(transaction, leftover)?;
-    Ok(true)
+    Ok(())
 }

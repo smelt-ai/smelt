@@ -33,7 +33,12 @@ impl Workspace {
             .sessions
             .iter()
             .enumerate()
-            .map(|(i, session)| (format!("切换到: {}", session.title(cx)), Cmd::SwitchTab(i)))
+            .map(|(i, session)| {
+                (
+                    format!("切换到: {}", Self::title_with_runtime(session, cx)),
+                    Cmd::SwitchTab(i),
+                )
+            })
             .collect();
         [commands, sessions]
     }

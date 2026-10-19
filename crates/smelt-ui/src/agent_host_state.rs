@@ -11,11 +11,17 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::automation::{Automation, AutomationRun, AutomationState};
-pub use smelt_core::agent_definition::AgentDefinition;
-use smelt_core::agent_kind::{
+pub use smelt_model::agent_definition::AgentDefinition;
+use smelt_model::agent_host::{AgentHostEdit, AgentHostSettings};
+use smelt_model::agent_kind::{
     AcpProfile, CONVERSATION_AGENTS, ConversationAgentKind, ConversationLaunchSpec,
 };
-use smelt_core::automation::AutomationFile;
+use smelt_model::automation::AutomationFile;
+use smelt_model::control_api::{AgentHostApplyEdit, AgentHostGet};
+use smelt_runtime_client::protocol::control::EmptyParams;
+
+/// 读写运行时配置的上限。一次合并写库，正常是毫秒级。
+const RUNTIME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn default_true() -> bool {
     true
@@ -184,8 +190,13 @@ pub struct AgentHostState {
     pub webhook_base_url: Option<String>,
     #[serde(skip)]
     pub persistence_error: Option<String>,
+    /// 侧栏「新对话」默认用哪个智能体。
     #[serde(skip)]
-    pub persistence_blocked: bool,
+    pub default_conversation_agent: Option<String>,
+    /// 运行时那部分（命令、env、profile、定义、hook 开关）是否已从运行时加载。
+    /// 没加载前是出厂值，不能拿去启动会话，也不接受修改。
+    #[serde(skip)]
+    pub runtime_loaded: bool,
 }
 
 impl AgentHostState {
@@ -458,7 +469,8 @@ impl Default for AgentHostState {
             automation_store_error: None,
             webhook_base_url: None,
             persistence_error: None,
-            persistence_blocked: false,
+            default_conversation_agent: None,
+            runtime_loaded: false,
         }
     }
 }
@@ -473,294 +485,288 @@ fn upsert_config_value(values: &mut Vec<(String, String)>, config_id: String, va
 
 impl Global for AgentHostState {}
 
-pub fn load_agent_host_state() -> AgentHostState {
-    let (mut config, legacy_value) = load_agent_ui_sources();
-    config.native_dsh_profiles = smelt_core::agent_kind::native_dsh_profiles();
-    let mut migrated = legacy_value.as_ref().is_some_and(|value| {
-        let hooks = migrate_legacy_hooks_setting(&mut config, value);
-        let notifications = migrate_legacy_notification_setting(&mut config, value);
-        let definitions = value.get("agent_presets").is_some() && value.get("agents").is_none();
-        hooks || notifications || definitions
-    });
-    // 只迁移之前随应用发出的默认值；用户自定义命令不动。
-    if migrate_released_adapter_defaults(&mut config) {
-        migrated = true;
-    }
-    if migrated && let Err(error) = save_agent_host_state(&config) {
-        config.persistence_error = Some(error);
-    }
-    config
-}
+// ===================== 运行时那部分：缓存 + 异步提交 =====================
 
-fn migrate_legacy_hooks_setting(config: &mut AgentHostState, value: &serde_json::Value) -> bool {
-    if value.get("agent_hooks_enabled").is_some() {
-        return false;
-    }
-    config.agent_hooks_enabled = true;
-    true
-}
-
-fn migrate_legacy_notification_setting(
-    config: &mut AgentHostState,
-    value: &serde_json::Value,
-) -> bool {
-    let Some(enabled) = value.get("notify_awaiting").and_then(|v| v.as_bool()) else {
-        return false;
-    };
-    config.notify_approval = enabled;
-    config.notify_input = enabled;
-    true
-}
-
-fn migrate_released_adapter_defaults(config: &mut AgentHostState) -> bool {
-    let mut migrated = false;
-    for agent in ConversationAgentKind::ALL {
-        let current = config.acp_cmd_for(agent);
-        if let Some(upgraded) = agent.upgrade_released_default_command(&current) {
-            config.set_acp_cmd_for(agent, upgraded);
-            migrated = true;
+impl AgentHostState {
+    /// 交给运行时的那部分配置。通知开关、自动化投影、错误状态不在里面。
+    pub fn runtime_settings(&self) -> AgentHostSettings {
+        AgentHostSettings {
+            hooks_enabled: self.agent_hooks_enabled,
+            cross_agent_enabled: self.cross_agent_enabled,
+            commands: self
+                .acp_cmds
+                .0
+                .iter()
+                .map(|(id, cmd)| ((*id).to_string(), cmd.clone()))
+                .collect(),
+            env: self.acp_env.clone(),
+            config_memory: self.acp_config_memory.clone(),
+            profiles: self.profiles.clone(),
+            native_dsh_profiles: self.native_dsh_profiles.clone(),
+            agents: self.agents.clone(),
+            default_conversation_agent: self.default_conversation_agent.clone(),
         }
     }
-    migrated
+
+    /// 用运行时给的权威配置替换缓存里运行时那部分，并标记为已加载。
+    pub fn apply_runtime_settings(&mut self, settings: AgentHostSettings) {
+        self.agent_hooks_enabled = settings.hooks_enabled;
+        self.cross_agent_enabled = settings.cross_agent_enabled;
+        self.acp_cmds = ConversationCommands(
+            CONVERSATION_AGENTS
+                .iter()
+                .filter_map(|d| settings.commands.get(d.id).map(|cmd| (d.id, cmd.clone())))
+                .collect(),
+        );
+        self.acp_env = settings.env;
+        self.acp_config_memory = settings.config_memory;
+        self.profiles = settings.profiles;
+        self.native_dsh_profiles = settings.native_dsh_profiles;
+        self.agents = settings.agents;
+        self.default_conversation_agent = settings.default_conversation_agent;
+        self.runtime_loaded = true;
+    }
+
+    fn notify_prefs(&self) -> NotifyPrefs {
+        NotifyPrefs {
+            approval: self.notify_approval,
+            input: self.notify_input,
+            success: self.notify_success,
+            failure: self.notify_failure,
+            terminal_bell: self.notify_terminal_bell,
+        }
+    }
+
+    fn set_notify_prefs(&mut self, prefs: NotifyPrefs) {
+        self.notify_approval = prefs.approval;
+        self.notify_input = prefs.input;
+        self.notify_success = prefs.success;
+        self.notify_failure = prefs.failure;
+        self.notify_terminal_bell = prefs.terminal_bell;
+    }
 }
 
-fn save_agent_host_state(c: &AgentHostState) -> Result<(), String> {
-    let store = smelt_core::sqlite_state::default_sqlite_store()?;
-    store
-        .put_agent_ui_prefs(&snapshot_from_config(c))
-        .map_err(Into::into)
+/// 通知怎么提醒是客户端自己的事（设计文档 D1），每台设备可以不同，不交给运行时。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NotifyPrefs {
+    approval: bool,
+    input: bool,
+    success: bool,
+    failure: bool,
+    terminal_bell: bool,
 }
 
-fn load_agent_ui_sources() -> (AgentHostState, Option<serde_json::Value>) {
-    match smelt_core::sqlite_state::default_sqlite_store() {
-        Ok(store) => match store.get_agent_ui_snapshot() {
-            Ok(Some(snapshot)) => (config_from_snapshot(snapshot), None),
-            Ok(None) => (AgentHostState::default(), None),
-            Err(error) => (
-                AgentHostState {
-                    persistence_blocked: true,
-                    persistence_error: Some(format!("读取智能体配置失败，已阻止覆盖：{error}")),
-                    ..Default::default()
-                },
-                None,
-            ),
+/// 读客户端库里的通知偏好；没有时用出厂值。
+fn load_notify_prefs() -> NotifyPrefs {
+    match smelt_client_store::client_store().and_then(|store| store.notify_prefs()) {
+        Ok(Some(record)) => NotifyPrefs {
+            approval: record.approval,
+            input: record.input,
+            success: record.success,
+            failure: record.failure,
+            terminal_bell: record.terminal_bell,
         },
-        Err(_) => (AgentHostState::default(), None),
-    }
-}
-
-fn snapshot_from_config(config: &AgentHostState) -> smelt_store::AgentUiSnapshot {
-    smelt_store::AgentUiSnapshot {
-        agent_hooks_enabled: config.agent_hooks_enabled,
-        cross_agent_enabled: config.cross_agent_enabled,
-        notify_approval: config.notify_approval,
-        notify_input: config.notify_input,
-        notify_success: config.notify_success,
-        notify_failure: config.notify_failure,
-        notify_terminal_bell: config.notify_terminal_bell,
-        commands: CONVERSATION_AGENTS
-            .iter()
-            .filter_map(|descriptor| {
-                config.acp_cmds.0.get(descriptor.id).map(|command| {
-                    smelt_store::AgentConversationCommandRecord {
-                        command_key: descriptor.config_key.to_string(),
-                        command: command.clone(),
-                    }
-                })
-            })
-            .collect(),
-        env: config
-            .acp_env
-            .iter()
-            .flat_map(|(engine_kind_id, vars)| {
-                vars.iter()
-                    .map(|(name, value)| smelt_store::AgentAcpEnvRecord {
-                        engine_kind_id: engine_kind_id.clone(),
-                        name: name.clone(),
-                        value: value.clone(),
-                    })
-            })
-            .collect(),
-        config_memory: config
-            .acp_config_memory
-            .iter()
-            .flat_map(|(engine_kind_id, pairs)| {
-                pairs.iter().map(
-                    |(config_id, value_id)| smelt_store::AgentAcpConfigMemoryRecord {
-                        engine_kind_id: engine_kind_id.clone(),
-                        config_id: config_id.clone(),
-                        value_id: value_id.clone(),
-                    },
-                )
-            })
-            .collect(),
-        agents: config
-            .agents
-            .iter()
-            .map(|agent| smelt_store::AgentDefinitionRecord {
-                id: agent.id.clone(),
-                name: agent.name.clone(),
-                description: agent.description.clone(),
-                engine_kind_id: agent.engine_kind_id.clone(),
-                prompt: agent.prompt.clone(),
-                plugins_json: serde_json::to_vec(&agent.plugins).unwrap_or_else(|_| b"[]".to_vec()),
-                mcp_servers_json: serde_json::to_vec(&agent.mcp_servers)
-                    .unwrap_or_else(|_| b"[]".to_vec()),
-                context_folders_json: serde_json::to_vec(&agent.context_folders)
-                    .unwrap_or_else(|_| b"[]".to_vec()),
-                context_links_json: serde_json::to_vec(&agent.context_links)
-                    .unwrap_or_else(|_| b"[]".to_vec()),
-                model_provider: agent.model_provider.clone(),
-                model_id: agent.model_id.clone(),
-                memory_enabled: agent.memory_enabled,
-            })
-            .collect(),
-        profiles: config
-            .profiles
-            .iter()
-            .map(|profile| smelt_store::AgentProfileRecord {
-                id: profile.id.clone(),
-                kind_id: profile.kind_id.clone(),
-                label: profile.label.clone(),
-                workspace_dir: profile.workspace_dir.clone(),
-            })
-            .collect(),
-    }
-}
-
-fn config_from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostState {
-    let mut acp_cmds = ConversationCommands::default();
-    for command in snapshot.commands {
-        if let Some(descriptor) = CONVERSATION_AGENTS
-            .iter()
-            .find(|descriptor| descriptor.config_key == command.command_key)
-        {
-            acp_cmds.0.insert(descriptor.id, command.command);
+        Ok(None) => AgentHostState::default().notify_prefs(),
+        Err(error) => {
+            eprintln!("[settings] 读取通知偏好失败，使用默认值：{error}");
+            AgentHostState::default().notify_prefs()
         }
     }
-    let mut acp_env = BTreeMap::new();
-    for record in snapshot.env {
-        acp_env
-            .entry(record.engine_kind_id)
-            .or_insert_with(BTreeMap::new)
-            .insert(record.name, record.value);
-    }
-    let mut acp_config_memory = BTreeMap::new();
-    for record in snapshot.config_memory {
-        acp_config_memory
-            .entry(record.engine_kind_id)
-            .or_insert_with(Vec::new)
-            .push((record.config_id, record.value_id));
-    }
-    AgentHostState {
-        agent_hooks_enabled: snapshot.agent_hooks_enabled,
-        cross_agent_enabled: snapshot.cross_agent_enabled,
-        notify_approval: snapshot.notify_approval,
-        notify_input: snapshot.notify_input,
-        notify_success: snapshot.notify_success,
-        notify_failure: snapshot.notify_failure,
-        notify_terminal_bell: snapshot.notify_terminal_bell,
-        acp_cmds,
-        acp_env,
-        acp_config_memory,
-        native_dsh_profiles: Vec::new(),
-        profiles: snapshot
-            .profiles
-            .into_iter()
-            .map(|profile| AcpProfile {
-                id: profile.id,
-                kind_id: profile.kind_id,
-                label: profile.label,
-                workspace_dir: profile.workspace_dir,
-            })
-            .collect(),
-        agents: snapshot
-            .agents
-            .into_iter()
-            .map(|agent| AgentDefinition {
-                id: agent.id,
-                name: agent.name,
-                description: agent.description,
-                engine_kind_id: agent.engine_kind_id,
-                prompt: agent.prompt,
-                plugins: serde_json::from_slice(&agent.plugins_json).unwrap_or_default(),
-                mcp_servers: serde_json::from_slice(&agent.mcp_servers_json).unwrap_or_default(),
-                context_folders: serde_json::from_slice(&agent.context_folders_json)
-                    .unwrap_or_default(),
-                context_links: serde_json::from_slice(&agent.context_links_json)
-                    .unwrap_or_default(),
-                model_provider: agent.model_provider,
-                model_id: agent.model_id,
-                memory_enabled: agent.memory_enabled,
-            })
-            .collect(),
-        automations: Vec::new(),
-        automation_store_id: String::new(),
-        retired_automation_store_ids: HashSet::new(),
-        automation_revision: 0,
-        automation_states: Vec::new(),
-        automation_runs: Vec::new(),
-        automation_store_error: None,
-        webhook_base_url: None,
-        persistence_error: None,
-        persistence_blocked: false,
-    }
 }
 
+fn save_notify_prefs(prefs: NotifyPrefs) -> Result<(), String> {
+    smelt_client_store::client_store()
+        .and_then(|store| {
+            store.put_notify_prefs(&smelt_client_store::NotifyPrefsRecord {
+                approval: prefs.approval,
+                input: prefs.input,
+                success: prefs.success,
+                failure: prefs.failure,
+                terminal_bell: prefs.terminal_bell,
+            })
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// 启动时的初始状态：客户端的通知偏好立刻可用；运行时那部分还没加载，
+/// 不接受修改，见 [`start_agent_host_load`]。
+pub fn initial_agent_host_state() -> AgentHostState {
+    let mut state = AgentHostState::default();
+    state.set_notify_prefs(load_notify_prefs());
+    state
+}
+
+fn fetch_agent_host() -> Result<AgentHostSettings, String> {
+    smelt_client::daemon_state::local_runtime()
+        .call::<AgentHostGet>(&EmptyParams::default(), RUNTIME_TIMEOUT)
+        .map_err(|error| error.to_string())
+}
+
+/// 运行时那部分配置加载好了没有。没好之前，依赖它的启动和恢复要等。
+pub fn agent_host_loaded(cx: &App) -> bool {
+    cx.try_global::<AgentHostState>()
+        .is_some_and(|state| state.runtime_loaded)
+}
+
+/// 后台从运行时加载配置；运行时还没起来就按退避重试，直到拿到为止。
+/// `on_first_load` 在第一次加载成功后调用一次。
+pub fn start_agent_host_load(cx: &mut App, on_first_load: impl FnOnce(&mut App) + 'static) {
+    cx.spawn(async move |cx| {
+        let mut attempt = 0u32;
+        loop {
+            let fetched = cx
+                .background_executor()
+                .spawn(async { fetch_agent_host() })
+                .await;
+            match fetched {
+                Ok(settings) => {
+                    cx.update(|cx| {
+                        let mut state = cx.global::<AgentHostState>().clone();
+                        state.apply_runtime_settings(settings);
+                        state.persistence_error = None;
+                        cx.set_global(state);
+                        on_first_load(cx);
+                    });
+                    return;
+                }
+                Err(error) => {
+                    // 运行时刚被拉起、正在升级时连不上是常态，先安静重试几次。
+                    if attempt >= 4 {
+                        cx.update(|cx| {
+                            let mut state = cx.global::<AgentHostState>().clone();
+                            state.persistence_error =
+                                Some(format!("读取运行时的智能体配置失败，正在重试：{error}"));
+                            cx.set_global(state);
+                        });
+                    }
+                }
+            }
+            cx.background_executor()
+                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
+                    attempt,
+                ))
+                .await;
+            attempt = attempt.saturating_add(1);
+        }
+    })
+    .detach();
+}
+
+/// 修改按提交顺序逐个发给运行时。并发发出去，运行时处理的先后和回包的先后都可能
+/// 乱，界面就会停在一个旧版本上。
+struct AgentHostEditQueue {
+    tx: smol::channel::Sender<AgentHostEdit>,
+}
+
+impl Global for AgentHostEditQueue {}
+
+fn submit_agent_host_edit(edit: AgentHostEdit, cx: &mut App) {
+    if !cx.has_global::<AgentHostEditQueue>() {
+        let (tx, rx) = smol::channel::unbounded::<AgentHostEdit>();
+        cx.set_global(AgentHostEditQueue { tx });
+        cx.spawn(async move |cx| {
+            while let Ok(edit) = rx.recv().await {
+                let applied = cx
+                    .background_executor()
+                    .spawn(async move {
+                        smelt_client::daemon_state::local_runtime()
+                            .call::<AgentHostApplyEdit>(&edit, RUNTIME_TIMEOUT)
+                            .map_err(|error| error.to_string())
+                    })
+                    .await;
+                // 后面还有排着的修改时，这一包不是最终状态，先不覆盖本地。
+                let drained = rx.is_empty();
+                let settled = match applied {
+                    Ok(settings) => Ok(settings),
+                    Err(error) if drained => {
+                        // 失败后以运行时为准，把本地乐观改动退回去。
+                        let fresh = cx
+                            .background_executor()
+                            .spawn(async { fetch_agent_host() })
+                            .await;
+                        Err((error, fresh.ok()))
+                    }
+                    Err(error) => Err((error, None)),
+                };
+                cx.update(|cx| {
+                    let mut state = cx.global::<AgentHostState>().clone();
+                    match settled {
+                        Ok(settings) => {
+                            if drained {
+                                state.apply_runtime_settings(settings);
+                            }
+                        }
+                        Err((error, fresh)) => {
+                            eprintln!("[agent-ui] 保存配置失败: {error}");
+                            if let Some(settings) = fresh {
+                                state.apply_runtime_settings(settings);
+                            }
+                            state.persistence_error = Some(format!("保存智能体配置失败：{error}"));
+                        }
+                    }
+                    cx.set_global(state);
+                });
+            }
+        })
+        .detach();
+    }
+    let _ = cx.global::<AgentHostEditQueue>().tx.try_send(edit);
+}
+
+/// 改一次配置。本地立刻生效；运行时那部分按「这次改了什么」异步提交，以运行时
+/// 合并后的结果为准。返回 false 表示这次没有接受：运行时配置还没加载，或客户端
+/// 偏好写不进去。
 pub fn try_apply_agent_host(f: impl FnOnce(&mut AgentHostState), cx: &mut App) -> bool {
     let current = cx.global::<AgentHostState>().clone();
-    if current.persistence_blocked {
+    if !current.runtime_loaded {
+        let mut current = current;
+        current.persistence_error = Some("运行时的智能体配置还没读到，稍后再改".to_string());
         cx.set_global(current);
         return false;
     }
     let mut candidate = current.clone();
     f(&mut candidate);
     candidate.persistence_error = None;
-    if let Err(error) = save_agent_host_state(&candidate) {
-        eprintln!("[agent-ui] 保存配置失败: {error}");
+    if candidate.notify_prefs() != current.notify_prefs()
+        && let Err(error) = save_notify_prefs(candidate.notify_prefs())
+    {
+        eprintln!("[agent-ui] 保存通知偏好失败: {error}");
         let mut current = current;
-        current.persistence_error = Some(format!("保存智能体配置失败：{error}"));
+        current.persistence_error = Some(format!("保存通知偏好失败：{error}"));
         cx.set_global(current);
         return false;
     }
-    let synced = smelt_core::agent_definition_store::sync_agent_definitions(
-        &current.agents,
-        &candidate.agents,
-    );
-    // 定义的真源是 SQLite：同步是按字段合并到库里最新行上的，内存里的 `candidate`
-    // 不含 CLI / Control API 同期的修改。无论成败都从库重读，不让界面停在旧副本上；
-    // 重读本身失败才退回内存副本并报错。
-    let stored_agents = smelt_core::agent_definition_store::list_agent_definitions();
-    let (mut next, saved, error) = match synced {
-        Ok(()) => (candidate, true, None),
-        Err(error) => (current, false, Some(error.to_string())),
-    };
-    let error = match stored_agents {
-        Ok(agents) => {
-            next.agents = agents;
-            error
-        }
-        Err(reload_error) => error.or_else(|| Some(reload_error.to_string())),
-    };
-    if let Some(error) = &error {
-        eprintln!("[agent-ui] 保存智能体定义失败: {error}");
-        next.persistence_error = Some(format!("保存智能体配置失败：{error}"));
+    let before = current.runtime_settings();
+    let after = candidate.runtime_settings();
+    cx.set_global(candidate);
+    if before != after {
+        submit_agent_host_edit(AgentHostEdit { before, after }, cx);
     }
-    cx.set_global(next);
-    saved
+    true
 }
 
-/// 从 SQLite 重新加载定义清单。CLI / Control API 写入后，打开智能体面时对齐内存。
+/// 从运行时重新取一份。CLI / Control API 改过定义后，打开智能体面时对齐。
 pub fn reload_agent_definitions(cx: &mut App) {
-    if !cx.has_global::<AgentHostState>() {
+    if !agent_host_loaded(cx) {
         return;
     }
-    let mut state = cx.global::<AgentHostState>().clone();
-    if state.persistence_blocked {
-        return;
-    }
-    state.agents = smelt_core::agent_definition_store::load_agent_definitions();
-    cx.set_global(state);
+    cx.spawn(async move |cx| {
+        let fetched = cx
+            .background_executor()
+            .spawn(async { fetch_agent_host() })
+            .await;
+        cx.update(|cx| {
+            let mut state = cx.global::<AgentHostState>().clone();
+            match fetched {
+                Ok(settings) => state.apply_runtime_settings(settings),
+                Err(error) => {
+                    state.persistence_error = Some(format!("读取智能体配置失败：{error}"))
+                }
+            }
+            cx.set_global(state);
+        });
+    })
+    .detach();
 }
 
 pub fn apply_agent_host(f: impl FnOnce(&mut AgentHostState), cx: &mut App) {
@@ -901,109 +907,6 @@ mod tests {
         store_a.revision = 11;
         assert!(!config.replace_automation_snapshot(store_a));
         assert_eq!(config.automation_store_id, "store-b");
-    }
-
-    #[test]
-    fn legacy_codex_default_is_replaced_by_current_adapter() {
-        let mut config = AgentHostState::default();
-        config.set_acp_cmd_for(
-            ConversationAgentKind::Codex,
-            "bunx --bun @zed-industries/codex-acp@0.16.0".into(),
-        );
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Codex),
-            ConversationAgentKind::Codex.default_cmd()
-        );
-    }
-
-    #[test]
-    fn interim_app_server_default_is_replaced_by_current_adapter() {
-        let mut config = AgentHostState::default();
-        config.set_acp_cmd_for(ConversationAgentKind::Codex, "codex app-server".into());
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Codex),
-            ConversationAgentKind::Codex.default_cmd()
-        );
-    }
-
-    #[test]
-    fn previous_official_adapter_defaults_are_replaced_by_current_versions() {
-        let mut config = AgentHostState::default();
-        config.set_acp_cmd_for(
-            ConversationAgentKind::Claude,
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.59.0".into(),
-        );
-        config.set_acp_cmd_for(
-            ConversationAgentKind::Codex,
-            "bunx --bun @agentclientprotocol/codex-acp@1.1.7".into(),
-        );
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Claude),
-            "bunx --bun @agentclientprotocol/claude-agent-acp@0.78.0"
-        );
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Codex),
-            "bunx --bun @agentclientprotocol/codex-acp@1.12.0"
-        );
-    }
-
-    #[test]
-    fn unsupported_kiro_v3_trust_default_is_migrated_without_touching_custom_commands() {
-        let mut config = AgentHostState::default();
-        config.set_acp_cmd_for(
-            ConversationAgentKind::Kiro,
-            "kiro-cli acp --agent-engine v3 --auth-method cli --trust-all-tools".into(),
-        );
-
-        assert!(migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Kiro),
-            "kiro-cli acp --agent-engine v3 --auth-method cli"
-        );
-
-        let custom =
-            "kiro-cli acp --agent-engine v3 --auth-method cli --agent personal".to_string();
-        let mut config =
-            AgentHostState::default().with_acp_cmd(ConversationAgentKind::Kiro, custom.clone());
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-        assert_eq!(config.acp_cmd_for(ConversationAgentKind::Kiro), custom);
-    }
-
-    #[test]
-    fn customized_previous_adapter_command_is_not_replaced() {
-        let custom = "NO_BROWSER=1 bunx --bun @agentclientprotocol/codex-acp@1.1.7".to_string();
-        let mut config =
-            AgentHostState::default().with_acp_cmd(ConversationAgentKind::Codex, custom.clone());
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-        assert_eq!(config.acp_cmd_for(ConversationAgentKind::Codex), custom);
-    }
-
-    #[test]
-    fn current_adapter_defaults_do_not_repeat_migration() {
-        let mut config = AgentHostState::default();
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-    }
-
-    #[test]
-    fn custom_codex_adapter_is_not_migrated() {
-        let mut config = AgentHostState::default();
-        config.set_acp_cmd_for(ConversationAgentKind::Codex, "codex-acp --custom".into());
-
-        assert!(!migrate_released_adapter_defaults(&mut config));
-        assert_eq!(
-            config.acp_cmd_for(ConversationAgentKind::Codex),
-            "codex-acp --custom"
-        );
     }
 
     /// 设置页填的环境变量必须真的跟着会话走。之前会话侧是自己
@@ -1184,6 +1087,7 @@ mod tests {
     #[test]
     fn profile_inherits_kind_env_without_losing_its_workspace_dir() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "p1".into(),
             kind_id: ConversationAgentKind::Claude.id().into(),
             label: "Claude Quant".into(),
@@ -1217,6 +1121,11 @@ mod tests {
     #[test]
     fn native_dsh_profile_keeps_credentials_owned_by_dsh() {
         let profile = AcpProfile {
+            native_launch: Some(
+                smelt_model::agent_kind::ConversationLaunchSpec::from_command(
+                    "dsh-acp-rich --profile team",
+                ),
+            ),
             id: "dsh-native-team".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · team".into(),
@@ -1238,6 +1147,11 @@ mod tests {
     #[test]
     fn default_dsh_launch_prefers_the_discovered_native_profile() {
         let native = AcpProfile {
+            native_launch: Some(
+                smelt_model::agent_kind::ConversationLaunchSpec::from_command(
+                    "dsh-acp-rich --profile web",
+                ),
+            ),
             id: "dsh-native-web".into(),
             kind_id: ConversationAgentKind::Dsh.id().into(),
             label: "DeepSeek Harness · web".into(),
@@ -1319,52 +1233,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_disabled_awaiting_setting_disables_both_wait_notifications() {
-        let mut config = AgentHostState::default();
-        let old = serde_json::json!({ "notify_awaiting": false });
-
-        assert!(migrate_legacy_notification_setting(&mut config, &old));
-        assert!(!config.notify_approval);
-        assert!(!config.notify_input);
-        assert!(config.notify_success);
-        assert!(config.notify_failure);
-    }
-
-    #[test]
-    fn new_install_and_legacy_upgrade_enable_hooks() {
-        assert!(AgentHostState::default().agent_hooks_enabled);
-
-        let legacy_value = serde_json::json!({});
-        let mut legacy: AgentHostState = serde_json::from_value(legacy_value.clone()).unwrap();
-        assert!(!legacy.agent_hooks_enabled);
-        assert!(migrate_legacy_hooks_setting(&mut legacy, &legacy_value));
-        assert!(legacy.agent_hooks_enabled);
-        assert_eq!(
-            serde_json::to_value(&legacy).unwrap()["agent_hooks_enabled"],
-            serde_json::json!(true)
-        );
-    }
-
-    #[test]
-    fn missing_hooks_key_migrates_to_enabled() {
-        let value = serde_json::json!({ "cross_agent_enabled": true });
-        let mut config: AgentHostState = serde_json::from_value(value.clone()).unwrap();
-        assert!(value.get("agent_hooks_enabled").is_none());
-        assert!(migrate_legacy_hooks_setting(&mut config, &value));
-        assert!(config.agent_hooks_enabled);
-    }
-
-    #[test]
-    fn explicit_hook_preference_is_never_overridden() {
-        for enabled in [false, true] {
-            let value = serde_json::json!({ "agent_hooks_enabled": enabled });
-            let mut config: AgentHostState = serde_json::from_value(value.clone()).unwrap();
-            assert!(!migrate_legacy_hooks_setting(&mut config, &value));
-            assert_eq!(config.agent_hooks_enabled, enabled);
-        }
-    }
-
-    #[test]
     fn cross_agent_messaging_defaults_to_enabled_for_legacy_config() {
         let legacy: AgentHostState = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(legacy.cross_agent_enabled);
@@ -1384,6 +1252,7 @@ mod tests {
         let mut config = AgentHostState::default();
         config.set_acp_cmd_for(ConversationAgentKind::Claude, "claude-custom --acp".into());
         let profile = AcpProfile {
+            native_launch: None,
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
@@ -1402,6 +1271,7 @@ mod tests {
     #[test]
     fn unknown_profile_cannot_resolve_a_launch_spec() {
         let profile = AcpProfile {
+            native_launch: None,
             id: "future-profile".into(),
             kind_id: "future-agent".into(),
             label: "Future Agent".into(),

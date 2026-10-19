@@ -26,8 +26,7 @@ pub struct LocalRepositoryBinding {
     pub path: String,
     /// 主 canonical remote key：host/path，不包含凭据、scheme 和 `.git`。
     ///
-    /// 作为该 checkout 的稳定身份，被 worktree 目录名与 workspace id 复用，
-    /// 因此选取规则必须确定（`origin` > `upstream` > 其余按名称排序取首个）。
+    /// 作为该 checkout 的稳定身份，选取规则必须确定（`origin` > `upstream` > 其余按名称排序取首个）。
     pub remote_key: String,
     /// 该 checkout 上全部 remote 的 canonical key（含 [`Self::remote_key`]）。
     ///
@@ -131,7 +130,7 @@ pub fn project_root_for_repository(
 }
 
 /// 判断一个已登记项目是否是包含多个 Git checkout 的本地 workspace。
-/// 该信息主要供原地执行/兼容逻辑做目录级并发判断；新 Issue 会为每个 repo 创建子 worktree。
+/// 该信息主要供原地执行/兼容逻辑做目录级并发判断。
 pub fn is_multi_repository_project(registry: &LocalProjectRegistry, root: &Path) -> bool {
     if !root.is_dir() {
         return false;

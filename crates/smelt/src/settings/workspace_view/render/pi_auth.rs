@@ -3,13 +3,13 @@
 //! 和「自定义 Provider」那一节的分工：那边是填一个网关地址加一把 key，这边是
 //! Pi 自己认识的 provider——它们的凭据要么来自订阅登录（授权链接 / device code），
 //! 要么是一把存进 `auth.json` 的 key，两条路都由 Pi 的登录流程自己跑（见
-//! [`smelt_core::pi_auth`]）。
+//! [`smelt_model::pi_auth`]）。
 //!
 //! 列表本身（和自定义 Provider 合并、排序、折叠）在 `pi_model.rs`；这里只画内置
 //! Provider 的一行，以及就地展开的登录面板和模型选择面板。
 
 use super::*;
-use smelt_core::pi_auth::{PiAuthProvider, PiAuthStatus, PiLoginMethod, PiPromptKind};
+use smelt_model::pi_auth::{PiAuthProvider, PiAuthStatus, PiLoginMethod, PiPromptKind};
 
 /// 内置 Provider 的一行。按钮区只放当下最该点的那一个，其余动作收进「⋯」：
 /// 原来一行最多五个按钮，扫一眼分不出哪个是正路。
@@ -174,10 +174,11 @@ pub(super) fn builtin_provider_row(
                         .children(
                             provider
                                 .subscription
-                                .then(|| super::pi_model::pill("订阅", palette.muted)),
+                                .then(|| Tag::secondary().rounded_full().flex_none().child("订阅")),
                         )
                         .children(
-                            is_default.then(|| super::pi_model::pill("默认", palette.success)),
+                            is_default
+                                .then(|| Tag::success().rounded_full().flex_none().child("默认")),
                         ),
                 )
                 .child(
@@ -454,7 +455,7 @@ pub(super) fn login_panel(
 fn model_choices(
     entity: Entity<Workspace>,
     provider_id: &str,
-    models: Option<&Result<Vec<smelt_core::provider_api::DiscoveredModel>, String>>,
+    models: Option<&Result<Vec<smelt_model::provider_api::DiscoveredModel>, String>>,
     current_default: Option<&str>,
     fg: gpui::Hsla,
     muted: gpui::Hsla,

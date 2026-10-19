@@ -7,44 +7,24 @@ use crate::{
     RemoteTerminalSessionRecord, StoreError,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde_json::{Value, json};
-use std::collections::BTreeSet;
-
-const AGENT_UI_DOCUMENT: &str = "agent_ui.json";
-const REMOTE_ACP_DOCUMENT: &str = "remote_acp_sessions.json";
-const REMOTE_TERMINAL_DOCUMENT: &str = "remote_terminal_sessions.json";
-const PUBLISHED_SESSION_DOCUMENT: &str = "sessions.json";
-
-const AGENT_UI_RESERVED: &[&str] = &[
-    "agent_hooks_enabled",
-    "cross_agent_enabled",
-    "notify_approval",
-    "notify_awaiting",
-    "notify_input",
-    "notify_success",
-    "notify_failure",
-    "notify_terminal_bell",
-    "acp_env",
-    "acp_config_memory",
-    "profiles",
-    "agents",
-    "agent_presets",
-];
 
 pub(crate) fn read_agent_ui_snapshot(
     connection: &Connection,
 ) -> Result<Option<AgentUiSnapshot>, StoreError> {
-    if !agent_ui_exists(connection)? {
+    let prefs: Option<(bool, bool)> = connection
+        .query_row(
+            "SELECT hooks_enabled, cross_agent_enabled FROM agent_host_pref WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if prefs.is_none() && !agent_definitions_exist(connection)? {
         return Ok(None);
     }
+    let (agent_hooks_enabled, cross_agent_enabled) = prefs.unwrap_or((true, true));
     Ok(Some(AgentUiSnapshot {
-        agent_hooks_enabled: pref_bool(connection, "agent_hooks_enabled")?.unwrap_or(true),
-        cross_agent_enabled: pref_bool(connection, "cross_agent_enabled")?.unwrap_or(true),
-        notify_approval: pref_bool(connection, "notify_approval")?.unwrap_or(true),
-        notify_input: pref_bool(connection, "notify_input")?.unwrap_or(true),
-        notify_success: pref_bool(connection, "notify_success")?.unwrap_or(true),
-        notify_failure: pref_bool(connection, "notify_failure")?.unwrap_or(true),
-        notify_terminal_bell: pref_bool(connection, "notify_terminal_bell")?.unwrap_or(true),
+        agent_hooks_enabled,
+        cross_agent_enabled,
         commands: query_commands(connection)?,
         env: query_env(connection)?,
         config_memory: query_config_memory(connection)?,
@@ -62,38 +42,23 @@ pub(crate) fn write_agent_ui_snapshot(
     Ok(())
 }
 
-/// 写智能体界面偏好、启动命令和 profile，不动 `agent_definition`。
+/// 写智能体宿主偏好、启动命令和 profile，不动 `agent_definition`。
 ///
-/// GUI 改通知开关时不能整表重写定义：否则并发的单行 create 会被内存里的旧清单盖掉。
+/// 改偏好时不能整表重写定义：否则并发的单行 create 会被内存里的旧清单盖掉。
 pub(crate) fn write_agent_ui_prefs(
     transaction: &Transaction<'_>,
     snapshot: &AgentUiSnapshot,
 ) -> Result<(), StoreError> {
-    transaction.execute("DELETE FROM agent_ui_pref", [])?;
     transaction.execute("DELETE FROM agent_acp_command", [])?;
     transaction.execute("DELETE FROM agent_acp_env", [])?;
     transaction.execute("DELETE FROM agent_acp_config_memory", [])?;
     transaction.execute("DELETE FROM agent_profile", [])?;
-    crate::documents::delete_document_scope(transaction, AGENT_UI_DOCUMENT)?;
-
-    upsert_pref(
-        transaction,
-        "agent_hooks_enabled",
-        snapshot.agent_hooks_enabled,
-    )?;
-    upsert_pref(
-        transaction,
-        "cross_agent_enabled",
-        snapshot.cross_agent_enabled,
-    )?;
-    upsert_pref(transaction, "notify_approval", snapshot.notify_approval)?;
-    upsert_pref(transaction, "notify_input", snapshot.notify_input)?;
-    upsert_pref(transaction, "notify_success", snapshot.notify_success)?;
-    upsert_pref(transaction, "notify_failure", snapshot.notify_failure)?;
-    upsert_pref(
-        transaction,
-        "notify_terminal_bell",
-        snapshot.notify_terminal_bell,
+    transaction.execute(
+        "INSERT INTO agent_host_pref(id, hooks_enabled, cross_agent_enabled) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET
+           hooks_enabled = excluded.hooks_enabled,
+           cross_agent_enabled = excluded.cross_agent_enabled",
+        params![snapshot.agent_hooks_enabled, snapshot.cross_agent_enabled],
     )?;
     for command in &snapshot.commands {
         transaction.execute(
@@ -232,272 +197,6 @@ pub(crate) fn delete_agent_definition(
     Ok(changed > 0)
 }
 
-pub(crate) fn agent_ui_from_document(value: &Value) -> Result<AgentUiSnapshot, StoreError> {
-    let object = value.as_object();
-    let reserved: BTreeSet<&str> = AGENT_UI_RESERVED.iter().copied().collect();
-    let mut commands = Vec::new();
-    if let Some(object) = object {
-        for (key, item) in object {
-            if reserved.contains(key.as_str()) {
-                continue;
-            }
-            if let Some(command) = item.as_str() {
-                commands.push(AgentConversationCommandRecord {
-                    command_key: key.clone(),
-                    command: command.to_string(),
-                });
-            }
-        }
-    }
-    let mut env = Vec::new();
-    if let Some(map) = value.get("acp_env").and_then(Value::as_object) {
-        for (engine_kind_id, vars) in map {
-            if let Some(vars) = vars.as_object() {
-                for (name, item) in vars {
-                    if let Some(item) = item.as_str() {
-                        env.push(AgentAcpEnvRecord {
-                            engine_kind_id: engine_kind_id.clone(),
-                            name: name.clone(),
-                            value: item.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    let mut config_memory = Vec::new();
-    if let Some(map) = value.get("acp_config_memory").and_then(Value::as_object) {
-        for (engine_kind_id, pairs) in map {
-            if let Some(pairs) = pairs.as_array() {
-                for pair in pairs {
-                    let config_id = pair
-                        .get(0)
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let value_id = pair
-                        .get(1)
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    if config_id.is_empty() {
-                        continue;
-                    }
-                    config_memory.push(AgentAcpConfigMemoryRecord {
-                        engine_kind_id: engine_kind_id.clone(),
-                        config_id,
-                        value_id,
-                    });
-                }
-            }
-        }
-    }
-    let agents_value = value
-        .get("agents")
-        .or_else(|| value.get("agent_presets"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut agents = Vec::new();
-    for agent in agents_value {
-        let id = agent.get("id").and_then(Value::as_str).unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        agents.push(AgentDefinitionRecord {
-            id: id.to_string(),
-            name: agent
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            description: agent
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            engine_kind_id: agent
-                .get("engine_kind")
-                .or_else(|| agent.get("agent_id"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            prompt: agent
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            plugins_json: json_bytes(agent.get("plugins"), json!([])),
-            mcp_servers_json: json_bytes(agent.get("mcp_servers"), json!([])),
-            context_folders_json: json_bytes(agent.get("context_folders"), json!([])),
-            context_links_json: json_bytes(agent.get("context_links"), json!([])),
-            model_provider: agent
-                .get("model_provider")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            model_id: agent
-                .get("model_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            memory_enabled: agent
-                .get("memory_enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-        });
-    }
-    let mut profiles = Vec::new();
-    if let Some(items) = value.get("profiles").and_then(Value::as_array) {
-        for profile in items {
-            let id = profile
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if id.is_empty() {
-                continue;
-            }
-            profiles.push(AgentProfileRecord {
-                id: id.to_string(),
-                kind_id: profile
-                    .get("kind_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                label: profile
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                workspace_dir: profile
-                    .get("workspace_dir")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            });
-        }
-    }
-    Ok(AgentUiSnapshot {
-        agent_hooks_enabled: value
-            .get("agent_hooks_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        cross_agent_enabled: value
-            .get("cross_agent_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_approval: value
-            .get("notify_approval")
-            .or_else(|| value.get("notify_awaiting"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_input: value
-            .get("notify_input")
-            .or_else(|| value.get("notify_awaiting"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_success: value
-            .get("notify_success")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_failure: value
-            .get("notify_failure")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        notify_terminal_bell: value
-            .get("notify_terminal_bell")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        commands,
-        env,
-        config_memory,
-        agents,
-        profiles,
-    })
-}
-
-pub(crate) fn json_from_agent_ui(snapshot: &AgentUiSnapshot) -> Result<Value, StoreError> {
-    let mut object = serde_json::Map::new();
-    object.insert(
-        "agent_hooks_enabled".into(),
-        json!(snapshot.agent_hooks_enabled),
-    );
-    object.insert(
-        "cross_agent_enabled".into(),
-        json!(snapshot.cross_agent_enabled),
-    );
-    object.insert("notify_approval".into(), json!(snapshot.notify_approval));
-    object.insert("notify_input".into(), json!(snapshot.notify_input));
-    object.insert("notify_success".into(), json!(snapshot.notify_success));
-    object.insert("notify_failure".into(), json!(snapshot.notify_failure));
-    object.insert(
-        "notify_terminal_bell".into(),
-        json!(snapshot.notify_terminal_bell),
-    );
-    for command in &snapshot.commands {
-        object.insert(command.command_key.clone(), json!(command.command));
-    }
-    let mut env = serde_json::Map::new();
-    for record in &snapshot.env {
-        env.entry(record.engine_kind_id.clone())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .expect("env object")
-            .insert(record.name.clone(), json!(record.value));
-    }
-    object.insert("acp_env".into(), Value::Object(env));
-    let mut memory = serde_json::Map::new();
-    for record in &snapshot.config_memory {
-        memory
-            .entry(record.engine_kind_id.clone())
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("memory array")
-            .push(json!([record.config_id, record.value_id]));
-    }
-    object.insert("acp_config_memory".into(), Value::Object(memory));
-    object.insert(
-        "agents".into(),
-        json!(snapshot
-            .agents
-            .iter()
-            .map(|agent| {
-                json!({
-                    "id": agent.id,
-                    "name": agent.name,
-                    "description": agent.description,
-                    "engine_kind": agent.engine_kind_id,
-                    "prompt": agent.prompt,
-                    "plugins": serde_json::from_slice::<Value>(&agent.plugins_json)
-                        .unwrap_or_else(|_| json!([])),
-                    "mcp_servers": serde_json::from_slice::<Value>(&agent.mcp_servers_json)
-                        .unwrap_or_else(|_| json!([])),
-                    "context_folders": serde_json::from_slice::<Value>(&agent.context_folders_json)
-                        .unwrap_or_else(|_| json!([])),
-                    "context_links": serde_json::from_slice::<Value>(&agent.context_links_json)
-                        .unwrap_or_else(|_| json!([])),
-                })
-            })
-            .collect::<Vec<_>>()),
-    );
-    object.insert(
-        "profiles".into(),
-        json!(
-            snapshot
-                .profiles
-                .iter()
-                .map(|profile| json!({
-                    "id": profile.id,
-                    "kind_id": profile.kind_id,
-                    "label": profile.label,
-                    "workspace_dir": profile.workspace_dir,
-                }))
-                .collect::<Vec<_>>()
-        ),
-    );
-    Ok(Value::Object(object))
-}
-
 pub(crate) fn read_remote_session_snapshot(
     connection: &Connection,
 ) -> Result<Option<RemoteSessionCatalogSnapshot>, StoreError> {
@@ -515,8 +214,6 @@ pub(crate) fn write_remote_session_snapshot(
 ) -> Result<(), StoreError> {
     transaction.execute("DELETE FROM remote_acp_session", [])?;
     transaction.execute("DELETE FROM remote_terminal_session", [])?;
-    crate::documents::delete_document_scope(transaction, REMOTE_ACP_DOCUMENT)?;
-    crate::documents::delete_document_scope(transaction, REMOTE_TERMINAL_DOCUMENT)?;
     for session in &snapshot.acp {
         transaction.execute(
             "INSERT INTO remote_acp_session(
@@ -597,7 +294,6 @@ pub(crate) fn write_published_session_snapshot(
     snapshot: &PublishedSessionSnapshot,
 ) -> Result<(), StoreError> {
     transaction.execute("DELETE FROM published_session", [])?;
-    crate::documents::delete_document_scope(transaction, PUBLISHED_SESSION_DOCUMENT)?;
     for session in &snapshot.sessions {
         transaction.execute(
             "INSERT INTO published_session(
@@ -627,269 +323,12 @@ pub(crate) fn write_published_session_snapshot(
     Ok(())
 }
 
-pub(crate) fn migrate_catalog_from_kv_documents(
-    transaction: &Transaction<'_>,
-) -> Result<(), StoreError> {
-    if !agent_ui_exists(transaction)?
-        && let Some(raw) =
-            crate::documents::read_generic_document_bytes(transaction, AGENT_UI_DOCUMENT)?
-    {
-        let value: Value = serde_json::from_slice(&raw)?;
-        write_agent_ui_snapshot(transaction, &agent_ui_from_document(&value)?)?;
-    }
-    let mut remote =
-        read_remote_session_snapshot(transaction)?.unwrap_or(RemoteSessionCatalogSnapshot {
-            acp: Vec::new(),
-            terminal: Vec::new(),
-        });
-    let mut remote_changed = false;
-    if remote.acp.is_empty()
-        && let Some(raw) =
-            crate::documents::read_generic_document_bytes(transaction, REMOTE_ACP_DOCUMENT)?
-    {
-        let value: Value = serde_json::from_slice(&raw)?;
-        remote.acp = remote_acp_from_document(&value)?;
-        remote_changed = true;
-    }
-    if remote.terminal.is_empty()
-        && let Some(raw) =
-            crate::documents::read_generic_document_bytes(transaction, REMOTE_TERMINAL_DOCUMENT)?
-    {
-        let value: Value = serde_json::from_slice(&raw)?;
-        remote.terminal = remote_terminal_from_document(&value)?;
-        remote_changed = true;
-    }
-    if remote_changed {
-        write_remote_session_snapshot(transaction, &remote)?;
-    }
-    if read_published_session_snapshot(transaction)?.is_none()
-        && let Some(raw) =
-            crate::documents::read_generic_document_bytes(transaction, PUBLISHED_SESSION_DOCUMENT)?
-    {
-        let value: Value = serde_json::from_slice(&raw)?;
-        write_published_session_snapshot(transaction, &published_from_document(&value)?)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn remote_acp_from_document(
-    value: &Value,
-) -> Result<Vec<RemoteAcpSessionRecord>, StoreError> {
-    let mut sessions = Vec::new();
-    let items = value
-        .get("sessions")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for session in items {
-        let id = session
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        let launch = session.get("launch").cloned().unwrap_or(json!({}));
-        sessions.push(RemoteAcpSessionRecord {
-            id: id.to_string(),
-            cwd: session
-                .get("cwd")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            title: session
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            agent_option_id: session
-                .get("agent_option_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            agent: session
-                .get("agent")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            launch_command: launch
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            launch_env_json: json_bytes(launch.get("env"), json!({})),
-            resume_id: session
-                .get("resume_id")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            created_at: session
-                .get("created_at")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
-            lifecycle: session
-                .get("lifecycle")
-                .and_then(Value::as_str)
-                .unwrap_or("active")
-                .to_string(),
-            hidden: session
-                .get("hidden")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        });
-    }
-    Ok(sessions)
-}
-
-pub(crate) fn remote_terminal_from_document(
-    value: &Value,
-) -> Result<Vec<RemoteTerminalSessionRecord>, StoreError> {
-    let mut sessions = Vec::new();
-    let items = value
-        .get("sessions")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for session in items {
-        let id = session
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        sessions.push(RemoteTerminalSessionRecord {
-            id: id.to_string(),
-            cwd: session
-                .get("cwd")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            title: session
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            created_at: session
-                .get("created_at")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
-            lifecycle: session
-                .get("lifecycle")
-                .and_then(Value::as_str)
-                .unwrap_or("active")
-                .to_string(),
-        });
-    }
-    Ok(sessions)
-}
-
-pub(crate) fn published_from_document(
-    value: &Value,
-) -> Result<PublishedSessionSnapshot, StoreError> {
-    let mut sessions = Vec::new();
-    let items = value
-        .get("sessions")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for session in items {
-        let id = session
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        sessions.push(PublishedSessionRecord {
-            id: id.to_string(),
-            cwd: session
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            launch: session
-                .get("launch")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            provider: session
-                .get("provider")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            conversation_id: session
-                .get("conversation_id")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            title: session
-                .get("title")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            phase: session
-                .get("phase")
-                .and_then(Value::as_str)
-                .unwrap_or("idle")
-                .to_string(),
-            phase_since: session
-                .get("phase_since")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
-            updated_at: session
-                .get("updated_at")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
-            structured_events: session
-                .get("structured_events")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            turn_events: session
-                .get("turn_events")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            agent_event_version: session.get("agent_event_version").and_then(Value::as_i64),
-            tokens_used: session.get("tokens_used").and_then(Value::as_i64),
-            branch: session
-                .get("branch")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            dirty_files_json: json_bytes(session.get("dirty_files"), json!([])),
-        });
-    }
-    Ok(PublishedSessionSnapshot {
-        version: value.get("version").and_then(Value::as_u64).unwrap_or(1) as u32,
-        sessions,
-    })
-}
-
-fn agent_ui_exists(connection: &Connection) -> Result<bool, StoreError> {
-    let has_pref: bool =
-        connection.query_row("SELECT EXISTS(SELECT 1 FROM agent_ui_pref)", [], |row| {
-            row.get(0)
-        })?;
-    if has_pref {
-        return Ok(true);
-    }
+fn agent_definitions_exist(connection: &Connection) -> Result<bool, StoreError> {
     connection
         .query_row("SELECT EXISTS(SELECT 1 FROM agent_definition)", [], |row| {
             row.get(0)
         })
         .map_err(StoreError::from)
-}
-
-fn pref_bool(connection: &Connection, key: &str) -> Result<Option<bool>, StoreError> {
-    let value: Option<String> = connection
-        .query_row(
-            "SELECT value FROM agent_ui_pref WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(value.map(|value| value == "1" || value == "true"))
-}
-
-fn upsert_pref(transaction: &Transaction<'_>, key: &str, value: bool) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO agent_ui_pref(key, value) VALUES (?1, ?2)",
-        params![key, if value { "1" } else { "0" }],
-    )?;
-    Ok(())
 }
 
 fn query_commands(
@@ -1043,8 +482,4 @@ fn query_remote_terminal(
     })?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
-}
-
-fn json_bytes(value: Option<&Value>, fallback: Value) -> Vec<u8> {
-    serde_json::to_vec(value.unwrap_or(&fallback)).unwrap_or_else(|_| b"null".to_vec())
 }

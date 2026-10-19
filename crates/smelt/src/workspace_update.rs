@@ -34,7 +34,7 @@ impl Workspace {
         let current_release_url = match updater::current_release_url() {
             Ok(url) => url,
             Err(error) => {
-                smelt_core::app_log::error(
+                smelt_sys::app_log::error(
                     "updater",
                     &format!("读取本机更新状态失败，暂停检查：{error:#}"),
                 );
@@ -51,7 +51,7 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    smelt_core::block_on::block_on_tokio(updater::fetch_latest(channel))
+                    smelt_sys::block_on::block_on_tokio(updater::fetch_latest(channel))
                         .and_then(|r| r)
                 })
                 .await;
@@ -88,7 +88,7 @@ impl Workspace {
                         return;
                     }
                     Err(e) => {
-                        smelt_core::app_log::error(
+                        smelt_sys::app_log::error(
                             "updater",
                             &format!("检查{}更新失败：{e:#}", channel.label()),
                         );
@@ -146,7 +146,7 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
-                    smelt_core::app_log::info(
+                    smelt_sys::app_log::info(
                         "updater",
                         &format!(
                             "更新源已替换安装失败的包 {}，作废旧作业并继续检查结果",
@@ -156,7 +156,7 @@ impl Workspace {
                     this.apply_update_check_outcome(outcome, cx);
                 }
                 Err(error) => {
-                    smelt_core::app_log::error(
+                    smelt_sys::app_log::error(
                         "updater",
                         &format!("作废安装失败的更新 {} 失败：{error:#}", failed.version),
                     );
@@ -199,7 +199,7 @@ impl Workspace {
             let v = version.clone();
             let download_url = url.clone();
             let task = cx.background_executor().spawn(async move {
-                smelt_core::block_on::block_on_tokio(updater::download_and_stage(
+                smelt_sys::block_on::block_on_tokio(updater::download_and_stage(
                     &download_url,
                     &v,
                     |p| {
@@ -233,7 +233,7 @@ impl Workspace {
                 this.update_status = match result {
                     Ok(update) => updater::UpdateStatus::ReadyToInstall(update),
                     Err(e) => {
-                        smelt_core::app_log::error(
+                        smelt_sys::app_log::error(
                             "updater",
                             &format!("下载并准备更新包 {version} 失败：{e:#}"),
                         );
@@ -264,7 +264,7 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(Some(update)) => {
-                    smelt_core::app_log::info(
+                    smelt_sys::app_log::info(
                         "updater",
                         &format!("恢复待安装更新 {}，等待用户显式重试", update.version),
                     );
@@ -282,7 +282,7 @@ impl Workspace {
                     this.check_for_update(silent_check, cx);
                 }
                 Err(error) => {
-                    smelt_core::app_log::error(
+                    smelt_sys::app_log::error(
                         "updater",
                         &format!("恢复更新事务失败，暂停新更新作业：{error:#}"),
                     );
@@ -318,7 +318,7 @@ impl Workspace {
                 .await;
             match result {
                 Ok(ticket) => {
-                    smelt_core::app_log::info(
+                    smelt_sys::app_log::info(
                         "updater",
                         &format!(
                             "installer 已接管更新 {version}（job={} attempt={}），等待 GUI 退出",
@@ -330,7 +330,7 @@ impl Workspace {
                     cx.update(request_app_quit);
                 }
                 Err(error) => {
-                    smelt_core::app_log::error(
+                    smelt_sys::app_log::error(
                         "updater",
                         &format!("启动 installer 失败，当前 App 未替换：{error:#}"),
                     );
@@ -389,21 +389,19 @@ impl Workspace {
         .detach();
     }
 
-    /// 是否有 agent 正在跑（结构化 phase 处于 Thinking / ExecutingTool）。
-    /// 空闲升级的门控：升级会让终端闪断重连，不该打断正在跑的任务。
+    /// 本机运行时上是否有 agent 正在跑（结构化 phase 处于 Thinking / ExecutingTool）。
+    /// 本机守护空闲升级的门控：升级会让终端闪断重连，不该打断正在跑的任务。
     pub(crate) fn any_agent_busy(&self, cx: &App) -> bool {
-        cx.try_global::<DaemonStates>()
-            .map(|states| {
-                states.map.lock().unwrap().values().any(|s| {
-                    s.has_runtime()
-                        && matches!(
-                            s.phase,
-                            crate::terminal::DaemonPhase::Thinking
-                                | crate::terminal::DaemonPhase::ExecutingTool
-                        )
-                })
+        DaemonStates::snapshot(&crate::RuntimeKey::Local, cx)
+            .iter()
+            .any(|s| {
+                s.has_runtime()
+                    && matches!(
+                        s.phase,
+                        crate::terminal::DaemonPhase::Thinking
+                            | crate::terminal::DaemonPhase::ExecutingTool
+                    )
             })
-            .unwrap_or(false)
     }
 
     /// subscribe 相位变化后调用：挂起的升级等所有 agent 空闲再发一次。
@@ -427,12 +425,18 @@ impl Workspace {
                 };
                 let leaf_for_result = leaf.clone();
                 cx.spawn(async move |_, cx| {
-                    let terminal =
-                        cx.background_executor()
-                            .spawn(async move {
-                                terminal::Terminal::reattach(24, 80, cwd.as_deref(), &sid)
-                            })
-                            .await;
+                    let terminal = cx
+                        .background_executor()
+                        .spawn(async move {
+                            terminal::Terminal::reattach(
+                                &crate::runtimes::Runtime::local(),
+                                24,
+                                80,
+                                cwd.as_deref(),
+                                &sid,
+                            )
+                        })
+                        .await;
                     if let Ok(terminal) = terminal {
                         leaf_for_result.update(cx, |view, cx| {
                             view.adopt_terminal(terminal, cx);
@@ -468,13 +472,6 @@ impl Workspace {
                 this.daemon_upgrading = false;
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                // exec 出来的新进程同样丢了网关和隧道（运行态不参与交接），理由与
-                // 硬重启那条路径一样，见 confirm_restart_daemon 里的注释。
-                if outcome == terminal::UpgradeOutcome::Upgraded
-                    || outcome == terminal::UpgradeOutcome::Failed
-                {
-                    settings::spawn_remote_bootstrap(cx);
-                }
                 this.daemon_upgrade_msg = Some(match outcome {
                     terminal::UpgradeOutcome::Upgraded => {
                         this.reconnect_all_terminals(cx);
@@ -529,13 +526,13 @@ impl Workspace {
     }
 
     pub(crate) fn refresh_session_manager(&mut self, cx: &mut Context<Self>) {
-        if !DaemonStates::is_primed(cx) {
+        if !DaemonStates::is_primed(&crate::RuntimeKey::Local, cx) {
             self.session_manager_list = None;
             cx.notify();
             return;
         }
-        self.session_manager_list = Some(smelt_core::daemon_state::apply_identity_tombstones(
-            DaemonStates::snapshot(cx),
+        self.session_manager_list = Some(smelt_client::daemon_state::apply_identity_tombstones(
+            DaemonStates::snapshot(&crate::RuntimeKey::Local, cx),
             &mut self.session_manager_tombstones,
         ));
         cx.notify();
@@ -547,9 +544,9 @@ impl Workspace {
     /// 实际上会话根本没被杀掉，圈了个大坑）。
     pub(crate) fn kill_daemon_session(id: &str) {
         if id.starts_with("acp-") {
-            smelt_core::acp_client::kill_acp_session(id);
+            smelt_client::acp_client::kill_acp_session(&crate::runtimes::local(), id);
         } else {
-            terminal::kill_remote(id);
+            terminal::kill_remote(&crate::runtimes::Runtime::local(), id);
         }
     }
 
@@ -632,7 +629,14 @@ impl Workspace {
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
                     for (entity, cwd, sid) in jobs {
-                        let term = terminal::Terminal::spawn(24, 80, cwd.as_deref(), &sid, None);
+                        let term = terminal::Terminal::spawn(
+                            &crate::runtimes::Runtime::local(),
+                            24,
+                            80,
+                            cwd.as_deref(),
+                            &sid,
+                            None,
+                        );
                         out.push((entity, term));
                     }
                     out
@@ -642,11 +646,6 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                // 新守护进程里网关和隧道都是空的（运行态不参与交接）。守护自己会按
-                // 配置自愈，但老版本守护不会，且 UI 手里的配对码此刻已经过期——这里
-                // 幂等地补一发并刷新二维码。不补的话就是「重启守护后手机连不上，
-                // 必须去设置页把远程关掉再打开」那个 bug。
-                settings::spawn_remote_bootstrap(cx);
                 let mut failed = 0usize;
                 for (entity, term) in built {
                     match term {

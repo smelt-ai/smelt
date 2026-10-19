@@ -25,36 +25,34 @@ use gpui_component::*;
 use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
 mod agent_hooks;
+mod bundled_helpers;
+mod dsh_config;
 mod memory;
 mod nav;
 mod pi_auth;
+mod pi_config;
 mod pi_mcp;
-pub(crate) mod plugins;
 mod remote;
 mod workspace;
 mod workspace_view;
 
 pub(crate) use nav::{
-    SettingsCategoryId, SettingsNavCategory, SettingsSection, filter_settings_nav, nav_contains,
-    settings_nav,
+    SettingsCategoryId, SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav,
 };
-pub(super) use plugins::*;
 pub(super) use remote::*;
+
+/// 「反馈问题」入口统一跳转的链接。应用菜单 / 侧栏用户菜单 / 设置页三处共用。
+pub const FEEDBACK_URL: &str = "https://github.com/smelt-ai/smelt/issues/new/choose";
 
 #[cfg(test)]
 pub(super) use remote::qr_png_for_url;
 
 pub(super) use agent_hooks::{
-    hooks_installed_status, install_agent_hooks, invalidate_hooks_cache, smelt_notify_path,
-    sync_bundled_smelt_agent_mcp, sync_bundled_smelt_notify, uninstall_agent_hooks,
+    AgentHooksCache, install_agent_hooks, reconcile_agent_hooks, refresh_agent_hooks_status,
+    uninstall_agent_hooks,
 };
-
-#[cfg(test)]
-pub(super) use agent_hooks::{
-    ANTIGRAVITY_HOOK_EVENTS, ANTIGRAVITY_HOOK_NAME, antigravity_event_installed,
-    command_uses_smelt_notify, merge_antigravity_hooks, uninstall_antigravity_hooks_at,
-    uninstall_hook_file, write_json_atomic,
-};
+pub(super) use bundled_helpers::{sync_bundled_smelt_agent_mcp, sync_bundled_smelt_notify};
+pub(crate) use pi_config::pi_model_choice_groups;
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -63,7 +61,7 @@ fn default_theme_mode() -> ThemeMode {
 }
 
 fn default_theme_name() -> String {
-    smelt_core::theme_index::DEFAULT_DARK.to_string()
+    smelt_model::theme_index::DEFAULT_DARK.to_string()
 }
 
 /// 界面字号（基准 rem，px）默认值与取值范围。
@@ -233,39 +231,47 @@ impl Default for UpdateSettings {
 
 impl Global for UpdateSettings {}
 
+/// 枚举在客户端库里存它的 serde 名（`dev`、`dark`、`session`……），和协议里的写法一致。
+pub(crate) fn enum_name<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// 认不出的名字（库是别的版本写的）返回 `None`，由调用方用出厂值。
+pub(crate) fn enum_from_name<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
+    serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
+}
+
+/// 更新设置归客户端（每台设备各自管自己的更新），存在客户端库。
 pub fn load_update_settings() -> UpdateSettings {
-    let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
+    let record = match smelt_client_store::client_store().and_then(|store| store.update_settings())
+    {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("[storage] 读取更新设置失败，使用默认值: {error}");
+            None
+        }
+    };
+    let Some(record) = record else {
         return UpdateSettings::default();
     };
-    match store.get_update_settings_snapshot() {
-        Ok(Some(snapshot)) => settings_from_snapshot(snapshot),
-        Ok(None) | Err(_) => UpdateSettings::default(),
+    UpdateSettings {
+        channel: enum_from_name(&record.channel).unwrap_or_default(),
+        auto_install: record.auto_install,
     }
 }
 
 pub fn save_update_settings(settings: &UpdateSettings) {
-    if let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() {
-        let _ = store.put_update_settings_snapshot(&snapshot_from_settings(settings));
-    }
-}
-
-fn snapshot_from_settings(settings: &UpdateSettings) -> smelt_store::UpdateSettingsSnapshot {
-    smelt_store::UpdateSettingsSnapshot {
-        channel: match settings.channel {
-            updater::UpdateChannel::Dev => "dev".into(),
-            updater::UpdateChannel::Prod => "prod".into(),
-        },
+    let record = smelt_client_store::UpdateSettingsRecord {
+        channel: enum_name(&settings.channel),
         auto_install: settings.auto_install,
-    }
-}
-
-fn settings_from_snapshot(snapshot: smelt_store::UpdateSettingsSnapshot) -> UpdateSettings {
-    UpdateSettings {
-        channel: match snapshot.channel.as_str() {
-            "dev" => updater::UpdateChannel::Dev,
-            _ => updater::UpdateChannel::Prod,
-        },
-        auto_install: snapshot.auto_install,
+    };
+    if let Err(error) =
+        smelt_client_store::client_store().and_then(|store| store.put_update_settings(&record))
+    {
+        eprintln!("[storage] 保存更新设置失败: {error}");
     }
 }
 
@@ -283,12 +289,25 @@ pub fn apply_auto_install(auto_install: bool, cx: &mut App) {
     cx.set_global(settings);
 }
 
-/// CLI 改过 SQLite 后，打开设置页时把外观重新套上窗口。
-pub fn reload_appearance_from_store(cx: &mut App) {
-    install_appearance(load_appearance(), cx);
+/// CLI / Control API 经运行时转来的外观改动：按可脚本目录的规则套到当前外观上，
+/// 存进客户端库并整份重新安装。规则在运行时那边已经校验过一遍，这里再走同一份
+/// 校验，是因为「主题明暗」要按本机当前的主题找同族的另一侧。
+pub fn apply_requested_appearance(
+    settings: &std::collections::BTreeMap<String, serde_json::Value>,
+    cx: &mut App,
+) {
+    let current = cx.global::<Appearance>().clone();
+    let mut snapshot = snapshot_from_appearance(&current);
+    if let Err(error) = smelt_model::appearance_settings::apply_patch(&mut snapshot, settings) {
+        crate::status_item::notify_error(format!("外观修改未生效：{error}"));
+        return;
+    }
+    let next = appearance_from_snapshot(snapshot);
+    save_appearance(&next);
+    install_appearance(next, cx);
 }
 
-/// 把一份完整外观套到所有层并重绘。外观的真源是 SQLite，内存里的全局只是它的投影。
+/// 把一份完整外观套到所有层并重绘。外观的真源是客户端库，内存里的全局只是它的投影。
 fn install_appearance(appearance: Appearance, cx: &mut App) {
     terminal_view::set_font_px(appearance.font_px);
     terminal_view::set_font_family(&appearance.font_family);
@@ -359,14 +378,42 @@ fn sync_theme_fonts(cx: &mut App) {
 /// 而且一部手机可以连多台设备，配色必须**按设备**下发而不是客户端内置。
 ///
 /// 主题、用户自选底色变化时都要调（见 `apply_named_theme` / `apply_appearance`）。
+///
+/// 交给运行时落盘，在后台按顺序发：主题切换时会连着调好几次，只有最后一份要紧。
 pub fn publish_terminal_theme() {
-    smelt_core::terminal_theme::publish(&current_terminal_theme());
+    static PUBLISHER: std::sync::OnceLock<
+        smol::channel::Sender<smelt_model::terminal_theme::TerminalThemeSnapshot>,
+    > = std::sync::OnceLock::new();
+    let publisher = PUBLISHER.get_or_init(|| {
+        let (tx, rx) =
+            smol::channel::unbounded::<smelt_model::terminal_theme::TerminalThemeSnapshot>();
+        std::thread::spawn(move || {
+            while let Ok(mut theme) = rx.recv_blocking() {
+                // 积压的旧配色直接跳过。
+                while let Ok(newer) = rx.try_recv() {
+                    theme = newer;
+                }
+                if let Err(error) = crate::runtime_call::call::<
+                    smelt_model::control_api::TerminalThemePublish,
+                >(
+                    theme, crate::runtime_call::RUNTIME_CALL_TIMEOUT
+                ) {
+                    eprintln!(
+                        "[theme] 发布终端配色失败：{}",
+                        crate::runtime_call::error_text(error)
+                    );
+                }
+            }
+        });
+        tx
+    });
+    let _ = publisher.try_send(current_terminal_theme());
 }
 
 /// 按当前主题 + 外观设置组装配色快照。
-fn current_terminal_theme() -> smelt_core::terminal_theme::TerminalThemeSnapshot {
-    smelt_core::terminal_theme::TerminalThemeSnapshot {
-        version: smelt_core::terminal_theme::TERMINAL_THEME_VERSION,
+fn current_terminal_theme() -> smelt_model::terminal_theme::TerminalThemeSnapshot {
+    smelt_model::terminal_theme::TerminalThemeSnapshot {
+        version: smelt_model::terminal_theme::TERMINAL_THEME_VERSION,
         dark: terminal::is_dark(),
         background: terminal::default_bg(),
         foreground: terminal::default_fg(),
@@ -379,13 +426,25 @@ fn current_terminal_theme() -> smelt_core::terminal_theme::TerminalThemeSnapshot
     }
 }
 
-/// 读取外观设置；缺失/损坏回退默认。
+/// 读取外观设置；缺失/损坏回退默认。外观归客户端，存在客户端库。
 pub fn load_appearance() -> Appearance {
-    let Ok(store) = smelt_core::sqlite_state::default_sqlite_store() else {
-        return Appearance::default();
-    };
-    match store.get_appearance_snapshot() {
-        Ok(Some(snapshot)) => appearance_from_snapshot(snapshot),
+    match smelt_client_store::client_store().and_then(|store| store.appearance()) {
+        Ok(Some(record)) => {
+            appearance_from_snapshot(smelt_model::appearance_settings::AppearanceSnapshot {
+                bg_color: record.bg_color,
+                bg_image: record.bg_image,
+                bg_image_opacity: record.bg_image_opacity,
+                opacity: record.opacity,
+                blur: record.blur,
+                glass_style: record.glass_style,
+                theme_mode: record.theme_mode,
+                theme_name: record.theme_name,
+                ui_font_px: record.ui_font_px,
+                ui_font_family: record.ui_font_family,
+                font_px: record.font_px,
+                font_family: record.font_family,
+            })
+        }
         Ok(None) => Appearance::default(),
         Err(error) => {
             eprintln!("[storage] 读取外观设置失败，使用默认值: {error}");
@@ -394,26 +453,33 @@ pub fn load_appearance() -> Appearance {
     }
 }
 
-/// 提交一次界面编辑，返回库里提交后的完整外观。
-///
-/// 只落 `before → after` 改过的字段（见 `appearance_settings::commit_edit`）：设置页
-/// 打开期间 CLI / Control API 可能改过别的字段，不能用内存旧副本整份覆盖。
-/// 写库失败时记日志并沿用本地编辑结果，界面主流程继续运行。
-fn commit_appearance(before: &Appearance, after: &Appearance) -> Appearance {
-    match smelt_core::appearance_settings::commit_edit(
-        &snapshot_from_appearance(before),
-        &snapshot_from_appearance(after),
-    ) {
-        Ok(committed) => appearance_from_snapshot(committed),
-        Err(error) => {
-            eprintln!("[storage] 保存外观设置失败: {error}");
-            after.clone()
-        }
+fn save_appearance(appearance: &Appearance) {
+    let snapshot = snapshot_from_appearance(appearance);
+    let record = smelt_client_store::AppearanceRecord {
+        bg_color: snapshot.bg_color,
+        bg_image: snapshot.bg_image,
+        bg_image_opacity: snapshot.bg_image_opacity,
+        opacity: snapshot.opacity,
+        blur: snapshot.blur,
+        glass_style: snapshot.glass_style,
+        theme_mode: snapshot.theme_mode,
+        theme_name: snapshot.theme_name,
+        ui_font_px: snapshot.ui_font_px,
+        ui_font_family: snapshot.ui_font_family,
+        font_px: snapshot.font_px,
+        font_family: snapshot.font_family,
+    };
+    if let Err(error) =
+        smelt_client_store::client_store().and_then(|store| store.put_appearance(&record))
+    {
+        eprintln!("[storage] 保存外观设置失败: {error}");
     }
 }
 
-fn snapshot_from_appearance(appearance: &Appearance) -> smelt_store::AppearanceSnapshot {
-    smelt_store::AppearanceSnapshot {
+fn snapshot_from_appearance(
+    appearance: &Appearance,
+) -> smelt_model::appearance_settings::AppearanceSnapshot {
+    smelt_model::appearance_settings::AppearanceSnapshot {
         bg_color: appearance.bg_color,
         bg_image: appearance.bg_image.clone(),
         bg_image_opacity: appearance.bg_image_opacity,
@@ -439,7 +505,9 @@ fn snapshot_from_appearance(appearance: &Appearance) -> smelt_store::AppearanceS
     }
 }
 
-fn appearance_from_snapshot(snapshot: smelt_store::AppearanceSnapshot) -> Appearance {
+fn appearance_from_snapshot(
+    snapshot: smelt_model::appearance_settings::AppearanceSnapshot,
+) -> Appearance {
     Appearance {
         bg_color: snapshot.bg_color,
         bg_image: snapshot.bg_image,
@@ -466,52 +534,7 @@ fn appearance_from_snapshot(snapshot: smelt_store::AppearanceSnapshot) -> Appear
 
 /// 项目行「+」下拉菜单里的一条可配置启动项，以及它的出厂默认集合。
 /// 定义在 `smelt-core`：桌面新建菜单和移动端读的是同一份启动项目录。
-pub use smelt_core::new_session::{LaunchEntry, default_launch_entries};
-
-/// 内置启动项由 provider 注册信息识别；旧配置缺少 provider 时，只把 Smelt
-/// 发布过的逐字默认命令视为内置，避免把用户自定义的 Agent 命令误锁定。
-fn launch_entry_matches_builtin(entry: &LaunchEntry, agent: TerminalAgentKind) -> bool {
-    entry.provider.as_deref() == Some(agent.id())
-        || (entry.provider.is_none()
-            && (entry.command.trim() == agent.quick_terminal_cmd()
-                || agent
-                    .upgrade_released_quick_terminal_command(&entry.command)
-                    .is_some()))
-}
-
-fn launch_entry_is_builtin(entry: &LaunchEntry) -> bool {
-    entry
-        .provider
-        .as_deref()
-        .and_then(TerminalAgentKind::from_id)
-        .is_some()
-}
-
-/// 固定内置启动项与注册表对齐，并给旧版无 provider 的逐字出厂项补上稳定标识。
-/// 返回 true 表示配置发生变化，需要持久化。
-fn ensure_builtin_launch_entries(config: &mut LaunchConfig) -> bool {
-    let mut changed = false;
-    for agent in TerminalAgentKind::ALL {
-        if let Some(entry) = config
-            .entries
-            .iter_mut()
-            .find(|entry| launch_entry_matches_builtin(entry, agent))
-        {
-            if entry.provider.is_none() {
-                entry.provider = Some(agent.id().to_string());
-                changed = true;
-            }
-            continue;
-        }
-        config.entries.push(LaunchEntry {
-            label: agent.quick_terminal_label().to_string(),
-            command: agent.quick_terminal_cmd().to_string(),
-            provider: Some(agent.id().to_string()),
-        });
-        changed = true;
-    }
-    changed
-}
+pub use smelt_model::new_session::{LaunchEntry, default_launch_entries};
 
 /// 删除自定义启动项。内置项是固定集合，数据层也拒绝删除，不能只依赖设置页
 /// 隐藏按钮。
@@ -519,35 +542,28 @@ fn remove_launch_entry_at(config: &mut LaunchConfig, index: usize) -> bool {
     let Some(entry) = config.entries.get(index) else {
         return false;
     };
-    if launch_entry_is_builtin(entry) {
+    if smelt_model::launch_settings::launch_entry_is_builtin(entry) {
         return false;
     }
     config.entries.remove(index);
     true
 }
 
-/// 项目行「+」可配置启动项列表（全局单例，存 SQLite KV）。
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// 项目行「+」可配置启动项：运行时那份清单的缓存（全局单例）。窗口先起来，后台
+/// 加载；没加载好之前显示出厂默认，不接受修改。
+#[derive(Clone)]
 pub struct LaunchConfig {
-    /// 启动项迁移版本。旧出厂命令与标签只在对应版本升级时改写；固定内置项则在
-    /// 每次加载时与注册表对齐。
-    #[serde(default = "current_launch_config_version")]
-    version: u32,
-    /// 除固定的「新建终端」「新建 Worktree…」外，下拉菜单里的启动项。
+    /// 除固定的「新建终端」外，下拉菜单里的启动项。
     pub entries: Vec<LaunchEntry>,
-}
-
-const LAUNCH_CONFIG_VERSION: u32 = 14;
-
-fn current_launch_config_version() -> u32 {
-    LAUNCH_CONFIG_VERSION
+    /// 是否已从运行时加载。
+    pub loaded: bool,
 }
 
 impl Default for LaunchConfig {
     fn default() -> Self {
         Self {
-            version: LAUNCH_CONFIG_VERSION,
             entries: default_launch_entries(),
+            loaded: false,
         }
     }
 }
@@ -590,102 +606,110 @@ pub fn active_launch_entries(cx: &App) -> Vec<LaunchEntry> {
 
 impl Global for LaunchConfig {}
 
-fn launch_config_path() -> Option<std::path::PathBuf> {
-    smelt_paths::smelt_home().map(|h| h.join(smelt_store::DATABASE_FILE_NAME))
+fn fetch_launch_settings() -> Result<smelt_model::launch_settings::LaunchSettings, String> {
+    crate::runtime_call::call::<smelt_model::control_api::LaunchGet>(
+        smelt_runtime_client::protocol::control::EmptyParams::default(),
+        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+    )
+    .map_err(crate::runtime_call::error_text)
 }
 
-/// 持久化文档的原始形状：兼容旧版「全权限」三开关，也兼容新版 `entries` 列表。
-/// `entries: None` 表示文档里没写这个键（旧格式）→ 迁到出厂默认并回写；
-/// `Some([])` 表示用户清空了列表，照用。
-/// 读取启动配置；缺失则回退出厂默认。
-pub fn load_launch_config() -> LaunchConfig {
-    let Some(path) = launch_config_path() else {
-        return LaunchConfig::default();
-    };
-    load_launch_config_from_path(&path)
+fn set_launch_entries(entries: Vec<LaunchEntry>, cx: &mut App) {
+    cx.set_global(LaunchConfig {
+        entries,
+        loaded: true,
+    });
 }
 
-fn persist_launch_config_at(path: &std::path::Path, config: &LaunchConfig) {
-    if let Ok(store) = smelt_core::sqlite_state::open_sqlite_store(path) {
-        let snapshot = smelt_store::LaunchSnapshot {
-            version: config.version,
-            entries: config
-                .entries
-                .iter()
-                .map(|entry| smelt_store::LaunchEntryRecord {
-                    label: entry.label.clone(),
-                    command: entry.command.clone(),
-                    provider: entry.provider.clone(),
-                })
-                .collect(),
-        };
-        let _ = store.put_launch_snapshot(&snapshot);
-    }
+/// 后台从运行时加载启动项；运行时还没起来就按退避重试，直到拿到为止。
+pub fn start_launch_config_load(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut attempt = 0u32;
+        loop {
+            let fetched = cx
+                .background_executor()
+                .spawn(async { fetch_launch_settings() })
+                .await;
+            if let Ok(settings) = fetched {
+                cx.update(|cx| set_launch_entries(settings.entries, cx));
+                return;
+            }
+            cx.background_executor()
+                .timer(smelt_client::daemon_state::daemon_reconnect_backoff(
+                    attempt,
+                ))
+                .await;
+            attempt = attempt.saturating_add(1);
+        }
+    })
+    .detach();
 }
 
-fn launch_from_snapshot(snapshot: smelt_store::LaunchSnapshot) -> LaunchConfig {
-    LaunchConfig {
-        version: snapshot.version,
-        entries: snapshot
-            .entries
-            .into_iter()
-            .map(|entry| LaunchEntry {
-                label: entry.label,
-                command: entry.command,
-                provider: entry.provider,
-            })
-            .collect(),
-    }
+/// 整表替换按提交顺序逐个发给运行时：每次的 `base` 都是上一次提交后的本地状态，
+/// 并发发出去就会互相判成冲突。
+struct LaunchEditQueue {
+    tx: smol::channel::Sender<(Vec<LaunchEntry>, Vec<LaunchEntry>)>,
 }
 
-fn load_launch_config_from_path(path: &std::path::Path) -> LaunchConfig {
-    if let Ok(store) = smelt_core::sqlite_state::open_sqlite_store(path)
-        && let Ok(Some(snapshot)) = store.get_launch_snapshot()
-    {
-        let mut config = launch_from_snapshot(snapshot);
-        let mut changed = config.version < LAUNCH_CONFIG_VERSION;
-        if changed {
-            for entry in &mut config.entries {
-                if let Some(command) = TerminalAgentKind::ALL
-                    .into_iter()
-                    .find_map(|agent| agent.upgrade_released_quick_terminal_command(&entry.command))
-                {
-                    entry.command = command.to_string();
-                }
-                if entry.label.trim() == "Copilot"
-                    && (entry.provider.as_deref() == Some(TerminalAgentKind::Copilot.id())
-                        || TerminalAgentKind::from_command_prefix(&entry.command)
-                            == Some(TerminalAgentKind::Copilot))
-                {
-                    entry.label = TerminalAgentKind::Copilot
-                        .quick_terminal_label()
-                        .to_string();
+impl Global for LaunchEditQueue {}
+
+fn submit_launch_entries(base: Vec<LaunchEntry>, entries: Vec<LaunchEntry>, cx: &mut App) {
+    if !cx.has_global::<LaunchEditQueue>() {
+        let (tx, rx) = smol::channel::unbounded::<(Vec<LaunchEntry>, Vec<LaunchEntry>)>();
+        cx.set_global(LaunchEditQueue { tx });
+        cx.spawn(async move |cx| {
+            while let Ok((base, entries)) = rx.recv().await {
+                let replaced = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::runtime_call::call::<smelt_model::control_api::LaunchReplace>(
+                            smelt_model::control_api::LaunchReplaceParams { base, entries },
+                            crate::runtime_call::RUNTIME_CALL_TIMEOUT,
+                        )
+                    })
+                    .await;
+                match replaced {
+                    // 后面还有排着的修改时，这一包不是最终状态，先不覆盖本地。
+                    Ok(settings) => {
+                        if rx.is_empty() {
+                            cx.update(|cx| set_launch_entries(settings.entries, cx));
+                        }
+                    }
+                    Err(error) => {
+                        // 冲突或失败都以运行时为准：丢掉排着的修改（它们的 base 已经
+                        // 不成立），重新拉一份。
+                        while rx.try_recv().is_ok() {}
+                        crate::status_item::notify_error(crate::runtime_call::error_text(error));
+                        let fresh = cx
+                            .background_executor()
+                            .spawn(async { fetch_launch_settings() })
+                            .await;
+                        if let Ok(settings) = fresh {
+                            cx.update(|cx| set_launch_entries(settings.entries, cx));
+                        }
+                    }
                 }
             }
-        }
-        changed |= ensure_builtin_launch_entries(&mut config);
-        if changed {
-            config.version = LAUNCH_CONFIG_VERSION;
-            persist_launch_config_at(path, &config);
-        }
-        return config;
+        })
+        .detach();
     }
-    LaunchConfig::default()
+    let _ = cx.global::<LaunchEditQueue>().tx.try_send((base, entries));
 }
 
-/// 写回启动配置；失败由统一存储入口记录，界面主流程继续运行。
-fn save_launch_config(c: &LaunchConfig) {
-    if let Some(path) = launch_config_path() {
-        persist_launch_config_at(&path, c);
-    }
-}
-
-/// 改启动配置全局 + 存盘，不触发 view 重绘，用法同 [`apply_appearance`]。
+/// 改启动项：本地立刻生效，整表按序提交给运行时。还没从运行时加载时不接受修改。
 fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
-    let mut c = cx.global::<LaunchConfig>().clone();
-    f(&mut c);
-    save_launch_config(&c);
-    cx.set_global(c);
+    let current = cx.global::<LaunchConfig>().clone();
+    if !current.loaded {
+        crate::status_item::notify_error("正在读取运行时的启动项，请稍后再改");
+        return;
+    }
+    let mut next = current.clone();
+    f(&mut next);
+    if next.entries == current.entries {
+        return;
+    }
+    cx.set_global(next.clone());
+    submit_launch_entries(current.entries, next.entries, cx);
 }
 
 // ===================== Agent 身份与宿主状态 =====================
@@ -695,13 +719,13 @@ fn apply_launch_config(f: impl FnOnce(&mut LaunchConfig), cx: &mut App) {
 // crate 之后要跨 crate 共用的数据模型。这里重导出成原来的裸名字，本文件剩下
 // 的 UI 渲染代码（acp_cmd_setting_item、手动添加 workspace 的编辑器等）不用
 // 逐处改路径。
-use smelt_core::agent_kind::ConversationLaunchSpec;
-pub use smelt_core::agent_kind::{
+use smelt_model::agent_kind::ConversationLaunchSpec;
+pub use smelt_model::agent_kind::{
     AcpProfile, ConversationAgentKind, HistorySourceKind, TerminalAgentKind,
 };
 pub use smelt_ui::agent_host_state::{
-    AgentDefinition, AgentHostState, apply_agent_host, load_agent_host_state,
-    reload_agent_definitions, try_apply_agent_host,
+    AgentDefinition, AgentHostState, agent_host_loaded, apply_agent_host, initial_agent_host_state,
+    reload_agent_definitions, start_agent_host_load, try_apply_agent_host,
 };
 pub use smelt_ui::automation::{
     Automation, AutomationAction, AutomationActionKindId, AutomationNotificationPreset,
@@ -813,7 +837,7 @@ impl Global for CleanupState {}
 /// 避免打开设置时被多个 `--version` 子进程卡住。
 #[derive(Clone, Default)]
 pub struct AcpRuntimeState {
-    pub diagnostics: Option<smelt_core::acp_conn::AcpRuntimeDiagnostics>,
+    pub diagnostics: Option<smelt_model::acp_conn::AcpRuntimeDiagnostics>,
     pub refreshing: bool,
     pub checked_at: Option<Instant>,
     pub installing: Option<ConversationAgentKind>,
@@ -890,19 +914,12 @@ pub(crate) fn copy_with_feedback(text: String, btn_id: &'static str, cx: &mut Ap
 /// 改外观全局 + 存盘，不触发 view 重绘（调用方按需自己 notify/refresh）。
 /// 供只有 `&mut App`（没有 `Context<Self>`）的场景用，比如设置页 SettingField 的 get/set 闭包。
 fn apply_appearance(f: impl FnOnce(&mut Appearance), cx: &mut App) {
-    let before = cx.global::<Appearance>().clone();
-    let mut edited = before.clone();
+    let mut edited = cx.global::<Appearance>().clone();
     f(&mut edited);
-    let committed = commit_appearance(&before, &edited);
-    if snapshot_from_appearance(&committed) != snapshot_from_appearance(&edited) {
-        // 合并带进了别的进程刚提交的字段（主题、字体等），只套底色和字体不够，
-        // 整份重新安装，界面与库保持一致。
-        install_appearance(committed, cx);
-        return;
-    }
+    save_appearance(&edited);
     // 用户自选底色要镜像给 PTY 线程（OSC 11 应答）和移动端配色快照，三处同源。
-    apply_bg_color(&committed);
-    cx.set_global(committed);
+    apply_bg_color(&edited);
+    cx.set_global(edited);
     sync_theme_fonts(cx);
 }
 
@@ -962,7 +979,7 @@ pub struct DshPluginManager {
     /// 包名输入框，供安装/升级使用。
     pub spec: Entity<gpui_component::input::InputState>,
     /// 已加载的清单；None 表示还没读过。
-    pub plugins: Option<Result<Vec<smelt_core::agent_kind::DshPlugin>, String>>,
+    pub plugins: Option<Result<Vec<smelt_model::agent_kind::DshPlugin>, String>>,
     /// 正在执行的动作描述，非 None 时禁用所有按钮。
     pub busy: Option<String>,
     /// 上一次动作的结果。
@@ -1040,7 +1057,7 @@ pub struct DshCustomProviderEditor {
 pub enum ModelDiscoveryState {
     Loading,
     /// 端点答了。空列表也是答案——它说"我一个都不提供"。
-    Ready(Vec<smelt_core::provider_api::DiscoveredModel>),
+    Ready(Vec<smelt_model::provider_api::DiscoveredModel>),
     /// 问不到。协议不支持列举、端点拒绝、凭据不对都落在这里，理由必须原样带出来。
     Failed(String),
 }
@@ -1052,7 +1069,7 @@ pub enum ModelDiscoveryState {
 #[derive(Clone)]
 pub enum PiAuthProvidersState {
     Loading,
-    Ready(Vec<smelt_core::pi_auth::PiAuthProvider>),
+    Ready(Vec<smelt_model::pi_auth::PiAuthProvider>),
     Failed(String),
 }
 
@@ -1065,28 +1082,26 @@ pub struct PiAuthModelPicker {
     pub provider_id: String,
     pub provider_name: String,
     /// `None` 表示还在问。
-    pub models: Option<Result<Vec<smelt_core::provider_api::DiscoveredModel>, String>>,
+    pub models: Option<Result<Vec<smelt_model::provider_api::DiscoveredModel>, String>>,
 }
 
 /// 登录流程当前在等用户回答的那个提问。
 #[derive(Clone)]
 pub struct PiLoginPrompt {
     pub id: String,
-    pub kind: smelt_core::pi_auth::PiPromptKind,
+    pub kind: smelt_model::pi_auth::PiPromptKind,
     pub message: String,
     pub placeholder: Option<String>,
-    pub options: Vec<smelt_core::pi_auth::PiPromptOption>,
+    pub options: Vec<smelt_model::pi_auth::PiPromptOption>,
 }
 
-/// 一次进行中的（或刚结束的）登录。
-///
-/// `session` 用 `Arc` 是因为快照会把它复制给渲染层，而它的 `Drop` 会杀掉登录
-/// 子进程：面板还开着、渲染却持有最后一个引用被丢掉，用户的授权就断在半路。
+/// 一次进行中的（或刚结束的）登录。登录本身跑在运行时那边，这里只拿着它的 id。
 #[derive(Clone)]
 pub struct PiLoginView {
     pub provider_id: String,
     pub provider_name: String,
-    pub session: std::sync::Arc<smelt_core::pi_auth::PiLoginSession>,
+    /// 运行时给的登录 id：取事件、回答、取消都带着它。
+    pub login_id: String,
     /// progress / info 的流水，最新的在最后。
     pub messages: Vec<String>,
     pub auth_url: Option<String>,
@@ -1105,51 +1120,18 @@ pub struct PiLoginView {
     /// `None` 表示还在跑。
     pub outcome: Option<Result<(), String>>,
     /// 登录成功后可选的模型目录，用来一键设默认。
-    pub models: Option<Result<Vec<smelt_core::provider_api::DiscoveredModel>, String>>,
+    pub models: Option<Result<Vec<smelt_model::provider_api::DiscoveredModel>, String>>,
 }
 
 impl PiLoginView {
     /// 当前提问该用哪个输入框。
     pub fn active_input(&self) -> Option<&Entity<gpui_component::input::InputState>> {
         match self.prompt.as_ref()?.kind {
-            smelt_core::pi_auth::PiPromptKind::Select => None,
-            smelt_core::pi_auth::PiPromptKind::Secret => Some(&self.secret_input),
+            smelt_model::pi_auth::PiPromptKind::Select => None,
+            smelt_model::pi_auth::PiPromptKind::Secret => Some(&self.secret_input),
             _ => Some(&self.input),
         }
     }
-}
-
-/// 保存 Pi 自定义 provider 时，从各个输入框读出来的纯文本草稿。
-///
-/// 单独拎出来的理由和 dsh 那份一样：「不填模型」那条路要先去端点问一遍模型，
-/// 问完才能落盘，而 `Entity<InputState>` 不能跨 await 带走。
-#[derive(Clone)]
-pub struct PiCustomProviderDraft {
-    pub previous_id: Option<String>,
-    pub id: String,
-    pub display_name: String,
-    pub api: String,
-    pub base_url: String,
-    /// `None` 表示这次没改凭据，沿用已保存的那份。
-    pub api_key: Option<String>,
-    pub credential_configured: bool,
-    pub set_default: bool,
-}
-
-/// 保存自定义 provider 时，从各个输入框读出来的纯文本草稿。
-///
-/// 单独拎出来是因为「不填模型」那条路要先去端点问一遍模型，问完才能落盘，而
-/// `Entity<InputState>` 不能跨 await 带走，也不该在几秒之后再去读。
-#[derive(Clone)]
-pub struct NativeDshCustomProviderDraft {
-    pub previous_id: Option<String>,
-    pub id: String,
-    pub display_name: String,
-    pub api: String,
-    pub base_url: String,
-    pub api_key_env: String,
-    pub api_key: String,
-    pub set_default: bool,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1202,11 +1184,6 @@ struct NativeDshCustomModel {
     name: String,
     context_window: Option<u64>,
     max_tokens: Option<u64>,
-}
-
-#[derive(serde::Deserialize)]
-struct NativeDshModelSaveResponse {
-    ok: bool,
 }
 
 /// 画"推理强度"那一栏。
@@ -1303,7 +1280,7 @@ const NATIVE_DSH_EDITABLE_PROVIDER: &str = "deepseek-official";
 #[derive(Clone)]
 pub enum NativeDshCapabilityState {
     Loading,
-    Ready(smelt_core::agent_kind::DshModelCapabilities),
+    Ready(smelt_model::agent_kind::DshModelCapabilities),
     Failed(String),
 }
 
@@ -1320,7 +1297,7 @@ enum DshEffortView {
     /// 问失败了。和 `Unavailable` 分开：一个是答案，一个是没有答案。
     Unknown(String),
     Choices {
-        efforts: Vec<smelt_core::agent_kind::DshEffort>,
+        efforts: Vec<smelt_model::agent_kind::DshEffort>,
         default_effort: Option<String>,
     },
 }
@@ -1336,7 +1313,7 @@ enum DshModelChoicesView {
     /// 问到了，但这条 provider 一个模型都没有。
     Unavailable,
     Unknown(String),
-    Choices(Vec<smelt_core::agent_kind::DshModelCapability>),
+    Choices(Vec<smelt_model::agent_kind::DshModelCapability>),
 }
 
 /// 画「可选模型」那一排。
@@ -1422,7 +1399,7 @@ fn render_model_discovery_section(
     workspace: Entity<Workspace>,
     adopt: fn(
         &mut Workspace,
-        smelt_core::provider_api::DiscoveredModel,
+        smelt_model::provider_api::DiscoveredModel,
         &mut Window,
         &mut Context<Workspace>,
     ),
@@ -1571,7 +1548,10 @@ struct SettingsRenderSnapshot {
     /// 可选模型栏该画什么；`None` 表示表单没打开。
     dsh_model_choices_view: Option<DshModelChoicesView>,
     native_dsh_model_settings: Option<Result<NativeDshModelSettings, String>>,
-    dsh_settings: Result<smelt_core::agent_kind::DshSettingsSummary, String>,
+    dsh_settings: Result<smelt_model::agent_kind::DshSettingsSummary, String>,
+    dsh_profiles: Vec<AcpProfile>,
+    dsh_missing_profiles: Vec<smelt_model::dsh_service::DshMissingProfile>,
+    dsh_paths: smelt_model::dsh_service::DshConfigPaths,
     pi_model_editor: Option<PiModelEditor>,
     pi_custom_provider_editor: Option<PiCustomProviderEditor>,
     /// Pi 内置 provider 的登录状态；`None` 表示这台机器上还没问过。
@@ -1582,14 +1562,15 @@ struct SettingsRenderSnapshot {
     pi_auth_error: Option<String>,
     pi_auth_show_all: bool,
     /// `~/.pi/agent/mcp.json` 里的服务器。文件很小，每次刷新快照时重读，外部改动也能跟上。
-    pi_mcp_servers: Result<Vec<smelt_core::pi_mcp::PiMcpServer>, String>,
+    pi_mcp_servers: Result<Vec<smelt_model::pi_mcp::PiMcpServer>, String>,
     pi_mcp_login: Option<String>,
     pi_mcp_pending_remove: Option<String>,
     pi_mcp_error: Option<String>,
     pi_model_editor_error: Option<String>,
-    pi_model_settings: Result<smelt_core::pi_model_settings::PiModelSettings, String>,
-    pi_settings: Result<smelt_core::pi_model_settings::PiSettingsSummary, String>,
-    pi_plugins: Vec<smelt_core::pi_plugin_catalog::PiPlugin>,
+    pi_model_settings: Result<smelt_model::pi_model_settings::PiModelSettings, String>,
+    pi_settings: Result<smelt_model::pi_model_settings::PiSettingsSummary, String>,
+    pi_plugins: Vec<smelt_model::pi_plugin_catalog::PiPlugin>,
+    pi_paths: smelt_model::pi_service::PiConfigPaths,
     pi_plugin_pending_delete: Option<String>,
     pi_plugin_error: Option<String>,
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
@@ -1625,11 +1606,6 @@ pub struct SettingsContentView {
     snapshot: SettingsRenderSnapshot,
     _observe_workspace: Subscription,
     _observe_settings_globals: Vec<Subscription>,
-    /// 运行状态不在设置快照里，绘制时直接读 Global。观察者只 notify 本视图，
-    /// 不走 250ms 的整页快照刷新。
-    _observe_plugin_statuses: Subscription,
-    /// 插件页可见时的状态轮询。离开页面或关掉设置窗口就 drop，查询随之取消。
-    plugin_status_task: Option<Task<()>>,
     last_refresh: Option<Instant>,
     refresh_pending: bool,
     refresh_generation: u64,
@@ -1644,7 +1620,7 @@ impl SettingsContentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self {
+        Self {
             _observe_workspace: cx.observe_in(
                 &workspace,
                 window,
@@ -1664,62 +1640,14 @@ impl SettingsContentView {
                 Self::observe_settings_global::<CleanupState>(window, cx),
                 Self::observe_settings_global::<CopyFlash>(window, cx),
                 Self::observe_settings_global::<RemoteConfig>(window, cx),
-                Self::observe_settings_global::<RemoteRuntimeState>(window, cx),
-                Self::observe_settings_global::<IrohRuntimeState>(window, cx),
-                Self::observe_settings_global::<IrohConnectionsState>(window, cx),
-                Self::observe_settings_global::<crate::worktree_inherit::WorktreeInheritSettings>(
-                    window, cx,
-                ),
-                Self::observe_settings_global::<PluginEnablementState>(window, cx),
+                Self::observe_settings_global::<RemoteSettingsState>(window, cx),
+                Self::observe_settings_global::<crate::runtimes::RuntimeHub>(window, cx),
             ],
-            _observe_plugin_statuses: cx.observe_global_in::<PluginRuntimeStatuses>(
-                window,
-                |this, _, cx| {
-                    if this.shows_plugin_runtime_status() {
-                        cx.notify();
-                    }
-                },
-            ),
-            plugin_status_task: None,
             // 初始快照已经同步取好；避免刚打开就被第一条后台流式通知立即打穿缓存。
             last_refresh: Some(Instant::now()),
             refresh_pending: false,
             refresh_generation: 0,
-        };
-        this.sync_plugin_status_watch(cx);
-        this
-    }
-
-    fn shows_plugin_runtime_status(&self) -> bool {
-        plugins::shows_plugin_runtime_status(self.surface, &self.snapshot.settings_section)
-    }
-
-    /// 进入插件页时开始轮询，离开时丢掉 `Task`。绘制只读 Global，不再从 render 里发起查询。
-    fn sync_plugin_status_watch(&mut self, cx: &mut Context<Self>) {
-        if !self.shows_plugin_runtime_status() {
-            self.plugin_status_task = None;
-            return;
         }
-        if self.plugin_status_task.is_some() {
-            return;
-        }
-        self.plugin_status_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let outcome = cx
-                    .background_spawn(async move { terminal::plugin_statuses() })
-                    .await;
-                let show = this
-                    .update(cx, |this, _cx| this.shows_plugin_runtime_status())
-                    .unwrap_or(false);
-                if !show {
-                    return;
-                }
-                cx.update(|cx| plugins::publish_plugin_runtime_statuses(outcome, cx));
-                cx.background_executor()
-                    .timer(plugins::PLUGIN_STATUS_POLL_INTERVAL)
-                    .await;
-            }
-        }));
     }
 
     fn observe_settings_global<G: Global + 'static>(
@@ -1738,7 +1666,6 @@ impl SettingsContentView {
         self.last_refresh = Some(Instant::now());
         self.refresh_pending = false;
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
-        self.sync_plugin_status_watch(cx);
         cx.notify();
     }
 

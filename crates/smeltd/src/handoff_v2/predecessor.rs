@@ -6,8 +6,7 @@
 //! 函数边界是借用规则决定的，不绕（自引用结构是 UB 温床）。
 //!
 //! 相对 exec-self 删除的东西：CLOEXEC 手术（`SCM_RIGHTS` 直接 dup 描述符，
-//! 发送方原件保持 CLOEXEC 全程不动）、交接文件、二次 exec、exec 失败回滚里
-//! 的插件重启（插件只在 commit 后停，回滚碰都不碰）。
+//! 发送方原件保持 CLOEXEC 全程不动）、交接文件、二次 exec。
 //!
 //! 保留的拒绝项（Bus you can't drain）：peer_messaging 在途投递与
 //! `acp_upgrade_blockers`——hosted 会话永不进 blockers，只有 direct-fd
@@ -48,7 +47,7 @@ pub(crate) struct StagedSnapshot<'a> {
 
 pub(crate) enum TransactionOutcome {
     /// 已 COMMIT：调用方回 {ok:true} 后 exit(0)，successor 正在服务。
-    /// sidecars 与插件已停，EventHub 已刷。
+    /// sidecars 已停，EventHub 已刷。
     Committed,
     /// 已回滚：老进程原地继续服务。reason 进回执 + dlog。
     RolledBack { reason: String },
@@ -212,7 +211,7 @@ pub(crate) fn run_transaction(
     // 提交前 spawn 调用方给的映像路径。启动名先不动：拨早了，回滚之后下一次冷启动
     // 会跑到这次没提交成功的映像上。
     let target = exe.to_path_buf();
-    let fingerprint = match smelt_plugin_host::executable_fingerprint(&target) {
+    let fingerprint = match smelt_core::daemon_image::content_fingerprint(&target) {
         Ok(fingerprint) => fingerprint,
         Err(error) => return rollback(format!("计算候选守护指纹失败：{error}")),
     };
@@ -253,7 +252,7 @@ pub(crate) fn run_transaction(
     ));
 
     // 提交前最后的可回滚点：EventHub 落盘。失败则 ABANDON（successor 退出），
-    // 插件/sidecar 全程没动过，回滚即恢复。
+    // sidecar 全程没动过，回滚即恢复。
     if let Err(error) = event_hub.flush_for_shutdown() {
         return abort_and_kill(&ours, &mut child, format!("EventHub flush 失败：{error}"));
     }
@@ -273,9 +272,11 @@ pub(crate) fn run_transaction(
     if let Err(error) = smelt_core::daemon_image::retarget_launch_after_commit(exe) {
         crate::dlog(&format!("handoff: COMMIT 后改写启动名失败：{error}"));
     }
+    // systemd 拉起的话，赶在自己退出之前把主进程交给 successor，否则 systemd 当服务
+    // 已停，successor 成了没人管的残留进程。
+    crate::service::notify_main_pid(child.id());
 
-    // 先停 sidecars（让出端口），再停插件（杀 bun 子进程防孤儿），调用方随后
-    // 回 ok + exit。自启若发现端口仍被占用且前任还是父进程，会等前任退出
+    // 先停 sidecars（让出端口），调用方随后回 ok + exit。自启若发现端口仍被占用且前任还是父进程，会等前任退出
     // 后再绑一次。此处失败也不回滚（已无可回滚之处），只留痕。
     //
     // 双 accept 窗口（COMMIT→exit 间两边同时 accept，新连接可能落到 dying
@@ -284,7 +285,6 @@ pub(crate) fn run_transaction(
     // 后走客户端既有重连（终端 schedule_auto_reconnect + 升级后批量重连），
     // 不丢数据。为此改 accept 循环是过度设计。
     crate::remote::cleanup_sidecar_services();
-    crate::plugin_runtime::stop();
     drop(ours);
     // successor 独立运行：我们 exit 后它重定父到 launchd。不 wait（它不会退出）。
     drop(child);
@@ -321,13 +321,13 @@ fn migrated(before: Option<u32>, after: Option<u32>) -> bool {
 }
 
 /// successor 可观测的 spawn 环境（纯函数，可单测）：交接 socket fd 号 +
-/// 插件 daemon 指纹。fd 号即 `--import-handoff` 模式信号（argv 保持无参，
+/// 守护映像指纹。fd 号即 `--import-handoff` 模式信号（argv 保持无参，
 /// 沿用 SMELTD_MENUBAR 的 env 风格）。
 pub(crate) fn successor_env(sock_fd: RawFd, fingerprint: &str) -> Vec<(String, String)> {
     vec![
         ("SMELTD_HANDOFF_SOCK".to_string(), sock_fd.to_string()),
         (
-            "SMELTD_PLUGIN_DAEMON_FINGERPRINT".to_string(),
+            "SMELTD_DAEMON_FINGERPRINT".to_string(),
             fingerprint.to_string(),
         ),
     ]
@@ -401,7 +401,7 @@ mod tests {
         let env: HashMap<String, String> = successor_env(17, "fp-abc").into_iter().collect();
         assert_eq!(env.get("SMELTD_HANDOFF_SOCK"), Some(&"17".to_string()));
         assert_eq!(
-            env.get("SMELTD_PLUGIN_DAEMON_FINGERPRINT"),
+            env.get("SMELTD_DAEMON_FINGERPRINT"),
             Some(&"fp-abc".to_string())
         );
         assert_eq!(env.len(), 2);

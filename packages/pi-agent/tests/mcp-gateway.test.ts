@@ -16,7 +16,6 @@ import {
 	currentStdioServerSpec,
 	type GatewayEndpoint,
 	GatewayTransport,
-	gatewayEnvironment,
 	sharedTransportFactory,
 	stdioServerSpec,
 } from "../src/mcp-gateway-client.ts";
@@ -29,7 +28,7 @@ import {
 	stdioServerSpecs,
 	upstreamKey,
 } from "../src/mcp-gateway.ts";
-import { createPiDefaultTransport } from "../src/pi-mcp-runtime.ts";
+import { createPiDefaultTransport, mcpServerEnvironment } from "../src/pi-mcp-runtime.ts";
 
 const SOURCE = "/home/me/.pi/agent/mcp.json";
 const SPEC: StdioServerSpec = { source: SOURCE, name: "rea", command: "bun", args: ["x", "rea-agents", "mcp"] };
@@ -546,7 +545,7 @@ describe("server specs", () => {
 
 	test("the gateway does not inherit one conversation's Smelt variables", () => {
 		expect(
-			gatewayEnvironment({ PATH: "/bin", SMELT_HOME: "/h", SMELT_SESSION_ID: "s", SMELT_AGENT_TOKEN: "t" }),
+			mcpServerEnvironment({ PATH: "/bin", SMELT_HOME: "/h", SMELT_SESSION_ID: "s", SMELT_AGENT_TOKEN: "t" }),
 		).toEqual({ PATH: "/bin", SMELT_HOME: "/h" });
 	});
 });

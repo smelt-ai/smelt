@@ -46,6 +46,8 @@ struct UiNotice {
 #[derive(Clone)]
 struct ModelNotice {
     id: String,
+    /// `command` 是宿主起的命令，`subagent` 是挂接的后台子智能体。扩展按它写成不同的消息。
+    kind: &'static str,
     title: String,
     status: String,
     exit_code: Option<i32>,
@@ -75,10 +77,18 @@ struct LiveTask {
     watched_by: Option<u64>,
     /// 界面上的状态行已经发出。和模型是否收到是两件事。
     ui_published: bool,
-    /// 当前监听的套接字写成功之后才算模型收到。入队、换连接都不算。
+    /// 扩展回了 ack 才算模型收到：Pi 真把这条结果交给了模型。写进套接字不算，
+    /// 进了 Pi 的队列也不算，停止时 `clear_queue` 会连它一起清掉。
     model_delivered: bool,
-    /// 正在写给这条监听。写失败就放开，让当前连接再写一次。
+    /// 写给了这条监听，在等它的 ack。换了监听（fork、reload、重连）就由新的那条
+    /// 再写一次；写失败就放开，让当前连接再写一次。
     delivering_to: Option<u64>,
+    /// 写出去之后被 `clear_queue` 清掉，又放回来重发的。用户刚按过停止，不再叫醒模型。
+    quiet: bool,
+    /// 挂接的后台子智能体。结果由它报 `finish` 时带回，经同一条监听交回会话。
+    attached: bool,
+    /// 后台子智能体交回的结果。宿主自己起的命令用日志尾部。
+    result: Option<String>,
     deadline: Option<Instant>,
     /// 挂接任务（后台子智能体）的看管线程唤醒端。进程不归宿主管，要停时叫醒那条线程，
     /// 由它转告 Pi。宿主自己起的命令是 `None`。
@@ -203,6 +213,42 @@ impl BackgroundSupervisor {
     pub fn socket_path(&self) -> &Path {
         &self.inner.socket_path
     }
+
+    pub fn control(&self) -> BackgroundControl {
+        BackgroundControl {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+/// 驱动拿着的控制句柄。丢掉它不会停宿主。
+#[derive(Clone)]
+pub struct BackgroundControl {
+    inner: Arc<Inner>,
+}
+
+impl BackgroundControl {
+    /// 用户在界面上停会话自己的一个后台任务，和模型调 `background_task_stop` 是同一件事。
+    /// 停掉的结果照常交回会话，但不叫醒模型。
+    pub fn stop(&self, id: &str) -> Result<(), String> {
+        stop_task(&self.inner, &serde_json::json!({"id": id}), "").map(|_| ())
+    }
+
+    /// Pi 的队列刚被 `clear_queue` 清空。写给会话、还在等 ack 的结果多半跟着没了，
+    /// 放回去重发。用户刚按过停止，重发的不叫醒模型。清空之后才送进 Pi 的那条
+    /// 会再送一次，内容相同。
+    pub fn queue_cleared(&self) {
+        {
+            let mut state = self.inner.mu.lock().unwrap();
+            for task in &mut state.tasks {
+                if task.owner.is_empty() && !task.model_delivered && task.delivering_to.is_some() {
+                    task.delivering_to = None;
+                    task.quiet = true;
+                }
+            }
+        }
+        poke(&self.inner);
+    }
 }
 
 impl Drop for BackgroundSupervisor {
@@ -316,7 +362,8 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream, o
         end_listener(&inner, owner, id);
         return;
     }
-    let mut buf = [0u8; 64];
+    let mut buf = [0u8; 1024];
+    let mut pending = Vec::new();
     loop {
         if inner.stop.load(Ordering::SeqCst) {
             clear_if_current(&inner, owner, id);
@@ -360,8 +407,23 @@ fn serve_listen(inner: Arc<Inner>, mut stream: std::os::unix::net::UnixStream, o
                     false
                 }
                 Err(_) => true,
-                Ok(_) => false,
+                Ok(read) => {
+                    pending.extend_from_slice(&buf[..read]);
+                    false
+                }
             };
+            // 扩展回的 ack：Pi 已经把这条结果交给了模型。
+            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = pending.drain(..=end).collect();
+                let Ok(message) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if message.get("op").and_then(serde_json::Value::as_str) == Some("ack")
+                    && let Some(task_id) = message.get("id").and_then(serde_json::Value::as_str)
+                {
+                    acknowledge_model(&inner, owner, task_id);
+                }
+            }
             if peer_gone {
                 end_listener(&inner, owner, id);
                 return;
@@ -442,10 +504,13 @@ fn serve_attach(
                     pgid: None,
                     cancel: None,
                     watched_by: None,
-                    // 结果由 Pi 交回，宿主不再发状态行，也不再通知模型。
+                    // 状态行由会话里那条子智能体结果消息画，宿主不另发。
                     ui_published: true,
-                    model_delivered: true,
+                    model_delivered: false,
                     delivering_to: None,
+                    quiet: false,
+                    attached: true,
+                    result: None,
                     deadline: None,
                     attach_poke: Some(poke_tx),
                     tool_call_id,
@@ -471,7 +536,7 @@ fn serve_attach(
     )
     .is_err()
     {
-        settle_attached(&inner, &id, BackgroundTaskStatus::Stopped);
+        settle_attached(&inner, &id, BackgroundTaskStatus::Stopped, None);
         return;
     }
 
@@ -493,8 +558,13 @@ fn serve_attach(
                         .unwrap_or(""),
                 ),
                 Some("finish") => {
-                    break 'serve Some(attach_status(
-                        message.get("status").and_then(serde_json::Value::as_str),
+                    let result = message
+                        .get("result")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned);
+                    break 'serve Some((
+                        attach_status(message.get("status").and_then(serde_json::Value::as_str)),
+                        result,
                     ));
                 }
                 _ => {}
@@ -529,11 +599,8 @@ fn serve_attach(
             }
         }
     };
-    settle_attached(
-        &inner,
-        &id,
-        reported.unwrap_or(BackgroundTaskStatus::Stopped),
-    );
+    let (status, result) = reported.unwrap_or((BackgroundTaskStatus::Stopped, None));
+    settle_attached(&inner, &id, status, result);
 }
 
 /// Pi 报的结果。认不出来的按失败算，不能当成完成。
@@ -571,7 +638,14 @@ fn record_attach_progress(inner: &Inner, id: &str, text: &str) {
 }
 
 /// 挂接任务结束。宿主先要求过停止的，以停止为准：Pi 被叫停后报的多半是「失败（aborted）」。
-fn settle_attached(inner: &Inner, id: &str, reported: BackgroundTaskStatus) {
+/// 带回的结果和后台命令的完成走同一条监听交回会话；没报结果就断开（Pi 被杀、崩了）的，
+/// 没有东西可交。
+fn settle_attached(
+    inner: &Inner,
+    id: &str,
+    reported: BackgroundTaskStatus,
+    result: Option<String>,
+) {
     {
         let mut state = inner.mu.lock().unwrap();
         let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) else {
@@ -583,6 +657,8 @@ fn settle_attached(inner: &Inner, id: &str, reported: BackgroundTaskStatus) {
         task.status = task.cancel.unwrap_or(reported);
         task.finished_at_ms = Some(now_ms());
         task.attach_poke = None;
+        task.model_delivered = result.is_none();
+        task.result = result;
         if !inner.stop.load(Ordering::SeqCst) {
             publish_locked(&state, &inner.events);
         }
@@ -648,6 +724,7 @@ fn write_model_notice(writer: &mut impl Write, notice: &ModelNotice) -> std::io:
         &serde_json::json!({
             "op": "completion",
             "id": notice.id,
+            "kind": notice.kind,
             "title": notice.title,
             "status": notice.status,
             "exitCode": notice.exit_code,
@@ -799,6 +876,9 @@ fn start_task(
         ui_published: false,
         model_delivered: false,
         delivering_to: None,
+        quiet: false,
+        attached: false,
+        result: None,
         deadline: timeout.map(|seconds| Instant::now() + Duration::from_secs(seconds)),
         attach_poke: None,
         tool_call_id: None,
@@ -1484,15 +1564,20 @@ fn take_ui(task: &mut LiveTask) -> Option<UiNotice> {
 }
 
 fn completion_of(task: &LiveTask) -> ModelNotice {
-    let output = log_tail_limited(&task.log_path, MODEL_TAIL);
+    let output = task
+        .result
+        .clone()
+        .unwrap_or_else(|| log_tail_limited(&task.log_path, MODEL_TAIL));
     ModelNotice {
         id: task.id.clone(),
+        kind: if task.attached { "subagent" } else { "command" },
         title: task.title.clone(),
         status: status_name(task.status).to_string(),
         exit_code: task.exit_code,
         output_tail: display_tail(&output),
         output,
-        wake: !matches!(task.status, BackgroundTaskStatus::Stopped),
+        // 被停掉的不叫醒模型；停止时被清掉、放回来重发的也不叫醒，用户刚按过停止。
+        wake: !matches!(task.status, BackgroundTaskStatus::Stopped) && !task.quiet,
     }
 }
 
@@ -1530,32 +1615,23 @@ fn write_ready(
             unclaim(inner, &notice.id, listener_id);
             return Ok(());
         }
+        // 写成功也还不算送到：留在这条监听名下等 ack。
         if let Err(error) = write_model_notice(stream, &notice) {
             unclaim(inner, &notice.id, listener_id);
             return Err(error);
         }
-        let mut state = inner.mu.lock().unwrap();
-        if let Some(task) = state.tasks.iter_mut().find(|task| task.id == notice.id) {
-            if task.delivering_to == Some(listener_id) {
-                task.model_delivered = true;
-                task.delivering_to = None;
-            }
-        }
     }
 }
 
+/// 认领一条还没送到的结果。已经写给这条监听、在等 ack 的跳过；写给的是已经被换掉的
+/// 监听（fork、reload、重连），由当前这条重写一次。
 fn claim_model(state: &mut State, owner: &str, listener_id: u64) -> Option<ModelNotice> {
     for task in &mut state.tasks {
         if task.owner != owner
             || task.watched_by.is_some()
             || is_running(task.status)
             || task.model_delivered
-        {
-            continue;
-        }
-        if task
-            .delivering_to
-            .is_some_and(|holder| holder != listener_id)
+            || task.delivering_to == Some(listener_id)
         {
             continue;
         }
@@ -1563,6 +1639,19 @@ fn claim_model(state: &mut State, owner: &str, listener_id: u64) -> Option<Model
         return Some(completion_of(task));
     }
     None
+}
+
+/// 扩展确认 Pi 已经把这条结果交给了模型。
+fn acknowledge_model(inner: &Inner, owner: &str, task_id: &str) {
+    let mut state = inner.mu.lock().unwrap();
+    if let Some(task) = state
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == task_id && task.owner == owner)
+    {
+        task.model_delivered = true;
+        task.delivering_to = None;
+    }
 }
 
 fn still_claimed(inner: &Inner, task_id: &str, listener_id: u64) -> bool {
@@ -1578,10 +1667,11 @@ fn still_claimed(inner: &Inner, task_id: &str, listener_id: u64) -> bool {
 
 fn unclaim(inner: &Inner, task_id: &str, listener_id: u64) {
     let mut state = inner.mu.lock().unwrap();
-    if let Some(task) = state.tasks.iter_mut().find(|task| task.id == task_id) {
-        if task.delivering_to == Some(listener_id) && !task.model_delivered {
-            task.delivering_to = None;
-        }
+    if let Some(task) = state.tasks.iter_mut().find(|task| task.id == task_id)
+        && task.delivering_to == Some(listener_id)
+        && !task.model_delivered
+    {
+        task.delivering_to = None;
     }
 }
 
@@ -1743,16 +1833,10 @@ fn record_task_group(root: &Path, pgid: i32) {
     if pgid <= 1 {
         return;
     }
-    let Some(started) = crate::acp_conn::process_start_time(pgid) else {
+    let Some(birth) = crate::acp_conn::process_birth(pgid) else {
         return;
     };
-    let Ok(elapsed) = started.duration_since(UNIX_EPOCH) else {
-        return;
-    };
-    let _ = fs::write(
-        root.join(format!("group-{pgid}")),
-        format!("{} {}\n", elapsed.as_secs(), elapsed.subsec_nanos()),
-    );
+    let _ = fs::write(root.join(format!("group-{pgid}")), format!("{birth}\n"));
 }
 
 fn forget_task_group(root: &Path, pgid: i32) {
@@ -1813,20 +1897,7 @@ fn group_record_matches(path: &Path, pgid: i32) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
-    let mut parts = text.split_whitespace();
-    let (Some(secs), Some(nanos)) = (
-        parts.next().and_then(|part| part.parse::<u64>().ok()),
-        parts.next().and_then(|part| part.parse::<u32>().ok()),
-    ) else {
-        return false;
-    };
-    let Some(live) = crate::acp_conn::process_start_time(pgid) else {
-        return false;
-    };
-    let Ok(elapsed) = live.duration_since(UNIX_EPOCH) else {
-        return false;
-    };
-    elapsed.as_secs() == secs && elapsed.subsec_nanos() == nanos
+    crate::acp_conn::process_birth(pgid).is_some_and(|live| live == text.trim())
 }
 
 /// 叫一个任务停下。宿主自己起的命令给整个进程组发信号；挂接任务叫醒它的看管线程，
@@ -2168,6 +2239,14 @@ mod tests {
 
         fn shutdown(&self) {
             let _ = self.reader.get_ref().shutdown(std::net::Shutdown::Both);
+        }
+
+        /// 扩展看到 Pi 把这条结果交给了模型。
+        fn ack(&mut self, id: &str) {
+            self.reader
+                .get_mut()
+                .write_all(format!("{}\n", serde_json::json!({"op": "ack", "id": id})).as_bytes())
+                .unwrap();
         }
     }
 
@@ -2905,9 +2984,10 @@ mod tests {
     }
 
     /// 后台子智能体的进程不归宿主管，但要和后台命令一样出现在会话的任务列表里：
-    /// 带着派它出去的那次工具调用，进展能翻到，报完结果就结束，宿主不再另发完成通知。
+    /// 带着派它出去的那次工具调用，进展能翻到，报完结果就结束。结果经监听交回会话，
+    /// 状态行由那条结果消息画，宿主不另发。
     #[test]
-    fn an_attached_subagent_is_listed_until_it_reports_and_stays_silent() {
+    fn an_attached_subagent_is_listed_and_hands_its_result_back_through_the_listener() {
         let (supervisor, events, outbound) = supervisor_with_outbound();
         let path = supervisor.socket_path().to_path_buf();
         let mut session = Listen::connect(&path);
@@ -2947,29 +3027,117 @@ mod tests {
 
         send_line(
             &mut conn,
-            serde_json::json!({"op": "finish", "status": "completed"}),
+            serde_json::json!({"op": "finish", "status": "completed", "result": "八项都过了"}),
         );
         assert_eq!(until_settled(&path, &id)["tasks"][0]["status"], "completed");
-        assert!(
-            session.try_next(Duration::from_millis(200)).is_none(),
-            "结果由子智能体自己交回，宿主不能再通知模型一遍"
+        let completion = session.next();
+        assert_eq!(completion["id"], id.as_str());
+        assert_eq!(completion["kind"], "subagent");
+        assert_eq!(
+            completion["output"], "八项都过了",
+            "交回的是完整结果，不是进展"
         );
+        assert_eq!(completion["wake"], true);
         let ui: Vec<_> =
             std::iter::from_fn(|| recv_outbound(&outbound, Duration::from_millis(200))).collect();
         assert!(
             ui.iter().all(|line| line["id"] != id.as_str()),
-            "也不能再画一条状态行: {ui:?}"
+            "状态行由结果消息画，宿主不能再画一条: {ui:?}"
         );
     }
 
     /// Pi 被杀或崩掉时连接断开，任务必须跟着结束，不能留一个永远在跑的假任务。
+    /// 没报结果就没有东西交回。
     #[test]
     fn a_dropped_attachment_ends_the_task() {
         let (supervisor, _events) = supervisor();
         let path = supervisor.socket_path().to_path_buf();
+        let mut session = Listen::connect(&path);
         let (conn, id) = attach(&path, "call-8");
         drop(conn);
         assert_eq!(until_settled(&path, &id)["tasks"][0]["status"], "stopped");
+        assert!(session.try_next(Duration::from_millis(300)).is_none());
+    }
+
+    /// 叫停的子智能体和后台命令一样：结果照常交回，但不叫醒模型。
+    #[test]
+    fn a_stopped_attached_subagent_does_not_wake_the_model() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let mut session = Listen::connect(&path);
+        let (mut conn, id) = attach(&path, "call-10");
+        let stopped = call(&path, serde_json::json!({"op": "stop", "id": id}));
+        assert_eq!(stopped["ok"], true, "{stopped}");
+        send_line(
+            &mut conn,
+            serde_json::json!({"op": "finish", "status": "failed", "result": "aborted"}),
+        );
+        let completion = session.next();
+        assert_eq!(completion["id"], id.as_str());
+        assert_eq!(completion["status"], "stopped");
+        assert_eq!(completion["wake"], false);
+    }
+
+    /// 写进套接字不算送到。回退（fork）后旧会话的 pi 不能用了，结果还没交给模型，
+    /// 新会话连上的监听要再收一次；收下（ack）之后就不再送。
+    #[test]
+    fn an_unacknowledged_completion_goes_to_the_next_listener() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let mut before_fork = Listen::connect(&path);
+        let started = call(
+            &path,
+            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+        );
+        let id = started["id"].as_str().unwrap().to_string();
+        until_settled(&path, &id);
+        assert_eq!(before_fork.next()["id"], id.as_str());
+        assert!(
+            before_fork.try_next(Duration::from_millis(300)).is_none(),
+            "同一条监听在等 ack，不能再写"
+        );
+
+        let mut after_fork = Listen::connect(&path);
+        let again = after_fork.next();
+        assert_eq!(again["id"], id.as_str());
+        assert_eq!(again["wake"], true);
+        after_fork.ack(&id);
+        thread::sleep(Duration::from_millis(100));
+
+        let mut later = Listen::connect(&path);
+        assert!(
+            later.try_next(Duration::from_millis(300)).is_none(),
+            "收下之后不再送"
+        );
+    }
+
+    /// 停止时驱动先发 `clear_queue`，排在 Pi 队列里的结果跟着没了。宿主要重发，
+    /// 但用户刚按过停止，重发的不叫醒模型。
+    #[test]
+    fn a_completion_cleared_from_the_queue_is_resent_without_waking() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let mut listen = Listen::connect(&path);
+        let started = call(
+            &path,
+            serde_json::json!({"op": "start", "command": "printf ready", "title": "打印"}),
+        );
+        let id = started["id"].as_str().unwrap().to_string();
+        until_settled(&path, &id);
+        assert_eq!(listen.next()["wake"], true);
+
+        supervisor.control().queue_cleared();
+        let resent = listen.next();
+        assert_eq!(resent["id"], id.as_str());
+        assert_eq!(resent["wake"], false);
+
+        listen.ack(&id);
+        thread::sleep(Duration::from_millis(100));
+        supervisor.control().queue_cleared();
+        assert!(
+            listen.try_next(Duration::from_millis(300)).is_none(),
+            "已经收下的不随清队列重发"
+        );
     }
 
     /// 模型或上级要停它时，宿主转告 Pi；Pi 被叫停后报的失败按停止记。

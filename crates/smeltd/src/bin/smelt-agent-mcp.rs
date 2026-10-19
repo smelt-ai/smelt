@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use smelt_core::control_api::{
-    AgentList, AgentListParams, AgentSend, AgentSendParams, ControlClientError,
-};
-use smelt_plugin_api::CommandId;
+use smelt_core::control_api::{AgentList, AgentListParams, AgentSend, AgentSendParams};
+use smelt_event_protocol::CommandId;
+use smelt_runtime_client::protocol::control::ControlClientError;
+use smelt_runtime_client::{LocalConnector, RuntimeClient};
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 const SMELT_LIST_AGENTS: &str = "smelt_list_agents";
@@ -56,13 +56,12 @@ fn daemon_list() -> Result<Value, String> {
 }
 
 fn daemon_list_at(socket_path: &Path, source: &str, token: &str) -> Result<Value, String> {
-    match smelt_core::control_client::call_at::<AgentList>(
-        socket_path,
-        Duration::from_secs(5),
+    match RuntimeClient::new(LocalConnector::new(socket_path)).call::<AgentList>(
         &AgentListParams {
             source_session_id: source.to_string(),
             source_token: token.to_string(),
         },
+        Duration::from_secs(5),
     ) {
         Ok(result) => Ok(json!({ "ok": true, "agents": result.agents })),
         Err(error) => control_error_value(error),
@@ -90,12 +89,9 @@ fn daemon_send_at(
         target: target.to_string(),
         message: message.to_string(),
     };
+    let client = RuntimeClient::new(LocalConnector::new(socket_path));
     for attempt in 0..2 {
-        match smelt_core::control_client::call_at::<AgentSend>(
-            socket_path,
-            Duration::from_secs(10),
-            &params,
-        ) {
+        match client.call::<AgentSend>(&params, Duration::from_secs(10)) {
             Ok(result) => {
                 return Ok(json!({
                     "ok": true,
@@ -437,8 +433,8 @@ mod tests {
     #[test]
     fn control_domain_error_has_tool_error_shape() {
         let value = control_error_value(ControlClientError::Protocol(
-            smelt_core::control_api::ControlError::new(
-                smelt_core::control_api::ControlErrorCode::OperationFailed,
+            smelt_runtime_client::protocol::control::ControlError::new(
+                smelt_runtime_client::protocol::control::ControlErrorCode::OperationFailed,
                 "target is busy",
             ),
         ))
@@ -460,7 +456,7 @@ mod tests {
             assert_eq!(value["params"]["source_session_id"], "source");
             assert_eq!(value["params"]["source_token"], "token");
             let request_id = value["request_id"].as_str().unwrap();
-            let response = smelt_core::control_api::ControlResponse::ok(
+            let response = smelt_runtime_client::protocol::control::ControlResponse::ok(
                 request_id,
                 smelt_core::control_api::AgentListResult { agents: Vec::new() },
             );
@@ -491,7 +487,7 @@ mod tests {
                 first_request["params"]["command_id"]
             );
             let request_id = retry_request["request_id"].as_str().unwrap();
-            let response = smelt_core::control_api::ControlResponse::ok(
+            let response = smelt_runtime_client::protocol::control::ControlResponse::ok(
                 request_id,
                 smelt_core::control_api::AgentSendResult {
                     message_id: retry_request["params"]["command_id"]

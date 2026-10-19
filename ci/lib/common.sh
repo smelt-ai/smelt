@@ -51,6 +51,12 @@ die()  { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 # 冒出与本次改动无关的 diff。所以这里是唯一真相源，android 与 ios 都从这里取。
 REQUIRED_FLUTTER="3.47.3"
 
+# Rust 的唯一真相源是仓库根 rust-toolchain.toml：桌面端的 cargo 和移动端的 cargokit
+# 都按它选工具链，CI 直接读它，不再在各平台脚本里抄一份版本号。
+REQUIRED_RUST="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+  "$REPO_ROOT/rust-toolchain.toml" 2>/dev/null | head -n 1)"
+[[ -n "$REQUIRED_RUST" ]] || die "无法从 ${REPO_ROOT}/rust-toolchain.toml 读出 channel"
+
 # ── 版本处理 ────────────────────────────────────────────────────────────────
 
 # 版本比较不用 sort -V：macOS 自带的是 BSD sort，老版本没有 -V，构建机上不能赌。
@@ -115,6 +121,12 @@ require_macos() {
     || die "只支持 macOS，当前是 $(uname -s)"
 }
 
+# Linux 版运行时只在 Linux 上原生构建，不交叉编译。
+require_linux() {
+  [[ "$(uname -s)" == "Linux" ]] \
+    || die "只支持 Linux，当前是 $(uname -s)。Linux 版运行时在对应架构的 Linux 机器上原生构建"
+}
+
 # 检查 Xcode Command Line Tools。编译要链接系统框架，没有 CLT 会在编译到一半才
 # 炸，且报错很难懂。装它需要管理员权限，我们装不了，只能报清楚。
 require_xcode_clt() {
@@ -173,5 +185,69 @@ passthrough_mirrors() {
       echo "export $var=\"${!var}\"" >>"$file"
       info "透传镜像配置：$var"
     fi
+  done
+}
+
+# ── Rust ──────────────────────────────────────────────────────────────────────
+# mac / android / ios 共用：把 rustup 与 REQUIRED_RUST 装进自己的 CARGO_HOME /
+# RUSTUP_HOME（硬规矩 3），再装上调用方给的交叉编译 target。
+#
+# target 必须装在 REQUIRED_RUST 这套工具链上：cargo 在仓库里会被
+# rust-toolchain.toml 切到它，移动端的 cargokit 也按同一个文件选工具链。装到
+# default/stable 上，交叉编译时会找不到 target。
+#
+# 用法：setup_rust_toolchain [target ...]。依赖调用方定义的 CHECK_ONLY。
+setup_rust_toolchain() {
+  export CARGO_HOME="$CARGO_HOME_DIR" RUSTUP_HOME="$RUSTUP_HOME_DIR"
+  local rustup_bin="$CARGO_HOME_DIR/bin/rustup"
+  local rustc_bin="$CARGO_HOME_DIR/bin/rustc"
+  local have=""
+  have="$(tool_version "$rustc_bin" --version)"
+
+  if need_install "Rust" "$have" "$REQUIRED_RUST"; then
+    [[ "$CHECK_ONLY" == 1 ]] && die "Rust 不满足要求（--check 模式不安装）"
+
+    if [[ -x "$rustup_bin" ]]; then
+      info "升级 Rust 到 $REQUIRED_RUST"
+      "$rustup_bin" toolchain install "$REQUIRED_RUST" --profile minimal || die "Rust 工具链安装失败"
+      "$rustup_bin" default "$REQUIRED_RUST" || die "切换默认工具链失败"
+    else
+      info "安装 rustup 到 $CARGO_HOME_DIR"
+      mkdir -p "$TOOLCHAIN_ROOT"
+      # 走架构无关的安装脚本。按 uname -m 自己拼 dist/<arch>-apple-darwin/rustup-init
+      # 是错的：Apple Silicon 上 uname -m 返回 arm64，而 rustup 的分发路径用的是
+      # Rust 三元组里的 aarch64，拼出来的 URL 一定 404。
+      local init="$TOOLCHAIN_ROOT/rustup-init.sh"
+      curl -fsSL --retry 3 "${RUSTUP_UPDATE_ROOT:-https://sh.rustup.rs}" -o "$init" \
+        || die "下载 rustup 失败。内网机器请设置 RUSTUP_UPDATE_ROOT 指向镜像。"
+      # --no-modify-path 是关键：默认行为会往 ~/.profile、~/.bashrc 里塞 PATH，
+      # 那是对构建机的永久污染。PATH 由各平台的 env-setup 写进 ci/.env/<平台>.sh。
+      sh "$init" -y --no-modify-path --default-toolchain "$REQUIRED_RUST" --profile minimal \
+        || die "rustup 安装失败"
+      rm -f "$init"
+    fi
+    ok "Rust $(tool_version "$rustc_bin" --version)"
+  fi
+
+  [[ -x "$rustup_bin" ]] || die "找不到 rustup（${rustup_bin}）"
+
+  # 默认工具链达标不等于 REQUIRED_RUST 本身装了（比如 default 是更新的 stable）。
+  if [[ "$CHECK_ONLY" != 1 ]]; then
+    "$rustup_bin" toolchain install "$REQUIRED_RUST" --profile minimal \
+      || die "安装 Rust $REQUIRED_RUST 失败"
+  fi
+
+  [[ $# -gt 0 ]] || return 0
+  local installed target
+  installed="$("$rustup_bin" target list --toolchain "$REQUIRED_RUST" --installed 2>/dev/null || true)"
+  for target in "$@"; do
+    if grep -qx "$target" <<<"$installed"; then
+      ok "Rust target $target"
+      continue
+    fi
+    [[ "$CHECK_ONLY" == 1 ]] && die "缺少 Rust target ${target}（--check 模式不安装）"
+    info "安装 Rust target ${target}（${REQUIRED_RUST}）"
+    "$rustup_bin" target add "$target" --toolchain "$REQUIRED_RUST" \
+      || die "安装 Rust target ${target} 失败"
   done
 }

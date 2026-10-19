@@ -10,7 +10,7 @@ use smelt_core::agent_bus::{
 };
 use smelt_core::agent_kind::ConversationAgentKind;
 use smelt_core::control_api::{AgentListParams, AgentListResult, AgentSendParams, AgentSendResult};
-use smelt_plugin_api::CommandId;
+use smelt_event_protocol::CommandId;
 
 use super::{
     AcpSession, AcpSessions, EventHubHandle, Phase, Session, Sessions, acp_runtime_alive,
@@ -692,7 +692,7 @@ fn required_non_empty<'a>(value: &'a str, key: &str) -> Result<&'a str, PeerMess
 mod tests {
     use super::*;
     use smelt_event_bus::Delivery;
-    use smelt_plugin_api::{
+    use smelt_event_protocol::{
         AgentMessageDelivered, CORE_CAPABILITY_AGENT_MESSAGE_READ,
         CORE_TOPIC_AGENT_MESSAGE_DELIVERED, Capability, DeliveryClass, PluginId, SubscriptionId,
         Topic,
@@ -709,7 +709,6 @@ mod tests {
                 id,
                 None,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
-                None,
                 None,
             )
         });

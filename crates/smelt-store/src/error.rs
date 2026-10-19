@@ -44,21 +44,6 @@ pub enum StoreError {
     #[error("{label} 不能包含 NUL")]
     NameContainsNul { label: String },
 
-    #[error("legacy source 不能为空")]
-    EmptyLegacySource,
-
-    #[error("legacy source 不能包含 NUL")]
-    LegacySourceContainsNul,
-
-    #[error("未知 legacy import 状态: {status}")]
-    UnknownLegacyStatus { status: String },
-
-    #[error(transparent)]
-    LegacyMappingMismatch(Box<LegacyMappingMismatch>),
-
-    #[error("legacy source {legacy_source} 的 KV 元数据不完整")]
-    IncompleteLegacyMetadata { legacy_source: String },
-
     #[error("智能体定义的 id 不能在更新中修改: {from} -> {to}")]
     AgentDefinitionIdChanged { from: String, to: String },
 
@@ -70,9 +55,6 @@ pub enum StoreError {
 
     #[error("delivery_attempts 不能为负")]
     NegativeDeliveryAttempts,
-
-    #[error("隔离目标不能与原 KV 相同")]
-    QuarantineSameKey,
 
     #[error("KV scope {scope} 的根节点不是 object")]
     KvRootNotObject { scope: String },
@@ -126,7 +108,7 @@ pub enum StoreError {
     UninitializedDatabase,
 
     #[error(transparent)]
-    PluginApi(#[from] smelt_plugin_api::ValidationError),
+    EventProtocol(#[from] smelt_event_protocol::ValidationError),
 
     #[error("事务已中止")]
     TransactionAborted,
@@ -142,20 +124,6 @@ pub enum StoreError {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     #[error(transparent)]
     Sqlite(Box<rusqlite::Error>),
-}
-
-/// legacy 映射冲突。字段多，单独装箱，避免撑大 `StoreError`。
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "legacy source {legacy_source} 已映射到 {mapped_namespace}/{mapped_key}，拒绝{action}为 {namespace}/{key}"
-)]
-pub struct LegacyMappingMismatch {
-    pub legacy_source: String,
-    pub mapped_namespace: String,
-    pub mapped_key: String,
-    pub namespace: String,
-    pub key: String,
-    pub action: &'static str,
 }
 
 /// 打开数据库文件时的底层失败。移动端没有 rusqlite，用 io 兜住 Display。
@@ -191,24 +159,6 @@ impl StoreError {
 
     pub(crate) fn unrecognized_schema(version: u32) -> Self {
         Self::SchemaUnrecognized { version }
-    }
-
-    pub(crate) fn legacy_mapping_mismatch(
-        legacy_source: impl Into<String>,
-        mapped_namespace: impl Into<String>,
-        mapped_key: impl Into<String>,
-        namespace: impl Into<String>,
-        key: impl Into<String>,
-        action: &'static str,
-    ) -> Self {
-        Self::LegacyMappingMismatch(Box::new(LegacyMappingMismatch {
-            legacy_source: legacy_source.into(),
-            mapped_namespace: mapped_namespace.into(),
-            mapped_key: mapped_key.into(),
-            namespace: namespace.into(),
-            key: key.into(),
-            action,
-        }))
     }
 }
 

@@ -1,4 +1,4 @@
-import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { createMcpExtension, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
 	SMELT_BACKGROUND_TASK_EXTENSION_NAME,
 	smeltBackgroundTaskExtension,
@@ -11,6 +11,7 @@ import {
 } from "./elicitation.ts";
 import { SMELT_MCP_EXTENSION_NAME, smeltMcpExtension } from "./mcp-selection.ts";
 import smeltMemoryExtension, { SMELT_MEMORY_EXTENSION_NAME } from "./memory-extension.ts";
+import { createSmeltMcpTransport } from "./pi-mcp-runtime.ts";
 import smeltPermissionExtension from "./smelt-permission.ts";
 import smeltSubagentExtension, { SMELT_SUBAGENT_EXTENSION_NAME } from "./subagent/index.ts";
 
@@ -44,4 +45,23 @@ export function withAgentMcp(
 		{ name: SMELT_MCP_EXTENSION_NAME, factory: smeltMcpExtension(selection), hidden: true },
 		...factories.slice(permission),
 	];
+}
+
+/**
+ * Pi 内置 MCP 扩展（`builtin:mcp`）的代码，换成只改 transport 的同一个扩展。
+ *
+ * 裸 Pi 会话用的是内置 MCP 扩展，它默认让 stdio server 整份继承 Pi 进程的环境，会话 token 也在里面。
+ * Pi 允许宿主用同名的 `builtin: true` 条目提供内置扩展的代码（后给的覆盖 Pi 自带的），所以默认加载、
+ * `pi config` 开关、`--no-extensions` 关掉它、第三方 MCP 扩展注册 `/mcp` 时让位，这些行为都不变。
+ */
+export const SMELT_BUILTIN_MCP_EXTENSION = {
+	name: "mcp",
+	factory: createMcpExtension({ createTransport: createSmeltMcpTransport }),
+	replaceable: true,
+	builtin: true,
+} satisfies InlineExtension;
+
+/** 交给 Pi `main` 的全部扩展：内置 MCP 的替身，加上 Smelt 自己的扩展和产品智能体勾选的 MCP。 */
+export function smeltExtensionFactories(selection: ReadonlySet<string> | undefined): InlineExtension[] {
+	return [SMELT_BUILTIN_MCP_EXTENSION, ...withAgentMcp(SMELT_EXTENSION_FACTORIES, selection)];
 }

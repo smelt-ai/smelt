@@ -87,7 +87,7 @@ fn list_includes_recovered_sessions_as_disconnected() {
         writeln!(client, "{}", serde_json::json!({ "op": "list" })).unwrap();
         handle_conn(
             server,
-            ServerContext {
+            ServerShared {
                 sessions: new_sessions(),
                 acp_sessions: new_test_acp_sessions(),
                 remote_sessions: new_test_remote_sessions(),
@@ -96,11 +96,9 @@ fn list_includes_recovered_sessions_as_disconnected() {
                 exe_mtime: 0,
                 daemon_fingerprint: None,
                 listen_fd: -1,
-                remote_state: new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string())),
-                iroh_state: Arc::new(Mutex::new(None)),
-                iroh_connections: new_iroh_connections(),
                 event_hub: new_event_hub(),
-            },
+            }
+            .context(Principal::Local),
         );
 
         let mut resp = String::new();
@@ -158,7 +156,7 @@ fn kill_recovered_session_removes_identity() {
         .unwrap();
         handle_conn(
             server,
-            ServerContext {
+            ServerShared {
                 sessions: Arc::clone(&sessions),
                 acp_sessions: Arc::clone(&acp_sessions),
                 remote_sessions: Arc::clone(&remote_sessions),
@@ -167,11 +165,9 @@ fn kill_recovered_session_removes_identity() {
                 exe_mtime: 0,
                 daemon_fingerprint: None,
                 listen_fd: -1,
-                remote_state: new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string())),
-                iroh_state: Arc::new(Mutex::new(None)),
-                iroh_connections: new_iroh_connections(),
                 event_hub: Arc::clone(&subscribers),
-            },
+            }
+            .context(Principal::Local),
         );
 
         let mut resp = String::new();
@@ -250,7 +246,6 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
                 "acp-1",
                 None,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
-                None,
                 None,
             )
         });

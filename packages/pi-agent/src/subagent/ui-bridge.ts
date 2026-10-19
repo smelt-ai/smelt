@@ -25,11 +25,6 @@ export async function bridgeSubagentUiRequest(
 	}
 
 	const dialog = request as DialogRequest;
-	if (!context.hasUI || signal?.aborted) {
-		await sendResponse(cancel(dialog));
-		return;
-	}
-
 	const options: ExtensionUIDialogOptions | undefined =
 		request.method !== "editor" && (request.timeout !== undefined || signal)
 			? {
@@ -38,7 +33,12 @@ export async function bridgeSubagentUiRequest(
 				}
 			: undefined;
 
+	// 读 ctx 也要在 try 里：会话换掉后旧 ctx 一碰就抛错，子进程必须收到取消，不能一直等。
 	try {
+		if (!context.hasUI || signal?.aborted) {
+			await sendResponse(cancel(dialog));
+			return;
+		}
 		switch (request.method) {
 			case "confirm": {
 				const confirmed = await context.ui.confirm(request.title, request.message, options);

@@ -101,7 +101,13 @@ impl Workspace {
             self.ensure_git_watch(root, cx);
         }
 
-        let repo_cwds: HashSet<String> = self.sessions.iter().filter_map(|s| s.cwd(cx)).collect();
+        // 仓库信息问的是本机运行时，只收本机会话的目录。
+        let repo_cwds: HashSet<String> = self
+            .sessions
+            .iter()
+            .filter(|s| s.runtime(cx).is_local())
+            .filter_map(|s| s.cwd(cx))
+            .collect();
         for cwd in repo_cwds {
             self.ensure_repo_info(cwd, cx);
         }
@@ -144,6 +150,17 @@ impl Workspace {
             }
             if let Some(root) = cwd {
                 let (agent, pid) = self.history_source(Some(root.as_str()), cx);
+                let tabs = crate::session_history::history_source_tabs(
+                    self.history_engine_override(Some(root.as_str()), cx),
+                    cx.global::<crate::settings::AgentHostState>()
+                        .all_profiles()
+                        .cloned(),
+                );
+                for tab in tabs {
+                    if tab.kind != agent || tab.profile_id != pid {
+                        self.prefetch_session_list(tab.kind, tab.profile_id, root.clone(), cx);
+                    }
+                }
                 self.ensure_session_list(agent, pid, root, cx);
             }
         }
@@ -153,12 +170,13 @@ impl Workspace {
                 use gpui_component::input::{InputEvent, InputState};
                 let state =
                     cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名 / 内容…"));
-                self._file_filter_sub = Some(cx.subscribe(&state, |this, _, ev: &InputEvent, cx| {
-                    if matches!(ev, InputEvent::Change) {
-                        this.schedule_visible_refresh(cx);
-                        cx.notify();
-                    }
-                }));
+                self._file_filter_sub =
+                    Some(cx.subscribe(&state, |this, _, ev: &InputEvent, cx| {
+                        if matches!(ev, InputEvent::Change) {
+                            this.schedule_visible_refresh(cx);
+                            cx.notify();
+                        }
+                    }));
                 self.file_filter = Some(state);
             }
             let query = self
@@ -204,7 +222,7 @@ impl Workspace {
             self.applied_ui_font_px = Some(ui_font_px);
         }
 
-        if should_auto_resume_active_acp(self.sessions_restored)
+        if should_auto_resume_active_acp(self.local.sessions_restored)
             && let Some(SessionKind::Conversation(view)) =
                 self.sessions.get(self.active_session).map(|s| &s.kind)
         {
@@ -225,19 +243,19 @@ impl Workspace {
             .get(self.active_session)
             .is_some_and(|session| session.is_agent_conversation(cx));
         if crate::should_open_restored_agent_conversation(
-            self.sessions_restored,
+            self.local.sessions_restored,
             self.restored_agent_conversation_route,
             active_is_agent_conversation,
             self.active_tab(),
         ) {
             self.restored_agent_conversation_route = true;
             self.activate(self.active_session, window, cx);
-        } else if self.sessions_restored {
+        } else if self.local.sessions_restored {
             self.restored_agent_conversation_route = true;
         }
 
         if crate::should_correct_agent_conversation_on_project_stage(
-            self.sessions_restored,
+            self.local.sessions_restored,
             self.active_tab(),
             active_is_agent_conversation,
         ) {

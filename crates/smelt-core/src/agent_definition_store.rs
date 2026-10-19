@@ -1,7 +1,11 @@
+pub use smelt_model::agent_definition_store::*;
+
+pub use smelt_model::agent_paths::*;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::agent_definition::AgentDefinition;
 use crate::agent_kind::{
@@ -113,52 +117,21 @@ pub fn load_session_agent_definition_ids() -> BTreeMap<String, String> {
     let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
         return BTreeMap::new();
     };
-    match store.session_agent_definition_ids() {
-        Ok(Some(ids)) => ids,
-        Ok(None) => match store.get_workspace_snapshot() {
-            Ok(Some(snapshot)) => session_agent_definition_ids_from_snapshot(&snapshot),
-            Ok(None) | Err(_) => BTreeMap::new(),
-        },
-        Err(_) => BTreeMap::new(),
-    }
+    store.session_agent_definition_ids().unwrap_or_default()
 }
 
-/// 从工作区快照里挑出「这条会话属于哪个智能体」。
-fn session_agent_definition_ids_from_snapshot(
-    snapshot: &smelt_store::WorkspaceSnapshot,
-) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    for session in &snapshot.sessions {
-        let Some(acp) = &session.acp else {
-            continue;
-        };
-        let Some(sid) = acp
-            .sid
-            .as_deref()
-            .map(str::trim)
-            .filter(|sid| !sid.is_empty())
-        else {
-            continue;
-        };
-        let Some(id) = acp
-            .agent_definition_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            continue;
-        };
-        map.insert(sid.to_string(), id.to_string());
-    }
-    map
-}
-
+/// 测试用：工作区文档经运行时库落盘，再按库里的绑定读回来。
 #[cfg(test)]
 fn session_agent_definition_ids(workspace: &serde_json::Value) -> BTreeMap<String, String> {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let store =
+        smelt_store::Store::open_or_create(dir.path().join(smelt_store::DATABASE_FILE_NAME))
+            .expect("测试库");
     let raw = serde_json::to_vec(workspace).expect("测试夹具应能序列化");
     let snapshot =
         smelt_store::Store::workspace_snapshot_from_json(&raw).expect("测试夹具应能转成工作区快照");
-    session_agent_definition_ids_from_snapshot(&snapshot)
+    store.put_workspace_snapshot(&snapshot).expect("写入工作区");
+    store.session_agent_definition_ids().expect("读回绑定")
 }
 
 fn resolve_agent_execution_definition(
@@ -195,6 +168,38 @@ fn resolve_agent_execution_definition(
         kind,
         launch,
     })
+}
+
+/// `session.launch.prepare`：注入智能体的长期指令、插件与 MCP 勾选、模型、记忆目录。
+/// 插件目录和记忆目录都在运行时那台机器上，所以由运行时来补。
+pub fn prepare_launch(params: LaunchPrepareParams) -> LaunchPrepareResult {
+    let LaunchPrepareParams { launch, prep, cwd } = params;
+    let definition = prep.agent_definition_id.as_deref().and_then(|id| {
+        load_agent_definitions()
+            .into_iter()
+            .find(|agent| agent.id == id)
+    });
+    let launch = if prep.restore {
+        let mut launch = repair_agent_definition_launch(launch, definition.as_ref());
+        // 记忆目录由智能体 id 决定，升级前保存的会话也能补上。
+        attach_agent_memory_dirs(&mut launch, prep.agent_definition_id.as_deref());
+        launch
+    } else {
+        prepare_agent_definition_launch(launch, definition.as_ref())
+    };
+    let skills =
+        crate::pi_plugin_catalog::loaded_skills_for_launch(&launch, cwd.as_deref().map(Path::new));
+    LaunchPrepareResult { launch, skills }
+}
+
+/// `session.loaded_skills`：一场 Pi 会话按启动规格和工作目录会加载哪些技能。
+pub fn loaded_skills(params: LoadedSkillsParams) -> LoadedSkillsResult {
+    LoadedSkillsResult {
+        skills: crate::pi_plugin_catalog::loaded_skills_for_launch(
+            &params.launch,
+            params.cwd.as_deref().map(Path::new),
+        ),
+    }
 }
 
 pub fn prepare_agent_definition_launch(
@@ -291,25 +296,6 @@ fn agent_workspace_skill_roots(definition: &AgentDefinition) -> Vec<PathBuf> {
     roots
 }
 
-/// 智能体自己的 space 根目录：`~/.smelt/agents/<id>`。
-///
-/// 同一个智能体的所有会话共用它作为工作目录。以前每开一次对话就建一个随机
-/// uuid 空目录，等于把「进程 cwd」和「智能体的长期上下文」混为一谈——agent
-/// 攒下的文件、笔记、AGENTS.md 下次开对话就找不到了。space 根让这些东西真正
-/// 属于智能体。
-pub fn agent_space_root(agent_definition_id: &str) -> Option<PathBuf> {
-    agent_space_in(&agent_spaces_root()?, agent_definition_id)
-}
-
-/// `spaces_root` 下这个智能体的 space；id 不能安全地当目录名时返回 `None`。
-pub fn agent_space_in(spaces_root: &Path, agent_definition_id: &str) -> Option<PathBuf> {
-    let id = agent_definition_id.trim();
-    if id.is_empty() || id.contains('/') || id.contains('\\') || id == "." || id == ".." {
-        return None;
-    }
-    Some(spaces_root.join(id))
-}
-
 pub fn ensure_agent_space(agent_definition_id: &str) -> Option<PathBuf> {
     let dir = agent_space_root(agent_definition_id)?;
     std::fs::create_dir_all(&dir).ok()?;
@@ -357,43 +343,6 @@ pub fn attach_agent_memory_dirs(
                 .insert(name.to_string(), dir.to_string_lossy().into_owned());
         }
     }
-}
-
-/// 智能体自己的记忆目录：`~/.smelt/agents/<id>/memory`。
-///
-/// 跟着智能体走，不跟着工作目录走：同一个智能体在自己的 space、自动化目录还是用户项目
-/// 里运行，读写的都是这一份。格式和规则见 `docs/agent-memory.md`。
-pub fn agent_memory_dir(agent_definition_id: &str) -> Option<PathBuf> {
-    agent_space_root(agent_definition_id).map(|space| space.join("memory"))
-}
-
-/// 跨智能体的用户全局记忆：`~/.smelt/memory`，只放用户本人和用户纠正过的做法。
-pub fn user_memory_dir() -> Option<PathBuf> {
-    smelt_paths::smelt_home().map(|home| home.join("memory"))
-}
-
-fn agent_spaces_root() -> Option<PathBuf> {
-    smelt_paths::smelt_home().map(|home| home.join("agents"))
-}
-
-pub fn is_agent_space(path: &Path) -> bool {
-    agent_spaces_root().is_some_and(|root| path.starts_with(&root))
-}
-
-/// 从 space 路径反解出智能体 id。
-///
-/// 工具面板、历史页这类只拿得到一个 cwd 的地方，靠它认出「现在是在某个智能体
-/// 的上下文里」，从而按智能体而不是按裸引擎来处理。只认 space 根本身，子目录
-/// 不算：那是智能体的工作产物，不是另一个智能体。
-pub fn agent_definition_id_for_space(path: &Path) -> Option<String> {
-    let root = agent_spaces_root()?;
-    let relative = path.strip_prefix(&root).ok()?;
-    let mut parts = relative.components();
-    let id = parts.next()?.as_os_str().to_str()?.to_string();
-    if parts.next().is_some() || id.is_empty() {
-        return None;
-    }
-    Some(id)
 }
 
 /// 把绑定的目录与链接渲染成 system prompt 片段。
@@ -472,19 +421,6 @@ pub fn build_automation_run_instructions(
     }
 }
 
-/// 工作台「新对话」的托管目录：`~/.smelt/workspaces/conversations`。
-/// 不属于项目会话，不能沿用当前打开的仓库。
-pub fn workbench_conversation_workspace_root() -> Option<PathBuf> {
-    smelt_paths::smelt_home().map(|home| home.join("workspaces").join("conversations"))
-}
-
-pub fn is_workbench_conversation_workspace(path: &Path) -> bool {
-    let Some(root) = workbench_conversation_workspace_root() else {
-        return false;
-    };
-    path.starts_with(&root)
-}
-
 /// 工作台「聊天」每次新开一场对话用的空目录：`~/.smelt/workspaces/conversations/<uuid>`。
 ///
 /// 跟智能体 space 不同——Pi 裸对话没有长期归属对象，不能共用一个 cwd，否则
@@ -531,56 +467,6 @@ impl From<smelt_store::StoreError> for AgentDefinitionError {
     fn from(error: smelt_store::StoreError) -> Self {
         Self::Store(error.to_string())
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentDefinitionCreate {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub prompt: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_kind_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub plugins: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub context_folders: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub context_links: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_enabled: Option<bool>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentDefinitionPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_kind_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugins: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_folders: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_links: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_enabled: Option<bool>,
 }
 
 pub fn list_agent_definitions_on(
@@ -929,6 +815,35 @@ fn automations_using_agent(
 mod tests {
     use super::*;
 
+    #[test]
+    fn product_agent_instructions_are_pi_system_prompt_input_not_a_user_message() {
+        let definition = AgentDefinition {
+            id: "quant".into(),
+            name: "量化智能体".into(),
+            description: String::new(),
+            engine_kind_id: crate::agent_kind::ConversationAgentKind::Pi.id().into(),
+            prompt: "  先验证行情时间\n再给出结论  ".into(),
+            plugins: Vec::new(),
+            context_folders: Vec::new(),
+            context_links: Vec::new(),
+            ..Default::default()
+        };
+        let launch = crate::agent_kind::ConversationLaunchSpec::from_command("smelt-pi-agent")
+            .with_env("EXISTING", "keep");
+
+        let launch = prepare_agent_definition_launch(launch, Some(&definition));
+
+        assert_eq!(launch.env.get("EXISTING").map(String::as_str), Some("keep"));
+        assert_eq!(
+            launch
+                .env
+                .get(crate::agent_kind::SMELT_AGENT_INSTRUCTIONS_ENV)
+                .map(String::as_str),
+            Some("先验证行情时间\n再给出结论")
+        );
+        assert_eq!(launch.command, "smelt-pi-agent");
+    }
+
     /// GUI 拿着打开面板时的旧副本改了 prompt；在此期间 CLI / Control API 改了 name。
     /// GUI 保存只能落下它自己改过的字段，不能用旧副本把 CLI 的修改覆盖回去。
     #[test]
@@ -1101,7 +1016,12 @@ mod tests {
             ]
         });
 
-        assert!(session_agent_definition_ids(&workspace).is_empty());
+        let map = session_agent_definition_ids(&workspace);
+        assert_eq!(map.get("acp-1"), None);
+        assert!(
+            !map.contains_key("   "),
+            "空白会话 id 不能作为键：库里会换成生成的 id"
+        );
     }
 
     /// 历史页、工具面板只拿得到一个 cwd，靠反解认出「现在在某个智能体的上下文
@@ -1262,11 +1182,6 @@ mod tests {
         let snapshot = smelt_store::AgentUiSnapshot {
             agent_hooks_enabled: true,
             cross_agent_enabled: true,
-            notify_approval: true,
-            notify_input: true,
-            notify_success: true,
-            notify_failure: true,
-            notify_terminal_bell: true,
             commands: vec![smelt_store::AgentConversationCommandRecord {
                 command_key: ConversationAgentKind::Pi
                     .descriptor()

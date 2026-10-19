@@ -4,383 +4,9 @@
 //! 由按钮 listener 调用。
 
 use super::*;
+use gpui_component::tab::{Tab, TabBar};
 
 impl Workspace {
-    /// 「删除 Worktree」确认弹窗：dirty 探测完之前（None）按钮禁用显示"检查中…"；
-    /// 探测出有未提交改动就红字警告 + 按钮仍可点（--force 由确认后的调用方处理）。
-    /// 视觉同 render_daemon_restart_confirm 一套（红色危险操作配色）。
-    pub fn render_delete_worktree_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
-        let Some(target) = self.delete_worktree_target.as_ref() else {
-            return div().into_any_element();
-        };
-
-        let (body_text, warn) = match target.dirty {
-            None => ("正在检查有没有未提交的更改…".to_string(), false),
-            Some(true) => (
-                format!(
-                    "分支「{}」的这个 worktree 还有未提交的更改，删除后会永久丢失，且其下所有终端会话都会被关闭。",
-                    target.branch
-                ),
-                true,
-            ),
-            Some(false) => (
-                format!(
-                    "删除分支「{}」的这个 worktree，其下所有终端会话都会被关闭。",
-                    target.branch
-                ),
-                false,
-            ),
-        };
-        let ready = target.dirty.is_some();
-        let fg = cx.theme().foreground;
-
-        let content = v_flex()
-            .child(Self::modal_title(fg, "确定删除这个 Worktree 吗？"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(if warn { accent_text } else { muted })
-                    .child(body_text),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_button(
-                        "cancel-delete-worktree",
-                        "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
-                        |this, _, _, cx| this.cancel_delete_worktree(cx),
-                        cx,
-                    ))
-                    .child(
-                        Self::modal_button(
-                            "confirm-delete-worktree",
-                            if ready {
-                                "确定删除"
-                            } else {
-                                "检查中…"
-                            },
-                            tint,
-                            hover,
-                            accent_text,
-                            |this, _, _, cx| this.confirm_delete_worktree(cx),
-                            cx,
-                        )
-                        .disabled(!ready),
-                    ),
-            );
-        self.modal_shell(
-            360.,
-            true,
-            content,
-            crate::overlay::ModalLayer::DeleteWorktree,
-            cx,
-        )
-    }
-
-    /// 「关联 Worktree」弹窗：列出这个仓库的所有 worktree。主工作树不可删；其余
-    /// 条目「删除」走 [`Self::start_delete_worktree`] 的确认流程（确认弹窗叠在本层
-    /// 之上）；已失效（prunable）条目只能「清理」（`git worktree prune`）；底部另有
-    /// 「清理失效项」把失效记录一次性清掉并刷新列表。
-    pub fn render_worktree_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let fg = cx.theme().foreground;
-        let (neutral_bg, neutral_hover, _, _, _) = Self::modal_accent_colors(true);
-        let Some(state) = self.worktree_list.as_ref() else {
-            return div().into_any_element();
-        };
-
-        let repo_name = Path::new(&state.root)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(state.root.as_str())
-            .to_string();
-
-        let body: AnyElement = if let Some(error) = state.error.as_ref() {
-            div()
-                .text_sm()
-                .text_color(rgb(ui_theme::red()))
-                .child(error.clone())
-                .into_any_element()
-        } else if let Some(entries) = state.entries.as_ref() {
-            if entries.is_empty() {
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("这个仓库没有可显示的 worktree。")
-                    .into_any_element()
-            } else {
-                let mut rows = v_flex()
-                    .id("worktree-list")
-                    .gap_1()
-                    .max_h(px(380.))
-                    .overflow_y_scroll();
-                for entry in entries.iter() {
-                    let path = entry.path.clone();
-                    let branch = entry.branch.clone();
-                    let main_root = state.main_root.clone();
-                    let is_main = entry.is_main;
-                    let prunable = entry.prunable;
-                    let locked = entry.locked;
-                    // 徽标：主工作树 / 已失效 / 已锁定，普通条目显示分支名。
-                    // 用拥有所有权的 String，避免借用 branch 导致与下方删除按钮的
-                    // move 冲突（badge 要活过整轮渲染，删除按钮闭包也要拿 branch）。
-                    let badge = if is_main {
-                        Some(("主工作树".to_string(), rgb(ui_theme::accent())))
-                    } else if prunable {
-                        Some(("已失效".to_string(), rgb(ui_theme::red())))
-                    } else if locked {
-                        Some(("已锁定".to_string(), rgb(ui_theme::yellow())))
-                    } else {
-                        branch.clone().map(|b| (b, rgb(ui_theme::text_faint())))
-                    };
-                    let row = h_flex()
-                        .id((ElementId::from("worktree"), path.clone()))
-                        .gap_2()
-                        .items_center()
-                        .justify_between()
-                        .py_1()
-                        .px_2()
-                        .rounded(ui_theme::row_radius())
-                        .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_xs()
-                                        .font_family(crate::terminal_view::font_family())
-                                        .text_color(if is_main { fg } else { muted })
-                                        .child(path.clone()),
-                                )
-                                .children(badge.map(|(text, color)| {
-                                    div()
-                                        .flex_shrink_0()
-                                        .px(px(4.))
-                                        .py(px(1.))
-                                        .rounded(px(4.))
-                                        .bg(ui_theme::overlay(0x14))
-                                        .text_xs()
-                                        .text_color(color)
-                                        .child(text)
-                                })),
-                        )
-                        .child(
-                            // 操作列：主工作树不可删；已失效只能清理；其余走删除确认。
-                            // 三分支类型不同，统一收成 AnyElement。
-                            if is_main {
-                                div().size(px(0.)).into_any_element()
-                            } else if prunable {
-                                Button::new("wt-prune")
-                                    .small()
-                                    .label("清理")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.prune_stale_worktrees(cx);
-                                    }))
-                                    .into_any_element()
-                            } else {
-                                Button::new("wt-del")
-                                    .small()
-                                    .label("删除")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let branch_label = branch
-                                            .clone()
-                                            .unwrap_or_else(|| "detached HEAD".to_string());
-                                        this.start_delete_worktree(
-                                            path.clone(),
-                                            main_root.clone(),
-                                            branch_label,
-                                            cx,
-                                        );
-                                    }))
-                                    .into_any_element()
-                            },
-                        );
-                    rows = rows.child(row);
-                }
-                rows.into_any_element()
-            }
-        } else {
-            div()
-                .text_sm()
-                .text_color(muted)
-                .child("正在列出 worktree…")
-                .into_any_element()
-        };
-
-        let content = v_flex()
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Icon::new(IconName::HardDrive).size(px(15.)).text_color(fg))
-                            .child(Self::modal_title(fg, format!("Worktree · {repo_name}"))),
-                    )
-                    .child(
-                        Button::new("wt-close-x")
-                            .ghost()
-                            .small()
-                            .icon(IconName::Close)
-                            .accessibility_label("关闭")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_worktree_list(cx);
-                            })),
-                    ),
-            )
-            .child(body)
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        Button::new("wt-prune-all")
-                            .small()
-                            .label("清理失效项")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.prune_stale_worktrees(cx);
-                            })),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                Button::new("wt-refresh")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Redo)
-                                    .accessibility_label("刷新")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.refresh_worktree_list(cx);
-                                    })),
-                            )
-                            .child(Self::modal_button(
-                                "wt-close",
-                                "关闭",
-                                neutral_bg,
-                                neutral_hover,
-                                fg,
-                                |this, _, _, cx| this.close_worktree_list(cx),
-                                cx,
-                            )),
-                    ),
-            );
-
-        self.modal_shell(
-            560.,
-            true,
-            content,
-            crate::overlay::ModalLayer::WorktreeList,
-            cx,
-        )
-    }
-
-    /// 「新建 Worktree」弹窗：分支名（留空 = detached）+ 检出目录两个输入框，
-    /// 底部取消/创建。创建中按钮置灰；失败红字显示在输入框下方。
-    pub fn render_new_worktree(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let fg = cx.theme().foreground;
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
-            Self::modal_accent_colors(false);
-        let Some(state) = self.new_worktree.as_ref() else {
-            return div().into_any_element();
-        };
-
-        let reserved = self.git_writes.get(&state.main_root).copied();
-        let base_hint = if state.base_branch.is_empty() {
-            format!("基于 {} 当前 HEAD 创建", state.main_root)
-        } else {
-            format!("基于 {} 的「{}」分支", state.main_root, state.base_branch)
-        };
-
-        let content = v_flex()
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Icon::new(IconName::HardDrive).size(px(15.)).text_color(fg))
-                            .child(Self::modal_title(fg, "新建 Worktree")),
-                    )
-                    .child(
-                        Button::new("nwt-close-x")
-                            .ghost()
-                            .small()
-                            .icon(IconName::Close)
-                            .accessibility_label("关闭")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cancel_new_worktree(cx);
-                            })),
-                    ),
-            )
-            .child(div().text_sm().text_color(muted).child(base_hint))
-            .child(div().text_xs().text_color(muted).child("分支名"))
-            .child(Input::new(&state.branch_input).small())
-            .child(div().text_xs().text_color(muted).child("检出目录"))
-            .child(Input::new(&state.path_input).small())
-            .children(state.error.as_ref().map(|err| {
-                div()
-                    .text_sm()
-                    .text_color(rgb(ui_theme::red()))
-                    .child(err.clone())
-            }))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::modal_button(
-                        "cancel-new-worktree",
-                        "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
-                        |this, _, _, cx| this.cancel_new_worktree(cx),
-                        cx,
-                    ))
-                    .child(
-                        Self::modal_button(
-                            "confirm-new-worktree",
-                            match reserved {
-                                Some(GitWrite::CreateWorktree) => "创建中…",
-                                Some(op) => op.chip(),
-                                None => "创建",
-                            },
-                            tint,
-                            hover,
-                            accent_text,
-                            |this, _, _, cx| this.confirm_new_worktree(cx),
-                            cx,
-                        )
-                        .disabled(reserved.is_some()),
-                    ),
-            );
-
-        self.modal_shell(
-            420.,
-            false,
-            content,
-            crate::overlay::ModalLayer::NewWorktree,
-            cx,
-        )
-    }
-
     /// 「丢弃文件改动」确认弹窗。未跟踪文件是直接删盘，措辞要比 restore 更重。
     pub fn render_discard_file_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let (fg, muted) = {
@@ -388,10 +14,11 @@ impl Workspace {
             (t.foreground, t.muted_foreground)
         };
         let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
-        let Some((_, path, untracked)) = self.discard_file_target.as_ref() else {
+        let Some((_, seen)) = self.discard_file_target.as_ref() else {
             return div().into_any_element();
         };
-        let untracked = *untracked;
+        let path = &seen.path;
+        let untracked = seen.untracked();
         let (title, body) = if untracked {
             (
                 "确定删除这个新文件吗？",
@@ -641,6 +268,11 @@ impl Workspace {
         use crate::ui_theme;
 
         let Some(root) = self.active_project_root(cx) else {
+            let remote = self.remote_project_notice(cx);
+            let (title, hint) = match remote.as_deref() {
+                Some(notice) => ("远程项目", notice.to_string()),
+                None => ("没有项目", "打开一个项目后再看更改".to_string()),
+            };
             return v_flex()
                 .flex_1()
                 .min_h_0()
@@ -657,13 +289,13 @@ impl Workspace {
                                 .text_lg()
                                 .font_semibold()
                                 .text_color(rgb(ui_theme::text_bright()))
-                                .child("没有项目"),
+                                .child(title),
                         )
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(rgb(ui_theme::text_faint()))
-                                .child("打开一个项目后再看更改"),
+                                .child(hint),
                         ),
                 )
                 .into_any_element();
@@ -673,7 +305,7 @@ impl Workspace {
         // 头部（分支、↑N↓M、stash、同步菜单）展示的是**当前提交目标仓库**的状态，
         // 不是项目根的。否则在子仓上提交时，头部会显示另一个仓库的分支与领先/落后。
         let active_repo = self.active_git_repo_root(&root);
-        let status = self.git_status.get(&active_repo).map(|(_, d)| d.clone());
+        let status = self.git_status.get(&active_repo).map(|(_, d)| d);
         let status_refreshing = self.git_status_inflight.contains(&active_repo);
         let status_failure_count = self
             .git_status_failures
@@ -691,11 +323,11 @@ impl Workspace {
         // 进行中反馈：点了拉取/获取几秒内没动静会以为没反应，op 跑着时按钮直接显示
         // 「拉取中…」。
         let busy = self.git_writes.get(&active_repo).copied();
-        // 同步入口 = 把本来就显眼的绿色 ↑N↓M 直接做成可点下拉（带 ▾ 提示），
+        // 同步入口 = 把本来就显眼的绿色 ↑N↓M 直接做成可点下拉（带下拉箭头），
         // 替代之前那个不起眼的「⇅」。点开是获取/拉取/暂存/恢复/丢弃全部。
         let sync_label = match busy {
             Some(op) => op.chip().to_string(),
-            None => format!("↑{ahead} ↓{behind} ▾"),
+            None => format!("↑{ahead} ↓{behind}"),
         };
         let sync_color = if busy.is_some() {
             rgb(ui_theme::yellow())
@@ -707,18 +339,18 @@ impl Workspace {
         let tab_view = cx.entity();
         // 仓库集合要在头部之前算好：历史页的仓库选择器和改动页的分组都用它。
         let repo_set = self.git_repos.get(&root).map(|(_, set)| set.clone());
-        let repos: Vec<smelt_git::discovery::DiscoveredRepo> = match &repo_set {
+        let repos: Vec<DiscoveredRepo> = match &repo_set {
             Some(set) if !set.repos.is_empty() => set.repos.clone(),
             // 发现还没回来：先当单仓渲染，首帧不至于空白。
-            _ => vec![smelt_git::discovery::DiscoveredRepo {
+            _ => vec![DiscoveredRepo {
                 root: std::path::PathBuf::from(&root),
                 rel_path: String::new(),
-                kind: smelt_git::discovery::RepoKind::Root,
+                kind: RepoKind::Root,
             }],
         };
         let show_repo_headers = repos.len() > 1;
         // 仓库选择器的选项：(显示名, 仓库根)。
-        let repo_label_of = |repo: &smelt_git::discovery::DiscoveredRepo| -> String {
+        let repo_label_of = |repo: &DiscoveredRepo| -> String {
             if repo.rel_path.is_empty() {
                 std::path::Path::new(&root)
                     .file_name()
@@ -739,54 +371,38 @@ impl Workspace {
             .unwrap_or_else(|| active_repo.clone());
         let ws_log_repo = cx.entity();
 
-        let changes_view = tab_view.clone();
-        let log_view = tab_view;
-        let view_tabs = smelt_ui::segmented::segmented_track(
-            "git-view-tabs",
-            smelt_ui::segmented::SegmentedVariant::Underline,
-            Some(match self.git_tab {
+        let view_tabs = TabBar::new("git-view-tabs")
+            .underline()
+            .xsmall()
+            .selected_index(match self.git_tab {
                 GitTab::Changes => 0,
                 GitTab::Log => 1,
-            }),
-        )
-        .child(
-            smelt_ui::segmented::underline_segment(
-                "git-view-changes",
-                "更改",
-                self.git_tab == GitTab::Changes,
-                cx,
-            )
-            .on_click(move |_event, _window, cx| {
-                changes_view.update(cx, |workspace, cx| {
-                    if workspace.git_tab != GitTab::Changes {
-                        workspace.git_tab = GitTab::Changes;
+            })
+            .on_click(move |ix, _window, cx| {
+                tab_view.update(cx, |workspace, cx| {
+                    let tab = if *ix == 0 {
+                        GitTab::Changes
+                    } else {
+                        GitTab::Log
+                    };
+                    if workspace.git_tab == tab {
+                        return;
+                    }
+                    workspace.git_tab = tab;
+                    if tab == GitTab::Changes {
                         workspace.reset_git_diff_view();
-                        cx.notify();
                     }
+                    cx.notify();
                 });
-            }),
-        )
-        .child(
-            smelt_ui::segmented::underline_segment(
-                "git-view-log",
-                "历史",
-                self.git_tab == GitTab::Log,
-                cx,
-            )
-            .on_click(move |_event, _window, cx| {
-                log_view.update(cx, |workspace, cx| {
-                    if workspace.git_tab != GitTab::Log {
-                        workspace.git_tab = GitTab::Log;
-                        cx.notify();
-                    }
-                });
-            }),
-        );
+            })
+            .child(Tab::new().label("更改"))
+            .child(Tab::new().label("历史"));
         let scope_view = cx.entity();
         let scope_control = Button::new("git-diff-scope")
             .ghost()
             .xsmall()
-            .label(format!("{} ▾", self.diff_scope.label()))
+            .label(self.diff_scope.label())
+            .dropdown_caret(true)
             .text_color(rgb(ui_theme::text_muted()))
             .dropdown_menu(move |mut menu, _window, _cx| {
                 for scope in [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged] {
@@ -802,17 +418,10 @@ impl Workspace {
                 menu
             });
         // 改动 / 历史是长期可见的同级视图，不属于操作菜单；与标题合并到同一行，
-        // 避免旧的第二条 tab 栏挤压本就有限的 Git 内容高度。
-        let header = div()
-            .h(ui_theme::height::lg())
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .border_b_1()
-            .border_color(ui_theme::hairline())
-            .child(view_tabs)
+        // 避免旧的第二条 tab 栏挤压本就有限的 Git 内容高度。页签条铺满这一行，
+        // 它自己的底线就是分隔线；作用范围、仓库、同步这些操作收在右侧。
+        let actions = h_flex()
+            .gap_2()
             .when(self.git_tab == GitTab::Changes, |bar| {
                 bar.child(scope_control)
             })
@@ -823,7 +432,8 @@ impl Workspace {
                     Button::new("git-log-repo")
                         .ghost()
                         .xsmall()
-                        .label(format!("{active_repo_label} ▾"))
+                        .label(active_repo_label)
+                        .dropdown_caret(true)
                         .text_color(rgb(ui_theme::text_muted()))
                         .dropdown_menu(move |mut menu, _window, _cx| {
                             for (label, repo_root) in repo_choices.clone() {
@@ -841,7 +451,6 @@ impl Workspace {
                         }),
                 )
             })
-            .child(div().flex_1())
             // 历史页还没有分仓概念，仍用当前目标仓库的操作菜单；改动页的操作
             // 已经下放到每个仓库自己那一行，这里不再摆一个"作用于谁不明确"的全局按钮。
             .when(self.git_tab == GitTab::Log, |bar| {
@@ -850,6 +459,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .label(sync_label)
+                        .dropdown_caret(busy.is_none())
                         .font_family(crate::terminal_view::font_family())
                         .text_color(sync_color)
                         .dropdown_menu(move |menu, _window, _cx| {
@@ -865,6 +475,12 @@ impl Workspace {
                         }),
                 )
             });
+        let header = view_tabs
+            .w_full()
+            .h(ui_theme::height::lg())
+            .flex_shrink_0()
+            .px_3()
+            .suffix(actions);
 
         if self.git_tab == GitTab::Log {
             return v_flex()
@@ -903,7 +519,7 @@ impl Workspace {
         // 只能用来标注项目根自己的 status；拿去匹配子仓内的文件会张冠李戴。
         let root_gitlinks: HashSet<String> = repos
             .iter()
-            .filter(|r| matches!(r.kind, smelt_git::discovery::RepoKind::Submodule))
+            .filter(|r| matches!(r.kind, RepoKind::Submodule))
             .map(|r| r.rel_path.clone())
             .collect();
         let no_gitlinks: HashSet<String> = HashSet::new();
@@ -1031,8 +647,7 @@ impl Workspace {
             narrow_rows.clear();
         }
         let list: AnyElement = if narrow_rows.is_empty() {
-            let message =
-                git_empty_list_message(status.as_ref(), status_refreshing, status_failure_count);
+            let message = git_empty_list_message(status, status_refreshing, status_failure_count);
             div()
                 .id("narrow-git-list-empty")
                 .flex_1()
@@ -1189,8 +804,6 @@ impl Workspace {
                                         .min_h_0()
                                         .flex()
                                         .flex_col()
-                                        .border_l_1()
-                                        .border_color(ui_theme::hairline())
                                         .child(list_and_commit),
                                 ),
                         ),
@@ -1222,7 +835,6 @@ impl Workspace {
             .get(&root)
             .map(|(_, d)| d.branch_name().to_string())
             .filter(|b| !b.is_empty());
-        let border = rgb(crate::ui_theme::border_dim());
         // 三栏都可拖拽：窗口窄的时候能自己腾地方，写死宽度的话中间的提交
         // 列表会被挤得没法看。
         div()
@@ -1241,8 +853,6 @@ impl Workspace {
                                 div()
                                     .size_full()
                                     .min_h_0()
-                                    .border_r_1()
-                                    .border_color(border)
                                     .child(crate::git_log_view::branch_tree(
                                         Some(root.clone()),
                                         branches,
@@ -1262,8 +872,6 @@ impl Workspace {
                                 .flex()
                                 .min_w_0()
                                 .min_h_0()
-                                .border_r_1()
-                                .border_color(border)
                                 .child(crate::git_log_view::git_log_view(
                                     Some(root.clone()),
                                     &self.git_log,

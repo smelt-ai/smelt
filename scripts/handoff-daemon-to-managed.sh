@@ -63,26 +63,6 @@ if [[ ! -x "$SRC" && ! -f "$SRC" ]]; then
   exit 1
 fi
 
-sync_plugin_set_for_candidate() {
-  local src="$1"
-  local daemon="$2"
-  local macos_dir packages sync_bin smelt_root
-  macos_dir="$(cd "$(dirname "$src")" && pwd)"
-  packages="$macos_dir/../Resources/plugin-packages"
-  sync_bin="$(cd "$(dirname "$0")/.." && pwd)/target/release/smelt-sync-plugins"
-  smelt_root="${HOME}/.smelt"
-  if [[ ! -x "$sync_bin" ]]; then
-    echo "· 跳过插件集同步：找不到 ${sync_bin}（先 make build）" >&2
-    return 0
-  fi
-  if [[ ! -d "$packages" ]]; then
-    echo "· 跳过插件集同步：找不到 $packages" >&2
-    return 0
-  fi
-  echo "· 同步 bundled 插件集 → $daemon"
-  "$sync_bin" --packages "$packages" --smelt-root "$smelt_root" --daemon "$daemon"
-}
-
 # 映像按内容指纹写一次，之后不再改这个文件。启动名只是同目录里的符号链接。
 publish_image() {
   local src="$1"
@@ -159,10 +139,6 @@ PY
 mkdir -p "$MANAGED_DIR"
 IMAGE="$(publish_image "$SRC")"
 IMAGE_NAME="$(basename "$IMAGE")"
-
-# exec 新守护之前必须先写好 daemon-sets 映射。make install 会先 handoff、后
-# 启动 GUI；若映射还不存在，smeltd 启动时会认为没有 bundled 插件。
-sync_plugin_set_for_candidate "$SRC" "$IMAGE"
 
 if [[ "$BACKGROUND_ON_BUSY" == true ]]; then
   marker_tmp="${PENDING_MARKER}.$$.tmp"

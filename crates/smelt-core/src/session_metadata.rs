@@ -243,31 +243,8 @@ pub fn set_custom_title(
     set_custom_title_at(&path, agent, profile_id, resume_id, custom_title)
 }
 
-const HISTORY_AGENT_NAMESPACE: &str = "history_agent";
-const HISTORY_AGENT_KEY_SEP: char = '\u{1f}';
-
 fn history_agent_store(path: &Path) -> Result<smelt_store::Store, String> {
     crate::sqlite_state::open_sqlite_store(&database_path(path))
-}
-
-fn history_agent_key(
-    agent: HistorySourceKind,
-    profile_id: Option<&str>,
-    resume_id: &str,
-) -> String {
-    format!(
-        "{}{HISTORY_AGENT_KEY_SEP}{}{HISTORY_AGENT_KEY_SEP}{resume_id}",
-        agent.id(),
-        profile_id.unwrap_or("")
-    )
-}
-
-fn history_agent_prefix(agent: HistorySourceKind, profile_id: Option<&str>) -> String {
-    format!(
-        "{}{HISTORY_AGENT_KEY_SEP}{}{HISTORY_AGENT_KEY_SEP}",
-        agent.id(),
-        profile_id.unwrap_or("")
-    )
 }
 
 fn remember_agent_definition_at(
@@ -283,10 +260,11 @@ fn remember_agent_definition_at(
         return Ok(());
     }
     history_agent_store(path)?
-        .put_blob(
-            HISTORY_AGENT_NAMESPACE,
-            &history_agent_key(agent, profile_id, resume_id),
-            agent_definition_id.as_bytes(),
+        .put_history_agent_binding(
+            agent.id(),
+            profile_id.unwrap_or(""),
+            resume_id,
+            agent_definition_id,
         )
         .map_err(Into::into)
 }
@@ -301,18 +279,10 @@ fn agent_definition_id_at(
     if resume_id.is_empty() {
         return Ok(None);
     }
-    let Some(raw) = history_agent_store(path)?.get_blob(
-        HISTORY_AGENT_NAMESPACE,
-        &history_agent_key(agent, profile_id, resume_id),
-    )?
-    else {
-        return Ok(None);
-    };
-    let id = String::from_utf8(raw)
-        .map_err(|error| error.to_string())?
-        .trim()
-        .to_string();
-    Ok((!id.is_empty()).then_some(id))
+    Ok(history_agent_store(path)?
+        .history_agent_binding(agent.id(), profile_id.unwrap_or(""), resume_id)?
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty()))
 }
 
 fn agent_definition_ids_at(
@@ -323,31 +293,12 @@ fn agent_definition_ids_at(
     let Ok(store) = history_agent_store(path) else {
         return HashMap::new();
     };
-    let Ok(keys) = store.blob_keys(HISTORY_AGENT_NAMESPACE) else {
-        return HashMap::new();
-    };
-    let prefix = history_agent_prefix(agent, profile_id);
-    let mut ids = HashMap::new();
-    for key in keys {
-        let Some(resume_id) = key.strip_prefix(&prefix) else {
-            continue;
-        };
-        if resume_id.is_empty() || resume_id.contains(HISTORY_AGENT_KEY_SEP) {
-            continue;
-        }
-        let Ok(Some(raw)) = store.get_blob(HISTORY_AGENT_NAMESPACE, &key) else {
-            continue;
-        };
-        let Ok(id) = String::from_utf8(raw) else {
-            continue;
-        };
-        let id = id.trim();
-        if id.is_empty() {
-            continue;
-        }
-        ids.insert(resume_id.to_string(), id.to_string());
-    }
-    ids
+    store
+        .history_agent_bindings(agent.id(), profile_id.unwrap_or(""))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, id)| !id.trim().is_empty())
+        .collect()
 }
 
 /// 把「这条历史会话属于哪个产品智能体」记在 `resume_id` 上。

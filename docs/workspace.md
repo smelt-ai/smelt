@@ -17,8 +17,8 @@ cargo run --bin smelt
 
 > 注：`smelt` 原有的 instincts 蒸馏 CLI（`observe`/`digest`/`merge` 等）已整体移除。
 > 工作区现含多个二进制：`smelt`（GUI 主程序）、`smeltd`（终端持久化守护，另含
-> `gateway` / `smelt-notify` 等辅助二进制，见 `crates/smeltd/src/bin/`），以及独立打包的
-> 插件，详见根目录 `Cargo.toml` 的 workspace 注释与成员列表。
+> `gateway` / `smelt-notify` 等辅助二进制，见 `crates/smeltd/src/bin/`），以及随 App 分发的
+> 插件（`plugins/`，gpui-shell 脚本应用），详见根目录 `Cargo.toml` 的 workspace 注释与成员列表。
 
 ---
 
@@ -42,21 +42,19 @@ cargo run --bin smelt
 工作区是虚拟 workspace，代码全部分布在 `crates/` 下（见根目录 `Cargo.toml` 的成员列表）：
 
 - **`crates/smelt`** —— GUI 主程序（bin 名 `smelt`）：窗口 / 会话列表 / 标签分屏 /
-  文件树 / Git 面板 / 通用插件 UI 等。`terminal.rs` 是内嵌终端前端
+  文件树 / Git 面板 / 插件（`plugins/`，gpui-shell 脚本应用）等。`terminal.rs` 是内嵌终端前端
   （连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
   （渲染/输入/IME/选区/滚动/resize）。PTY 与 shell 在 `smeltd`。
 - **`crates/smelt-core`** —— GUI 与守护共用的无 UI 逻辑（不许引 GPUI）：
   ACP 连接层（`acp_conn.rs`）、agent 注册/身份（`agent_kind/`）、会话状态
   （`agent_status.rs`/`daemon_state.rs`）、主库入口（`sqlite_state.rs`，关系表在 `smelt-store`）、
-  通用项目注册与隔离 workspace 服务等。
+  通用项目注册等。
 - **`crates/smeltd`** —— 守护侧二进制（`smeltd` / `gateway` / `smelt-notify`）：
-  终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）、插件 Host 与远程网关。
+  终端持久化、ACP 会话托管（`acp_registry.rs`/`acp_host.rs`）与远程网关。
 - **`crates/smelt-paths`** —— 统一环境路径推导（`~/.smelt`）与单用例测试隔离沙箱。
 - **`crates/smelt-git`** —— 独立的 Git 领域层（多仓库发现/状态解析/diff/写操作，不含 UI）。
-- **`crates/smelt-event-bus`** —— 系统内部进程间与插件事件总线（EventHub）。
-- **`crates/smelt-plugin-api`** —— 插件系统跨进程 API 契约与 DTO 定义。
-- **`crates/smelt-plugin-host`** —— 宿主侧插件进程管理与 Web/Node 插件执行环境。
-- **`crates/smelt-webview`** —— 基于 macOS 原生 WKWebView 的独立窗口化视图容器。
+- **`crates/smelt-event-bus`** —— 系统内部进程间事件总线（EventHub）。
+- **`crates/smelt-event-protocol`** —— 事件总线的 wire 协议（话题、事件信封、订阅与投递确认）。
 - **`crates/smelt-acp-view`** —— ACP 对话原生界面（消息流/工具卡片/审批/composer）。
 - **`crates/smelt-ui`** —— 主 GUI 与 acp-view 共用的 UI 基建（`ui_theme`/`markdown_mermaid`/`agent_host_state` 等）。
 - **`crates/smelt-process-wait`** —— 等待进程退出：没有退出事件时睡到截止，不轮询。
@@ -72,14 +70,13 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 ### 导航
 
 桌面没有 URL 路由器。当前显示哪一面由 `WorkspaceNav` 记录：智能体、自动化、
-会话、插件工作台。
+会话。
 
 左侧是「新对话 / 智能体 / 自动化 / 最近对话」。点「智能体」「自动化」进该面根页。
 不属于项目的对话按最近活动排在「最近对话」，行首头像标出智能体；项目里的对话
-留在项目下，同样带头像。点对话是独立页。插件工作台挂在「插件」分组下。
+留在项目下，同样带头像。点对话是独立页。
 
-会话右侧 Tool Panel、设置窗、确认框都不是一级入口。落盘仍是 `route` +
-`active_workspace_surface`。实现见 `crates/smelt/src/workspace_nav.rs`。
+会话右侧 Tool Panel、设置窗、确认框都不是一级入口。落盘是 `route`。实现见 `crates/smelt/src/workspace_nav.rs`。
 
 ---
 
@@ -144,7 +141,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 | 快捷键 | 作用 |
 |---|---|
 | `Cmd+K` | 命令面板 |
-| `Cmd+B` | 切换右侧 Tool Panel（Files / Git / History，以及插件贡献的 tab） |
+| `Cmd+B` | 切换右侧 Tool Panel（Files / Git / History，以及插件的 tab） |
 | `Esc` | 收起舞台上的全屏覆盖页（总览/文件树/Git/历史），回到当前会话 |
 | `Cmd+[` / `Cmd+]` | 循环切换当前会话内的 pane（分屏） |
 | `Cmd+1` ~ `Cmd+9` | 跳到会话列表里第 N 个会话（按显示顺序，跨项目连续数） |

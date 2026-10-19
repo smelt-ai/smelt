@@ -4,7 +4,6 @@
 //! 滚动到分组，右侧仍是整页。这里把每个入口做成独立 `SettingsSection`，由壳层
 //! 只渲染当前这一页。分类是默认展开的一级节点，所有二级入口初始都直接可见。
 
-use super::plugins::InstalledPlugin;
 use gpui_component::IconName;
 
 /// 设置窗口当前选中的内容页。深链接（检查更新、登录）也走这里，不再用页下标。
@@ -21,10 +20,6 @@ pub enum SettingsSection {
     AgentNotify,
     AgentHooks,
     CollaborationRemote,
-    /// `id` 为空表示插件清单还没就绪或尚未安装任何插件。
-    Plugin {
-        id: String,
-    },
     MaintenanceUpdate,
     MaintenanceDaemon,
     MaintenanceStorage,
@@ -52,7 +47,6 @@ impl SettingsSection {
             Self::AgentNotify => "agent-notify".into(),
             Self::AgentHooks => "agent-hooks".into(),
             Self::CollaborationRemote => "collaboration-remote".into(),
-            Self::Plugin { id } => format!("plugin:{id}").into(),
             Self::MaintenanceUpdate => "maintenance-update".into(),
             Self::MaintenanceDaemon => "maintenance-daemon".into(),
             Self::MaintenanceStorage => "maintenance-storage".into(),
@@ -66,7 +60,6 @@ pub enum SettingsCategoryId {
     General,
     Agent,
     Workspace,
-    Plugins,
     System,
 }
 
@@ -76,7 +69,6 @@ impl SettingsCategoryId {
             Self::General => "general",
             Self::Agent => "agent",
             Self::Workspace => "workspace",
-            Self::Plugins => "plugins",
             Self::System => "system",
         }
     }
@@ -99,15 +91,8 @@ pub struct SettingsNavCategory {
     pub children: Vec<SettingsNavLeaf>,
 }
 
-/// 已构造好的侧栏里有没有这一页。渲染时用它，省掉为判断归属再建一棵树。
-pub fn nav_contains(nav: &[SettingsNavCategory], section: &SettingsSection) -> bool {
-    nav.iter()
-        .flat_map(|category| category.children.iter())
-        .any(|child| &child.section == section)
-}
-
-/// 设置侧栏的两级导航。一级分类默认展开；插件子项来自当前已安装清单。
-pub fn settings_nav(plugins: &[InstalledPlugin]) -> Vec<SettingsNavCategory> {
+/// 设置侧栏的两级导航。一级分类默认展开。
+pub fn settings_nav() -> Vec<SettingsNavCategory> {
     vec![
         SettingsNavCategory {
             id: SettingsCategoryId::General,
@@ -333,7 +318,6 @@ pub fn settings_nav(plugins: &[InstalledPlugin]) -> Vec<SettingsNavCategory> {
                 ],
             )],
         },
-        plugin_category(plugins),
         SettingsNavCategory {
             id: SettingsCategoryId::System,
             title: "系统",
@@ -399,39 +383,6 @@ pub fn settings_nav(plugins: &[InstalledPlugin]) -> Vec<SettingsNavCategory> {
             ],
         },
     ]
-}
-
-fn plugin_category(plugins: &[InstalledPlugin]) -> SettingsNavCategory {
-    let mut children = vec![SettingsNavLeaf {
-        title: "安装插件".to_string(),
-        icon: IconName::Plus,
-        section: SettingsSection::Plugin { id: String::new() },
-        keywords: vec![
-            "安装".to_string(),
-            "插件".to_string(),
-            "install".to_string(),
-        ],
-    }];
-    children.extend(plugins.iter().map(|plugin| SettingsNavLeaf {
-        title: plugin.name.clone(),
-        icon: IconName::Frame,
-        section: SettingsSection::Plugin {
-            id: plugin.id.clone(),
-        },
-        keywords: vec![
-            plugin.name.clone(),
-            plugin.id.clone(),
-            "插件".to_string(),
-            "plugin".to_string(),
-        ],
-    }));
-    SettingsNavCategory {
-        id: SettingsCategoryId::Plugins,
-        title: "插件",
-        keywords: &["扩展", "plugin"],
-        default_open: true,
-        children,
-    }
 }
 
 fn leaf(
@@ -567,10 +518,10 @@ mod tests {
 
     #[test]
     fn nav_exposes_task_oriented_groups_as_independent_sections() {
-        let nav = settings_nav(&[]);
+        let nav = settings_nav();
         assert_eq!(
             titles(&nav),
-            ["通用", "模型与 Agent", "工作区与远程", "插件", "系统"]
+            ["通用", "模型与 Agent", "工作区与远程", "系统"]
         );
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::General),
@@ -622,7 +573,7 @@ mod tests {
 
     #[test]
     fn nav_categories_are_default_open_two_level_branches() {
-        let nav = settings_nav(&[]);
+        let nav = settings_nav();
         assert!(
             nav.iter().all(|category| !category.children.is_empty()),
             "一级分类下面必须有二级页面，不能混入同级叶子"
@@ -634,50 +585,8 @@ mod tests {
     }
 
     #[test]
-    fn plugin_children_come_from_catalog() {
-        let empty = settings_nav(&[]);
-        let plugins = empty
-            .iter()
-            .find(|category| category.id == SettingsCategoryId::Plugins)
-            .unwrap();
-        assert_eq!(plugins.children[0].title, "安装插件");
-
-        let catalog = vec![
-            InstalledPlugin {
-                id: "com.example.account".into(),
-                name: "Account".into(),
-                version: "1.0.0".into(),
-                user_installed: false,
-                load_error: None,
-            },
-            InstalledPlugin {
-                id: "com.example.other".into(),
-                name: "Other".into(),
-                version: "0.1.0".into(),
-                user_installed: true,
-                load_error: None,
-            },
-        ];
-        let nav = settings_nav(&catalog);
-        assert_eq!(
-            child_titles(&nav, SettingsCategoryId::Plugins),
-            ["安装插件", "Account", "Other"]
-        );
-        let plugins = nav
-            .iter()
-            .find(|category| category.id == SettingsCategoryId::Plugins)
-            .unwrap();
-        assert_eq!(
-            plugins.children[1].section,
-            SettingsSection::Plugin {
-                id: "com.example.account".into()
-            }
-        );
-    }
-
-    #[test]
     fn search_filters_visible_entries_without_changing_page_structure() {
-        let nav = settings_nav(&[]);
+        let nav = settings_nav();
         let filtered = filter_settings_nav(&nav, "守护");
         assert_ne!(
             filtered[0].id, nav[0].id,
@@ -699,7 +608,7 @@ mod tests {
 
     #[test]
     fn search_understands_user_tasks_and_multiple_terms() {
-        let nav = settings_nav(&[]);
+        let nav = settings_nav();
 
         assert_eq!(
             child_titles(
@@ -767,7 +676,7 @@ mod tests {
 
     #[test]
     fn every_destination_is_a_second_level_leaf() {
-        let nav = settings_nav(&[]);
+        let nav = settings_nav();
         assert!(nav.iter().all(|category| !category.children.is_empty()));
         let visible_destinations = nav
             .iter()
@@ -775,14 +684,14 @@ mod tests {
             .map(|child| child.section.clone())
             .collect::<Vec<_>>();
 
-        assert_eq!(visible_destinations.len(), 15);
+        assert_eq!(visible_destinations.len(), 14);
         assert!(visible_destinations.contains(&SettingsSection::DshModel));
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
     }
 
     #[test]
     fn element_keys_are_unique() {
-        let keys = settings_nav(&[])
+        let keys = settings_nav()
             .into_iter()
             .flat_map(|category| category.children)
             .map(|child| child.section.element_key())

@@ -5,8 +5,6 @@ use super::*;
 
 fn call_input(sessions: &Sessions, id: &str, data: &str) -> serde_json::Value {
     let (server, client) = UnixStream::pair().unwrap();
-    let remote_state = new_remote_state(Some(uuid::Uuid::new_v4().simple().to_string()));
-    let iroh_state: IrohState = Arc::new(Mutex::new(None));
     let subscribers = new_event_hub();
     let mut client = client;
     writeln!(
@@ -17,7 +15,7 @@ fn call_input(sessions: &Sessions, id: &str, data: &str) -> serde_json::Value {
     .unwrap();
     handle_conn(
         server,
-        ServerContext {
+        ServerShared {
             sessions: Arc::clone(sessions),
             acp_sessions: new_test_acp_sessions(),
             remote_sessions: new_test_remote_sessions(),
@@ -26,11 +24,9 @@ fn call_input(sessions: &Sessions, id: &str, data: &str) -> serde_json::Value {
             exe_mtime: 0,
             daemon_fingerprint: None,
             listen_fd: -1,
-            remote_state,
-            iroh_state,
-            iroh_connections: new_iroh_connections(),
             event_hub: subscribers,
-        },
+        }
+        .context(Principal::Local),
     );
     let mut resp = String::new();
     BufReader::new(client).read_line(&mut resp).unwrap();

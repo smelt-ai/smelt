@@ -13,31 +13,44 @@ use std::sync::{Arc, Mutex};
 mod error;
 pub use error::{OpenSource, StoreError};
 
-// 这两个模块只服务桌面的 SQLite 实现（cfg 与下面的 `imp` 保持一致）。移动端不编
+// 这些模块只服务桌面的 SQLite 实现（cfg 与下面的 `imp` 保持一致）。移动端不编
 // native SQLite，rusqlite/serde_json 在 iOS/Android 上根本没进依赖树，无条件声明
 // 会让交叉编译直接挂在解析不到 crate 上。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod automation;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod catalog;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
-mod documents;
+mod devices;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod history;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod launch;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod memory;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod migrate_v18;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
 mod snapshots;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod workspace;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod workspace_document;
 
 pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AppearanceSnapshot,
-    AutoModelSnapshot, HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
-    MemoryMetaSnapshot, MemoryTrust, MemoryUsageRecord, PublishedSessionRecord,
-    PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheSnapshot,
+    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AutoModelHarness,
+    HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
+    MemoryMetaSnapshot, MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice,
+    PublishedSessionRecord, PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot,
+    QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
     RemoteAcpSessionRecord, RemoteConfigSnapshot, RemoteSessionCatalogSnapshot,
-    RemoteTerminalSessionRecord, TerminalThemeSnapshot, UpdateSettingsSnapshot,
-    UpdateStateSnapshot, WorkspaceAcpRecord, WorkspaceLayoutNode, WorkspaceProjectRecord,
-    WorkspaceSessionRecord, WorkspaceSnapshot, WorktreeInheritSnapshot,
+    RemoteTerminalSessionRecord, TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogCommit,
+    WorkspaceCatalogWriter, WorkspaceLayoutNode, WorkspaceMenuProjectRecord,
+    WorkspaceMenuSessionRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -49,7 +62,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 16;
+pub const STORE_SCHEMA_VERSION: u32 = 21;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -151,14 +164,14 @@ pub struct AutomationRunRecord {
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutboxEvent {
     pub outbox_id: u64,
-    pub envelope: smelt_plugin_api::EventEnvelope<serde_json::Value>,
+    pub envelope: smelt_event_protocol::EventEnvelope<serde_json::Value>,
     pub created_at_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerMessageCommandResult {
     pub source_session_id: String,
-    pub command_id: smelt_plugin_api::CommandId,
+    pub command_id: smelt_event_protocol::CommandId,
     pub request_fingerprint: String,
     pub completed_at_ms: u64,
     pub message_id: String,
@@ -178,13 +191,6 @@ pub struct CursorDeclaration {
     pub declaration_fingerprint: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LegacyState {
-    Pending,
-    Imported,
-    Deleted,
-}
-
 #[derive(Clone)]
 pub struct Store {
     backend: imp::Backend,
@@ -195,37 +201,6 @@ fn store_from_backend(backend: imp::Backend) -> Store {
     Store {
         backend,
         durable_notify: Arc::new(Mutex::new(None)),
-    }
-}
-
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-pub struct StoreTransaction<'a> {
-    transaction: &'a rusqlite::Transaction<'a>,
-}
-
-#[cfg(any(target_os = "ios", target_os = "android"))]
-pub struct StoreTransaction<'a> {
-    marker: std::marker::PhantomData<&'a ()>,
-}
-
-impl StoreTransaction<'_> {
-    pub fn put(&mut self, namespace: &str, key: &str, value: &[u8]) -> Result<(), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::transaction_put(self, namespace, key, value)
-    }
-
-    pub fn delete(&mut self, namespace: &str, key: &str) -> Result<bool, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::transaction_delete(self, namespace, key)
-    }
-
-    pub fn append_outbox_batch(
-        &mut self,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        imp::transaction_append_outbox(self, events)
     }
 }
 
@@ -289,43 +264,114 @@ impl Store {
         imp::read_user_version(path)
     }
 
-    pub fn get(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::get(&self.backend, namespace, key)
+    /// 运行时身份。只有 smeltd 第一次启动时写一次。
+    pub fn runtime_id(&self) -> Result<Option<String>, StoreError> {
+        imp::runtime_id(&self.backend)
     }
 
-    pub fn put(&self, namespace: &str, key: &str, value: &[u8]) -> Result<(), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::put(&self.backend, namespace, key, value)
+    pub fn put_runtime_id(&self, runtime_id: &str) -> Result<(), StoreError> {
+        validate_name("runtime_id", runtime_id)?;
+        imp::put_runtime_id(&self.backend, runtime_id)
     }
 
-    /// 读取一个明确作用域的二进制状态值，不经过 JSON 文档映射或 legacy 路由。
-    pub fn get_blob(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::get_blob(&self.backend, namespace, key)
+    /// 工作区目录的版本号，每次保存加一。从没保存过是 0。
+    pub fn workspace_catalog_revision(&self) -> Result<u64, StoreError> {
+        imp::workspace_catalog_revision(&self.backend)
     }
 
-    /// 写入一个明确作用域的二进制状态值，不生成或读取任何 JSON 文件。
-    pub fn put_blob(&self, namespace: &str, key: &str, value: &[u8]) -> Result<(), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::put_blob(&self.backend, namespace, key, value)
+    /// 基于 `base_revision` 提交整份工作区目录。比对版本、写快照、推进版本、记下写入方
+    /// 在同一个事务里，中途失败什么都不留下。
+    ///
+    /// 基准就是当前版本时照常提交。基准落后时，只有当前版本正是同一个写入方用更小的
+    /// 序号提交的，才算它自己的提交：回执在路上丢了，客户端还停在旧版本，这不是冲突。
+    /// 写入方的版本只在收到回执或重新读取时前进，它基于旧版本而当前版本是它写的，
+    /// 中间那些版本也都是它写的；别人写过一次，最后的写入方就不是它了。序号挡住超时后
+    /// 才到的旧请求，免得它盖掉后发先到的新提交。
+    pub fn commit_workspace_snapshot(
+        &self,
+        base_revision: u64,
+        writer: &WorkspaceCatalogWriter,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Result<WorkspaceCatalogCommit, StoreError> {
+        validate_name("workspace catalog writer", &writer.id)?;
+        imp::commit_workspace_snapshot(&self.backend, base_revision, writer, snapshot)
     }
 
-    /// 列出一个 blob 作用域下的全部 key。与 [`Self::keys`] 不同：后者走 JSON 文档目录。
-    pub fn blob_keys(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
-        validate_name("namespace", namespace)?;
-        imp::blob_keys(&self.backend, namespace)
+    /// 某条历史会话由哪个智能体定义创建。`profile_id` 为空表示没有 profile。
+    pub fn history_agent_binding(
+        &self,
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        imp::history_agent_binding(&self.backend, agent, profile_id, resume_id)
     }
 
-    /// 删除一个 blob。与 [`Self::delete`] 不同：后者会走 JSON 文档删除语义。
-    pub fn delete_blob(&self, namespace: &str, key: &str) -> Result<bool, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::delete_blob(&self.backend, namespace, key)
+    /// 某引擎、某 profile 下全部历史会话的智能体绑定：`resume_id` → 智能体定义 id。
+    pub fn history_agent_bindings(
+        &self,
+        agent: &str,
+        profile_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        imp::history_agent_bindings(&self.backend, agent, profile_id)
+    }
+
+    pub fn put_history_agent_binding(
+        &self,
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+        agent_definition_id: &str,
+    ) -> Result<(), StoreError> {
+        validate_name("agent", agent)?;
+        validate_name("resume_id", resume_id)?;
+        validate_name("agent_definition_id", agent_definition_id)?;
+        imp::put_history_agent_binding(
+            &self.backend,
+            agent,
+            profile_id,
+            resume_id,
+            agent_definition_id,
+        )
+    }
+
+    /// 侧栏「新对话」默认用哪个智能体。
+    pub fn default_conversation_agent(&self) -> Result<Option<String>, StoreError> {
+        imp::default_conversation_agent(&self.backend)
+    }
+
+    /// `None` 清掉默认智能体。
+    pub fn put_default_conversation_agent(
+        &self,
+        agent_definition_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        if let Some(id) = agent_definition_id {
+            validate_name("agent_definition_id", id)?;
+        }
+        imp::put_default_conversation_agent(&self.backend, agent_definition_id)
+    }
+
+    /// 新建菜单里置顶的动作 key，按置顶顺序。
+    pub fn new_session_pins(&self) -> Result<Vec<String>, StoreError> {
+        imp::new_session_pins(&self.backend)
+    }
+
+    pub fn put_new_session_pins(&self, pins: &[String]) -> Result<(), StoreError> {
+        imp::put_new_session_pins(&self.backend, pins)
+    }
+
+    /// 记忆召回的配置；没设过时各项都是空字符串。
+    pub fn memory_settings(&self) -> Result<MemorySettingsRecord, StoreError> {
+        imp::memory_settings(&self.backend)
+    }
+
+    /// 在同一个 IMMEDIATE 事务里读-改-写记忆配置，返回提交后的值。CLI、Control API
+    /// 各改一项时不会拿旧整行把对方刚写的那项盖掉；`modify` 返回错误时整笔回滚。
+    pub fn modify_memory_settings<E: From<StoreError>>(
+        &self,
+        modify: impl FnOnce(&mut MemorySettingsRecord) -> Result<(), E>,
+    ) -> Result<MemorySettingsRecord, E> {
+        imp::modify_memory_settings(&self.backend, modify)
     }
 
     pub fn put_automation_run_transcript(
@@ -383,32 +429,14 @@ impl Store {
         imp::put_history_title_snapshot(&self.backend, snapshot)
     }
 
-    pub fn get_appearance_snapshot(&self) -> Result<Option<AppearanceSnapshot>, StoreError> {
-        imp::get_appearance_snapshot(&self.backend)
-    }
-
-    /// 在同一个 IMMEDIATE 事务里读-改-写外观快照，返回提交后的值。
-    ///
-    /// GUI、smeltd（Control API）和 `smelt settings` CLI 是三个进程、三条连接，都会改
-    /// 外观。读和写不在同一把写锁里，后写的一方就会拿旧值把别人刚提交的修改覆盖掉。
-    /// `modify` 返回错误时整笔回滚。
-    pub fn modify_appearance_snapshot<E: From<StoreError>>(
-        &self,
-        missing: impl FnOnce() -> AppearanceSnapshot,
-        modify: impl FnOnce(&mut AppearanceSnapshot) -> Result<(), E>,
-    ) -> Result<AppearanceSnapshot, E> {
-        imp::modify_appearance_snapshot(&self.backend, missing, modify)
-    }
-
     pub fn get_workspace_snapshot(&self) -> Result<Option<WorkspaceSnapshot>, StoreError> {
         imp::get_workspace_snapshot(&self.backend)
     }
 
-    /// 会话 id → 智能体定义 id。关系表已存在时返回 `Some`（可以是空表）；
-    /// 只有旧 JSON 工作区时返回 `None`，调用方再走快照回退。
+    /// 会话 id → 智能体定义 id。
     pub fn session_agent_definition_ids(
         &self,
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         imp::session_agent_definition_ids(&self.backend)
     }
 
@@ -443,11 +471,12 @@ impl Store {
         imp::clear_history_session_id(&self.backend, session_id)
     }
 
-    /// 残留 workspace JSON 文档导入成类型化快照。活路径不要再走 JSON 文档入口。
+    /// `workspace.save` 发来的工作区文档转成类型化快照。文档只是传输格式。
     pub fn workspace_snapshot_from_json(raw: &[u8]) -> Result<WorkspaceSnapshot, StoreError> {
         imp::workspace_snapshot_from_json(raw)
     }
 
+    /// 类型化快照转成 `workspace.load` 回给客户端的文档。
     pub fn workspace_snapshot_to_json(snapshot: &WorkspaceSnapshot) -> Result<Vec<u8>, StoreError> {
         imp::workspace_snapshot_to_json(snapshot)
     }
@@ -534,6 +563,28 @@ impl Store {
         imp::memory_meta(&self.backend, scope)
     }
 
+    pub fn list_paired_devices(&self) -> Result<Vec<PairedDevice>, StoreError> {
+        imp::list_paired_devices(&self.backend)
+    }
+
+    pub fn paired_device(&self, endpoint_id: &str) -> Result<Option<PairedDevice>, StoreError> {
+        imp::paired_device(&self.backend, endpoint_id)
+    }
+
+    /// 配对成功：记进白名单。同一台设备重新配对就覆盖。
+    pub fn put_paired_device(&self, device: &PairedDevice) -> Result<(), StoreError> {
+        imp::put_paired_device(&self.backend, device)
+    }
+
+    /// 撤销。返回是否真有这台设备。
+    pub fn delete_paired_device(&self, endpoint_id: &str) -> Result<bool, StoreError> {
+        imp::delete_paired_device(&self.backend, endpoint_id)
+    }
+
+    pub fn touch_paired_device(&self, endpoint_id: &str, now_ms: i64) -> Result<(), StoreError> {
+        imp::touch_paired_device(&self.backend, endpoint_id, now_ms)
+    }
+
     pub fn get_remote_session_snapshot(
         &self,
     ) -> Result<Option<RemoteSessionCatalogSnapshot>, StoreError> {
@@ -560,12 +611,6 @@ impl Store {
         imp::put_published_session_snapshot(&self.backend, snapshot)
     }
 
-    pub fn agent_ui_snapshot_from_json(
-        value: &serde_json::Value,
-    ) -> Result<AgentUiSnapshot, StoreError> {
-        imp::agent_ui_snapshot_from_json(value)
-    }
-
     pub fn get_remote_config_snapshot(&self) -> Result<Option<RemoteConfigSnapshot>, StoreError> {
         imp::get_remote_config_snapshot(&self.backend)
     }
@@ -575,43 +620,6 @@ impl Store {
         snapshot: &RemoteConfigSnapshot,
     ) -> Result<(), StoreError> {
         imp::put_remote_config_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn get_update_settings_snapshot(
-        &self,
-    ) -> Result<Option<UpdateSettingsSnapshot>, StoreError> {
-        imp::get_update_settings_snapshot(&self.backend)
-    }
-
-    pub fn put_update_settings_snapshot(
-        &self,
-        snapshot: &UpdateSettingsSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_update_settings_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn get_update_state_snapshot(&self) -> Result<Option<UpdateStateSnapshot>, StoreError> {
-        imp::get_update_state_snapshot(&self.backend)
-    }
-
-    pub fn put_update_state_snapshot(
-        &self,
-        snapshot: &UpdateStateSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_update_state_snapshot(&self.backend, snapshot)
-    }
-
-    pub fn get_worktree_inherit_snapshot(
-        &self,
-    ) -> Result<Option<WorktreeInheritSnapshot>, StoreError> {
-        imp::get_worktree_inherit_snapshot(&self.backend)
-    }
-
-    pub fn put_worktree_inherit_snapshot(
-        &self,
-        snapshot: &WorktreeInheritSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_worktree_inherit_snapshot(&self.backend, snapshot)
     }
 
     pub fn get_terminal_theme_snapshot(&self) -> Result<Option<TerminalThemeSnapshot>, StoreError> {
@@ -636,26 +644,20 @@ impl Store {
         imp::put_quota_cache_snapshot(&self.backend, snapshot)
     }
 
-    pub fn get_dsh_auto_model_snapshot(&self) -> Result<Option<AutoModelSnapshot>, StoreError> {
-        imp::get_dsh_auto_model_snapshot(&self.backend)
-    }
-
-    pub fn put_dsh_auto_model_snapshot(
+    /// 模型目录由 Smelt 维护的 provider，按 id 排序。
+    pub fn auto_model_providers(
         &self,
-        snapshot: &AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_dsh_auto_model_snapshot(&self.backend, snapshot)
+        harness: AutoModelHarness,
+    ) -> Result<Vec<String>, StoreError> {
+        imp::auto_model_providers(&self.backend, harness)
     }
 
-    pub fn get_pi_auto_model_snapshot(&self) -> Result<Option<AutoModelSnapshot>, StoreError> {
-        imp::get_pi_auto_model_snapshot(&self.backend)
-    }
-
-    pub fn put_pi_auto_model_snapshot(
+    pub fn put_auto_model_providers(
         &self,
-        snapshot: &AutoModelSnapshot,
+        harness: AutoModelHarness,
+        providers: &[String],
     ) -> Result<(), StoreError> {
-        imp::put_pi_auto_model_snapshot(&self.backend, snapshot)
+        imp::put_auto_model_providers(&self.backend, harness, providers)
     }
 
     pub fn get_workspace_menu_snapshot(
@@ -671,107 +673,10 @@ impl Store {
         imp::put_workspace_menu_snapshot(&self.backend, snapshot)
     }
 
-    pub fn delete(&self, namespace: &str, key: &str) -> Result<bool, StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::delete(&self.backend, namespace, key)
-    }
-
-    pub fn keys(&self, namespace: &str) -> Result<Vec<String>, StoreError> {
-        validate_name("namespace", namespace)?;
-        imp::keys(&self.backend, namespace)
-    }
-
-    /// Runs document mutations and outbox insertion in one database transaction.
-    ///
-    /// The transaction exposes only typed store operations, never arbitrary SQL.
-    pub fn transaction<R>(
-        &self,
-        operation: impl FnOnce(&mut StoreTransaction<'_>) -> Result<R, StoreError>,
-    ) -> Result<R, StoreError> {
-        let result = imp::store_transaction(&self.backend, operation)?;
-        self.notify_durable();
-        Ok(result)
-    }
-
-    pub fn legacy_state(&self, source: &str) -> Result<LegacyState, StoreError> {
-        validate_legacy_source(source)?;
-        imp::legacy_state(&self.backend, source)
-    }
-
-    /// 在同一个 SQLite 快照中读取 KV 和对应 legacy source 的处理状态。
-    pub fn get_with_legacy_state(
-        &self,
-        namespace: &str,
-        key: &str,
-        source: &str,
-    ) -> Result<(Option<Vec<u8>>, LegacyState), StoreError> {
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        validate_legacy_source(source)?;
-        imp::get_with_legacy_state(&self.backend, namespace, key, source)
-    }
-
-    /// 删除 KV，并在同一事务中记录该 legacy source 已被明确删除。
-    pub fn delete_with_legacy_tombstone(
-        &self,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        validate_legacy_source(source)?;
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::delete_with_legacy_tombstone(&self.backend, source, namespace, key)
-    }
-
-    /// 只记录 legacy source 已被明确处理，不删除当前 KV。
-    ///
-    /// 用于文件系统 payload 已成功移入隔离区后的第二阶段提交；期间并发写入的新值
-    /// 必须保留。
-    pub fn mark_legacy_deleted(
-        &self,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        validate_legacy_source(source)?;
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        imp::mark_legacy_deleted(&self.backend, source, namespace, key)
-    }
-
-    /// 把 KV 原样移入隔离 namespace，并在同一事务中写入 legacy 删除墓碑。
-    pub fn quarantine_with_legacy_tombstone(
-        &self,
-        source: &str,
-        namespace: &str,
-        key: &str,
-        quarantine_namespace: &str,
-        quarantine_key: &str,
-    ) -> Result<bool, StoreError> {
-        validate_legacy_source(source)?;
-        validate_name("namespace", namespace)?;
-        validate_name("key", key)?;
-        validate_name("quarantine namespace", quarantine_namespace)?;
-        validate_name("quarantine key", quarantine_key)?;
-        if namespace == quarantine_namespace && key == quarantine_key {
-            return Err(StoreError::QuarantineSameKey);
-        }
-        imp::quarantine_with_legacy_tombstone(
-            &self.backend,
-            source,
-            namespace,
-            key,
-            quarantine_namespace,
-            quarantine_key,
-        )
-    }
-
     /// Adds durable events to the domain transaction's outbox in one commit.
     pub fn append_outbox_batch(
         &self,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         imp::append_outbox_batch(&self.backend, events)?;
         if !events.is_empty() {
@@ -799,8 +704,8 @@ impl Store {
 
     pub fn bind_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         declaration_fingerprint: &str,
     ) -> Result<CursorDeclaration, StoreError> {
         validate_name("declaration fingerprint", declaration_fingerprint)?;
@@ -814,8 +719,8 @@ impl Store {
 
     pub fn load_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<CursorDeclaration>, StoreError> {
         imp::load_cursor_declaration(&self.backend, plugin_id, subscription_id)
     }
@@ -823,7 +728,7 @@ impl Store {
     pub fn get_peer_message_command_result(
         &self,
         source_session_id: &str,
-        command_id: &smelt_plugin_api::CommandId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<PeerMessageCommandResult>, StoreError> {
         validate_name("source session id", source_session_id)?;
         imp::get_peer_message_command_result(&self.backend, source_session_id, command_id)
@@ -833,7 +738,7 @@ impl Store {
     pub fn commit_peer_message_delivery(
         &self,
         result: &PeerMessageCommandResult,
-        event: &smelt_plugin_api::EventEnvelope<serde_json::Value>,
+        event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
     ) -> Result<PeerMessageCommitOutcome, StoreError> {
         validate_name("source session id", &result.source_session_id)?;
         validate_name("request fingerprint", &result.request_fingerprint)?;
@@ -866,7 +771,7 @@ impl smelt_event_bus::EventStore for Store {
     fn load_after_topics(
         &self,
         sequence: u64,
-        topics: &std::collections::BTreeSet<smelt_plugin_api::Topic>,
+        topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::StoredEvent>, smelt_event_bus::EventBusError> {
         imp::load_events_after_topics(&self.backend, sequence, topics, limit)
@@ -879,8 +784,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn bind_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         declaration_fingerprint: &str,
     ) -> Result<smelt_event_bus::CursorDeclaration, smelt_event_bus::EventBusError> {
         self.bind_cursor_declaration(plugin_id, subscription_id, declaration_fingerprint)
@@ -893,8 +798,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn load_cursor_declaration(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::CursorDeclaration>, smelt_event_bus::EventBusError> {
         self.load_cursor_declaration(plugin_id, subscription_id)
             .map(|declaration| {
@@ -909,8 +814,8 @@ impl smelt_event_bus::EventStore for Store {
     fn store_cursors(
         &self,
         cursors: &[(
-            smelt_plugin_api::PluginId,
-            smelt_plugin_api::SubscriptionId,
+            smelt_event_protocol::PluginId,
+            smelt_event_protocol::SubscriptionId,
             u64,
         )],
     ) -> Result<(), smelt_event_bus::EventBusError> {
@@ -927,8 +832,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn load_dead_letters(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::DeadLetter>, smelt_event_bus::EventBusError> {
         imp::load_dead_letters(&self.backend, plugin_id, subscription_id, limit)
@@ -937,8 +842,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn load_retry(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::DeliveryRetry>, smelt_event_bus::EventBusError> {
         imp::load_retry(&self.backend, plugin_id, subscription_id)
             .map_err(smelt_event_bus::EventBusError::new)
@@ -953,8 +858,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn delete_retry(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<(), smelt_event_bus::EventBusError> {
         imp::delete_retry(&self.backend, plugin_id, subscription_id)
             .map_err(smelt_event_bus::EventBusError::new)
@@ -962,8 +867,8 @@ impl smelt_event_bus::EventStore for Store {
 
     fn get_command_result(
         &self,
-        plugin_id: &smelt_plugin_api::PluginId,
-        command_id: &smelt_plugin_api::CommandId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<smelt_event_bus::CommandResult>, smelt_event_bus::EventBusError> {
         imp::get_command_result(&self.backend, plugin_id, command_id)
             .map_err(smelt_event_bus::EventBusError::new)
@@ -974,16 +879,6 @@ impl smelt_event_bus::EventStore for Store {
         result: &smelt_event_bus::CommandResult,
     ) -> Result<bool, smelt_event_bus::EventBusError> {
         imp::put_command_result(&self.backend, result).map_err(smelt_event_bus::EventBusError::new)
-    }
-}
-
-fn validate_legacy_source(source: &str) -> Result<(), StoreError> {
-    if source.trim().is_empty() {
-        Err(StoreError::EmptyLegacySource)
-    } else if source.as_bytes().contains(&0) {
-        Err(StoreError::LegacySourceContainsNul)
-    } else {
-        Ok(())
     }
 }
 
@@ -1026,7 +921,7 @@ fn validate_automation_snapshot(snapshot: &AutomationSnapshot) -> Result<(), Sto
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod imp {
-    use super::{HashSet, LegacyState, OpenSource, STORE_SCHEMA_VERSION, StoreError};
+    use super::{HashSet, OpenSource, STORE_SCHEMA_VERSION, StoreError};
     use rusqlite::{
         Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params,
     };
@@ -1036,8 +931,6 @@ mod imp {
 
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
     const BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
-    const QUARANTINE_SCOPE: &str = "quarantine";
-    const LEGACY_SCOPE_PREFIX: &str = "legacy:";
     const LEGACY_V3_FINGERPRINT: &str = "legacy-v3-unbound";
 
     const OPEN_EXISTING_FLAGS: OpenFlags =
@@ -1155,153 +1048,166 @@ mod imp {
             })
     }
 
-    pub(super) fn store_transaction<R>(
+    fn read<T>(
         backend: &Backend,
-        operation: impl FnOnce(&mut super::StoreTransaction<'_>) -> Result<R, StoreError>,
-    ) -> Result<R, StoreError> {
+        read: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let connection = lock_connection(backend)?;
+        read(&connection)
+    }
+
+    fn write<T>(
+        backend: &Backend,
+        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = operation(&mut super::StoreTransaction {
-            transaction: &transaction,
-        })?;
+        let result = write(&transaction)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(result)
     }
 
-    pub(super) fn transaction_put(
-        transaction: &mut super::StoreTransaction<'_>,
-        namespace: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), StoreError> {
-        match namespace {
-            "quarantine" => upsert_kv_blob(transaction.transaction, QUARANTINE_SCOPE, key, value),
-            _ => crate::documents::write_document(transaction.transaction, key, value),
-        }
+    pub(super) fn runtime_id(backend: &Backend) -> Result<Option<String>, StoreError> {
+        read(backend, crate::config::read_runtime_id)
     }
 
-    pub(super) fn transaction_delete(
-        transaction: &mut super::StoreTransaction<'_>,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        match namespace {
-            "quarantine" => transaction
-                .transaction
-                .execute(
-                    "DELETE FROM kv WHERE scope = ?1 AND key = ?2",
-                    params![QUARANTINE_SCOPE, key],
-                )
-                .map(|changed| changed > 0)
-                .map_err(StoreError::from),
-            _ => crate::documents::delete_document(transaction.transaction, key),
-        }
+    pub(super) fn put_runtime_id(backend: &Backend, runtime_id: &str) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_runtime_id(transaction, runtime_id)
+        })
     }
 
-    pub(super) fn transaction_append_outbox(
-        transaction: &mut super::StoreTransaction<'_>,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
-    ) -> Result<(), StoreError> {
-        insert_outbox_events(transaction.transaction, events)
+    pub(super) fn workspace_catalog_revision(backend: &Backend) -> Result<u64, StoreError> {
+        read(backend, crate::config::read_workspace_catalog_revision)
     }
 
-    pub(super) fn get(
+    pub(super) fn commit_workspace_snapshot(
         backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
-        let connection = lock_connection(backend)?;
-        match namespace {
-            "quarantine" => connection
-                .query_row(
-                    "SELECT value FROM kv
-                     WHERE scope = ?1 AND key = ?2 AND value_type = 'blob'",
-                    params![QUARANTINE_SCOPE, key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(StoreError::from),
-            _ => crate::documents::read_document(&connection, key),
-        }
-    }
-
-    pub(super) fn put(
-        backend: &Backend,
-        namespace: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match namespace {
-            "quarantine" => {
-                upsert_kv_blob(&transaction, QUARANTINE_SCOPE, key, value)?;
+        base_revision: u64,
+        writer: &super::WorkspaceCatalogWriter,
+        snapshot: &super::WorkspaceSnapshot,
+    ) -> Result<super::WorkspaceCatalogCommit, StoreError> {
+        write(backend, |transaction| {
+            let head = crate::config::read_workspace_catalog_head(transaction)?;
+            if !head.accepts(base_revision, writer) {
+                return Ok(super::WorkspaceCatalogCommit::Conflict {
+                    current: head.revision,
+                });
             }
-            _ => crate::documents::write_document(&transaction, key, value)?,
-        }
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
+            crate::workspace::write_workspace_snapshot(transaction, snapshot)?;
+            let revision = head.revision + 1;
+            crate::config::write_workspace_catalog_head(transaction, revision, writer)?;
+            Ok(super::WorkspaceCatalogCommit::Committed { revision })
+        })
     }
 
-    pub(super) fn get_blob(
+    pub(super) fn history_agent_binding(
         backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
-        let connection = lock_connection(backend)?;
-        connection
-            .query_row(
-                "SELECT value FROM kv
-                 WHERE scope = ?1 AND key = ?2 AND value_type = 'blob'",
-                params![namespace, key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        read(backend, |connection| {
+            crate::history::read_history_agent_binding(connection, agent, profile_id, resume_id)
+        })
     }
 
-    pub(super) fn put_blob(
+    pub(super) fn history_agent_bindings(
         backend: &Backend,
-        namespace: &str,
-        key: &str,
-        value: &[u8],
+        agent: &str,
+        profile_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        read(backend, |connection| {
+            crate::history::read_history_agent_bindings(connection, agent, profile_id)
+        })
+    }
+
+    pub(super) fn put_history_agent_binding(
+        backend: &Backend,
+        agent: &str,
+        profile_id: &str,
+        resume_id: &str,
+        agent_definition_id: &str,
     ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        upsert_kv_blob(&transaction, namespace, key, value)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
+        write(backend, |transaction| {
+            crate::history::write_history_agent_binding(
+                transaction,
+                agent,
+                profile_id,
+                resume_id,
+                agent_definition_id,
+            )
+        })
     }
 
-    pub(super) fn blob_keys(backend: &Backend, namespace: &str) -> Result<Vec<String>, StoreError> {
-        let connection = lock_connection(backend)?;
-        let mut statement = connection.prepare(
-            "SELECT key FROM kv
-                 WHERE scope = ?1 AND value_type = 'blob'
-                 ORDER BY key",
-        )?;
-        let rows = statement.query_map(params![namespace], |row| row.get(0))?;
-        rows.collect::<Result<Vec<String>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    pub(super) fn delete_blob(
+    pub(super) fn default_conversation_agent(
         backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<String>, StoreError> {
+        read(backend, crate::config::read_default_conversation_agent)
+    }
+
+    pub(super) fn put_default_conversation_agent(
+        backend: &Backend,
+        agent_definition_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_default_conversation_agent(transaction, agent_definition_id)
+        })
+    }
+
+    pub(super) fn new_session_pins(backend: &Backend) -> Result<Vec<String>, StoreError> {
+        read(backend, crate::config::read_new_session_pins)
+    }
+
+    pub(super) fn put_new_session_pins(
+        backend: &Backend,
+        pins: &[String],
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_new_session_pins(transaction, pins)
+        })
+    }
+
+    pub(super) fn memory_settings(
+        backend: &Backend,
+    ) -> Result<super::MemorySettingsRecord, StoreError> {
+        read(backend, crate::config::read_memory_settings)
+    }
+
+    pub(super) fn modify_memory_settings<E: From<StoreError>>(
+        backend: &Backend,
+        modify: impl FnOnce(&mut super::MemorySettingsRecord) -> Result<(), E>,
+    ) -> Result<super::MemorySettingsRecord, E> {
         let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "DELETE FROM kv WHERE scope = ?1 AND key = ?2 AND value_type = 'blob'",
-            params![namespace, key],
-        )?;
-        transaction.commit()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let mut record = crate::config::read_memory_settings(&transaction)?;
+        modify(&mut record)?;
+        crate::config::write_memory_settings(&transaction, &record)?;
+        transaction.commit().map_err(StoreError::from)?;
         secure_sidecar_permissions(&backend.path);
-        Ok(changed > 0)
+        Ok(record)
+    }
+
+    pub(super) fn auto_model_providers(
+        backend: &Backend,
+        harness: super::AutoModelHarness,
+    ) -> Result<Vec<String>, StoreError> {
+        read(backend, |connection| {
+            crate::config::read_auto_model_providers(connection, harness)
+        })
+    }
+
+    pub(super) fn put_auto_model_providers(
+        backend: &Backend,
+        harness: super::AutoModelHarness,
+        providers: &[String],
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::config::write_auto_model_providers(transaction, harness, providers)
+        })
     }
 
     pub(super) fn put_automation_run_transcript(
@@ -1343,7 +1249,7 @@ mod imp {
         backend: &Backend,
     ) -> Result<Option<super::AutomationSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_automation_snapshot(&connection)
+        crate::automation::read_automation_snapshot(&connection)
     }
 
     pub(super) fn put_automation_snapshot(
@@ -1352,7 +1258,7 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_automation_snapshot(&transaction, snapshot)?;
+        crate::automation::write_automation_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1362,7 +1268,7 @@ mod imp {
         backend: &Backend,
     ) -> Result<Option<super::LaunchSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_launch_snapshot(&connection)
+        crate::launch::read_launch_snapshot(&connection)
     }
 
     pub(super) fn put_launch_snapshot(
@@ -1371,7 +1277,7 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_launch_snapshot(&transaction, snapshot)?;
+        crate::launch::write_launch_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1381,7 +1287,7 @@ mod imp {
         backend: &Backend,
     ) -> Result<Option<super::HistoryTitleSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_history_title_snapshot(&connection)
+        crate::history::read_history_title_snapshot(&connection)
     }
 
     pub(super) fn put_history_title_snapshot(
@@ -1390,49 +1296,24 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_history_title_snapshot(&transaction, snapshot)?;
+        crate::history::write_history_title_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
-    }
-
-    pub(super) fn get_appearance_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::AppearanceSnapshot>, StoreError> {
-        let connection = lock_connection(backend)?;
-        crate::documents::read_appearance_snapshot(&connection)
-    }
-
-    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
-        backend: &Backend,
-        missing: impl FnOnce() -> super::AppearanceSnapshot,
-        modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
-    ) -> Result<super::AppearanceSnapshot, E> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StoreError::from)?;
-        let mut snapshot =
-            crate::documents::read_appearance_snapshot(&transaction)?.unwrap_or_else(missing);
-        modify(&mut snapshot)?;
-        crate::documents::write_appearance_snapshot(&transaction, &snapshot)?;
-        transaction.commit().map_err(StoreError::from)?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(snapshot)
     }
 
     pub(super) fn get_workspace_snapshot(
         backend: &Backend,
     ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_workspace_snapshot(&connection)
+        crate::workspace::read_workspace_snapshot(&connection)
     }
 
     pub(super) fn session_agent_definition_ids(
         backend: &Backend,
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::read_session_agent_definition_ids(&connection)
+        crate::workspace::read_session_agent_definition_ids(&connection)
     }
 
     pub(super) fn put_workspace_snapshot(
@@ -1441,7 +1322,7 @@ mod imp {
     ) -> Result<(), StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::documents::write_workspace_snapshot(&transaction, snapshot)?;
+        crate::workspace::write_workspace_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
         Ok(())
@@ -1455,7 +1336,7 @@ mod imp {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let updated =
-            crate::documents::remember_history_session_id(&transaction, session_id, history_id)?;
+            crate::workspace::remember_history_session_id(&transaction, session_id, history_id)?;
         transaction.commit()?;
         Ok(updated)
     }
@@ -1465,7 +1346,7 @@ mod imp {
         session_id: &str,
     ) -> Result<Option<String>, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::history_session_id(&connection, session_id)
+        crate::workspace::history_session_id(&connection, session_id)
     }
 
     pub(super) fn stored_history_identity(
@@ -1473,7 +1354,7 @@ mod imp {
         session_id: &str,
     ) -> Result<super::StoredHistoryIdentity, StoreError> {
         let connection = lock_connection(backend)?;
-        crate::documents::stored_history_identity(&connection, session_id)
+        crate::workspace::stored_history_identity(&connection, session_id)
     }
 
     pub(super) fn clear_history_session_id(
@@ -1482,7 +1363,7 @@ mod imp {
     ) -> Result<bool, StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let updated = crate::documents::clear_history_session_id(&transaction, session_id)?;
+        let updated = crate::workspace::clear_history_session_id(&transaction, session_id)?;
         transaction.commit()?;
         Ok(updated)
     }
@@ -1491,13 +1372,13 @@ mod imp {
         raw: &[u8],
     ) -> Result<super::WorkspaceSnapshot, StoreError> {
         let value: serde_json::Value = serde_json::from_slice(raw)?;
-        crate::documents::workspace_from_document(&value)
+        crate::workspace_document::workspace_from_document(&value)
     }
 
     pub(super) fn workspace_snapshot_to_json(
         snapshot: &super::WorkspaceSnapshot,
     ) -> Result<Vec<u8>, StoreError> {
-        let value = crate::documents::json_from_workspace_snapshot(snapshot)?;
+        let value = crate::workspace_document::json_from_workspace_snapshot(snapshot);
         serde_json::to_vec(&value).map_err(StoreError::from)
     }
 
@@ -1583,25 +1464,13 @@ mod imp {
         Ok(changed)
     }
 
-    fn write_memory<T>(
-        backend: &Backend,
-        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = write(&transaction)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(result)
-    }
-
     pub(super) fn record_memory_read(
         backend: &Backend,
         scope: &str,
         file_name: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::record_read(transaction, scope, file_name, now_ms)
         })
     }
@@ -1615,7 +1484,7 @@ mod imp {
         session_id: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::record_write(
                 transaction,
                 scope,
@@ -1633,7 +1502,7 @@ mod imp {
         scope: &str,
         file_name: &str,
     ) -> Result<bool, StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::approve(transaction, scope, file_name)
         })
     }
@@ -1643,7 +1512,7 @@ mod imp {
         scope: &str,
         file_name: &str,
     ) -> Result<(), StoreError> {
-        write_memory(backend, |transaction| {
+        write(backend, |transaction| {
             crate::memory::forget(transaction, scope, file_name)
         })
     }
@@ -1654,6 +1523,49 @@ mod imp {
     ) -> Result<super::MemoryMetaSnapshot, StoreError> {
         let connection = lock_connection(backend)?;
         crate::memory::read_meta(&connection, scope)
+    }
+
+    pub(super) fn list_paired_devices(
+        backend: &Backend,
+    ) -> Result<Vec<super::PairedDevice>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::devices::list(&connection)
+    }
+
+    pub(super) fn paired_device(
+        backend: &Backend,
+        endpoint_id: &str,
+    ) -> Result<Option<super::PairedDevice>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::devices::get(&connection, endpoint_id)
+    }
+
+    pub(super) fn put_paired_device(
+        backend: &Backend,
+        device: &super::PairedDevice,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::devices::put(transaction, device)
+        })
+    }
+
+    pub(super) fn delete_paired_device(
+        backend: &Backend,
+        endpoint_id: &str,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::devices::delete(transaction, endpoint_id)
+        })
+    }
+
+    pub(super) fn touch_paired_device(
+        backend: &Backend,
+        endpoint_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::devices::touch(transaction, endpoint_id, now_ms)
+        })
     }
 
     pub(super) fn get_remote_session_snapshot(
@@ -1680,12 +1592,6 @@ mod imp {
     ) -> Result<Option<super::PublishedSessionSnapshot>, StoreError> {
         let connection = lock_connection(backend)?;
         crate::catalog::read_published_session_snapshot(&connection)
-    }
-
-    pub(super) fn agent_ui_snapshot_from_json(
-        value: &serde_json::Value,
-    ) -> Result<super::AgentUiSnapshot, StoreError> {
-        crate::catalog::agent_ui_from_document(value)
     }
 
     pub(super) fn put_published_session_snapshot(
@@ -1738,57 +1644,6 @@ mod imp {
         )
     }
 
-    pub(super) fn get_update_settings_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::UpdateSettingsSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_update_settings_snapshot)
-    }
-
-    pub(super) fn put_update_settings_snapshot(
-        backend: &Backend,
-        snapshot: &super::UpdateSettingsSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_update_settings_snapshot,
-        )
-    }
-
-    pub(super) fn get_update_state_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::UpdateStateSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_update_state_snapshot)
-    }
-
-    pub(super) fn put_update_state_snapshot(
-        backend: &Backend,
-        snapshot: &super::UpdateStateSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_update_state_snapshot,
-        )
-    }
-
-    pub(super) fn get_worktree_inherit_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::WorktreeInheritSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_worktree_inherit_snapshot)
-    }
-
-    pub(super) fn put_worktree_inherit_snapshot(
-        backend: &Backend,
-        snapshot: &super::WorktreeInheritSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_worktree_inherit_snapshot,
-        )
-    }
-
     pub(super) fn get_terminal_theme_snapshot(
         backend: &Backend,
     ) -> Result<Option<super::TerminalThemeSnapshot>, StoreError> {
@@ -1817,40 +1672,6 @@ mod imp {
         snapshot: &super::QuotaCacheSnapshot,
     ) -> Result<(), StoreError> {
         put_config(backend, snapshot, crate::config::write_quota_cache_snapshot)
-    }
-
-    pub(super) fn get_dsh_auto_model_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_dsh_auto_model_snapshot)
-    }
-
-    pub(super) fn put_dsh_auto_model_snapshot(
-        backend: &Backend,
-        snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_dsh_auto_model_snapshot,
-        )
-    }
-
-    pub(super) fn get_pi_auto_model_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_pi_auto_model_snapshot)
-    }
-
-    pub(super) fn put_pi_auto_model_snapshot(
-        backend: &Backend,
-        snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_pi_auto_model_snapshot,
-        )
     }
 
     pub(super) fn get_workspace_menu_snapshot(
@@ -1893,259 +1714,6 @@ mod imp {
         }
         transaction.commit()?;
         secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
-    pub(super) fn delete(
-        backend: &Backend,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = match namespace {
-            "quarantine" => {
-                transaction.execute(
-                    "DELETE FROM kv WHERE scope = ?1 AND key = ?2",
-                    params![QUARANTINE_SCOPE, key],
-                )? > 0
-            }
-            _ => crate::documents::delete_document(&transaction, key)?,
-        };
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(changed)
-    }
-
-    pub(super) fn keys(backend: &Backend, namespace: &str) -> Result<Vec<String>, StoreError> {
-        let connection = lock_connection(backend)?;
-        if namespace == "quarantine" {
-            let mut statement =
-                connection.prepare("SELECT key FROM kv WHERE scope = ?1 ORDER BY key")?;
-            let rows = statement.query_map([QUARANTINE_SCOPE], |row| row.get(0))?;
-            return rows
-                .collect::<Result<Vec<String>, _>>()
-                .map_err(StoreError::from);
-        }
-        crate::documents::list_document_keys(&connection)
-    }
-
-    pub(super) fn legacy_state(backend: &Backend, source: &str) -> Result<LegacyState, StoreError> {
-        let connection = lock_connection(backend)?;
-        let status = read_legacy_record(&connection, source)?.map(|(_, _, status)| status);
-        match status.as_deref() {
-            None => Ok(LegacyState::Pending),
-            Some("imported") => Ok(LegacyState::Imported),
-            Some("deleted") => Ok(LegacyState::Deleted),
-            Some(other) => Err(StoreError::UnknownLegacyStatus {
-                status: other.to_string(),
-            }),
-        }
-    }
-
-    pub(super) fn get_with_legacy_state(
-        backend: &Backend,
-        namespace: &str,
-        key: &str,
-        source: &str,
-    ) -> Result<(Option<Vec<u8>>, LegacyState), StoreError> {
-        let connection = lock_connection(backend)?;
-        let value = crate::documents::read_document(&connection, key)?;
-        let state = match read_legacy_record(&connection, source)? {
-            None => LegacyState::Pending,
-            Some((mapped_namespace, mapped_key, status)) => {
-                if mapped_namespace != namespace || mapped_key != key {
-                    return Err(StoreError::legacy_mapping_mismatch(
-                        source,
-                        mapped_namespace,
-                        mapped_key,
-                        namespace,
-                        key,
-                        "读取",
-                    ));
-                }
-                match status.as_str() {
-                    "imported" => LegacyState::Imported,
-                    "deleted" => LegacyState::Deleted,
-                    other => {
-                        return Err(StoreError::UnknownLegacyStatus {
-                            status: other.to_string(),
-                        });
-                    }
-                }
-            }
-        };
-        Ok((value, state))
-    }
-
-    pub(super) fn delete_with_legacy_tombstone(
-        backend: &Backend,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_legacy_mapping(&transaction, source, namespace, key)?;
-        upsert_deleted_tombstone(&transaction, source, namespace, key)?;
-        let changed = crate::documents::delete_document(&transaction, key)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(changed)
-    }
-
-    pub(super) fn quarantine_with_legacy_tombstone(
-        backend: &Backend,
-        source: &str,
-        namespace: &str,
-        key: &str,
-        quarantine_namespace: &str,
-        quarantine_key: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_legacy_mapping(&transaction, source, namespace, key)?;
-        let _ = quarantine_namespace;
-        let payload = crate::documents::read_document(&transaction, key)?;
-        let moved = if let Some(payload) = payload {
-            upsert_kv_blob(&transaction, QUARANTINE_SCOPE, quarantine_key, &payload)?;
-            crate::documents::delete_document(&transaction, key)?;
-            upsert_deleted_tombstone(&transaction, source, namespace, key)?;
-            true
-        } else {
-            false
-        };
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(moved)
-    }
-
-    pub(super) fn mark_legacy_deleted(
-        backend: &Backend,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_legacy_mapping(&transaction, source, namespace, key)?;
-        upsert_deleted_tombstone(&transaction, source, namespace, key)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
-    fn validate_legacy_mapping(
-        transaction: &rusqlite::Transaction<'_>,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        let mapped = read_legacy_record(transaction, source)?;
-        if let Some((existing_namespace, existing_key, _)) = mapped
-            && (existing_namespace != namespace || existing_key != key)
-        {
-            return Err(StoreError::legacy_mapping_mismatch(
-                source,
-                existing_namespace,
-                existing_key,
-                namespace,
-                key,
-                "改写",
-            ));
-        }
-        Ok(())
-    }
-
-    fn upsert_deleted_tombstone(
-        transaction: &rusqlite::Transaction<'_>,
-        source: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StoreError> {
-        upsert_legacy_record(transaction, source, namespace, key, "deleted")
-    }
-
-    fn legacy_scope(source: &str) -> String {
-        format!("{LEGACY_SCOPE_PREFIX}{source}")
-    }
-
-    fn read_legacy_record(
-        connection: &Connection,
-        source: &str,
-    ) -> Result<Option<(String, String, String)>, StoreError> {
-        let scope = legacy_scope(source);
-        let row = connection.query_row(
-            "SELECT
-                   MAX(CASE WHEN key = 'namespace' THEN CAST(value AS TEXT) END),
-                   MAX(CASE WHEN key = 'key' THEN CAST(value AS TEXT) END),
-                   MAX(CASE WHEN key = 'status' THEN CAST(value AS TEXT) END)
-                 FROM kv WHERE scope = ?1",
-            [&scope],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )?;
-        match row {
-            (None, None, None) => Ok(None),
-            (Some(namespace), Some(key), Some(status)) => Ok(Some((namespace, key, status))),
-            _ => Err(StoreError::IncompleteLegacyMetadata {
-                legacy_source: source.to_string(),
-            }),
-        }
-    }
-
-    fn upsert_legacy_record(
-        transaction: &rusqlite::Transaction<'_>,
-        source: &str,
-        namespace: &str,
-        key: &str,
-        status: &str,
-    ) -> Result<(), StoreError> {
-        let scope = legacy_scope(source);
-        for (field, value) in [("namespace", namespace), ("key", key), ("status", status)] {
-            upsert_kv_text(transaction, &scope, field, value)?;
-        }
-        Ok(())
-    }
-
-    fn upsert_kv_text(
-        transaction: &rusqlite::Transaction<'_>,
-        scope: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), StoreError> {
-        transaction.execute(
-            "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES (?1, ?2, ?3, 'text', ?4)
-                 ON CONFLICT(scope, key) DO UPDATE SET
-                   value = excluded.value,
-                   value_type = 'text',
-                   updated_at_ms = excluded.updated_at_ms",
-            params![scope, key, value, now_ms()],
-        )?;
-        Ok(())
-    }
-
-    fn upsert_kv_blob(
-        transaction: &rusqlite::Transaction<'_>,
-        scope: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), StoreError> {
-        transaction.execute(
-            "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES (?1, ?2, ?3, 'blob', ?4)
-                 ON CONFLICT(scope, key) DO UPDATE SET
-                   value = excluded.value,
-                   value_type = 'blob',
-                   updated_at_ms = excluded.updated_at_ms",
-            params![scope, key, value, now_ms()],
-        )?;
         Ok(())
     }
 
@@ -2254,7 +1822,7 @@ mod imp {
     pub(super) fn load_events_after_topics(
         backend: &Backend,
         sequence: u64,
-        topics: &std::collections::BTreeSet<smelt_plugin_api::Topic>,
+        topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
         if topics.is_empty() || limit == 0 {
@@ -2307,7 +1875,7 @@ mod imp {
 
     pub(super) fn append_outbox_batch(
         backend: &Backend,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         if events.is_empty() {
             return Ok(());
@@ -2322,7 +1890,7 @@ mod imp {
 
     fn insert_outbox_events(
         transaction: &rusqlite::Transaction<'_>,
-        events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         let mut statement = transaction.prepare_cached(
             "INSERT INTO event_outbox(event_id, envelope_json, created_at_ms)
@@ -2338,7 +1906,7 @@ mod imp {
     pub(super) fn get_peer_message_command_result(
         backend: &Backend,
         source_session_id: &str,
-        command_id: &smelt_plugin_api::CommandId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<super::PeerMessageCommandResult>, StoreError> {
         let connection = lock_connection(backend)?;
         connection
@@ -2365,7 +1933,7 @@ mod imp {
     pub(super) fn commit_peer_message_delivery(
         backend: &Backend,
         result: &super::PeerMessageCommandResult,
-        event: &smelt_plugin_api::EventEnvelope<serde_json::Value>,
+        event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
     ) -> Result<super::PeerMessageCommitOutcome, StoreError> {
         let mut connection = lock_connection(backend)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2496,7 +2064,7 @@ mod imp {
         };
         let mut dispatched = Vec::with_capacity(pending.len());
         for (outbox_id, wire_bytes) in pending {
-            let envelope: smelt_plugin_api::EventEnvelope<serde_json::Value> =
+            let envelope: smelt_event_protocol::EventEnvelope<serde_json::Value> =
                 serde_json::from_slice(&wire_bytes)?;
             let existing = transaction
                 .query_row(
@@ -2542,8 +2110,8 @@ mod imp {
 
     pub(super) fn bind_cursor_declaration(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         declaration_fingerprint: &str,
     ) -> Result<super::CursorDeclaration, StoreError> {
         let mut connection = lock_connection(backend)?;
@@ -2615,8 +2183,8 @@ mod imp {
 
     pub(super) fn load_cursor_declaration(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<super::CursorDeclaration>, StoreError> {
         let connection = lock_connection(backend)?;
         connection
@@ -2639,8 +2207,8 @@ mod imp {
     pub(super) fn store_cursors(
         backend: &Backend,
         cursors: &[(
-            smelt_plugin_api::PluginId,
-            smelt_plugin_api::SubscriptionId,
+            smelt_event_protocol::PluginId,
+            smelt_event_protocol::SubscriptionId,
             u64,
         )],
     ) -> Result<(), StoreError> {
@@ -2721,8 +2289,8 @@ mod imp {
 
     pub(super) fn load_dead_letters(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
         limit: usize,
     ) -> Result<Vec<smelt_event_bus::DeadLetter>, StoreError> {
         let connection = lock_connection(backend)?;
@@ -2750,7 +2318,7 @@ mod imp {
                 plugin_id: plugin_id.clone(),
                 subscription_id: subscription_id.clone(),
                 sequence: sequence as u64,
-                event_id: smelt_plugin_api::EventId::new(event_id)?,
+                event_id: smelt_event_protocol::EventId::new(event_id)?,
                 attempts: attempts as u32,
                 reason,
                 failed_at_ms: failed_at_ms as u64,
@@ -2761,8 +2329,8 @@ mod imp {
 
     pub(super) fn load_retry(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::DeliveryRetry>, StoreError> {
         let connection = lock_connection(backend)?;
         let row = connection
@@ -2788,7 +2356,7 @@ mod imp {
                     plugin_id: plugin_id.clone(),
                     subscription_id: subscription_id.clone(),
                     sequence: sequence as u64,
-                    event_id: smelt_plugin_api::EventId::new(event_id)?,
+                    event_id: smelt_event_protocol::EventId::new(event_id)?,
                     attempts: attempts as u32,
                     next_attempt_at_ms: next_attempt_at_ms as u64,
                     reason,
@@ -2829,8 +2397,8 @@ mod imp {
 
     pub(super) fn delete_retry(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        subscription_id: &smelt_plugin_api::SubscriptionId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<(), StoreError> {
         let connection = lock_connection(backend)?;
         connection.execute(
@@ -2843,8 +2411,8 @@ mod imp {
 
     pub(super) fn get_command_result(
         backend: &Backend,
-        plugin_id: &smelt_plugin_api::PluginId,
-        command_id: &smelt_plugin_api::CommandId,
+        plugin_id: &smelt_event_protocol::PluginId,
+        command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<smelt_event_bus::CommandResult>, StoreError> {
         let connection = lock_connection(backend)?;
         let row = connection
@@ -3168,6 +2736,61 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 20 {
+            apply_v21_layout_tabs(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v20 形状：重建完 layout_node 后与当前形状逐字一致，就说明原来正是 v20。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 19 {
+            apply_v20_drop_worktree_inherit(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v19 形状：删完两张表、重建完 layout_node 后与当前形状逐字一致，就说明原来正是 v19。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 18 {
+            apply_v19_workspace_catalog_writer(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v18 形状：补完两列、删完两张表、重建完 layout_node 后与当前形状逐字一致，
+            // 就说明原来正是 v18。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 17 {
+            if !schema_matches_v17(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v18_runtime_tables(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 16 {
+            if !schema_matches_v16(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            apply_v17_paired_device(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 15 {
             if !schema_matches_v15(&transaction)? {
                 return Err(unrecognized_schema_error(current));
@@ -3293,8 +2916,7 @@ mod imp {
             |row| row.get(0),
         )?;
         if has_automation {
-            crate::documents::migrate_automations_from_kv_document(transaction)?;
-            crate::documents::rebuild_automation_run_transcript_fk(transaction)?;
+            crate::automation::rebuild_automation_run_transcript_fk(transaction)?;
         }
         apply_v10_catalog_domain(transaction)
     }
@@ -3311,8 +2933,7 @@ mod imp {
         if !has_agent_ui {
             transaction.execute_batch(crate::schema::MIGRATE_V9_TO_V10)?;
         }
-        apply_v11_engine_kind_columns(transaction)?;
-        crate::catalog::migrate_catalog_from_kv_documents(transaction)
+        apply_v11_engine_kind_columns(transaction)
     }
 
     fn apply_v11_engine_kind_columns(
@@ -3387,6 +3008,71 @@ mod imp {
         if default.as_deref() == Some("'[]'") {
             transaction.execute_batch(crate::schema::MIGRATE_V15_TO_V16)?;
         }
+        apply_v17_paired_device(transaction)
+    }
+
+    fn apply_v17_paired_device(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "paired_device")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V16_TO_V17)?;
+        }
+        apply_v18_runtime_tables(transaction)
+    }
+
+    /// v18 去掉通用 `kv`：先把运行时自己的数据读进内存，改完结构再写进新表。
+    /// 已经没有 `kv` 的库（新形状的夹具）跳过这一步，接着补 v19。
+    fn apply_v18_runtime_tables(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if table_names(transaction)?.iter().any(|table| table == "kv") {
+            // 只改认得的 v17 形状；前面哪一步没收敛到 v17，就按认不出的库拒绝，整笔回滚。
+            if !schema_matches_v17(transaction)? {
+                return Err(unrecognized_schema_error(STORE_SCHEMA_VERSION));
+            }
+            let state = crate::migrate_v18::read_v17_state(transaction)?;
+            transaction.execute_batch(crate::schema::MIGRATE_V17_TO_V18)?;
+            crate::migrate_v18::write_v18_state(transaction, state)?;
+        }
+        apply_v19_workspace_catalog_writer(transaction)
+    }
+
+    /// v19 给工作区目录补上写入方两列。已经有这两列的库跳过，接着补 v20。
+    fn apply_v19_workspace_catalog_writer(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "workspace_catalog")?
+            .iter()
+            .any(|column| column == "writer")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V18_TO_V19)?;
+        }
+        apply_v20_drop_worktree_inherit(transaction)
+    }
+
+    /// v20 删掉没人读的 worktree 继承两张表，接着补 v21。已经没有这两张表的库跳过；
+    /// 只剩其中一张的库不认，交给后面的形状校验拒绝。
+    fn apply_v20_drop_worktree_inherit(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        let tables = table_names(transaction)?;
+        if tables.iter().any(|table| table == "worktree_inherit")
+            && tables
+                .iter()
+                .any(|table| table == "worktree_inherit_skip_pattern")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V19_TO_V20)?;
+        }
+        apply_v21_layout_tabs(transaction)
+    }
+
+    /// v21 让布局树能记标签组：layout_node 整表重建。已经有 `active_index` 列的库跳过。
+    fn apply_v21_layout_tabs(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_columns(transaction, "layout_node")?
+            .iter()
+            .any(|column| column == "active_index")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V20_TO_V21)?;
+        }
         Ok(())
     }
 
@@ -3399,77 +3085,121 @@ mod imp {
             table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
                 && table_columns(connection, "automation_run_transcript")?
                     == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
+                && schema_matches_shape_outside_acp_table(
+                    connection,
+                    &crate::schema::TABLES,
+                    false,
+                )?
                 && schema_objects(connection)?
                     == expected_schema_objects(SchemaGeneration::Current)?,
         )
     }
 
+    fn schema_matches_v17(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V17_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V17)?)
+    }
+
+    fn schema_matches_v16(connection: &Connection) -> Result<bool, StoreError> {
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V16)?)
+    }
+
     fn schema_matches_v15(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V15)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V15)?)
     }
 
     fn schema_matches_v14(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V14)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V14)?)
     }
 
     fn schema_matches_v13(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V13)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V16_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V13)?)
     }
 
     fn schema_matches_v12(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V12)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V12_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V12)?)
     }
 
     fn schema_matches_v11(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V11)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V12_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V11)?)
     }
 
     fn schema_matches_v10(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V12_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V10)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(
+                connection,
+                &crate::schema::V12_TABLES,
+                true,
+            )?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V10)?)
     }
 
     /// v5 与 v6 只差 `acp_detail` 一张表，其余结构必须完全一致才允许就地重建。
     fn schema_matches_v5(connection: &Connection) -> Result<bool, StoreError> {
         Ok(
             table_columns(connection, "acp_detail")? == LEGACY_ACP_COLUMNS
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES)?
+                && schema_matches_shape_outside_acp_table(
+                    connection,
+                    &crate::schema::V7_TABLES,
+                    true,
+                )?
                 && schema_objects_without_acp_table(connection)?
                     == expected_schema_objects(SchemaGeneration::V7WithoutAcpTable)?,
         )
@@ -3478,47 +3208,43 @@ mod imp {
     /// v6 与 v7 同样只差 `acp_detail` 一张表。
     fn schema_matches_v6(connection: &Connection) -> Result<bool, StoreError> {
         Ok(table_columns(connection, "acp_detail")? == V6_ACP_COLUMNS
-            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES)?
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES, true)?
             && schema_objects_without_acp_table(connection)?
                 == expected_schema_objects(SchemaGeneration::V7WithoutAcpTable)?)
     }
 
     fn schema_matches_v7(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V7)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V7_TABLES, true)?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V7)?)
     }
 
     fn schema_matches_v9(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V9_TABLES)?
-                && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V9)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V9_TABLES, true)?
+            && schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V9)?)
     }
 
     fn schema_matches_v8(connection: &Connection) -> Result<bool, StoreError> {
-        Ok(
-            table_columns(connection, "acp_detail")? == CURRENT_ACP_COLUMNS
-                && table_columns(connection, "automation_run_transcript")?
-                    == ["run_id", "entries_json", "updated_at_ms"]
-                && schema_matches_shape_outside_acp_table(connection, &crate::schema::V8_TABLES)?
-                && schema_objects_excluding_transcript(connection)?
-                    == expected_schema_objects(SchemaGeneration::V8WithoutTranscript)?,
-        )
+        Ok(table_columns(connection, "acp_detail")? == V17_ACP_COLUMNS
+            && table_columns(connection, "automation_run_transcript")?
+                == ["run_id", "entries_json", "updated_at_ms"]
+            && schema_matches_shape_outside_acp_table(connection, &crate::schema::V8_TABLES, true)?
+            && schema_objects_excluding_transcript(connection)?
+                == expected_schema_objects(SchemaGeneration::V8WithoutTranscript)?)
     }
 
+    /// `legacy`：v17 及更早的形状，还有 `kv` 表和带 `collapsed` 列的 `project`。
     fn schema_matches_shape_outside_acp_table(
         connection: &Connection,
         expected_tables: &[&str],
+        legacy: bool,
     ) -> Result<bool, StoreError> {
         let tables = table_names(connection)?;
         Ok(tables == expected_tables
-            && schema_matches_shared_columns(connection)?
+            && schema_matches_shared_columns(connection, legacy)?
             && table_columns(connection, "event_log")?
                 == [
                     "sequence",
@@ -3597,12 +3323,29 @@ mod imp {
             // 三者都要放行，后续迁移会把它们收敛到同一形状。
             && (acp_columns == LEGACY_ACP_COLUMNS
                 || acp_columns == V6_ACP_COLUMNS
-                || acp_columns == CURRENT_ACP_COLUMNS)
-            && schema_matches_shared_columns(connection)?
+                || acp_columns == V17_ACP_COLUMNS)
+            && schema_matches_shared_columns(connection, true)?
             && v1_schema_objects(connection)? == expected_schema_objects(SchemaGeneration::V1)?)
     }
 
-    const CURRENT_ACP_COLUMNS: [&str; 15] = [
+    const CURRENT_ACP_COLUMNS: [&str; 13] = [
+        "session_id",
+        "agent",
+        "profile_id",
+        "history_session_id",
+        "launch_command",
+        "refresh_launch_from_settings",
+        "pending_prompt",
+        "pending_delivery_id",
+        "agent_definition_id",
+        "automation_id",
+        "binding_automation_run_id",
+        "pending_agent_preset",
+        "session_title",
+    ];
+
+    /// v7..v17 的 `acp_detail` 形状：还带着分叉列，会话的其余字段散在 `kv` 里。
+    const V17_ACP_COLUMNS: [&str; 15] = [
         "session_id",
         "agent",
         "profile_id",
@@ -3660,7 +3403,43 @@ mod imp {
         "pending_delivery_id",
     ];
 
-    fn schema_matches_shared_columns(connection: &Connection) -> Result<bool, StoreError> {
+    fn schema_matches_shared_columns(
+        connection: &Connection,
+        legacy: bool,
+    ) -> Result<bool, StoreError> {
+        let (kv_columns, project_columns): (&[&str], &[&str]) = if legacy {
+            (
+                &["scope", "key", "value", "value_type", "updated_at_ms"],
+                &["root", "position", "collapsed"],
+            )
+        } else {
+            (&[], &["root", "position"])
+        };
+        // v21 起布局树能记标签组，多一列 `active_index`。
+        let layout_node_columns: &[&str] = if legacy {
+            &[
+                "id",
+                "group_id",
+                "parent_id",
+                "position",
+                "kind",
+                "axis",
+                "session_id",
+                "size_px",
+            ]
+        } else {
+            &[
+                "id",
+                "group_id",
+                "parent_id",
+                "position",
+                "kind",
+                "axis",
+                "session_id",
+                "size_px",
+                "active_index",
+            ]
+        };
         Ok(table_columns(connection, "history_title")?
             == [
                 "agent",
@@ -3669,22 +3448,11 @@ mod imp {
                 "custom_title",
                 "updated_at_ms",
             ]
-            && table_columns(connection, "kv")?
-                == ["scope", "key", "value", "value_type", "updated_at_ms"]
+            && table_columns(connection, "kv")? == kv_columns
             && table_columns(connection, "launch_entry")?
                 == ["position", "label", "command", "provider"]
-            && table_columns(connection, "layout_node")?
-                == [
-                    "id",
-                    "group_id",
-                    "parent_id",
-                    "position",
-                    "kind",
-                    "axis",
-                    "session_id",
-                    "size_px",
-                ]
-            && table_columns(connection, "project")? == ["root", "position", "collapsed"]
+            && table_columns(connection, "layout_node")? == layout_node_columns
+            && table_columns(connection, "project")? == project_columns
             && table_columns(connection, "session")?
                 == [
                     "id",
@@ -3790,6 +3558,8 @@ mod imp {
         V13,
         V14,
         V15,
+        V16,
+        V17,
         Current,
     }
 
@@ -3808,7 +3578,11 @@ mod imp {
         if let Some(objects) = slot.get() {
             return Ok(objects.clone());
         }
-        let objects = map(build_expected_schema_objects()?);
+        // v16 及更早都没有 v17 的设备表，在各版本自己的差异之前统一去掉。
+        let objects = map(schema_objects_of(crate::schema::V17_SCHEMA)?
+            .into_iter()
+            .filter(|object| object.table_name != "paired_device")
+            .collect());
         Ok(slot.get_or_init(|| objects.clone()).clone())
     }
 
@@ -3826,6 +3600,8 @@ mod imp {
         static V13_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V14_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static V15_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V16_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
+        static V17_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         static CURRENT_OBJECTS: OnceLock<Vec<SchemaObject>> = OnceLock::new();
         match generation {
             SchemaGeneration::V1 => cached_schema_objects(&V1_OBJECTS, |objects| {
@@ -3955,13 +3731,28 @@ mod imp {
                 }
                 objects
             }),
-            SchemaGeneration::Current => cached_schema_objects(&CURRENT_OBJECTS, |objects| objects),
+            SchemaGeneration::V16 => cached_schema_objects(&V16_OBJECTS, |objects| objects),
+            SchemaGeneration::V17 => frozen_schema_objects(&V17_OBJECTS, crate::schema::V17_SCHEMA),
+            SchemaGeneration::Current => {
+                frozen_schema_objects(&CURRENT_OBJECTS, crate::schema::CREATE_SCHEMA)
+            }
         }
     }
 
-    fn build_expected_schema_objects() -> Result<Vec<SchemaObject>, StoreError> {
+    fn frozen_schema_objects(
+        slot: &OnceLock<Vec<SchemaObject>>,
+        schema: &str,
+    ) -> Result<Vec<SchemaObject>, StoreError> {
+        if let Some(objects) = slot.get() {
+            return Ok(objects.clone());
+        }
+        let objects = schema_objects_of(schema)?;
+        Ok(slot.get_or_init(|| objects.clone()).clone())
+    }
+
+    fn schema_objects_of(schema: &str) -> Result<Vec<SchemaObject>, StoreError> {
         let connection = Connection::open_in_memory()?;
-        connection.execute_batch(crate::schema::CREATE_SCHEMA)?;
+        connection.execute_batch(schema)?;
         schema_objects(&connection)
     }
 
@@ -4103,7 +3894,7 @@ mod imp {
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
 mod imp {
-    use super::{HashSet, LegacyState, StoreError};
+    use super::{HashSet, StoreError};
     use std::path::Path;
 
     #[derive(Clone)]
@@ -4131,77 +3922,92 @@ mod imp {
         Err(StoreError::SqliteDisabledOnMobile)
     }
 
-    pub(super) fn store_transaction<R>(
-        _backend: &Backend,
-        _operation: impl FnOnce(&mut super::StoreTransaction<'_>) -> Result<R, StoreError>,
-    ) -> Result<R, StoreError> {
+    pub(super) fn runtime_id(_backend: &Backend) -> Result<Option<String>, StoreError> {
         unsupported()
     }
-    pub(super) fn transaction_put(
-        _transaction: &mut super::StoreTransaction<'_>,
-        _namespace: &str,
-        _key: &str,
-        _value: &[u8],
+    pub(super) fn put_runtime_id(_backend: &Backend, _runtime_id: &str) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn workspace_catalog_revision(_backend: &Backend) -> Result<u64, StoreError> {
+        unsupported()
+    }
+    pub(super) fn commit_workspace_snapshot(
+        _backend: &Backend,
+        _base_revision: u64,
+        _writer: &super::WorkspaceCatalogWriter,
+        _snapshot: &super::WorkspaceSnapshot,
+    ) -> Result<super::WorkspaceCatalogCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn history_agent_binding(
+        _backend: &Backend,
+        _agent: &str,
+        _profile_id: &str,
+        _resume_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn history_agent_bindings(
+        _backend: &Backend,
+        _agent: &str,
+        _profile_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_history_agent_binding(
+        _backend: &Backend,
+        _agent: &str,
+        _profile_id: &str,
+        _resume_id: &str,
+        _agent_definition_id: &str,
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn transaction_delete(
-        _transaction: &mut super::StoreTransaction<'_>,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
+    pub(super) fn default_conversation_agent(
+        _backend: &Backend,
+    ) -> Result<Option<String>, StoreError> {
         unsupported()
     }
-    pub(super) fn transaction_append_outbox(
-        _transaction: &mut super::StoreTransaction<'_>,
-        _events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+    pub(super) fn put_default_conversation_agent(
+        _backend: &Backend,
+        _agent_definition_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn new_session_pins(_backend: &Backend) -> Result<Vec<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_new_session_pins(
+        _backend: &Backend,
+        _pins: &[String],
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn memory_settings(
+        _backend: &Backend,
+    ) -> Result<super::MemorySettingsRecord, StoreError> {
+        unsupported()
+    }
+    pub(super) fn modify_memory_settings<E: From<StoreError>>(
+        _backend: &Backend,
+        _modify: impl FnOnce(&mut super::MemorySettingsRecord) -> Result<(), E>,
+    ) -> Result<super::MemorySettingsRecord, E> {
+        Err(StoreError::SqliteDisabledOnMobile.into())
+    }
+    pub(super) fn auto_model_providers(
+        _backend: &Backend,
+        _harness: super::AutoModelHarness,
+    ) -> Result<Vec<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_auto_model_providers(
+        _backend: &Backend,
+        _harness: super::AutoModelHarness,
+        _providers: &[String],
     ) -> Result<(), StoreError> {
         unsupported()
     }
 
-    pub(super) fn get(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-        _value: &[u8],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_blob(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_blob(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-        _value: &[u8],
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn blob_keys(
-        _backend: &Backend,
-        _namespace: &str,
-    ) -> Result<Vec<String>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn delete_blob(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
     pub(super) fn put_automation_run_transcript(
         _backend: &Backend,
         _run_id: &str,
@@ -4248,18 +4054,6 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn get_appearance_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::AppearanceSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn modify_appearance_snapshot<E: From<StoreError>>(
-        _backend: &Backend,
-        _missing: impl FnOnce() -> super::AppearanceSnapshot,
-        _modify: impl FnOnce(&mut super::AppearanceSnapshot) -> Result<(), E>,
-    ) -> Result<super::AppearanceSnapshot, E> {
-        Err(StoreError::SqliteDisabledOnMobile.into())
-    }
     pub(super) fn get_workspace_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::WorkspaceSnapshot>, StoreError> {
@@ -4267,7 +4061,7 @@ mod imp {
     }
     pub(super) fn session_agent_definition_ids(
         _backend: &Backend,
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, StoreError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         unsupported()
     }
     pub(super) fn put_workspace_snapshot(
@@ -4386,6 +4180,36 @@ mod imp {
     ) -> Result<super::MemoryMetaSnapshot, StoreError> {
         unsupported()
     }
+    pub(super) fn list_paired_devices(
+        _backend: &Backend,
+    ) -> Result<Vec<super::PairedDevice>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn paired_device(
+        _backend: &Backend,
+        _endpoint_id: &str,
+    ) -> Result<Option<super::PairedDevice>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_paired_device(
+        _backend: &Backend,
+        _device: &super::PairedDevice,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn delete_paired_device(
+        _backend: &Backend,
+        _endpoint_id: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn touch_paired_device(
+        _backend: &Backend,
+        _endpoint_id: &str,
+        _now_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
     pub(super) fn get_remote_session_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::RemoteSessionCatalogSnapshot>, StoreError> {
@@ -4408,11 +4232,6 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn agent_ui_snapshot_from_json(
-        _value: &serde_json::Value,
-    ) -> Result<super::AgentUiSnapshot, StoreError> {
-        unsupported()
-    }
     pub(super) fn get_remote_config_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::RemoteConfigSnapshot>, StoreError> {
@@ -4421,39 +4240,6 @@ mod imp {
     pub(super) fn put_remote_config_snapshot(
         _backend: &Backend,
         _snapshot: &super::RemoteConfigSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_update_settings_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::UpdateSettingsSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_update_settings_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::UpdateSettingsSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_update_state_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::UpdateStateSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_update_state_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::UpdateStateSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_worktree_inherit_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::WorktreeInheritSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_worktree_inherit_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::WorktreeInheritSnapshot,
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -4479,28 +4265,6 @@ mod imp {
     ) -> Result<(), StoreError> {
         unsupported()
     }
-    pub(super) fn get_dsh_auto_model_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_dsh_auto_model_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_pi_auto_model_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::AutoModelSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_pi_auto_model_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::AutoModelSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
     pub(super) fn get_workspace_menu_snapshot(
         _backend: &Backend,
     ) -> Result<Option<super::PublishedWorkspaceMenuSnapshot>, StoreError> {
@@ -4516,56 +4280,6 @@ mod imp {
         _backend: &Backend,
         _keep: &HashSet<String>,
     ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn delete(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
-    pub(super) fn keys(_backend: &Backend, _namespace: &str) -> Result<Vec<String>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn legacy_state(
-        _backend: &Backend,
-        _source: &str,
-    ) -> Result<LegacyState, StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_with_legacy_state(
-        _backend: &Backend,
-        _namespace: &str,
-        _key: &str,
-        _source: &str,
-    ) -> Result<(Option<Vec<u8>>, LegacyState), StoreError> {
-        unsupported()
-    }
-    pub(super) fn delete_with_legacy_tombstone(
-        _backend: &Backend,
-        _source: &str,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<bool, StoreError> {
-        unsupported()
-    }
-    pub(super) fn mark_legacy_deleted(
-        _backend: &Backend,
-        _source: &str,
-        _namespace: &str,
-        _key: &str,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn quarantine_with_legacy_tombstone(
-        _backend: &Backend,
-        _source: &str,
-        _namespace: &str,
-        _key: &str,
-        _quarantine_namespace: &str,
-        _quarantine_key: &str,
-    ) -> Result<bool, StoreError> {
         unsupported()
     }
 
@@ -4584,7 +4298,7 @@ mod imp {
     pub(super) fn load_events_after_topics(
         _backend: &Backend,
         _sequence: u64,
-        _topics: &std::collections::BTreeSet<smelt_plugin_api::Topic>,
+        _topics: &std::collections::BTreeSet<smelt_event_protocol::Topic>,
         _limit: usize,
     ) -> Result<Vec<smelt_event_bus::StoredEvent>, StoreError> {
         unsupported()
@@ -4594,7 +4308,7 @@ mod imp {
     }
     pub(super) fn append_outbox_batch(
         _backend: &Backend,
-        _events: &[smelt_plugin_api::EventEnvelope<serde_json::Value>],
+        _events: &[smelt_event_protocol::EventEnvelope<serde_json::Value>],
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -4619,37 +4333,37 @@ mod imp {
     pub(super) fn get_peer_message_command_result(
         _backend: &Backend,
         _source_session_id: &str,
-        _command_id: &smelt_plugin_api::CommandId,
+        _command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<super::PeerMessageCommandResult>, StoreError> {
         unsupported()
     }
     pub(super) fn commit_peer_message_delivery(
         _backend: &Backend,
         _result: &super::PeerMessageCommandResult,
-        _event: &smelt_plugin_api::EventEnvelope<serde_json::Value>,
+        _event: &smelt_event_protocol::EventEnvelope<serde_json::Value>,
     ) -> Result<super::PeerMessageCommitOutcome, StoreError> {
         unsupported()
     }
     pub(super) fn bind_cursor_declaration(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
         _declaration_fingerprint: &str,
     ) -> Result<super::CursorDeclaration, StoreError> {
         unsupported()
     }
     pub(super) fn load_cursor_declaration(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<super::CursorDeclaration>, StoreError> {
         unsupported()
     }
     pub(super) fn store_cursors(
         _backend: &Backend,
         _cursors: &[(
-            smelt_plugin_api::PluginId,
-            smelt_plugin_api::SubscriptionId,
+            smelt_event_protocol::PluginId,
+            smelt_event_protocol::SubscriptionId,
             u64,
         )],
     ) -> Result<(), StoreError> {
@@ -4663,16 +4377,16 @@ mod imp {
     }
     pub(super) fn load_dead_letters(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
         _limit: usize,
     ) -> Result<Vec<smelt_event_bus::DeadLetter>, StoreError> {
         unsupported()
     }
     pub(super) fn load_retry(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<Option<smelt_event_bus::DeliveryRetry>, StoreError> {
         unsupported()
     }
@@ -4684,15 +4398,15 @@ mod imp {
     }
     pub(super) fn delete_retry(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _subscription_id: &smelt_plugin_api::SubscriptionId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _subscription_id: &smelt_event_protocol::SubscriptionId,
     ) -> Result<(), StoreError> {
         unsupported()
     }
     pub(super) fn get_command_result(
         _backend: &Backend,
-        _plugin_id: &smelt_plugin_api::PluginId,
-        _command_id: &smelt_plugin_api::CommandId,
+        _plugin_id: &smelt_event_protocol::PluginId,
+        _command_id: &smelt_event_protocol::CommandId,
     ) -> Result<Option<smelt_event_bus::CommandResult>, StoreError> {
         unsupported()
     }
@@ -4709,7 +4423,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use smelt_event_bus::EventStore;
-    use smelt_plugin_api::{
+    use smelt_event_protocol::{
         AggregateRef, CommandId, CorrelationId, EventEnvelope, EventId, EventSource, PluginId,
         SubscriptionId, Topic,
     };
@@ -4745,11 +4459,24 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v17 的完整结构（冻结的 `V17_SCHEMA`）。
+    fn create_v17_schema(connection: &rusqlite::Connection) {
+        connection.execute_batch(crate::schema::V17_SCHEMA).unwrap();
+    }
+
+    /// v16 的完整结构：v17 去掉设备表。更早版本的夹具在它上面再改。
+    fn create_v16_schema(connection: &rusqlite::Connection) {
+        connection.execute_batch(crate::schema::V17_SCHEMA).unwrap();
+        connection
+            .execute_batch("DROP TABLE paired_device;")
+            .unwrap();
+    }
+
     fn v1_schema() -> &'static str {
         static SCHEMA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         SCHEMA
             .get_or_init(|| {
-                let base = crate::schema::CREATE_SCHEMA
+                let base = crate::schema::V17_SCHEMA
                     .split("CREATE TABLE event_log")
                     .next()
                     .unwrap();
@@ -4820,10 +4547,10 @@ mod tests {
     }
 
     fn v9_schema() -> String {
-        let schema = crate::schema::CREATE_SCHEMA;
+        let schema = crate::schema::V17_SCHEMA;
         let cut = schema
             .find("CREATE TABLE agent_ui_pref")
-            .expect("v10 catalog tables follow automation tables in CREATE_SCHEMA");
+            .expect("v10 catalog tables follow automation tables in V17_SCHEMA");
         schema[..cut].to_string()
     }
 
@@ -4918,9 +4645,7 @@ mod tests {
         let dir = temp_dir("migrate-v13-memory-switch");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE agent_definition RENAME TO agent_definition_v14;
@@ -4970,9 +4695,7 @@ mod tests {
         let dir = temp_dir("migrate-v14-mcp-servers");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE agent_definition RENAME TO agent_definition_v15;
@@ -5022,6 +4745,601 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v16 的库：v17 多一张已配对设备表，再到 v18 把偏好搬进按字段的表。
+    #[test]
+    fn migrates_v16_through_paired_devices_to_typed_preferences() {
+        let dir = temp_dir("migrate-v16-paired-device");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        create_v16_schema(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO agent_ui_pref VALUES ('agent_hooks_enabled', '0');
+                 INSERT INTO agent_ui_pref VALUES ('notify_success', '0');",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 16).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert!(store.list_paired_devices().unwrap().is_empty());
+        let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
+        assert!(!prefs.agent_hooks_enabled);
+        assert!(prefs.cross_agent_enabled, "没存过的开关按默认打开");
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 照开发者真实 v16/v17 库的 `kv` 形状（已脱敏）造一份旧库：运行时自己的数据要落进新表，
+    /// 客户端的界面状态和没人读的作用域随 `kv` 一起删掉。
+    fn create_owner_kv_database(path: &Path, version: u32) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        if version == 16 {
+            create_v16_schema(&connection);
+        } else {
+            create_v17_schema(&connection);
+        }
+        let kv = |scope: &str, key: &str, value_type: &str, value: Option<&str>| {
+            connection
+                .execute(
+                    "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, 1)",
+                    rusqlite::params![scope, key, value, value_type],
+                )
+                .unwrap();
+        };
+        let blob = |scope: &str, key: &str, value: &str| {
+            connection
+                .execute(
+                    "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
+                     VALUES (?1, ?2, ?3, 'blob', 1)",
+                    rusqlite::params![scope, key, value.as_bytes()],
+                )
+                .unwrap();
+        };
+        // 客户端的：外观、更新状态、侧栏、会话 route、旧客户端数据暂存、旧插件开关。
+        kv("appearance", "$", "object", Some(""));
+        kv("appearance", "theme_mode", "text", Some("dark"));
+        kv("appearance", "opacity", "real", Some("0.95"));
+        kv("update_state", "$", "object", Some(""));
+        kv("update_state", "staged", "null", None);
+        kv("workspace", "$", "object", Some(""));
+        kv("workspace", "route", "text", Some("session"));
+        kv("workspace", "sidebar_grouping", "text", Some("project"));
+        kv("session_group:group:0:term-1", "route", "object", Some(""));
+        kv(
+            "session_group:group:0:term-1",
+            "route/tool_panel_w",
+            "real",
+            Some("626.0"),
+        );
+        blob(
+            "client_migration",
+            "staged",
+            r#"{"appearance":{"theme_mode":"dark"}}"#,
+        );
+        blob(
+            "plugins",
+            "enablement",
+            r#"{"disabled":["com.example.browser"]}"#,
+        );
+
+        // 运行时的。
+        blob(
+            "runtime",
+            "runtime_id",
+            "4df5dd5c-434f-4c2c-b8da-38795277fb20",
+        );
+        blob("workspace_catalog", "revision", "174");
+        blob("history_agent", "pi\u{1f}\u{1f}resume-1", "agent-a");
+        blob("history_agent", "pi\u{1f}work\u{1f}resume-2", "agent-b");
+        blob(
+            "preferences",
+            "default_conversation_agent",
+            r#"{"agent_id":"agent-a"}"#,
+        );
+        blob(
+            "preferences",
+            "new_session_pins",
+            r#"{"pinned":["conversation:agent:agent-a","terminal:claude:claude"]}"#,
+        );
+        blob("memory", "embedding_base_url", "http://localhost:11434/v1");
+        blob("memory", "embedding_model", "bge-m3");
+        kv("collab", "$", "object", Some(""));
+        kv("collab", "enabled", "boolean", Some("1"));
+        kv(
+            "collab",
+            "iroh_relay",
+            "text",
+            Some("https://relay.example"),
+        );
+        kv("worktree_inherit", "$", "object", Some(""));
+        kv("worktree_inherit", "enabled", "boolean", Some("1"));
+        kv("worktree_inherit", "skip_patterns", "array", Some(""));
+        kv(
+            "worktree_inherit",
+            "skip_patterns/0",
+            "text",
+            Some("node_modules"),
+        );
+        kv("pi_auto_models", "$", "object", Some(""));
+        kv("pi_auto_models", "providers", "array", Some(""));
+        kv("pi_auto_models", "providers/0", "text", Some("deepseek"));
+        kv("pi_auto_models", "providers/1", "text", Some("token-x"));
+        kv("terminal_theme", "$", "object", Some(""));
+        kv("terminal_theme", "version", "integer", Some("1"));
+        kv("terminal_theme", "dark", "boolean", Some("1"));
+        kv("terminal_theme", "background", "integer", Some("657930"));
+        kv("terminal_theme", "foreground", "integer", Some("14211288"));
+        kv("terminal_theme", "cursor", "integer", Some("14211288"));
+        kv("terminal_theme", "selection", "integer", Some("802170"));
+        kv("terminal_theme", "search_hit", "integer", Some("8018976"));
+        kv(
+            "terminal_theme",
+            "search_hit_current",
+            "integer",
+            Some("13934615"),
+        );
+        kv("terminal_theme", "palette", "array", Some(""));
+        // key 按字符串排是 0、1、10、2：顺序必须按下标还原。
+        for index in 0..11 {
+            kv(
+                "terminal_theme",
+                &format!("palette/{index}"),
+                "integer",
+                Some(&(100 + index).to_string()),
+            );
+        }
+        kv("quota_cache", "$", "object", Some(""));
+        kv(
+            "quota_cache",
+            "saved_at_ms",
+            "integer",
+            Some("1792250484008"),
+        );
+        kv("quota_cache", "schema_version", "integer", Some("3"));
+        kv("quota_cache", "provider_ids", "array", Some(""));
+        kv("quota_cache", "provider_ids/0", "text", Some("claude"));
+        kv(
+            "quota_cache",
+            "provider_ids/1",
+            "text",
+            Some("pi:github-copilot"),
+        );
+        kv("quota_cache", "providers", "object", Some(""));
+        kv("quota_cache", "providers/claude", "object", Some(""));
+        kv(
+            "quota_cache",
+            "providers/claude/windows",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/checked_at_ms",
+            "integer",
+            Some("1792250484008"),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/error",
+            "null",
+            None,
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows",
+            "array",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/label",
+            "text",
+            Some("5h"),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/reset_after_seconds",
+            "null",
+            None,
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/resets_at_ms",
+            "integer",
+            Some("1792258200463"),
+        );
+        kv(
+            "quota_cache",
+            "providers/claude/windows/quota/windows/0/used_percent",
+            "real",
+            Some("37.0"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/checked_at_ms",
+            "integer",
+            Some("1792250484008"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/error",
+            "null",
+            None,
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota",
+            "object",
+            Some(""),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/limit",
+            "real",
+            Some("43000.0"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/remaining",
+            "real",
+            Some("11347.0"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/unit",
+            "text",
+            Some("AiCredits"),
+        );
+        kv(
+            "quota_cache",
+            "providers/pi:github-copilot/copilot/quota/used",
+            "real",
+            Some("31653.0"),
+        );
+        kv("workspace_menu", "$", "object", Some(""));
+        kv("workspace_menu", "version", "integer", Some("2"));
+        kv("workspace_menu", "revision", "integer", Some("12132"));
+        kv("workspace_menu", "source_id", "text", Some("c8acdab2"));
+        kv("workspace_menu", "source_revision", "integer", Some("133"));
+        kv("workspace_menu", "projects", "array", Some(""));
+        kv("workspace_menu", "projects/0", "object", Some(""));
+        kv("workspace_menu", "projects/0/order", "integer", Some("0"));
+        kv("workspace_menu", "projects/0/root", "text", Some("/repo"));
+        kv("workspace_menu", "projects/0/title", "text", Some("repo"));
+        kv("workspace_menu", "sessions", "array", Some(""));
+        kv("workspace_menu", "sessions/0", "object", Some(""));
+        kv("workspace_menu", "sessions/0/agent", "text", Some("claude"));
+        kv(
+            "workspace_menu",
+            "sessions/0/custom_title",
+            "boolean",
+            Some("0"),
+        );
+        kv("workspace_menu", "sessions/0/cwd", "text", Some("/repo"));
+        kv("workspace_menu", "sessions/0/id", "text", Some("term-1"));
+        kv(
+            "workspace_menu",
+            "sessions/0/kind",
+            "text",
+            Some("terminal"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/leaf_order",
+            "integer",
+            Some("0"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/project_order",
+            "integer",
+            Some("0"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/project_root",
+            "text",
+            Some("/repo"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/project_title",
+            "text",
+            Some("repo"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/session_order",
+            "integer",
+            Some("0"),
+        );
+        kv(
+            "workspace_menu",
+            "sessions/0/title",
+            "text",
+            Some("你知道 Godot 吗"),
+        );
+        kv("launch", "version", "integer", Some("14"));
+        // ACP 会话散在 `acp:<id>` 里的字段。
+        kv("acp:acp-1", "env", "object", Some(""));
+        kv(
+            "acp:acp-1",
+            "env/SMELT_AGENT_MEMORY_DIR",
+            "text",
+            Some("/home/me/memory"),
+        );
+        kv("acp:acp-1", "config_values", "array", Some(""));
+        kv("acp:acp-1", "config_values/0", "array", Some(""));
+        kv("acp:acp-1", "config_values/0/0", "text", Some("model"));
+        kv(
+            "acp:acp-1",
+            "config_values/0/1",
+            "text",
+            Some("deepseek/flash"),
+        );
+        kv("acp:acp-1", "config_values/1", "array", Some(""));
+        kv("acp:acp-1", "config_values/1/0", "text", Some("mode"));
+        kv(
+            "acp:acp-1",
+            "config_values/1/1",
+            "text",
+            Some("bypassPermissions"),
+        );
+        kv("acp:acp-1", "conversation_binding", "object", Some(""));
+        kv(
+            "acp:acp-1",
+            "conversation_binding/type",
+            "text",
+            Some("direct"),
+        );
+        kv("acp:acp-1", "session_title", "text", Some("季度复盘"));
+        kv(
+            "acp:gone",
+            "session_title",
+            "text",
+            Some("目录里已经没有的会话"),
+        );
+
+        connection
+            .execute_batch(
+                "BEGIN;
+                 INSERT INTO agent_ui_pref VALUES ('agent_hooks_enabled', '1');
+                 INSERT INTO agent_ui_pref VALUES ('cross_agent_enabled', '0');
+                 INSERT INTO agent_ui_pref VALUES ('notify_success', '0');
+                 INSERT INTO project(root, position, collapsed) VALUES ('/repo', 0, 1);
+                 INSERT INTO session_group(id, project_root, position, active_session_id)
+                 VALUES ('group:0:term-1', '/repo', 0, 'term-1'),
+                        ('group:1:acp-1', '/repo', 1, 'acp-1');
+                 INSERT INTO session(id, group_id, kind, cwd)
+                 VALUES ('term-1', 'group:0:term-1', 'terminal', '/repo'),
+                        ('acp-1', 'group:1:acp-1', 'acp', '/repo');
+                 INSERT INTO layout_node(id, group_id, parent_id, position, kind, session_id)
+                 VALUES ('group:0:term-1:node:0', 'group:0:term-1', NULL, 0, 'leaf', 'term-1'),
+                        ('group:1:acp-1:node:0', 'group:1:acp-1', NULL, 0, 'leaf', 'acp-1');
+                 INSERT INTO acp_detail(
+                   session_id, agent, history_session_id, launch_command,
+                   refresh_launch_from_settings, agent_definition_id
+                 ) VALUES ('acp-1', 'pi', 'pi-history-1', 'smelt-pi-agent', 1, 'agent-a');
+                 COMMIT;",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+    }
+
+    #[test]
+    fn migrates_owner_kv_data_into_typed_tables() {
+        for version in [16, 17] {
+            let dir = temp_dir(&format!("migrate-owner-v{version}"));
+            let path = dir.join(DATABASE_FILE_NAME);
+            create_owner_kv_database(&path, version);
+
+            let store = Store::open_or_create(&path).unwrap();
+            assert_eq!(
+                store.runtime_id().unwrap().as_deref(),
+                Some("4df5dd5c-434f-4c2c-b8da-38795277fb20")
+            );
+            assert_eq!(store.workspace_catalog_revision().unwrap(), 174);
+            assert_eq!(
+                store
+                    .history_agent_binding("pi", "", "resume-1")
+                    .unwrap()
+                    .as_deref(),
+                Some("agent-a")
+            );
+            assert_eq!(
+                store.history_agent_bindings("pi", "work").unwrap(),
+                std::collections::BTreeMap::from([("resume-2".to_string(), "agent-b".to_string())])
+            );
+            assert_eq!(
+                store.default_conversation_agent().unwrap().as_deref(),
+                Some("agent-a")
+            );
+            assert_eq!(
+                store.new_session_pins().unwrap(),
+                ["conversation:agent:agent-a", "terminal:claude:claude"]
+            );
+            let memory = store.memory_settings().unwrap();
+            assert_eq!(memory.embedding_base_url, "http://localhost:11434/v1");
+            assert_eq!(memory.embedding_model, "bge-m3");
+            assert_eq!(memory.embedding_api_key, "");
+            assert_eq!(
+                store.get_remote_config_snapshot().unwrap(),
+                Some(RemoteConfigSnapshot {
+                    enabled: true,
+                    iroh_relay: "https://relay.example".into(),
+                })
+            );
+            assert_eq!(
+                store.auto_model_providers(AutoModelHarness::Pi).unwrap(),
+                ["deepseek", "token-x"]
+            );
+            let theme = store.get_terminal_theme_snapshot().unwrap().unwrap();
+            assert_eq!(theme.background, 657930);
+            assert_eq!(theme.search_hit_current, 13934615);
+            assert_eq!(theme.palette, (100..111).collect::<Vec<u32>>());
+            let quota = store.get_quota_cache_snapshot().unwrap().unwrap();
+            assert_eq!(quota.saved_at_ms, 1792250484008);
+            assert_eq!(quota.provider_ids, ["claude", "pi:github-copilot"]);
+            assert_eq!(
+                quota.statuses,
+                [
+                    QuotaCacheStatusRecord {
+                        provider_id: "claude".into(),
+                        checked_at_ms: 1792250484008,
+                        error: None,
+                        quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
+                            label: "5h".into(),
+                            used_percent: 37.0,
+                            resets_at_ms: Some(1792258200463),
+                            reset_after_seconds: None,
+                        }]),
+                    },
+                    QuotaCacheStatusRecord {
+                        provider_id: "pi:github-copilot".into(),
+                        checked_at_ms: 1792250484008,
+                        error: None,
+                        quota: QuotaCacheQuota::Copilot {
+                            unit: "ai_credits".into(),
+                            remaining: 11347.0,
+                            limit: Some(43000.0),
+                            used: Some(31653.0),
+                        },
+                    },
+                ]
+            );
+            let menu = store.get_workspace_menu_snapshot().unwrap().unwrap();
+            assert_eq!((menu.version, menu.revision), (2, 12132));
+            assert_eq!(menu.projects[0].root, "/repo");
+            assert_eq!(menu.sessions[0].title, "你知道 Godot 吗");
+            assert_eq!(menu.sessions[0].kind, "terminal");
+            assert_eq!(store.get_launch_snapshot().unwrap().unwrap().version, 14);
+            let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
+            assert!(prefs.agent_hooks_enabled);
+            assert!(!prefs.cross_agent_enabled);
+
+            let workspace = store.get_workspace_snapshot().unwrap().unwrap();
+            assert_eq!(workspace.projects, ["/repo"]);
+            let acp = workspace.sessions[1].acp.as_ref().unwrap();
+            assert_eq!(acp.sid.as_deref(), Some("acp-1"));
+            assert_eq!(acp.history_session_id.as_deref(), Some("pi-history-1"));
+            assert_eq!(acp.agent_definition_id.as_deref(), Some("agent-a"));
+            assert_eq!(
+                acp.launch_env,
+                [(
+                    "SMELT_AGENT_MEMORY_DIR".to_string(),
+                    "/home/me/memory".to_string()
+                )]
+            );
+            assert_eq!(
+                acp.config_values,
+                [
+                    ("model".to_string(), "deepseek/flash".to_string()),
+                    ("mode".to_string(), "bypassPermissions".to_string()),
+                ]
+            );
+            assert_eq!(acp.binding_automation_run_id, None);
+            assert_eq!(acp.session_title.as_deref(), Some("季度复盘"));
+            drop(store);
+
+            assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            // worktree 继承随 git worktree 功能一起下线：v18 建过这两张表，v20 又删掉了。
+            for table in [
+                "kv",
+                "agent_ui_pref",
+                "acp_detail_v17",
+                "worktree_inherit",
+                "worktree_inherit_skip_pattern",
+            ] {
+                let exists: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                        [table],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(!exists, "v{version}: {table} 应该已经删掉");
+            }
+            let project_columns = connection
+                .prepare("PRAGMA table_info(project)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(project_columns, ["root", "position"], "折叠状态归客户端");
+            drop(connection);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn paired_devices_round_trip_and_repairing_resets_last_seen() {
+        let dir = temp_dir("paired-devices");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let laptop = PairedDevice {
+            endpoint_id: "aa".to_string(),
+            name: "MacBook".to_string(),
+            paired_at_ms: 10,
+            last_seen_at_ms: None,
+        };
+        store.put_paired_device(&laptop).unwrap();
+        store.touch_paired_device("aa", 20).unwrap();
+        assert_eq!(
+            store.paired_device("aa").unwrap().unwrap().last_seen_at_ms,
+            Some(20)
+        );
+
+        store
+            .put_paired_device(&PairedDevice {
+                name: "MacBook Pro".to_string(),
+                paired_at_ms: 30,
+                ..laptop
+            })
+            .unwrap();
+        let devices = store.list_paired_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].name, "MacBook Pro");
+        assert_eq!(devices[0].last_seen_at_ms, None);
+
+        assert!(store.delete_paired_device("aa").unwrap());
+        assert!(!store.delete_paired_device("aa").unwrap());
+        assert!(store.paired_device("aa").unwrap().is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// v15 发出去的库：`mcp_servers_json` 默认值是文本 `'[]'`。升到 v16 后默认值改成 BLOB，
     /// 已勾选的 MCP 服务器和其余字段原样保留。
     #[test]
@@ -5029,9 +5347,7 @@ mod tests {
         let dir = temp_dir("migrate-v15-mcp-default");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "DROP TABLE agent_definition;
@@ -5085,9 +5401,7 @@ mod tests {
         let dir = temp_dir("migrate-v12-memory");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        create_v16_schema(&connection);
         connection
             .execute_batch(
                 "DROP TABLE agent_memory_usage; DROP TABLE agent_memory_provenance;
@@ -5118,7 +5432,7 @@ mod tests {
 
         let store = Store::open_or_create(&path).unwrap();
         let workspace = store.get_workspace_snapshot().unwrap().unwrap();
-        assert_eq!(workspace.projects[0].root, "/repo");
+        assert_eq!(workspace.projects[0], "/repo");
         store.record_memory_read("user", "a.md", 1).unwrap();
         drop(store);
         assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
@@ -5126,78 +5440,7 @@ mod tests {
     }
 
     #[test]
-    fn kv_round_trip_scan_and_delete() {
-        let dir = temp_dir("kv");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        assert_eq!(store.get("json", "appearance.json").unwrap(), None);
-        store
-            .put("json", "appearance.json", br#"{"dark":true}"#)
-            .unwrap();
-        store
-            .put("json", "appearance.json", br#"{"dark":false}"#)
-            .unwrap();
-        assert_eq!(
-            store.get("json", "appearance.json").unwrap().unwrap(),
-            br#"{"dark":false}"#
-        );
-        assert_eq!(store.keys("json").unwrap(), vec!["appearance.json"]);
-        assert!(store.delete("json", "appearance.json").unwrap());
-        assert!(!store.delete("json", "appearance.json").unwrap());
-        assert!(store.get("json", "appearance.json").unwrap().is_none());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn scoped_blob_is_independent_from_json_documents_and_other_scopes() {
-        let dir = temp_dir("scoped-blob");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-
-        store
-            .put_blob("preferences", "new_session_pins", b"{\"pinned\":[]}")
-            .unwrap();
-        store
-            .put_blob("other", "new_session_pins", b"other-value")
-            .unwrap();
-
-        assert_eq!(
-            store.get_blob("preferences", "new_session_pins").unwrap(),
-            Some(br#"{"pinned":[]}"#.to_vec())
-        );
-        assert_eq!(
-            store.get_blob("other", "new_session_pins").unwrap(),
-            Some(b"other-value".to_vec())
-        );
-        let mut keys = store.blob_keys("preferences").unwrap();
-        keys.sort();
-        assert_eq!(keys, ["new_session_pins"]);
-        assert!(
-            store
-                .delete_blob("preferences", "new_session_pins")
-                .unwrap()
-        );
-        assert!(
-            store
-                .get_blob("preferences", "new_session_pins")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            store
-                .get_blob("other", "new_session_pins")
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(
-            store.get("json", "new_session_pins").unwrap(),
-            None,
-            "作用域 blob 不应通过 JSON 文档入口可见"
-        );
-
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn new_database_contains_exactly_the_eight_state_tables() {
+    fn new_database_contains_exactly_the_current_tables() {
         let dir = temp_dir("minimal-schema");
         let path = dir.join(DATABASE_FILE_NAME);
         drop(Store::open_or_create(&path).unwrap());
@@ -5214,16 +5457,9 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(tables, crate::schema::TABLES);
-        let kv_columns = connection
-            .prepare("PRAGMA table_info(kv)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            kv_columns,
-            ["scope", "key", "value", "value_type", "updated_at_ms"]
+        assert!(
+            !tables.iter().any(|table| table == "kv"),
+            "运行时库不再有通用 kv 表"
         );
 
         drop(connection);
@@ -5330,7 +5566,7 @@ mod tests {
         let command = store
             .get_peer_message_command_result(
                 "source",
-                &smelt_plugin_api::CommandId::new("command-1").unwrap(),
+                &smelt_event_protocol::CommandId::new("command-1").unwrap(),
             )
             .unwrap()
             .unwrap();
@@ -5519,7 +5755,7 @@ mod tests {
 
         let result = smelt_event_bus::CommandResult {
             plugin_id: plugin.clone(),
-            command_id: smelt_plugin_api::CommandId::new("command-1").unwrap(),
+            command_id: smelt_event_protocol::CommandId::new("command-1").unwrap(),
             completed_at_ms: 30,
             result: json!({"created": true}),
         };
@@ -5617,33 +5853,6 @@ mod tests {
     }
 
     #[test]
-    fn store_transaction_commits_domain_write_and_outbox_together() {
-        let dir = temp_dir("domain-outbox-transaction");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let failed: Result<(), StoreError> = store.transaction(|transaction| {
-            transaction.put("json", "test.json", br#"{"value":1}"#)?;
-            transaction.append_outbox_batch(&[event("rolled-back")])?;
-            Err(StoreError::TransactionAborted)
-        });
-        assert!(failed.is_err());
-        assert_eq!(store.get("json", "test.json").unwrap(), None);
-        assert!(store.load_pending_outbox(10).unwrap().is_empty());
-
-        store
-            .transaction(|transaction| {
-                transaction.put("json", "test.json", br#"{"value":2}"#)?;
-                transaction.append_outbox_batch(&[event("committed")])
-            })
-            .unwrap();
-        assert_eq!(
-            store.get("json", "test.json").unwrap(),
-            Some(br#"{"value":2}"#.to_vec())
-        );
-        assert_eq!(store.load_pending_outbox(10).unwrap().len(), 1);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn durable_revision_survives_restart_and_serializes_publishers() {
         let dir = temp_dir("durable-revision");
         let path = dir.join(DATABASE_FILE_NAME);
@@ -5718,6 +5927,17 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// 迁移前后都在的一行数据：旧版本就有的历史标题表。
+    fn kept_history_title(store: &Store) -> String {
+        store
+            .get_history_title_snapshot()
+            .unwrap()
+            .expect("迁移不能丢掉历史标题")
+            .sessions
+            .remove(0)
+            .custom_title
+    }
+
     #[test]
     fn migrates_released_v5_schema_dropping_multica_columns() {
         let dir = temp_dir("migrate-v5-release");
@@ -5731,18 +5951,15 @@ mod tests {
                  INSERT INTO acp_detail(
                    session_id, agent, launch_command, multica_issue_id, multica_workspace_id
                  ) VALUES ('s1', 'codex', 'codex acp', 'issue-1', 'ws-1');
-                 INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:test.json', '$', X'6B656570', 'blob', 1);",
+                 INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1);",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 5).unwrap();
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        assert_eq!(
-            store.get("json", "test.json").unwrap(),
-            Some(b"keep".to_vec())
-        );
+        assert_eq!(kept_history_title(&store), "keep");
         drop(store);
 
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -5782,8 +5999,8 @@ mod tests {
         connection.execute_batch(v1_schema()).unwrap();
         connection
             .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:test.json', '$', X'6B656570', 'blob', 1)",
+                "INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1)",
                 [],
             )
             .unwrap();
@@ -5791,10 +6008,7 @@ mod tests {
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        assert_eq!(
-            store.get("json", "test.json").unwrap(),
-            Some(b"keep".to_vec())
-        );
+        assert_eq!(kept_history_title(&store), "keep");
         assert_eq!(store.high_watermark().unwrap(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -5839,81 +6053,43 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v7 的库一路迁到当前版本。v9 之前的自动化只存在 `kv` 文档里，那套导入已经删了
+    /// （产品没发布过，真实库都在 v16 之后），这里只保证结构收敛、`kv` 不留。
     #[test]
-    fn migrates_v7_schema_and_moves_kv_transcripts_into_the_table() {
-        let dir = temp_dir("migrate-v7-transcript");
+    fn migrates_v7_schema_to_current_without_kv() {
+        let dir = temp_dir("migrate-v7");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch(&v7_schema()).unwrap();
-        let snapshot = serde_json::to_vec(&json!({
-            "schema_version": 1,
-            "store_id": "s",
-            "revision": 1,
-            "timezone_fingerprint": "UTC",
-            "automations": [{
-                "id": "auto-1",
-                "name": "A",
-                "enabled": true,
-                "trigger": {},
-                "action": {"type": "shell", "command": "true", "args": []},
-                "sinks": []
-            }],
-            "states": [],
-            "runs": [{
-                "id": "run-1",
-                "automation_id": "auto-1",
-                "source": "manual",
-                "status": "completed",
-                "created_at": 1,
-                "delivery_attempts": 0,
-                "context": {
-                    "automation_name": "A",
-                    "cwd": "/",
-                    "permission_mode": "full_access",
-                    "action": {"type": "shell", "command": "true", "args": []}
-                }
-            }]
-        }))
-        .unwrap();
         connection
-            .execute(
+            .execute_batch(
                 "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:automations.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![snapshot],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('automation_run_transcript', 'run-1', X'5B5D', 'blob', 9)",
-                [],
+                 VALUES ('automation_run_transcript', 'run-1', X'5B5D', 'blob', 9);
+                 INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1);",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 7).unwrap();
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(kept_history_title(&store), "keep");
         assert_eq!(
             store.get_automation_run_transcript("run-1").unwrap(),
-            Some(b"[]".to_vec())
+            None,
+            "没有对应 Run 的对话记录随外键重建丢掉"
         );
         drop(store);
-
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
         let connection = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-                .unwrap(),
-            STORE_SCHEMA_VERSION
-        );
-        let leftover: i64 = connection
+        let kv_exists: bool = connection
             .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope = 'automation_run_transcript'",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'kv')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(leftover, 0);
+        assert!(!kv_exists);
         drop(connection);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -6059,9 +6235,7 @@ mod tests {
         let dir = temp_dir("migrate-v5-acp-detail");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
+        connection.execute_batch(crate::schema::V17_SCHEMA).unwrap();
         connection
             .execute_batch("ALTER TABLE acp_detail ADD COLUMN obsolete_context TEXT")
             .unwrap();
@@ -6092,44 +6266,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_source_validation_is_consistent() {
-        let dir = temp_dir("legacy-source-validation");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        assert!(store.legacy_state("").is_err());
-        assert!(store.legacy_state("bad\0source").is_err());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn kv_and_legacy_state_are_read_from_one_snapshot() {
-        let dir = temp_dir("legacy-lookup");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        assert_eq!(
-            store
-                .get_with_legacy_state("json", "appearance.json", "json:appearance.json")
-                .unwrap(),
-            (None, LegacyState::Pending)
-        );
-        store.put("json", "appearance.json", b"legacy").unwrap();
-        assert_eq!(
-            store
-                .get_with_legacy_state("json", "appearance.json", "json:appearance.json")
-                .unwrap(),
-            (Some(b"legacy".to_vec()), LegacyState::Pending)
-        );
-        store
-            .delete_with_legacy_tombstone("json:appearance.json", "json", "appearance.json")
-            .unwrap();
-        assert_eq!(
-            store
-                .get_with_legacy_state("json", "appearance.json", "json:appearance.json")
-                .unwrap(),
-            (None, LegacyState::Deleted)
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn concurrent_first_open_initializes_once() {
         let dir = temp_dir("concurrent-open");
         let path = dir.join(DATABASE_FILE_NAME);
@@ -6142,7 +6278,12 @@ mod tests {
                     barrier.wait();
                     let store = Store::open_or_create(path).unwrap();
                     store
-                        .put("json", &format!("worker-{index}.json"), b"ready")
+                        .put_paired_device(&PairedDevice {
+                            endpoint_id: format!("worker-{index}"),
+                            name: "ready".into(),
+                            paired_at_ms: 1,
+                            last_seen_at_ms: None,
+                        })
                         .unwrap();
                 })
             })
@@ -6151,7 +6292,7 @@ mod tests {
             thread.join().unwrap();
         }
         let store = Store::open_or_create(path).unwrap();
-        assert_eq!(store.keys("json").unwrap().len(), 8);
+        assert_eq!(store.list_paired_devices().unwrap().len(), 8);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6237,7 +6378,7 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute(
-                "INSERT INTO project(root, position, collapsed) VALUES ('/keep-me', 0, 0)",
+                "INSERT INTO project(root, position) VALUES ('/keep-me', 0)",
                 [],
             )
             .unwrap();
@@ -6434,18 +6575,20 @@ mod tests {
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
         store
-            .put(
-                "json",
-                "launch.json",
-                br#"{"version":7,"entries":[{"label":"Claude","command":"claude","provider":"claude"}]}"#,
-            )
+            .put_launch_snapshot(&LaunchSnapshot {
+                version: 7,
+                entries: vec![LaunchEntryRecord {
+                    label: "Claude".into(),
+                    command: "claude".into(),
+                    provider: Some("claude".into()),
+                }],
+            })
             .unwrap();
         drop(store);
 
         let store = Store::open_or_create(&path).unwrap();
-        let raw = store.get("json", "launch.json").unwrap().unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(value["entries"][0]["label"], "Claude");
+        let launch = store.get_launch_snapshot().unwrap().unwrap();
+        assert_eq!(launch.entries[0].label, "Claude");
         drop(store);
 
         let mut connection = rusqlite::Connection::open(&path).unwrap();
@@ -6473,30 +6616,6 @@ mod tests {
             .unwrap();
         assert_eq!(note, "");
         transaction.commit().unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn appearance_theme_mode_is_a_kv_row() {
-        let dir = temp_dir("appearance-kv");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"dark","opacity":0.95}"#,
-            )
-            .unwrap();
-        let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let mode: String = connection
-            .query_row(
-                "SELECT CAST(value AS TEXT) FROM kv
-                 WHERE scope = 'appearance' AND key = 'theme_mode'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(mode, "dark");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6551,40 +6670,15 @@ mod tests {
                         "config_values": [["model", "sonnet"]],
                         "pending_agent_preset": "先检查正确性和回归风险",
                         "conversation_binding": {
-                            "type": "plugin",
-                            "plugin_id": "com.example.quant",
-                            "route": {
-                                "contribution_id": "strategy-input",
-                                "context": {"strategy_id": "strategy-1"}
-                            }
-                        },
-                        "agent_session": {
-                            "agent": {
-                                "plugin_id": "com.example.quant",
-                                "contribution_id": "quant-agent"
-                            },
-                            "controller": {
-                                "plugin_id": "com.example.quant",
-                                "contribution_id": "quant-session"
-                            },
-                            "instance": {
-                                "plugin_id": "com.example.quant",
-                                "resource_type": "strategy",
-                                "resource_id": "strategy-1"
-                            }
+                            "type": "automation",
+                            "run_id": "run-1"
                         }
                     },
                     "route": null
                 }
             ]
         });
-        store
-            .put(
-                "json",
-                "workspace.json",
-                &serde_json::to_vec(&workspace).unwrap(),
-            )
-            .unwrap();
+        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         for (table, expected) in [
@@ -6603,13 +6697,22 @@ mod tests {
         }
         let profile: String = connection
             .query_row(
-                "SELECT CAST(value AS TEXT) FROM kv
-                 WHERE scope = 'acp:acp-1' AND key = 'env/PROFILE'",
+                "SELECT value FROM acp_launch_env WHERE session_id = 'acp-1' AND name = 'PROFILE'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(profile, "work");
+        let (model, binding): (String, String) = connection
+            .query_row(
+                "SELECT c.value_id, d.binding_automation_run_id
+                 FROM acp_config_value c JOIN acp_detail d USING (session_id)
+                 WHERE c.session_id = 'acp-1' AND c.config_id = 'model'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((model.as_str(), binding.as_str()), ("sonnet", "run-1"));
         let old_payload_tables: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema
@@ -6620,8 +6723,7 @@ mod tests {
             .unwrap();
         assert_eq!(old_payload_tables, 0);
 
-        let restored: serde_json::Value =
-            serde_json::from_slice(&store.get("json", "workspace.json").unwrap().unwrap()).unwrap();
+        let restored: serde_json::Value = workspace_json(&store);
         assert_eq!(restored["sessions"][0]["layout"]["Split"]["axis"], "H");
         assert_eq!(restored["sessions"][0]["active"], 1);
         assert_eq!(restored["sessions"][1]["acp"]["sid"], "acp-1");
@@ -6634,12 +6736,8 @@ mod tests {
             "先检查正确性和回归风险"
         );
         assert_eq!(
-            restored["sessions"][1]["acp"]["conversation_binding"]["route"]["context"]["strategy_id"],
-            "strategy-1"
-        );
-        assert_eq!(
-            restored["sessions"][1]["acp"]["agent_session"]["controller"]["contribution_id"],
-            "quant-session"
+            restored["sessions"][1]["acp"]["conversation_binding"]["run_id"],
+            "run-1"
         );
         // 智能体归属必须活过落盘：丢了这一列，重启后对话会退化成按 cwd 成组的项目。
         assert_eq!(
@@ -6665,30 +6763,22 @@ mod tests {
                 "history_session_id",
                 "launch_command",
                 "refresh_launch_from_settings",
-                "fork_session_id",
-                "fork_title",
-                "fork_agent",
-                "fork_profile_label",
-                "fork_from_history",
                 "pending_prompt",
                 "pending_delivery_id",
                 "agent_definition_id",
                 "automation_id",
+                "binding_automation_run_id",
+                "pending_agent_preset",
+                "session_title",
             ]
         );
-        assert_eq!(restored["collapsed_projects"], serde_json::json!(["/repo"]));
-        assert_eq!(
-            restored["collapsed_agents"],
-            serde_json::json!(["agent-def-1"])
+        assert!(
+            restored.get("collapsed_projects").is_none() && restored.get("sidebar_w").is_none(),
+            "界面状态归客户端，运行时不存"
         );
+        assert!(restored["sessions"][0].get("route").is_none());
         drop(connection);
-        store
-            .put(
-                "json",
-                "workspace.json",
-                &serde_json::to_vec(&workspace).unwrap(),
-            )
-            .unwrap();
+        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
         let connection = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(
             connection
@@ -6700,6 +6790,17 @@ mod tests {
             "重复快照应原子替换，不能累积旧 session"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn put_workspace_json(store: &Store, raw: &[u8]) {
+        store
+            .put_workspace_snapshot(&Store::workspace_snapshot_from_json(raw).unwrap())
+            .unwrap();
+    }
+
+    fn workspace_json(store: &Store) -> serde_json::Value {
+        let snapshot = store.get_workspace_snapshot().unwrap().unwrap();
+        serde_json::from_slice(&Store::workspace_snapshot_to_json(&snapshot).unwrap()).unwrap()
     }
 
     fn acp_workspace(history_session_id: Option<&str>) -> Vec<u8> {
@@ -6723,9 +6824,7 @@ mod tests {
     }
 
     fn stored_history_id(store: &Store) -> Option<String> {
-        let raw = store.get("json", "workspace.json").unwrap().unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        value["sessions"][0]["acp"]["history_session_id"]
+        workspace_json(store)["sessions"][0]["acp"]["history_session_id"]
             .as_str()
             .map(str::to_string)
     }
@@ -6743,9 +6842,7 @@ mod tests {
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::NoRow
         );
-        store
-            .put("json", "workspace.json", &acp_workspace(Some("from-gui")))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(Some("from-gui")));
         assert_eq!(
             stored_history_id(&store),
             None,
@@ -6766,17 +6863,13 @@ mod tests {
         );
         assert!(!store.remember_history_session_id("acp-1", "  ").unwrap());
 
-        store
-            .put("json", "workspace.json", &acp_workspace(None))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(None));
         assert_eq!(
             stored_history_id(&store).as_deref(),
             Some("pi-confirmed"),
             "窗口存档没带恢复身份时，不能把守护进程已经确认的 id 写成空"
         );
-        store
-            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
         assert_eq!(
             stored_history_id(&store).as_deref(),
             Some("pi-confirmed"),
@@ -6788,15 +6881,11 @@ mod tests {
                 .remember_history_session_id("acp-1", "pi-next")
                 .unwrap()
         );
-        store
-            .put("json", "workspace.json", &acp_workspace(None))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(None));
         assert_eq!(stored_history_id(&store).as_deref(), Some("pi-next"));
 
         assert!(store.clear_history_session_id("acp-1").unwrap());
-        store
-            .put("json", "workspace.json", &acp_workspace(Some("gui-stale")))
-            .unwrap();
+        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
         assert_eq!(
             stored_history_id(&store),
             None,
@@ -6815,183 +6904,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_snapshot_keeps_live_sidebar_fields() {
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "active_session": 1,
-            "active_session_id": "sid-1",
-            "collapsed_agents": ["research", "quant"],
-            "pinned_projects": ["/repo/smelt", "/repo/pulse"],
-            "sidebar_hide_empty_projects": true,
-            "projects": ["/repo/smelt"],
-            "sessions": []
-        }))
-        .unwrap();
-        let snapshot = Store::workspace_snapshot_from_json(&raw).unwrap();
-        assert_eq!(snapshot.active_session, 1);
-        assert_eq!(snapshot.active_session_id.as_deref(), Some("sid-1"));
-        assert_eq!(
-            snapshot.collapsed_agents,
-            vec!["research".to_string(), "quant".to_string()]
-        );
-        assert_eq!(
-            snapshot.pinned_projects,
-            vec!["/repo/smelt".to_string(), "/repo/pulse".to_string()]
-        );
-        assert!(snapshot.sidebar_hide_empty_projects);
-
-        let dir = temp_dir("workspace-live-fields");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store.put_workspace_snapshot(&snapshot).unwrap();
-        let restored = store.get_workspace_snapshot().unwrap().unwrap();
-        assert_eq!(restored.active_session_id.as_deref(), Some("sid-1"));
-        assert_eq!(restored.collapsed_agents, snapshot.collapsed_agents);
-        assert_eq!(restored.pinned_projects, snapshot.pinned_projects);
-        assert!(restored.sidebar_hide_empty_projects);
-        let json: serde_json::Value =
-            serde_json::from_slice(&Store::workspace_snapshot_to_json(&restored).unwrap()).unwrap();
-        assert_eq!(json["active_session_id"], "sid-1");
-        assert_eq!(json["collapsed_agents"][1], "quant");
-        assert_eq!(json["pinned_projects"][1], "/repo/pulse");
-        assert_eq!(json["sidebar_hide_empty_projects"], true);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn workspace_snapshot_reads_leftover_generic_document() {
-        let dir = temp_dir("workspace-generic-doc");
-        let path = dir.join(DATABASE_FILE_NAME);
-        drop(Store::open_or_create(&path).unwrap());
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "active_session_id": "sid-legacy",
-            "projects": ["/repo"],
-            "sessions": [{
-                "layout": {"Leaf": {"cwd": "/repo", "id": "sid-legacy"}},
-                "active": 0
-            }]
-        }))
-        .unwrap();
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:workspace.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![raw],
-            )
-            .unwrap();
-        drop(connection);
-
-        let store = Store::open_or_create(&path).unwrap();
-        let snapshot = store
-            .get_workspace_snapshot()
-            .unwrap()
-            .expect("旧 json 文档应回退读出工作区");
-        assert_eq!(snapshot.active_session_id.as_deref(), Some("sid-legacy"));
-        assert_eq!(snapshot.projects[0].root, "/repo");
-        assert_eq!(snapshot.sessions.len(), 1);
-
-        store.put_workspace_snapshot(&snapshot).unwrap();
-        let leftover: i64 = rusqlite::Connection::open(&path)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope = 'document:workspace.json'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0, "写入类型化快照后应删掉旧 json 文档");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn appearance_snapshot_uses_domain_defaults_for_missing_fields() {
-        let dir = temp_dir("appearance-defaults");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .put("json", "appearance.json", br#"{"theme_mode":"light"}"#)
-            .unwrap();
-        let snapshot = store.get_appearance_snapshot().unwrap().unwrap();
-        assert!(
-            (snapshot.bg_image_opacity - 0.25).abs() < f32::EPSILON,
-            "bg_image_opacity={}",
-            snapshot.bg_image_opacity
-        );
-        assert_eq!(snapshot.ui_font_px, 16);
-        assert_eq!(snapshot.font_px, 13);
-        assert_eq!(snapshot.theme_mode, "light");
-        assert_eq!(snapshot.theme_name, "Default Light");
-
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"dark","theme_name":"Sand Dark"}"#,
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .get_appearance_snapshot()
-                .unwrap()
-                .unwrap()
-                .theme_name,
-            "Default Dark"
-        );
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"light","theme_name":"Sand Dark"}"#,
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .get_appearance_snapshot()
-                .unwrap()
-                .unwrap()
-                .theme_name,
-            "Default Light"
-        );
-        store
-            .put(
-                "json",
-                "appearance.json",
-                br#"{"theme_mode":"light","theme_name":"Ayu Light"}"#,
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .get_appearance_snapshot()
-                .unwrap()
-                .unwrap()
-                .theme_name,
-            "Ayu Light"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn agent_ui_missing_hooks_key_defaults_to_enabled() {
-        let snapshot = Store::agent_ui_snapshot_from_json(&serde_json::json!({})).unwrap();
-        assert!(snapshot.agent_hooks_enabled);
-        let explicit = Store::agent_ui_snapshot_from_json(&serde_json::json!({
-            "agent_hooks_enabled": false
-        }))
-        .unwrap();
-        assert!(!explicit.agent_hooks_enabled);
-    }
-
-    #[test]
-    fn catalog_snapshots_round_trip_without_kv_documents() {
+    fn catalog_snapshots_round_trip_through_relational_tables() {
         let dir = temp_dir("catalog-snapshots");
         let path = dir.join(DATABASE_FILE_NAME);
         let store = Store::open_or_create(&path).unwrap();
         let agent_ui = AgentUiSnapshot {
             agent_hooks_enabled: true,
             cross_agent_enabled: false,
-            notify_approval: false,
-            notify_input: true,
-            notify_success: false,
-            notify_failure: true,
-            notify_terminal_bell: false,
             commands: vec![AgentConversationCommandRecord {
                 command_key: "acp_cmd".into(),
                 command: "claude --acp".into(),
@@ -7130,7 +7049,7 @@ mod tests {
 
         let connection = rusqlite::Connection::open(&path).unwrap();
         for (table, expected) in [
-            ("agent_ui_pref", 7i64),
+            ("agent_host_pref", 1i64),
             ("agent_acp_command", 1),
             ("agent_acp_env", 1),
             ("agent_acp_config_memory", 1),
@@ -7147,192 +7066,38 @@ mod tests {
                 .unwrap();
             assert_eq!(count, expected, "{table}");
         }
-        let leftover: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope IN (
-                   'document:agent_ui.json',
-                   'document:remote_acp_sessions.json',
-                   'document:remote_terminal_sessions.json',
-                   'document:sessions.json'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0, "活路径不得再写 kv 文档");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// v9 的库建出 v10 起的目录表，一路迁到当前版本；已有的关系表数据原样保留。
+    /// v9 之前放在 `kv` 文档里的目录不再导入（同 v7 的说明）。
     #[test]
-    fn migrates_v9_catalog_kv_documents_into_relational_tables() {
-        let dir = temp_dir("migrate-v9-catalog");
+    fn migrates_v9_schema_to_current_keeping_relational_rows() {
+        let dir = temp_dir("migrate-v9");
         let path = dir.join(DATABASE_FILE_NAME);
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch(&v9_schema()).unwrap();
         connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:agent_ui.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "agent_hooks_enabled": true,
-                        "acp_cmd": "claude-custom --acp",
-                        "acp_env": {"claude": {"TOKEN": "secret"}},
-                        "agents": [{
-                            "id": "agent-1",
-                            "name": "助手",
-                            "description": "",
-                            "agent_id": "pi",
-                            "prompt": "hello",
-                            "plugins": [],
-                            "context_folders": [],
-                            "context_links": []
-                        }]
-                    }))
-                    .unwrap()
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:remote_acp_sessions.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "sessions": [{
-                            "id": "acp-1",
-                            "cwd": "/work",
-                            "title": "远程",
-                            "agent_option_id": "claude",
-                            "agent": "claude",
-                            "launch": {"command": "claude --acp", "env": {}},
-                            "created_at": 1,
-                            "lifecycle": "active",
-                            "hidden": false
-                        }]
-                    }))
-                    .unwrap()
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:remote_terminal_sessions.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "sessions": [{
-                            "id": "term-1",
-                            "cwd": "/work",
-                            "title": "终端",
-                            "created_at": 2,
-                            "lifecycle": "active"
-                        }]
-                    }))
-                    .unwrap()
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:sessions.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![
-                    serde_json::to_vec(&json!({
-                        "version": 1,
-                        "sessions": [{
-                            "id": "s1",
-                            "phase": "idle",
-                            "phase_since": 0,
-                            "updated_at": 0,
-                            "structured_events": false,
-                            "turn_events": false,
-                            "dirty_files": []
-                        }]
-                    }))
-                    .unwrap()
-                ],
+            .execute_batch(
+                "INSERT INTO automation(
+                   id, name, enabled, workspace_dir, position, trigger_json, action_json, sinks_json
+                 ) VALUES ('auto-1', 'Morning', 1, NULL, 0, X'7B7D', X'7B7D', X'5B5D');
+                 INSERT INTO automation_meta(key, value) VALUES ('revision', '3');
+                 INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+                 VALUES ('codex', '', 'r1', 'keep', 1);",
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 9).unwrap();
         drop(connection);
 
         let store = Store::open_or_create(&path).unwrap();
-        let agent_ui = store.get_agent_ui_snapshot().unwrap().unwrap();
-        assert!(
-            agent_ui.agent_hooks_enabled,
-            "hooks={:?} commands={:?} agents={:?} env={:?}",
-            agent_ui.agent_hooks_enabled, agent_ui.commands, agent_ui.agents, agent_ui.env
-        );
-        assert_eq!(
-            agent_ui
-                .commands
-                .iter()
-                .map(|command| command.command.as_str())
-                .collect::<Vec<_>>(),
-            vec!["claude-custom --acp"],
-            "{agent_ui:#?}"
-        );
-        assert_eq!(
-            agent_ui
-                .agents
-                .iter()
-                .map(|agent| agent.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["agent-1"],
-            "{agent_ui:#?}"
-        );
-        let remote = store.get_remote_session_snapshot().unwrap().unwrap();
-        assert_eq!(
-            remote
-                .acp
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["acp-1"],
-            "{remote:#?}"
-        );
-        assert_eq!(
-            remote
-                .terminal
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["term-1"],
-            "{remote:#?}"
-        );
-        let published = store.get_published_session_snapshot().unwrap().unwrap();
-        assert_eq!(
-            published
-                .sessions
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["s1"],
-            "{published:#?}"
-        );
+        let automations = store.get_automation_snapshot().unwrap().unwrap();
+        assert_eq!(automations.revision, 3);
+        assert_eq!(automations.automations[0].name, "Morning");
+        assert_eq!(kept_history_title(&store), "keep");
+        assert!(store.get_agent_ui_snapshot().unwrap().is_none());
         drop(store);
-
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-                .unwrap(),
-            STORE_SCHEMA_VERSION
-        );
-        let leftover: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope IN (
-                   'document:agent_ui.json',
-                   'document:remote_acp_sessions.json',
-                   'document:remote_terminal_sessions.json',
-                   'document:sessions.json'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -7388,7 +7153,7 @@ mod tests {
             .get_workspace_snapshot()
             .unwrap()
             .expect("v10→v11 不得丢掉已有项目");
-        assert_eq!(workspace.projects[0].root, "/repo");
+        assert_eq!(workspace.projects[0], "/repo");
         let snapshot = store.get_agent_ui_snapshot().unwrap().unwrap();
         assert_eq!(snapshot.env[0].engine_kind_id, "pi");
         assert_eq!(snapshot.config_memory[0].engine_kind_id, "pi");
@@ -7423,106 +7188,605 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    fn catalog_writer(id: &str, seq: u64) -> WorkspaceCatalogWriter {
+        WorkspaceCatalogWriter {
+            id: id.to_string(),
+            seq,
+        }
+    }
+
+    fn catalog_snapshot(project: &str) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            projects: vec![project.to_string()],
+            sessions: Vec::new(),
+        }
+    }
+
+    fn catalog_projects(store: &Store) -> Vec<String> {
+        store.get_workspace_snapshot().unwrap().unwrap().projects
+    }
+
+    /// 回执丢了：运行时已经提交，客户端还停在旧版本。它下一次提交基于旧版本，
+    /// 但当前版本正是它自己写的，必须照常提交，不能当成别的设备改过。
     #[test]
-    fn config_snapshots_round_trip_without_kv_documents() {
-        let dir = temp_dir("config-snapshots");
+    fn same_writer_resending_on_a_stale_base_after_a_lost_reply_commits() {
+        let dir = temp_dir("catalog-lost-reply");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let writer = |seq| catalog_writer("client-a", seq);
+
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(0, &writer(1), &catalog_snapshot("/a1"))
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 1 }
+        );
+        // 回执丢了，客户端仍以 0 为基准，接连又丢了一次。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(0, &writer(2), &catalog_snapshot("/a2"))
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 2 }
+        );
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(0, &writer(3), &catalog_snapshot("/a3"))
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 3 }
+        );
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 3);
+        assert_eq!(catalog_projects(&store), ["/a3"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 别的写入方提交过一次，基于旧版本的提交就是真冲突，哪怕更早的版本是自己写的。
+    #[test]
+    fn stale_base_after_another_writer_committed_is_a_conflict() {
+        let dir = temp_dir("catalog-other-writer");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+
+        store
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
+            .unwrap();
+        store
+            .commit_workspace_snapshot(1, &catalog_writer("client-b", 1), &catalog_snapshot("/b"))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    0,
+                    &catalog_writer("client-a", 2),
+                    &catalog_snapshot("/mine")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 2 }
+        );
+        // 新的写入方（比如重启后的客户端）基于旧版本也一样。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    1,
+                    &catalog_writer("client-c", 1),
+                    &catalog_snapshot("/mine")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 2 }
+        );
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 2);
+        assert_eq!(catalog_projects(&store), ["/b"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 超时的旧请求在新提交之后才到：序号更小，不能盖掉更新的那份。
+    #[test]
+    fn late_request_from_the_same_writer_cannot_overwrite_a_newer_commit() {
+        let dir = temp_dir("catalog-late-request");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+
+        store
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 2), &catalog_snapshot("/new"))
+            .unwrap();
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    0,
+                    &catalog_writer("client-a", 1),
+                    &catalog_snapshot("/old")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 1 }
+        );
+        assert_eq!(catalog_projects(&store), ["/new"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v18、v19 都有、v20 删掉的 worktree 继承两张表，原样照 v18 的建表语句。
+    /// 用当前结构的库退回旧版本做夹具时补上。
+    const V19_WORKTREE_INHERIT_TABLES: &str = "
+CREATE TABLE worktree_inherit (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+);
+CREATE TABLE worktree_inherit_skip_pattern (
+  position INTEGER PRIMARY KEY CHECK (position >= 0),
+  pattern TEXT NOT NULL
+);
+";
+
+    /// 库里各结构对象的建表语句，去掉空白后按名字排好，用来比较两份库的形状。
+    fn normalized_schema(path: &Path) -> Vec<(String, String, String)> {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_schema
+                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                let sql: Option<String> = row.get(2)?;
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    sql.unwrap_or_default()
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect(),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// v18 的库：工作区目录补上写入方两列，原来的版本号留着；接着删掉 worktree 继承两张表。
+    #[test]
+    fn migrates_v18_workspace_catalog_to_record_its_writer() {
+        let dir = temp_dir("migrate-v18-catalog-writer");
+        let path = dir.join(DATABASE_FILE_NAME);
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
+                 ALTER TABLE workspace_catalog DROP COLUMN writer;
+                 INSERT INTO workspace_catalog(id, revision) VALUES (1, 41);
+                 {V19_WORKTREE_INHERIT_TABLES}
+                 INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 18).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 41);
+        // 迁移来的版本没有写入方，只认基于当前版本的提交。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    40,
+                    &catalog_writer("client-a", 1),
+                    &catalog_snapshot("/a")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Conflict { current: 41 }
+        );
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    41,
+                    &catalog_writer("client-a", 1),
+                    &catalog_snapshot("/a")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 42 }
+        );
+        drop(store);
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v18 升上来的库要和新建的库一个形状"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v19 的库：worktree 继承两张表随 git worktree 功能下线删掉，其余数据原样留着，
+    /// 升级前留一份 `.bak-v19`。
+    #[test]
+    fn migrates_v19_drops_worktree_inherit_tables() {
+        let dir = temp_dir("migrate-v19-worktree-inherit");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        store.put_runtime_id("runtime-1").unwrap();
+        store
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
+            .unwrap();
         store
             .put_remote_config_snapshot(&RemoteConfigSnapshot {
                 enabled: true,
                 iroh_relay: "relay.example".into(),
-                write_enabled: true,
             })
             .unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V19_WORKTREE_INHERIT_TABLES}
+                 INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);
+                 INSERT INTO worktree_inherit_skip_pattern(position, pattern)
+                 VALUES (0, 'node_modules'), (1, 'target');"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 19).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 1);
+        assert_eq!(catalog_projects(&store), ["/a"]);
+        assert_eq!(
+            store.get_remote_config_snapshot().unwrap(),
+            Some(RemoteConfigSnapshot {
+                enabled: true,
+                iroh_relay: "relay.example".into(),
+            })
+        );
+        // 写入方跟着留下：同一写入方基于旧版本的下一次提交，仍认得出是自己的。
+        assert_eq!(
+            store
+                .commit_workspace_snapshot(
+                    0,
+                    &catalog_writer("client-a", 2),
+                    &catalog_snapshot("/b")
+                )
+                .unwrap(),
+            WorkspaceCatalogCommit::Committed { revision: 2 }
+        );
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        for table in ["worktree_inherit", "worktree_inherit_skip_pattern"] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!exists, "{table} 应该已经删掉");
+        }
+        drop(connection);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v19 升上来的库要和新建的库一个形状"
+        );
+
+        let backup = path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v19"));
+        let backup = rusqlite::Connection::open(&backup).unwrap();
+        assert_eq!(
+            backup
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            19
+        );
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT COUNT(*) FROM worktree_inherit_skip_pattern",
+                    [],
+                    |row| row.get::<_, u32>(0)
+                )
+                .unwrap(),
+            2,
+            "备份里留着删表前的数据"
+        );
+        drop(backup);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 两个终端叠在左格、右格单独一个终端。
+    fn tabbed_workspace_json() -> serde_json::Value {
+        serde_json::json!({
+            "projects": ["/repo"],
+            "sessions": [{
+                "layout": {"Split": {
+                    "axis": "H",
+                    "children": [
+                        {"Tabs": {
+                            "active": 1,
+                            "children": [
+                                {"Leaf": {"cwd": "/repo", "id": "term-1"}},
+                                {"Leaf": {"cwd": "/repo/src", "id": "term-2"}}
+                            ]
+                        }},
+                        {"Leaf": {"cwd": "/repo", "id": "term-3"}}
+                    ],
+                    "sizes": [400.0, 600.0]
+                }},
+                "active": 2,
+                "last_updated_at": 7
+            }]
+        })
+    }
+
+    #[test]
+    fn tab_groups_round_trip_through_layout_nodes() {
+        let dir = temp_dir("layout-tabs");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        put_workspace_json(
+            &store,
+            &serde_json::to_vec(&tabbed_workspace_json()).unwrap(),
+        );
+
+        let restored = workspace_json(&store);
+        let split = &restored["sessions"][0]["layout"]["Split"];
+        assert_eq!(split["sizes"], serde_json::json!([400.0, 600.0]));
+        let tabs = &split["children"][0]["Tabs"];
+        assert_eq!(tabs["active"], 1);
+        assert_eq!(tabs["children"][0]["Leaf"]["id"], "term-1");
+        assert_eq!(tabs["children"][1]["Leaf"]["id"], "term-2");
+        assert_eq!(split["children"][1]["Leaf"]["id"], "term-3");
+        // 活动终端按深度优先序数，标签组里的终端也算在内。
+        assert_eq!(restored["sessions"][0]["active"], 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// v20 的 layout_node：只有 split / leaf 两种节点，没有 `active_index`。
+    const V20_LAYOUT_NODE_TABLE: &str = "
+CREATE TABLE layout_node (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES session_group(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES layout_node(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  kind TEXT NOT NULL CHECK (kind IN ('split', 'leaf')),
+  axis TEXT CHECK (axis IN ('horizontal', 'vertical') OR axis IS NULL),
+  session_id TEXT UNIQUE REFERENCES session(id) ON DELETE CASCADE,
+  size_px REAL CHECK (size_px IS NULL OR size_px >= 0),
+  UNIQUE (group_id, parent_id, position),
+  CHECK (
+    (kind = 'split' AND axis IS NOT NULL AND session_id IS NULL)
+    OR (kind = 'leaf' AND axis IS NULL AND session_id IS NOT NULL)
+  )
+);
+CREATE UNIQUE INDEX layout_node_root_idx
+  ON layout_node(group_id)
+  WHERE parent_id IS NULL;
+";
+
+    /// v20 的库：layout_node 整表重建成能记标签组的形状，已有的分屏树原样留着。
+    #[test]
+    fn migrates_v20_layout_nodes_to_hold_tab_groups() {
+        let dir = temp_dir("migrate-v20-layout-tabs");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let workspace = serde_json::json!({
+            "projects": ["/repo"],
+            "sessions": [{
+                "layout": {"Split": {
+                    "axis": "V",
+                    "children": [
+                        {"Leaf": {"cwd": "/repo", "id": "term-1"}},
+                        {"Leaf": {"cwd": "/repo/src", "id": "term-2"}}
+                    ],
+                    "sizes": [300.0, 500.0]
+                }},
+                "active": 1,
+                "last_updated_at": 7
+            }]
+        });
+        put_workspace_json(&store, &serde_json::to_vec(&workspace).unwrap());
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE layout_node RENAME TO layout_node_v21;
+                 DROP INDEX layout_node_root_idx;
+                 {V20_LAYOUT_NODE_TABLE}
+                 INSERT INTO layout_node
+                   SELECT id, group_id, parent_id, position, kind, axis, session_id, size_px
+                   FROM layout_node_v21;
+                 DROP TABLE layout_node_v21;"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 20).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        let restored = workspace_json(&store);
+        let split = &restored["sessions"][0]["layout"]["Split"];
+        assert_eq!(split["axis"], "V");
+        assert_eq!(split["sizes"], serde_json::json!([300.0, 500.0]));
+        assert_eq!(split["children"][1]["Leaf"]["id"], "term-2");
+        assert_eq!(restored["sessions"][0]["active"], 1);
+        // 升上来的库能写标签组。
+        put_workspace_json(
+            &store,
+            &serde_json::to_vec(&tabbed_workspace_json()).unwrap(),
+        );
+        assert_eq!(
+            workspace_json(&store)["sessions"][0]["layout"]["Split"]["children"][0]["Tabs"]["active"],
+            1
+        );
+        drop(store);
+
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v20 升上来的库要和新建的库一个形状"
+        );
+        assert!(
+            path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v20"))
+                .exists()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runtime_settings_round_trip_through_typed_tables() {
+        let dir = temp_dir("runtime-settings");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+
+        assert_eq!(store.runtime_id().unwrap(), None);
+        store.put_runtime_id("runtime-1").unwrap();
+        assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
+
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 0);
         store
-            .put_dsh_auto_model_snapshot(&AutoModelSnapshot {
-                providers: vec!["sub2api".into()],
+            .commit_workspace_snapshot(0, &catalog_writer("client-a", 1), &catalog_snapshot("/a"))
+            .unwrap();
+        assert_eq!(store.workspace_catalog_revision().unwrap(), 1);
+
+        store
+            .put_remote_config_snapshot(&RemoteConfigSnapshot {
+                enabled: true,
+                iroh_relay: "relay.example".into(),
             })
             .unwrap();
         let loaded = store.get_remote_config_snapshot().unwrap().unwrap();
         assert!(loaded.enabled);
         assert_eq!(loaded.iroh_relay, "relay.example");
+
+        store
+            .put_auto_model_providers(AutoModelHarness::Dsh, &["sub2api".into(), "a".into()])
+            .unwrap();
+        assert_eq!(
+            store.auto_model_providers(AutoModelHarness::Dsh).unwrap(),
+            ["a", "sub2api"]
+        );
+        assert!(
+            store
+                .auto_model_providers(AutoModelHarness::Pi)
+                .unwrap()
+                .is_empty(),
+            "两家的名单互不串"
+        );
+
+        let theme = TerminalThemeSnapshot {
+            version: 1,
+            dark: false,
+            background: 0xffffff,
+            foreground: 0x111111,
+            cursor: 0x222222,
+            selection: 0x333333,
+            palette: vec![1, 2, 3],
+            search_hit: 4,
+            search_hit_current: 5,
+        };
+        store.put_terminal_theme_snapshot(&theme).unwrap();
+        assert_eq!(store.get_terminal_theme_snapshot().unwrap(), Some(theme));
+
+        let quota = QuotaCacheSnapshot {
+            saved_at_ms: 1_000,
+            schema_version: 3,
+            provider_ids: vec!["claude".into(), "copilot".into()],
+            statuses: vec![
+                QuotaCacheStatusRecord {
+                    provider_id: "claude".into(),
+                    checked_at_ms: 900,
+                    error: None,
+                    quota: QuotaCacheQuota::Windows(vec![QuotaCacheWindowRecord {
+                        label: "5h".into(),
+                        used_percent: 37.5,
+                        resets_at_ms: Some(2_000),
+                        reset_after_seconds: None,
+                    }]),
+                },
+                QuotaCacheStatusRecord {
+                    provider_id: "copilot".into(),
+                    checked_at_ms: 900,
+                    error: None,
+                    quota: QuotaCacheQuota::Copilot {
+                        unit: "ai_credits".into(),
+                        remaining: 11.0,
+                        limit: Some(43.0),
+                        used: None,
+                    },
+                },
+            ],
+        };
+        store.put_quota_cache_snapshot(&quota).unwrap();
+        assert_eq!(store.get_quota_cache_snapshot().unwrap(), Some(quota));
+
+        let menu = PublishedWorkspaceMenuSnapshot {
+            version: 2,
+            revision: 12,
+            source_id: "desktop".into(),
+            source_revision: 3,
+            projects: vec![WorkspaceMenuProjectRecord {
+                root: "/repo".into(),
+                title: "repo".into(),
+                order: 0,
+            }],
+            sessions: vec![WorkspaceMenuSessionRecord {
+                id: "s1".into(),
+                kind: "acp".into(),
+                title: "对话".into(),
+                custom_title: true,
+                cwd: Some("/repo".into()),
+                project_root: Some("/repo".into()),
+                project_title: Some("repo".into()),
+                project_order: 0,
+                session_order: 1,
+                leaf_order: 0,
+                agent: Some("pi".into()),
+            }],
+        };
+        store.put_workspace_menu_snapshot(&menu).unwrap();
+        assert_eq!(store.get_workspace_menu_snapshot().unwrap(), Some(menu));
+
+        assert_eq!(
+            store.memory_settings().unwrap(),
+            MemorySettingsRecord::default()
+        );
+        store
+            .modify_memory_settings::<StoreError>(|settings| {
+                settings.embedding_model = "bge-m3".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.memory_settings().unwrap().embedding_model, "bge-m3");
+
+        store
+            .put_default_conversation_agent(Some("writer"))
+            .unwrap();
+        assert_eq!(
+            store.default_conversation_agent().unwrap().as_deref(),
+            Some("writer")
+        );
+        store.put_default_conversation_agent(None).unwrap();
+        assert_eq!(store.default_conversation_agent().unwrap(), None);
+
+        store
+            .put_new_session_pins(&["b".into(), "a".into(), "b".into()])
+            .unwrap();
+        assert_eq!(store.new_session_pins().unwrap(), ["b", "a"]);
+
+        store
+            .put_history_agent_binding("pi", "", "resume-1", "writer")
+            .unwrap();
+        store
+            .put_history_agent_binding("pi", "work", "resume-2", "coder")
+            .unwrap();
         assert_eq!(
             store
-                .get_dsh_auto_model_snapshot()
+                .history_agent_binding("pi", "", "resume-1")
                 .unwrap()
-                .unwrap()
-                .providers,
-            vec!["sub2api".to_string()]
+                .as_deref(),
+            Some("writer")
         );
-        let leftover: i64 = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME))
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope IN (
-                   'document:collab.json',
-                   'document:dsh-auto-models.json'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn leftover_config_kv_documents_are_visible_to_typed_snapshots() {
-        let dir = temp_dir("config-leftover");
-        let path = dir.join(DATABASE_FILE_NAME);
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(crate::schema::CREATE_SCHEMA)
-            .unwrap();
-        connection
-            .pragma_update(None, "user_version", STORE_SCHEMA_VERSION)
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO kv(scope, key, value, value_type, updated_at_ms)
-                 VALUES ('document:collab.json', '$', ?1, 'blob', 1)",
-                rusqlite::params![br#"{"enabled":true,"iroh_relay":"old","write_enabled":true}"#],
-            )
-            .unwrap();
-        drop(connection);
-
-        let store = Store::open_or_create(&path).unwrap();
-        let loaded = store.get_remote_config_snapshot().unwrap().unwrap();
-        assert!(loaded.enabled);
-        assert_eq!(loaded.iroh_relay, "old");
-        store.put_remote_config_snapshot(&loaded).unwrap();
-        let leftover: i64 = rusqlite::Connection::open(&path)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM kv WHERE scope = 'document:collab.json'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leftover, 0);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn launch_lands_in_relational_tables() {
-        let dir = temp_dir("relational-docs");
-        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
-        store
-            .put(
-                "json",
-                "launch.json",
-                br#"{"version":7,"entries":[{"label":"Claude","command":"claude","provider":"claude"}]}"#,
-            )
-            .unwrap();
-
-        let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
-        let label: String = connection
-            .query_row(
-                "SELECT label FROM launch_entry WHERE position = 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(label, "Claude");
+        assert_eq!(
+            store.history_agent_bindings("pi", "work").unwrap(),
+            std::collections::BTreeMap::from([("resume-2".to_string(), "coder".to_string())])
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

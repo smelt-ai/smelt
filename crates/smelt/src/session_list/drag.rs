@@ -2,7 +2,7 @@
 
 use super::*;
 use gpui_component::scroll::AutoScroll;
-use smelt_core::agent_kind::TerminalAgentKind;
+use smelt_model::agent_kind::TerminalAgentKind;
 
 /// 指针在侧栏视口顶/底边缘时的滚动量。正数往下，负数往上。
 /// 横向上离开侧栏太远就停，避免拖到舞台区还在滚列表。
@@ -30,7 +30,6 @@ pub(super) struct SessionDrag {
     pub(super) acp: Option<ConversationAgentKind>,
     pub(super) terminal: Option<TerminalAgentKind>,
     pub(super) status: AgentStatus,
-    pub(super) plugin_agent: Option<crate::plugin_ui::PluginAgentPresentation>,
     pub(super) subtitle: Option<SharedString>,
     pub(super) status_label: Option<SharedString>,
     pub(super) grab: Point<Pixels>,
@@ -42,16 +41,15 @@ impl Render for SessionDrag {
     }
 }
 
-/// 拖拽项目分组的 payload。身份用 root；其余字段复原项目头那一行。
+/// 拖拽项目分组的 payload。身份用运行时加 root；其余字段复原项目头那一行。
 #[derive(Clone)]
 pub(super) struct ProjectDrag {
-    pub(super) root: SharedString,
+    pub(super) project: crate::ProjectRef,
     pub(super) label: SharedString,
     pub(super) collapsed: bool,
     pub(super) empty: bool,
     pub(super) branch: Option<SharedString>,
     pub(super) agg: AgentStatus,
-    pub(super) plugin_agent: Option<crate::plugin_ui::PluginAgentPresentation>,
     pub(super) session_count: usize,
     pub(super) grab: Point<Pixels>,
 }
@@ -109,14 +107,9 @@ fn session_drag_preview(drag: &SessionDrag) -> Div {
                 .justify_center()
                 .text_color(ui_theme::session_dot_color(drag.status))
                 .child(
-                    drag.plugin_agent
-                        .as_ref()
-                        .map(plugin_agent_icon)
-                        .unwrap_or_else(|| {
-                            drag.acp
-                                .map(acp_provider_icon)
-                                .unwrap_or_else(|| provider_icon(drag.terminal))
-                        })
+                    drag.acp
+                        .map(acp_provider_icon)
+                        .unwrap_or_else(|| provider_icon(drag.terminal))
                         .size(px(SESSION_AGENT_ICON_SIZE)),
                 ),
         )
@@ -157,7 +150,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .px_3()
+                .px(px(PROJECT_HEADER_PAD_X))
                 .py(px(4.))
                 .child(
                     div()
@@ -185,7 +178,7 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                 .text_size(px(12.))
                                 .font_semibold()
                                 .text_color(rgb(if drag.empty {
-                                    ui_theme::text_faint()
+                                    ui_theme::text_muted()
                                 } else {
                                     ui_theme::text_bright()
                                 }))
@@ -200,16 +193,6 @@ fn project_drag_preview(drag: &ProjectDrag) -> Div {
                                     .bg(ui_theme::session_dot_color(drag.agg)),
                             )
                         })
-                        .children(drag.plugin_agent.as_ref().map(|agent| {
-                            div()
-                                .flex_shrink_0()
-                                .size(px(15.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgb(ui_theme::text_muted()))
-                                .child(plugin_agent_icon(agent).size(px(14.)))
-                        }))
                         .children(drag.branch.clone().map(|branch| {
                             div()
                                 .min_w_0()
@@ -274,13 +257,17 @@ fn update_sess_drop_hint(
 
 fn update_proj_drop_hint(
     workspace: Entity<Workspace>,
-    root: SharedString,
+    project: crate::ProjectRef,
     before: bool,
 ) -> impl Fn(&DragMoveEvent<ProjectDrag>, &mut Window, &mut App) + 'static {
     move |ev, _window, cx| {
         let inside = ev.bounds.contains(&ev.event.position);
+        // 项目顺序是每个运行时各自的，拖到别的运行时那段上不给落点。
+        if ev.drag(cx).project.runtime != project.runtime {
+            return;
+        }
         workspace.update(cx, |ws, cx| {
-            let hint = Some((root.to_string(), before));
+            let hint = Some((project.clone(), before));
             if inside && ws.proj_drop_hint != hint {
                 ws.proj_drop_hint = hint;
                 cx.notify();
@@ -316,11 +303,11 @@ pub(super) fn with_project_drag(
     workspace: Entity<Workspace>,
 ) -> Stateful<Div> {
     row.on_drag(payload, move |drag, grab, _, cx| {
-        let dragged_root = drag.root.to_string();
+        let dragged = drag.project.clone();
         workspace.update(cx, |ws, _| {
             ws.sess_drop_hint = None;
             ws.proj_drop_hint = None;
-            ws.sidebar_drag = Some(crate::SidebarDrag::Project(dragged_root));
+            ws.sidebar_drag = Some(crate::SidebarDrag::Project(dragged));
         });
         let mut drag = drag.clone();
         drag.grab = grab;
@@ -382,15 +369,15 @@ pub(super) fn attach_session_drop_layers<E: ParentElement + FluentBuilder>(
 
 pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
     row: E,
-    root: SharedString,
+    project: crate::ProjectRef,
     hint_before: bool,
     hint_after: bool,
     workspace: Entity<Workspace>,
 ) -> E {
     let e_before = workspace.clone();
     let e_after = workspace.clone();
-    let before_root = root.clone();
-    let after_root = root.clone();
+    let before_project = project.clone();
+    let after_project = project.clone();
     row.child(
         div()
             .absolute()
@@ -403,10 +390,14 @@ pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
                     .left_0()
                     .right_0()
                     .h_1_2()
-                    .on_drag_move(update_proj_drop_hint(workspace.clone(), root.clone(), true))
+                    .on_drag_move(update_proj_drop_hint(
+                        workspace.clone(),
+                        project.clone(),
+                        true,
+                    ))
                     .on_drop(move |drag: &ProjectDrag, window, cx| {
-                        let from = drag.root.to_string();
-                        let to = before_root.to_string();
+                        let from = drag.project.clone();
+                        let to = before_project.clone();
                         let drop_top = drop_preview_top(window);
                         e_before.update(cx, |ws, cx| {
                             ws.move_project_near(&from, &to, true, Some(drop_top), cx);
@@ -421,10 +412,10 @@ pub(super) fn attach_project_drop_layers<E: ParentElement + FluentBuilder>(
                     .left_0()
                     .right_0()
                     .h_1_2()
-                    .on_drag_move(update_proj_drop_hint(workspace, root, false))
+                    .on_drag_move(update_proj_drop_hint(workspace, project, false))
                     .on_drop(move |drag: &ProjectDrag, window, cx| {
-                        let from = drag.root.to_string();
-                        let to = after_root.to_string();
+                        let from = drag.project.clone();
+                        let to = after_project.clone();
                         let drop_top = drop_preview_top(window);
                         e_after.update(cx, |ws, cx| {
                             ws.move_project_near(&from, &to, false, Some(drop_top), cx);

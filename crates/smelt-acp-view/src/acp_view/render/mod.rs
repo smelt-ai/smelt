@@ -4,7 +4,8 @@
 //! 消息列表、审批卡、输入栏分别在 sibling 模块。
 
 use super::*;
-use smelt_core::daemon_state::DaemonPhase;
+use gpui_component::button::ButtonCustomVariant;
+use smelt_client::daemon_state::DaemonPhase;
 
 use super::ConversationTranscript;
 
@@ -43,11 +44,20 @@ impl Render for AcpView {
             window,
             cx,
         );
+        // 运行光带的显隐：回合开始淡入，结束淡出。曲线同样每个会话一条。
+        let sweep_id: gpui::ElementId = ("acp-composer-sweep", cx.entity_id()).into();
+        let sweep_presence = unit_transition(
+            sweep_id,
+            if self.is_visibly_running() { 1.0 } else { 0.0 },
+            window,
+            cx,
+        );
         if !cx.reduce_motion() && !self.pending_image_enter.is_empty() {
             window.request_animation_frame();
         }
         self.view(
             composer_focus,
+            sweep_presence,
             ambient_motion_enabled(
                 ambient_application_active(cx),
                 window.is_window_active(),
@@ -64,6 +74,7 @@ impl AcpView {
     fn view(
         &self,
         composer_focus: f32,
+        sweep_presence: f32,
         animate_ambient: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -103,7 +114,7 @@ impl AcpView {
             self.entries.is_empty(),
             self.history_session_id.is_some(),
             self.pending_initial_prompt.is_some(),
-            self.queued_prompts.is_empty()
+            self.pending_prompts.is_empty()
                 && self.queued_steering.is_empty()
                 && self.queued_follow_up.is_empty(),
             self.prompt_dispatch_pending,
@@ -170,18 +181,13 @@ impl AcpView {
                             .child(div().text_sm().text_color(t.danger).child("会话已结束"))
                             .child(div().flex_1())
                             .child(
-                                div()
-                                    .id("acp-restart")
+                                Button::new("acp-restart")
+                                    .secondary()
+                                    .xsmall()
                                     .h(ui_theme::height::sm())
                                     .px_3()
-                                    .rounded(ui_theme::row_radius())
-                                    .bg(ui_theme::overlay(0x18))
-                                    .flex()
-                                    .items_center()
-                                    .text_xs()
                                     .font_medium()
-                                    .hover(|d| d.bg(ui_theme::overlay(0x28)))
-                                    .child("重新开始")
+                                    .label("重新开始")
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.restart(window, cx);
                                     })),
@@ -193,7 +199,7 @@ impl AcpView {
                                 .pl_6()
                                 .text_xs()
                                 .text_color(muted)
-                                .font_family(smelt_core::font_config::font_family())
+                                .font_family(smelt_model::font_config::font_family())
                                 .child(self.end_reason.clone()),
                         )
                     })
@@ -321,20 +327,13 @@ impl AcpView {
                                 .child(message),
                         )
                         .child(
-                            div()
-                                .id("acp-restart")
+                            Button::new("acp-restart")
+                                .primary()
                                 .h(ui_theme::height::lg())
                                 .px_5()
-                                .rounded_full()
-                                .bg(gpui::rgb(ui_theme::action_fill()))
-                                .text_sm()
+                                .rounded(ui_theme::height::lg() / 2.)
                                 .font_semibold()
-                                .text_color(gpui::rgb(ui_theme::action_on()))
-                                .flex()
-                                .items_center()
-                                .cursor_pointer()
-                                .hover(|d| d.opacity(0.88))
-                                .child(action_label)
+                                .label(action_label)
                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                     this.restart(window, cx);
                                 })),
@@ -344,7 +343,7 @@ impl AcpView {
         let empty_conversation_state = show_empty_conversation_state.then(|| {
             let workspace_label = self.cwd.as_deref().and_then(|cwd| {
                 let path = std::path::Path::new(cwd);
-                if smelt_core::agent_definition_store::is_workbench_conversation_workspace(path) {
+                if smelt_model::agent_paths::is_workbench_conversation_workspace(path) {
                     return Some("工作台".to_string());
                 }
                 path.file_name()
@@ -379,17 +378,11 @@ impl AcpView {
             for (title, _detail, prompt) in quick_prompts {
                 let prompt = prompt.to_string();
                 prompt_chips = prompt_chips.child(
-                    div()
-                        .id((gpui::ElementId::from("acp-empty-prompt"), title))
+                    Button::new((gpui::ElementId::from("acp-empty-prompt"), title))
+                        .secondary()
                         .px_3()
-                        .py_1p5()
-                        .rounded_full()
-                        .bg(ui_theme::overlay(0x14))
-                        .text_sm()
-                        .text_color(t.foreground)
-                        .cursor_pointer()
-                        .hover(|chip| chip.bg(ui_theme::overlay(0x22)))
-                        .child(gpui::SharedString::new_static(title))
+                        .rounded(ui_theme::height::md() / 2.)
+                        .label(title)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.insert_prompt_text(&prompt, window, cx);
                         })),
@@ -459,20 +452,20 @@ impl AcpView {
                 .right_0()
                 .justify_center()
                 .child(
-                    h_flex()
-                        .id("acp-jump-to-latest")
-                        .role(gpui::Role::Button)
-                        .aria_label("回到最新")
+                    Button::new("acp-jump-to-latest")
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(ui_theme::glass_floating().into())
+                                .hover(gpui::rgb(ui_theme::bg_hover()).into())
+                                .active(gpui::rgb(ui_theme::bg_hover()).into()),
+                        )
                         .h(ui_theme::height::lg())
                         .px_4()
-                        .gap_2()
-                        .items_center()
-                        .rounded_full()
+                        .rounded(ui_theme::height::lg() / 2.)
+                        // 自定义变体的底色只取 `color` 的两成，这里直接给足。
                         .bg(ui_theme::glass_floating())
                         .shadow_sm()
-                        .shadow_sm()
-                        .cursor_pointer()
-                        .hover(|button| button.bg(gpui::rgb(ui_theme::bg_hover())))
+                        .accessibility_label("回到最新")
                         .child(
                             div()
                                 .text_sm()
@@ -518,7 +511,7 @@ impl AcpView {
                 .min_h(gpui::px(0.)),
         );
         let (permission, elicitation) = self.render_approval_ui(animate_ambient, cx);
-        let input_row = self.render_composer(composer_focus, cx);
+        let input_row = self.render_composer(composer_focus, sweep_presence, animate_ambient, cx);
         v_flex()
             .size_full()
             .relative()
@@ -641,6 +634,32 @@ impl AcpView {
             )
             .children(permission)
             .children(elicitation)
+            .children(self.visible_notice().map(|notice| {
+                let id = notice.id;
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_4()
+                    .py_1p5()
+                    .border_t_1()
+                    .border_color(border)
+                    .bg(ui_theme::tint(ui_theme::yellow(), 0x14))
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::yellow()))
+                    .child(div().flex_1().min_w(px(0.)).child(notice.text.clone()))
+                    .child(
+                        Button::new(("acp-notice-dismiss", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .text_color(gpui::rgb(ui_theme::yellow()))
+                            .icon_action("关闭提示")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.dismissed_notice_id = Some(id);
+                                cx.notify();
+                            })),
+                    )
+            }))
             .children(self.paste_hint.as_ref().map(|msg| {
                 h_flex()
                     .items_center()

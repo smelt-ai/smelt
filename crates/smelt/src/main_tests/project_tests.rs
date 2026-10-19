@@ -1,10 +1,11 @@
 use super::{
     AcpSaved, PaneState, ProjectGroup, SessionState, SplitAxis, disambiguate_labels,
-    project_root_of, remove_projects_under, session_state_cwd,
+    project_root_of, session_state_cwd,
 };
 
 fn group(root: &str, label: &str) -> ProjectGroup {
     ProjectGroup {
+        runtime: crate::RuntimeKey::Local,
         root: root.into(),
         label: label.into(),
         sessions: Vec::new(),
@@ -13,8 +14,7 @@ fn group(root: &str, label: &str) -> ProjectGroup {
 
 /// 跑一遍消歧，取回显示名（base 就是各组当前的 label）。
 fn labels(mut groups: Vec<ProjectGroup>) -> Vec<String> {
-    let bases: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
-    disambiguate_labels(&mut groups, &bases);
+    disambiguate_labels(&mut groups);
     groups.into_iter().map(|g| g.label).collect()
 }
 
@@ -49,18 +49,6 @@ fn keeps_climbing_until_unique() {
             group("/b/dev/smelt", "smelt")
         ]),
         vec!["a/dev · smelt", "b/dev · smelt"]
-    );
-}
-
-/// worktree 的显示名本来就是「仓库 · 分支」，消歧时整体当末段，前缀补在最前。
-#[test]
-fn worktree_labels_keep_their_branch_suffix() {
-    assert_eq!(
-        labels(vec![
-            group("/x/wt/smelt", "smelt · feat"),
-            group("/y/wt/smelt", "smelt · feat"),
-        ]),
-        vec!["x/wt · smelt · feat", "y/wt · smelt · feat"]
     );
 }
 
@@ -134,19 +122,6 @@ fn trailing_slashes_are_ignored() {
     assert_eq!(project_root_of(&p, "/a/b/c").as_deref(), Some("/a/b"));
 }
 
-#[test]
-fn deleting_worktree_removes_project_even_if_session_close_readded_it() {
-    let mut p = projects(&[
-        "/repo",
-        "/repo-worktrees/feature",
-        "/repo-worktrees/feature/sub",
-    ]);
-
-    remove_projects_under(&mut p, "/repo-worktrees/feature/");
-
-    assert_eq!(p, projects(&["/repo"]));
-}
-
 /// 旧存档迁移：项目列表从会话 cwd 反推，终端会话取分屏树里第一个叶子的 cwd。
 #[test]
 fn legacy_archive_cwd_comes_from_first_leaf() {
@@ -175,15 +150,14 @@ fn acp_archive_cwd_comes_from_acp_meta() {
         custom_title: None,
         acp: Some(AcpSaved {
             cwd: Some("/a/acp-proj".into()),
-            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"),
+            launch: smelt_model::agent_kind::ConversationLaunchSpec::from_command("claude --acp"),
             profile_id: None,
             agent: None,
             agent_definition_id: None,
             history_session_id: None,
             sid: None,
             refresh_launch_from_settings: false,
-            conversation_binding: smelt_core::conversation::ConversationBinding::Direct,
-            agent_session: None,
+            conversation_binding: smelt_model::conversation::ConversationBinding::Direct,
             config_values: Vec::new(),
             pending_prompt: None,
             pending_delivery_id: None,
@@ -194,4 +168,30 @@ fn acp_archive_cwd_comes_from_acp_meta() {
         route: None,
     };
     assert_eq!(session_state_cwd(&ss).as_deref(), Some("/a/acp-proj"));
+}
+
+/// 面板（变更、文件树）跟着选中的项目走，舞台上的会话可能属于别的项目。
+/// 评论只能交给这个项目里的会话，不能写进别的项目的终端或对话。
+#[test]
+fn panel_text_goes_only_to_a_session_of_the_panel_project() {
+    use crate::workspace_sessions::panel_send_target;
+
+    assert_eq!(panel_send_target(Some(2), Some(("smelt", &[1, 2]))), Ok(2));
+    let refused = panel_send_target(Some(0), Some(("smelt", &[1, 2]))).unwrap_err();
+    assert!(refused.contains("smelt"), "{refused}");
+    assert!(
+        panel_send_target(Some(0), Some(("空项目", &[]))).is_err(),
+        "项目里还没有会话时也不能落到别处"
+    );
+    assert!(panel_send_target(None, Some(("smelt", &[1]))).is_err());
+    assert_eq!(panel_send_target(Some(3), None), Ok(3));
+}
+
+#[test]
+fn only_closing_a_running_session_asks_first() {
+    use crate::workspace_sessions::closing_needs_confirm;
+
+    assert!(closing_needs_confirm(crate::AgentStatus::Running));
+    assert!(!closing_needs_confirm(crate::AgentStatus::Idle));
+    assert!(!closing_needs_confirm(crate::AgentStatus::NeedsYou));
 }

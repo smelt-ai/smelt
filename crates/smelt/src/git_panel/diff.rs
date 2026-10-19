@@ -10,15 +10,13 @@
 use std::rc::Rc;
 
 use super::*;
+use gpui_component::button::Toggle;
 use gpui_component::diff::{Diff, DiffAnnotation, DiffLinePosition, DiffLineRange, DiffSide};
 
 /// 块操作挂在哪一行。优先新文件侧的行号，纯删除才退回旧文件侧。
 ///
 /// 返回 `(true, 行号)` 表示 Modified，`(false, 行号)` 表示 Original。行号从 1 起。
-pub(crate) fn hunk_line_anchor(
-    lines: &[DiffLine],
-    hunk: &smelt_git::DiffHunk,
-) -> Option<(bool, usize)> {
+pub(crate) fn hunk_line_anchor(lines: &[DiffLine], hunk: &DiffHunk) -> Option<(bool, usize)> {
     let slice = lines.get(hunk.range.clone())?;
     for line in slice {
         if let Some(n) = line.new_ln.filter(|n| *n > 0) {
@@ -94,7 +92,7 @@ struct DiffChrome {
     path: String,
     worktree_file: Option<String>,
     lines: Rc<Vec<DiffLine>>,
-    hunks: Rc<Vec<smelt_git::DiffHunk>>,
+    hunks: Rc<Vec<DiffHunk>>,
     ops: HunkOps,
     split: bool,
     comment_range: Option<DiffLineRange>,
@@ -250,14 +248,9 @@ impl Workspace {
 
 impl GitDiffBody {
     fn render_chrome(&self, cx: &mut Context<Self>) -> Div {
-        let (muted, fg, border, accent) = {
+        let (muted, border) = {
             let theme = cx.theme();
-            (
-                theme.muted_foreground,
-                theme.foreground,
-                theme.border,
-                theme.accent,
-            )
+            (theme.muted_foreground, theme.border)
         };
         let Some(chrome) = self.chrome.as_ref() else {
             return placeholder_view("（无差异）", muted);
@@ -290,17 +283,12 @@ impl GitDiffBody {
         let input = chrome.comment_input.clone();
         let open_full_file = chrome.worktree_file.clone().map(|full_path| {
             let host = host.clone();
-            div()
-                .id("diff-view-full-file")
+            Button::new("diff-view-full-file")
+                .ghost()
+                .xsmall()
                 .flex_none()
-                .px_2()
-                .py(px(1.0))
-                .text_xs()
-                .whitespace_nowrap()
-                .cursor_pointer()
+                .label("在右侧 FILES 打开")
                 .text_color(muted)
-                .hover(|style| style.text_color(fg))
-                .child("在右侧 FILES 打开")
                 .on_click(move |_ev, window, cx| {
                     let Some(host) = host.upgrade() else {
                         return;
@@ -317,54 +305,38 @@ impl GitDiffBody {
         });
         let collapse_all = chrome.aggregate.then(|| {
             let host = host.clone();
-            div()
-                .id("diff-collapse-all")
+            Button::new("diff-collapse-all")
+                .ghost()
+                .xsmall()
                 .flex_none()
-                .px_2()
-                .py(px(1.0))
-                .text_xs()
-                .whitespace_nowrap()
-                .rounded_sm()
-                .cursor_pointer()
-                .text_color(fg)
-                .hover(|style| style.bg(rgb(crate::ui_theme::bg_hover())))
+                .label(if all_collapsed {
+                    "全部展开"
+                } else {
+                    "全部收起"
+                })
                 .on_click(move |_ev, _window, cx| {
                     let Some(host) = host.upgrade() else {
                         return;
                     };
                     host.update(cx, |this, cx| this.toggle_all_aggregate_diff_files(cx));
                 })
-                .child(if all_collapsed {
-                    "全部展开"
-                } else {
-                    "全部收起"
-                })
         });
-        let toggle = div()
-            .id("diff-split-toggle")
+        // 并排是开关：按下是并排，抬起是统一。
+        let toggle = Toggle::new("diff-split-toggle")
+            .xsmall()
             .flex_none()
             .px_2()
-            .py(px(1.0))
-            .text_xs()
-            .whitespace_nowrap()
-            .rounded_sm()
-            .cursor_pointer()
-            .text_color(fg)
-            .bg(accent)
-            .hover(|style| style.opacity(0.8))
+            .label("并排")
+            .checked(chrome.split)
+            .tooltip("并排对照新旧两侧；关掉是统一视图")
             .on_click({
                 let host = host.clone();
-                move |_ev, _window, cx| {
+                move |_, _window, cx| {
                     let Some(host) = host.upgrade() else {
                         return;
                     };
                     host.update(cx, |this, cx| this.toggle_diff_split(cx));
                 }
-            })
-            .child(if chrome.split {
-                "并排 ⇄"
-            } else {
-                "统一 ☰"
             });
         let stage_path = (!chrome.aggregate).then(|| chrome.path.clone());
         let root = chrome.root.clone();
@@ -483,7 +455,7 @@ fn comment_range_label(range: &DiffLineRange) -> String {
 
 fn diff_annotations(
     lines: &[DiffLine],
-    hunks: &[smelt_git::DiffHunk],
+    hunks: &[DiffHunk],
     show_hunks: bool,
     file_path: Option<&str>,
     comment: Option<&DiffLineRange>,
@@ -532,12 +504,10 @@ fn diff_header_suffix(
             let host = host.clone();
             let root = root.to_string();
             row = row.child(
-                div()
-                    .id("diff-stage-file")
-                    .px_2()
-                    .text_xs()
-                    .cursor_pointer()
-                    .child(label)
+                Button::new("diff-stage-file")
+                    .ghost()
+                    .xsmall()
+                    .label(label)
                     .on_click(move |_ev, _window, cx| {
                         let Some(host) = host.upgrade() else {
                             return;
@@ -557,12 +527,10 @@ fn diff_header_suffix(
         };
         let host = host.clone();
         row = row.child(
-            div()
-                .id((ElementId::from("diff-open-header"), rel.clone()))
-                .px_2()
-                .text_xs()
-                .cursor_pointer()
-                .child("打开")
+            Button::new((ElementId::from("diff-open-header"), rel.clone()))
+                .ghost()
+                .xsmall()
+                .label("打开")
                 .on_click(move |_ev, window, cx| {
                     let Some(host) = host.upgrade() else {
                         return;
@@ -613,13 +581,11 @@ fn hunk_ops_row(
 ) -> Div {
     let theme = cx.theme();
     let button = |id: &'static str, label: &'static str, color: Hsla| {
-        div()
-            .id((id, idx))
-            .px_2()
-            .text_xs()
-            .cursor_pointer()
+        Button::new((id, idx))
+            .ghost()
+            .xsmall()
+            .label(label)
             .text_color(color)
-            .child(label)
     };
     let row = div().flex().items_center().gap_2();
     match ops {

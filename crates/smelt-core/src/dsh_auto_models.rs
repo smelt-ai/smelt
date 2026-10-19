@@ -23,19 +23,19 @@ use serde::Deserialize;
 
 pub use crate::auto_model_store::AutoModelStore as DshAutoModelStore;
 
-/// 名单存在这个文件里。dsh 与 Pi 各一份：同名 provider 在两边是两回事。
-const STORE_FILE: &str = "dsh-auto-models.json";
+/// dsh 与 Pi 各一份名单：同名 provider 在两边是两回事。
+const HARNESS: smelt_store::AutoModelHarness = smelt_store::AutoModelHarness::Dsh;
 
 pub fn load() -> DshAutoModelStore {
-    crate::auto_model_store::load(STORE_FILE)
+    crate::auto_model_store::load(HARNESS)
 }
 
 pub fn save(store: &DshAutoModelStore) {
-    crate::auto_model_store::save(STORE_FILE, store);
+    crate::auto_model_store::save(HARNESS, store);
 }
 
 pub fn update(mutate: impl FnOnce(&mut DshAutoModelStore)) {
-    crate::auto_model_store::update(STORE_FILE, mutate);
+    crate::auto_model_store::update(HARNESS, mutate);
 }
 
 /// `dsh-model-settings --action read` 里刷新真正用得上的那几个字段。

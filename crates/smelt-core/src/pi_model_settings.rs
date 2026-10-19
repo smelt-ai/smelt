@@ -5,21 +5,9 @@
 //! - `models.json`：自定义 provider、网关端点、兼容模式及模型定义
 //! - `auth.json`：各 provider 的 API key 等凭据（采用 0600 权限保护）
 
-use std::path::{Path, PathBuf};
+pub use smelt_model::pi_model_settings::*;
 
-/// 获取 Pi Agent 配置根目录。优先读取 `PI_CODING_AGENT_DIR` 环境变量，
-/// 默认退回 `~/.pi/agent`。
-pub fn pi_agent_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR")
-        && !dir.trim().is_empty()
-    {
-        return PathBuf::from(crate::workspace_override::expand_tilde(&dir));
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".pi")
-        .join("agent")
-}
+use std::path::{Path, PathBuf};
 
 pub fn pi_settings_path() -> PathBuf {
     pi_agent_dir().join("settings.json")
@@ -33,67 +21,12 @@ pub fn pi_auth_path() -> PathBuf {
     pi_agent_dir().join("auth.json")
 }
 
-/// `auth.json` 里一条凭据的形态。
-///
-/// Pi 在同一个文件、同一个 provider 键下存两种东西：`/login` 选 API key 存的是
-/// `{"type":"api_key","key":...}`，选订阅登录存的是
-/// `{"type":"oauth","access":...,"refresh":...,"expires":...}`。只看 `key` 字段
-/// 会把所有 OAuth 登录过的 provider 报成「缺少凭据」。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PiCredentialKind {
-    ApiKey,
-    OAuth,
-}
-
-/// 判断一条 `auth.json` 条目算不算「已配置凭据」，并给出它是哪一种。
-///
-/// 认 `type` 字段，但不强求：Pi 早期写下的条目可能只有 `key`。OAuth 条目以
-/// `refresh` 或 `access` 存在为准——过期与否这里不判，刷新是 Pi 的事，而把一
-/// 个只是 access token 过期的账号显示成「未登录」会让人以为要重新登录。
-pub fn pi_credential_kind(entry: &serde_json::Value) -> Option<PiCredentialKind> {
-    let non_empty = |field: &str| {
-        entry
-            .get(field)
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| !v.trim().is_empty())
-    };
-    match entry.get("type").and_then(|t| t.as_str()) {
-        Some("oauth") => {
-            (non_empty("refresh") || non_empty("access")).then_some(PiCredentialKind::OAuth)
-        }
-        Some("api_key") | None => non_empty("key").then_some(PiCredentialKind::ApiKey),
-        // 认不出的 type 也可能带着一份能用的凭据（Pi 更新过、我们还没跟上）。
-        Some(_) => {
-            if non_empty("key") {
-                Some(PiCredentialKind::ApiKey)
-            } else if non_empty("refresh") || non_empty("access") {
-                Some(PiCredentialKind::OAuth)
-            } else {
-                None
-            }
-        }
-    }
-}
-
 /// 某个 provider 在 `auth.json` 里有没有凭据。
 fn auth_entry_configured(auth_json: &serde_json::Value, provider_id: &str) -> bool {
     auth_json
         .get(provider_id)
         .and_then(pi_credential_kind)
         .is_some()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PiDefaultModelSummary {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub thinking_level: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PiSettingsSummary {
-    pub path: PathBuf,
-    pub default_model: Option<PiDefaultModelSummary>,
 }
 
 /// 读取 `settings.json` 概况用于展示当前默认模型与文件位置。
@@ -150,86 +83,6 @@ pub fn pi_settings_summary_at(agent_dir: &Path) -> Result<PiSettingsSummary, Str
     })
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PiDefaultModelConfig {
-    pub provider: String,
-    pub model: String,
-    #[serde(default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub thinking_level: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PiCustomModel {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub context_window: Option<u64>,
-    #[serde(default)]
-    pub max_tokens: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PiCustomProvider {
-    pub id: String,
-    pub display_name: String,
-    pub api: String,
-    #[serde(rename = "baseUrl", default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub credential_configured: bool,
-    #[serde(default)]
-    pub models: Vec<PiCustomModel>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PiModelSettings {
-    pub default_model: PiDefaultModelConfig,
-    pub credential_configured: bool,
-    #[serde(default)]
-    pub custom_providers: Vec<PiCustomProvider>,
-}
-
-/// 智能体定义页下拉用的一条模型。不依赖正在跑的 Pi 会话。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PiModelChoice {
-    pub provider: String,
-    pub provider_name: String,
-    pub id: String,
-    pub name: String,
-}
-
-impl PiModelChoice {
-    pub fn label(&self) -> String {
-        if self.name.trim().is_empty() || self.name == self.id {
-            format!("{} / {}", self.provider_name, self.id)
-        } else {
-            format!("{} / {}", self.provider_name, self.name)
-        }
-    }
-
-    pub fn short_label(&self) -> &str {
-        if self.name.trim().is_empty() {
-            &self.id
-        } else {
-            &self.name
-        }
-    }
-}
-
-/// 下拉里按 provider 分组，避免把所有模型摊成一条长名单。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PiModelChoiceGroup {
-    pub provider: String,
-    pub provider_name: String,
-    pub models: Vec<PiModelChoice>,
-}
-
 /// 从 `models.json` 和 Pi 的 `models-store.json` 拼一份可选模型目录。
 /// `models-store` 只收已经配了凭据或自定义过的 provider，缓存里的其它目录不进名单。
 pub fn list_pi_model_choices() -> Vec<PiModelChoice> {
@@ -238,25 +91,6 @@ pub fn list_pi_model_choices() -> Vec<PiModelChoice> {
 
 pub fn list_pi_model_choice_groups() -> Vec<PiModelChoiceGroup> {
     group_pi_model_choices(list_pi_model_choices())
-}
-
-pub fn group_pi_model_choices(choices: Vec<PiModelChoice>) -> Vec<PiModelChoiceGroup> {
-    let mut groups: Vec<PiModelChoiceGroup> = Vec::new();
-    for choice in choices {
-        if let Some(group) = groups
-            .iter_mut()
-            .find(|group| group.provider == choice.provider)
-        {
-            group.models.push(choice);
-        } else {
-            groups.push(PiModelChoiceGroup {
-                provider: choice.provider.clone(),
-                provider_name: choice.provider_name.clone(),
-                models: vec![choice],
-            });
-        }
-    }
-    groups
 }
 
 pub fn list_pi_model_choices_at(agent_dir: &Path) -> Vec<PiModelChoice> {
@@ -549,40 +383,102 @@ pub(crate) fn read_or_create_json(path: &Path) -> Result<serde_json::Value, Stri
     }
 }
 
+/// 原子写 JSON：同目录临时文件写好再 rename 过去。
+///
+/// - 路径是符号链接（dotfiles 常这么管 `~/.pi/agent`）时写到它最终指向的文件；直接 rename
+///   到链接上会把链接换成普通文件。
+/// - 已有文件沿用原来的权限位：`models.json`、`mcp.json` 里可能直接写着令牌，用户
+///   `chmod 600` 过，改一次设置不能变成谁都能读。新建的文件一律 0600。
+/// - `secure`（`auth.json`）：不管原来是什么都收紧到 0600。
 pub(crate) fn write_json_file(
     path: &Path,
     value: &serde_json::Value,
     secure: bool,
 ) -> Result<(), String> {
+    let path = resolve_symlinks(path)?;
+    let path = path.as_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;
     }
     let content =
         serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
+    #[cfg(unix)]
+    let mode = target_file_mode(path, secure)?;
 
     let tmp_path = unique_tmp_path(path);
-    {
+    let write_tmp = || -> Result<(), String> {
         use std::io::Write as _;
-        let mut file = std::fs::File::create(&tmp_path)
-            .map_err(|e| format!("创建临时文件 {} 失败：{e}", tmp_path.display()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // 先以 0600 建出来，内容写进去之前就不给别人读。
         #[cfg(unix)]
-        if secure {
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp_path)
+            .map_err(|e| format!("创建临时文件 {} 失败：{e}", tmp_path.display()))?;
+        // 建文件的权限受 umask 影响，这里再显式设一次，才能原样还原用户给的权限。
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            file.set_permissions(std::fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("设置临时文件 {} 的权限失败：{e}", tmp_path.display()))?;
         }
         file.write_all(content.as_bytes())
             .map_err(|e| format!("写入临时文件 {} 失败：{e}", tmp_path.display()))?;
         file.flush()
             .map_err(|e| format!("刷新临时文件 {} 失败：{e}", tmp_path.display()))?;
         file.sync_all()
-            .map_err(|e| format!("同步临时文件 {} 失败：{e}", tmp_path.display()))?;
+            .map_err(|e| format!("同步临时文件 {} 失败：{e}", tmp_path.display()))
+    };
+    if let Err(error) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
     }
     if let Err(error) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("覆盖写入 {} 失败：{error}", path.display()));
     }
     Ok(())
+}
+
+/// 顺着符号链接找到最终路径。目标还不存在（悬空链接）也返回目标，写出来正好补上。
+fn resolve_symlinks(path: &Path) -> Result<PathBuf, String> {
+    // 和内核的 MAXSYMLINKS 同量级，防链接成环。
+    const MAX_HOPS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_HOPS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current)
+                    .map_err(|e| format!("读取符号链接 {} 失败：{e}", current.display()))?;
+                // 相对目标相对链接所在目录；绝对目标 `join` 后就是它本身。
+                current = match current.parent() {
+                    Some(parent) => parent.join(target),
+                    None => target,
+                };
+            }
+            _ => return Ok(current),
+        }
+    }
+    Err(format!("{} 的符号链接层数过多", path.display()))
+}
+
+/// 写出去的文件该有的权限位。
+#[cfg(unix)]
+fn target_file_mode(path: &Path, secure: bool) -> Result<u32, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    if secure {
+        return Ok(0o600);
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.permissions().mode() & 0o777),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0o600),
+        Err(error) => Err(format!("读取 {} 的权限失败：{error}", path.display())),
+    }
 }
 
 /// Pi 和登录助手用 `proper-lockfile` 锁 `auth.json`：锁是旁边的 `auth.json.lock` 目录。
@@ -954,27 +850,6 @@ pub fn clear_pi_provider_base_url_at(agent_dir: &Path, provider_id: &str) -> Res
         write_json_file(&models_path, &models, false)?;
     }
     Ok(())
-}
-
-/// 自定义 Provider 在 `models.json` 里的键名。
-///
-/// Pi 把这个字符串当对象键用，大小写敏感、本身几乎不限制字符。我们只拦空键、空白、
-/// 以及会把 JSON 键弄乱的符号；`Token-X` 这种大小写混写必须能过——用户填的就是这个。
-pub fn validate_custom_provider_id(id: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err("请填写 Provider ID".to_string());
-    }
-    let valid = id.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic())
-        && id
-            .split('-')
-            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric()));
-    if valid {
-        Ok(())
-    } else {
-        Err(format!(
-            "Provider ID「{id}」无效：须以字母开头，只能含字母、数字和短连字符"
-        ))
-    }
 }
 
 /// 保存或添加自定义 Provider 配置。
@@ -1823,5 +1698,188 @@ mod tests {
         assert!(validate_custom_provider_id("acme-").is_err());
         assert!(validate_custom_provider_id("acme--gw").is_err());
         assert!(validate_custom_provider_id("token x").is_err());
+    }
+}
+
+#[cfg(test)]
+mod pi_model_settings_integration_tests {
+    use crate::pi_model_settings::{
+        PiCustomModel, PiCustomProvider, PiDefaultModelConfig, load_pi_model_settings_at,
+        pi_settings_summary_at, remove_pi_custom_provider_at, save_pi_custom_provider_at,
+        save_pi_default_model_at, write_json_file,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn pi_model_settings_lifecycle_in_isolated_dir() {
+        let temp_dir = std::env::temp_dir().join(format!("smelt-pi-test-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let temp = temp_dir.as_path();
+        let initial = load_pi_model_settings_at(temp).expect("load initial");
+        assert_eq!(initial.default_model.provider, "deepseek");
+        assert_eq!(initial.default_model.model, "deepseek-chat");
+        assert_eq!(initial.default_model.thinking_level, "medium");
+        let environment_credential_configured =
+            std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+        assert_eq!(
+            initial.credential_configured,
+            environment_credential_configured
+        );
+        assert!(initial.custom_providers.is_empty());
+
+        let default_config = PiDefaultModelConfig {
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
+            thinking_level: "low".to_string(),
+        };
+        save_pi_default_model_at(temp, &default_config, Some("sk-official-key"))
+            .expect("save default");
+
+        let custom_provider = PiCustomProvider {
+            id: "local-vllm".to_string(),
+            display_name: "Local vLLM".to_string(),
+            api: "openai-completions".to_string(),
+            base_url: "http://localhost:8000/v1".to_string(),
+            credential_configured: false,
+            models: vec![PiCustomModel {
+                id: "qwen-2.5-coder".to_string(),
+                name: "Qwen 2.5 Coder 32B".to_string(),
+                context_window: Some(65536),
+                max_tokens: Some(4096),
+            }],
+        };
+        save_pi_custom_provider_at(temp, &custom_provider, None, false).expect("save custom");
+
+        let reloaded = load_pi_model_settings_at(temp).expect("reload");
+        assert_eq!(reloaded.default_model.provider, "deepseek");
+        assert_eq!(reloaded.default_model.base_url, "https://api.deepseek.com");
+        assert_eq!(reloaded.default_model.thinking_level, "low");
+        assert!(reloaded.credential_configured);
+        assert_eq!(reloaded.custom_providers.len(), 1);
+        assert_eq!(reloaded.custom_providers[0].id, "local-vllm");
+        assert_eq!(reloaded.custom_providers[0].models[0].id, "qwen-2.5-coder");
+
+        let summary = pi_settings_summary_at(temp).expect("summary");
+        let dm = summary.default_model.expect("default model in summary");
+        assert_eq!(dm.provider.as_deref(), Some("deepseek"));
+        assert_eq!(dm.model.as_deref(), Some("deepseek-chat"));
+        assert_eq!(dm.thinking_level.as_deref(), Some("low"));
+
+        remove_pi_custom_provider_at(temp, "local-vllm").expect("remove custom");
+        let after_removal = load_pi_model_settings_at(temp).expect("after remove");
+        assert!(after_removal.custom_providers.is_empty());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_file_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// 用户把写着令牌的配置 `chmod 600` 了，改一次设置不能让它变成谁都能读；
+    /// 特意放开的权限也不该被我们改掉。
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_keeps_the_existing_file_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mcp.json");
+        for mode in [0o600, 0o640, 0o644] {
+            std::fs::write(&path, "{}").unwrap();
+            set_file_mode(&path, mode);
+            write_json_file(&path, &serde_json::json!({ "mcpServers": {} }), false).unwrap();
+            assert_eq!(file_mode(&path), mode, "原来是 {mode:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_files_are_private_and_auth_is_always_tightened() {
+        let temp = tempfile::tempdir().unwrap();
+        let fresh = temp.path().join("models.json");
+        write_json_file(&fresh, &serde_json::json!({}), false).unwrap();
+        assert_eq!(file_mode(&fresh), 0o600, "新建的配置里可能会写进令牌");
+
+        let auth = temp.path().join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        set_file_mode(&auth, 0o644);
+        write_json_file(&auth, &serde_json::json!({}), true).unwrap();
+        assert_eq!(file_mode(&auth), 0o600);
+    }
+
+    /// dotfiles 把 `~/.pi/agent/mcp.json` 链到仓库里：写的是仓库里那份，链接保持原样。
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_through_a_symlink_updates_the_target_and_keeps_the_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let dotfiles = temp.path().join("dotfiles");
+        let agent = temp.path().join("agent");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        let target = dotfiles.join("mcp.json");
+        std::fs::write(&target, "{}").unwrap();
+        set_file_mode(&target, 0o600);
+        let link = agent.join("mcp.json");
+        // 相对链接：相对的是链接所在目录，不是进程当前目录。
+        std::os::unix::fs::symlink("../dotfiles/mcp.json", &link).unwrap();
+
+        write_json_file(&link, &serde_json::json!({ "k": 1 }), false).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "链接不能被换成普通文件"
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(written["k"], 1);
+        assert_eq!(file_mode(&target), 0o600);
+        let leftovers: Vec<_> = std::fs::read_dir(&agent)
+            .unwrap()
+            .chain(std::fs::read_dir(&dotfiles).unwrap())
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "临时文件没清掉：{leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_filled_in_instead_of_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("store").join("mcp.json");
+        let link = temp.path().join("mcp.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_json_file(&link, &serde_json::json!({}), false).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(target.is_file());
+        assert_eq!(file_mode(&target), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loops_are_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a.json");
+        let b = temp.path().join("b.json");
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        assert!(write_json_file(&a, &serde_json::json!({}), false).is_err());
     }
 }

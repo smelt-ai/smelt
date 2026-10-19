@@ -19,7 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use smelt_core::agent_event::{AgentEvent, AgentEventKind};
-use smelt_core::daemon_protocol::DaemonOperation;
+use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 fn main() {
     // 用户级 hooks 在 Smelt 外也会运行；即使下方因缺少 SMELT_* 环境变量而退出，

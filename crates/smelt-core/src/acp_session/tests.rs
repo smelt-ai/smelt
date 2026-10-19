@@ -374,7 +374,7 @@ fn history_replay_does_not_publish_the_empty_scratch_buffer() {
 
     assert!(state.entries.is_empty(), "归约草稿从空缓冲重建");
     assert!(state.replaying_history);
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.history_len, Some(2));
     assert!(
         live.open_turn.is_empty(),
@@ -390,7 +390,7 @@ fn history_replay_does_not_publish_the_empty_scratch_buffer() {
         ConversationEvent::UserChunk("看看这个仓库".into()),
     );
     assert_eq!(state.entries.len(), 1, "草稿只累积已经重放的条目");
-    assert_eq!(SessionLive::from_state(&state).history_len, Some(2));
+    assert_eq!(super::live_from_state(&state).history_len, Some(2));
     assert_eq!(state.to_snapshot(false).entries.len(), 2);
 
     apply_event(
@@ -405,7 +405,7 @@ fn history_replay_does_not_publish_the_empty_scratch_buffer() {
 
     assert!(!state.replaying_history);
     assert_eq!(state.entries.len(), 2);
-    let done = SessionLive::from_state(&state);
+    let done = super::live_from_state(&state);
     assert_eq!(done.history_len, Some(2));
     assert_eq!(state.to_snapshot(false).entries.len(), 2);
 }
@@ -461,7 +461,7 @@ fn prompt_during_empty_replay_appends_to_the_published_transcript() {
         [AcpEntry::User(first), AcpEntry::User(second)]
             if first == "看看这个仓库" && second == "继续"
     ));
-    assert_eq!(SessionLive::from_state(&state).history_len, Some(1));
+    assert_eq!(super::live_from_state(&state).history_len, Some(1));
 }
 
 /// 重放失败时草稿是空的或不完整的。失败不能把上一份已发布正文换成这份草稿。
@@ -481,7 +481,7 @@ fn failed_history_replay_keeps_the_transcript_that_was_already_published() {
     assert!(!state.replaying_history);
     assert!(matches!(state.phase, DaemonPhase::Dead));
     assert!(matches!(&state.entries[..], [AcpEntry::User(text)] if text == "看看这个仓库"));
-    assert_eq!(SessionLive::from_state(&state).history_len, Some(1));
+    assert_eq!(super::live_from_state(&state).history_len, Some(1));
 }
 
 /// 恢复后用户不再发消息时，`replaying_history` 必须靠显式的结束信号收尾。
@@ -1054,7 +1054,7 @@ fn idle_session_keeps_history_out_of_the_open_turn() {
     ];
     let (start, end) = state.open_turn_range();
     assert_eq!((start, end), (2, 2));
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.history_len, Some(2));
     assert!(live.open_turn.is_empty());
 
@@ -1574,6 +1574,264 @@ fn late_agent_chunk_after_cancel_is_dropped_before_next_prompt() {
 }
 
 #[test]
+fn a_turn_the_provider_starts_itself_runs_and_completes_even_after_a_stop() {
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "跑测试".into(), Vec::new());
+    note_cancel_requested(&mut s);
+    apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::Cancelled));
+    let entries_before = s.entries.len();
+
+    // 后台任务结束，Pi 自己起了一轮。
+    apply_event(&mut s, ConversationEvent::ProviderTurnStarted);
+    assert!(matches!(s.phase, DaemonPhase::Thinking));
+    assert!(s.turn_started_at_ms.is_some());
+    apply_event(
+        &mut s,
+        ConversationEvent::AgentChunk {
+            thought: false,
+            text: "后台测试过了".into(),
+            parent_id: None,
+        },
+    );
+    assert!(
+        matches!(
+            s.entries.get(entries_before),
+            Some(AcpEntry::Assistant { text, thought: false }) if text == "后台测试过了"
+        ),
+        "停过的回合之后，Pi 自己起的这一轮不能被当成迟到正文丢掉"
+    );
+    assert_eq!(s.turn_timings.len(), 1, "没有用户消息，不记计时条目");
+
+    apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    assert!(matches!(s.phase, DaemonPhase::Idle));
+    assert!(s.completed_unread);
+    assert_eq!(s.turn_outcome, Some(AcpTurnOutcome::Succeeded));
+}
+
+fn background_task(id: &str, status: BackgroundTaskStatus) -> BackgroundTaskView {
+    BackgroundTaskView {
+        id: id.into(),
+        title: "测试".into(),
+        command: "npm test".into(),
+        status,
+        exit_code: None,
+        output: String::new(),
+        started_at_ms: 10,
+        finished_at_ms: None,
+        tool_call_id: None,
+    }
+}
+
+#[test]
+fn completion_waits_until_background_work_is_stopped() {
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "后台跑测试".into(), Vec::new());
+    apply_event(
+        &mut s,
+        ConversationEvent::BackgroundTasks(vec![background_task(
+            "bg-1",
+            BackgroundTaskStatus::Running,
+        )]),
+    );
+    apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::EndTurn));
+
+    assert!(matches!(s.phase, DaemonPhase::Idle), "用户仍能接着发");
+    assert!(!s.completed_unread, "后台还在跑，不能报完成");
+    assert!(s.completion_waits_on_background());
+
+    apply_event(
+        &mut s,
+        ConversationEvent::BackgroundTasks(vec![background_task(
+            "bg-1",
+            BackgroundTaskStatus::Stopped,
+        )]),
+    );
+    assert!(s.completed_unread, "停掉的不会叫醒 Pi，完成就在这时报");
+    assert!(!s.completion_waits_on_background());
+}
+
+#[test]
+fn a_finished_background_task_leaves_completion_to_the_turn_it_wakes() {
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "后台跑测试".into(), Vec::new());
+    apply_event(
+        &mut s,
+        ConversationEvent::BackgroundTasks(vec![background_task(
+            "bg-1",
+            BackgroundTaskStatus::Running,
+        )]),
+    );
+    apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    apply_event(
+        &mut s,
+        ConversationEvent::BackgroundTasks(vec![background_task(
+            "bg-1",
+            BackgroundTaskStatus::Completed,
+        )]),
+    );
+    assert!(
+        !s.completed_unread,
+        "结果马上会叫醒 Pi 再跑一轮，这时报完成会紧接着又开始干活"
+    );
+    assert!(!s.completion_waits_on_background());
+
+    apply_event(&mut s, ConversationEvent::ProviderTurnStarted);
+    apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::EndTurn));
+    assert!(s.completed_unread);
+}
+
+#[test]
+fn a_failed_turn_is_reported_even_while_background_work_runs() {
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "后台跑测试".into(), Vec::new());
+    apply_event(
+        &mut s,
+        ConversationEvent::BackgroundTasks(vec![background_task(
+            "bg-1",
+            BackgroundTaskStatus::Running,
+        )]),
+    );
+    apply_event(&mut s, ConversationEvent::TurnFailed("模型请求失败".into()));
+
+    assert!(s.completed_unread, "失败要立刻让人看到");
+    assert!(!s.completion_waits_on_background());
+}
+
+/// 自动重试的状态跟着这一轮走：开始时挂上，重试结束、回合结束、开新一轮都清掉。
+#[test]
+fn provider_retry_lives_only_while_the_turn_retries() {
+    let retry = crate::acp_session::ProviderRetryView {
+        attempt: 1,
+        max_attempts: 3,
+        delay_ms: 2_000,
+        error: "overloaded".into(),
+    };
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "跑一下".into(), Vec::new());
+    apply_event(
+        &mut s,
+        ConversationEvent::ProviderRetry(Some(retry.clone())),
+    );
+    assert_eq!(s.to_snapshot(false).provider_retry, Some(retry.clone()));
+    apply_event(&mut s, ConversationEvent::ProviderRetry(None));
+    assert_eq!(s.provider_retry, None);
+
+    apply_event(
+        &mut s,
+        ConversationEvent::ProviderRetry(Some(retry.clone())),
+    );
+    apply_event(&mut s, ConversationEvent::TurnFailed("重试用完了".into()));
+    assert_eq!(s.provider_retry, None, "回合结束时不能留着正在重试");
+
+    s.provider_retry = Some(retry);
+    note_prompt_sent(&mut s, "再来".into(), Vec::new());
+    assert_eq!(s.provider_retry, None);
+}
+
+/// 插话、压缩这类失败要让用户看见。`status_line` 只在启动横幅里显示，提示不能走它。
+#[test]
+fn notice_is_not_startup_status_and_clears_when_the_user_starts_a_turn() {
+    let mut s = fresh_state();
+    s.phase = DaemonPhase::Idle;
+    let outcome = apply_event(
+        &mut s,
+        ConversationEvent::Notice("压缩上下文失败：busy".into()),
+    );
+    assert!(outcome.envelope_changed, "提示在信封里，这一帧必须带上");
+    let snap = s.to_snapshot(false);
+    assert_eq!(snap.status_line, None);
+    let first = snap.notice.expect("提示要进快照");
+    assert_eq!(first.text, "压缩上下文失败：busy");
+
+    apply_event(
+        &mut s,
+        ConversationEvent::Notice("Pi Extension：boom".into()),
+    );
+    let second = s.notice.clone().unwrap();
+    assert_eq!(second.text, "Pi Extension：boom");
+    assert!(
+        second.id > first.id,
+        "客户端关掉旧提示不能连新提示一起藏起来"
+    );
+
+    // Provider 自己开的一轮不是用户的下一步，提示留着。
+    apply_event(&mut s, ConversationEvent::ProviderTurnStarted);
+    assert_eq!(s.notice, Some(second));
+    apply_event(&mut s, ConversationEvent::TurnEnded(StopReason::EndTurn));
+
+    note_prompt_sent(&mut s, "再来".into(), Vec::new());
+    assert_eq!(s.notice, None, "用户开了新一轮，上一轮的失败提示收起");
+
+    apply_event(
+        &mut s,
+        ConversationEvent::Notice("停止后台任务失败：gone".into()),
+    );
+    reset_for_restart(&mut s);
+    assert_eq!(s.notice, None);
+}
+
+#[test]
+fn hosted_mirror_keeps_queue_and_notice_through_envelope_omitted_frames() {
+    let mut host = fresh_state();
+    host.phase = DaemonPhase::Idle;
+    host.pending_prompts = vec![PendingPromptView {
+        id: 7,
+        text: "下一句".into(),
+        image_count: 2,
+        withdrawable: true,
+    }];
+    apply_event(
+        &mut host,
+        ConversationEvent::Notice("插入消息失败：x".into()),
+    );
+
+    let mut mirror = fresh_state();
+    mirror
+        .merge_hosted_snapshot(host.to_snapshot(false))
+        .unwrap();
+    assert_eq!(mirror.pending_prompts, host.pending_prompts);
+    assert_eq!(mirror.notice, host.notice);
+
+    let total = host.entries_total();
+    let tail = host.to_snapshot_range_selective(false, total, total, false, false, false);
+    assert!(tail.envelope_omitted);
+    mirror.merge_hosted_snapshot(tail).unwrap();
+    assert_eq!(
+        mirror.pending_prompts, host.pending_prompts,
+        "正文帧不能清掉排队"
+    );
+    assert_eq!(mirror.notice, host.notice);
+
+    // 队列本体不随进程交接，换进程后的投影从空开始，不能留幽灵条目。
+    let restored = AcpSessionState::from_snapshot(host.to_snapshot(false));
+    assert!(restored.pending_prompts.is_empty());
+}
+
+#[test]
+fn snapshot_from_an_older_daemon_has_no_queue_or_notice() {
+    let mut value = serde_json::to_value(fresh_state().to_snapshot(false)).unwrap();
+    let object = value.as_object_mut().unwrap();
+    assert!(object.remove("pending_prompts").is_some());
+    assert!(object.remove("notice").is_some());
+    let snap: ConversationSnapshot = serde_json::from_value(value).unwrap();
+    assert!(snap.pending_prompts.is_empty());
+    assert_eq!(snap.notice, None);
+}
+
+#[test]
+fn provider_turn_start_does_not_restart_an_open_turn() {
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "做吧".into(), Vec::new());
+    let seq = s.turn_seq;
+    let started = s.turn_started_at_ms;
+
+    apply_event(&mut s, ConversationEvent::ProviderTurnStarted);
+
+    assert_eq!(s.turn_seq, seq);
+    assert_eq!(s.turn_started_at_ms, started);
+}
+
+#[test]
 fn stop_reasons_preserve_success_cancel_and_failure_semantics() {
     for (reason, expected) in [
         (StopReason::EndTurn, AcpTurnOutcome::Succeeded),
@@ -2025,7 +2283,7 @@ fn live_header_matches_snapshot_without_entry_payload() {
             raw_input: None,
         },
     );
-    let header = SessionLive::header_from_state(&state);
+    let header = super::live_header_from_state(&state);
     let via_snapshot = SessionLive::from_snapshot(&state.to_snapshot(false));
     assert_eq!(header.phase, via_snapshot.phase);
     assert_eq!(header.end_reason, via_snapshot.end_reason);
@@ -2036,7 +2294,7 @@ fn live_header_matches_snapshot_without_entry_payload() {
     assert_eq!(header.status_line, via_snapshot.status_line);
     assert_eq!(header.history_len, None);
     assert!(header.open_turn.is_empty());
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.session_title, header.session_title);
     assert!(live.history_len.is_some());
     assert!(
@@ -2606,17 +2864,30 @@ fn compaction_and_native_queue_events_update_the_snapshot() {
 
 #[test]
 fn claimed_queue_text_is_removed_once_and_only_if_returned() {
+    let image = |data: &str| crate::acp_chat::AcpImage {
+        mime: "image/png".into(),
+        data_b64: data.into(),
+    };
     let mut texts = vec![
         "别的".to_string(),
         "但是我想字数一致".to_string(),
         "但是我想字数一致".to_string(),
     ];
-    assert!(take_claimed_queue_text(&mut texts, "但是我想字数一致"));
+    let mut images = vec![Vec::new(), vec![image("a")], vec![image("b")]];
+    assert_eq!(
+        take_claimed_queue_text(&mut texts, &mut images, "但是我想字数一致"),
+        Some(vec![image("a")]),
+        "认领的那一条带走自己的附图"
+    );
     assert_eq!(
         texts,
         vec!["别的".to_string(), "但是我想字数一致".to_string()]
     );
-    assert!(!take_claimed_queue_text(&mut texts, "没有"));
+    assert_eq!(images, vec![Vec::new(), vec![image("b")]]);
+    assert_eq!(
+        take_claimed_queue_text(&mut texts, &mut images, "没有"),
+        None
+    );
 
     let mut state = fresh_state();
     state.queued_steering = vec!["带图".into()];
@@ -2674,9 +2945,13 @@ fn composer_restore_acknowledgement_is_idempotent_and_revision_safe() {
         &mut state,
         ConversationEvent::ComposerRestore {
             revision: 3,
-            texts: Vec::new(),
-            images: vec![image.clone()],
+            texts: vec![String::new()],
+            images: vec![vec![image.clone()]],
         },
+    );
+    assert!(
+        state.composer_restore_texts.is_empty(),
+        "只有图的那条不能在输入框里留空段"
     );
     assert_eq!(state.composer_restore_images, vec![image]);
     assert!(acknowledge_composer_restore(&mut state, 3));
@@ -3039,7 +3314,7 @@ fn hosted_mirror_keeps_the_last_turn_when_idle() {
         state.resolved_session_title().as_deref(),
         Some("来自宿主的标题")
     );
-    let live = SessionLive::from_state(&state);
+    let live = super::live_from_state(&state);
     assert_eq!(live.history_len, Some(4));
     assert!(live.open_turn.is_empty());
 

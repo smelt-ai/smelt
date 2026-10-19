@@ -65,7 +65,7 @@ make help                   # Show all available build targets
 Run tests and type checks:
 
 ```sh
-make check-all              # rustfmt + clippy + tests + plugin SDK
+make check-all              # rustfmt + clippy + tests + Pi Agent
 make test                   # cargo nextest（与 CI 同一运行器）
 ```
 

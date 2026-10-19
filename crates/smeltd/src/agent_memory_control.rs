@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use smelt_core::agent_memory::{self, MemoryRequestError, MemoryScope};
 use smelt_core::control_api::{
     AgentMemoryLayer, AgentMemoryMetaResult, AgentMemoryRecordReadParams,
-    AgentMemoryRecordWriteParams, AgentMemorySessionParams, ControlError, ControlErrorCode,
+    AgentMemoryRecordWriteParams, AgentMemorySessionParams,
 };
+use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 
 use super::{AcpSessions, Phase, acp_runtime_alive};
 
@@ -150,7 +151,6 @@ mod tests {
                 id,
                 None,
                 Some(smelt_core::conversation::ConversationBinding::Direct),
-                None,
                 None,
             )
         });

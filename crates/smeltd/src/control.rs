@@ -2,7 +2,6 @@
 //!
 //! 领域逻辑留在各自模块；这里仅负责 wire 解码、能力发现、类型转换和统一错误。
 
-use std::io::Write;
 use std::os::unix::net::UnixStream;
 
 use serde::Serialize;
@@ -15,15 +14,17 @@ use smelt_core::control_api::{
     AgentDefinitionGetResult, AgentDefinitionIdParams, AgentDefinitionListResult,
     AgentDefinitionUpdateParams, AgentListParams, AgentMemoryRecordReadParams,
     AgentMemoryRecordWriteParams, AgentMemorySessionParams, AgentSendParams, AutomationGetResult,
-    AutomationListResult, AutomationRunOnceResult, AutomationSetEnabledParams,
+    AutomationListResult, AutomationRunOnceResult, AutomationSetEnabledParams, SessionListResult,
+};
+use smelt_runtime_client::protocol::control::{
     CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlError, ControlErrorCode,
     ControlMethod, ControlProtocolDescription, ControlRequestEnvelope, ControlResponse,
-    DaemonRuntimeInfo, EmptyParams, SUPPORTED_CONTROL_METHODS, SessionListResult,
+    DaemonRuntimeInfo, EmptyParams, EventProtocolDescription, SUPPORTED_CONTROL_METHODS,
     SystemDescribeResult, decode_params, decode_request_envelope,
 };
 
 use super::session_catalog::published_session_states;
-use super::{AcpSessions, EventHubHandle, Sessions};
+use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions};
 
 fn error_value(
     control_version: u16,
@@ -106,10 +107,13 @@ fn operation_error(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_control(
     envelope: ControlRequestEnvelope,
+    principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
+    remote_sessions: &RemoteSessions,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -156,9 +160,627 @@ fn dispatch_control(
                     started_at: super::started_at(),
                     session_count: published_session_states(sessions, acp_sessions).len(),
                     agent_event_version: AGENT_EVENT_VERSION,
+                    runtime_id: super::runtime_identity::runtime_id().map(|id| id.to_string()),
+                    os: Some(std::env::consts::OS.to_string()),
+                    arch: Some(std::env::consts::ARCH.to_string()),
+                    hostname: smelt_sys::hostname(),
                 },
+                events: Some(EventProtocolDescription {
+                    protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
+                    projection_version: smelt_event_protocol::CORE_PROJECTION_VERSION,
+                    session_projection_version:
+                        smelt_event_protocol::CORE_SESSION_PROJECTION_VERSION,
+                    session_state_schema_version:
+                        smelt_event_protocol::CORE_SESSION_STATE_SCHEMA_VERSION,
+                }),
             };
             success_value(control_version, &request_id, result)
+        }
+        git @ (ControlMethod::GitDiscover
+        | ControlMethod::GitRepoInfo
+        | ControlMethod::GitStatus
+        | ControlMethod::GitBranches
+        | ControlMethod::GitCheckout
+        | ControlMethod::GitBranchDelete
+        | ControlMethod::GitMerge
+        | ControlMethod::GitStage
+        | ControlMethod::GitUnstage
+        | ControlMethod::GitDiscardFile
+        | ControlMethod::GitApplyPatch
+        | ControlMethod::GitDiscardAll
+        | ControlMethod::GitCommit
+        | ControlMethod::GitPush
+        | ControlMethod::GitFetch
+        | ControlMethod::GitPull
+        | ControlMethod::GitStashPush
+        | ControlMethod::GitStashPop
+        | ControlMethod::GitFileDiff
+        | ControlMethod::GitAllDiff
+        | ControlMethod::GitLog
+        | ControlMethod::GitCommitFiles
+        | ControlMethod::GitCommitFileDiff) => match super::git_control::dispatch(git, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
+        files @ (ControlMethod::ProjectTree
+        | ControlMethod::ProjectSearch
+        | ControlMethod::ProjectDeleteEntry
+        | ControlMethod::FileOpen
+        | ControlMethod::FileSave
+        | ControlMethod::SessionCompleteFiles) => {
+            match super::files_control::dispatch(files, params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        history @ (ControlMethod::HistoryList
+        | ControlMethod::HistoryDetail
+        | ControlMethod::HistoryDelete
+        | ControlMethod::HistoryTitles
+        | ControlMethod::HistoryRememberAgent) => {
+            match super::history_control::dispatch(history, params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        pi @ (ControlMethod::PiConfigGet
+        | ControlMethod::PiConfigEnsureFile
+        | ControlMethod::PiModelsSetThinkingLevel
+        | ControlMethod::PiModelsSaveDefault
+        | ControlMethod::PiProvidersDiscoverModels
+        | ControlMethod::PiProvidersSaveCustom
+        | ControlMethod::PiProvidersRemoveCustom
+        | ControlMethod::PiProvidersRefreshAuto
+        | ControlMethod::PiMcpAddPreset
+        | ControlMethod::PiMcpSetEnabled
+        | ControlMethod::PiMcpRemove
+        | ControlMethod::PiMcpLogin
+        | ControlMethod::PiPluginsRemove
+        | ControlMethod::PiPluginsImport
+        | ControlMethod::PiAuthProviders
+        | ControlMethod::PiAuthModels
+        | ControlMethod::PiAuthLogout
+        | ControlMethod::PiAuthLoginStart
+        | ControlMethod::PiAuthLoginEvents
+        | ControlMethod::PiAuthLoginAnswer
+        | ControlMethod::PiAuthLoginCancel) => match super::pi_control::dispatch(pi, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
+        dsh @ (ControlMethod::DshConfigGet
+        | ControlMethod::DshConfigEnsureFile
+        | ControlMethod::DshModelsCapabilities
+        | ControlMethod::DshModelsSaveDefault
+        | ControlMethod::DshProvidersDiscoverModels
+        | ControlMethod::DshProvidersSaveCustom
+        | ControlMethod::DshProvidersRefreshAuto
+        | ControlMethod::DshPluginsList
+        | ControlMethod::DshPluginsRun) => match super::dsh_control::dispatch(dsh, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
+        ControlMethod::SessionLaunchPrepare => {
+            let params: smelt_core::agent_definition_store::LaunchPrepareParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_definition_store::prepare_launch(params),
+            )
+        }
+        ControlMethod::SessionLoadedSkills => {
+            let params: smelt_core::agent_definition_store::LoadedSkillsParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_definition_store::loaded_skills(params),
+            )
+        }
+        ControlMethod::TerminalThemePublish => {
+            let theme: smelt_core::terminal_theme::TerminalThemeSnapshot =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            smelt_core::terminal_theme::publish(&theme);
+            success_value(control_version, &request_id, EmptyParams::default())
+        }
+        ControlMethod::DesktopTypeText => {
+            let params: smelt_runtime_client::protocol::desktop::DesktopTypeTextParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::desktop::type_text(&params.text) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(message) => error_value(
+                    control_version,
+                    &request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, message),
+                ),
+            }
+        }
+        ControlMethod::NewSessionPinsGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::new_session::load_preferences(),
+            )
+        }
+        ControlMethod::NewSessionPinsToggle => {
+            let params: smelt_core::new_session::PinParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::new_session::toggle_pin(params),
+            )
+        }
+        ControlMethod::RemoteConfigGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::remote_config::load(),
+            )
+        }
+        ControlMethod::RemoteConfigSet => {
+            let config: smelt_core::remote_config::RemoteConfig =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            smelt_core::remote_config::save(&config);
+            let status = match super::remote::lifecycle_remote() {
+                Some(state) => {
+                    super::remote::apply_remote_config(state, &config);
+                    super::remote::remote_status(state)
+                }
+                None => smelt_core::remote_config::RemoteAccessState::Off,
+            };
+            success_value(control_version, &request_id, status)
+        }
+        ControlMethod::RemoteStatus => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let status = super::remote::lifecycle_remote()
+                .map(super::remote::remote_status)
+                .unwrap_or_default();
+            success_value(control_version, &request_id, status)
+        }
+        device @ (ControlMethod::DevicePairBegin
+        | ControlMethod::DevicePair
+        | ControlMethod::DeviceList
+        | ControlMethod::DeviceRevoke) => {
+            match super::devices::dispatch(device, params, principal) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::QuotaGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::quota_service::snapshot(),
+            )
+        }
+        ControlMethod::QuotaRefresh => {
+            let params: smelt_core::quota_service::QuotaRefreshParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::quota_service::refresh(params),
+            )
+        }
+        ControlMethod::AgentCliInspect => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::acp_conn::inspect_acp_runtime(),
+            )
+        }
+        ControlMethod::AgentCliInstall => {
+            let params: smelt_core::control_api::AgentCliInstallParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let Some(agent) = smelt_core::agent_kind::ConversationAgentKind::from_id(&params.agent)
+            else {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::InvalidParams,
+                        format!("未知的 agent：{}", params.agent),
+                    ),
+                );
+            };
+            match smelt_core::acp_conn::install_acp_cli(agent) {
+                Ok(report) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AgentCliInstallResult {
+                        installer: report.installer.to_string(),
+                        diagnostics: smelt_core::acp_conn::inspect_acp_runtime(),
+                    },
+                ),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentHooksStatus => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_hooks::hooks_status(),
+            )
+        }
+        ControlMethod::AgentHooksInstall | ControlMethod::AgentHooksUninstall => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let result = if known_method == ControlMethod::AgentHooksInstall {
+                smelt_core::agent_hooks::install_agent_hooks()
+            } else {
+                smelt_core::agent_hooks::uninstall_agent_hooks()
+            };
+            match result {
+                Ok(()) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::agent_hooks::hooks_status(),
+                ),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::ConversationCreateForAgent => {
+            let params: AgentDefinitionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match create_agent_conversation(
+                &params.id,
+                sessions,
+                acp_sessions,
+                event_hub,
+                remote_sessions,
+            ) {
+                Ok(created) => success_value(control_version, &request_id, created),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentSpaceEnsure => {
+            let params: AgentDefinitionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::agent_definition_store::ensure_agent_space(&params.id) {
+                Some(path) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AgentSpaceResult {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                ),
+                None => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, "无法创建智能体工作区"),
+                ),
+            }
+        }
+        ControlMethod::SkillsSyncControl => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::control_skill::sync() {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
+            }
+        }
+        ControlMethod::ProjectWatch => {
+            let params: smelt_runtime_client::protocol::files::ProjectRootParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::project_watch::watch(&params.root, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentMemoryEnsureDir => {
+            let params: smelt_core::control_api::AgentMemoryDirParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let dir = match params.layer {
+                smelt_core::control_api::AgentMemoryLayer::Agent => {
+                    smelt_core::agent_definition_store::agent_memory_dir(&params.agent_id)
+                }
+                smelt_core::control_api::AgentMemoryLayer::User => {
+                    smelt_core::agent_definition_store::user_memory_dir()
+                }
+            };
+            match dir.filter(|dir| std::fs::create_dir_all(dir).is_ok()) {
+                Some(path) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_core::control_api::AgentSpaceResult {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                ),
+                None => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, "无法创建记忆目录"),
+                ),
+            }
+        }
+        ControlMethod::AutomationRunDetail => {
+            let params: smelt_core::control_api::AutomationRunDetailParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::control_api::AutomationRunDetailResult {
+                    archived_run: params
+                        .include_archived_run
+                        .then(|| smelt_core::automation_store::load_run(&params.run_id))
+                        .flatten(),
+                    transcript: smelt_core::automation_transcript::load_run_transcript(
+                        &params.run_id,
+                    )
+                    .unwrap_or_default(),
+                },
+            )
+        }
+        ControlMethod::AgentMemoryList => {
+            let params: AgentDefinitionIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            success_value(
+                control_version,
+                &request_id,
+                smelt_core::agent_memory::list_for_agent(&params.id),
+            )
+        }
+        ControlMethod::AgentMemoryDelete | ControlMethod::AgentMemoryApprove => {
+            let params: smelt_core::control_api::AgentMemoryFileParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let result = if known_method == ControlMethod::AgentMemoryDelete {
+                smelt_core::agent_memory::delete_for_agent(
+                    &params.agent_id,
+                    params.layer,
+                    &params.file_name,
+                )
+            } else {
+                smelt_core::agent_memory::approve_for_agent(
+                    &params.agent_id,
+                    params.layer,
+                    &params.file_name,
+                )
+            };
+            match result {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
+            }
+        }
+        ControlMethod::WorkspaceBrowseDirs => {
+            let params: smelt_runtime_client::protocol::workspace::BrowseDirsParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::project_files::browse_dirs(&params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
+            }
+        }
+        ControlMethod::WorkspaceLoad => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::workspace_catalog::load() {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                ),
+            }
+        }
+        ControlMethod::WorkspaceSave => {
+            let params: smelt_runtime_client::protocol::workspace::WorkspaceSaveParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::workspace_catalog::save(&params) {
+                Ok(revision) => success_value(
+                    control_version,
+                    &request_id,
+                    smelt_runtime_client::protocol::workspace::WorkspaceSaveResult { revision },
+                ),
+                Err(error) => {
+                    let code = match error {
+                        smelt_core::workspace_catalog::CatalogError::Conflict { .. } => {
+                            ControlErrorCode::Conflict
+                        }
+                        smelt_core::workspace_catalog::CatalogError::Invalid(_) => {
+                            ControlErrorCode::InvalidParams
+                        }
+                        smelt_core::workspace_catalog::CatalogError::Store(_) => {
+                            ControlErrorCode::OperationFailed
+                        }
+                    };
+                    error_value(
+                        control_version,
+                        request_id,
+                        ControlError::new(code, error.to_string()),
+                    )
+                }
+            }
+        }
+        ControlMethod::LaunchGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::launch_settings::load() {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::LaunchReplace => {
+            let params: smelt_core::control_api::LaunchReplaceParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::launch_settings::replace_entries(&params.base, params.entries) {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => {
+                    let code = match error {
+                        smelt_core::launch_settings::LaunchError::Conflict => {
+                            ControlErrorCode::Conflict
+                        }
+                        smelt_core::launch_settings::LaunchError::Store(_) => {
+                            ControlErrorCode::OperationFailed
+                        }
+                    };
+                    error_value(
+                        control_version,
+                        request_id,
+                        ControlError::new(code, error.to_string()),
+                    )
+                }
+            }
+        }
+        ControlMethod::MemoryTestEmbedding => {
+            let params: smelt_core::control_api::MemoryTestParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match memory_test_embedding(params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentHostGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match smelt_core::agent_host::load() {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
+        }
+        ControlMethod::AgentHostApplyEdit => {
+            let edit: smelt_core::agent_host::AgentHostEdit =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match smelt_core::agent_host::apply_edit(&edit) {
+                Ok(settings) => success_value(control_version, &request_id, settings),
+                Err(error) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::OperationFailed, error),
+                ),
+            }
         }
         ControlMethod::SessionList => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
@@ -334,8 +956,34 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
+            // 外观归桌面端：没有在线的桌面端就整单拒绝，别让记忆配置写了一半。
+            let wants_appearance = params
+                .settings
+                .keys()
+                .any(|key| !smelt_core::memory_settings::is_memory_key(key));
+            if wants_appearance && !event_hub.has_appearance_listener().unwrap_or(false) {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::FailedPrecondition,
+                        "外观属于桌面客户端，现在没有打开的桌面客户端来接收这次修改",
+                    ),
+                );
+            }
             match appearance_settings::update_settings(params).map_err(control_error_for_settings) {
-                Ok(result) => success_value(control_version, &request_id, result),
+                Ok(update) => {
+                    if !update.appearance.is_empty()
+                        && let Err(error) = event_hub.request_appearance_change(update.appearance)
+                    {
+                        return error_value(
+                            control_version,
+                            request_id,
+                            ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
+                        );
+                    }
+                    success_value(control_version, &request_id, update.result)
+                }
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
@@ -451,6 +1099,29 @@ fn dispatch_control(
     }
 }
 
+/// 用表单里的地址和模型真发一次 `/embeddings` 请求；没给密钥就用库里存的。
+fn memory_test_embedding(
+    params: smelt_core::control_api::MemoryTestParams,
+) -> Result<smelt_core::control_api::MemoryTestResult, String> {
+    let store = smelt_core::sqlite_state::default_sqlite_store()?;
+    let stored = smelt_core::memory_settings::load_on(&store).map_err(|error| error.to_string())?;
+    let settings = smelt_core::memory_settings::EmbeddingSettings {
+        base_url: params.base_url.trim().to_string(),
+        model: params.model.trim().to_string(),
+        api_key: params
+            .api_key
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .unwrap_or(stored.api_key),
+    };
+    let probe = smelt_core::block_on::block_on_tokio(smelt_core::memory_settings::probe(&settings))
+        .map_err(|error| error.to_string())??;
+    Ok(smelt_core::control_api::MemoryTestResult {
+        dimensions: probe.dimensions,
+        elapsed_ms: u64::try_from(probe.elapsed_ms).unwrap_or(u64::MAX),
+    })
+}
+
 fn definition_store() -> Result<smelt_store::Store, ControlError> {
     smelt_core::sqlite_state::default_sqlite_store()
         .map_err(|error| ControlError::new(ControlErrorCode::TemporarilyUnavailable, error))
@@ -544,11 +1215,48 @@ fn run_automation_once(
     Ok(applied.result)
 }
 
+/// 用产品智能体定义开一场对话：会话进运行时的远程目录，桌面会投影到「对话」栏。
+fn create_agent_conversation(
+    agent_definition_id: &str,
+    sessions: &Sessions,
+    acp_sessions: &AcpSessions,
+    event_hub: &EventHubHandle,
+    remote_sessions: &RemoteSessions,
+) -> Result<smelt_core::session_control::CreatedAgentConversation, String> {
+    let session = smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
+    let request = serde_json::json!({
+        "id": session.id,
+        "cwd": session.cwd,
+        "launch": session.launch,
+        "agent": session.agent,
+        "resume_id": session.resume_id,
+    });
+    let open = super::acp_host::parse_acp_open_request(&request)
+        .ok_or_else(|| "invalid ACP create request".to_string())?;
+    let created = smelt_core::session_control::CreatedAgentConversation {
+        session_id: session.id.clone(),
+        agent_definition_id: agent_definition_id.trim().to_string(),
+        cwd: session.cwd.clone(),
+    };
+    super::acp_host::create_daemon_acp_session(
+        &open,
+        Some(session),
+        sessions,
+        acp_sessions,
+        event_hub,
+        remote_sessions,
+    )?;
+    Ok(created)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_control(
     mut conn: UnixStream,
     payload: serde_json::Value,
+    principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
+    remote_sessions: &RemoteSessions,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -556,15 +1264,17 @@ pub(crate) fn handle_control(
     let response = match decode_request_envelope(payload) {
         Ok(envelope) => dispatch_control(
             envelope,
+            principal,
             sessions,
             acp_sessions,
+            remote_sessions,
             automations,
             event_hub,
             exe_mtime,
         ),
         Err(failure) => error_value(failure.response_version, failure.request_id, failure.error),
     };
-    let _ = writeln!(conn, "{response}");
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
 }
 
 #[cfg(test)]
@@ -572,7 +1282,7 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
 
-    use smelt_core::control_api::{
+    use smelt_runtime_client::protocol::control::{
         CONTROL_API_VERSION, ControlErrorCode, ControlOutcome, ControlResponse, EmptyParams,
         SystemDescribe, SystemDescribeResult, decode_request_envelope_in_range, encode_request,
     };
@@ -599,8 +1309,10 @@ mod tests {
         handle_control(
             server,
             serde_json::Value::Object(payload),
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             123,
@@ -645,8 +1357,10 @@ mod tests {
 
         let response = dispatch_control(
             envelope,
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             0,
@@ -673,8 +1387,10 @@ mod tests {
                 "method": "system.describe",
                 "params": {},
             }),
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             0,
@@ -706,8 +1422,10 @@ mod tests {
                 "method": "plugin.guess",
                 "params": {},
             }),
+            &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
+            &super::super::new_test_remote_sessions(),
             &automations,
             &event_hub,
             0,

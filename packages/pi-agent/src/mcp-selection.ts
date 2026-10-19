@@ -7,7 +7,7 @@ import {
 	type McpServerConfig,
 } from "@earendil-works/pi-coding-agent";
 import { sharedTransportFactory } from "./mcp-gateway-client.ts";
-import { createPiDefaultTransport } from "./pi-mcp-runtime.ts";
+import { createSmeltMcpTransport } from "./pi-mcp-runtime.ts";
 
 /**
  * MCP servers a product agent checked, as a JSON string array of `mcp.json` server names.
@@ -21,6 +21,8 @@ export const SMELT_AGENT_MCP_SERVERS_ENV = "SMELT_AGENT_MCP_SERVERS";
 
 export const SMELT_MCP_EXTENSION_NAME = "smelt-mcp";
 
+let consumedSelection: ReadonlySet<string> | undefined;
+
 /**
  * Read and remove the agent's MCP selection before Pi starts, so tool subprocesses do not inherit
  * it. Returns `undefined` when there is no usable selection; an empty list means "connect none".
@@ -28,6 +30,7 @@ export const SMELT_MCP_EXTENSION_NAME = "smelt-mcp";
 export function consumeMcpSelection(
 	environment: Record<string, string | undefined>,
 ): ReadonlySet<string> | undefined {
+	consumedSelection = undefined;
 	const raw = environment[SMELT_AGENT_MCP_SERVERS_ENV]?.trim();
 	delete environment[SMELT_AGENT_MCP_SERVERS_ENV];
 	if (!raw) return undefined;
@@ -38,9 +41,21 @@ export function consumeMcpSelection(
 		return undefined;
 	}
 	if (!Array.isArray(parsed)) return undefined;
-	return new Set(
+	consumedSelection = new Set(
 		parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
 	);
+	return consumedSelection;
+}
+
+/**
+ * 托管子智能体沿用父进程的 MCP 勾选：把启动时消费掉的名单原样放回子进程环境。
+ *
+ * 子进程复用父进程的插件参数（`--no-extensions` 加 codemode / tool-search），不把名单一起带上就
+ * 只有 MCP 配套扩展、没有一个 server。和插件参数一样只经内存转交，普通工具子进程拿不到。
+ */
+export function inheritedMcpSelectionEnvironment(): Record<string, string> {
+	if (consumedSelection === undefined) return {};
+	return { [SMELT_AGENT_MCP_SERVERS_ENV]: JSON.stringify([...consumedSelection]) };
 }
 
 /**
@@ -75,7 +90,7 @@ export function smeltMcpExtension(selection: ReadonlySet<string>) {
 	const configPath = resolve(getAgentDir(), "mcp.json");
 	const connectRegistered = createMcpExtension({
 		loadConfig: () => ({ servers: [], errors: [] }),
-		createTransport: sharedTransportFactory(createPiDefaultTransport, configPath),
+		createTransport: sharedTransportFactory(createSmeltMcpTransport, configPath),
 	});
 	return (pi: ExtensionAPI) => {
 		connectRegistered(pi);
