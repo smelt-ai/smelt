@@ -5,6 +5,9 @@ use gpui::{
     Window, canvas, div,
 };
 
+use gpui_component::button::{Button, ButtonRounded};
+use smelt_ui::IconAction as _;
+
 use super::*;
 
 /// 确认框的叠放顺序。同一扇窗里只有最上层做成 Dialog，底下的只留卡片，
@@ -430,26 +433,14 @@ impl Workspace {
                         .child(preview_canvas),
                 )
                 .child(
-                    div()
-                        .id("workspace-image-preview-close")
-                        .role(gpui::Role::Button)
-                        .aria_label("关闭预览")
+                    Button::new("workspace-image-preview-close")
+                        .icon(IconName::Close)
+                        .icon_action("关闭预览")
+                        .with_size(px(34.))
+                        .rounded(ButtonRounded::Size(px(9999.)))
                         .absolute()
                         .top(px(48.))
                         .right(px(48.))
-                        .size(px(34.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(ui_theme::card_stroke())
-                        .bg(rgb(ui_theme::bg_card()))
-                        .text_color(rgb(ui_theme::text()))
-                        .text_lg()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
-                        .child("×")
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.acp_image_preview = None;
                             cx.notify();

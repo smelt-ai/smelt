@@ -46,10 +46,9 @@ use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
 use smelt_ui::motion::{
-    BASE_MS, COPY_ACK_MS, ENTER_MS, PRESS_OPACITY, SweepMode, ambient_animation,
-    ambient_application_active, ambient_motion_enabled, ambient_spinner, composer_shadows,
-    copy_ack_opacity, ease_overshoot, ease_snap, enter_offset_px, mix_rgba, quiet_dots,
-    running_sweep, unit_transition,
+    BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_active,
+    ambient_motion_enabled, ambient_spinner, composer_shadows, copy_ack_opacity, ease_overshoot,
+    ease_snap, enter_offset_px, mix_rgba, quiet_dots, running_sweep, unit_transition,
 };
 use smelt_ui::provider_status_global::ProviderStatus;
 use smelt_ui::ui_theme;
@@ -4892,19 +4891,12 @@ impl AcpView {
                                 .child(summary),
                         )
                         .child(
-                            div()
+                            gpui_component::progress::Progress::new("acp-plan-progress")
+                                .with_size(px(5.))
                                 .flex_shrink_0()
                                 .w(px(120.))
-                                .h(px(5.))
-                                .rounded_full()
-                                .bg(gpui::rgb(ui_theme::border_dim()))
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .w(gpui::relative(progress.clamp(0., 1.)))
-                                        .h_full()
-                                        .bg(gpui::rgb(ui_theme::text_muted())),
-                                ),
+                                .color(gpui::rgb(ui_theme::text_muted()))
+                                .value(progress.clamp(0., 1.) * 100.),
                         ),
                 ),
             );

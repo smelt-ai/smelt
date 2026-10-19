@@ -118,19 +118,7 @@ pub(super) fn dsh_model_page(
                                                                     .child("DeepSeek"),
                                                             )
                                                             .child(
-                                                                div()
-                                                                    .px_2()
-                                                                    .py_0p5()
-                                                                    .rounded_full()
-                                                                    .bg(crate::ui_theme::tint(
-                                                                        crate::ui_theme::green(),
-                                                                        0x22,
-                                                                    ))
-                                                                    .text_xs()
-                                                                    .text_color(rgb(
-                                                                        crate::ui_theme::green(),
-                                                                    ))
-                                                                    .child("官方 Provider"),
+                                                                Tag::success().rounded_full().flex_none().child("官方 Provider"),
                                                             ),
                                                     )
                                                     .child(
@@ -309,36 +297,11 @@ pub(super) fn dsh_model_page(
                                                                             ),
                                                                     )
                                                                     .child(
-                                                                        div()
-                                                                            .px_2()
-                                                                            .py_0p5()
-                                                                            .rounded_full()
-                                                                            .bg(
-                                                                                crate::ui_theme::overlay(
-                                                                                    0x18,
-                                                                                ),
-                                                                            )
-                                                                            .text_xs()
-                                                                            .text_color(muted)
-                                                                            .child("自定义"),
+                                                                        Tag::secondary().rounded_full().flex_none().child("自定义"),
                                                                     )
                                                                     .children(is_default.then(
                                                                         || {
-                                                                            div()
-                                                                                .px_2()
-                                                                                .py_0p5()
-                                                                                .rounded_full()
-                                                                                .bg(
-                                                                                    crate::ui_theme::tint(
-                                                                                        crate::ui_theme::purple(),
-                                                                                        0x22,
-                                                                                    ),
-                                                                                )
-                                                                                .text_xs()
-                                                                                .text_color(rgb(
-                                                                                    crate::ui_theme::purple(),
-                                                                                ))
-                                                                                .child("当前默认")
+                                                                            Tag::success().rounded_full().flex_none().child("当前默认")
                                                                         },
                                                                     )),
                                                             )
@@ -757,14 +720,7 @@ pub(super) fn dsh_model_page(
                                                             }),
                                                     )
                                                     .child(
-                                                        div()
-                                                            .px_2()
-                                                            .py_0p5()
-                                                            .rounded_full()
-                                                            .bg(crate::ui_theme::overlay(0x18))
-                                                            .text_xs()
-                                                            .text_color(muted)
-                                                            .child("原生 DSH"),
+                                                        Tag::secondary().rounded_full().flex_none().child("原生 DSH"),
                                                     ),
                                             )
                                             .child(

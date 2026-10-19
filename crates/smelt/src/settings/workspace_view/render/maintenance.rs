@@ -1,6 +1,7 @@
 //! 设置页：系统（更新、后台服务、存储清理）。
 
 use super::*;
+use gpui_component::tab::{Tab, TabBar};
 
 pub(super) fn update_page(
     entity: Entity<Workspace>,
@@ -46,15 +47,9 @@ fn maintenance_groups(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> (SettingGroup, SettingGroup, SettingGroup) {
-    let (fg, muted, border, popover) = {
+    let (fg, muted, border) = {
         let t = cx.theme();
-        (t.foreground, t.muted_foreground, t.border, t.popover)
-    };
-    let btn = move |id: &'static str, label: String| {
-        settings_chip_button(id, label, fg, popover, border).hover(|s| s.bg(border))
-    };
-    let btn_hover = move |id: &'static str, label: String, hover_bg: Hsla| {
-        settings_chip_button(id, label, fg, popover, border).hover(move |s| s.bg(hover_bg))
+        (t.foreground, t.muted_foreground, t.border)
     };
 
     // —— 维护：更新、守护进程和残留数据清理 ——
@@ -65,11 +60,6 @@ fn maintenance_groups(
         let status = update_status.clone();
         let channel = cx.global::<UpdateSettings>().channel;
         let auto_install = cx.global::<UpdateSettings>().auto_install;
-        let card_bg = rgb(crate::ui_theme::bg_column());
-        let card_surface = rgb(crate::ui_theme::bg_card());
-        let card_border = rgb(crate::ui_theme::border_mid());
-        let accent = rgb(crate::ui_theme::action_fill());
-        let accent_text = Hsla::from(rgb(crate::ui_theme::action_on()));
 
         // 字节数换算成 MB 展示，只在拿得到 Content-Length 时才有百分比。
         let mb = |b: u64| b as f64 / 1024.0 / 1024.0;
@@ -189,79 +179,44 @@ fn maintenance_groups(
         // 用分段控件让当前通道一眼可见；切换通道会立即检查，进行中的更新
         // 则锁定选择，避免下载源和状态提示在中途发生错配。
         let channel_locked = !can_check;
-        let mut channel_selector = h_flex()
-            .gap_1()
-            .p(px(3.))
-            .rounded_md()
-            .bg(card_surface)
-            .border_1()
-            .border_color(card_border)
-            .flex_none();
-        for option in updater::UpdateChannel::ALL {
-            let selected = channel == option;
-            let channel_entity = update_entity.clone();
-            let mut option_button = div()
-                .id(match option {
-                    updater::UpdateChannel::Dev => "update-channel-dev",
-                    updater::UpdateChannel::Prod => "update-channel-prod",
-                })
-                .h(crate::ui_theme::height::sm())
-                .px_3()
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .cursor_pointer()
-                .text_xs()
-                .text_color(if selected { accent_text } else { muted })
-                .bg(if selected { accent } else { card_surface })
-                .child(option.label())
-                .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
-                    if !channel_locked {
-                        channel_entity.update(cx, |workspace, cx| {
-                            workspace.set_update_channel(option, cx);
-                        });
-                    }
-                });
-            if !selected && !channel_locked {
-                option_button = option_button.hover(|s| s.bg(card_bg).text_color(fg));
-            }
-            if channel_locked {
-                option_button = option_button.opacity(0.55);
-            }
-            channel_selector = channel_selector.child(option_button);
-        }
+        let channel_entity = update_entity.clone();
+        let channel_selector = TabBar::new("update-channel")
+            .segmented()
+            .flex_none()
+            .when_some(
+                updater::UpdateChannel::ALL
+                    .iter()
+                    .position(|option| *option == channel),
+                |bar, ix| bar.selected_index(ix),
+            )
+            .on_click(move |ix, _, cx| {
+                if channel_locked {
+                    return;
+                }
+                if let Some(option) = updater::UpdateChannel::ALL.get(*ix).copied() {
+                    channel_entity.update(cx, |workspace, cx| {
+                        workspace.set_update_channel(option, cx);
+                    });
+                }
+            })
+            .children(
+                updater::UpdateChannel::ALL
+                    .map(|option| Tab::new().label(option.label()).disabled(channel_locked)),
+            );
 
         let check_entity = update_entity.clone();
-        let check_btn = btn_hover(
-            "check-update",
-            check_label,
-            Hsla::from(crate::ui_theme::tint(crate::ui_theme::action_fill(), 0xe6)),
-        )
-        .text_color(if can_request_check {
-            accent_text
-        } else {
-            muted
-        })
-        .bg(if can_request_check {
-            accent
-        } else {
-            card_surface
-        })
-        .border_color(if can_request_check {
-            accent
-        } else {
-            card_border
-        })
-        .when(!can_request_check, |button| button.opacity(0.55))
-        .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
-            check_entity.update(cx, |this, cx| {
-                if this.update_status.can_check() || this.update_status.can_retry_recovery() {
-                    this.check_or_recover_update(false, cx);
-                }
+        let check_btn = Button::new("check-update")
+            .primary()
+            .small()
+            .label(check_label)
+            .disabled(!can_request_check)
+            .on_click(move |_, _window, cx: &mut App| {
+                check_entity.update(cx, |this, cx| {
+                    if this.update_status.can_check() || this.update_status.can_retry_recovery() {
+                        this.check_or_recover_update(false, cx);
+                    }
+                });
             });
-        });
         // 关掉自动下载时唯一的前进入口：把 Available 里记下的那个包接进
         // 原有下载流程，后续状态流转和自动模式完全一致。
         let download_btn = match &status {
@@ -272,25 +227,17 @@ fn maintenance_groups(
                     url: url.clone(),
                 };
                 Some(
-                    btn_hover(
-                        "download-update",
-                        "下载并更新".into(),
-                        Hsla::from(crate::ui_theme::tint(crate::ui_theme::blue(), 0x40)),
-                    )
-                    .text_color(rgb(crate::ui_theme::blue()))
-                    .bg(Hsla::from(crate::ui_theme::tint(
-                        crate::ui_theme::blue(),
-                        0x24,
-                    )))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        move |_, _window, cx: &mut App| {
+                    Button::new("download-update")
+                        .info()
+                        .outline()
+                        .small()
+                        .label("下载并更新")
+                        .on_click(move |_, _window, cx: &mut App| {
                             let candidate = candidate.clone();
                             download_entity.update(cx, |this, cx| {
                                 this.start_update_download(candidate, cx);
                             });
-                        },
-                    ),
+                        }),
                 )
             }
             _ => None,
@@ -298,25 +245,22 @@ fn maintenance_groups(
 
         let restart_entity = update_entity.clone();
         let restart_btn = ready.then(|| {
-            btn_hover(
-                "restart-update",
-                if matches!(&status, updater::UpdateStatus::InstallFailed(_)) {
-                    "重试重启更新".into()
-                } else {
-                    "立即重启更新".into()
-                },
-                Hsla::from(crate::ui_theme::tint(crate::ui_theme::blue(), 0x40)),
-            )
-            .text_color(rgb(crate::ui_theme::blue()))
-            .bg(Hsla::from(crate::ui_theme::tint(
-                crate::ui_theme::blue(),
-                0x24,
-            )))
-            .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
-                restart_entity.update(cx, |this, cx| {
-                    this.begin_ready_update_install(cx);
-                });
-            })
+            Button::new("restart-update")
+                .info()
+                .outline()
+                .small()
+                .label(
+                    if matches!(&status, updater::UpdateStatus::InstallFailed(_)) {
+                        "重试重启更新"
+                    } else {
+                        "立即重启更新"
+                    },
+                )
+                .on_click(move |_, _window, cx: &mut App| {
+                    restart_entity.update(cx, |this, cx| {
+                        this.begin_ready_update_install(cx);
+                    });
+                })
         });
 
         let mut action_row = h_flex().gap_2().items_center().child(check_btn);
@@ -333,38 +277,29 @@ fn maintenance_groups(
             .items_center()
             .flex_wrap()
             .child(
-                div()
-                    .id("settings-github-link")
-                    .text_xs()
-                    .cursor_pointer()
-                    .text_color(muted)
-                    .hover(|s| s.text_color(fg))
-                    .child("源码 GitHub ↗")
-                    .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                Button::new("settings-github-link")
+                    .text()
+                    .xsmall()
+                    .label("源码 GitHub ↗")
+                    .on_click(|_, _window, cx| {
                         cx.open_url("https://github.com/smelt-ai/smelt");
                     }),
             )
             .child(
-                div()
-                    .id("settings-help-link")
-                    .text_xs()
-                    .cursor_pointer()
-                    .text_color(muted)
-                    .hover(|s| s.text_color(fg))
-                    .child("帮助文档 ↗")
-                    .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                Button::new("settings-help-link")
+                    .text()
+                    .xsmall()
+                    .label("帮助文档 ↗")
+                    .on_click(|_, _window, cx| {
                         cx.open_url("https://smelt.onoo.io/");
                     }),
             )
             .child(
-                div()
-                    .id("settings-open-log-link")
-                    .text_xs()
-                    .cursor_pointer()
-                    .text_color(muted)
-                    .hover(|s| s.text_color(fg))
-                    .child("打开日志 ↗")
-                    .on_mouse_down(MouseButton::Left, |_, _window, _cx| {
+                Button::new("settings-open-log-link")
+                    .text()
+                    .xsmall()
+                    .label("打开日志 ↗")
+                    .on_click(|_, _window, _cx| {
                         // 反馈问题时手动带上这份日志：GitHub issue 附件靠拖拽，
                         // 没有 API 能替用户自动上传，所以帮用户直接定位到文件。
                         if let Some(path) = smelt_sys::app_log::log_path() {
@@ -385,14 +320,11 @@ fn maintenance_groups(
                     }),
             )
             .child(
-                div()
-                    .id("settings-report-issue-link")
-                    .text_xs()
-                    .cursor_pointer()
-                    .text_color(muted)
-                    .hover(|s| s.text_color(fg))
-                    .child("反馈问题 ↗")
-                    .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                Button::new("settings-report-issue-link")
+                    .text()
+                    .xsmall()
+                    .label("反馈问题 ↗")
+                    .on_click(|_, _window, cx| {
                         // 先把日志在 Finder 里选出来，用户点开 issue 页面后可以直接把它拖进去。
                         if let Some(path) = smelt_sys::app_log::log_path() {
                             #[cfg(target_os = "macos")]
@@ -534,29 +466,25 @@ fn maintenance_groups(
                     let restart_entity = daemon_entity.clone();
                     // 首选：无缝升级（exec 交接，会话不中断）。
                     let upgrade_daemon_btn = (outdated == Some(true)).then(|| {
-                        btn(
-                            "upgrade-daemon",
-                            if upgrading { "升级中…".into() } else { "无缝升级".into() },
-                        )
-                        .when(!upgrading, |b| {
-                            b.on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                        Button::new("upgrade-daemon")
+                            .small()
+                            .label(if upgrading { "升级中…" } else { "无缝升级" })
+                            .loading(upgrading)
+                            .disabled(upgrading)
+                            .on_click(move |_, _window, cx: &mut App| {
                                 upgrade_entity.update(cx, |this, cx| {
                                     this.upgrade_daemon_seamless(cx);
                                 });
                             })
-                        })
                     });
                     // 硬重启：常驻入口（守护卡死 / 想强制换二进制时用），会断会话。
                     // 不受版本是否落后限制；点击走二次确认弹窗兜底。
-                    // 用 btn_hover：自定义 hover 色，避免在已有 hover 的 btn 上再链式 .hover() 崩。
-                    let restart_daemon_btn = btn_hover(
-                        "restart-daemon",
-                        "重启守护进程".into(),
-                        Hsla::from(crate::ui_theme::tint(crate::ui_theme::red(), 0x40)),
-                    )
-                        .text_color(rgb(crate::ui_theme::red()))
-                        .bg(Hsla::from(crate::ui_theme::tint(crate::ui_theme::red(), 0x24)))
-                        .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                    let restart_daemon_btn = Button::new("restart-daemon")
+                        .danger()
+                        .outline()
+                        .small()
+                        .label("重启守护进程")
+                        .on_click(move |_, _window, cx: &mut App| {
                             restart_entity.update(cx, |this, cx| {
                                 this.show_daemon_restart_confirm = true;
                                 cx.notify();
@@ -581,13 +509,11 @@ fn maintenance_groups(
                     // 会话的核选项。守护没起来就没什么可看的，不露这个入口。
                     let manage_sessions_entity = daemon_entity.clone();
                     let manage_sessions_link = info.is_some().then(|| {
-                        div()
-                            .text_xs()
-                            .cursor_pointer()
-                            .text_color(muted)
-                            .hover(|s| s.text_color(fg))
-                            .child("查看/清理会话 ›")
-                            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                        Button::new("settings-manage-daemon-sessions")
+                            .text()
+                            .xsmall()
+                            .label("查看/清理会话 ›")
+                            .on_click(move |_, _window, cx| {
                                 manage_sessions_entity.update(cx, |ws, cx| {
                                     ws.open_session_manager(cx);
                                 });
@@ -643,41 +569,36 @@ fn maintenance_groups(
 
         let has_findings = state.scan.as_ref().is_some_and(|s| !s.is_empty());
 
-        let scan_btn = btn("storage-scan", "扫描残留数据".into()).on_mouse_down(
-            MouseButton::Left,
-            move |_, _window, cx: &mut App| {
+        let scan_btn = Button::new("storage-scan")
+            .small()
+            .label("扫描残留数据")
+            .on_click(move |_, _window, cx: &mut App| {
                 let scan = crate::storage_cleanup::scan();
                 cx.set_global(CleanupState {
                     scan: Some(scan),
                     message: None,
                 });
-            },
-        );
+            });
 
         let clean_btn = has_findings.then(|| {
-            btn_hover(
-                "storage-clean",
-                "清理".into(),
-                Hsla::from(crate::ui_theme::tint(crate::ui_theme::blue(), 0x40)),
-            )
-            .text_color(rgb(crate::ui_theme::blue()))
-            .bg(Hsla::from(crate::ui_theme::tint(
-                crate::ui_theme::blue(),
-                0x24,
-            )))
-            .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
-                let Some(scan) = cx
-                    .try_global::<CleanupState>()
-                    .and_then(|state| state.scan.clone())
-                else {
-                    return;
-                };
-                let removed = crate::storage_cleanup::clean(&scan);
-                cx.set_global(CleanupState {
-                    scan: Some(crate::storage_cleanup::scan()),
-                    message: Some(format!("已清理 {removed} 项").into()),
-                });
-            })
+            Button::new("storage-clean")
+                .info()
+                .outline()
+                .small()
+                .label("清理")
+                .on_click(move |_, _window, cx: &mut App| {
+                    let Some(scan) = cx
+                        .try_global::<CleanupState>()
+                        .and_then(|state| state.scan.clone())
+                    else {
+                        return;
+                    };
+                    let removed = crate::storage_cleanup::clean(&scan);
+                    cx.set_global(CleanupState {
+                        scan: Some(crate::storage_cleanup::scan()),
+                        message: Some(format!("已清理 {removed} 项").into()),
+                    });
+                })
         });
 
         v_flex()

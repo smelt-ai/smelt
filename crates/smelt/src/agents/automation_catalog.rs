@@ -16,45 +16,28 @@ impl Workspace {
         entity: Entity<Workspace>,
         left_guard: Pixels,
     ) -> AnyElement {
-        let tab = self.automation_surface.catalog_tab;
-        let tasks_entity = entity.clone();
-        let runs_entity = entity.clone();
+        const TABS: [(AutomationCatalogTab, &str); 2] = [
+            (AutomationCatalogTab::Tasks, "自动化"),
+            (AutomationCatalogTab::Runs, "运行"),
+        ];
+        let current = self.automation_surface.catalog_tab;
+        let tab_entity = entity.clone();
         let add_entity = entity;
         product_page_chrome(left_guard)
             .justify_between()
             .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .p_0p5()
-                    .rounded_full()
-                    .bg(rgb(crate::ui_theme::bg_card()))
-                    .border_1()
-                    .border_color(crate::ui_theme::card_stroke())
-                    .child(catalog_tab_pill(
-                        "automations-tab-tasks",
-                        "自动化",
-                        tab == AutomationCatalogTab::Tasks,
-                        move |_, _, cx| {
-                            tasks_entity.update(cx, |workspace, cx| {
-                                workspace
-                                    .set_automation_catalog_tab(AutomationCatalogTab::Tasks, cx);
-                            });
-                        },
-                    ))
-                    .child(catalog_tab_pill(
-                        "automations-tab-runs",
-                        "运行",
-                        tab == AutomationCatalogTab::Runs,
-                        move |_, _, cx| {
-                            runs_entity.update(cx, |workspace, cx| {
-                                workspace
-                                    .set_automation_catalog_tab(AutomationCatalogTab::Runs, cx);
-                            });
-                        },
-                    )),
-            )
+            .child(choice_tabs(
+                "automations-tabs",
+                TABS.iter().position(|(tab, _)| *tab == current),
+                TABS.map(|(_, label)| Tab::new().label(label)),
+                move |ix, cx| {
+                    if let Some((tab, _)) = TABS.get(ix).copied() {
+                        tab_entity.update(cx, |workspace, cx| {
+                            workspace.set_automation_catalog_tab(tab, cx);
+                        });
+                    }
+                },
+            ))
             .child(
                 Button::new("automations-add")
                     .primary()
@@ -436,27 +419,24 @@ impl Workspace {
                 .into_iter()
                 .map(|category| (Some(category), category.label())),
         );
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .children(filters.into_iter().map(|(filter, label)| {
-                let entity = entity.clone();
-                catalog_tab_pill(
-                    format!(
-                        "automation-template-filter-{}",
-                        filter.map(|category| category.label()).unwrap_or("all")
-                    ),
-                    label,
-                    selected == filter,
-                    move |_, _, cx| {
-                        entity.update(cx, |workspace, cx| {
-                            workspace.set_automation_template_filter(filter, cx);
-                        });
-                    },
-                )
-            }))
-            .into_any_element()
+        let selected_ix = filters.iter().position(|(filter, _)| *filter == selected);
+        let tabs: Vec<Tab> = filters
+            .iter()
+            .map(|(_, label)| Tab::new().label(*label))
+            .collect();
+        choice_tabs(
+            "automation-template-filters",
+            selected_ix,
+            tabs,
+            move |ix, cx| {
+                if let Some((filter, _)) = filters.get(ix).copied() {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.set_automation_template_filter(filter, cx);
+                    });
+                }
+            },
+        )
+        .into_any_element()
     }
 
     fn render_template_grid(
@@ -505,36 +485,6 @@ const AUTOMATION_COL_MENU: f32 = 32.;
 
 fn automation_fixed_col(width: f32) -> Div {
     div().w(px(width)).flex_shrink_0()
-}
-
-fn catalog_tab_pill(
-    id: impl Into<ElementId>,
-    label: &'static str,
-    selected: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    div()
-        .id(id)
-        .h(crate::ui_theme::height::sm())
-        .px_3()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(selected, |pill| {
-            pill.bg(rgb(crate::ui_theme::bg_hover()))
-                .text_color(rgb(crate::ui_theme::text_bright()))
-        })
-        .when(!selected, |pill| {
-            pill.text_color(rgb(crate::ui_theme::text_muted()))
-                .hover(|pill| {
-                    pill.bg(rgb(crate::ui_theme::bg_row_hover()))
-                        .text_color(rgb(crate::ui_theme::text()))
-                })
-        })
-        .on_click(on_click)
-        .child(div().text_xs().font_medium().child(label))
-        .into_any_element()
 }
 
 fn automation_table_header() -> AnyElement {

@@ -4,6 +4,7 @@
 //! 消息列表、审批卡、输入栏分别在 sibling 模块。
 
 use super::*;
+use gpui_component::button::ButtonCustomVariant;
 use smelt_client::daemon_state::DaemonPhase;
 
 use super::ConversationTranscript;
@@ -180,18 +181,13 @@ impl AcpView {
                             .child(div().text_sm().text_color(t.danger).child("会话已结束"))
                             .child(div().flex_1())
                             .child(
-                                div()
-                                    .id("acp-restart")
+                                Button::new("acp-restart")
+                                    .secondary()
+                                    .xsmall()
                                     .h(ui_theme::height::sm())
                                     .px_3()
-                                    .rounded(ui_theme::row_radius())
-                                    .bg(ui_theme::overlay(0x18))
-                                    .flex()
-                                    .items_center()
-                                    .text_xs()
                                     .font_medium()
-                                    .hover(|d| d.bg(ui_theme::overlay(0x28)))
-                                    .child("重新开始")
+                                    .label("重新开始")
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.restart(window, cx);
                                     })),
@@ -331,20 +327,13 @@ impl AcpView {
                                 .child(message),
                         )
                         .child(
-                            div()
-                                .id("acp-restart")
+                            Button::new("acp-restart")
+                                .primary()
                                 .h(ui_theme::height::lg())
                                 .px_5()
-                                .rounded_full()
-                                .bg(gpui::rgb(ui_theme::action_fill()))
-                                .text_sm()
+                                .rounded(ui_theme::height::lg() / 2.)
                                 .font_semibold()
-                                .text_color(gpui::rgb(ui_theme::action_on()))
-                                .flex()
-                                .items_center()
-                                .cursor_pointer()
-                                .hover(|d| d.opacity(0.88))
-                                .child(action_label)
+                                .label(action_label)
                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                     this.restart(window, cx);
                                 })),
@@ -389,17 +378,11 @@ impl AcpView {
             for (title, _detail, prompt) in quick_prompts {
                 let prompt = prompt.to_string();
                 prompt_chips = prompt_chips.child(
-                    div()
-                        .id((gpui::ElementId::from("acp-empty-prompt"), title))
+                    Button::new((gpui::ElementId::from("acp-empty-prompt"), title))
+                        .secondary()
                         .px_3()
-                        .py_1p5()
-                        .rounded_full()
-                        .bg(ui_theme::overlay(0x14))
-                        .text_sm()
-                        .text_color(t.foreground)
-                        .cursor_pointer()
-                        .hover(|chip| chip.bg(ui_theme::overlay(0x22)))
-                        .child(gpui::SharedString::new_static(title))
+                        .rounded(ui_theme::height::md() / 2.)
+                        .label(title)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.insert_prompt_text(&prompt, window, cx);
                         })),
@@ -469,20 +452,20 @@ impl AcpView {
                 .right_0()
                 .justify_center()
                 .child(
-                    h_flex()
-                        .id("acp-jump-to-latest")
-                        .role(gpui::Role::Button)
-                        .aria_label("回到最新")
+                    Button::new("acp-jump-to-latest")
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(ui_theme::glass_floating().into())
+                                .hover(gpui::rgb(ui_theme::bg_hover()).into())
+                                .active(gpui::rgb(ui_theme::bg_hover()).into()),
+                        )
                         .h(ui_theme::height::lg())
                         .px_4()
-                        .gap_2()
-                        .items_center()
-                        .rounded_full()
+                        .rounded(ui_theme::height::lg() / 2.)
+                        // 自定义变体的底色只取 `color` 的两成，这里直接给足。
                         .bg(ui_theme::glass_floating())
                         .shadow_sm()
-                        .shadow_sm()
-                        .cursor_pointer()
-                        .hover(|button| button.bg(gpui::rgb(ui_theme::bg_hover())))
+                        .accessibility_label("回到最新")
                         .child(
                             div()
                                 .text_sm()
@@ -665,13 +648,12 @@ impl AcpView {
                     .text_color(gpui::rgb(ui_theme::yellow()))
                     .child(div().flex_1().min_w(px(0.)).child(notice.text.clone()))
                     .child(
-                        div()
-                            .id(("acp-notice-dismiss", id as usize))
-                            .role(gpui::Role::Button)
-                            .aria_label("关闭提示")
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.8))
-                            .child(Icon::new(IconName::Close).size_3p5())
+                        Button::new(("acp-notice-dismiss", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .text_color(gpui::rgb(ui_theme::yellow()))
+                            .icon_action("关闭提示")
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.dismissed_notice_id = Some(id);
                                 cx.notify();

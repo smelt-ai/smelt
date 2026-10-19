@@ -82,8 +82,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Local, TimeZone};
 use gpui::InteractiveElement;
-use gpui::StatefulInteractiveElement;
 use gpui::*;
+use gpui_component::button::ButtonVariants as _;
 use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{
     DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart,
@@ -3997,8 +3997,7 @@ impl Render for Workspace {
                     ),
             )
             // 浮层只留左侧栏开关。窗口开关在右侧共用顶栏，跟 tab 同一条 flex。
-            .child({
-                let sidebar_toggle = cx.entity().downgrade();
+            .child(
                 div()
                     .absolute()
                     // 跟主体内的共用顶栏使用同一个纵向原点；外壳内边距若以后
@@ -4010,56 +4009,40 @@ impl Render for Workspace {
                     .flex()
                     .items_center()
                     .child(
+                        // 这一条浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
                         div()
-                            .id("sidebar-toggle")
-                            .role(Role::Button)
-                            .aria_label("切换左侧栏")
                             // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
                             // 隐藏红绿灯，这 92px 就全空了，按钮回到窗口左侧
                             // 18px 的统一视觉基准。纵向不再手算 top：由共用顶栏的
                             // flex 居中，UI 字号改变、按钮尺寸随 rem 缩放时也不会偏。
                             .ml(px(if window.is_fullscreen() { 18. } else { 92. }))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size_6()
-                            .rounded_full()
-                            .cursor_pointer()
-                            .text_color(rgb(ui_theme::text_mid()))
-                            .hover(|s| s.bg(ui_theme::overlay(0x18)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
-                                // 跟右侧两个开关同一套「细线 ↔ 实心色块」区分开合：
-                                // 收起态用 bundled 的细线 PanelLeft，展开态换成
-                                // panel-left-filled 实心色块，不再用带箭头的
-                                // -open/-close 变体（对齐 Codex 工具栏风格）。
-                                if self.sidebar_open {
-                                    Icon::empty().path("smelt-icons/panel-left-filled.svg")
-                                } else {
-                                    Icon::new(IconName::PanelLeft)
-                                }
-                                .size_4(),
-                            )
-                            .tooltip(|window, cx| {
-                                gpui_component::tooltip::Tooltip::new("切换左侧栏")
-                                    .action(&ToggleSidebar, None)
-                                    .build(window, cx)
-                            })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_sidebar(window, cx);
-                                }),
-                            )
-                            .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
-                                let _ = sidebar_toggle.update(cx, |this, cx| {
-                                    this.toggle_sidebar(window, cx);
-                                });
-                            }),
+                                gpui_component::button::Button::new("sidebar-toggle")
+                                    .ghost()
+                                    .small()
+                                    .rounded(gpui_component::button::ButtonRounded::Size(px(
+                                        9999.,
+                                    )))
+                                    // 跟右侧两个开关同一套「细线 ↔ 实心色块」区分开合：
+                                    // 收起态用 bundled 的细线 PanelLeft，展开态换成
+                                    // panel-left-filled 实心色块，不再用带箭头的
+                                    // -open/-close 变体（对齐 Codex 工具栏风格）。
+                                    .icon(if self.sidebar_open {
+                                        Icon::empty().path("smelt-icons/panel-left-filled.svg")
+                                    } else {
+                                        Icon::new(IconName::PanelLeft)
+                                    })
+                                    .accessibility_label("切换左侧栏")
+                                    .tooltip_with_action("切换左侧栏", &ToggleSidebar, None)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_sidebar(window, cx);
+                                    })),
+                            ),
                     )
                     // 中间点穿。窗口开关在右侧共用顶栏里，不在这条浮层。
-                    .child(div().flex_1().min_w_0())
-            })
+                    .child(div().flex_1().min_w_0()),
+            )
             // 确认框、命令面板和图片预览都留在当前 Workspace 的 GPUI 树内。
             .child(self.render_overlay_layers(window, cx))
             .child(shell_pointer_bridge)

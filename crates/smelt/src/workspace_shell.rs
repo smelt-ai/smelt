@@ -15,7 +15,9 @@ use gpui_component::dock::{
 };
 
 use gpui_component::ActiveTheme as _;
+use gpui_component::Sizable as _;
 use gpui_component::StyledExt as _;
+use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
 
 use crate::settings::Appearance;
 use crate::{
@@ -598,23 +600,12 @@ impl Workspace {
                                     .child("打开一个项目，开始对话或终端"),
                             )
                             .child(
-                                div()
-                                    .id("empty-open")
-                                    .h(ui_theme::height::lg())
-                                    .px_5()
-                                    .rounded_full()
-                                    .bg(rgb(ui_theme::action_fill()))
-                                    .text_color(rgb(ui_theme::action_on()))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .cursor_pointer()
-                                    .hover(|style| style.opacity(0.88))
-                                    .child("打开项目")
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
+                                Button::new("empty-open")
+                                    .primary()
+                                    .large()
+                                    .rounded(ButtonRounded::Size(px(9999.)))
+                                    .label("打开项目")
+                                    .on_click(
                                         cx.listener(|this, _, _window, cx| this.open_project(cx)),
                                     ),
                             )

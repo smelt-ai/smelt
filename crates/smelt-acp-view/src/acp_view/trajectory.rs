@@ -5,6 +5,8 @@
 
 use super::*;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::separator::Separator;
+use gpui_component::tab::{Tab, TabBar};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InspectorTab {
@@ -463,7 +465,11 @@ fn render_trajectory_toolbar(
                         .child("会话追踪"),
                 ),
         )
-        .child(div().w(px(1.)).h(px(14.)).bg(ui_theme::card_stroke()))
+        .child(
+            Separator::vertical()
+                .h(px(14.))
+                .color(ui_theme::card_stroke()),
+        )
         .child(
             h_flex()
                 .gap_3()
@@ -777,16 +783,11 @@ fn render_inspector(
                         )
                         .child(div().flex_1())
                         .child(
-                            div()
-                                .id("trajectory-inspector-close")
-                                .size(px(22.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.))
-                                .cursor_pointer()
-                                .hover(|d| d.bg(ui_theme::overlay(0x20)))
-                                .child(Icon::new(IconName::Close).size(px(12.)))
+                            Button::new("trajectory-inspector-close")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .icon_action("关闭")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.selected = None;
                                     cx.notify();
@@ -830,26 +831,24 @@ fn render_inspector(
                 }),
         )
         .child(
-            h_flex()
+            TabBar::new("trajectory-inspector-tabs")
+                .underline()
+                .small()
+                .w_full()
                 .h(ui_theme::height::lg())
                 .flex_shrink_0()
                 .px_4()
-                .gap_5()
-                .items_end()
-                .border_b_1()
-                .border_color(ui_theme::card_stroke())
-                .child(inspector_tab_label(
-                    "预览",
-                    preview,
-                    InspectorTab::Preview,
-                    cx,
-                ))
-                .child(inspector_tab_label(
-                    "原始数据",
-                    !preview,
-                    InspectorTab::Source,
-                    cx,
-                )),
+                .selected_index(if preview { 0 } else { 1 })
+                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                    this.inspector_tab = if *ix == 0 {
+                        InspectorTab::Preview
+                    } else {
+                        InspectorTab::Source
+                    };
+                    cx.notify();
+                }))
+                .child(Tab::new().label("预览"))
+                .child(Tab::new().label("原始数据")),
         )
         .child(
             div()
@@ -885,40 +884,6 @@ fn inspector_meta(label: &'static str, value: String, muted: gpui::Hsla) -> gpui
                 .text_color(gpui::rgb(ui_theme::text_mid()))
                 .child(value),
         )
-}
-
-fn inspector_tab_label(
-    label: &'static str,
-    active: bool,
-    tab: InspectorTab,
-    cx: &mut Context<TrajectoryWindow>,
-) -> impl IntoElement {
-    div()
-        .id(if matches!(tab, InspectorTab::Preview) {
-            "trajectory-tab-preview"
-        } else {
-            "trajectory-tab-source"
-        })
-        .h(ui_theme::height::lg())
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .text_sm()
-        .when(active, |tab_el| {
-            tab_el
-                .font_medium()
-                .text_color(gpui::rgb(ui_theme::text_bright()))
-                .border_b_2()
-                .border_color(gpui::rgb(ui_theme::accent()))
-        })
-        .when(!active, |tab_el| {
-            tab_el.text_color(gpui::rgb(ui_theme::text_muted()))
-        })
-        .child(label)
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.inspector_tab = tab;
-            cx.notify();
-        }))
 }
 
 fn render_sequence_overview(overview: &TrajectoryOverview, muted: gpui::Hsla) -> gpui::Div {

@@ -1,7 +1,7 @@
 //! 能力库「MCP」页签：内置服务器一键添加，`~/.pi/agent/mcp.json` 里的服务器启停、
 //! 登录、移除。排版和模型页签同一套（居中限宽、行内按钮 xsmall）。
 
-use super::pi_model::{Palette, card, pill, section};
+use super::pi_model::{Palette, card, section};
 use super::*;
 use crate::settings::workspace::PiConfigFileKind;
 use smelt_model::pi_mcp::{PI_MCP_PRESETS, PiMcpPreset, PiMcpServer, PiMcpTransport};
@@ -76,7 +76,11 @@ fn preset_row(
     palette: Palette,
 ) -> Div {
     let action = if added {
-        pill("已添加", palette.muted).into_any_element()
+        Tag::secondary()
+            .rounded_full()
+            .flex_none()
+            .child("已添加")
+            .into_any_element()
     } else {
         let entity = entity.clone();
         Button::new(format!("pi-mcp-add-{}", preset.id))
@@ -203,9 +207,9 @@ fn server_row(
         .items_center()
         .child(row_title(server.name.clone(), palette));
     if !server.enabled {
-        badges = badges.child(pill("已停用", palette.muted));
+        badges = badges.child(Tag::secondary().rounded_full().flex_none().child("已停用"));
     } else if server.signed_in {
-        badges = badges.child(pill("已登录", palette.success));
+        badges = badges.child(Tag::success().rounded_full().flex_none().child("已登录"));
     }
 
     let login = (server.is_http() && server.enabled).then(|| {

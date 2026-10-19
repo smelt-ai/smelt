@@ -323,6 +323,8 @@ impl Workspace {
                                     })
                                     .tooltip(if selected { "取消选择" } else { "选择" })
                                     .on_click(cx.listener(move |this, _, _, cx| {
+                                        // 整行点击是进入目录；勾选不能冒泡上去，否则选中的同时就进去了。
+                                        cx.stop_propagation();
                                         this.dir_picker_toggle(toggle_path.clone(), cx);
                                     })),
                             )

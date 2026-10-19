@@ -230,9 +230,6 @@ pub const ENTER_MS: u64 = 280;
 /// 复制成功后对勾停留再淡回。
 pub const COPY_ACK_MS: u64 = 1200;
 
-/// Div 没有 scale。按下用这段透明度代替缩到 0.96，布局不会跟着抖。
-pub const PRESS_OPACITY: f32 = 0.72;
-
 const QUIET_DOT_CYCLE_MS: u64 = 1_900;
 
 /// `cubic-bezier(.32, .72, 0, 1)`。输出留在 \[0, 1\]，给宽度和焦点用。

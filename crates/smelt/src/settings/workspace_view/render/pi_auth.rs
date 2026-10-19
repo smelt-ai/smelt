@@ -174,10 +174,11 @@ pub(super) fn builtin_provider_row(
                         .children(
                             provider
                                 .subscription
-                                .then(|| super::pi_model::pill("订阅", palette.muted)),
+                                .then(|| Tag::secondary().rounded_full().flex_none().child("订阅")),
                         )
                         .children(
-                            is_default.then(|| super::pi_model::pill("默认", palette.success)),
+                            is_default
+                                .then(|| Tag::success().rounded_full().flex_none().child("默认")),
                         ),
                 )
                 .child(

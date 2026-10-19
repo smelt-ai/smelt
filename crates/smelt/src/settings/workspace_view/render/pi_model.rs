@@ -22,8 +22,6 @@ pub(super) struct Palette {
     pub(super) muted: Hsla,
     pub(super) border: Hsla,
     pub(super) danger: Hsla,
-    pub(super) success: Hsla,
-    pub(super) warning: Hsla,
 }
 
 impl Palette {
@@ -34,8 +32,6 @@ impl Palette {
             muted: theme.muted_foreground,
             border: theme.border,
             danger: theme.danger,
-            success: theme.success,
-            warning: theme.warning,
         }
     }
 }
@@ -101,18 +97,6 @@ pub(super) fn card(palette: Palette) -> Div {
         .border_color(palette.border)
 }
 
-pub(super) fn pill(label: impl Into<SharedString>, color: Hsla) -> Div {
-    div()
-        .flex_none()
-        .px_2()
-        .py_0p5()
-        .rounded_full()
-        .bg(color.opacity(0.14))
-        .text_xs()
-        .text_color(color)
-        .child(label.into())
-}
-
 /// 「默认模型」卡片。
 ///
 /// `settings.json` 里没写默认模型时，`load_pi_model_settings` 会填上 Pi 的兜底值
@@ -140,10 +124,12 @@ fn default_model_section(
     let mut status = h_flex().gap_2().items_center().flex_wrap();
     match &snapshot.pi_settings {
         Err(error) => {
-            status = status.child(pill(
-                format!("无法读取 settings.json：{error}"),
-                palette.danger,
-            ));
+            status = status.child(
+                Tag::danger()
+                    .rounded_full()
+                    .flex_none()
+                    .child(format!("无法读取 settings.json：{error}")),
+            );
         }
         Ok(_) if explicit.is_none() => {
             status = status.child(
@@ -157,10 +143,15 @@ fn default_model_section(
     }
     match &snapshot.pi_model_settings {
         Ok(settings) if settings.credential_configured => {
-            status = status.child(pill("凭据已配置", palette.success));
+            status = status.child(
+                Tag::success()
+                    .rounded_full()
+                    .flex_none()
+                    .child("凭据已配置"),
+            );
         }
         Ok(_) => {
-            status = status.child(pill("缺少凭据", palette.warning));
+            status = status.child(Tag::warning().rounded_full().flex_none().child("缺少凭据"));
         }
         Err(error) => {
             status = status.child(
@@ -694,8 +685,11 @@ fn custom_provider_row(
                                 .text_color(palette.fg)
                                 .child(name),
                         )
-                        .child(pill("自定义", palette.muted))
-                        .children(is_default.then(|| pill("默认", palette.success))),
+                        .child(Tag::secondary().rounded_full().flex_none().child("自定义"))
+                        .children(
+                            is_default
+                                .then(|| Tag::success().rounded_full().flex_none().child("默认")),
+                        ),
                 )
                 .child(
                     div()
@@ -1100,16 +1094,7 @@ fn custom_provider_form(
                                 "添加自定义 Provider"
                             },
                         ))
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(crate::ui_theme::overlay(0x18))
-                                .text_xs()
-                                .text_color(muted)
-                                .child("原生 Pi"),
-                        ),
+                        .child(Tag::secondary().rounded_full().flex_none().child("原生 Pi")),
                 )
                 .child(div().text_xs().text_color(muted).child(credential_status)),
         )

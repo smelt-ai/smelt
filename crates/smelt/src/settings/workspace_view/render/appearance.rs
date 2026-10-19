@@ -151,13 +151,7 @@ pub(super) fn window_page(
     snapshot: &SettingsRenderSnapshot,
     cx: &App,
 ) -> SettingPage {
-    let (fg, muted, border, popover) = {
-        let t = cx.theme();
-        (t.foreground, t.muted_foreground, t.border, t.popover)
-    };
-    let btn = move |id: &'static str, label: String| {
-        settings_chip_button(id, label, fg, popover, border).hover(|s| s.bg(border))
-    };
+    let muted = cx.theme().muted_foreground;
     let bg_color_picker = snapshot.bg_color_picker.clone();
     let opacity_slider = snapshot.opacity_slider.clone();
     let bg_image_opacity_slider = snapshot.bg_image_opacity_slider.clone();
@@ -211,29 +205,27 @@ pub(super) fn window_page(
                                             .child(img_name),
                                     )
                                     .child(
-                                        btn("pick-img", "选择图片…".into())
+                                        Button::new("pick-img")
+                                            .small()
+                                            .label("选择图片…")
                                             .flex_shrink_0()
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_, _window, cx: &mut App| {
-                                                    pick_entity.update(cx, |this, cx| {
-                                                        this.pick_bg_image(cx)
-                                                    });
-                                                },
-                                            ),
+                                            .on_click(move |_, _window, cx: &mut App| {
+                                                pick_entity.update(cx, |this, cx| {
+                                                    this.pick_bg_image(cx)
+                                                });
+                                            }),
                                     )
                                     .child(
-                                        btn("clear-img", "清除".into())
+                                        Button::new("clear-img")
+                                            .ghost()
+                                            .small()
+                                            .label("清除")
                                             .flex_shrink_0()
-                                            .text_color(muted)
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_, _window, cx: &mut App| {
-                                                    clear_entity.update(cx, |this, cx| {
-                                                        this.set_bg_image(None, cx)
-                                                    });
-                                                },
-                                            ),
+                                            .on_click(move |_, _window, cx: &mut App| {
+                                                clear_entity.update(cx, |this, cx| {
+                                                    this.set_bg_image(None, cx)
+                                                });
+                                            }),
                                     ),
                             )
                             .child(

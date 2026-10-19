@@ -10,13 +10,17 @@
 use chrono::{Local, TimeZone, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_component::button::{
+    Button, ButtonCustomVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+};
 use gpui_component::input::{Input, InputEvent, InputState, NumberInput, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::switch::Switch;
+use gpui_component::tab::{Tab, TabBar};
+use gpui_component::tag::Tag;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Selectable as _,
-    Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Sizable as _,
+    StyledExt as _,
 };
 
 use crate::workspace_sessions::NewAcpSessionRequest;
@@ -224,15 +228,6 @@ impl MemoryFilter {
         }
     }
 
-    fn element_id(self) -> &'static str {
-        match self {
-            Self::All => "agent-memory-filter-all",
-            Self::Pending => "agent-memory-filter-pending",
-            Self::Rules => "agent-memory-filter-rules",
-            Self::Facts => "agent-memory-filter-facts",
-        }
-    }
-
     fn matches(self, entry: &smelt_model::agent_memory::MemoryEntry) -> bool {
         let rule = smelt_model::agent_memory::is_rule_memory_kind(entry.kind.as_deref());
         match self {
@@ -308,15 +303,6 @@ impl ScheduleKind {
         }
     }
 
-    fn id_name(self) -> &'static str {
-        match self {
-            Self::Daily => "daily",
-            Self::Weekdays => "weekdays",
-            Self::Weekly => "weekly",
-            Self::Interval => "interval",
-        }
-    }
-
     fn is_interval(self) -> bool {
         matches!(self, Self::Interval)
     }
@@ -333,13 +319,6 @@ impl IntervalUnit {
         match self {
             Self::Minutes => "分钟",
             Self::Hours => "小时",
-        }
-    }
-
-    fn id_name(self) -> &'static str {
-        match self {
-            Self::Minutes => "minutes",
-            Self::Hours => "hours",
         }
     }
 }
@@ -361,14 +340,6 @@ impl IntervalDayScope {
             Self::Everyday => "每天",
             Self::Weekdays => "工作日",
             Self::Weekly => "每周",
-        }
-    }
-
-    fn id_name(self) -> &'static str {
-        match self {
-            Self::Everyday => "everyday",
-            Self::Weekdays => "weekdays",
-            Self::Weekly => "weekly",
         }
     }
 
@@ -1491,19 +1462,20 @@ fn render_schedule_rule(
     cx: &App,
 ) -> AnyElement {
     let frequency = (!rule.kind.is_interval()).then(|| {
-        segmented_track(cx).children(ScheduleKind::clock_kinds().into_iter().map(|kind| {
-            let selected = kind == rule.kind;
-            let frequency_entity = entity.clone();
-            compact_chip((ElementId::from("agent-trigger-frequency"), kind.id_name()))
-                .label(kind.label())
-                .selected(selected)
-                .toggled(selected)
-                .on_click(move |_, _, cx| {
+        let kinds = ScheduleKind::clock_kinds();
+        let frequency_entity = entity.clone();
+        choice_tabs(
+            ("agent-trigger-frequency", index),
+            kinds.iter().position(|kind| *kind == rule.kind),
+            kinds.iter().map(|kind| Tab::new().label(kind.label())),
+            move |ix, cx| {
+                if let Some(kind) = kinds.get(ix).copied() {
                     frequency_entity.update(cx, |workspace, cx| {
                         workspace.set_trigger_schedule_kind(index, kind, cx);
                     });
-                })
-        }))
+                }
+            },
+        )
     });
     let clock = |input: &Entity<InputState>, aria: &'static str| {
         framed_text_input(input, aria)
@@ -1516,40 +1488,53 @@ fn render_schedule_rule(
             .text_color(cx.theme().muted_foreground)
             .child(local_timezone_label())
     };
+    // 星期可以多选，用开关组而不是单选的分段页签。
     let weekday_picker = |id_prefix: &'static str| {
-        segmented_track(cx).children((0..7).map(|day_index| {
-            let bit = 1_u8 << day_index;
-            let selected = rule.weekday_mask & bit != 0;
-            let day_entity = entity.clone();
-            compact_chip((id_prefix, day_index))
-                .w(px(32.))
-                .label(smelt_model::automation::SCHEDULE_DAY_LABELS[day_index])
-                .selected(selected)
-                .toggled(selected)
-                .on_click(move |_, _, cx| {
-                    day_entity.update(cx, |workspace, cx| {
-                        workspace.toggle_schedule_weekday(index, bit, cx);
-                    });
-                })
-        }))
+        let mask = rule.weekday_mask;
+        let day_entity = entity.clone();
+        ToggleGroup::new((id_prefix, index))
+            .outline()
+            .segmented()
+            .flex_none()
+            .children((0..7).map(|day_index| {
+                Toggle::new(day_index)
+                    .w(px(32.))
+                    .label(smelt_model::automation::SCHEDULE_DAY_LABELS[day_index])
+                    .checked(mask & (1_u8 << day_index) != 0)
+            }))
+            .on_click(move |checks, _, cx| {
+                // 一次只点一格：和当前不一样的那一格就是被点的。
+                let Some(day_index) = checks
+                    .iter()
+                    .enumerate()
+                    .position(|(day, on)| *on != (mask & (1_u8 << day) != 0))
+                else {
+                    return;
+                };
+                day_entity.update(cx, |workspace, cx| {
+                    workspace.toggle_schedule_weekday(index, 1_u8 << day_index, cx);
+                });
+            })
     };
     let interval_unit = rule.interval_unit;
     let schedule_control = match rule.kind {
         ScheduleKind::Interval => {
-            let day_scope =
-                segmented_track(cx).children(IntervalDayScope::all().into_iter().map(|scope| {
-                    let selected = scope == rule.interval_day_scope;
-                    let scope_entity = entity.clone();
-                    compact_chip((ElementId::from("automation-interval-days"), scope.id_name()))
-                        .label(scope.label())
-                        .selected(selected)
-                        .toggled(selected)
-                        .on_click(move |_, _, cx| {
-                            scope_entity.update(cx, |workspace, cx| {
-                                workspace.set_interval_day_scope(index, scope, cx);
-                            });
-                        })
-                }));
+            let scopes = IntervalDayScope::all();
+            let scope_entity = entity.clone();
+            let day_scope = choice_tabs(
+                ("automation-interval-days", index),
+                scopes
+                    .iter()
+                    .position(|scope| *scope == rule.interval_day_scope),
+                scopes.iter().map(|scope| Tab::new().label(scope.label())),
+                move |ix, cx| {
+                    if let Some(scope) = scopes.get(ix).copied() {
+                        scope_entity.update(cx, |workspace, cx| {
+                            workspace.set_interval_day_scope(index, scope, cx);
+                        });
+                    }
+                },
+            );
             let mut interval_body = div()
                 .flex()
                 .flex_col()
@@ -1564,30 +1549,23 @@ fn render_schedule_rule(
                                 .w(px(120.))
                                 .into_any_element(),
                         )
-                        .child(
-                            segmented_track(cx).children(
-                                [IntervalUnit::Minutes, IntervalUnit::Hours]
-                                    .into_iter()
-                                    .map(|unit| {
-                                        let selected = unit == interval_unit;
-                                        let unit_entity = entity.clone();
-                                        compact_chip((
-                                            ElementId::from("automation-interval-unit"),
-                                            unit.id_name(),
-                                        ))
-                                        .label(unit.label())
-                                        .selected(selected)
-                                        .toggled(selected)
-                                        .on_click(
-                                            move |_, _, cx| {
-                                                unit_entity.update(cx, |workspace, cx| {
-                                                    workspace.set_interval_unit(index, unit, cx);
-                                                });
-                                            },
-                                        )
-                                    }),
-                            ),
-                        ),
+                        .child({
+                            const UNITS: [IntervalUnit; 2] =
+                                [IntervalUnit::Minutes, IntervalUnit::Hours];
+                            let unit_entity = entity.clone();
+                            choice_tabs(
+                                ("automation-interval-unit", index),
+                                UNITS.iter().position(|unit| *unit == interval_unit),
+                                UNITS.iter().map(|unit| Tab::new().label(unit.label())),
+                                move |ix, cx| {
+                                    if let Some(unit) = UNITS.get(ix).copied() {
+                                        unit_entity.update(cx, |workspace, cx| {
+                                            workspace.set_interval_unit(index, unit, cx);
+                                        });
+                                    }
+                                },
+                            )
+                        }),
                 )
                 .child(day_scope);
             if rule.interval_day_scope == IntervalDayScope::Weekly {
@@ -1975,15 +1953,7 @@ fn agent_surface_card() -> Div {
 }
 
 fn render_agent_error(error: String) -> AnyElement {
-    div()
-        .px_3()
-        .py_2()
-        .rounded(px(10.))
-        .bg(rgb(crate::ui_theme::red()).opacity(0.12))
-        .text_sm()
-        .text_color(rgb(crate::ui_theme::red()))
-        .child(error)
-        .into_any_element()
+    gpui_component::alert::Alert::error("agent-error", error).into_any_element()
 }
 
 fn render_engine_mark(kind: Option<settings::ConversationAgentKind>, size: f32) -> Icon {
@@ -2105,21 +2075,12 @@ fn render_agent_model_control(
 }
 
 fn render_engine_chip(label: String, kind: Option<settings::ConversationAgentKind>) -> AnyElement {
-    div()
-        .h(crate::ui_theme::height::xxs())
-        .px_2()
+    Tag::secondary()
         .rounded_full()
-        .bg(rgb(crate::ui_theme::bg_hover()))
-        .flex()
-        .items_center()
+        .flex_none()
         .gap_1()
         .child(render_engine_mark(kind, 12.))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(crate::ui_theme::text_muted()))
-                .child(label),
-        )
+        .child(label)
         .into_any_element()
 }
 
@@ -2602,20 +2563,25 @@ fn render_agent_memory_card(
     let query = editor.memory_query.read(cx).value().to_string();
     let filter = editor.memory_filter;
     let narrowed = !query.trim().is_empty() || filter != MemoryFilter::All;
-    let filters = segmented_track(cx).children(MemoryFilter::ALL.into_iter().map(|option| {
-        let selected = option == filter;
-        let entity = entity.clone();
-        compact_chip(option.element_id())
-            .label(option.label())
-            .tooltip(option.tooltip())
-            .selected(selected)
-            .toggled(selected)
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |workspace, cx| {
+    let filter_entity = entity.clone();
+    let filters = choice_tabs(
+        "agent-memory-filters",
+        MemoryFilter::ALL
+            .iter()
+            .position(|option| *option == filter),
+        MemoryFilter::ALL.into_iter().map(|option| {
+            Tab::new().label(option.label()).tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(option.tooltip()).build(window, cx)
+            })
+        }),
+        move |ix, cx| {
+            if let Some(option) = MemoryFilter::ALL.get(ix).copied() {
+                filter_entity.update(cx, |workspace, cx| {
                     workspace.set_agent_memory_filter(option, cx)
                 });
-            })
-    }));
+            }
+        },
+    );
     agent_surface_card()
         .flex()
         .flex_col()
@@ -3471,17 +3437,19 @@ fn automation_section_label(label: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-/// 分段开关：描边跟输入框同一档，选中格铺满，看起来就是能点的控件。
-fn segmented_track(_cx: &App) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .p_0p5()
-        .rounded(px(8.))
-        .border_1()
-        .border_color(rgb(crate::ui_theme::border_loud()))
-        .bg(rgb(crate::ui_theme::bg_column()))
+/// 几个互斥选项的分段开关，选中块在选项之间滑动。`on_select` 拿到被点的下标。
+fn choice_tabs(
+    id: impl Into<ElementId>,
+    selected: Option<usize>,
+    tabs: impl IntoIterator<Item = Tab>,
+    on_select: impl Fn(usize, &mut App) + 'static,
+) -> TabBar {
+    TabBar::new(id)
+        .segmented()
+        .flex_none()
+        .when_some(selected, |bar, ix| bar.selected_index(ix))
+        .on_click(move |ix, _, cx| on_select(*ix, cx))
+        .children(tabs)
 }
 
 mod automation_catalog;

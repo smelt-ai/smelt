@@ -46,16 +46,12 @@ pub(crate) fn has_remote_runtimes(cx: &gpui::App) -> bool {
 
 /// 设置、能力库里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
 /// 对远程不生效，得说清楚。
-pub(crate) fn local_runtime_scope_chip() -> gpui::Div {
+pub(crate) fn local_runtime_scope_chip() -> gpui_component::tag::Tag {
     use gpui::{ParentElement as _, Styled as _};
-    gpui::div()
-        .flex_shrink_0()
-        .px_2()
+    gpui_component::tag::Tag::secondary()
+        .outline()
         .rounded_full()
-        .border_1()
-        .border_color(gpui::rgb(crate::ui_theme::border_dim()))
-        .text_xs()
-        .text_color(gpui::rgb(crate::ui_theme::text_faint()))
+        .flex_none()
         .child("只作用于本机运行时")
 }
 

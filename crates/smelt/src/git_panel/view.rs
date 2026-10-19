@@ -4,6 +4,7 @@
 //! 由按钮 listener 调用。
 
 use super::*;
+use gpui_component::tab::{Tab, TabBar};
 
 impl Workspace {
     /// 「丢弃文件改动」确认弹窗。未跟踪文件是直接删盘，措辞要比 restore 更重。
@@ -322,11 +323,11 @@ impl Workspace {
         // 进行中反馈：点了拉取/获取几秒内没动静会以为没反应，op 跑着时按钮直接显示
         // 「拉取中…」。
         let busy = self.git_writes.get(&active_repo).copied();
-        // 同步入口 = 把本来就显眼的绿色 ↑N↓M 直接做成可点下拉（带 ▾ 提示），
+        // 同步入口 = 把本来就显眼的绿色 ↑N↓M 直接做成可点下拉（带下拉箭头），
         // 替代之前那个不起眼的「⇅」。点开是获取/拉取/暂存/恢复/丢弃全部。
         let sync_label = match busy {
             Some(op) => op.chip().to_string(),
-            None => format!("↑{ahead} ↓{behind} ▾"),
+            None => format!("↑{ahead} ↓{behind}"),
         };
         let sync_color = if busy.is_some() {
             rgb(ui_theme::yellow())
@@ -370,54 +371,38 @@ impl Workspace {
             .unwrap_or_else(|| active_repo.clone());
         let ws_log_repo = cx.entity();
 
-        let changes_view = tab_view.clone();
-        let log_view = tab_view;
-        let view_tabs = smelt_ui::segmented::segmented_track(
-            "git-view-tabs",
-            smelt_ui::segmented::SegmentedVariant::Underline,
-            Some(match self.git_tab {
+        let view_tabs = TabBar::new("git-view-tabs")
+            .underline()
+            .xsmall()
+            .selected_index(match self.git_tab {
                 GitTab::Changes => 0,
                 GitTab::Log => 1,
-            }),
-        )
-        .child(
-            smelt_ui::segmented::underline_segment(
-                "git-view-changes",
-                "更改",
-                self.git_tab == GitTab::Changes,
-                cx,
-            )
-            .on_click(move |_event, _window, cx| {
-                changes_view.update(cx, |workspace, cx| {
-                    if workspace.git_tab != GitTab::Changes {
-                        workspace.git_tab = GitTab::Changes;
+            })
+            .on_click(move |ix, _window, cx| {
+                tab_view.update(cx, |workspace, cx| {
+                    let tab = if *ix == 0 {
+                        GitTab::Changes
+                    } else {
+                        GitTab::Log
+                    };
+                    if workspace.git_tab == tab {
+                        return;
+                    }
+                    workspace.git_tab = tab;
+                    if tab == GitTab::Changes {
                         workspace.reset_git_diff_view();
-                        cx.notify();
                     }
+                    cx.notify();
                 });
-            }),
-        )
-        .child(
-            smelt_ui::segmented::underline_segment(
-                "git-view-log",
-                "历史",
-                self.git_tab == GitTab::Log,
-                cx,
-            )
-            .on_click(move |_event, _window, cx| {
-                log_view.update(cx, |workspace, cx| {
-                    if workspace.git_tab != GitTab::Log {
-                        workspace.git_tab = GitTab::Log;
-                        cx.notify();
-                    }
-                });
-            }),
-        );
+            })
+            .child(Tab::new().label("更改"))
+            .child(Tab::new().label("历史"));
         let scope_view = cx.entity();
         let scope_control = Button::new("git-diff-scope")
             .ghost()
             .xsmall()
-            .label(format!("{} ▾", self.diff_scope.label()))
+            .label(self.diff_scope.label())
+            .dropdown_caret(true)
             .text_color(rgb(ui_theme::text_muted()))
             .dropdown_menu(move |mut menu, _window, _cx| {
                 for scope in [DiffScope::All, DiffScope::Staged, DiffScope::Unstaged] {
@@ -433,17 +418,10 @@ impl Workspace {
                 menu
             });
         // 改动 / 历史是长期可见的同级视图，不属于操作菜单；与标题合并到同一行，
-        // 避免旧的第二条 tab 栏挤压本就有限的 Git 内容高度。
-        let header = div()
-            .h(ui_theme::height::lg())
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .border_b_1()
-            .border_color(ui_theme::hairline())
-            .child(view_tabs)
+        // 避免旧的第二条 tab 栏挤压本就有限的 Git 内容高度。页签条铺满这一行，
+        // 它自己的底线就是分隔线；作用范围、仓库、同步这些操作收在右侧。
+        let actions = h_flex()
+            .gap_2()
             .when(self.git_tab == GitTab::Changes, |bar| {
                 bar.child(scope_control)
             })
@@ -454,7 +432,8 @@ impl Workspace {
                     Button::new("git-log-repo")
                         .ghost()
                         .xsmall()
-                        .label(format!("{active_repo_label} ▾"))
+                        .label(active_repo_label)
+                        .dropdown_caret(true)
                         .text_color(rgb(ui_theme::text_muted()))
                         .dropdown_menu(move |mut menu, _window, _cx| {
                             for (label, repo_root) in repo_choices.clone() {
@@ -472,7 +451,6 @@ impl Workspace {
                         }),
                 )
             })
-            .child(div().flex_1())
             // 历史页还没有分仓概念，仍用当前目标仓库的操作菜单；改动页的操作
             // 已经下放到每个仓库自己那一行，这里不再摆一个"作用于谁不明确"的全局按钮。
             .when(self.git_tab == GitTab::Log, |bar| {
@@ -481,6 +459,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .label(sync_label)
+                        .dropdown_caret(busy.is_none())
                         .font_family(crate::terminal_view::font_family())
                         .text_color(sync_color)
                         .dropdown_menu(move |menu, _window, _cx| {
@@ -496,6 +475,12 @@ impl Workspace {
                         }),
                 )
             });
+        let header = view_tabs
+            .w_full()
+            .h(ui_theme::height::lg())
+            .flex_shrink_0()
+            .px_3()
+            .suffix(actions);
 
         if self.git_tab == GitTab::Log {
             return v_flex()

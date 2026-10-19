@@ -6,6 +6,7 @@ use gpui::ElementId;
 use gpui::InteractiveElement;
 use gpui::StatefulInteractiveElement;
 use gpui::prelude::FluentBuilder;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
@@ -15,6 +16,7 @@ use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
 use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
+use smelt_ui::IconAction as _;
 
 use super::*;
 
@@ -896,54 +898,30 @@ pub fn file_content_parts(
                         "查看预览"
                     };
                     el.child(
-                        div()
-                            .id("markdown-view-toggle")
-                            .role(gpui::Role::Button)
-                            .aria_label(markdown_label)
+                        Button::new("markdown-view-toggle")
+                            .ghost()
+                            .xsmall()
                             .flex_shrink_0()
-                            .text_xs()
-                            .text_color(fg)
-                            .cursor_pointer()
-                            .hover(|el| el.opacity(0.75))
-                            .child(markdown_label)
+                            .label(markdown_label)
                             .on_click(cx.listener(move |ws, _ev, _window, cx| {
                                 ws.set_file_preview(!preview, cx)
                             })),
                     )
                 })
                 .child(
-                    div()
-                        .id("file-tree-toggle")
-                        .role(gpui::Role::Button)
-                        .aria_label(if file_tree_open {
+                    Button::new("file-tree-toggle")
+                        .ghost()
+                        .small()
+                        .flex_shrink_0()
+                        .icon(if file_tree_open {
+                            IconName::PanelRight
+                        } else {
+                            IconName::PanelLeft
+                        })
+                        .icon_action(if file_tree_open {
                             "收起文件树"
                         } else {
                             "展开文件树"
-                        })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size_6()
-                        .rounded_md()
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .text_color(fg)
-                        .hover(|el| el.bg(border))
-                        .child(
-                            Icon::new(if file_tree_open {
-                                IconName::PanelRight
-                            } else {
-                                IconName::PanelLeft
-                            })
-                            .size_4(),
-                        )
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(if file_tree_open {
-                                "收起文件树"
-                            } else {
-                                "展开文件树"
-                            })
-                            .build(window, cx)
                         })
                         .on_click(cx.listener(|ws, _ev, _window, cx| {
                             ws.toggle_file_tree(cx);

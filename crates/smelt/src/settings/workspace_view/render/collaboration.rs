@@ -35,16 +35,8 @@ fn last_seen_text(device: &smelt_model::remote_config::DeviceInfo) -> String {
 pub(super) fn remote_page(
     _entity: Entity<Workspace>,
     _snapshot: &SettingsRenderSnapshot,
-    cx: &App,
+    _cx: &App,
 ) -> SettingPage {
-    let (fg, _muted, border, popover) = {
-        let t = cx.theme();
-        (t.foreground, t.muted_foreground, t.border, t.popover)
-    };
-    let btn = move |id: &'static str, label: String| {
-        settings_chip_button(id, label, fg, popover, border).hover(|s| s.bg(border))
-    };
-
     let access_group = SettingGroup::new().items(vec![
         SettingItem::new(
             "开启远程访问",
@@ -135,10 +127,12 @@ pub(super) fn remote_page(
             };
             card = card.child(
                 h_flex().child(
-                    btn("begin-pairing", label.into())
-                        .on_mouse_down(MouseButton::Left, |_, _window, cx: &mut App| {
-                            begin_pairing(cx)
-                        }),
+                    Button::new("begin-pairing")
+                        .small()
+                        .label(label)
+                        .loading(state.generating_offer)
+                        .disabled(state.generating_offer)
+                        .on_click(|_, _window, cx: &mut App| begin_pairing(cx)),
                 ),
             );
             let Some(offer) = state.offer else {
@@ -181,16 +175,12 @@ pub(super) fn remote_page(
                         )
                         .child(
                             h_flex().gap_2().child(
-                                btn(
-                                    "copy-pairing-uri",
-                                    copy_btn_label("copy-pairing-uri", "复制配对串", cx),
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    move |_, _window, cx: &mut App| {
+                                Button::new("copy-pairing-uri")
+                                    .small()
+                                    .label(copy_btn_label("copy-pairing-uri", "复制配对串", cx))
+                                    .on_click(move |_, _window, cx: &mut App| {
                                         copy_with_feedback(uri.clone(), "copy-pairing-uri", cx);
-                                    },
-                                ),
+                                    }),
                             ),
                         )
                         .child(div().text_xs().text_color(muted).child(
@@ -245,20 +235,12 @@ pub(super) fn remote_page(
                                 ))),
                         )
                         .child(
-                            settings_chip_button(
-                                ("revoke-device", index),
-                                "撤销",
-                                fg,
-                                popover,
-                                border,
-                            )
-                            .hover(|s| s.bg(border))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                move |_, _window, cx: &mut App| {
+                            Button::new(("revoke-device", index))
+                                .small()
+                                .label("撤销")
+                                .on_click(move |_, _window, cx: &mut App| {
                                     revoke_device(endpoint_id.clone(), cx);
-                                },
-                            ),
+                                }),
                         ),
                 );
             }
@@ -294,10 +276,12 @@ pub(super) fn remote_page(
             let mut list = v_flex().gap_2();
             let label = if hub.adding { "正在配对…" } else { "添加运行时" };
             list = list.child(h_flex().child(
-                btn("add-runtime", label.into()).on_mouse_down(
-                    MouseButton::Left,
-                    |_, _window, cx: &mut App| crate::runtimes::add_runtime(cx),
-                ),
+                Button::new("add-runtime")
+                    .small()
+                    .label(label)
+                    .loading(hub.adding)
+                    .disabled(hub.adding)
+                    .on_click(|_, _window, cx: &mut App| crate::runtimes::add_runtime(cx)),
             ));
             if let Some(error) = hub.error.clone() {
                 list = list.child(div().text_xs().text_color(danger).child(error));
@@ -346,9 +330,10 @@ pub(super) fn remote_page(
                                 .child(div().text_xs().text_color(muted).child(status)),
                         )
                         .child(
-                            settings_chip_button(("remove-runtime", index), "移除", fg, popover, border)
-                                .hover(|s| s.bg(border))
-                                .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                            Button::new(("remove-runtime", index))
+                                .small()
+                                .label("移除")
+                                .on_click(move |_, _window, cx: &mut App| {
                                     crate::runtimes::remove_runtime(runtime_id.clone(), cx);
                                 }),
                         ),

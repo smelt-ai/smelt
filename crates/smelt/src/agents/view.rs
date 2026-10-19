@@ -641,29 +641,24 @@ impl Workspace {
         name: &str,
         entity: Entity<Workspace>,
         left_guard: Pixels,
-        cx: &App,
     ) -> AnyElement {
         let draft = self.editing_conversation_draft();
         let back_entity = entity.clone();
         let tabs = self.agent_surface.editor.as_ref().map(|editor| {
-            segmented_track(cx).children([AgentEditorTab::Config, AgentEditorTab::Memory].map(
-                |tab| {
-                    let selected = tab == editor.tab;
-                    let entity = entity.clone();
-                    compact_chip(match tab {
-                        AgentEditorTab::Config => "agent-editor-tab-config",
-                        AgentEditorTab::Memory => "agent-editor-tab-memory",
-                    })
-                    .label(agent_editor_tab_label(tab, editor))
-                    .selected(selected)
-                    .toggled(selected)
-                    .on_click(move |_, _, cx| {
+            const TABS: [AgentEditorTab; 2] = [AgentEditorTab::Config, AgentEditorTab::Memory];
+            let entity = entity.clone();
+            choice_tabs(
+                "agent-editor-tabs",
+                TABS.iter().position(|tab| *tab == editor.tab),
+                TABS.map(|tab| Tab::new().label(agent_editor_tab_label(tab, editor))),
+                move |ix, cx| {
+                    if let Some(tab) = TABS.get(ix).copied() {
                         entity.update(cx, |workspace, cx| {
                             workspace.select_agent_editor_tab(tab, cx)
                         });
-                    })
+                    }
                 },
-            ))
+            )
         });
         let start_entity = entity;
         product_page_chrome(left_guard)
@@ -1213,7 +1208,7 @@ impl Workspace {
             let selected = agents.iter().find(|agent| agent.id == editor_id).cloned();
             match (selected, self.agent_surface.editor.as_ref()) {
                 (Some(agent), Some(editor)) => (
-                    self.render_agent_editor_header(&agent.name, entity.clone(), left_guard, cx),
+                    self.render_agent_editor_header(&agent.name, entity.clone(), left_guard),
                     self.render_agent_config_panel(agent, editor, entity, cx),
                 ),
                 _ => (
@@ -1252,21 +1247,18 @@ impl Workspace {
     ) -> AnyElement {
         let entity = cx.entity();
         let current = self.nav.capabilities_tab();
-        // 选中块从上一个页签滑到这一个，而不是两格之间瞬间换底色。
-        let tabs = smelt_ui::segmented::segmented_track(
+        let tabs = choice_tabs(
             "capabilities-tabs",
-            smelt_ui::segmented::SegmentedVariant::Pill,
             CapabilitiesTab::ALL.iter().position(|tab| *tab == current),
-        )
-        .children(CapabilitiesTab::ALL.into_iter().map(|tab| {
-            let entity = entity.clone();
-            smelt_ui::segmented::pill_segment(tab.element_id(), tab.label(), tab == current)
-                .on_click(move |_, _, cx| {
+            CapabilitiesTab::ALL.map(|tab| Tab::new().label(tab.label())),
+            move |ix, cx| {
+                if let Some(tab) = CapabilitiesTab::ALL.get(ix).copied() {
                     entity.update(cx, |workspace, cx| {
                         workspace.select_capabilities_tab(tab, cx)
                     });
-                })
-        }));
+                }
+            },
+        );
         let header = product_page_chrome(self.chrome_left_guard(window))
             .gap_3()
             .child(

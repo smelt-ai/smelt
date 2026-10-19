@@ -1,6 +1,7 @@
 //! ACP 审批卡与选择题卡。
 
 use super::*;
+use gpui_component::Disableable as _;
 
 impl AcpView {
     pub(super) fn render_approval_ui(
@@ -47,20 +48,13 @@ impl AcpView {
                 let tool_call_id = tool_call_id.clone();
                 buttons = buttons.child(
                     h_flex().w_full().min_w_0().child(
-                        div()
-                            .id((gpui::ElementId::from("acp-perm-primary"), option_id.clone()))
+                        Button::new((gpui::ElementId::from("acp-perm-primary"), option_id.clone()))
+                            .primary()
                             .h(ui_theme::height::lg())
                             .px_4()
-                            .flex()
-                            .items_center()
-                            .rounded_full()
-                            .bg(gpui::rgb(ui_theme::action_fill()))
-                            .text_color(gpui::rgb(ui_theme::action_on()))
-                            .text_sm()
+                            .rounded(ui_theme::height::lg() / 2.)
                             .font_semibold()
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.88))
-                            .child(format!("{name} ⌘⏎"))
+                            .label(format!("{name} ⌘⏎"))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.pick_permission(&tool_call_id, &option_id, cx);
                             })),
@@ -85,19 +79,25 @@ impl AcpView {
                 } else {
                     ui_theme::text_muted()
                 };
-                let button = div()
-                    .id((gpui::ElementId::from("acp-perm-opt"), option_id.clone()))
+                let soft = |alpha| gpui::Hsla::from(ui_theme::tint(bg_u32, alpha));
+                let button = Button::new((gpui::ElementId::from("acp-perm-opt"), option_id.clone()))
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(soft(0x1c))
+                            .foreground(if danger {
+                                gpui::rgb(ui_theme::red()).into()
+                            } else {
+                                t.foreground
+                            })
+                            .hover(soft(0x30))
+                            .active(soft(0x40)),
+                    )
                     .h(ui_theme::height::lg())
                     .px_3p5()
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .bg(ui_theme::tint(bg_u32, 0x1c))
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(danger, |d| d.text_color(gpui::rgb(ui_theme::red())))
-                    .hover(|d| d.bg(ui_theme::tint(bg_u32, 0x30)))
-                    .child(opt.name.clone())
+                    .rounded(ui_theme::height::lg() / 2.)
+                    // 自定义变体的底色只取 `color` 的两成，这里直接给足。
+                    .bg(soft(0x1c))
+                    .label(opt.name.clone())
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.pick_permission(&tool_call_id, &option_id, cx);
                     }));
@@ -270,18 +270,12 @@ impl AcpView {
                         ..
                     }]
                 );
-            let skip = div()
-                .id("acp-elicit-skip")
-                .h(ui_theme::height::sm())
+            let skip = Button::new("acp-elicit-skip")
+                .text()
+                .small()
                 .px_3()
-                .flex()
-                .items_center()
-                .rounded_full()
-                .text_sm()
+                .label("跳过")
                 .text_color(muted)
-                .cursor_pointer()
-                .hover(|d| d.opacity(0.8))
-                .child("跳过")
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.dismiss_elicitation(cx);
                 }));
@@ -337,25 +331,22 @@ impl AcpView {
                             .gap_1()
                             .child(div().text_xs().text_color(muted).child(field.title.clone()))
                             .child(
-                                div()
-                                    .id((
-                                        gpui::ElementId::from("acp-elicit-url"),
-                                        field.key.clone(),
-                                    ))
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_full()
-                                    .bg(gpui::rgb(ui_theme::action_fill()))
-                                    .text_color(gpui::rgb(ui_theme::action_on()))
-                                    .text_sm()
-                                    .font_semibold()
-                                    .cursor_pointer()
-                                    .hover(|d| d.opacity(0.88))
-                                    .child("打开并继续")
-                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                Button::new((
+                                    gpui::ElementId::from("acp-elicit-url"),
+                                    field.key.clone(),
+                                ))
+                                .primary()
+                                .h(ui_theme::height::lg())
+                                .px_3()
+                                .rounded(ui_theme::height::lg() / 2.)
+                                .font_semibold()
+                                .label("打开并继续")
+                                .on_click(cx.listener(
+                                    move |this, _ev, _window, cx| {
                                         cx.open_url(&url);
                                         this.submit_elicitation(cx);
-                                    })),
+                                    },
+                                )),
                             ),
                     );
                     continue;
@@ -469,26 +460,15 @@ impl AcpView {
             if show_footer {
                 inner = inner.child(
                     h_flex().w_full().gap_2().items_center().child(
-                        div()
-                            .id("acp-elicit-submit")
+                        Button::new("acp-elicit-submit")
                             .debug_selector(|| "acp-elicit-submit".to_string())
+                            .primary()
+                            .disabled(!ready)
                             .h(ui_theme::height::lg())
                             .px_4()
-                            .flex()
-                            .items_center()
-                            .rounded_full()
-                            .text_sm()
+                            .rounded(ui_theme::height::lg() / 2.)
                             .font_semibold()
-                            .when(ready, |d| {
-                                d.bg(gpui::rgb(ui_theme::action_fill()))
-                                    .text_color(gpui::rgb(ui_theme::action_on()))
-                                    .cursor_pointer()
-                                    .hover(|x| x.opacity(0.9))
-                            })
-                            .when(!ready, |d| {
-                                d.border_1().border_color(t.border).text_color(muted)
-                            })
-                            .child("提交")
+                            .label("提交")
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 if this.elicit_ready(cx) {
                                     this.submit_elicitation(cx);

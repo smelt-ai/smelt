@@ -9,12 +9,13 @@
 //! 跟 file_tree 模块（`crates/smelt/src/file_tree/`）同一个套路：`impl Workspace` 方法，字段仍在 main.rs。
 
 use gpui::StatefulInteractiveElement;
-use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
 
 use crate::{StageCover, Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
+use smelt_ui::IconAction as _;
 
 /// 共用顶栏标题槽。目录/编辑器/自动化钻取都有页头，那些面必须是 `Hidden`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,107 +528,59 @@ impl Workspace {
     pub(crate) fn render_window_trailing_toggles(&self, cx: &mut Context<Self>) -> Div {
         let promoted = self.tool_panel_promoted();
         let panel_visible = self.tool_panel_open || promoted;
-        let fullscreen_toggle = cx.entity().downgrade();
-        let panel_toggle = cx.entity().downgrade();
         let fullscreen_label = if promoted {
             "收回右侧面板"
         } else {
             "全屏显示右侧面板"
         };
+        let round = ButtonRounded::Size(px(9999.));
         h_flex()
             .flex_none()
             .items_center()
             .gap_1()
+            // 挂在拖窗口的顶栏上：按下先拦住，不让它变成拖窗口。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children((promoted || self.tool_panel_open).then(|| {
-                div()
-                    .id("tool-panel-fullscreen-toggle")
-                    .role(Role::Button)
-                    .aria_label(fullscreen_label)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size_6()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .when(promoted, |s| s.bg(ui_theme::overlay(0x18)))
-                    .hover(|s| s.bg(ui_theme::overlay(0x18)))
-                    .child(
-                        Icon::new(if promoted {
-                            IconName::Minimize
+                Button::new("tool-panel-fullscreen-toggle")
+                    .ghost()
+                    .small()
+                    .rounded(round)
+                    .selected(promoted)
+                    .toggled(promoted)
+                    .icon(if promoted {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    })
+                    .icon_action(fullscreen_label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if promoted {
+                            this.set_stage_cover(None, window, cx);
+                            this.set_tool_panel_open(true, cx);
                         } else {
-                            IconName::Maximize
-                        })
-                        .size_4(),
-                    )
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(fullscreen_label).build(window, cx)
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            if promoted {
-                                this.set_stage_cover(None, window, cx);
-                                this.set_tool_panel_open(true, cx);
-                            } else {
-                                this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
-                            }
-                            this.save_state(cx);
-                            cx.notify();
-                        }),
-                    )
-                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
-                        let _ = fullscreen_toggle.update(cx, |this, cx| {
-                            if promoted {
-                                this.set_stage_cover(None, window, cx);
-                                this.set_tool_panel_open(true, cx);
-                            } else {
-                                this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
-                            }
-                            this.save_state(cx);
-                            cx.notify();
-                        });
-                    })
+                            this.set_stage_cover(Some(StageCover::ToolPanel), window, cx);
+                        }
+                        this.save_state(cx);
+                        cx.notify();
+                    }))
             }))
             .child(
-                div()
-                    .id("tool-panel-toggle")
-                    .role(Role::Button)
-                    .aria_label("切换右侧面板")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size_6()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .when(panel_visible, |s| s.bg(ui_theme::overlay(0x18)))
-                    .hover(|s| s.bg(ui_theme::overlay(0x18)))
-                    .child(
-                        if panel_visible {
-                            Icon::empty().path("smelt-icons/panel-right-filled.svg")
-                        } else {
-                            Icon::new(IconName::PanelRight)
-                        }
-                        .size_4(),
-                    )
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("切换右侧面板")
-                            .action(&crate::ToggleToolPanel, None)
-                            .build(window, cx)
+                Button::new("tool-panel-toggle")
+                    .ghost()
+                    .small()
+                    .rounded(round)
+                    .selected(panel_visible)
+                    .toggled(panel_visible)
+                    .icon(if panel_visible {
+                        Icon::empty().path("smelt-icons/panel-right-filled.svg")
+                    } else {
+                        Icon::new(IconName::PanelRight)
                     })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.toggle_tool_panel(window, cx);
-                        }),
-                    )
-                    .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
-                        let _ =
-                            panel_toggle.update(cx, |this, cx| this.toggle_tool_panel(window, cx));
-                    }),
+                    .accessibility_label("切换右侧面板")
+                    .tooltip_with_action("切换右侧面板", &crate::ToggleToolPanel, None)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_tool_panel(window, cx);
+                    })),
             )
     }
 }

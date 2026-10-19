@@ -20,7 +20,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::scroll::ScrollableElement;
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -255,33 +255,35 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         (t.muted_foreground, t.foreground, t.border, t.primary)
     };
 
-    let current_profile = profile_id.clone();
-    let tab_colors = HistoryTabColors { accent, fg, muted };
+    let selected_source = source_tabs
+        .iter()
+        .position(|tab| tab.kind == agent && tab.profile_id == profile_id);
+    let targets: Vec<(HistorySourceKind, Option<String>)> = source_tabs
+        .iter()
+        .map(|tab| (tab.kind, tab.profile_id.clone()))
+        .collect();
     let agent_switcher = h_flex()
-        .id("history-agent-switcher")
         .w_full()
         .h(px(38.))
         .min_w_0()
         .flex_none()
-        .overflow_x_scrollbar()
-        .gap_1()
         .px_3()
-        .py_1p5()
         .border_b_1()
         .border_color(c_border)
-        // 空间足够时把来源 tab 推到右侧；内容超出时占位区收缩为零，保留滚动。
+        // 空间足够时把来源 tab 推到右侧；放不下时占位区收缩为零，tab 条自己横向滚动。
         .child(div().flex_1().min_w_0())
-        .children(source_tabs.into_iter().map(|tab| {
-            agent_tab_button(
-                tab.kind,
-                tab.profile_id,
-                tab.label.into(),
-                agent,
-                current_profile.clone(),
-                tab_colors,
-                cx,
-            )
-        }));
+        .child(
+            TabBar::new("history-agent-switcher")
+                .segmented()
+                .min_w_0()
+                .when_some(selected_source, |bar, ix| bar.selected_index(ix))
+                .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                    if let Some((target, profile)) = targets.get(*ix).cloned() {
+                        select_history_source(this, target, profile, cx);
+                    }
+                }))
+                .children(source_tabs.into_iter().map(|tab| Tab::new().label(tab.label))),
+        );
 
     // 选中会话的路径：list 和 detail 各自渲染都要用它判断"这行是不是当前打开的"，
     // 先从 detail 里取出来，避免下面重复解构。
@@ -840,59 +842,24 @@ fn history_turn(turn: &Turn, index: usize, muted: Hsla, fg: Hsla, border: Hsla) 
         .into_any_element()
 }
 
-/// 会话来源 tab 上的一个按钮，选中态用 accent 底色标出来。
-/// 视觉，但换 agent 时还要顺带清掉右侧详情——不然会显示"上一个 agent 那份会话"
-/// 的残留内容，跟点开新会话前那一瞬间的空白状态不一致）。
-#[derive(Clone, Copy)]
-struct HistoryTabColors {
-    accent: Hsla,
-    fg: Hsla,
-    muted: Hsla,
-}
-
-fn agent_tab_button(
+/// 换会话来源。换了还要顺带清掉右侧详情——不然会显示"上一个 agent 那份会话"
+/// 的残留内容，跟点开新会话前那一瞬间的空白状态不一致。
+fn select_history_source(
+    this: &mut Workspace,
     target: HistorySourceKind,
     target_profile: Option<String>,
-    label: SharedString,
-    current: HistorySourceKind,
-    current_profile: Option<String>,
-    colors: HistoryTabColors,
     cx: &mut Context<Workspace>,
-) -> Stateful<Div> {
-    let HistoryTabColors { accent, fg, muted } = colors;
-    let selected = target == current && target_profile == current_profile;
-    let elem_id: SharedString = target_profile
-        .as_deref()
-        .map(|id| format!("profile:{id}"))
-        .unwrap_or_else(|| target.id().to_string())
-        .into();
-    div()
-        .id(elem_id)
-        .flex_none()
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .text_sm()
-        .text_color(if selected { fg } else { muted })
-        .when(selected, |d| d.bg(accent.opacity(0.18)))
-        .when(!selected, |d| d.hover(|s| s.text_color(fg)))
-        .child(label)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, _, cx| {
-                if this.history_agent != target || this.history_profile != target_profile {
-                    this.history_agent = target;
-                    this.history_profile = target_profile.clone();
-                    this.session_detail_gen = this.session_detail_gen.wrapping_add(1);
-                    this.session_detail = None;
-                    this.history_detail_list_state.reset(0);
-                    // 换来源后立刻排一次刷新：缺缓存或超过 10 秒就重扫这份列表。
-                    this.schedule_visible_refresh(cx);
-                    cx.notify();
-                }
-            }),
-        )
+) {
+    if this.history_agent != target || this.history_profile != target_profile {
+        this.history_agent = target;
+        this.history_profile = target_profile;
+        this.session_detail_gen = this.session_detail_gen.wrapping_add(1);
+        this.session_detail = None;
+        this.history_detail_list_state.reset(0);
+        // 换来源后立刻排一次刷新：缺缓存或超过 10 秒就重扫这份列表。
+        this.schedule_visible_refresh(cx);
+        cx.notify();
+    }
 }
 
 use crate::settings::{ConversationAgentKind, HistorySourceKind};

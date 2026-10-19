@@ -118,10 +118,7 @@ fn agent_groups(
                         let muted = cx.theme().muted_foreground;
                         let border = cx.theme().border;
                         let fg = cx.theme().foreground;
-                        let popover = cx.theme().popover;
                         let secondary = cx.theme().secondary;
-                        let danger = cx.theme().danger;
-                        let danger_fg = cx.theme().danger_foreground;
                         // 侧栏默认 250 + 左右 padding/滚动条余量；再夹到合理区间。
                         let field_w = {
                             let vw = f32::from(window.viewport_size().width);
@@ -187,28 +184,18 @@ fn agent_groups(
                                 let row_ix = ix;
                                 let row_key = label.entity_id();
                                 let delete_slot = if *removable {
-                                    div()
-                                        .id(("del-launch", row_key))
+                                    Button::new(("del-launch", row_key))
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Close)
+                                        .icon_action("删除启动项")
                                         .size(del_w)
-                                        .flex()
                                         .flex_none()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        // 删除是破坏性操作，hover 时给红底明示。
-                                        .hover(|s| s.bg(danger).text_color(danger_fg))
-                                        .child("×")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |_, _, cx: &mut App| {
-                                                del_entity.update(cx, |ws, cx| {
-                                                    ws.remove_launch_entry(row_ix, cx);
-                                                });
-                                            },
-                                        )
+                                        .on_click(move |_, _, cx: &mut App| {
+                                            del_entity.update(cx, |ws, cx| {
+                                                ws.remove_launch_entry(row_ix, cx);
+                                            });
+                                        })
                                         .into_any_element()
                                 } else {
                                     // 内置启动项固定存在；保留空槽以维持两列对齐。
@@ -234,24 +221,12 @@ fn agent_groups(
                             col = col.child(list);
                             let add_entity = launch_editor_entity.clone();
                             col.child(
-                                div()
-                                    .id("add-launch")
-                                    .h(crate::ui_theme::height::lg())
+                                Button::new("add-launch")
+                                    .outline()
+                                    .icon(IconName::Plus)
+                                    .label("添加启动项")
                                     .w(field_w)
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_lg()
-                                    .cursor_pointer()
-                                    .text_sm()
-                                    .text_color(fg)
-                                    .bg(popover)
-                                    .border_1()
-                                    .border_color(border)
-                                    .hover(|s| s.bg(border))
-                                    .child("+ 添加启动项")
-                                    .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
+                                    .on_click(move |_, _, cx: &mut App| {
                                         add_entity.update(cx, |ws, cx| ws.add_launch_entry(cx));
                                     }),
                             )
@@ -617,10 +592,7 @@ fn agent_groups(
                             let muted = cx.theme().muted_foreground;
                             let border = cx.theme().border;
                             let fg = cx.theme().foreground;
-                            let popover = cx.theme().popover;
                             let secondary = cx.theme().secondary;
-                            let danger = cx.theme().danger;
-                            let danger_fg = cx.theme().danger_foreground;
                             let field_w = {
                                 let vw = f32::from(window.viewport_size().width);
                                 let w = (vw - 250. - 80.).clamp(360., 720.);
@@ -727,51 +699,30 @@ fn agent_groups(
                                                 Input::new(dir).w(dir_w).font_family(mono.clone()),
                                             )
                                             .child(
-                                                div()
-                                                    .id(("del-profile", row_key))
+                                                Button::new(("del-profile", row_key))
+                                                    .ghost()
+                                                    .small()
+                                                    .icon(IconName::Close)
+                                                    .icon_action("删除 workspace")
                                                     .size(del_w)
-                                                    .flex()
                                                     .flex_none()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded_md()
-                                                    .cursor_pointer()
-                                                    .text_sm()
-                                                    .text_color(muted)
-                                                    .hover(|s| s.bg(danger).text_color(danger_fg))
-                                                    .child("×")
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        move |_, _, cx: &mut App| {
-                                                            del_entity.update(cx, |ws, cx| {
-                                                                ws.remove_profile(row_ix, cx);
-                                                            });
-                                                        },
-                                                    ),
+                                                    .on_click(move |_, _, cx: &mut App| {
+                                                        del_entity.update(cx, |ws, cx| {
+                                                            ws.remove_profile(row_ix, cx);
+                                                        });
+                                                    }),
                                             ),
                                     );
                                 }
                                 col = col.child(list);
                                 let add_entity = profile_editor_entity.clone();
                                 col.child(
-                                    div()
-                                        .id("add-profile")
-                                        .h(crate::ui_theme::height::lg())
+                                    Button::new("add-profile")
+                                        .outline()
+                                        .icon(IconName::Plus)
+                                        .label("添加 workspace")
                                         .w(field_w)
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_lg()
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .text_color(fg)
-                                        .bg(popover)
-                                        .border_1()
-                                        .border_color(border)
-                                        .hover(|s| s.bg(border))
-                                        .child("+ 添加 workspace")
-                                        .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
+                                        .on_click(move |_, _, cx: &mut App| {
                                             add_entity.update(cx, |ws, cx| ws.add_profile(cx));
                                         }),
                                 )
@@ -796,10 +747,7 @@ fn agent_groups(
                     let installed = hook_status
                         .as_ref()
                         .is_some_and(|providers| providers.iter().all(|provider| provider.installed));
-                    let (fg, muted, border) = {
-                        let t = cx.theme();
-                        (t.foreground, t.muted_foreground, t.border)
-                    };
+                    let muted = cx.theme().muted_foreground;
                     let success: Hsla = rgb(crate::ui_theme::green()).into();
                     v_flex()
                         .gap_2()
@@ -840,29 +788,18 @@ fn agent_groups(
                             h_flex()
                                 .gap_2()
                                 .child(
-                                    div()
-                                        .id("install-agent-hooks")
-                                        .px_3()
-                                        .py(px(6.))
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(border)
-                                        .bg(crate::ui_theme::tint(crate::ui_theme::green(), 0x22))
-                                        .text_sm()
-                                        .text_color(rgb(crate::ui_theme::green()))
-                                        .hover(|s| s.opacity(0.9))
-                                        .child(if installed {
+                                    Button::new("install-agent-hooks")
+                                        .success()
+                                        .outline()
+                                        .label(if installed {
                                             "重新安装 hooks"
                                         } else {
                                             "安装 hooks"
                                         })
-                                        .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                                        .disabled(busy)
+                                        .on_click(move |_, _window, cx: &mut App| {
                                             // 先记用户意图：即使某个 provider 本次安装失败，
                                             // 下次启动也会继续校正，而不是悄悄退回关闭。
-                                            if busy {
-                                                return;
-                                            }
                                             apply_agent_host(|c| {
                                                 c.agent_hooks_enabled = true;
                                             }, cx);
@@ -870,23 +807,12 @@ fn agent_groups(
                                         }),
                                 )
                                 .child(
-                                    div()
-                                        .id("uninstall-agent-hooks")
-                                        .px_3()
-                                        .py(px(6.))
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(border)
-                                        .text_sm()
-                                        .text_color(fg)
-                                        .hover(|s| s.bg(border))
-                                        .child("移除 Smelt hooks")
-                                        .on_mouse_down(MouseButton::Left, move |_, _window, cx: &mut App| {
+                                    Button::new("uninstall-agent-hooks")
+                                        .outline()
+                                        .label("移除 Smelt hooks")
+                                        .disabled(busy)
+                                        .on_click(move |_, _window, cx: &mut App| {
                                             // 先关闭自动安装，避免部分移除失败后重启又被装回。
-                                            if busy {
-                                                return;
-                                            }
                                             apply_agent_host(|c| {
                                                 c.agent_hooks_enabled = false;
                                             }, cx);

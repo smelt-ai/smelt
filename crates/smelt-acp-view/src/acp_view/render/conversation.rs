@@ -90,6 +90,24 @@ fn entry_with_enter(progress: Option<f32>, el: gpui::AnyElement) -> gpui::AnyEle
         .into_any_element()
 }
 
+/// 线 + 字 + 线的分隔条。不用 `Separator::label`：它给字垫一块窗口底色，
+/// 会话有背景图时会露出一块色块。
+fn labeled_divider(
+    label: gpui::SharedString,
+    line: gpui::Hsla,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_2()
+        .my_1()
+        .child(div().flex_1().h(px(1.)).bg(line))
+        .child(div().text_xs().text_color(muted).child(label))
+        .child(div().flex_1().h(px(1.)).bg(line))
+        .into_any_element()
+}
+
 struct SubagentCard<'a> {
     index: usize,
     id: &'a str,
@@ -311,15 +329,9 @@ impl AcpView {
                 let mut el: gpui::AnyElement = match entry {
                     // agent 回显的「中断」标记不是用户说的话，别套成气泡——
                     // 那会读成「用户发了一条叫 [Request interrupted...] 的消息」。
-                    AcpEntry::User(text) if is_interrupt_marker(text) => h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap_2()
-                        .my_1()
-                        .child(div().flex_1().h(px(1.)).bg(t.border))
-                        .child(div().text_xs().text_color(muted).child("已中断"))
-                        .child(div().flex_1().h(px(1.)).bg(t.border))
-                        .into_any_element(),
+                    AcpEntry::User(text) if is_interrupt_marker(text) => {
+                        labeled_divider("已中断".into(), t.border, muted)
+                    }
                     // 用户气泡右对齐限宽（对齐设计稿）：整行铺满时跟 agent 正文
                     // 混成一片，看不出谁在说话。
                     AcpEntry::User(_) => {
@@ -976,23 +988,20 @@ impl AcpView {
                                                     .when(need_toggle, |d| {
                                                         let key = key.clone();
                                                         d.child(
-                                                            div()
-                                                                .id(owner_part(
-                                                                    "acp-tool-toggle",
-                                                                    &owner,
-                                                                    part_ix,
-                                                                ))
-                                                                .text_xs()
-                                                                .text_color(faint)
-                                                                .cursor_pointer()
-                                                                .hover(|d| d.opacity(0.8))
-                                                                .child(if expanded {
-                                                                    "收起".to_string()
-                                                                } else {
-                                                                    format!("展开全部 {total} 行")
-                                                                })
-                                                                .on_mouse_down(
-                                                                    gpui::MouseButton::Left,
+                                                            Button::new(owner_part(
+                                                                "acp-tool-toggle",
+                                                                &owner,
+                                                                part_ix,
+                                                            ))
+                                                            .text()
+                                                            .xsmall()
+                                                            .label(if expanded {
+                                                                "收起".to_string()
+                                                            } else {
+                                                                format!("展开全部 {total} 行")
+                                                            })
+                                                            .text_color(faint)
+                                                            .on_click(
                                                                     cx.listener(
                                                                         move |this, _ev, _window, cx| {
                                                                             if !this
@@ -1135,15 +1144,9 @@ impl AcpView {
                         }
                         block.into_any_element()
                     }
-                    AcpEntry::Divider(label) => h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap_2()
-                        .my_1()
-                        .child(div().flex_1().h(px(1.)).bg(t.border))
-                        .child(div().text_xs().text_color(muted).child(label.clone()))
-                        .child(div().flex_1().h(px(1.)).bg(t.border))
-                        .into_any_element(),
+                    AcpEntry::Divider(label) => {
+                        labeled_divider(label.clone().into(), t.border, muted)
+                    }
                 };
                 if let Some(run) = tool_run.as_ref()
                     && run.start == i
@@ -2173,44 +2176,25 @@ impl AcpView {
                 } else {
                     format!("展开全部 {total} 行")
                 };
-                let toggle_view = cx.entity().downgrade();
-                let toggle_key = key.clone();
                 block.child(
                     h_flex()
                         .gap_3()
                         .items_center()
                         .child(
-                            div()
-                                .id(owner_part("acp-tool-toggle", &owner, part_ix))
-                                .role(gpui::Role::Button)
-                                .aria_label(toggle_label.clone())
-                                .text_xs()
+                            Button::new(owner_part("acp-tool-toggle", &owner, part_ix))
+                                .text()
+                                .xsmall()
+                                .label(toggle_label)
                                 .text_color(gpui::rgb(ui_theme::text_faint()))
-                                .cursor_pointer()
-                                .hover(|row| row.opacity(0.8))
-                                .child(toggle_label)
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(move |this, _ev, _window, cx| {
-                                        if !this.expanded_tools.remove(&key) {
-                                            this.expanded_tools.insert(key.clone());
-                                        }
-                                        this.list_state
-                                            .remeasure_items(entry_ix..entry_ix.saturating_add(1));
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }),
-                                )
-                                .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
-                                    let _ = toggle_view.update(cx, |this, cx| {
-                                        if !this.expanded_tools.remove(&toggle_key) {
-                                            this.expanded_tools.insert(toggle_key.clone());
-                                        }
-                                        this.list_state
-                                            .remeasure_items(entry_ix..entry_ix.saturating_add(1));
-                                        cx.notify();
-                                    });
-                                }),
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    if !this.expanded_tools.remove(&key) {
+                                        this.expanded_tools.insert(key.clone());
+                                    }
+                                    this.list_state
+                                        .remeasure_items(entry_ix..entry_ix.saturating_add(1));
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                })),
                         )
                         .child(self.render_copy_button(
                             CopySite::ToolLog {

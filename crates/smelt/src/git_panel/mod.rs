@@ -18,13 +18,14 @@ use gpui_component::resizable::resizable_panel;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 
-use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable};
+use crate::{GitTab, Workspace, placeholder_view, resizable_split::h_resizable, ui_theme};
 use smelt_runtime_client::protocol::control::ControlCall;
 use smelt_runtime_client::protocol::git::*;
 pub use smelt_runtime_client::protocol::git::{
     BranchList, DiffLine, DiffScope, GitSeenChange, GitStatusData, GitTreeRow, RepoInfo,
     build_git_tree, full_file_path, parse_diff,
 };
+use smelt_ui::IconAction as _;
 
 mod diff;
 pub(crate) use diff::*;
@@ -532,6 +533,21 @@ pub(crate) fn release_git_write(
     true
 }
 
+/// 树行里的暂存 / 取消暂存。固定 16px 见方，不挤文件名，也不撑高行。
+fn stage_toggle_button(id: ElementId, staged: bool) -> Button {
+    Button::new(id)
+        .ghost()
+        .with_size(px(16.))
+        .flex_shrink_0()
+        .text_color(rgb(ui_theme::text_muted()))
+        .icon(if staged {
+            IconName::Minus
+        } else {
+            IconName::Plus
+        })
+        .icon_action(if staged { "取消暂存" } else { "暂存" })
+}
+
 /// 提交并推送按钮的文案。
 ///
 /// 只有这次操作自己就是提交或推送时才换成进行中。其它写入按钮不可点，
@@ -590,14 +606,17 @@ fn render_narrow_git_row(
                 .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
                 // 折叠箭头：未初始化的仓库没有内容可折，留空位保持对齐。
                 .child(
-                    div()
-                        .id(git_repo_id("git-repo-caret", root))
-                        .w(px(12.))
+                    Button::new(git_repo_id("git-repo-caret", root))
+                        .ghost()
+                        .with_size(px(16.))
                         .flex_shrink_0()
-                        .text_xs()
                         .text_color(rgb(ui_theme::text_faint()))
-                        .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                        .child(if *collapsed { "▸" } else { "▾" })
+                        .icon(if *collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .icon_action(if *collapsed { "展开仓库" } else { "收起仓库" })
                         .on_click(move |_ev, _window, cx| {
                             let root = root_toggle.clone();
                             ws_toggle.update(cx, |workspace, cx| {
@@ -710,91 +729,53 @@ fn render_narrow_git_row(
                     h_flex()
                         .gap_1p5()
                         .child(
-                            div()
-                                .id(git_repo_id("git-commit-push", root))
+                            Button::new(git_repo_id("git-commit-push", root))
+                                .primary()
+                                .small()
                                 .flex_1()
                                 .h(ui_theme::height::sm())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(ui_theme::row_radius())
-                                .text_xs()
-                                .font_semibold()
-                                .map(|d| {
-                                    if can_commit {
-                                        d.bg(rgb(ui_theme::action_fill()))
-                                            .text_color(rgb(ui_theme::action_on()))
-                                            .hover(|d| d.opacity(0.9))
-                                    } else {
-                                        d.bg(rgb(ui_theme::bg_card()))
-                                            .text_color(rgb(ui_theme::text_faint()))
-                                    }
-                                })
-                                .child(commit_label)
-                                .when(can_commit, |d| {
-                                    d.on_click(move |_ev, window, cx| {
-                                        let root = root_commit.clone();
-                                        ws_commit.update(cx, |ws, cx| {
-                                            // 按钮点谁就提交谁，不依赖当前选中的是哪个仓库。
-                                            ws.set_active_git_repo(root, cx);
-                                            ws.commit(true, window, cx);
-                                        });
-                                    })
+                                .label(commit_label)
+                                .disabled(!can_commit)
+                                .on_click(move |_ev, window, cx| {
+                                    let root = root_commit.clone();
+                                    ws_commit.update(cx, |ws, cx| {
+                                        // 按钮点谁就提交谁，不依赖当前选中的是哪个仓库。
+                                        ws.set_active_git_repo(root, cx);
+                                        ws.commit(true, window, cx);
+                                    });
                                 }),
                         )
                         .child(
-                            div()
-                                .id(git_repo_id("git-commit-only", root))
-                                .px_2()
+                            Button::new(git_repo_id("git-commit-only", root))
+                                .ghost()
+                                .small()
                                 .h(ui_theme::height::sm())
-                                .flex()
-                                .items_center()
-                                .rounded(ui_theme::row_radius())
-                                .text_xs()
-                                .text_color(rgb(if can_commit {
-                                    ui_theme::text_muted()
-                                } else {
-                                    ui_theme::text_faint()
-                                }))
-                                .when(can_commit, |d| {
-                                    d.hover(|d| d.bg(rgb(ui_theme::bg_hover())))
-                                        .on_click(move |_ev, window, cx| {
-                                            let root = root_target.clone();
-                                            ws_target.update(cx, |ws, cx| {
-                                                ws.set_active_git_repo(root, cx);
-                                                ws.commit(false, window, cx);
-                                            });
-                                        })
-                                })
-                                .child("仅提交"),
+                                .label("仅提交")
+                                .disabled(!can_commit)
+                                .on_click(move |_ev, window, cx| {
+                                    let root = root_target.clone();
+                                    ws_target.update(cx, |ws, cx| {
+                                        ws.set_active_git_repo(root, cx);
+                                        ws.commit(false, window, cx);
+                                    });
+                                }),
                         )
                         .child(
-                            div()
-                                .id(git_repo_id("git-push-only", root))
-                                .px_2()
+                            Button::new(git_repo_id("git-push-only", root))
+                                .ghost()
+                                .small()
                                 .h(ui_theme::height::sm())
-                                .flex()
-                                .items_center()
-                                .rounded(ui_theme::row_radius())
-                                .text_xs()
-                                .text_color(rgb(if can_push {
-                                    ui_theme::text_muted()
-                                } else {
-                                    ui_theme::text_faint()
-                                }))
-                                // 点击跟可用态同一个条件：以前只置灰不拦点击，↑0 照样能点，
-                                // 点了就是一次毫无意义的 push（失败时还会贴出一条报错）。
-                                .when(can_push, |d| {
-                                    d.hover(|d| d.bg(rgb(ui_theme::bg_hover())))
-                                        .on_click(move |_ev, _window, cx| {
-                                            let root = root_push.clone();
-                                            ws_push.update(cx, |ws, cx| {
-                                                ws.set_active_git_repo(root, cx);
-                                                ws.push_only(cx);
-                                            });
-                                        })
-                                })
-                                .child(format!("↑{ahead}")),
+                                .label(format!("↑{ahead}"))
+                                // 点击跟可用态同一个条件：↑0 时点了就是一次毫无意义的
+                                // push（失败时还会贴出一条报错）。
+                                .disabled(!can_push)
+                                .on_click(move |_ev, _window, cx| {
+                                    let root = root_push.clone();
+                                    ws_push.update(cx, |ws, cx| {
+                                        ws.set_active_git_repo(root, cx);
+                                        ws.push_only(cx);
+                                    });
+                                }),
                         ),
                 )
                 .when(has_text && !has_staged, |col| {
@@ -847,27 +828,22 @@ fn render_narrow_git_row(
                 .children(batch.as_ref().map(|batch| {
                     let batch = batch.clone();
                     let ws_batch = ws.clone();
-                    div()
-                        .id(git_scoped_id("git-group-stage", key, &header_root, title))
-                        .flex_shrink_0()
-                        .w(px(16.))
-                        .text_center()
-                        .text_xs()
-                        .text_color(rgb(ui_theme::text_muted()))
-                        .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                        .child(if batch.staged { "−" } else { "+" })
-                        .on_click(move |_ev, _window, cx| {
-                            cx.stop_propagation();
-                            let batch = batch.clone();
-                            ws_batch.update(cx, |workspace, cx| {
-                                workspace.stage_paths(
-                                    batch.root.to_string(),
-                                    batch.paths.clone(),
-                                    !batch.staged,
-                                    cx,
-                                );
-                            });
-                        })
+                    stage_toggle_button(
+                        git_scoped_id("git-group-stage", key, &header_root, title),
+                        batch.staged,
+                    )
+                    .on_click(move |_ev, _window, cx| {
+                        cx.stop_propagation();
+                        let batch = batch.clone();
+                        ws_batch.update(cx, |workspace, cx| {
+                            workspace.stage_paths(
+                                batch.root.to_string(),
+                                batch.paths.clone(),
+                                !batch.staged,
+                                cx,
+                            );
+                        });
+                    })
                 }))
                 .into_any_element()
         }
@@ -898,23 +874,18 @@ fn render_narrow_git_row(
                     let ws_batch = ws.clone();
                     let root_batch = root.to_string();
                     let path_batch = row.path.clone();
-                    let batch_action = div()
-                        .id(git_scoped_id("git-dir-stage", key, root, &row.path))
-                        .flex_shrink_0()
-                        .w(px(16.))
-                        .text_center()
-                        .text_xs()
-                        .text_color(rgb(ui_theme::text_muted()))
-                        .hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                        .child(if batch_staged { "−" } else { "+" })
-                        .on_click(move |_ev, _window, cx| {
-                            cx.stop_propagation();
-                            let root = root_batch.clone();
-                            let path = path_batch.clone();
-                            ws_batch.update(cx, |workspace, cx| {
-                                workspace.stage_paths(root, vec![path], !batch_staged, cx);
-                            });
+                    let batch_action = stage_toggle_button(
+                        git_scoped_id("git-dir-stage", key, root, &row.path),
+                        batch_staged,
+                    )
+                    .on_click(move |_ev, _window, cx| {
+                        cx.stop_propagation();
+                        let root = root_batch.clone();
+                        let path = path_batch.clone();
+                        ws_batch.update(cx, |workspace, cx| {
+                            workspace.stage_paths(root, vec![path], !batch_staged, cx);
                         });
+                    });
                     div()
                         .id(git_scoped_id("git-dir", key, root, &row.path))
                         .h(px(NARROW_GIT_ROW_H))
@@ -930,11 +901,13 @@ fn render_narrow_git_row(
                         .text_color(rgb(ui_theme::text_muted()))
                         .hover(|d| d.bg(rgb(ui_theme::bg_hover())))
                         .child(
-                            div()
-                                .w(px(10.))
-                                .flex_shrink_0()
-                                .text_xs()
-                                .child(if is_collapsed { "▸" } else { "▾" }),
+                            Icon::new(if is_collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(px(10.))
+                            .flex_shrink_0(),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
                         .child(batch_action)
@@ -973,33 +946,23 @@ fn render_narrow_git_row(
                     // 可点：pending 会因为迟到回包、读取失败重试、期间切项目而滞留，
                     // 按"有没有 pending"禁用等于让这个文件的按钮永久失效。
                     let busy = git_index_op_in_flight(pending);
-                    let stage_action = div()
-                        .id(git_scoped_id("git-file-stage", key, root, &row.path))
-                        .flex_shrink_0()
-                        .w(px(16.))
-                        .text_center()
-                        .text_xs()
-                        .text_color(rgb(if busy {
-                            ui_theme::text_faint()
-                        } else {
-                            ui_theme::text_muted()
-                        }))
-                        .when(!busy, |d| {
-                            d.hover(|d| d.text_color(rgb(ui_theme::text_bright())))
-                                .on_click(move |_ev, _window, cx| {
-                                    cx.stop_propagation();
-                                    let root = root_stage.clone();
-                                    let path = path_stage.clone();
-                                    ws_stage.update(cx, |workspace, cx| {
-                                        if staged {
-                                            workspace.unstage_file(root, path, cx);
-                                        } else {
-                                            workspace.stage_file(root, path, cx);
-                                        }
-                                    });
-                                })
-                        })
-                        .child(if staged { "−" } else { "+" });
+                    let stage_action = stage_toggle_button(
+                        git_scoped_id("git-file-stage", key, root, &row.path),
+                        staged,
+                    )
+                    .disabled(busy)
+                    .on_click(move |_ev, _window, cx| {
+                        cx.stop_propagation();
+                        let root = root_stage.clone();
+                        let path = path_stage.clone();
+                        ws_stage.update(cx, |workspace, cx| {
+                            if staged {
+                                workspace.unstage_file(root, path, cx);
+                            } else {
+                                workspace.stage_file(root, path, cx);
+                            }
+                        });
+                    });
 
                     let ws_row = ws.clone();
                     let root_row = root.to_string();

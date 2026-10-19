@@ -6,6 +6,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::tab::{Tab, TabBar};
+use gpui_component::tag::Tag;
 use gpui_component::*;
 
 use crate::{StageCover, Workspace, ui_theme};
@@ -88,18 +90,6 @@ impl ToolPanelTab {
     /// 解析插件 tab 的稳定 key；插件不可用时降级成 Files。
     fn plugin_or_files(key: &str) -> Self {
         crate::plugins::slot_for_key(key).map_or(Self::Files, Self::Plugin)
-    }
-
-    /// 页签元素身份。插件增删会平移槽位下标，key 不会。
-    fn element_key(self) -> String {
-        match self {
-            Self::Plugin(slot) => {
-                crate::plugins::key_for(slot).unwrap_or_else(|| format!("plugin:{}", slot.0))
-            }
-            builtin => builtin_panel(builtin)
-                .map(|panel| panel.key.to_string())
-                .unwrap_or_else(|| DEFAULT_PANEL_KEY.to_string()),
-        }
     }
 
     fn label(self) -> String {
@@ -364,7 +354,7 @@ impl Workspace {
         stage_rail: bool,
         left_guard: Pixels,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> TabBar {
         // 内置面板来自注册表，插件面板追在后面；两者在这一层同等。
         let mut tabs: Vec<ToolPanelTab> = BUILTIN_PANELS.iter().map(|panel| panel.tab).collect();
         tabs.extend(
@@ -377,91 +367,58 @@ impl Workspace {
             .then(|| tabs.iter().position(|t| *t == active_tab))
             .flatten();
 
-        // 下划线跟着选中页签滑过去，不是在两个页签之间瞬移。
-        let mut track = smelt_ui::segmented::segmented_track(
-            if stage_rail {
-                "stage-tool-panel-rail"
-            } else {
-                "tool-panel-rail"
-            },
-            smelt_ui::segmented::SegmentedVariant::Underline,
-            selected_index,
-        );
-        for (ix, entry) in tabs.iter().copied().enumerate() {
-            // 角标由面板自己声明，不在这里特判某个 tab。
-            let badge = builtin_panel(entry)
-                .and_then(|panel| panel.badge)
-                .map_or(0, |badge| badge(self, cx));
-            let tab_key = entry.element_key();
-            let tab = smelt_ui::segmented::underline_segment(
-                (ElementId::from("tool-panel-tab"), tab_key),
-                entry.label(),
-                selected_index == Some(ix),
-                cx,
-            )
-            // 字格默认 20px，下划线画在轨道底、格的外面。铺满轨道后，点字和下划线都落在这一格上。
-            .h_full()
-            // 按下就切换。这一行在标题栏里，松手经常到不了，不能等 click。
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |ws, _, _, cx| {
-                    cx.stop_propagation();
-                    ws.toggle_tool_panel_tab(entry, cx);
-                }),
-            )
-            .when(badge > 0, |tab| {
-                tab.child(
-                    div()
-                        .px(px(5.))
-                        .rounded_full()
-                        .bg(rgb(ui_theme::action_fill()))
-                        .text_size(px(8.))
-                        .font_semibold()
-                        .text_color(rgb(ui_theme::action_on()))
-                        .child(badge.to_string()),
-                )
-            });
-            track = track.child(tab);
-        }
-        // 页签按内容宽，放不下再缩。空白留给后面的拖动手柄，不要把整行都包进拖窗口。
         let bar_h = crate::workspace_frame::TOP_BAR_HEIGHT;
-        let tab_bar = div()
-            .id(if stage_rail {
-                "stage-tool-panel-tabs"
-            } else {
-                "tool-panel-tabs"
+        let tab_items: Vec<Tab> = tabs
+            .iter()
+            .map(|&entry| {
+                // 角标由面板自己声明，不在这里特判某个 tab。
+                let badge = builtin_panel(entry)
+                    .and_then(|panel| panel.badge)
+                    .map_or(0, |badge| badge(self, cx));
+                Tab::new().label(entry.label()).when(badge > 0, |tab| {
+                    tab.suffix(
+                        Tag::primary()
+                            .small()
+                            .rounded_full()
+                            .child(badge.to_string()),
+                    )
+                })
             })
-            .flex_initial()
-            .min_w_0()
-            .h(bar_h)
-            .flex()
-            .items_center()
-            .overflow_x_scroll()
-            .child(track);
-        // 分隔线铺满这一行。页签条自己不再画一条，否则缩成内容宽后线会断开。
-        div()
-            .w_full()
-            .h(bar_h)
-            .flex_none()
-            .flex()
-            .items_center()
-            .border_b_1()
-            .border_color(ui_theme::hairline())
-            .child(crate::workspace_frame::with_window_drag(
-                // 铺满舞台且侧栏收起时，页签从交通灯右边开始。停靠右栏时 left_guard 是 0。
-                div().w(left_guard + px(16.)).h(bar_h).flex_none(),
-            ))
-            .child(tab_bar)
-            .child(crate::workspace_frame::with_window_drag(
-                div().flex_1().min_w_0().h(bar_h),
-            ))
-            // 窗口开关浮在这一行右上角，tab 收到开关左边。
-            .child(crate::workspace_frame::with_window_drag(
-                div()
-                    .w(px(crate::stage::CHROME_TOGGLE_RESERVE))
-                    .h(bar_h)
-                    .flex_none(),
-            ))
+            .collect();
+        // 页签条铺满这一行，它自己的底线就是这一行的分隔线。交通灯让位、页签后的空白、
+        // 窗口开关让位都能拖窗口；页签本身不在拖窗口区里。
+        TabBar::new(if stage_rail {
+            "stage-tool-panel-tabs"
+        } else {
+            "tool-panel-tabs"
+        })
+        .underline()
+        .xsmall()
+        .w_full()
+        .h(bar_h)
+        .flex_none()
+        .when_some(selected_index, |bar, ix| bar.selected_index(ix))
+        // 页签按下时组件自己拦住冒泡，不会变成拖窗口，松手照常算点击。
+        .on_click(cx.listener(move |ws, ix: &usize, _, cx| {
+            if let Some(entry) = tabs.get(*ix).copied() {
+                ws.toggle_tool_panel_tab(entry, cx);
+            }
+        }))
+        .children(tab_items)
+        // 铺满舞台且侧栏收起时，页签从交通灯右边开始。停靠右栏时 left_guard 是 0。
+        .prefix(crate::workspace_frame::with_window_drag(
+            div().w(left_guard + px(16.)).h(bar_h).flex_none(),
+        ))
+        .last_empty_space(crate::workspace_frame::with_window_drag(
+            div().flex_1().min_w_0().h(bar_h),
+        ))
+        // 窗口开关浮在这一行右上角，tab 收到开关左边。
+        .suffix(crate::workspace_frame::with_window_drag(
+            div()
+                .w(px(crate::stage::CHROME_TOGGLE_RESERVE))
+                .h(bar_h)
+                .flex_none(),
+        ))
     }
 
     /// 停靠右栏：tab 在抽屉顶，内容在下面。窗口顶栏不放这些 tab。
