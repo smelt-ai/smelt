@@ -41,6 +41,7 @@ mod snapshot_tests;
 mod spawn_gate_sync_tests;
 mod state_bus_tests;
 mod state_listener_tests;
+mod test_owner_tests;
 mod watch_tests;
 mod workspace_menu_tests;
 
