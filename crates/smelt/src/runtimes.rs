@@ -245,14 +245,15 @@ pub(crate) fn runtime_has_desktop(key: &RuntimeKey, cx: &gpui::App) -> bool {
         .is_some_and(|remote| matches!(remote.status, RuntimeStatus::Online { desktop: true, .. }))
 }
 
-/// 有没有哪台机器离线、版本不对，或者走中继还很慢：机器按钮上挂个点提醒。
+/// 机器列表读不出来，或者有哪台机器离线、版本不对、走中继还很慢：机器按钮上挂个点提醒。
 pub(crate) fn any_runtime_needs_attention(cx: &gpui::App) -> bool {
     cx.try_global::<RuntimeHub>().is_some_and(|hub| {
-        hub.remotes.iter().any(|remote| {
-            link_text(&remote.status, remote.link.as_ref(), true)
-                .is_some_and(|(_, tone)| tone == LinkTone::Warning)
-                || matches!(remote.status, RuntimeStatus::Offline(_))
-        })
+        hub.load_error.is_some()
+            || hub.remotes.iter().any(|remote| {
+                link_text(&remote.status, remote.link.as_ref(), true)
+                    .is_some_and(|(_, tone)| tone == LinkTone::Warning)
+                    || matches!(remote.status, RuntimeStatus::Offline(_))
+            })
     })
 }
 
@@ -265,6 +266,9 @@ pub(crate) struct RuntimeHub {
     pub(crate) adding: bool,
     /// 最近一次添加、移除的失败原因。
     pub(crate) error: Option<String>,
+    /// 启动时没读出登记过的机器（比如客户端库版本比程序新）。这时列表里只剩本机，不说
+    /// 一声就像机器全丢了，所以机器面板和设置页都要显示它。
+    pub(crate) load_error: Option<String>,
 }
 
 impl gpui::Global for RuntimeHub {}
@@ -518,7 +522,7 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                 })
                 .collect();
         }
-        Err(error) => hub.error = Some(format!("读取运行时列表失败：{error}")),
+        Err(error) => hub.load_error = Some(format!("读取机器列表失败：{error}")),
     }
     cx.set_global(hub);
     refresh_runtime_status(cx);

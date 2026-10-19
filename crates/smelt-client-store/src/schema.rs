@@ -2,6 +2,11 @@
 //!
 //! 改表结构时：改 [`CREATE_SCHEMA`]，`SCHEMA_VERSION` 加一，在 [`migrate`] 里补上从上一版
 //! 过来的那一步。认不出的版本拒绝打开，不猜。
+//!
+//! 版本号在真实数据上跑过就不再挪作他用：没提交的构建迁过 `~/.smelt` 后又推翻了设计，要么
+//! 往前再写一步迁移，要么拿迁移前的 `.bak-v<N>` 把数据还原，不要让同一个版本号对应两种表结构。
+
+use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
@@ -208,8 +213,14 @@ CREATE TABLE conversation_route_path (
 ) WITHOUT ROWID;
 ";
 
-/// 打开时把库带到当前版本。
-pub(crate) fn migrate(connection: &mut Connection) -> Result<(), String> {
+/// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
+pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
+    let observed: u32 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if (1..SCHEMA_VERSION).contains(&observed) {
+        backup_before_migration(connection, path, observed)?;
+    }
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -241,6 +252,28 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<(), String> {
         .pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())
+}
+
+/// 迁移只往前走。把旧库整份留成 `client.sqlite3.bak-v<旧版本>`：新版本的表结构万一后来
+/// 被推翻（开发中途的构建在真实数据上跑过），拿它覆盖回去就回到迁移前。同名的旧备份换成
+/// 这一次的。`VACUUM INTO` 不能在事务里跑，所以放在迁移事务之前。
+fn backup_before_migration(
+    connection: &Connection,
+    path: &Path,
+    version: u32,
+) -> Result<(), String> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".bak-v{version}"));
+    let backup = path.with_file_name(name);
+    match std::fs::remove_file(&backup) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("删除旧备份 {}：{error}", backup.display())),
+    }
+    connection
+        .execute("VACUUM INTO ?1", [backup.to_string_lossy()])
+        .map_err(|error| format!("迁移前备份到 {}：{error}", backup.display()))?;
+    Ok(())
 }
 
 fn has_table(connection: &Connection, name: &str) -> Result<bool, String> {

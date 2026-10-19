@@ -271,7 +271,7 @@ fn machines_button(workspace: Entity<Workspace>, cx: &App) -> impl IntoElement +
     let trigger = Button::new("sidebar-machines-btn")
         .quiet()
         .compact()
-        .icon(Icon::empty().path("icons/server.svg"))
+        .icon(Icon::new(gpui_kit_assets::IconName::Server))
         .icon_action("机器");
     div()
         .relative()
@@ -300,7 +300,9 @@ fn machines_button(workspace: Entity<Workspace>, cx: &App) -> impl IntoElement +
 fn machines_panel(workspace: Entity<Workspace>, cx: &App) -> Div {
     let mut runtimes = vec![crate::runtimes::Runtime::local()];
     let mut any_relay = false;
+    let mut load_error = None;
     if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
+        load_error = hub.load_error.clone();
         for remote in &hub.remotes {
             any_relay |= matches!(
                 remote.link.as_ref().map(|link| &link.kind),
@@ -338,6 +340,16 @@ fn machines_panel(workspace: Entity<Workspace>, cx: &App) -> Div {
                     }),
             ),
     );
+    if let Some(error) = load_error {
+        panel = panel.child(
+            div()
+                .px_1()
+                .pb_1()
+                .text_xs()
+                .text_color(rgb(ui_theme::yellow()))
+                .child(error),
+        );
+    }
     for runtime in runtimes {
         let key = runtime.key().clone();
         let name = crate::runtimes::runtime_name(&key, cx);

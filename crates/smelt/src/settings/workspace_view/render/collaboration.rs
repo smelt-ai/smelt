@@ -283,13 +283,15 @@ pub(super) fn remote_page(
                     .disabled(hub.adding)
                     .on_click(|_, _window, cx: &mut App| crate::runtimes::add_runtime(cx)),
             ));
-            if let Some(error) = hub.error.clone() {
+            for error in [hub.load_error.clone(), hub.error.clone()].into_iter().flatten() {
                 list = list.child(div().text_xs().text_color(danger).child(error));
             }
             if hub.remotes.is_empty() {
-                return list
-                    .child(div().text_xs().text_color(muted).child("还没有添加其他运行时。"))
-                    .into_any_element();
+                if hub.load_error.is_none() {
+                    list = list
+                        .child(div().text_xs().text_color(muted).child("还没有添加其他运行时。"));
+                }
+                return list.into_any_element();
             }
             for (index, remote) in hub.remotes.iter().enumerate() {
                 let runtime_id = remote.connection.runtime_id.clone();

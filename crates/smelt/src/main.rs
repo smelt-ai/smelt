@@ -4359,12 +4359,19 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
         .map(|(_, bytes)| *bytes)
 }
 
+// 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
+// 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
+gpui_kit_assets::icon_assets!(LucideExtras, [Server]);
+
 struct SmeltAssets;
 
 impl gpui::AssetSource for SmeltAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         if let Some(bytes) = agent_icon_svg(path) {
             return Ok(Some(std::borrow::Cow::Borrowed(bytes)));
+        }
+        if let Some(bytes) = LucideExtras.load(path)? {
+            return Ok(Some(bytes));
         }
         if path == "smelt-icons/git-branch.svg" {
             return Ok(Some(std::borrow::Cow::Borrowed(

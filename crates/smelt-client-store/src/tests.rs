@@ -237,6 +237,32 @@ fn v2_session_routes_are_dropped() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, schema::SCHEMA_VERSION);
+
+    // 迁移前的库原样留了一份，覆盖回去就回到 v2。
+    let backup = Connection::open(path.with_file_name(format!("{DATABASE_FILE_NAME}.bak-v2")))
+        .expect("迁移前必须留下备份");
+    let backup_version: u32 = backup
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(backup_version, 2);
+    let old_routes: u32 = backup
+        .query_row("SELECT COUNT(*) FROM session_route", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(old_routes, 1);
+    cleanup(&path);
+}
+
+#[test]
+fn a_new_or_current_store_leaves_no_backup() {
+    let (store, path) = temp_store();
+    drop(store);
+    ClientStore::open(&path).unwrap();
+    let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".bak-v"))
+        .collect();
+    assert!(backups.is_empty());
     cleanup(&path);
 }
 
