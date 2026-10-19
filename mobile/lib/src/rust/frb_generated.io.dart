@@ -3,16 +3,16 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/catalog.dart';
 import 'api/connection.dart';
+import 'api/conversation.dart';
 import 'api/error.dart';
 import 'api/identity.dart';
-
+import 'api/terminal.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
-
 import 'frb_generated.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_io.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
@@ -27,7 +27,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
+  RustStreamSink<CatalogEvent> dco_decode_StreamSink_catalog_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   RustStreamSink<ConnectionEvent> dco_decode_StreamSink_connection_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
+  RustStreamSink<ConversationEvent>
+  dco_decode_StreamSink_conversation_event_Sse(dynamic raw);
+
+  @protected
+  RustStreamSink<TerminalEvent> dco_decode_StreamSink_terminal_event_Sse(
     dynamic raw,
   );
 
@@ -35,13 +49,129 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  AcpAgentOption dco_decode_acp_agent_option(dynamic raw);
+
+  @protected
+  AgentDefinitionSummary dco_decode_agent_definition_summary(dynamic raw);
+
+  @protected
+  ApprovalDetails dco_decode_approval_details(dynamic raw);
+
+  @protected
+  ApprovalKind dco_decode_approval_kind(dynamic raw);
+
+  @protected
+  AttentionItem dco_decode_attention_item(dynamic raw);
+
+  @protected
+  AttentionKind dco_decode_attention_kind(dynamic raw);
+
+  @protected
+  AutomationActionKind dco_decode_automation_action_kind(dynamic raw);
+
+  @protected
+  AutomationCatalog dco_decode_automation_catalog(dynamic raw);
+
+  @protected
+  AutomationRunSource dco_decode_automation_run_source(dynamic raw);
+
+  @protected
+  AutomationRunStatus dco_decode_automation_run_status(dynamic raw);
+
+  @protected
+  AutomationRunSummary dco_decode_automation_run_summary(dynamic raw);
+
+  @protected
+  AutomationSchedule dco_decode_automation_schedule(dynamic raw);
+
+  @protected
+  AutomationSource dco_decode_automation_source(dynamic raw);
+
+  @protected
+  AutomationSummary dco_decode_automation_summary(dynamic raw);
+
+  @protected
+  bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AttentionItem dco_decode_box_autoadd_attention_item(dynamic raw);
+
+  @protected
+  AutomationRunSummary dco_decode_box_autoadd_automation_run_summary(
+    dynamic raw,
+  );
+
+  @protected
+  AutomationSource dco_decode_box_autoadd_automation_source(dynamic raw);
+
+  @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw);
+
+  @protected
+  ContextUsage dco_decode_box_autoadd_context_usage(dynamic raw);
+
+  @protected
+  ConversationImage dco_decode_box_autoadd_conversation_image(dynamic raw);
+
+  @protected
+  ConversationView dco_decode_box_autoadd_conversation_view(dynamic raw);
+
+  @protected
+  DiffView dco_decode_box_autoadd_diff_view(dynamic raw);
+
+  @protected
+  Elicitation dco_decode_box_autoadd_elicitation(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_i_32(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  ImageRef dco_decode_box_autoadd_image_ref(dynamic raw);
+
+  @protected
   LinkMetrics dco_decode_box_autoadd_link_metrics(dynamic raw);
+
+  @protected
+  ModelSelector dco_decode_box_autoadd_model_selector(dynamic raw);
+
+  @protected
+  SessionKind dco_decode_box_autoadd_session_kind(dynamic raw);
+
+  @protected
+  SessionList dco_decode_box_autoadd_session_list(dynamic raw);
 
   @protected
   SmeltError dco_decode_box_autoadd_smelt_error(dynamic raw);
 
   @protected
+  TaskNoteView dco_decode_box_autoadd_task_note_view(dynamic raw);
+
+  @protected
+  TerminalGeometry dco_decode_box_autoadd_terminal_geometry(dynamic raw);
+
+  @protected
+  TerminalReady dco_decode_box_autoadd_terminal_ready(dynamic raw);
+
+  @protected
+  ToolCallView dco_decode_box_autoadd_tool_call_view(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  CatalogEvent dco_decode_catalog_event(dynamic raw);
+
+  @protected
+  CatalogEventKind dco_decode_catalog_event_kind(dynamic raw);
+
+  @protected
+  ChoiceOption dco_decode_choice_option(dynamic raw);
+
+  @protected
+  ConfigOption dco_decode_config_option(dynamic raw);
 
   @protected
   ConnectionEvent dco_decode_connection_event(dynamic raw);
@@ -50,10 +180,76 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ConnectionState dco_decode_connection_state(dynamic raw);
 
   @protected
+  ContextUsage dco_decode_context_usage(dynamic raw);
+
+  @protected
+  ConversationEntry dco_decode_conversation_entry(dynamic raw);
+
+  @protected
+  ConversationEvent dco_decode_conversation_event(dynamic raw);
+
+  @protected
+  ConversationEventKind dco_decode_conversation_event_kind(dynamic raw);
+
+  @protected
+  ConversationImage dco_decode_conversation_image(dynamic raw);
+
+  @protected
+  ConversationPhase dco_decode_conversation_phase(dynamic raw);
+
+  @protected
+  ConversationView dco_decode_conversation_view(dynamic raw);
+
+  @protected
   DeviceIdentity dco_decode_device_identity(dynamic raw);
 
   @protected
+  DiffView dco_decode_diff_view(dynamic raw);
+
+  @protected
+  Elicitation dco_decode_elicitation(dynamic raw);
+
+  @protected
+  ElicitationField dco_decode_elicitation_field(dynamic raw);
+
+  @protected
+  ElicitationFieldKind dco_decode_elicitation_field_kind(dynamic raw);
+
+  @protected
+  ElicitationTextInput dco_decode_elicitation_text_input(dynamic raw);
+
+  @protected
+  EntryKind dco_decode_entry_kind(dynamic raw);
+
+  @protected
+  HistoryRenameResult dco_decode_history_rename_result(dynamic raw);
+
+  @protected
+  HistorySessionSummary dco_decode_history_session_summary(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  ImageData dco_decode_image_data(dynamic raw);
+
+  @protected
+  ImageInput dco_decode_image_input(dynamic raw);
+
+  @protected
+  ImageRef dco_decode_image_ref(dynamic raw);
+
+  @protected
+  LaunchAction dco_decode_launch_action(dynamic raw);
+
+  @protected
+  LaunchSections dco_decode_launch_sections(dynamic raw);
+
+  @protected
+  LaunchTarget dco_decode_launch_target(dynamic raw);
 
   @protected
   LinkMetrics dco_decode_link_metrics(dynamic raw);
@@ -62,31 +258,258 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LinkPath dco_decode_link_path(dynamic raw);
 
   @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<AcpAgentOption> dco_decode_list_acp_agent_option(dynamic raw);
+
+  @protected
+  List<AgentDefinitionSummary> dco_decode_list_agent_definition_summary(
+    dynamic raw,
+  );
+
+  @protected
+  List<AutomationSchedule> dco_decode_list_automation_schedule(dynamic raw);
+
+  @protected
+  List<AutomationSummary> dco_decode_list_automation_summary(dynamic raw);
+
+  @protected
+  List<ChoiceOption> dco_decode_list_choice_option(dynamic raw);
+
+  @protected
+  List<ConfigOption> dco_decode_list_config_option(dynamic raw);
+
+  @protected
+  List<ConversationEntry> dco_decode_list_conversation_entry(dynamic raw);
+
+  @protected
+  List<ConversationImage> dco_decode_list_conversation_image(dynamic raw);
+
+  @protected
+  List<ElicitationField> dco_decode_list_elicitation_field(dynamic raw);
+
+  @protected
+  List<ElicitationTextInput> dco_decode_list_elicitation_text_input(
+    dynamic raw,
+  );
+
+  @protected
+  List<HistorySessionSummary> dco_decode_list_history_session_summary(
+    dynamic raw,
+  );
+
+  @protected
+  List<ImageInput> dco_decode_list_image_input(dynamic raw);
+
+  @protected
+  List<LaunchAction> dco_decode_list_launch_action(dynamic raw);
+
+  @protected
+  List<ModelProvider> dco_decode_list_model_provider(dynamic raw);
+
+  @protected
+  List<PermissionOption> dco_decode_list_permission_option(dynamic raw);
+
+  @protected
+  List<PermissionRequest> dco_decode_list_permission_request(dynamic raw);
+
+  @protected
+  List<PlanStep> dco_decode_list_plan_step(dynamic raw);
+
+  @protected
+  Uint32List dco_decode_list_prim_u_32_strict(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<SessionSkill> dco_decode_list_session_skill(dynamic raw);
+
+  @protected
+  List<SessionSummary> dco_decode_list_session_summary(dynamic raw);
+
+  @protected
+  List<SlashCommand> dco_decode_list_slash_command(dynamic raw);
+
+  @protected
+  List<ToolOutput> dco_decode_list_tool_output(dynamic raw);
+
+  @protected
+  List<WorkspaceProject> dco_decode_list_workspace_project(dynamic raw);
+
+  @protected
+  ModelProvider dco_decode_model_provider(dynamic raw);
+
+  @protected
+  ModelSelector dco_decode_model_selector(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  AttentionItem? dco_decode_opt_box_autoadd_attention_item(dynamic raw);
+
+  @protected
+  AutomationRunSummary? dco_decode_opt_box_autoadd_automation_run_summary(
+    dynamic raw,
+  );
+
+  @protected
+  AutomationSource? dco_decode_opt_box_autoadd_automation_source(dynamic raw);
+
+  @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
+
+  @protected
+  ContextUsage? dco_decode_opt_box_autoadd_context_usage(dynamic raw);
+
+  @protected
+  ConversationImage? dco_decode_opt_box_autoadd_conversation_image(dynamic raw);
+
+  @protected
+  ConversationView? dco_decode_opt_box_autoadd_conversation_view(dynamic raw);
+
+  @protected
+  DiffView? dco_decode_opt_box_autoadd_diff_view(dynamic raw);
+
+  @protected
+  Elicitation? dco_decode_opt_box_autoadd_elicitation(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
+
+  @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  ImageRef? dco_decode_opt_box_autoadd_image_ref(dynamic raw);
+
+  @protected
   LinkMetrics? dco_decode_opt_box_autoadd_link_metrics(dynamic raw);
+
+  @protected
+  ModelSelector? dco_decode_opt_box_autoadd_model_selector(dynamic raw);
+
+  @protected
+  SessionKind? dco_decode_opt_box_autoadd_session_kind(dynamic raw);
+
+  @protected
+  SessionList? dco_decode_opt_box_autoadd_session_list(dynamic raw);
 
   @protected
   SmeltError? dco_decode_opt_box_autoadd_smelt_error(dynamic raw);
 
   @protected
+  TaskNoteView? dco_decode_opt_box_autoadd_task_note_view(dynamic raw);
+
+  @protected
+  TerminalReady? dco_decode_opt_box_autoadd_terminal_ready(dynamic raw);
+
+  @protected
+  ToolCallView? dco_decode_opt_box_autoadd_tool_call_view(dynamic raw);
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
   PairingTarget dco_decode_pairing_target(dynamic raw);
 
   @protected
+  PendingActions dco_decode_pending_actions(dynamic raw);
+
+  @protected
+  PermissionOption dco_decode_permission_option(dynamic raw);
+
+  @protected
+  PermissionOptionKind dco_decode_permission_option_kind(dynamic raw);
+
+  @protected
+  PermissionRequest dco_decode_permission_request(dynamic raw);
+
+  @protected
+  PlanStep dco_decode_plan_step(dynamic raw);
+
+  @protected
+  PlanStepStatus dco_decode_plan_step_status(dynamic raw);
+
+  @protected
   RuntimeInfo dco_decode_runtime_info(dynamic raw);
+
+  @protected
+  ScheduleKind dco_decode_schedule_kind(dynamic raw);
+
+  @protected
+  SendFailureKind dco_decode_send_failure_kind(dynamic raw);
+
+  @protected
+  SendMessageError dco_decode_send_message_error(dynamic raw);
+
+  @protected
+  SessionKind dco_decode_session_kind(dynamic raw);
+
+  @protected
+  SessionList dco_decode_session_list(dynamic raw);
+
+  @protected
+  SessionPhase dco_decode_session_phase(dynamic raw);
+
+  @protected
+  SessionSkill dco_decode_session_skill(dynamic raw);
+
+  @protected
+  SessionSkills dco_decode_session_skills(dynamic raw);
+
+  @protected
+  SessionStatus dco_decode_session_status(dynamic raw);
+
+  @protected
+  SessionSummary dco_decode_session_summary(dynamic raw);
+
+  @protected
+  SlashCommand dco_decode_slash_command(dynamic raw);
 
   @protected
   SmeltError dco_decode_smelt_error(dynamic raw);
 
   @protected
   SmeltErrorKind dco_decode_smelt_error_kind(dynamic raw);
+
+  @protected
+  TaskNoteKind dco_decode_task_note_kind(dynamic raw);
+
+  @protected
+  TaskNoteView dco_decode_task_note_view(dynamic raw);
+
+  @protected
+  TerminalEvent dco_decode_terminal_event(dynamic raw);
+
+  @protected
+  TerminalEventKind dco_decode_terminal_event_kind(dynamic raw);
+
+  @protected
+  TerminalGeometry dco_decode_terminal_geometry(dynamic raw);
+
+  @protected
+  TerminalReady dco_decode_terminal_ready(dynamic raw);
+
+  @protected
+  ToolCallView dco_decode_tool_call_view(dynamic raw);
+
+  @protected
+  ToolKind dco_decode_tool_kind(dynamic raw);
+
+  @protected
+  ToolOutput dco_decode_tool_output(dynamic raw);
+
+  @protected
+  ToolOutputKind dco_decode_tool_output_kind(dynamic raw);
+
+  @protected
+  ToolStatus dco_decode_tool_status(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -98,7 +521,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  WorkspaceCatalog dco_decode_workspace_catalog(dynamic raw);
+
+  @protected
+  WorkspaceProject dco_decode_workspace_project(dynamic raw);
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<CatalogEvent> sse_decode_StreamSink_catalog_event_Sse(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<ConnectionEvent> sse_decode_StreamSink_connection_event_Sse(
@@ -106,16 +540,173 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<ConversationEvent>
+  sse_decode_StreamSink_conversation_event_Sse(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<TerminalEvent> sse_decode_StreamSink_terminal_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
+
+  @protected
+  AcpAgentOption sse_decode_acp_agent_option(SseDeserializer deserializer);
+
+  @protected
+  AgentDefinitionSummary sse_decode_agent_definition_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ApprovalDetails sse_decode_approval_details(SseDeserializer deserializer);
+
+  @protected
+  ApprovalKind sse_decode_approval_kind(SseDeserializer deserializer);
+
+  @protected
+  AttentionItem sse_decode_attention_item(SseDeserializer deserializer);
+
+  @protected
+  AttentionKind sse_decode_attention_kind(SseDeserializer deserializer);
+
+  @protected
+  AutomationActionKind sse_decode_automation_action_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationCatalog sse_decode_automation_catalog(SseDeserializer deserializer);
+
+  @protected
+  AutomationRunSource sse_decode_automation_run_source(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationRunStatus sse_decode_automation_run_status(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationRunSummary sse_decode_automation_run_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationSchedule sse_decode_automation_schedule(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationSource sse_decode_automation_source(SseDeserializer deserializer);
+
+  @protected
+  AutomationSummary sse_decode_automation_summary(SseDeserializer deserializer);
+
+  @protected
+  bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AttentionItem sse_decode_box_autoadd_attention_item(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationRunSummary sse_decode_box_autoadd_automation_run_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationSource sse_decode_box_autoadd_automation_source(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  ContextUsage sse_decode_box_autoadd_context_usage(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationImage sse_decode_box_autoadd_conversation_image(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationView sse_decode_box_autoadd_conversation_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DiffView sse_decode_box_autoadd_diff_view(SseDeserializer deserializer);
+
+  @protected
+  Elicitation sse_decode_box_autoadd_elicitation(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  ImageRef sse_decode_box_autoadd_image_ref(SseDeserializer deserializer);
 
   @protected
   LinkMetrics sse_decode_box_autoadd_link_metrics(SseDeserializer deserializer);
 
   @protected
+  ModelSelector sse_decode_box_autoadd_model_selector(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SessionKind sse_decode_box_autoadd_session_kind(SseDeserializer deserializer);
+
+  @protected
+  SessionList sse_decode_box_autoadd_session_list(SseDeserializer deserializer);
+
+  @protected
   SmeltError sse_decode_box_autoadd_smelt_error(SseDeserializer deserializer);
 
   @protected
+  TaskNoteView sse_decode_box_autoadd_task_note_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TerminalGeometry sse_decode_box_autoadd_terminal_geometry(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TerminalReady sse_decode_box_autoadd_terminal_ready(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ToolCallView sse_decode_box_autoadd_tool_call_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  CatalogEvent sse_decode_catalog_event(SseDeserializer deserializer);
+
+  @protected
+  CatalogEventKind sse_decode_catalog_event_kind(SseDeserializer deserializer);
+
+  @protected
+  ChoiceOption sse_decode_choice_option(SseDeserializer deserializer);
+
+  @protected
+  ConfigOption sse_decode_config_option(SseDeserializer deserializer);
 
   @protected
   ConnectionEvent sse_decode_connection_event(SseDeserializer deserializer);
@@ -124,10 +715,86 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ConnectionState sse_decode_connection_state(SseDeserializer deserializer);
 
   @protected
+  ContextUsage sse_decode_context_usage(SseDeserializer deserializer);
+
+  @protected
+  ConversationEntry sse_decode_conversation_entry(SseDeserializer deserializer);
+
+  @protected
+  ConversationEvent sse_decode_conversation_event(SseDeserializer deserializer);
+
+  @protected
+  ConversationEventKind sse_decode_conversation_event_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationImage sse_decode_conversation_image(SseDeserializer deserializer);
+
+  @protected
+  ConversationPhase sse_decode_conversation_phase(SseDeserializer deserializer);
+
+  @protected
+  ConversationView sse_decode_conversation_view(SseDeserializer deserializer);
+
+  @protected
   DeviceIdentity sse_decode_device_identity(SseDeserializer deserializer);
 
   @protected
+  DiffView sse_decode_diff_view(SseDeserializer deserializer);
+
+  @protected
+  Elicitation sse_decode_elicitation(SseDeserializer deserializer);
+
+  @protected
+  ElicitationField sse_decode_elicitation_field(SseDeserializer deserializer);
+
+  @protected
+  ElicitationFieldKind sse_decode_elicitation_field_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ElicitationTextInput sse_decode_elicitation_text_input(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  EntryKind sse_decode_entry_kind(SseDeserializer deserializer);
+
+  @protected
+  HistoryRenameResult sse_decode_history_rename_result(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  HistorySessionSummary sse_decode_history_session_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  ImageData sse_decode_image_data(SseDeserializer deserializer);
+
+  @protected
+  ImageInput sse_decode_image_input(SseDeserializer deserializer);
+
+  @protected
+  ImageRef sse_decode_image_ref(SseDeserializer deserializer);
+
+  @protected
+  LaunchAction sse_decode_launch_action(SseDeserializer deserializer);
+
+  @protected
+  LaunchSections sse_decode_launch_sections(SseDeserializer deserializer);
+
+  @protected
+  LaunchTarget sse_decode_launch_target(SseDeserializer deserializer);
 
   @protected
   LinkMetrics sse_decode_link_metrics(SseDeserializer deserializer);
@@ -136,13 +803,194 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LinkPath sse_decode_link_path(SseDeserializer deserializer);
 
   @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<AcpAgentOption> sse_decode_list_acp_agent_option(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<AgentDefinitionSummary> sse_decode_list_agent_definition_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<AutomationSchedule> sse_decode_list_automation_schedule(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<AutomationSummary> sse_decode_list_automation_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ChoiceOption> sse_decode_list_choice_option(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ConfigOption> sse_decode_list_config_option(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ConversationEntry> sse_decode_list_conversation_entry(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ConversationImage> sse_decode_list_conversation_image(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ElicitationField> sse_decode_list_elicitation_field(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ElicitationTextInput> sse_decode_list_elicitation_text_input(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<HistorySessionSummary> sse_decode_list_history_session_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ImageInput> sse_decode_list_image_input(SseDeserializer deserializer);
+
+  @protected
+  List<LaunchAction> sse_decode_list_launch_action(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ModelProvider> sse_decode_list_model_provider(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<PermissionOption> sse_decode_list_permission_option(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<PermissionRequest> sse_decode_list_permission_request(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<PlanStep> sse_decode_list_plan_step(SseDeserializer deserializer);
+
+  @protected
+  Uint32List sse_decode_list_prim_u_32_strict(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<SessionSkill> sse_decode_list_session_skill(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<SessionSummary> sse_decode_list_session_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<SlashCommand> sse_decode_list_slash_command(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ToolOutput> sse_decode_list_tool_output(SseDeserializer deserializer);
+
+  @protected
+  List<WorkspaceProject> sse_decode_list_workspace_project(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ModelProvider sse_decode_model_provider(SseDeserializer deserializer);
+
+  @protected
+  ModelSelector sse_decode_model_selector(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  AttentionItem? sse_decode_opt_box_autoadd_attention_item(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationRunSummary? sse_decode_opt_box_autoadd_automation_run_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AutomationSource? sse_decode_opt_box_autoadd_automation_source(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  ContextUsage? sse_decode_opt_box_autoadd_context_usage(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationImage? sse_decode_opt_box_autoadd_conversation_image(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConversationView? sse_decode_opt_box_autoadd_conversation_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DiffView? sse_decode_opt_box_autoadd_diff_view(SseDeserializer deserializer);
+
+  @protected
+  Elicitation? sse_decode_opt_box_autoadd_elicitation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  ImageRef? sse_decode_opt_box_autoadd_image_ref(SseDeserializer deserializer);
+
+  @protected
   LinkMetrics? sse_decode_opt_box_autoadd_link_metrics(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ModelSelector? sse_decode_opt_box_autoadd_model_selector(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SessionKind? sse_decode_opt_box_autoadd_session_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SessionList? sse_decode_opt_box_autoadd_session_list(
     SseDeserializer deserializer,
   );
 
@@ -152,19 +1000,125 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  TaskNoteView? sse_decode_opt_box_autoadd_task_note_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TerminalReady? sse_decode_opt_box_autoadd_terminal_ready(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ToolCallView? sse_decode_opt_box_autoadd_tool_call_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
   PairingTarget sse_decode_pairing_target(SseDeserializer deserializer);
 
   @protected
+  PendingActions sse_decode_pending_actions(SseDeserializer deserializer);
+
+  @protected
+  PermissionOption sse_decode_permission_option(SseDeserializer deserializer);
+
+  @protected
+  PermissionOptionKind sse_decode_permission_option_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PermissionRequest sse_decode_permission_request(SseDeserializer deserializer);
+
+  @protected
+  PlanStep sse_decode_plan_step(SseDeserializer deserializer);
+
+  @protected
+  PlanStepStatus sse_decode_plan_step_status(SseDeserializer deserializer);
+
+  @protected
   RuntimeInfo sse_decode_runtime_info(SseDeserializer deserializer);
+
+  @protected
+  ScheduleKind sse_decode_schedule_kind(SseDeserializer deserializer);
+
+  @protected
+  SendFailureKind sse_decode_send_failure_kind(SseDeserializer deserializer);
+
+  @protected
+  SendMessageError sse_decode_send_message_error(SseDeserializer deserializer);
+
+  @protected
+  SessionKind sse_decode_session_kind(SseDeserializer deserializer);
+
+  @protected
+  SessionList sse_decode_session_list(SseDeserializer deserializer);
+
+  @protected
+  SessionPhase sse_decode_session_phase(SseDeserializer deserializer);
+
+  @protected
+  SessionSkill sse_decode_session_skill(SseDeserializer deserializer);
+
+  @protected
+  SessionSkills sse_decode_session_skills(SseDeserializer deserializer);
+
+  @protected
+  SessionStatus sse_decode_session_status(SseDeserializer deserializer);
+
+  @protected
+  SessionSummary sse_decode_session_summary(SseDeserializer deserializer);
+
+  @protected
+  SlashCommand sse_decode_slash_command(SseDeserializer deserializer);
 
   @protected
   SmeltError sse_decode_smelt_error(SseDeserializer deserializer);
 
   @protected
   SmeltErrorKind sse_decode_smelt_error_kind(SseDeserializer deserializer);
+
+  @protected
+  TaskNoteKind sse_decode_task_note_kind(SseDeserializer deserializer);
+
+  @protected
+  TaskNoteView sse_decode_task_note_view(SseDeserializer deserializer);
+
+  @protected
+  TerminalEvent sse_decode_terminal_event(SseDeserializer deserializer);
+
+  @protected
+  TerminalEventKind sse_decode_terminal_event_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TerminalGeometry sse_decode_terminal_geometry(SseDeserializer deserializer);
+
+  @protected
+  TerminalReady sse_decode_terminal_ready(SseDeserializer deserializer);
+
+  @protected
+  ToolCallView sse_decode_tool_call_view(SseDeserializer deserializer);
+
+  @protected
+  ToolKind sse_decode_tool_kind(SseDeserializer deserializer);
+
+  @protected
+  ToolOutput sse_decode_tool_output(SseDeserializer deserializer);
+
+  @protected
+  ToolOutputKind sse_decode_tool_output_kind(SseDeserializer deserializer);
+
+  @protected
+  ToolStatus sse_decode_tool_status(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -176,11 +1130,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  bool sse_decode_bool(SseDeserializer deserializer);
+  WorkspaceCatalog sse_decode_workspace_catalog(SseDeserializer deserializer);
+
+  @protected
+  WorkspaceProject sse_decode_workspace_project(SseDeserializer deserializer);
 
   @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_catalog_event_Sse(
+    RustStreamSink<CatalogEvent> self,
     SseSerializer serializer,
   );
 
@@ -191,11 +1154,185 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_conversation_event_Sse(
+    RustStreamSink<ConversationEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_terminal_event_Sse(
+    RustStreamSink<TerminalEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_acp_agent_option(
+    AcpAgentOption self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_agent_definition_summary(
+    AgentDefinitionSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_approval_details(
+    ApprovalDetails self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_approval_kind(ApprovalKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_attention_item(AttentionItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_attention_kind(AttentionKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_automation_action_kind(
+    AutomationActionKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_catalog(
+    AutomationCatalog self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_run_source(
+    AutomationRunSource self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_run_status(
+    AutomationRunStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_run_summary(
+    AutomationRunSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_schedule(
+    AutomationSchedule self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_source(
+    AutomationSource self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_automation_summary(
+    AutomationSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_attention_item(
+    AttentionItem self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_automation_run_summary(
+    AutomationRunSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_automation_source(
+    AutomationSource self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_context_usage(
+    ContextUsage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_conversation_image(
+    ConversationImage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_conversation_view(
+    ConversationView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_diff_view(
+    DiffView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_elicitation(
+    Elicitation self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_image_ref(
+    ImageRef self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_link_metrics(
     LinkMetrics self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_model_selector(
+    ModelSelector self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_session_kind(
+    SessionKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_session_list(
+    SessionList self,
     SseSerializer serializer,
   );
 
@@ -206,7 +1343,46 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_task_note_view(
+    TaskNoteView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_terminal_geometry(
+    TerminalGeometry self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_terminal_ready(
+    TerminalReady self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_tool_call_view(
+    ToolCallView self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_catalog_event(CatalogEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_catalog_event_kind(
+    CatalogEventKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_choice_option(ChoiceOption self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_config_option(ConfigOption self, SseSerializer serializer);
 
   @protected
   void sse_encode_connection_event(
@@ -221,13 +1397,115 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_context_usage(ContextUsage self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_conversation_entry(
+    ConversationEntry self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_event(
+    ConversationEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_event_kind(
+    ConversationEventKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_image(
+    ConversationImage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_phase(
+    ConversationPhase self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conversation_view(
+    ConversationView self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_device_identity(
     DeviceIdentity self,
     SseSerializer serializer,
   );
 
   @protected
+  void sse_encode_diff_view(DiffView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_elicitation(Elicitation self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_elicitation_field(
+    ElicitationField self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_elicitation_field_kind(
+    ElicitationFieldKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_elicitation_text_input(
+    ElicitationTextInput self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_entry_kind(EntryKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_history_rename_result(
+    HistoryRenameResult self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_history_session_summary(
+    HistorySessionSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_image_data(ImageData self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_image_input(ImageInput self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_image_ref(ImageRef self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_launch_action(LaunchAction self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_launch_sections(
+    LaunchSections self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_launch_target(LaunchTarget self, SseSerializer serializer);
 
   @protected
   void sse_encode_link_metrics(LinkMetrics self, SseSerializer serializer);
@@ -236,17 +1514,245 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_link_path(LinkPath self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_acp_agent_option(
+    List<AcpAgentOption> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_agent_definition_summary(
+    List<AgentDefinitionSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_automation_schedule(
+    List<AutomationSchedule> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_automation_summary(
+    List<AutomationSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_choice_option(
+    List<ChoiceOption> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_config_option(
+    List<ConfigOption> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_conversation_entry(
+    List<ConversationEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_conversation_image(
+    List<ConversationImage> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_elicitation_field(
+    List<ElicitationField> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_elicitation_text_input(
+    List<ElicitationTextInput> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_history_session_summary(
+    List<HistorySessionSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_image_input(
+    List<ImageInput> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_launch_action(
+    List<LaunchAction> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_model_provider(
+    List<ModelProvider> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_permission_option(
+    List<PermissionOption> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_permission_request(
+    List<PermissionRequest> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_plan_step(List<PlanStep> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_prim_u_32_strict(
+    Uint32List self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
   );
 
   @protected
+  void sse_encode_list_session_skill(
+    List<SessionSkill> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_session_summary(
+    List<SessionSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_slash_command(
+    List<SlashCommand> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_tool_output(
+    List<ToolOutput> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_workspace_project(
+    List<WorkspaceProject> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_model_provider(ModelProvider self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_model_selector(ModelSelector self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_attention_item(
+    AttentionItem? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_automation_run_summary(
+    AutomationRunSummary? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_automation_source(
+    AutomationSource? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_context_usage(
+    ContextUsage? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_conversation_image(
+    ConversationImage? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_conversation_view(
+    ConversationView? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_diff_view(
+    DiffView? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_elicitation(
+    Elicitation? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_image_ref(
+    ImageRef? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_link_metrics(
     LinkMetrics? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_model_selector(
+    ModelSelector? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_session_kind(
+    SessionKind? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_session_list(
+    SessionList? self,
     SseSerializer serializer,
   );
 
@@ -257,13 +1763,112 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_task_note_view(
+    TaskNoteView? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_terminal_ready(
+    TerminalReady? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_tool_call_view(
+    ToolCallView? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_pairing_target(PairingTarget self, SseSerializer serializer);
 
   @protected
+  void sse_encode_pending_actions(
+    PendingActions self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_permission_option(
+    PermissionOption self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_permission_option_kind(
+    PermissionOptionKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_permission_request(
+    PermissionRequest self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_plan_step(PlanStep self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_plan_step_status(
+    PlanStepStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_runtime_info(RuntimeInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_schedule_kind(ScheduleKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_send_failure_kind(
+    SendFailureKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_send_message_error(
+    SendMessageError self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_session_kind(SessionKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_session_list(SessionList self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_session_phase(SessionPhase self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_session_skill(SessionSkill self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_session_skills(SessionSkills self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_session_status(SessionStatus self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_session_summary(
+    SessionSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_slash_command(SlashCommand self, SseSerializer serializer);
 
   @protected
   void sse_encode_smelt_error(SmeltError self, SseSerializer serializer);
@@ -275,6 +1880,48 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_task_note_kind(TaskNoteKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_task_note_view(TaskNoteView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_terminal_event(TerminalEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_terminal_event_kind(
+    TerminalEventKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_terminal_geometry(
+    TerminalGeometry self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_terminal_ready(TerminalReady self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tool_call_view(ToolCallView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tool_kind(ToolKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tool_output(ToolOutput self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_tool_output_kind(
+    ToolOutputKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_tool_status(ToolStatus self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
@@ -284,7 +1931,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
-  void sse_encode_bool(bool self, SseSerializer serializer);
+  void sse_encode_workspace_catalog(
+    WorkspaceCatalog self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_workspace_project(
+    WorkspaceProject self,
+    SseSerializer serializer,
+  );
 }
 
 // Section: wire_class

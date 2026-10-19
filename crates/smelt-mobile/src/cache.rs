@@ -123,7 +123,12 @@ impl Cache {
     }
 
     /// 存一个对话的快照，并按条数和总大小淘汰这个运行时最旧的快照。
-    pub(crate) fn save_snapshot<T: Serialize>(&self, endpoint_id: &str, session_id: &str, value: &T) {
+    pub(crate) fn save_snapshot<T: Serialize>(
+        &self,
+        endpoint_id: &str,
+        session_id: &str,
+        value: &T,
+    ) {
         let Ok(payload) = serde_json::to_string(value) else {
             return;
         };
@@ -236,16 +241,26 @@ mod tests {
         }
         cache.save_snapshot("b", "other", &0);
         let kept = (0..MAX_SNAPSHOTS_PER_RUNTIME + 2)
-            .filter(|i| cache.load_snapshot::<usize>("a", &format!("s{i}")).is_some())
+            .filter(|i| {
+                cache
+                    .load_snapshot::<usize>("a", &format!("s{i}"))
+                    .is_some()
+            })
             .count();
         assert_eq!(kept, MAX_SNAPSHOTS_PER_RUNTIME);
-        assert!(cache.load_snapshot::<usize>("a", "s0").is_none(), "最旧的先淘汰");
+        assert!(
+            cache.load_snapshot::<usize>("a", "s0").is_none(),
+            "最旧的先淘汰"
+        );
         assert!(
             cache
                 .load_snapshot::<usize>("a", &format!("s{}", MAX_SNAPSHOTS_PER_RUNTIME + 1))
                 .is_some()
         );
-        assert!(cache.load_snapshot::<usize>("b", "other").is_some(), "别的运行时不受影响");
+        assert!(
+            cache.load_snapshot::<usize>("b", "other").is_some(),
+            "别的运行时不受影响"
+        );
     }
 
     #[test]

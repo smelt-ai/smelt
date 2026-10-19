@@ -102,7 +102,6 @@ impl Timing {
 
 /// 后续阶段拿当前运行时用。
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct CurrentRuntime {
     /// 当前代号。和 [`Listener`] 收到的不同就说明运行时换了（或断开过），要丢掉旧状态。
     pub generation: u64,
@@ -256,7 +255,6 @@ impl ConnectionHub {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn current(&self) -> Option<CurrentRuntime> {
         let inner = self.shared.lock();
         inner.session.as_ref().map(|session| CurrentRuntime {

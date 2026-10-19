@@ -79,19 +79,16 @@ pub(crate) fn dialer() -> Result<Arc<IrohDialer>, SmeltError> {
 }
 
 /// 当前运行时（连接中或重连中都算），没有时为 None。给后续阶段用。
-#[allow(dead_code)]
 pub(crate) fn current_runtime() -> Option<crate::connection::CurrentRuntime> {
     HUB.current()
 }
 
 /// 监听运行时切换与连接状态。见 [`ConnectionHub::subscribe`]。给后续阶段用。
-#[allow(dead_code)]
 pub(crate) fn subscribe(listener: crate::connection::Listener) {
     HUB.subscribe(listener);
 }
 
 /// 离线缓存。还没初始化身份或库打不开时为 None。
-#[allow(dead_code)]
 pub(crate) fn cache() -> Option<Arc<Cache>> {
     IDENTITY
         .lock()

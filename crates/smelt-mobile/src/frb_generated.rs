@@ -27,7 +27,7 @@
 // Section: imports
 
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
 
 // Section: boilerplate
@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -999557082;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 189195747;
 
 // Section: executor
 
@@ -46,6 +46,148 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
+fn wire__crate__api__catalog__automation_catalog_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "automation_catalog",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::catalog::automation_catalog()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__cancel_turn_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "cancel_turn",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::cancel_turn(api_session_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__catalog__catalog_events_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "catalog_events",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_sink = <StreamSink<
+                crate::api::catalog::CatalogEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::catalog::catalog_events(api_sink);
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__choose_elicitation_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "choose_elicitation",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_field_index = <u32>::sse_decode(&mut deserializer);
+            let api_option_index = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::choose_elicitation(
+                        api_session_id,
+                        api_field_index,
+                        api_option_index,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__connection__connect_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -119,6 +261,85 @@ fn wire__crate__api__connection__connection_events_impl(
         },
     )
 }
+fn wire__crate__api__catalog__create_session_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "create_session",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_project_root = <String>::sse_decode(&mut deserializer);
+            let api_agent_option_id = <Option<String>>::sse_decode(&mut deserializer);
+            let api_launch_key = <Option<String>>::sse_decode(&mut deserializer);
+            let api_resume_id = <Option<String>>::sse_decode(&mut deserializer);
+            let api_kind =
+                <Option<crate::api::catalog::SessionKind>>::sse_decode(&mut deserializer);
+            let api_request_id = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::catalog::create_session(
+                        api_project_root,
+                        api_agent_option_id,
+                        api_launch_key,
+                        api_resume_id,
+                        api_kind,
+                        api_request_id,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__catalog__delete_session_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "delete_session",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::catalog::delete_session(api_session_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__connection__disconnect_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -147,6 +368,39 @@ fn wire__crate__api__connection__disconnect_impl(
                     let output_ok = Result::<_, ()>::Ok({
                         crate::api::connection::disconnect();
                     })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__dismiss_elicitation_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "dismiss_elicitation",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::dismiss_elicitation(api_session_id)?;
                     Ok(output_ok)
                 })())
             }
@@ -220,6 +474,209 @@ fn wire__crate__api__identity__init_client_impl(
         },
     )
 }
+fn wire__crate__api__catalog__list_history_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_history",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_project_root = <String>::sse_decode(&mut deserializer);
+            let api_agent_option_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok =
+                        crate::api::catalog::list_history(api_project_root, api_agent_option_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__list_skills_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_skills",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::list_skills(api_session_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__load_image_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "load_image",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_entry = <i64>::sse_decode(&mut deserializer);
+            let api_digest = <String>::sse_decode(&mut deserializer);
+            let api_max_edge = <Option<u32>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::load_image(
+                        api_session_id,
+                        api_entry,
+                        api_digest,
+                        api_max_edge,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__load_older_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "load_older",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::load_older(api_session_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__catalog__mark_read_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mark_read",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::catalog::mark_read(api_session_id);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__conversation__new_request_id_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "new_request_id",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::conversation::new_request_id())?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__identity__pair_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -284,6 +741,554 @@ fn wire__crate__api__identity__parse_pairing_impl(
         },
     )
 }
+fn wire__crate__api__conversation__pending_actions_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "pending_actions",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::pending_actions(api_session_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__catalog__rename_history_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "rename_history",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_project_root = <String>::sse_decode(&mut deserializer);
+            let api_agent_option_id = <String>::sse_decode(&mut deserializer);
+            let api_resume_id = <String>::sse_decode(&mut deserializer);
+            let api_title = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::catalog::rename_history(
+                        api_project_root,
+                        api_agent_option_id,
+                        api_resume_id,
+                        api_title,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__respond_approval_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "respond_approval",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_tool_call_id = <String>::sse_decode(&mut deserializer);
+            let api_option_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::respond_approval(
+                        api_session_id,
+                        api_tool_call_id,
+                        api_option_id,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__catalog__run_automation_once_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "run_automation_once",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_automation_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::catalog::run_automation_once(api_automation_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__send_message_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "send_message",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_request_id = <String>::sse_decode(&mut deserializer);
+            let api_text = <String>::sse_decode(&mut deserializer);
+            let api_images =
+                <Vec<crate::api::conversation::ImageInput>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::conversation::SendMessageError>((move || {
+                    let output_ok = crate::api::conversation::send_message(
+                        api_session_id,
+                        api_request_id,
+                        api_text,
+                        api_images,
+                    )?;
+                    Ok(output_ok)
+                })(
+                ))
+            }
+        },
+    )
+}
+fn wire__crate__api__catalog__set_automation_enabled_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_automation_enabled",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_automation_id = <String>::sse_decode(&mut deserializer);
+            let api_enabled = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::catalog::set_automation_enabled(
+                        api_automation_id,
+                        api_enabled,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__set_config_option_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_config_option",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_config_id = <String>::sse_decode(&mut deserializer);
+            let api_value_id = <String>::sse_decode(&mut deserializer);
+            let api_boolean = <Option<bool>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::set_config_option(
+                        api_session_id,
+                        api_config_id,
+                        api_value_id,
+                        api_boolean,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__submit_elicitation_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "submit_elicitation",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_text_values = <Vec<crate::api::conversation::ElicitationTextInput>>::sse_decode(
+                &mut deserializer,
+            );
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::submit_elicitation(
+                        api_session_id,
+                        api_text_values,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__terminal__terminal_attach_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "terminal_attach",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_geometry =
+                <crate::api::terminal::TerminalGeometry>::sse_decode(&mut deserializer);
+            let api_max_scrollback_lines = <Option<u32>>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                crate::api::terminal::TerminalEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                let output_ok = crate::api::terminal::terminal_attach(
+                    api_session_id,
+                    api_geometry,
+                    api_max_scrollback_lines,
+                    api_sink,
+                )?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__terminal__terminal_detach_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "terminal_detach",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::terminal::terminal_detach(api_session_id);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__terminal__terminal_detach_all_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "terminal_detach_all",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::terminal::terminal_detach_all();
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__terminal__terminal_input_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "terminal_input",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_data = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                let output_ok = crate::api::terminal::terminal_input(api_session_id, api_data)?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__terminal__terminal_resize_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "terminal_resize",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_geometry =
+                <crate::api::terminal::TerminalGeometry>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                let output_ok =
+                    crate::api::terminal::terminal_resize(api_session_id, api_geometry)?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__conversation__unwatch_conversation_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "unwatch_conversation",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::conversation::unwatch_conversation();
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__conversation__update_elicitation_text_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_elicitation_text",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_field_index = <u32>::sse_decode(&mut deserializer);
+            let api_value = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::conversation::update_elicitation_text(
+                        api_session_id,
+                        api_field_index,
+                        api_value,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__connection__verify_connection_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -318,6 +1323,77 @@ fn wire__crate__api__connection__verify_connection_impl(
         },
     )
 }
+fn wire__crate__api__conversation__watch_conversation_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "watch_conversation",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                crate::api::conversation::ConversationEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::conversation::watch_conversation(api_session_id, api_sink);
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__catalog__workspace_catalog_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "workspace_catalog",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::error::SmeltError>((move || {
+                    let output_ok = crate::api::catalog::workspace_catalog()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 
 // Section: dart2rust
 
@@ -326,6 +1402,16 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <String>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<crate::api::catalog::CatalogEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
     }
 }
 
@@ -342,11 +1428,372 @@ impl SseDecode
     }
 }
 
+impl SseDecode
+    for StreamSink<
+        crate::api::conversation::ConversationEvent,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<
+        crate::api::terminal::TerminalEvent,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
 impl SseDecode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <Vec<u8>>::sse_decode(deserializer);
         return String::from_utf8(inner).unwrap();
+    }
+}
+
+impl SseDecode for crate::api::catalog::AcpAgentOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_kind = <String>::sse_decode(deserializer);
+        let mut var_label = <String>::sse_decode(deserializer);
+        let mut var_agentDefinitionId = <Option<String>>::sse_decode(deserializer);
+        return crate::api::catalog::AcpAgentOption {
+            id: var_id,
+            kind: var_kind,
+            label: var_label,
+            agent_definition_id: var_agentDefinitionId,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AgentDefinitionSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_description = <String>::sse_decode(deserializer);
+        let mut var_engineKindId = <String>::sse_decode(deserializer);
+        let mut var_prompt = <String>::sse_decode(deserializer);
+        let mut var_plugins = <Vec<String>>::sse_decode(deserializer);
+        let mut var_contextFolders = <Vec<String>>::sse_decode(deserializer);
+        let mut var_contextLinks = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::catalog::AgentDefinitionSummary {
+            id: var_id,
+            name: var_name,
+            description: var_description,
+            engine_kind_id: var_engineKindId,
+            prompt: var_prompt,
+            plugins: var_plugins,
+            context_folders: var_contextFolders,
+            context_links: var_contextLinks,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ApprovalDetails {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::conversation::ApprovalKind>::sse_decode(deserializer);
+        let mut var_command = <Option<String>>::sse_decode(deserializer);
+        let mut var_cwd = <Option<String>>::sse_decode(deserializer);
+        let mut var_reason = <Option<String>>::sse_decode(deserializer);
+        let mut var_grantRoot = <Option<String>>::sse_decode(deserializer);
+        let mut var_summary = <Option<String>>::sse_decode(deserializer);
+        return crate::api::conversation::ApprovalDetails {
+            kind: var_kind,
+            command: var_command,
+            cwd: var_cwd,
+            reason: var_reason,
+            grant_root: var_grantRoot,
+            summary: var_summary,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ApprovalKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::ApprovalKind::Command,
+            1 => crate::api::conversation::ApprovalKind::FileChange,
+            2 => crate::api::conversation::ApprovalKind::Permissions,
+            3 => crate::api::conversation::ApprovalKind::Generic,
+            _ => unreachable!("Invalid variant for ApprovalKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AttentionItem {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_message = <String>::sse_decode(deserializer);
+        let mut var_kind = <crate::api::catalog::AttentionKind>::sse_decode(deserializer);
+        return crate::api::catalog::AttentionItem {
+            session_id: var_sessionId,
+            title: var_title,
+            message: var_message,
+            kind: var_kind,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AttentionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::AttentionKind::Approval,
+            1 => crate::api::catalog::AttentionKind::Input,
+            2 => crate::api::catalog::AttentionKind::Success,
+            3 => crate::api::catalog::AttentionKind::Failure,
+            4 => crate::api::catalog::AttentionKind::Bell,
+            5 => crate::api::catalog::AttentionKind::Notice,
+            _ => unreachable!("Invalid variant for AttentionKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationActionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::AutomationActionKind::Agent,
+            1 => crate::api::catalog::AutomationActionKind::Shell,
+            _ => unreachable!("Invalid variant for AutomationActionKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationCatalog {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_automations =
+            <Vec<crate::api::catalog::AutomationSummary>>::sse_decode(deserializer);
+        let mut var_agents =
+            <Vec<crate::api::catalog::AgentDefinitionSummary>>::sse_decode(deserializer);
+        return crate::api::catalog::AutomationCatalog {
+            automations: var_automations,
+            agents: var_agents,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationRunSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::AutomationRunSource::Manual,
+            1 => crate::api::catalog::AutomationRunSource::Scheduled,
+            2 => crate::api::catalog::AutomationRunSource::Webhook,
+            3 => crate::api::catalog::AutomationRunSource::Event,
+            _ => unreachable!("Invalid variant for AutomationRunSource: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationRunStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::AutomationRunStatus::Starting,
+            1 => crate::api::catalog::AutomationRunStatus::Queued,
+            2 => crate::api::catalog::AutomationRunStatus::Dispatching,
+            3 => crate::api::catalog::AutomationRunStatus::Running,
+            4 => crate::api::catalog::AutomationRunStatus::AwaitingApproval,
+            5 => crate::api::catalog::AutomationRunStatus::WaitingForUser,
+            6 => crate::api::catalog::AutomationRunStatus::Completed,
+            7 => crate::api::catalog::AutomationRunStatus::Failed,
+            8 => crate::api::catalog::AutomationRunStatus::Cancelled,
+            9 => crate::api::catalog::AutomationRunStatus::Skipped,
+            _ => unreachable!("Invalid variant for AutomationRunStatus: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationRunSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_status = <crate::api::catalog::AutomationRunStatus>::sse_decode(deserializer);
+        let mut var_source = <crate::api::catalog::AutomationRunSource>::sse_decode(deserializer);
+        let mut var_startedAt = <Option<i64>>::sse_decode(deserializer);
+        let mut var_finishedAt = <Option<i64>>::sse_decode(deserializer);
+        let mut var_sessionId = <Option<String>>::sse_decode(deserializer);
+        let mut var_error = <Option<String>>::sse_decode(deserializer);
+        return crate::api::catalog::AutomationRunSummary {
+            status: var_status,
+            source: var_source,
+            started_at: var_startedAt,
+            finished_at: var_finishedAt,
+            session_id: var_sessionId,
+            error: var_error,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationSchedule {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::catalog::ScheduleKind>::sse_decode(deserializer);
+        let mut var_hour = <u8>::sse_decode(deserializer);
+        let mut var_minute = <u8>::sse_decode(deserializer);
+        let mut var_minutes = <u32>::sse_decode(deserializer);
+        let mut var_hours = <u32>::sse_decode(deserializer);
+        let mut var_days = <u8>::sse_decode(deserializer);
+        let mut var_endHour = <u8>::sse_decode(deserializer);
+        let mut var_endMinute = <u8>::sse_decode(deserializer);
+        return crate::api::catalog::AutomationSchedule {
+            kind: var_kind,
+            hour: var_hour,
+            minute: var_minute,
+            minutes: var_minutes,
+            hours: var_hours,
+            days: var_days,
+            end_hour: var_endHour,
+            end_minute: var_endMinute,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_automationName = <String>::sse_decode(deserializer);
+        let mut var_runStatus =
+            <crate::api::catalog::AutomationRunStatus>::sse_decode(deserializer);
+        let mut var_runSource =
+            <crate::api::catalog::AutomationRunSource>::sse_decode(deserializer);
+        let mut var_prompt = <Option<String>>::sse_decode(deserializer);
+        let mut var_startedAt = <Option<i64>>::sse_decode(deserializer);
+        return crate::api::catalog::AutomationSource {
+            automation_name: var_automationName,
+            run_status: var_runStatus,
+            run_source: var_runSource,
+            prompt: var_prompt,
+            started_at: var_startedAt,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::AutomationSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_enabled = <bool>::sse_decode(deserializer);
+        let mut var_schedules =
+            <Vec<crate::api::catalog::AutomationSchedule>>::sse_decode(deserializer);
+        let mut var_eventTopics = <Vec<String>>::sse_decode(deserializer);
+        let mut var_webhook = <bool>::sse_decode(deserializer);
+        let mut var_action = <crate::api::catalog::AutomationActionKind>::sse_decode(deserializer);
+        let mut var_agentName = <Option<String>>::sse_decode(deserializer);
+        let mut var_nextRunAt = <Option<i64>>::sse_decode(deserializer);
+        let mut var_lastRun =
+            <Option<crate::api::catalog::AutomationRunSummary>>::sse_decode(deserializer);
+        return crate::api::catalog::AutomationSummary {
+            id: var_id,
+            name: var_name,
+            enabled: var_enabled,
+            schedules: var_schedules,
+            event_topics: var_eventTopics,
+            webhook: var_webhook,
+            action: var_action,
+            agent_name: var_agentName,
+            next_run_at: var_nextRunAt,
+            last_run: var_lastRun,
+        };
+    }
+}
+
+impl SseDecode for bool {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u8().unwrap() != 0
+    }
+}
+
+impl SseDecode for crate::api::catalog::CatalogEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::catalog::CatalogEventKind>::sse_decode(deserializer);
+        let mut var_sessions = <Option<crate::api::catalog::SessionList>>::sse_decode(deserializer);
+        let mut var_attention =
+            <Option<crate::api::catalog::AttentionItem>>::sse_decode(deserializer);
+        let mut var_sessionId = <Option<String>>::sse_decode(deserializer);
+        let mut var_message = <Option<String>>::sse_decode(deserializer);
+        return crate::api::catalog::CatalogEvent {
+            kind: var_kind,
+            sessions: var_sessions,
+            attention: var_attention,
+            session_id: var_sessionId,
+            message: var_message,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::CatalogEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::CatalogEventKind::Sessions,
+            1 => crate::api::catalog::CatalogEventKind::Attention,
+            2 => crate::api::catalog::CatalogEventKind::AttentionResolved,
+            3 => crate::api::catalog::CatalogEventKind::Error,
+            _ => unreachable!("Invalid variant for CatalogEventKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ChoiceOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_value = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_selected = <bool>::sse_decode(deserializer);
+        return crate::api::conversation::ChoiceOption {
+            value: var_value,
+            name: var_name,
+            selected: var_selected,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConfigOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_configId = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_description = <Option<String>>::sse_decode(deserializer);
+        let mut var_currentName = <String>::sse_decode(deserializer);
+        let mut var_options =
+            <Vec<crate::api::conversation::ChoiceOption>>::sse_decode(deserializer);
+        let mut var_boolean = <Option<bool>>::sse_decode(deserializer);
+        return crate::api::conversation::ConfigOption {
+            config_id: var_configId,
+            name: var_name,
+            description: var_description,
+            current_name: var_currentName,
+            options: var_options,
+            boolean: var_boolean,
+        };
     }
 }
 
@@ -380,6 +1827,163 @@ impl SseDecode for crate::api::connection::ConnectionState {
     }
 }
 
+impl SseDecode for crate::api::conversation::ContextUsage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_usedTokens = <i64>::sse_decode(deserializer);
+        let mut var_contextWindow = <i64>::sse_decode(deserializer);
+        return crate::api::conversation::ContextUsage {
+            used_tokens: var_usedTokens,
+            context_window: var_contextWindow,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConversationEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_index = <i64>::sse_decode(deserializer);
+        let mut var_kind = <crate::api::conversation::EntryKind>::sse_decode(deserializer);
+        let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_thought = <bool>::sse_decode(deserializer);
+        let mut var_images =
+            <Vec<crate::api::conversation::ConversationImage>>::sse_decode(deserializer);
+        let mut var_toolCall =
+            <Option<crate::api::conversation::ToolCallView>>::sse_decode(deserializer);
+        let mut var_taskNote =
+            <Option<crate::api::conversation::TaskNoteView>>::sse_decode(deserializer);
+        return crate::api::conversation::ConversationEntry {
+            index: var_index,
+            kind: var_kind,
+            text: var_text,
+            thought: var_thought,
+            images: var_images,
+            tool_call: var_toolCall,
+            task_note: var_taskNote,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConversationEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind =
+            <crate::api::conversation::ConversationEventKind>::sse_decode(deserializer);
+        let mut var_view =
+            <Option<crate::api::conversation::ConversationView>>::sse_decode(deserializer);
+        let mut var_cached = <bool>::sse_decode(deserializer);
+        let mut var_savedAtMs = <Option<i64>>::sse_decode(deserializer);
+        let mut var_message = <Option<String>>::sse_decode(deserializer);
+        return crate::api::conversation::ConversationEvent {
+            kind: var_kind,
+            view: var_view,
+            cached: var_cached,
+            saved_at_ms: var_savedAtMs,
+            message: var_message,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConversationEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::ConversationEventKind::Snapshot,
+            1 => crate::api::conversation::ConversationEventKind::Unavailable,
+            2 => crate::api::conversation::ConversationEventKind::Error,
+            _ => unreachable!("Invalid variant for ConversationEventKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConversationImage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_mime = <String>::sse_decode(deserializer);
+        let mut var_bytes = <Option<Vec<u8>>>::sse_decode(deserializer);
+        let mut var_original =
+            <Option<crate::api::conversation::ImageRef>>::sse_decode(deserializer);
+        return crate::api::conversation::ConversationImage {
+            mime: var_mime,
+            bytes: var_bytes,
+            original: var_original,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConversationPhase {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::ConversationPhase::Connecting,
+            1 => crate::api::conversation::ConversationPhase::Thinking,
+            2 => crate::api::conversation::ConversationPhase::ExecutingTool,
+            3 => crate::api::conversation::ConversationPhase::AwaitingApproval,
+            4 => crate::api::conversation::ConversationPhase::WaitingForUser,
+            5 => crate::api::conversation::ConversationPhase::Succeeded,
+            6 => crate::api::conversation::ConversationPhase::Failed,
+            7 => crate::api::conversation::ConversationPhase::Idle,
+            8 => crate::api::conversation::ConversationPhase::Dead,
+            _ => unreachable!("Invalid variant for ConversationPhase: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ConversationView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <String>::sse_decode(deserializer);
+        let mut var_phase = <crate::api::conversation::ConversationPhase>::sse_decode(deserializer);
+        let mut var_statusLine = <Option<String>>::sse_decode(deserializer);
+        let mut var_endReason = <String>::sse_decode(deserializer);
+        let mut var_sessionTitle = <Option<String>>::sse_decode(deserializer);
+        let mut var_turnStartedAtMs = <Option<i64>>::sse_decode(deserializer);
+        let mut var_lastTurnDurationMs = <Option<i64>>::sse_decode(deserializer);
+        let mut var_plan = <Vec<crate::api::conversation::PlanStep>>::sse_decode(deserializer);
+        let mut var_pendingPermissions =
+            <Vec<crate::api::conversation::PermissionRequest>>::sse_decode(deserializer);
+        let mut var_pendingElicitation =
+            <Option<crate::api::conversation::Elicitation>>::sse_decode(deserializer);
+        let mut var_entries =
+            <Vec<crate::api::conversation::ConversationEntry>>::sse_decode(deserializer);
+        let mut var_entriesOffset = <i64>::sse_decode(deserializer);
+        let mut var_hasMoreBefore = <bool>::sse_decode(deserializer);
+        let mut var_finalAnswerIndex = <Option<u32>>::sse_decode(deserializer);
+        let mut var_supportsImage = <bool>::sse_decode(deserializer);
+        let mut var_availableCommands =
+            <Vec<crate::api::conversation::SlashCommand>>::sse_decode(deserializer);
+        let mut var_usage =
+            <Option<crate::api::conversation::ContextUsage>>::sse_decode(deserializer);
+        let mut var_model =
+            <Option<crate::api::conversation::ModelSelector>>::sse_decode(deserializer);
+        let mut var_configOptions =
+            <Vec<crate::api::conversation::ConfigOption>>::sse_decode(deserializer);
+        return crate::api::conversation::ConversationView {
+            session_id: var_sessionId,
+            phase: var_phase,
+            status_line: var_statusLine,
+            end_reason: var_endReason,
+            session_title: var_sessionTitle,
+            turn_started_at_ms: var_turnStartedAtMs,
+            last_turn_duration_ms: var_lastTurnDurationMs,
+            plan: var_plan,
+            pending_permissions: var_pendingPermissions,
+            pending_elicitation: var_pendingElicitation,
+            entries: var_entries,
+            entries_offset: var_entriesOffset,
+            has_more_before: var_hasMoreBefore,
+            final_answer_index: var_finalAnswerIndex,
+            supports_image: var_supportsImage,
+            available_commands: var_availableCommands,
+            usage: var_usage,
+            model: var_model,
+            config_options: var_configOptions,
+        };
+    }
+}
+
 impl SseDecode for crate::api::identity::DeviceIdentity {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -390,10 +1994,228 @@ impl SseDecode for crate::api::identity::DeviceIdentity {
     }
 }
 
+impl SseDecode for crate::api::conversation::DiffView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_path = <String>::sse_decode(deserializer);
+        let mut var_oldText = <Option<String>>::sse_decode(deserializer);
+        let mut var_newText = <String>::sse_decode(deserializer);
+        return crate::api::conversation::DiffView {
+            path: var_path,
+            old_text: var_oldText,
+            new_text: var_newText,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::Elicitation {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_message = <String>::sse_decode(deserializer);
+        let mut var_fields =
+            <Vec<crate::api::conversation::ElicitationField>>::sse_decode(deserializer);
+        let mut var_isReady = <bool>::sse_decode(deserializer);
+        return crate::api::conversation::Elicitation {
+            message: var_message,
+            fields: var_fields,
+            is_ready: var_isReady,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ElicitationField {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_key = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_required_ = <bool>::sse_decode(deserializer);
+        let mut var_allowCustomInput = <bool>::sse_decode(deserializer);
+        let mut var_kind =
+            <crate::api::conversation::ElicitationFieldKind>::sse_decode(deserializer);
+        let mut var_options = <Vec<String>>::sse_decode(deserializer);
+        let mut var_secret = <bool>::sse_decode(deserializer);
+        let mut var_url = <Option<String>>::sse_decode(deserializer);
+        let mut var_chosen = <Vec<u32>>::sse_decode(deserializer);
+        let mut var_textValue = <Option<String>>::sse_decode(deserializer);
+        return crate::api::conversation::ElicitationField {
+            key: var_key,
+            title: var_title,
+            required: var_required_,
+            allow_custom_input: var_allowCustomInput,
+            kind: var_kind,
+            options: var_options,
+            secret: var_secret,
+            url: var_url,
+            chosen: var_chosen,
+            text_value: var_textValue,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ElicitationFieldKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::ElicitationFieldKind::Select,
+            1 => crate::api::conversation::ElicitationFieldKind::MultiSelect,
+            2 => crate::api::conversation::ElicitationFieldKind::Text,
+            3 => crate::api::conversation::ElicitationFieldKind::ExternalUrl,
+            _ => unreachable!("Invalid variant for ElicitationFieldKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ElicitationTextInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_fieldIndex = <u32>::sse_decode(deserializer);
+        let mut var_value = <String>::sse_decode(deserializer);
+        return crate::api::conversation::ElicitationTextInput {
+            field_index: var_fieldIndex,
+            value: var_value,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::EntryKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::EntryKind::User,
+            1 => crate::api::conversation::EntryKind::Interrupted,
+            2 => crate::api::conversation::EntryKind::Assistant,
+            3 => crate::api::conversation::EntryKind::ToolCall,
+            4 => crate::api::conversation::EntryKind::Completion,
+            5 => crate::api::conversation::EntryKind::Divider,
+            6 => crate::api::conversation::EntryKind::TaskNote,
+            _ => unreachable!("Invalid variant for EntryKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::HistoryRenameResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_customTitle = <Option<String>>::sse_decode(deserializer);
+        return crate::api::catalog::HistoryRenameResult {
+            title: var_title,
+            custom_title: var_customTitle,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::HistorySessionSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_resumeId = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_customTitle = <Option<String>>::sse_decode(deserializer);
+        let mut var_lastActiveAtMs = <Option<i64>>::sse_decode(deserializer);
+        let mut var_messageCount = <u32>::sse_decode(deserializer);
+        return crate::api::catalog::HistorySessionSummary {
+            resume_id: var_resumeId,
+            title: var_title,
+            custom_title: var_customTitle,
+            last_active_at_ms: var_lastActiveAtMs,
+            message_count: var_messageCount,
+        };
+    }
+}
+
 impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for i64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i64::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for crate::api::conversation::ImageData {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_mime = <String>::sse_decode(deserializer);
+        let mut var_bytes = <Vec<u8>>::sse_decode(deserializer);
+        return crate::api::conversation::ImageData {
+            mime: var_mime,
+            bytes: var_bytes,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ImageInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_mime = <String>::sse_decode(deserializer);
+        let mut var_bytes = <Vec<u8>>::sse_decode(deserializer);
+        return crate::api::conversation::ImageInput {
+            mime: var_mime,
+            bytes: var_bytes,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ImageRef {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_entry = <i64>::sse_decode(deserializer);
+        let mut var_digest = <String>::sse_decode(deserializer);
+        return crate::api::conversation::ImageRef {
+            entry: var_entry,
+            digest: var_digest,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::LaunchAction {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_key = <String>::sse_decode(deserializer);
+        let mut var_label = <String>::sse_decode(deserializer);
+        let mut var_target = <crate::api::catalog::LaunchTarget>::sse_decode(deserializer);
+        let mut var_agent = <String>::sse_decode(deserializer);
+        return crate::api::catalog::LaunchAction {
+            key: var_key,
+            label: var_label,
+            target: var_target,
+            agent: var_agent,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::LaunchSections {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_common = <Vec<crate::api::catalog::LaunchAction>>::sse_decode(deserializer);
+        let mut var_terminal = <Vec<crate::api::catalog::LaunchAction>>::sse_decode(deserializer);
+        let mut var_conversation =
+            <Vec<crate::api::catalog::LaunchAction>>::sse_decode(deserializer);
+        return crate::api::catalog::LaunchSections {
+            common: var_common,
+            terminal: var_terminal,
+            conversation: var_conversation,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::LaunchTarget {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::LaunchTarget::Conversation,
+            1 => crate::api::catalog::LaunchTarget::Terminal,
+            2 => crate::api::catalog::LaunchTarget::BlankTerminal,
+            _ => unreachable!("Invalid variant for LaunchTarget: {}", inner),
+        };
     }
 }
 
@@ -423,6 +2245,266 @@ impl SseDecode for crate::api::connection::LinkPath {
     }
 }
 
+impl SseDecode for Vec<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<String>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::AcpAgentOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::AcpAgentOption>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::AgentDefinitionSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::AgentDefinitionSummary>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::AutomationSchedule> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::AutomationSchedule>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::AutomationSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::AutomationSummary>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ChoiceOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ChoiceOption>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ConfigOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ConfigOption>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ConversationEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ConversationEntry>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ConversationImage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ConversationImage>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ElicitationField> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ElicitationField>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ElicitationTextInput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ElicitationTextInput>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::HistorySessionSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::HistorySessionSummary>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ImageInput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ImageInput>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::LaunchAction> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::LaunchAction>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ModelProvider> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ModelProvider>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::PermissionOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::PermissionOption>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::PermissionRequest> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::PermissionRequest>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::PlanStep> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::PlanStep>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<u32>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -435,11 +2517,272 @@ impl SseDecode for Vec<u8> {
     }
 }
 
+impl SseDecode for Vec<crate::api::conversation::SessionSkill> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::SessionSkill>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::SessionSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::SessionSummary>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::SlashCommand> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::SlashCommand>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::conversation::ToolOutput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::conversation::ToolOutput>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::catalog::WorkspaceProject> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::catalog::WorkspaceProject>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for crate::api::conversation::ModelProvider {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_options =
+            <Vec<crate::api::conversation::ChoiceOption>>::sse_decode(deserializer);
+        let mut var_switchValue = <Option<String>>::sse_decode(deserializer);
+        let mut var_selected = <bool>::sse_decode(deserializer);
+        return crate::api::conversation::ModelProvider {
+            id: var_id,
+            name: var_name,
+            options: var_options,
+            switch_value: var_switchValue,
+            selected: var_selected,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ModelSelector {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_configId = <String>::sse_decode(deserializer);
+        let mut var_currentValue = <String>::sse_decode(deserializer);
+        let mut var_currentName = <String>::sse_decode(deserializer);
+        let mut var_providers =
+            <Vec<crate::api::conversation::ModelProvider>>::sse_decode(deserializer);
+        let mut var_currentProvider = <Option<u32>>::sse_decode(deserializer);
+        let mut var_options =
+            <Vec<crate::api::conversation::ChoiceOption>>::sse_decode(deserializer);
+        return crate::api::conversation::ModelSelector {
+            config_id: var_configId,
+            current_value: var_currentValue,
+            current_name: var_currentName,
+            providers: var_providers,
+            current_provider: var_currentProvider,
+            options: var_options,
+        };
+    }
+}
+
 impl SseDecode for Option<String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::catalog::AttentionItem> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::catalog::AttentionItem>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::catalog::AutomationRunSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::catalog::AutomationRunSummary>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::catalog::AutomationSource> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::catalog::AutomationSource>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<bool>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::ContextUsage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::ContextUsage>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::ConversationImage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::ConversationImage>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::ConversationView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::ConversationView>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::DiffView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::DiffView>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::Elicitation> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::Elicitation>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<i32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<i32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<i64>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::ImageRef> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::ImageRef>::sse_decode(
+                deserializer,
+            ));
         } else {
             return None;
         }
@@ -459,11 +2802,85 @@ impl SseDecode for Option<crate::api::connection::LinkMetrics> {
     }
 }
 
+impl SseDecode for Option<crate::api::conversation::ModelSelector> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::ModelSelector>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::catalog::SessionKind> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::catalog::SessionKind>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::catalog::SessionList> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::catalog::SessionList>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::error::SmeltError> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::error::SmeltError>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::TaskNoteView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::TaskNoteView>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::terminal::TerminalReady> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::terminal::TerminalReady>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::conversation::ToolCallView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::conversation::ToolCallView>::sse_decode(
+                deserializer,
+            ));
         } else {
             return None;
         }
@@ -481,6 +2898,17 @@ impl SseDecode for Option<u32> {
     }
 }
 
+impl SseDecode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<u8>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for crate::api::identity::PairingTarget {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -489,6 +2917,91 @@ impl SseDecode for crate::api::identity::PairingTarget {
         return crate::api::identity::PairingTarget {
             endpoint_id: var_endpointId,
             relay_url: var_relayUrl,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::PendingActions {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_permissions =
+            <Vec<crate::api::conversation::PermissionRequest>>::sse_decode(deserializer);
+        let mut var_elicitation =
+            <Option<crate::api::conversation::Elicitation>>::sse_decode(deserializer);
+        return crate::api::conversation::PendingActions {
+            permissions: var_permissions,
+            elicitation: var_elicitation,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::PermissionOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_optionId = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_kind =
+            <crate::api::conversation::PermissionOptionKind>::sse_decode(deserializer);
+        return crate::api::conversation::PermissionOption {
+            option_id: var_optionId,
+            name: var_name,
+            kind: var_kind,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::PermissionOptionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::PermissionOptionKind::AllowOnce,
+            1 => crate::api::conversation::PermissionOptionKind::AllowAlways,
+            2 => crate::api::conversation::PermissionOptionKind::RejectOnce,
+            3 => crate::api::conversation::PermissionOptionKind::RejectAlways,
+            _ => unreachable!("Invalid variant for PermissionOptionKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::PermissionRequest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_toolCallId = <String>::sse_decode(deserializer);
+        let mut var_question = <String>::sse_decode(deserializer);
+        let mut var_options =
+            <Vec<crate::api::conversation::PermissionOption>>::sse_decode(deserializer);
+        let mut var_details = <crate::api::conversation::ApprovalDetails>::sse_decode(deserializer);
+        return crate::api::conversation::PermissionRequest {
+            tool_call_id: var_toolCallId,
+            question: var_question,
+            options: var_options,
+            details: var_details,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::PlanStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_content = <String>::sse_decode(deserializer);
+        let mut var_status = <crate::api::conversation::PlanStepStatus>::sse_decode(deserializer);
+        return crate::api::conversation::PlanStep {
+            content: var_content,
+            status: var_status,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::PlanStepStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::PlanStepStatus::Pending,
+            1 => crate::api::conversation::PlanStepStatus::InProgress,
+            2 => crate::api::conversation::PlanStepStatus::Completed,
+            _ => unreachable!("Invalid variant for PlanStepStatus: {}", inner),
         };
     }
 }
@@ -509,6 +3022,180 @@ impl SseDecode for crate::api::connection::RuntimeInfo {
             version: var_version,
             endpoint_id: var_endpointId,
             relay_url: var_relayUrl,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::ScheduleKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::ScheduleKind::Daily,
+            1 => crate::api::catalog::ScheduleKind::EveryMinutes,
+            2 => crate::api::catalog::ScheduleKind::EveryHours,
+            3 => crate::api::catalog::ScheduleKind::Weekly,
+            4 => crate::api::catalog::ScheduleKind::During,
+            _ => unreachable!("Invalid variant for ScheduleKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::SendFailureKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::SendFailureKind::Rejected,
+            1 => crate::api::conversation::SendFailureKind::Unknown,
+            _ => unreachable!("Invalid variant for SendFailureKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::SendMessageError {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::conversation::SendFailureKind>::sse_decode(deserializer);
+        let mut var_message = <String>::sse_decode(deserializer);
+        return crate::api::conversation::SendMessageError {
+            kind: var_kind,
+            message: var_message,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::SessionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::SessionKind::Acp,
+            1 => crate::api::catalog::SessionKind::Terminal,
+            _ => unreachable!("Invalid variant for SessionKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::SessionList {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessions = <Vec<crate::api::catalog::SessionSummary>>::sse_decode(deserializer);
+        let mut var_cached = <bool>::sse_decode(deserializer);
+        let mut var_savedAtMs = <Option<i64>>::sse_decode(deserializer);
+        return crate::api::catalog::SessionList {
+            sessions: var_sessions,
+            cached: var_cached,
+            saved_at_ms: var_savedAtMs,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::SessionPhase {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::SessionPhase::Connecting,
+            1 => crate::api::catalog::SessionPhase::Thinking,
+            2 => crate::api::catalog::SessionPhase::ExecutingTool,
+            3 => crate::api::catalog::SessionPhase::AwaitingApproval,
+            4 => crate::api::catalog::SessionPhase::WaitingForUser,
+            5 => crate::api::catalog::SessionPhase::Succeeded,
+            6 => crate::api::catalog::SessionPhase::Failed,
+            7 => crate::api::catalog::SessionPhase::Idle,
+            8 => crate::api::catalog::SessionPhase::Dead,
+            _ => unreachable!("Invalid variant for SessionPhase: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::SessionSkill {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_description = <String>::sse_decode(deserializer);
+        return crate::api::conversation::SessionSkill {
+            name: var_name,
+            description: var_description,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::SessionSkills {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_supported = <bool>::sse_decode(deserializer);
+        let mut var_skills =
+            <Vec<crate::api::conversation::SessionSkill>>::sse_decode(deserializer);
+        return crate::api::conversation::SessionSkills {
+            supported: var_supported,
+            skills: var_skills,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::SessionStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::catalog::SessionStatus::NeedsYou,
+            1 => crate::api::catalog::SessionStatus::Running,
+            2 => crate::api::catalog::SessionStatus::Idle,
+            _ => unreachable!("Invalid variant for SessionStatus: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::SessionSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_kind = <crate::api::catalog::SessionKind>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_phase = <crate::api::catalog::SessionPhase>::sse_decode(deserializer);
+        let mut var_status = <crate::api::catalog::SessionStatus>::sse_decode(deserializer);
+        let mut var_agent = <String>::sse_decode(deserializer);
+        let mut var_cwd = <Option<String>>::sse_decode(deserializer);
+        let mut var_projectRoot = <Option<String>>::sse_decode(deserializer);
+        let mut var_projectTitle = <Option<String>>::sse_decode(deserializer);
+        let mut var_projectOrder = <u32>::sse_decode(deserializer);
+        let mut var_updatedAt = <i64>::sse_decode(deserializer);
+        let mut var_detail = <Option<String>>::sse_decode(deserializer);
+        let mut var_attention =
+            <Option<crate::api::catalog::AttentionItem>>::sse_decode(deserializer);
+        let mut var_automation =
+            <Option<crate::api::catalog::AutomationSource>>::sse_decode(deserializer);
+        let mut var_agentDefinitionId = <Option<String>>::sse_decode(deserializer);
+        return crate::api::catalog::SessionSummary {
+            id: var_id,
+            kind: var_kind,
+            title: var_title,
+            phase: var_phase,
+            status: var_status,
+            agent: var_agent,
+            cwd: var_cwd,
+            project_root: var_projectRoot,
+            project_title: var_projectTitle,
+            project_order: var_projectOrder,
+            updated_at: var_updatedAt,
+            detail: var_detail,
+            attention: var_attention,
+            automation: var_automation,
+            agent_definition_id: var_agentDefinitionId,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::SlashCommand {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_description = <String>::sse_decode(deserializer);
+        return crate::api::conversation::SlashCommand {
+            name: var_name,
+            description: var_description,
         };
     }
 }
@@ -541,6 +3228,197 @@ impl SseDecode for crate::api::error::SmeltErrorKind {
     }
 }
 
+impl SseDecode for crate::api::conversation::TaskNoteKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::TaskNoteKind::BackgroundTask,
+            1 => crate::api::conversation::TaskNoteKind::Subagent,
+            _ => unreachable!("Invalid variant for TaskNoteKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::TaskNoteView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::conversation::TaskNoteKind>::sse_decode(deserializer);
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_status = <String>::sse_decode(deserializer);
+        let mut var_exitCode = <Option<i32>>::sse_decode(deserializer);
+        let mut var_outputTail = <String>::sse_decode(deserializer);
+        return crate::api::conversation::TaskNoteView {
+            kind: var_kind,
+            id: var_id,
+            title: var_title,
+            status: var_status,
+            exit_code: var_exitCode,
+            output_tail: var_outputTail,
+        };
+    }
+}
+
+impl SseDecode for crate::api::terminal::TerminalEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::terminal::TerminalEventKind>::sse_decode(deserializer);
+        let mut var_ready = <Option<crate::api::terminal::TerminalReady>>::sse_decode(deserializer);
+        let mut var_data = <Option<Vec<u8>>>::sse_decode(deserializer);
+        let mut var_message = <Option<String>>::sse_decode(deserializer);
+        let mut var_fatal = <bool>::sse_decode(deserializer);
+        return crate::api::terminal::TerminalEvent {
+            kind: var_kind,
+            ready: var_ready,
+            data: var_data,
+            message: var_message,
+            fatal: var_fatal,
+        };
+    }
+}
+
+impl SseDecode for crate::api::terminal::TerminalEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::terminal::TerminalEventKind::Ready,
+            1 => crate::api::terminal::TerminalEventKind::Data,
+            2 => crate::api::terminal::TerminalEventKind::ReplayComplete,
+            3 => crate::api::terminal::TerminalEventKind::Closed,
+            4 => crate::api::terminal::TerminalEventKind::Error,
+            _ => unreachable!("Invalid variant for TerminalEventKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::terminal::TerminalGeometry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_cols = <u32>::sse_decode(deserializer);
+        let mut var_rows = <u32>::sse_decode(deserializer);
+        let mut var_cellWidth = <u32>::sse_decode(deserializer);
+        let mut var_cellHeight = <u32>::sse_decode(deserializer);
+        return crate::api::terminal::TerminalGeometry {
+            cols: var_cols,
+            rows: var_rows,
+            cell_width: var_cellWidth,
+            cell_height: var_cellHeight,
+        };
+    }
+}
+
+impl SseDecode for crate::api::terminal::TerminalReady {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_cols = <u32>::sse_decode(deserializer);
+        let mut var_rows = <u32>::sse_decode(deserializer);
+        let mut var_replayBytes = <u32>::sse_decode(deserializer);
+        let mut var_historyLines = <u32>::sse_decode(deserializer);
+        let mut var_scrollbackLines = <u32>::sse_decode(deserializer);
+        return crate::api::terminal::TerminalReady {
+            cols: var_cols,
+            rows: var_rows,
+            replay_bytes: var_replayBytes,
+            history_lines: var_historyLines,
+            scrollback_lines: var_scrollbackLines,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ToolCallView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_kind = <crate::api::conversation::ToolKind>::sse_decode(deserializer);
+        let mut var_status = <crate::api::conversation::ToolStatus>::sse_decode(deserializer);
+        let mut var_output = <Vec<crate::api::conversation::ToolOutput>>::sse_decode(deserializer);
+        return crate::api::conversation::ToolCallView {
+            id: var_id,
+            title: var_title,
+            kind: var_kind,
+            status: var_status,
+            output: var_output,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ToolKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::ToolKind::Read,
+            1 => crate::api::conversation::ToolKind::Edit,
+            2 => crate::api::conversation::ToolKind::Delete,
+            3 => crate::api::conversation::ToolKind::Move,
+            4 => crate::api::conversation::ToolKind::Search,
+            5 => crate::api::conversation::ToolKind::Execute,
+            6 => crate::api::conversation::ToolKind::Think,
+            7 => crate::api::conversation::ToolKind::Fetch,
+            8 => crate::api::conversation::ToolKind::SwitchMode,
+            9 => crate::api::conversation::ToolKind::Collaborate,
+            10 => crate::api::conversation::ToolKind::Review,
+            11 => crate::api::conversation::ToolKind::Image,
+            12 => crate::api::conversation::ToolKind::Compact,
+            13 => crate::api::conversation::ToolKind::Wait,
+            14 => crate::api::conversation::ToolKind::Other,
+            _ => unreachable!("Invalid variant for ToolKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ToolOutput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::conversation::ToolOutputKind>::sse_decode(deserializer);
+        let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_diff = <Option<crate::api::conversation::DiffView>>::sse_decode(deserializer);
+        let mut var_image =
+            <Option<crate::api::conversation::ConversationImage>>::sse_decode(deserializer);
+        let mut var_exitCode = <Option<i32>>::sse_decode(deserializer);
+        let mut var_truncated = <bool>::sse_decode(deserializer);
+        return crate::api::conversation::ToolOutput {
+            kind: var_kind,
+            text: var_text,
+            diff: var_diff,
+            image: var_image,
+            exit_code: var_exitCode,
+            truncated: var_truncated,
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ToolOutputKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::ToolOutputKind::Text,
+            1 => crate::api::conversation::ToolOutputKind::Diff,
+            2 => crate::api::conversation::ToolOutputKind::Image,
+            3 => crate::api::conversation::ToolOutputKind::Terminal,
+            _ => unreachable!("Invalid variant for ToolOutputKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::conversation::ToolStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::conversation::ToolStatus::Pending,
+            1 => crate::api::conversation::ToolStatus::InProgress,
+            2 => crate::api::conversation::ToolStatus::Completed,
+            3 => crate::api::conversation::ToolStatus::Failed,
+            _ => unreachable!("Invalid variant for ToolStatus: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for u32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -560,10 +3438,32 @@ impl SseDecode for () {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
 }
 
-impl SseDecode for bool {
+impl SseDecode for crate::api::catalog::WorkspaceCatalog {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_u8().unwrap() != 0
+        let mut var_projects =
+            <Vec<crate::api::catalog::WorkspaceProject>>::sse_decode(deserializer);
+        let mut var_agents = <Vec<crate::api::catalog::AcpAgentOption>>::sse_decode(deserializer);
+        let mut var_sections = <crate::api::catalog::LaunchSections>::sse_decode(deserializer);
+        return crate::api::catalog::WorkspaceCatalog {
+            projects: var_projects,
+            agents: var_agents,
+            sections: var_sections,
+        };
+    }
+}
+
+impl SseDecode for crate::api::catalog::WorkspaceProject {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_root = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_order = <u32>::sse_decode(deserializer);
+        return crate::api::catalog::WorkspaceProject {
+            root: var_root,
+            title: var_title,
+            order: var_order,
+        };
     }
 }
 
@@ -576,17 +3476,86 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__connection__connect_impl(port, ptr, rust_vec_len, data_len),
-        2 => {
+        1 => wire__crate__api__catalog__automation_catalog_impl(port, ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__conversation__cancel_turn_impl(port, ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__catalog__catalog_events_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__conversation__choose_elicitation_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        5 => wire__crate__api__connection__connect_impl(port, ptr, rust_vec_len, data_len),
+        6 => {
             wire__crate__api__connection__connection_events_impl(port, ptr, rust_vec_len, data_len)
         }
-        3 => wire__crate__api__connection__disconnect_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__identity__init_client_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__identity__pair_impl(port, ptr, rust_vec_len, data_len),
-        8 => {
+        7 => wire__crate__api__catalog__create_session_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__catalog__delete_session_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__connection__disconnect_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__conversation__dismiss_elicitation_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        11 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__identity__init_client_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__catalog__list_history_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__conversation__list_skills_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__conversation__load_image_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__conversation__load_older_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__identity__pair_impl(port, ptr, rust_vec_len, data_len),
+        21 => {
+            wire__crate__api__conversation__pending_actions_impl(port, ptr, rust_vec_len, data_len)
+        }
+        22 => wire__crate__api__catalog__rename_history_impl(port, ptr, rust_vec_len, data_len),
+        23 => {
+            wire__crate__api__conversation__respond_approval_impl(port, ptr, rust_vec_len, data_len)
+        }
+        24 => {
+            wire__crate__api__catalog__run_automation_once_impl(port, ptr, rust_vec_len, data_len)
+        }
+        25 => wire__crate__api__conversation__send_message_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__catalog__set_automation_enabled_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        27 => wire__crate__api__conversation__set_config_option_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        28 => wire__crate__api__conversation__submit_elicitation_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        34 => wire__crate__api__conversation__unwatch_conversation_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        35 => wire__crate__api__conversation__update_elicitation_text_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        36 => {
             wire__crate__api__connection__verify_connection_impl(port, ptr, rust_vec_len, data_len)
         }
+        37 => wire__crate__api__conversation__watch_conversation_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        38 => wire__crate__api__catalog__workspace_catalog_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -599,13 +3568,459 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        7 => wire__crate__api__identity__parse_pairing_impl(ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__catalog__mark_read_impl(ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__conversation__new_request_id_impl(ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__identity__parse_pairing_impl(ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__terminal__terminal_attach_impl(ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__terminal__terminal_detach_impl(ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__terminal__terminal_detach_all_impl(ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__terminal__terminal_input_impl(ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__terminal__terminal_resize_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
 
 // Section: rust2dart
 
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AcpAgentOption {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+            self.label.into_into_dart().into_dart(),
+            self.agent_definition_id.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AcpAgentOption
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AcpAgentOption>
+    for crate::api::catalog::AcpAgentOption
+{
+    fn into_into_dart(self) -> crate::api::catalog::AcpAgentOption {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AgentDefinitionSummary {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+            self.engine_kind_id.into_into_dart().into_dart(),
+            self.prompt.into_into_dart().into_dart(),
+            self.plugins.into_into_dart().into_dart(),
+            self.context_folders.into_into_dart().into_dart(),
+            self.context_links.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AgentDefinitionSummary
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AgentDefinitionSummary>
+    for crate::api::catalog::AgentDefinitionSummary
+{
+    fn into_into_dart(self) -> crate::api::catalog::AgentDefinitionSummary {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ApprovalDetails {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.command.into_into_dart().into_dart(),
+            self.cwd.into_into_dart().into_dart(),
+            self.reason.into_into_dart().into_dart(),
+            self.grant_root.into_into_dart().into_dart(),
+            self.summary.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ApprovalDetails
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ApprovalDetails>
+    for crate::api::conversation::ApprovalDetails
+{
+    fn into_into_dart(self) -> crate::api::conversation::ApprovalDetails {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ApprovalKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Command => 0.into_dart(),
+            Self::FileChange => 1.into_dart(),
+            Self::Permissions => 2.into_dart(),
+            Self::Generic => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ApprovalKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ApprovalKind>
+    for crate::api::conversation::ApprovalKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::ApprovalKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AttentionItem {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.session_id.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AttentionItem
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AttentionItem>
+    for crate::api::catalog::AttentionItem
+{
+    fn into_into_dart(self) -> crate::api::catalog::AttentionItem {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AttentionKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Approval => 0.into_dart(),
+            Self::Input => 1.into_dart(),
+            Self::Success => 2.into_dart(),
+            Self::Failure => 3.into_dart(),
+            Self::Bell => 4.into_dart(),
+            Self::Notice => 5.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AttentionKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AttentionKind>
+    for crate::api::catalog::AttentionKind
+{
+    fn into_into_dart(self) -> crate::api::catalog::AttentionKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationActionKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Agent => 0.into_dart(),
+            Self::Shell => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationActionKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationActionKind>
+    for crate::api::catalog::AutomationActionKind
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationActionKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationCatalog {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.automations.into_into_dart().into_dart(),
+            self.agents.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationCatalog
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationCatalog>
+    for crate::api::catalog::AutomationCatalog
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationCatalog {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationRunSource {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Manual => 0.into_dart(),
+            Self::Scheduled => 1.into_dart(),
+            Self::Webhook => 2.into_dart(),
+            Self::Event => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationRunSource
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationRunSource>
+    for crate::api::catalog::AutomationRunSource
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationRunSource {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationRunStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Starting => 0.into_dart(),
+            Self::Queued => 1.into_dart(),
+            Self::Dispatching => 2.into_dart(),
+            Self::Running => 3.into_dart(),
+            Self::AwaitingApproval => 4.into_dart(),
+            Self::WaitingForUser => 5.into_dart(),
+            Self::Completed => 6.into_dart(),
+            Self::Failed => 7.into_dart(),
+            Self::Cancelled => 8.into_dart(),
+            Self::Skipped => 9.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationRunStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationRunStatus>
+    for crate::api::catalog::AutomationRunStatus
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationRunStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationRunSummary {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.status.into_into_dart().into_dart(),
+            self.source.into_into_dart().into_dart(),
+            self.started_at.into_into_dart().into_dart(),
+            self.finished_at.into_into_dart().into_dart(),
+            self.session_id.into_into_dart().into_dart(),
+            self.error.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationRunSummary
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationRunSummary>
+    for crate::api::catalog::AutomationRunSummary
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationRunSummary {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationSchedule {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.hour.into_into_dart().into_dart(),
+            self.minute.into_into_dart().into_dart(),
+            self.minutes.into_into_dart().into_dart(),
+            self.hours.into_into_dart().into_dart(),
+            self.days.into_into_dart().into_dart(),
+            self.end_hour.into_into_dart().into_dart(),
+            self.end_minute.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationSchedule
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationSchedule>
+    for crate::api::catalog::AutomationSchedule
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationSchedule {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationSource {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.automation_name.into_into_dart().into_dart(),
+            self.run_status.into_into_dart().into_dart(),
+            self.run_source.into_into_dart().into_dart(),
+            self.prompt.into_into_dart().into_dart(),
+            self.started_at.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationSource
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationSource>
+    for crate::api::catalog::AutomationSource
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationSource {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::AutomationSummary {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.enabled.into_into_dart().into_dart(),
+            self.schedules.into_into_dart().into_dart(),
+            self.event_topics.into_into_dart().into_dart(),
+            self.webhook.into_into_dart().into_dart(),
+            self.action.into_into_dart().into_dart(),
+            self.agent_name.into_into_dart().into_dart(),
+            self.next_run_at.into_into_dart().into_dart(),
+            self.last_run.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::AutomationSummary
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::AutomationSummary>
+    for crate::api::catalog::AutomationSummary
+{
+    fn into_into_dart(self) -> crate::api::catalog::AutomationSummary {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::CatalogEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.sessions.into_into_dart().into_dart(),
+            self.attention.into_into_dart().into_dart(),
+            self.session_id.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::CatalogEvent
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::CatalogEvent>
+    for crate::api::catalog::CatalogEvent
+{
+    fn into_into_dart(self) -> crate::api::catalog::CatalogEvent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::CatalogEventKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Sessions => 0.into_dart(),
+            Self::Attention => 1.into_dart(),
+            Self::AttentionResolved => 2.into_dart(),
+            Self::Error => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::CatalogEventKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::CatalogEventKind>
+    for crate::api::catalog::CatalogEventKind
+{
+    fn into_into_dart(self) -> crate::api::catalog::CatalogEventKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ChoiceOption {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.value.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.selected.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ChoiceOption
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ChoiceOption>
+    for crate::api::conversation::ChoiceOption
+{
+    fn into_into_dart(self) -> crate::api::conversation::ChoiceOption {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConfigOption {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.config_id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+            self.current_name.into_into_dart().into_dart(),
+            self.options.into_into_dart().into_dart(),
+            self.boolean.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConfigOption
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConfigOption>
+    for crate::api::conversation::ConfigOption
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConfigOption {
+        self
+    }
+}
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::connection::ConnectionEvent {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
@@ -653,6 +4068,187 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::connection::ConnectionState>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ContextUsage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.used_tokens.into_into_dart().into_dart(),
+            self.context_window.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ContextUsage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ContextUsage>
+    for crate::api::conversation::ContextUsage
+{
+    fn into_into_dart(self) -> crate::api::conversation::ContextUsage {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationEntry {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.index.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+            self.text.into_into_dart().into_dart(),
+            self.thought.into_into_dart().into_dart(),
+            self.images.into_into_dart().into_dart(),
+            self.tool_call.into_into_dart().into_dart(),
+            self.task_note.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationEntry
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationEntry>
+    for crate::api::conversation::ConversationEntry
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationEntry {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.view.into_into_dart().into_dart(),
+            self.cached.into_into_dart().into_dart(),
+            self.saved_at_ms.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationEvent
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationEvent>
+    for crate::api::conversation::ConversationEvent
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationEvent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationEventKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Snapshot => 0.into_dart(),
+            Self::Unavailable => 1.into_dart(),
+            Self::Error => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationEventKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationEventKind>
+    for crate::api::conversation::ConversationEventKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationEventKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationImage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.mime.into_into_dart().into_dart(),
+            self.bytes.into_into_dart().into_dart(),
+            self.original.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationImage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationImage>
+    for crate::api::conversation::ConversationImage
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationImage {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationPhase {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Connecting => 0.into_dart(),
+            Self::Thinking => 1.into_dart(),
+            Self::ExecutingTool => 2.into_dart(),
+            Self::AwaitingApproval => 3.into_dart(),
+            Self::WaitingForUser => 4.into_dart(),
+            Self::Succeeded => 5.into_dart(),
+            Self::Failed => 6.into_dart(),
+            Self::Idle => 7.into_dart(),
+            Self::Dead => 8.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationPhase
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationPhase>
+    for crate::api::conversation::ConversationPhase
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationPhase {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ConversationView {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.session_id.into_into_dart().into_dart(),
+            self.phase.into_into_dart().into_dart(),
+            self.status_line.into_into_dart().into_dart(),
+            self.end_reason.into_into_dart().into_dart(),
+            self.session_title.into_into_dart().into_dart(),
+            self.turn_started_at_ms.into_into_dart().into_dart(),
+            self.last_turn_duration_ms.into_into_dart().into_dart(),
+            self.plan.into_into_dart().into_dart(),
+            self.pending_permissions.into_into_dart().into_dart(),
+            self.pending_elicitation.into_into_dart().into_dart(),
+            self.entries.into_into_dart().into_dart(),
+            self.entries_offset.into_into_dart().into_dart(),
+            self.has_more_before.into_into_dart().into_dart(),
+            self.final_answer_index.into_into_dart().into_dart(),
+            self.supports_image.into_into_dart().into_dart(),
+            self.available_commands.into_into_dart().into_dart(),
+            self.usage.into_into_dart().into_dart(),
+            self.model.into_into_dart().into_dart(),
+            self.config_options.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ConversationView
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ConversationView>
+    for crate::api::conversation::ConversationView
+{
+    fn into_into_dart(self) -> crate::api::conversation::ConversationView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::identity::DeviceIdentity {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [self.endpoint_id.into_into_dart().into_dart()].into_dart()
@@ -666,6 +4262,324 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::identity::DeviceIdentity>
     for crate::api::identity::DeviceIdentity
 {
     fn into_into_dart(self) -> crate::api::identity::DeviceIdentity {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::DiffView {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.path.into_into_dart().into_dart(),
+            self.old_text.into_into_dart().into_dart(),
+            self.new_text.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::DiffView
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::DiffView>
+    for crate::api::conversation::DiffView
+{
+    fn into_into_dart(self) -> crate::api::conversation::DiffView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::Elicitation {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.message.into_into_dart().into_dart(),
+            self.fields.into_into_dart().into_dart(),
+            self.is_ready.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::Elicitation
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::Elicitation>
+    for crate::api::conversation::Elicitation
+{
+    fn into_into_dart(self) -> crate::api::conversation::Elicitation {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ElicitationField {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.key.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.required.into_into_dart().into_dart(),
+            self.allow_custom_input.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+            self.options.into_into_dart().into_dart(),
+            self.secret.into_into_dart().into_dart(),
+            self.url.into_into_dart().into_dart(),
+            self.chosen.into_into_dart().into_dart(),
+            self.text_value.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ElicitationField
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ElicitationField>
+    for crate::api::conversation::ElicitationField
+{
+    fn into_into_dart(self) -> crate::api::conversation::ElicitationField {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ElicitationFieldKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Select => 0.into_dart(),
+            Self::MultiSelect => 1.into_dart(),
+            Self::Text => 2.into_dart(),
+            Self::ExternalUrl => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ElicitationFieldKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ElicitationFieldKind>
+    for crate::api::conversation::ElicitationFieldKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::ElicitationFieldKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ElicitationTextInput {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.field_index.into_into_dart().into_dart(),
+            self.value.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ElicitationTextInput
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ElicitationTextInput>
+    for crate::api::conversation::ElicitationTextInput
+{
+    fn into_into_dart(self) -> crate::api::conversation::ElicitationTextInput {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::EntryKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::User => 0.into_dart(),
+            Self::Interrupted => 1.into_dart(),
+            Self::Assistant => 2.into_dart(),
+            Self::ToolCall => 3.into_dart(),
+            Self::Completion => 4.into_dart(),
+            Self::Divider => 5.into_dart(),
+            Self::TaskNote => 6.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::EntryKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::EntryKind>
+    for crate::api::conversation::EntryKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::EntryKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::HistoryRenameResult {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.title.into_into_dart().into_dart(),
+            self.custom_title.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::HistoryRenameResult
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::HistoryRenameResult>
+    for crate::api::catalog::HistoryRenameResult
+{
+    fn into_into_dart(self) -> crate::api::catalog::HistoryRenameResult {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::HistorySessionSummary {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.resume_id.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.custom_title.into_into_dart().into_dart(),
+            self.last_active_at_ms.into_into_dart().into_dart(),
+            self.message_count.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::HistorySessionSummary
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::HistorySessionSummary>
+    for crate::api::catalog::HistorySessionSummary
+{
+    fn into_into_dart(self) -> crate::api::catalog::HistorySessionSummary {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ImageData {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.mime.into_into_dart().into_dart(),
+            self.bytes.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ImageData
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ImageData>
+    for crate::api::conversation::ImageData
+{
+    fn into_into_dart(self) -> crate::api::conversation::ImageData {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ImageInput {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.mime.into_into_dart().into_dart(),
+            self.bytes.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ImageInput
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ImageInput>
+    for crate::api::conversation::ImageInput
+{
+    fn into_into_dart(self) -> crate::api::conversation::ImageInput {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ImageRef {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.entry.into_into_dart().into_dart(),
+            self.digest.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ImageRef
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ImageRef>
+    for crate::api::conversation::ImageRef
+{
+    fn into_into_dart(self) -> crate::api::conversation::ImageRef {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::LaunchAction {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.key.into_into_dart().into_dart(),
+            self.label.into_into_dart().into_dart(),
+            self.target.into_into_dart().into_dart(),
+            self.agent.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::LaunchAction
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::LaunchAction>
+    for crate::api::catalog::LaunchAction
+{
+    fn into_into_dart(self) -> crate::api::catalog::LaunchAction {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::LaunchSections {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.common.into_into_dart().into_dart(),
+            self.terminal.into_into_dart().into_dart(),
+            self.conversation.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::LaunchSections
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::LaunchSections>
+    for crate::api::catalog::LaunchSections
+{
+    fn into_into_dart(self) -> crate::api::catalog::LaunchSections {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::LaunchTarget {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Conversation => 0.into_dart(),
+            Self::Terminal => 1.into_dart(),
+            Self::BlankTerminal => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::LaunchTarget
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::LaunchTarget>
+    for crate::api::catalog::LaunchTarget
+{
+    fn into_into_dart(self) -> crate::api::catalog::LaunchTarget {
         self
     }
 }
@@ -714,6 +4628,55 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::connection::LinkPath>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ModelProvider {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.options.into_into_dart().into_dart(),
+            self.switch_value.into_into_dart().into_dart(),
+            self.selected.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ModelProvider
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ModelProvider>
+    for crate::api::conversation::ModelProvider
+{
+    fn into_into_dart(self) -> crate::api::conversation::ModelProvider {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ModelSelector {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.config_id.into_into_dart().into_dart(),
+            self.current_value.into_into_dart().into_dart(),
+            self.current_name.into_into_dart().into_dart(),
+            self.providers.into_into_dart().into_dart(),
+            self.current_provider.into_into_dart().into_dart(),
+            self.options.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ModelSelector
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ModelSelector>
+    for crate::api::conversation::ModelSelector
+{
+    fn into_into_dart(self) -> crate::api::conversation::ModelSelector {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::identity::PairingTarget {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -731,6 +4694,138 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::identity::PairingTarget>
     for crate::api::identity::PairingTarget
 {
     fn into_into_dart(self) -> crate::api::identity::PairingTarget {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::PendingActions {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.permissions.into_into_dart().into_dart(),
+            self.elicitation.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::PendingActions
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::PendingActions>
+    for crate::api::conversation::PendingActions
+{
+    fn into_into_dart(self) -> crate::api::conversation::PendingActions {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::PermissionOption {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.option_id.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::PermissionOption
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::PermissionOption>
+    for crate::api::conversation::PermissionOption
+{
+    fn into_into_dart(self) -> crate::api::conversation::PermissionOption {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::PermissionOptionKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::AllowOnce => 0.into_dart(),
+            Self::AllowAlways => 1.into_dart(),
+            Self::RejectOnce => 2.into_dart(),
+            Self::RejectAlways => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::PermissionOptionKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::PermissionOptionKind>
+    for crate::api::conversation::PermissionOptionKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::PermissionOptionKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::PermissionRequest {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.tool_call_id.into_into_dart().into_dart(),
+            self.question.into_into_dart().into_dart(),
+            self.options.into_into_dart().into_dart(),
+            self.details.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::PermissionRequest
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::PermissionRequest>
+    for crate::api::conversation::PermissionRequest
+{
+    fn into_into_dart(self) -> crate::api::conversation::PermissionRequest {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::PlanStep {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.content.into_into_dart().into_dart(),
+            self.status.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::PlanStep
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::PlanStep>
+    for crate::api::conversation::PlanStep
+{
+    fn into_into_dart(self) -> crate::api::conversation::PlanStep {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::PlanStepStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Pending => 0.into_dart(),
+            Self::InProgress => 1.into_dart(),
+            Self::Completed => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::PlanStepStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::PlanStepStatus>
+    for crate::api::conversation::PlanStepStatus
+{
+    fn into_into_dart(self) -> crate::api::conversation::PlanStepStatus {
         self
     }
 }
@@ -756,6 +4851,262 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::connection::RuntimeInfo>
     for crate::api::connection::RuntimeInfo
 {
     fn into_into_dart(self) -> crate::api::connection::RuntimeInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::ScheduleKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Daily => 0.into_dart(),
+            Self::EveryMinutes => 1.into_dart(),
+            Self::EveryHours => 2.into_dart(),
+            Self::Weekly => 3.into_dart(),
+            Self::During => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::ScheduleKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::ScheduleKind>
+    for crate::api::catalog::ScheduleKind
+{
+    fn into_into_dart(self) -> crate::api::catalog::ScheduleKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::SendFailureKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Rejected => 0.into_dart(),
+            Self::Unknown => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::SendFailureKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::SendFailureKind>
+    for crate::api::conversation::SendFailureKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::SendFailureKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::SendMessageError {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::SendMessageError
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::SendMessageError>
+    for crate::api::conversation::SendMessageError
+{
+    fn into_into_dart(self) -> crate::api::conversation::SendMessageError {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Acp => 0.into_dart(),
+            Self::Terminal => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::SessionKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::SessionKind>
+    for crate::api::catalog::SessionKind
+{
+    fn into_into_dart(self) -> crate::api::catalog::SessionKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionList {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.sessions.into_into_dart().into_dart(),
+            self.cached.into_into_dart().into_dart(),
+            self.saved_at_ms.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::SessionList
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::SessionList>
+    for crate::api::catalog::SessionList
+{
+    fn into_into_dart(self) -> crate::api::catalog::SessionList {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionPhase {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Connecting => 0.into_dart(),
+            Self::Thinking => 1.into_dart(),
+            Self::ExecutingTool => 2.into_dart(),
+            Self::AwaitingApproval => 3.into_dart(),
+            Self::WaitingForUser => 4.into_dart(),
+            Self::Succeeded => 5.into_dart(),
+            Self::Failed => 6.into_dart(),
+            Self::Idle => 7.into_dart(),
+            Self::Dead => 8.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::SessionPhase
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::SessionPhase>
+    for crate::api::catalog::SessionPhase
+{
+    fn into_into_dart(self) -> crate::api::catalog::SessionPhase {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::SessionSkill {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.name.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::SessionSkill
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::SessionSkill>
+    for crate::api::conversation::SessionSkill
+{
+    fn into_into_dart(self) -> crate::api::conversation::SessionSkill {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::SessionSkills {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.supported.into_into_dart().into_dart(),
+            self.skills.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::SessionSkills
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::SessionSkills>
+    for crate::api::conversation::SessionSkills
+{
+    fn into_into_dart(self) -> crate::api::conversation::SessionSkills {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::NeedsYou => 0.into_dart(),
+            Self::Running => 1.into_dart(),
+            Self::Idle => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::SessionStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::SessionStatus>
+    for crate::api::catalog::SessionStatus
+{
+    fn into_into_dart(self) -> crate::api::catalog::SessionStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::SessionSummary {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.phase.into_into_dart().into_dart(),
+            self.status.into_into_dart().into_dart(),
+            self.agent.into_into_dart().into_dart(),
+            self.cwd.into_into_dart().into_dart(),
+            self.project_root.into_into_dart().into_dart(),
+            self.project_title.into_into_dart().into_dart(),
+            self.project_order.into_into_dart().into_dart(),
+            self.updated_at.into_into_dart().into_dart(),
+            self.detail.into_into_dart().into_dart(),
+            self.attention.into_into_dart().into_dart(),
+            self.automation.into_into_dart().into_dart(),
+            self.agent_definition_id.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::SessionSummary
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::SessionSummary>
+    for crate::api::catalog::SessionSummary
+{
+    fn into_into_dart(self) -> crate::api::catalog::SessionSummary {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::SlashCommand {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.name.into_into_dart().into_dart(),
+            self.description.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::SlashCommand
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::SlashCommand>
+    for crate::api::conversation::SlashCommand
+{
+    fn into_into_dart(self) -> crate::api::conversation::SlashCommand {
         self
     }
 }
@@ -802,11 +5153,334 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::error::SmeltErrorKind>
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::TaskNoteKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::BackgroundTask => 0.into_dart(),
+            Self::Subagent => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::TaskNoteKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::TaskNoteKind>
+    for crate::api::conversation::TaskNoteKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::TaskNoteKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::TaskNoteView {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.id.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.status.into_into_dart().into_dart(),
+            self.exit_code.into_into_dart().into_dart(),
+            self.output_tail.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::TaskNoteView
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::TaskNoteView>
+    for crate::api::conversation::TaskNoteView
+{
+    fn into_into_dart(self) -> crate::api::conversation::TaskNoteView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::terminal::TerminalEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.ready.into_into_dart().into_dart(),
+            self.data.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+            self.fatal.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::terminal::TerminalEvent
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalEvent>
+    for crate::api::terminal::TerminalEvent
+{
+    fn into_into_dart(self) -> crate::api::terminal::TerminalEvent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::terminal::TerminalEventKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Ready => 0.into_dart(),
+            Self::Data => 1.into_dart(),
+            Self::ReplayComplete => 2.into_dart(),
+            Self::Closed => 3.into_dart(),
+            Self::Error => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::terminal::TerminalEventKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalEventKind>
+    for crate::api::terminal::TerminalEventKind
+{
+    fn into_into_dart(self) -> crate::api::terminal::TerminalEventKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::terminal::TerminalGeometry {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.cols.into_into_dart().into_dart(),
+            self.rows.into_into_dart().into_dart(),
+            self.cell_width.into_into_dart().into_dart(),
+            self.cell_height.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::terminal::TerminalGeometry
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalGeometry>
+    for crate::api::terminal::TerminalGeometry
+{
+    fn into_into_dart(self) -> crate::api::terminal::TerminalGeometry {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::terminal::TerminalReady {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.cols.into_into_dart().into_dart(),
+            self.rows.into_into_dart().into_dart(),
+            self.replay_bytes.into_into_dart().into_dart(),
+            self.history_lines.into_into_dart().into_dart(),
+            self.scrollback_lines.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::terminal::TerminalReady
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalReady>
+    for crate::api::terminal::TerminalReady
+{
+    fn into_into_dart(self) -> crate::api::terminal::TerminalReady {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ToolCallView {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.kind.into_into_dart().into_dart(),
+            self.status.into_into_dart().into_dart(),
+            self.output.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ToolCallView
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ToolCallView>
+    for crate::api::conversation::ToolCallView
+{
+    fn into_into_dart(self) -> crate::api::conversation::ToolCallView {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ToolKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Read => 0.into_dart(),
+            Self::Edit => 1.into_dart(),
+            Self::Delete => 2.into_dart(),
+            Self::Move => 3.into_dart(),
+            Self::Search => 4.into_dart(),
+            Self::Execute => 5.into_dart(),
+            Self::Think => 6.into_dart(),
+            Self::Fetch => 7.into_dart(),
+            Self::SwitchMode => 8.into_dart(),
+            Self::Collaborate => 9.into_dart(),
+            Self::Review => 10.into_dart(),
+            Self::Image => 11.into_dart(),
+            Self::Compact => 12.into_dart(),
+            Self::Wait => 13.into_dart(),
+            Self::Other => 14.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ToolKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ToolKind>
+    for crate::api::conversation::ToolKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::ToolKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ToolOutput {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.text.into_into_dart().into_dart(),
+            self.diff.into_into_dart().into_dart(),
+            self.image.into_into_dart().into_dart(),
+            self.exit_code.into_into_dart().into_dart(),
+            self.truncated.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ToolOutput
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ToolOutput>
+    for crate::api::conversation::ToolOutput
+{
+    fn into_into_dart(self) -> crate::api::conversation::ToolOutput {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ToolOutputKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Text => 0.into_dart(),
+            Self::Diff => 1.into_dart(),
+            Self::Image => 2.into_dart(),
+            Self::Terminal => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ToolOutputKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ToolOutputKind>
+    for crate::api::conversation::ToolOutputKind
+{
+    fn into_into_dart(self) -> crate::api::conversation::ToolOutputKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::conversation::ToolStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Pending => 0.into_dart(),
+            Self::InProgress => 1.into_dart(),
+            Self::Completed => 2.into_dart(),
+            Self::Failed => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::conversation::ToolStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::conversation::ToolStatus>
+    for crate::api::conversation::ToolStatus
+{
+    fn into_into_dart(self) -> crate::api::conversation::ToolStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::WorkspaceCatalog {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.projects.into_into_dart().into_dart(),
+            self.agents.into_into_dart().into_dart(),
+            self.sections.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::WorkspaceCatalog
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::WorkspaceCatalog>
+    for crate::api::catalog::WorkspaceCatalog
+{
+    fn into_into_dart(self) -> crate::api::catalog::WorkspaceCatalog {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::catalog::WorkspaceProject {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.root.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.order.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::catalog::WorkspaceProject
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::catalog::WorkspaceProject>
+    for crate::api::catalog::WorkspaceProject
+{
+    fn into_into_dart(self) -> crate::api::catalog::WorkspaceProject {
+        self
+    }
+}
 
 impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(format!("{:?}", self), serializer);
+    }
+}
+
+impl SseEncode
+    for StreamSink<crate::api::catalog::CatalogEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
     }
 }
 
@@ -822,10 +5496,294 @@ impl SseEncode
     }
 }
 
+impl SseEncode
+    for StreamSink<
+        crate::api::conversation::ConversationEvent,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
+impl SseEncode
+    for StreamSink<
+        crate::api::terminal::TerminalEvent,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<u8>>::sse_encode(self.into_bytes(), serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::AcpAgentOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.label, serializer);
+        <Option<String>>::sse_encode(self.agent_definition_id, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::AgentDefinitionSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.description, serializer);
+        <String>::sse_encode(self.engine_kind_id, serializer);
+        <String>::sse_encode(self.prompt, serializer);
+        <Vec<String>>::sse_encode(self.plugins, serializer);
+        <Vec<String>>::sse_encode(self.context_folders, serializer);
+        <Vec<String>>::sse_encode(self.context_links, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ApprovalDetails {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::conversation::ApprovalKind>::sse_encode(self.kind, serializer);
+        <Option<String>>::sse_encode(self.command, serializer);
+        <Option<String>>::sse_encode(self.cwd, serializer);
+        <Option<String>>::sse_encode(self.reason, serializer);
+        <Option<String>>::sse_encode(self.grant_root, serializer);
+        <Option<String>>::sse_encode(self.summary, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ApprovalKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::ApprovalKind::Command => 0,
+                crate::api::conversation::ApprovalKind::FileChange => 1,
+                crate::api::conversation::ApprovalKind::Permissions => 2,
+                crate::api::conversation::ApprovalKind::Generic => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::AttentionItem {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.session_id, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <String>::sse_encode(self.message, serializer);
+        <crate::api::catalog::AttentionKind>::sse_encode(self.kind, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::AttentionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::AttentionKind::Approval => 0,
+                crate::api::catalog::AttentionKind::Input => 1,
+                crate::api::catalog::AttentionKind::Success => 2,
+                crate::api::catalog::AttentionKind::Failure => 3,
+                crate::api::catalog::AttentionKind::Bell => 4,
+                crate::api::catalog::AttentionKind::Notice => 5,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationActionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::AutomationActionKind::Agent => 0,
+                crate::api::catalog::AutomationActionKind::Shell => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationCatalog {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::catalog::AutomationSummary>>::sse_encode(self.automations, serializer);
+        <Vec<crate::api::catalog::AgentDefinitionSummary>>::sse_encode(self.agents, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationRunSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::AutomationRunSource::Manual => 0,
+                crate::api::catalog::AutomationRunSource::Scheduled => 1,
+                crate::api::catalog::AutomationRunSource::Webhook => 2,
+                crate::api::catalog::AutomationRunSource::Event => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationRunStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::AutomationRunStatus::Starting => 0,
+                crate::api::catalog::AutomationRunStatus::Queued => 1,
+                crate::api::catalog::AutomationRunStatus::Dispatching => 2,
+                crate::api::catalog::AutomationRunStatus::Running => 3,
+                crate::api::catalog::AutomationRunStatus::AwaitingApproval => 4,
+                crate::api::catalog::AutomationRunStatus::WaitingForUser => 5,
+                crate::api::catalog::AutomationRunStatus::Completed => 6,
+                crate::api::catalog::AutomationRunStatus::Failed => 7,
+                crate::api::catalog::AutomationRunStatus::Cancelled => 8,
+                crate::api::catalog::AutomationRunStatus::Skipped => 9,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationRunSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::catalog::AutomationRunStatus>::sse_encode(self.status, serializer);
+        <crate::api::catalog::AutomationRunSource>::sse_encode(self.source, serializer);
+        <Option<i64>>::sse_encode(self.started_at, serializer);
+        <Option<i64>>::sse_encode(self.finished_at, serializer);
+        <Option<String>>::sse_encode(self.session_id, serializer);
+        <Option<String>>::sse_encode(self.error, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationSchedule {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::catalog::ScheduleKind>::sse_encode(self.kind, serializer);
+        <u8>::sse_encode(self.hour, serializer);
+        <u8>::sse_encode(self.minute, serializer);
+        <u32>::sse_encode(self.minutes, serializer);
+        <u32>::sse_encode(self.hours, serializer);
+        <u8>::sse_encode(self.days, serializer);
+        <u8>::sse_encode(self.end_hour, serializer);
+        <u8>::sse_encode(self.end_minute, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.automation_name, serializer);
+        <crate::api::catalog::AutomationRunStatus>::sse_encode(self.run_status, serializer);
+        <crate::api::catalog::AutomationRunSource>::sse_encode(self.run_source, serializer);
+        <Option<String>>::sse_encode(self.prompt, serializer);
+        <Option<i64>>::sse_encode(self.started_at, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::AutomationSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <bool>::sse_encode(self.enabled, serializer);
+        <Vec<crate::api::catalog::AutomationSchedule>>::sse_encode(self.schedules, serializer);
+        <Vec<String>>::sse_encode(self.event_topics, serializer);
+        <bool>::sse_encode(self.webhook, serializer);
+        <crate::api::catalog::AutomationActionKind>::sse_encode(self.action, serializer);
+        <Option<String>>::sse_encode(self.agent_name, serializer);
+        <Option<i64>>::sse_encode(self.next_run_at, serializer);
+        <Option<crate::api::catalog::AutomationRunSummary>>::sse_encode(self.last_run, serializer);
+    }
+}
+
+impl SseEncode for bool {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::catalog::CatalogEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::catalog::CatalogEventKind>::sse_encode(self.kind, serializer);
+        <Option<crate::api::catalog::SessionList>>::sse_encode(self.sessions, serializer);
+        <Option<crate::api::catalog::AttentionItem>>::sse_encode(self.attention, serializer);
+        <Option<String>>::sse_encode(self.session_id, serializer);
+        <Option<String>>::sse_encode(self.message, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::CatalogEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::CatalogEventKind::Sessions => 0,
+                crate::api::catalog::CatalogEventKind::Attention => 1,
+                crate::api::catalog::CatalogEventKind::AttentionResolved => 2,
+                crate::api::catalog::CatalogEventKind::Error => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::ChoiceOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.value, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <bool>::sse_encode(self.selected, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConfigOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.config_id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <Option<String>>::sse_encode(self.description, serializer);
+        <String>::sse_encode(self.current_name, serializer);
+        <Vec<crate::api::conversation::ChoiceOption>>::sse_encode(self.options, serializer);
+        <Option<bool>>::sse_encode(self.boolean, serializer);
     }
 }
 
@@ -857,6 +5815,121 @@ impl SseEncode for crate::api::connection::ConnectionState {
     }
 }
 
+impl SseEncode for crate::api::conversation::ContextUsage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.used_tokens, serializer);
+        <i64>::sse_encode(self.context_window, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConversationEntry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.index, serializer);
+        <crate::api::conversation::EntryKind>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.text, serializer);
+        <bool>::sse_encode(self.thought, serializer);
+        <Vec<crate::api::conversation::ConversationImage>>::sse_encode(self.images, serializer);
+        <Option<crate::api::conversation::ToolCallView>>::sse_encode(self.tool_call, serializer);
+        <Option<crate::api::conversation::TaskNoteView>>::sse_encode(self.task_note, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConversationEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::conversation::ConversationEventKind>::sse_encode(self.kind, serializer);
+        <Option<crate::api::conversation::ConversationView>>::sse_encode(self.view, serializer);
+        <bool>::sse_encode(self.cached, serializer);
+        <Option<i64>>::sse_encode(self.saved_at_ms, serializer);
+        <Option<String>>::sse_encode(self.message, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConversationEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::ConversationEventKind::Snapshot => 0,
+                crate::api::conversation::ConversationEventKind::Unavailable => 1,
+                crate::api::conversation::ConversationEventKind::Error => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConversationImage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.mime, serializer);
+        <Option<Vec<u8>>>::sse_encode(self.bytes, serializer);
+        <Option<crate::api::conversation::ImageRef>>::sse_encode(self.original, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConversationPhase {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::ConversationPhase::Connecting => 0,
+                crate::api::conversation::ConversationPhase::Thinking => 1,
+                crate::api::conversation::ConversationPhase::ExecutingTool => 2,
+                crate::api::conversation::ConversationPhase::AwaitingApproval => 3,
+                crate::api::conversation::ConversationPhase::WaitingForUser => 4,
+                crate::api::conversation::ConversationPhase::Succeeded => 5,
+                crate::api::conversation::ConversationPhase::Failed => 6,
+                crate::api::conversation::ConversationPhase::Idle => 7,
+                crate::api::conversation::ConversationPhase::Dead => 8,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::ConversationView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.session_id, serializer);
+        <crate::api::conversation::ConversationPhase>::sse_encode(self.phase, serializer);
+        <Option<String>>::sse_encode(self.status_line, serializer);
+        <String>::sse_encode(self.end_reason, serializer);
+        <Option<String>>::sse_encode(self.session_title, serializer);
+        <Option<i64>>::sse_encode(self.turn_started_at_ms, serializer);
+        <Option<i64>>::sse_encode(self.last_turn_duration_ms, serializer);
+        <Vec<crate::api::conversation::PlanStep>>::sse_encode(self.plan, serializer);
+        <Vec<crate::api::conversation::PermissionRequest>>::sse_encode(
+            self.pending_permissions,
+            serializer,
+        );
+        <Option<crate::api::conversation::Elicitation>>::sse_encode(
+            self.pending_elicitation,
+            serializer,
+        );
+        <Vec<crate::api::conversation::ConversationEntry>>::sse_encode(self.entries, serializer);
+        <i64>::sse_encode(self.entries_offset, serializer);
+        <bool>::sse_encode(self.has_more_before, serializer);
+        <Option<u32>>::sse_encode(self.final_answer_index, serializer);
+        <bool>::sse_encode(self.supports_image, serializer);
+        <Vec<crate::api::conversation::SlashCommand>>::sse_encode(
+            self.available_commands,
+            serializer,
+        );
+        <Option<crate::api::conversation::ContextUsage>>::sse_encode(self.usage, serializer);
+        <Option<crate::api::conversation::ModelSelector>>::sse_encode(self.model, serializer);
+        <Vec<crate::api::conversation::ConfigOption>>::sse_encode(self.config_options, serializer);
+    }
+}
+
 impl SseEncode for crate::api::identity::DeviceIdentity {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -864,10 +5937,177 @@ impl SseEncode for crate::api::identity::DeviceIdentity {
     }
 }
 
+impl SseEncode for crate::api::conversation::DiffView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.path, serializer);
+        <Option<String>>::sse_encode(self.old_text, serializer);
+        <String>::sse_encode(self.new_text, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::Elicitation {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.message, serializer);
+        <Vec<crate::api::conversation::ElicitationField>>::sse_encode(self.fields, serializer);
+        <bool>::sse_encode(self.is_ready, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ElicitationField {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.key, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <bool>::sse_encode(self.required, serializer);
+        <bool>::sse_encode(self.allow_custom_input, serializer);
+        <crate::api::conversation::ElicitationFieldKind>::sse_encode(self.kind, serializer);
+        <Vec<String>>::sse_encode(self.options, serializer);
+        <bool>::sse_encode(self.secret, serializer);
+        <Option<String>>::sse_encode(self.url, serializer);
+        <Vec<u32>>::sse_encode(self.chosen, serializer);
+        <Option<String>>::sse_encode(self.text_value, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ElicitationFieldKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::ElicitationFieldKind::Select => 0,
+                crate::api::conversation::ElicitationFieldKind::MultiSelect => 1,
+                crate::api::conversation::ElicitationFieldKind::Text => 2,
+                crate::api::conversation::ElicitationFieldKind::ExternalUrl => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::ElicitationTextInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.field_index, serializer);
+        <String>::sse_encode(self.value, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::EntryKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::EntryKind::User => 0,
+                crate::api::conversation::EntryKind::Interrupted => 1,
+                crate::api::conversation::EntryKind::Assistant => 2,
+                crate::api::conversation::EntryKind::ToolCall => 3,
+                crate::api::conversation::EntryKind::Completion => 4,
+                crate::api::conversation::EntryKind::Divider => 5,
+                crate::api::conversation::EntryKind::TaskNote => 6,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::HistoryRenameResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.title, serializer);
+        <Option<String>>::sse_encode(self.custom_title, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::HistorySessionSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.resume_id, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <Option<String>>::sse_encode(self.custom_title, serializer);
+        <Option<i64>>::sse_encode(self.last_active_at_ms, serializer);
+        <u32>::sse_encode(self.message_count, serializer);
+    }
+}
+
 impl SseEncode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for i64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i64::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::conversation::ImageData {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.mime, serializer);
+        <Vec<u8>>::sse_encode(self.bytes, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ImageInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.mime, serializer);
+        <Vec<u8>>::sse_encode(self.bytes, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ImageRef {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.entry, serializer);
+        <String>::sse_encode(self.digest, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::LaunchAction {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.key, serializer);
+        <String>::sse_encode(self.label, serializer);
+        <crate::api::catalog::LaunchTarget>::sse_encode(self.target, serializer);
+        <String>::sse_encode(self.agent, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::LaunchSections {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::catalog::LaunchAction>>::sse_encode(self.common, serializer);
+        <Vec<crate::api::catalog::LaunchAction>>::sse_encode(self.terminal, serializer);
+        <Vec<crate::api::catalog::LaunchAction>>::sse_encode(self.conversation, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::LaunchTarget {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::LaunchTarget::Conversation => 0,
+                crate::api::catalog::LaunchTarget::Terminal => 1,
+                crate::api::catalog::LaunchTarget::BlankTerminal => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -897,6 +6137,196 @@ impl SseEncode for crate::api::connection::LinkPath {
     }
 }
 
+impl SseEncode for Vec<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <String>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::AcpAgentOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::AcpAgentOption>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::AgentDefinitionSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::AgentDefinitionSummary>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::AutomationSchedule> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::AutomationSchedule>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::AutomationSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::AutomationSummary>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ChoiceOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ChoiceOption>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ConfigOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ConfigOption>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ConversationEntry> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ConversationEntry>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ConversationImage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ConversationImage>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ElicitationField> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ElicitationField>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ElicitationTextInput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ElicitationTextInput>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::HistorySessionSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::HistorySessionSummary>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ImageInput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ImageInput>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::LaunchAction> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::LaunchAction>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ModelProvider> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ModelProvider>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::PermissionOption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::PermissionOption>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::PermissionRequest> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::PermissionRequest>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::PlanStep> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::PlanStep>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <u32>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -907,12 +6337,205 @@ impl SseEncode for Vec<u8> {
     }
 }
 
+impl SseEncode for Vec<crate::api::conversation::SessionSkill> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::SessionSkill>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::SessionSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::SessionSummary>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::SlashCommand> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::SlashCommand>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::conversation::ToolOutput> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::conversation::ToolOutput>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::catalog::WorkspaceProject> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::catalog::WorkspaceProject>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for crate::api::conversation::ModelProvider {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <Vec<crate::api::conversation::ChoiceOption>>::sse_encode(self.options, serializer);
+        <Option<String>>::sse_encode(self.switch_value, serializer);
+        <bool>::sse_encode(self.selected, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ModelSelector {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.config_id, serializer);
+        <String>::sse_encode(self.current_value, serializer);
+        <String>::sse_encode(self.current_name, serializer);
+        <Vec<crate::api::conversation::ModelProvider>>::sse_encode(self.providers, serializer);
+        <Option<u32>>::sse_encode(self.current_provider, serializer);
+        <Vec<crate::api::conversation::ChoiceOption>>::sse_encode(self.options, serializer);
+    }
+}
+
 impl SseEncode for Option<String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::catalog::AttentionItem> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::catalog::AttentionItem>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::catalog::AutomationRunSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::catalog::AutomationRunSummary>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::catalog::AutomationSource> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::catalog::AutomationSource>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <bool>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::ContextUsage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ContextUsage>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::ConversationImage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ConversationImage>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::ConversationView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ConversationView>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::DiffView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::DiffView>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::Elicitation> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::Elicitation>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<i32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <i32>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<i64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <i64>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::ImageRef> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ImageRef>::sse_encode(value, serializer);
         }
     }
 }
@@ -927,12 +6550,72 @@ impl SseEncode for Option<crate::api::connection::LinkMetrics> {
     }
 }
 
+impl SseEncode for Option<crate::api::conversation::ModelSelector> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ModelSelector>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::catalog::SessionKind> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::catalog::SessionKind>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::catalog::SessionList> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::catalog::SessionList>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::error::SmeltError> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::error::SmeltError>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::TaskNoteView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::TaskNoteView>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::terminal::TerminalReady> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::terminal::TerminalReady>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::conversation::ToolCallView> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::conversation::ToolCallView>::sse_encode(value, serializer);
         }
     }
 }
@@ -947,11 +6630,94 @@ impl SseEncode for Option<u32> {
     }
 }
 
+impl SseEncode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<u8>>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for crate::api::identity::PairingTarget {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.endpoint_id, serializer);
         <Option<String>>::sse_encode(self.relay_url, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::PendingActions {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::conversation::PermissionRequest>>::sse_encode(
+            self.permissions,
+            serializer,
+        );
+        <Option<crate::api::conversation::Elicitation>>::sse_encode(self.elicitation, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::PermissionOption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.option_id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <crate::api::conversation::PermissionOptionKind>::sse_encode(self.kind, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::PermissionOptionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::PermissionOptionKind::AllowOnce => 0,
+                crate::api::conversation::PermissionOptionKind::AllowAlways => 1,
+                crate::api::conversation::PermissionOptionKind::RejectOnce => 2,
+                crate::api::conversation::PermissionOptionKind::RejectAlways => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::PermissionRequest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.tool_call_id, serializer);
+        <String>::sse_encode(self.question, serializer);
+        <Vec<crate::api::conversation::PermissionOption>>::sse_encode(self.options, serializer);
+        <crate::api::conversation::ApprovalDetails>::sse_encode(self.details, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::PlanStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.content, serializer);
+        <crate::api::conversation::PlanStepStatus>::sse_encode(self.status, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::PlanStepStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::PlanStepStatus::Pending => 0,
+                crate::api::conversation::PlanStepStatus::InProgress => 1,
+                crate::api::conversation::PlanStepStatus::Completed => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -964,6 +6730,159 @@ impl SseEncode for crate::api::connection::RuntimeInfo {
         <String>::sse_encode(self.version, serializer);
         <String>::sse_encode(self.endpoint_id, serializer);
         <Option<String>>::sse_encode(self.relay_url, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::ScheduleKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::ScheduleKind::Daily => 0,
+                crate::api::catalog::ScheduleKind::EveryMinutes => 1,
+                crate::api::catalog::ScheduleKind::EveryHours => 2,
+                crate::api::catalog::ScheduleKind::Weekly => 3,
+                crate::api::catalog::ScheduleKind::During => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::SendFailureKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::SendFailureKind::Rejected => 0,
+                crate::api::conversation::SendFailureKind::Unknown => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::SendMessageError {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::conversation::SendFailureKind>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.message, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::SessionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::SessionKind::Acp => 0,
+                crate::api::catalog::SessionKind::Terminal => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::SessionList {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::catalog::SessionSummary>>::sse_encode(self.sessions, serializer);
+        <bool>::sse_encode(self.cached, serializer);
+        <Option<i64>>::sse_encode(self.saved_at_ms, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::SessionPhase {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::SessionPhase::Connecting => 0,
+                crate::api::catalog::SessionPhase::Thinking => 1,
+                crate::api::catalog::SessionPhase::ExecutingTool => 2,
+                crate::api::catalog::SessionPhase::AwaitingApproval => 3,
+                crate::api::catalog::SessionPhase::WaitingForUser => 4,
+                crate::api::catalog::SessionPhase::Succeeded => 5,
+                crate::api::catalog::SessionPhase::Failed => 6,
+                crate::api::catalog::SessionPhase::Idle => 7,
+                crate::api::catalog::SessionPhase::Dead => 8,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::SessionSkill {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.description, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::SessionSkills {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.supported, serializer);
+        <Vec<crate::api::conversation::SessionSkill>>::sse_encode(self.skills, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::SessionStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::catalog::SessionStatus::NeedsYou => 0,
+                crate::api::catalog::SessionStatus::Running => 1,
+                crate::api::catalog::SessionStatus::Idle => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::catalog::SessionSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <crate::api::catalog::SessionKind>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <crate::api::catalog::SessionPhase>::sse_encode(self.phase, serializer);
+        <crate::api::catalog::SessionStatus>::sse_encode(self.status, serializer);
+        <String>::sse_encode(self.agent, serializer);
+        <Option<String>>::sse_encode(self.cwd, serializer);
+        <Option<String>>::sse_encode(self.project_root, serializer);
+        <Option<String>>::sse_encode(self.project_title, serializer);
+        <u32>::sse_encode(self.project_order, serializer);
+        <i64>::sse_encode(self.updated_at, serializer);
+        <Option<String>>::sse_encode(self.detail, serializer);
+        <Option<crate::api::catalog::AttentionItem>>::sse_encode(self.attention, serializer);
+        <Option<crate::api::catalog::AutomationSource>>::sse_encode(self.automation, serializer);
+        <Option<String>>::sse_encode(self.agent_definition_id, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::SlashCommand {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.description, serializer);
     }
 }
 
@@ -995,6 +6914,173 @@ impl SseEncode for crate::api::error::SmeltErrorKind {
     }
 }
 
+impl SseEncode for crate::api::conversation::TaskNoteKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::TaskNoteKind::BackgroundTask => 0,
+                crate::api::conversation::TaskNoteKind::Subagent => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::TaskNoteView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::conversation::TaskNoteKind>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <String>::sse_encode(self.status, serializer);
+        <Option<i32>>::sse_encode(self.exit_code, serializer);
+        <String>::sse_encode(self.output_tail, serializer);
+    }
+}
+
+impl SseEncode for crate::api::terminal::TerminalEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::terminal::TerminalEventKind>::sse_encode(self.kind, serializer);
+        <Option<crate::api::terminal::TerminalReady>>::sse_encode(self.ready, serializer);
+        <Option<Vec<u8>>>::sse_encode(self.data, serializer);
+        <Option<String>>::sse_encode(self.message, serializer);
+        <bool>::sse_encode(self.fatal, serializer);
+    }
+}
+
+impl SseEncode for crate::api::terminal::TerminalEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::terminal::TerminalEventKind::Ready => 0,
+                crate::api::terminal::TerminalEventKind::Data => 1,
+                crate::api::terminal::TerminalEventKind::ReplayComplete => 2,
+                crate::api::terminal::TerminalEventKind::Closed => 3,
+                crate::api::terminal::TerminalEventKind::Error => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::terminal::TerminalGeometry {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.cols, serializer);
+        <u32>::sse_encode(self.rows, serializer);
+        <u32>::sse_encode(self.cell_width, serializer);
+        <u32>::sse_encode(self.cell_height, serializer);
+    }
+}
+
+impl SseEncode for crate::api::terminal::TerminalReady {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.cols, serializer);
+        <u32>::sse_encode(self.rows, serializer);
+        <u32>::sse_encode(self.replay_bytes, serializer);
+        <u32>::sse_encode(self.history_lines, serializer);
+        <u32>::sse_encode(self.scrollback_lines, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ToolCallView {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <crate::api::conversation::ToolKind>::sse_encode(self.kind, serializer);
+        <crate::api::conversation::ToolStatus>::sse_encode(self.status, serializer);
+        <Vec<crate::api::conversation::ToolOutput>>::sse_encode(self.output, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ToolKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::ToolKind::Read => 0,
+                crate::api::conversation::ToolKind::Edit => 1,
+                crate::api::conversation::ToolKind::Delete => 2,
+                crate::api::conversation::ToolKind::Move => 3,
+                crate::api::conversation::ToolKind::Search => 4,
+                crate::api::conversation::ToolKind::Execute => 5,
+                crate::api::conversation::ToolKind::Think => 6,
+                crate::api::conversation::ToolKind::Fetch => 7,
+                crate::api::conversation::ToolKind::SwitchMode => 8,
+                crate::api::conversation::ToolKind::Collaborate => 9,
+                crate::api::conversation::ToolKind::Review => 10,
+                crate::api::conversation::ToolKind::Image => 11,
+                crate::api::conversation::ToolKind::Compact => 12,
+                crate::api::conversation::ToolKind::Wait => 13,
+                crate::api::conversation::ToolKind::Other => 14,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::ToolOutput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::conversation::ToolOutputKind>::sse_encode(self.kind, serializer);
+        <String>::sse_encode(self.text, serializer);
+        <Option<crate::api::conversation::DiffView>>::sse_encode(self.diff, serializer);
+        <Option<crate::api::conversation::ConversationImage>>::sse_encode(self.image, serializer);
+        <Option<i32>>::sse_encode(self.exit_code, serializer);
+        <bool>::sse_encode(self.truncated, serializer);
+    }
+}
+
+impl SseEncode for crate::api::conversation::ToolOutputKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::ToolOutputKind::Text => 0,
+                crate::api::conversation::ToolOutputKind::Diff => 1,
+                crate::api::conversation::ToolOutputKind::Image => 2,
+                crate::api::conversation::ToolOutputKind::Terminal => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::conversation::ToolStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::conversation::ToolStatus::Pending => 0,
+                crate::api::conversation::ToolStatus::InProgress => 1,
+                crate::api::conversation::ToolStatus::Completed => 2,
+                crate::api::conversation::ToolStatus::Failed => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for u32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1014,10 +7100,21 @@ impl SseEncode for () {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
 }
 
-impl SseEncode for bool {
+impl SseEncode for crate::api::catalog::WorkspaceCatalog {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_u8(self as _).unwrap();
+        <Vec<crate::api::catalog::WorkspaceProject>>::sse_encode(self.projects, serializer);
+        <Vec<crate::api::catalog::AcpAgentOption>>::sse_encode(self.agents, serializer);
+        <crate::api::catalog::LaunchSections>::sse_encode(self.sections, serializer);
+    }
+}
+
+impl SseEncode for crate::api::catalog::WorkspaceProject {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.root, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <u32>::sse_encode(self.order, serializer);
     }
 }
 
@@ -1032,7 +7129,7 @@ mod io {
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
@@ -1056,7 +7153,7 @@ mod web {
     };
     use flutter_rust_bridge::for_generated::wasm_bindgen;
     use flutter_rust_bridge::for_generated::wasm_bindgen::prelude::*;
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
