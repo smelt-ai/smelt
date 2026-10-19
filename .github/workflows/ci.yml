@@ -11,11 +11,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# 同一分支上新推送会取消仍在跑的旧任务，两个 job 都要装重量级工具链，
-# 排队重跑没有意义。
+# PR 上新推送会取消仍在跑的旧任务：工具链都很重，旧提交的结果已经没人看。
+# main 上每次推送各跑各的（按 sha 分组）：它要产出给 PR 共用的缓存，被紧接着的
+# 下一次合并取消的话，缓存就存不下来。
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # 按改动路径决定跑哪些 job。只改文档时三个都跳过，由 ci-ok 汇总成通过。
@@ -126,8 +127,6 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          # 缓存 Flutter SDK 与 pub 依赖，省下每次约 1 分钟的下载。
-          cache: true
 
       # 也是在验证 xterm 那条 git 依赖能解析：它指向 smelt-ai/xterm.dart 的一个
       # commit，pub 上没有，解析不了的话这一步就直接红。
@@ -191,8 +190,6 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          # 缓存 Flutter SDK 与 pub 依赖，省下每次约 1 分钟的下载。
-          cache: true
 
       # 不带签名配置，app/build.gradle.kts 会退回 debug 签名。这里只验证能不能
       # 编过，可分发的包由发版流水线单独出。
