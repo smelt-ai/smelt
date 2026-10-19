@@ -229,6 +229,8 @@ impl RemoteSessionCatalogGlobal {
 }
 
 // Cmd+Q 退出的应用级 action（gpui 无默认菜单栏，需自建菜单栏 + 键位绑定）。
+// 工作区快捷键也走 Action：键位在 `app_key_bindings`，处理在 Workspace 根节点。
+// 不绑 `None`——无 context 的键位和最内层同深度，后注册会盖过 Input。
 gpui::actions!(
     smelt,
     [
@@ -240,9 +242,32 @@ gpui::actions!(
         PrevSession,
         NextSession,
         ToggleSidebar,
-        ToggleToolPanel
+        ToggleToolPanel,
+        ToggleCommandPalette,
+        CyclePanePrev,
+        CyclePaneNext,
+        SplitBeside,
+        SplitBelow,
+        ClosePane,
+        SaveFile,
+        ToggleDebugHud,
+        NextHunk,
+        PrevHunk,
+        DismissWorkspace,
+        FileTreeMoveUp,
+        FileTreeMoveDown,
+        FileTreeMoveLeft,
+        FileTreeMoveRight,
+        FileTreeActivate,
     ]
 );
+
+/// Cmd+1…9：按侧栏视觉顺序激活第 N 个会话（0 起）。
+#[derive(Clone, PartialEq, Debug, gpui::Action)]
+#[action(namespace = smelt, no_json)]
+pub struct ActivateSession {
+    pub index: usize,
+}
 
 /// 命令面板里的一个可执行动作。
 #[derive(Clone)]
@@ -2665,10 +2690,9 @@ struct Workspace {
     /// 根节点自己的焦点句柄：总览/文件树/Git/历史会话这些页面自身没有可
     /// 聚焦的元素，切过去后如果谁都不 focus，窗口的 focus 仍停在切走前那个（可能
     /// 已经不在当前渲染树里的）终端上——GPUI 找不到就把 focus 兜底纠正到 window 的
-    /// 真正根节点，而 Workspace 这层的 on_key_down（Cmd+Shift+F 等全局快捷键）挂在
-    /// Root 组件之下、并非那个根节点，于是收不到事件，表现为"切到别的页面后快捷键
-    /// 全部失灵"。切到非终端页面时把 focus 显式认领到这个句柄上，保证 Workspace 的
-    /// on_key_down 始终在 dispatch 路径上。
+    /// 真正根节点，而 Workspace 的键位 context 挂在 Root 组件之下、并非那个根节点，
+    /// 于是匹配不到，表现为"切到别的页面后快捷键全部失灵"。切到非终端页面时把
+    /// focus 显式认领到这个句柄上，保证 Workspace context 始终在 dispatch 路径上。
     focus_handle: FocusHandle,
     /// 文件树的专属键盘焦点。文件树的方向键导航只在这个焦点生效，不能让终端、
     /// ACP 输入框或其它控件冒泡出来的按键误操作右侧面板。
@@ -2768,6 +2792,25 @@ impl Workspace {
     fn files_view_visible(&self) -> bool {
         self.tool_panel_stage_active(tool_panel::ToolPanelTab::Files)
             || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Files)
+    }
+
+    /// Git「改动」页正在显示（舞台展开或停靠）。F7 的键位 context 只在这时挂上。
+    fn git_changes_shown(&self) -> bool {
+        (self.tool_panel_stage_active(tool_panel::ToolPanelTab::Git)
+            || (self.tool_panel_open && self.tool_panel_tab == tool_panel::ToolPanelTab::Git))
+            && self.git_tab == GitTab::Changes
+    }
+
+    /// 某个终端网格自己的焦点句柄正被聚焦（搜索框等子元素不算）。
+    /// F7 / Esc 这类终端会编码进 PTY 的键，网格聚焦时必须让回去。
+    fn terminal_grid_focused(&self, window: &Window, cx: &App) -> bool {
+        self.sessions.iter().any(|session| {
+            session.term_dock().is_some_and(|dock| {
+                dock.leaves()
+                    .iter()
+                    .any(|view| view.read(cx).focus_handle().is_focused(window))
+            })
+        })
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -3708,10 +3751,14 @@ impl Render for Workspace {
                 },
             ))
             // 见 focus_handle 字段注释：非终端页面没有可聚焦的子元素时，靠这个把
-            // window 的 focus 兜底钉在这层，保证下面的全局 on_key_down 收得到事件。
+            // window 的 focus 兜底钉在这层，保证 Workspace 键位 context 在 dispatch 路径上。
             .track_focus(&self.focus_handle)
-            // cmd-up/down 的 context。挂在 handler 这一层才浅于 Input。
-            .key_context("Workspace")
+            // 挂在这一层才浅于 Terminal / Input。Files、GitChanges 是同一节点上的
+            // 条件标识，谓词只看焦点路径上的 context，看不到任意 Rust 状态。
+            .key_context(workspace_key_context(
+                self.files_view_visible(),
+                self.git_changes_shown(),
+            ))
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 if this.quit_requested {
                     return;
@@ -3758,128 +3805,79 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleToolPanel, window, cx| {
                 this.toggle_tool_panel(window, cx);
             }))
-            // 输入控件可能消费 Escape，先在捕获阶段关闭最上层 Workspace 弹层。
-            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" && this.dismiss_workspace_overlay(window, cx) {
-                    cx.stop_propagation();
+            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+                if this.palette.is_some() {
+                    this.close_palette(window, cx);
+                } else {
+                    this.open_palette(window, cx);
                 }
             }))
-            // 全局快捷键：Cmd+K 面板 / Cmd+B 侧栏 / Cmd+[ ] 切当前会话内的 pane /
-            // Cmd+1~9 跳到第 N 个会话（键位分工对齐 iTerm2）
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                let ks = &ev.keystroke;
-                // 文件树导航只在树本身拥有焦点时处理。此前这里只排除了搜索框和编辑器，
-                // 终端 / ACP 输入等子视图的按键会继续冒泡，导致右侧树跟着移动。
-                let file_search_active = this
-                    .file_filter
-                    .as_ref()
-                    .is_some_and(|input| !input.read(cx).value().trim().is_empty());
-                if this.files_view_visible()
-                    && this.file_tree_open
-                    && !file_search_active
-                    && this.file_tree_focus_handle.is_focused(window)
-                    && !ks.modifiers.platform
-                    && !ks.modifiers.control
-                {
-                    match ks.key.as_str() {
-                        "up" => {
-                            this.file_tree_move_selection(-1, cx);
-                            cx.stop_propagation();
-                            return;
-                        }
-                        "down" => {
-                            this.file_tree_move_selection(1, cx);
-                            cx.stop_propagation();
-                            return;
-                        }
-                        "left" => {
-                            this.file_tree_key_left(cx);
-                            cx.stop_propagation();
-                            return;
-                        }
-                        "right" => {
-                            this.file_tree_key_right(window, cx);
-                            cx.stop_propagation();
-                            return;
-                        }
-                        "enter" => {
-                            this.file_tree_key_enter(window, cx);
-                            cx.stop_propagation();
-                            return;
-                        }
-                        _ => {}
-                    }
+            // 切当前会话内的活动 pane（分屏）。编辑器里的 Outdent/Indent 绑在
+            // 更深的 Input 上，焦点在输入框时由它们接手。
+            .on_action(cx.listener(|this, _: &CyclePanePrev, window, cx| {
+                this.cycle_pane(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CyclePaneNext, window, cx| {
+                this.cycle_pane(1, window, cx);
+            }))
+            // Cmd+1~9：按侧栏视觉顺序（各项目分组依次铺平）跳到第 N 个会话。
+            .on_action(cx.listener(|this, action: &ActivateSession, window, cx| {
+                let visible = this.sidebar_session_order(cx);
+                if let Some(&ix) = visible.get(action.index) {
+                    this.activate(ix, window, cx);
                 }
-                // Git 页 F7 / Shift+F7：在改动块之间跳（对齐 JetBrains 的 next/previous
-                // difference）。不带 Cmd，所以要赶在下面的 platform 判断之前处理。
-                // diff 现在停靠 / 展开态都能内嵌显示，这个快捷键两种态都该生效。
-                if (this.tool_panel_stage_active(tool_panel::ToolPanelTab::Git)
-                    || (this.tool_panel_open
-                        && this.tool_panel_tab == tool_panel::ToolPanelTab::Git))
-                    && this.git_tab == GitTab::Changes
-                    && ks.key == "f7"
-                    && !ks.modifiers.platform
-                {
-                    this.jump_hunk(!ks.modifiers.shift, cx);
+            }))
+            // Cmd+D 右侧并排 / Cmd+Shift+D 下方堆叠。
+            .on_action(cx.listener(|this, _: &SplitBeside, _window, cx| {
+                this.split_active(Axis::Horizontal, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitBelow, _window, cx| {
+                this.split_active(Axis::Vertical, cx);
+            }))
+            // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）。
+            .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
+                this.close_active(window, cx);
+            }))
+            // Cmd+S：保存 Files 里打开的文件。键位只在 Files context 上，两种显示方式都算。
+            .on_action(cx.listener(|this, _: &SaveFile, _window, cx| {
+                this.save_open_file(cx);
+            }))
+            // Cmd+Shift+F 切换调试 HUD（帧耗时、GPU/CPU/内存）。
+            // 编辑器把同一组合键绑成 Replace，更深的 Input 优先。
+            .on_action(cx.listener(|this, _: &ToggleDebugHud, _window, cx| {
+                this.debug_hud = !this.debug_hud;
+                cx.notify();
+            }))
+            // F7 / Shift+F7：改动块之间跳。终端网格会把这两键编码进 PTY，
+            // 网格聚焦时让出，交给终端自己的 on_key_down。
+            .on_action(cx.listener(|this, _: &NextHunk, window, cx| {
+                if this.terminal_grid_focused(window, cx) {
+                    cx.propagate();
                     return;
                 }
-                // Esc：收掉 session 内的舞台覆盖页。
-                if ks.key == "escape"
-                    && this.palette.is_none()
-                    && this.rename_target.is_none()
-                    && !this.show_quit_confirm
-                    && this.close_confirm.is_none()
+                this.jump_hunk(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevHunk, window, cx| {
+                if this.terminal_grid_focused(window, cx) {
+                    cx.propagate();
+                    return;
+                }
+                this.jump_hunk(false, cx);
+            }))
+            // Esc：先关工作区弹层；没有弹层时收掉 session 舞台覆盖。
+            // 终端网格聚焦时 Esc 属于 PTY（vim 等），不关覆盖页。
+            .on_action(cx.listener(|this, _: &DismissWorkspace, window, cx| {
+                if this.dismiss_workspace_overlay(window, cx) {
+                    return;
+                }
+                if !this.terminal_grid_focused(window, cx)
                     && this.active_tab().is_session()
                     && this.stage_cover.is_some()
                 {
                     this.set_stage_cover(None, window, cx);
                     return;
                 }
-                if !ks.modifiers.platform {
-                    return;
-                }
-                match ks.key.as_str() {
-                    "k" => {
-                        if this.palette.is_some() {
-                            this.close_palette(window, cx);
-                        } else {
-                            this.open_palette(window, cx);
-                        }
-                    }
-                    // 切当前会话内的活动 pane（分屏），不是切会话——切会话见下面的 Cmd+1~9。
-                    "[" => this.cycle_pane(-1, window, cx),
-                    "]" => this.cycle_pane(1, window, cx),
-                    // Cmd+1~9：跳到会话列表里第 N 个会话——按列表显示顺序（各项目
-                    // 分组依次铺平）数，所见即所得；超出会话数就什么都不做。
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                        let n = (ks.key.as_bytes()[0] - b'1') as usize;
-                        let visible = this.sidebar_session_order(cx);
-                        if let Some(&ix) = visible.get(n) {
-                            this.activate(ix, window, cx);
-                        }
-                    }
-                    // Cmd+D 竖切（右侧并排）/ Cmd+Shift+D 横切（下方堆叠）
-                    "d" => {
-                        let axis = if ks.modifiers.shift {
-                            Axis::Vertical
-                        } else {
-                            Axis::Horizontal
-                        };
-                        this.split_active(axis, cx);
-                    }
-                    // Cmd+W 关闭当前 pane；会话只剩一个 pane 时关掉整个会话（至少留一个会话）
-                    "w" => this.close_active(window, cx),
-                    // Cmd+S：保存 Files 里打开的文件。Files 既可以展开到舞台，也可以
-                    // 停靠在 Tool Panel；两种显示方式都必须支持保存。
-                    "s" if this.files_view_visible() => this.save_open_file(cx),
-                    // Cmd+Shift+F 切换调试 HUD（帧耗时、GPU/CPU/内存）
-                    "f" if ks.modifiers.shift => {
-                        this.debug_hud = !this.debug_hud;
-                        cx.notify();
-                    }
-                    // Cmd+Q 退出交给应用菜单的 Quit action（全局绑定，见 main）
-                    _ => {}
-                }
+                cx.propagate();
             }))
             // 主体先绘制；透明标题栏随后覆盖在顶部 safe area 上，避免面板背景
             // 把铃铛和 Tool Panel 开关压成若隐若现的轮廓。
@@ -4307,6 +4305,94 @@ fn schedule_obsolete_file_cleanup() {
     });
 }
 
+/// Workspace 根节点的键位 context。Files / GitChanges 只在对应面板显示时出现，
+/// 而且和 Workspace 写在同一个节点上：谓词匹配的是焦点路径上的标识，不是任意状态。
+fn workspace_key_context(files_visible: bool, git_changes_shown: bool) -> &'static str {
+    match (files_visible, git_changes_shown) {
+        (false, false) => "Workspace",
+        (true, false) => "Workspace Files",
+        (false, true) => "Workspace GitChanges",
+        (true, true) => "Workspace Files GitChanges",
+    }
+}
+
+/// 应用键位。必须在 `set_menus` 之前注册，菜单项才会带上快捷键。
+///
+/// 新的工作区组合键绑在 `Workspace` 或更具体、但仍浅于 Terminal / Input 的
+/// context 上。`None` 与最内层同深度，后注册会抢走输入框的键，这里不再新增。
+/// Cmd+C / Cmd+V / Cmd+F 留在终端自己的按键监听里，不在这里绑。
+fn app_key_bindings() -> Vec<KeyBinding> {
+    let mut bindings = vec![
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("alt-cmd-b", ToggleToolPanel, None),
+        // 会话上/下切换（跨项目按侧栏视觉顺序，到头循环）。
+        // None 和最内层 context 同深度，后注册会盖过 Input 的 cmd-up/down。
+        // 绑在 Workspace 上更浅：输入框里是文首/文末，其余工作区切会话。
+        KeyBinding::new("cmd-up", PrevSession, Some("Workspace")),
+        KeyBinding::new("cmd-down", NextSession, Some("Workspace")),
+        KeyBinding::new("cmd-k", ToggleCommandPalette, Some("Workspace")),
+        KeyBinding::new("cmd-[", CyclePanePrev, Some("Workspace")),
+        KeyBinding::new("cmd-]", CyclePaneNext, Some("Workspace")),
+        KeyBinding::new("cmd-d", SplitBeside, Some("Workspace")),
+        KeyBinding::new("shift-cmd-d", SplitBelow, Some("Workspace")),
+        KeyBinding::new("cmd-w", ClosePane, Some("Workspace")),
+        KeyBinding::new("cmd-s", SaveFile, Some("Files")),
+        KeyBinding::new("cmd-shift-f", ToggleDebugHud, Some("Workspace")),
+        KeyBinding::new("f7", NextHunk, Some("GitChanges")),
+        KeyBinding::new("shift-f7", PrevHunk, Some("GitChanges")),
+        KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
+        // 文件树只在自己的宿主上挂 FileTree。树没挂载（文件页不可见、树收起、
+        // 搜索框有内容）时这条 context 不在焦点路径上。
+        KeyBinding::new("up", FileTreeMoveUp, Some("FileTree")),
+        KeyBinding::new("down", FileTreeMoveDown, Some("FileTree")),
+        KeyBinding::new("left", FileTreeMoveLeft, Some("FileTree")),
+        KeyBinding::new("right", FileTreeMoveRight, Some("FileTree")),
+        KeyBinding::new("enter", FileTreeActivate, Some("FileTree")),
+        // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
+        // Ctrl+W 删词。绑在 Input context，所有输入框（ACP composer 等）生效。
+        KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),
+        KeyBinding::new("ctrl-k", DeleteToEndOfLine, Some("Input")),
+        KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
+        // 把 Tab/Shift-Tab 从 gpui-component Root 的全局焦点跳转手里要回来，
+        // 终端聚焦时改发给 shell（见 terminal_view.rs 里 TerminalTab 的注释）。
+        KeyBinding::new("tab", terminal_view::TerminalTab, Some("Terminal")),
+        KeyBinding::new(
+            "shift-tab",
+            terminal_view::TerminalBackTab,
+            Some("Terminal"),
+        ),
+    ];
+    for (index, key) in [
+        "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        bindings.push(KeyBinding::new(
+            key,
+            ActivateSession { index },
+            Some("Workspace"),
+        ));
+    }
+    // cmux：Ctrl+Backspace / Ctrl+Delete 也是删行（^U / ^K），不是删词。
+    #[cfg(target_os = "macos")]
+    {
+        bindings.push(KeyBinding::new(
+            "ctrl-backspace",
+            DeleteToBeginningOfLine,
+            Some("Input"),
+        ));
+        bindings.push(KeyBinding::new(
+            "ctrl-delete",
+            DeleteToEndOfLine,
+            Some("Input"),
+        ));
+    }
+    bindings
+}
+
 fn main() {
     if let Some(code) = terminal::maybe_run_install_app(std::env::args()) {
         std::process::exit(code);
@@ -4390,35 +4476,7 @@ fn main() {
             .expect("加载内嵌字体失败");
         // 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
         // （跟齿轮图标一样开独立设置窗口，符合 mac 惯例——系统偏好设置一般都在这）。
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-,", OpenSettings, None),
-            KeyBinding::new("cmd-b", ToggleSidebar, None),
-            KeyBinding::new("alt-cmd-b", ToggleToolPanel, None),
-            // 会话上/下切换（跨项目按侧栏视觉顺序，到头循环）。
-            // None 和最内层 context 同深度，后注册会盖过 Input 的 cmd-up/down。
-            // 绑在 Workspace 上更浅：输入框里是文首/文末，其余工作区切会话。
-            KeyBinding::new("cmd-up", PrevSession, Some("Workspace")),
-            KeyBinding::new("cmd-down", NextSession, Some("Workspace")),
-            // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
-            // Ctrl+W 删词。绑在 Input context，所有输入框（ACP composer 等）生效。
-            KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),
-            KeyBinding::new("ctrl-k", DeleteToEndOfLine, Some("Input")),
-            KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
-            // cmux：Ctrl+Backspace / Ctrl+Delete 也是删行（^U / ^K），不是删词。
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("ctrl-backspace", DeleteToBeginningOfLine, Some("Input")),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("ctrl-delete", DeleteToEndOfLine, Some("Input")),
-            // 把 Tab/Shift-Tab 从 gpui-component Root 的全局焦点跳转手里要回来，
-            // 终端聚焦时改发给 shell（见 terminal_view.rs 里 TerminalTab 的注释）。
-            KeyBinding::new("tab", terminal_view::TerminalTab, Some("Terminal")),
-            KeyBinding::new(
-                "shift-tab",
-                terminal_view::TerminalBackTab,
-                Some("Terminal"),
-            ),
-        ]);
+        cx.bind_keys(app_key_bindings());
         cx.set_menus(vec![
             Menu::new("Smelt").items([
                 MenuItem::action(concat!("v", env!("CARGO_PKG_VERSION")), gpui::NoAction)

@@ -8,6 +8,7 @@ mod agent_route_alignment_tests;
 mod daemon_delivery_ownership_tests;
 mod daemon_state_notification_tests;
 mod internal_file_url_tests;
+mod key_binding_tests;
 mod main_window_liveness_tests;
 mod overlay_architecture_tests;
 mod pane_state_tests;

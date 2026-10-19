@@ -2,7 +2,7 @@
 
 use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
-    Window, canvas, div,
+    Window, canvas, div, relative,
 };
 
 use gpui_component::button::{Button, ButtonRounded};
@@ -392,9 +392,6 @@ impl Workspace {
                     )
             });
 
-        let preview_viewport = window.viewport_size();
-        let preview_box_w = preview_viewport.width * 0.86;
-        let preview_box_h = preview_viewport.height * 0.84;
         let preview_render = self
             .acp_image_preview
             .as_ref()
@@ -413,6 +410,9 @@ impl Workspace {
                 .id("workspace-image-preview-backdrop")
                 .absolute()
                 .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
                 .bg(rgba(0x000000d9))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -422,11 +422,8 @@ impl Workspace {
                 .child(
                     div()
                         .id("workspace-image-preview-content")
-                        .absolute()
-                        .top((preview_viewport.height - preview_box_h) / 2.0)
-                        .left((preview_viewport.width - preview_box_w) / 2.0)
-                        .w(preview_box_w)
-                        .h(preview_box_h)
+                        .w(relative(0.86))
+                        .h(relative(0.84))
                         .overflow_hidden()
                         .cursor_default()
                         .on_click(|_ev, _window, cx| cx.stop_propagation())

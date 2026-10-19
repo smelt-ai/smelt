@@ -489,18 +489,35 @@ pub fn image_surface(image: &Arc<gpui::Image>) -> AnyElement {
     }
 }
 
-/// cover 时图片相对盒子左上角的位置和尺寸。多出来的部分由绘制时的盒子裁掉。
-fn cover_placement(box_w: f32, box_h: f32, image_w: f32, image_h: f32) -> (f32, f32, f32, f32) {
-    let scale = (box_w / image_w).max(box_h / image_h);
-    let w = image_w * scale;
-    let h = image_h * scale;
-    ((box_w - w) / 2.0, (box_h - h) / 2.0, w, h)
+/// 按 `ObjectFit` 把 render 放进 bounds。
+///
+/// 用 Contain / Cover，不用 ScaleDown：小图也要放大到盒子里。零尺寸先返回，
+/// `get_bounds` 会拿宽高做除法。
+fn paint_fitted(
+    fit: ObjectFit,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    render: &Arc<RenderImage>,
+    corner_radius: f32,
+) {
+    let img_size = render.size(0);
+    if img_size.width.0 <= 0 || img_size.height.0 <= 0 {
+        return;
+    }
+    let _ = window.paint_image(
+        bounds,
+        fit.get_bounds(bounds, img_size),
+        Corners::all(px(corner_radius)),
+        Arc::clone(render),
+        0,
+        false,
+    );
 }
 
 /// contain 绘制：把 render 完整放入 bounds 并居中，不裁剪、不拉伸。
 ///
 /// `contain_canvas` 内部用它，预览层等需要自定义 hitbox 的 canvas 也直接调它，
-/// 保证所有场景的绘制路径完全一致。
+/// 保证所有场景的绘制路径完全一致。可放大也可缩小。
 pub fn paint_contain(
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -510,57 +527,11 @@ pub fn paint_contain(
     let Some(render) = render else {
         return;
     };
-    let img_size = render.size(0);
-    let (iw, ih) = (img_size.width.0 as f32, img_size.height.0 as f32);
-    if iw <= 0.0 || ih <= 0.0 {
-        return;
-    }
-    // contain：完整放入盒子并居中（可放大也可缩小）。
-    let scale = (bounds.size.width / iw).min(bounds.size.height / ih);
-    let w = iw * scale;
-    let h = ih * scale;
-    let origin = point(
-        bounds.origin.x + (bounds.size.width - w) / 2.0,
-        bounds.origin.y + (bounds.size.height - h) / 2.0,
-    );
-    let image_bounds = Bounds {
-        origin,
-        size: size(w, h),
-    };
-    let _ = window.paint_image(
-        bounds,
-        image_bounds,
-        Corners::all(px(corner_radius)),
-        render.clone(),
-        0,
-        false,
-    );
+    paint_fitted(ObjectFit::Contain, bounds, window, render, corner_radius);
 }
 
 fn paint_cover(bounds: Bounds<Pixels>, window: &mut Window, render: &Arc<RenderImage>) {
-    let img_size = render.size(0);
-    let (iw, ih) = (img_size.width.0 as f32, img_size.height.0 as f32);
-    if iw <= 0.0 || ih <= 0.0 {
-        return;
-    }
-    let (x, y, w, h) = cover_placement(
-        bounds.size.width / px(1.),
-        bounds.size.height / px(1.),
-        iw,
-        ih,
-    );
-    let image_bounds = Bounds {
-        origin: point(bounds.origin.x + px(x), bounds.origin.y + px(y)),
-        size: size(px(w), px(h)),
-    };
-    let _ = window.paint_image(
-        bounds,
-        image_bounds,
-        Corners::all(px(0.)),
-        Arc::clone(render),
-        0,
-        false,
-    );
+    paint_fitted(ObjectFit::Cover, bounds, window, render, 0.);
 }
 
 fn cover_canvas(render: Arc<RenderImage>) -> Canvas<()> {
@@ -629,9 +600,8 @@ mod tests {
     // 上下文深度解析，rustc 直接 SIGBUS）。见 acp_view.rs 测试模块的同一惯例。
     use super::{
         CACHE_CAPACITY, FilePaint, ImageCacheInner, MAX_PREVIEW_DIM, StoredPreview, ThumbPaint,
-        begin_file_fetch, begin_preview, contain_width_at_height, cover_placement, decode_preview,
-        file_paint, finish_preview, load_file_preview, preview_pending, put, store_preview,
-        thumb_paint,
+        begin_file_fetch, begin_preview, contain_width_at_height, decode_preview, file_paint,
+        finish_preview, load_file_preview, preview_pending, put, store_preview, thumb_paint,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::Arc;
@@ -763,11 +733,31 @@ mod tests {
 
     #[test]
     fn cover_crops_the_long_edge() {
-        let (x, y, w, h) = cover_placement(100., 100., 200., 50.);
-        assert!((w - 400.).abs() < 0.01);
-        assert!((h - 100.).abs() < 0.01);
-        assert!((x - -150.).abs() < 0.01);
-        assert!(y.abs() < 0.01);
+        let bounds = gpui::Bounds {
+            origin: gpui::point(gpui::px(0.), gpui::px(0.)),
+            size: gpui::size(gpui::px(100.), gpui::px(100.)),
+        };
+        let fitted = gpui::ObjectFit::Cover.get_bounds(
+            bounds,
+            gpui::size(gpui::DevicePixels(200), gpui::DevicePixels(50)),
+        );
+        assert_eq!(fitted.origin, gpui::point(gpui::px(-150.), gpui::px(0.)));
+        assert_eq!(fitted.size, gpui::size(gpui::px(400.), gpui::px(100.)));
+    }
+
+    #[test]
+    fn contain_upscales_smaller_images() {
+        let bounds = gpui::Bounds {
+            origin: gpui::point(gpui::px(10.), gpui::px(20.)),
+            size: gpui::size(gpui::px(100.), gpui::px(100.)),
+        };
+        let fitted = gpui::ObjectFit::Contain.get_bounds(
+            bounds,
+            gpui::size(gpui::DevicePixels(20), gpui::DevicePixels(10)),
+        );
+        // 宽图贴满盒子宽度并垂直居中；ScaleDown 会保持 20×10，这里必须放大。
+        assert_eq!(fitted.origin, gpui::point(gpui::px(10.), gpui::px(45.)));
+        assert_eq!(fitted.size, gpui::size(gpui::px(100.), gpui::px(50.)));
     }
 
     fn write_png(name: &str, w: u32, h: u32) -> std::path::PathBuf {
