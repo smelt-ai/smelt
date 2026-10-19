@@ -168,6 +168,7 @@ mod remote;
 mod runtime_identity;
 mod service;
 mod session_catalog;
+mod session_control;
 mod session_directory;
 mod session_state;
 mod terminal_output;

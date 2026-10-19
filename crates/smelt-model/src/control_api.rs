@@ -698,6 +698,65 @@ mod tests {
     }
 
     #[test]
+    fn session_create_params_are_optional_except_the_project() {
+        let params = decode_params::<SessionCreateParams>(serde_json::json!({
+            "project_root": "/repo",
+            "kind": "terminal",
+            "request_id": "6f1c2b8e-4d5a-4f3b-9c2d-1e0f9a8b7c6d",
+        }))
+        .unwrap();
+        assert_eq!(params.kind, Some(SessionCreateKind::Terminal));
+        assert_eq!(params.agent_option_id, None);
+        assert_eq!(
+            serde_json::to_value(SessionCreateParams::default()).unwrap(),
+            serde_json::json!({"project_root": ""})
+        );
+        assert!(decode_params::<SessionCreateParams>(serde_json::json!({"kind": "vnc"})).is_err());
+    }
+
+    #[test]
+    fn new_session_catalog_decodes_on_the_client() {
+        let wire = serde_json::json!({
+            "control_version": CONTROL_API_VERSION,
+            "request_id": "catalog-1",
+            "status": "ok",
+            "result": {
+                "agents": [
+                    {"id": "agent:quant", "kind": "pi", "label": "量化", "profile": false,
+                     "agentDefinitionId": "quant"},
+                    {"id": "claude", "kind": "claude", "label": "Claude Code", "profile": false}
+                ],
+                "sections": {
+                    "common": [],
+                    "terminal": [
+                        {"key": "terminal:claude:claude", "label": "Claude Code", "kind": "terminal",
+                         "pinned": false, "target": "terminal", "command": "claude",
+                         "provider": "claude"},
+                        {"key": "terminal:blank", "label": "空白终端", "kind": "terminal",
+                         "pinned": true, "target": "blankTerminal"}
+                    ],
+                    "conversation": [
+                        {"key": "conversation:agent:quant", "label": "量化", "kind": "conversation",
+                         "pinned": false, "target": "conversation", "agentOptionId": "agent:quant",
+                         "agentKind": "pi"}
+                    ]
+                }
+            }
+        });
+        let catalog = decode_response::<NewSessionCatalog>("catalog-1", wire).unwrap();
+        assert_eq!(catalog.agents[0].agent_definition_id(), Some("quant"));
+        assert_eq!(catalog.agents[1].agent_definition_id, None);
+        assert_eq!(
+            catalog.sections.conversation[0].agent_option_id(),
+            Some("agent:quant")
+        );
+        assert_eq!(
+            catalog.sections.terminal[1].target,
+            crate::new_session::NewSessionTarget::BlankTerminal
+        );
+    }
+
+    #[test]
     fn future_error_codes_degrade_to_unknown() {
         let error = decode_response::<AgentSend>(
             "future-error",
@@ -837,6 +896,15 @@ pi_calls! {
     /// 用产品智能体定义开一场对话（`smelt agent start`）。
     ConversationCreateForAgent => ConversationCreateForAgent(AgentDefinitionIdParams)
         -> crate::session_control::CreatedAgentConversation;
+    /// 新建会话的选择目录：可开对话的 agent 选项，和按「常用 / 终端 / 对话」分好组的
+    /// 启动动作（含 Pin）。CLI 装没装按运行时的探测缓存过滤。
+    NewSessionCatalog => NewSessionCatalog(EmptyParams) -> NewSessionCatalogResult;
+    /// 在运行时上新建一个会话（对话或终端），会话进远程目录，桌面侧栏也看得到。
+    SessionCreate => SessionCreate(SessionCreateParams) -> SessionCreateResult;
+    /// 删除一个会话。运行时自己判断是终端还是对话；自动化运行的会话拒绝删除。
+    SessionDelete => SessionDelete(SessionIdParams) -> EmptyParams;
+    /// 会话 id → 它所属的产品智能体定义 id。
+    SessionAgentBindings => SessionAgentBindings(EmptyParams) -> SessionAgentBindingsResult;
     /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录），顺带给出
     /// 会加载的技能。
     SessionLaunchPrepare => SessionLaunchPrepare(crate::agent_definition_store::LaunchPrepareParams)
@@ -844,6 +912,63 @@ pi_calls! {
     /// 一场 Pi 会话会加载哪些技能。
     SessionLoadedSkills => SessionLoadedSkills(crate::agent_definition_store::LoadedSkillsParams)
         -> crate::agent_definition_store::LoadedSkillsResult;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NewSessionCatalogResult {
+    /// 产品智能体在前，裸引擎与 profile 在后，与桌面新建菜单同序。不按探测结果过滤：
+    /// 历史列表等地方要靠它把 option id 还原成引擎和 profile。
+    pub agents: Vec<crate::session_control::AcpAgentOption>,
+    pub sections: crate::new_session::NewSessionSections,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCreateKind {
+    #[default]
+    Acp,
+    Terminal,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCreateParams {
+    /// 必须是工作区菜单里的项目。对话可以留空：选项属于产品智能体时开在智能体自己的
+    /// space，否则报错。
+    #[serde(default)]
+    pub project_root: String,
+    /// 对话用哪个 agent 选项（`new_session.catalog` 的 `agents[].id`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_option_id: Option<String>,
+    /// 新建目录里那一行的 key。给了它就由运行时决定开对话还是哪种终端，
+    /// `kind` / `agent_option_id` 不再看。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_key: Option<String>,
+    /// 续接哪段历史（只对对话有效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_id: Option<String>,
+    /// 不给就是对话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SessionCreateKind>,
+    /// 客户端为一次新建生成、重试时复用的 UUID。会话 id 由它确定，重试落到同一个会话；
+    /// 同一个 `request_id` 带着不同参数再来回 `conflict`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCreateResult {
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIdParams {
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAgentBindingsResult {
+    /// 会话 id → 智能体定义 id。
+    pub bindings: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
