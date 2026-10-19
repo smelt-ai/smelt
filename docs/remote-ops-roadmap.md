@@ -1,5 +1,8 @@
 # 远程操作 Roadmap
 
+> **历史路线图，不是现行协议。** 文中的 `/acp/ws`、`/terminal/{id}/ws`、长期共享 token、`write_enabled`、`smelt-remote-gateway` 和 `smelt-iroh-host` 已删除（2026-10-17 起运行时直接收 iroh 流，按设备配对）。
+> 现行行为见 [`workspace.md`](workspace.md) 的「运行时、多机与手机」，自建 relay 见 [`iroh-relay-deployment.md`](iroh-relay-deployment.md)，设计记录见 [`remote-runtime.html`](remote-runtime.html)。不要按下面的网关契约实现。
+
 **产品概念：远程操作**——对 smeltd 里仍存活的 agent 会话，在**任意客户端**上查看、知情、操控与协作。
 
 客户端可以是桌面浏览器、手机 H5、飞书机器人卡片等。  

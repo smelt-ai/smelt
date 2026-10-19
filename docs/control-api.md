@@ -1,7 +1,9 @@
 # smeltd Control API v1
 
-状态：已实现。契约真源是 `smelt-core/src/control_api.rs`，服务端分发在
-`smeltd/src/control.rs`。
+状态：已实现。方法名的真源是
+`crates/smelt-runtime-client/src/protocol/control.rs` 的 `define_control_methods!`。
+参数和结果类型在 `crates/smelt-model/src/control_api.rs`（`smelt-core` 再导出同一模块，
+没有 `smelt-core/src/control_api.rs` 这个文件）。服务端分发在 `smeltd/src/control.rs`。
 
 Control API 是 smeltd 的**版本化短请求协议**，不是 HTTP 服务，也不取代 ACP。
 它复用 `~/.smelt/smeltd.sock` 的首帧分流，供桌面、Mobile、MCP、CLI 和未来的进程外
@@ -103,7 +105,19 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | `automation.set_enabled` | 有副作用 | 幂等设值，不是 toggle |
 | `automation.run_once` | 有副作用 | 立即跑一次，不推进定时游标 |
 
-CLI：`smelt agent` / `smelt automation` / `smelt settings`。教模型用的 skill 安装到 `~/.agents/skills/smelt/SKILL.md`。
+上表是最早一批仍在用的方法，不是全集。同一份 `define_control_methods!` 里还有这些组（只加方法不升 `control_version`，客户端用 `system.describe` 的方法清单判断运行时有没有）：
+
+| 组 | 方法 |
+|---|---|
+| 远程与设备 | `remote.config.get` / `remote.config.set` / `remote.status`；`device.pair_begin` / `device.pair` / `device.list` / `device.revoke` |
+| 会话生命周期 | `new_session.catalog`、`session.create`、`session.delete`、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image` |
+| 工作区与文件 | `workspace.load` / `workspace.save` / `workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
+| Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
+| 智能体记忆 | `agent.memory.meta` / `record_read` / `record_write` / `list` / `delete` / `approve` / `ensure_dir`；`memory.test_embedding` |
+| Pi / DSH / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`；`dsh.*`；`quota.get` / `quota.refresh` |
+| 其它 | `agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`skills.sync_control`、`history.*`、`desktop.type_text`、`automation.run_detail` |
+
+CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用的 skill 安装到 `~/.agents/skills/smelt/SKILL.md`。无头机器上的安装和配对是 `smeltd install` / `smeltd pair` / `smeltd devices`，不是这组 CLI。
 
 `agent.list/send` 的 `source_session_id` 与 `source_token` 放在类型化 params 内；领域层仍会
 在提交前重新校验当前 runtime 代际和能力令牌，Control API 不绕过原有授权边界。

@@ -1,7 +1,7 @@
 # Smelt 架构审查：一页纸总结
 
-> 历史快照，不是当前实施说明。得分、缺陷清单和 13 周计划没有跟着代码更新。
-> 现状见 [`docs/workspace.md`](docs/workspace.md)，产品待做见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
+> 历史快照，不是当前实施说明。得分、缺陷清单和 13 周计划没有跟着代码更新。正文里的 gateway 与远程令牌已删除。
+> 现行说明：[`docs/workspace.md`](docs/workspace.md)、[`docs/local-storage.md`](docs/local-storage.md)。产品待做见 [`docs/product-roadmap.md`](docs/product-roadmap.md)。
 
 ## 得分：8.5/10 ✅ 符合业内最佳实践
 

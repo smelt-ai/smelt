@@ -5,7 +5,7 @@
 
 ## 状态
 
-EventHub、稳定 wire DTO、`event_subscribe`、桌面端和 Remote Gateway 一等客户端已实现。
+EventHub、稳定 wire DTO、`event_subscribe`、桌面端一等客户端已实现。Remote Gateway 已删除；`FirstPartyClientKind` 只剩 `Desktop`。
 插件管理器、插件凭据签发和完整 Action SDK 仍是后续工作；在此之前 daemon 明确拒绝
 `plugin` 事件身份，不允许插件自报 ID 或 capability。
 
@@ -570,8 +570,9 @@ nack 并报告不兼容，不能尝试按旧结构解析。
   生产（双边 team 一致 + identifier 相符，与 Apple XPC team-identity 要求同构，
   不 pin 具体证书，证书轮换不影响）；本地自签名（无 team，比较磁盘静态证书，
   同 keychain 重签 skew 下恒成立）；ad-hoc 仅 debug 认同目录兄弟，release 照样
-  拒绝。Desktop 的 signing-id 必须为 `com.zzfn.smelt`，daemon 为 `smeltd`，
-  独立 Remote Gateway 为 `gateway`，内嵌 Gateway 必须与 daemon 同 pid。
+  拒绝。一方客户端表（`crates/smeltd/src/protocol/auth.rs` 的 `FIRST_PARTY_EXECUTABLES`）
+  只登记 Desktop：basename `smelt`，signing-id `com.zzfn.smelt`。`FirstPartyClientKind`
+  （`crates/smelt-event-protocol/src/lib.rs`）没有 Remote Gateway，也没有 `gateway` 这个 signing-id。
   basename 单独永远不足以认证（只用于 kind 选择）。请求 kind 与 peer 事实不一致、
   签名检查失败、平台无法可靠取证或 wire 试图附加 capability 时均 fail closed。
   认证后 Desktop 可读 session、remote sessions、workspace 和 automations。
@@ -630,8 +631,8 @@ schema v4 把已有 v3 cursor 标成 `legacy-v3-unbound`：升级后的第一次
 ### `event_subscribe`
 
 正式内部路径已由版本化 `event_subscribe` 替代。桌面端订阅 session state/removed、
-remote sessions、workspace menu 和 automations；Remote Gateway 订阅同样的投影
-topic。两者消费稳定 DTO / `CoreProjectionEvent`，Lag 后等待恢复 snapshots。旧
+remote sessions、workspace menu 和 automations，消费稳定 DTO / `CoreProjectionEvent`，
+Lag 后等待恢复 snapshots。手机不另开一等事件客户端，目录投影在 `smelt-mobile`。旧
 `op=subscribe` 已移除，避免它绕过正式 peer 认证。
 
 ### `AgentEvent`

@@ -14,7 +14,7 @@
 
 ## 智能体人设保护（待定）
 
-现状：产品对话和自动化都跑完全访问（`bypassPermissions`），所有工具调用自动批准；
+现状：产品对话默认逐次审批（`default`），可以切到完全访问（`bypassPermissions`）；闲置挂起后按挂起前的权限模式恢复（`crates/smeltd/src/acp_idle.rs`）。自动化投递时强制完全访问（`crates/smeltd/src/automation_runtime.rs` 的 `pi_full_access_action`），工具调用自动批准。
 `smelt agent update --prompt` 直接写 SQLite，智能体能经 bash 悄悄改掉自己的工作方式。
 调研结论是不新增 SOUL.md 一类人设文件，改为保护已有的指令入口：
 

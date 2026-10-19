@@ -1,7 +1,7 @@
 # smelt-core 领域拆分指南
 
-> 历史方案，没有按本文落地。文中的 `agent_kind.rs` 等路径已变成目录或换了位置，不要按字面迁移。
-> 现状见 [`workspace.md`](workspace.md)。
+> 历史方案，没有按本文落地。文中的 `agent_kind.rs` 等路径已变成目录或换了位置，也不要按文中的 gateway 划分迁移。
+> 现行说明：[`workspace.md`](workspace.md)、[`local-storage.md`](local-storage.md)。
 
 ## 📋 目录
 

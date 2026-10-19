@@ -1,7 +1,11 @@
 # 移动端交互重构 · 把 IA 拉回「指挥台」
 
 > 当时的施工手记。文中「五态」色是那一轮的取色口径；`AgentStatus` 后来收成
-> 要你 / 运行中 / 空闲三态，以 `crates/smelt-core/src/agent_status.rs` 为准。
+> 要你 / 运行中 / 空闲三态，以 `crates/smelt-model/src/agent_status.rs` 为准
+> （`smelt-core` 再导出）。
+>
+> 2026-10-19：`smelt-remote-gateway`、`remote_gateway.rs`、`gateway_service` 已删除。
+> 状态投影在 `crates/smelt-mobile/src/catalog.rs`。下文引用这些路径的地方是当时的代码。
 
 配套：[`product-roadmap.md §6`](product-roadmap.md)（目标体验）·
 [`remote-ops-roadmap.md`](remote-ops-roadmap.md)（A/B/C 三种客户端形态）·
@@ -167,8 +171,8 @@
 
 而且它**不需要我编时间窗**：客户端用 `unread && phase=='succeeded'` 自算「刚完成
 （Recently ran）」——`status` 只发 `needs_you` / `running` / `idle` 三态，**没有 `done`**，
-见 `crates/smelt-remote-gateway/src/lib.rs` 的 `mobile_status_name` 与
-`crates/smelt-core/src/agent_status.rs`。未读直接读摘要上的 `unread`；看过一眼 `unread`
+见当时 `crates/smelt-remote-gateway/src/lib.rs` 的 `mobile_status_name`（路径已删除，见文首）与
+`crates/smelt-model/src/agent_status.rs`。未读直接读摘要上的 `unread`；看过一眼 `unread`
 变 false，这一段就自己清空。
 
 **项目身份色只在移动端。** 六色取自桌面语义色（accent / green / blue / purple /
@@ -321,7 +325,7 @@ Flutter/Dart SDK 也不冲突。**问题是它做不到分片 2 要的事。**
 不需要，而且不该做。
 
 先说事实。**smeltd 本来就支持多订阅**——`acp_watch` 的协议注释写着「只读镜像，
-会话必须已存在，**可多个并存**」。但网关 `remote_gateway.rs` 里
+会话必须已存在，**可多个并存**」。但当时的网关 `remote_gateway.rs`（路径已删除，见文首）里
 `current_subscription` 是单个 slot，subscribe(B) 会掐掉 subscribe(A)。这不是疏漏：
 **PC 端根本不用 `acp_watch`**（全仓搜索，唯一调用方就是网关自己），它的模型是
 一条全局 `subscribe` 拿所有会话的四色状态 + `open`/`acp_open` 管当前那一个会话。
@@ -450,7 +454,7 @@ controller 自己就是对的。已验证：把这段判断改回去，对应测
 
 根因是 `_ConsoleRow` 里一条我自己写错的去重规则——**标题里包含项目名就不画项目行**。
 当时的注释写着「服务端的标题常常是『Copilot 对话 · smelt』这种自带项目后缀的形态」，
-这个前提是**假的**。查 `crates/smelt-remote-gateway/src/lib.rs` 可知，title 依次取
+这个前提是**假的**。查当时的 `crates/smelt-remote-gateway/src/lib.rs`（路径已删除，见文首）可知，title 依次取
 `custom_title`（用户手打）→ `launch_label` → 路径名，**从不追加项目名**。那个 ` · smelt`
 是用户自己起的标题。
 
