@@ -8,3 +8,4 @@ workspace = true
 
 [dependencies]
 dirs = "5"
+libc = "0.2"

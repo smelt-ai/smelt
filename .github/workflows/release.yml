@@ -1,5 +1,6 @@
-# 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release。
-# 本地打包链路复用：make dist-build → scripts/package-mac.sh（详见该脚本）。
+# 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release，
+# 再附上 Linux 运行时两种架构的包和一键安装脚本。
+# 本地打包链路复用：make dist-build → scripts/package-mac.sh；ci/linux/ci.sh package。
 name: release
 
 on:
@@ -40,10 +41,12 @@ jobs:
           [[ "$missing" == 0 ]] || { echo "打包链路文件不完整，终止。"; exit 1; }
           echo "✅ 打包所需文件齐全"
 
-      # tag 去掉 v 前缀，必须与 Cargo.toml 的 version 一致，避免版本号漂移。
+      # tag 去掉 v 前缀，必须与 Cargo.toml 的 version 一致，避免版本号漂移。预发布的
+      # tag 带 -rc.1 这类后缀（见 prerelease），比对时只看后缀前面的部分。
       - name: Check tag matches Cargo.toml version
         run: |
           tag="${GITHUB_REF_NAME#v}"
+          tag="${tag%%-*}"
           crate="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           echo "tag=$tag  Cargo.toml=$crate"
           if [[ "$tag" != "$crate" ]]; then
@@ -116,8 +119,187 @@ jobs:
         run: |
           [[ -n "${KEYCHAIN_PATH:-}" ]] && security delete-keychain "$KEYCHAIN_PATH" || true
 
+      # tag 带 - 后缀（v0.9.0-rc.1）就发成预发布：不成为 Latest，一键安装默认装的
+      # releases/latest 也不会指向它（要装它得设 SMELT_VERSION）。
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: dist/Smelt.dmg
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Linux 运行时的包（设计文档 D7「一键安装」）：两种架构各在对应架构的 runner 上原生构建，
+  # 不交叉编译。在 Ubuntu 22.04 容器里编，链接的 glibc 是 2.35，Debian 12+、Ubuntu 22.04+
+  # 都能跑；直接在 runner 上编会链到更新的 glibc，老一点的系统上起不来。
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    steps:
+      # reqwest 在 Linux 上走 native-tls，openssl-sys 要 OpenSSL 头文件和 pkg-config。
+      # 产物动态链接 libssl3：Debian 12+、Ubuntu 22.04+ 都有，curl 就依赖它。
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git libssl-dev pkg-config
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 容器里工作区属主和当前用户不一致，git 会拒绝操作。
+      - name: Trust workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Toolchain
+        run: ./ci/linux/env-setup.sh
+
+      - name: Package
+        run: ./ci/linux/ci.sh package
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: smeltd-linux-${{ matrix.arch }}
+          path: dist/smeltd-*-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  # 等 dmg 那边建好 Release 再往上加，避免两边同时建。附上一键安装脚本（发布名 install.sh）
+  # 和校验和清单：一键安装从清单里认出各架构的包名，并对着它核对。
+  linux-release:
+    needs: [build, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: smeltd-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums and installer
+        run: |
+          cd dist
+          sha256sum smeltd-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          install -m 0755 ../scripts/get-smeltd.sh install.sh
+
+      - name: Add to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/smeltd-*.tar.gz
+            dist/SHA256SUMS
+            dist/install.sh
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # 手机 App 的安装包。正式签名的 keystore 存在 secrets 里，没配就失败（发出 debug 签名的
+  # 包，以后换正式签名时用户只能卸载重装）。versionCode 用这条流水线的 run_number：
+  # 逐次递增，新包总能覆盖旧包；versionName 就是 tag 去掉 v（含 -rc.N）。
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 版本要求同 ci.yml 的 android-build。
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install NDK
+        run: sdkmanager "ndk;28.2.13676358"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/smelt-mobile
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Write keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SMELT_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" ]]; then
+            echo "✗ 没配置 SMELT_ANDROID_KEYSTORE_BASE64，发版的 APK 必须正式签名。"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          echo "SMELT_ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        env:
+          SMELT_CI_SKIP_ENV: "1"
+          SMELT_REQUIRE_RELEASE_SIGNING: "1"
+          SMELT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.SMELT_ANDROID_KEYSTORE_PASSWORD }}
+          SMELT_ANDROID_KEY_ALIAS: ${{ secrets.SMELT_ANDROID_KEY_ALIAS }}
+          SMELT_ANDROID_KEY_PASSWORD: ${{ secrets.SMELT_ANDROID_KEY_PASSWORD }}
+          SMELT_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          export SMELT_BUILD_NAME="${GITHUB_REF_NAME#v}"
+          ./ci/android/ci.sh build
+          mkdir -p dist
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk \
+            "dist/Smelt-${SMELT_BUILD_NAME}-android-arm64.apk"
+          ls -lh dist/
+
+      # 签名必须是正式证书：apksigner 打出证书指纹，debug 证书的主题是 "CN=Android Debug"。
+      - name: Verify signature
+        run: |
+          apksigner="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          "$apksigner" verify --print-certs dist/Smelt-*-android-arm64.apk | tee "$RUNNER_TEMP/certs.txt"
+          if grep -q "CN=Android Debug" "$RUNNER_TEMP/certs.txt"; then
+            echo "✗ APK 是 debug 签名"
+            exit 1
+          fi
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: smelt-android
+          path: dist/Smelt-*-android-arm64.apk
+          if-no-files-found: error
+
+  # 同 linux-release：等 dmg 那边建好 Release 再往上加。
+  android-release:
+    needs: [build, android]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v8
+        with:
+          name: smelt-android
+          path: dist
+
+      - name: Add to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/Smelt-*-android-arm64.apk
+          prerelease: ${{ contains(github.ref_name, '-') }}

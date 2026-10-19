@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Smelt 远程桌面：最大化的窗口不画标题栏（Chrome 最大化后贴在任务栏下面），只留一个
+     工作区，关掉合成器（没有显卡全靠 CPU，远程桌面里也用不上阴影和透明）。 -->
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="titleless_maximize" type="bool" value="true"/>
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="workspace_count" type="int" value="1"/>
+  </property>
+</channel>

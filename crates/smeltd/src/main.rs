@@ -2062,6 +2062,7 @@ fn main() {
     if let Some(code) = service::maybe_run(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
+    exit_with_test_owner();
     smelt_core::sqlite_state::enable_sqlite_state();
     // 全 app 通用运行日志（~/.smelt/app.log，默认开、大小有上限，见 app_log 模块）：
     // 先装 panic hook，再记一条启动事件——守护本身没有终端可看，崩溃/异常全靠这份
@@ -2196,6 +2197,28 @@ fn main() {
         event_hub,
         daemon_fingerprint,
     );
+}
+
+/// 测试拉起的守护跟着测试进程退出（见 [`smelt_paths::TEST_OWNER_PID_ENV`]）。
+///
+/// 守护自成进程组，测试进程退出时它收不到信号；不跟着退就在沙箱里一直跑，开着
+/// 库和上百 MB 的 debug 映像，曾攒出几百个。变量不从环境里摘：交接出来的
+/// successor 靠继承拿到它，同样要跟着退。
+fn exit_with_test_owner() {
+    let Some(owner) = smelt_paths::test_owner_pid() else {
+        return;
+    };
+    thread::spawn(move || {
+        wait_for_test_owner_exit(owner);
+        dlog(&format!("测试进程 {owner} 已退出，守护跟着退出"));
+        cleanup_sidecar_services();
+        std::process::exit(0);
+    });
+}
+
+/// 没有截止时间：一次等一小时，没等到就接着等。
+fn wait_for_test_owner_exit(owner: i32) {
+    while !smelt_core::process_wait::wait_until_exit(owner, Duration::from_secs(3600)) {}
 }
 
 /// 交接 v2 import 模式：经 socketpair 收齐→恢复→READY→COMMIT 后直接服务。

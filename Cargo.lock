@@ -10701,6 +10701,7 @@ name = "smelt-paths"
 version = "0.9.0"
 dependencies = [
  "dirs 5.0.1",
+ "libc",
 ]
 
 [[package]]

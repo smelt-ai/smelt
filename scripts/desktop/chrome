@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# 常驻的 Chrome（设计文档 D9）。agent 经调试端口用它（Pi 的 desktop-chrome MCP 接
+# 127.0.0.1:9222），人在远程桌面里看和接管的是同一个实例。用户目录固定，人登录过的网站
+# agent 直接沿用。
+#
+# 不带参数是服务在拉起；任务栏的 Chrome 图标带 --new-window 调这个脚本，实例已经在跑就只是
+# 在里面开个新窗口，没在跑就由它起这个实例（参数相同，agent 照样连得上）。
+set -euo pipefail
+
+source "$(dirname "$0")/common.sh"
+
+profile="$(cd "$(dirname "$0")/.." && pwd)/chrome"
+
+chrome=""
+for candidate in google-chrome-stable chromium; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    chrome="$(command -v "$candidate")"
+    break
+  fi
+done
+[[ -n "$chrome" ]] || { echo "没装 Chrome：重新执行 install.sh --with-desktop" >&2; exit 1; }
+
+# 服务这边：实例已经被任务栏图标起来了就等它退出再接手。直接启动的话，新进程只是把
+# 「开窗口」转给那个实例就退出，服务一重启就又开一个窗口。锁是指向「主机名-pid」的软链；
+# 容器重启后 pid 会被复用，所以要看进程名。
+if (($# == 0)); then
+  while owner="$(readlink "$profile/SingletonLock" 2>/dev/null)" \
+    && [[ "$(cat "/proc/${owner##*-}/comm" 2>/dev/null)" == chrom* ]]; do
+    sleep 2
+  done
+fi
+
+flags=(
+  --user-data-dir="$profile"
+  # 只绑本机；调试端口能完全控制浏览器，不能对外。
+  --remote-debugging-port=9222
+  # 机器上没有钥匙串服务。保存的密码和 cookie 在磁盘上只是弱加密，机器本身的安全就是这些
+  # 账号的安全（D9）。
+  --password-store=basic
+  # 浏览器重启后恢复上次的标签页。
+  --restore-last-session
+  # 网页少放动画，没有显卡全靠 CPU 渲染。
+  --force-prefers-reduced-motion
+  --no-first-run
+  --no-default-browser-check
+  --start-maximized
+)
+
+# Docker 默认只给 64MB 的 /dev/shm，Chrome 的渲染进程放不下会崩标签页。
+shm_kb="$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $2 }')"
+if [[ -n "$shm_kb" ]] && ((shm_kb < 1048576)); then
+  flags+=(--disable-dev-shm-usage)
+fi
+
+# 沙箱要么靠用户命名空间，要么靠 setuid 的 chrome-sandbox（Google Chrome 的包带，Debian 的
+# Chromium 不带）。容器默认的 seccomp 不让建用户命名空间，两样都没有时 Chrome 起不来，
+# 只能关沙箱，并留一句话在日志里。
+sandbox="$(dirname "$(readlink -f "$chrome")")/chrome-sandbox"
+if ! unshare --user true 2>/dev/null && [[ ! -u "$sandbox" ]]; then
+  echo "这里建不了用户命名空间，也没有 setuid 的 chrome-sandbox：Chrome 关掉沙箱运行" >&2
+  flags+=(--no-sandbox)
+fi
+
+wait_for_display
+exec "$chrome" "${flags[@]}" "$@"
