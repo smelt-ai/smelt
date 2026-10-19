@@ -13,7 +13,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let Some((_, seen)) = self.discard_file_target.as_ref() else {
             return div().into_any_element();
         };
@@ -37,32 +36,26 @@ impl Workspace {
             .child(
                 div()
                     .text_sm()
-                    .text_color(accent_text)
+                    .text_color(cx.theme().danger)
                     .child("不进 reflog，找不回来。"),
             )
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-discard-file",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_discard_file(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-discard-file",
                         if untracked {
                             "删除文件"
                         } else {
                             "丢弃更改"
                         },
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_discard_file(cx),
                         cx,
                     )),
@@ -83,7 +76,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let Some((_, idx)) = self.discard_hunk_target.as_ref() else {
             return div().into_any_element();
         };
@@ -102,28 +94,22 @@ impl Workspace {
             .child(
                 div()
                     .text_sm()
-                    .text_color(accent_text)
+                    .text_color(cx.theme().danger)
                     .child("直接改工作区文件，不进暂存区也不进 reflog——丢了就找不回来。"),
             )
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-discard-hunk",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_discard_hunk(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-discard-hunk",
                         "丢弃这一块",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_discard_hunk(cx),
                         cx,
                     )),
@@ -143,7 +129,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let Some((_, branch, remote)) = self.delete_branch_target.as_ref() else {
             return div().into_any_element();
         };
@@ -163,30 +148,29 @@ impl Workspace {
             } else {
                 format!("{branch} 只删本地引用，工作区文件不受影响。")
             }))
-            .child(div().text_sm().text_color(accent_text).child(if remote {
-                "影响所有协作者，删之前确认没人在用。"
-            } else {
-                "有未合并的提交时 git 会拒绝删除，不会强删。"
-            }))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(if remote {
+                        "影响所有协作者，删之前确认没人在用。"
+                    } else {
+                        "有未合并的提交时 git 会拒绝删除，不会强删。"
+                    }),
+            )
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-delete-branch",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_delete_branch(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-delete-branch",
                         "删除",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_delete_branch(cx),
                         cx,
                     )),
@@ -207,7 +191,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         if self.discard_all_target.is_none() {
             return div().into_any_element();
         }
@@ -222,28 +205,22 @@ impl Workspace {
             .child(
                 div()
                     .text_sm()
-                    .text_color(accent_text)
+                    .text_color(cx.theme().danger)
                     .child("不进 reflog，找不回来。"),
             )
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-discard-all",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_discard_all(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-discard-all",
                         "全部丢弃",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_discard_all(cx),
                         cx,
                     )),
@@ -399,8 +376,8 @@ impl Workspace {
             .child(Tab::new().label("历史"));
         let scope_view = cx.entity();
         let scope_control = Button::new("git-diff-scope")
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .label(self.diff_scope.label())
             .dropdown_caret(true)
             .text_color(rgb(ui_theme::text_muted()))
@@ -430,8 +407,8 @@ impl Workspace {
             .when(self.git_tab == GitTab::Log && repo_choices.len() > 1, |bar| {
                 bar.child(
                     Button::new("git-log-repo")
-                        .ghost()
-                        .xsmall()
+                        .quiet()
+                        .icon_size()
                         .label(active_repo_label)
                         .dropdown_caret(true)
                         .text_color(rgb(ui_theme::text_muted()))
@@ -456,8 +433,8 @@ impl Workspace {
             .when(self.git_tab == GitTab::Log, |bar| {
                 bar.child(
                     Button::new("git-sync-menu")
-                        .ghost()
-                        .xsmall()
+                        .quiet()
+                        .icon_size()
                         .label(sync_label)
                         .dropdown_caret(busy.is_none())
                         .font_family(crate::terminal_view::font_family())
@@ -475,12 +452,7 @@ impl Workspace {
                         }),
                 )
             });
-        let header = view_tabs
-            .w_full()
-            .h(ui_theme::height::lg())
-            .flex_shrink_0()
-            .px_3()
-            .suffix(actions);
+        let header = view_tabs.w_full().flex_shrink_0().px_3().suffix(actions);
 
         if self.git_tab == GitTab::Log {
             return v_flex()

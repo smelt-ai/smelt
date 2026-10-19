@@ -23,6 +23,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
     required this.done,
     required this.idle,
     required this.danger,
+    required this.dangerFill,
+    required this.onDangerFill,
     required this.sunken,
     required this.diffAdd,
     required this.diffDelete,
@@ -45,7 +47,14 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
 
   /// 错误终态：provider 挂了、历史恢复失败。跟 [waitingApproval] 同色，
   /// 对应桌面 `ui_theme.rs` 里 `red` 同时承担「等审批」和「失败/拒绝」。
+  /// 这是字色。深色 `#ff263c` 上放白字不到 4.5:1，实心危险按钮用 [dangerFill]。
   final Color danger;
+
+  /// 不可逆确认的实心底。深浅两套都用同一组，白字对比超过 4.5:1。
+  final Color dangerFill;
+
+  /// [dangerFill] 上的字色。
+  final Color onDangerFill;
 
   /// 下沉面：代码块 / 命令块的底。**它在深浅两色下的方向是相反的**——深色要比
   /// 卡片更暗（桌面的 `bg_rail`），浅色要比卡片更暗一点（`bg_selected`）。
@@ -63,6 +72,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
     done: Color(0xff22c55e),
     idle: Color(0xff777777),
     danger: Color(0xffff263c),
+    dangerFill: Color(0xffc21d2e),
+    onDangerFill: Color(0xfffafafa),
     sunken: Color(0xff070707),
     diffAdd: Color(0xff78e2b4),
     diffDelete: Color(0xffff8c98),
@@ -77,6 +88,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
     done: Color(0xff16a34a),
     idle: Color(0xff777777),
     danger: Color(0xffc21d2e),
+    dangerFill: Color(0xffc21d2e),
+    onDangerFill: Color(0xfffafafa),
     sunken: Color(0xffe8e8e8),
     diffAdd: Color(0xff00673a),
     diffDelete: Color(0xffc21d2e),
@@ -98,6 +111,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
     Color? done,
     Color? idle,
     Color? danger,
+    Color? dangerFill,
+    Color? onDangerFill,
     Color? sunken,
     Color? diffAdd,
     Color? diffDelete,
@@ -109,6 +124,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
       done: done ?? this.done,
       idle: idle ?? this.idle,
       danger: danger ?? this.danger,
+      dangerFill: dangerFill ?? this.dangerFill,
+      onDangerFill: onDangerFill ?? this.onDangerFill,
       sunken: sunken ?? this.sunken,
       diffAdd: diffAdd ?? this.diffAdd,
       diffDelete: diffDelete ?? this.diffDelete,
@@ -125,6 +142,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
           other.done == done &&
           other.idle == idle &&
           other.danger == danger &&
+          other.dangerFill == dangerFill &&
+          other.onDangerFill == onDangerFill &&
           other.sunken == sunken &&
           other.diffAdd == diffAdd &&
           other.diffDelete == diffDelete;
@@ -139,6 +158,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
     done,
     idle,
     danger,
+    dangerFill,
+    onDangerFill,
     sunken,
     diffAdd,
     diffDelete,
@@ -154,6 +175,8 @@ class SmeltColors extends ThemeExtension<SmeltColors> {
       done: Color.lerp(done, other.done, t)!,
       idle: Color.lerp(idle, other.idle, t)!,
       danger: Color.lerp(danger, other.danger, t)!,
+      dangerFill: Color.lerp(dangerFill, other.dangerFill, t)!,
+      onDangerFill: Color.lerp(onDangerFill, other.onDangerFill, t)!,
       sunken: Color.lerp(sunken, other.sunken, t)!,
       diffAdd: Color.lerp(diffAdd, other.diffAdd, t)!,
       diffDelete: Color.lerp(diffDelete, other.diffDelete, t)!,
@@ -174,8 +197,17 @@ extension SmeltColorsX on BuildContext {
 }
 
 /// 交互强调：Grok Bot `fill/accent`，与桌面 `accent` 同值。只给 fromSeed 的
-/// 残余槽位用；真正的主按钮走近白/近黑，见下面 `primary`。
+/// 残余槽位用。主操作按钮见 [_Surfaces.apply] 里的 `primary`。
 const _seed = Color(0xff1084fe);
+
+/// 不可逆确认（删除会话、忘记运行时、去掉附件）的实心按钮。
+///
+/// 不用 [ColorScheme.error]：深色 error 是字色 `#ff263c`，白字压上去不到 4.5:1。
+ButtonStyle dangerFillStyle(SmeltColors colors) => FilledButton.styleFrom(
+  backgroundColor: colors.dangerFill,
+  foregroundColor: colors.onDangerFill,
+  minimumSize: const Size(40, 40),
+);
 
 /// 表面色同样取自 `ui_theme.rs`，不交给 `ColorScheme.fromSeed` 生成。
 ///
@@ -243,13 +275,14 @@ class _Surfaces {
   /// Grok Bot 深色是舞台最暗、卡片上抬；浅色是舞台最亮、卡片略压暗。
   /// 「顶栏取 bar」这层关系 Material 的梯子表达不了，所以顶栏/底栏单独指定。
   ColorScheme apply(ColorScheme base) => base.copyWith(
-    // 主按钮走近白/近黑（Grok Bot fill/primary），强调蓝不当事 CTA。
+    // 主操作（发送、保存、开始对话）对应桌面 commit：一块里唯一的默认提交。
+    // 桌面 Default 主题的 primary 仍是中性色，Ayu / Catppuccin 才是彩色；
+    // 手机只有一套 ColorScheme，所以固定用这组产品蓝，不跟桌面 Default 的中性主色走。
+    // 触控高度仍是 Material ≥40dp，不照搬桌面的 20 / 24 / 32。
     primary: base.brightness == Brightness.dark
-        ? const Color(0xfffafafa)
-        : const Color(0xff141414),
-    onPrimary: base.brightness == Brightness.dark
-        ? const Color(0xff141414)
-        : const Color(0xfffcfcfc),
+        ? const Color(0xff2563eb)
+        : const Color(0xff1d4ed8),
+    onPrimary: const Color(0xfffafafa),
     error: error,
     onError: const Color(0xfffcfcfc),
     surface: stage,

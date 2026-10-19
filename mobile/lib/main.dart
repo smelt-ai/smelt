@@ -1313,6 +1313,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: dangerFillStyle(context.smeltColors),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -1593,6 +1594,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: dangerFillStyle(context.smeltColors),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Forget'),
           ),
@@ -1801,7 +1803,7 @@ class _SessionHistoryPageState extends State<SessionHistoryPage> {
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel'),
           ),
-          TextButton(
+          FilledButton(
             onPressed: () => Navigator.pop(context, controller.text),
             child: const Text('Save'),
           ),
@@ -2507,8 +2509,11 @@ class _SessionPageState extends State<SessionPage> {
           ),
           if (working)
             IconButton(
-              visualDensity: VisualDensity.compact,
               tooltip: 'Stop current turn',
+              style: IconButton.styleFrom(
+                foregroundColor: context.smeltColors.danger,
+                minimumSize: const Size(40, 40),
+              ),
               onPressed: () =>
                   _fire(runtimeService.cancelTurn(widget.session.id)),
               icon: const Icon(Icons.stop_circle_outlined),
@@ -3079,8 +3084,12 @@ class _SessionPageState extends State<SessionPage> {
               top: -6,
               right: -6,
               child: IconButton.filled(
-                visualDensity: VisualDensity.compact,
                 tooltip: 'Remove image',
+                style: IconButton.styleFrom(
+                  backgroundColor: context.smeltColors.dangerFill,
+                  foregroundColor: context.smeltColors.onDangerFill,
+                  minimumSize: const Size(40, 40),
+                ),
                 onPressed: () {
                   _pendingImages.removeAt(index);
                   _markDraftEdited();

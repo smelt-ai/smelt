@@ -9,10 +9,10 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{Disableable as _, Sizable, StyledExt as _, h_flex};
+use gpui_component::{StyledExt as _, h_flex};
 use smelt_runtime_client::desktop::DesktopProxy;
 use smelt_runtime_client::protocol::desktop::{DesktopTypeTextCall, DesktopTypeTextParams};
+pub(crate) use smelt_ui::Button;
 
 use crate::runtimes::Runtime;
 use crate::ui_theme;
@@ -225,7 +225,7 @@ impl DesktopView {
             .when(closed, |d| {
                 d.child(
                     Button::new("desktop-reconnect")
-                        .small()
+                        .compact()
                         .outline()
                         .label("重新连接")
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -236,7 +236,7 @@ impl DesktopView {
             })
             .child({
                 let button = Button::new("desktop-control")
-                    .small()
+                    .compact()
                     .disabled(!connected)
                     .label(if controlling { "只看" } else { "接管" })
                     .on_click(
@@ -245,7 +245,7 @@ impl DesktopView {
                 if controlling {
                     button.outline()
                 } else {
-                    button.primary()
+                    button.commit()
                 }
             })
     }
@@ -308,8 +308,8 @@ impl crate::Workspace {
             // 回到会话页；离开这一页时视图和连接一起关掉。
             .child(
                 Button::new("desktop-close")
-                    .small()
-                    .ghost()
+                    .compact()
+                    .quiet()
                     .label("关闭")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.activate_workspace_tab(crate::WorkspaceRoute::Session, window, cx)

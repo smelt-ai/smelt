@@ -13,6 +13,12 @@ use crate::{
     updater,
 };
 
+enum ModalRole {
+    Normal,
+    Commit,
+    Danger,
+}
+
 impl Workspace {
     /// 关闭确认弹窗：关项目说清会连带关掉几个会话；关正在跑的会话说清这一轮会被终止。
     /// 用危险配色。
@@ -24,7 +30,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let (title, body, confirm_label) = match &target {
             CloseConfirm::Project {
                 label, sessions, ..
@@ -57,21 +62,15 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-close-confirm",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_close_confirm(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-close-confirm",
                         confirm_label,
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, window, cx| this.confirm_close(window, cx),
                         cx,
                     )),
@@ -92,7 +91,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground, t.border)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let tracked = self.tracked_session_ids(cx);
 
         let body: AnyElement = match &self.session_manager_list {
@@ -176,12 +174,9 @@ impl Workspace {
                                             .child("游离会话（无侧栏追踪）")
                                     })),
                             )
-                            .child(Self::modal_button(
+                            .child(Self::modal_normal_button(
                                 "kill-session-in-manager",
                                 "关闭",
-                                neutral_bg,
-                                neutral_hover,
-                                fg,
                                 move |this, _, _, cx| {
                                     this.kill_session_in_manager(id_for_kill.clone(), cx);
                                 },
@@ -221,12 +216,9 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "close-session-manager",
                         "关闭",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| {
                             this.session_manager_open = false;
                             this.session_manager_tombstones.clear();
@@ -235,12 +227,9 @@ impl Workspace {
                         cx,
                     ))
                     .when(has_detached, |el| {
-                        el.child(Self::modal_button(
+                        el.child(Self::modal_danger_button(
                             "kill-all-detached",
                             "清理全部游离会话",
-                            tint,
-                            hover,
-                            accent_text,
                             |this, _, _, cx| {
                                 this.kill_all_detached_in_manager(cx);
                             },
@@ -318,63 +307,59 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 弹窗按钮的中性/强调配色：(中性底色, 中性 hover, 强调底色, 强调 hover, 强调文字色)。
-    /// `danger=true` 强调色用红（危险操作，如删除/重启），`false` 用蓝（普通确认）。
-    pub(crate) fn modal_accent_colors(danger: bool) -> (Hsla, Hsla, Hsla, Hsla, Hsla) {
-        let neutral_bg: Hsla = ui_theme::overlay(0x0a).into();
-        let neutral_hover: Hsla = ui_theme::overlay(0x1f).into();
-        if danger {
-            (
-                neutral_bg,
-                neutral_hover,
-                ui_theme::tint(ui_theme::red(), 0x24).into(),
-                ui_theme::tint(ui_theme::red(), 0x40).into(),
-                Hsla::from(rgb(ui_theme::red())),
-            )
-        } else {
-            // 主操作用当前主题的 primary（action_fill / action_on）。
-            // danger 仍是红薄底，克制警示。
-            (
-                neutral_bg,
-                neutral_hover,
-                Hsla::from(rgb(ui_theme::action_fill())),
-                ui_theme::tint(ui_theme::action_fill(), 0xe6).into(),
-                Hsla::from(rgb(ui_theme::action_on())),
-            )
-        }
-    }
-
-    /// 弹窗按钮。用 `gpui_base::Button` 才进 Tab 序；Div 没有 tab stop。
-    /// 禁用时按钮自己丢掉焦点和点击。调用方用 `.disabled(...)`。
-    pub(crate) fn modal_button(
+    /// 弹窗里的普通按钮（取消）。
+    pub(crate) fn modal_normal_button(
         id: &'static str,
-        label: &'static str,
-        bg: Hsla,
-        hover_bg: Hsla,
-        text_color: Hsla,
+        label: impl Into<SharedString>,
         on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
-    ) -> gpui_base::Button {
+    ) -> smelt_ui::Button {
+        Self::modal_role_button(id, label, ModalRole::Normal, on_click, cx)
+    }
+
+    /// 这块确认里唯一的默认提交（退出、改名、未保存、选目录）。
+    pub(crate) fn modal_commit_button(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> smelt_ui::Button {
+        Self::modal_role_button(id, label, ModalRole::Commit, on_click, cx)
+    }
+
+    /// 不可逆确认：丢弃、删除、重启守护、关闭仍在跑的会话。
+    pub(crate) fn modal_danger_button(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> smelt_ui::Button {
+        Self::modal_role_button(id, label, ModalRole::Danger, on_click, cx)
+    }
+
+    fn modal_role_button(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        role: ModalRole,
+        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> smelt_ui::Button {
         let host = cx.entity().downgrade();
-        gpui_base::Button::new(id)
-            .h(ui_theme::height::md())
-            .px_4()
-            .flex()
-            .items_center()
-            .rounded(ui_theme::row_radius())
-            .bg(bg)
-            .text_sm()
-            .font_medium()
-            .text_color(text_color)
-            .hover(move |style| style.bg(hover_bg))
-            .accessibility_label(label)
-            .child(label)
-            .on_click(move |event, window, cx| {
-                let Some(host) = host.upgrade() else {
-                    return;
-                };
-                host.update(cx, |this, cx| on_click(this, event, window, cx));
-            })
+        let label = label.into();
+        let button = smelt_ui::Button::new(id)
+            .label(label.clone())
+            .accessibility_label(label);
+        let button = match role {
+            ModalRole::Normal => button.normal(),
+            ModalRole::Commit => button.commit(),
+            ModalRole::Danger => button.danger(),
+        };
+        button.on_click(move |event, window, cx| {
+            let Some(host) = host.upgrade() else {
+                return;
+            };
+            host.update(cx, |this, cx| on_click(this, event, window, cx));
+        })
     }
 
     /// 渲染无条件退出确认弹层：轻遮罩 + 确认退出/取消按钮。
@@ -383,8 +368,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
-            Self::modal_accent_colors(false);
         let update_is_applying =
             matches!(self.update_status, updater::UpdateStatus::Applying { .. });
 
@@ -404,12 +387,9 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-quit",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| {
                             if this.quit_requested {
                                 return;
@@ -419,7 +399,7 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_commit_button(
                         "confirm-quit",
                         if self.quit_requested {
                             "正在退出…"
@@ -428,9 +408,6 @@ impl Workspace {
                         } else {
                             "退出"
                         },
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| {
                             if this.quit_requested {
                                 return;
@@ -465,8 +442,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
-            Self::modal_accent_colors(false);
         let Some(input) = self.rename_input.as_ref() else {
             return div().into_any_element();
         };
@@ -490,21 +465,15 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-rename",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_rename(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_commit_button(
                         "confirm-rename",
                         "确定",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, window, cx| this.confirm_rename(window, cx),
                         cx,
                     )),
@@ -522,7 +491,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
 
         let content = v_flex()
             .child(Self::modal_title(fg, "确定重启守护进程吗？"))
@@ -536,27 +504,21 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-daemon-restart",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| {
                             this.show_daemon_restart_confirm = false;
                             cx.notify();
                         },
                         cx,
                     ))
-                    .child(Self::modal_button(
-                        "confirm-daemon-restart",
-                        "确定重启",
-                        tint,
-                        hover,
-                        accent_text,
-                        |this, _, _, cx| this.confirm_restart_daemon(cx),
-                        cx,
-                    )),
+                    .child(Self::modal_danger_button(
+"confirm-daemon-restart",
+"确定重启",
+|this, _, _, cx| this.confirm_restart_daemon(cx),
+cx,
+)),
             );
         self.modal_shell(
             320.,
@@ -578,8 +540,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) =
-            Self::modal_accent_colors(false);
         let cur_name = self
             .open_file
             .as_ref()
@@ -609,24 +569,18 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "unsaved-cancel",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| {
                             this.pending_file_switch = None;
                             cx.notify();
                         },
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "unsaved-discard",
                         "不保存，直接切换",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, window, cx| {
                             if let Some(target) = this.pending_file_switch.take() {
                                 this.open_file_now(target, None, window, cx);
@@ -634,12 +588,9 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_commit_button(
                         "unsaved-save-switch",
                         "保存并切换",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| {
                             if let Some(target) = this.pending_file_switch.take() {
                                 this.pending_switch_after_save = Some(target);

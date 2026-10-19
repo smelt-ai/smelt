@@ -18,10 +18,10 @@ use crate::{ProjectRef, RuntimeKey};
 use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
+pub(crate) use smelt_ui::Button;
 use smelt_ui::IconAction as _;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
@@ -115,8 +115,8 @@ fn runtime_section_header(
             Button::new(ElementId::from(SharedString::from(format!(
                 "runtime-desktop-{key:?}"
             ))))
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .icon(Icon::empty().path("smelt-icons/monitor.svg"))
             .icon_action("远程桌面")
             .opacity(0.0)
@@ -130,8 +130,8 @@ fn runtime_section_header(
             Button::new(ElementId::from(SharedString::from(format!(
                 "runtime-open-project-{key:?}"
             ))))
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .icon(IconName::Plus)
             .icon_action("打开项目")
             .opacity(0.0)
@@ -402,8 +402,8 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 Button::new("session-grouping")
-                    .ghost()
-                    .size(px(24.))
+                    .quiet()
+                    .compact()
                     .icon(IconName::Settings2)
                     .icon_action("筛选与分组")
                     .dropdown_menu(move |menu, _window, _cx| {
@@ -495,8 +495,8 @@ impl Workspace {
                                     })
                                     .child(
                                         Button::new("open-project")
-                                            .ghost()
-                                            .size(px(24.))
+                                            .quiet()
+                                            .compact()
                                             .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
                                             .icon_action("添加项目")
                                             .on_click(move |_ev, _window, cx| {
@@ -764,13 +764,13 @@ impl Workspace {
                         .child(
                             // 数字和「+」不是两套右对齐元素，而是同一个方形槽里的
                             // 两个满铺图层；hover 只切透明度，因此字形中心不会横跳。
+                            // 槽仍是 28，计数和按钮共用一个中心。「+」本身是图标档 20。
                             // 数字只在折叠或空项目时有用：展开后下面的会话一眼就数得出来。
                             div()
                                 .relative()
                                 .flex_shrink_0()
                                 .w(px(PROJECT_NEW_BUTTON_SIZE))
-                                // 保留原来的项目行高；28px 新建按钮在 hover 时向上下
-                                // 各扩 4px，完整占满标题行，而不是把所有项目行撑高。
+                                // 行高仍是 20。28 的槽在垂直方向溢出，不把项目行撑高。
                                 .h(px(PROJECT_ACTION_SLOT_HEIGHT))
                                 .child(
                                     div()
@@ -1282,30 +1282,21 @@ impl Workspace {
                             .child(label)
                     }))
                     .child(
-                        // 关闭是这一行唯一的主操作，放在行尾，hover 整行才显出来；用透明度
-                        // 而不是不渲染，位置一直占着，显隐时标题截断不跳。不用 ghost Button：
-                        // 它的 hover 底是 secondary(bg_card).lighten(0.1)，压在选中行的
-                        // bg_selected 上比底色还暗，且图标色 hover 前后不变。这里自己画，
-                        // hover 只把图标转红、不加底。
-                        div()
-                            .id(("close-session", ui_id))
+                        // 关闭占着行尾。整行 hover 才显出来，用透明度而不是不渲染，
+                        // 标题截断才不会跳。悬停字色走主题 danger。
+                        Button::new(("close-session", ui_id))
+                            .dismiss()
                             .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(20.))
-                            .rounded(px(4.))
-                            .text_color(rgb(ui_theme::text_muted()))
+                            .icon(IconName::Close)
+                            .icon_action("关闭")
                             .opacity(0.0)
                             .group_hover(SESSION_ROW_GROUP, |s| s.opacity(1.0))
-                            .hover(|d| d.text_color(rgb(ui_theme::red())))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation()
-                            })
-                            .child(Icon::new(IconName::Close).size(px(14.)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_ev, window, cx| {
                                 cx.stop_propagation();
-                                e_close.update(cx, |ws, cx| ws.request_close_session(ix, window, cx));
+                                e_close.update(cx, |ws, cx| {
+                                    ws.request_close_session(ix, window, cx)
+                                });
                             }),
                     )
                     .when(can_drag, |row| {
@@ -1531,8 +1522,8 @@ impl Workspace {
                                         })
                                         .child(
                                             Button::new(("close-pane", pane_entity_id))
-                                                .ghost()
-                                                .xsmall()
+                                                .quiet()
+                                                .icon_size()
                                                 .icon(IconName::Close)
                                                 .accessibility_label("关闭分栏")
                                                 .on_click(move |_ev, window, cx| {
@@ -1804,47 +1795,14 @@ impl Workspace {
                     .id("sidebar-settings")
                     .relative()
                     .flex_1()
-                    .h(ui_theme::height::md())
                     .min_w_0()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(ui_theme::text_mid()))
-                    .hover(|d| {
-                        d.bg(rgb(ui_theme::bg_row_hover()))
-                            .text_color(rgb(ui_theme::text_bright()))
-                    })
                     .child(
                         Button::new("sidebar-settings-btn")
-                            .custom(ButtonCustomVariant::new(cx))
-                            .h(ui_theme::height::md())
+                            .normal()
+                            .capsule()
                             .w_full()
-                            .px_0()
-                            .cursor_pointer()
-                            .accessibility_label("设置")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .font_medium()
-                                    .text_color(rgb(ui_theme::text_mid()))
-                                    .child(
-                                        Icon::new(IconName::Settings)
-                                            .size(px(14.))
-                                            .text_color(rgb(ui_theme::text_muted())),
-                                    )
-                                    .child("设置"),
-                            )
+                            .icon(IconName::Settings)
+                            .label("设置")
                             .dropdown_menu_with_anchor(
                                 Anchor::BottomLeft,
                                 move |menu, _window, _cx| {

@@ -40,7 +40,7 @@ impl Workspace {
             ))
             .child(
                 Button::new("automations-add")
-                    .primary()
+                    .normal()
                     .icon(IconName::Plus)
                     .label("新建自动化")
                     .on_click(move |_, window, cx| {
@@ -549,8 +549,8 @@ fn render_automation_row_menu(
     let delete_entity = entity.clone();
     let cancel_entity = entity;
     Button::new(format!("automation-row-more-{automation_id}"))
-        .ghost()
-        .small()
+        .quiet()
+        .compact()
         .icon(IconName::Ellipsis)
         .accessibility_label("更多操作")
         .dropdown_menu(move |mut menu, _, _| {
@@ -637,8 +637,8 @@ fn render_template_card(template: &AutomationTemplate, entity: Entity<Workspace>
                 .child(neutral_icon_mark(template_icon(template.glyph), 32.))
                 .child(
                     Button::new(format!("automation-template-add-{id}"))
-                        .ghost()
-                        .small()
+                        .quiet()
+                        .compact()
                         .label("添加")
                         .on_click(move |_, window, cx| {
                             add_entity.update(cx, |workspace, cx| {

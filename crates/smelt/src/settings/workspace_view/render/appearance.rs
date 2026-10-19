@@ -206,7 +206,7 @@ pub(super) fn window_page(
                                     )
                                     .child(
                                         Button::new("pick-img")
-                                            .small()
+                                            .compact()
                                             .label("选择图片…")
                                             .flex_shrink_0()
                                             .on_click(move |_, _window, cx: &mut App| {
@@ -217,8 +217,8 @@ pub(super) fn window_page(
                                     )
                                     .child(
                                         Button::new("clear-img")
-                                            .ghost()
-                                            .small()
+                                            .quiet()
+                                            .compact()
                                             .label("清除")
                                             .flex_shrink_0()
                                             .on_click(move |_, _window, cx: &mut App| {

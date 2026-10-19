@@ -84,7 +84,7 @@ fn preset_row(
     } else {
         let entity = entity.clone();
         Button::new(format!("pi-mcp-add-{}", preset.id))
-            .xsmall()
+            .icon_size()
             .label("添加")
             .tooltip(if preset.transport.needs_sign_in() {
                 "写入 ~/.pi/agent/mcp.json，之后点「登录」授权"
@@ -101,8 +101,8 @@ fn preset_row(
     // 加没加都留着：先添加、后装扩展也是常见顺序。
     let install = preset.extension_url.map(|url| {
         Button::new(format!("pi-mcp-extension-{}", preset.id))
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .label("安装扩展")
             .tooltip("打开 Chrome 应用商店里的扩展页")
             .on_click(move |_, _, cx| cx.open_url(url))
@@ -216,7 +216,7 @@ fn server_row(
         let entity = entity.clone();
         let name = server.name.clone();
         Button::new(format!("pi-mcp-login-{}", server.name))
-            .xsmall()
+            .icon_size()
             .label(if logging_in {
                 "等待浏览器授权…"
             } else if server.signed_in {
@@ -236,8 +236,8 @@ fn server_row(
         let name = server.name.clone();
         let enable = !server.enabled;
         Button::new(format!("pi-mcp-toggle-{}", server.name))
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .label(if enable { "启用" } else { "停用" })
             .disabled(logging_in)
             .on_click(move |_, _, cx| {
@@ -251,8 +251,8 @@ fn server_row(
         let entity = entity.clone();
         let name = server.name.clone();
         Button::new(format!("pi-mcp-remove-{}", server.name))
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .icon(crate::trash_icon())
             .icon_action("从 mcp.json 移除")
             .disabled(logging_in || removing)
@@ -308,8 +308,8 @@ fn confirm_remove(entity: &Entity<Workspace>, name: &str, palette: Palette) -> D
                 .gap_1()
                 .child(
                     Button::new("pi-mcp-remove-cancel")
-                        .ghost()
-                        .xsmall()
+                        .quiet()
+                        .icon_size()
                         .label("取消")
                         .on_click(move |_, _, cx| {
                             cancel_entity
@@ -319,7 +319,7 @@ fn confirm_remove(entity: &Entity<Workspace>, name: &str, palette: Palette) -> D
                 .child(
                     Button::new("pi-mcp-remove-confirm")
                         .danger()
-                        .xsmall()
+                        .icon_size()
                         .label("移除")
                         .on_click(move |_, _, cx| {
                             let name = confirm_name.clone();
@@ -355,8 +355,8 @@ fn footer(entity: &Entity<Workspace>, mcp_path: &str, palette: Palette) -> Div {
                 )
                 .child(
                     Button::new("pi-edit-mcp-file")
-                        .ghost()
-                        .xsmall()
+                        .quiet()
+                        .icon_size()
                         .label("mcp.json")
                         .tooltip(mcp_path.to_string())
                         .on_click(move |_, window, cx| {

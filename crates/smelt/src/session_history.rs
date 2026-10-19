@@ -1170,7 +1170,6 @@ impl Workspace {
             let t = cx.theme();
             (t.foreground, t.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let content = v_flex()
             .child(Self::modal_title(fg, "确定删除这条历史会话吗？"))
             .child(div().text_sm().text_color(muted).child(format!(
@@ -1182,21 +1181,15 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-delete-history",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_delete_history(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-delete-history",
                         "确定删除",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_delete_history(cx),
                         cx,
                     )),

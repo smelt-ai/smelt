@@ -6,11 +6,11 @@ use gpui::ElementId;
 use gpui::InteractiveElement;
 use gpui::StatefulInteractiveElement;
 use gpui::prelude::FluentBuilder;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::*;
+pub(crate) use smelt_ui::Button;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -923,8 +923,8 @@ pub fn file_content_parts(
                     };
                     el.child(
                         Button::new("markdown-view-toggle")
-                            .ghost()
-                            .xsmall()
+                            .quiet()
+                            .icon_size()
                             .flex_shrink_0()
                             .label(markdown_label)
                             .on_click(cx.listener(move |ws, _ev, _window, cx| {
@@ -934,8 +934,8 @@ pub fn file_content_parts(
                 })
                 .child(
                     Button::new("file-tree-toggle")
-                        .ghost()
-                        .small()
+                        .quiet()
+                        .compact()
                         .flex_shrink_0()
                         .icon(if file_tree_open {
                             IconName::PanelRight
@@ -1029,7 +1029,6 @@ impl Workspace {
     /// 「删除文件」二次确认弹窗。
     pub fn render_delete_file_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let Some(target) = self.delete_file_target.as_ref() else {
             return div().into_any_element();
         };
@@ -1057,21 +1056,15 @@ impl Workspace {
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-delete-file",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_delete_file(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-delete-file",
                         "确定删除",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_delete_file(cx),
                         cx,
                     )),

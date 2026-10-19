@@ -349,8 +349,8 @@ impl AcpView {
                                 row.child(
                                     Button::new(("acp-edit-message", i))
                                         .icon(Icon::new(IconName::Undo2))
-                                        .ghost()
-                                        .xsmall()
+                                        .quiet()
+                                        .icon_size()
                                         .icon_action("编辑并重发最后一条消息")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
@@ -433,8 +433,8 @@ impl AcpView {
                                 row.child(
                                     Button::new(("acp-edit-message", i))
                                         .icon(Icon::new(IconName::Undo2))
-                                        .ghost()
-                                        .xsmall()
+                                        .quiet()
+                                        .icon_size()
                                         .icon_action("编辑并重发最后一条消息（图片需重新添加）")
                                         .on_click(cx.listener(
                                             move |this, _ev, _window, cx| {
@@ -538,8 +538,8 @@ impl AcpView {
                                                             Icon::empty()
                                                                 .path("smelt-icons/git-branch.svg"),
                                                         )
-                                                        .ghost()
-                                                        .xsmall()
+                                                        .quiet()
+                                                        .icon_size()
                                                         .icon_action("分叉对话")
                                                         .on_click(cx.listener(
                                                             move |this, _ev, _window, cx| {
@@ -780,7 +780,7 @@ impl AcpView {
                                     i,
                                     muted,
                                     Button::new(owner_id("acp-tool-compact-trigger", &owner))
-                                        .text()
+                                        .quiet()
                                         .w_full()
                                         .justify_start()
                                         .group(PEEK_ROW_GROUP)
@@ -993,8 +993,8 @@ impl AcpView {
                                                                 &owner,
                                                                 part_ix,
                                                             ))
-                                                            .text()
-                                                            .xsmall()
+                                                            .quiet()
+                                                            .icon_size()
                                                             .label(if expanded {
                                                                 "收起".to_string()
                                                             } else {
@@ -1358,7 +1358,7 @@ impl AcpView {
                 )
                 .child(
                     Button::new(("acp-turn-outcome-action", entry_ix))
-                        .small()
+                        .compact()
                         .label(label)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.rerun_last_turn(action, window, cx);
@@ -1587,7 +1587,7 @@ impl AcpView {
                         ix,
                         muted,
                         Button::new(owner_id("acp-tool-run-item-trigger", &tool_owner))
-                            .text()
+                            .quiet()
                             .w_full()
                             .justify_start()
                             .group(PEEK_ROW_GROUP)
@@ -2182,8 +2182,8 @@ impl AcpView {
                         .items_center()
                         .child(
                             Button::new(owner_part("acp-tool-toggle", &owner, part_ix))
-                                .text()
-                                .xsmall()
+                                .quiet()
+                                .icon_size()
                                 .label(toggle_label)
                                 .text_color(gpui::rgb(ui_theme::text_faint()))
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {

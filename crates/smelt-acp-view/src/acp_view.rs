@@ -17,7 +17,6 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, list as virtual_list, point,
     px, size, uniform_list,
 };
-use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
@@ -25,6 +24,7 @@ use gpui_component::popover::Popover;
 use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h_flex, v_flex};
+pub(crate) use smelt_ui::Button;
 
 use agent_client_protocol::schema::v1::SessionId;
 
@@ -4436,8 +4436,8 @@ impl AcpView {
             } else {
                 IconName::Copy
             })
-            .ghost()
-            .xsmall()
+            .quiet()
+            .icon_size()
             .when_some(opacity, |button, opacity| button.opacity(opacity))
             .icon_action(tooltip)
             .on_click(cx.listener(move |this, _event, _window, cx| {

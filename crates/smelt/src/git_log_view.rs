@@ -16,11 +16,11 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::diff::Diff;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Sizable as _, h_flex, v_flex};
+pub(crate) use smelt_ui::Button;
 
 use crate::git_log::{CommitNode, Edge, GitLogState, GraphRow, LogScope};
 use crate::ui_theme;
@@ -347,9 +347,8 @@ pub fn git_log_view(
                 )
                 .child(
                     Button::new("git-log-reload")
-                        .primary()
-                        .xsmall()
-                        .rounded(px(999.))
+                        .normal()
+                        .icon_size()
                         .label("刷新")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let root = this.current_local_cwd(cx);

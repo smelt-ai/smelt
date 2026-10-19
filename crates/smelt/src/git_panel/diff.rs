@@ -284,8 +284,8 @@ impl GitDiffBody {
         let open_full_file = chrome.worktree_file.clone().map(|full_path| {
             let host = host.clone();
             Button::new("diff-view-full-file")
-                .ghost()
-                .xsmall()
+                .quiet()
+                .icon_size()
                 .flex_none()
                 .label("在右侧 FILES 打开")
                 .text_color(muted)
@@ -306,8 +306,8 @@ impl GitDiffBody {
         let collapse_all = chrome.aggregate.then(|| {
             let host = host.clone();
             Button::new("diff-collapse-all")
-                .ghost()
-                .xsmall()
+                .quiet()
+                .icon_size()
                 .flex_none()
                 .label(if all_collapsed {
                     "全部展开"
@@ -505,8 +505,8 @@ fn diff_header_suffix(
             let root = root.to_string();
             row = row.child(
                 Button::new("diff-stage-file")
-                    .ghost()
-                    .xsmall()
+                    .quiet()
+                    .icon_size()
                     .label(label)
                     .on_click(move |_ev, _window, cx| {
                         let Some(host) = host.upgrade() else {
@@ -528,8 +528,8 @@ fn diff_header_suffix(
         let host = host.clone();
         row = row.child(
             Button::new((ElementId::from("diff-open-header"), rel.clone()))
-                .ghost()
-                .xsmall()
+                .quiet()
+                .icon_size()
                 .label("打开")
                 .on_click(move |_ev, window, cx| {
                     let Some(host) = host.upgrade() else {
@@ -577,15 +577,13 @@ fn hunk_ops_row(
     ops: HunkOps,
     root: String,
     host: WeakEntity<Workspace>,
-    cx: &App,
+    _cx: &App,
 ) -> Div {
-    let theme = cx.theme();
-    let button = |id: &'static str, label: &'static str, color: Hsla| {
-        Button::new((id, idx))
-            .ghost()
-            .xsmall()
-            .label(label)
-            .text_color(color)
+    let quiet = |id: &'static str, label: &'static str| {
+        Button::new((id, idx)).quiet().icon_size().label(label)
+    };
+    let danger = |id: &'static str, label: &'static str| {
+        Button::new((id, idx)).danger().icon_size().label(label)
     };
     let row = div().flex().items_center().gap_2();
     match ops {
@@ -593,26 +591,26 @@ fn hunk_ops_row(
         HunkOps::StageDiscard => {
             let (stage_host, stage_root) = (host.clone(), root.clone());
             let (discard_host, discard_root) = (host, root);
-            row.child(button("hunk-stage", "暂存块", theme.accent).on_click(
-                move |_ev, _window, cx| {
+            row.child(
+                quiet("hunk-stage", "暂存块").on_click(move |_ev, _window, cx| {
                     let Some(host) = stage_host.upgrade() else {
                         return;
                     };
                     let root = stage_root.clone();
                     host.update(cx, |this, cx| this.stage_hunk(root, idx, cx));
-                },
-            ))
-            .child(button("hunk-discard", "丢弃块", theme.danger).on_click(
-                move |_ev, _window, cx| {
+                }),
+            )
+            .child(
+                danger("hunk-discard", "丢弃块").on_click(move |_ev, _window, cx| {
                     let Some(host) = discard_host.upgrade() else {
                         return;
                     };
                     let root = discard_root.clone();
                     host.update(cx, |this, cx| this.start_discard_hunk(root, idx, cx));
-                },
-            ))
+                }),
+            )
         }
-        HunkOps::Unstage => row.child(button("hunk-unstage", "取消暂存块", theme.accent).on_click(
+        HunkOps::Unstage => row.child(quiet("hunk-unstage", "取消暂存块").on_click(
             move |_ev, _window, cx| {
                 let Some(host) = host.upgrade() else {
                     return;
@@ -677,7 +675,7 @@ fn diff_comment_composer(
                 .gap_2()
                 .child(
                     Button::new("diff-comment-cancel")
-                        .small()
+                        .compact()
                         .label("取消")
                         .on_click(move |_ev, window, cx| {
                             let Some(host) = clear_host.upgrade() else {
@@ -688,14 +686,17 @@ fn diff_comment_composer(
                             });
                         }),
                 )
-                .child(Button::new("diff-send").small().label("发送评论").on_click(
-                    move |_ev, window, cx| {
-                        let Some(host) = host.upgrade() else {
-                            return;
-                        };
-                        host.update(cx, |this, cx| this.send_diff_comments(window, cx));
-                    },
-                )),
+                .child(
+                    Button::new("diff-send")
+                        .compact()
+                        .label("发送评论")
+                        .on_click(move |_ev, window, cx| {
+                            let Some(host) = host.upgrade() else {
+                                return;
+                            };
+                            host.update(cx, |this, cx| this.send_diff_comments(window, cx));
+                        }),
+                ),
         )
         .border_color(border)
 }

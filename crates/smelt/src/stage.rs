@@ -10,9 +10,9 @@
 
 use gpui::StatefulInteractiveElement;
 use gpui::*;
-use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::*;
+pub(crate) use smelt_ui::Button;
 
 use crate::{StageCover, Workspace, WorkspaceRoute, acp_view, ui_theme, workspace_frame};
 use smelt_ui::IconAction as _;
@@ -533,7 +533,6 @@ impl Workspace {
         } else {
             "全屏显示右侧面板"
         };
-        let round = ButtonRounded::Size(px(9999.));
         h_flex()
             .flex_none()
             .items_center()
@@ -542,9 +541,8 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children((promoted || self.tool_panel_open).then(|| {
                 Button::new("tool-panel-fullscreen-toggle")
-                    .ghost()
-                    .small()
-                    .rounded(round)
+                    .quiet()
+                    .compact()
                     .selected(promoted)
                     .toggled(promoted)
                     .icon(if promoted {
@@ -566,9 +564,8 @@ impl Workspace {
             }))
             .child(
                 Button::new("tool-panel-toggle")
-                    .ghost()
-                    .small()
-                    .rounded(round)
+                    .quiet()
+                    .compact()
                     .selected(panel_visible)
                     .toggled(panel_visible)
                     .icon(if panel_visible {

@@ -1,7 +1,6 @@
 //! ACP 审批卡与选择题卡。
 
 use super::*;
-use gpui_component::Disableable as _;
 
 impl AcpView {
     pub(super) fn render_approval_ui(
@@ -49,11 +48,8 @@ impl AcpView {
                 buttons = buttons.child(
                     h_flex().w_full().min_w_0().child(
                         Button::new((gpui::ElementId::from("acp-perm-primary"), option_id.clone()))
-                            .primary()
-                            .h(ui_theme::height::lg())
-                            .px_4()
-                            .rounded(ui_theme::height::lg() / 2.)
-                            .font_semibold()
+                            .commit()
+                            .capsule()
                             .label(format!("{name} ⌘⏎"))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 this.pick_permission(&tool_call_id, &option_id, cx);
@@ -71,36 +67,19 @@ impl AcpView {
                 );
                 let option_id = opt.option_id.clone();
                 let tool_call_id = tool_call_id.clone();
-                // 次级选项也改软底胶囊：danger 用红色调软底，其余用中性灰软底,
-                // 不再是空心线框——跟主按钮的实心胶囊放一起才是同一套语言，
-                // 而不是「一个填色一个描边」的两套风格拼在一起。
-                let bg_u32 = if danger {
-                    ui_theme::red()
+                let button =
+                    Button::new((gpui::ElementId::from("acp-perm-opt"), option_id.clone()))
+                        .capsule();
+                let button = if danger {
+                    button.danger()
                 } else {
-                    ui_theme::text_muted()
+                    button.outline()
                 };
-                let soft = |alpha| gpui::Hsla::from(ui_theme::tint(bg_u32, alpha));
-                let button = Button::new((gpui::ElementId::from("acp-perm-opt"), option_id.clone()))
-                    .custom(
-                        ButtonCustomVariant::new(cx)
-                            .color(soft(0x1c))
-                            .foreground(if danger {
-                                gpui::rgb(ui_theme::red()).into()
-                            } else {
-                                t.foreground
-                            })
-                            .hover(soft(0x30))
-                            .active(soft(0x40)),
-                    )
-                    .h(ui_theme::height::lg())
-                    .px_3p5()
-                    .rounded(ui_theme::height::lg() / 2.)
-                    // 自定义变体的底色只取 `color` 的两成，这里直接给足。
-                    .bg(soft(0x1c))
-                    .label(opt.name.clone())
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                let button = button.label(opt.name.clone()).on_click(cx.listener(
+                    move |this, _ev, _window, cx| {
                         this.pick_permission(&tool_call_id, &option_id, cx);
-                    }));
+                    },
+                ));
                 buttons = buttons.child(h_flex().w_full().min_w_0().child(button));
             }
             buttons.into_any_element()
@@ -271,11 +250,9 @@ impl AcpView {
                     }]
                 );
             let skip = Button::new("acp-elicit-skip")
-                .text()
-                .small()
-                .px_3()
+                .quiet()
+                .compact()
                 .label("跳过")
-                .text_color(muted)
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.dismiss_elicitation(cx);
                 }));
@@ -335,11 +312,8 @@ impl AcpView {
                                     gpui::ElementId::from("acp-elicit-url"),
                                     field.key.clone(),
                                 ))
-                                .primary()
-                                .h(ui_theme::height::lg())
-                                .px_3()
-                                .rounded(ui_theme::height::lg() / 2.)
-                                .font_semibold()
+                                .commit()
+                                .capsule()
                                 .label("打开并继续")
                                 .on_click(cx.listener(
                                     move |this, _ev, _window, cx| {
@@ -462,12 +436,9 @@ impl AcpView {
                     h_flex().w_full().gap_2().items_center().child(
                         Button::new("acp-elicit-submit")
                             .debug_selector(|| "acp-elicit-submit".to_string())
-                            .primary()
+                            .commit()
+                            .capsule()
                             .disabled(!ready)
-                            .h(ui_theme::height::lg())
-                            .px_4()
-                            .rounded(ui_theme::height::lg() / 2.)
-                            .font_semibold()
                             .label("提交")
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 if this.elicit_ready(cx) {

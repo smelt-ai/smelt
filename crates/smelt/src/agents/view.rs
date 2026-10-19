@@ -13,7 +13,6 @@ impl Workspace {
             let theme = cx.theme();
             (theme.foreground, theme.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let kept = if target.conversations == 0 {
             String::new()
         } else {
@@ -32,21 +31,15 @@ impl Workspace {
                     .flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-delete-agent",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_delete_agent(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-delete-agent",
                         "确定删除",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_delete_agent(cx),
                         cx,
                     )),
@@ -68,7 +61,6 @@ impl Workspace {
             let theme = cx.theme();
             (theme.foreground, theme.muted_foreground)
         };
-        let (neutral_bg, neutral_hover, tint, hover, accent_text) = Self::modal_accent_colors(true);
         let scope = match target.layer {
             MemoryLayer::Agent => "这个智能体之后不会再用到它。",
             MemoryLayer::User => "这是全局记忆，所有智能体之后都不会再用到它。",
@@ -86,21 +78,15 @@ impl Workspace {
                     .flex()
                     .justify_end()
                     .gap_2()
-                    .child(Self::modal_button(
+                    .child(Self::modal_normal_button(
                         "cancel-delete-agent-memory",
                         "取消",
-                        neutral_bg,
-                        neutral_hover,
-                        fg,
                         |this, _, _, cx| this.cancel_delete_agent_memory(cx),
                         cx,
                     ))
-                    .child(Self::modal_button(
+                    .child(Self::modal_danger_button(
                         "confirm-delete-agent-memory",
                         "确定删除",
-                        tint,
-                        hover,
-                        accent_text,
                         |this, _, _, cx| this.confirm_delete_agent_memory(cx),
                         cx,
                     )),
@@ -252,7 +238,7 @@ impl Workspace {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             Button::new("workbench-chat-switch")
-                                .ghost()
+                                .quiet()
                                 .size(px(22.))
                                 .icon(IconName::ChevronDown)
                                 .icon_action("更换默认智能体")
@@ -287,37 +273,20 @@ impl Workspace {
         label: String,
         ready: Vec<smelt_model::default_conversation::ConversationAgentChoice>,
         clear_stored: bool,
-        cx: &App,
+        _cx: &App,
     ) -> AnyElement {
-        div()
-            .id("workbench-chat")
-            .h(crate::ui_theme::height::md())
-            .rounded(crate::ui_theme::row_radius())
-            .cursor_pointer()
-            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-            .child(
-                Button::new("workbench-chat-pick")
-                    .custom(ButtonCustomVariant::new(cx))
-                    .h(crate::ui_theme::height::md())
-                    .w_full()
-                    .px_2()
-                    .cursor_pointer()
-                    .accessibility_label(label.clone())
-                    .child(new_conversation_row_body(label, None).w_full())
-                    // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
-                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
-                        if clear_stored {
-                            clear_default_conversation_agent(cx);
-                        }
-                        fill_conversation_agent_menu(
-                            menu,
-                            ready.clone(),
-                            None,
-                            true,
-                            entity.clone(),
-                        )
-                    }),
-            )
+        Button::new("workbench-chat-pick")
+            .quiet()
+            .w_full()
+            .accessibility_label(label.clone())
+            .child(new_conversation_row_body(label, None).w_full())
+            // 侧栏顶行，菜单向下展开。BottomLeft 会盖住红绿灯。
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
+                if clear_stored {
+                    clear_default_conversation_agent(cx);
+                }
+                fill_conversation_agent_menu(menu, ready.clone(), None, true, entity.clone())
+            })
             .into_any_element()
     }
 
@@ -465,32 +434,20 @@ impl Workspace {
                         }),
                     )
                     .child(
-                        div()
+                        Button::new(format!("close-product-conversation-{sid}"))
+                            .dismiss()
                             .flex_shrink_0()
+                            .icon(IconName::Close)
+                            .icon_action("关闭")
                             .opacity(0.0)
                             .group_hover("product-conv-row", |s| s.opacity(1.0))
-                            .child(
-                                div()
-                                    .id(format!("close-product-conversation-{sid}"))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(20.))
-                                    .rounded(px(4.))
-                                    .cursor_pointer()
-                                    .text_color(rgb(crate::ui_theme::text_muted()))
-                                    .hover(|d| d.text_color(rgb(crate::ui_theme::red())))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .child(Icon::new(IconName::Close).size(px(14.)))
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        close_entity.update(cx, |workspace, cx| {
-                                            workspace.request_close_session(open_ix, window, cx)
-                                        });
-                                    }),
-                            ),
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                close_entity.update(cx, |workspace, cx| {
+                                    workspace.request_close_session(open_ix, window, cx)
+                                });
+                            }),
                     )
                     .on_click(move |_, window, cx| {
                         open_entity.update(cx, |workspace, cx| {
@@ -593,7 +550,7 @@ impl Workspace {
         let add_button = if let [kind] = engines.as_slice() {
             let kind = *kind;
             Button::new("agents-add")
-                .primary()
+                .normal()
                 .icon(IconName::Plus)
                 .label("新建智能体")
                 .on_click(move |_, window, cx| {
@@ -602,7 +559,7 @@ impl Workspace {
                 .into_any_element()
         } else {
             Button::new("agents-add")
-                .primary()
+                .normal()
                 .icon(IconName::Plus)
                 .label("新建智能体")
                 .dropdown_menu(move |mut menu, _, _| {
@@ -703,8 +660,8 @@ impl Workspace {
             .when(draft, |row| {
                 row.child(
                     Button::new("agent-draft-start-conversation")
-                        .primary()
-                        .small()
+                        .commit()
+                        .compact()
                         .label("开始对话")
                         .on_click(move |_, window, cx| {
                             start_entity.update(cx, |workspace, cx| {
@@ -908,8 +865,8 @@ impl Workspace {
                     )
                     .child(
                         Button::new("agents-empty-add")
-                            .primary()
-                            .small()
+                            .normal()
+                            .compact()
                             .icon(IconName::Plus)
                             .label("新建智能体")
                             .on_click(move |_, window, cx| {
@@ -984,8 +941,8 @@ impl Workspace {
         let conversation_id = agent.id.clone();
         let talk_entity = entity.clone();
         let talk_button = Button::new("agent-new-conversation")
-            .primary()
-            .small()
+            .commit()
+            .compact()
             .label("新对话")
             .tooltip("新开一段对话")
             .on_click(move |_, window, cx| {
@@ -1003,8 +960,8 @@ impl Workspace {
             format!("请先删除关联的 {automation_count} 条自动化")
         };
         let delete_button = Button::new("agent-delete")
-            .ghost()
-            .small()
+            .quiet()
+            .compact()
             .icon(IconName::Ellipsis)
             .accessibility_label("更多操作")
             .tooltip(delete_tooltip)

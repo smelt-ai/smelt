@@ -5,7 +5,7 @@ use gpui::{
     Window, canvas, div, relative,
 };
 
-use gpui_component::button::{Button, ButtonRounded};
+pub(crate) use smelt_ui::Button;
 use smelt_ui::IconAction as _;
 
 use super::*;
@@ -431,10 +431,10 @@ impl Workspace {
                 )
                 .child(
                     Button::new("workspace-image-preview-close")
+                        .surface()
+                        .circle()
                         .icon(IconName::Close)
                         .icon_action("关闭预览")
-                        .with_size(px(34.))
-                        .rounded(ButtonRounded::Size(px(9999.)))
                         .absolute()
                         .top(px(48.))
                         .right(px(48.))
