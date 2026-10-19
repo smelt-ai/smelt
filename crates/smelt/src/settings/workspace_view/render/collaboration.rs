@@ -303,8 +303,11 @@ pub(super) fn remote_page(
                         true,
                     ),
                     crate::runtimes::RuntimeStatus::Offline(error) => (format!("离线：{error}"), false),
-                    crate::runtimes::RuntimeStatus::Incompatible(detail) => {
+                    crate::runtimes::RuntimeStatus::Incompatible { detail, .. } => {
                         (format!("版本不兼容：{detail}"), false)
+                    }
+                    crate::runtimes::RuntimeStatus::Upgrading(progress) => {
+                        (format!("升级中：{progress}"), false)
                     }
                 };
                 list = list.child(

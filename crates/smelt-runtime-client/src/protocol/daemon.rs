@@ -39,6 +39,8 @@ pub enum DaemonOperation {
     Resize,
     /// 远程桌面：转发到运行时本机 VNC 的原始字节流，见 [`super::desktop`]。
     DesktopAttach,
+    /// 升到指定版本：运行时自己下载、安装、交接，见 [`super::runtime_upgrade`]。
+    RuntimeUpgrade,
 }
 
 /// 首帧只先解析操作名，其余字段原样留给对应 handler。
@@ -88,6 +90,7 @@ mod tests {
             (DaemonOperation::Input, "input"),
             (DaemonOperation::Resize, "resize"),
             (DaemonOperation::DesktopAttach, "desktop_attach"),
+            (DaemonOperation::RuntimeUpgrade, "runtime_upgrade"),
         ];
 
         for (operation, wire_name) in operations {

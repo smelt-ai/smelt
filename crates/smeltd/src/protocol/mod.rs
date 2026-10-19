@@ -178,6 +178,9 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         DaemonOperation::DesktopAttach => {
             crate::desktop::handle_desktop_attach(conn, reader, &crate::desktop::vnc_endpoint())
         }
+        DaemonOperation::RuntimeUpgrade => {
+            crate::runtime_upgrade::handle_runtime_upgrade(conn, &v)
+        }
     }
 }
 

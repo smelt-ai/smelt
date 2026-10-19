@@ -69,7 +69,8 @@ pub(crate) fn runtime_unavailable_label(key: &RuntimeKey, cx: &gpui::App) -> Opt
             .map(|remote| &remote.status)
         {
             Some(RuntimeStatus::Online { .. }) => None,
-            Some(RuntimeStatus::Incompatible(_)) => Some("版本不兼容"),
+            Some(RuntimeStatus::Incompatible { .. }) => Some("版本不兼容"),
+            Some(RuntimeStatus::Upgrading(_)) => Some("升级中"),
             Some(RuntimeStatus::Connecting | RuntimeStatus::Offline(_)) | None => Some("离线"),
         },
     }
@@ -90,7 +91,13 @@ pub(crate) enum RuntimeStatus {
     Offline(String),
     /// 连得上，但版本和这个桌面对不上（见 `smelt_client::compat`），说明里写着该升级
     /// 哪一边。这时不订阅它的事件：订阅了也解不出来，只会断开重连。
-    Incompatible(String),
+    Incompatible {
+        detail: String,
+        /// 是运行时旧：可以请它升到这个桌面的版本（见 [`push_upgrade`]）。
+        runtime_outdated: bool,
+    },
+    /// 正在请它升到这个桌面的版本，带着给人看的进展。
+    Upgrading(String),
 }
 
 /// 一个登记过的远程运行时。
@@ -184,17 +191,94 @@ pub(crate) fn status_of(client: &RuntimeClient) -> RuntimeStatus {
     match client.describe() {
         Ok(described) => described_status(described),
         Err(error) => match smelt_client::compat::describe_error(&error) {
-            Some(incompatible) => RuntimeStatus::Incompatible(incompatible.to_string()),
+            Some(incompatible) => incompatible_status(&incompatible),
             None => RuntimeStatus::Offline(error.to_string()),
         },
     }
+}
+
+fn incompatible_status(incompatible: &smelt_client::compat::Incompatibility) -> RuntimeStatus {
+    RuntimeStatus::Incompatible {
+        detail: incompatible.to_string(),
+        runtime_outdated: incompatible.outdated == smelt_client::compat::Outdated::Runtime,
+    }
+}
+
+/// 这个桌面的版本：请远程运行时升级时就升到它。
+pub(crate) const DESKTOP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 请运行时升级（[`push_upgrade`]）的结局。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PushUpgrade {
+    /// 运行时接下后断开了：多半是交接到了新版本（旧进程退出），也可能是中途断了网。
+    /// 重新探测才知道。
+    HandedOff,
+    /// 装着的已经是这个版本。
+    Current,
+    /// 新版本装好了，运行时正忙，空闲时自己换过去。
+    Staged(String),
+    /// 运行时太旧，不认识这个请求：只能到那台机器上手动装一次。
+    Unsupported,
+    Failed(String),
+}
+
+/// 下载要走公网，慢的机器上几十 MB 要等一阵。
+const PUSH_UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// 请远程运行时升到这个桌面的版本：它自己去 GitHub Release 下载、装好、交接（协议见
+/// `smelt_runtime_client::protocol::runtime_upgrade`）。阻塞，只在后台调。
+pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
+    use smelt_runtime_client::protocol::daemon::DaemonOperation;
+    use smelt_runtime_client::protocol::runtime_upgrade::RuntimeUpgradeReply;
+    use std::io::BufRead as _;
+
+    let mut stream = match client.connect() {
+        Ok(stream) => stream,
+        Err(error) => return PushUpgrade::Failed(format!("连不上运行时：{error}")),
+    };
+    let request = serde_json::json!({
+        "op": DaemonOperation::RuntimeUpgrade,
+        "version": DESKTOP_VERSION,
+    });
+    if let Err(error) = smelt_runtime_client::protocol::write_json_line(&mut stream, &request) {
+        return PushUpgrade::Failed(format!("发不出升级请求：{error}"));
+    }
+    let _ = stream.set_read_timeout(Some(PUSH_UPGRADE_TIMEOUT));
+    let mut reader = std::io::BufReader::new(stream);
+    let mut accepted = false;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) if accepted => return PushUpgrade::HandedOff,
+            Ok(0) => return PushUpgrade::Unsupported,
+            Ok(_) => {}
+            Err(error) if accepted => {
+                return PushUpgrade::Failed(format!("等运行时升级超时：{error}"));
+            }
+            Err(error) => return PushUpgrade::Failed(format!("读不到运行时的回复：{error}")),
+        }
+        match serde_json::from_str::<RuntimeUpgradeReply>(line.trim()) {
+            Ok(RuntimeUpgradeReply::Accepted) => accepted = true,
+            Ok(RuntimeUpgradeReply::Current) => return PushUpgrade::Current,
+            Ok(RuntimeUpgradeReply::Staged { reason }) => return PushUpgrade::Staged(reason),
+            Ok(RuntimeUpgradeReply::Failed { error }) => return PushUpgrade::Failed(error),
+            Err(_) => return PushUpgrade::Failed(format!("看不懂运行时的回复：{}", line.trim())),
+        }
+    }
+}
+
+/// 运行时太旧、不会自己升级时，到那台机器上执行的命令：装这个桌面的版本。
+pub(crate) fn manual_upgrade_command() -> String {
+    format!(
+        "curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | SMELT_VERSION={DESKTOP_VERSION} bash"
+    )
 }
 
 fn described_status(
     described: smelt_runtime_client::protocol::control::SystemDescribeResult,
 ) -> RuntimeStatus {
     if let Err(incompatible) = smelt_client::compat::check(&described) {
-        return RuntimeStatus::Incompatible(incompatible.to_string());
+        return incompatible_status(&incompatible);
     }
     RuntimeStatus::Online {
         version: described.daemon.version,
@@ -273,6 +357,10 @@ pub(crate) fn refresh_runtime_status(cx: &mut gpui::App) {
         return;
     };
     for remote in hub.remotes.clone() {
+        // 订阅线程正请它升级、等它换好：这时探到的旧版本盖上去，会把那条线程停掉。
+        if matches!(remote.status, RuntimeStatus::Upgrading(_)) {
+            continue;
+        }
         let runtime_id = remote.connection.runtime_id.clone();
         let client = remote.runtime.client().clone();
         cx.spawn(async move |cx| {
@@ -514,10 +602,14 @@ mod tests {
     /// 之后各处零散地报 MethodNotFound。
     #[test]
     fn older_runtime_is_incompatible() {
-        let RuntimeStatus::Incompatible(detail) = status_of(&describe_without("workspace.load"))
+        let RuntimeStatus::Incompatible {
+            detail,
+            runtime_outdated,
+        } = status_of(&describe_without("workspace.load"))
         else {
             panic!("缺方法的运行时应判为不兼容");
         };
+        assert!(runtime_outdated, "运行时旧，可以请它升级");
         assert!(detail.contains("需要升级运行时"), "{detail}");
         assert!(detail.contains("workspace.load"), "{detail}");
     }
@@ -540,9 +632,14 @@ mod tests {
             ))
             .unwrap()
         });
-        let RuntimeStatus::Incompatible(detail) = status_of(&client) else {
+        let RuntimeStatus::Incompatible {
+            detail,
+            runtime_outdated,
+        } = status_of(&client)
+        else {
             panic!("控制协议对不上应判为不兼容");
         };
+        assert!(!runtime_outdated, "运行时比桌面新，只升不降，不能请它升级");
         assert!(detail.contains("需要升级桌面"), "{detail}");
     }
 
@@ -568,6 +665,65 @@ mod tests {
         let (_, second) = status_rx.recv_blocking().unwrap();
         assert!(matches!(second, RuntimeStatus::Offline(_)), "{second:?}");
         stop.store(true, Ordering::Release);
+    }
+
+    /// 假运行时：读到首行升级请求后按顺序回这几行，然后断开。
+    fn runtime_replying(lines: &'static [&'static str]) -> RuntimeClient {
+        use std::io::{BufRead, Write};
+        RuntimeClient::new(move || {
+            let (client, server) = std::os::unix::net::UnixStream::pair()?;
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                std::io::BufReader::new(server.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["op"], "runtime_upgrade");
+                assert_eq!(request["version"], DESKTOP_VERSION);
+                for reply in lines {
+                    writeln!(&server, "{reply}").unwrap();
+                }
+            });
+            Ok(client)
+        })
+    }
+
+    /// 不认识这个请求的旧运行时一行不回就断开：认成「不支持」，提示手动装，而不是
+    /// 当成升级成功。
+    #[test]
+    fn a_runtime_that_hangs_up_without_a_word_cannot_upgrade_itself() {
+        assert_eq!(push_upgrade(&runtime_replying(&[])), PushUpgrade::Unsupported);
+    }
+
+    /// 接下以后断开：交接时旧进程退出就是这样，要重新探测。
+    #[test]
+    fn hanging_up_after_accepting_means_go_look_again() {
+        assert_eq!(
+            push_upgrade(&runtime_replying(&[r#"{"state":"accepted"}"#])),
+            PushUpgrade::HandedOff
+        );
+    }
+
+    #[test]
+    fn the_runtime_says_how_the_upgrade_ended() {
+        assert_eq!(
+            push_upgrade(&runtime_replying(&[
+                r#"{"state":"accepted"}"#,
+                r#"{"state":"failed","error":"GitHub 上没有 v9.9.9"}"#,
+            ])),
+            PushUpgrade::Failed("GitHub 上没有 v9.9.9".into())
+        );
+        assert_eq!(
+            push_upgrade(&runtime_replying(&[
+                r#"{"state":"accepted"}"#,
+                r#"{"state":"staged","reason":"ACP 会话仍有未完成请求"}"#,
+            ])),
+            PushUpgrade::Staged("ACP 会话仍有未完成请求".into())
+        );
+        assert_eq!(
+            push_upgrade(&runtime_replying(&[r#"{"state":"current"}"#])),
+            PushUpgrade::Current
+        );
     }
 
     #[test]

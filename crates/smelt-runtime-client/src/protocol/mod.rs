@@ -6,6 +6,7 @@ pub mod desktop;
 pub mod files;
 pub mod git;
 pub mod history;
+pub mod runtime_upgrade;
 pub mod workspace;
 
 use std::io::{self, Write};

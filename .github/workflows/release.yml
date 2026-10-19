@@ -21,6 +21,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # tag 必须就是 v<工作区版本号>（预发布也一样，先把版本号改成 0.9.1-rc.1 再打
+      # v0.9.1-rc.1）：桌面请远程运行时升级时，运行时按桌面的版本号去这个 tag 的 Release
+      # 下载包，对不上就找不到。
+      - name: Tag matches workspace version
+        run: |
+          version="$(awk -F'"' '/^\[workspace.package\]/{inside=1; next} /^\[/{inside=0} inside && /^version *=/{print $2; exit}' Cargo.toml)"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "✗ tag $GITHUB_REF_NAME 和 Cargo.toml 的版本 $version 对不上，应打 v$version"
+            exit 1
+          fi
+
       # 打包链路依赖这些文件真的进了 git；缺任何一个就一次性列全并失败，
       # 而不是跑到一半才炸（历史教训：本地能打包 ≠ 文件都入了库）。
       - name: Verify required files exist

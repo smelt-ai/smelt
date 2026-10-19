@@ -400,7 +400,7 @@
   <tr><td>agent 与 provider：CLI 检测和安装、hook 安装、Pi 登录、模型发现、MCP、插件目录</td><td>hook 安装、卸载、状态 <span class="chip chip-done">已完成</span>：逻辑搬进 <code>smelt_core::agent_hooks</code>，桌面启动时按开关请运行时校正一次，设置页读缓存。CLI 检测和安装 <span class="chip chip-done">已完成</span>。Pi 的默认模型、自定义 provider（含问端点、已存凭据只留在运行时）、MCP、插件 <span class="chip chip-done">已完成</span>：能力库和智能体编辑页读运行时给的 Pi 配置快照，修改回带新快照，渲染不再读盘。Pi 登录、注销、模型目录 <span class="chip chip-done">已完成</span>：登录会话挂在运行时的登录 id 上，客户端长轮询事件、回答提问，授权链接在客户端打开；客户端走掉两分钟没人取事件，运行时杀掉子进程。注意：走回环回调的 OAuth 在远程运行时上回调不到客户端的浏览器，要用 device code 或手动粘贴 code 的流程。DeepSeek Harness 的默认模型、推理强度、自定义 provider、profile 插件（pnpm）<span class="chip chip-done">已完成</span>：Node 桥和 pnpm 都在运行时上跑，设置页读 DSH 配置快照。其余仍在 <code>settings/*</code>；<code>smelt_core::agent_kind</code> / <code>pi_auth</code> / <code>pi_mcp</code> / <code>pi_model_*</code></td><td><code>agent.hooks.status</code>、<code>agent.hooks.install</code>、<code>agent.hooks.uninstall</code>；<code>agent.cli.inspect</code>、<code>agent.cli.install</code>；<code>pi.config.*</code>、<code>pi.models.*</code>、<code>pi.providers.*</code>、<code>pi.mcp.*</code>、<code>pi.plugins.*</code>、<code>pi.auth.*</code>；<code>dsh.*</code>；其余 <code>provider.*</code></td><td><code>provider.changed</code></td><td>否</td></tr>
   <tr><td>额度：keychain、Copilot、Cursor</td><td><span class="chip chip-done">已完成</span> 注册表、查询和跨启动缓存搬进 <code>smelt_core::quota_service</code>，缓存存在运行时库；桌面只管刷新节奏</td><td><code>quota.get</code>、<code>quota.refresh</code></td><td><code>provider.quota_changed</code></td><td>否</td></tr>
   <tr><td>存储清理、守护维护</td><td><code>storage_cleanup.rs</code>、设置页维护区</td><td><code>runtime.*</code></td><td></td><td>否</td></tr>
-  <tr><td>运行时身份与升级</td><td></td><td><code>system.describe</code>、<code>runtime.upgrade</code></td><td></td><td>必须</td></tr>
+  <tr><td>运行时身份与升级</td><td></td><td><code>system.describe</code>、<code>runtime_upgrade</code>（首帧 op）</td><td></td><td>必须</td></tr>
 </table></div>
 <p>对话里的图片不需要方法：它们以字节形式随 ACP 快照下发，客户端从不按路径读盘。</p>
 <p>留在客户端、不搬的：外观、字体、主题、壁纸、会话界面路由、连过哪些运行时；系统通知、Dock 角标；打开 IDE、Finder、浏览器；剪贴板；客户端自己的更新；往终端里拖本机文件、粘贴图片（已经是读成字节再发出去）；插件（D8）。分屏树留在运行时。</p>
@@ -469,18 +469,20 @@
 <ul>
   <li><b>运行时独立存活。</b>在 Mac 上，GUI 仍然可以替用户安装、启动本机运行时，但要通过一个和远程共用的「运行时管理」接口，不再在 <code>terminal.rs</code> 里直接管理进程。</li>
   <li><b>Linux 首次安装</b>（唯一需要用户自己 SSH 登录的一步）：一条命令装好，见下面的「决定：一键安装」。装完运行时以 <code>systemd --user</code> 服务常驻，开着 iroh，打印配对串。</li>
-  <li><b>升级：</b>运行时自己完成交接，复用现有的 <code>handoff_v2</code>。触发方式是 <code>runtime.upgrade</code>。</li>
+  <li><b>升级：</b>运行时自己完成交接，复用现有的 <code>handoff_v2</code>。触发方式是首帧 op <code>runtime_upgrade</code>。</li>
   <li><b>版本错位：桌面不会错位，手机会。</b>桌面每次连上就对齐版本（见下面的决定），所以桌面只依赖冻结契约。手机走应用商店，更新节奏不受控，它和运行时之间的错位是常态：运行时要接受上一个版本的手机客户端，手机也要能面对更新的运行时。办法是协议只做增量变更，新能力靠 <code>system.describe</code> 的能力清单探测；真不兼容时标成 <code>incompatible</code>，提示更新 App。</li>
-  <li><b><code>system.describe</code> 和 <code>runtime.upgrade</code> 是冻结契约</b>：永远不改形状，<code>incompatible</code> 状态下也必须能调用。否则版本一旦错开太多，就连升级都发不过去，只能让用户重新 SSH 上去手动装。</li>
+  <li><b><code>system.describe</code> 和 <code>runtime_upgrade</code> 是冻结契约</b>：永远不改形状，<code>incompatible</code> 状态下也必须能调用。否则版本一旦错开太多，就连升级都发不过去，只能让用户重新 SSH 上去手动装。所以 <code>runtime_upgrade</code> 不走带 <code>control_version</code> 的控制信封（控制协议对不上时信封直接被拒），是和 <code>upgrade</code>、<code>version</code> 一样的首帧 op。</li>
 </ul>
 <div class="decision">
-  <div class="label">决定：桌面推送</div>
+  <div class="label">决定：桌面让运行时升到自己的版本，运行时自己从 GitHub 下载</div>
   <ul>
-    <li>桌面连上运行时，发现运行时版本比自己旧，就通过 <code>runtime.upgrade</code> 把匹配平台的二进制分块传过去（带校验和），运行时校验后用 <code>handoff_v2</code> 交接。本机 Mac 运行时也走这条路，和今天「GUI 带着 smeltd 升级」是同一回事。</li>
-    <li>桌面安装包附带 linux x86_64 / aarch64 两份 smeltd。</li>
-    <li><b>只升不降</b>：运行时比桌面新时，桌面不推送，把该运行时标成 <code>incompatible</code> 并提示更新桌面。两台不同版本的桌面连同一个运行时时，运行时最终跟随较新的那台。</li>
-    <li>交接期间所有客户端都会断开一次，按普通断线重连处理。推送前在界面上提示，有 agent 正在跑时等用户确认。</li>
-    <li>不做运行时自更新（<code>updater.rs</code> 的发布渠道）。代价：只用手机、从不连桌面的运行时不会自动升级，只能重新运行安装脚本。</li>
+    <li>桌面连上远程运行时，版本协商判定运行时旧（<code>smelt_client::compat</code>），就发 <code>{"op":"runtime_upgrade","version":"&lt;桌面版本&gt;"}</code>。运行时回 <code>accepted</code>，自己去 GitHub Release <code>v&lt;版本&gt;</code> 下载 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，对着同一个 Release 的 <code>SHA256SUMS</code> 校验，解包后先跑一次新 smeltd 的 <code>--version</code>（架构、glibc 不对在这一步暴露），再把 <code>smelt-notify</code>、<code>smelt-agent-mcp</code>、<code>smelt-up</code> 原子替换进 <code>~/.smelt/bin</code>，smeltd 发布成不可变映像后用 <code>handoff_v2</code> 交接（和 <code>smeltd install</code> 共用一份）。交接成功时旧进程退出、连接断开，桌面重新探测；正忙就回 <code>staged</code>，新映像挂在 <code>smeltd.pending</code>，没人订阅时 headless 自升级在空闲时换过去。</li>
+    <li>桌面不传字节、安装包不附带 Linux 二进制：远程机器本来就是从 GitHub 一键安装的，连得上。版本对齐靠版本号：<b>release 的 tag 必须就是 <code>v&lt;工作区版本号&gt;</code></b>（<code>release.yml</code> 校验），预发布也一样先改版本号再打 tag。</li>
+    <li><b>只升不降</b>：运行时比桌面新时，桌面不请它升级，标成 <code>incompatible</code> 并提示更新桌面；运行时收到比自己旧的版本也拒绝。两台不同版本的桌面连同一个运行时时，运行时最终跟随较新的那台。</li>
+    <li>每条订阅线程只请一次。升了还对不上（开发构建的版本号还没发布、GitHub 上没有这个版本、下载失败），照常标不兼容，说明里写上原因。早于这个 op 的运行时一行不回就断开，桌面提示到那台机器上执行一次 <code>curl … | SMELT_VERSION=&lt;桌面版本&gt; bash</code>，之后就能自动升级。</li>
+    <li>交接期间所有客户端都会断开一次，按普通断线重连处理；有 ACP 回合在跑时交接本身会回 busy，等空闲。</li>
+    <li>系统包和远程桌面（<code>--with-desktop</code>）的配置要 root，自动升级不碰，变了仍要重新跑安装脚本。本机 Mac 运行时仍由 GUI 带着升级（<code>upgrade_daemon</code>）。</li>
+    <li>运行时不自己定时检查更新：版本跟着桌面走，自己追 latest 会跑到桌面前面，反过来变成「需要升级桌面」。代价：只用手机、从不连桌面的运行时不会自动升级，只能重新运行安装脚本。</li>
   </ul>
 </div>
 <div class="decision">
@@ -570,7 +572,7 @@
   <tr><td>菜单栏、IOKit 防休眠</td><td><span class="chip chip-na">不适用</span> 已有桩实现</td><td>能力清单里如实报告没有</td></tr>
   <tr><td>额度查询（钥匙串）</td><td><span class="chip chip-split">部分</span> 非 macOS 跳过钥匙串，只读环境变量和各家 CLI 的凭据文件</td><td>能力清单里如实报告哪些查不了</td></tr>
   <tr><td>agent hook 安装</td><td><span class="chip chip-done">已完成</span></td><td>运行时执行 <code>agent.hooks.*</code>，在自己那台机器上写配置；<code>smelt-notify</code> 由运行时安装包放进 <code>~/.smelt/bin</code>（本机仍由桌面从 App 包同步）</td></tr>
-  <tr><td>打包分发</td><td><span class="chip chip-done">已完成</span> <code>ci/linux/ci.sh package</code> 出 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，解包执行 <code>./install.sh</code>：<code>smeltd install</code> 用和桌面同一套受管布局（不可变映像 + 启动名软链），已在跑就交接到新版本、会话保留，再注册 systemd 用户服务，最后 <code>smeltd pair</code></td><td>按 D7 的桌面推送，同一份二进制也随桌面安装包附带</td></tr>
+  <tr><td>打包分发</td><td><span class="chip chip-done">已完成</span> <code>ci/linux/ci.sh package</code> 出 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code>，解包执行 <code>./install.sh</code>：<code>smeltd install</code> 用和桌面同一套受管布局（不可变映像 + 启动名软链），已在跑就交接到新版本、会话保留，再注册 systemd 用户服务，最后 <code>smeltd pair</code></td><td>桌面请运行时升级时，运行时下载的就是这个包（D7）</td></tr>
   <tr><td>一键安装</td><td><span class="chip chip-done">已完成</span> 打 tag 时 <code>release.yml</code> 构建两种架构的包，连同 <code>SHA256SUMS</code> 和一键安装脚本发到 Release；安装脚本以 root 执行时建普通用户，有 systemd 开 linger、没有就用 <code>smelt-up</code>（见 D7）</td><td>首次发版后在全新的 Debian、Ubuntu 和 Docker 容器里各装一遍</td></tr>
   <tr><td>远程桌面与常驻浏览器</td><td><span class="chip chip-split">部分</span> 远程桌面页、转发、文字注入、<code>--with-desktop</code> 安装已完成（见 D9）</td><td>Pi 交接、手机</td></tr>
 </table></div>
@@ -636,7 +638,7 @@
       <li>运行时直接接收 iroh 流（D2）；按设备配对和撤销（D3）；<code>smeltd pair</code> / <code>smeltd devices</code>。<span class="chip chip-done">已完成</span>：桌面设置页「远程访问」改成开关、自建 relay 和设备（生成一次性配对串、列出、撤销）</li>
       <li>桌面的 iroh 连接器、「添加运行时」（粘贴配对串）。连接器 <span class="chip chip-done">已完成</span>（<code>smelt_iroh::runtime::RuntimeConnector</code>，桌面和手机共用；<code>smelt-iroh-connect</code> 是用它的命令行验证工具）；「添加运行时」等 P2 的多运行时</li>
       <li>D7 的版本协商 <span class="chip chip-done">已完成</span>：<code>system.describe</code> 多报事件总线协议和投影版本（可缺省字段）；桌面连远程运行时先对控制协议区间、方法清单（缺方法即运行时旧）和投影版本（<code>smelt_client::compat</code>），对不上标成「版本不兼容」并说明该升级哪一边，不再订阅它，免得解不出投影就断开、无限重连。只加方法不升 <code>CONTROL_API_VERSION</code>；删方法、改形状才升并抬最低支持版本。不兼容后要再探测（打开设置窗口或重启）才会重新连。</li>
-      <li>D7 的桌面推送升级：<code>runtime.upgrade</code> 分块传二进制、只升不降。</li>
+      <li>D7 的自动升级 <span class="chip chip-done">已完成</span>：版本协商判定运行时旧时，桌面发 <code>runtime_upgrade</code>，运行时自己从 GitHub Release 下载桌面那个版本的包、校验、交接；只升不降。release 的 tag 必须等于工作区版本号。</li>
     </ul>
     <p class="exit"><b>完成标准：</b>Mac 桌面连上一台不在同一网络的 Linux 运行时，除了能力清单里声明缺失的部分，其余功能都能用；本机运行时同时在线。</p>
   </div>

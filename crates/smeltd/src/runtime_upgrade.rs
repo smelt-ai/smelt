@@ -1,0 +1,376 @@
+//! 桌面请运行时升到它的版本（设计文档 D7，协议见
+//! [`smelt_runtime_client::protocol::runtime_upgrade`]）。运行时自己从 GitHub Release
+//! 下载那个版本的包，对着同一个 Release 的 SHA256SUMS 校验，和一键安装（`get-smeltd.sh`
+//! 加包里的 `install.sh`）装的是同一份东西：随运行时一起的小工具原子替换进
+//! `~/.smelt/bin`，smeltd 发布成不可变映像再交接，会话保留。
+//!
+//! 只升不降：要的版本比自己旧就拒绝。两台不同版本的桌面连同一个运行时时，运行时最终
+//! 跟着较新的那台。系统包和远程桌面的配置要 root，这里不碰，变了仍要重新跑安装脚本。
+
+use std::io::Write as _;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use smelt_runtime_client::protocol::runtime_upgrade::{RuntimeUpgradeReply, RuntimeUpgradeRequest};
+
+/// 同一时间只做一次：两台桌面同时请求时，后来的直接回失败，等前一次的结局。
+static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn handle_runtime_upgrade(mut conn: UnixStream, request: &serde_json::Value) {
+    let reply = match serde_json::from_value::<RuntimeUpgradeRequest>(request.clone()) {
+        Ok(request) => upgrade(&mut conn, &request.version),
+        Err(error) => RuntimeUpgradeReply::Failed {
+            error: format!("请求不合法：{error}"),
+        },
+    };
+    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &reply);
+}
+
+fn upgrade(conn: &mut UnixStream, version: &str) -> RuntimeUpgradeReply {
+    let target = match check_target(version, env!("CARGO_PKG_VERSION")) {
+        Ok(target) => target,
+        Err(error) => return RuntimeUpgradeReply::Failed { error },
+    };
+    if IN_PROGRESS.swap(true, Ordering::AcqRel) {
+        return RuntimeUpgradeReply::Failed {
+            error: "已经在升级了，等它结束".to_string(),
+        };
+    }
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            IN_PROGRESS.store(false, Ordering::Release);
+        }
+    }
+    let _done = Done;
+    let _ = smelt_runtime_client::protocol::write_json_line(conn, &RuntimeUpgradeReply::Accepted);
+    let _ = conn.flush();
+    crate::dlog(&format!("runtime_upgrade：开始升到 v{target}"));
+    let reply = install_release(&target);
+    crate::dlog(&format!("runtime_upgrade：v{target} → {reply:?}"));
+    reply
+}
+
+/// 版本号要是合法的 semver（顺带挡住拼进 URL 的斜杠之类），且不比自己旧。
+fn check_target(requested: &str, current: &str) -> Result<semver::Version, String> {
+    let target = semver::Version::parse(requested.trim())
+        .map_err(|error| format!("版本号不合法（{requested}）：{error}"))?;
+    if let Ok(current) = semver::Version::parse(current)
+        && target < current
+    {
+        return Err(format!("只升不降：运行时 v{current} 比要的 v{target} 新"));
+    }
+    Ok(target)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_release(_version: &semver::Version) -> RuntimeUpgradeReply {
+    RuntimeUpgradeReply::Failed {
+        error: "只有 Linux 上的运行时这样升级；macOS 上运行时随桌面升级".to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_release(version: &semver::Version) -> RuntimeUpgradeReply {
+    use crate::service::ImageInstall;
+
+    let result = linux::Staging::new().and_then(|staging| {
+        let package = linux::fetch_package(&staging, version, &release_url(version))?;
+        linux::install_helpers(&package)?;
+        crate::service::install_image(&package.join("smeltd"))
+    });
+    match result {
+        // 交接成功时这个进程已经退出，一般走不到 `Upgraded`；真走到了，跑着的也已是新版。
+        Ok(ImageInstall::AlreadyInstalled | ImageInstall::Upgraded) => RuntimeUpgradeReply::Current,
+        Ok(ImageInstall::Busy(reason)) => RuntimeUpgradeReply::Staged { reason },
+        // 问自己没问着，当成没在跑：启动名已拨到新版，下次拉起就是它。
+        Ok(ImageInstall::Launched) => RuntimeUpgradeReply::Staged {
+            reason: "新版本已装好，运行时下次重启时换过去".to_string(),
+        },
+        Err(error) => RuntimeUpgradeReply::Failed { error },
+    }
+}
+
+/// 和一键安装脚本取的是同一个 Release。
+#[cfg(any(target_os = "linux", test))]
+const RELEASE_REPO: &str = "smelt-ai/smelt";
+
+#[cfg(any(target_os = "linux", test))]
+fn release_url(version: &semver::Version) -> String {
+    format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}")
+}
+
+/// 包名和 `ci/linux/ci.sh package` 打出来的一致。架构名同 `uname -m`。
+#[cfg(any(target_os = "linux", test))]
+fn package_name(version: &semver::Version, arch: &str) -> String {
+    format!("smeltd-{version}-linux-{arch}")
+}
+
+/// 从 `sha256sum` 的输出里找出这个文件的校验和。
+#[cfg(any(target_os = "linux", test))]
+fn checksum_for<'a>(sums: &'a str, file: &str) -> Option<&'a str> {
+    sums.lines().find_map(|line| {
+        let (sum, name) = line.split_once(char::is_whitespace)?;
+        // `sha256sum` 二进制模式在文件名前加 `*`。
+        let name = name.trim_start().trim_start_matches('*');
+        (name == file && sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then_some(sum)
+    })
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// 包里随 smeltd 一起装进 `~/.smelt/bin` 的东西，同安装脚本。smeltd 自己另走映像。
+    const HELPERS: [&str; 3] = ["smelt-notify", "smelt-agent-mcp", "smelt-up"];
+
+    /// 下载、解包用的临时目录，用完删掉。放在 `~/.smelt` 下：和 `~/.smelt/bin` 同一个
+    /// 文件系统，`/tmp` 常是容量很小的 tmpfs。名字固定、每次先清空：交接成功时旧进程
+    /// 直接退出，`Drop` 来不及跑，留下的这份由下一次升级清掉。同一时间只有一次升级
+    /// （`IN_PROGRESS`），不会互相清掉。
+    pub(super) struct Staging(PathBuf);
+
+    impl Staging {
+        pub(super) fn new() -> Result<Self, String> {
+            let dir = smelt_paths::smelt_home()
+                .ok_or_else(|| "找不到 $HOME".to_string())?
+                .join("staging")
+                .join("runtime-upgrade");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir)
+                .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+            Ok(Self(dir))
+        }
+    }
+
+    impl Drop for Staging {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 下载、校验、解包，验证包里的 smeltd 在这台机器上跑得起来、版本对得上，返回解开的
+    /// 包目录。`base` 是 Release 下载地址的前缀（测试里指向本地文件）。
+    pub(super) fn fetch_package(
+        staging: &Staging,
+        version: &semver::Version,
+        base: &str,
+    ) -> Result<PathBuf, String> {
+        let name = super::package_name(version, std::env::consts::ARCH);
+        let archive_name = format!("{name}.tar.gz");
+        let sums_path = staging.0.join("SHA256SUMS");
+        download(&format!("{base}/SHA256SUMS"), &sums_path).map_err(|error| {
+            format!("取不到 v{version} 的校验和清单（GitHub 上可能没有这个版本）：{error}")
+        })?;
+        let sums = fs::read_to_string(&sums_path)
+            .map_err(|error| format!("读校验和清单失败：{error}"))?;
+        let expected = super::checksum_for(&sums, &archive_name)
+            .ok_or_else(|| format!("v{version} 没有这台机器（linux-{}）的包", std::env::consts::ARCH))?
+            .to_string();
+        let archive = staging.0.join(&archive_name);
+        download(&format!("{base}/{archive_name}"), &archive)
+            .map_err(|error| format!("下载 {archive_name} 失败：{error}"))?;
+        let actual = smelt_core::daemon_image::content_fingerprint(&archive)
+            .map_err(|error| format!("读取下载的包失败：{error}"))?;
+        if actual != expected {
+            return Err(format!(
+                "{archive_name} 校验失败（期望 {expected}，实际 {actual}）"
+            ));
+        }
+        let output = Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&staging.0)
+            .output()
+            .map_err(|error| format!("无法执行 tar：{error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "解包失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let package = staging.0.join(&name);
+        verify_smeltd(&package.join("smeltd"), version)?;
+        for helper in HELPERS {
+            if !package.join(helper).is_file() {
+                return Err(format!("包里缺少 {helper}"));
+            }
+        }
+        Ok(package)
+    }
+
+    /// 连不上、或者连上了却半天不动都要放弃，不能一直等：桌面那边一直显示「升级中」。
+    fn download(url: &str, to: &Path) -> Result<(), String> {
+        let output = Command::new("curl")
+            .args(["-fsSL", "--retry", "2", "--connect-timeout", "20"])
+            // 连续 60 秒低于 1 KB/s 就当卡住了。
+            .args(["--speed-limit", "1024", "--speed-time", "60", "-o"])
+            .arg(to)
+            .arg(url)
+            .output()
+            .map_err(|error| format!("无法执行 curl：{error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
+    }
+
+    /// 包里的 smeltd 在这台机器上能跑，而且就是要的版本。架构不对、glibc 太旧都在这一步
+    /// 暴露，不能等交接时才失败。
+    fn verify_smeltd(smeltd: &Path, version: &semver::Version) -> Result<(), String> {
+        let output = Command::new(smeltd)
+            .arg("--version")
+            .output()
+            .map_err(|error| format!("新版 smeltd 在这台机器上跑不起来：{error}"))?;
+        let printed = String::from_utf8_lossy(&output.stdout);
+        let expected = format!("smeltd {version}");
+        if !output.status.success() || printed.trim() != expected {
+            return Err(format!(
+                "新版 smeltd 在这台机器上跑不起来（{}）",
+                [printed.trim(), String::from_utf8_lossy(&output.stderr).trim()]
+                    .into_iter()
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ));
+        }
+        Ok(())
+    }
+
+    /// 同安装脚本的 `put`：先写到旁边再改名盖过去，正在跑的旧版本不受影响。
+    pub(super) fn install_helpers(package: &Path) -> Result<(), String> {
+        let bin = crate::service::bin_dir()?;
+        fs::create_dir_all(&bin)
+            .map_err(|error| format!("创建 {} 失败：{error}", bin.display()))?;
+        for helper in HELPERS {
+            let to = bin.join(helper);
+            let temporary = bin.join(format!(".{helper}.new-{}", std::process::id()));
+            let result = fs::copy(package.join(helper), &temporary)
+                .and_then(|_| fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)))
+                .and_then(|()| fs::rename(&temporary, &to));
+            if let Err(error) = result {
+                let _ = fs::remove_file(&temporary);
+                return Err(format!("装 {} 失败：{error}", to.display()));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 下载回来的包和清单对不上就停，不解包、不装。
+        #[test]
+        fn a_tampered_package_is_rejected() {
+            let release = std::env::temp_dir().join(format!(
+                "smelt-release-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            fs::create_dir_all(&release).unwrap();
+            let version = semver::Version::parse("9.9.9").unwrap();
+            let archive = format!(
+                "{}.tar.gz",
+                super::super::package_name(&version, std::env::consts::ARCH)
+            );
+            fs::write(release.join(&archive), b"not the real package").unwrap();
+            fs::write(
+                release.join("SHA256SUMS"),
+                format!("{}  {archive}\n", "0".repeat(64)),
+            )
+            .unwrap();
+
+            let staging = Staging(release.join("staging"));
+            fs::create_dir_all(&staging.0).unwrap();
+            let error =
+                fetch_package(&staging, &version, &format!("file://{}", release.display()))
+                    .unwrap_err();
+            assert!(error.contains("校验失败"), "{error}");
+            drop(staging);
+            let _ = fs::remove_dir_all(release);
+        }
+
+        /// Release 里没有这个版本：说清楚，而不是只甩一句 curl 的报错。
+        #[test]
+        fn a_missing_release_says_so() {
+            let staging = Staging::new_in_temp();
+            let version = semver::Version::parse("9.9.9").unwrap();
+            let error = fetch_package(&staging, &version, "file:///nonexistent-smelt-release")
+                .unwrap_err();
+            assert!(error.contains("没有这个版本"), "{error}");
+        }
+
+        impl Staging {
+            fn new_in_temp() -> Self {
+                let dir = std::env::temp_dir().join(format!(
+                    "smelt-staging-{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                fs::create_dir_all(&dir).unwrap();
+                Self(dir)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_upgrades_never_downgrades() {
+        assert!(check_target("0.9.1", "0.9.0").is_ok());
+        assert!(check_target("0.9.0", "0.9.0").is_ok());
+        assert!(check_target("0.9.0", "0.9.0-rc.2").is_ok());
+        assert!(check_target("0.9.0-rc.3", "0.9.0-rc.2").is_ok());
+        let error = check_target("0.8.9", "0.9.0").unwrap_err();
+        assert!(error.contains("只升不降"), "{error}");
+        assert!(check_target("0.9.0-rc.1", "0.9.0").is_err());
+    }
+
+    /// 版本号会拼进下载地址，不是 semver 的一律拒绝。
+    #[test]
+    fn version_must_be_semver() {
+        assert!(check_target("../../evil", "0.9.0").is_err());
+        assert!(check_target("1.0.0/x", "0.9.0").is_err());
+        assert!(check_target("", "0.9.0").is_err());
+    }
+
+    #[test]
+    fn release_paths_match_the_published_package() {
+        let version = semver::Version::parse("0.9.1-rc.1").unwrap();
+        assert_eq!(
+            release_url(&version),
+            "https://github.com/smelt-ai/smelt/releases/download/v0.9.1-rc.1"
+        );
+        assert_eq!(
+            package_name(&version, "x86_64"),
+            "smeltd-0.9.1-rc.1-linux-x86_64"
+        );
+    }
+
+    #[test]
+    fn finds_the_checksum_line_for_exactly_this_package() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let sums = format!(
+            "{a}  smeltd-0.9.1-linux-aarch64.tar.gz\n{b} *smeltd-0.9.1-linux-x86_64.tar.gz\n"
+        );
+        assert_eq!(
+            checksum_for(&sums, "smeltd-0.9.1-linux-x86_64.tar.gz"),
+            Some(b.as_str())
+        );
+        assert_eq!(
+            checksum_for(&sums, "smeltd-0.9.1-linux-aarch64.tar.gz"),
+            Some(a.as_str())
+        );
+        assert_eq!(checksum_for(&sums, "smeltd-0.9.1-linux-x86.tar.gz"), None);
+        assert_eq!(checksum_for("short  smeltd.tar.gz\n", "smeltd.tar.gz"), None);
+    }
+}

@@ -45,6 +45,8 @@ sha2 = "0.10"
 # `conversation.image`：手机按需取对话里的图，缩略图在运行时这边解码、缩放、重新编码。
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# 桌面请运行时升级时比版本（只升不降），也挡住拼进下载地址的非法版本号。
+semver = "1"
 
 [dev-dependencies]
 smelt-core = { path = "../smelt-core", features = ["test-support"] }

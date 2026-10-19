@@ -30,6 +30,8 @@
 //!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，但 exec 指定路径（装 DMG 时先
 //!                                                              handoff 到暂存包，再替换 .app，避免
 //!                                                              整包覆盖把旧守护 SIGKILL、会话全灭）
+//!   {"op":"runtime_upgrade","version":"0.9.1"}               → 回 {"state":"accepted"}，从 GitHub Release
+//!                                                              下载该版本装好再交接；见 runtime_upgrade.rs
 //!   {"op":"remote_start","bind":"..","port":0,"write":false}  → 回 {"ok":true,"token":"..","addr":"..","write":bool}，
 //!                                                              见下「内嵌远程网关」（bind/port/write 都可省，
 //!                                                              默认回环随机口 + 只读）
@@ -167,6 +169,7 @@ mod project_watch;
 mod protocol;
 mod remote;
 mod runtime_identity;
+mod runtime_upgrade;
 mod service;
 mod session_catalog;
 mod session_control;

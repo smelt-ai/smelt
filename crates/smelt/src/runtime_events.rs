@@ -8,6 +8,9 @@
 //!
 //! 订阅线程是远程运行时连通性的唯一来源：每次探测的结果、订阅断开，都报回 [`RuntimeHub`]，
 //! 侧栏的「离线」跟着它走，不是只在启动时探一次。
+//!
+//! 运行时比桌面旧时先请它升到桌面的版本（设计文档 D7，见 [`upgrade_then_probe`]），升完
+//! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,15 +74,26 @@ pub(crate) fn spawn_subscription(
         .name(format!("smelt-events-{key:?}"))
         .spawn(move || {
             let mut reconnect_attempt = 0u32;
+            let mut upgrade_requested = false;
             while !stop.load(Ordering::Acquire) {
-                let status =
+                let mut status =
                     (!runtime.is_local()).then(|| crate::runtimes::status_of(runtime.client()));
+                if !upgrade_requested
+                    && let Some(RuntimeStatus::Incompatible {
+                        detail,
+                        runtime_outdated: true,
+                    }) = &status
+                {
+                    upgrade_requested = true;
+                    let detail = detail.clone();
+                    status = Some(upgrade_then_probe(&runtime, &detail, &status_tx, &stop));
+                }
                 let connected_at = Instant::now();
                 if let Some(status) = &status {
                     let _ = status_tx.try_send((key.clone(), status.clone()));
                 }
                 match status {
-                    Some(RuntimeStatus::Incompatible(_)) => return,
+                    Some(RuntimeStatus::Incompatible { .. }) => return,
                     // 连不上就不再拨一次订阅，直接退避。
                     Some(RuntimeStatus::Offline(_)) => {}
                     _ => crate::terminal::subscribe_daemon_states_blocking(
@@ -111,6 +125,81 @@ pub(crate) fn spawn_subscription(
         .expect("spawn smelt-events 线程");
 }
 
+/// 请运行时升到这个桌面的版本，等它换好再探一次，返回探到的状态。升级没成就在原来的
+/// 不兼容说明后面写上为什么、该怎么办。
+fn upgrade_then_probe(
+    runtime: &Runtime,
+    detail: &str,
+    status_tx: &smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
+    stop: &AtomicBool,
+) -> RuntimeStatus {
+    use crate::runtimes::{DESKTOP_VERSION, PushUpgrade, push_upgrade, status_of};
+
+    let key = runtime.key().clone();
+    let report = |progress: String| {
+        let _ = status_tx.try_send((key.clone(), RuntimeStatus::Upgrading(progress)));
+    };
+    let still_incompatible = |note: String| RuntimeStatus::Incompatible {
+        detail: format!("{detail}。{note}"),
+        runtime_outdated: true,
+    };
+    report(format!("正在升级到 v{DESKTOP_VERSION}"));
+    let waiting_for_idle = match push_upgrade(runtime.client()) {
+        PushUpgrade::HandedOff => false,
+        PushUpgrade::Staged(reason) => {
+            report(format!(
+                "v{DESKTOP_VERSION} 已装好，运行时正忙（{reason}），空闲后自己换过去"
+            ));
+            true
+        }
+        PushUpgrade::Current => {
+            return still_incompatible(format!(
+                "运行时已经是 v{DESKTOP_VERSION}，仍对不上：这个桌面多半是还没发布的开发构建"
+            ));
+        }
+        PushUpgrade::Unsupported => {
+            return still_incompatible(format!(
+                "这台运行时太旧，不会自动升级，到那台机器上执行一次：{}",
+                crate::runtimes::manual_upgrade_command()
+            ));
+        }
+        PushUpgrade::Failed(error) => {
+            return still_incompatible(format!("自动升级失败：{error}"));
+        }
+    };
+    // 交接时旧进程连同 iroh 端点一起退出，新进程重新上线要几秒；正忙的要等到它空闲。
+    const HANDOFF_GRACE: Duration = Duration::from_secs(120);
+    let started = Instant::now();
+    loop {
+        std::thread::sleep(if waiting_for_idle {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(2)
+        });
+        let status = status_of(runtime.client());
+        let pending = match &status {
+            RuntimeStatus::Offline(_) => !waiting_for_idle && started.elapsed() < HANDOFF_GRACE,
+            // 还是旧进程：正忙的接着等它空闲，交接过的就是没换成。
+            RuntimeStatus::Incompatible { .. } => waiting_for_idle,
+            _ => false,
+        };
+        if !pending || stop.load(Ordering::Acquire) {
+            return match status {
+                RuntimeStatus::Incompatible {
+                    detail,
+                    runtime_outdated,
+                } => RuntimeStatus::Incompatible {
+                    detail: format!(
+                        "{detail}。请它升到 v{DESKTOP_VERSION} 后仍对不上，详见那台机器的 ~/.smelt/daemon.log"
+                    ),
+                    runtime_outdated,
+                },
+                status => status,
+            };
+        }
+    }
+}
+
 /// 远程运行时的订阅跟着 RuntimeHub 走：新添加的起一条，移除的停掉并丢掉它的状态镜像。
 /// 版本不兼容的和移除的一样处理；之后再探测对上了，就当新添加的重起一条。
 fn sync_remote_subscriptions(cx: &mut App) {
@@ -120,7 +209,7 @@ fn sync_remote_subscriptions(cx: &mut App) {
     let remotes: Vec<Runtime> = hub
         .remotes
         .iter()
-        .filter(|remote| !matches!(remote.status, RuntimeStatus::Incompatible(_)))
+        .filter(|remote| !matches!(remote.status, RuntimeStatus::Incompatible { .. }))
         .map(|remote| remote.runtime.clone())
         .collect();
     let subscriptions = cx.global_mut::<RuntimeSubscriptions>();

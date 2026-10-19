@@ -301,37 +301,45 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// 把正在执行的这份 smeltd 装进 `~/.smelt/bin`，用和桌面同一套受管布局：发布成不可变
-/// 映像 `smeltd-<指纹>`，启动名 `smeltd` 是指向它的软链。运行时已经在跑就请它交接到
-/// 新映像（会话保留），正忙就挂在 `smeltd.pending`，空闲时它自己换。
+/// 把一份 smeltd 装进 `~/.smelt/bin` 之后的情形。
 #[cfg(target_os = "linux")]
-fn install_image() -> Result<PathBuf, String> {
+pub(crate) enum ImageInstall {
+    /// 启动名本来就指向这份映像。
+    AlreadyInstalled,
+    /// 运行时没在跑，启动名已经拨过去，下次拉起就是它。
+    Launched,
+    /// 正在跑的运行时交接到了新映像，会话保留。
+    Upgraded,
+    /// 运行时正忙，新映像挂在 `smeltd.pending`，空闲时它自己换。
+    Busy(String),
+}
+
+/// 把 `exe` 装进 `~/.smelt/bin`，用和桌面同一套受管布局：发布成不可变映像
+/// `smeltd-<指纹>`，启动名 `smeltd` 是指向它的软链。运行时已经在跑就请它交接到新映像
+/// （会话保留），正忙就挂在 `smeltd.pending`，空闲时它自己换。`smeltd install` 和桌面
+/// 请运行时升级（[`crate::runtime_upgrade`]）共用这一份。
+#[cfg(target_os = "linux")]
+pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
     use smelt_core::daemon_image;
 
-    let exe =
-        std::env::current_exe().map_err(|error| format!("找不到 smeltd 自身路径：{error}"))?;
-    let dir = smelt_paths::smelt_home()
-        .ok_or_else(|| "找不到 $HOME".to_string())?
-        .join("bin");
+    let dir = bin_dir()?;
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
-    let launch = dir.join("smeltd");
-    let image = daemon_image::publish_image(&dir, &exe)
+    let launch = dir.join(daemon_image::LAUNCH_NAME);
+    let image = daemon_image::publish_image(&dir, exe)
         .map_err(|error| format!("发布 smeltd 映像失败：{error}"))?;
     let installed = std::fs::canonicalize(&launch).ok() == std::fs::canonicalize(&image).ok();
     let running = smelt_runtime_client::local::local_runtime()
         .describe()
         .is_ok();
-    if installed {
-        println!("这个版本已经装好了");
+    let outcome = if installed {
+        ImageInstall::AlreadyInstalled
     } else if running {
         daemon_image::retarget_pending_symlink(&dir, &image)
             .map_err(|error| format!("挂上 smeltd.pending 失败：{error}"))?;
         match crate::request_self_upgrade(&image) {
-            crate::SelfUpgradeOutcome::Upgraded => println!("运行时已换到新版本，会话都保留着"),
-            crate::SelfUpgradeOutcome::Busy(reason) => {
-                println!("运行时正忙（{reason}），空闲时会自己换到新版本")
-            }
+            crate::SelfUpgradeOutcome::Upgraded => ImageInstall::Upgraded,
+            crate::SelfUpgradeOutcome::Busy(reason) => ImageInstall::Busy(reason),
             crate::SelfUpgradeOutcome::Failed(error) => {
                 return Err(format!("运行时换到新版本失败：{error}"));
             }
@@ -339,18 +347,41 @@ fn install_image() -> Result<PathBuf, String> {
     } else {
         daemon_image::retarget_launch_after_commit(&image)
             .map_err(|error| format!("设置启动名失败：{error}"))?;
-    }
+        ImageInstall::Launched
+    };
     if let Err(error) = daemon_image::reap_unused_images(&dir) {
         eprintln!("回收旧映像失败：{error}");
     }
-    Ok(launch)
+    Ok(outcome)
+}
+
+/// `~/.smelt/bin`：启动名、映像和随运行时一起装的小工具都在这里。
+#[cfg(target_os = "linux")]
+pub(crate) fn bin_dir() -> Result<PathBuf, String> {
+    Ok(smelt_paths::smelt_home()
+        .ok_or_else(|| "找不到 $HOME".to_string())?
+        .join("bin"))
+}
+
+/// 把正在执行的这份 smeltd 装好，返回启动名。
+#[cfg(target_os = "linux")]
+fn install_current_exe() -> Result<PathBuf, String> {
+    let exe =
+        std::env::current_exe().map_err(|error| format!("找不到 smeltd 自身路径：{error}"))?;
+    match install_image(&exe)? {
+        ImageInstall::AlreadyInstalled => println!("这个版本已经装好了"),
+        ImageInstall::Upgraded => println!("运行时已换到新版本，会话都保留着"),
+        ImageInstall::Busy(reason) => println!("运行时正忙（{reason}），空闲时会自己换到新版本"),
+        ImageInstall::Launched => {}
+    }
+    Ok(bin_dir()?.join(smelt_core::daemon_image::LAUNCH_NAME))
 }
 
 #[cfg(target_os = "linux")]
 fn install() -> Result<(), String> {
     if !systemd_booted() {
         // 没有服务管理器可登记。已经在跑（smelt-up 拉起的）就照常交接到新映像。
-        install_image()?;
+        install_current_exe()?;
         println!("这台机器没有 systemd，没装服务：运行时由 smelt-up 拉起并看着");
         return Ok(());
     }
@@ -365,7 +396,7 @@ fn install() -> Result<(), String> {
                 .to_string(),
         );
     }
-    let exe = install_image()?;
+    let exe = install_current_exe()?;
     let unit = unit_path()?;
     if let Some(dir) = unit.parent() {
         std::fs::create_dir_all(dir)
