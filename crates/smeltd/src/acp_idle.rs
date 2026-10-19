@@ -22,6 +22,11 @@
 //!
 //! 已挂起的槽位没有可交接的 fd，daemon 升级后就不在了。桌面端断线重连会
 //! `acp_open`，把它们重新拉起来，再过一轮闲置期后再次挂起。
+//!
+//! 唤醒要把挂起那一刻的会话配置（模型、推理强度、权限模式等）写回新 runtime。
+//! 新进程只会从 provider 自己的会话文件里找回一部分：Pi 的权限模式和脚本工具
+//! 只活在驱动内存里，配了模型的智能体启动时还会被强制换回定义里的模型。挂起
+//! 对用户应当不可见，所以由守护自己恢复，不指望客户端补发。
 
 use super::*;
 
@@ -31,6 +36,10 @@ const ACP_IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// 唤醒后等 Pi 恢复历史的上限。超时只让这一次动作失败，会话照常继续恢复。
 const ACP_WAKE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const ACP_WAKE_READY_POLL: Duration = Duration::from_millis(100);
+/// 唤醒后每一步配置恢复等 agent 确认的上限。超时只记日志，用户的动作照常送达。
+const ACP_CONFIG_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
+/// 驱动写配置失败时 `status_line` 的前缀（pi_rpc 与 acp_conn 同一句）。
+const CONFIG_UPDATE_FAILURE_PREFIX: &str = "更新会话配置失败";
 
 /// 会话的闲置账本。构造时记一次活动：刚建好或刚交接过来的会话不能在第一轮扫描就被挂起。
 pub(crate) struct AcpIdleState {
@@ -212,8 +221,100 @@ pub(crate) fn suspend_idle_acp_sessions(
     suspended
 }
 
-/// 用到 runtime 之前调用。挂起的会话按记录的启动规格拉起，等 Pi 重放完历史；
-/// 没挂起就只记一次活动。错误串说明这一次为什么用不了。
+/// 挂起那一刻生效的会话配置，唤醒后照它写回。
+///
+/// 模型单独放：换模型会把 Pi 的推理强度重置成模型默认值，必须先换模型、
+/// 等确认后再写其它项。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SuspendedConfig {
+    model: Option<String>,
+    options: Vec<(String, String)>,
+}
+
+impl SuspendedConfig {
+    pub(crate) fn capture(reduced: &smelt_core::acp_session::AcpSessionState) -> Self {
+        let model_config_id = reduced.model.as_ref().map(|model| model.config_id.as_str());
+        Self {
+            model: reduced
+                .model
+                .as_ref()
+                .map(|model| model.current_value.clone())
+                .filter(|value| !value.is_empty()),
+            options: reduced
+                .config_options
+                .iter()
+                // 有的 adapter 把模型同时放在配置项里，那份已经由 `model` 管。
+                .filter(|config| Some(config.config_id.as_str()) != model_config_id)
+                .filter_map(|config| Some((config.config_id.clone(), config_value(config)?)))
+                .collect(),
+        }
+    }
+
+    /// 模型和挂起前不一样、且新 runtime 还能选它时，返回换回去的动作。
+    pub(crate) fn model_action(
+        &self,
+        reduced: &smelt_core::acp_session::AcpSessionState,
+    ) -> Option<smelt_core::acp_session::AcpUserAction> {
+        let wanted = self.model.as_ref()?;
+        let model = reduced.model.as_ref()?;
+        if &model.current_value == wanted
+            || (!model.options.is_empty()
+                && !model.options.iter().any(|(value, _)| value == wanted))
+        {
+            return None;
+        }
+        Some(smelt_core::acp_session::AcpUserAction::SetConfigOption {
+            config_id: model.config_id.clone(),
+            value_id: wanted.clone(),
+            boolean: None,
+        })
+    }
+
+    /// 模型以外和挂起前不一样、且新 runtime 仍提供的配置项。
+    pub(crate) fn option_actions(
+        &self,
+        reduced: &smelt_core::acp_session::AcpSessionState,
+    ) -> Vec<smelt_core::acp_session::AcpUserAction> {
+        self.options
+            .iter()
+            .filter_map(|(config_id, wanted)| {
+                let config = reduced
+                    .config_options
+                    .iter()
+                    .find(|config| &config.config_id == config_id)?;
+                if config_value(config).as_ref() == Some(wanted) {
+                    return None;
+                }
+                let boolean = match config.boolean {
+                    Some(_) => Some(wanted == "true"),
+                    None if config.options.iter().any(|(value, _)| value == wanted) => None,
+                    None => return None,
+                };
+                Some(smelt_core::acp_session::AcpUserAction::SetConfigOption {
+                    config_id: config_id.clone(),
+                    value_id: wanted.clone(),
+                    boolean,
+                })
+            })
+            .collect()
+    }
+}
+
+/// 配置项当前的值 id。开关是 `true` / `false`，选择项按当前显示名反查。
+fn config_value(config: &smelt_core::acp_conn::SessionConfigState) -> Option<String> {
+    if let Some(flag) = config.boolean {
+        return Some(flag.to_string());
+    }
+    config
+        .options
+        .iter()
+        .find(|(_, name)| name == &config.current_name)
+        .map(|(value, _)| value.clone())
+}
+
+/// 用到 runtime 之前调用。挂起的会话按记录的启动规格拉起，等 Pi 重放完历史，
+/// 再把挂起前的会话配置写回去；没挂起就只记一次活动。错误串说明这一次为什么
+/// 用不了。
 pub(crate) fn wake_suspended_acp_session(
     id: &str,
     slot: &Arc<AcpSlot<AcpSession>>,
@@ -225,7 +326,7 @@ pub(crate) fn wake_suspended_acp_session(
     if !sess.idle.is_suspended() {
         return Ok(());
     }
-    {
+    let saved = {
         let _lifecycle = slot.lifecycle.lock().unwrap();
         if !acp_sessions.is_current(id, slot) {
             return Err("ACP session was replaced".to_string());
@@ -233,11 +334,86 @@ pub(crate) fn wake_suspended_acp_session(
         // 等锁期间别人可能已经拉起了。
         if sess.idle.is_suspended() && !acp_runtime_alive(sess) {
             crate::dlog(&format!("acp 唤醒闲置会话 id={id}"));
+            // 拉起会清掉镜像里的模型，必须在那之前记下。挂起期间改不了配置
+            // （改配置要 runtime，会先走到这里），所以镜像就是挂起时的值。
+            let saved = SuspendedConfig::capture(&sess.reduced.lock().unwrap());
             relaunch_recorded_acp_runtime(id, slot, acp_sessions, subscribers)
                 .map_err(str::to_string)?;
+            Some(saved)
+        } else {
+            None
+        }
+    };
+    wait_for_acp_ready(sess, ACP_WAKE_READY_TIMEOUT)?;
+    if let Some(saved) = saved {
+        restore_suspended_config(id, sess, &saved, subscribers);
+    }
+    Ok(())
+}
+
+/// 把挂起前的配置写回刚拉起的 runtime。先模型、再其它项，每一步等 agent 确认：
+/// 动作之后紧跟的就是用户的消息，配置没落定就开回合会用错模型或权限。
+/// 写不回去（模型下架、agent 不再提供某项）只记日志，不挡用户的动作。
+pub(crate) fn restore_suspended_config(
+    id: &str,
+    sess: &AcpSession,
+    saved: &SuspendedConfig,
+    subscribers: &EventHubHandle,
+) {
+    let model = saved.model_action(&sess.reduced.lock().unwrap());
+    apply_config_restore_step(
+        id,
+        sess,
+        model.into_iter().collect(),
+        subscribers,
+        |reduced| saved.model_action(reduced).is_none(),
+    );
+    let options = saved.option_actions(&sess.reduced.lock().unwrap());
+    apply_config_restore_step(id, sess, options, subscribers, |reduced| {
+        saved.option_actions(reduced).is_empty()
+    });
+}
+
+fn apply_config_restore_step(
+    id: &str,
+    sess: &AcpSession,
+    actions: Vec<smelt_core::acp_session::AcpUserAction>,
+    subscribers: &EventHubHandle,
+    restored: impl Fn(&smelt_core::acp_session::AcpSessionState) -> bool,
+) {
+    use smelt_core::daemon_state::DaemonPhase;
+    if actions.is_empty() {
+        return;
+    }
+    crate::dlog(&format!("acp 恢复闲置前的会话配置 id={id} {actions:?}"));
+    let status_before = sess.reduced.lock().unwrap().status_line.clone();
+    for action in actions {
+        if let Err(error) = apply_acp_user_action(sess, action, subscribers) {
+            eprintln!("[acp] 会话 {id} 恢复闲置前的配置失败：{error}");
+            return;
         }
     }
-    wait_for_acp_ready(sess, ACP_WAKE_READY_TIMEOUT)
+    let deadline = Instant::now() + ACP_CONFIG_RESTORE_TIMEOUT;
+    loop {
+        {
+            let reduced = sess.reduced.lock().unwrap();
+            if restored(&reduced) || reduced.phase == DaemonPhase::Dead {
+                return;
+            }
+            if reduced.status_line != status_before
+                && let Some(status) = reduced.status_line.as_deref()
+                && status.starts_with(CONFIG_UPDATE_FAILURE_PREFIX)
+            {
+                eprintln!("[acp] 会话 {id} 恢复闲置前的配置被拒绝：{status}");
+                return;
+            }
+        }
+        if Instant::now() >= deadline {
+            eprintln!("[acp] 会话 {id} 恢复闲置前的配置超时，未等到 agent 确认");
+            return;
+        }
+        thread::sleep(ACP_WAKE_READY_POLL);
+    }
 }
 
 /// 等刚拉起的 runtime 恢复完：不在建连，也不在重放历史。拉起失败的终态原样报回。

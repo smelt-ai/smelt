@@ -180,3 +180,231 @@ fn waking_a_running_conversation_only_records_activity() {
         "没挂起就不该重新拉起"
     );
 }
+
+fn pi_model(current: &str) -> smelt_core::acp_conn::ModelState {
+    smelt_core::acp_conn::ModelState {
+        config_id: "model".into(),
+        current_value: current.into(),
+        current_name: current.into(),
+        options: vec![
+            ("openai/gpt-5".into(), "openai/gpt-5".into()),
+            ("deepseek/flash".into(), "deepseek/flash".into()),
+        ],
+        provider_groups: Vec::new(),
+    }
+}
+
+fn select(
+    id: &str,
+    current: &str,
+    options: &[(&str, &str)],
+) -> smelt_core::acp_conn::SessionConfigState {
+    smelt_core::acp_conn::SessionConfigState {
+        config_id: id.into(),
+        name: id.into(),
+        description: None,
+        current_name: current.into(),
+        options: options
+            .iter()
+            .map(|(value, name)| (value.to_string(), name.to_string()))
+            .collect(),
+        boolean: None,
+    }
+}
+
+fn mode(current: &str) -> smelt_core::acp_conn::SessionConfigState {
+    select(
+        "mode",
+        current,
+        &[("default", "逐次审批"), ("bypassPermissions", "完全访问")],
+    )
+}
+
+fn thinking(current: &str) -> smelt_core::acp_conn::SessionConfigState {
+    select(
+        "thought_level",
+        current,
+        &[("medium", "中"), ("high", "高")],
+    )
+}
+
+fn switch(id: &str, on: bool) -> smelt_core::acp_conn::SessionConfigState {
+    smelt_core::acp_conn::SessionConfigState {
+        boolean: Some(on),
+        ..select(id, "", &[])
+    }
+}
+
+/// 挂起前用户调过的一组配置：换了模型、开了完全访问、推理拉到高、开了开关。
+fn tuned_state() -> AcpSessionState {
+    quiet_with(|state| {
+        state.model = Some(pi_model("deepseek/flash"));
+        state.config_options = vec![mode("完全访问"), thinking("高"), switch("codemode", true)];
+    })
+}
+
+/// 新 runtime 起来时的默认值。
+fn fresh_defaults() -> AcpSessionState {
+    quiet_with(|state| {
+        state.model = Some(pi_model("openai/gpt-5"));
+        state.config_options = vec![mode("逐次审批"), thinking("中"), switch("codemode", false)];
+    })
+}
+
+fn set(config_id: &str, value_id: &str, boolean: Option<bool>) -> String {
+    format!(
+        "{:?}",
+        AcpUserAction::SetConfigOption {
+            config_id: config_id.into(),
+            value_id: value_id.into(),
+            boolean,
+        }
+    )
+}
+
+fn debug_all(actions: impl IntoIterator<Item = AcpUserAction>) -> Vec<String> {
+    actions
+        .into_iter()
+        .map(|action| format!("{action:?}"))
+        .collect()
+}
+
+#[test]
+fn waking_restores_every_setting_that_fell_back_to_default() {
+    let saved = acp_idle::SuspendedConfig::capture(&tuned_state());
+    let fresh = fresh_defaults();
+    assert_eq!(
+        debug_all(saved.model_action(&fresh)),
+        [set("model", "deepseek/flash", None)]
+    );
+    assert_eq!(
+        debug_all(saved.option_actions(&fresh)),
+        [
+            set("mode", "bypassPermissions", None),
+            set("thought_level", "high", None),
+            set("codemode", "true", Some(true)),
+        ]
+    );
+}
+
+#[test]
+fn settings_the_new_runtime_already_has_are_not_resent() {
+    let saved = acp_idle::SuspendedConfig::capture(&tuned_state());
+    let same = tuned_state();
+    assert!(saved.model_action(&same).is_none());
+    assert!(saved.option_actions(&same).is_empty());
+}
+
+#[test]
+fn settings_the_new_runtime_no_longer_offers_are_skipped() {
+    let saved = acp_idle::SuspendedConfig::capture(&tuned_state());
+    let narrowed = quiet_with(|state| {
+        let mut model = pi_model("openai/gpt-5");
+        model.options.retain(|(value, _)| value == "openai/gpt-5");
+        state.model = Some(model);
+        // 推理强度只剩 medium，codemode 整项没了。
+        state.config_options = vec![
+            mode("逐次审批"),
+            select("thought_level", "中", &[("medium", "中")]),
+        ];
+    });
+    assert!(
+        saved.model_action(&narrowed).is_none(),
+        "模型已下架就不硬塞"
+    );
+    assert_eq!(
+        debug_all(saved.option_actions(&narrowed)),
+        [set("mode", "bypassPermissions", None)]
+    );
+}
+
+#[test]
+fn a_model_also_listed_as_a_config_option_is_restored_once() {
+    let mut tuned = tuned_state();
+    tuned.config_options.push(select(
+        "model",
+        "deepseek/flash",
+        &[("deepseek/flash", "deepseek/flash")],
+    ));
+    let saved = acp_idle::SuspendedConfig::capture(&tuned);
+    let mut fresh = fresh_defaults();
+    fresh.config_options.push(select(
+        "model",
+        "openai/gpt-5",
+        &[
+            ("openai/gpt-5", "openai/gpt-5"),
+            ("deepseek/flash", "deepseek/flash"),
+        ],
+    ));
+    assert!(
+        !debug_all(saved.option_actions(&fresh))
+            .iter()
+            .any(|action| action.contains("\"model\"")),
+        "模型只走 model 那一步"
+    );
+}
+
+/// 换模型会把 Pi 的推理强度打回模型默认值，所以必须等模型确认后再写其它项。
+#[test]
+fn restore_waits_for_the_model_before_writing_other_settings() {
+    use std::io::BufRead;
+    let saved = acp_idle::SuspendedConfig::capture(&tuned_state());
+    let (session, peer) = hosted_session(fresh_defaults());
+    let session = Arc::new(session);
+    let subscribers = new_event_hub();
+    let restoring = {
+        let session = Arc::clone(&session);
+        std::thread::spawn(move || {
+            acp_idle::restore_suspended_config("acp-idle", &session, &saved, &subscribers)
+        })
+    };
+    let mut lines = std::io::BufReader::new(peer).lines();
+    let mut next =
+        || serde_json::from_str::<AcpUserAction>(&lines.next().unwrap().unwrap()).unwrap();
+
+    assert_eq!(
+        format!("{:?}", next()),
+        set("model", "deepseek/flash", None)
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!restoring.is_finished(), "模型没确认前不能往下走");
+    // agent 确认换好了模型，推理强度被打回中。
+    session.reduced.lock().unwrap().model = Some(pi_model("deepseek/flash"));
+
+    assert_eq!(
+        [next(), next(), next()].map(|action| format!("{action:?}")),
+        [
+            set("mode", "bypassPermissions", None),
+            set("thought_level", "high", None),
+            set("codemode", "true", Some(true)),
+        ]
+    );
+    session.reduced.lock().unwrap().config_options =
+        vec![mode("完全访问"), thinking("高"), switch("codemode", true)];
+    restoring.join().unwrap();
+}
+
+#[test]
+fn a_rejected_restore_does_not_hold_the_user_action() {
+    let saved = acp_idle::SuspendedConfig::capture(&tuned_state());
+    let (session, _peer) = hosted_session(quiet_with(|state| {
+        state.model = Some(pi_model("deepseek/flash"));
+        state.config_options = vec![mode("逐次审批")];
+    }));
+    let session = Arc::new(session);
+    let subscribers = new_event_hub();
+    let restoring = {
+        let session = Arc::clone(&session);
+        std::thread::spawn(move || {
+            acp_idle::restore_suspended_config("acp-idle", &session, &saved, &subscribers)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    session.reduced.lock().unwrap().status_line = Some("更新会话配置失败：不行".into());
+    let started = std::time::Instant::now();
+    restoring.join().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "被拒绝就别等满超时"
+    );
+}

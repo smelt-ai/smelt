@@ -63,3 +63,10 @@ redundant_clone = "warn"
 # 正确性闸门：空 dbg/todo 不应进主线。存量 style 警告不在这里 deny，避免一次清不完。
 dbg_macro = "deny"
 todo = "deny"
+
+# proc-macro 和 build script 只在构建机上用，不发布，不用 strip。
+# rustc 1.97 在 macOS 上用 `rust-objcopy --strip-debug` 实现默认的 strip=debuginfo，处理后的
+# dylib 有时 LINKEDIT 字符串表不对齐（跟产物内容有关），macOS 27 的 dyld 拒绝加载，rustc 就报
+# `can't find crate for rquickjs_macro`（2026-10-19 复现；系统 `strip -S` 处理同一文件没问题）。
+[profile.release.build-override]
+strip = false
