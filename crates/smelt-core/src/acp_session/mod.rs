@@ -155,6 +155,8 @@ pub struct AcpSessionState {
     pub background_tasks: Vec<BackgroundTaskView>,
     /// Pi 子智能体。会话宿主每次变化推全量。
     pub subagents: Vec<SubagentView>,
+    /// 别的 Pi 对话发来、宿主还记得的消息。会话宿主每次变化推全量。
+    pub peer_inbox: Vec<crate::acp_session::PeerMessageView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     pub supports_compaction: bool,
@@ -230,6 +232,7 @@ impl Default for AcpSessionState {
             plan: None,
             background_tasks: Vec::new(),
             subagents: Vec::new(),
+            peer_inbox: Vec::new(),
             model: None,
             config_options: Vec::new(),
             supports_compaction: false,
@@ -331,6 +334,7 @@ impl AcpSessionState {
             plan: snap.plan,
             background_tasks: snap.background_tasks,
             subagents: snap.subagents,
+            peer_inbox: snap.peer_inbox,
             model: snap.model,
             config_options: snap.config_options,
             supports_compaction: snap.supports_compaction,
@@ -407,6 +411,7 @@ impl AcpSessionState {
             plan,
             background_tasks,
             subagents,
+            peer_inbox,
             model,
             config_options,
             conversation_state: _,
@@ -512,6 +517,7 @@ impl AcpSessionState {
             self.plan = plan;
             self.background_tasks = background_tasks;
             self.subagents = subagents;
+            self.peer_inbox = peer_inbox;
             self.model = model;
             self.config_options = config_options;
             self.supports_compaction = supports_compaction;
@@ -848,6 +854,11 @@ impl AcpSessionState {
             },
             subagents: if include_envelope {
                 self.subagents.clone()
+            } else {
+                Vec::new()
+            },
+            peer_inbox: if include_envelope {
+                self.peer_inbox.clone()
             } else {
                 Vec::new()
             },

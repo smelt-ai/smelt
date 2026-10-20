@@ -108,6 +108,31 @@ fn labeled_divider(
         .into_any_element()
 }
 
+/// 别的对话发来的正文超过这么高先收起。
+const PEER_NOTE_PREVIEW_HEIGHT: f32 = 120.;
+
+/// 正文长到要收起：行多或字多。按文本估，不量排版。
+fn peer_text_is_long(text: &str) -> bool {
+    text.lines().count() > 5 || text.chars().count() > 400
+}
+
+/// 事件行的内容：小字、次要色，一行排开。
+fn event_line(muted: gpui::Hsla) -> gpui::Div {
+    h_flex()
+        .max_w_full()
+        .min_w_0()
+        .gap_1()
+        .items_center()
+        .text_xs()
+        .text_color(muted)
+}
+
+/// 「非用户、非助手」的条目（后台结果、子智能体结果、别的对话的消息）居中一行，
+/// 和靠右的用户气泡、靠左的助手回答分开。
+fn centered_event(row: gpui::Div) -> gpui::Div {
+    h_flex().w_full().justify_center().py_1().child(row)
+}
+
 struct SubagentCard<'a> {
     index: usize,
     id: &'a str,
@@ -649,6 +674,7 @@ impl AcpView {
                         output,
                         children,
                         subagents,
+                        peer,
                     } => {
                         let owner = super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, id);
                         let failed = matches!(status, ToolCallStatus::Failed);
@@ -695,7 +721,10 @@ impl AcpView {
                         // 已完成工具在展开的过程组里占绝大多数。提前返回紧凑行，
                         // 只保留必要的 diff 统计，不构建随后会被丢弃的完整卡片。
                         // 连续同类工具由外层收成「搜索了 N 次」，起点占位给合并行。
-                        if compact_in_process
+                        // 发给别的 Pi 对话的一条不是工具卡片，是居中的事件行。
+                        if let Some(send) = peer.as_ref() {
+                            this.render_peer_send(i, &owner, send, *status, muted, cx)
+                        } else if compact_in_process
                             && tool_run.as_ref().is_some_and(|run| run.start == i)
                         {
                             div().w_full().into_any_element()
@@ -1081,43 +1110,30 @@ impl AcpView {
                     AcpEntry::TaskNote(note) => {
                         let note_owner =
                             super::super::lookup_owner(&this.layout_cache.borrow().owner_ids, &note.id);
-                        // 后台任务和后台子智能体的结果：默认只占一行。输出可能很长，模型已经
-                        // 拿到完整内容，人要看时再点开，展开后限高滚动。展开状态和思考详情
-                        // 共用 `expanded_thoughts`（key 都是 entries 下标，互不冲突）。
+                        if let Some(peer) = note.peer.as_ref() {
+                            this.render_peer_note(i, &note_owner, entry, note, peer, muted, t.border, cx)
+                        } else {
+                        // 后台任务和后台子智能体的结果：居中一行，不是谁说的话。输出可能很长，
+                        // 模型已经拿到完整内容，人要看时再点开，展开后限高滚动。展开状态和思考
+                        // 详情共用 `expanded_thoughts`（key 都是 entries 下标，互不冲突）。
                         let has_output = !note.output_tail.trim().is_empty();
                         let expanded = has_output && this.expanded_thoughts.contains(&i);
-                        let summary = h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap_1p5()
-                            .items_center()
-                            .py_1()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(div().min_w_0().truncate().child(note.summary()));
-                        let summary = if has_output {
-                            let hover = t.foreground;
-                            summary
-                                .id(owner_id("acp-task-note-row", &note_owner))
-                                
-                                .hover(move |row| row.text_color(hover))
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .child(if expanded { "▾" } else { "▸" }),
-                                )
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    if !this.expanded_thoughts.remove(&i) {
-                                        this.expanded_thoughts.insert(i);
-                                    }
-                                    this.list_state.remeasure_items(i..i.saturating_add(1));
-                                    cx.notify();
-                                }))
-                                .into_any_element()
-                        } else {
-                            summary.into_any_element()
+                        let icon = match note.kind {
+                            smelt_model::acp_chat::TaskNoteKind::Subagent => IconName::Bot,
+                            _ => IconName::SquareTerminal,
                         };
-                        let mut block = v_flex().w_full().child(summary);
+                        let mut row = event_line(muted)
+                            .child(Icon::new(icon).size(px(13.)).text_color(muted))
+                            .child(div().min_w_0().truncate().child(note.summary()));
+                        if has_output {
+                            row = row.child(this.render_event_toggle(
+                                owner_id("acp-task-note-row", &note_owner),
+                                i,
+                                expanded,
+                                cx,
+                            ));
+                        }
+                        let mut block = v_flex().w_full().child(centered_event(row));
                         if expanded {
                             block = block.child(
                                 div()
@@ -1139,6 +1155,7 @@ impl AcpView {
                             );
                         }
                         block.into_any_element()
+                        }
                     }
                     AcpEntry::Divider(label) => {
                         labeled_divider(label.clone().into(), t.border, muted)
@@ -1597,6 +1614,205 @@ impl AcpView {
             }
         }
         col.into_any_element()
+    }
+
+    /// 发给别的 Pi 对话的一条：居中一行「已发任务给 B」，起新对话的是「新建对话 C 并交代任务」。
+    /// 点对方标题切过去，点箭头看发出去的正文。
+    fn render_peer_send(
+        &self,
+        index: usize,
+        owner: &gpui::SharedString,
+        send: &smelt_model::acp_chat::PeerSend,
+        status: ToolCallStatus,
+        muted: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let red: gpui::Hsla = gpui::rgb(ui_theme::red()).into();
+        let running = matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress);
+        let failed = send.error.is_some() || matches!(status, ToolCallStatus::Failed);
+        let kind = send.kind.label();
+        let (icon, ink, lead) = match (failed, running, send.spawned) {
+            (true, _, true) => (IconName::TriangleAlert, red, "新建对话".to_string()),
+            (true, _, false) => (IconName::TriangleAlert, red, "发给".to_string()),
+            (false, true, true) => (IconName::Plus, muted, "正在新建对话".to_string()),
+            (false, false, true) => (IconName::Plus, muted, "新建对话".to_string()),
+            (false, true, false) => (IconName::ArrowRight, muted, format!("正在发{kind}给")),
+            (false, false, false) => (IconName::ArrowRight, muted, format!("已发{kind}给")),
+        };
+        // 新建对话交代的就是任务：「新建对话 C 并交代任务」。
+        let tail = (send.spawned && !failed && !running).then_some("并交代任务");
+        let has_body = !send.text.trim().is_empty();
+        let expanded = has_body && self.expanded_thoughts.contains(&index);
+        let mut row = event_line(muted)
+            .child(Icon::new(icon).size(px(13.)).text_color(ink))
+            .child(div().flex_shrink_0().child(lead))
+            .child(self.render_conversation_link(
+                owner_id("acp-peer-send-to", owner),
+                &send.to_id,
+                &send.to_title,
+                cx,
+            ));
+        if let Some(tail) = tail {
+            row = row.child(div().flex_shrink_0().child(tail));
+        }
+        if failed {
+            let reason = send
+                .error
+                .as_deref()
+                .map_or_else(|| "失败".to_string(), |error| format!("失败：{error}"));
+            row = row.child(div().min_w_0().truncate().text_color(red).child(reason));
+        }
+        if has_body {
+            row = row.child(self.render_event_toggle(
+                owner_id("acp-peer-send-toggle", owner),
+                index,
+                expanded,
+                cx,
+            ));
+        }
+        let mut block = v_flex().w_full().child(centered_event(row));
+        if expanded {
+            block = block.child(
+                div()
+                    .id(owner_id("acp-peer-send-body", owner))
+                    .w_full()
+                    .max_h(px(320.))
+                    .overflow_y_scroll()
+                    .pb_2()
+                    .child(
+                        selectable_plain_text(owner_id("acp-peer-send-text", owner), &send.text)
+                            .text_xs()
+                            .text_color(muted),
+                    ),
+            );
+        }
+        block.into_any_element()
+    }
+
+    /// 别的 Pi 对话发来的消息：居中一行「A 发来任务」，下面直接是正文（引用块）。
+    /// 这个对话接下来做什么由它决定，人得直接读到；太长先收起，点「展开全文」看完。
+    /// 退信同样画在这里：警示图标加「B 没收到你的消息」，正文是原因和原文开头。
+    #[allow(clippy::too_many_arguments)]
+    fn render_peer_note(
+        &self,
+        index: usize,
+        owner: &gpui::SharedString,
+        entry: &AcpEntry,
+        note: &smelt_model::acp_chat::TaskNote,
+        peer: &smelt_model::acp_chat::PeerNote,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (icon, ink): (IconName, gpui::Hsla) =
+            if peer.kind == smelt_model::acp_session::PeerMessageKind::Bounce {
+                (IconName::TriangleAlert, gpui::rgb(ui_theme::red()).into())
+            } else {
+                (IconName::Inbox, muted)
+            };
+        let row = event_line(muted)
+            .child(Icon::new(icon).size(px(13.)).text_color(ink))
+            .child(self.render_conversation_link(
+                owner_id("acp-peer-note-from", owner),
+                &peer.source_session_id,
+                &peer.source_title,
+                cx,
+            ))
+            .child(div().flex_shrink_0().child(peer.kind.received()));
+        let mut block = v_flex().w_full().gap_1().child(centered_event(row));
+        if note.output_tail.trim().is_empty() {
+            return block.into_any_element();
+        }
+        let long = peer_text_is_long(&note.output_tail);
+        let full = self.expanded_thoughts.contains(&index);
+        let markdown = cached_entry_markdown(&self.rendered_markdown, index, entry);
+        let mut body = div()
+            .id(owner_id("acp-peer-note-body", owner))
+            .w_full()
+            .pl_3()
+            .border_l_2()
+            .border_color(border)
+            .child(self.retained_markdown("acp-peer-md", index, 0, markdown, cx));
+        if long && !full {
+            body = body.max_h(px(PEER_NOTE_PREVIEW_HEIGHT)).overflow_hidden();
+        }
+        block = block.child(body);
+        if long {
+            block = block.child(
+                h_flex().w_full().pl_3().child(
+                    Button::new(owner_id("acp-peer-note-more", owner))
+                        .quiet()
+                        .compact()
+                        .label(if full { "收起" } else { "展开全文" })
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            if !this.expanded_thoughts.remove(&index) {
+                                this.expanded_thoughts.insert(index);
+                            }
+                            this.list_state
+                                .remeasure_items(index..index.saturating_add(1));
+                            cx.notify();
+                        })),
+                ),
+            );
+        }
+        block.into_any_element()
+    }
+
+    /// 事件行里的对话标题。点了切到那个对话；没有标题时显示 id。
+    fn render_conversation_link(
+        &self,
+        id: gpui::ElementId,
+        sid: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let label = if title.trim().is_empty() {
+            sid.to_string()
+        } else {
+            title.to_string()
+        };
+        let sid = sid.to_string();
+        Button::new(id)
+            .quiet()
+            .compact()
+            .label(label.clone())
+            .tooltip(sid.clone())
+            .accessibility_label(format!("打开对话 {label}"))
+            .on_click(cx.listener(move |_this, _ev, _window, cx| {
+                // 新对话还在建，没有 id 可跳。
+                if !sid.is_empty() {
+                    cx.emit(AcpViewEvent::OpenConversation { sid: sid.clone() });
+                }
+            }))
+            .into_any_element()
+    }
+
+    /// 事件行末尾的展开箭头。展开状态记在 `expanded_thoughts`，key 是 entries 下标。
+    fn render_event_toggle(
+        &self,
+        id: gpui::ElementId,
+        index: usize,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        Button::new(id)
+            .quiet()
+            .icon_size()
+            .icon(Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            }))
+            .accessibility_label(if expanded { "收起" } else { "展开" })
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                if !this.expanded_thoughts.remove(&index) {
+                    this.expanded_thoughts.insert(index);
+                }
+                this.list_state
+                    .remeasure_items(index..index.saturating_add(1));
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     fn render_subagent_card(
@@ -2072,6 +2288,7 @@ impl AcpView {
                     output,
                     children: nested,
                     subagents: _,
+                    peer: _,
                 } => {
                     let failed = matches!(status, ToolCallStatus::Failed);
                     let nested_running = smelt_model::acp_chat::has_unfinished_tool_call(nested);

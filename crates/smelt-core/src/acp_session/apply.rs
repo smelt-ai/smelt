@@ -275,11 +275,13 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         ConversationEvent::SubagentRuns { id, runs } => {
             apply_subagent_runs(state, &mut outcome, id, runs)
         }
+        ConversationEvent::PeerSend { id, send } => apply_peer_send(state, &mut outcome, id, send),
         ConversationEvent::Model(model) => state.model = Some(model),
         ConversationEvent::ConfigOptions(options) => state.config_options = options,
         ConversationEvent::Plan(plan) => apply_plan(state, plan),
         ConversationEvent::BackgroundTasks(tasks) => apply_background_tasks(state, tasks),
         ConversationEvent::Subagents(subagents) => apply_subagents(state, subagents),
+        ConversationEvent::PeerInbox(messages) => state.peer_inbox = messages,
         ConversationEvent::Permission {
             question,
             tool_call_id,
@@ -392,6 +394,7 @@ fn is_transcript_delta(ev: &ConversationEvent) -> bool {
             | ConversationEvent::ToolFinished { .. }
             | ConversationEvent::ToolChildren { .. }
             | ConversationEvent::SubagentRuns { .. }
+            | ConversationEvent::PeerSend { .. }
             | ConversationEvent::ToolDebug { .. }
             | ConversationEvent::UserChunk(_)
             | ConversationEvent::UserImage(_)
@@ -408,6 +411,7 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
             | ConversationEvent::Subagents(_)
+            | ConversationEvent::PeerInbox(_)
             | ConversationEvent::Model(_)
             | ConversationEvent::ConfigOptions(_)
             | ConversationEvent::Usage { .. }
@@ -439,6 +443,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
             | ConversationEvent::Subagents(_)
+            | ConversationEvent::PeerInbox(_)
             | ConversationEvent::BackgroundNotice(_)
             | ConversationEvent::PromptAccepted
             | ConversationEvent::PromptNotAccepted
@@ -1024,6 +1029,20 @@ fn apply_subagent_runs(
         crate::acp_chat::find_tool_call_mut(&mut state.entries, &id)
     {
         *subagents = runs;
+    }
+}
+
+fn apply_peer_send(
+    state: &mut AcpSessionState,
+    outcome: &mut ApplyOutcome,
+    id: String,
+    send: crate::acp_chat::PeerSend,
+) {
+    outcome.entries_offset = crate::acp_chat::find_tool_top_level_index(&state.entries, &id);
+    if let Some(AcpEntry::ToolCall { peer, .. }) =
+        crate::acp_chat::find_tool_call_mut(&mut state.entries, &id)
+    {
+        *peer = Some(send);
     }
 }
 

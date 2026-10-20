@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use gpui::*;
 
+mod html_preview;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -49,11 +50,31 @@ pub struct OpenFile {
     /// 上次保存时检测到磁盘内容跟 saved_content 对不上（外部改过）。为 true 时
     /// 再按一次 Cmd+S 会跳过冲突检查强制覆盖——用"再按一次"当作用户已确认覆盖。
     pub(super) conflict_pending: bool,
-    /// markdown 文件的「预览」开关（仅 .md 生效，见 file_content_parts）；切换打开的
-    /// 文件不带过去，open_file_now 每次按文件类型重置（Markdown 默认进预览）。
+    /// 「预览」开关（只对 [`PreviewKind`] 认得的文件生效，见 file_content_parts）；切换
+    /// 打开的文件不带过去，open_file_now 每次按文件类型重置（能预览的默认进预览）。
     pub(super) preview: bool,
-    /// 预览用的正文。编辑器每个按键都会变，这里按停手后再更新，避免每帧重解析 Markdown。
+    /// 预览用的正文。编辑器每个按键都会变，这里按停手后再更新，避免每帧重解析 Markdown、
+    /// 每个字都重载一次网页。
     pub(super) preview_source: SharedString,
+    /// HTML 预览的网页视图。只在 HTML 文件开着预览时存在，关掉预览就整个丢掉。
+    pub(super) html_preview: Option<Entity<html_preview::HtmlPreview>>,
+}
+
+/// 文件面板能预览的文件类型。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreviewKind {
+    Markdown,
+    Html,
+}
+
+impl PreviewKind {
+    pub(super) fn for_path(path: &str) -> Option<Self> {
+        match view::editor_language_for_path(path).as_str() {
+            "md" => Some(Self::Markdown),
+            "html" | "htm" => Some(Self::Html),
+            _ => None,
+        }
+    }
 }
 
 /// 保存一次的结果：分 Saved（带新版本）/ 检测到外部改动的 Conflict / 其它错误。

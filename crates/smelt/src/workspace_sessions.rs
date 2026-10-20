@@ -1036,6 +1036,18 @@ impl Workspace {
                         this.mark_visible_session_read(cx);
                     }
                 }
+                acp_view::AcpViewEvent::OpenConversation { sid } => {
+                    // 互发消息的事件行上点了对方的标题。不在侧栏里的（别处托管的）不动。
+                    let target = this.sessions.iter().position(|session| {
+                        matches!(
+                            &session.kind,
+                            SessionKind::Conversation(view) if view.read(cx).session_id() == sid
+                        )
+                    });
+                    if let Some(ix) = target {
+                        this.activate(ix, window, cx);
+                    }
+                }
             },
         )
     }

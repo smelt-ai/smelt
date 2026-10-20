@@ -209,6 +209,8 @@ pub struct DiffView {
 pub enum TaskNoteKind {
     BackgroundTask,
     Subagent,
+    /// 另一个 Pi 对话发来的消息。
+    PeerMessage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

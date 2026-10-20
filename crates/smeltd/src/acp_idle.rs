@@ -95,6 +95,7 @@ pub(crate) fn acp_action_needs_runtime(action: &smelt_core::acp_session::AcpUser
             | AcpUserAction::RefreshModels
             | AcpUserAction::StopBackgroundTask { .. }
             | AcpUserAction::StopSubagent { .. }
+            | AcpUserAction::PeerReply { .. }
     )
 }
 
@@ -134,6 +135,14 @@ pub(crate) fn reduced_suspend_blocker(
     {
         // 子智能体的进程是会话里的 Pi 起的，停宿主会把它一起杀掉。
         return Some("subagent running");
+    }
+    if reduced
+        .peer_inbox
+        .iter()
+        .any(|message| message.status == smelt_core::acp_session::PeerMessageStatus::Pending)
+    {
+        // 别的对话发来、还没送进会话的消息只在宿主内存里，停宿主就丢了。
+        return Some("peer message pending");
     }
     None
 }
@@ -196,7 +205,10 @@ pub(crate) fn suspend_idle_acp_sessions(
     let mut suspended = Vec::new();
     for (id, slot) in acp_sessions.snapshot() {
         let sess = &slot.value;
-        if acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some() {
+        // 发件队列里还有发给它、没送到的信：挂起会让交出去的那几封跟着宿主一起没了。
+        if acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some()
+            || crate::peer_messages::has_undelivered(&id)
+        {
             continue;
         }
         if is_known_remote_session(remote_sessions, RemoteSessionKind::Acp, &id) != Some(false) {
@@ -207,6 +219,7 @@ pub(crate) fn suspend_idle_acp_sessions(
         };
         if !acp_sessions.is_current(&id, &slot)
             || acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some()
+            || crate::peer_messages::has_undelivered(&id)
         {
             continue;
         }
@@ -305,7 +318,7 @@ impl SuspendedConfig {
 }
 
 /// 配置项当前的值 id。开关是 `true` / `false`，选择项按当前显示名反查。
-fn config_value(config: &smelt_core::acp_conn::SessionConfigState) -> Option<String> {
+pub(crate) fn config_value(config: &smelt_core::acp_conn::SessionConfigState) -> Option<String> {
     if let Some(flag) = config.boolean {
         return Some(flag.to_string());
     }
@@ -421,6 +434,20 @@ fn apply_config_restore_step(
 }
 
 /// 等刚拉起的 runtime 恢复完：不在建连，也不在重放历史。拉起失败的终态原样报回。
+/// 别的对话起的新对话和发起方用同一套配置：模型、推理强度、权限模式。等新 runtime
+/// 就绪后照唤醒恢复的办法写进去，每一步等 agent 确认，之后再发任务。
+pub(crate) fn copy_session_config(
+    source: &AcpSession,
+    id: &str,
+    target: &AcpSession,
+    subscribers: &EventHubHandle,
+) -> Result<(), String> {
+    let saved = SuspendedConfig::capture(&source.reduced.lock().unwrap());
+    wait_for_acp_ready(target, ACP_WAKE_READY_TIMEOUT)?;
+    restore_suspended_config(id, target, &saved, subscribers);
+    Ok(())
+}
+
 fn wait_for_acp_ready(sess: &AcpSession, timeout: Duration) -> Result<(), String> {
     use smelt_core::daemon_state::DaemonPhase;
     let deadline = Instant::now() + timeout;

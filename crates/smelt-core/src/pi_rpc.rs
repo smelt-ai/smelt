@@ -1465,6 +1465,7 @@ fn background_notice_from_outbound(message: &serde_json::Value) -> Option<Conver
                 .unwrap_or("")
                 .to_string(),
             runs: Vec::new(),
+            peer: None,
         },
     ))
 }
@@ -1689,6 +1690,14 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 )));
             }
         }
+        ConversationCommand::DeliverPeerMessage(delivery) => match &state.background {
+            Some(background) => background.deliver_peer(delivery),
+            None => {
+                let _ = event_tx.try_send(ConversationEvent::Notice(
+                    "会话宿主还没就绪，丢掉了一条别的对话发来的消息".to_string(),
+                ));
+            }
+        },
         ConversationCommand::StopSubagent { id } => {
             let result = match &state.background {
                 Some(background) => background.stop_subagent(&id),
@@ -2599,13 +2608,17 @@ fn handle_event(
             }
         }
         Some("message_end") => {
-            // 后台子智能体的结果是自定义消息（`display: false`），实时到达时只有这里能看到。
-            // 只认子智能体：后台任务的状态行由守护进程自己发（`smelt_background_notify`），
-            // 这里再发一次会重复。
+            // 后台子智能体的结果、别的对话发来的消息是自定义消息（`display: false`），
+            // 实时到达时只有这里能看到。后台任务的状态行由守护进程自己发
+            // （`smelt_background_notify`），这里再发一次会重复。
             if let Some(message) = event.get("message")
                 && message.get("role").and_then(serde_json::Value::as_str) == Some("custom")
                 && let Some(note) = crate::acp_chat::task_note_from_pi_custom(message)
-                && note.kind == crate::acp_chat::TaskNoteKind::Subagent
+                && matches!(
+                    note.kind,
+                    crate::acp_chat::TaskNoteKind::Subagent
+                        | crate::acp_chat::TaskNoteKind::PeerMessage
+                )
             {
                 let _ = event_tx.try_send(ConversationEvent::BackgroundNotice(note));
                 return;
@@ -2644,6 +2657,7 @@ fn handle_event(
                 state.tool_args.insert(id.to_string(), args.clone());
             }
             emit_tool_started(event_tx, id, &name, args.as_ref());
+            emit_peer_send(event_tx, id, &name, args.as_ref(), None, None);
         }
         Some("tool_execution_update") => {
             let Some(id) = event.get("toolCallId").and_then(serde_json::Value::as_str) else {
@@ -2713,6 +2727,17 @@ fn handle_event(
                     runs,
                 });
             }
+            let failure = is_error.then(|| {
+                content_text(event.get("result").and_then(|value| value.get("content")))
+            });
+            emit_peer_send(
+                event_tx,
+                id,
+                &name,
+                args.as_ref(),
+                event.get("result").and_then(|value| value.get("details")),
+                failure.as_deref(),
+            );
             let output = event
                 .get("result")
                 .map(|result| tool_output_parts(result, &name, args.as_ref()))
@@ -3116,6 +3141,23 @@ fn tool_kind(name: &str) -> ToolKind {
 
 /// Pi `subagent` 工具结果里记下的子智能体（`details.runs`）。过程在各自的子会话里，
 /// 父会话只认这份名单；别的工具没有。
+/// `session_send` 发给了谁：开始时只有参数，结束后带上门卫回的标题、消息 id 或拒绝原因。
+fn emit_peer_send(
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    id: &str,
+    name: &str,
+    args: Option<&serde_json::Value>,
+    details: Option<&serde_json::Value>,
+    failure: Option<&str>,
+) {
+    if let Some(send) = crate::acp_chat::peer_send_from_tool(name, args, details, failure) {
+        let _ = event_tx.try_send(ConversationEvent::PeerSend {
+            id: id.to_string(),
+            send,
+        });
+    }
+}
+
 fn subagent_runs_from_details(
     name: &str,
     details: &serde_json::Value,
@@ -3377,6 +3419,19 @@ fn replay_messages(
                     });
                 }
                 let args = state.tool_args.get(id).cloned();
+                let failure = message
+                    .get("isError")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                    .then(|| content_text(message.get("content")));
+                emit_peer_send(
+                    event_tx,
+                    id,
+                    &name,
+                    args.as_ref(),
+                    message.get("details"),
+                    failure.as_deref(),
+                );
                 let _ = event_tx.try_send(ConversationEvent::ToolFinished {
                     id: id.to_string(),
                     status: if message
@@ -5255,6 +5310,102 @@ mod tests {
         assert_eq!(runs[0].id, "sa-1");
         assert_eq!(runs[0].status, crate::acp_session::SubagentStatus::Running);
         assert!(event_rx.try_recv().is_err());
+    }
+
+    /// `session_send` 开始时就知道发给谁；结束后补上门卫回的标题和消息 id，被拒时带原因。
+    #[test]
+    fn session_send_reports_who_it_went_to_and_why_it_failed() {
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        let peer_sends = |event_rx: &smol::channel::Receiver<ConversationEvent>| -> Vec<crate::acp_chat::PeerSend> {
+            std::iter::from_fn(|| event_rx.try_recv().ok())
+                .filter_map(|event| match event {
+                    ConversationEvent::PeerSend { id, send } if id == "call-9" => Some(send),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        handle_event(
+            serde_json::json!({
+                "type": "tool_execution_start",
+                "toolCallId": "call-9",
+                "toolName": "session_send",
+                "args": {"to": "acp-b", "text": "跑测试", "kind": "task"}
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        let started = peer_sends(&event_rx);
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].to_id, "acp-b");
+        assert_eq!(started[0].kind, crate::acp_session::PeerMessageKind::Task);
+        assert_eq!(started[0].message_id, None);
+
+        handle_event(
+            serde_json::json!({
+                "type": "tool_execution_end",
+                "toolCallId": "call-9",
+                "toolName": "session_send",
+                "isError": false,
+                "result": {
+                    "content": [{"type": "text", "text": "已发给〈测试〉"}],
+                    "details": {"to": {"id": "acp-b", "title": "测试"}, "kind": "task", "messageId": "pm-1"}
+                }
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        let finished = peer_sends(&event_rx);
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].to_title, "测试");
+        assert_eq!(finished[0].message_id.as_deref(), Some("pm-1"));
+        assert_eq!(finished[0].error, None);
+
+        handle_event(
+            serde_json::json!({
+                "type": "tool_execution_start",
+                "toolCallId": "call-9",
+                "toolName": "session_send",
+                "args": {"to": "acp-c", "text": "x"}
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        handle_event(
+            serde_json::json!({
+                "type": "tool_execution_end",
+                "toolCallId": "call-9",
+                "toolName": "session_send",
+                "isError": true,
+                "result": {
+                    "content": [{"type": "text", "text": "对方还有 8 条消息没收"}],
+                    "details": {"error": true, "reason": "inbox_full", "to": {"id": "acp-c", "title": ""}}
+                }
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        let refused = peer_sends(&event_rx);
+        let last = refused.last().expect("被拒也要说发给了谁");
+        assert_eq!(last.to_id, "acp-c");
+        assert_eq!(last.error.as_deref(), Some("对方还有 8 条消息没收"));
+
+        assert!(
+            crate::acp_chat::peer_send_from_tool("bash", None, None, None).is_none(),
+            "别的工具不算"
+        );
     }
 
     #[test]

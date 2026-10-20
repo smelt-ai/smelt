@@ -350,6 +350,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                 let row_count = visible_indices.len();
                 let row_text = row_text.clone();
                 let row_keys = row_keys.clone();
+                let cwd_for_rows = cwd.clone();
                 uniform_list("session-list", row_count, move |range, _window, _app| {
                     range
                         .map(|row_ix| {
@@ -364,25 +365,27 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                 agent_context,
                                 history_agent_ids.get(&s.resume_id).map(String::as_str),
                             );
-                            let row_cwd = cwd.clone();
+                            let row_cwd = cwd_for_rows.clone();
                             let ws_for_resume = workspace.clone();
                             let row_launch_override = launch_override.clone();
                             let row_profile_id = profile_id.clone();
-                            let rename_cwd = cwd.clone();
+                            let rename_cwd = cwd_for_rows.clone();
                             let rename_resume_id = s.resume_id.clone();
                             let rename_title = s.title.clone();
-                            let delete_target = cwd.clone().filter(|_| supports_delete).map(|cwd| {
-                                DeleteHistoryTarget {
+                            let delete_target = cwd_for_rows
+                                .clone()
+                                .filter(|_| supports_delete)
+                                .map(|cwd| DeleteHistoryTarget {
                                     agent,
                                     profile_id: profile_id.clone(),
                                     cwd,
                                     resume_id: s.resume_id.clone(),
                                     path: s.path.clone(),
                                     title: s.title.clone(),
-                                }
-                            });
+                                });
                             let migrate_source =
-                                cwd.clone()
+                                cwd_for_rows
+                                    .clone()
                                     .zip(migrate_agent)
                                     .map(|(cwd, agent)| HistoryMigrationSource {
                                         agent,

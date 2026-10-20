@@ -23,21 +23,39 @@ use super::view::{FileTreeRow, collect_file_tree_rows, editor_language_for_path}
 use super::*;
 use smelt_runtime_client::protocol::files::is_previewable_image;
 
+impl OpenFile {
+    /// 把预览正文交给 HTML 预览；不是 HTML 或没开预览时什么也不做。
+    fn sync_html_preview(&self, cx: &mut App) {
+        if let Some(html) = &self.html_preview {
+            let source = self.preview_source.clone();
+            html.update(cx, |preview, cx| preview.set_html(&source, cx));
+        }
+    }
+}
+
 // ===================== Workspace 方法 =====================
 
 impl Workspace {
-    /// 文件内容面板右上角源码 / 预览切换（仅 markdown 生效）。
-    pub(super) fn set_file_preview(&mut self, preview: bool, cx: &mut Context<Self>) {
+    /// 文件内容面板右上角源码 / 预览切换（只对 [`PreviewKind`] 认得的文件生效）。
+    pub(super) fn set_file_preview(
+        &mut self,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(of) = self.open_file.as_mut() {
             of.preview = preview;
+            of.html_preview = (preview
+                && PreviewKind::for_path(&of.path) == Some(PreviewKind::Html))
+            .then(|| cx.new(|cx| html_preview::HtmlPreview::new(window, cx)));
         }
         if preview {
-            self.refresh_markdown_preview_source(cx);
+            self.refresh_preview_source(cx);
         }
         cx.notify();
     }
 
-    fn refresh_markdown_preview_source(&mut self, cx: &App) {
+    fn refresh_preview_source(&mut self, cx: &mut Context<Self>) {
         let Some(open) = self.open_file.as_mut() else {
             return;
         };
@@ -48,20 +66,21 @@ impl Workspace {
         if open.preview_source.as_ref() != next {
             open.preview_source = next.into();
         }
+        open.sync_html_preview(cx);
     }
 
-    fn schedule_markdown_preview_refresh(&mut self, cx: &mut Context<Self>) {
-        self.markdown_preview_epoch = self.markdown_preview_epoch.wrapping_add(1);
-        let epoch = self.markdown_preview_epoch;
+    fn schedule_preview_refresh(&mut self, cx: &mut Context<Self>) {
+        self.preview_epoch = self.preview_epoch.wrapping_add(1);
+        let epoch = self.preview_epoch;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(80))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.markdown_preview_epoch != epoch {
+                if this.preview_epoch != epoch {
                     return;
                 }
-                this.refresh_markdown_preview_source(cx);
+                this.refresh_preview_source(cx);
                 cx.notify();
             });
         })
@@ -342,6 +361,23 @@ impl Workspace {
         }
     }
 
+    /// HTML 文件在系统默认浏览器里打开。开的是磁盘上的文件，相对路径的资源能加载；
+    /// 编辑器里没保存的改动不会带过去。
+    pub(super) fn open_file_in_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(of) = &self.open_file else {
+            return;
+        };
+        match url::Url::from_file_path(&of.path) {
+            Ok(url) => cx.open_url(url.as_str()),
+            Err(()) => {
+                if let Some(of) = self.open_file.as_mut() {
+                    of.save_error = Some("这个路径转不成文件地址，打不开浏览器".to_string());
+                }
+                cx.notify();
+            }
+        }
+    }
+
     /// 右键：在系统文件管理器中显示。
     pub fn reveal_path_in_finder(&mut self, path: String, _cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
@@ -423,7 +459,7 @@ impl Workspace {
         let r#gen = self.file_gen;
 
         let language = editor_language_for_path(&path);
-        let is_markdown = language == "md";
+        let preview_kind = PreviewKind::for_path(&path);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(language)
@@ -442,14 +478,16 @@ impl Workspace {
             save_error: None,
             readable: false, // 读完确认是文本才翻真，防止读取完成前误按 Cmd+S
             conflict_pending: false,
-            preview: is_markdown,
+            preview: preview_kind.is_some(),
             preview_source: SharedString::default(),
+            html_preview: (preview_kind == Some(PreviewKind::Html))
+                .then(|| cx.new(|cx| html_preview::HtmlPreview::new(window, cx))),
         });
         // 编辑器自己会刷新。预览和未保存标记属于 Workspace：按键先记下世代，
         // 停手后再把正文交给 Markdown，避免每个字符都重解析。
         self._file_editor_sub = Some(cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                this.schedule_markdown_preview_refresh(cx);
+                this.schedule_preview_refresh(cx);
             }
         }));
         cx.notify();
@@ -489,6 +527,7 @@ impl Workspace {
                         of.saved_content = Rc::new(content.clone());
                         of.saved_version = Some(version);
                         of.preview_source = content.into();
+                        of.sync_html_preview(cx);
                         of.readable = true;
                         None
                     }

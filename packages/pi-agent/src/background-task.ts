@@ -2,6 +2,7 @@ import { connect, type Socket } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import { createBashTool, defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { keepsForegroundTimeout, watchHostCommand } from "./bash-run.ts";
+import { type PeerMessageKind, SMELT_PEER_MESSAGE_CUSTOM_TYPE, peerMessage, peerMessageKind } from "./peer-message.ts";
 import {
 	SMELT_SUBAGENT_RESULT_CUSTOM_TYPE,
 	type SubagentResultStatus,
@@ -73,11 +74,23 @@ export type BackgroundHostResponse = {
 
 type HostRequest = Record<string, unknown>;
 
+/** 别的 Pi 对话发来的消息：来源、类别、剩余跳数、回复哪条。主 daemon 核过来源。 */
+export type PeerNoticeFields = {
+	sourceSessionId: string;
+	sourceTitle: string;
+	kind: PeerMessageKind;
+	hops: number;
+	replyTo: string | null;
+};
+
 export type TaskCompletionNotice = {
-	/** 后台命令是任务 id；后台子智能体派发是派发它的工具调用 id。 */
+	/** 后台命令是任务 id；后台子智能体派发是派发它的工具调用 id；别的对话发来的消息是 `pm-` id。 */
 	id: string;
-	/** `command` 是宿主起的命令，`subagent` 是一次后台子智能体派发交回的结果。 */
-	kind: "command" | "subagent";
+	/**
+	 * `command` 是宿主起的命令，`subagent` 是一次后台子智能体派发交回的结果，
+	 * `peer_message` 是别的 Pi 对话发来的消息（正文在 `output`）。
+	 */
+	kind: "command" | "subagent" | "peer_message";
 	title: string;
 	status: string;
 	exitCode: number | null;
@@ -85,6 +98,7 @@ export type TaskCompletionNotice = {
 	outputTail: string;
 	/** 后台子智能体派发里每个子智能体的结束状态。 */
 	runs: SubagentRunSummary[];
+	peer?: PeerNoticeFields;
 	wake: boolean;
 };
 
@@ -116,16 +130,33 @@ function parseCompletion(value: unknown): TaskCompletionNotice | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	const row = value as Record<string, unknown>;
 	if (row.op !== "completion" || typeof row.id !== "string" || !row.id) return undefined;
+	const kind: TaskCompletionNotice["kind"] =
+		row.kind === "subagent" ? "subagent" : row.kind === "peer_message" ? "peer_message" : "command";
+	const peer = kind === "peer_message" ? parsePeer(row.peer) : undefined;
+	if (kind === "peer_message" && !peer) return undefined;
 	return {
 		id: row.id,
-		kind: row.kind === "subagent" ? "subagent" : "command",
+		kind,
 		title: typeof row.title === "string" ? row.title : "",
 		status: typeof row.status === "string" ? row.status : "",
 		exitCode: typeof row.exitCode === "number" ? row.exitCode : null,
 		output: typeof row.output === "string" ? row.output : "",
 		outputTail: typeof row.outputTail === "string" ? row.outputTail : "",
 		runs: parseRuns(row.runs),
+		peer,
 		wake: row.wake === true,
+	};
+}
+
+function parsePeer(value: unknown): PeerNoticeFields | undefined {
+	const row = value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+	if (!row || typeof row.sourceSessionId !== "string" || !row.sourceSessionId) return undefined;
+	return {
+		sourceSessionId: row.sourceSessionId,
+		sourceTitle: typeof row.sourceTitle === "string" ? row.sourceTitle : "",
+		kind: peerMessageKind(row.kind),
+		hops: typeof row.hops === "number" ? row.hops : 0,
+		replyTo: typeof row.replyTo === "string" && row.replyTo ? row.replyTo : null,
 	};
 }
 
@@ -146,6 +177,13 @@ export function completionMessage(notice: TaskCompletionNotice): {
 	message: Parameters<ExtensionAPI["sendMessage"]>[0];
 	options: Parameters<ExtensionAPI["sendMessage"]>[1];
 } {
+	if (notice.kind === "peer_message" && notice.peer) {
+		return {
+			message: peerMessage({ id: notice.id, ...notice.peer, text: notice.output }),
+			// 和子智能体的结果一样，等这一轮做完再看，不插进手上的工具调用；空闲时开一轮。
+			options: { triggerTurn: notice.wake, deliverAs: "followUp" },
+		};
+	}
 	if (notice.kind === "subagent") {
 		const status: SubagentResultStatus =
 			notice.status === "completed" ? "completed" : notice.status === "stopped" ? "stopped" : "failed";
@@ -178,11 +216,15 @@ export function completionMessage(notice: TaskCompletionNotice): {
 	};
 }
 
-/** 宿主等 ack 的那两类结果消息。Pi 把它交给模型时，扩展能看到它的 `message_start`。 */
+/** 宿主等 ack 的那几类消息。Pi 把它交给模型时，扩展能看到它的 `message_start`。 */
 export function deliveredResultId(message: unknown): string | undefined {
 	const row = message as { role?: unknown; customType?: unknown; details?: { id?: unknown } } | undefined;
 	if (row?.role !== "custom") return undefined;
-	if (row.customType !== SMELT_BACKGROUND_TASK_CUSTOM_TYPE && row.customType !== SMELT_SUBAGENT_RESULT_CUSTOM_TYPE) {
+	if (
+		row.customType !== SMELT_BACKGROUND_TASK_CUSTOM_TYPE &&
+		row.customType !== SMELT_SUBAGENT_RESULT_CUSTOM_TYPE &&
+		row.customType !== SMELT_PEER_MESSAGE_CUSTOM_TYPE
+	) {
 		return undefined;
 	}
 	return typeof row.details?.id === "string" && row.details.id ? row.details.id : undefined;

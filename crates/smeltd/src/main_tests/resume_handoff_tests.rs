@@ -652,6 +652,7 @@ fn handoff_only_recovers_a_running_turn_with_an_active_start_marker() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         });
     assert!(snapshot_has_active_turn(&snapshot));
 }
@@ -672,6 +673,7 @@ fn handoff_dangling_tool_is_not_recovered_as_an_active_turn() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         });
     assert!(snapshot_has_active_turn(&snapshot));
 

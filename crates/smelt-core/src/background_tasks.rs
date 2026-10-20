@@ -1,6 +1,6 @@
-//! 会话宿主里的后台任务，以及 Pi 子智能体的登记（`subagents`）。
+//! 会话宿主里的后台任务、Pi 子智能体的登记（`subagents`），以及别的 Pi 对话发来的消息（`peers`）。
 //!
-//! 两者共用这里的套接字和「结果交回会话」的投递：结果写给扩展的监听，扩展回 ack
+//! 三者共用这里的套接字和「交回会话」的投递：结果写给扩展的监听，扩展回 ack
 //! 才算模型收到；`clear_queue` 清掉的静默重发；回退换了监听的由新监听再收一次。
 //!
 //! 进程归会话宿主所有，不放进 Pi 的进程组。Pi 扩展通过 Unix 套接字下命令；
@@ -20,8 +20,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::acp_conn::ConversationEvent;
-use crate::acp_session::{BackgroundTaskStatus, BackgroundTaskView};
+use crate::acp_session::{BackgroundTaskStatus, BackgroundTaskView, PeerDelivery};
 
+mod peers;
 mod subagents;
 
 const MAX_TASKS: usize = 12;
@@ -61,6 +62,8 @@ struct ModelNotice {
     output_tail: String,
     /// 后台派发里每个子智能体的 id、标题和状态。后台命令没有。
     runs: Option<serde_json::Value>,
+    /// 别的 Pi 对话发来的消息：来源、类别、剩余跳数、回复哪条。其余没有。
+    peer: Option<serde_json::Value>,
     wake: bool,
 }
 
@@ -102,6 +105,8 @@ struct State {
     dispatches: Vec<subagents::LiveDispatch>,
     /// 本次宿主生命期内登记过的子智能体。
     subagents: Vec<subagents::LiveSubagent>,
+    /// 别的 Pi 对话发来的消息：没送到的，加最近送到的。
+    peers: Vec<peers::LivePeer>,
     last_log_publish: Option<Instant>,
 }
 
@@ -180,6 +185,7 @@ impl BackgroundSupervisor {
                 tasks: Vec::new(),
                 dispatches: Vec::new(),
                 subagents: Vec::new(),
+                peers: Vec::new(),
                 last_log_publish: None,
             }),
             cv: Condvar::new(),
@@ -244,6 +250,11 @@ impl BackgroundControl {
         subagents::request_stop(&self.inner, id)
     }
 
+    /// 主 daemon 交来别的 Pi 对话的消息。排队等监听交回会话，同一个 id 只收一次。
+    pub fn deliver_peer(&self, delivery: PeerDelivery) {
+        peers::deliver(&self.inner, delivery);
+    }
+
     /// Pi 的队列刚被 `clear_queue` 清空。写给会话、还在等 ack 的结果多半跟着没了，
     /// 放回去重发。用户刚按过停止，重发的不叫醒模型。清空之后才送进 Pi 的那条
     /// 会再送一次，内容相同。
@@ -257,6 +268,7 @@ impl BackgroundControl {
                 }
             }
             subagents::queue_cleared(&mut state);
+            peers::queue_cleared(&mut state);
         }
         poke(&self.inner);
     }
@@ -345,6 +357,9 @@ fn handle_client(inner: Arc<Inner>, stream: std::os::unix::net::UnixStream, sess
     match request.get("op").and_then(serde_json::Value::as_str) {
         Some("listen") => serve_listen(inner, stream, request_owner(&request)),
         Some("subagent_dispatch") => subagents::serve_dispatch(inner, stream, &request, pending),
+        Some(op @ ("session_list" | "session_read" | "session_send" | "session_spawn")) => {
+            peers::forward(stream, op, &request);
+        }
         Some("wait") if wait_timeout(&request).is_some() => {
             serve_wait_until(inner, stream, &request);
         }
@@ -510,6 +525,7 @@ fn write_model_notice(writer: &mut impl Write, notice: &ModelNotice) -> std::io:
             "output": notice.output,
             "outputTail": notice.output_tail,
             "runs": notice.runs,
+            "peer": notice.peer,
             "wake": notice.wake,
         })
         .to_string(),
@@ -1350,6 +1366,7 @@ fn completion_of(task: &LiveTask) -> ModelNotice {
         output_tail: display_tail(&output),
         output,
         runs: None,
+        peer: None,
         // 被停掉的不叫醒模型；停止时被清掉、放回来重发的也不叫醒，用户刚按过停止。
         wake: !matches!(task.status, BackgroundTaskStatus::Stopped) && !task.quiet,
     }
@@ -1413,6 +1430,7 @@ fn claim_model(state: &mut State, owner: &str, listener_id: u64) -> Option<Model
         return Some(completion_of(task));
     }
     subagents::claim(state, owner, listener_id)
+        .or_else(|| peers::claim(state, owner, listener_id))
 }
 
 /// 扩展确认 Pi 已经把这条结果交给了模型。
@@ -1428,6 +1446,9 @@ fn acknowledge_model(inner: &Inner, owner: &str, task_id: &str) {
         return;
     }
     subagents::acknowledge(&mut state, owner, task_id);
+    if peers::acknowledge(&mut state, owner, task_id) {
+        peers::publish_locked(&state, &inner.events);
+    }
 }
 
 fn still_claimed(inner: &Inner, task_id: &str, listener_id: u64) -> bool {
@@ -1439,6 +1460,7 @@ fn still_claimed(inner: &Inner, task_id: &str, listener_id: u64) -> bool {
             && task.watched_by.is_none()
             && !is_running(task.status)
     }) || subagents::still_claimed(&state, task_id, listener_id)
+        || peers::still_claimed(&state, task_id, listener_id)
 }
 
 fn unclaim(inner: &Inner, task_id: &str, listener_id: u64) {
@@ -1451,6 +1473,7 @@ fn unclaim(inner: &Inner, task_id: &str, listener_id: u64) {
         return;
     }
     subagents::unclaim(&mut state, task_id, listener_id);
+    peers::unclaim(&mut state, task_id, listener_id);
 }
 
 /// 这条监听结束。只放开它名下的观察，不把「还没写到模型」记成已送达。
@@ -3019,6 +3042,110 @@ mod tests {
         assert!(
             listen.try_next(Duration::from_millis(300)).is_none(),
             "已经收下的不随清队列重发"
+        );
+    }
+
+    fn peer_delivery(id: &str) -> crate::acp_session::PeerDelivery {
+        crate::acp_session::PeerDelivery {
+            id: id.into(),
+            source_session_id: "acp-a".into(),
+            source_title: "修登录".into(),
+            kind: crate::acp_session::PeerMessageKind::Task,
+            hops: 7,
+            reply_to: None,
+            text: "重跑 flaky e2e".into(),
+        }
+    }
+
+    fn latest_peer_inbox(
+        events: &smol::channel::Receiver<ConversationEvent>,
+    ) -> Vec<crate::acp_session::PeerMessageView> {
+        let mut latest = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let ConversationEvent::PeerInbox(views) = event {
+                latest = views;
+            }
+        }
+        latest
+    }
+
+    /// 别的对话发来的消息和后台结果走同一条监听：写给会话本身，带上来源和跳数；
+    /// ack 之后在 `peer_inbox` 里记成已送到，不再送。同一个 id 只排一次。
+    #[test]
+    fn a_peer_message_reaches_the_session_once_and_is_marked_delivered_on_ack() {
+        use crate::acp_session::PeerMessageStatus;
+        let (supervisor, events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let control = supervisor.control();
+        control.deliver_peer(peer_delivery("pm-1"));
+        control.deliver_peer(peer_delivery("pm-1"));
+        let inbox = latest_peer_inbox(&events);
+        assert_eq!(inbox.len(), 1, "同一个 id 只排一次");
+        assert_eq!(inbox[0].status, PeerMessageStatus::Pending);
+
+        let mut subagent = Listen::connect_as(&path, "call-1/sa-1");
+        let mut listen = Listen::connect(&path);
+        let notice = listen.next();
+        assert_eq!(notice["op"], "completion");
+        assert_eq!(notice["kind"], "peer_message");
+        assert_eq!(notice["id"], "pm-1");
+        assert_eq!(notice["output"], "重跑 flaky e2e");
+        assert_eq!(notice["wake"], true);
+        assert_eq!(notice["peer"]["sourceSessionId"], "acp-a");
+        assert_eq!(notice["peer"]["kind"], "task");
+        assert_eq!(notice["peer"]["hops"], 7);
+        assert!(
+            subagent.try_next(Duration::from_millis(200)).is_none(),
+            "子智能体的监听收不到别的对话的消息"
+        );
+
+        listen.ack("pm-1");
+        thread::sleep(Duration::from_millis(100));
+        let inbox = latest_peer_inbox(&events);
+        assert_eq!(inbox.len(), 1, "送到的还留着，发送方据此知道送到了");
+        assert_eq!(inbox[0].status, PeerMessageStatus::Delivered);
+        assert!(inbox[0].delivered_at_ms.is_some());
+
+        let mut later = Listen::connect(&path);
+        assert!(
+            later.try_next(Duration::from_millis(300)).is_none(),
+            "收下之后不再送"
+        );
+        control.deliver_peer(peer_delivery("pm-1"));
+        assert!(
+            later.try_next(Duration::from_millis(300)).is_none(),
+            "送到过的同一个 id 不再排"
+        );
+    }
+
+    /// 用户按停止时 `clear_queue` 清掉了还没进会话的消息：静默重发，不再叫醒模型。
+    #[test]
+    fn a_peer_message_cleared_from_the_queue_is_resent_without_waking() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let mut listen = Listen::connect(&path);
+        supervisor.control().deliver_peer(peer_delivery("pm-2"));
+        assert_eq!(listen.next()["wake"], true);
+
+        supervisor.control().queue_cleared();
+        let resent = listen.next();
+        assert_eq!(resent["id"], "pm-2");
+        assert_eq!(resent["wake"], false);
+    }
+
+    /// 子智能体不能和别的对话通信：请求不转给主 daemon，直接拒绝。
+    #[test]
+    fn peer_requests_from_subagents_are_refused() {
+        let (supervisor, _events) = supervisor();
+        let path = supervisor.socket_path().to_path_buf();
+        let refused = call(
+            &path,
+            serde_json::json!({"op": "session_list", "owner": "call-1/sa-1"}),
+        );
+        assert_eq!(refused["ok"], false);
+        assert!(
+            refused["error"].as_str().unwrap().contains("子智能体"),
+            "{refused}"
         );
     }
 }

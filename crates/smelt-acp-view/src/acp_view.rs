@@ -1192,6 +1192,8 @@ pub enum AcpViewEvent {
     Recovered,
     /// 用户从往上翻的历史滚回了最新位置。这时才算看到了最新结果，上层据此补标已读。
     ReturnedToLatest,
+    /// 用户点了另一个 Pi 对话的标题（互发消息的事件行）。上层切过去。
+    OpenConversation { sid: String },
 }
 
 /// 上一轮没正常结束后能做的事。
@@ -5595,6 +5597,11 @@ fn is_completion_entry(entry: &AcpEntry) -> bool {
     )
 }
 
+/// 发给别的 Pi 对话的一条：画成居中事件行，和状态行一样不收进「处理过程」。
+fn is_peer_send_entry(entry: &AcpEntry) -> bool {
+    matches!(entry, AcpEntry::ToolCall { peer: Some(_), .. })
+}
+
 fn is_collaboration_entry(entry: &AcpEntry) -> bool {
     matches!(
         entry,
@@ -5864,6 +5871,7 @@ fn groupable_process_tool_kind(
             status,
             title,
             children,
+            peer: None,
             ..
         } if *kind != ToolKind::Collaborate
             && !is_task_completion_tool_title(title)
@@ -6663,6 +6671,7 @@ fn fill_conversation_layout(
                 Some(*ix) != final_ix
                     && !is_completion_entry(&entries[*ix])
                     && !is_collaboration_entry(&entries[*ix])
+                    && !is_peer_send_entry(&entries[*ix])
                     && !matches!(entries[*ix], AcpEntry::TaskNote(_))
             })
             .collect();
@@ -6922,6 +6931,10 @@ fn markdown_for_entry(entry: &AcpEntry) -> Option<gpui::SharedString> {
     let text = match entry {
         AcpEntry::User(text) if !is_interrupt_marker(text) => text.clone(),
         AcpEntry::UserWithImages { text, .. } | AcpEntry::Assistant { text, .. } => text.clone(),
+        // 别的 Pi 对话发来的正文，和助手回答一样按 Markdown 画。
+        AcpEntry::TaskNote(note) if note.peer.is_some() && !note.output_tail.trim().is_empty() => {
+            note.output_tail.clone()
+        }
         AcpEntry::ToolCall { title, output, .. } if is_task_completion_tool_title(title) => {
             let text = completion_summary_text(output);
             if text.trim().is_empty() {

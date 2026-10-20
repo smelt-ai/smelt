@@ -41,6 +41,10 @@ pub enum AcpEntry {
         /// 子智能体卡片，过程在各自的子会话里，不挂 `children`。旧快照没有这个字段。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         subagents: Vec<SubagentRun>,
+        /// Pi `session_send`：发给哪个对话、什么类别、结果。有值就画成事件行，不画工具卡片。
+        /// 旧快照没有这个字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer: Option<PeerSend>,
     },
     /// 「重新开始」在旧对话和新对话之间插的分割线（不清空历史，只做标记）。
     Divider(String),
@@ -52,6 +56,8 @@ pub enum AcpEntry {
 pub const SMELT_BACKGROUND_TASK_CUSTOM_TYPE: &str = "smelt.background_task";
 /// 后台子智能体交回结果。和后台任务一样是状态，不是用户消息。
 pub const SMELT_SUBAGENT_RESULT_CUSTOM_TYPE: &str = "smelt.subagent_result";
+/// 另一个 Pi 对话发来的消息。不是用户说的话，画成事件行。
+pub const SMELT_PEER_MESSAGE_CUSTOM_TYPE: &str = "smelt.peer_message";
 
 /// 状态行说的是哪一种后台工作。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +66,100 @@ pub enum TaskNoteKind {
     #[default]
     BackgroundTask,
     Subagent,
+    /// 另一个 Pi 对话发来的消息。`id` 是 `pm-` id，来源和类别在 `peer` 里。
+    PeerMessage,
+}
+
+/// Pi 对话里的一次 `session_send`：发给谁、发的是哪类、送出去没有。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerSend {
+    pub to_id: String,
+    /// 门卫回的对方标题。还没回（工具在跑）或被拒时为空，界面用 id。
+    #[serde(default)]
+    pub to_title: String,
+    pub kind: crate::acp_session::PeerMessageKind,
+    /// 发出去的正文（工具参数里的 `text`）。
+    #[serde(default)]
+    pub text: String,
+    /// 门卫分的 `pm-` id。没送出去时为空。
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// 被拒或出错时的原因，给人看的一句话。
+    #[serde(default)]
+    pub error: Option<String>,
+    /// `session_spawn`：对方是这次新起的对话，`text` 是交代的任务。
+    #[serde(default)]
+    pub spawned: bool,
+}
+
+/// Pi 发消息、起新对话的工具名。只认这两个，不按标题猜。
+pub const PI_SESSION_SEND_TOOL: &str = "session_send";
+pub const PI_SESSION_SPAWN_TOOL: &str = "session_spawn";
+
+/// 从 `session_send` / `session_spawn` 的参数和（结束后的）结果还原。别的工具返回 None。
+/// `details` 来自扩展：成功时有 `to`、`messageId`；失败时 `error: true`，原因在结果正文里。
+/// 起新对话时，开始那一刻还没有对方 id，只有参数里的标题。
+pub fn peer_send_from_tool(
+    name: &str,
+    args: Option<&serde_json::Value>,
+    details: Option<&serde_json::Value>,
+    failure: Option<&str>,
+) -> Option<PeerSend> {
+    let spawned = match name {
+        PI_SESSION_SEND_TOOL => false,
+        PI_SESSION_SPAWN_TOOL => true,
+        _ => return None,
+    };
+    let text = |value: Option<&serde_json::Value>, key: &str| {
+        value
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let to = details.and_then(|details| details.get("to"));
+    let to_id = text(to, "id").or_else(|| text(args, "to"));
+    if to_id.is_none() && !spawned {
+        return None;
+    }
+    let body_key = if spawned { "task" } else { "text" };
+    Some(PeerSend {
+        to_id: to_id.unwrap_or_default(),
+        to_title: text(to, "title")
+            .or_else(|| spawned.then(|| text(args, "title")).flatten())
+            .unwrap_or_default(),
+        kind: if spawned {
+            crate::acp_session::PeerMessageKind::Task
+        } else {
+            crate::acp_session::PeerMessageKind::from_sender(
+                &text(details, "kind")
+                    .or_else(|| text(args, "kind"))
+                    .unwrap_or_default(),
+            )
+        },
+        text: args
+            .and_then(|args| args.get(body_key))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        message_id: text(details, "messageId"),
+        error: failure
+            .map(str::trim)
+            .filter(|error| !error.is_empty())
+            .map(ToOwned::to_owned),
+        spawned,
+    })
+}
+
+/// 发来这条消息的对话。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerNote {
+    pub source_session_id: String,
+    pub source_title: String,
+    pub kind: crate::acp_session::PeerMessageKind,
 }
 
 /// 一次 Pi 子智能体派发里的一个子智能体，按父会话记录里写下的那份。运行中的实时状态
@@ -118,11 +218,22 @@ pub struct TaskNote {
     /// 后台子智能体派发：每个子智能体的结束状态。`id` 是派发它的工具调用 id。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<SubagentRun>,
+    /// 别的 Pi 对话发来的消息：来源和类别。`output_tail` 是正文，`title` 和 `status` 不用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerNote>,
 }
 
 impl TaskNote {
     /// 一行说明：任务、状态、退出码。输出尾部另外显示，不写进这句话。
     pub fn summary(&self) -> String {
+        if let Some(peer) = &self.peer {
+            let from = if peer.source_title.is_empty() {
+                &peer.source_session_id
+            } else {
+                &peer.source_title
+            };
+            return format!("{from} {}", peer.kind.received());
+        }
         let status = match self.status.as_str() {
             "completed" => "完成",
             "failed" => "失败",
@@ -141,6 +252,7 @@ impl TaskNote {
             (TaskNoteKind::Subagent, [run]) => format!("子智能体 {}", run.id),
             (TaskNoteKind::Subagent, []) => format!("子智能体 {}", self.id),
             (TaskNoteKind::Subagent, runs) => format!("{} 个子智能体", runs.len()),
+            (TaskNoteKind::PeerMessage, _) => format!("消息 {}", self.id),
         };
         if self.title.is_empty() {
             format!("{who} 已结束，状态 {status}{code}")
@@ -158,6 +270,7 @@ pub fn task_note_from_pi_custom(message: &serde_json::Value) -> Option<TaskNote>
     {
         SMELT_BACKGROUND_TASK_CUSTOM_TYPE => TaskNoteKind::BackgroundTask,
         SMELT_SUBAGENT_RESULT_CUSTOM_TYPE => TaskNoteKind::Subagent,
+        SMELT_PEER_MESSAGE_CUSTOM_TYPE => TaskNoteKind::PeerMessage,
         _ => return None,
     };
     let details = message.get("details")?;
@@ -165,6 +278,30 @@ pub fn task_note_from_pi_custom(message: &serde_json::Value) -> Option<TaskNote>
         .get("id")
         .and_then(serde_json::Value::as_str)
         .filter(|id| !id.is_empty())?;
+    let text = |key: &str| {
+        details
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    if kind == TaskNoteKind::PeerMessage {
+        // 正文是对方写的原文，写给模型的框架句只在 `content` 里。
+        return Some(TaskNote {
+            kind,
+            id: id.to_string(),
+            title: String::new(),
+            status: String::new(),
+            exit_code: None,
+            output_tail: text("text"),
+            runs: Vec::new(),
+            peer: Some(PeerNote {
+                source_session_id: text("sourceSessionId"),
+                source_title: text("sourceTitle"),
+                kind: crate::acp_session::PeerMessageKind::parse(&text("kind")),
+            }),
+        });
+    }
     Some(TaskNote {
         kind,
         id: id.to_string(),
@@ -188,6 +325,7 @@ pub fn task_note_from_pi_custom(message: &serde_json::Value) -> Option<TaskNote>
             .unwrap_or("")
             .to_string(),
         runs: subagent_runs_from_value(details.get("runs")),
+        peer: None,
     })
 }
 
@@ -405,6 +543,7 @@ impl AcpEntry {
             output,
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         }
     }
 }
@@ -979,6 +1118,84 @@ mod tests {
         assert!(task_note_from_pi_custom(&other).is_none());
     }
 
+    /// 别的 Pi 对话发来的消息：正文是对方的原文（不带写给模型的框架句），来源和类别单独记，
+    /// 一行说明写「谁发来什么」。
+    #[test]
+    fn peer_message_custom_message_keeps_its_source_and_original_text() {
+        let message = serde_json::json!({
+            "role": "custom",
+            "customType": SMELT_PEER_MESSAGE_CUSTOM_TYPE,
+            "content": [{"type": "text", "text": "<peer-message …>框架句</peer-message>"}],
+            "details": {
+                "id": "pm-1a2b3c4d5e6f",
+                "sourceSessionId": "acp-a",
+                "sourceTitle": "修登录",
+                "kind": "task",
+                "hops": 7,
+                "text": "重跑 flaky e2e",
+            },
+        });
+        let note = task_note_from_pi_custom(&message).unwrap();
+        assert_eq!(note.kind, TaskNoteKind::PeerMessage);
+        assert_eq!(note.id, "pm-1a2b3c4d5e6f");
+        assert_eq!(note.output_tail, "重跑 flaky e2e");
+        let peer = note.peer.as_ref().unwrap();
+        assert_eq!(peer.source_session_id, "acp-a");
+        assert_eq!(peer.kind, crate::acp_session::PeerMessageKind::Task);
+        assert_eq!(note.summary(), "修登录 发来任务");
+
+        let untitled = serde_json::json!({
+            "customType": SMELT_PEER_MESSAGE_CUSTOM_TYPE,
+            "details": {"id": "pm-2", "sourceSessionId": "acp-b", "kind": "completion", "text": "好了"},
+        });
+        assert_eq!(
+            task_note_from_pi_custom(&untitled).unwrap().summary(),
+            "acp-b 交回结果"
+        );
+
+        let bounce = serde_json::json!({
+            "customType": SMELT_PEER_MESSAGE_CUSTOM_TYPE,
+            "details": {"id": "pm-3-bounce", "sourceSessionId": "acp-c", "sourceTitle": "部署", "kind": "bounce", "text": "桌面没开"},
+        });
+        let note = task_note_from_pi_custom(&bounce).unwrap();
+        assert_eq!(
+            note.peer.as_ref().unwrap().kind,
+            crate::acp_session::PeerMessageKind::Bounce
+        );
+        assert_eq!(note.summary(), "部署 没收到你的消息");
+    }
+
+    /// 退信只由主 daemon 写：工具参数里写 `bounce` 也只是普通消息。
+    #[test]
+    fn a_sender_cannot_pick_the_bounce_kind() {
+        let args = serde_json::json!({"to": "acp-b", "text": "hi", "kind": "bounce"});
+        let send = peer_send_from_tool(PI_SESSION_SEND_TOOL, Some(&args), None, None).unwrap();
+        assert_eq!(send.kind, crate::acp_session::PeerMessageKind::Message);
+    }
+
+    /// 起新对话：开始时只有标题，还没有 id；结束后带上新对话的 id 和交代任务的消息 id。
+    #[test]
+    fn session_spawn_reads_as_a_task_handed_to_a_new_conversation() {
+        let args = serde_json::json!({"title": "跑 e2e", "task": "重跑 login e2e"});
+        let started = peer_send_from_tool(PI_SESSION_SPAWN_TOOL, Some(&args), None, None).unwrap();
+        assert!(started.spawned);
+        assert_eq!(started.to_id, "");
+        assert_eq!(started.to_title, "跑 e2e");
+        assert_eq!(started.kind, crate::acp_session::PeerMessageKind::Task);
+        assert_eq!(started.text, "重跑 login e2e");
+
+        let details = serde_json::json!({
+            "to": {"id": "acp-c", "title": "跑 e2e"}, "kind": "task", "messageId": "pm-5", "spawned": true
+        });
+        let finished =
+            peer_send_from_tool(PI_SESSION_SPAWN_TOOL, Some(&args), Some(&details), None).unwrap();
+        assert_eq!(finished.to_id, "acp-c");
+        assert_eq!(finished.message_id.as_deref(), Some("pm-5"));
+
+        // 发消息没有对方 id 就不算。
+        assert!(peer_send_from_tool(PI_SESSION_SEND_TOOL, Some(&args), None, None).is_none());
+    }
+
     /// 派发的结果按工具调用 id 交回，状态行说的是子智能体自己的 id，不露工具调用 id。
     #[test]
     fn a_dispatch_result_names_its_subagents_not_the_tool_call() {
@@ -1273,6 +1490,7 @@ mod tests {
                 output,
                 children,
                 subagents: _,
+                peer: _,
             } => {
                 assert_eq!(id, "call-1");
                 assert_eq!(title, "Read foo.rs");

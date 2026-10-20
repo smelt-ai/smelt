@@ -37,16 +37,21 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ElementId, HighlightStyle, InteractiveElement, IntoElement, ObjectFit,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img,
-    px, relative, rgb,
+    AnyElement, App, AppContext as _, AvailableSpace, Bounds, Context, DevicePixels, DragMoveEvent,
+    Element, ElementId, EmptyView, GlobalElementId, HighlightStyle, ImageSource,
+    InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    ObjectFit, ParentElement, Pixels, Point, Render, RenderImage, ScrollHandle, SharedString, Size,
+    StatefulInteractiveElement, Style, Styled, StyledImage, SvgSize, Task, Window, canvas, div,
+    img, point, px, rgb, size,
 };
-use gpui_component::ActiveTheme;
+use gpui_component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_component::text::{
     MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewState, TextViewStyle,
     markdown_ast,
 };
+use gpui_component::{ActiveTheme, WindowExt as _, h_flex, v_flex};
 use merman::svg::{
     DeterministicTextMeasurer, MeasurementProfileId, SvgPipeline, TextMeasurementPolicy,
     TextMeasurementProfile, TextMeasurementProfileIdentity, TextStyle,
@@ -128,12 +133,491 @@ fn parse_mermaid_block(
 }
 
 /// 渲染成功后要显示的东西：full-color SVG 的字节数据 + 它自身的自然像素尺寸
-/// （从 SVG 的 `viewBox` 读出来，不缩放——超宽图靠外层横向滚动兜底，而不是压缩
-/// 到看不清文字，见 `render_mermaid_block`）。
+/// （从 SVG 的 `viewBox` 读出来）。内嵌时按列宽缩小、不放大（见 [`MermaidInline`]），
+/// 看细节点开放大预览（见 [`MermaidPreview`]）。
 struct MermaidImage {
     image: Arc<gpui::Image>,
     width: f32,
     height: f32,
+}
+
+/// 内嵌尺寸：放进可用宽度，不超过自然尺寸，高度按比例跟着宽度走。
+fn mermaid_inline_size(width: f32, height: f32, available_width: Option<f32>) -> Size<Pixels> {
+    let scale = available_width.map_or(1.0, |available| (available / width).clamp(0.0, 1.0));
+    size(px(width * scale), px(height * scale))
+}
+
+/// 内嵌的 mermaid 图。
+///
+/// 复杂图的自然尺寸远超对话列宽，原尺寸加横向滚动只能露出一角。这里用测量布局：
+/// taffy 给出可用宽度时直接算出宽高，不靠 `aspect_ratio` 推导（`crate::image`
+/// 模块注释记着那是历次图片撑破、留白的根因），也不靠上一帧量到的列宽。
+struct MermaidInline {
+    image: Arc<MermaidImage>,
+}
+
+impl IntoElement for MermaidInline {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for MermaidInline {
+    type RequestLayoutState = ();
+    type PrepaintState = AnyElement;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let (width, height) = (self.image.width, self.image.height);
+        let layout_id =
+            window.request_measured_layout(Style::default(), move |known, available, _, _| {
+                let available_width = known.width.or(match available.width {
+                    AvailableSpace::Definite(width) => Some(width),
+                    // 最小内容宽度给 0，所在的 flex 行才能把它压到列宽以内。
+                    AvailableSpace::MinContent => Some(px(0.)),
+                    AvailableSpace::MaxContent => None,
+                });
+                mermaid_inline_size(width, height, available_width.map(f32::from))
+            });
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        // 父级若把盒子拉宽了，图仍按自己的比例靠左画，不拉伸。
+        let fitted = mermaid_inline_size(
+            self.image.width,
+            self.image.height,
+            Some(f32::from(bounds.size.width)),
+        );
+        let mut image = img(self.image.image.clone())
+            .w(fitted.width)
+            .h(fitted.height)
+            .into_any_element();
+        image.prepaint_as_root(
+            bounds.origin,
+            size(
+                AvailableSpace::Definite(fitted.width),
+                AvailableSpace::Definite(fitted.height),
+            ),
+            window,
+            cx,
+        );
+        image
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        image: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        image.paint(window, cx);
+    }
+}
+
+/// 预览缩放倍数都相对 SVG 自然尺寸（1.0 = 内嵌时的大小）。
+const MIN_PREVIEW_SCALE: f32 = 0.1;
+const MAX_PREVIEW_SCALE: f32 = 8.0;
+const PREVIEW_ZOOM_STEP: f32 = 1.25;
+
+/// 预览栅格的上限。gpui sprite atlas 单图上限 16384px；像素总数再压一道，
+/// 大图放到最大倍数时一张 RGBA 不超过 64MB。超过上限就拉伸这张封顶的栅格。
+const MAX_RASTER_SIDE: f32 = 8192.0;
+const MAX_RASTER_PIXELS: f32 = 16_777_216.0;
+
+fn preview_zoom_in(scale: f32) -> f32 {
+    (scale * PREVIEW_ZOOM_STEP).min(MAX_PREVIEW_SCALE)
+}
+
+fn preview_zoom_out(scale: f32) -> f32 {
+    (scale / PREVIEW_ZOOM_STEP).max(MIN_PREVIEW_SCALE)
+}
+
+/// 「适合窗口」时的实际倍数。小图也会放大填满：预览重新栅格化，放大不糊。
+fn preview_fit_scale(image_width: f32, image_height: f32, viewport: Size<Pixels>) -> f32 {
+    (f32::from(viewport.width) / image_width).min(f32::from(viewport.height) / image_height)
+}
+
+/// 缩放后单个轴上的滚动偏移：保持视口中心对着图上同一点。图比视口窄时它是居中
+/// 摆放的，中心就是图的中点。结果夹在可滚动范围内（偏移向内容方向为负）。
+fn preview_anchored_offset(offset: f32, viewport: f32, old_len: f32, new_len: f32) -> f32 {
+    let center = if old_len > viewport {
+        (viewport / 2.0 - offset) / old_len
+    } else {
+        0.5
+    };
+    let max_scroll = (new_len - viewport).max(0.0);
+    (viewport / 2.0 - center * new_len).clamp(-max_scroll, 0.0)
+}
+
+fn preview_pan_offset(
+    scroll_origin: Point<Pixels>,
+    pointer_origin: Point<Pixels>,
+    pointer_current: Point<Pixels>,
+) -> Point<Pixels> {
+    scroll_origin + pointer_current - pointer_origin
+}
+
+/// 按设备像素算预览栅格尺寸，超过上限时等比缩到上限以内。
+fn preview_raster_size(width: f32, height: f32, device_scale: f32) -> Size<DevicePixels> {
+    let w = width * device_scale;
+    let h = height * device_scale;
+    let shrink = (MAX_RASTER_SIDE / w.max(h))
+        .min((MAX_RASTER_PIXELS / (w * h)).sqrt())
+        .min(1.0);
+    size(
+        DevicePixels(((w * shrink).ceil() as i32).max(1)),
+        DevicePixels(((h * shrink).ceil() as i32).max(1)),
+    )
+}
+
+/// 视口尺寸的小抖动不值得重新栅格化一次。
+fn raster_close_enough(a: Size<DevicePixels>, b: Size<DevicePixels>) -> bool {
+    let close = |a: i32, b: i32| (a - b).abs() <= (b / 50).max(2);
+    close(a.width.0, b.width.0) && close(a.height.0, b.height.0)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PreviewZoom {
+    /// 交给布局按 contain 放进视口，窗口变了跟着变。
+    Fit,
+    Scale(f32),
+}
+
+/// 拖拽平移的载荷。只用来让 `on_drag_move` 在指针离开预览区后还能收到移动。
+struct MermaidPan;
+
+/// 放大预览。
+///
+/// `gpui::Image` 的 SVG 只按自然尺寸的 2 倍栅格化一次，放大就是拉伸位图，所以
+/// 预览按当前倍数和窗口缩放自己在后台重新栅格化，栅格好之前先拉伸原图顶着。
+/// 视口尺寸来自上一帧的布局（`measure`），render 只读这些缓存。
+struct MermaidPreview {
+    image: Arc<MermaidImage>,
+    zoom: PreviewZoom,
+    scroll: ScrollHandle,
+    viewport: Option<Size<Pixels>>,
+    scale_factor: f32,
+    raster: Option<Arc<RenderImage>>,
+    /// 在途栅格的目标尺寸，避免同一尺寸重复起任务。
+    pending_raster: Option<Size<DevicePixels>>,
+    raster_task: Option<Task<()>>,
+    /// 按下左键时的指针位置和滚动偏移；内容可滚动时才记。
+    pan_origin: Option<(Point<Pixels>, Point<Pixels>)>,
+}
+
+impl MermaidPreview {
+    fn new(image: Arc<MermaidImage>, cx: &mut Context<Self>) -> Self {
+        // `RenderImage` 的纹理按 id 留在 sprite atlas 里，只丢 `Arc` 不会释放。
+        cx.on_release(|this, cx| {
+            if let Some(raster) = this.raster.take() {
+                cx.drop_image(raster, None);
+            }
+        })
+        .detach();
+        Self {
+            image,
+            zoom: PreviewZoom::Fit,
+            scroll: ScrollHandle::new(),
+            viewport: None,
+            scale_factor: 1.0,
+            raster: None,
+            pending_raster: None,
+            raster_task: None,
+            pan_origin: None,
+        }
+    }
+
+    fn effective_scale(&self) -> Option<f32> {
+        match self.zoom {
+            PreviewZoom::Scale(scale) => Some(scale),
+            PreviewZoom::Fit => self
+                .viewport
+                .map(|viewport| preview_fit_scale(self.image.width, self.image.height, viewport)),
+        }
+    }
+
+    /// 预览区 prepaint 时回报自己的尺寸。只有变了才重新栅格化、重绘。
+    fn measure(&mut self, viewport: Size<Pixels>, scale_factor: f32, cx: &mut Context<Self>) {
+        if viewport.width <= px(0.) || viewport.height <= px(0.) {
+            return;
+        }
+        if self.viewport == Some(viewport) && self.scale_factor == scale_factor {
+            return;
+        }
+        self.viewport = Some(viewport);
+        self.scale_factor = scale_factor;
+        self.sync_raster(cx);
+        cx.notify();
+    }
+
+    fn sync_raster(&mut self, cx: &mut Context<Self>) {
+        let Some(scale) = self.effective_scale() else {
+            return;
+        };
+        let target = preview_raster_size(
+            self.image.width,
+            self.image.height,
+            scale * self.scale_factor,
+        );
+        let current = self
+            .pending_raster
+            .or_else(|| self.raster.as_ref().map(|raster| raster.size(0)));
+        if current.is_some_and(|current| raster_close_enough(current, target)) {
+            return;
+        }
+        self.pending_raster = Some(target);
+        let image = self.image.image.clone();
+        let renderer = cx.svg_renderer();
+        self.raster_task = Some(cx.spawn(async move |this, cx| {
+            let raster = cx
+                .background_executor()
+                .spawn(async move {
+                    renderer
+                        .parse_svg(image.bytes())
+                        .and_then(|svg| renderer.render_parsed(&svg, SvgSize::ExactSize(target)))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.pending_raster = None;
+                // 失败就继续拉伸原图：内嵌时这张 SVG 已经画出来过。
+                let Ok(raster) = raster else {
+                    return;
+                };
+                if let Some(old) = this.raster.replace(raster) {
+                    cx.drop_image(old, None);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn zoom_to(&mut self, next: f32, cx: &mut Context<Self>) {
+        let current = self.effective_scale().unwrap_or(1.0);
+        if let Some(viewport) = self.viewport {
+            let offset = self.scroll.offset();
+            let (width, height) = (self.image.width, self.image.height);
+            self.scroll.set_offset(point(
+                px(preview_anchored_offset(
+                    f32::from(offset.x),
+                    f32::from(viewport.width),
+                    width * current,
+                    width * next,
+                )),
+                px(preview_anchored_offset(
+                    f32::from(offset.y),
+                    f32::from(viewport.height),
+                    height * current,
+                    height * next,
+                )),
+            ));
+        }
+        self.zoom = PreviewZoom::Scale(next);
+        self.sync_raster(cx);
+        cx.notify();
+    }
+
+    fn zoom_fit(&mut self, cx: &mut Context<Self>) {
+        self.zoom = PreviewZoom::Fit;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.sync_raster(cx);
+        cx.notify();
+    }
+}
+
+impl Render for MermaidPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scale = self.effective_scale();
+        let source: ImageSource = match &self.raster {
+            Some(raster) => raster.clone().into(),
+            None => self.image.image.clone().into(),
+        };
+        let content = match (self.zoom, self.viewport) {
+            (PreviewZoom::Scale(scale), Some(viewport)) => {
+                let width = self.image.width * scale;
+                let height = self.image.height * scale;
+                // 图比视口小的那个轴撑满视口并居中，大的那个轴才可滚动。
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(width.max(f32::from(viewport.width))))
+                    .h(px(height.max(f32::from(viewport.height))))
+                    .child(
+                        img(source)
+                            .flex_none()
+                            .w(px(width))
+                            .h(px(height))
+                            .object_fit(ObjectFit::Fill),
+                    )
+                    .into_any_element()
+            }
+            _ => img(source)
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .into_any_element(),
+        };
+
+        let viewport = div()
+            .id("mermaid-preview-viewport")
+            .size_full()
+            .overflow_scroll()
+            .track_scroll(&self.scroll)
+            .when(matches!(self.zoom, PreviewZoom::Scale(_)), |this| {
+                this.cursor_grab()
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, _| {
+                    let max = this.scroll.max_offset();
+                    this.pan_origin = (max.x > px(0.) || max.y > px(0.))
+                        .then(|| (event.position, this.scroll.offset()));
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.pan_origin = None),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.pan_origin = None),
+            )
+            .on_drag(MermaidPan, |_, _, _, cx| cx.new(|_| EmptyView))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<MermaidPan>, _, cx| {
+                    let Some((pointer_origin, scroll_origin)) = this.pan_origin else {
+                        return;
+                    };
+                    this.scroll.set_offset(preview_pan_offset(
+                        scroll_origin,
+                        pointer_origin,
+                        event.event.position,
+                    ));
+                    cx.notify();
+                }),
+            )
+            .child(content)
+            .scrollbar(&self.scroll, ScrollbarAxis::Both);
+
+        let measure = canvas(
+            {
+                let view = cx.entity();
+                move |bounds, window, cx| {
+                    let scale_factor = window.scale_factor();
+                    view.update(cx, |this, cx| this.measure(bounds.size, scale_factor, cx));
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_end()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .children(scale.map(|scale| format!("{:.0}%", scale * 100.0))),
+                    )
+                    .child(
+                        crate::Button::new("mermaid-preview-zoom-out")
+                            .quiet()
+                            .compact()
+                            .label("缩小")
+                            .debug_selector(|| "MERMAID_PREVIEW_ZOOM_OUT".to_string())
+                            .disabled(scale.is_some_and(|scale| scale <= MIN_PREVIEW_SCALE))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let scale = this.effective_scale().unwrap_or(1.0);
+                                this.zoom_to(preview_zoom_out(scale), cx);
+                            })),
+                    )
+                    .child(
+                        crate::Button::new("mermaid-preview-zoom-in")
+                            .quiet()
+                            .compact()
+                            .label("放大")
+                            .debug_selector(|| "MERMAID_PREVIEW_ZOOM_IN".to_string())
+                            .disabled(scale.is_some_and(|scale| scale >= MAX_PREVIEW_SCALE))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let scale = this.effective_scale().unwrap_or(1.0);
+                                this.zoom_to(preview_zoom_in(scale), cx);
+                            })),
+                    )
+                    .child(
+                        crate::Button::new("mermaid-preview-zoom-fit")
+                            .quiet()
+                            .compact()
+                            .label("适合窗口")
+                            .debug_selector(|| "MERMAID_PREVIEW_ZOOM_FIT".to_string())
+                            .disabled(self.zoom == PreviewZoom::Fit)
+                            .on_click(cx.listener(|this, _, _, cx| this.zoom_fit(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .child(viewport)
+                    .child(measure),
+            )
+    }
+}
+
+fn open_mermaid_preview(image: Arc<MermaidImage>, window: &mut Window, cx: &mut App) {
+    let preview = cx.new(|cx| MermaidPreview::new(image, cx));
+    window.open_dialog(cx, move |dialog, window, _cx| {
+        // 对话框会把宽高夹在窗口减去边距以内，这里只表达「尽量大」，不替它算边距。
+        let viewport = window.viewport_size();
+        let preview = preview.clone();
+        dialog
+            .title("Mermaid 图表")
+            .width(viewport.width)
+            .h(viewport.height)
+            .content(move |content, _, _| content.min_h_0().child(preview.clone()))
+    });
 }
 
 #[derive(Clone)]
@@ -771,17 +1255,25 @@ fn mermaid_result_element(
     cx: &App,
 ) -> AnyElement {
     match result {
-        MermaidRender::Ok(m) => div()
-            .id(SharedString::from(format!("mermaid-{digest}")))
-            .overflow_x_scroll()
-            .child(
-                img(m.image.clone())
-                    .object_fit(ObjectFit::Contain)
-                    .max_w(relative(1.))
-                    .w(px(m.width))
-                    .h(px(m.height)),
-            )
-            .into_any_element(),
+        MermaidRender::Ok(m) => {
+            let preview = m.clone();
+            // 外层 flex 行撑满列宽；触发区按图的实际宽度收缩，空白处不响应点击。
+            // 点开预览不是链接，光标保持默认箭头。
+            div()
+                .id(SharedString::from(format!("mermaid-{digest}")))
+                .flex()
+                .child(
+                    div()
+                        .id("preview-trigger")
+                        .debug_selector(|| "MERMAID_PREVIEW_TRIGGER".to_string())
+                        .flex()
+                        .on_click(move |_, window, cx| {
+                            open_mermaid_preview(preview.clone(), window, cx);
+                        })
+                        .child(MermaidInline { image: m }),
+                )
+                .into_any_element()
+        }
         MermaidRender::Err(msg) => div()
             .flex()
             .flex_col()
@@ -928,7 +1420,6 @@ fn chat_markdown_extensions() -> &'static MarkdownExtensions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext as _;
 
     struct ChatMarkdownRoot {
         state: gpui::Entity<TextViewState>,
@@ -986,6 +1477,147 @@ mod tests {
             shared_markdown_extensions(),
             shared_markdown_extensions()
         ));
+    }
+
+    #[gpui::test]
+    fn clicking_mermaid_opens_the_zoom_preview(cx: &mut gpui::TestAppContext) {
+        use gpui::VisualTestContext;
+
+        cx.update(gpui_component::init);
+        let source = "```mermaid\nflowchart TD\nA-->B\n```";
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| ChatMarkdownRoot {
+                state: cx.new(|cx| TextViewState::markdown(source, cx)),
+            });
+            gpui_component::Root::new(view, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let trigger = cx
+            .debug_bounds("MERMAID_PREVIEW_TRIGGER")
+            .expect("Mermaid 图表应可点击打开预览");
+        let natural = render_or_load("flowchart TD\nA-->B", false).expect("应能渲染");
+        assert!(
+            (f32::from(trigger.size.height) - natural.height).abs() < 1.0,
+            "内嵌图按 SVG 自然高度显示"
+        );
+        cx.simulate_click(trigger.center(), Default::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("dialog-layer").is_some(),
+            "点击图表后应打开带缩放控件的预览对话框"
+        );
+        assert!(cx.debug_bounds("MERMAID_PREVIEW_ZOOM_OUT").is_some());
+        assert!(cx.debug_bounds("MERMAID_PREVIEW_ZOOM_IN").is_some());
+        assert!(cx.debug_bounds("MERMAID_PREVIEW_ZOOM_FIT").is_some());
+    }
+
+    #[test]
+    fn inline_mermaid_fits_the_column_without_upscaling() {
+        // 比列宽的图等比缩到列宽，高度跟着缩，不留白。
+        assert_eq!(
+            mermaid_inline_size(1800.0, 900.0, Some(600.0)),
+            size(px(600.), px(300.))
+        );
+        // 比列窄的图保持自然尺寸，不放大。
+        assert_eq!(
+            mermaid_inline_size(300.0, 200.0, Some(600.0)),
+            size(px(300.), px(200.))
+        );
+        // 没有宽度约束（max-content）时报自然尺寸，最小内容宽度为 0。
+        assert_eq!(
+            mermaid_inline_size(300.0, 200.0, None),
+            size(px(300.), px(200.))
+        );
+        assert_eq!(
+            mermaid_inline_size(300.0, 200.0, Some(0.0)),
+            size(px(0.), px(0.))
+        );
+    }
+
+    #[test]
+    fn preview_zoom_steps_stay_within_bounds() {
+        assert_eq!(preview_zoom_in(MAX_PREVIEW_SCALE), MAX_PREVIEW_SCALE);
+        assert_eq!(preview_zoom_out(MIN_PREVIEW_SCALE), MIN_PREVIEW_SCALE);
+        assert!((preview_zoom_in(1.0) - 1.25).abs() < f32::EPSILON);
+        assert!((preview_zoom_out(1.0) - 0.8).abs() < 0.0001);
+    }
+
+    #[test]
+    fn preview_fit_uses_the_tighter_axis() {
+        let viewport = size(px(600.), px(400.));
+        assert!((preview_fit_scale(1200.0, 600.0, viewport) - 0.5).abs() < f32::EPSILON);
+        assert!((preview_fit_scale(100.0, 200.0, viewport) - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn preview_zoom_keeps_the_viewport_center_on_the_same_point() {
+        // 1000 宽的图在 400 视口里滚到 -300，中心对着图上 500 处（正中）。放大到 2000
+        // 后中心仍对着正中：偏移 = 200 - 1000 = -800。
+        assert_eq!(
+            preview_anchored_offset(-300.0, 400.0, 1000.0, 2000.0),
+            -800.0
+        );
+        // 图原本比视口窄（居中摆放），放大后从图中点开始。
+        assert_eq!(preview_anchored_offset(0.0, 400.0, 300.0, 600.0), -100.0);
+        // 缩到比视口还小时偏移归零，不会滚出内容。
+        assert_eq!(preview_anchored_offset(-800.0, 400.0, 2000.0, 300.0), 0.0);
+        // 结果夹在可滚动范围内。
+        assert_eq!(
+            preview_anchored_offset(-600.0, 400.0, 1000.0, 1000.0),
+            -600.0
+        );
+        assert_eq!(
+            preview_anchored_offset(-600.0, 400.0, 1000.0, 500.0),
+            -100.0
+        );
+    }
+
+    #[test]
+    fn preview_raster_follows_the_display_scale_and_stays_capped() {
+        // 2 倍屏上放大到 3 倍：每个自然像素对应 6 个设备像素。
+        assert_eq!(
+            preview_raster_size(400.0, 300.0, 6.0),
+            size(DevicePixels(2400), DevicePixels(1800))
+        );
+        // 大图放到最大倍数：长边、总像素都不超过上限，并保持比例。
+        let capped = preview_raster_size(3000.0, 1500.0, MAX_PREVIEW_SCALE * 2.0);
+        assert!(capped.width.0 as f32 <= MAX_RASTER_SIDE);
+        assert!(capped.width.0 as f32 * capped.height.0 as f32 <= MAX_RASTER_PIXELS * 1.001);
+        assert!((capped.width.0 as f32 / capped.height.0 as f32 - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn small_viewport_jitter_does_not_rerasterize() {
+        let base = size(DevicePixels(1000), DevicePixels(800));
+        assert!(raster_close_enough(
+            size(DevicePixels(1010), DevicePixels(795)),
+            base
+        ));
+        assert!(!raster_close_enough(
+            size(DevicePixels(1250), DevicePixels(1000)),
+            base
+        ));
+    }
+
+    #[test]
+    fn dragging_preview_moves_the_scroll_origin_with_the_pointer() {
+        let offset = preview_pan_offset(
+            point(px(-20.), px(-60.)),
+            point(px(100.), px(100.)),
+            point(px(140.), px(80.)),
+        );
+        assert_eq!(offset, point(px(20.), px(-80.)));
     }
 
     #[test]

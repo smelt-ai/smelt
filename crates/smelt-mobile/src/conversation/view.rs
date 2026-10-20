@@ -303,6 +303,7 @@ fn task_note(note: &TaskNote) -> TaskNoteView {
         kind: match note.kind {
             acp_chat::TaskNoteKind::BackgroundTask => TaskNoteKind::BackgroundTask,
             acp_chat::TaskNoteKind::Subagent => TaskNoteKind::Subagent,
+            acp_chat::TaskNoteKind::PeerMessage => TaskNoteKind::PeerMessage,
         },
         id: note.id.clone(),
         title: note.title.clone(),

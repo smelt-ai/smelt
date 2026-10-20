@@ -75,7 +75,6 @@ mod updater;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2401,8 +2400,8 @@ struct Workspace {
     acp_image_preview: Option<Arc<gpui::Image>>,
     /// 打开文件的自增序号：后台高亮完成时用它判断结果是否已过期（切了别的文件）。
     file_gen: u64,
-    /// Markdown 预览刷新世代。连续按键只保留最后一次，停手后再解析。
-    markdown_preview_epoch: u64,
+    /// 文件预览（Markdown / HTML）刷新世代。连续按键只保留最后一次，停手后再更新。
+    preview_epoch: u64,
     /// 当前文件有未保存改动时，用户又点了别的文件——先记下目标路径弹确认弹窗，
     /// 等用户选了"不保存"/"保存并切换"才真正打开，见 render_unsaved_file_confirm。
     pending_file_switch: Option<String>,
@@ -3036,7 +3035,7 @@ impl Workspace {
             file_tree_pending_reveal: None,
             acp_image_preview: None,
             file_gen: 0,
-            markdown_preview_epoch: 0,
+            preview_epoch: 0,
             pending_file_switch: None,
             delete_file_target: None,
             pending_switch_after_save: None,
