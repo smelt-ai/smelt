@@ -13,6 +13,7 @@ smelt-sys = { path = "../smelt-sys" }
 smelt-model = { path = "../smelt-model" }
 smelt-client = { path = "../smelt-client" }
 smelt-paths = { path = "../smelt-paths" }
+smelt-demo = { path = "../smelt-demo" }
 smelt-pairing = { path = "../smelt-pairing" }
 smelt-iroh = { path = "../smelt-iroh" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }

@@ -21,6 +21,7 @@ pub(crate) mod agents;
 mod automation_notifications;
 mod cli;
 mod conversation_layout;
+mod demo_surface;
 mod desktop_view;
 mod dir_picker;
 mod dock;
@@ -3292,6 +3293,7 @@ impl Workspace {
         );
         ws.start_visible_data_watch(cx);
         // 首帧绘制前就把输入框和缓存任务备好。观察器只在之后的外观变化时再排一次。
+        ws.install_demo_surface(window, cx);
         ws.refresh_visible_caches(window, cx);
         ws
     }
@@ -4008,6 +4010,9 @@ impl Render for Workspace {
             }))
             // 主体先绘制；透明标题栏随后覆盖在顶部 safe area 上，避免面板背景
             // 把铃铛和 Tool Panel 开关压成若隐若现的轮廓。
+            .when(smelt_demo::is_active(), |column| {
+                column.child(demo_surface::banner(cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -4285,8 +4290,17 @@ fn smelt_file_url_to_target(url: &str) -> Option<InternalFileLink> {
 /// 重新拼出会话布局，跟正常重启应用效果一致。
 /// 返回值同时留下窗口句柄：主窗口还在不在看它，不看 Workspace 还能不能升级。
 fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) -> MainWindow {
-    let window_options =
+    let mut window_options =
         workspace_frame::workspace_window_options(ui_theme::shell_padding(), window_bg);
+    if smelt_demo::is_active() {
+        window_options.window_bounds = Some(WindowBounds::centered(
+            size(px(smelt_demo::WINDOW_WIDTH), px(smelt_demo::WINDOW_HEIGHT)),
+            cx,
+        ));
+        if let Some(titlebar) = window_options.titlebar.as_mut() {
+            titlebar.title = Some(smelt_demo::DISPLAY_NAME.into());
+        }
+    }
     let mut workspace = None;
     let window_handle = cx
         .open_window(window_options, |window, cx| {
@@ -4525,6 +4539,8 @@ fn app_key_bindings() -> Vec<KeyBinding> {
 }
 
 fn main() {
+    // 赶在更新锁、smelt_home 和登录 shell 探测之前。演示包不能先碰主人的 ~/.smelt。
+    smelt_demo::activate();
     if let Some(code) = terminal::maybe_run_install_app(std::env::args()) {
         std::process::exit(code);
     }
@@ -4583,13 +4599,16 @@ fn main() {
         // Markdown 中的本地文件链接使用 smelt-file://，由 on_open_urls 回流到
         // Workspace 的内置编辑器。打包时 Info.plist 也声明该 scheme；运行时注册
         // 用于已安装应用升级后无需重启 LaunchServices 数据库。
-        let register_file_scheme = cx.register_url_scheme("smelt-file");
-        cx.spawn(async move |_cx| {
-            if let Err(error) = register_file_scheme.await {
-                eprintln!("[workspace] 注册 smelt-file URL scheme 失败：{error}");
-            }
-        })
-        .detach();
+        // 演示包不注册：不能把主人的 smelt-file 链接抢到临时数据上。
+        if !smelt_demo::is_active() {
+            let register_file_scheme = cx.register_url_scheme("smelt-file");
+            cx.spawn(async move |_cx| {
+                if let Err(error) = register_file_scheme.await {
+                    eprintln!("[workspace] 注册 smelt-file URL scheme 失败：{error}");
+                }
+            })
+            .detach();
+        }
         // 内嵌终端默认字体 Maple Mono NF（Regular/Bold，v7.9）。Ghostty 同款思路：
         // 默认字体自己带，不赌用户装没装——任何机器上默认字体族都能解析成功，
         // 杜绝"没装字体 → 测量/渲染各自 fallback 到不同字体 → 列宽错乱"。它是打过
@@ -4608,19 +4627,33 @@ fn main() {
         // 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
         // （跟齿轮图标一样开独立设置窗口，符合 mac 惯例——系统偏好设置一般都在这）。
         cx.bind_keys(app_key_bindings());
-        cx.set_menus(vec![
-            Menu::new("Smelt").items([
-                MenuItem::action(concat!("v", env!("CARGO_PKG_VERSION")), gpui::NoAction)
-                    .disabled(true),
-                MenuItem::Separator,
-                MenuItem::action("检查更新…", CheckForUpdate),
-                MenuItem::Separator,
-                MenuItem::action("设置…", OpenSettings),
-                MenuItem::action("反馈问题…", ReportIssue),
-                MenuItem::Separator,
-                MenuItem::action("退出 Smelt", Quit),
-            ]),
-        ]);
+        if smelt_demo::is_active() {
+            cx.set_menus(vec![
+                Menu::new(smelt_demo::DISPLAY_NAME).items([
+                    MenuItem::action(concat!("v", env!("CARGO_PKG_VERSION")), gpui::NoAction)
+                        .disabled(true),
+                    MenuItem::Separator,
+                    MenuItem::action("设置…", OpenSettings),
+                    MenuItem::action("反馈问题…", ReportIssue),
+                    MenuItem::Separator,
+                    MenuItem::action("退出 Smelt Demo", Quit),
+                ]),
+            ]);
+        } else {
+            cx.set_menus(vec![
+                Menu::new("Smelt").items([
+                    MenuItem::action(concat!("v", env!("CARGO_PKG_VERSION")), gpui::NoAction)
+                        .disabled(true),
+                    MenuItem::Separator,
+                    MenuItem::action("检查更新…", CheckForUpdate),
+                    MenuItem::Separator,
+                    MenuItem::action("设置…", OpenSettings),
+                    MenuItem::action("反馈问题…", ReportIssue),
+                    MenuItem::Separator,
+                    MenuItem::action("退出 Smelt", Quit),
+                ]),
+            ]);
+        }
 
         // 外观设置：读盘设为全局单例，据此确定窗口背景外观（透明 / 模糊）。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。

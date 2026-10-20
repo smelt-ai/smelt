@@ -1,4 +1,5 @@
 # 虚拟 workspace：所有代码住 crates/ 下，根不再有 package。
+# - crates/smelt-demo   —— 展台 Demo.app 的隔离与种子（只给桌面 smelt / smeltd）
 # - crates/smelt-store  —— 桌面 SQLite/KV 与 legacy 导入事务原语（移动端不编 native SQLite）
 # - crates/smelt-pairing —— 桌面/移动端共用的配对码格式
 # - crates/smelt-runtime-client —— smeltd wire 契约与协议客户端（桌面/移动端共用，能编进移动端）
@@ -9,6 +10,7 @@
 # - crates/smelt        —— GUI 主程序（bin 名 smelt，与产品名统一）
 [workspace]
 members = [
+    "crates/smelt-demo",
     "crates/smelt-paths",
     "crates/smelt-sys",
     "crates/smelt-model",

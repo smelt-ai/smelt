@@ -135,10 +135,9 @@ mod acp_registry;
 mod acp_runtime_host;
 mod agent_memory_control;
 mod automation_runtime;
-mod desktop;
 mod control;
 mod conversation_image;
-mod subagent_transcript;
+mod desktop;
 mod devices;
 mod dsh_control;
 mod event_hub;
@@ -150,6 +149,7 @@ mod history_control;
 mod menubar;
 mod peer_messages;
 mod pi_control;
+mod subagent_transcript;
 use devices::Principal;
 mod program_status;
 mod project_watch;
@@ -2033,6 +2033,8 @@ fn main() {
     // Pi 退出后 status() 永远等不到通知，会话就停在「正在启动」。
     // 必须赶在任何 thread::spawn / 再拉起 session host 之前做，新建线程才会复制空掩码。
     clear_inherited_signal_mask();
+    // 跟 GUI 同一条隔离。必须在 socket、SQLite 和登录环境之前，子进程才能继承临时家。
+    smelt_demo::activate();
     // Grok/CI 会给进程打 NO_COLOR=1。必须在任何线程/子进程之前卸掉，否则
     // 交互式 PTY（agy 等）会继承关色开关，整屏只剩默认灰白。
     smelt_core::tty_color::clear_process();

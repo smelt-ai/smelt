@@ -60,6 +60,9 @@ smelt {version}
 
 用法：
   smelt                         启动图形界面
+  smelt --demo [--demo-route <页面>]
+                                用隔离的临时数据启动图形界面（展台 / 调试）
+                                页面：workspace、agents、automations、conversation、settings-agent-runtime
   smelt agent list|get|create|update|delete|chat|conversations|conversation-rename|plugins
   smelt automation list|get|create|update|enable|disable|run|delete
   smelt settings get

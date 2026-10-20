@@ -217,11 +217,70 @@ pub fn login_environment() -> &'static HashMap<String, String> {
 /// 保留（而不是 `env_clear`）父进程环境：GUI 自身注入的那些变量（临时目录、
 /// 沙盒标识）子进程照样需要。同名的以 login shell 为准——用户在 rc 里写的才是
 /// 他真正在用的那套工具链。
+///
+/// 演示模式只留 PATH，再把隔离变量从当前进程钉回去。登录 shell 的快照会把
+/// `HOME` 和各家 agent 目录改回主人的家。
 pub fn apply_login_environment(command: &mut Command) -> &mut Command {
+    if env_flag_on(std::env::var("SMELT_DEMO").ok().as_deref()) {
+        command.env("PATH", login_path());
+        return pin_demo_environment(command);
+    }
     for (key, value) in login_environment() {
         command.env(key, value);
     }
     command.env("PATH", login_path())
+}
+
+/// 演示进程已经改过的家目录和 agent 配置目录。启动规格里的 env 不能把它们盖掉。
+pub(crate) fn pin_demo_environment(command: &mut Command) -> &mut Command {
+    if !env_flag_on(std::env::var("SMELT_DEMO").ok().as_deref()) {
+        return command;
+    }
+    for key in DEMO_PROTECTED_ENV {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    command
+}
+
+const DEMO_PROTECTED_ENV: &[&str] = &[
+    "HOME",
+    "SMELT_HOME",
+    "SMELT_DEMO",
+    "SMELT_DEMO_HOME",
+    "SMELT_DEMO_ROUTE",
+    "SMELT_DEMO_LIVE_AGENTS",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "GROK_HOME",
+    "COPILOT_HOME",
+    "ZDOTDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+];
+
+pub(crate) fn env_flag_on(value: Option<&str>) -> bool {
+    matches!(
+        value
+            .map(str::trim)
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes")
+    )
+}
+
+/// 演示模式默认不启动真实智能体。`SMELT_DEMO_LIVE_AGENTS=1` 才放行，并且仍然在隔离目录里。
+pub(crate) fn refuses_live_agent(demo: Option<&str>, allow: Option<&str>) -> bool {
+    env_flag_on(demo) && !env_flag_on(allow)
+}
+
+pub(crate) fn live_agent_refusal() -> Option<&'static str> {
+    refuses_live_agent(
+        std::env::var("SMELT_DEMO").ok().as_deref(),
+        std::env::var("SMELT_DEMO_LIVE_AGENTS").ok().as_deref(),
+    )
+    .then_some("演示模式不会启动真实智能体。要在隔离目录里试跑，请设置 SMELT_DEMO_LIVE_AGENTS=1。")
 }
 
 /// Resolve an executable against the login shell PATH rather than Finder's
@@ -345,6 +404,15 @@ mod tests {
             !vars.contains_key("RemoteHost") && !vars.contains_key("ShellIntegrationVersion"),
             "OSC 噪音里的 `k=v` 不能被当成环境变量：{vars:?}"
         );
+    }
+
+    #[test]
+    fn demo_refuses_live_agents_unless_explicitly_allowed() {
+        assert!(super::refuses_live_agent(Some("1"), None));
+        assert!(super::refuses_live_agent(Some("true"), Some("0")));
+        assert!(!super::refuses_live_agent(Some("1"), Some("yes")));
+        assert!(!super::refuses_live_agent(None, None));
+        assert!(!super::refuses_live_agent(Some("0"), Some("1")));
     }
 
     #[test]

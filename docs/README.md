@@ -10,6 +10,7 @@ How the product works today.
 
 - [`workspace.md`](workspace.md) — Desktop workspace: terminals, agents, layout, multi-runtime windows, and shortcuts.
 - [`local-storage.md`](local-storage.md) — The two SQLite databases under `~/.smelt/` and what they store.
+- [`demo.md`](demo.md) — Booth build: Smelt Demo.app, isolated data, and the fixed showcase pages.
 - [`iroh-relay-deployment.md`](iroh-relay-deployment.md) — When and how to run a private iroh relay.
 - [`release.md`](release.md) — Tags, release artifacts, and stable versus pre-release.
 - [`ui-design-language.md`](ui-design-language.md) — Desktop visual language: theme tokens, surfaces, and chrome.

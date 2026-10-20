@@ -1067,10 +1067,15 @@ impl Workspace {
             .iter()
             .filter(|session| session.runtime(cx).key() == key)
             .filter(|session| {
-                persist_in_workspace_snapshot(
-                    matches!(session.kind, SessionKind::Conversation(_)),
-                    session.remote_owned,
-                )
+                let showcase = session
+                    .active_acp()
+                    .is_some_and(|view| view.read(cx).is_showcase());
+                // 演示对话不进运行时目录。写进去之后，下次打开会被当成要自动拉起的 ACP。
+                !showcase
+                    && persist_in_workspace_snapshot(
+                        matches!(session.kind, SessionKind::Conversation(_)),
+                        session.remote_owned,
+                    )
             })
             .map(|s| {
                 let route = if self.ui_session_id == Some(s.ui_id) {

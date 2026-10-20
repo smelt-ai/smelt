@@ -58,8 +58,11 @@ AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agen
 make run                    # 编译 GUI、守护进程和通知器，然后运行 GUI
 cargo run --bin smelt       # 仅运行 GUI，需确保 smeltd 已经可用
 make dist-build             # 编译 release 并打包出 dist/Smelt.dmg
+make demo                   # 打包展台用的 dist/Smelt Demo.app（不打 dmg，不进正式发版）
 make help                   # 查看全部构建目标
 ```
+
+展台用单独的 `Smelt Demo.app`（`com.zzfn.smelt.demo`）。它用临时数据目录，不读写 `~/.smelt`，也不改 `~/.claude` 这类智能体配置。见 [`docs/demo.md`](docs/demo.md)。
 
 跑测试与类型检查：
 

@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all
+.PHONY: help build run icon dist dist-build demo install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all
 
 build run install: SHELL := /bin/bash
 
@@ -75,6 +75,9 @@ dist: ## 用已有 release 产物打包 app + dmg
 
 dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
+
+demo: ## 打包展台用的 Smelt Demo.app（不进正式发版，不打 dmg）
+	./scripts/package-mac.sh --demo --build
 
 install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把

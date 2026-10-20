@@ -1193,7 +1193,9 @@ pub enum AcpViewEvent {
     /// 用户从往上翻的历史滚回了最新位置。这时才算看到了最新结果，上层据此补标已读。
     ReturnedToLatest,
     /// 用户点了另一个 Pi 对话的标题（互发消息的事件行）。上层切过去。
-    OpenConversation { sid: String },
+    OpenConversation {
+        sid: String,
+    },
 }
 
 /// 上一轮没正常结束后能做的事。
@@ -1678,6 +1680,8 @@ pub struct AcpView {
     /// 有旧 session id 则协议级续接，没有则新建一轮但保留本地历史。只消费一次——
     /// 自动启动失败（Fatal → Ended）后回到手动，错误得让人看见，不能循环重试。
     auto_resume_pending: bool,
+    /// 展台对话：条目是种子数据，不连接 smeltd，也不拉起智能体。
+    showcase: bool,
     /// ACP 没有 fork 原语。新会话握手进入 Idle 后，自动发送一次精简交接提示。
     pending_initial_prompt: Option<String>,
     /// 来源会话当前选择的模型、权限等 ACP 配置。必须先于交接提示写入新会话。
@@ -1965,6 +1969,7 @@ impl AcpView {
         let mut this = Self {
             runtime,
             auto_resume_pending,
+            showcase: false,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
             entries,
@@ -2112,6 +2117,29 @@ impl AcpView {
         this
     }
 
+    /// 展台用的内存对话。不调用 `open_daemon_session`，批准和发送都留在本地。
+    pub fn showcase(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        origin: AcpViewOrigin,
+        permission: PendingPermission,
+    ) -> Self {
+        let mut this = Self::placeholder(cx, origin);
+        this.showcase = true;
+        this.auto_resume_pending = false;
+        this.awaiting_initial_history_snapshot = false;
+        this.phase = DaemonPhase::AwaitingApproval;
+        this.permissions = vec![permission];
+        this.end_reason.clear();
+        this.expanded_tool_cards.insert("demo-edit".into());
+        this.init_input(window, cx);
+        this
+    }
+
+    pub fn is_showcase(&self) -> bool {
+        self.showcase
+    }
+
     /// 本机凭据/模型配置变了，让 agent 重拉一次模型目录。
     ///
     /// 模型列表只有 agent 自己知道（Pi 走 `get_available_models`），而那是会话启动时
@@ -2143,6 +2171,12 @@ impl AcpView {
         cx: &mut Context<Self>,
         preserve_launch: bool,
     ) {
+        if self.showcase {
+            self.auto_resume_pending = false;
+            self.restart_error = Some("演示对话不会启动真实智能体。".into());
+            cx.notify();
+            return;
+        }
         // 空白会话把 runtime id 错存成 history id，是旧版留下的脏状态；
         // 这类会话没有可 load 的内容，直接开新会话。真正的历史恢复占位
         // 只有 history id、没有同值 runtime id，因此仍保留 session/load。
@@ -3689,6 +3723,10 @@ impl AcpView {
     /// 唯一例外是 daemon-owned 自动化 Run：关闭临时查看页只能断开 GUI，停止必须
     /// 走带 Run id 的自动化命令。
     pub fn shutdown(&mut self, _cx: &mut App) {
+        if self.showcase {
+            self.handle = None;
+            return;
+        }
         let kill_sid = (!matches!(
             &self.conversation_binding,
             smelt_model::conversation::ConversationBinding::Automation { .. }
@@ -3710,6 +3748,11 @@ impl AcpView {
         let Some(input) = self.input.clone() else {
             return;
         };
+        if self.showcase {
+            self.paste_hint = Some("演示对话不会发给真实模型。".into());
+            cx.notify();
+            return;
+        }
         if self.pending_external_image_loads > 0 {
             self.paste_hint = Some(format!(
                 "正在读取 {} 张图片，请稍候…",
@@ -5006,7 +5049,6 @@ impl AcpView {
                         .py_2()
                         .gap_2p5()
                         .items_center()
-                        
                         .hover(|d| d.bg(ui_theme::overlay(0x14)))
                         .active(|d| d.opacity(0.88))
                         .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -5162,6 +5204,13 @@ impl AcpView {
     /// 审批按钮：把选中项发给 smeltd（真正消费 responder 回 RPC 是服务端的
     /// 事），卡片收起、相位回 Running 等下一份快照即可，不用本地抢跑。
     fn pick_permission(&mut self, tool_call_id: &str, option_id: &str, cx: &mut Context<Self>) {
+        if self.showcase {
+            self.permissions.clear();
+            self.phase = DaemonPhase::Idle;
+            self.paste_hint = Some("这次点击只留在演示窗口里。".into());
+            cx.notify();
+            return;
+        }
         // ACP agent 可能一次发来多条请求，但实际执行仍按队列推进。只允许回应
         // 队首，避免上一帧残留的按钮或其它入口越过当前审批。
         if self.permission_submitting.is_some()
@@ -5256,7 +5305,8 @@ struct DispatchProgress {
 
 fn dispatch_progress(statuses: &[SubagentStatus], activity: Option<&str>) -> DispatchProgress {
     let total = statuses.len();
-    let count = |wanted: SubagentStatus| statuses.iter().filter(|status| **status == wanted).count();
+    let count =
+        |wanted: SubagentStatus| statuses.iter().filter(|status| **status == wanted).count();
     let running = count(SubagentStatus::Running);
     let completed = count(SubagentStatus::Completed);
     let failed = count(SubagentStatus::Failed);

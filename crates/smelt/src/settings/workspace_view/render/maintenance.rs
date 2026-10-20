@@ -9,8 +9,13 @@ pub(super) fn update_page(
     cx: &App,
 ) -> SettingPage {
     let (update, _, _) = maintenance_groups(entity, snapshot, cx);
+    let description = if smelt_demo::is_active() {
+        "演示包不检查更新，也不会写入正式版的更新状态。"
+    } else {
+        "检查 Smelt 版本，选择更新通道和自动下载方式。"
+    };
     SettingPage::new("应用更新")
-        .description("检查 Smelt 版本，选择更新通道和自动下载方式。")
+        .description(description)
         .resettable(false)
         .group(update)
 }
@@ -63,84 +68,92 @@ fn maintenance_groups(
 
         // 字节数换算成 MB 展示，只在拿得到 Content-Length 时才有百分比。
         let mb = |b: u64| b as f64 / 1024.0 / 1024.0;
-        let (status_title, status_detail, status_rgb) = match &status {
-            updater::UpdateStatus::Idle => (
-                "尚未检查更新".to_string(),
-                format!("点击“检查更新”获取{}的最新安装包", channel.label()),
+        let (status_title, status_detail, status_rgb) = if smelt_demo::is_active() {
+            (
+                "演示包不检查更新".to_string(),
+                "正式版的更新状态不会被这个窗口碰到。".to_string(),
                 None,
-            ),
-            updater::UpdateStatus::Checking => (
-                "正在检查更新".to_string(),
-                format!("正在获取{}的最新版本信息…", channel.label()),
-                Some(crate::ui_theme::blue()),
-            ),
-            updater::UpdateStatus::UpToDate => (
-                "当前已是最新".to_string(),
-                format!("{}暂无可用更新", channel.label()),
-                Some(crate::ui_theme::green()),
-            ),
-            updater::UpdateStatus::Available { version, .. } => (
-                "发现新版本".to_string(),
-                format!(
-                    "{}已发布 {version}，点击“下载并更新”获取安装包",
-                    channel.label()
+            )
+        } else {
+            match &status {
+                updater::UpdateStatus::Idle => (
+                    "尚未检查更新".to_string(),
+                    format!("点击“检查更新”获取{}的最新安装包", channel.label()),
+                    None,
                 ),
-                Some(crate::ui_theme::blue()),
-            ),
-            updater::UpdateStatus::Downloading {
-                version,
-                received,
-                total,
-            } => {
-                let detail = match total {
-                    Some(total) if *total > 0 => format!(
-                        "正在下载更新包 {version}… {:.0}%（{:.1} / {:.1} MB）",
-                        *received as f64 / *total as f64 * 100.0,
-                        mb(*received),
-                        mb(*total),
-                    ),
-                    _ => format!(
-                        "正在下载更新包 {version}…（已下载 {:.1} MB）",
-                        mb(*received)
-                    ),
-                };
-                (
-                    "正在下载更新".to_string(),
-                    detail,
+                updater::UpdateStatus::Checking => (
+                    "正在检查更新".to_string(),
+                    format!("正在获取{}的最新版本信息…", channel.label()),
                     Some(crate::ui_theme::blue()),
-                )
+                ),
+                updater::UpdateStatus::UpToDate => (
+                    "当前已是最新".to_string(),
+                    format!("{}暂无可用更新", channel.label()),
+                    Some(crate::ui_theme::green()),
+                ),
+                updater::UpdateStatus::Available { version, .. } => (
+                    "发现新版本".to_string(),
+                    format!(
+                        "{}已发布 {version}，点击“下载并更新”获取安装包",
+                        channel.label()
+                    ),
+                    Some(crate::ui_theme::blue()),
+                ),
+                updater::UpdateStatus::Downloading {
+                    version,
+                    received,
+                    total,
+                } => {
+                    let detail = match total {
+                        Some(total) if *total > 0 => format!(
+                            "正在下载更新包 {version}… {:.0}%（{:.1} / {:.1} MB）",
+                            *received as f64 / *total as f64 * 100.0,
+                            mb(*received),
+                            mb(*total),
+                        ),
+                        _ => format!(
+                            "正在下载更新包 {version}…（已下载 {:.1} MB）",
+                            mb(*received)
+                        ),
+                    };
+                    (
+                        "正在下载更新".to_string(),
+                        detail,
+                        Some(crate::ui_theme::blue()),
+                    )
+                }
+                updater::UpdateStatus::Installing { version } => (
+                    "正在准备更新".to_string(),
+                    format!("正在解压并准备更新包 {version}…"),
+                    Some(crate::ui_theme::blue()),
+                ),
+                updater::UpdateStatus::Applying { version } => (
+                    "正在启动更新安装器".to_string(),
+                    format!("正在为更新包 {version} 创建受控安装事务；成功后 App 才会退出"),
+                    Some(crate::ui_theme::blue()),
+                ),
+                updater::UpdateStatus::ReadyToInstall(update) => (
+                    "更新已准备就绪".to_string(),
+                    format!(
+                        "更新包 {} 已下载完成，点击“立即重启更新”生效",
+                        update.version
+                    ),
+                    Some(crate::ui_theme::green()),
+                ),
+                updater::UpdateStatus::InstallFailed(update) => (
+                    "安装更新失败".to_string(),
+                    format!(
+                        "更新包 {} 仍已安全保留；可直接重试，或检查是否已有替代版本",
+                        update.version
+                    ),
+                    Some(crate::ui_theme::red()),
+                ),
+                updater::UpdateStatus::Failed(failure) => (
+                    failure.title().to_string(),
+                    failure.detail().to_string(),
+                    Some(crate::ui_theme::red()),
+                ),
             }
-            updater::UpdateStatus::Installing { version } => (
-                "正在准备更新".to_string(),
-                format!("正在解压并准备更新包 {version}…"),
-                Some(crate::ui_theme::blue()),
-            ),
-            updater::UpdateStatus::Applying { version } => (
-                "正在启动更新安装器".to_string(),
-                format!("正在为更新包 {version} 创建受控安装事务；成功后 App 才会退出"),
-                Some(crate::ui_theme::blue()),
-            ),
-            updater::UpdateStatus::ReadyToInstall(update) => (
-                "更新已准备就绪".to_string(),
-                format!(
-                    "更新包 {} 已下载完成，点击“立即重启更新”生效",
-                    update.version
-                ),
-                Some(crate::ui_theme::green()),
-            ),
-            updater::UpdateStatus::InstallFailed(update) => (
-                "安装更新失败".to_string(),
-                format!(
-                    "更新包 {} 仍已安全保留；可直接重试，或检查是否已有替代版本",
-                    update.version
-                ),
-                Some(crate::ui_theme::red()),
-            ),
-            updater::UpdateStatus::Failed(failure) => (
-                failure.title().to_string(),
-                failure.detail().to_string(),
-                Some(crate::ui_theme::red()),
-            ),
         };
         let status_color = status_rgb
             .map(|color| Hsla::from(rgb(color)))
@@ -163,7 +176,8 @@ fn maintenance_groups(
             _ => None,
         };
         let can_check = status.can_check();
-        let can_request_check = can_check || status.can_retry_recovery();
+        let can_request_check =
+            !smelt_demo::is_active() && (can_check || status.can_retry_recovery());
         let ready = status.ready_update().is_some();
 
         let check_label: String = match &status {

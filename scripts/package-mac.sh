@@ -5,10 +5,12 @@
 #   ./scripts/package-mac.sh            # 用已有 release 产物组装，并打 dmg
 #   ./scripts/package-mac.sh --build    # 先 cargo build --release 再组装
 #   ./scripts/package-mac.sh --no-dmg   # 只组装 .app。make install 走这条，本机开发不打分发映像
+#   ./scripts/package-mac.sh --demo     # 组装 dist/Smelt Demo.app，不打 dmg，不进正式发版
 #
 # 产物：
 #   dist/Smelt.app     —— 可双击运行的应用
 #   dist/Smelt.dmg     —— 分发件（定制拖拽安装窗口；--no-dmg 时不产生）
+#   dist/Smelt Demo.app —— 展台包（只在 --demo 时产生，不替换 Smelt.app）
 set -euo pipefail
 
 APP_NAME="Smelt"
@@ -30,17 +32,31 @@ INSTALLER_BIN="$ROOT/target/release/smelt-installer" # GUI 退出后提交原子
 
 BUILD=0
 SKIP_DMG=0
+DEMO=0
 for arg in "$@"; do
   case "$arg" in
     --build) BUILD=1 ;;
     --no-dmg) SKIP_DMG=1 ;;
+    --demo) DEMO=1 ;;
     *)
       echo "✗ 未知参数：$arg" >&2
-      echo "  用法：$(basename "$0") [--build] [--no-dmg]" >&2
+      echo "  用法：$(basename "$0") [--build] [--no-dmg] [--demo]" >&2
       exit 2
       ;;
   esac
 done
+
+# 展台包跟正式包分开：另一个名字、另一个 bundle id、不写更新地址、不打 dmg。
+# 可执行文件名仍是 smelt，GUI 才能在同目录找到 smeltd。
+if [[ "$DEMO" -eq 1 ]]; then
+  APP_NAME="Smelt Demo"
+  BUNDLE_ID="com.zzfn.smelt.demo"
+  SKIP_DMG=1
+  UPDATE_URL=""
+  APP="$DIST/$APP_NAME.app"
+  MACOS="$APP/Contents/MacOS"
+  RES="$APP/Contents/Resources"
+fi
 
 # 只有打 dmg 用 Python：dmgbuild 1.6.7 要求 Python >= 3.10。组装 .app 不需要。
 if [[ "$SKIP_DMG" -eq 0 ]]; then
@@ -168,7 +184,51 @@ fi
 ICON_LINE=""
 if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
   cp "$ROOT/assets/AppIcon.icns" "$RES/AppIcon.icns"
+  if [[ "$DEMO" -eq 1 ]]; then
+    if ! "$ROOT/scripts/badge-demo-icon.sh" "$RES/AppIcon.icns"; then
+      echo "  … 演示图标角标跳过，沿用正式图标"
+    fi
+  fi
   ICON_LINE=$'\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>'
+fi
+
+# 演示包不声明 smelt-file，也不注册成文件夹的打开方式，避免抢正式版的链接。
+DEMO_PLIST=""
+FILE_PLIST=""
+if [[ "$DEMO" -eq 1 ]]; then
+  DEMO_PLIST=$'\t<key>SmeltDemo</key>\n\t<true/>'
+else
+  FILE_PLIST="$(cat <<EOF
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>${BUNDLE_ID}.file</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>smelt-file</string>
+			</array>
+		</dict>
+	</array>
+	<!-- 声明可打开文件夹：Dock 图标才接受拖入目录（触发 application:openURLs:）。
+	     LSHandlerRank=Alternate 避免抢占系统默认的文件夹打开方式。 -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+EOF
+)"
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -198,40 +258,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>macosx</string>
 	<key>DTPlatformName</key>
 	<string>macosx</string>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>${BUNDLE_ID}.file</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>smelt-file</string>
-			</array>
-		</dict>
-	</array>
+${FILE_PLIST}
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Smelt uses the local network to connect to development devices and remote sessions.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<!-- 声明可打开文件夹：Dock 图标才接受拖入目录（触发 application:openURLs:）。
-	     LSHandlerRank=Alternate 避免抢占系统默认的文件夹打开方式。 -->
-	<key>CFBundleDocumentTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleTypeName</key>
-			<string>Folder</string>
-			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
-			<key>LSHandlerRank</key>
-			<string>Alternate</string>
-			<key>LSItemContentTypes</key>
-			<array>
-				<string>public.folder</string>
-			</array>
-		</dict>
-	</array>
+${DEMO_PLIST}
 ${ICON_LINE}
 </dict>
 </plist>
