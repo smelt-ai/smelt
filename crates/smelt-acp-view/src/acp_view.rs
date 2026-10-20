@@ -45,6 +45,7 @@ use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
+use smelt_ui::markdown_links::FileLinks;
 use smelt_ui::motion::{
     BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_active,
     ambient_motion_enabled, ambient_spinner, composer_shadows, copy_ack_opacity, ease_overshoot,
@@ -6904,70 +6905,18 @@ fn format_duration(milliseconds: u64) -> String {
     }
 }
 
-/// 点击 Markdown 链接时要打开的地址：本地文件路径解析成 Smelt 内部的 file URL，
-/// 其余原样返回。
-///
-/// 只在点击时解析，不改写消息原文：原文改写认不出代码块，代码里的链接也会被换掉，
-/// 复制出来的也是改写后的。不解析的话，gpui-component 会把链接目标原样交给
-/// `open_url`，相对文件路径在 macOS 上会被 LaunchServices 误当作应用标识并报 -50。
-fn markdown_link_target(url: &str, links: FileLinks<'_>) -> String {
-    resolve_relative_file_link(url, links).unwrap_or_else(|| url.to_string())
-}
-
-/// 对话里 Markdown 链接的点击处理，见 [`markdown_link_target`]。
-fn markdown_link_opener(
-    links: FileLinks<'_>,
-) -> impl Fn(&gpui::SharedString, &gpui::ClickEvent, &mut Window, &mut App) + Send + Sync + 'static
-{
-    let cwd = links.cwd.map(str::to_owned);
-    let runtime = links.runtime.map(str::to_owned);
-    move |url, event, _window, cx| {
-        if !opens_link(event) {
-            return;
-        }
-        let links = FileLinks {
-            cwd: cwd.as_deref(),
-            runtime: runtime.as_deref(),
-        };
-        cx.open_url(&markdown_link_target(url, links));
-    }
-}
-
-/// 和 gpui-component 默认的打开条件一致：左键、中键、键盘、非长按的触摸。右键留给菜单。
-fn opens_link(event: &gpui::ClickEvent) -> bool {
-    match event {
-        gpui::ClickEvent::Mouse(click) => {
-            matches!(
-                click.up.button,
-                gpui::MouseButton::Left | gpui::MouseButton::Middle
-            )
-        }
-        gpui::ClickEvent::Keyboard(_) => true,
-        gpui::ClickEvent::Touch(click) => !click.long_press,
-    }
-}
-
-/// Markdown 里文件链接的解析基准。相对路径按 `cwd` 补全；`runtime` 是远程运行时的 id，
-/// 写进链接的 host，桌面据此知道文件在哪台机器上，不会去打开本机同路径的文件。
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct FileLinks<'a> {
-    cwd: Option<&'a str>,
-    runtime: Option<&'a str>,
-}
-
-impl<'a> FileLinks<'a> {
-    fn of(runtime: &'a Runtime, cwd: Option<&'a str>) -> Self {
-        let runtime = match runtime.key() {
-            smelt_client::runtime::RuntimeKey::Local => None,
-            smelt_client::runtime::RuntimeKey::Remote(id) => Some(id.as_str()),
-        };
-        Self { cwd, runtime }
-    }
+/// Markdown 文件链接的解析基准：相对路径按会话 `cwd` 补全，远程运行时把 id 写进 host。
+fn file_links<'a>(runtime: &'a Runtime, cwd: Option<&'a str>) -> FileLinks<'a> {
+    let runtime = match runtime.key() {
+        smelt_client::runtime::RuntimeKey::Local => None,
+        smelt_client::runtime::RuntimeKey::Remote(id) => Some(id.as_str()),
+    };
+    FileLinks::new(cwd, runtime)
 }
 
 /// 一条消息交给 Markdown 渲染的正文，原文不改：原始 HTML 由
 /// `smelt_ui::markdown_mermaid::chat_markdown_view` 按原文显示，文件链接在点击时才
-/// 解析（[`markdown_link_target`]）。
+/// 解析（`smelt_ui::markdown_links`）。
 fn markdown_for_entry(entry: &AcpEntry) -> Option<gpui::SharedString> {
     let text = match entry {
         AcpEntry::User(text) if !is_interrupt_marker(text) => text.clone(),
@@ -7054,73 +7003,6 @@ fn preformatted_html(text: &str) -> String {
     }
     html.push_str("</pre>");
     html
-}
-
-fn resolve_relative_file_link(target: &str, links: FileLinks<'_>) -> Option<String> {
-    let target = target.trim();
-    if target.is_empty()
-        || target.starts_with('#')
-        || target.starts_with('~')
-        || target.contains("://")
-        || target.starts_with("mailto:")
-        || target.starts_with("data:")
-    {
-        return None;
-    }
-    let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
-    // Agent 引用文件常写成 grep/编译器诊断那种 `path:行号` 或 `path:行号:列号`
-    // 格式（不是 `#L行号` 片段）。这种没有 `#` 片段时，才尝试从冒号后缀里抠
-    // 行号出来——不然会把 `:2765` 当成文件名的一部分拼进路径，读不到文件时
-    // 还误报“可能是二进制文件”。
-    let (path, fragment) = if fragment.is_empty() {
-        match extract_trailing_line_number(path) {
-            Some((base, line)) => (base, format!("L{line}")),
-            None => (path, String::new()),
-        }
-    } else {
-        (path, fragment.to_string())
-    };
-    let path = std::path::Path::new(path);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::path::Path::new(links.cwd?).join(path)
-    };
-    let mut url = url::Url::from_file_path(absolute).ok()?;
-    // 远程运行时上的文件：host 写运行时 id。本机的不带 host。
-    if let Some(runtime) = links.runtime {
-        url.set_host(Some(runtime)).ok()?;
-    }
-    if !fragment.is_empty() {
-        url.set_fragment(Some(&fragment));
-    }
-    // `Url::set_scheme` 会把自定义 scheme 序列化成 `smelt-file:/path`
-    // （单斜杠），而 macOS URL scheme 与主进程解析器都按 authority 形式接收。
-    // 从标准 file URL 替换前缀可稳定保留 `smelt-file:///absolute/path`。
-    Some(url.to_string().replacen("file://", "smelt-file://", 1))
-}
-
-/// 从 `path:行号` / `path:行号:列号` 里拆出末尾的行号：从右往左数，只要是纯
-/// 数字的 segment 就一直往前吞（列号可选，最多吞两段），吞到的最后一个数字
-/// segment 就是行号；一段数字都没吃到就说明不是这种格式，返回 None 原样处理
-/// （比如 Windows 盘符 `C:\...`，虽然本 app 只跑 macOS，多判一下无妨）。
-fn extract_trailing_line_number(path: &str) -> Option<(&str, u32)> {
-    let mut rest = path;
-    let mut line = None;
-    for _ in 0..2 {
-        let Some((head, tail)) = rest.rsplit_once(':') else {
-            break;
-        };
-        if head.is_empty() {
-            break;
-        }
-        let Ok(n) = tail.parse::<u32>() else {
-            break;
-        };
-        line = Some(n);
-        rest = head;
-    }
-    line.map(|n| (rest, n))
 }
 
 /// 审批请求按收到顺序串行展示和处理，不能越过队首回应后续 responder。

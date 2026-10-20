@@ -2,7 +2,7 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, FileLinks, LoadedSkillsRefresh, LoadedSkillsSnapshot,
+    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot,
     OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction,
     ViewHistoryIdentity, append_prompt_text, apply_pending_config_selection,
     background_task_elapsed, background_task_one_line, background_task_output_lines,
@@ -20,7 +20,7 @@ use super::{
     external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
     is_active_permission_selection, is_fresh_conversation_start, is_match_count_line,
     is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
-    loaded_entries_end, loaded_skills_refresh, markdown_link_target,
+    loaded_entries_end, loaded_skills_refresh,
     merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
     native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
@@ -1415,91 +1415,6 @@ fn state_only_snapshot_does_not_rebuild_loaded_entries() {
     );
     assert_eq!(loaded_offset, 10);
     assert_eq!(entries.len(), 2);
-}
-
-#[test]
-fn markdown_local_files_become_internal_file_urls() {
-    let links = FileLinks {
-        cwd: Some("/tmp/project"),
-        runtime: None,
-    };
-    assert_eq!(
-        markdown_link_target("docs/workspace.md", links),
-        "smelt-file:///tmp/project/docs/workspace.md"
-    );
-    assert_eq!(
-        markdown_link_target("/tmp/source.rs#L42", links),
-        "smelt-file:///tmp/source.rs#L42"
-    );
-    assert_eq!(
-        markdown_link_target("https://example.com", links),
-        "https://example.com"
-    );
-}
-
-#[test]
-fn markdown_absolute_files_resolve_without_session_cwd() {
-    assert_eq!(
-        markdown_link_target(
-            "/tmp/smelt-current-notification-final.png",
-            FileLinks::default()
-        ),
-        "smelt-file:///tmp/smelt-current-notification-final.png"
-    );
-    // 没有 cwd 补不全的相对路径原样交出去，不猜。
-    assert_eq!(
-        markdown_link_target("docs/a.md", FileLinks::default()),
-        "docs/a.md"
-    );
-}
-
-/// grep / 编译器诊断常见的 `path:行号` 引用格式（不是 `#L行号` 片段）也要能
-/// 拆出行号——原来只认 `#`，`:2765` 会整段被当成文件名拼进路径，导致读不到
-/// 文件、误报“可能是二进制文件”（见用户反馈：点 ACP 对话里的文件引用链接）。
-#[test]
-fn markdown_colon_line_refs_resolve_to_fragment() {
-    assert_eq!(
-        markdown_link_target(
-            "crates/smelt-acp-view/src/acp_view.rs:2765",
-            FileLinks {
-                cwd: Some("/tmp/project"),
-                runtime: None,
-            },
-        ),
-        "smelt-file:///tmp/project/crates/smelt-acp-view/src/acp_view.rs#L2765"
-    );
-}
-
-/// `path:行号:列号` 形式（列号可选的第二段）也只取行号，列号丢弃。
-#[test]
-fn markdown_colon_line_col_refs_take_line_not_col() {
-    assert_eq!(
-        markdown_link_target(
-            "src/main.rs:10:5",
-            FileLinks {
-                cwd: Some("/tmp/project"),
-                runtime: None,
-            },
-        ),
-        "smelt-file:///tmp/project/src/main.rs#L10"
-    );
-}
-
-/// 远程对话里的文件在另一台机器上：链接带上运行时 id，桌面不会去打开本机同路径的文件。
-#[test]
-fn markdown_files_in_remote_conversations_carry_the_runtime() {
-    let links = FileLinks {
-        cwd: Some("/root/project"),
-        runtime: Some("39fafd41-9942-49b0-b9ec-7eb670d2711e"),
-    };
-    assert_eq!(
-        markdown_link_target("src/main.rs:3", links),
-        "smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/root/project/src/main.rs#L3"
-    );
-    assert_eq!(
-        markdown_link_target("/etc/hosts", links),
-        "smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/etc/hosts"
-    );
 }
 
 /// 交给 Markdown 的正文就是消息原文：链接不在原文里改写（代码块里的链接、复制出来的

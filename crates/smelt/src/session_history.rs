@@ -693,10 +693,14 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
             let detail = opened.detail.clone();
             let turn_markdown = opened.turn_markdown.clone();
             let remeasure = detail_list_state.clone();
+            // 历史页只读本机存档（远程项目给的是说明，见 `HistoryListState::RemoteProject`），
+            // 文件链接按项目目录补全，不带运行时。
+            let link_cwd = cwd.clone();
             // 和对话页同一套排版：居中限宽的阅读栏，间距算在虚拟项自己身上。
             gpui::list(detail_list_state, move |i, _window, app| {
                 let turn = &detail.turns[i];
-                let body = turn_markdown.view(i, &turn.text, &remeasure, app);
+                let links = smelt_ui::markdown_links::FileLinks::new(link_cwd.as_deref(), None);
+                let body = turn_markdown.view(i, &turn.text, links, &remeasure, app);
                 h_flex()
                     .w_full()
                     .justify_center()
@@ -805,7 +809,14 @@ struct HistoryTurnMarkdown {
 }
 
 impl HistoryTurnMarkdown {
-    fn view(&self, index: usize, text: &str, list_state: &ListState, cx: &mut App) -> TextView {
+    fn view(
+        &self,
+        index: usize,
+        text: &str,
+        links: smelt_ui::markdown_links::FileLinks<'_>,
+        list_state: &ListState,
+        cx: &mut App,
+    ) -> TextView {
         let state = self
             .turns
             .borrow_mut()
@@ -820,7 +831,7 @@ impl HistoryTurnMarkdown {
             })
             .0
             .clone();
-        crate::markdown_mermaid::chat_markdown_view(&state)
+        crate::markdown_mermaid::chat_markdown_view(&state, links)
     }
 }
 

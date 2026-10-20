@@ -175,9 +175,10 @@ impl AcpView {
                 state
             }
         };
-        smelt_ui::markdown_mermaid::chat_markdown_view(&state).on_link_click(markdown_link_opener(
-            FileLinks::of(&self.runtime, self.cwd.as_deref()),
-        ))
+        smelt_ui::markdown_mermaid::chat_markdown_view(
+            &state,
+            file_links(&self.runtime, self.cwd.as_deref()),
+        )
     }
 
     pub(super) fn render_message_list(

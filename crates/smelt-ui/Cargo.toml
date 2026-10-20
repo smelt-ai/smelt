@@ -26,6 +26,8 @@ gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "af456d
 # mermaid 代码块画图，见 markdown_mermaid.rs 文件头注释；版本锁定理由同处。
 rusty-mermaid = { version = "=0.2.0", features = ["svg"] }
 sha2 = "0.10"
+# 对话里 Markdown 文件链接点击时转成 smelt-file URL，见 markdown_links.rs。
+url = "2"
 # 图片显示统一抽象（image.rs）：ACP 图片解码 + 降采样。与 smelt 主 crate 同
 # 版本（0.25、默认关全格式），features 保持 png/jpeg/gif/webp——Bmp/Tiff 等
 # 格式当前调用方不会遇到，不为此扩大解码面。

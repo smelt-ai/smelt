@@ -352,16 +352,21 @@ fn markdown_view_with_selection(
 }
 
 /// 对话消息（ACP 对话、会话历史）的 Markdown，解析状态由调用方持有。原始 HTML 按
-/// 原文显示，见 `markdown_literal_html` 模块。
+/// 原文显示，见 `markdown_literal_html` 模块；文件链接点击时按 `links` 解析，见
+/// [`crate::markdown_links`]。
 ///
 /// `TextView::markdown` 把解析结果挂在元素上，元素有一帧没画就丢掉。虚拟列表里的行
 /// 滚出渲染范围再回来，超过 4KB 的正文要先以空内容等后台重新解析，行高跟着跳。
 /// 这类地方自己留住 `TextViewState`，用这个入口画。
-pub fn chat_markdown_view(state: &gpui::Entity<TextViewState>) -> TextView {
+pub fn chat_markdown_view(
+    state: &gpui::Entity<TextViewState>,
+    links: crate::markdown_links::FileLinks<'_>,
+) -> TextView {
     with_markdown_hooks(
         TextView::new(state).selectable(true),
         chat_markdown_extensions(),
     )
+    .on_link_click(crate::markdown_links::link_opener(links))
 }
 
 fn with_markdown_hooks(view: TextView, extensions: &MarkdownExtensions) -> TextView {
@@ -397,6 +402,7 @@ fn chat_markdown_extensions() -> &'static MarkdownExtensions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext as _;
 
     struct ChatMarkdownRoot {
         state: gpui::Entity<TextViewState>,
@@ -408,7 +414,10 @@ mod tests {
             _window: &mut Window,
             _cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            div().w(px(600.)).child(chat_markdown_view(&self.state))
+            div().w(px(600.)).child(chat_markdown_view(
+                &self.state,
+                crate::markdown_links::FileLinks::default(),
+            ))
         }
     }
 
