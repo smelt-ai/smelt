@@ -1420,7 +1420,6 @@ fn chat_markdown_extensions() -> &'static MarkdownExtensions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext as _;
 
     struct ChatMarkdownRoot {
         state: gpui::Entity<TextViewState>,
@@ -1490,7 +1489,7 @@ mod tests {
             let view = cx.new(|cx| ChatMarkdownRoot {
                 state: cx.new(|cx| TextViewState::markdown(source, cx)),
             });
-            cx.new(|cx| gpui_component::Root::new(view, window, cx))
+            gpui_component::Root::new(view, window, cx)
         });
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
