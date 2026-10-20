@@ -1,4 +1,5 @@
-//! 终端：附着一个终端会话的字节流、输入与尺寸。Dart 入口见 `crate::api::terminal`。
+//! 一台机器上的终端：附着终端会话的字节流、输入与尺寸。Dart 入口见 `crate::api::terminal`。
+//! 机队里每个节点一份（见 `crate::fleet`）。
 //!
 //! 一次附着是一条 `watch` 长连接（`controls_geometry: true`）：
 //!
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -31,10 +32,10 @@ use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::{ControlClientError, EmptyParams, SystemDescribe};
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
-use crate::api::connection::{ConnectionEvent, ConnectionState};
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::fleet::ConnectionState;
 use crate::api::terminal::TerminalGeometry;
-use crate::connection::Listener;
+use crate::connection::{ConnectionEvent, Listener};
 
 /// 运行时的上限（smeltd `MAX_SESSION_COLS` / `MAX_SESSION_ROWS` / `MAX_SESSION_CELL_PX`）。
 const MAX_COLS: u32 = 1000;
@@ -51,25 +52,13 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// 一次 `input` 请求的上限（旧网关同值）。
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 
-/// 读写线程拿当前运行时用。生产走 `crate::client`，测试注入假的。
+/// 读写线程拿这台机器的连接用。生产用节点的 `NodeSource`（见 `crate::fleet`），测试注入
+/// 假的。
 pub(crate) trait RuntimeSource: Send + Sync {
-    /// 当前运行时的代号和客户端。
+    /// 当前连接的代号和客户端。
     fn current(&self) -> Option<(u64, RuntimeClient)>;
-    /// 监听连接状态，语义同 `crate::client::subscribe`。
+    /// 监听连接状态，语义同 `ConnectionHub::subscribe`。
     fn subscribe(&self, listener: Listener);
-}
-
-// 写成带花括号的空结构体：FRB 会解析全 crate 的 trait 实现，不支持单元结构体。
-struct ClientSource {}
-
-impl RuntimeSource for ClientSource {
-    fn current(&self) -> Option<(u64, RuntimeClient)> {
-        crate::client::current_runtime().map(|runtime| (runtime.generation, runtime.client))
-    }
-
-    fn subscribe(&self, listener: Listener) {
-        crate::client::subscribe(listener);
-    }
 }
 
 /// 各种时限。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
@@ -128,20 +117,13 @@ pub(crate) enum TerminalUpdate {
     ReplayComplete,
     /// 终端会话已结束（shell 退出或被关掉）。流随之结束。
     Closed,
-    /// `fatal` 时流随之结束：会话不存在、运行时已切换或断开、运行时回包不对。
+    /// `fatal` 时流随之结束：会话不存在、连接停下（未配对、机器被忘记）、运行时回包不对。
     /// 非 fatal 是断线或输入发送失败，后台会按退避自动重新附着，成功后再来 `Ready`。
     Error { message: String, fatal: bool },
 }
 
 /// 推事件给 Dart，返回 false 表示对面已取消订阅。丢掉它就结束 Dart 侧的流。
 pub(crate) type Emit = Box<dyn Fn(TerminalUpdate) -> bool + Send + Sync>;
-
-static HUB: LazyLock<TerminalHub> =
-    LazyLock::new(|| TerminalHub::new(Arc::new(ClientSource {}), Timing::PRODUCTION));
-
-pub(crate) fn hub() -> &'static TerminalHub {
-    &HUB
-}
 
 pub(crate) struct TerminalHub {
     inner: Arc<HubInner>,
@@ -185,18 +167,16 @@ impl HubInner {
         let attachments: Vec<_> = self.attachments().values().cloned().collect();
         for attachment in attachments {
             match attachment.generation() {
-                Some(bound) if bound != generation => {
-                    attachment.fail(RUNTIME_GONE);
-                    self.forget(&attachment);
-                }
-                // 运行时重新连上：别等退避，立刻重新附着。
+                // 同一台机器重新连过：旧一代链路上的附着连接掐掉，立刻在新连接上重新附着。
+                Some(bound) if bound != generation => attachment.follow(generation),
+                // 重新连上：别等退避，立刻重新附着。
                 Some(_) if event.state == ConnectionState::Connected => attachment.retry_now(),
                 _ => {}
             }
         }
     }
 
-    /// 当前运行时的客户端。运行时换了（或没了）就让附着以 fatal 收尾，返回 None。
+    /// 这台机器当前连接的客户端。连接停下了（没有当前连接）就让附着以 fatal 收尾，返回 None。
     fn runtime_for(&self, attachment: &Attachment) -> Option<RuntimeClient> {
         let Some((generation, client)) = self.source.current() else {
             attachment.fail(if attachment.generation().is_some() {
@@ -206,20 +186,8 @@ impl HubInner {
             });
             return None;
         };
-        if attachment.bind(generation) != generation {
-            attachment.fail(RUNTIME_GONE);
-            return None;
-        }
-        // 绑定前的那一刻运行时可能刚换过：监听当时还没看到这个附着的代号，不会叫停它。
-        // 绑定后再看一次，之后的切换由监听负责。
-        if self
-            .source
-            .current()
-            .is_none_or(|(current, _)| current != generation)
-        {
-            attachment.fail(RUNTIME_GONE);
-            return None;
-        }
+        // 记下这次用的代号：之后换代由监听掐掉这条连接、叫读线程重新附着。
+        attachment.bind(generation);
         Some(client)
     }
 
@@ -375,19 +343,13 @@ impl HubInner {
     fn pump_input(&self, attachment: &Attachment) {
         while let Some(chunk) = attachment.next_input() {
             let result = match self.source.current() {
-                Some((generation, client))
-                    if attachment
-                        .generation()
-                        .is_none_or(|bound| bound == generation) =>
-                {
-                    send_input(
-                        &client,
-                        &attachment.session_id,
-                        &chunk,
-                        self.timing.input_timeout,
-                    )
-                }
-                _ => Err(RUNTIME_GONE.to_string()),
+                Some((_, client)) => send_input(
+                    &client,
+                    &attachment.session_id,
+                    &chunk,
+                    self.timing.input_timeout,
+                ),
+                None => Err(RUNTIME_GONE.to_string()),
             };
             if let Err(message) = result {
                 attachment.input_failed(format!("终端输入没有发出：{message}"));
@@ -396,8 +358,8 @@ impl HubInner {
     }
 }
 
-const NO_RUNTIME: &str = "还没有连上运行时";
-const RUNTIME_GONE: &str = "运行时已断开或切换，终端已停止";
+const NO_RUNTIME: &str = "还没有连上这台机器";
+const RUNTIME_GONE: &str = "和这台机器的连接已停止，终端已停止";
 
 impl TerminalHub {
     pub(crate) fn new(source: Arc<dyn RuntimeSource>, timing: Timing) -> Self {
@@ -508,6 +470,7 @@ impl TerminalHub {
         }
     }
 
+    /// 断开全部附着（切后台、机器被忘记、节点被替换时）。
     pub(crate) fn detach_all(&self) {
         let removed: Vec<_> = self.inner.attachments().drain().map(|(_, a)| a).collect();
         for attachment in removed {
@@ -516,8 +479,8 @@ impl TerminalHub {
     }
 }
 
-/// 一次 [`TerminalHub::attach`]：从登记到被叫停（detach、替换、运行时切换、Dart 取消订阅）
-/// 或得出结论（会话结束、fatal）。
+/// 一次 [`TerminalHub::attach`]：从登记到被叫停（detach、替换、Dart 取消订阅）或得出结论
+/// （会话结束、连接停下、fatal）。
 struct Attachment {
     session_id: String,
     emit: Emit,
@@ -530,7 +493,7 @@ struct State {
     stopped: bool,
     /// 运行时刚重新连上，读线程别等退避了。
     retry_now: bool,
-    /// 第一次拿到运行时时绑定，之后运行时换代就停。
+    /// 当前附着用的连接代号。没拿到过连接时为空。
     generation: Option<u64>,
     /// 当前附着连接的写端（同一 socket 的 dup），写 resize 帧、叫停时 shutdown。
     writer: Option<UnixStream>,
@@ -571,9 +534,24 @@ impl Attachment {
         self.lock().generation
     }
 
-    /// 绑定运行时代号（只绑第一次），返回绑定的代号。
-    fn bind(&self, generation: u64) -> u64 {
-        *self.lock().generation.get_or_insert(generation)
+    fn bind(&self, generation: u64) {
+        self.lock().generation = Some(generation);
+    }
+
+    /// 连接换代：掐掉旧链路上的附着连接（读线程随之返回），并让它别等退避立刻重新附着。
+    fn follow(&self, generation: u64) {
+        let mut state = self.lock();
+        if state.stopped {
+            return;
+        }
+        state.generation = Some(generation);
+        state.retry_now = true;
+        if let Some(writer) = state.writer.take() {
+            let _ = writer.shutdown(Shutdown::Both);
+        }
+        state.sent = None;
+        drop(state);
+        self.wake.notify_all();
     }
 
     fn is_stopped(&self) -> bool {

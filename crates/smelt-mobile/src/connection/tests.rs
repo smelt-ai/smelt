@@ -10,7 +10,7 @@ use smelt_runtime_client::protocol::control::{ControlError, ControlResponse};
 use smelt_runtime_client::protocol::write_json_line;
 
 use super::*;
-use crate::api::connection::LinkPath;
+use crate::api::fleet::LinkPath;
 
 const FAST: Timing = Timing {
     interval: Duration::from_millis(30),

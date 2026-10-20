@@ -1,4 +1,4 @@
-//! 当前运行时的连接状态机。
+//! 一台机器的连接状态机。机队里每个节点一个（见 `crate::fleet`），彼此独立。
 //!
 //! ```text
 //!            connect / pair
@@ -11,8 +11,9 @@
 //! ```
 //!
 //! 每次 connect / pair / disconnect 换一代（generation）：旧会话的探活线程被叫停，它晚到的
-//! 结果、以及被取代的 connect / pair 的结果，都按代号丢弃。传输经 [`Dialer`] 注入，测试用假
-//! 运行时。
+//! 结果、以及被取代的 connect / pair 的结果，都按代号丢弃。一个状态机只连一台机器，换代
+//! 只说明重新连过（重连、endpoint 换形态、重新配对），不说明换了机器。传输经 [`Dialer`]
+//! 注入，测试用假运行时。
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -24,8 +25,36 @@ use smelt_runtime_client::protocol::control::{
     ControlClientError, ControlErrorCode, EmptyParams, SystemDescribe, SystemDescribeResult,
 };
 
-use crate::api::connection::{ConnectionEvent, ConnectionState, LinkMetrics, RuntimeInfo};
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::fleet::{ConnectionState, LinkMetrics};
+
+/// `system.describe` 给出的机器身份。客户端按 `runtime_id` 区分机器，按 `endpoint_id` +
+/// `relay_url` 找到它。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeInfo {
+    pub runtime_id: String,
+    /// 运行时所在机器的主机名，登记时当默认名字。老运行时没有。
+    pub hostname: Option<String>,
+    /// 如 `macos`、`linux`。老运行时没有。
+    pub os: Option<String>,
+    pub version: String,
+    pub endpoint_id: String,
+    pub relay_url: Option<String>,
+}
+
+/// 状态机推出的一条状态。对 Dart 只露出其中的 `state` / `link` / `error`（见
+/// `crate::api::fleet::RuntimeStatus`）；`endpoint_id` 给缓存按机器分库用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectionEvent {
+    pub state: ConnectionState,
+    /// 这条状态针对的机器。主动断开后为空。
+    pub endpoint_id: Option<String>,
+    /// 只有 `Connected` 时有。
+    pub link: Option<LinkMetrics>,
+    /// `Reconnecting` 时是最近一次失败；`Disconnected` 时是停下来的原因（主动断开时为空）。
+    /// `kind == Unpaired` 表示要重新配对。
+    pub error: Option<SmeltError>,
+}
 
 /// 一个运行时的地址。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,10 +129,10 @@ impl Timing {
     }
 }
 
-/// 后续阶段拿当前运行时用。
+/// 会话目录、对话、终端拿这台机器当前的连接用。
 #[derive(Clone, Debug)]
 pub(crate) struct CurrentRuntime {
-    /// 当前代号。和 [`Listener`] 收到的不同就说明运行时换了（或断开过），要丢掉旧状态。
+    /// 当前代号。和 [`Listener`] 收到的不同就说明重新连过（或断开过）。
     pub generation: u64,
     pub endpoint_id: String,
     /// 重连成功后会换成新链路的客户端，长连接断了重试时重新取。
@@ -163,7 +192,7 @@ impl Inner {
     }
 }
 
-/// 一个当前运行时的会话：从 connect / pair 成功（或 connect 离线转入重连）到被取代或停下。
+/// 一次连接会话：从 connect / pair 成功（或 connect 离线转入重连）到被取代或停下。
 struct Session {
     target: Target,
     route: Arc<dyn Route>,
@@ -264,7 +293,7 @@ impl ConnectionHub {
         })
     }
 
-    /// 切换当前运行时并握手。阻塞。
+    /// （重新）连这台机器并握手。阻塞。
     pub(crate) fn connect(
         &self,
         dialer: &dyn Dialer,
@@ -280,7 +309,7 @@ impl ConnectionHub {
         self.finish(generation, target, route, link, outcome, true)
     }
 
-    /// 配对并设为当前运行时。阻塞。
+    /// 配对并连上。阻塞。
     pub(crate) fn pair(
         &self,
         dialer: &dyn Dialer,

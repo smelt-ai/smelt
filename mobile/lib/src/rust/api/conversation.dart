@@ -7,33 +7,51 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
-/// 订阅一个会话。同一时间只有一个活动订阅：再调一次（同一个或别的会话）会顶掉前一个。
+/// 订阅一个会话。可以同时订阅多个会话（含不同机器上的），各自独立。同一会话再调一次
+/// 只换推送出口：旧流不再收到事件，新流马上收到手里的视图。
 ///
 /// 有离线缓存就先推一份（`cached = true`），再连运行时，收到实时数据后推 `cached = false`
-/// 的视图。断线且运行时还连着时后台退避重订；运行时被切换或断开（换了一代连接）就停，
-/// 回到前台或重新连上后要再调一次。Dart 取消订阅也会停。
-Stream<ConversationEvent> watchConversation({required String sessionId}) =>
-    RustLib.instance.api.crateApiConversationWatchConversation(
-      sessionId: sessionId,
-    );
+/// 的视图。断线或这台机器重新连过时后台续订；和这台机器的连接停下（未配对、被忘记）就停，
+/// 重新连上后要再调一次。Dart 取消订阅也会停。
+Stream<ConversationEvent> watchConversation({
+  required String runtimeId,
+  required String sessionId,
+}) => RustLib.instance.api.crateApiConversationWatchConversation(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+);
 
-/// 停掉当前订阅（离开对话页时调）。
-Future<void> unwatchConversation() =>
-    RustLib.instance.api.crateApiConversationUnwatchConversation();
+/// 停掉一个会话的订阅（离开对话页时调），其它订阅不受影响。
+Future<void> unwatchConversation({
+  required String runtimeId,
+  required String sessionId,
+}) => RustLib.instance.api.crateApiConversationUnwatchConversation(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+);
 
-/// 往前翻一页（100 条）。结果合并进当前订阅的窗口，从订阅流推出。
+/// 往前翻一页（100 条）。结果合并进这个会话订阅的窗口，从订阅流推出。
 ///
-/// 返回 false 表示没翻：不是当前订阅的会话、前面没有了，或已经在翻。
-Future<bool> loadOlder({required String sessionId}) =>
-    RustLib.instance.api.crateApiConversationLoadOlder(sessionId: sessionId);
+/// 返回 false 表示没翻：没在订阅这个会话、前面没有了，或已经在翻。
+Future<bool> loadOlder({
+  required String runtimeId,
+  required String sessionId,
+}) => RustLib.instance.api.crateApiConversationLoadOlder(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+);
 
-/// 不订阅、只取一个会话当前在等的审批和询问（指挥台用）。
-Future<PendingActions> pendingActions({required String sessionId}) => RustLib
-    .instance
-    .api
-    .crateApiConversationPendingActions(sessionId: sessionId);
+/// 不订阅、只取一个会话当前在等的审批和询问。指挥台的单据已经带着它（见
+/// `crate::api::pass`），这里给单据之外的地方用。
+Future<PendingActions> pendingActions({
+  required String runtimeId,
+  required String sessionId,
+}) => RustLib.instance.api.crateApiConversationPendingActions(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+);
 
 /// 新的发送请求 id。草稿里存着它，没等到确认就用同一个 id 重发。
 String newRequestId() =>
@@ -42,11 +60,13 @@ String newRequestId() =>
 /// 发一条消息。`request_id` 用 [`new_request_id`] 生成，作为这次提交的 `submission_id`；
 /// 重发同一份草稿时要用同一个 id。最长等 35 秒。
 Future<void> sendMessage({
+  required String runtimeId,
   required String sessionId,
   required String requestId,
   required String text,
   required List<ImageInput> images,
 }) => RustLib.instance.api.crateApiConversationSendMessage(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   requestId: requestId,
   text: text,
@@ -54,17 +74,24 @@ Future<void> sendMessage({
 );
 
 /// 停掉当前回合。
-Future<void> cancelTurn({required String sessionId}) =>
-    RustLib.instance.api.crateApiConversationCancelTurn(sessionId: sessionId);
+Future<void> cancelTurn({
+  required String runtimeId,
+  required String sessionId,
+}) => RustLib.instance.api.crateApiConversationCancelTurn(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+);
 
 /// 切换模型或会话配置。开关项传 `boolean`，下拉项传 `value_id`（开关项的 `value_id`
 /// 运行时不看，传空串即可）。
 Future<void> setConfigOption({
+  required String runtimeId,
   required String sessionId,
   required String configId,
   required String valueId,
   bool? boolean,
 }) => RustLib.instance.api.crateApiConversationSetConfigOption(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   configId: configId,
   valueId: valueId,
@@ -73,10 +100,12 @@ Future<void> setConfigOption({
 
 /// 回答一个审批。
 Future<void> respondApproval({
+  required String runtimeId,
   required String sessionId,
   required String toolCallId,
   required String optionId,
 }) => RustLib.instance.api.crateApiConversationRespondApproval(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   toolCallId: toolCallId,
   optionId: optionId,
@@ -84,10 +113,12 @@ Future<void> respondApproval({
 
 /// 点选询问里的一个选项（多选题再点一次是取消）。
 Future<void> chooseElicitation({
+  required String runtimeId,
   required String sessionId,
   required int fieldIndex,
   required int optionIndex,
 }) => RustLib.instance.api.crateApiConversationChooseElicitation(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   fieldIndex: fieldIndex,
   optionIndex: optionIndex,
@@ -95,10 +126,12 @@ Future<void> chooseElicitation({
 
 /// 记下询问里一个文字框的内容。
 Future<void> updateElicitationText({
+  required String runtimeId,
   required String sessionId,
   required int fieldIndex,
   required String value,
 }) => RustLib.instance.api.crateApiConversationUpdateElicitationText(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   fieldIndex: fieldIndex,
   value: value,
@@ -106,30 +139,42 @@ Future<void> updateElicitationText({
 
 /// 提交询问。`text_values` 是界面上还没同步给运行时的文字框，按顺序先写再提交。
 Future<void> submitElicitation({
+  required String runtimeId,
   required String sessionId,
   required List<ElicitationTextInput> textValues,
 }) => RustLib.instance.api.crateApiConversationSubmitElicitation(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   textValues: textValues,
 );
 
 /// 关掉询问（不回答）。
-Future<void> dismissElicitation({required String sessionId}) => RustLib
-    .instance
-    .api
-    .crateApiConversationDismissElicitation(sessionId: sessionId);
+Future<void> dismissElicitation({
+  required String runtimeId,
+  required String sessionId,
+}) => RustLib.instance.api.crateApiConversationDismissElicitation(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+);
 
 /// 这场对话加载了哪些技能。
-Future<SessionSkills> listSkills({required String sessionId}) =>
-    RustLib.instance.api.crateApiConversationListSkills(sessionId: sessionId);
+Future<SessionSkills> listSkills({
+  required String runtimeId,
+  required String sessionId,
+}) => RustLib.instance.api.crateApiConversationListSkills(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+);
 
 /// 取一张大图。给 `max_edge` 出缩略图（长边不超过它），不给出可看的原图。
 Future<ImageData> loadImage({
+  required String runtimeId,
   required String sessionId,
   required PlatformInt64 entry,
   required String digest,
   int? maxEdge,
 }) => RustLib.instance.api.crateApiConversationLoadImage(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   entry: entry,
   digest: digest,
@@ -834,10 +879,19 @@ class PendingActions {
   final List<PermissionRequest> permissions;
   final Elicitation? elicitation;
 
-  const PendingActions({required this.permissions, this.elicitation});
+  /// 会话最近几条（旧的在前，最多 [`crate::conversation::RECENT_CONTEXT`] 条）：单据上印出来的
+  /// 上下文，让人批之前看得到它刚才在做什么、为什么要这么做。和待办取自同一份快照头。
+  final List<ConversationEntry> recent;
+
+  const PendingActions({
+    required this.permissions,
+    this.elicitation,
+    required this.recent,
+  });
 
   @override
-  int get hashCode => permissions.hashCode ^ elicitation.hashCode;
+  int get hashCode =>
+      permissions.hashCode ^ elicitation.hashCode ^ recent.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -845,7 +899,8 @@ class PendingActions {
       other is PendingActions &&
           runtimeType == other.runtimeType &&
           permissions == other.permissions &&
-          elicitation == other.elicitation;
+          elicitation == other.elicitation &&
+          recent == other.recent;
 }
 
 class PermissionOption {

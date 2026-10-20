@@ -1,5 +1,6 @@
-//! 对话：订阅一个会话的快照流、翻更早的页、发送与各类动作、取图片。Dart 入口见
-//! `crate::api::conversation`。
+//! 一台机器上的对话：订阅会话的快照流、翻更早的页、发送与各类动作、取图片。Dart 入口见
+//! `crate::api::conversation`。机队里每个节点一份（见 `crate::fleet`），同一节点上可以同时
+//! 订阅多个会话（平板双栏、逐张处理单据时预载下一张），按会话 id 各自独立。
 //!
 //! 订阅（`acp_watch`）是只读长连接：首帧整段快照，之后是整段帧或相对上一帧的增量帧，
 //! 用 [`FrameMirror`] 还原。客户端只写首行请求，之后**不能往这条连接写任何东西，也不能
@@ -9,17 +10,19 @@
 //! 一个订阅三条线：
 //! - 读线程：等运行时连上 → 建 watch → 读帧、合并进窗口；断了就退避重订。
 //! - 推送线程：窗口变了按间隔合并推一次视图；变化后过一会儿把尾部存进离线缓存。
-//! - 连接状态监听（在状态机的锁里回调）：换了一代运行时就停；掉线就掐断当前 watch，
-//!   免得挂在一条已经死掉的旧链路上，等重新连上再订。
+//! - 连接状态监听（在状态机的锁里回调）：掉线或换代（同一台机器重新连过）就掐断当前
+//!   watch，免得挂在一条已经死掉的旧链路上，等重新连上再带着手里的窗口续订；连接停下
+//!   （未配对、被忘记）就停。
 //!
 //! 运行时、连接状态与离线缓存经 [`RuntimeSource`] 注入，测试用假运行时。
 
 mod merge;
 mod view;
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -36,19 +39,21 @@ use smelt_runtime_client::protocol::daemon::DaemonOperation;
 use smelt_runtime_client::protocol::write_json_line;
 use smelt_runtime_client::{RequestError, RuntimeClient};
 
-use crate::api::connection::{ConnectionEvent, ConnectionState};
 use crate::api::conversation::{
-    ConversationEvent, ConversationEventKind, ElicitationTextInput, ImageData, ImageInput,
-    PendingActions, SendFailureKind, SendMessageError, SessionSkill, SessionSkills,
+    ConversationEntry, ConversationEvent, ConversationEventKind, ElicitationTextInput, ImageData,
+    ImageInput, PendingActions, SendFailureKind, SendMessageError, SessionSkill, SessionSkills,
 };
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::fleet::ConnectionState;
 use crate::cache::Cache;
-use crate::connection::{CurrentRuntime, Listener};
+use crate::connection::{ConnectionEvent, CurrentRuntime, Listener};
 
 /// 订阅时要的尾部条数，也是往前翻一页的条数和缓存里留的条数。
 const PAGE_LIMIT: usize = 100;
 /// 指挥台取待办只要快照头，条目带几条就够。
 const PENDING_ACTIONS_LIMIT: usize = 8;
+/// 单据上印几条上下文。取自待办那份快照头（[`PENDING_ACTIONS_LIMIT`] 条）的末尾。
+pub(crate) const RECENT_CONTEXT: usize = 6;
 /// 动作、翻页可能要先唤醒挂起的会话，比普通短请求宽一些。
 const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -57,29 +62,13 @@ const SKILLS_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(35);
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// 当前运行时、连接状态与离线缓存的来源。生产用 `crate::client`，测试注入假的。
+/// 这台机器的连接、连接状态与离线缓存的来源。生产用节点的 `NodeSource`（见
+/// `crate::fleet`），测试注入假的。
 pub(crate) trait RuntimeSource: Send + Sync {
     fn current(&self) -> Option<CurrentRuntime>;
     /// 见 `ConnectionHub::subscribe`：先同步回调一次当前状态。
     fn subscribe(&self, listener: Listener);
     fn cache(&self) -> Option<Arc<Cache>>;
-}
-
-// 写成带花括号的空结构体：FRB 会解析全 crate 的 trait 实现，不支持单元结构体。
-struct ClientSource {}
-
-impl RuntimeSource for ClientSource {
-    fn current(&self) -> Option<CurrentRuntime> {
-        crate::client::current_runtime()
-    }
-
-    fn subscribe(&self, listener: Listener) {
-        crate::client::subscribe(listener);
-    }
-
-    fn cache(&self) -> Option<Arc<Cache>> {
-        crate::client::cache()
-    }
 }
 
 /// 各种时限。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
@@ -122,14 +111,9 @@ pub(crate) type EventSink = Box<dyn Fn(ConversationEvent) -> bool + Send>;
 pub(crate) struct Conversations {
     source: Arc<dyn RuntimeSource>,
     timing: Timing,
-    active: Mutex<Option<Arc<Watch>>>,
-}
-
-static GLOBAL: LazyLock<Conversations> =
-    LazyLock::new(|| Conversations::new(Arc::new(ClientSource {}), Timing::PRODUCTION));
-
-pub(crate) fn global() -> &'static Conversations {
-    &GLOBAL
+    /// 会话 id → 订阅。停下的订阅（运行时接不上、Dart 取消、连接停下）留在表里直到被替换
+    /// 或 unwatch，查到时按已停处理。
+    watches: Mutex<HashMap<String, Arc<Watch>>>,
 }
 
 impl Conversations {
@@ -137,18 +121,29 @@ impl Conversations {
         Self {
             source,
             timing,
-            active: Mutex::new(None),
+            watches: Mutex::new(HashMap::new()),
         }
     }
 
-    fn active(&self) -> MutexGuard<'_, Option<Arc<Watch>>> {
-        self.active.lock().unwrap_or_else(|e| e.into_inner())
+    fn watches(&self) -> MutexGuard<'_, HashMap<String, Arc<Watch>>> {
+        self.watches.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 开始订阅一个会话，顶掉之前的订阅。不阻塞在网络上（缓存读写除外）。
+    /// 订阅一个会话。已经在订（且没停）时只换掉推送出口，把手里的视图补推一次给新出口；
+    /// 否则新开一个订阅。不阻塞在网络上（缓存读写除外）。
     pub(crate) fn watch(&self, session_id: String, sink: EventSink) {
-        let watch = Arc::new(Watch::new(session_id, sink, self.timing));
-        let previous = self.active().replace(Arc::clone(&watch));
+        let sink = {
+            let watches = self.watches();
+            match watches.get(&session_id) {
+                Some(existing) => match existing.replace_sink(sink) {
+                    Ok(()) => return,
+                    Err(sink) => sink,
+                },
+                None => sink,
+            }
+        };
+        let watch = Arc::new(Watch::new(session_id.clone(), sink, self.timing));
+        let previous = self.watches().insert(session_id, Arc::clone(&watch));
         let cache = self.source.cache();
         if let Some(previous) = previous {
             previous.stop();
@@ -185,7 +180,7 @@ impl Conversations {
                 state
                     .stop_reason
                     .clone()
-                    .unwrap_or_else(|| "没有连接运行时".to_string())
+                    .unwrap_or_else(|| "没有连接这台机器".to_string())
             })
         };
         if let Some(reason) = stopped {
@@ -215,26 +210,32 @@ impl Conversations {
         }
     }
 
-    pub(crate) fn unwatch(&self) {
-        let previous = self.active().take();
+    /// 停掉一个会话的订阅，其它会话不受影响。
+    pub(crate) fn unwatch(&self, session_id: &str) {
+        let previous = self.watches().remove(session_id);
         if let Some(previous) = previous {
             previous.stop();
             previous.flush(self.source.cache().as_deref());
         }
     }
 
+    /// 撤掉这台机器时：停掉全部订阅，手里没存的数据也不再写缓存（缓存随后整台删掉）。
+    pub(crate) fn close(&self) {
+        let watches: Vec<_> = self.watches().drain().map(|(_, watch)| watch).collect();
+        for watch in watches {
+            watch.discard();
+        }
+    }
+
     fn active_watch(&self, session_id: &str) -> Option<Arc<Watch>> {
-        self.active()
-            .as_ref()
-            .filter(|watch| watch.session_id == session_id)
-            .cloned()
+        self.watches().get(session_id).cloned()
     }
 
     fn client(&self) -> Result<RuntimeClient, SmeltError> {
         self.source
             .current()
             .map(|runtime| runtime.client)
-            .ok_or_else(|| error(SmeltErrorKind::Offline, "没有连接运行时"))
+            .ok_or_else(|| error(SmeltErrorKind::Offline, "没有连接这台机器"))
     }
 
     pub(crate) fn load_older(&self, session_id: &str) -> Result<bool, SmeltError> {
@@ -285,6 +286,7 @@ impl Conversations {
         Ok(PendingActions {
             permissions: view::permissions(&snapshot.pending_permissions),
             elicitation: snapshot.pending_elicitation.as_ref().map(view::elicitation),
+            recent: recent_context(&snapshot),
         })
     }
 
@@ -305,7 +307,7 @@ impl Conversations {
             .source
             .current()
             .map(|runtime| runtime.client)
-            .ok_or_else(|| send_error(SendFailureKind::Rejected, "没有连接运行时"))?;
+            .ok_or_else(|| send_error(SendFailureKind::Rejected, "没有连接这台机器"))?;
         // submission_id 用客户端的请求 id：重发同一份草稿时运行时能认出是同一次提交。
         let input = ConversationInput {
             submission_id: request_id.to_string(),
@@ -497,7 +499,7 @@ struct WatchState {
     stopped: bool,
     /// 停下的原因（连接断开时状态机给的），没连上就开始订阅时报给界面。
     stop_reason: Option<String>,
-    /// 订阅开始时运行时连接的代号。换代就停。
+    /// 正在跟的连接代号。换代（同一台机器重新连过）就掐掉旧链路上的 watch，跟上新的一代。
     generation: Option<u64>,
     endpoint_id: Option<String>,
     /// 这一代连接当前是 Connected。
@@ -563,8 +565,32 @@ impl Watch {
         self.wake.notify_all();
     }
 
+    /// 停下且丢掉待存的缓存：和推送线程的收尾存盘在同一把锁下互斥，之后不会再写。
+    fn discard(&self) {
+        let mut state = self.lock();
+        state.save_due = None;
+        stop_locked(&mut state);
+        drop(state);
+        self.wake.notify_all();
+    }
+
     fn is_stopped(&self) -> bool {
         self.lock().stopped
+    }
+
+    /// 换推送出口（同一会话又被订阅一次），并让推送线程把手里的视图补推一次。已经停了就
+    /// 原样还回出口，由调用方新开订阅。
+    fn replace_sink(&self, sink: EventSink) -> Result<(), EventSink> {
+        let mut state = self.lock();
+        if state.stopped {
+            return Err(sink);
+        }
+        // 先换出口再放状态锁：推送线程推之前要拿状态锁，补推一定落在新出口上。
+        *self.sink.lock().unwrap_or_else(|e| e.into_inner()) = sink;
+        state.emit_pending = state.snapshot.is_some();
+        drop(state);
+        self.wake.notify_all();
+        Ok(())
     }
 
     /// 推一个事件。Dart 取消订阅了就停。不能在持有状态锁时调。
@@ -600,12 +626,17 @@ impl Watch {
                 state.generation = Some(generation);
                 state.endpoint_id = event.endpoint_id.clone();
             }
-            Some(start) if start != generation => {
-                log::info!("运行时已切换，停止订阅对话 {}", self.session_id);
-                stop_locked(&mut state);
-                drop(state);
-                self.wake.notify_all();
-                return false;
+            Some(current) if current != generation => {
+                // 同一台机器重新连过：旧一代链路上的 watch 不能再用，掐掉，等新的一代连上再续订。
+                log::info!("连接换代，对话 {} 等新连接续订", self.session_id);
+                state.generation = Some(generation);
+                if event.endpoint_id.is_some() {
+                    state.endpoint_id = event.endpoint_id.clone();
+                }
+                state.connected = false;
+                if let Some(conn) = state.conn.take() {
+                    let _ = conn.shutdown(std::net::Shutdown::Both);
+                }
             }
             Some(_) => {}
         }
@@ -675,14 +706,11 @@ impl Watch {
                 }
                 state.generation
             };
-            // 状态机的锁和本订阅的锁不能嵌套着拿：先放掉自己的再问当前运行时。
+            // 状态机的锁和本订阅的锁不能嵌套着拿：先放掉自己的再问当前连接。
             let runtime = match source.current() {
                 Some(runtime) if Some(runtime.generation) == generation => runtime,
-                Some(_) => {
-                    self.stop();
-                    return;
-                }
-                None => {
+                // 刚换代、正在连：等这一代连上（监听会叫醒）。
+                _ => {
                     failures = failures.saturating_add(1);
                     if self.pause(self.timing.backoff(failures)) {
                         return;
@@ -1004,6 +1032,18 @@ fn message_event(kind: ConversationEventKind, message: String) -> ConversationEv
 // ---------------------------------------------------------------------------
 
 /// `acp_snapshot`：`before` 之前的 `limit` 条，和完整的快照头。
+/// 快照头末尾的几条，带上它们在整段对话里的序号。
+fn recent_context(snapshot: &ConversationSnapshot) -> Vec<ConversationEntry> {
+    let start = snapshot.entries.len().saturating_sub(RECENT_CONTEXT);
+    snapshot.entries[start..]
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            view::conversation_entry(view::to_i64(snapshot.entries_offset + start + i), entry)
+        })
+        .collect()
+}
+
 fn history_page(
     client: &RuntimeClient,
     session_id: &str,

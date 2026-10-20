@@ -633,18 +633,44 @@ fn losing_the_link_drops_the_watch_until_it_is_back() {
 }
 
 #[test]
-fn a_new_runtime_generation_stops_the_watch() {
+fn a_new_generation_resumes_the_watch_on_the_new_link() {
+    let (runtime, source, conversations) = setup();
+    let events = watch(&conversations);
+    let first = runtime.watcher(1);
+    first.full(snapshot_json(0, 2, 3, &[assistant("a"), assistant("b")]));
+    events.snapshot_where("首帧", |_| true);
+
+    // 同一台机器重新连过（重连、endpoint 换形态）：先换代进入 Connecting，不在新链路连上前重订。
+    source.publish(2, ConnectionState::Connecting);
+    wait_until("旧一代的 watch 被掐掉", || {
+        first.closed.load(Ordering::SeqCst)
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(runtime.watch_count(), 1, "新的一代没连上之前不重订");
+
+    source.publish(2, ConnectionState::Connected);
+    let second = runtime.watcher(2);
+    let request = &runtime.requests("acp_watch")[1];
+    assert_eq!(request["known_entries"], 2, "带着手里的窗口续订");
+    second.full(snapshot_json(2, 3, 4, &[assistant("c")]));
+    let event = events.snapshot_where("续上", |event| texts(event).len() == 3);
+    assert_eq!(texts(&event), ["a", "b", "c"]);
+    assert!(!first.client_wrote.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_stopped_connection_stops_the_watch() {
     let (runtime, source, conversations) = setup();
     let events = watch(&conversations);
     let first = runtime.watcher(1);
     first.full(snapshot_json(0, 1, 1, &[assistant("a")]));
     events.snapshot_where("首帧", |_| true);
 
-    source.publish(2, ConnectionState::Connected);
+    source.publish(2, ConnectionState::Disconnected);
     wait_until("watch 关掉", || first.closed.load(Ordering::SeqCst));
+    source.publish(2, ConnectionState::Connected);
     std::thread::sleep(Duration::from_millis(150));
-    assert_eq!(runtime.watch_count(), 1);
-    assert!(!first.client_wrote.load(Ordering::SeqCst));
+    assert_eq!(runtime.watch_count(), 1, "停下就不再续订");
 }
 
 #[test]
@@ -663,7 +689,7 @@ fn unwatch_closes_without_writing_and_flushes_the_cache() {
     watcher.full(snapshot_json(0, 1, 1, &[assistant("a")]));
     events.snapshot_where("首帧", |_| true);
 
-    conversations.unwatch();
+    conversations.unwatch(SESSION);
     wait_until("watch 关掉", || watcher.closed.load(Ordering::SeqCst));
     assert!(!watcher.client_wrote.load(Ordering::SeqCst));
     assert!(
@@ -674,14 +700,119 @@ fn unwatch_closes_without_writing_and_flushes_the_cache() {
     assert!(events.quiet().is_empty(), "停了就不再推");
 }
 
+fn watch_session(conversations: &Conversations, session_id: &str) -> Events {
+    let (tx, rx) = mpsc::channel();
+    conversations.watch(
+        session_id.to_string(),
+        Box::new(move |event| tx.send(event).is_ok()),
+    );
+    Events(rx)
+}
+
 #[test]
-fn a_new_watch_replaces_the_old_one() {
+fn several_sessions_are_watched_at_once_and_unwatched_one_by_one() {
     let (runtime, _source, conversations) = setup();
-    let _old = watch(&conversations);
+    let a = watch_session(&conversations, "acp-a");
     let first = runtime.watcher(1);
-    let _new = watch(&conversations);
-    wait_until("旧 watch 关掉", || first.closed.load(Ordering::SeqCst));
+    let b = watch_session(&conversations, "acp-b");
+    let second = runtime.watcher(2);
+    let ids: Vec<Value> = runtime
+        .requests("acp_watch")
+        .iter()
+        .map(|request| request["id"].clone())
+        .collect();
+    assert_eq!(ids, [json!("acp-a"), json!("acp-b")]);
+
+    first.full(snapshot_json(0, 1, 1, &[assistant("给 a")]));
+    second.full(snapshot_json(0, 1, 1, &[assistant("给 b")]));
+    let a_view = a.snapshot_where("a 的帧", |_| true);
+    let b_view = b.snapshot_where("b 的帧", |_| true);
+    assert_eq!(a_view.view.as_ref().unwrap().session_id, "acp-a");
+    assert_eq!(texts(&a_view), ["给 a"]);
+    assert_eq!(b_view.view.as_ref().unwrap().session_id, "acp-b");
+    assert_eq!(texts(&b_view), ["给 b"]);
+
+    conversations.unwatch("acp-a");
+    wait_until("a 的 watch 关掉", || first.closed.load(Ordering::SeqCst));
+    assert!(!second.closed.load(Ordering::SeqCst), "b 不受影响");
+    second.full(snapshot_json(
+        0,
+        2,
+        2,
+        &[assistant("给 b"), assistant("还在")],
+    ));
+    b.snapshot_where("b 还在推", |event| texts(event).len() == 2);
+    assert!(a.quiet().is_empty(), "a 停了就不再推");
+}
+
+#[test]
+fn watching_the_same_session_again_swaps_the_sink() {
+    let (runtime, _source, conversations) = setup();
+    let old = watch(&conversations);
+    let first = runtime.watcher(1);
+    first.full(snapshot_json(0, 1, 1, &[assistant("a")]));
+    old.snapshot_where("首帧", |_| true);
+
+    let new = watch(&conversations);
+    let replayed = new.snapshot_where("新出口马上拿到手里的视图", |_| true);
+    assert_eq!(texts(&replayed), ["a"]);
+    assert!(!replayed.cached);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!first.closed.load(Ordering::SeqCst), "不重开 watch");
+    assert_eq!(runtime.watch_count(), 1);
+
+    first.full(snapshot_json(0, 2, 2, &[assistant("a"), assistant("b")]));
+    new.snapshot_where("后续帧推给新出口", |event| texts(event).len() == 2);
+    assert!(
+        old.quiet().iter().all(|event| event
+            .view
+            .as_ref()
+            .is_none_or(|view| view.entries.len() == 1)),
+        "旧出口收不到新帧"
+    );
+}
+
+#[test]
+fn watching_a_stopped_session_again_starts_a_new_watch() {
+    let (runtime, _source, conversations) = setup();
+    conversations.watch(SESSION.to_string(), Box::new(|_| false));
+    let first = runtime.watcher(1);
+    first.full(snapshot_json(0, 1, 1, &[assistant("a")]));
+    wait_until("Dart 取消后 watch 关掉", || {
+        first.closed.load(Ordering::SeqCst)
+    });
+    let _events = watch(&conversations);
     runtime.watcher(2);
+}
+
+#[test]
+fn close_stops_every_watch_without_saving() {
+    let runtime = FakeRuntime::new();
+    let cache = Arc::new(Cache::in_memory());
+    let source = FakeSource::connected(&runtime, Some(Arc::clone(&cache)));
+    let timing = Timing {
+        save_delay: Duration::from_secs(600),
+        ..FAST
+    };
+    let conversations = Conversations::new(source, timing);
+    let a = watch_session(&conversations, "acp-a");
+    let first = runtime.watcher(1);
+    let _b = watch_session(&conversations, "acp-b");
+    let second = runtime.watcher(2);
+    first.full(snapshot_json(0, 1, 1, &[assistant("a")]));
+    a.snapshot_where("首帧", |_| true);
+
+    conversations.close();
+    wait_until("全部关掉", || {
+        first.closed.load(Ordering::SeqCst) && second.closed.load(Ordering::SeqCst)
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        cache
+            .load_snapshot::<ConversationSnapshot>(ENDPOINT, "acp-a")
+            .is_none(),
+        "机器要被删了，不再写缓存"
+    );
 }
 
 #[test]
@@ -961,4 +1092,23 @@ fn snapshot_errors_are_passed_through() {
     );
     runtime.respond(|_| Reply::Line(json!({"ok": true, "supported": false, "skills": []})));
     assert!(!conversations.list_skills(SESSION).unwrap().supported);
+}
+
+#[test]
+fn pending_actions_carry_the_last_few_entries_as_context() {
+    let (runtime, _source, conversations) = setup();
+    runtime.respond(|request| match request["op"].as_str() {
+        Some("acp_snapshot") => {
+            // 快照头 8 条，前面还有 40 条：单据只印最后 6 条，序号是整段对话里的序号。
+            let entries: Vec<_> = (0..8).map(|i| assistant(&format!("e{i}"))).collect();
+            Reply::Line(json!({ "snapshot": snapshot_json(40, 48, 1, &entries) }))
+        }
+        _ => Reply::Close,
+    });
+
+    let pending = conversations.pending_actions(SESSION).unwrap();
+    assert_eq!(pending.recent.len(), RECENT_CONTEXT);
+    assert_eq!(pending.recent.first().unwrap().index, 42);
+    assert_eq!(pending.recent.last().unwrap().index, 47);
+    assert_eq!(pending.recent.last().unwrap().text, "e7");
 }

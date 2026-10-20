@@ -641,6 +641,8 @@ fn automation_catalog_projects_triggers_states_and_the_last_run() {
 // 假运行时与连接状态
 // ---------------------------------------------------------------------------
 
+const RUNTIME: &str = "runtime-a";
+
 const FAST: Timing = Timing {
     push_delay: Duration::from_millis(60),
     save_delay: Duration::from_millis(80),
@@ -1047,7 +1049,7 @@ fn live(
 ) -> (Arc<FakeSource>, Arc<FakeRuntime>, Catalog, Events) {
     let source = FakeSource::new(Some(Arc::new(Cache::in_memory())));
     let runtime = FakeRuntime::new();
-    let catalog = Catalog::new(source.clone(), FAST);
+    let catalog = Catalog::new(RUNTIME.to_string(), source.clone(), FAST);
     let events = record(&catalog);
     source.connect(1, "ep-a", &runtime);
     runtime.wait_subscriptions(1);
@@ -1065,7 +1067,7 @@ fn subscribes_with_the_catalog_shape_and_pushes_the_live_list() {
     let source = FakeSource::new(None);
     let runtime = FakeRuntime::new();
     runtime.result("session.agent_bindings", json!({"bindings": {"s1": "d1"}}));
-    let catalog = Catalog::new(source.clone(), FAST);
+    let catalog = Catalog::new(RUNTIME.to_string(), source.clone(), FAST);
     let events = record(&catalog);
     assert_eq!(
         last_list(&events),
@@ -1128,6 +1130,35 @@ fn subscribes_with_the_catalog_shape_and_pushes_the_live_list() {
     });
     std::thread::sleep(FAST.push_delay * 3);
     assert_eq!(lists(&events).len(), pushed, "列表内容没变不推");
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.runtime_id == RUNTIME),
+        "事件都带着这台机器的 id"
+    );
+}
+
+#[test]
+fn close_stops_the_subscription_and_every_listener() {
+    let (source, runtime, catalog, events) = live(
+        vec![dto("s1", 1, CoreSessionPhase::Thinking)],
+        repo_menu(&["s1"]),
+    );
+    catalog.close();
+    runtime.wait_closed(0);
+    let pushed = events.lock().unwrap().len();
+    source.set_state(ConnectionState::Reconnecting);
+    source.set_state(ConnectionState::Connected);
+    std::thread::sleep(FAST.push_delay * 3);
+    assert_eq!(runtime.subscription_count(), 1, "关了就不再订阅");
+    assert_eq!(events.lock().unwrap().len(), pushed, "关了就不再推");
+    let late = record(&catalog);
+    assert!(
+        late.lock().unwrap().is_empty(),
+        "关了之后的订阅者什么也收不到"
+    );
 }
 
 #[test]
@@ -1226,7 +1257,7 @@ fn cached_list_shows_until_the_live_snapshot_then_the_live_list_is_saved() {
     cache.save_session_list("ep-a", &vec![old.clone()]);
     let source = FakeSource::new(Some(Arc::clone(&cache)));
     let runtime = FakeRuntime::new();
-    let catalog = Catalog::new(source.clone(), FAST);
+    let catalog = Catalog::new(RUNTIME.to_string(), source.clone(), FAST);
     let events = record(&catalog);
 
     source.connect(1, "ep-a", &runtime);
@@ -1369,7 +1400,7 @@ fn new_session_catalog() -> Value {
 
 #[test]
 fn calls_without_a_runtime_are_offline() {
-    let catalog = Catalog::new(FakeSource::new(None), FAST);
+    let catalog = Catalog::new(RUNTIME.to_string(), FakeSource::new(None), FAST);
     assert_eq!(
         catalog.workspace_catalog().unwrap_err().kind,
         SmeltErrorKind::Offline
@@ -1420,7 +1451,7 @@ fn workspace_catalog_waits_for_the_first_snapshot() {
     let source = FakeSource::new(None);
     let runtime = FakeRuntime::new();
     runtime.result("new_session.catalog", new_session_catalog());
-    let catalog = Arc::new(Catalog::new(source.clone(), FAST));
+    let catalog = Arc::new(Catalog::new(RUNTIME.to_string(), source.clone(), FAST));
     source.connect(1, "ep-a", &runtime);
     let pending = {
         let catalog = Arc::clone(&catalog);

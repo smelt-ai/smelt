@@ -1,4 +1,4 @@
-//! 终端：附着一个终端会话的字节流、输入与尺寸。实现见 `crate::terminal`。
+//! 终端：附着某台机器上一个终端会话的字节流、输入与尺寸。实现见 `crate::terminal`。
 //!
 //! 这里的入口全是 `#[frb(sync)]`，函数体只改内存状态、起线程，不做网络 IO：
 //! Dart 在 UI 线程上按调用顺序执行它们。普通 `pub fn` 会被丢进 FRB 线程池并发执行，
@@ -37,8 +37,9 @@ pub enum TerminalEventKind {
     ReplayComplete,
     /// 终端会话已结束（shell 退出或被关掉）。流随之结束。
     Closed,
-    /// `message` 与 `fatal` 有值。`fatal` 时流随之结束：会话不存在、运行时已切换或断开、
-    /// 运行时回包不对。非 fatal 是断线或输入发送失败，后台按退避自动重新附着，成功后再来 `Ready`。
+    /// `message` 与 `fatal` 有值。`fatal` 时流随之结束：会话不存在、和这台机器的连接停下
+    /// （未配对、被忘记）、运行时回包不对。非 fatal 是断线或输入发送失败，后台按退避自动
+    /// 重新附着，成功后再来 `Ready`。
     Error,
 }
 
@@ -110,16 +111,18 @@ impl From<TerminalUpdate> for TerminalEvent {
 ///
 /// 同一会话再次附着会替换旧的（旧流随之结束），用来换 scrollback 预算重取历史。
 /// `max_scrollback_lines` 为空表示要运行时上限（10000 行），否则夹到 1..=10000。
-/// 断线且运行时没换时按 500ms 起、翻倍、封顶 8s 的退避自动重新附着；运行时切换或断开就停。
-/// 只有行列为 0、会话 id 为空这类调用错误同步返回错误。
+/// 断线时按 500ms 起、翻倍、封顶 8s 的退避自动重新附着；这台机器重新连过（换代）就立刻
+/// 在新连接上重新附着；连接停下就停。没有这台机器、行列为 0、会话 id 为空这类调用错误
+/// 同步返回错误。
 #[frb(sync)]
 pub fn terminal_attach(
+    runtime_id: String,
     session_id: String,
     geometry: TerminalGeometry,
     max_scrollback_lines: Option<u32>,
     sink: StreamSink<TerminalEvent>,
 ) -> Result<(), SmeltError> {
-    crate::terminal::hub().attach(
+    crate::fleet::fleet().node(&runtime_id)?.terminals.attach(
         session_id,
         geometry,
         max_scrollback_lines,
@@ -130,26 +133,42 @@ pub fn terminal_attach(
 /// 改终端尺寸：在附着连接上写 resize 帧，只在尺寸变了时写。正在重连时记下来，
 /// 下次附着按它来。没有附着这个会话时报错。
 #[frb(sync)]
-pub fn terminal_resize(session_id: String, geometry: TerminalGeometry) -> Result<(), SmeltError> {
-    crate::terminal::hub().resize(&session_id, geometry)
+pub fn terminal_resize(
+    runtime_id: String,
+    session_id: String,
+    geometry: TerminalGeometry,
+) -> Result<(), SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .terminals
+        .resize(&session_id, geometry)
 }
 
 /// 发终端输入。空串忽略。按调用顺序发出，在途时到达的输入合并成一次发送，
 /// 超过 64 KB 按 UTF-8 字符边界切开。发送失败从事件流推非 fatal 的 `Error`，
 /// 并丢掉还没发出的输入。没有附着这个会话时报错。
 #[frb(sync)]
-pub fn terminal_input(session_id: String, data: String) -> Result<(), SmeltError> {
-    crate::terminal::hub().input(&session_id, data)
+pub fn terminal_input(
+    runtime_id: String,
+    session_id: String,
+    data: String,
+) -> Result<(), SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .terminals
+        .input(&session_id, data)
 }
 
 /// 断开附着：关掉连接（运行时据此进入几何租约的宽限期），不再重连，流随之结束。
 #[frb(sync)]
-pub fn terminal_detach(session_id: String) {
-    crate::terminal::hub().detach(&session_id);
+pub fn terminal_detach(runtime_id: String, session_id: String) {
+    if let Ok(node) = crate::fleet::fleet().node(&runtime_id) {
+        node.terminals.detach(&session_id);
+    }
 }
 
-/// 断开所有附着（切后台时用）。
+/// 断开所有机器上的所有附着（切后台时用）。
 #[frb(sync)]
 pub fn terminal_detach_all() {
-    crate::terminal::hub().detach_all();
+    crate::fleet::fleet().detach_all_terminals();
 }

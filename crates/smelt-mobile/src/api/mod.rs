@@ -4,10 +4,12 @@
 use flutter_rust_bridge::frb;
 
 pub mod catalog;
-pub mod connection;
 pub mod conversation;
+pub mod draft;
 pub mod error;
+pub mod fleet;
 pub mod identity;
+pub mod pass;
 pub mod terminal;
 
 /// App 启动时由 FRB 调用一次。

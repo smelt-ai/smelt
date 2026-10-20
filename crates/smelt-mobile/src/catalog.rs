@@ -1,7 +1,8 @@
-//! 会话目录：会话摘要与 attention 的事件流、工作区、自动化、历史、新建与删除。实现，Dart 入口见 `crate::api::catalog`。
+//! 一台机器的会话目录：会话摘要与 attention 的事件流、工作区、自动化、历史、新建与删除。
+//! 实现，Dart 入口见 `crate::api::catalog`。机队里每个节点一份（见 `crate::fleet`）。
 //!
 //! ```text
-//! 连接状态（client::subscribe）──> Catalog ──> 每代一个订阅线程：event_subscribe 长连接
+//! 本节点的连接状态 ──> Catalog ──> 每代一个订阅线程：event_subscribe 长连接
 //!        │ generation 变：丢状态、停订阅、读缓存          │ 逐行 decode_line → CatalogState
 //!        │ Connected：开订阅；其它：停订阅                │ 快照 / 菜单 / 远程目录变了 → session.agent_bindings
 //!        v                                                v
@@ -22,7 +23,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -46,34 +47,18 @@ use crate::api::catalog::{
     AutomationCatalog, CatalogEvent, CatalogEventKind, HistoryRenameResult, HistorySessionSummary,
     SessionKind, SessionList, SessionSummary, WorkspaceCatalog,
 };
-use crate::api::connection::{ConnectionEvent, ConnectionState};
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::fleet::ConnectionState;
 use crate::cache::{Cache, Cached};
-use crate::connection::{CurrentRuntime, Listener};
+use crate::connection::{ConnectionEvent, CurrentRuntime, Listener};
 use projection::CatalogState;
 
-/// 当前运行时、连接状态与离线缓存从哪来。生产用 `client` 的单例，测试注入假的。
+/// 这台机器的连接、连接状态与离线缓存从哪来。生产用节点的 `NodeSource`（见
+/// `crate::fleet`），测试注入假的。
 pub(crate) trait RuntimeSource: Send + Sync {
     fn current(&self) -> Option<CurrentRuntime>;
     fn subscribe(&self, listener: Listener);
     fn cache(&self) -> Option<Arc<Cache>>;
-}
-
-// 写成带花括号的空结构体：FRB 会解析全 crate 的 trait 实现，不支持单元结构体。
-struct ProcessRuntime {}
-
-impl RuntimeSource for ProcessRuntime {
-    fn current(&self) -> Option<CurrentRuntime> {
-        crate::client::current_runtime()
-    }
-
-    fn subscribe(&self, listener: Listener) {
-        crate::client::subscribe(listener);
-    }
-
-    fn cache(&self) -> Option<Arc<Cache>> {
-        crate::client::cache()
-    }
 }
 
 /// 各种时限。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
@@ -107,14 +92,6 @@ impl Timing {
     };
 }
 
-static CATALOG: LazyLock<Catalog> =
-    LazyLock::new(|| Catalog::new(Arc::new(ProcessRuntime {}), Timing::PRODUCTION));
-
-/// 进程级的会话目录。第一次用到时开始跟随当前运行时。
-pub(crate) fn catalog() -> &'static Catalog {
-    &CATALOG
-}
-
 /// Dart 订阅者：返回 false 表示已取消。在状态锁里调用，不能阻塞。
 pub(crate) type EventListener = Box<dyn Fn(&CatalogEvent) -> bool + Send>;
 
@@ -141,6 +118,8 @@ struct Shared {
 }
 
 struct Inner {
+    /// 推出去的事件都带上它：Dart 一条流收所有机器的事件。
+    runtime_id: String,
     closed: bool,
     /// 最近一次看到的连接代号。还没看到过时为 None。
     generation: Option<u64>,
@@ -193,6 +172,17 @@ impl Inner {
         self.listeners.retain(|listener| listener(&event));
     }
 
+    fn event(&self, kind: CatalogEventKind) -> CatalogEvent {
+        CatalogEvent {
+            runtime_id: self.runtime_id.clone(),
+            kind,
+            sessions: None,
+            attention: None,
+            session_id: None,
+            message: None,
+        }
+    }
+
     fn current_list(&self) -> SessionList {
         if self.state.primed {
             return SessionList {
@@ -234,7 +224,8 @@ impl Inner {
             self.save_at = Some(Instant::now() + timing.save_delay);
         }
         self.last_list = Some(list.clone());
-        self.emit(sessions_event(list));
+        let event = self.sessions_event(list);
+        self.emit(event);
     }
 
     /// 提醒类事件之前先把攒着的列表推出去，界面收到提醒时列表已经是新的。
@@ -245,52 +236,43 @@ impl Inner {
     }
 }
 
-fn sessions_event(list: SessionList) -> CatalogEvent {
-    CatalogEvent {
-        kind: CatalogEventKind::Sessions,
-        sessions: Some(list),
-        attention: None,
-        session_id: None,
-        message: None,
+impl Inner {
+    fn sessions_event(&self, list: SessionList) -> CatalogEvent {
+        CatalogEvent {
+            sessions: Some(list),
+            ..self.event(CatalogEventKind::Sessions)
+        }
     }
-}
 
-fn attention_event(item: crate::api::catalog::AttentionItem) -> CatalogEvent {
-    CatalogEvent {
-        kind: CatalogEventKind::Attention,
-        sessions: None,
-        attention: Some(item),
-        session_id: None,
-        message: None,
+    fn attention_event(&self, item: crate::api::catalog::AttentionItem) -> CatalogEvent {
+        CatalogEvent {
+            attention: Some(item),
+            ..self.event(CatalogEventKind::Attention)
+        }
     }
-}
 
-fn resolved_event(session_id: String) -> CatalogEvent {
-    CatalogEvent {
-        kind: CatalogEventKind::AttentionResolved,
-        sessions: None,
-        attention: None,
-        session_id: Some(session_id),
-        message: None,
+    fn resolved_event(&self, session_id: String) -> CatalogEvent {
+        CatalogEvent {
+            session_id: Some(session_id),
+            ..self.event(CatalogEventKind::AttentionResolved)
+        }
     }
-}
 
-fn error_event(message: String) -> CatalogEvent {
-    CatalogEvent {
-        kind: CatalogEventKind::Error,
-        sessions: None,
-        attention: None,
-        session_id: None,
-        message: Some(message),
+    fn error_event(&self, message: String) -> CatalogEvent {
+        CatalogEvent {
+            message: Some(message),
+            ..self.event(CatalogEventKind::Error)
+        }
     }
 }
 
 impl Catalog {
-    pub(crate) fn new(source: Arc<dyn RuntimeSource>, timing: Timing) -> Self {
+    pub(crate) fn new(runtime_id: String, source: Arc<dyn RuntimeSource>, timing: Timing) -> Self {
         let shared = Arc::new(Shared {
             source: Arc::clone(&source),
             timing,
             inner: Mutex::new(Inner {
+                runtime_id,
                 closed: false,
                 generation: None,
                 endpoint_id: None,
@@ -326,8 +308,11 @@ impl Catalog {
     /// 订阅目录事件：先推一次当前已知的列表。
     pub(crate) fn subscribe(&self, listener: EventListener) {
         let mut inner = self.shared.lock();
-        let list = inner.current_list();
-        if listener(&sessions_event(list)) {
+        if inner.closed {
+            return;
+        }
+        let event = inner.sessions_event(inner.current_list());
+        if listener(&event) {
             inner.listeners.push(listener);
         }
     }
@@ -343,7 +328,7 @@ impl Catalog {
         self.shared
             .source
             .current()
-            .ok_or_else(|| error(SmeltErrorKind::Offline, "还没有连上运行时"))
+            .ok_or_else(|| error(SmeltErrorKind::Offline, "还没有连上这台机器"))
     }
 
     /// 等这一代的首个快照。代号已变或超时返回 false。
@@ -640,14 +625,22 @@ impl Catalog {
     }
 }
 
-impl Drop for Catalog {
-    fn drop(&mut self) {
+impl Catalog {
+    /// 停下：停订阅、放掉所有订阅者，之后不再推任何事件。忘记机器、节点被替换时调，不等
+    /// 最后一个持有者放手。
+    pub(crate) fn close(&self) {
         let mut inner = self.shared.lock();
         inner.closed = true;
         inner.stop_worker();
         inner.listeners.clear();
         drop(inner);
         self.shared.wake.notify_all();
+    }
+}
+
+impl Drop for Catalog {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -661,7 +654,7 @@ fn on_connection(weak: &Weak<Shared>, generation: u64, event: &ConnectionEvent) 
         return false;
     }
     if inner.generation != Some(generation) {
-        // 换了运行时或断开过：旧运行时的一切作废。
+        // 重新连过或断开过：上一代的一切作废（提醒基线、订阅、智能体选项）。
         inner.stop_worker();
         inner.generation = Some(generation);
         inner.endpoint_id = event.endpoint_id.clone();
@@ -947,10 +940,12 @@ impl Shared {
             inner.flush_pending(&self.timing);
         }
         for item in &applied.attention {
-            inner.emit(attention_event(projection::attention_item(item)));
+            let event = inner.attention_event(projection::attention_item(item));
+            inner.emit(event);
         }
         for session_id in applied.resolved {
-            inner.emit(resolved_event(session_id));
+            let event = inner.resolved_event(session_id);
+            inner.emit(event);
         }
         Some(applied.refresh_bindings)
     }
@@ -971,7 +966,8 @@ impl Shared {
             return;
         }
         inner.last_error = Some(message.clone());
-        inner.emit(error_event(message));
+        let event = inner.error_event(message);
+        inner.emit(event);
     }
 }
 

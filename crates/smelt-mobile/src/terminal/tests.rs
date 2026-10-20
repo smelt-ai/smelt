@@ -178,7 +178,7 @@ impl FakeSource {
         })
     }
 
-    /// 换代（切到别的运行时或断开）。
+    /// 换代（重新连过，或连接停下）。
     fn switch(&self, client: Option<RuntimeClient>) {
         let mut state = self.state.lock().unwrap();
         state.generation += 1;
@@ -698,37 +698,50 @@ fn detach_all_closes_every_attachment() {
 }
 
 #[test]
-fn runtime_switch_stops_the_attachment() {
+fn a_new_generation_reattaches_on_the_new_link() {
     let (closed_tx, closed_rx) = mpsc::channel();
     let closed_tx = Mutex::new(closed_tx);
-    let runtime = FakeRuntime::new(move |_, _, reader, writer| {
+    let old = FakeRuntime::new(move |_, _, reader, writer| {
         send_header(&writer, 80, 24, b"", 0);
         read_until_eof(reader);
         closed_tx.lock().unwrap().send(()).unwrap();
     });
-    let (hub, source) = setup(&runtime);
+    let new = FakeRuntime::new(idle_watch);
+    let source = FakeSource::new(old.client());
+    // 退避很长：只有「换代立刻重新附着」能让下面的断言成立。
+    let hub = TerminalHub::new(
+        Arc::clone(&source) as Arc<dyn RuntimeSource>,
+        Timing {
+            backoff_base: Duration::from_secs(3600),
+            backoff_max: Duration::from_secs(3600),
+            ..FAST
+        },
+    );
     let recorder = Recorder::new();
 
     hub.attach("t1".into(), GEOMETRY, None, recorder.emit())
         .unwrap();
     recorder.wait_readies(1);
-    // 换到另一台运行时（客户端还是同一个假运行时也没关系：代号变了就停）。
-    source.switch(Some(runtime.client()));
+    // 同一台机器重新连过（重连、endpoint 换形态）：旧链路上的附着掐掉，立刻在新连接上重新附着。
+    source.switch(Some(new.client()));
 
-    recorder.wait_ended();
     closed_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("旧运行时上的 watch 被关掉");
-    assert!(matches!(
-        recorder.events().last(),
-        Some(TerminalUpdate::Error { fatal: true, .. })
-    ));
-    std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(runtime.watches(), 1);
+        .expect("旧一代链路上的 watch 被关掉");
+    recorder.wait_readies(2);
+    assert_eq!(new.watches(), 1, "在新连接上重新附着");
+    assert_eq!(old.watches(), 1);
+    assert!(!recorder.ended());
+    assert!(
+        !recorder
+            .events()
+            .iter()
+            .any(|event| matches!(event, TerminalUpdate::Error { fatal: true, .. }))
+    );
 }
 
 #[test]
-fn runtime_switch_while_reconnecting_stops_retrying() {
+fn a_stopped_connection_while_reconnecting_stops_retrying() {
     let runtime = FakeRuntime::new(idle_watch);
     runtime.set_online(false);
     let (hub, source) = setup(&runtime);

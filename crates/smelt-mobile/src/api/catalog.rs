@@ -1,8 +1,8 @@
 //! 会话目录：会话摘要与 attention 的事件流、工作区、自动化、历史、新建与删除。
 //!
-//! 会话列表和 attention 由 Rust 侧订阅运行时事件后在手机本地投影（attention 的已读状态
-//! 只属于这台手机）；其余都是对当前运行时的一问一答。会阻塞的调用都是普通 `pub fn`：
-//! FRB 放到工作线程池执行，Dart 拿到 Future。
+//! 会话列表和 attention 由 Rust 侧订阅每台机器的事件后在手机本地投影（attention 的已读
+//! 状态只属于这台手机）；其余都是对某台机器的一问一答，第一个参数 `runtime_id` 指定是哪台。
+//! 会阻塞的调用都是普通 `pub fn`：FRB 放到工作线程池执行，Dart 拿到 Future。
 
 use flutter_rust_bridge::frb;
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,7 @@ pub struct SessionSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionList {
     pub sessions: Vec<SessionSummary>,
-    /// 不是运行时的实时数据：还没收到这个运行时的快照，或根本没有当前运行时。
+    /// 不是运行时的实时数据：还没收到这台机器的快照（没连上、正在连）。
     /// 此时 `saved_at_ms` 有值表示列表来自离线缓存，没有值表示列表为空占位。
     pub cached: bool,
     /// 缓存保存时间（unix 毫秒）。
@@ -153,6 +153,8 @@ pub enum CatalogEventKind {
 /// `kind` + 对应的可选负载。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogEvent {
+    /// 哪台机器的事件。
+    pub runtime_id: String,
     pub kind: CatalogEventKind,
     pub sessions: Option<SessionList>,
     pub attention: Option<AttentionItem>,
@@ -160,18 +162,22 @@ pub struct CatalogEvent {
     pub message: Option<String>,
 }
 
-/// 会话目录事件流。订阅时先推一次当前已知的列表；可以有多个订阅者。
+/// 所有机器的会话目录事件流，事件带 `runtime_id`。订阅时每台机器先推一次当前已知的列表；
+/// 之后配对的机器同样会推。忘记一台机器时推一次它的空列表（`cached = true`、没有
+/// `saved_at_ms`）。可以有多个订阅者。
 pub fn catalog_events(sink: StreamSink<CatalogEvent>) {
-    crate::catalog::catalog().subscribe(Box::new(move |event| {
+    crate::fleet::fleet().subscribe_catalog(Box::new(move |event| {
         // Dart 侧取消订阅后端口关闭，发送失败，监听随之移除。
         sink.add(event.clone()).is_ok()
     }));
 }
 
-/// 标记这条会话的提醒已读。只影响本机。
+/// 标记这条会话的提醒已读。只影响本机。没有这台机器时什么也不做。
 #[frb(sync)]
-pub fn mark_read(session_id: String) {
-    crate::catalog::catalog().mark_read(&session_id);
+pub fn mark_read(runtime_id: String, session_id: String) {
+    if let Ok(node) = crate::fleet::fleet().node(&runtime_id) {
+        node.catalog.mark_read(&session_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,8 +237,11 @@ pub struct WorkspaceCatalog {
 }
 
 /// 项目列表（来自桌面菜单与远程会话）和新建目录。刚连上还没收到会话目录时最多等几秒。
-pub fn workspace_catalog() -> Result<WorkspaceCatalog, SmeltError> {
-    crate::catalog::catalog().workspace_catalog()
+pub fn workspace_catalog(runtime_id: String) -> Result<WorkspaceCatalog, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .workspace_catalog()
 }
 
 /// 新建会话，返回会话 id。
@@ -242,6 +251,7 @@ pub fn workspace_catalog() -> Result<WorkspaceCatalog, SmeltError> {
 /// - `project_root` 为空：只有产品智能体的对话可以，开在智能体自己的 space。
 /// - `request_id`：一次新建意图的 UUID，重试时复用，落到同一个会话。
 pub fn create_session(
+    runtime_id: String,
     project_root: String,
     agent_option_id: Option<String>,
     launch_key: Option<String>,
@@ -249,7 +259,8 @@ pub fn create_session(
     kind: Option<SessionKind>,
     request_id: Option<String>,
 ) -> Result<String, SmeltError> {
-    crate::catalog::catalog().create_session(crate::catalog::CreateSession {
+    let node = crate::fleet::fleet().node(&runtime_id)?;
+    node.catalog.create_session(crate::catalog::CreateSession {
         project_root,
         agent_option_id,
         launch_key,
@@ -260,8 +271,11 @@ pub fn create_session(
 }
 
 /// 删除会话（终端或对话由运行时判断；自动化运行的会话会被拒绝）。成功后立刻从列表划掉。
-pub fn delete_session(session_id: String) -> Result<(), SmeltError> {
-    crate::catalog::catalog().delete_session(&session_id)
+pub fn delete_session(runtime_id: String, session_id: String) -> Result<(), SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .delete_session(&session_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -356,21 +370,34 @@ pub struct AutomationCatalog {
 }
 
 /// 自动化与智能体定义。
-pub fn automation_catalog() -> Result<AutomationCatalog, SmeltError> {
-    crate::catalog::catalog().automation_catalog()
+pub fn automation_catalog(runtime_id: String) -> Result<AutomationCatalog, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .automation_catalog()
 }
 
 /// 开关一条自动化，返回最新目录。
 pub fn set_automation_enabled(
+    runtime_id: String,
     automation_id: String,
     enabled: bool,
 ) -> Result<AutomationCatalog, SmeltError> {
-    crate::catalog::catalog().set_automation_enabled(&automation_id, enabled)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .set_automation_enabled(&automation_id, enabled)
 }
 
 /// 立刻运行一次，返回最新目录（这次运行已在 `last_run` 里）。
-pub fn run_automation_once(automation_id: String) -> Result<AutomationCatalog, SmeltError> {
-    crate::catalog::catalog().run_automation_once(&automation_id)
+pub fn run_automation_once(
+    runtime_id: String,
+    automation_id: String,
+) -> Result<AutomationCatalog, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .run_automation_once(&automation_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -401,23 +428,31 @@ pub struct HistoryRenameResult {
 
 /// 某个 agent 选项在某个项目下的历史会话，最近活跃的在前。
 pub fn list_history(
+    runtime_id: String,
     project_root: String,
     agent_option_id: String,
 ) -> Result<Vec<HistorySessionSummary>, SmeltError> {
-    crate::catalog::catalog().list_history(&project_root, &agent_option_id)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .list_history(&project_root, &agent_option_id)
 }
 
 /// 给历史会话改名；`title` 为空表示恢复 agent 原始标题。
 pub fn rename_history(
+    runtime_id: String,
     project_root: String,
     agent_option_id: String,
     resume_id: String,
     title: Option<String>,
 ) -> Result<HistoryRenameResult, SmeltError> {
-    crate::catalog::catalog().rename_history(
-        &project_root,
-        &agent_option_id,
-        &resume_id,
-        title.as_deref(),
-    )
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .catalog
+        .rename_history(
+            &project_root,
+            &agent_option_id,
+            &resume_id,
+            title.as_deref(),
+        )
 }

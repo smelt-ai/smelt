@@ -82,7 +82,7 @@ pub(crate) fn conversation_view(
     }
 }
 
-fn to_i64(value: usize) -> i64 {
+pub(crate) fn to_i64(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
@@ -142,7 +142,7 @@ fn blank_entry(index: i64, kind: EntryKind) -> ConversationEntry {
     }
 }
 
-fn conversation_entry(index: i64, entry: &AcpEntry) -> ConversationEntry {
+pub(crate) fn conversation_entry(index: i64, entry: &AcpEntry) -> ConversationEntry {
     match entry {
         AcpEntry::User(text) if acp_chat::is_interrupt_marker(text) => ConversationEntry {
             text: text.clone(),

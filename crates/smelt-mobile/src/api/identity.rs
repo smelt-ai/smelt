@@ -5,8 +5,8 @@
 
 use flutter_rust_bridge::frb;
 
-use crate::api::connection::RuntimeInfo;
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::fleet::RuntimeRecord;
 use crate::connection::Target;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,12 +22,13 @@ pub struct PairingTarget {
     pub relay_url: Option<String>,
 }
 
-/// 读取或生成设备密钥（`<data_dir>/client-iroh-secret`，0600），返回设备身份。
+/// 读取或生成设备密钥（`<data_dir>/client-iroh-secret`，0600），打开本机库
+/// （`smelt-mobile.sqlite3`）和离线缓存，为每台登记的机器建节点并在后台开始连。返回设备身份。
 ///
 /// 幂等：同一目录重复调用返回同一身份；换目录调用报错（身份不能在进程里悄悄换掉）。
-/// 必须先于 [`pair`] 和 [`crate::api::connection::connect`] 调用。
+/// 机器、草稿相关的调用都要在它之后；各事件流可以先订阅。
 pub fn init_client(data_dir: String) -> Result<DeviceIdentity, SmeltError> {
-    let endpoint_id = crate::client::init(data_dir.into())?;
+    let endpoint_id = crate::fleet::fleet().init_client(data_dir.into())?;
     Ok(DeviceIdentity { endpoint_id })
 }
 
@@ -41,15 +42,15 @@ pub fn parse_pairing(uri: String) -> Result<PairingTarget, SmeltError> {
     })
 }
 
-/// 用配对串配对：`device.pair` 后 `system.describe`，成功后它就是当前运行时（已连接）。
+/// 用配对串配对：`device.pair` 后 `system.describe`，成功后写进登记并保持连接，返回登记。
 ///
-/// 配对即切换：先断开原来的当前运行时（同一把设备密钥不能同时挂两个 iroh endpoint）。
-/// 失败时停在 `Disconnected`，不自动重试（配对码一次性）。
-pub fn pair(uri: String, device_name: String) -> Result<RuntimeInfo, SmeltError> {
+/// 不影响其它机器的连接（只有 endpoint 形态因此改变时，其它机器会自动重连一次）。这台
+/// endpoint 已登记（被撤销后重新配对）时更新它的登记，名字、标签色、顺序不变；新机器名字
+/// 默认取主机名，标签色取色板里还没用过的第一个，排在最后。失败时不留下任何登记，不自动
+/// 重试（配对码一次性）。
+pub fn pair(uri: String, device_name: String) -> Result<RuntimeRecord, SmeltError> {
     let pairing = parse(&uri)?;
-    let dialer = crate::client::dialer()?;
-    crate::client::hub().pair(
-        dialer.as_ref(),
+    crate::fleet::fleet().pair(
         Target::new(pairing.endpoint_id, pairing.relay_url),
         pairing.code,
         device_name,

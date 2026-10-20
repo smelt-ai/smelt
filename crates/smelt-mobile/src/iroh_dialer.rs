@@ -1,8 +1,10 @@
 //! 真实传输：经 iroh `smelt/runtime/1` 连运行时。
 //!
 //! 整个进程只有一个 [`IrohClient`]（同一把设备密钥同时绑几个 endpoint 会让 relay 上出现
-//! 重复节点）。它按 relay 设置构造：给了自建 relay 用 Minimal + 该 relay + 系统 DNS，
-//! 没给用 n0 预设。切到 relay 不同的运行时时先丢掉旧的再建新的。
+//! 重复节点），所有机器共用。它的形态由**全部登记机器**的 relay 设置决定，见 [`shape_for`]：
+//! 都用同一个自建 relay 时只用它、域名交给系统解析器（iOS 开着系统代理也能连）；其余情况
+//! 用 n0 预设，指定了 relay 的机器在拨号地址里带上它的 relay（桌面多运行时就是这样）。
+//! 形态变了就丢掉旧的，下次拨号时按新形态重建。
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -12,45 +14,70 @@ use smelt_iroh::runtime::IrohClient;
 use smelt_iroh::{EndpointId, PathKind, PathStatus, RelaySettings};
 use smelt_runtime_client::{Connector as _, RuntimeClient};
 
-use crate::api::connection::{LinkMetrics, LinkPath};
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
+use crate::api::fleet::{LinkMetrics, LinkPath};
 use crate::connection::{Dialer, Link, Route, Target};
+use crate::fleet::Transport;
+
+/// endpoint 的形态。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Shape {
+    /// n0 预设：公共 relay 与地址发现。
+    Preset,
+    /// Minimal + 这个 relay + 系统 DNS。
+    Relay(RelaySettings),
+}
+
+/// 按全部登记机器的 relay 决定形态：都指定了同一个 relay 时只用它，其余（没有机器、都没
+/// 指定、混用）用 n0 预设。
+///
+/// 混用时自建 relay 的域名走 iroh 自带的解析器，iOS 开着系统代理时可能连不上那台机器的
+/// relay：这是混用的已知限制，换来的是一个 endpoint 能同时连所有机器。
+pub(crate) fn shape_for(relays: &[Option<RelaySettings>]) -> Shape {
+    match relays.first() {
+        Some(Some(first)) if relays.iter().all(|relay| relay.as_ref() == Some(first)) => {
+            Shape::Relay(first.clone())
+        }
+        _ => Shape::Preset,
+    }
+}
 
 pub(crate) struct IrohDialer {
     secret: SecretKey,
-    client: Mutex<Option<CachedClient>>,
+    state: Mutex<DialerState>,
 }
 
-struct CachedClient {
-    relay: Option<RelaySettings>,
-    client: Arc<IrohClient>,
+struct DialerState {
+    shape: Shape,
+    /// 按 `shape` 建的客户端。形态变了就丢掉，下次拨号时重建。
+    client: Option<Arc<IrohClient>>,
 }
 
 impl IrohDialer {
     pub(crate) fn new(secret: SecretKey) -> Self {
         Self {
             secret,
-            client: Mutex::new(None),
+            state: Mutex::new(DialerState {
+                shape: Shape::Preset,
+                client: None,
+            }),
         }
     }
 
-    /// 按 relay 设置拿 IrohClient：相同就复用，不同就先丢旧的再建。绑定会起 tokio 运行时
-    /// 并 `block_on`，只能在普通线程上调。
-    fn client_for(&self, relay: Option<&RelaySettings>) -> Result<Arc<IrohClient>, SmeltError> {
-        let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cached) = slot.as_ref()
-            && cached.relay.as_ref() == relay
-        {
-            return Ok(Arc::clone(&cached.client));
+    /// 按当前形态拿 IrohClient，没有就建。绑定会起 tokio 运行时并 `block_on`，只能在普通
+    /// 线程上调。
+    fn client(&self) -> Result<Arc<IrohClient>, SmeltError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(client) = state.client.as_ref() {
+            return Ok(Arc::clone(client));
         }
-        // 先放掉自己持有的旧 endpoint。旧会话的探活线程若还拿着它，会在那边退出时释放。
-        *slot = None;
+        let relay = match &state.shape {
+            Shape::Preset => None,
+            Shape::Relay(relay) => Some(relay),
+        };
         let client = IrohClient::new(self.secret.clone(), relay)
             .map_err(|e| error(SmeltErrorKind::Other, format!("起不了 iroh：{e:#}")))?;
-        *slot = Some(CachedClient {
-            relay: relay.cloned(),
-            client: Arc::clone(&client),
-        });
+        state.client = Some(Arc::clone(&client));
         Ok(client)
     }
 }
@@ -58,12 +85,38 @@ impl IrohDialer {
 impl Dialer for IrohDialer {
     fn route(&self, target: &Target) -> Result<Arc<dyn Route>, SmeltError> {
         let (endpoint, relay) = validate(&target.endpoint_id, target.relay_url.as_deref())?;
-        let client = self.client_for(relay.as_ref())?;
+        let client = self.client()?;
         Ok(Arc::new(IrohRoute {
             client,
             endpoint,
             relay,
         }))
+    }
+}
+
+impl Transport for IrohDialer {
+    fn configure(&self, relays: &[Option<String>]) -> Result<bool, SmeltError> {
+        let relays = relays
+            .iter()
+            .map(|relay| {
+                relay
+                    .as_deref()
+                    .map(RelaySettings::parse)
+                    .transpose()
+                    .map_err(|e| error(SmeltErrorKind::InvalidPairing, format!("{e:#}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let shape = shape_for(&relays);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.shape == shape {
+            return Ok(false);
+        }
+        log::info!("iroh endpoint 换形态：{:?} → {shape:?}", state.shape);
+        state.shape = shape;
+        // 先放掉自己持有的旧 endpoint。各节点的旧会话若还拿着它，会在重新 connect 换代、
+        // 旧会话退出时释放。
+        state.client = None;
+        Ok(true)
     }
 }
 
@@ -75,7 +128,8 @@ struct IrohRoute {
 
 impl Route for IrohRoute {
     fn link(&self) -> Link {
-        // 每条链路一个新连接器：重连时不复用可能已经僵死的 QUIC 连接。
+        // 每条链路一个新连接器：重连时不复用可能已经僵死的 QUIC 连接。拨号地址带上这台
+        // 机器自己的 relay：endpoint 是 n0 预设时靠它找到用自建 relay 的机器。
         let connector = Arc::new(self.client.connector(self.endpoint, self.relay.as_ref()));
         let for_client = Arc::clone(&connector);
         Link {
@@ -198,6 +252,65 @@ mod tests {
                 rtt_ms: None
             }
         );
+    }
+
+    fn relay(address: &str) -> Option<RelaySettings> {
+        Some(RelaySettings::parse(address).unwrap())
+    }
+
+    #[test]
+    fn shape_follows_the_relays_of_all_runtimes() {
+        assert_eq!(shape_for(&[]), Shape::Preset, "没有机器");
+        assert_eq!(shape_for(&[None, None]), Shape::Preset, "都没指定 relay");
+        assert_eq!(
+            shape_for(&[relay("relay.example"), relay("https://relay.example")]),
+            Shape::Relay(RelaySettings::parse("relay.example").unwrap()),
+            "都指定了同一个 relay（写法不同也算同一个）"
+        );
+        assert_eq!(
+            shape_for(&[relay("relay.example")]),
+            Shape::Relay(RelaySettings::parse("relay.example").unwrap())
+        );
+        assert_eq!(
+            shape_for(&[relay("a.example"), relay("b.example")]),
+            Shape::Preset,
+            "不同 relay"
+        );
+        assert_eq!(
+            shape_for(&[relay("a.example"), None]),
+            Shape::Preset,
+            "有的指定有的没指定"
+        );
+        assert_eq!(shape_for(&[None, relay("a.example")]), Shape::Preset);
+    }
+
+    #[test]
+    fn configure_reports_shape_changes_only() {
+        let dialer = IrohDialer::new(SecretKey::generate());
+        assert!(!dialer.configure(&[]).unwrap(), "起始就是 n0 预设");
+        assert!(!dialer.configure(&[None]).unwrap());
+        assert!(
+            dialer
+                .configure(&[Some("relay.example".to_string())])
+                .unwrap()
+        );
+        assert!(
+            !dialer
+                .configure(&[
+                    Some("relay.example".to_string()),
+                    Some("https://relay.example/".to_string())
+                ])
+                .unwrap()
+        );
+        assert!(
+            dialer
+                .configure(&[Some("relay.example".to_string()), None])
+                .unwrap()
+        );
+        let bad = dialer
+            .configure(&[Some("http://[::1".to_string())])
+            .unwrap_err();
+        assert_eq!(bad.kind, SmeltErrorKind::InvalidPairing);
     }
 
     #[test]

@@ -4,10 +4,12 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/catalog.dart';
-import 'api/connection.dart';
 import 'api/conversation.dart';
+import 'api/draft.dart';
 import 'api/error.dart';
+import 'api/fleet.dart';
 import 'api/identity.dart';
+import 'api/pass.dart';
 import 'api/terminal.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -32,13 +34,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  RustStreamSink<ConnectionEvent> dco_decode_StreamSink_connection_event_Sse(
-    dynamic raw,
-  );
-
-  @protected
   RustStreamSink<ConversationEvent>
   dco_decode_StreamSink_conversation_event_Sse(dynamic raw);
+
+  @protected
+  RustStreamSink<FleetView> dco_decode_StreamSink_fleet_view_Sse(dynamic raw);
+
+  @protected
+  RustStreamSink<Pass> dco_decode_StreamSink_pass_Sse(dynamic raw);
 
   @protected
   RustStreamSink<TerminalEvent> dco_decode_StreamSink_terminal_event_Sse(
@@ -135,7 +138,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LinkMetrics dco_decode_box_autoadd_link_metrics(dynamic raw);
 
   @protected
+  MessageDraft dco_decode_box_autoadd_message_draft(dynamic raw);
+
+  @protected
   ModelSelector dco_decode_box_autoadd_model_selector(dynamic raw);
+
+  @protected
+  PermissionRequest dco_decode_box_autoadd_permission_request(dynamic raw);
 
   @protected
   SessionKind dco_decode_box_autoadd_session_kind(dynamic raw);
@@ -172,9 +181,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConfigOption dco_decode_config_option(dynamic raw);
-
-  @protected
-  ConnectionEvent dco_decode_connection_event(dynamic raw);
 
   @protected
   ConnectionState dco_decode_connection_state(dynamic raw);
@@ -220,6 +226,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   EntryKind dco_decode_entry_kind(dynamic raw);
+
+  @protected
+  FleetRuntime dco_decode_fleet_runtime(dynamic raw);
+
+  @protected
+  FleetView dco_decode_fleet_view(dynamic raw);
 
   @protected
   HistoryRenameResult dco_decode_history_rename_result(dynamic raw);
@@ -295,6 +307,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<FleetRuntime> dco_decode_list_fleet_runtime(dynamic raw);
+
+  @protected
   List<HistorySessionSummary> dco_decode_list_history_session_summary(
     dynamic raw,
   );
@@ -307,6 +322,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ModelProvider> dco_decode_list_model_provider(dynamic raw);
+
+  @protected
+  List<PassStation> dco_decode_list_pass_station(dynamic raw);
+
+  @protected
+  List<PassTicket> dco_decode_list_pass_ticket(dynamic raw);
 
   @protected
   List<PermissionOption> dco_decode_list_permission_option(dynamic raw);
@@ -324,6 +345,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<RuntimeImport> dco_decode_list_runtime_import(dynamic raw);
+
+  @protected
+  List<RuntimeRecord> dco_decode_list_runtime_record(dynamic raw);
+
+  @protected
   List<SessionSkill> dco_decode_list_session_skill(dynamic raw);
 
   @protected
@@ -337,6 +364,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<WorkspaceProject> dco_decode_list_workspace_project(dynamic raw);
+
+  @protected
+  MessageDraft dco_decode_message_draft(dynamic raw);
 
   @protected
   ModelProvider dco_decode_model_provider(dynamic raw);
@@ -389,7 +419,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LinkMetrics? dco_decode_opt_box_autoadd_link_metrics(dynamic raw);
 
   @protected
+  MessageDraft? dco_decode_opt_box_autoadd_message_draft(dynamic raw);
+
+  @protected
   ModelSelector? dco_decode_opt_box_autoadd_model_selector(dynamic raw);
+
+  @protected
+  PermissionRequest? dco_decode_opt_box_autoadd_permission_request(dynamic raw);
 
   @protected
   SessionKind? dco_decode_opt_box_autoadd_session_kind(dynamic raw);
@@ -419,6 +455,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PairingTarget dco_decode_pairing_target(dynamic raw);
 
   @protected
+  Pass dco_decode_pass(dynamic raw);
+
+  @protected
+  PassStation dco_decode_pass_station(dynamic raw);
+
+  @protected
+  PassTicket dco_decode_pass_ticket(dynamic raw);
+
+  @protected
   PendingActions dco_decode_pending_actions(dynamic raw);
 
   @protected
@@ -437,7 +482,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlanStepStatus dco_decode_plan_step_status(dynamic raw);
 
   @protected
-  RuntimeInfo dco_decode_runtime_info(dynamic raw);
+  RuntimeImport dco_decode_runtime_import(dynamic raw);
+
+  @protected
+  RuntimeRecord dco_decode_runtime_record(dynamic raw);
+
+  @protected
+  RuntimeStatus dco_decode_runtime_status(dynamic raw);
 
   @protected
   ScheduleKind dco_decode_schedule_kind(dynamic raw);
@@ -535,13 +586,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  RustStreamSink<ConnectionEvent> sse_decode_StreamSink_connection_event_Sse(
+  RustStreamSink<ConversationEvent>
+  sse_decode_StreamSink_conversation_event_Sse(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<FleetView> sse_decode_StreamSink_fleet_view_Sse(
     SseDeserializer deserializer,
   );
 
   @protected
-  RustStreamSink<ConversationEvent>
-  sse_decode_StreamSink_conversation_event_Sse(SseDeserializer deserializer);
+  RustStreamSink<Pass> sse_decode_StreamSink_pass_Sse(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<TerminalEvent> sse_decode_StreamSink_terminal_event_Sse(
@@ -660,7 +716,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LinkMetrics sse_decode_box_autoadd_link_metrics(SseDeserializer deserializer);
 
   @protected
+  MessageDraft sse_decode_box_autoadd_message_draft(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ModelSelector sse_decode_box_autoadd_model_selector(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PermissionRequest sse_decode_box_autoadd_permission_request(
     SseDeserializer deserializer,
   );
 
@@ -707,9 +773,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ConfigOption sse_decode_config_option(SseDeserializer deserializer);
-
-  @protected
-  ConnectionEvent sse_decode_connection_event(SseDeserializer deserializer);
 
   @protected
   ConnectionState sse_decode_connection_state(SseDeserializer deserializer);
@@ -761,6 +824,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   EntryKind sse_decode_entry_kind(SseDeserializer deserializer);
+
+  @protected
+  FleetRuntime sse_decode_fleet_runtime(SseDeserializer deserializer);
+
+  @protected
+  FleetView sse_decode_fleet_view(SseDeserializer deserializer);
 
   @protected
   HistoryRenameResult sse_decode_history_rename_result(
@@ -856,6 +925,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<FleetRuntime> sse_decode_list_fleet_runtime(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<HistorySessionSummary> sse_decode_list_history_session_summary(
     SseDeserializer deserializer,
   );
@@ -872,6 +946,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ModelProvider> sse_decode_list_model_provider(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<PassStation> sse_decode_list_pass_station(SseDeserializer deserializer);
+
+  @protected
+  List<PassTicket> sse_decode_list_pass_ticket(SseDeserializer deserializer);
 
   @protected
   List<PermissionOption> sse_decode_list_permission_option(
@@ -891,6 +971,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<RuntimeImport> sse_decode_list_runtime_import(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<RuntimeRecord> sse_decode_list_runtime_record(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<SessionSkill> sse_decode_list_session_skill(
@@ -914,6 +1004,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<WorkspaceProject> sse_decode_list_workspace_project(
     SseDeserializer deserializer,
   );
+
+  @protected
+  MessageDraft sse_decode_message_draft(SseDeserializer deserializer);
 
   @protected
   ModelProvider sse_decode_model_provider(SseDeserializer deserializer);
@@ -980,7 +1073,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  MessageDraft? sse_decode_opt_box_autoadd_message_draft(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ModelSelector? sse_decode_opt_box_autoadd_model_selector(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PermissionRequest? sse_decode_opt_box_autoadd_permission_request(
     SseDeserializer deserializer,
   );
 
@@ -1024,6 +1127,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PairingTarget sse_decode_pairing_target(SseDeserializer deserializer);
 
   @protected
+  Pass sse_decode_pass(SseDeserializer deserializer);
+
+  @protected
+  PassStation sse_decode_pass_station(SseDeserializer deserializer);
+
+  @protected
+  PassTicket sse_decode_pass_ticket(SseDeserializer deserializer);
+
+  @protected
   PendingActions sse_decode_pending_actions(SseDeserializer deserializer);
 
   @protected
@@ -1044,7 +1156,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlanStepStatus sse_decode_plan_step_status(SseDeserializer deserializer);
 
   @protected
-  RuntimeInfo sse_decode_runtime_info(SseDeserializer deserializer);
+  RuntimeImport sse_decode_runtime_import(SseDeserializer deserializer);
+
+  @protected
+  RuntimeRecord sse_decode_runtime_record(SseDeserializer deserializer);
+
+  @protected
+  RuntimeStatus sse_decode_runtime_status(SseDeserializer deserializer);
 
   @protected
   ScheduleKind sse_decode_schedule_kind(SseDeserializer deserializer);
@@ -1148,14 +1266,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_StreamSink_connection_event_Sse(
-    RustStreamSink<ConnectionEvent> self,
+  void sse_encode_StreamSink_conversation_event_Sse(
+    RustStreamSink<ConversationEvent> self,
     SseSerializer serializer,
   );
 
   @protected
-  void sse_encode_StreamSink_conversation_event_Sse(
-    RustStreamSink<ConversationEvent> self,
+  void sse_encode_StreamSink_fleet_view_Sse(
+    RustStreamSink<FleetView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_pass_Sse(
+    RustStreamSink<Pass> self,
     SseSerializer serializer,
   );
 
@@ -1319,8 +1443,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_message_draft(
+    MessageDraft self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_model_selector(
     ModelSelector self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_permission_request(
+    PermissionRequest self,
     SseSerializer serializer,
   );
 
@@ -1383,12 +1519,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_config_option(ConfigOption self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_connection_event(
-    ConnectionEvent self,
-    SseSerializer serializer,
-  );
 
   @protected
   void sse_encode_connection_state(
@@ -1467,6 +1597,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_entry_kind(EntryKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_fleet_runtime(FleetRuntime self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_fleet_view(FleetView self, SseSerializer serializer);
 
   @protected
   void sse_encode_history_rename_result(
@@ -1577,6 +1713,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_fleet_runtime(
+    List<FleetRuntime> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_history_session_summary(
     List<HistorySessionSummary> self,
     SseSerializer serializer,
@@ -1597,6 +1739,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_model_provider(
     List<ModelProvider> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_pass_station(
+    List<PassStation> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_pass_ticket(
+    List<PassTicket> self,
     SseSerializer serializer,
   );
 
@@ -1624,6 +1778,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_runtime_import(
+    List<RuntimeImport> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_runtime_record(
+    List<RuntimeRecord> self,
     SseSerializer serializer,
   );
 
@@ -1656,6 +1822,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<WorkspaceProject> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_message_draft(MessageDraft self, SseSerializer serializer);
 
   @protected
   void sse_encode_model_provider(ModelProvider self, SseSerializer serializer);
@@ -1739,8 +1908,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_message_draft(
+    MessageDraft? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_model_selector(
     ModelSelector? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_permission_request(
+    PermissionRequest? self,
     SseSerializer serializer,
   );
 
@@ -1793,6 +1974,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_pairing_target(PairingTarget self, SseSerializer serializer);
 
   @protected
+  void sse_encode_pass(Pass self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_pass_station(PassStation self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_pass_ticket(PassTicket self, SseSerializer serializer);
+
+  @protected
   void sse_encode_pending_actions(
     PendingActions self,
     SseSerializer serializer,
@@ -1826,7 +2016,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_runtime_info(RuntimeInfo self, SseSerializer serializer);
+  void sse_encode_runtime_import(RuntimeImport self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_runtime_record(RuntimeRecord self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_runtime_status(RuntimeStatus self, SseSerializer serializer);
 
   @protected
   void sse_encode_schedule_kind(ScheduleKind self, SseSerializer serializer);

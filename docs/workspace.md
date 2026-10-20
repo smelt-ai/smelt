@@ -287,7 +287,7 @@ smeltd status
 
 ### 手机
 
-`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。内核负责设备密钥、配对、每个运行时一条连接、会话目录投影、对话（增量帧）和终端字节流。离线时读 App 数据目录里的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每个运行时最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端配色由手机按明暗自己定，不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`archive/mobile-runtime-p4.md`](archive/mobile-runtime-p4.md)。
+`mobile/` 的 Flutter 界面经 FRB 调 `smelt-mobile`。内核是一个「机队」：同时连着所有配对过的机器，每台一个节点（连接状态机、会话目录投影、对话订阅、终端字节流），各自重连、互不影响，没有「当前运行时」；全进程共用一个 iroh endpoint，形态由所有机器的 relay 设置决定。跨机器的指挥台（等你处理的单据、各机器在做和刚完成的会话）也在内核里投影。设计见 [`mobile-redesign.md`](mobile-redesign.md) 第 1 节。机器登记和消息草稿存在 App 数据目录的 `smelt-mobile.sqlite3`，按 `user_version` 逐步迁移、不删库。离线时读同目录的 `smelt-mobile-cache.sqlite3`：按 endpoint 存上次的会话列表，以及每台机器最近几个对话的快照尾部（最多 5 段、合计 32MB）。这是缓存，库坏了就重建，不迁版本。终端配色由手机按明暗自己定，不跟运行时下发的主题走。构建见 [`mobile/README.md`](../mobile/README.md)，接入步骤的记录见 [`archive/mobile-runtime-p4.md`](archive/mobile-runtime-p4.md)。
 
 ## 路线图
 

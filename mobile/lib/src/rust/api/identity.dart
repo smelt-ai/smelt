@@ -4,17 +4,18 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
-import 'connection.dart';
 import 'error.dart';
+import 'fleet.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `parse`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`
 
-/// 读取或生成设备密钥（`<data_dir>/client-iroh-secret`，0600），返回设备身份。
+/// 读取或生成设备密钥（`<data_dir>/client-iroh-secret`，0600），打开本机库
+/// （`smelt-mobile.sqlite3`）和离线缓存，为每台登记的机器建节点并在后台开始连。返回设备身份。
 ///
 /// 幂等：同一目录重复调用返回同一身份；换目录调用报错（身份不能在进程里悄悄换掉）。
-/// 必须先于 [`pair`] 和 [`crate::api::connection::connect`] 调用。
+/// 机器、草稿相关的调用都要在它之后；各事件流可以先订阅。
 Future<DeviceIdentity> initClient({required String dataDir}) =>
     RustLib.instance.api.crateApiIdentityInitClient(dataDir: dataDir);
 
@@ -22,11 +23,13 @@ Future<DeviceIdentity> initClient({required String dataDir}) =>
 PairingTarget parsePairing({required String uri}) =>
     RustLib.instance.api.crateApiIdentityParsePairing(uri: uri);
 
-/// 用配对串配对：`device.pair` 后 `system.describe`，成功后它就是当前运行时（已连接）。
+/// 用配对串配对：`device.pair` 后 `system.describe`，成功后写进登记并保持连接，返回登记。
 ///
-/// 配对即切换：先断开原来的当前运行时（同一把设备密钥不能同时挂两个 iroh endpoint）。
-/// 失败时停在 `Disconnected`，不自动重试（配对码一次性）。
-Future<RuntimeInfo> pair({required String uri, required String deviceName}) =>
+/// 不影响其它机器的连接（只有 endpoint 形态因此改变时，其它机器会自动重连一次）。这台
+/// endpoint 已登记（被撤销后重新配对）时更新它的登记，名字、标签色、顺序不变；新机器名字
+/// 默认取主机名，标签色取色板里还没用过的第一个，排在最后。失败时不留下任何登记，不自动
+/// 重试（配对码一次性）。
+Future<RuntimeRecord> pair({required String uri, required String deviceName}) =>
     RustLib.instance.api.crateApiIdentityPair(uri: uri, deviceName: deviceName);
 
 class DeviceIdentity {

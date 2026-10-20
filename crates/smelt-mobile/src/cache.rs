@@ -170,6 +170,19 @@ impl Cache {
         Some(Cached { value, saved_at_ms })
     }
 
+    /// 删掉一台机器的全部缓存（忘记这台机器时）。
+    pub(crate) fn delete_runtime(&self, endpoint_id: &str) {
+        for table in ["session_list", "conversation_snapshot"] {
+            let result = self.conn().execute(
+                &format!("DELETE FROM {table} WHERE endpoint_id = ?1"),
+                params![endpoint_id],
+            );
+            if let Err(error) = result {
+                log::warn!("删除机器的缓存失败：{error}");
+            }
+        }
+    }
+
     pub(crate) fn delete_snapshot(&self, endpoint_id: &str, session_id: &str) {
         let result = self.conn().execute(
             "DELETE FROM conversation_snapshot WHERE endpoint_id = ?1 AND session_id = ?2",
@@ -261,6 +274,20 @@ mod tests {
             cache.load_snapshot::<usize>("b", "other").is_some(),
             "别的运行时不受影响"
         );
+    }
+
+    #[test]
+    fn deleting_a_runtime_drops_only_its_rows() {
+        let cache = Cache::in_memory();
+        cache.save_session_list("a", &1);
+        cache.save_snapshot("a", "s", &1);
+        cache.save_session_list("b", &2);
+        cache.save_snapshot("b", "s", &2);
+        cache.delete_runtime("a");
+        assert!(cache.load_session_list::<i32>("a").is_none());
+        assert!(cache.load_snapshot::<i32>("a", "s").is_none());
+        assert_eq!(cache.load_session_list::<i32>("b").unwrap().value, 2);
+        assert_eq!(cache.load_snapshot::<i32>("b", "s").unwrap().value, 2);
     }
 
     #[test]

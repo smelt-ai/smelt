@@ -13,13 +13,16 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 ///
 /// 同一会话再次附着会替换旧的（旧流随之结束），用来换 scrollback 预算重取历史。
 /// `max_scrollback_lines` 为空表示要运行时上限（10000 行），否则夹到 1..=10000。
-/// 断线且运行时没换时按 500ms 起、翻倍、封顶 8s 的退避自动重新附着；运行时切换或断开就停。
-/// 只有行列为 0、会话 id 为空这类调用错误同步返回错误。
+/// 断线时按 500ms 起、翻倍、封顶 8s 的退避自动重新附着；这台机器重新连过（换代）就立刻
+/// 在新连接上重新附着；连接停下就停。没有这台机器、行列为 0、会话 id 为空这类调用错误
+/// 同步返回错误。
 Stream<TerminalEvent> terminalAttach({
+  required String runtimeId,
   required String sessionId,
   required TerminalGeometry geometry,
   int? maxScrollbackLines,
 }) => RustLib.instance.api.crateApiTerminalTerminalAttach(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   geometry: geometry,
   maxScrollbackLines: maxScrollbackLines,
@@ -28,9 +31,11 @@ Stream<TerminalEvent> terminalAttach({
 /// 改终端尺寸：在附着连接上写 resize 帧，只在尺寸变了时写。正在重连时记下来，
 /// 下次附着按它来。没有附着这个会话时报错。
 void terminalResize({
+  required String runtimeId,
   required String sessionId,
   required TerminalGeometry geometry,
 }) => RustLib.instance.api.crateApiTerminalTerminalResize(
+  runtimeId: runtimeId,
   sessionId: sessionId,
   geometry: geometry,
 );
@@ -38,16 +43,24 @@ void terminalResize({
 /// 发终端输入。空串忽略。按调用顺序发出，在途时到达的输入合并成一次发送，
 /// 超过 64 KB 按 UTF-8 字符边界切开。发送失败从事件流推非 fatal 的 `Error`，
 /// 并丢掉还没发出的输入。没有附着这个会话时报错。
-void terminalInput({required String sessionId, required String data}) => RustLib
-    .instance
-    .api
-    .crateApiTerminalTerminalInput(sessionId: sessionId, data: data);
+void terminalInput({
+  required String runtimeId,
+  required String sessionId,
+  required String data,
+}) => RustLib.instance.api.crateApiTerminalTerminalInput(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+  data: data,
+);
 
 /// 断开附着：关掉连接（运行时据此进入几何租约的宽限期），不再重连，流随之结束。
-void terminalDetach({required String sessionId}) =>
-    RustLib.instance.api.crateApiTerminalTerminalDetach(sessionId: sessionId);
+void terminalDetach({required String runtimeId, required String sessionId}) =>
+    RustLib.instance.api.crateApiTerminalTerminalDetach(
+      runtimeId: runtimeId,
+      sessionId: sessionId,
+    );
 
-/// 断开所有附着（切后台时用）。
+/// 断开所有机器上的所有附着（切后台时用）。
 void terminalDetachAll() =>
     RustLib.instance.api.crateApiTerminalTerminalDetachAll();
 
@@ -103,8 +116,9 @@ enum TerminalEventKind {
   /// 终端会话已结束（shell 退出或被关掉）。流随之结束。
   closed,
 
-  /// `message` 与 `fatal` 有值。`fatal` 时流随之结束：会话不存在、运行时已切换或断开、
-  /// 运行时回包不对。非 fatal 是断线或输入发送失败，后台按退避自动重新附着，成功后再来 `Ready`。
+  /// `message` 与 `fatal` 有值。`fatal` 时流随之结束：会话不存在、和这台机器的连接停下
+  /// （未配对、被忘记）、运行时回包不对。非 fatal 是断线或输入发送失败，后台按退避自动
+  /// 重新附着，成功后再来 `Ready`。
   error,
 }
 

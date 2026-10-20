@@ -1,4 +1,5 @@
-//! 对话：订阅一个会话的快照流、翻更早的页、发送与各类动作、取图片。
+//! 对话：订阅会话的快照流、翻更早的页、发送与各类动作、取图片。入口的第一个参数
+//! `runtime_id` 指定是哪台机器。
 //!
 //! 实现在 `crate::conversation`，这里只放 Dart 用的视图模型和入口。会阻塞的调用都是普通
 //! `pub fn`（FRB 放到工作线程池，Dart 拿 Future），不用 `async fn`：iroh 连接器内部
@@ -312,10 +313,13 @@ pub struct ElicitationField {
 }
 
 /// 指挥台不进会话就能审批：一个会话当前在等的审批和询问。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PendingActions {
     pub permissions: Vec<PermissionRequest>,
     pub elicitation: Option<Elicitation>,
+    /// 会话最近几条（旧的在前，最多 [`crate::conversation::RECENT_CONTEXT`] 条）：单据上印出来的
+    /// 上下文，让人批之前看得到它刚才在做什么、为什么要这么做。和待办取自同一份快照头。
+    pub recent: Vec<ConversationEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -451,30 +455,51 @@ pub struct ImageData {
 // 入口
 // ---------------------------------------------------------------------------
 
-/// 订阅一个会话。同一时间只有一个活动订阅：再调一次（同一个或别的会话）会顶掉前一个。
+/// 订阅一个会话。可以同时订阅多个会话（含不同机器上的），各自独立。同一会话再调一次
+/// 只换推送出口：旧流不再收到事件，新流马上收到手里的视图。
 ///
 /// 有离线缓存就先推一份（`cached = true`），再连运行时，收到实时数据后推 `cached = false`
-/// 的视图。断线且运行时还连着时后台退避重订；运行时被切换或断开（换了一代连接）就停，
-/// 回到前台或重新连上后要再调一次。Dart 取消订阅也会停。
-pub fn watch_conversation(session_id: String, sink: StreamSink<ConversationEvent>) {
-    crate::conversation::global().watch(session_id, Box::new(move |event| sink.add(event).is_ok()));
+/// 的视图。断线或这台机器重新连过时后台续订；和这台机器的连接停下（未配对、被忘记）就停，
+/// 重新连上后要再调一次。Dart 取消订阅也会停。
+pub fn watch_conversation(
+    runtime_id: String,
+    session_id: String,
+    sink: StreamSink<ConversationEvent>,
+) -> Result<(), SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .watch(session_id, Box::new(move |event| sink.add(event).is_ok()));
+    Ok(())
 }
 
-/// 停掉当前订阅（离开对话页时调）。
-pub fn unwatch_conversation() {
-    crate::conversation::global().unwatch();
+/// 停掉一个会话的订阅（离开对话页时调），其它订阅不受影响。
+pub fn unwatch_conversation(runtime_id: String, session_id: String) {
+    if let Ok(node) = crate::fleet::fleet().node(&runtime_id) {
+        node.conversations.unwatch(&session_id);
+    }
 }
 
-/// 往前翻一页（100 条）。结果合并进当前订阅的窗口，从订阅流推出。
+/// 往前翻一页（100 条）。结果合并进这个会话订阅的窗口，从订阅流推出。
 ///
-/// 返回 false 表示没翻：不是当前订阅的会话、前面没有了，或已经在翻。
-pub fn load_older(session_id: String) -> Result<bool, SmeltError> {
-    crate::conversation::global().load_older(&session_id)
+/// 返回 false 表示没翻：没在订阅这个会话、前面没有了，或已经在翻。
+pub fn load_older(runtime_id: String, session_id: String) -> Result<bool, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .load_older(&session_id)
 }
 
-/// 不订阅、只取一个会话当前在等的审批和询问（指挥台用）。
-pub fn pending_actions(session_id: String) -> Result<PendingActions, SmeltError> {
-    crate::conversation::global().pending_actions(&session_id)
+/// 不订阅、只取一个会话当前在等的审批和询问。指挥台的单据已经带着它（见
+/// `crate::api::pass`），这里给单据之外的地方用。
+pub fn pending_actions(
+    runtime_id: String,
+    session_id: String,
+) -> Result<PendingActions, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .pending_actions(&session_id)
 }
 
 /// 新的发送请求 id。草稿里存着它，没等到确认就用同一个 id 重发。
@@ -486,81 +511,122 @@ pub fn new_request_id() -> String {
 /// 发一条消息。`request_id` 用 [`new_request_id`] 生成，作为这次提交的 `submission_id`；
 /// 重发同一份草稿时要用同一个 id。最长等 35 秒。
 pub fn send_message(
+    runtime_id: String,
     session_id: String,
     request_id: String,
     text: String,
     images: Vec<ImageInput>,
 ) -> Result<(), SendMessageError> {
-    crate::conversation::global().send_message(&session_id, &request_id, text, images)
+    let node = crate::fleet::fleet()
+        .node(&runtime_id)
+        .map_err(|e| SendMessageError {
+            kind: SendFailureKind::Rejected,
+            message: e.message,
+        })?;
+    node.conversations
+        .send_message(&session_id, &request_id, text, images)
 }
 
 /// 停掉当前回合。
-pub fn cancel_turn(session_id: String) -> Result<(), SmeltError> {
-    crate::conversation::global().cancel_turn(&session_id)
+pub fn cancel_turn(runtime_id: String, session_id: String) -> Result<(), SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .cancel_turn(&session_id)
 }
 
 /// 切换模型或会话配置。开关项传 `boolean`，下拉项传 `value_id`（开关项的 `value_id`
 /// 运行时不看，传空串即可）。
 pub fn set_config_option(
+    runtime_id: String,
     session_id: String,
     config_id: String,
     value_id: String,
     boolean: Option<bool>,
 ) -> Result<(), SmeltError> {
-    crate::conversation::global().set_config_option(&session_id, config_id, value_id, boolean)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .set_config_option(&session_id, config_id, value_id, boolean)
 }
 
 /// 回答一个审批。
 pub fn respond_approval(
+    runtime_id: String,
     session_id: String,
     tool_call_id: String,
     option_id: String,
 ) -> Result<(), SmeltError> {
-    crate::conversation::global().respond_approval(&session_id, tool_call_id, option_id)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .respond_approval(&session_id, tool_call_id, option_id)
 }
 
 /// 点选询问里的一个选项（多选题再点一次是取消）。
 pub fn choose_elicitation(
+    runtime_id: String,
     session_id: String,
     field_index: u32,
     option_index: u32,
 ) -> Result<(), SmeltError> {
-    crate::conversation::global().choose_elicitation(&session_id, field_index, option_index)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .choose_elicitation(&session_id, field_index, option_index)
 }
 
 /// 记下询问里一个文字框的内容。
 pub fn update_elicitation_text(
+    runtime_id: String,
     session_id: String,
     field_index: u32,
     value: String,
 ) -> Result<(), SmeltError> {
-    crate::conversation::global().update_elicitation_text(&session_id, field_index, value)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .update_elicitation_text(&session_id, field_index, value)
 }
 
 /// 提交询问。`text_values` 是界面上还没同步给运行时的文字框，按顺序先写再提交。
 pub fn submit_elicitation(
+    runtime_id: String,
     session_id: String,
     text_values: Vec<ElicitationTextInput>,
 ) -> Result<(), SmeltError> {
-    crate::conversation::global().submit_elicitation(&session_id, text_values)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .submit_elicitation(&session_id, text_values)
 }
 
 /// 关掉询问（不回答）。
-pub fn dismiss_elicitation(session_id: String) -> Result<(), SmeltError> {
-    crate::conversation::global().dismiss_elicitation(&session_id)
+pub fn dismiss_elicitation(runtime_id: String, session_id: String) -> Result<(), SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .dismiss_elicitation(&session_id)
 }
 
 /// 这场对话加载了哪些技能。
-pub fn list_skills(session_id: String) -> Result<SessionSkills, SmeltError> {
-    crate::conversation::global().list_skills(&session_id)
+pub fn list_skills(runtime_id: String, session_id: String) -> Result<SessionSkills, SmeltError> {
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .list_skills(&session_id)
 }
 
 /// 取一张大图。给 `max_edge` 出缩略图（长边不超过它），不给出可看的原图。
 pub fn load_image(
+    runtime_id: String,
     session_id: String,
     entry: i64,
     digest: String,
     max_edge: Option<u32>,
 ) -> Result<ImageData, SmeltError> {
-    crate::conversation::global().load_image(&session_id, entry, digest, max_edge)
+    crate::fleet::fleet()
+        .node(&runtime_id)?
+        .conversations
+        .load_image(&session_id, entry, digest, max_edge)
 }
