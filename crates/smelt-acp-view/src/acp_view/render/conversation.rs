@@ -719,7 +719,6 @@ impl AcpView {
                                 .min_h(px(22.))
                                 .gap_2()
                                 .items_center()
-                                .when(can_expand, |row| row.cursor_pointer())
                                 .child(
                                     div()
                                         .flex_shrink_0()
@@ -872,7 +871,7 @@ impl AcpView {
                             .items_center();
                         if has_expandable_content {
                             let id_for_toggle = id.clone();
-                            header = header.group(EXPAND_ICON_GROUP).cursor_pointer().on_mouse_down(
+                            header = header.group(EXPAND_ICON_GROUP).on_mouse_down(
                                 gpui::MouseButton::Left,
                                 cx.listener(move |this, _ev, _window, cx| {
                                     this.toggle_tool_card(
@@ -1100,7 +1099,7 @@ impl AcpView {
                             let hover = t.foreground;
                             summary
                                 .id(owner_id("acp-task-note-row", &note_owner))
-                                .cursor_pointer()
+                                
                                 .hover(move |row| row.text_color(hover))
                                 .child(
                                     div()
@@ -1420,7 +1419,7 @@ impl AcpView {
             .flex_shrink_0()
             .gap_1p5()
             .items_center()
-            .cursor_pointer()
+            
             .hover(|row| row.opacity(0.78))
             .when(group.active && !thinking, |row| {
                 row.child(ambient_spinner(
@@ -1497,7 +1496,7 @@ impl AcpView {
             .min_h(px(22.))
             .gap_2()
             .items_center()
-            .cursor_pointer()
+            
             .child(expandable_lead_icon(
                 process_timeline_icon(&run.kind),
                 open,
@@ -1554,7 +1553,6 @@ impl AcpView {
                     .pl_5()
                     .gap_2()
                     .items_center()
-                    .when(can_expand, |row| row.cursor_pointer())
                     .child(
                         div()
                             .flex_shrink_0()
@@ -1650,7 +1648,7 @@ impl AcpView {
             .gap_2()
             .items_center()
             .group(EXPAND_ICON_GROUP)
-            .cursor_pointer()
+            
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _ev, _window, cx| {
@@ -2106,7 +2104,7 @@ impl AcpView {
                         let id_for_toggle = id.clone();
                         row = row
                             .group(EXPAND_ICON_GROUP)
-                            .cursor_pointer()
+                            
                             .on_mouse_down(
                                 gpui::MouseButton::Left,
                                 cx.listener(move |this, _ev, _window, cx| {
@@ -2226,6 +2224,8 @@ impl AcpView {
             preview = "正在想".to_string();
         }
         let has_details = progress_has_details(text);
+        // 进行中的摘要不展开：悬停底和点击同一条件，避免看起来不能点却还能点。
+        let interactive = has_details && !in_process;
         let settled = if !in_process && live_elapsed.is_none() {
             settled_thought_elapsed(
                 &self.entries,
@@ -2236,57 +2236,41 @@ impl AcpView {
         } else {
             None
         };
-        let mut row = h_flex()
-            .id((
-                if in_process {
-                    "acp-progress-toggle"
-                } else {
-                    "acp-analysis-toggle"
-                },
-                entry_ix,
-            ))
-            .debug_selector(move || format!("ACP_PROGRESS_{entry_ix}"))
-            .w_full()
-            .min_w_0()
-            .min_h(px(if in_process { 22. } else { 26. }))
-            .when(!in_process, |row| row.px_2().rounded_md())
-            .gap_2()
-            .items_center()
-            .when(in_process && has_details, |row| {
-                row.group(EXPAND_ICON_GROUP)
-            })
-            .child(if in_process {
-                let thought = matches!(entry, AcpEntry::Assistant { thought: true, .. });
-                if thought && live_elapsed.is_some() {
-                    quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
-                } else if has_details && thought {
-                    expandable_lead_icon(IconName::Asterisk, expanded, muted)
-                } else if thought {
-                    Icon::new(IconName::Asterisk)
-                        .size(px(13.))
-                        .text_color(muted)
-                        .into_any_element()
-                } else if has_details {
-                    expandable_lead(
-                        div()
-                            .size(px(8.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(muted)
-                            .into_any_element(),
-                        expanded,
-                        muted,
-                    )
-                } else {
-                    div()
-                        .size(px(8.))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(muted)
-                        .into_any_element()
-                }
-            } else if live_elapsed.is_some() {
+        let mut row = ListRow::new((
+            if in_process {
+                "acp-progress-toggle"
+            } else {
+                "acp-analysis-toggle"
+            },
+            entry_ix,
+        ))
+        .debug_selector(move || format!("ACP_PROGRESS_{entry_ix}"))
+        .h_flex()
+        .w_full()
+        .min_w_0()
+        .min_h(px(if in_process { 22. } else { 26. }))
+        .when(!in_process, |row| row.px_2().rounded_md())
+        .gap_2()
+        .disabled(!interactive)
+        .child(if in_process {
+            let thought = matches!(entry, AcpEntry::Assistant { thought: true, .. });
+            if thought && live_elapsed.is_some() {
+                quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
+            } else if thought {
+                Icon::new(IconName::Asterisk)
+                    .size(px(13.))
+                    .text_color(muted)
+                    .into_any_element()
+            } else {
+                div()
+                    .size(px(8.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(muted)
+                    .into_any_element()
+            }
+        } else if live_elapsed.is_some() {
                 quiet_dots(("acp-thought-dots", entry_ix), muted, animate_ambient)
             } else {
                 div()
@@ -2318,21 +2302,18 @@ impl AcpView {
                         .child(settled_thought_label(elapsed_ms)),
                 )
             });
-        if has_details {
+        if interactive {
             row = row
+                .card()
                 .role(gpui::Role::Button)
                 .aria_label(preview)
-                .cursor_pointer()
-                .when(!in_process, |row| {
-                    row.hover(|row| row.bg(gpui::rgb(ui_theme::bg_hover())))
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(if expanded { "▾" } else { "▸" }),
-                        )
-                })
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(if expanded { "▾" } else { "▸" }),
+                )
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     let open = if this.expanded_thoughts.remove(&entry_ix) {
                         false
@@ -3047,7 +3028,7 @@ fn render_clickable_image_thumb(
         .rounded_md()
         .border_1()
         .border_color(border)
-        .cursor_pointer()
+        
         .hover(|image| image.border_color(ui_theme::tint(ui_theme::accent(), 0x72)))
         .on_click(cx.listener(move |_this, _ev, _window, cx| {
             cx.emit(AcpViewEvent::PreviewImage(preview_image.clone()));

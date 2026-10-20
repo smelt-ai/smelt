@@ -63,6 +63,10 @@ redundant_clone = "warn"
 # 正确性闸门：空 dbg/todo 不应进主线。存量 style 警告不在这里 deny，避免一次清不完。
 dbg_macro = "deny"
 todo = "deny"
+# 手型光标只留给链接。路径是 gpui-pre 0.3.9 里 `Styled` 上由
+# `cursor_style_methods!` 生成的方法（`gpui/src/styled.rs`，模块 `gpui::styled`）。
+# macOS CI 不跑 clippy，真正挡住调用点的是 ci/lint-pointer.sh。
+disallowed_methods = "deny"
 
 # proc-macro 和 build script 只在构建机上用，不发布，不用 strip。
 # rustc 1.97 在 macOS 上用 `rust-objcopy --strip-debug` 实现默认的 strip=debuginfo，处理后的

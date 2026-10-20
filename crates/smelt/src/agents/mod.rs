@@ -21,6 +21,7 @@ use gpui_component::{
     StyledExt as _,
 };
 pub(crate) use smelt_ui::Button;
+use smelt_ui::ListRow;
 
 use crate::workspace_sessions::NewAcpSessionRequest;
 use crate::{AgentStatus, CapabilitiesTab, Workspace, WorkspaceRoute, acp_view, settings};
@@ -1938,12 +1939,16 @@ fn agent_definition_column() -> Div {
 }
 
 /// 内容卡：12px 圆角加发丝描边。智能体空状态、自动化表和表单共用。
-fn content_card() -> Div {
-    div()
+fn content_card_style<E: Styled>(element: E) -> E {
+    element
         .rounded(crate::ui_theme::card_radius())
         .border_1()
         .border_color(crate::ui_theme::card_stroke())
         .bg(rgb(crate::ui_theme::bg_card()))
+}
+
+fn content_card() -> Div {
+    content_card_style(div())
 }
 
 fn agent_surface_card() -> Div {
@@ -2873,7 +2878,7 @@ fn agent_memory_row(
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .cursor_pointer()
+                
                 .on_click(move |_, _, cx| {
                     let file_name = toggle_file.clone();
                     toggle_entity.update(cx, |workspace, cx| {

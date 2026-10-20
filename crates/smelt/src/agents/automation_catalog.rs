@@ -239,16 +239,14 @@ impl Workspace {
             entity,
         );
 
-        div()
-            .id(format!("automation-row-{}", automation.id))
+        ListRow::new(format!("automation-row-{}", automation.id))
+            .card()
             .w_full()
             .px_4()
             .py_3()
             .flex()
             .items_center()
             .gap_3()
-            .cursor_pointer()
-            .hover(|row| row.bg(rgb(crate::ui_theme::bg_hover())))
             .child(
                 div()
                     .flex_1()
@@ -357,16 +355,14 @@ impl Workspace {
             .map(compact_instructions);
         let open_entity = entity;
         let run_id = run.id.clone();
-        div()
-            .id(format!("automation-catalog-run-{run_id}"))
+        ListRow::new(format!("automation-catalog-run-{run_id}"))
+            .card()
             .w_full()
             .px_4()
             .py_3()
             .flex()
             .items_center()
             .gap_3()
-            .cursor_pointer()
-            .hover(|row| row.bg(rgb(crate::ui_theme::bg_hover())))
             .child(automation_run_detail::run_status_dot(run.status))
             .child(
                 automation_run_lines(

@@ -414,7 +414,7 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .bg(rgba(0x000000d9))
-                .cursor_pointer()
+                
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.acp_image_preview = None;
                     cx.notify();

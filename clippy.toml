@@ -1,0 +1,6 @@
+# 桌面控件用默认箭头。手型只给真正的链接，由 gpui-component Button 的
+# link / text 变体在库内设置（`button.rs` 里 interactive && is_link/is_text
+# 才 `cursor_pointer`）。本仓库不要再调用这个方法。
+disallowed-methods = [
+    { path = "gpui::styled::Styled::cursor_pointer", reason = "桌面控件用默认箭头。手型只给链接，由库的 link 变体设置。" },
+]

@@ -284,7 +284,7 @@ impl Workspace {
                         .py_1p5()
                         .gap_2()
                         .items_center()
-                        .cursor_pointer()
+                        
                         .when(selected, |row| {
                             row.bg(ui_theme::tint(ui_theme::action_fill(), 0x22))
                         })

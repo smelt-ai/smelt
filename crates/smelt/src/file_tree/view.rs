@@ -109,7 +109,7 @@ fn search_tree_rows(
                 .py(px(2.))
                 .text_sm()
                 .text_color(context.fg)
-                .cursor_pointer()
+                
                 .hover(move |row| row.bg(context.hover))
                 .child(
                     Icon::new(IconName::File)
@@ -869,7 +869,7 @@ pub fn file_content_parts(
                         .items_center()
                         .text_size(px(14.))
                         .line_height(relative(1.2))
-                        .cursor_pointer()
+                        
                         .when(is_last, |el| el.text_color(fg).font_semibold())
                         .when(!is_last, |el| el.text_color(muted))
                         .hover(move |el| el.bg(border).text_color(fg))

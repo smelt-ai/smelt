@@ -1,6 +1,31 @@
 //! ACP 审批卡与选择题卡。
 
 use super::*;
+use gpui_component::checkbox::Checkbox;
+use gpui_component::radio::Radio;
+
+/// 选择题的一行。外框、字号和悬停透明度留在这里；勾选语义交给库的单选 / 复选框。
+fn elicit_choice_row<E>(row: E, selected: bool, border: gpui::Hsla) -> E
+where
+    E: gpui::Styled + gpui::InteractiveElement,
+{
+    let accent = gpui::rgb(ui_theme::accent());
+    row.w_full()
+        .min_w_0()
+        .min_h(px(36.))
+        .px_3p5()
+        .py_2()
+        .text_sm()
+        .rounded_lg()
+        .border_1()
+        .border_color(if selected { accent.into() } else { border })
+        .bg(if selected {
+            ui_theme::tint(ui_theme::accent(), 0x24)
+        } else {
+            ui_theme::overlay(0x10)
+        })
+        .hover(|row| row.opacity(0.85))
+}
 
 impl AcpView {
     pub(super) fn render_approval_ui(
@@ -354,51 +379,35 @@ impl AcpView {
                     .gap_2();
                 for (oix, opt) in options.iter().enumerate() {
                     let selected = chosen.contains(&oix);
-                    let accent = gpui::rgb(ui_theme::accent());
-                    list = list.child(
-                        h_flex().w_full().min_w_0().child(
-                            div()
-                                .id(("acp-elicit-opt", oix))
+                    let id = gpui::SharedString::from(format!("acp-elicit-opt-{fix}-{oix}"));
+                    let label = opt.label.clone();
+                    list = list.child(if is_multi {
+                        elicit_choice_row(
+                            Checkbox::new(id)
+                                .checked(selected)
+                                .label(label)
                                 .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
-                                .w_full()
-                                .min_w_0()
-                                .min_h(px(36.))
-                                .px_3p5()
-                                .py_2()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(if selected { accent.into() } else { t.border })
-                                .bg(if selected {
-                                    ui_theme::tint(ui_theme::accent(), 0x24)
-                                } else {
-                                    ui_theme::overlay(0x10)
-                                })
-                                .cursor_pointer()
-                                .hover(|d| d.opacity(0.85))
-                                .child(
-                                    div()
-                                        .mt(px(2.))
-                                        .size(px(16.))
-                                        .flex_shrink_0()
-                                        .border_1()
-                                        .border_color(if selected {
-                                            accent.into()
-                                        } else {
-                                            t.border
-                                        })
-                                        .when(is_multi, |d| d.rounded(px(4.)))
-                                        .when(!is_multi, |d| d.rounded_full())
-                                        .when(selected, |d| d.bg(accent)),
-                                )
-                                .child(div().min_w_0().flex_1().text_sm().child(opt.label.clone()))
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                .on_click(cx.listener(move |this, _: &bool, _window, cx| {
                                     this.pick_elicit_option(fix, oix, cx);
                                 })),
-                        ),
-                    );
+                            selected,
+                            t.border,
+                        )
+                        .into_any_element()
+                    } else {
+                        elicit_choice_row(
+                            Radio::new(id)
+                                .checked(selected)
+                                .label(label)
+                                .debug_selector(move || format!("acp-elicit-opt-{fix}-{oix}"))
+                                .on_click(cx.listener(move |this, _: &bool, _window, cx| {
+                                    this.pick_elicit_option(fix, oix, cx);
+                                })),
+                            selected,
+                            t.border,
+                        )
+                        .into_any_element()
+                    });
                 }
                 if field.allow_custom_input {
                     let input = self.elicitation_inputs.get(&fix).cloned();

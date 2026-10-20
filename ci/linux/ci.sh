@@ -41,6 +41,9 @@ done
 PROGRAMS=(smeltd smelt-notify)
 
 stage_lint() {
+  info "光标：禁止手型"
+  "$REPO_ROOT/ci/lint-pointer.sh"
+  ok "没有手型光标"
   info "Rust：格式"
   cargo fmt --check "${PACKAGE_ARGS[@]}"
   ok "rustfmt 通过"

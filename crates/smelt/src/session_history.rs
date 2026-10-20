@@ -416,7 +416,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                                         .gap_0p5()
                                         .px_2()
                                         .rounded_md()
-                                        .cursor_pointer()
+                                        
                                         .text_color(fg)
                                         .when(is_sel, |d| d.bg(accent.opacity(0.18)))
                                         .when(!is_sel, |d| d.hover(|s| s.bg(c_border.opacity(0.5))))

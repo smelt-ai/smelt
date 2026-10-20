@@ -111,22 +111,14 @@ impl Workspace {
     ) -> AnyElement {
         let selected = self.active_tab() == &route
             && (route != WorkspaceRoute::Agents || self.nav.agents().conversation_sid().is_none());
-        div()
-            .id(id)
+        ListRow::new(id)
+            .selected(selected)
             .h(crate::ui_theme::height::md())
             .px_2()
             .flex()
             .items_center()
             .gap_2()
             .rounded(crate::ui_theme::row_radius())
-            .cursor_pointer()
-            .map(|row| {
-                if selected {
-                    row.bg(rgb(crate::ui_theme::bg_selected()))
-                } else {
-                    row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-                }
-            })
             .child(Icon::new(icon).size(px(16.)).text_color(rgb(if selected {
                 crate::ui_theme::text_mid()
             } else {
@@ -217,8 +209,7 @@ impl Workspace {
         )>,
     ) -> AnyElement {
         let click_entity = entity.clone();
-        div()
-            .id("workbench-chat")
+        ListRow::new("workbench-chat")
             .role(gpui::Role::Button)
             .aria_label(label.clone())
             .h(crate::ui_theme::height::md())
@@ -227,8 +218,6 @@ impl Workspace {
             .items_center()
             .gap_2()
             .rounded(crate::ui_theme::row_radius())
-            .cursor_pointer()
-            .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
             .child(new_conversation_row_body(label, mark).flex_1())
             .when_some(switch, |row, (current_id, ready)| {
                 let menu_entity = entity.clone();
@@ -362,8 +351,8 @@ impl Workspace {
             let close_entity = entity.clone();
             let rename_entity = entity.clone();
             rows.push(
-                div()
-                    .id(format!("product-conversation-{sid}"))
+                ListRow::new(format!("product-conversation-{sid}"))
+                    .selected(selected)
                     .group("product-conv-row")
                     .px_2()
                     .py(px(6.))
@@ -371,14 +360,6 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .rounded(crate::ui_theme::row_radius())
-                    .cursor_pointer()
-                    .map(|row| {
-                        if selected {
-                            row.bg(rgb(crate::ui_theme::bg_selected()))
-                        } else {
-                            row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-                        }
-                    })
                     .child(
                         div()
                             .flex_shrink_0()
@@ -514,15 +495,12 @@ impl Workspace {
             })
             .when_some(toggle_label, |section, label| {
                 section.child(
-                    div()
-                        .id("recent-conversations-toggle")
+                    ListRow::new("recent-conversations-toggle")
                         .px_2()
                         .h(crate::ui_theme::height::sm())
                         .flex()
                         .items_center()
                         .rounded(crate::ui_theme::row_radius())
-                        .cursor_pointer()
-                        .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
                         .text_xs()
                         .text_color(rgb(crate::ui_theme::text_faint()))
                         .child(label)
@@ -730,16 +708,13 @@ impl Workspace {
         let menu_talk_id = id.clone();
         let menu_delete_entity = open_entity.clone();
         let menu_delete_id = id.clone();
-        agent_surface_card()
-            .id(format!("agent-row-{id}"))
+        content_card_style(ListRow::new(format!("agent-row-{id}")).card())
             .w_full()
             .px_4()
             .py_3()
-            .cursor_pointer()
             .flex()
             .items_center()
             .gap_3()
-            .hover(|card| card.bg(rgb(crate::ui_theme::bg_hover())))
             .child(agent_monogram(&name, 36., true))
             .child(
                 div()

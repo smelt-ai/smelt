@@ -609,7 +609,7 @@ fn render_ledger_row(
         .items_center()
         .border_b_1()
         .border_color(ui_theme::overlay(0x10))
-        .cursor_pointer()
+        
         .when(selected, |row| row.bg(ui_theme::overlay(0x1c)))
         .hover(|row| row.bg(ui_theme::overlay(0x10)))
         .on_click(cx.listener(move |this, _, _, cx| {

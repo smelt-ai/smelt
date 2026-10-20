@@ -263,17 +263,12 @@ impl Workspace {
                 let open_entity = entity.clone();
                 let run_id = run.id.clone();
                 let selected = selected_run_id.as_deref() == Some(run.id.as_str());
-                div()
-                    .id(format!("automation-editor-run-{run_id}"))
+                ListRow::new(format!("automation-editor-run-{run_id}"))
+                    .selected(selected)
                     .w_full()
                     .px_2()
                     .py_2()
                     .rounded(crate::ui_theme::row_radius())
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(rgb(crate::ui_theme::bg_selected())))
-                    .when(!selected, |row| {
-                        row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-                    })
                     .flex()
                     .gap_2()
                     .child(automation_run_detail::run_status_dot(run.status).mt(px(6.)))
@@ -309,19 +304,12 @@ impl Workspace {
             .gap_1()
             .when(show_task, |column| {
                 column.child(
-                    div()
-                        .id("automation-run-column-task")
+                    ListRow::new("automation-run-column-task")
+                        .selected(task_selected)
                         .w_full()
                         .px_2()
                         .py_2()
                         .rounded(crate::ui_theme::row_radius())
-                        .cursor_pointer()
-                        .when(task_selected, |row| {
-                            row.bg(rgb(crate::ui_theme::bg_selected()))
-                        })
-                        .when(!task_selected, |row| {
-                            row.hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-                        })
                         .child(
                             div()
                                 .text_sm()

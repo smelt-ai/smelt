@@ -25,6 +25,7 @@ use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Icon, IconName, RopeExt, Sizable, StyledExt, h_flex, v_flex};
 pub(crate) use smelt_ui::Button;
+use smelt_ui::ListRow;
 
 use agent_client_protocol::schema::v1::SessionId;
 
@@ -5003,7 +5004,7 @@ impl AcpView {
                         .py_2()
                         .gap_2p5()
                         .items_center()
-                        .cursor_pointer()
+                        
                         .hover(|d| d.bg(ui_theme::overlay(0x14)))
                         .active(|d| d.opacity(0.88))
                         .on_click(cx.listener(|this, _ev, _window, cx| {

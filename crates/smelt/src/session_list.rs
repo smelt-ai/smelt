@@ -23,6 +23,7 @@ use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
+use smelt_ui::ListRow;
 use smelt_ui::IconAction as _;
 use smelt_ui::motion::{ambient_animation, flip_slot};
 use std::time::Duration;
@@ -97,8 +98,7 @@ fn runtime_section_header(
     let menu_workspace = workspace.clone();
     let context_runtime = runtime.clone();
     let context_workspace = workspace.clone();
-    div()
-        .id(ElementId::from(group.clone()))
+    ListRow::new(ElementId::from(group.clone()))
         .group(group.clone())
         .mx_2()
         .mt_3()
@@ -109,8 +109,6 @@ fn runtime_section_header(
         .items_center()
         .gap_1()
         .rounded(ui_theme::row_radius())
-        .cursor_pointer()
-        .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
         .on_click(move |_ev, _window, cx| {
             toggle_workspace.update(cx, |ws, cx| ws.toggle_runtime_fold(&toggle_key, cx));
         })
@@ -964,8 +962,8 @@ impl Workspace {
             visible_ix += 1;
             if grouping != SidebarGrouping::None {
                 group_rows = group_rows.child(
-                    div()
-                        .id(project_element_id("proj-group", &project))
+                    ListRow::new(project_element_id("proj-group", &project))
+                        .selected(project_header_selected)
                         // relative：右端的 + 浮层靠 absolute 定位到这行内。
                         .relative()
                         .flex()
@@ -975,13 +973,6 @@ impl Workspace {
                         .py(px(4.))
                         .rounded(ui_theme::row_radius())
                         .group(PROJ_HEADER_GROUP)
-                        .map(|d| {
-                            if project_header_selected {
-                                d.bg(rgb(ui_theme::bg_selected()))
-                            } else {
-                                d.hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                            }
-                        })
                         .child(
                             div()
                                 .id(project_element_id("proj-disclosure", &project))
@@ -1493,9 +1484,9 @@ impl Workspace {
                 };
 
                 let row_tooltip = title.clone();
-                let row = div()
-                    .id(("sess-row", ui_id))
+                let row = ListRow::new(("sess-row", ui_id))
                     .group(SESSION_ROW_GROUP)
+                    .selected(is_active)
                     .relative()
                     .flex()
                     .items_center()
@@ -1507,15 +1498,7 @@ impl Workspace {
                     .tooltip(move |window, cx| {
                         gpui_component::tooltip::Tooltip::new(row_tooltip.clone()).build(window, cx)
                     })
-                    // 选中靠整张会话卡亮起来，不再靠左侧白条——那是频道列表的旧说法。
-                    // hover 走 bg_row_hover：划过只浮起一点，亮起来留给当前会话。
-                    .map(|d| {
-                        if is_active {
-                            d.bg(rgb(ui_theme::bg_selected()))
-                        } else {
-                            d.hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                        }
-                    })
+                    // 选中靠整张会话卡亮起来，不再靠左侧白条。悬停底由 ListRow 铺。
                     // Grok 对话列表：小图标，不套色块。状态只给图标上色。
                     .child(session_icon)
                     .child(
@@ -1769,8 +1752,8 @@ impl Workspace {
                                 .into_any_element()
                         };
                         pane_rows = pane_rows.child(
-                            div()
-                                .id(("sess-pane-row", pane_entity_id))
+                            ListRow::new(("sess-pane-row", pane_entity_id))
+                                .selected(is_current_view)
                                 .relative()
                                 .flex()
                                 .items_center()
@@ -1779,13 +1762,6 @@ impl Workspace {
                                 .py(px(6.))
                                 .rounded(ui_theme::row_radius())
                                 .when(is_drag_source_session, |d| d.opacity(0.4))
-                                .map(|d| {
-                                    if is_current_view {
-                                        d.bg(rgb(ui_theme::bg_selected()))
-                                    } else {
-                                        d.hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
-                                    }
-                                })
                                 .child(pane_icon)
                                 .child(
                                     div()
@@ -1962,15 +1938,12 @@ impl Workspace {
         if hidden_empty > 0 {
             let e_show = this.clone();
             rows = rows.child(
-                div()
-                    .id("hidden-empty-projects")
+                ListRow::new("hidden-empty-projects")
                     .mx_2()
                     .mt_2()
                     .px(px(PROJECT_HEADER_PAD_X))
                     .py(px(4.))
                     .rounded(ui_theme::row_radius())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_ev, _window, cx| {
                         e_show.update(cx, |ws, cx| {
@@ -2054,8 +2027,7 @@ impl Workspace {
                                 format!("{hint} 点击刷新。")
                             };
                             let on_click_this = quota_this.clone();
-                            div()
-                                .id(SharedString::from(target.id()))
+                            ListRow::new(SharedString::from(target.id()))
                                 .flex()
                                 .items_center()
                                 .gap_1()
@@ -2068,8 +2040,6 @@ impl Workspace {
                                 } else {
                                     color
                                 }))
-                                .cursor_pointer()
-                                .hover(|d| d.bg(rgb(ui_theme::bg_row_hover())))
                                 .child(acp_provider_icon(target.agent).size(px(12.)))
                                 .child(text)
                                 .tooltip(move |window, cx| {

@@ -279,11 +279,14 @@ fn update_proj_drop_hint(
     }
 }
 
-pub(super) fn with_session_drag(
-    row: Stateful<Div>,
+pub(super) fn with_session_drag<E>(
+    row: E,
     payload: SessionDrag,
     workspace: Entity<Workspace>,
-) -> Stateful<Div> {
+) -> E
+where
+    E: StatefulInteractiveElement,
+{
     let ui_id = payload.id;
     row.on_drag(payload, move |drag, grab, _, cx| {
         workspace.update(cx, |ws, _| {
@@ -297,11 +300,14 @@ pub(super) fn with_session_drag(
     })
 }
 
-pub(super) fn with_project_drag(
-    row: Stateful<Div>,
+pub(super) fn with_project_drag<E>(
+    row: E,
     payload: ProjectDrag,
     workspace: Entity<Workspace>,
-) -> Stateful<Div> {
+) -> E
+where
+    E: StatefulInteractiveElement,
+{
     row.on_drag(payload, move |drag, grab, _, cx| {
         let dragged = drag.project.clone();
         workspace.update(cx, |ws, _| {

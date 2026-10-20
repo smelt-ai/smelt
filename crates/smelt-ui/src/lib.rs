@@ -11,6 +11,7 @@ pub mod frame_stats;
 pub mod history_titles_global;
 pub mod icon_action;
 pub mod image;
+pub mod list_row;
 pub mod markdown_links;
 mod markdown_literal_html;
 pub mod markdown_mermaid;
@@ -22,3 +23,4 @@ pub mod ui_theme;
 
 pub use button::Button;
 pub use icon_action::IconAction;
+pub use list_row::ListRow;

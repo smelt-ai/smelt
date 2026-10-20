@@ -19,6 +19,7 @@ fmt-check: ## 检查代码格式
 	cargo fmt --check
 
 lint: ## 运行 Clippy 静态检查（正确性 lint 由 workspace.lints deny）
+	./ci/lint-pointer.sh
 	cargo clippy --workspace --all-targets
 
 lint-sh: ## 检查 shell 脚本里 $$var 紧跟非 ASCII 的写法

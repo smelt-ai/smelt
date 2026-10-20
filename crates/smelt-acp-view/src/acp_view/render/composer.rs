@@ -139,7 +139,7 @@ impl AcpView {
                         .gap_2()
                         .items_center()
                         .when(selected, |d| d.bg(ui_theme::tint(ui_theme::accent(), 0x38)))
-                        .cursor_pointer()
+                        
                         .hover(move |d| {
                             d.bg(if selected {
                                 ui_theme::tint(ui_theme::accent(), 0x48)
@@ -700,7 +700,7 @@ impl AcpView {
                                 .role(gpui::Role::Button)
                                 .aria_label("预览图片")
                                 .relative()
-                                .cursor_pointer()
+                                
                                 .hover(|d| d.opacity(0.88))
                                 .border_1()
                                 .border_color(t.border)
@@ -731,7 +731,7 @@ impl AcpView {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .cursor_pointer()
+                                        
                                         .hover(|d| d.opacity(0.8))
                                         .child("×")
                                         .on_mouse_down(
@@ -817,7 +817,7 @@ impl AcpView {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .cursor_pointer()
+                                        
                                         .hover(|d| d.opacity(0.8))
                                         .child(if compacting {
                                             ambient_spinner(
@@ -1181,7 +1181,7 @@ impl AcpView {
                 .px_2()
                 .py_1p5()
                 .rounded(ui_theme::row_radius())
-                .cursor_pointer()
+                
                 .hover(|row| row.bg(ui_theme::overlay(0x14)))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     if !this.expanded_background_tasks.remove(&id) {

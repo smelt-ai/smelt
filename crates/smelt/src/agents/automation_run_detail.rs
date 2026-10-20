@@ -419,8 +419,7 @@ fn run_detail_disclosure(
         .flex_col()
         .gap_2()
         .child(
-            div()
-                .id(SharedString::from(format!("automation-run-block-{key}")))
+            ListRow::new(SharedString::from(format!("automation-run-block-{key}")))
                 .flex()
                 .items_center()
                 .gap_1p5()
@@ -428,8 +427,6 @@ fn run_detail_disclosure(
                 .px(px(6.))
                 .h(crate::ui_theme::height::xs())
                 .rounded(crate::ui_theme::row_radius())
-                .cursor_pointer()
-                .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
                 .child(disclosure_chevron(expanded))
                 .child(
                     div()
@@ -709,8 +706,8 @@ fn transcript_step(
     };
     let toggle_key = key.to_string();
     let toggle_entity = entity.clone();
-    let row = div()
-        .id(SharedString::from(format!("automation-run-step-{key}")))
+    let row = ListRow::new(SharedString::from(format!("automation-run-step-{key}")))
+        .disabled(!expandable)
         .min_h(px(24.))
         .mx(px(-6.))
         .px(px(6.))
@@ -735,16 +732,12 @@ fn transcript_step(
                 .text_color(rgb(flag.color()))
                 .child(flag.label())
         }))
-        .when(expandable, |row| {
-            row.cursor_pointer()
-                .hover(|row| row.bg(rgb(crate::ui_theme::bg_row_hover())))
-                .child(disclosure_chevron(expanded))
-                .on_click(move |_, _, cx| {
-                    let key = toggle_key.clone();
-                    toggle_entity.update(cx, |workspace, cx| {
-                        workspace.toggle_automation_run_block(key, cx)
-                    });
-                })
+        .when(expandable, |row| row.child(disclosure_chevron(expanded)))
+        .on_click(move |_, _, cx| {
+            let key = toggle_key.clone();
+            toggle_entity.update(cx, |workspace, cx| {
+                workspace.toggle_automation_run_block(key, cx)
+            });
         });
     let body = body.filter(|_| expanded);
     div()
