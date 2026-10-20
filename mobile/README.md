@@ -4,8 +4,7 @@ Flutter client for Smelt remote ACP conversations and live terminal sessions.
 
 ## Flutter SDK version
 
-Use the version pinned as `REQUIRED_FLUTTER` in `ci/lib/common.sh`. It is the
-single source of truth, shared by the iOS and Android CI setup scripts.
+Use Flutter 3.47.3.
 
 Matching it locally is not optional. Every `flutter` invocation silently
 migrates the platform projects to the shape its own SDK expects — the iOS
@@ -16,10 +15,9 @@ diffs in every commit. Check with:
 
 ```sh
 flutter --version
-bash ci/ios/env-setup.sh --check    # or ci/android/env-setup.sh --check
 ```
 
-When you deliberately upgrade, bump `REQUIRED_FLUTTER` and commit whatever the
+When you deliberately upgrade, bump the version above and commit whatever the
 new SDK migrates in the same change, so the two never drift.
 
 ## iOS development signing
@@ -60,10 +58,6 @@ verifies most of them):
 | Android NDK | 28.2.13676358 |
 | Rust targets | `aarch64-linux-android` (plus `armv7-linux-androideabi`, `x86_64-linux-android`, `i686-linux-android` for other ABIs) |
 
-`./ci/android/env-setup.sh` installs all of the above into
-`~/.smelt-ci/toolchains` without touching system directories, if you prefer not
-to set them up by hand.
-
 ```sh
 flutter build apk --debug --target-platform android-arm64
 ```
@@ -84,9 +78,8 @@ keyPassword=...
 
 Without that file the release build falls back to the debug keystore, so
 `flutter run --release` still works on a development machine — but the resulting
-APK is not distributable. On CI, pass the same values through
-`SMELT_ANDROID_KEYSTORE` and friends and let `./ci/android/ci.sh build` write
-the file; it is removed again when the build finishes.
+APK is not distributable. The release workflow writes the file from repository
+secrets and removes it again when the build finishes.
 
 The production keystore and the final Play Store listing are intentionally not
 configured yet, mirroring the iOS situation above.

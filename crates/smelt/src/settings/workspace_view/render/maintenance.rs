@@ -55,6 +55,8 @@ fn maintenance_groups(
     // —— 维护：更新、守护进程和残留数据清理 ——
     let update_entity = entity.clone();
     let update_status = snapshot.update_status.clone();
+    let moving_app = snapshot.moving_app;
+    let move_app_error = snapshot.move_app_error.clone();
     let daemon_entity = entity;
     let update_group = SettingGroup::new().item(SettingItem::render(move |_, _, cx: &mut App| {
         let status = update_status.clone();
@@ -138,7 +140,10 @@ fn maintenance_groups(
             ),
             updater::UpdateStatus::Failed(failure) => (
                 failure.title().to_string(),
-                failure.detail().to_string(),
+                match (failure, &move_app_error) {
+                    (updater::UpdateFailure::Location, Some(error)) => error.to_string(),
+                    _ => failure.detail().to_string(),
+                },
                 Some(crate::ui_theme::red()),
             ),
         };
@@ -261,7 +266,31 @@ fn maintenance_groups(
                 })
         });
 
+        // 位置不对时唯一的前进入口，和启动时那个确认框是同一个动作。
+        let move_btn = matches!(
+            &status,
+            updater::UpdateStatus::Failed(updater::UpdateFailure::Location)
+        )
+        .then(|| {
+            let move_entity = update_entity.clone();
+            Button::new("move-app-to-applications")
+                .commit()
+                .compact()
+                .label(if moving_app {
+                    "正在移动…"
+                } else {
+                    "移到「应用程序」并重新打开"
+                })
+                .disabled(moving_app)
+                .on_click(move |_, _window, cx: &mut App| {
+                    move_entity.update(cx, |this, cx| this.move_app_to_applications(cx));
+                })
+        });
+
         let mut action_row = h_flex().gap_2().items_center().child(check_btn);
+        if let Some(move_btn) = move_btn {
+            action_row = action_row.child(move_btn);
+        }
         if let Some(download_btn) = download_btn {
             action_row = action_row.child(download_btn);
         }

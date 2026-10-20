@@ -114,12 +114,18 @@ jobs:
       - name: Build & package
         env:
           SMELT_CODESIGN_IDENTITY: "Smelt Local Signing"
+          SMELT_UPDATE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Smelt.app.zip
         run: make dist-build
+
+      # 桌面自更新下载的是这个 zip（见 smelt-client 的 updater）。ditto 保留签名和扩展属性。
+      - name: Update archive
+        run: ditto -c -k --keepParent dist/Smelt.app dist/Smelt.app.zip
 
       # 产物必须真的生成，否则后面上传会是空发布。
       - name: Verify artifact
         run: |
           test -f dist/Smelt.dmg || { echo "✗ 没生成 dist/Smelt.dmg"; exit 1; }
+          test -f dist/Smelt.app.zip || { echo "✗ 没生成 dist/Smelt.app.zip"; exit 1; }
           ls -lh dist/Smelt.dmg
           test -x dist/Smelt.app/Contents/MacOS/smelt-notify \
             || { echo "✗ App 缺少可执行的 smelt-notify"; exit 1; }
@@ -163,7 +169,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/Smelt.dmg
+          files: |
+            dist/Smelt.dmg
+            dist/Smelt.app.zip
           body_path: ${{ runner.temp }}/release-notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}
 
@@ -196,10 +204,13 @@ jobs:
       - name: Trust workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # 版本由仓库根的 rust-toolchain.toml 决定，rustup 只装个壳，再按它补齐工具链。
       - name: Toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install
 
       - name: Package
         run: ./scripts/package-linux.sh
@@ -284,31 +295,38 @@ jobs:
         with:
           channel: stable
 
+      # app/build.gradle.kts 读 android/key.properties（已 gitignore）。不用 -P 直通 Gradle：
+      # 参数会进构建缓存和日志，密码容易泄进 CI 输出。构建完和 keystore 一起删。
       - name: Write keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.SMELT_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.SMELT_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SMELT_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SMELT_ANDROID_KEY_PASSWORD }}
         run: |
-          if [[ -z "$KEYSTORE_BASE64" ]]; then
-            echo "✗ 没配置 SMELT_ANDROID_KEYSTORE_BASE64，发版的 APK 必须正式签名。"
-            exit 1
-          fi
+          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -z "${!var}" ]]; then
+              echo "✗ 没配置 SMELT_ANDROID_${var}，发版的 APK 必须正式签名。"
+              exit 1
+            fi
+          done
           echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
-          echo "SMELT_ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          umask 077
+          cat > mobile/android/key.properties <<EOF
+          storeFile=$RUNNER_TEMP/release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
 
       - name: Build APK
-        env:
-          SMELT_CI_SKIP_ENV: "1"
-          SMELT_REQUIRE_RELEASE_SIGNING: "1"
-          SMELT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.SMELT_ANDROID_KEYSTORE_PASSWORD }}
-          SMELT_ANDROID_KEY_ALIAS: ${{ secrets.SMELT_ANDROID_KEY_ALIAS }}
-          SMELT_ANDROID_KEY_PASSWORD: ${{ secrets.SMELT_ANDROID_KEY_PASSWORD }}
-          SMELT_BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          export SMELT_BUILD_NAME="${GITHUB_REF_NAME#v}"
-          ./ci/android/ci.sh build
+          version="${GITHUB_REF_NAME#v}"
+          (cd mobile && flutter build apk --release --target-platform android-arm64 \
+            --build-name "$version" --build-number "${{ github.run_number }}")
           mkdir -p dist
           cp mobile/build/app/outputs/flutter-apk/app-release.apk \
-            "dist/Smelt-${SMELT_BUILD_NAME}-android-arm64.apk"
+            "dist/Smelt-${version}-android-arm64.apk"
           ls -lh dist/
 
       # 签名必须是正式证书：apksigner 打出证书指纹，debug 证书的主题是 "CN=Android Debug"。
@@ -323,7 +341,7 @@ jobs:
 
       - name: Clean up keystore
         if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks"
+        run: rm -f "$RUNNER_TEMP/release.jks" mobile/android/key.properties
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
@@ -349,7 +367,7 @@ jobs:
           files: dist/Smelt-*-android-arm64.apk
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、APK、Linux 包、install.sh）。
+  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、自更新 zip、APK、Linux 包、install.sh）。
   checksums:
     needs: [linux-release, android-release]
     runs-on: ubuntu-24.04
@@ -360,7 +378,7 @@ jobs:
         run: |
           mkdir dist && cd dist
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Smelt.dmg' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'install.sh'
+            --pattern 'Smelt.dmg' --pattern 'Smelt.app.zip' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'install.sh'
           sha256sum -- * | sort -k2 > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"

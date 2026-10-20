@@ -94,10 +94,10 @@ jobs:
       # 的全局状态（fd 表、waitpid、进程组），同一个进程里跑就会互相串味——原样
       # 跑大约五次挂一次，串行也照挂。nextest 每个测试起一个独立进程，这个干扰
       # 就不存在了。
-      # 不靠 clippy：这个 job 不跑 clippy，GUI crate 在 Linux 上也编不进 ci/linux/ci.sh。
+      # 不靠 clippy：这个 job 不跑 clippy，GUI crate 在 Linux 上也编不进来。
       # 手型光标是调用点约定，grep 能在编译之前就失败。
       - name: 禁止手型光标
-        run: ./ci/lint-pointer.sh
+        run: ./scripts/lint-pointer.sh
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

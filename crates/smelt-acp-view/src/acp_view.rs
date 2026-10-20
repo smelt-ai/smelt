@@ -1199,23 +1199,34 @@ pub enum AcpViewEvent {
 /// 上一轮没正常结束后能做的事。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TurnOutcomeAction {
-    /// 原样重发最后一条用户消息。
+    /// 回到最后一条用户消息之前，原样再发一次（daemon 的 `RetryLastTurn`）。
     Retry,
     /// 接着被截断的地方说。
     Continue,
 }
 
-/// 上一轮的结局要不要在对话末尾给一张卡：要的话给提示和按钮。成功没有卡；
-/// 取消是用户自己停的，也没有。
-fn turn_outcome_card(outcome: Option<AcpTurnOutcome>) -> Option<(&'static str, TurnOutcomeAction)> {
+/// 上一轮的结局要不要在对话末尾给一张卡：要的话给提示，能做什么就再给个按钮。成功
+/// 没有卡；取消是用户自己停的，也没有。
+///
+/// 重试要能回到那条用户消息之前（`supports_rewind`）才给：不能回退的 agent 只能把它
+/// 当新消息再发，对话里和 agent 上下文里都会叠出一条一样的，那不是重试。
+fn turn_outcome_card(
+    outcome: Option<AcpTurnOutcome>,
+    supports_rewind: bool,
+) -> Option<(&'static str, Option<TurnOutcomeAction>)> {
+    let retry = supports_rewind.then_some(TurnOutcomeAction::Retry);
     match outcome? {
         AcpTurnOutcome::Succeeded | AcpTurnOutcome::Cancelled => None,
-        AcpTurnOutcome::Failed => Some(("这一轮没有完成", TurnOutcomeAction::Retry)),
-        AcpTurnOutcome::Refused => Some(("Agent 拒绝继续处理", TurnOutcomeAction::Retry)),
-        AcpTurnOutcome::MaxTokens => Some(("回复太长，被截断了", TurnOutcomeAction::Continue)),
-        AcpTurnOutcome::MaxTurnRequests => {
-            Some(("已达到本轮最大请求数", TurnOutcomeAction::Continue))
-        }
+        AcpTurnOutcome::Failed => Some(("这一轮没有完成", retry)),
+        AcpTurnOutcome::Refused => Some(("Agent 拒绝继续处理", retry)),
+        AcpTurnOutcome::MaxTokens => Some((
+            "回复太长，被截断了",
+            Some(TurnOutcomeAction::Continue),
+        )),
+        AcpTurnOutcome::MaxTurnRequests => Some((
+            "已达到本轮最大请求数",
+            Some(TurnOutcomeAction::Continue),
+        )),
     }
 }
 
@@ -3196,36 +3207,36 @@ impl AcpView {
         }
     }
 
-    /// 上一轮没正常结束时，再来一次：「重试」原样重发最后一条用户消息（带图），
-    /// 「继续」接着被截断的地方说。都走普通发送，输入框里的草稿和图不受影响。
+    /// 上一轮没正常结束时，再来一次。输入框里的草稿和图都不受影响。
+    ///
+    /// 「重试」交给 daemon：回到最后一条用户消息之前，再把它原样（带图）发一次，对话里和
+    /// agent 的上下文里都只留一条。不能当新消息重发——那样每点一次就多一条一样的用户
+    /// 消息，agent 那边也真的收到好几遍。「继续」本来就是一条新消息，走普通发送。
     fn rerun_last_turn(
         &mut self,
         action: TurnOutcomeAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (text, images) = match action {
-            TurnOutcomeAction::Continue => ("继续".to_string(), Vec::new()),
+        match action {
+            TurnOutcomeAction::Continue => {
+                let draft = std::mem::take(&mut self.pending_images);
+                self.send_prompt("继续".to_string(), window, cx);
+                self.pending_images = draft;
+            }
             TurnOutcomeAction::Retry => {
-                let Some(last) = self.entries.iter().rev().find_map(|entry| match entry {
-                    AcpEntry::User(text) => Some((text.clone(), Vec::new())),
-                    AcpEntry::UserWithImages { text, images } => Some((
-                        text.clone(),
-                        images
-                            .iter()
-                            .filter_map(decode_acp_image)
-                            .collect::<Vec<_>>(),
-                    )),
-                    _ => None,
-                }) else {
+                if !self.supports_rewind || self.has_active_turn() {
+                    return;
+                }
+                let Some(h) = &self.handle else {
                     return;
                 };
-                last
+                if h.action_tx.try_send(AcpUserAction::RetryLastTurn).is_err() {
+                    self.paste_hint = Some("无法重试这一轮".to_string());
+                    cx.notify();
+                }
             }
-        };
-        let draft = std::mem::replace(&mut self.pending_images, images);
-        self.send_prompt(text, window, cx);
-        self.pending_images = draft;
+        }
     }
 
     /// 用户是否正往上翻着看历史。这时最新结果不在眼前，不能算已读。

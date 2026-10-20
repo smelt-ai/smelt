@@ -124,7 +124,7 @@ async function createRunner(options: { spoofWrite?: boolean; host?: FakeMemoryHo
 }
 
 async function memorySectionFor(runner: ExtensionRunner) {
-	const result = await runner.emitBeforeAgentStart("hi", undefined, { cwd: process.cwd() });
+	const result = await runner.emitBeforeAgentStart({ messageType: "user", prompt: "hi" }, { cwd: process.cwd() });
 	expect(result?.systemPromptOptions.forceSystemPrompt).toBeUndefined();
 	return result?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION];
 }
@@ -351,7 +351,7 @@ describe("smelt-memory extension", () => {
 			"---\nname: release-flow\ndescription: 发布走 fx-deploy 流水线\ntype: project\n---\n先发测试环境。\n",
 		);
 		const { runner } = await createRunner();
-		const turn = (prompt: string) => runner.emitBeforeAgentStart(prompt, undefined, { cwd: process.cwd() });
+		const turn = (prompt: string) => runner.emitBeforeAgentStart({ messageType: "user", prompt }, { cwd: process.cwd() });
 
 		const first = await turn("发布流程怎么走");
 		const second = await turn("发布流程怎么走");
@@ -389,7 +389,7 @@ describe("smelt-memory extension", () => {
 
 	describe("provenance", () => {
 		const turn = (runner: ExtensionRunner, prompt = "hi") =>
-			runner.emitBeforeAgentStart(prompt, undefined, { cwd: process.cwd() });
+			runner.emitBeforeAgentStart({ messageType: "user", prompt }, { cwd: process.cwd() });
 		const toolResult = (runner: ExtensionRunner, toolCallId: string, toolName: string, input: Record<string, unknown> = {}) =>
 			runner.emitToolResult({
 				type: "tool_result",
@@ -458,6 +458,34 @@ describe("smelt-memory extension", () => {
 
 			expect(host.provenance.agent.get("tainted.md")?.trust).toBe("pending");
 			expect(host.provenance.agent.get("clean.md")?.trust).toBe("trusted");
+		});
+
+		// 子智能体、后台任务的结果开的那一轮不是用户的新消息：外部内容标记不能清，也没有
+		// 问题可召回，但记忆分节照样要在。
+		test("a run started by a result keeps the mark, skips recall and still carries memory", async () => {
+			const { agent } = setupRoots();
+			writeFileSync(join(agent, "reply-in-chinese.md"), validMemory);
+			const { runner, host } = await createRunner();
+			await turn(runner);
+			await toolResult(runner, "s1", "subagent");
+			const resultRun = await runner.emitBeforeAgentStart(
+				{
+					messageType: "custom",
+					message: {
+						role: "custom",
+						customType: "smelt-subagent-result",
+						content: "子智能体的结果",
+						display: true,
+						timestamp: Date.now(),
+					},
+				} as never,
+				{ cwd: process.cwd() },
+			);
+			await writeMemory(runner, agent, "from-result", "w1");
+
+			expect(host.provenance.agent.get("from-result.md")?.trust).toBe("pending");
+			expect(resultRun?.messages ?? []).toHaveLength(0);
+			expect(resultRun?.systemPromptOptions.sections?.[SMELT_MEMORY_PROMPT_SECTION]).toContain("reply-in-chinese");
 		});
 
 		test("unattended runs only ever write pending memory", async () => {
@@ -589,7 +617,7 @@ describe("smelt-memory extension", () => {
 			"---\nname: meeting-room\ndescription: 周会在 3 楼 301 会议室\ntype: reference\n---\n每周二上午十点。\n",
 		);
 		const { runner } = await createRunner();
-		const turn = (prompt: string) => runner.emitBeforeAgentStart(prompt, undefined, { cwd: process.cwd() });
+		const turn = (prompt: string) => runner.emitBeforeAgentStart({ messageType: "user", prompt }, { cwd: process.cwd() });
 		const custom = (result: Awaited<ReturnType<typeof turn>>) =>
 			(result?.messages ?? []).filter((message) => message.customType === SMELT_MEMORY_RECALL_MESSAGE);
 
@@ -659,7 +687,7 @@ describe("smelt-memory extension", () => {
 
 			// 自动召回挂在 before_agent_start 上，它慢一秒用户那条消息就晚一秒。
 			// 所以它只跑本地关键词：不请求向量服务，字面对不上就找不到。
-			const first = await runner.emitBeforeAgentStart("这个版本怎么上线？", undefined, { cwd: process.cwd() });
+			const first = await runner.emitBeforeAgentStart({ messageType: "user", prompt: "这个版本怎么上线？" }, { cwd: process.cwd() });
 			expect(String(first?.messages[0]?.content ?? "")).not.toContain("先发测试环境");
 			expect(calls).toEqual([]);
 

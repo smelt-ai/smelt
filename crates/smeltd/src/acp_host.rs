@@ -1585,6 +1585,8 @@ pub(crate) fn start_acp_event_drain(
                 let mut prompt_refused = false;
                 let mut applied = false;
                 let mut stop = false;
+                // 重试的回退落地后要原样再发的那条。截断先归约进投影，放闸前再排进队列。
+                let mut resend = None;
                 for mut ev in batch {
                     if sess.connection_generation.load(Ordering::SeqCst) != generation {
                         // 这条连接已被换掉，剩下的事件不能再改新连接的状态。但被丢掉的
@@ -1672,6 +1674,13 @@ pub(crate) fn start_acp_event_drain(
                     {
                         note_immediate_queue_restore(sess, texts, images);
                     }
+                    if let smelt_core::acp_conn::ConversationEvent::Rewound {
+                        then: smelt_core::acp_conn::AfterRewind::Resend { text, images },
+                        ..
+                    } = &ev
+                    {
+                        resend = Some((text.clone(), images.clone()));
+                    }
                     let (outcome, owner_ids) = {
                         let mut st = sess.reduced.lock().unwrap();
                         let outcome = smelt_core::acp_session::apply_event(&mut st, ev);
@@ -1735,6 +1744,9 @@ pub(crate) fn start_acp_event_drain(
                         );
                     }
                     update_acp_daemon_state(sess, &subscribers);
+                    if let Some((text, images)) = resend.take() {
+                        queue_retry_prompt(sess, text, images);
+                    }
                     // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
                     settle_acp_turn_locked(sess, turn_ended, ready, provider_idle, &subscribers);
                     // 闸门本来就开着时 settle 不进 flush 分支。还原刚落地的立即发送仍要发出去。
@@ -2883,10 +2895,15 @@ fn send_acp_command(
         .map_err(|_| "ACP command channel is busy or closed")
 }
 
-/// 编辑并重发最后一条用户消息。入口是 GUI 传来的 entry 下标，但下标背后的一切
-/// 验证（相位、消息类型、同文本序号）都以 daemon 自己的投影为准——GUI 的
-/// 本地列表可能与投影有短暂分页差异，不能拿它当事实源。
-fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static str> {
+/// 回到最后一条用户消息之前。编辑重发由 GUI 点名下标，原文回输入框；重试不点名，
+/// 取最后一条用户消息，回退成功后原样再发一次（见 [`queue_retry_prompt`]）。
+/// 下标背后的一切验证（相位、消息类型、同文本序号）都以 daemon 自己的投影为准——
+/// GUI 的本地列表可能与投影有短暂分页差异，不能拿它当事实源。
+fn send_acp_rewind(
+    sess: &AcpSession,
+    target: Option<usize>,
+    resend: bool,
+) -> Result<(), &'static str> {
     let handle = sess.handle.lock().unwrap().as_ref().map(|h| {
         (
             h.cmd_tx.clone(),
@@ -2902,58 +2919,47 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
     }
     // 回退会丢弃之后的所有回合与未决审批，只能在完全空闲的会话上发生。
     // 相位不是 Idle 时拒绝，不给“边跑边回退”留出任何竞态窗口。
-    let (phase, target, latest_user_index) = {
+    let (entry_index, text, images, occurrence) = {
         let reduced = sess.reduced.lock().unwrap();
         // 重放期间工作缓冲是草稿，GUI 的下标按已发布正文算，两边对不上；
         // 截断也不能落在半成品上。等重放收尾再回退。
         if reduced.replaying_history {
             return Err("rewind requires history replay to finish");
         }
-        let latest_user_index = reduced.entries().iter().rposition(|entry| match entry {
-            smelt_core::acp_chat::AcpEntry::User(text) => {
-                !smelt_core::acp_chat::is_interrupt_marker(text)
-            }
-            smelt_core::acp_chat::AcpEntry::UserWithImages { text, .. } => {
-                !smelt_core::acp_chat::is_interrupt_marker(text)
-            }
-            _ => false,
-        });
-        (
-            reduced.phase,
-            reduced.entries().get(entry_index).map(|entry| match entry {
-                smelt_core::acp_chat::AcpEntry::User(text) => Some(text.clone()),
-                smelt_core::acp_chat::AcpEntry::UserWithImages { text, .. } => Some(text.clone()),
-                _ => None,
-            }),
-            latest_user_index,
-        )
-    };
-    if phase != smelt_core::daemon_state::DaemonPhase::Idle {
-        return Err("rewind requires an idle session");
-    }
-    let Some(Some(text)) = target else {
-        return Err("rewind target is not a user message");
-    };
-    if smelt_core::acp_chat::is_interrupt_marker(&text) {
-        return Err("rewind target is not a user message");
-    }
-    if latest_user_index != Some(entry_index) {
-        return Err("rewind target is not the latest user message");
-    }
-    // 同文本消息靠序号区分：agent 的可分叉列表里取第 N 条同文本消息，N 必须与
-    // 本地同文本计数一致。中断标记不是真消息，不参与计数。
-    let occurrence = {
-        let reduced = sess.reduced.lock().unwrap();
-        reduced
-            .entries()
+        if reduced.phase != smelt_core::daemon_state::DaemonPhase::Idle {
+            return Err("rewind requires an idle session");
+        }
+        let entries = reduced.entries();
+        let latest_user_index = entries
+            .iter()
+            .rposition(|entry| rewindable_user_message(entry).is_some());
+        let entry_index = match target {
+            Some(entry_index) => entry_index,
+            None => latest_user_index.ok_or("rewind target is not a user message")?,
+        };
+        let Some((text, images)) = entries.get(entry_index).and_then(rewindable_user_message)
+        else {
+            return Err("rewind target is not a user message");
+        };
+        if latest_user_index != Some(entry_index) {
+            return Err("rewind target is not the latest user message");
+        }
+        // 同文本消息靠序号区分：agent 的可分叉列表里取第 N 条同文本消息，N 必须与
+        // 本地同文本计数一致。中断标记不是真消息，不参与计数。
+        let occurrence = entries
             .iter()
             .take(entry_index)
-            .filter(|entry| match entry {
-                smelt_core::acp_chat::AcpEntry::User(t) => t == &text,
-                smelt_core::acp_chat::AcpEntry::UserWithImages { text: t, .. } => t == &text,
-                _ => false,
-            })
-            .count()
+            .filter(|entry| rewindable_user_message(entry).is_some_and(|(t, _)| t == text))
+            .count();
+        (entry_index, text.to_string(), images.to_vec(), occurrence)
+    };
+    let then = if resend {
+        smelt_core::acp_conn::AfterRewind::Resend {
+            text: text.clone(),
+            images,
+        }
+    } else {
+        smelt_core::acp_conn::AfterRewind::RestoreComposer
     };
     in_flight_rpc.fetch_add(1, Ordering::SeqCst);
     if cmd_tx
@@ -2961,6 +2967,7 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
             text,
             occurrence,
             truncate_from: entry_index,
+            then,
         })
         .is_err()
     {
@@ -2968,6 +2975,41 @@ fn send_acp_rewind(sess: &AcpSession, entry_index: usize) -> Result<(), &'static
         return Err("ACP command channel is busy or closed");
     }
     Ok(())
+}
+
+/// 能回退到的用户消息：真实发出的那种（不含中断标记），带着原文和附图。
+fn rewindable_user_message(
+    entry: &smelt_core::acp_chat::AcpEntry,
+) -> Option<(&str, &[smelt_core::acp_chat::AcpImage])> {
+    let (text, images) = match entry {
+        smelt_core::acp_chat::AcpEntry::User(text) => (text.as_str(), &[][..]),
+        smelt_core::acp_chat::AcpEntry::UserWithImages { text, images } => {
+            (text.as_str(), images.as_slice())
+        }
+        _ => return None,
+    };
+    (!smelt_core::acp_chat::is_interrupt_marker(text)).then_some((text, images))
+}
+
+/// 重试的回退落地了：被截掉的那条用户消息原样排到队首，回合收尾放闸时和普通发送一样
+/// 只发一次、只写一个气泡。排队首是因为用户点的就是它，要比别的排队消息先走。
+/// 调用方必须持有 `turn_completion`，并在之后放闸（[`settle_acp_turn_locked`]）。
+pub(crate) fn queue_retry_prompt(
+    sess: &AcpSession,
+    text: String,
+    images: Vec<smelt_core::acp_conn::PromptImage>,
+) {
+    let id = next_pending_prompt_id(sess);
+    edit_pending_prompts(sess, |queue| {
+        queue.push_front(QueuedAcpPrompt {
+            id,
+            text,
+            images,
+            delivery_id: None,
+            origin: AcpPromptOrigin::User,
+            echoed: false,
+        })
+    });
 }
 
 /// 回合结束后只释放一条 daemon 队列中的 prompt。调用方必须持有 `turn_completion`；
@@ -3215,7 +3257,10 @@ fn apply_acp_user_action_inner(
         AcpUserAction::PeerReply { .. } => Err("peer reply is internal"),
         AcpUserAction::DeliverQueuedNow { text } => deliver_queued_now(sess, text, subscribers),
         AcpUserAction::WithdrawPendingPrompt { id } => withdraw_pending_prompt(sess, id),
-        AcpUserAction::RewindToMessage { entry_index } => send_acp_rewind(sess, entry_index),
+        AcpUserAction::RewindToMessage { entry_index } => {
+            send_acp_rewind(sess, Some(entry_index), false)
+        }
+        AcpUserAction::RetryLastTurn => send_acp_rewind(sess, None, true),
         AcpUserAction::Cancel => request_acp_cancel(sess, subscribers),
         AcpUserAction::SetConfigOption {
             config_id,
@@ -3592,6 +3637,7 @@ pub(crate) fn handle_acp_action(
                             | smelt_core::acp_session::AcpUserAction::StopBackgroundTask { .. }
                             | smelt_core::acp_session::AcpUserAction::StopSubagent { .. }
                             | smelt_core::acp_session::AcpUserAction::RewindToMessage { .. }
+                            | smelt_core::acp_session::AcpUserAction::RetryLastTurn
                             | smelt_core::acp_session::AcpUserAction::SetConfigOption { .. }
                             | smelt_core::acp_session::AcpUserAction::RestartRuntime
                     ) =>

@@ -329,7 +329,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
         }
         ConversationEvent::TurnEnded(reason) => outcome.entries_offset = finish_turn(state, reason),
         ConversationEvent::TurnFailed(msg) => apply_turn_failed(state, &mut outcome, msg),
-        ConversationEvent::Rewound { truncate_from } => {
+        ConversationEvent::Rewound { truncate_from, .. } => {
             apply_rewound(state, &mut outcome, truncate_from)
         }
         ConversationEvent::ProviderSessionIdChanged(session_id) => {

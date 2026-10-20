@@ -2873,24 +2873,45 @@ fn compact_tool_headlines_use_verbs_like_opened_page() {
 fn only_an_unfinished_turn_gets_a_card_with_the_right_action() {
     use smelt_model::acp_session::AcpTurnOutcome;
 
-    assert_eq!(turn_outcome_card(None), None);
-    assert_eq!(turn_outcome_card(Some(AcpTurnOutcome::Succeeded)), None);
-    assert_eq!(turn_outcome_card(Some(AcpTurnOutcome::Cancelled)), None);
+    let action = |outcome| turn_outcome_card(Some(outcome), true).map(|(_, action)| action);
+    assert_eq!(turn_outcome_card(None, true), None);
+    assert_eq!(action(AcpTurnOutcome::Succeeded), None);
+    assert_eq!(action(AcpTurnOutcome::Cancelled), None);
     assert_eq!(
-        turn_outcome_card(Some(AcpTurnOutcome::Failed)).map(|(_, action)| action),
-        Some(TurnOutcomeAction::Retry)
+        action(AcpTurnOutcome::Failed),
+        Some(Some(TurnOutcomeAction::Retry))
     );
     assert_eq!(
-        turn_outcome_card(Some(AcpTurnOutcome::Refused)).map(|(_, action)| action),
-        Some(TurnOutcomeAction::Retry)
+        action(AcpTurnOutcome::Refused),
+        Some(Some(TurnOutcomeAction::Retry))
     );
     assert_eq!(
-        turn_outcome_card(Some(AcpTurnOutcome::MaxTokens)).map(|(_, action)| action),
-        Some(TurnOutcomeAction::Continue)
+        action(AcpTurnOutcome::MaxTokens),
+        Some(Some(TurnOutcomeAction::Continue))
     );
     assert_eq!(
-        turn_outcome_card(Some(AcpTurnOutcome::MaxTurnRequests)).map(|(_, action)| action),
-        Some(TurnOutcomeAction::Continue)
+        action(AcpTurnOutcome::MaxTurnRequests),
+        Some(Some(TurnOutcomeAction::Continue))
+    );
+}
+
+/// 不能回退的 agent 没有真正的重试：只能当新消息再发，会叠出一条一样的用户消息。
+/// 卡照样给，说清这一轮没完成，但不给「重试」；「继续」本来就是新消息，照给。
+#[test]
+fn retry_is_offered_only_when_the_agent_can_rewind() {
+    use smelt_model::acp_session::AcpTurnOutcome;
+
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::Failed), false),
+        Some(("这一轮没有完成", None))
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::Refused), false).map(|(_, action)| action),
+        Some(None)
+    );
+    assert_eq!(
+        turn_outcome_card(Some(AcpTurnOutcome::MaxTokens), false).map(|(_, action)| action),
+        Some(Some(TurnOutcomeAction::Continue))
     );
 }
 

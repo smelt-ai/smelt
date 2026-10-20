@@ -1346,11 +1346,7 @@ impl AcpView {
         entry_ix: usize,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let (message, action) = turn_outcome_card(self.turn_outcome)?;
-        let label = match action {
-            TurnOutcomeAction::Retry => "重试",
-            TurnOutcomeAction::Continue => "继续",
-        };
+        let (message, action) = turn_outcome_card(self.turn_outcome, self.supports_rewind)?;
         Some(
             h_flex()
                 .id(("acp-turn-outcome", entry_ix))
@@ -1370,14 +1366,18 @@ impl AcpView {
                         .text_color(gpui::rgb(ui_theme::yellow()))
                         .child(message),
                 )
-                .child(
+                .children(action.map(|action| {
+                    let label = match action {
+                        TurnOutcomeAction::Retry => "重试",
+                        TurnOutcomeAction::Continue => "继续",
+                    };
                     Button::new(("acp-turn-outcome-action", entry_ix))
                         .compact()
                         .label(label)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.rerun_last_turn(action, window, cx);
-                        })),
-                )
+                        }))
+                }))
                 .into_any_element(),
         )
     }

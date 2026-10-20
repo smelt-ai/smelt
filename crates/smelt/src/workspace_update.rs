@@ -15,6 +15,59 @@ impl Workspace {
             )
     }
 
+    /// App 放的位置装不上更新时，所有更新入口都停在「需要先移到『应用程序』」，不检查、
+    /// 不下载、不安装：在那儿每一步都白做，最后还是写不进去。
+    fn blocked_by_app_location(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.app_location_issue.is_none() {
+            return false;
+        }
+        self.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::Location);
+        cx.notify();
+        true
+    }
+
+    /// 「移到『应用程序』并重新打开」：拷过去、安排好等这个进程退出后从新位置重开，再退出。
+    /// 后台会话在守护里，重开后照常接上。失败就留在原地，把原因给人看。
+    pub(crate) fn move_app_to_applications(&mut self, cx: &mut Context<Self>) {
+        if self.moving_app {
+            return;
+        }
+        self.moving_app = true;
+        self.move_app_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async {
+                    let app = smelt_client::app_location::move_to_applications()?;
+                    smelt_client::app_location::relaunch_after_exit(&app)?;
+                    anyhow::Ok(app)
+                })
+                .await;
+            match result {
+                Ok(app) => {
+                    smelt_sys::app_log::info(
+                        "app-location",
+                        &format!("已移到 {}，退出后从那里重新打开", app.display()),
+                    );
+                    cx.update(request_app_quit);
+                }
+                Err(error) => {
+                    smelt_sys::app_log::error(
+                        "app-location",
+                        &format!("移到「应用程序」失败：{error:#}"),
+                    );
+                    let _ = this.update(cx, |this, cx| {
+                        this.moving_app = false;
+                        this.move_app_error = Some(format!("没移成：{error:#}").into());
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     /// 检查是否有新版本。`silent` 区分启动时的后台静默检查（离线/失败时不打扰用户，
     /// 悄悄退回 Idle）和设置页手动点「检查更新」（失败要如实展示原因）。
     ///
@@ -22,6 +75,9 @@ impl Workspace {
     /// 关掉则停在 `Available`，只亮出版本号等用户自己决定何时下载。
     /// 检查本身两种情况下都照做——不然关掉之后连"有新版"都无从得知。
     pub(crate) fn check_for_update(&mut self, silent: bool, cx: &mut Context<Self>) {
+        if self.blocked_by_app_location(cx) {
+            return;
+        }
         if !self.update_status.can_check() {
             return;
         }
@@ -171,6 +227,9 @@ impl Workspace {
     /// 恢复失败时先收敛原事务；安装失败则由 check_for_update 拉取 manifest，只有
     /// 确认发布 URL 已变化后才作废旧作业，不能绕过持久化事务直接另起下载。
     pub(crate) fn check_or_recover_update(&mut self, silent: bool, cx: &mut Context<Self>) {
+        if self.blocked_by_app_location(cx) {
+            return;
+        }
         if self.update_status.can_retry_recovery() {
             self.recover_update_at_launch(silent, cx);
         } else {
@@ -186,6 +245,9 @@ impl Workspace {
         candidate: updater::UpdateCandidate,
         cx: &mut Context<Self>,
     ) {
+        if self.blocked_by_app_location(cx) {
+            return;
+        }
         let version = candidate.version;
         let url = candidate.url;
         self.update_status = updater::UpdateStatus::Downloading {
@@ -248,6 +310,9 @@ impl Workspace {
 
     /// 用户点击、启动恢复、退出安装都只从这里进入同一条安装状态机。
     pub(crate) fn begin_ready_update_install(&mut self, cx: &mut Context<Self>) {
+        if self.blocked_by_app_location(cx) {
+            return;
+        }
         let Some(update) = self.update_status.ready_update().cloned() else {
             return;
         };

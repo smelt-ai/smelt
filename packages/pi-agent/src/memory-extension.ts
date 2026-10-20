@@ -421,21 +421,29 @@ export default function smeltMemoryExtension(pi: ExtensionAPI): void {
 		warnIfTruncated(snapshotFor(roots, context.cwd, meta), (message, type) => context.ui.notify(message, type));
 	});
 
+	// 每一轮开始前都走这里：用户发的消息（`messageType` 是 "user"，带 `prompt`），和后台任务、
+	// 子智能体的结果开的那一轮（`sendMessage` 带 `triggerTurn`，"custom"，没有 `prompt`）。
 	pi.on("before_agent_start", async (event, context) => {
 		const roots = currentMemoryRoots();
 		if (!roots) return;
-		// 用户发了新消息：新的一轮，外部内容标记清零。
-		turnTaint.clear();
-		turnWrites.trusted = 0;
-		turnWrites.pending = 0;
+		const userTurn = event.messageType === "user";
+		// 用户发了新消息：新的一轮，外部内容标记清零。结果开的那一轮不清：带进来的
+		// 正可能是外部内容（子智能体就算外部），清了它写的记忆就成了可信的。
+		if (userTurn) {
+			turnTaint.clear();
+			turnWrites.trusted = 0;
+			turnWrites.pending = 0;
+		}
 		const meta = await currentMeta();
 		// 用户在配置页关掉了记忆：不给分节。Pi 会在对话末尾追加一条移除它的系统消息。
 		if (meta && !meta.enabled) return;
+		// 每一轮都带上分节：哪一轮少了它，这一轮就看不到记忆，请求开头也整段对不上缓存。
 		const snapshot = snapshotFor(roots, context.cwd, meta);
 		event.systemPromptOptions.sections ??= {};
 		event.systemPromptOptions.sections[SMELT_MEMORY_PROMPT_SECTION] = snapshot.text;
 		warnIfTruncated(snapshot, (message, type) => context.ui.notify(message, type));
-		if (!meta) return;
+		// 召回按用户的问题找；结果开的那一轮没有问题可找，留给用户的下一句。
+		if (!meta || event.messageType !== "user") return;
 		const generous = recallPending;
 		recallPending = false;
 		const found = await recallFor(context, roots, meta, event.prompt, generous);

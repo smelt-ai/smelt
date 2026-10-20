@@ -1,43 +1,49 @@
 #!/usr/bin/env bash
-# 打 Linux 运行时包：smeltd-<version>-linux-<arch>.tar.gz。
-# 里面有 smeltd、smelt-notify、smelt-up、install.sh、desktop/，以及 smelt-pi、bun、photon wasm、native/。
+# 打 Linux 无头运行时（smeltd）的发布包：dist/smeltd-<版本>-linux-<架构>.tar.gz。
+# 由 release.yml 在两种架构的 runner 上各跑一次。
+# 包里还有 smelt-pi、bun、photon wasm，以及 pi-tui 的 native/。
+#
+# 不交叉编译：在哪种架构的 Linux 机器上跑，就出哪种架构的包。只编运行时这一侧：
+# 桌面 GUI 那几个 crate 依赖 GPUI，只有 macOS 版。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed -E 's/.*"(.*)".*/\1/')"
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|aarch64) ;;
-  *) echo "不支持的架构：$ARCH" >&2; exit 1 ;;
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+[[ "$(uname -s)" == Linux ]] || { echo "✗ 只在 Linux 上打包，当前是 $(uname -s)" >&2; exit 1; }
+
+case "$(uname -m)" in
+  x86_64) BUN_ID=linux-x64 ;;
+  aarch64) BUN_ID=linux-arm64 ;;
+  *) echo "✗ 不支持的架构：$(uname -m)" >&2; exit 1 ;;
 esac
 
-echo "▶ 编译 Linux 运行时 …"
-cargo build --release --manifest-path "$ROOT/Cargo.toml" --bin smeltd --bin smelt-notify
-"$ROOT/scripts/build-smelt-pi.sh"
+# 随运行时一起分发的程序。
+PROGRAMS=(smeltd smelt-notify)
 
-NAME="smeltd-${VERSION}-linux-${ARCH}"
-STAGE="$(mktemp -d)"
-DIR="$STAGE/$NAME"
-mkdir -p "$DIR/desktop"
-cp "$ROOT/target/release/smeltd" "$DIR/smeltd"
-cp "$ROOT/target/release/smelt-notify" "$DIR/smelt-notify"
-cp "$ROOT/scripts/smelt-up.sh" "$DIR/smelt-up"
-cp "$ROOT/scripts/install-smeltd.sh" "$DIR/install.sh"
-cp -R "$ROOT/scripts/desktop/." "$DIR/desktop/"
-cp "$ROOT/target/smelt-pi/smelt-pi" "$DIR/smelt-pi"
-cp "$ROOT/target/smelt-pi/photon_rs_bg.wasm" "$DIR/photon_rs_bg.wasm"
-cp "$ROOT/target/bundled-bun/$(
-  case "$ARCH" in
-    x86_64) echo linux-x64 ;;
-    aarch64) echo linux-arm64 ;;
-  esac
-)/bun" "$DIR/bun"
-if [[ -d "$ROOT/target/smelt-pi/native" ]]; then
-  cp -R "$ROOT/target/smelt-pi/native" "$DIR/native"
+version="$(awk -F'"' '/^\[workspace.package\]/{inside=1; next} /^\[/{inside=0} inside && /^version *=/{print $2; exit}' Cargo.toml)"
+[[ -n "$version" ]] || { echo "✗ 读不到工作区版本号" >&2; exit 1; }
+name="smeltd-${version}-linux-$(uname -m)"
+echo "▶ 打包 ${name}"
+cargo build --release -p smeltd --bins --locked
+./scripts/build-smelt-pi.sh
+
+staging="dist/$name"
+rm -rf "$staging" "dist/$name.tar.gz"
+mkdir -p "$staging"
+for program in "${PROGRAMS[@]}"; do
+  install -m 0755 "target/release/$program" "$staging/$program"
+done
+install -m 0755 scripts/install-smeltd.sh "$staging/install.sh"
+install -m 0755 scripts/smelt-up.sh "$staging/smelt-up"
+install -m 0755 target/smelt-pi/smelt-pi "$staging/smelt-pi"
+install -m 0644 target/smelt-pi/photon_rs_bg.wasm "$staging/photon_rs_bg.wasm"
+install -m 0755 "target/bundled-bun/${BUN_ID}/bun" "$staging/bun"
+if [[ -d target/smelt-pi/native ]]; then
+  cp -R target/smelt-pi/native "$staging/native"
 fi
-chmod +x "$DIR/smeltd" "$DIR/smelt-notify" "$DIR/smelt-up" "$DIR/install.sh" "$DIR/smelt-pi" "$DIR/bun"
-
-mkdir -p "$ROOT/dist"
-tar -C "$STAGE" -czf "$ROOT/dist/${NAME}.tar.gz" "$NAME"
-rm -rf "$STAGE"
-echo "✓ $ROOT/dist/${NAME}.tar.gz"
+# 远程桌面（install.sh --with-desktop）的启动脚本、XFCE 设置、Chrome 策略。
+cp -R scripts/desktop "$staging/desktop"
+tar -C dist -czf "dist/$name.tar.gz" "$name"
+rm -rf "$staging"
+echo "✓ 产物：dist/$name.tar.gz"

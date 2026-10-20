@@ -8,8 +8,8 @@ description = "Smelt runtime (smeltd) wire protocol and client, shared by deskto
 workspace = true
 
 # 桌面和手机共用这一份协议客户端，必须能编进 iOS / Android：不许依赖 GPUI、
-# smelt-store（原生 SQLite）或 smelt-core。CI 在 ci/android/ci.sh 里按移动端
-# target 单独检查。
+# smelt-store（原生 SQLite）或 smelt-core。CI 的 android-build 把它编进 APK，
+# 依赖不对会在那里失败。
 [dependencies]
 smelt-paths = { path = "../smelt-paths" }
 serde = { version = "1", features = ["derive"] }

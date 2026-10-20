@@ -3590,7 +3590,13 @@ fn rewind_truncates_projection_and_adopts_the_new_provider_identity() {
     state.acp_session_id = Some("old-branch".into());
     state.history_session_id = Some("old-branch".into());
 
-    let outcome = apply_event(&mut state, ConversationEvent::Rewound { truncate_from: 2 });
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::Rewound {
+            truncate_from: 2,
+            then: crate::acp_conn::AfterRewind::RestoreComposer,
+        },
+    );
 
     assert_eq!(state.entries.len(), 2);
     assert!(matches!(
@@ -3620,7 +3626,13 @@ fn rewind_truncates_projection_and_adopts_the_new_provider_identity() {
     assert!(!state.history_abandoned);
 
     // 游标越界（极端时序下投影还没追上）不能把会话清空。
-    let outcome = apply_event(&mut state, ConversationEvent::Rewound { truncate_from: 99 });
+    let outcome = apply_event(
+        &mut state,
+        ConversationEvent::Rewound {
+            truncate_from: 99,
+            then: crate::acp_conn::AfterRewind::RestoreComposer,
+        },
+    );
     assert_eq!(state.entries.len(), 2);
     assert_eq!(outcome.entries_offset, None);
 }

@@ -4351,13 +4351,170 @@ fn rewind_action_gates_on_capability_phase_and_target() {
             text,
             occurrence,
             truncate_from,
+            then,
         } => {
             assert_eq!(text, "same");
             assert_eq!(occurrence, 1);
             assert_eq!(truncate_from, 3);
+            assert!(
+                matches!(then, smelt_core::acp_conn::AfterRewind::RestoreComposer),
+                "编辑重发是原文回输入框"
+            );
         }
         _ => panic!("expected rewind command"),
     }
+}
+
+/// 重试：回到最后一条用户消息之前，回退成功后把它原样（带图）再发一次。以前重试是把它
+/// 当新消息重发：对话里和 Pi 的上下文里每点一次就多一条一模一样的用户消息。
+#[test]
+fn retry_rewinds_the_failed_turn_and_resends_its_message_once() {
+    let image = smelt_core::acp_chat::AcpImage::new("image/png", "aGk=");
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    reduced.entries_mut().push(AcpEntry::User("早先的问题".into()));
+    reduced.entries_mut().push(AcpEntry::Assistant {
+        text: "早先的回答".into(),
+        thought: false,
+    });
+    reduced.entries_mut().push(AcpEntry::UserWithImages {
+        text: "分析一下".into(),
+        images: vec![image],
+    });
+    reduced.entries_mut().push(AcpEntry::Assistant {
+        text: "⚠️ 回合失败：模型不支持".into(),
+        thought: false,
+    });
+    let session = make_acp_session("acp-retry", reduced);
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: false,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: true,
+    });
+
+    // 1) 重试不点名下标：daemon 自己找最后一条用户消息，带上原文和附图。
+    apply_acp_user_action(
+        &session,
+        smelt_core::acp_session::AcpUserAction::RetryLastTurn,
+        &new_event_hub(),
+    )
+    .unwrap();
+    let then = match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Rewind {
+            text,
+            occurrence,
+            truncate_from,
+            then,
+        } => {
+            assert_eq!(text, "分析一下");
+            assert_eq!(occurrence, 0);
+            assert_eq!(truncate_from, 2);
+            then
+        }
+        _ => panic!("重试要先回退"),
+    };
+    let smelt_core::acp_conn::AfterRewind::Resend { text, images } = &then else {
+        panic!("重试的回退要原样再发");
+    };
+    assert_eq!(text, "分析一下");
+    assert_eq!(images.len(), 1);
+
+    // 2) 回退落地：截掉这条消息和失败的那一轮，再按普通发送发一次。drain 里的顺序。
+    let hub = new_event_hub();
+    let _turn_completion = session.turn_completion.lock().unwrap();
+    smelt_core::acp_session::apply_event(
+        &mut session.reduced.lock().unwrap(),
+        smelt_core::acp_conn::ConversationEvent::Rewound {
+            truncate_from: 2,
+            then: then.clone(),
+        },
+    );
+    let smelt_core::acp_conn::AfterRewind::Resend { text, images } = then else {
+        unreachable!();
+    };
+    queue_retry_prompt(&session, text, images);
+    settle_acp_turn_locked(&session, true, false, false, &hub);
+
+    match cmd_rx.try_recv().unwrap() {
+        smelt_core::acp_conn::ConversationCommand::Prompt { text, images } => {
+            assert_eq!(text, "分析一下");
+            assert_eq!(images.len(), 1, "附图跟着一起重发");
+        }
+        _ => panic!("回退之后要把这条原样再发一次"),
+    }
+    assert!(cmd_rx.try_recv().is_err(), "只发一次");
+    let reduced = session.reduced.lock().unwrap();
+    let users: Vec<_> = reduced
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            AcpEntry::User(text) | AcpEntry::UserWithImages { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        users,
+        ["早先的问题", "分析一下"],
+        "重试过的消息只留一条，失败的那一轮已截掉"
+    );
+    assert!(
+        !reduced.entries().iter().any(|entry| matches!(
+            entry,
+            AcpEntry::Assistant { text, .. } if text.contains("回合失败")
+        )),
+        "失败的回答跟着截掉"
+    );
+}
+
+/// 没有可重试的消息、或会话还在跑，重试和编辑重发一样直接拒绝，不发任何命令。
+#[test]
+fn retry_is_rejected_without_a_user_message_or_while_running() {
+    let mut reduced = AcpSessionState::default();
+    reduced.phase = DaemonPhase::Idle;
+    reduced.entries_mut().push(AcpEntry::Assistant {
+        text: "欢迎".into(),
+        thought: false,
+    });
+    let session = make_acp_session("acp-retry-gates", reduced);
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded();
+    let (_event_tx, event_rx) = smol::channel::unbounded();
+    *session.handle.lock().unwrap() = Some(smelt_core::acp_conn::ConversationHandle {
+        cmd_tx,
+        event_rx,
+        stdio: Arc::new(Mutex::new(None)),
+        in_flight_rpc: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supports_mid_turn_input: false,
+        supports_compaction: false,
+        supports_native_queue: false,
+        supports_rewind: true,
+    });
+    let retry = || {
+        apply_acp_user_action(
+            &session,
+            smelt_core::acp_session::AcpUserAction::RetryLastTurn,
+            &new_event_hub(),
+        )
+    };
+
+    assert_eq!(retry().unwrap_err(), "rewind target is not a user message");
+    session
+        .reduced
+        .lock()
+        .unwrap()
+        .entries_mut()
+        .push(AcpEntry::User("问题".into()));
+    session.reduced.lock().unwrap().phase = DaemonPhase::Thinking;
+    assert_eq!(retry().unwrap_err(), "rewind requires an idle session");
+    assert!(cmd_rx.try_recv().is_err());
 }
 
 /// automation 绑定的会话禁止回退：Run 的输入序列归 daemon 所有。
@@ -4391,6 +4548,23 @@ fn automation_binding_rejects_rewind() {
         &serde_json::json!({
             "id": "acp-rewind-automation",
             "action": {"RewindToMessage": {"entry_index": 0}},
+        }),
+        &acp_sessions,
+        &new_event_hub(),
+    );
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"], "automation Run action is daemon-owned");
+    assert!(cmd_rx.try_recv().is_err());
+
+    let (server, client) = UnixStream::pair().unwrap();
+    handle_acp_action(
+        server,
+        &serde_json::json!({
+            "id": "acp-rewind-automation",
+            "action": "RetryLastTurn",
         }),
         &acp_sessions,
         &new_event_hub(),

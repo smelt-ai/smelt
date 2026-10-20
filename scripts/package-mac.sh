@@ -183,8 +183,9 @@ for dir in "$ROOT"/plugins/*/; do
   echo "  … 打包插件：$(basename "$dir")"
 done
 
-# 可选：把当前包对应的内部发布地址写进 App。若发布系统是在打包后才生成
-# release URL，也可以不设这个变量；updater 会在成功自更新后把 URL 写入用户状态。
+# 可选：把当前包在 GitHub Release 上的更新包地址写进 App（release.yml 按 tag 拼好传进来），
+# 刚装好的包才不会把自己当成新版本再下一遍。本地打包不设；updater 会在成功自更新后
+# 把 URL 写入用户状态。
 if [[ -n "$UPDATE_URL" ]]; then
   printf '%s\n' "$UPDATE_URL" >"$RES/SmeltUpdateURL"
 fi

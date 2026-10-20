@@ -10,3 +10,6 @@ pub mod session_ops;
 // macOS 版。
 #[cfg(target_os = "macos")]
 pub mod updater;
+// 放的位置决定能不能自更新：被系统转移、只读的要先移到「应用程序」。
+#[cfg(target_os = "macos")]
+pub mod app_location;

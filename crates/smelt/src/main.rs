@@ -2702,6 +2702,15 @@ struct Workspace {
     update_status: updater::UpdateStatus,
     /// 每次开始或取消安装等待时递增，防止旧的后台重试在新请求上继续执行。
     update_install_generation: u64,
+    /// App 放的位置装不上更新（被系统转移、只读），启动时查一次；见
+    /// `smelt_client::app_location`。有问题时更新入口都停在「需要先移到『应用程序』」。
+    app_location_issue: Option<smelt_client::app_location::LocationIssue>,
+    /// 启动时提议「移到『应用程序』」的确认框。
+    show_move_app_confirm: bool,
+    /// 正在移动；移完就退出，从新位置重开。
+    moving_app: bool,
+    /// 上次移动失败的原因，确认框和设置页都显示。
+    move_app_error: Option<SharedString>,
     /// 设置窗口打开时要停在哪一页（对应左侧子菜单的独立内容页）。
     settings_section: settings::SettingsSection,
     /// 每请求跳一次页就 +1，用来变更 `Settings` 元素的 id。
@@ -3193,6 +3202,10 @@ impl Workspace {
             quit_requested: false,
             update_status: updater::UpdateStatus::default(),
             update_install_generation: 0,
+            app_location_issue: None,
+            show_move_app_confirm: false,
+            moving_app: false,
+            move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
             capabilities_view: None,
@@ -3252,9 +3265,17 @@ impl Workspace {
         ws.start_provider_quota_watch(cx);
         // 侧栏「+」菜单按本机已装 CLI 过滤；启动后立刻探一次，免得等用户打开设置。
         ws.refresh_acp_runtime(cx);
-        // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；恢复出待安装
-        // 作业后走与用户点击完全相同的安装驱动，没有待办才做常规静默检查。
-        ws.recover_update_at_launch(true, cx);
+        // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不恢复也不
+        // 检查，免得下载了还是装不上。移过去重开后才走下面的正常流程。
+        ws.app_location_issue = smelt_client::app_location::current_issue();
+        if ws.app_location_issue.is_some() {
+            ws.update_status = updater::UpdateStatus::Failed(updater::UpdateFailure::Location);
+            ws.show_move_app_confirm = true;
+        } else {
+            // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；恢复出待安装
+            // 作业后走与用户点击完全相同的安装驱动，没有待办才做常规静默检查。
+            ws.recover_update_at_launch(true, cx);
+        }
         ws.start_workspace_catalog_load(window, cx);
         for space in &ws.remote_spaces {
             let runtime = space.runtime.clone();

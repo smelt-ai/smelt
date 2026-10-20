@@ -441,6 +441,57 @@ impl Workspace {
         self.modal_shell(320., true, content, crate::overlay::ModalLayer::Quit, cx)
     }
 
+    /// 启动时提议把 App 移到「应用程序」：被系统转移或放在只读位置时更新装不上。
+    /// 「以后再说」只关这一次，设置页的更新栏里一直留着同一个按钮。
+    pub(crate) fn render_move_app_confirm(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (fg, muted, danger) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground, t.danger)
+        };
+        let body = match self.app_location_issue {
+            Some(smelt_client::app_location::LocationIssue::ReadOnly) => {
+                "Smelt 正从只读位置（比如安装盘映像）运行，自动更新装不上。移过去后会自动重新打开，后台会话不受影响。"
+            }
+            _ => {
+                "Smelt 没放进「应用程序」就打开了，macOS 让它在一个临时的只读位置运行，自动更新因此装不上。移过去后会自动重新打开，后台会话不受影响。"
+            }
+        };
+        let content = v_flex()
+            .child(Self::modal_title(fg, "把 Smelt 移到「应用程序」？"))
+            .child(div().text_sm().text_color(muted).child(body))
+            .when_some(self.move_app_error.clone(), |content, error| {
+                content.child(div().text_sm().text_color(danger).child(error))
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_normal_button(
+                        "move-app-later",
+                        "以后再说",
+                        |this, _, _, cx| {
+                            if this.moving_app {
+                                return;
+                            }
+                            this.show_move_app_confirm = false;
+                            cx.notify();
+                        },
+                        cx,
+                    ))
+                    .child(Self::modal_commit_button(
+                        "move-app-confirm",
+                        if self.moving_app {
+                            "正在移动…"
+                        } else {
+                            "移过去并重新打开"
+                        },
+                        |this, _, _, cx| this.move_app_to_applications(cx),
+                        cx,
+                    )),
+            );
+        self.modal_shell(380., true, content, crate::overlay::ModalLayer::MoveApp, cx)
+    }
+
     /// 侧栏「重命名」弹层：与 render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩），
     /// 正文换成预填当前标题的文本框。仅在 self.rename_input 就绪时被调用（见
     /// start_rename/上面 .children(self.rename_target.is_some()...)）。

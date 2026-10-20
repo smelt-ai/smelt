@@ -205,7 +205,7 @@ pub fn apply_window_opacity(_window: &Window, _opacity: f32) {}
 
 /// 在线更新配置（全局单例，存 SQLite KV）。
 ///
-/// 通道只决定读取哪一个公司 COS manifest；更新流程本身仍由 updater 统一处理。
+/// 通道只决定认不认 GitHub 上的预发布；更新流程本身仍由 updater 统一处理。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpdateSettings {
     #[serde(default)]
@@ -1571,6 +1571,9 @@ struct SettingsRenderSnapshot {
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
     agent_names_using_plugin: std::collections::HashMap<String, Vec<String>>,
     update_status: updater::UpdateStatus,
+    /// 正在把 App 移到「应用程序」，见 `Workspace::move_app_to_applications`。
+    moving_app: bool,
+    move_app_error: Option<SharedString>,
     daemon_outdated: Option<bool>,
     daemon_upgrading: bool,
     daemon_upgrade_msg: Option<String>,

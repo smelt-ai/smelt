@@ -100,7 +100,7 @@ fn release_url(version: &semver::Version) -> String {
     format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}")
 }
 
-/// 包名和 `ci/linux/ci.sh package` 打出来的一致。架构名同 `uname -m`。
+/// 包名和 `scripts/package-linux.sh` 打出来的一致。架构名同 `uname -m`。
 #[cfg(any(target_os = "linux", test))]
 fn package_name(version: &semver::Version, arch: &str) -> String {
     format!("smeltd-{version}-linux-{arch}")

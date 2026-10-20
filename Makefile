@@ -19,7 +19,7 @@ fmt-check: ## 检查代码格式
 	cargo fmt --check
 
 lint: ## 运行 Clippy 静态检查（正确性 lint 由 workspace.lints deny）
-	./ci/lint-pointer.sh
+	./scripts/lint-pointer.sh
 	cargo clippy --workspace --all-targets
 
 lint-sh: ## 检查 shell 脚本里 $$var 紧跟非 ASCII 的写法
@@ -27,7 +27,7 @@ lint-sh: ## 检查 shell 脚本里 $$var 紧跟非 ASCII 的写法
 	@# 字节当成变量名的一部分，于是 set -u 直接报 "unbound variable"。ASCII locale 下
 	@# 完全看不出来，所以只能靠这条检查兜住——本仓 echo 里中文很多，必然复发。
 	@# 修法是加花括号：$${plugin_id}（…）。
-	@out=$$(LC_ALL=C find scripts ci packages -name '*.sh' -print0 2>/dev/null \
+	@out=$$(LC_ALL=C find scripts packages -name '*.sh' -print0 2>/dev/null \
 		| LC_ALL=C xargs -0 grep -nE '\$$[A-Za-z_][A-Za-z0-9_]*[^[:print:][:space:]]'); \
 	if [ -n "$$out" ]; then \
 		echo "✗ shell 变量后紧跟非 ASCII 字符，请改成 \$${var}："; \

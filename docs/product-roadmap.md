@@ -63,7 +63,7 @@ app-server = smelt 直接消费 Codex 的原生 JSONL 协议
 
 ### 适配器：统一走应用里自带的 bun
 
-Bun 1.4.0 打进应用，`~/.smelt/runtime/bin/bun` 指向它。不再按 generation 下载。
+Bun 1.4.3 打进应用，`~/.smelt/runtime/bin/bun` 指向它。不再按 generation 下载。
 
 1. `bunx <adapter>@<锁版本>` 由这份 Bun 解析/缓存，**用户不必自己装 node/npx/适配器**
 2. 出厂命令**一律 `bunx …@版本`**，不用 `npx`（避免依赖用户系统 Node）

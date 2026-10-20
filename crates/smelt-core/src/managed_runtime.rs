@@ -17,7 +17,7 @@ use std::process::Command;
 
 /// 与 `scripts/fetch-bun.sh` 钉死的版本一致。运行时不再按这个版本下载。
 #[cfg(test)]
-const BUN_VERSION: &str = "1.4.0";
+const BUN_VERSION: &str = "1.4.3";
 
 pub use smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH;
 
@@ -25,6 +25,7 @@ include!(concat!(env!("OUT_DIR"), "/pi_agent_version.rs"));
 
 /// `~/.smelt/runtime/bin/bun`，相对 runtime 根目录。
 const BUN_LAUNCHER: &str = "bin/bun";
+
 
 #[derive(Clone, Debug)]
 pub struct ManagedBunRuntime {

@@ -1322,6 +1322,11 @@ pub enum AcpUserAction {
     RewindToMessage {
         entry_index: usize,
     },
+    /// 重试最后一轮：agent 切到最后一条用户消息之前，再把它原样发一次（带图）。这条
+    /// 消息和失败的那一轮先一起截掉，所以对话里和 agent 的上下文里都只留一条，不会像
+    /// 当新消息重发那样越点越多。仅空闲、支持回退的会话可用；旧 daemon 不认识这个
+    /// 动作，会回 unknown variant 错误。
+    RetryLastTurn,
     PermissionSelect {
         tool_call_id: String,
         option_id: String,

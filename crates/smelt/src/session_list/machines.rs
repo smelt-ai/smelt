@@ -423,10 +423,24 @@ fn machine_actions_page(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::rc::Rc;
 
-    use gpui::{Modifiers, TestAppContext};
+    use gpui::{
+        Anchor, Context, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _,
+        Render, Styled as _, TestAppContext, Window, div, px,
+    };
+    use gpui_component::popover::Popover;
+    use gpui_component::{Icon, v_flex};
+    use smelt_ui::Button;
 
-    use super::*;
+    // 不用 `use super::*;`：父模块 glob 导入了 `gpui::*`，连带把 gpui 的 `test` 宏带进来，
+    // `#[gpui::test]` 展开出的 `#[test]` 又解析回它自己，编译期无限递归。
+    use super::{
+        MachineAction, MachineRow, PANEL_WIDTH, machine_actions_page, machine_list_row,
+        machines_page, selected_machine,
+    };
+    use crate::RuntimeKey;
+    use crate::runtimes::LinkTone;
 
     /// 只有机器面板的浮层和页面，机器和操作是假的：点了只记一笔。
     struct Harness {

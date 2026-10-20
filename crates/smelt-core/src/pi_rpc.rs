@@ -137,6 +137,8 @@ struct PendingRewind {
     occurrence: usize,
     /// 要回退到的用户消息原文。
     text: String,
+    /// 回退成功后这条消息怎么办，原样放进 `Rewound`。
+    then: crate::acp_conn::AfterRewind,
     /// 正在等回执的 `get_fork_messages` 请求 id。
     list_request_id: String,
     /// 匹配到 entryId 之后发出的 `fork` 请求 id；None = 还在第一阶段。
@@ -1936,17 +1938,23 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             text,
             occurrence,
             truncate_from,
+            then,
         } => {
+            // daemon 发命令前记了一笔在途 RPC，拒绝也要销账，否则热升级永远等不到它。
             if state.active_turn {
-                let _ = event_tx.try_send(ConversationEvent::Notice(
+                abort_rewind(
+                    event_tx,
+                    in_flight_rpc,
                     "回退失败：回合还在运行，请先停止".to_string(),
-                ));
+                );
                 return Ok(());
             }
             if state.pending_rewind.is_some() {
-                let _ = event_tx.try_send(ConversationEvent::Notice(
+                abort_rewind(
+                    event_tx,
+                    in_flight_rpc,
                     "回退失败：已有一次回退在进行中".to_string(),
-                ));
+                );
                 return Ok(());
             }
             let list_id = state.request_id("rewind-list");
@@ -1954,6 +1962,7 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 truncate_from,
                 occurrence,
                 text,
+                then,
                 list_request_id: list_id.clone(),
                 fork_request_id: None,
             });
@@ -2628,8 +2637,9 @@ async fn handle_rewind_list_response<W: AsyncWrite + Unpin>(
 }
 
 /// 回退第二阶段回执：fork 成功后切到新分叉。被扩展取消（cancelled）或失败
-/// 时保持原分支不动；成功时广播 `Rewound`（截断游标）+ `ComposerRestore`
-/// （原文回输入框），再补一发 `get_state` 换 session id。
+/// 时保持原分支不动；成功时广播 `Rewound`（截断游标和 `then`），编辑重发再加
+/// `ComposerRestore`（原文回输入框），然后补一发 `get_state` 换 session id。
+/// 重试不还原输入框：daemon 收到 `Rewound` 后按普通发送再发一次。
 #[allow(clippy::too_many_arguments)]
 async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     pending: PendingRewind,
@@ -2658,13 +2668,17 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     }
     // 换到了新分叉，旧会话的队列跟着作废。
     state.queue.reset();
-    let truncate_from = pending.truncate_from;
-    let _ = event_tx.try_send(ConversationEvent::Rewound { truncate_from });
-    let prefill = data
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(&pending.text)
-        .to_string();
+    let restore = matches!(pending.then, crate::acp_conn::AfterRewind::RestoreComposer)
+        .then(|| {
+            data.get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&pending.text)
+                .to_string()
+        });
+    let _ = event_tx.try_send(ConversationEvent::Rewound {
+        truncate_from: pending.truncate_from,
+        then: pending.then,
+    });
     // in_flight 记账挂到 get_state 回执上：fork 已成功，但身份刷新还没落地，
     // 热升级仍不得跨越。
     let state_id = state.request_id("rewind-state");
@@ -2678,9 +2692,11 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     {
         // 身份刷不上新 id 只是“下次重连恢复到旧分支”的退化，回退本身已成功。
         state.rewind_state_request_id = None;
-        emit_queue_restore(event_tx, state, vec![(prefill, Vec::new())]);
+        if let Some(prefill) = restore {
+            emit_queue_restore(event_tx, state, vec![(prefill, Vec::new())]);
+        }
         finish_in_flight(in_flight_rpc);
-    } else {
+    } else if let Some(prefill) = restore {
         emit_queue_restore(event_tx, state, vec![(prefill, Vec::new())]);
     }
     Ok(())
@@ -8518,6 +8534,7 @@ mod tests {
                 text: "hi".to_string(),
                 occurrence: 0,
                 truncate_from: 0,
+                then: crate::acp_conn::AfterRewind::RestoreComposer,
             },
             &mut writer,
             &event_tx,
@@ -8530,13 +8547,17 @@ mod tests {
             event_rx.try_recv(),
             Ok(ConversationEvent::Notice(_))
         ));
+        // daemon 发命令前记的在途 RPC 拒绝时也要销账，否则热升级永远等不到它。
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
 
         // 回合结束了，但一次回退已在途：同文本第二次请求直接拒绝。
         state.active_turn = false;
+        in_flight.store(1, Ordering::SeqCst);
         state.pending_rewind = Some(PendingRewind {
             truncate_from: 0,
             occurrence: 0,
             text: "hi".to_string(),
+            then: crate::acp_conn::AfterRewind::RestoreComposer,
             list_request_id: "smelt-rewind-list-1".to_string(),
             fork_request_id: None,
         });
@@ -8545,6 +8566,7 @@ mod tests {
                 text: "again".to_string(),
                 occurrence: 0,
                 truncate_from: 0,
+                then: crate::acp_conn::AfterRewind::RestoreComposer,
             },
             &mut writer,
             &event_tx,
@@ -8557,6 +8579,7 @@ mod tests {
             event_rx.try_recv(),
             Ok(ConversationEvent::Notice(_))
         ));
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -8572,6 +8595,7 @@ mod tests {
                 text: "same".to_string(),
                 occurrence: 1,
                 truncate_from: 3,
+                then: crate::acp_conn::AfterRewind::RestoreComposer,
             },
             &mut writer,
             &event_tx,
@@ -8633,7 +8657,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             event_rx.try_recv(),
-            Ok(ConversationEvent::Rewound { truncate_from: 3 })
+            Ok(ConversationEvent::Rewound {
+                truncate_from: 3,
+                then: crate::acp_conn::AfterRewind::RestoreComposer,
+            })
         ));
         assert!(matches!(
             event_rx.try_recv(),
@@ -9261,6 +9288,61 @@ mod tests {
         assert!(error.contains("取消"), "{error}");
     }
 
+    /// 重试：fork 成功后只报 `Rewound`（带着要重发的原文和附图），不把原文还回输入框；
+    /// 再发一次由 daemon 走普通发送，这里不自己写 `prompt`。
+    #[test]
+    fn retry_rewind_hands_the_message_back_for_resend_instead_of_the_composer() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let image = crate::acp_conn::PromptImage::new("image/png", "aGk=");
+        state.pending_rewind = Some(PendingRewind {
+            truncate_from: 2,
+            occurrence: 0,
+            text: "分析一下".to_string(),
+            then: crate::acp_conn::AfterRewind::Resend {
+                text: "分析一下".to_string(),
+                images: vec![image],
+            },
+            list_request_id: "smelt-rewind-list-1".to_string(),
+            fork_request_id: Some("smelt-rewind-fork-2".to_string()),
+        });
+
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": "smelt-rewind-fork-2",
+                "type": "response",
+                "command": "fork",
+                "success": true,
+                "data": {"text": "分析一下", "cancelled": false}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+
+        let Ok(ConversationEvent::Rewound {
+            truncate_from: 2,
+            then: crate::acp_conn::AfterRewind::Resend { text, images },
+        }) = event_rx.try_recv()
+        else {
+            panic!("重试的回退要把原文和附图原样带回去");
+        };
+        assert_eq!(text, "分析一下");
+        assert_eq!(images.len(), 1);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "重试不能把原文还回输入框，否则用户还得再点一次发送"
+        );
+        let request: serde_json::Value =
+            serde_json::from_str(String::from_utf8(writer.get_ref().clone()).unwrap().trim())
+                .unwrap();
+        assert_eq!(request["type"], "get_state", "重发归 daemon，驱动不自己写 prompt");
+    }
+
     #[test]
     fn rewind_aborts_when_the_message_is_not_on_the_agent_branch() {
         let (event_tx, event_rx) = smol::channel::unbounded();
@@ -9273,6 +9355,7 @@ mod tests {
                 text: "gone".to_string(),
                 occurrence: 0,
                 truncate_from: 2,
+                then: crate::acp_conn::AfterRewind::RestoreComposer,
             },
             &mut writer,
             &event_tx,

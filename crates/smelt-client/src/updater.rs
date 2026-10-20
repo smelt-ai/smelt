@@ -1,4 +1,4 @@
-//! 在线更新：检查公司 COS manifest、静默下载新版 zip、退出时把 `.app` 换成新版本。
+//! 在线更新：查 GitHub Releases、静默下载新版 zip、退出时把 `.app` 换成新版本。
 //!
 //! 不碰 GPUI，纯文件/网络操作，方便独立验证。这里没有 tokio 运行时，`reqwest`
 //! 得在临时 current-thread 运行时里 `block_on`（调用方负责套
@@ -16,10 +16,10 @@ use sha2::{Digest, Sha256};
 
 const BUNDLE_ID: &str = "com.zzfn.smelt";
 const APP_NAME: &str = "Smelt";
-const DEV_MANIFEST_URL: &str =
-    "https://example.test/update.dev.json";
-const PROD_MANIFEST_URL: &str =
-    "https://example.test/update.prod.json";
+/// 查列表而不是 `releases/latest`：内测通道要能看到预发布，两个通道走同一条路径。
+const RELEASES_API: &str = "https://api.github.com/repos/smelt-ai/smelt/releases?per_page=20";
+/// 自更新用的 App 压缩包，`release.yml` 和 dmg 一起传到 Release 上。
+const UPDATE_ASSET: &str = "Smelt.app.zip";
 const BUNDLED_RELEASE_URL_FILE: &str = "Contents/Resources/SmeltUpdateURL";
 const UPDATE_STATE_DIR: &str = ".smelt";
 const UPDATE_LOCK_FILE: &str = "update.lock";
@@ -30,13 +30,13 @@ const INSTALLER_NAME: &str = "smelt-installer";
 /// 下载进度上报节流：攒够这么多字节才推一次事件，别让每个 chunk 都触发一次重绘。
 const PROGRESS_REPORT_STEP: u64 = 512 * 1024;
 
-/// 更新通道。manifest 地址固定在客户端，COS 文件只负责维护该通道当前指向的 ZIP。
+/// 更新通道。都从 GitHub Releases 取，区别只在认不认预发布（tag 带 `-` 的 rc 版）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
-    /// 内测包：允许同一个展示版本反复发布不同构建。
+    /// 内测包：最新的发布，预发布也算。
     Dev,
-    /// 生产包：默认只检查正式发布链路。
+    /// 生产包：只认正式发布。
     #[default]
     Prod,
 }
@@ -50,17 +50,10 @@ impl UpdateChannel {
             Self::Prod => "生产版",
         }
     }
-
-    pub const fn manifest_url(self) -> &'static str {
-        match self {
-            Self::Dev => DEV_MANIFEST_URL,
-            Self::Prod => PROD_MANIFEST_URL,
-        }
-    }
 }
 
-/// manifest 中的候选更新。`version` 只是展示信息，是否更新由 URL 是否变化决定，
-/// 因为内测可能在同一个用户版本下连续发布多个不同 ZIP。
+/// 更新源给出的候选更新。`version` 只是展示信息，是否更新由 URL 是否变化决定：
+/// 每个 Release 的下载地址都带 tag，换了发布就换了 URL。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateCandidate {
     pub version: String,
@@ -75,7 +68,7 @@ pub enum UpdateStatus {
     Checking,
     UpToDate,
     /// 关掉自动下载时的落点：查到新版本只如实告知，等用户点「下载并更新」再往下走。
-    /// 保留 `url` 是因为下载仍以 manifest 给的地址为准，不能等按下按钮再查一次
+    /// 保留 `url` 是因为下载仍以检查时拿到的地址为准，不能等按下按钮再查一次
     /// ——那样两次查到的可能已经不是同一个包了。
     Available {
         version: String,
@@ -109,6 +102,9 @@ pub enum UpdateFailure {
     Check,
     Download,
     Recovery,
+    /// App 被系统转移或放在只读位置，更新装不上；见 `app_location`。先移到「应用程序」，
+    /// 不检查、不下载。
+    Location,
 }
 
 impl UpdateFailure {
@@ -117,6 +113,7 @@ impl UpdateFailure {
             Self::Check => "检查更新失败",
             Self::Download => "下载更新失败",
             Self::Recovery => "恢复更新失败",
+            Self::Location => "需要先移到「应用程序」",
         }
     }
 
@@ -125,6 +122,9 @@ impl UpdateFailure {
             Self::Check => "暂时无法连接更新服务，请检查网络后重试。",
             Self::Download => "更新包下载或准备失败，请检查网络和可用存储空间后重试。",
             Self::Recovery => "上次更新事务尚未恢复，请重试；现有安装不会被覆盖。",
+            Self::Location => {
+                "Smelt 没放进「应用程序」就打开了，macOS 让它在只读位置运行，更新装不上。移过去后会自动重新打开，后台会话不受影响。"
+            }
         }
     }
 }
@@ -188,7 +188,7 @@ pub struct InstallerTicket {
 
 const INSTALLER_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 判断 manifest 是否指向一个本机没有记录过的发布包。
+/// 判断更新源是否指向一个本机没有记录过的发布包。
 ///
 /// `None` 只会出现在迁移前的旧安装或手工安装的首个包：没有可比较的发布地址时，
 /// 选择让 updater 下载一次并在成功安装后记住它，避免同版本内测包永远无法更新。
@@ -247,40 +247,66 @@ pub fn decide_failed_update_check(
 }
 
 #[derive(serde::Deserialize)]
-struct UpdateManifest {
+struct GithubRelease {
+    tag_name: String,
     #[serde(default)]
-    version: Option<serde_json::Value>,
-    url: String,
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    /// 草稿没有发布时间；排除草稿后都有值。
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
 }
 
-/// 查指定通道的 manifest，返回版本展示文本和 ZIP 发布地址。
+#[derive(serde::Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// 查指定通道最新的发布，返回版本展示文本和 ZIP 下载地址。
 pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
-    let url = channel.manifest_url();
-    let resp = reqwest::Client::new()
-        .get(url)
+    let releases: Vec<GithubRelease> = reqwest::Client::new()
+        .get(RELEASES_API)
         .header("User-Agent", "smelt-updater")
-        .header("Accept", "application/json")
+        .header("Accept", "application/vnd.github+json")
         .send()
         .await?
-        .error_for_status()?;
-    validate_download_url(resp.url().as_str())?;
-    let manifest: UpdateManifest = resp.json().await?;
-    let download_url = manifest.url.trim().to_string();
-    if download_url.is_empty() {
-        anyhow::bail!("{} 缺少 url", channel.manifest_url());
-    }
-    validate_download_url(&download_url)?;
+        .error_for_status()?
+        .json()
+        .await?;
+    let candidate = pick_release(&releases, channel).with_context(|| {
+        format!(
+            "GitHub Releases 里没有带 {UPDATE_ASSET} 的{}",
+            channel.label()
+        )
+    })?;
+    validate_download_url(&candidate.url)?;
+    Ok(candidate)
+}
 
-    let version = manifest
-        .version
-        .as_ref()
-        .and_then(manifest_version_text)
-        .filter(|v| !v.is_empty() && v != "0")
-        .unwrap_or_else(|| release_label_from_url(&download_url));
-    Ok(UpdateCandidate {
-        version,
-        url: download_url,
-    })
+/// 取符合通道、且已经传上更新包的发布里发布时间最晚的一个。不靠列表顺序：GitHub 按
+/// tag 所在提交的时间排，rc 和正式版打在同一个提交上时分不出先后。更新包还没传完的
+/// 发布先跳过，等下次检查。
+fn pick_release(releases: &[GithubRelease], channel: UpdateChannel) -> Option<UpdateCandidate> {
+    releases
+        .iter()
+        .filter(|release| !release.draft)
+        .filter(|release| channel == UpdateChannel::Dev || !release.prerelease)
+        .filter_map(|release| {
+            let asset = release
+                .assets
+                .iter()
+                .find(|asset| asset.name == UPDATE_ASSET)?;
+            Some((release, asset))
+        })
+        .max_by(|(left, _), (right, _)| left.published_at.cmp(&right.published_at))
+        .map(|(release, asset)| UpdateCandidate {
+            version: release.tag_name.trim().trim_start_matches('v').to_string(),
+            url: asset.browser_download_url.trim().to_string(),
+        })
 }
 
 fn validate_download_url(download_url: &str) -> anyhow::Result<()> {
@@ -290,29 +316,6 @@ fn validate_download_url(download_url: &str) -> anyhow::Result<()> {
         anyhow::bail!("更新 url 必须使用 HTTPS：{download_url}");
     }
     Ok(())
-}
-
-fn manifest_version_text(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.trim().to_string()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn release_label_from_url(download_url: &str) -> String {
-    url::Url::parse(download_url)
-        .ok()
-        .and_then(|url| {
-            url.path_segments().and_then(|mut segments| {
-                segments
-                    .rfind(|segment| !segment.is_empty())
-                    .map(str::to_string)
-            })
-        })
-        .map(|value| value.trim_end_matches(".zip").to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "更新包".to_string())
 }
 
 /// 已下载暂存、尚未应用到 App 的更新包。存在客户端库（`update_state`、`staged_update`、
@@ -408,7 +411,7 @@ impl StagedUpdate {
 
 #[derive(Default)]
 struct UpdateState {
-    /// 最近一次成功安装的 manifest URL。
+    /// 最近一次成功安装的发布包 URL。
     current_url: Option<String>,
     /// 上次下载暂存、还没应用成功的更新；启动时存在则自动补装。
     staged: Option<StagedUpdate>,
@@ -784,7 +787,7 @@ fn clear_preparing_update(expected: &StagedUpdate) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// manifest 已指向另一份发布包时，原子作废精确匹配的安装失败作业。状态先持久化
+/// 更新源已指向另一份发布包时，原子作废精确匹配的安装失败作业。状态先持久化
 /// 清空，再删除缓存；中途强杀至多留下可清理的缓存，不会让新旧作业同时生效。
 pub fn discard_failed_update(expected: &StagedUpdate) -> anyhow::Result<()> {
     let _guard = acquire_update_lock()?;
@@ -1416,7 +1419,7 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
 /// 从当前可执行文件路径反推 `Smelt.app` 的位置：
 /// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
 /// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
-fn current_app_bundle() -> anyhow::Result<PathBuf> {
+pub(crate) fn current_app_bundle() -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let bundle = exe
         .parent()
@@ -2004,17 +2007,17 @@ fn finalize_pending_update_at(
 mod tests {
     use super::swap_app_bundles;
     use super::{
-        ApplyingRecoveryState, BundleUseState, CheckOutcome, InstallerAttempt, StagedUpdate,
-        StagedUpdatePhase, UpdateCandidate, UpdateChannel, UpdateFailure, UpdateManifest,
+        ApplyingRecoveryState, BundleUseState, CheckOutcome, GithubRelease, InstallerAttempt,
+        StagedUpdate, StagedUpdatePhase, UpdateCandidate, UpdateChannel, UpdateFailure,
         UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
         acquire_installer_runtime_lease_at, app_fingerprint, begin_staged_update_in_state,
         classify_applying_recovery, classify_bundle_use_output, clear_installer_attempt_in_state,
         clear_preparing_update_in_state, decide_check_outcome, decide_failed_update_check,
         discard_failed_update_locked, failed_update_to_replace, installer_attempt_from_state,
-        is_update_available, is_valid_update_id, load_update_state_locked, manifest_version_text,
+        is_update_available, is_valid_update_id, load_update_state_locked, pick_release,
         promote_staged_update_in_state, reconcile_update_state_locked,
-        record_installer_failure_in_state, release_label_from_url, safe_component, same_update,
-        save_update_state_locked, validate_download_url,
+        record_installer_failure_in_state, safe_component, same_update, save_update_state_locked,
+        validate_download_url,
     };
     use std::path::PathBuf;
 
@@ -2351,21 +2354,48 @@ mod tests {
         }
     }
 
+    fn releases(json: &str) -> Vec<GithubRelease> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    const RELEASES: &str = r#"[
+        {"tag_name":"v0.9.0-rc.5","prerelease":true,"published_at":"2026-10-21T00:00:00Z",
+         "assets":[{"name":"Smelt.dmg","browser_download_url":"https://example.test/rc5/Smelt.dmg"}]},
+        {"tag_name":"v0.9.0","prerelease":false,"published_at":"2026-10-20T00:00:00Z",
+         "assets":[{"name":"Smelt.app.zip","browser_download_url":"https://example.test/090/Smelt.app.zip"}]},
+        {"tag_name":"v0.9.0-rc.4","prerelease":true,"published_at":"2026-10-19T00:00:00Z",
+         "assets":[{"name":"Smelt.app.zip","browser_download_url":"https://example.test/rc4/Smelt.app.zip"}]},
+        {"tag_name":"v1.0.0","draft":true,"published_at":null,
+         "assets":[{"name":"Smelt.app.zip","browser_download_url":"https://example.test/100/Smelt.app.zip"}]}
+    ]"#;
+
     #[test]
-    fn update_channel_points_to_the_two_internal_manifests() {
-        assert!(
-            UpdateChannel::Dev
-                .manifest_url()
-                .ends_with("update.dev.json")
+    fn channel_picks_latest_published_release_with_update_asset() {
+        let releases = releases(RELEASES);
+        // rc.5 还没传更新包、v1.0.0 是草稿，都不算；同一提交上的正式版晚于 rc.4 发布。
+        assert_eq!(
+            pick_release(&releases, UpdateChannel::Dev),
+            Some(UpdateCandidate {
+                version: "0.9.0".into(),
+                url: "https://example.test/090/Smelt.app.zip".into(),
+            })
         );
-        assert!(
-            UpdateChannel::Prod
-                .manifest_url()
-                .ends_with("update.prod.json")
+        assert_eq!(
+            pick_release(&releases, UpdateChannel::Prod).map(|c| c.version),
+            Some("0.9.0".into())
         );
-        assert_ne!(
-            UpdateChannel::Dev.manifest_url(),
-            UpdateChannel::Prod.manifest_url()
+    }
+
+    #[test]
+    fn prod_channel_ignores_prereleases() {
+        let releases = releases(
+            r#"[{"tag_name":"v0.9.0-rc.4","prerelease":true,"published_at":"2026-10-19T00:00:00Z",
+                 "assets":[{"name":"Smelt.app.zip","browser_download_url":"https://example.test/rc4/Smelt.app.zip"}]}]"#,
+        );
+        assert_eq!(pick_release(&releases, UpdateChannel::Prod), None);
+        assert_eq!(
+            pick_release(&releases, UpdateChannel::Dev).map(|c| c.version),
+            Some("0.9.0-rc.4".into())
         );
     }
 
@@ -2402,19 +2432,6 @@ mod tests {
         assert!(validate_download_url("https://example.test/release.zip").is_ok());
         assert!(validate_download_url("http://example.test/release.zip").is_err());
         assert!(validate_download_url("file:///tmp/release.zip").is_err());
-    }
-
-    #[test]
-    fn manifest_accepts_numeric_placeholder_version() {
-        let manifest: UpdateManifest = serde_json::from_str(
-            r#"{"version":0,"url":"https://example.test/releases/35039"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            manifest_version_text(manifest.version.as_ref().unwrap()),
-            Some("0".into())
-        );
-        assert_eq!(release_label_from_url(&manifest.url), "35039");
     }
 
     #[test]

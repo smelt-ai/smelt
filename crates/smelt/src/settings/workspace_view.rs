@@ -116,6 +116,8 @@ impl Workspace {
                 map
             },
             update_status: self.update_status.clone(),
+            moving_app: self.moving_app,
+            move_app_error: self.move_app_error.clone(),
             daemon_outdated: self.daemon_outdated,
             daemon_upgrading: self.daemon_upgrading,
             daemon_upgrade_msg: self.daemon_upgrade_msg.clone(),

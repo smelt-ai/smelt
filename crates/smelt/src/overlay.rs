@@ -16,6 +16,7 @@ use super::*;
 pub(crate) enum ModalLayer {
     Rename,
     Quit,
+    MoveApp,
     CloseConfirm,
     DiscardHunk,
     DiscardFile,
@@ -37,6 +38,7 @@ impl ModalLayer {
         match self {
             Self::Rename => 1,
             Self::Quit => 2,
+            Self::MoveApp => 14,
             Self::CloseConfirm => 3,
             Self::DiscardHunk => 4,
             Self::DiscardFile => 5,
@@ -51,7 +53,7 @@ impl ModalLayer {
             Self::SessionManager => 1,
             Self::DaemonRestart => 2,
             // 选目录盖在所有主窗口确认框之上：它总是从一次明确的点击打开。
-            Self::DirPicker => 14,
+            Self::DirPicker => 15,
         }
     }
 
@@ -80,6 +82,11 @@ impl Workspace {
             ModalLayer::Rename.rank(),
         );
         raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
+        raise(
+            &mut rank,
+            self.show_move_app_confirm,
+            ModalLayer::MoveApp.rank(),
+        );
         raise(
             &mut rank,
             self.close_confirm.is_some(),
@@ -289,6 +296,13 @@ impl Workspace {
             self.show_quit_confirm = false;
             cx.notify();
             true
+        } else if self.show_move_app_confirm {
+            // Esc 等于「以后再说」；正在移动时不能撤，移完就退出了。
+            if !self.moving_app {
+                self.show_move_app_confirm = false;
+                cx.notify();
+            }
+            true
         } else if self.close_confirm.is_some()
             || self.discard_hunk_target.is_some()
             || self.discard_file_target.is_some()
@@ -458,6 +472,10 @@ impl Workspace {
             .inset_0()
             .children(palette_overlay)
             .children(self.show_quit_confirm.then(|| self.render_quit_confirm(cx)))
+            .children(
+                self.show_move_app_confirm
+                    .then(|| self.render_move_app_confirm(cx)),
+            )
             .children(
                 self.rename_target
                     .is_some()

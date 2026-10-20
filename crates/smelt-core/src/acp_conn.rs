@@ -86,6 +86,19 @@ pub struct ConversationLaunch {
     pub fork_cut: Option<AcpForkCut>,
 }
 
+/// 回退到一条用户消息之前以后，这条消息怎么办。
+#[derive(Clone, Debug)]
+pub enum AfterRewind {
+    /// 编辑并重发：原文回输入框供修改。
+    RestoreComposer,
+    /// 重试：原样再发一次。截断已经去掉了这条消息和失败的那一轮，再发一次后对话里和
+    /// agent 的上下文里都只有一条，不会像把它当新消息重发那样叠出两条。
+    Resend {
+        text: String,
+        images: Vec<PromptImage>,
+    },
+}
+
 /// 随 prompt 一起发出去的一张图（剪贴板粘进来的截图等）。
 ///
 /// 协议要的就是 base64 + mime，所以在进这条通道前就编码好——连接线程不碰
@@ -113,17 +126,18 @@ pub enum ConversationCommand {
     Compact { custom_instructions: Option<String> },
     /// 清空 provider 侧 steering / follow-up 队列，并把原文还回输入框。
     ClearQueue,
-    /// 编辑并重发最后一条用户消息：agent 把活动分支切到该消息之前（Pi 的
-    /// `fork(entryId)`，进程内切换、同一条连接），并把该消息原文还回输入框供
-    /// 编辑重发。`text` + `occurrence` 用来在 agent 的可分叉消息列表里定位
-    /// entryId（事件流不带 entryId，只能按文本配对；`occurrence` 是同文本消息
-    /// 中的第几条，从 0 数起）。`truncate_from` 是发起方投影里的截断游标
-    /// （entry 下标），driver 不解释，fork 成功后原样放进 `Rewound` 事件。
+    /// 回到最后一条用户消息之前：agent 把活动分支切到该消息之前（Pi 的
+    /// `fork(entryId)`，进程内切换、同一条连接），之后按 `then` 处理这条消息。
+    /// `text` + `occurrence` 用来在 agent 的可分叉消息列表里定位 entryId（事件流
+    /// 不带 entryId，只能按文本配对；`occurrence` 是同文本消息中的第几条，从 0
+    /// 数起）。`truncate_from` 是发起方投影里的截断游标（entry 下标），driver 不
+    /// 解释，fork 成功后连同 `then` 原样放进 `Rewound` 事件。
     /// 只有 `supports_rewind` 的驱动会收到它。
     Rewind {
         text: String,
         occurrence: usize,
         truncate_from: usize,
+        then: AfterRewind,
     },
     /// 连接线程内部使用：当前 turn 不再活跃，但 `TurnEnded` 已由别处发出。
     /// 只有 exec 交接后补发遗失回调那条路径用（见 `make_resume_incoming_lines`）。
@@ -416,12 +430,14 @@ pub enum ConversationEvent {
     /// 就能改好的问题表现为整个会话猝死、输入框消失。agent 进程当时还活得好
     /// 好的。这里让回合失败、连接继续，用户改完配置直接重发即可。
     TurnFailed(String),
-    /// 回退成功：agent 已切到目标消息之前的新分叉。`truncate_from` 是发起
-    /// `Rewind` 命令时带上的投影截断游标，这里原样奉还；投影据此丢弃该消息
-    /// 及其之后的所有条目。被回退消息的原文由紧随其后的 `ComposerRestore`
-    /// 事件还回输入框（复用现有还原管线，天然带 revision 去重）。
+    /// 回退成功：agent 已切到目标消息之前的新分叉。`truncate_from` 和 `then` 是
+    /// 发起 `Rewind` 命令时带上的，这里原样奉还；投影据 `truncate_from` 丢弃该消息
+    /// 及其之后的所有条目。`then` 是 [`AfterRewind::RestoreComposer`] 时原文由紧随
+    /// 其后的 `ComposerRestore` 事件还回输入框（复用现有还原管线，天然带 revision
+    /// 去重）；是 [`AfterRewind::Resend`] 时由 daemon 按普通发送再发一次。
     Rewound {
         truncate_from: usize,
+        then: AfterRewind,
     },
     /// 会话的 provider 侧身份变了（Pi fork 之后切换到新的 session 文件）。
     /// 恢复 / 续接必须认新 id，旧 id 对应的分支已经是被丢弃的历史。

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 把钉死的 Bun 1.4.0 放进 target/bundled-bun/<id>/bun。已有且可执行文件哈希相符就复用。
+# 把钉死的 Bun 1.4.3 放进 target/bundled-bun/<id>/bun。已有且可执行文件哈希相符就复用。
 # 用法：scripts/fetch-bun.sh [darwin-arm64|darwin-x64|linux-x64|linux-arm64]
 # `--managed-only` 只是不走 PATH，和默认行为一样。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUN_VERSION=1.4.0
+BUN_VERSION=1.4.3
 
 host_id() {
   local os arch
@@ -33,23 +33,23 @@ ID="${ID:-$(host_id)}"
 case "$ID" in
   darwin-arm64)
     ZIP=bun-darwin-aarch64.zip
-    ARCHIVE_SHA=c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381
-    EXE_SHA=539598c775882420b9d8deb7dc14d845f20f7d26f5600c50ab067dde6ac3f3bf
+    ARCHIVE_SHA=80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
+    EXE_SHA=28c7dd0a06916aba284d570ef44a2d70e9c538eaf2ba58dfe0910525563b3f79
     ;;
   darwin-x64)
     ZIP=bun-darwin-x64.zip
-    ARCHIVE_SHA=1d0211b8f1dc991182344687ad15e72ee86f154845a5f7fa477994cd341dd9b0
-    EXE_SHA=ca8a18d0116d7b6b19f53bb0d8c48e487c0757cab4dc3f4f8cc5e43a44cd75d8
+    ARCHIVE_SHA=62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d
+    EXE_SHA=c2a945a9d33f9088b32ac3550d1d1fd485a7fc10d71c66f91ef0d33b41cefa7c
     ;;
   linux-x64)
     ZIP=bun-linux-x64-baseline.zip
-    ARCHIVE_SHA=184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f
-    EXE_SHA=33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b
+    ARCHIVE_SHA=1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b
+    EXE_SHA=7ce7d6b654eddeec20afddf2396317fba6dc19ab52788a27e894e1806bf8f24b
     ;;
   linux-arm64)
     ZIP=bun-linux-aarch64.zip
-    ARCHIVE_SHA=4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e
-    EXE_SHA=086c4121c8738a8e0f5ed730e8a461bc3973b4444e372ddb77aef9a747fa2ae9
+    ARCHIVE_SHA=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21
+    EXE_SHA=029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe
     ;;
 esac
 

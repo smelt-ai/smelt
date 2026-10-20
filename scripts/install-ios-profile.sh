@@ -213,19 +213,10 @@ if [[ "$CHECK_ONLY" == true ]]; then
   exit 0
 fi
 
-# Flutter 工具链装在 ~/.smelt-ci 下，不进全局 PATH，由 ci/ios/env-setup.sh 生成的
-# env 文件提供。PATH 里已有 flutter 就尊重它，否则加载 env 文件；两者都没有时
-# 明确报错——否则下面 `flutter devices` 失败会被误报成「没连手机」。
+# 找不到 flutter 时明确报错——否则下面 `flutter devices` 失败会被误报成「没连手机」。
 ensure_flutter() {
   command -v flutter >/dev/null 2>&1 && return 0
-  local env_file="$REPO_ROOT/ci/.env/ios.sh"
-  if [[ -f "$env_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$env_file"
-  fi
-  command -v flutter >/dev/null 2>&1 && return 0
-  echo "找不到 flutter：PATH 里没有，${env_file} 也没提供。" >&2
-  echo "先跑 ./ci/ios/env-setup.sh 生成 iOS 构建环境，再重跑本脚本。" >&2
+  echo "PATH 里找不到 flutter。按 mobile/README.md 装好对应版本的 Flutter，再重跑本脚本。" >&2
   exit 1
 }
 

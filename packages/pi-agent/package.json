@@ -1,6 +1,6 @@
 {
   "name": "@smelt-ai/pi-agent",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "private": true,
   "description": "Smelt-managed Pi RPC runtime with built-in interaction, subagent, permission, and usage telemetry extensions",
   "license": "Apache-2.0",
@@ -15,13 +15,13 @@
     "production-smoke": "bun scripts/production-smoke.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-coding-agent": "1.1.0",
-    "@earendil-works/pi-mcp": "1.1.0",
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-coding-agent": "1.3.0",
+    "@earendil-works/pi-mcp": "1.3.0",
     "proper-lockfile": "4.1.2"
   },
   "devDependencies": {
-    "@types/bun": "1.4.0",
+    "@types/bun": "1.4.3",
     "@types/node": "22.19.19",
     "@types/proper-lockfile": "4.1.4",
     "typescript": "5.9.3"

@@ -44,13 +44,11 @@ APK 必须一直用同一把 keystore 签名，否则已装的用户只能卸载
 存在 repo secrets：`SMELT_ANDROID_KEYSTORE_BASE64`、`SMELT_ANDROID_KEYSTORE_PASSWORD`、`SMELT_ANDROID_KEY_PASSWORD`、
 `SMELT_ANDROID_KEY_ALIAS`。原件与密码由维护者离线保管，不进仓库。
 
-本地出正式签名包：
+本地出正式签名包：照 `mobile/README.md` 的 Release signing 写好 `mobile/android/key.properties`，再
 
 ```sh
-SMELT_ANDROID_KEYSTORE=<jks 路径> SMELT_ANDROID_KEYSTORE_PASSWORD=… \
-SMELT_ANDROID_KEY_ALIAS=smelt SMELT_ANDROID_KEY_PASSWORD=… \
-SMELT_BUILD_NAME=0.9.0 SMELT_BUILD_NUMBER=<比线上大的数> \
-./ci/android/ci.sh build
+cd mobile && flutter build apk --release --target-platform android-arm64 \
+  --build-name 0.9.0 --build-number <比线上大的数>
 ```
 
 iOS 没有发版流水线：免费开发者账号只能直装到自己的设备（`scripts/install-ios-profile.sh`）。
