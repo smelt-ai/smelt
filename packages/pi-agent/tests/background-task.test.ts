@@ -248,9 +248,47 @@ describe("background task host client", () => {
 		expect(completionMessage({ ...notice, kind: "command", wake: true }).options).toEqual({ triggerTurn: true });
 	});
 
-	test("only the two host result messages are acknowledged", () => {
+	test("a message from another conversation comes in as a peer message, never as user input", () => {
+		const notice = {
+			id: "pm-1a2b3c4d5e6f",
+			kind: "peer_message" as const,
+			title: "修登录",
+			status: "task",
+			exitCode: null,
+			output: "重跑 flaky e2e，跑完把失败用例发给我",
+			outputTail: "",
+			runs: [],
+			peer: {
+				sourceSessionId: "acp-a",
+				sourceTitle: "修登录",
+				kind: "task" as const,
+				hops: 7,
+				replyTo: null,
+			},
+			wake: true,
+		};
+		const { message, options } = completionMessage(notice);
+		expect(message.customType).toBe("smelt.peer_message");
+		const text = JSON.stringify(message.content);
+		expect(text).toContain("不是用户的请求");
+		expect(text).toContain("session_send 发给 acp-a");
+		const details = (message as { details: Record<string, unknown> }).details;
+		expect(details).toMatchObject({
+			id: "pm-1a2b3c4d5e6f",
+			sourceSessionId: "acp-a",
+			kind: "task",
+			hops: 7,
+			text: "重跑 flaky e2e，跑完把失败用例发给我",
+		});
+		// 空闲时开一轮，忙时排到这一轮之后，不插进手上的工具调用。
+		expect(options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+		expect(completionMessage({ ...notice, wake: false }).options).toEqual({ triggerTurn: false, deliverAs: "followUp" });
+	});
+
+	test("the host results and peer messages are the ones acknowledged", () => {
 		expect(deliveredResultId({ role: "custom", customType: "smelt.background_task", details: { id: "bg-1" } })).toBe("bg-1");
 		expect(deliveredResultId({ role: "custom", customType: "smelt.subagent_result", details: { id: "bg-2" } })).toBe("bg-2");
+		expect(deliveredResultId({ role: "custom", customType: "smelt.peer_message", details: { id: "pm-1" } })).toBe("pm-1");
 		expect(deliveredResultId({ role: "custom", customType: "other", details: { id: "bg-3" } })).toBeUndefined();
 		expect(deliveredResultId({ role: "user", content: "bg-4" })).toBeUndefined();
 	});

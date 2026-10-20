@@ -514,6 +514,7 @@ fn submit_input_applies_pending_model_before_the_prompt() {
             "config_values": [["model", "sonnet"]],
         }),
         &acp_sessions,
+        &new_test_workspace_menu(),
         &new_event_hub(),
     );
     let mut response = String::new();
@@ -573,6 +574,7 @@ fn switching_model_does_not_stop_the_current_turn() {
             "config_values": [["model", "github-copilot/kimi-k3"]],
         }),
         &acp_sessions,
+        &new_test_workspace_menu(),
         &new_event_hub(),
     );
     let mut response = String::new();
@@ -1153,6 +1155,7 @@ fn task_note() -> smelt_core::acp_chat::TaskNote {
         exit_code: Some(1),
         output_tail: "error: boom".into(),
         runs: Vec::new(),
+        peer: None,
     }
 }
 
@@ -2141,6 +2144,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     let session = make_acp_session("acp-dangling-tool", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
@@ -2523,6 +2527,34 @@ fn watch_on_dormant_desktop_conversation_without_desktop_fails_fast() {
         &new_event_hub(),
     );
     assert!(read_watch_unavailable(client).contains("not open"));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "没有桌面端能兑现唤醒时不能空等超时"
+    );
+}
+
+/// 手机给侧栏里还没打开的对话发消息：和旁观一样请桌面打开，不再直接报「没有这个会话」。
+/// 桌面没开就立刻说清楚，不空等。
+#[test]
+fn submit_to_dormant_desktop_conversation_asks_the_desktop_and_fails_fast_without_it() {
+    let acp_sessions = new_test_acp_sessions();
+    let (server, client) = UnixStream::pair().unwrap();
+    let started = Instant::now();
+    handle_acp_submit_input(
+        server,
+        &serde_json::json!({
+            "id": "acp-dormant",
+            "input": {"text": "在吗", "images": []},
+        }),
+        &acp_sessions,
+        &desktop_menu_with_acp("acp-dormant"),
+        &new_event_hub(),
+    );
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(response.to_string().contains("not open"), "{response}");
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "没有桌面端能兑现唤醒时不能空等超时"
@@ -3011,6 +3043,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         });
     }
     let sess = make_acp_session("acp-parallel", reduced);
@@ -3690,6 +3723,7 @@ fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         });
     assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
 
@@ -3820,6 +3854,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&running_with_tool),
@@ -3840,6 +3875,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&idle_with_tool),
@@ -3902,6 +3938,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&completed),

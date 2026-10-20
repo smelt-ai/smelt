@@ -375,6 +375,107 @@ impl SubagentStatus {
     }
 }
 
+/// 另一个 Pi 对话发来的消息是哪一类。只是给对方看的标签，不改变投递方式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerMessageKind {
+    #[default]
+    Message,
+    Task,
+    /// 回报结果，通常带 `reply_to`。
+    Completion,
+    /// 退信：发出去的消息没送到。只由主 daemon 写，发送方选不到。
+    Bounce,
+}
+
+impl PeerMessageKind {
+    /// 会话记录里的写法。认不出来的当普通消息。
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "bounce" => Self::Bounce,
+            other => Self::from_sender(other),
+        }
+    }
+
+    /// 发送方（工具参数）能选的几类。写了 `bounce` 也只当普通消息。
+    pub fn from_sender(value: &str) -> Self {
+        match value {
+            "task" => Self::Task,
+            "completion" => Self::Completion,
+            _ => Self::Message,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Task => "task",
+            Self::Completion => "completion",
+            Self::Bounce => "bounce",
+        }
+    }
+
+    /// 发送那一头的名词：「已发任务给」。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Message => "消息",
+            Self::Task => "任务",
+            Self::Completion => "结果",
+            Self::Bounce => "退信",
+        }
+    }
+
+    /// 收到时事件行里跟在对方名字后面的那半句：「〈A〉发来任务」「〈B〉没收到你的消息」。
+    pub fn received(self) -> &'static str {
+        match self {
+            Self::Message => "发来消息",
+            Self::Task => "发来任务",
+            Self::Completion => "交回结果",
+            Self::Bounce => "没收到你的消息",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerMessageStatus {
+    /// 宿主收下了，还没进 Pi 的会话记录。
+    Pending,
+    /// 扩展在 `message_start` 回了 ack：已进会话记录，模型这一轮看得到。
+    Delivered,
+}
+
+/// 会话宿主里一条别的 Pi 对话发来的消息：还没送到的，加最近送到的一批。
+/// 只在宿主内存里，宿主退出就没了；送到的那条本身在 Pi 的会话记录里。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerMessageView {
+    /// 主 daemon 按（来源，`toolCallId`）算出的 `pm-` id。
+    pub id: String,
+    pub source_session_id: String,
+    pub source_title: String,
+    pub kind: PeerMessageKind,
+    pub status: PeerMessageStatus,
+    pub queued_at_ms: u64,
+    #[serde(default)]
+    pub delivered_at_ms: Option<u64>,
+}
+
+/// 主 daemon 交给目标会话宿主的一条消息。来源由 daemon 按发送方宿主的连接认定。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerDelivery {
+    pub id: String,
+    pub source_session_id: String,
+    pub source_title: String,
+    pub kind: PeerMessageKind,
+    /// 对方再往下转还剩几跳。
+    pub hops: u32,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    pub text: String,
+}
+
 const BACKGROUND_TASK_OUTPUT_CAP: usize = 8_000;
 
 const BACKGROUND_TASK_LIMIT: usize = 12;
@@ -779,6 +880,9 @@ pub struct ConversationSnapshot {
     /// Pi 子智能体。旧快照缺省为空。
     #[serde(default)]
     pub subagents: Vec<SubagentView>,
+    /// 别的 Pi 对话发来、宿主还记得的消息。旧快照缺省为空。
+    #[serde(default)]
+    pub peer_inbox: Vec<PeerMessageView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     /// 宿主级会话输入状态。旧 daemon / 独立 session host 不提供时为 None，客户端
@@ -905,6 +1009,8 @@ pub struct ConversationSnapshotDe {
     pub background_tasks: Vec<BackgroundTaskView>,
     #[serde(default)]
     pub subagents: Vec<SubagentView>,
+    #[serde(default)]
+    pub peer_inbox: Vec<PeerMessageView>,
     pub model: Option<ModelState>,
     pub config_options: Vec<SessionConfigState>,
     #[serde(default)]
@@ -985,6 +1091,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             plan: de.plan,
             background_tasks: de.background_tasks,
             subagents: de.subagents,
+            peer_inbox: de.peer_inbox,
             model: de.model,
             config_options: de.config_options,
             conversation_state: de.conversation_state,
@@ -1047,6 +1154,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             plan: snap.plan,
             background_tasks: snap.background_tasks,
             subagents: snap.subagents,
+            peer_inbox: snap.peer_inbox,
             model: snap.model,
             config_options: snap.config_options,
             conversation_state: snap.conversation_state,
@@ -1186,6 +1294,17 @@ pub enum AcpUserAction {
     /// 但不叫醒模型。旧 daemon 不认识，会回 unknown variant。
     StopSubagent {
         id: String,
+    },
+    /// 主 daemon 把别的 Pi 对话发来的消息交给这个会话宿主。只有主 daemon 能发：
+    /// 客户端发来的一律拒绝，否则谁都能冒充别的对话。
+    DeliverPeerMessage {
+        message: PeerDelivery,
+    },
+    /// 主 daemon 回答会话宿主转上来的 `session_list` / `session_read` / `session_send`。
+    /// 只在宿主的控制连接上出现。
+    PeerReply {
+        request_id: u64,
+        reply: serde_json::Value,
     },
     /// 把原生队列里的这一条从 provider 拿走，停掉当前回答，等 provider 真正空闲后只发一次。
     /// 再发同一个文本是同一个动作，不会再发一遍。旧 daemon 不认识，会回 unknown variant。

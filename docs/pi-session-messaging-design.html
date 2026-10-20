@@ -1,0 +1,1440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>smelt Pi↔Pi 会话消息技术方案</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-elevated: #161b22;
+    --bg-sidebar: #0b1017;
+    --border: #30363d;
+    --border-subtle: #21262d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --text-dim: #6e7681;
+    --accent: #39c5cf;
+    --accent-2: #58a6ff;
+    --accent-soft: rgba(57, 197, 207, 0.12);
+    --accent-2-soft: rgba(88, 166, 255, 0.12);
+    --warn: #d29922;
+    --warn-soft: rgba(210, 153, 34, 0.12);
+    --danger: #f85149;
+    --danger-soft: rgba(248, 81, 73, 0.1);
+    --ok: #3fb950;
+    --ok-soft: rgba(63, 185, 80, 0.1);
+    --code-bg: #010409;
+    --sidebar-w: 240px;
+    --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono",
+      Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 1.25rem 0.9rem 2rem;
+    font-size: 13px;
+  }
+  nav.toc .brand {
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.35rem;
+  }
+  nav.toc .toc-title {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-bottom: 1rem;
+    line-height: 1.4;
+  }
+  nav.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: toc;
+  }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block;
+    padding: 0.35rem 0.55rem;
+    border-radius: 6px;
+    color: var(--text-muted);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+  }
+  nav.toc a:hover {
+    background: var(--accent-soft);
+    color: var(--text);
+    text-decoration: none;
+  }
+  nav.toc a::before {
+    counter-increment: toc;
+    content: counter(toc) ". ";
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  main {
+    max-width: 880px;
+    padding: 2rem 2.5rem 4rem;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  header.doc-header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  header.doc-header h1 {
+    margin: 0 0 0.6rem;
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+  }
+  header.doc-header .meta {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+  header.doc-header .meta strong { color: var(--text); font-weight: 600; }
+  .badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.9rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+  }
+  .badge.accent { border-color: rgba(57,197,207,0.4); color: var(--accent); background: var(--accent-soft); }
+  .badge.blue { border-color: rgba(88,166,255,0.4); color: var(--accent-2); background: var(--accent-2-soft); }
+  .badge.warn { border-color: rgba(210,153,34,0.4); color: var(--warn); background: var(--warn-soft); }
+  .badge.ok { border-color: rgba(63,185,80,0.4); color: var(--ok); background: var(--ok-soft); }
+
+  section {
+    margin-bottom: 2.75rem;
+    scroll-margin-top: 1.25rem;
+  }
+  h2 {
+    font-size: 1.3rem;
+    margin: 0 0 1rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  h2 .num {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    margin-right: 0.35rem;
+  }
+  h3 {
+    font-size: 1.05rem;
+    margin: 1.5rem 0 0.6rem;
+    color: var(--text);
+  }
+  h4 {
+    font-size: 0.95rem;
+    margin: 1.1rem 0 0.45rem;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  p { margin: 0.65rem 0; }
+  ul, ol { margin: 0.5rem 0 0.85rem; padding-left: 1.35rem; }
+  li { margin: 0.28rem 0; }
+  li::marker { color: var(--text-dim); }
+
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin: 1rem 0;
+    font-size: 0.92rem;
+  }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .callout.danger { border-left-color: var(--danger); background: var(--danger-soft); }
+  .callout.ok { border-left-color: var(--ok); background: var(--ok-soft); }
+  .callout .label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.25rem;
+  }
+  .callout.warn .label { color: var(--warn); }
+  .callout.danger .label { color: var(--danger); }
+  .callout.ok .label { color: var(--ok); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    margin: 0.9rem 0 1.2rem;
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  th, td {
+    text-align: left;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: top;
+  }
+  th {
+    background: #1c2128;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 0.85em; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--code-bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    color: #c9d1d9;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.95rem 1.05rem;
+    overflow-x: auto;
+    margin: 0.85rem 0 1.1rem;
+    font-size: 0.8rem;
+    line-height: 1.55;
+  }
+  pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #c9d1d9;
+    font-size: inherit;
+  }
+  .sketch-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--warn);
+    background: var(--warn-soft);
+    border: 1px solid rgba(210,153,34,0.35);
+    border-radius: 4px;
+    padding: 0.1rem 0.45rem;
+    margin-bottom: 0.45rem;
+  }
+
+  .mermaid {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1rem 0 1.25rem;
+    overflow-x: auto;
+  }
+
+  .phase-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin: 1rem 0;
+  }
+  .phase-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    background: var(--bg-elevated);
+  }
+  .phase-card h4 { margin: 0 0 0.4rem; color: var(--accent); font-size: 0.95rem; }
+  .phase-card.p1 h4 { color: var(--accent-2); }
+  .phase-card.p2 h4 { color: var(--warn); }
+  .phase-card.out h4 { color: var(--danger); }
+  .phase-card ul { margin: 0; padding-left: 1.1rem; font-size: 0.88rem; }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc {
+      position: relative;
+      height: auto;
+      max-height: none;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding: 1rem;
+    }
+    nav.toc ol {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.25rem;
+    }
+    nav.toc a { border-left: none; padding: 0.3rem 0.5rem; }
+    main { padding: 1.25rem 1.1rem 3rem; }
+  }
+
+  @media print {
+    :root {
+      --bg: #fff;
+      --bg-elevated: #f6f8fa;
+      --bg-sidebar: #f6f8fa;
+      --text: #1f2328;
+      --text-muted: #656d76;
+      --text-dim: #8c959f;
+      --border: #d0d7de;
+      --border-subtle: #eaeef2;
+      --code-bg: #f6f8fa;
+      --accent: #0550ae;
+      --accent-2: #0550ae;
+    }
+    nav.toc { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    a { color: inherit; text-decoration: underline; }
+    .mermaid { break-inside: avoid; }
+    pre { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="目录">
+  <div class="brand">smelt · 设计文档</div>
+  <div class="toc-title">Pi↔Pi 会话消息<br/>transcript 即收件箱<br/>2026-10-20</div>
+  <ol>
+    <li><a href="#s1">背景与目标</a></li>
+    <li><a href="#s2">设计原则</a></li>
+    <li><a href="#s3">现状</a></li>
+    <li><a href="#s4">与 PI / 业内对照</a></li>
+    <li><a href="#s5">总体方案</a></li>
+    <li><a href="#s-dir">对话目录与拉起</a></li>
+    <li><a href="#s-link">通信链路 / 传输层</a></li>
+    <li><a href="#s6">「数据」放哪</a></li>
+    <li><a href="#s7">API / 工具</a></li>
+    <li><a href="#s8">投递时序</a></li>
+    <li><a href="#s9">护栏与权限</a></li>
+    <li><a href="#s10">UI</a></li>
+    <li><a href="#s11">分阶段落地</a></li>
+    <li><a href="#s-status">状态与结果的精度代价</a></li>
+    <li><a href="#s12">风险与取舍</a></li>
+    <li><a href="#s13">开放问题</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="doc-header">
+  <h1>smelt Pi↔Pi 会话消息技术方案</h1>
+  <div class="meta">
+    <strong>日期</strong>：2026-10-20（Asia/Taipei） ·
+    <strong>受众</strong>：smelt 仓库维护者（Rust <code>smeltd</code> + Pi agent） ·
+    <strong>状态</strong>：P0 实现中（PR #55）。本稿和代码一致，名字以代码为准
+  </div>
+  <div class="meta" style="margin-top:0.45rem">
+    <strong>项目</strong>：
+    <a href="https://github.com/smelt-ai/smelt" target="_blank" rel="noopener">smelt-ai/smelt</a>
+    （macOS AI coding cockpit · <code>smeltd</code> + Pi / Bun） ·
+    <strong>依据调研</strong>：
+    <code>2026-10-20-pi-and-industry-session-messaging.md</code> 等
+  </div>
+  <div class="badge-row">
+    <span class="badge accent">Pi transcript 即收件箱</span>
+    <span class="badge ok">零新 SQL 账本</span>
+    <span class="badge blue">仅 Pi ↔ Pi</span>
+    <span class="badge warn">先收下，再投递</span>
+  </div>
+</header>
+
+<!-- ========== 1 ========== -->
+<section id="s1">
+  <h2><span class="num">1.</span>背景与目标 / 非目标</h2>
+
+  <h3>1.1 为何要做</h3>
+  <p>
+    smelt 是 macOS 上的 AI coding cockpit：侧栏里的 Pi 对话由 <code>smeltd</code>（Rust）托管，
+    对话里的 agent 是 Pi（Bun）。产品要让 Pi 对话之间<strong>自由通信</strong>：一个正在跑的 Pi 对话
+    能给侧栏里另一个 Pi 对话发消息、交代任务、交回结果，对方在自己的回合里处理；
+    也能<strong>起一个新的 Pi 对话</strong>，把一块独立的活交给它。
+  </p>
+  <p>
+    这和现有 <code>subagent</code>（后台子进程、只向父报告、不进侧栏）是<strong>不同层</strong>：
+    subagent 保持不变；这里说的是侧栏里那些普通 Pi 对话之间的协作。
+  </p>
+
+  <h3>1.2 目标</h3>
+  <ul>
+    <li>发现：列出侧栏里的其它 Pi 对话，在跑的、挂起的、这次还没打开的都算。</li>
+    <li>发送：给其中一个发消息、任务或结果。对方没在跑就先把它拉起来。</li>
+    <li>起新对话：在同一个项目里新建一个 Pi 对话，模型、权限和发起方一样，第一条就是交代给它的任务。</li>
+    <li>送达权威在<strong>目标 Pi 的 transcript</strong>：消息作为自定义消息进了 transcript 才算送到。</li>
+    <li>工具调用立刻返回：<code>smeltd</code> 当场只做便宜的检查，收下之后在后台拉起对方、建对话、投递；后台失败了给发送方退信。</li>
+    <li>不引入协作账本表。</li>
+  </ul>
+
+  <h3>1.3 非目标</h3>
+  <ul>
+    <li><strong>不</strong>做跨引擎 ACP 总线（Claude / Codex / 其他 runtime 互通）。</li>
+    <li><strong>不</strong>复活已删除的 schema-23 MCP peer 总线（<code>smelt-agent-mcp</code> / <code>peer_message_*</code>）。</li>
+    <li><strong>不</strong>做子智能体之间互聊：子智能体仍然只向父会话交结果（与 PI Desktop ADR 0165 同向）。</li>
+    <li><strong>不</strong>新增 <code>session_messages</code> / <code>session_links</code> 等 SQL 协作账本，也<strong>不</strong>为该功能在 <code>smelt.sqlite3</code> 上加新 schema 字段。</li>
+  </ul>
+
+  <div class="callout ok">
+    <div class="label">产品偏好</div>
+    协作状态放进 Pi transcript，而不是 host SQL 账本。
+    接受相对 PI Desktop 更薄的持久化保证（见 §12），换取零新表、与 Pi 原生会话模型对齐。
+  </div>
+</section>
+
+<!-- ========== 2 ========== -->
+<section id="s2">
+  <h2><span class="num">2.</span>设计原则</h2>
+
+  <ol>
+    <li>
+      <strong>Pi transcript 即收件箱。</strong>
+      对方收到的是一条 Pi 自定义消息（<code>customType: "smelt.peer_message"</code>），元数据在 <code>details</code>。
+      界面和模型都从 transcript 本身读到「谁发来的」。
+    </li>
+    <li>
+      <strong>零新 SQL 账本。</strong>
+      不新增 <code>session_messages</code>、<code>session_links</code>，不为这个功能扩展 <code>smelt.sqlite3</code>。
+      <code>sourceSessionId</code>、<code>kind</code>、<code>hops</code>、<code>replyTo</code> 住在那条自定义消息的 <code>details</code> 里；
+      发件队列、链预算只在主 daemon 内存里。
+    </li>
+    <li>
+      <strong>来源只认连接。</strong>
+      来源是「这条宿主控制连接属于注册表里哪个对话」，请求里不带来源，也不带跳数。
+      模型在 bash 里读得到自己的环境，请求里写什么都能伪造。
+    </li>
+    <li>
+      <strong>先收下，再处理。</strong>
+      <code>session_send</code> / <code>session_spawn</code> 只等主 daemon 做完便宜的同步检查，拿到「已收下」和 id 就返回。
+      拉起对方、建新对话、写配置这些慢事在主 daemon 后台做，做不成就给发送方退信。
+      工具调用不会因为对方慢而超时，也就没有「超时了，到底送没送」的歧义。
+    </li>
+    <li>
+      <strong>id 由这次调用决定。</strong>
+      消息 id、新对话 id 都由（来源对话，Pi 的 <code>toolCallId</code>）算出来。
+      同一次调用不管重放几次，都落到同一条消息、同一个对话。模型不用自己出幂等 key。
+    </li>
+    <li>
+      <strong>目录和运行时分开。</strong>
+      能发给谁看对话目录（§5.1）；对方此刻有没有在跑，交给一个统一的「拉起」函数：挂起的唤醒，没打开的请桌面打开。
+      peer 投递、手机提交、手机旁观都用这一个函数，不各写一套。
+    </li>
+    <li>
+      <strong>复用既有结果投递路径，不当用户输入。</strong>
+      投递就是交给目标宿主的 <code>BackgroundSupervisor</code>，和后台任务、子智能体交回结果走同一条 listen / ack。
+      不走 <code>Prompt</code> / <code>FollowUp</code>。
+    </li>
+    <li>
+      <strong>与 subagent 分层。</strong>
+      subagent：后台、只报告、不进侧栏。peer：侧栏里的 Pi 对话之间。
+    </li>
+  </ol>
+</section>
+
+<!-- ========== 3 ========== -->
+<section id="s3">
+  <h2><span class="num">3.</span>现状（动工前）</h2>
+
+  <table>
+    <thead>
+      <tr><th>能力</th><th>现状</th><th>备注</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>侧栏目录</td>
+        <td>已有</td>
+        <td>桌面把侧栏投影成 <code>WorkspaceMenuSnapshot</code> 发给 daemon（id、标题、cwd、agent），按运行时分开发。daemon 自己建的对话另在远程目录里</td>
+      </tr>
+      <tr>
+        <td>拉起没在跑的对话</td>
+        <td>有，但分散</td>
+        <td>手机旁观对没打开的对话请桌面打开（<code>wake_dormant_conversation</code>）；提交前唤醒挂起的（<code>wake_suspended_acp_session</code>）。两处各写各的，手机提交给没打开的对话直接报 <code>ACP session not found</code></td>
+      </tr>
+      <tr>
+        <td><code>subagent</code></td>
+        <td>已有</td>
+        <td>后台子进程；向父报告；不在侧栏</td>
+      </tr>
+      <tr>
+        <td>Pi→Pi 发消息、起新对话</td>
+        <td><strong>无</strong></td>
+        <td>这次要补的</td>
+      </tr>
+      <tr>
+        <td>schema-23 MCP peer 总线</td>
+        <td>已删除</td>
+        <td>明确不复活</td>
+      </tr>
+      <tr>
+        <td>同一会话里的 claim / ack</td>
+        <td>已有</td>
+        <td>后台任务结果在 <code>message_start</code> 时 ack，peer 直接复用</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ========== 4 ========== -->
+<section id="s4">
+  <h2><span class="num">4.</span>与 PI / 业内对照</h2>
+
+  <h3>4.1 PI Desktop：host SQL collaboration ledger</h3>
+  <p>
+    PI Desktop（ADR 0239 / 0240）对 durable Agent Session 采用<strong>host 拥有的协作账本</strong>：
+  </p>
+  <ul>
+    <li><code>session_collaboration_messages</code>：按 message ID / idempotency key 幂等；kind ∈ {task, message, completion}</li>
+    <li><code>session_collaboration_links</code>：仅记录 spawn 创建的 parent–worker 关系</li>
+    <li>投递经 turn queue（忙则排队）；inbox 深度、hops、permission_ceiling 均有 SQL / host 侧权威</li>
+    <li>崩溃恢复与 exactly-once completion 回调由 ledger 支撑</li>
+  </ul>
+
+  <h3>4.2 smelt 选择：更薄的 Pi-native 路径</h3>
+  <table>
+    <thead>
+      <tr><th>维度</th><th>PI Desktop</th><th>smelt（本稿）</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>收件箱权威</td>
+        <td>host SQL ledger 行</td>
+        <td>目标 Pi transcript 里的 <code>smelt.peer_message</code></td>
+      </tr>
+      <tr>
+        <td>关系图</td>
+        <td><code>session_collaboration_links</code></td>
+        <td>新对话的第一条消息写明是谁起的；「不能再起」只记在内存</td>
+      </tr>
+      <tr>
+        <td>幂等</td>
+        <td>UNIQUE(plugin, source, idempotency_key)</td>
+        <td>id 由（来源，<code>toolCallId</code>）算出；发件队列和目标宿主都按 id 去重；不跨 daemon 重启</td>
+      </tr>
+      <tr>
+        <td>投递中的状态</td>
+        <td>queued 行，崩溃后可重放</td>
+        <td>主 daemon 内存里的发件队列；对方宿主退出会重投，主 daemon 崩溃时还没交出去的丢</td>
+      </tr>
+      <tr>
+        <td>schema 成本</td>
+        <td>新表 + 迁移</td>
+        <td>零新协作表 / 零新 runtime DB 字段</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 业内简述</h3>
+  <ul>
+    <li><strong>报告型子 agent</strong>：Claude Code Task、PI Task——子结束交结果，无兄弟 peer；smelt <code>subagent</code> 属此类，保持不变。</li>
+    <li><strong>对等投递</strong>：PI Desktop session collaboration——smelt 产品语义同类，实现落点改为 transcript。</li>
+    <li><strong>异步命令 + 发件箱（outbox）</strong>：受理和处理分开、按确定的 id 去重、失败回执给发送方，是消息系统和 saga 的常规做法。本稿的发件队列就是这个模式，只是放在内存里。</li>
+  </ul>
+</section>
+
+<!-- ========== 5 ========== -->
+<section id="s5">
+  <h2><span class="num">5.</span>总体方案</h2>
+
+  <p>
+    三个角色：发起方 Pi（A）、主 <code>smeltd</code>（门卫 + 发件队列）、目标 Pi（B）。
+    A 的工具经自己的会话宿主把请求交给主 daemon；主 daemon 当场检查、收下、回 id；
+    再在后台把 B 拉起来，把消息交给 B 宿主的 <code>BackgroundSupervisor</code>；
+    B 的扩展把它写成 <code>smelt.peer_message</code> 进 transcript，按既有 claim / ack 认领。
+  </p>
+
+  <div class="sketch-label">组件关系</div>
+  <div class="mermaid">
+flowchart TB
+  subgraph PiA["Pi A（Bun 扩展）"]
+    ToolA["session_list / read / send / spawn"]
+  end
+
+  subgraph HostA["宿主 A · smeltd --acp-session-host"]
+    BgA["BackgroundSupervisor<br/>SMELT_BACKGROUND_TASK_SOCK"]
+  end
+
+  subgraph Daemon["主 smeltd"]
+    Gate["门卫<br/>来源 = 这条连接的注册表 id"]
+    Dir["对话目录<br/>注册表 + 侧栏菜单"]
+    Outbox["发件队列（内存）<br/>每个目标一条投递线程"]
+    Ensure["ensure_conversation_runtime<br/>唤醒挂起 · 请桌面打开"]
+  end
+
+  subgraph HostB["宿主 B"]
+    BgB["BackgroundSupervisor<br/>peer 投递队列 · peer_inbox"]
+  end
+
+  subgraph PiB["Pi B（Bun 扩展）"]
+    TrB["transcript = 收件箱<br/>customType smelt.peer_message"]
+  end
+
+  ToolA -->|"一行 JSON · 带 toolCallId"| BgA
+  BgA -->|"socketpair 上的 peer_request 行"| Gate
+  Gate --> Dir
+  Gate -->|"收下 · 回 id"| Outbox
+  Outbox --> Ensure
+  Outbox -->|"AcpUserAction::DeliverPeerMessage"| BgB
+  BgB -->|"listen 连接 · kind peer_message"| TrB
+  BgB -.->|"快照里的 peer_inbox"| Outbox
+  </div>
+
+  <div class="callout">
+    <div class="label">核心断言</div>
+    送达 =「<code>smelt.peer_message</code> 已进入 B 的 transcript」，以 Pi 的 <code>message_start</code> 为准，B 的扩展此时回 ack。
+    在这之前，消息归主 daemon 的发件队列管：B 没在跑就拉起，B 的宿主退出就重投，投不了就退信。
+  </div>
+</section>
+
+<!-- ========== 5.1 ========== -->
+<section id="s-dir">
+  <h2>5.1 对话目录与拉起</h2>
+
+  <h3>目录：能发给谁</h3>
+  <p>
+    目录是这两处的并集，不含自己：
+  </p>
+  <table>
+    <thead>
+      <tr><th>来源</th><th>算哪些</th><th><code>state</code></th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>主 daemon 的 <code>AcpRegistry</code></td>
+        <td>启动规格是 Smelt 的 Pi、不归自动化、runtime 在跑或被闲置挂起的对话</td>
+        <td><code>busy</code> / <code>idle</code> / <code>suspended</code></td>
+      </tr>
+      <tr>
+        <td>桌面发来的侧栏菜单（<code>WorkspaceMenuSnapshot</code>）</td>
+        <td><code>kind = acp</code>、<code>agent = "pi"</code>、不在注册表里的对话：侧栏上有，这次 daemon 还没打开过</td>
+        <td><code>dormant</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <ul>
+    <li>注册表里有、但 runtime 已经退出又不是挂起的（agent 崩了，等用户点重启），不进目录。拉起它要用户决定。</li>
+    <li>标题按侧栏上的名字：先取菜单里的（含用户改过的），再取远程目录里的，再取对话自己的标题。</li>
+    <li>菜单按运行时分开发，daemon 拿到的只是这台运行时上的对话，不会列出别的机器上的。</li>
+    <li>远程目录（daemon 自己建的对话，手机建的、<code>session_spawn</code> 建的）只记在跑的；冷启动时没有 runtime 的记录会被删掉。桌面把这些对话收进侧栏之后，它们就和别的侧栏对话一样出现在菜单里。</li>
+  </ul>
+
+  <h3>拉起：一个函数</h3>
+  <p>
+    <code>acp_host.rs</code> 里两个函数，分别回答「有没有这个对话」和「它在不在跑」：
+  </p>
+  <pre><code>/// 注册表里有就直接给；没有但在侧栏菜单里，请桌面打开，等槽出现（最多 15 秒）。
+fn conversation_slot(id) -&gt; Result&lt;Slot, String&gt;
+
+/// 在 conversation_slot 之上，挂起的再唤醒，等 runtime 就绪。
+fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
+  <table>
+    <thead>
+      <tr><th>调用方</th><th>用哪个</th><th>改动</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>手机旁观（<code>handle_acp_watch</code>）</td>
+        <td><code>conversation_slot</code></td>
+        <td>原来内联的「没有就请桌面打开」挪进去。旁观不唤醒挂起的 runtime，镜像够看</td>
+      </tr>
+      <tr>
+        <td>提交输入（<code>handle_acp_submit_input</code>）</td>
+        <td><code>ensure_conversation_runtime</code></td>
+        <td>原来只认注册表 + 唤醒挂起。现在手机给没打开的对话发消息也会请桌面打开，不再报 <code>ACP session not found</code></td>
+      </tr>
+      <tr>
+        <td>peer 投递（发件队列）</td>
+        <td><code>ensure_conversation_runtime</code></td>
+        <td>新增</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    拉不起来时的原因原样给调用方：桌面没开、桌面没在时限内打开、对话已经不在侧栏、挂起的 runtime 起不来。
+    手机看到的是错误提示，peer 发送方收到的是一封退信。
+  </p>
+</section>
+
+<!-- ========== link ========== -->
+<section id="s-link">
+  <h2>通信链路 / 传输层</h2>
+
+  <p>
+    不新开协议、不新开套接字、不走 MCP、也不让两个 Pi 直接连。
+    扩展只连自己这个会话宿主上已经在听的 Unix 套接字；宿主只沿主 daemon 拉起它时留下的那条 socketpair 把请求交上去；
+    主 daemon 找到目标宿主，把一条 <code>AcpUserAction</code> 写过去。
+  </p>
+
+  <h3>现成的三条通道</h3>
+  <table>
+    <thead>
+      <tr><th>谁和谁</th><th>现网</th><th>这次怎么用</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Pi → 自己的会话宿主</td>
+        <td>
+          <code>BackgroundSupervisor::start</code> 在临时目录听 <code>smbg-{pid}-{nonce}.sock</code>（权限 <code>0o600</code>），路径放进这个 Pi 的 <code>SMELT_BACKGROUND_TASK_SOCK</code>。
+          <code>handle_client</code>（<code>background_tasks.rs</code>）按一行 JSON 的 <code>op</code> 分流。扩展侧短调用是 <code>callBackgroundHost</code>。
+        </td>
+        <td>
+          加 <code>session_list</code> / <code>session_read</code> / <code>session_send</code> / <code>session_spawn</code> 四个短 op，一问一答。
+          <code>owner</code> 非空是子智能体，一律拒绝：peer 只给会话本身用。
+        </td>
+      </tr>
+      <tr>
+        <td>会话宿主 ↔ 主 smeltd</td>
+        <td>
+          每个对话是一个 <code>smeltd --acp-session-host</code>，和主 daemon 之间一条 <code>UnixStream::pair()</code>。
+          daemon → 宿主是 <code>AcpUserAction</code>（<code>send_action</code>）；宿主 → daemon 是快照行和 <code>history_page</code> 回包。
+        </td>
+        <td>
+          宿主 → daemon 加一种行 <code>{"peer_request": {"request_id", "op", "body"}}</code>，<code>dispatch_snapshot_line</code> 和 <code>history_page</code> 一样先分流；
+          daemon 用 <code>AcpUserAction::PeerReply { request_id, reply }</code> 回答，宿主的动作循环先截下来交给 <code>peer_link::complete</code>。
+          <strong>不走 Control API</strong>：那是 <code>smeltd.sock</code> 上靠参数里的 session id 和 token 认人的，token 就在 Pi 的环境里。
+        </td>
+      </tr>
+      <tr>
+        <td>主 smeltd → 目标宿主 → Pi B</td>
+        <td>
+          槽在 <code>AcpRegistry</code>，句柄是 <code>AcpSession.hosted_handle</code>。Pi 的 stdin 由 <code>write_rpc</code> 写。
+        </td>
+        <td>
+          新动作 <code>AcpUserAction::DeliverPeerMessage { message }</code>，宿主交给自己的 <code>BackgroundSupervisor</code>。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>1. Pi A → 宿主 A</h3>
+  <p>
+    工具写一行 <code>{"op": "session_send", "toolCallId", "to", "text", "kind", "replyTo"}</code>，读一行回答。
+    宿主只托管这一个对话，不改写也不添加来源；去掉 <code>op</code> / <code>owner</code> 后原样转给主 daemon，等 15 秒。
+    主 daemon 只做同步检查，正常几毫秒就回。
+  </p>
+
+  <h3>2. 宿主 A → 主 smeltd：门卫</h3>
+  <p>
+    主 daemon 每收一行 <code>peer_request</code> 单开一个线程回答。来源就是这条控制连接所属的注册表 id；
+    连接已经被换掉（同一个 id 有了新槽）就拒绝。同步检查见 §7、§9，通过后：
+  </p>
+  <ul>
+    <li><code>session_list</code> / <code>session_read</code>：直接回答。</li>
+    <li><code>session_send</code>：算出消息 id，记一封信进发件队列，回 <code>accepted</code>。</li>
+    <li><code>session_spawn</code>：算出新对话 id 和任务消息 id，把建对话这件事交给后台，回 <code>accepted</code>。</li>
+  </ul>
+
+  <h3>3. 发件队列 → 宿主 B</h3>
+  <p>
+    发件队列是主 daemon 内存里的一张表，每封信：id、来源、目标、内容、状态。每个目标同一时间只有一条投递线程，按收下的先后一封封投：
+  </p>
+  <ol>
+    <li><code>ensure_conversation_runtime(B)</code>。</li>
+    <li>B 原来没打开、收下时还不知道它的权限档位的，这时补查权限（§9.2）。</li>
+    <li>记下 B 当前的 <code>connection_generation</code>，把 <code>DeliverPeerMessage</code> 写给 B 的宿主，信的状态改成「已交给宿主」。</li>
+  </ol>
+  <p>任何一步失败：这封信标成失败，给 A 退信（§7.2）。投递线程接着投下一封。</p>
+
+  <h3>4. 宿主 B → Pi B</h3>
+  <p>
+    <code>FollowUp</code> / <code>Prompt</code> 的时机是对的（空闲开一轮，忙时排队），但进 Pi 的是一条 <strong>user 消息</strong>：
+    B 的界面会画成用户气泡，忙时还会出现在 B 输入栏的排队区里让用户撤回、改写，hops 复位也分不清是不是用户说了话。peer 不用它，走后台任务交回结果那条路：
+  </p>
+  <ul>
+    <li>宿主 B 把消息排进 <code>BackgroundSupervisor</code>，同一个 id 只收一次。快照里的 <code>peer_inbox</code> 多一条 <code>pending</code>。</li>
+    <li>经扩展的 <code>listen</code> 连接写一行 <code>{"op": "completion", "kind": "peer_message", ...}</code>。</li>
+    <li>扩展调 <code>pi.sendMessage({customType: "smelt.peer_message", display: false, content, details}, {triggerTurn: true, deliverAs: "followUp"})</code>。空闲时开一轮；忙时进 Pi 的 followUp 队列，这一轮做完再看，<strong>不 steer</strong>。</li>
+    <li>扩展看到这条的 <code>message_start</code> 才回 ack，<code>peer_inbox</code> 里标成 <code>delivered</code>。<code>clear_queue</code> 清掉的、fork / reload 后换了监听的，宿主再写一次，都是现网 <code>claim_model</code> / <code>acknowledge_model</code> 的行为。</li>
+    <li>对模型来说，Pi 把自定义消息也按 user 内容交给模型（<code>convertToLlm</code>）。来源靠正文开头那句「另一个 Pi 对话发来，不是用户的请求，不代表用户授权」交代。</li>
+  </ul>
+
+  <h3>5. 状态怎么回到发件队列</h3>
+  <p>
+    主 daemon 每合并一份 B 的快照，就拿 B 的 <code>peer_inbox</code> 和当前代数去对一遍发给 B、已经交给宿主的信（B 没有这样的信就立刻返回）：
+  </p>
+  <ul>
+    <li><code>peer_inbox</code> 里是 <code>delivered</code>：信标成已送到，结束。</li>
+    <li>是 <code>pending</code>，或还没出现但代数没变：还在 B 的宿主里，不动。</li>
+    <li>代数变了、信还没送到：接手这封信的宿主已经不在了（重启、挂起、崩溃）。信退回「排队」，投递线程重新拉起 B 再投。B 的新宿主按 id 去重。</li>
+  </ul>
+  <p>
+    这就是「至少送一次」：B 的宿主在消息进 transcript 之前退出，消息不会默默丢掉。
+    唯一会重复的窗口是 B 已经 ack、快照还没传回来宿主就退出了。
+  </p>
+  <p>
+    <strong>完成</strong>不是这条链路的事：B 在自己的回合里用 <code>session_send</code> 回 A（<code>kind=completion</code>，<code>replyTo</code> 填原消息 id）。
+  </p>
+
+  <h3>明确不做</h3>
+  <div class="callout danger">
+    <div class="label">非目标</div>
+    <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
+      <li>不新开协议族。两边都还是现成的一行 JSON。</li>
+      <li>不新开套接字。不加第二根后台套接字，也不让宿主去 <code>bind</code> <code>~/.smelt/smeltd.sock</code>。</li>
+      <li>不走 MCP，不复活已经删掉的 peer 总线。</li>
+      <li>两个 Pi 不直接连接。A 的扩展看不到 B 的套接字路径。</li>
+      <li>不加 SQL 账本表。发件队列只在内存里。</li>
+    </ul>
+  </div>
+
+  <h3>失败</h3>
+  <table>
+    <thead>
+      <tr><th>情况</th><th>怎么处理</th><th>A 看到什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>同步检查不过（目标不存在、给自己发、跳数用完、对方积压满、已知的权限不允许）</td>
+        <td>不收下</td>
+        <td>工具调用直接失败，带原因</td>
+      </tr>
+      <tr>
+        <td>B 被闲置挂起</td>
+        <td><code>ensure_conversation_runtime</code> 唤醒，再投。<code>peer_inbox</code> 里还有 <code>pending</code> 时，B 不会被挂起</td>
+        <td>状态从 <code>queued</code> 走到 <code>delivered</code></td>
+      </tr>
+      <tr>
+        <td>B 在侧栏里，这次还没打开</td>
+        <td>请桌面打开，等槽出现，再唤醒、投递</td>
+        <td>同上</td>
+      </tr>
+      <tr>
+        <td>B 没打开，桌面也没开</td>
+        <td>拉不起来，信标成失败</td>
+        <td>退信：「Smelt 桌面没开，拉不起这段对话」</td>
+      </tr>
+      <tr>
+        <td>B 拉起来后，发现它是「完全访问」而 A 是「逐次审批」</td>
+        <td>不投，信标成失败</td>
+        <td>退信，原因 <code>permission</code></td>
+      </tr>
+      <tr>
+        <td>B 的宿主在消息进 transcript 前退出</td>
+        <td>代数变了，信退回排队，重新拉起再投</td>
+        <td>状态退回 <code>queued</code>，之后 <code>delivered</code></td>
+      </tr>
+      <tr>
+        <td>A 的工具连接在回答前断了</td>
+        <td>信可能已经收下</td>
+        <td>同一次调用重放（同一个 <code>toolCallId</code>）拿到同一个 id，不会多送一封。模型重新调用是一次新的发送</td>
+      </tr>
+      <tr>
+        <td><code>session_spawn</code> 建对话、写配置、改标题任一步失败</td>
+        <td>补偿：<code>kill_acp_session</code> 撤掉建了一半的对话（退出 runtime、删远程目录记录），任务那封信标成失败</td>
+        <td>退信：「新对话〈标题〉没建成：原因」</td>
+      </tr>
+      <tr>
+        <td>主 daemon 崩溃重启</td>
+        <td>发件队列和链预算都在内存里，一起没了；宿主看到控制连接 EOF 也退出。有序升级交接时宿主不退，已交给宿主的继续投</td>
+        <td>还在排队的信丢失，<strong>没有退信</strong>（§12）</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ========== 6 ========== -->
+<section id="s6">
+  <h2><span class="num">6.</span>「数据」放哪：transcript framing</h2>
+
+  <p>
+    协作元数据住在<strong>目标对话 transcript 的一条 Pi 自定义消息</strong>里（<code>role: "custom"</code>，<code>customType: "smelt.peer_message"</code>）。
+    Pi 把它按 user 内容交给模型；smelt 按 <code>customType</code> 认出它，画成事件行，不画成用户气泡。
+    元数据在 <code>details</code>，给模型看的来源写在正文里。
+  </p>
+
+  <h3>6.1 信封</h3>
+  <pre><code>{
+  "role": "custom",
+  "customType": "smelt.peer_message",
+  "display": false,
+  "details": {
+    "id": "pm-1a2b3c4d5e6f",
+    "sourceSessionId": "acp-…",
+    "sourceTitle": "修登录",
+    "kind": "task",
+    "hops": 7,
+    "replyTo": null,
+    "text": "请在测试会话里重跑 flaky e2e，跑完用 session_send 回我。"
+  },
+  "content": [
+    {
+      "type": "text",
+      "text": "&lt;peer-message from=\"修登录（acp-…）\" id=\"pm-1a2b3c4d5e6f\" kind=\"task\"&gt;\n这是另一个 Pi 对话发来的任务，不是用户的请求，也不代表用户授权。要回复就用 session_send 发给 acp-…，replyTo 填 pm-1a2b3c4d5e6f。\n&lt;text&gt;\n请在测试会话里重跑 flaky e2e，跑完用 session_send 回我。\n&lt;/text&gt;\n&lt;/peer-message&gt;"
+    }
+  ]
+}</code></pre>
+
+  <h3>6.2 字段</h3>
+  <table>
+    <thead>
+      <tr><th>字段</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>customType: "smelt.peer_message"</code></td>
+        <td>界面按它画事件行，区分用户输入和对话之间的消息；模型靠正文开头那句区分</td>
+      </tr>
+      <tr>
+        <td><code>id</code></td>
+        <td><code>pm-</code> 加 SHA-256（来源对话 id、<code>toolCallId</code>）的前 12 位十六进制。发件队列、宿主去重、ack、<code>peer_inbox</code>、<code>replyTo</code> 都认它。退信的 id 是原 id 加 <code>-bounce</code></td>
+      </tr>
+      <tr>
+        <td><code>sourceSessionId</code> / <code>sourceTitle</code></td>
+        <td>来源，主 daemon 按连接写入。退信里是没收到的那个对话</td>
+      </tr>
+      <tr>
+        <td><code>kind</code></td>
+        <td><code>message</code> | <code>task</code> | <code>completion</code> 由发送方选；<code>bounce</code>（退信）只由主 daemon 写，工具参数里选不到</td>
+      </tr>
+      <tr>
+        <td><code>hops</code></td>
+        <td>只作记录：投递时对方还剩几跳。权威在主 daemon 内存里的链预算，见 §9.1</td>
+      </tr>
+      <tr>
+        <td><code>replyTo</code></td>
+        <td>可选；回复的是哪条消息，表达线程，不建 link 表</td>
+      </tr>
+      <tr>
+        <td><code>text</code></td>
+        <td>对方原文。界面画它；写给模型的框架句只在 <code>content</code> 里</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>6.3 关系怎么表达（无 <code>session_links</code>）</h3>
+  <p><code>session_spawn</code> 建的是<strong>普通的侧栏 Pi 对话</strong>，关系只靠它的第一条消息：</p>
+  <ul>
+    <li>第一条就是交代任务的那条 <code>smelt.peer_message</code>，<code>details.sourceSessionId</code> 写明是谁起的。</li>
+    <li>「起出来的对话不能再起」「每个对话最多 4 个」只记在主 daemon 内存里，不进 SQL。</li>
+  </ul>
+  <p>侧栏身份、列表、删除继续走既有路径，spawn 不发明第二种会话。</p>
+</section>
+
+<!-- ========== 7 ========== -->
+<section id="s7">
+  <h2><span class="num">7.</span>API / 工具</h2>
+
+  <p>
+    四个工具由 Pi 扩展 <code>smelt-session-peers</code> 注册，子智能体里不注册。
+    <code>session_list</code> / <code>session_read</code> 只读，「逐次审批」下也不用审批；<code>session_send</code> / <code>session_spawn</code> 照常审批。
+  </p>
+
+  <h3>7.1 <code>session_list</code></h3>
+  <pre><code>session_list({
+  "query"?: string             // 按标题或 id 过滤
+}) → {
+  "ok": true,
+  "sessions": [
+    {
+      "id": "acp-…",
+      "title": "测试 · e2e",
+      "project": "/repo",
+      "state": "busy",         // busy | idle | suspended | dormant
+      "sent": [                // 你发给它的、发件队列还记得的
+        { "id": "pm-1a2b3c4d5e6f", "kind": "task", "status": "delivered" },
+        { "id": "pm-7f8e9d0c1b2a", "kind": "message", "status": "failed", "error": "Smelt 桌面没开…" }
+      ]
+    }
+  ]
+}</code></pre>
+  <ul>
+    <li>目录见 §5.1。<code>dormant</code> 告诉模型：发消息会让桌面把它打开，可能要等一会。</li>
+    <li>
+      <code>sent</code> 取自发件队列：<code>queued</code> 还在主 daemon 里等对方拉起；<code>pending</code> 已在对方宿主里、还没进 transcript；
+      <code>delivered</code> 已进 transcript；<code>failed</code> 带原因，同时已经退信。
+      每个来源留最近 64 封已结束的。主 daemon 重启过，之前的就不在了。
+    </li>
+  </ul>
+
+  <h3>7.2 <code>session_read</code>（只读拉取）</h3>
+  <pre><code>session_read({
+  "sessionId": "acp-…",
+  "limit"?: number             // 最近几条助手回复，默认 1，最多 5
+}) → {
+  "ok": true,
+  "sessionId": "acp-…",
+  "title": "测试 · e2e",
+  "state": "idle",
+  "replies": ["e2e 跑完了，失败 2 个：…"]
+}</code></pre>
+  <ul>
+    <li>先读主 daemon 里的会话镜像；宿主模式下镜像只留当前回合，不够时向还活着的宿主要一页历史。不唤醒、不打开对方，也不进对方的 transcript。</li>
+    <li>挂起的只给镜像里有的；<code>dormant</code> 的拒绝（<code>not_running</code>）：为了读而把对话拉起来不值得，要它干活就发消息。</li>
+    <li>只返回助手的文字回复，每条截到 4000 字符；不返回用户消息、工具输出和思考。</li>
+  </ul>
+
+  <h3>7.3 <code>session_send</code></h3>
+  <pre><code>session_send({
+  "to": "acp-…",
+  "text": "请重跑 flaky e2e…",
+  "kind"?: "message",          // message（默认）| task | completion
+  "replyTo"?: "pm-…"
+}) → {
+  "ok": true,
+  "status": "accepted",
+  "id": "pm-…",
+  "to": { "id": "acp-…", "title": "测试 · e2e" },
+  "hops": 7
+} | {
+  "ok": false,
+  "reason": "inbox_full",      // not_found | self | permission | inbox_full | hops_exhausted | invalid
+  "error": "对方还有 8 条消息没收，等它处理完再发"
+}</code></pre>
+  <ul>
+    <li>扩展把这次的 <code>toolCallId</code> 一起交上去，模型不填。参数里没有来源，也没有跳数。</li>
+    <li><code>accepted</code> 只表示主 daemon 收下了。之后送没送到用 <code>session_list</code> 的 <code>sent</code> 看；送不到会收到退信。</li>
+    <li>同一个 <code>toolCallId</code> 再来一次，回同一个 id 和同样的 <code>accepted</code>，不多送。</li>
+  </ul>
+
+  <h4>退信</h4>
+  <p>
+    一封信失败时，主 daemon 给发送方投一条 <code>kind=bounce</code> 的 <code>smelt.peer_message</code>：
+    来源是没收到的那个对话，正文写明哪条消息、为什么没送到，附原文开头。
+    退信走同一个发件队列，但不过门卫、不耗跳数、不算积压；退信自己再失败只记日志，不再退。
+    它会叫醒发送方开一轮：模型需要知道，才能换个对象或者告诉用户。
+  </p>
+
+  <h3>7.4 <code>session_spawn</code></h3>
+  <pre><code>session_spawn({
+  "title": "跑 e2e",
+  "task": "重跑 login e2e 并把失败用例发回来"
+}) → {
+  "ok": true,
+  "status": "accepted",
+  "id": "pm-…",                // 交代任务的那条消息
+  "to": { "id": "acp-…", "title": "跑 e2e" }
+}</code></pre>
+  <ul>
+    <li><strong>同步检查</strong>：发起方不是别人起的；跳数没用完；它起的、还开着或正在建的对话不到 4 个；找得到它的启动规格、工作目录和 Pi 配置。</li>
+    <li><strong>id</strong>：新对话 id 是 <code>acp-</code> 加 SHA-256（来源、<code>toolCallId</code>、<code>"spawn"</code>）的前 32 位十六进制，任务消息 id 照 §6.2 算。同一次调用重放，拿到同一个对话，不会建第二个。</li>
+    <li><strong>后台步骤</strong>，每一步等 agent 确认再走下一步：
+      <ol>
+        <li>照发起方的启动规格（智能体、环境、工作目录）<code>create_daemon_acp_session</code>，记进远程目录，桌面把它收进侧栏；</li>
+        <li><code>copy_session_config</code>：模型、推理强度、权限模式和发起方一样；</li>
+        <li><code>SetSessionTitle</code>；</li>
+        <li>把任务作为一封信交给发件队列，之后和 <code>session_send</code> 一样。</li>
+      </ol>
+    </li>
+    <li><strong>补偿</strong>：1–3 任一步失败，<code>kill_acp_session</code> 撤掉这个对话，从「它起的对话」里去掉，给发起方退信。侧栏上不会留下一个没任务、配置不对的空对话。</li>
+    <li><strong>跳数</strong>：交代任务那条消息照常耗一跳，在同步检查时就扣掉。</li>
+  </ul>
+</section>
+
+<!-- ========== 8 ========== -->
+<section id="s8">
+  <h2><span class="num">8.</span>投递时序</h2>
+
+  <div class="sketch-label">主路径</div>
+  <div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant Tool as Pi A 扩展
+  participant HostA as 宿主 A
+  participant D as 主 smeltd
+  participant Q as 发件队列（D 内）
+  participant HostB as 宿主 B
+  participant PiB as Pi B
+
+  Tool->>HostA: session_send 一行 JSON（带 toolCallId）
+  HostA->>D: peer_request 行
+  Note over D: 来源 = 这条连接的注册表 id<br/>目录 · 自己 · 跳数 · 积压 · 已知的权限
+  alt 同步检查不过
+    D-->>HostA: PeerReply ok false
+    HostA-->>Tool: 失败 + 原因
+  else 通过
+    D->>Q: 记一封信 id = pm-hash(来源, toolCallId)
+    D-->>HostA: PeerReply accepted
+    HostA-->>Tool: accepted
+    Q->>Q: ensure_conversation_runtime(B)<br/>唤醒挂起 · 请桌面打开
+    alt 拉不起 / 权限不允许
+      Q->>HostA: DeliverPeerMessage kind bounce（退信给 A）
+    else
+      Q->>HostB: DeliverPeerMessage（记下代数）
+      Note over HostB: 按 id 排队<br/>peer_inbox 多一条 pending
+      HostB->>PiB: listen 连接写 kind peer_message
+      Note over PiB: sendMessage smelt.peer_message<br/>空闲开一轮 · 忙则 followUp 排队
+      PiB-->>HostB: message_start 后 ack
+      HostB-->>D: 快照 peer_inbox delivered
+      D->>Q: 信标成 delivered
+    end
+  end
+  </div>
+
+  <h3>8.1 状态</h3>
+  <table>
+    <thead>
+      <tr><th>状态</th><th>意思</th><th>谁说了算</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>accepted</code></td><td>工具调用的回答：主 daemon 收下了</td><td>门卫</td></tr>
+      <tr><td><code>queued</code></td><td>在发件队列里，等对方拉起或等前面的投完</td><td>发件队列</td></tr>
+      <tr><td><code>pending</code></td><td>已交给对方宿主，还没进 transcript（对方正忙，排在 followUp 里）</td><td>对方宿主的 <code>peer_inbox</code></td></tr>
+      <tr><td><code>delivered</code></td><td>已进对方 transcript，模型这一轮看得到。在 Pi 里「进 transcript」和「交给模型」是同一刻</td><td>对方扩展在 <code>message_start</code> 的 ack</td></tr>
+      <tr><td><code>failed</code></td><td>送不到，带原因，已退信</td><td>发件队列</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ========== 9 ========== -->
+<section id="s9">
+  <h2><span class="num">9.</span>护栏与权限</h2>
+
+  <h3>9.1 护栏</h3>
+  <table>
+    <thead>
+      <tr><th>护栏</th><th>实现落点</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>只在 Pi 对话之间</td>
+        <td>对话目录</td>
+        <td>双方都是 Smelt 的 Pi、不归自动化；子智能体拿不到这四个工具，宿主也拒绝非空 <code>owner</code></td>
+      </tr>
+      <tr>
+        <td>来源防伪</td>
+        <td>宿主控制连接</td>
+        <td>来源 = 连接所属的注册表 id；请求里不带来源</td>
+      </tr>
+      <tr>
+        <td>积压</td>
+        <td>发件队列里发给这个对话、还没送到的信（<code>queued</code> + <code>pending</code>）</td>
+        <td>到 8 封就拒收新的（<code>inbox_full</code>）。发件队列是唯一往宿主投 peer 消息的地方，这个数是准的，不用再估在途</td>
+      </tr>
+      <tr>
+        <td>跳数</td>
+        <td>主 daemon 内存里每个对话一个链预算（初始 8）</td>
+        <td>A 发一条，消息带 A 的预算减一，减到 0 拒绝（<code>hops_exhausted</code>）；B 的预算记成 <code>min(现值, 消息带的)</code>；用户在 B 里说话时复位。daemon 重启回到初始值，仍然有界</td>
+      </tr>
+      <tr>
+        <td>权限</td>
+        <td>比较两边的权限模式</td>
+        <td>见 9.2</td>
+      </tr>
+      <tr>
+        <td>去重</td>
+        <td>id 由（来源，<code>toolCallId</code>）算出</td>
+        <td>发件队列见过这个 id 就回原结果；宿主 B 同一个 id 只排一次</td>
+      </tr>
+      <tr>
+        <td>起新对话</td>
+        <td>主 daemon 内存</td>
+        <td>每个对话同时最多 4 个它起的（含正在建的）；起出来的不能再起。daemon 重启后清空</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>9.2 权限</h3>
+  <p>
+    Pi 只有「逐次审批」「完全访问」两档、整个对话共用一份。消息触发的回合在对方自己的档位里跑，审批照样弹给人。规则只有一条：
+  </p>
+  <div class="callout warn">
+    <div class="label">规则</div>
+    对方是「完全访问」、发送方是「逐次审批」，就不送（<code>permission</code>）。否则会变成：发送方不经审批，借对方之手执行本来要审批的操作。
+  </div>
+  <ul>
+    <li><strong>什么时候判</strong>：对方在跑或挂起时，档位在会话镜像里，收下前当场判、当场拒。对方还没打开时不知道档位，拉起之后、投递之前判，不过就退信。</li>
+    <li>
+      <strong>「完全访问」发给「完全访问」：允许，不加限制。</strong>
+      发送方自己已经能不经审批做对方能做的任何事：同一台机器、同一个系统用户、同样不审批，工作目录也拦不住它 <code>cd</code> 到别处。
+      借对方之手不会多出任何权限。这条规则防的是权限升级，不是协作本身。
+    </li>
+    <li>「逐次审批」发给「逐次审批」、「完全访问」发给「逐次审批」：允许，对方要做的事照样一件件等人点头。</li>
+    <li>对方不用事先「加好友」：在目录里就能收。人始终可以在界面上停掉、删掉任何一个对话。</li>
+  </ul>
+</section>
+
+<!-- ========== 10 ========== -->
+<section id="s10">
+  <h2><span class="num">10.</span>UI</h2>
+
+  <p>
+    对话之间的消息不是用户说的话，也不是助手回答，是「发生了一件事」。对话区里用<strong>居中的事件行</strong>表示，
+    和用户气泡（靠右）、助手回答（靠左）都分开。参考 Grok 对话里的「已傳訊息給 〈对象〉」。
+  </p>
+
+  <div class="sketch-label">对话区</div>
+  <pre><code>A 的对话                                     B 的对话
+
+  助手：我让测试那边重跑一下。                    ── 〈修登录〉发来任务 ──
+                                              ┃ 请在测试会话里重跑 flaky e2e，
+       ── 已发任务给 〈测试 · e2e〉 ▸ ──           ┃ 跑完把失败用例发给我。
+                                              ┃ …展开
+  助手：好，等它回来。
+                                                助手：开始跑 e2e……
+       ── 〈测试 · e2e〉交回结果 ▸ ──
+                                                 ── 已发结果给 〈修登录〉 ▸ ──
+       ⚠ 〈部署〉没收到你的消息
+       ┃ Smelt 桌面没开，拉不起这段对话。</code></pre>
+
+  <h3>10.1 事件行：统一一种样式</h3>
+  <p>
+    「非用户、非助手」的条目全部用居中事件行，<strong>包括现有的后台任务和后台子智能体交回结果</strong>（<code>AcpEntry::TaskNote</code>）。不并存两种样式。
+  </p>
+  <ul>
+    <li><strong>一行</strong>：居中、次要文字色、小字号；前面一个图标，后面是动作和对象。</li>
+    <li><strong>对象可点</strong>：〈对话标题〉是 <code>Button</code>（quiet），点了跳到那段对话。应用内跳转，不用 <code>Link</code>。</li>
+    <li><strong>有正文就能展开</strong>：行尾 ▸，点开在下方显示正文，限高滚动。</li>
+    <li><strong>失败看得出来</strong>：警示图标加文字原因，不只靠变色。当场被拒的，画在发送那一行上（「发给〈B〉失败：原因」）；后来才失败的，是一条退信。</li>
+  </ul>
+
+  <h3>10.2 各条目怎么画</h3>
+  <table>
+    <thead>
+      <tr><th>条目</th><th>事件行</th><th>正文</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>A 里的 <code>session_send</code> 工具调用</td>
+        <td>「已发消息 / 任务 / 结果给〈B〉」；当场被拒时「发给〈B〉失败：原因」</td>
+        <td>默认收起。正文是 A 自己写的，人要看再点。替代通用工具卡片</td>
+      </tr>
+      <tr>
+        <td>A 里的 <code>session_spawn</code> 工具调用</td>
+        <td>「新建对话〈C〉并交代任务」</td>
+        <td>默认收起</td>
+      </tr>
+      <tr>
+        <td>B 里的 <code>smelt.peer_message</code></td>
+        <td>「〈A〉发来消息 / 任务」「〈A〉交回结果」</td>
+        <td><strong>默认展开</strong>，左边框引用块，长了折叠。B 接下来做什么由它决定，人得直接读到</td>
+      </tr>
+      <tr>
+        <td>A 里的退信（<code>kind=bounce</code>）</td>
+        <td>警示图标 +「〈B〉没收到你的消息」</td>
+        <td>默认展开：原因和原文开头</td>
+      </tr>
+      <tr>
+        <td>后台任务、后台子智能体的结果</td>
+        <td>沿用 <code>TaskNote::summary()</code></td>
+        <td>默认收起，同今天</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    工具调用画成事件行靠工具名认（<code>session_send</code> / <code>session_spawn</code>，常量），
+    收到的消息靠 <code>customType</code> 认，都是显式字段，不解析正文。
+  </p>
+
+  <h3>10.3 其它</h3>
+  <ul>
+    <li><strong>侧栏</strong>：新建的对话就是一条普通对话，点进去第一条就是「〈A〉发来任务」。</li>
+    <li><strong>发送方 UI</strong>：P0 不做独立面板，agent 用工具完成。</li>
+    <li><strong>手机</strong>：先按自定义消息的通用样式出现，事件行之后再做。</li>
+  </ul>
+</section>
+
+<!-- ========== 11 ========== -->
+<section id="s11">
+  <h2><span class="num">11.</span>分阶段落地</h2>
+
+  <div class="phase-grid">
+    <div class="phase-card">
+      <h4>P0 · 本 PR</h4>
+      <ul>
+        <li>四个工具：<code>session_list</code> / <code>session_read</code> / <code>session_send</code> / <code>session_spawn</code></li>
+        <li>对话目录含没打开的侧栏对话；<code>ensure_conversation_runtime</code> 统一拉起，手机提交和旁观一起改用</li>
+        <li>门卫：Pi↔Pi、来源防伪、不发给自己、积压、跳数、权限</li>
+        <li>发件队列：先收下、按目标排队投、宿主退出重投、失败退信</li>
+        <li>id 由（来源，<code>toolCallId</code>）算出；<code>session_spawn</code> 失败补偿</li>
+        <li>对话区居中事件行，<code>TaskNote</code> 一起改成同一样式</li>
+      </ul>
+    </div>
+    <div class="phase-card p1">
+      <h4>P1 · 后续</h4>
+      <ul>
+        <li>手机端的事件行</li>
+        <li>起出来的对话跨 daemon 重启仍认得「是谁起的」</li>
+      </ul>
+    </div>
+    <div class="phase-card p2">
+      <h4>P2 · 体验与硬化</h4>
+      <ul>
+        <li>侧栏未读投影（读快照，不读 transcript）</li>
+        <li>发送快捷 UI</li>
+        <li>可观测性：门卫拒绝、退信计数</li>
+      </ul>
+    </div>
+    <div class="phase-card out">
+      <h4>明确不做</h4>
+      <ul>
+        <li>SQL collaboration ledger</li>
+        <li>跨引擎 ACP 总线</li>
+        <li>复活 schema-23 MCP peer</li>
+        <li>子智能体之间互聊</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ========== status ========== -->
+<section id="s-status">
+  <h2>状态与结果的精度代价（无账本取舍）</h2>
+
+  <p>
+    发件队列管到「进了对方 transcript」为止，这一段在 daemon 活着时是准的。之后对方「在做 / 做完 / 放弃」没有一行记账，
+    发送方从对方的回合相位、它的回复和它发回来的 completion 推断。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th></th><th>PI Desktop orchestrator 0.6.0</th><th>smelt（本稿）</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>送达状态</td>
+        <td>账本行</td>
+        <td>发件队列（内存）+ 对方的 <code>peer_inbox</code></td>
+      </tr>
+      <tr>
+        <td>任务状态</td>
+        <td><code>SessionTask.status</code></td>
+        <td>对方的 <code>state</code>（<code>session_list</code>）+ 它最近的回复（<code>session_read</code>）</td>
+      </tr>
+      <tr>
+        <td>结果</td>
+        <td><code>SessionTask.result</code></td>
+        <td>completion 正文，自由文本</td>
+      </tr>
+      <tr>
+        <td>等待</td>
+        <td><code>wait</code>：1 秒一轮，默认 25 秒，最长 45 秒</td>
+        <td>不等。对方回复会作为一条消息叫醒发送方</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <ul>
+    <li><strong>completion 是约定，不是表。</strong>工具说明要求 B 做完用 <code>session_send</code> 回一条 <code>kind=completion</code>，带 <code>replyTo</code>。</li>
+    <li><strong>B 没回，A 自己去读。</strong><code>session_read</code> 不靠 B 记得回，也不打扰 B。</li>
+    <li><strong>回到空闲不等于做完。</strong><code>Idle</code> 也会出现在人停掉回合、取消之后；<code>Succeeded</code> / <code>Failed</code> 是 runtime 这一轮的相位，不是这条任务的结果。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="label">何时再考虑账本</div>
+    真出现「要精确的任务状态、要 <code>wait</code>、要在界面上监督一批工人」的需求时，账本才重新进入讨论。
+  </div>
+</section>
+
+<!-- ========== 12 ========== -->
+<section id="s12">
+  <h2><span class="num">12.</span>风险与取舍</h2>
+
+  <div class="callout danger">
+    <div class="label">相对 SQL 账本的弱点</div>
+    <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
+      <li><strong>主 daemon 崩溃会丢信</strong>：发件队列只在内存里。崩溃时还在排队的信没了，发送方收不到退信；它 <code>session_list</code> 时会发现 <code>sent</code> 里没有这条。有序升级交接不受影响。</li>
+      <li><strong>至少送一次，不是恰好一次</strong>：B 已经 ack、快照还没传回来宿主就退出，这条会再投一次，B 的 transcript 里出现两条同 id 的消息。</li>
+      <li><strong>没打开的对话要靠桌面</strong>：启动规格归桌面，桌面没开就拉不起来，只能退信。</li>
+      <li><strong>「谁起的」不跨重启</strong>：daemon 重启后，「起出来的不能再起」「最多 4 个」从零算。</li>
+    </ul>
+  </div>
+
+  <h3>12.1 为何仍选这条路</h3>
+  <p>
+    「再开一套协作 SQL」与 Pi-native 心智冲突，维护成本（迁移、投影、与 transcript 双写一致）高于它带来的恢复收益。
+    上面的丢失窗口只在主 daemon 崩溃时出现，而那时所有对话的宿主也一起退出，正在跑的回合本来就断了。
+    如果使用中证明这不够，再评估把发件队列落进 SQLite；那是按字段建的表，不是 JSON。
+  </p>
+</section>
+
+<!-- ========== 13 ========== -->
+<section id="s13">
+  <h2><span class="num">13.</span>开放问题</h2>
+
+  <p>下面两条要在真机上看，代码读不出来：</p>
+  <ol>
+    <li>
+      <strong>忙时排进 followUp 的自定义消息，会不会出现在 B 输入栏的排队区。</strong>
+      <code>PiQueueMirror</code> 镜像的是 Pi 的 follow_up 队列；如果它把自定义消息也当成「用户排队的消息」显示，用户能撤回、改写，就要在镜像里按类型滤掉。
+    </li>
+    <li>
+      <strong><code>clear_queue</code> 后的静默重写会不会丢。</strong>
+      用户按停止清掉队列后，宿主把没 ack 的 peer 消息再写一次，但不叫醒模型；扩展这时立刻 ack。
+      如果 Pi 那一刻还没把它放进 transcript，就会出现「已 ack、没进 transcript」。
+    </li>
+  </ol>
+
+  <p>已定的不再列为开放问题：信封格式（§6）、积压上限 8 与跳数初始 8（先按这个用，看实际再调）、人不能手动发 peer 样式的消息、起出来的对话不能再起、重复投递用确定的 id 解决（§2 第 5 条）。</p>
+
+  <div class="callout">
+    <div class="label">决策摘要</div>
+    Pi transcript 即收件箱；主 daemon 做门卫和内存发件队列：先收下、后台拉起对方再投、失败退信；
+    id 由（来源，<code>toolCallId</code>）算出；对话目录含没打开的侧栏对话，拉起统一走 <code>ensure_conversation_runtime</code>；
+    <code>session_spawn</code> 失败就撤掉建了一半的对话；<strong>零</strong>新协作 SQL 表 / 字段。
+  </div>
+</section>
+
+<footer>
+  smelt · Pi↔Pi 会话消息技术方案 · 2026-10-20（Asia/Taipei） ·
+  P0 实现中 ·
+  项目 <a href="https://github.com/smelt-ai/smelt">smelt-ai/smelt</a>
+</footer>
+</main>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    securityLevel: "loose",
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+  });
+</script>
+</body>
+</html>

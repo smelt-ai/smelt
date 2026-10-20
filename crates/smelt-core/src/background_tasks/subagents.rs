@@ -488,6 +488,7 @@ fn notice_of(dispatch: &LiveDispatch, state: &State) -> ModelNotice {
         output_tail: display_tail(&output),
         output,
         runs: Some(serde_json::Value::Array(runs)),
+        peer: None,
         // 全被停掉的不叫醒模型；停止时被清掉、放回来重发的也不叫醒，用户刚按过停止。
         wake: dispatch.status != SubagentStatus::Stopped && !dispatch.quiet,
     }

@@ -148,6 +148,7 @@ mod handoff_v2;
 mod history_control;
 #[cfg(target_os = "macos")]
 mod menubar;
+mod peer_messages;
 mod pi_control;
 use devices::Principal;
 mod program_status;

@@ -12,6 +12,7 @@ import {
 import { SMELT_MCP_EXTENSION_NAME, smeltMcpExtension } from "./mcp-selection.ts";
 import smeltMemoryExtension, { SMELT_MEMORY_EXTENSION_NAME } from "./memory-extension.ts";
 import { createSmeltMcpTransport } from "./pi-mcp-runtime.ts";
+import { SMELT_SESSION_PEERS_EXTENSION_NAME, smeltSessionPeersExtension } from "./session-peers.ts";
 import smeltPermissionExtension from "./smelt-permission.ts";
 import smeltSubagentExtension, { SMELT_SUBAGENT_EXTENSION_NAME } from "./subagent/index.ts";
 
@@ -23,6 +24,7 @@ export const SMELT_EXTENSION_FACTORIES = [
 	{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
 	{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 	{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
+	{ name: SMELT_SESSION_PEERS_EXTENSION_NAME, factory: smeltSessionPeersExtension, hidden: true },
 	{ name: "smelt-codemode", factory: smeltCodemodeExtension, hidden: true },
 	{ name: SMELT_MEMORY_EXTENSION_NAME, factory: smeltMemoryExtension, hidden: true },
 	{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },

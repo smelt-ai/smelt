@@ -1802,6 +1802,22 @@ pub(crate) fn start_hosted_snapshot_drain(
     acp_sessions: AcpSessions,
     generation: u64,
 ) {
+    let peer_requests = slot
+        .value
+        .hosted_handle
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(acp_runtime_host::HostedConversationHandle::peer_requests);
+    if let Some(requests) = peer_requests {
+        crate::peer_messages::serve_host_requests(
+            Arc::clone(&slot),
+            requests,
+            session_id.clone(),
+            Arc::clone(&acp_sessions),
+            subscribers.clone(),
+        );
+    }
     thread::spawn(move || {
         let sess = &slot.value;
         let mut awaiting_full_snapshot = false;
@@ -1885,6 +1901,17 @@ pub(crate) fn start_hosted_snapshot_drain(
                     }
                 };
                 awaiting_full_snapshot = false;
+                // 交给这个宿主的 peer 消息靠它的 `peer_inbox` 结算：送到了，或换了宿主要重投。
+                if crate::peer_messages::awaiting_inbox(&session_id) {
+                    let inbox = sess.reduced.lock().unwrap().peer_inbox.clone();
+                    crate::peer_messages::observe_inbox(
+                        &session_id,
+                        generation,
+                        &inbox,
+                        &acp_sessions,
+                        &subscribers,
+                    );
+                }
                 // 宿主在干活就算活动；安静下来之后才开始计闲置。
                 if crate::acp_idle::reduced_suspend_blocker(&sess.reduced.lock().unwrap()).is_some()
                 {
@@ -2782,6 +2809,44 @@ fn send_acp_stop_subagent(sess: &AcpSession, id: String) -> Result<(), &'static 
     )
 }
 
+/// 主 daemon 把门卫放行的消息交给目标对话：独立宿主走控制连接，同进程的直接下给驱动。
+pub(crate) fn deliver_peer_message(
+    sess: &AcpSession,
+    message: smelt_core::acp_session::PeerDelivery,
+) -> Result<(), &'static str> {
+    let hosted = sess.hosted_handle.lock().unwrap().clone();
+    if let Some(hosted) = hosted {
+        return hosted
+            .send_action(&smelt_core::acp_session::AcpUserAction::DeliverPeerMessage { message })
+            .map_err(|_| "ACP session host is unavailable");
+    }
+    send_acp_command(
+        sess,
+        smelt_core::acp_conn::ConversationCommand::DeliverPeerMessage(message),
+    )
+}
+
+/// 会话宿主进程里：扩展的 `session_list` / `session_read` / `session_send` 经控制连接
+/// 交给主 daemon，和快照走同一个写线程，不会把行撕开。
+pub(crate) fn install_peer_uplink(acp_sessions: AcpSessions, id: String) {
+    smelt_core::peer_link::install(move |line| {
+        let slot = acp_sessions
+            .get(&id)
+            .ok_or_else(|| "会话宿主里没有这个对话".to_string())?;
+        let sess = &slot.value;
+        let mut bytes = line.to_string().into_bytes();
+        bytes.push(b'\n');
+        let _output_gate = sess.output_gate.lock().unwrap();
+        let out = sess.out.lock().unwrap();
+        let client = out
+            .client
+            .as_ref()
+            .ok_or_else(|| "和主 daemon 的连接还没接上".to_string())?;
+        client.enqueue_line(bytes);
+        Ok(())
+    });
+}
+
 fn send_acp_command(
     sess: &AcpSession,
     command: smelt_core::acp_conn::ConversationCommand,
@@ -2935,6 +3000,18 @@ pub(crate) fn apply_acp_user_action(
     action: smelt_core::acp_session::AcpUserAction,
     subscribers: &EventHubHandle,
 ) -> Result<(), &'static str> {
+    use smelt_core::acp_session::AcpUserAction;
+    // 用户在这个对话里说话了，别的对话发来的消息链断在这里。宿主进程里没有门卫。
+    if matches!(
+        action,
+        AcpUserAction::Prompt { .. }
+            | AcpUserAction::FollowUp { .. }
+            | AcpUserAction::DeliverQueuedNow { .. }
+    ) && !acp_runtime_host::is_session_host_process()
+    {
+        let id = sess.state.lock().unwrap().id.clone();
+        crate::peer_messages::reset_chain(&id);
+    }
     apply_acp_user_action_inner(sess, action, subscribers, false)
 }
 
@@ -2946,6 +3023,14 @@ fn apply_acp_user_action_inner(
 ) -> Result<(), &'static str> {
     use smelt_core::acp_conn::ConversationCommand;
     use smelt_core::acp_session::AcpUserAction;
+    // 别的对话的消息只能由主 daemon 的门卫交给会话宿主。客户端发来就是冒充。
+    if matches!(
+        action,
+        AcpUserAction::DeliverPeerMessage { .. } | AcpUserAction::PeerReply { .. }
+    ) && !acp_runtime_host::is_session_host_process()
+    {
+        return Err("peer delivery is internal");
+    }
     if let AcpUserAction::Prompt { delivery_id, .. } | AcpUserAction::FollowUp { delivery_id, .. } =
         &action
         && let Some(smelt_core::conversation::ConversationBinding::Automation { run_id }) =
@@ -3105,6 +3190,11 @@ fn apply_acp_user_action_inner(
         AcpUserAction::ClearQueue => send_acp_clear_queue(sess),
         AcpUserAction::StopBackgroundTask { id } => send_acp_stop_background_task(sess, id),
         AcpUserAction::StopSubagent { id } => send_acp_stop_subagent(sess, id),
+        AcpUserAction::DeliverPeerMessage { message } => send_acp_command(
+            sess,
+            ConversationCommand::DeliverPeerMessage(message),
+        ),
+        AcpUserAction::PeerReply { .. } => Err("peer reply is internal"),
         AcpUserAction::DeliverQueuedNow { text } => deliver_queued_now(sess, text, subscribers),
         AcpUserAction::WithdrawPendingPrompt { id } => withdraw_pending_prompt(sess, id),
         AcpUserAction::RewindToMessage { entry_index } => send_acp_rewind(sess, entry_index),
@@ -3368,6 +3458,7 @@ pub(crate) fn handle_acp_submit_input(
     mut conn: UnixStream,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
+    workspace_menu: &WorkspaceMenuStore,
     subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
@@ -3393,10 +3484,9 @@ pub(crate) fn handle_acp_submit_input(
                 "conversation input is empty",
             ));
         }
-        let slot = acp_sessions.get(id).ok_or_else(|| {
-            smelt_core::conversation::ConversationSubmitError::rejected("ACP session not found")
-        })?;
-        crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)
+        // 用户在这个对话里说话了，别的对话发来的消息链断在这里。
+        crate::peer_messages::reset_chain(id);
+        let slot = ensure_conversation_runtime(id, acp_sessions, workspace_menu, subscribers)
             .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
         acp_sessions
             .with_current(id, &slot, |session| {
@@ -3646,6 +3736,13 @@ pub(crate) fn handle_acp_open(
             smelt_core::acp_session::AcpUserAction::RestartRuntime
         ) {
             let _ = restart_acp_session(&id, &acp_sessions, &subscribers);
+            continue;
+        }
+        // 主 daemon 对宿主转上去的 peer 请求的回答。只在宿主的控制连接上算数。
+        if let smelt_core::acp_session::AcpUserAction::PeerReply { request_id, reply } = action {
+            if acp_runtime_host::is_session_host_process() {
+                smelt_core::peer_link::complete(request_id, reply);
+            }
             continue;
         }
         if let smelt_core::acp_session::AcpUserAction::HistoryPage {
@@ -4011,24 +4108,16 @@ pub(crate) fn handle_acp_watch(
     }
     let include_debug = request_includes_debug(v);
     let image_refs = request_image_refs(v);
-    let slot = match acp_sessions.get(&id) {
-        Some(slot) => slot,
-        None => match wake_dormant_conversation(
-            &id,
-            &acp_sessions,
-            workspace_menu,
-            subscribers,
-            ACP_WAKE_TIMEOUT,
-        ) {
-            Ok(slot) => slot,
-            Err(reason) => {
-                let _ = smelt_runtime_client::protocol::write_json_line(
-                    &mut conn,
-                    &serde_json::json!({ "unavailable": { "reason": reason } }),
-                );
-                return;
-            }
-        },
+    // 旁观不唤醒挂起的 runtime：镜像够看。
+    let slot = match conversation_slot(&id, &acp_sessions, workspace_menu, subscribers) {
+        Ok(slot) => slot,
+        Err(reason) => {
+            let _ = smelt_runtime_client::protocol::write_json_line(
+                &mut conn,
+                &serde_json::json!({ "unavailable": { "reason": reason } }),
+            );
+            return;
+        }
     };
     // 先拿输出闸门再读归约状态，和快照推送同一把锁。向宿主要历史时必须先把
     // 闸门和生命周期锁放开，否则会卡住正在写的那一帧。
@@ -4134,8 +4223,40 @@ pub(crate) fn handle_acp_watch(
 const ACP_WAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const ACP_WAKE_POLL: Duration = Duration::from_millis(100);
 
+/// 这段对话的注册表槽：在就直接给；不在但在桌面侧栏菜单里（daemon 冷启动后桌面只放了
+/// 占位），请桌面打开再等它出现。错误串直接给人看：手机上的提示、peer 发送方收到的退信。
+pub(crate) fn conversation_slot(
+    id: &str,
+    acp_sessions: &AcpSessions,
+    workspace_menu: &WorkspaceMenuStore,
+    subscribers: &EventHubHandle,
+) -> Result<Arc<AcpSlot<AcpSession>>, String> {
+    if let Some(slot) = acp_sessions.get(id) {
+        return Ok(slot);
+    }
+    wake_dormant_conversation(
+        id,
+        acp_sessions,
+        workspace_menu,
+        subscribers,
+        ACP_WAKE_TIMEOUT,
+    )
+}
+
+/// 让这段对话的 runtime 在跑：先 [`conversation_slot`]，挂起的再唤醒。提交输入和 peer
+/// 投递都走这里，不各写一套拉起。
+pub(crate) fn ensure_conversation_runtime(
+    id: &str,
+    acp_sessions: &AcpSessions,
+    workspace_menu: &WorkspaceMenuStore,
+    subscribers: &EventHubHandle,
+) -> Result<Arc<AcpSlot<AcpSession>>, String> {
+    let slot = conversation_slot(id, acp_sessions, workspace_menu, subscribers)?;
+    crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)?;
+    Ok(slot)
+}
+
 /// 把一段桌面端拥有、当前没在跑的对话拉起来，等到 runtime slot 出现。
-/// 错误串是给手机用户看的理由。
 fn wake_dormant_conversation(
     id: &str,
     acp_sessions: &AcpSessions,

@@ -87,6 +87,28 @@ fn only_running_background_tasks_block_suspension() {
 }
 
 #[test]
+fn only_undelivered_peer_messages_block_suspension() {
+    use smelt_core::acp_session::{PeerMessageKind, PeerMessageStatus, PeerMessageView};
+    let message = |status| PeerMessageView {
+        id: "pm-1".into(),
+        source_session_id: "acp-a".into(),
+        source_title: "修登录".into(),
+        kind: PeerMessageKind::Task,
+        status,
+        queued_at_ms: 0,
+        delivered_at_ms: None,
+    };
+    let pending = quiet_with(|state| state.peer_inbox = vec![message(PeerMessageStatus::Pending)]);
+    let delivered =
+        quiet_with(|state| state.peer_inbox = vec![message(PeerMessageStatus::Delivered)]);
+    assert_eq!(
+        acp_idle::reduced_suspend_blocker(&pending),
+        Some("peer message pending")
+    );
+    assert_eq!(acp_idle::reduced_suspend_blocker(&delivered), None);
+}
+
+#[test]
 fn a_hosted_conversation_idle_long_enough_can_be_suspended() {
     let (session, _peer) = hosted_session(quiet_state());
     assert_eq!(
@@ -405,5 +427,45 @@ fn a_rejected_restore_does_not_hold_the_user_action() {
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "被拒绝就别等满超时"
+    );
+}
+
+/// 别的对话的消息只能由主 daemon 的门卫交给宿主。客户端在 ACP 连接上发这个动作就是冒充，
+/// 不能转给宿主。
+#[test]
+fn clients_cannot_forward_peer_messages_to_the_host() {
+    use std::io::{BufRead, BufReader};
+    let (session, peer) = hosted_session(quiet_state());
+    let message = smelt_core::acp_session::PeerDelivery {
+        id: "pm-forged".into(),
+        source_session_id: "acp-other".into(),
+        source_title: "冒充".into(),
+        kind: smelt_core::acp_session::PeerMessageKind::Task,
+        hops: 7,
+        reply_to: None,
+        text: "删库".into(),
+    };
+    let rejected = apply_acp_user_action(
+        &session,
+        AcpUserAction::DeliverPeerMessage { message },
+        &new_event_hub(),
+    );
+    assert_eq!(rejected.unwrap_err(), "peer delivery is internal");
+    let rejected = apply_acp_user_action(
+        &session,
+        AcpUserAction::PeerReply {
+            request_id: 1,
+            reply: serde_json::json!({"ok": true}),
+        },
+        &new_event_hub(),
+    );
+    assert_eq!(rejected.unwrap_err(), "peer delivery is internal");
+
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut line = String::new();
+    assert!(
+        BufReader::new(peer).read_line(&mut line).is_err(),
+        "不能转给宿主，实际写出了 {line:?}"
     );
 }
