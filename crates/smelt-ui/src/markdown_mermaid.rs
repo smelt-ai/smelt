@@ -969,7 +969,7 @@ mod tests {
         let fixed = super::strip_negative_stroke_width(raw);
         assert_eq!(
             fixed,
-            "#mm .edge-depth-5{}#mm .edge{stroke-width:3;}<line  stroke=\"red\"/>"
+            "#mm .edge-depth-5{}#mm .edge{stroke-width:3;}<line stroke=\"red\"/>"
         );
         assert!(!fixed.contains("stroke-width:-"));
         assert!(fixed.contains("stroke-width:3"));
@@ -1063,15 +1063,7 @@ mod tests {
             ),
             (
                 "mindmap",
-                "mindmap\n\
-                 root((主题))\n\
-                 a\n\
-                 b\n\
-                 c\n\
-                 d\n\
-                 e\n\
-                 f\n\
-                 g\n",
+                "mindmap\n  root((主题))\n    一级\n      二级\n        三级\n          四级\n            五级\n              六级\n                七级\n",
             ),
             (
                 "gantt",
