@@ -5,26 +5,36 @@
 | 产物 | job | 说明 |
 |---|---|---|
 | `Smelt.dmg` | `build`（macos-14） | `make dist-build`，用 secrets 里的自签名证书签名（`CODESIGN_P12_*`） |
-| `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`SHA256SUMS`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
+| `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
+| `SHA256SUMS` | `linux-release` → `checksums` | 先只含 Linux 包（一键安装和运行时自动升级马上能用），全部产物到齐后重写成覆盖所有产物 |
 
 ## 打 RC
 
-1. 确认 `main` 上 `Cargo.toml` 的 `version` 就是这次要发的版本（如 `0.9.0`）。tag 去掉 `v` 和 `-` 后缀后必须与它一致。
-2. 在要发的 `main` 提交上打 tag 并推送：
+tag 必须**正好**是 `v<Cargo.toml 的工作区版本>`，预发布也一样：桌面请远程运行时升级时，运行时按桌面的版本号
+去同名 tag 的 Release 下载 `smeltd-<版本>-linux-<架构>.tar.gz`，版本号里少了 `-rc.N` 就找不到包。
+
+1. 提 PR 把 `Cargo.toml` 的 `[workspace.package] version` 改成这次的版本（如 `0.9.1-rc.1`），合进 `main`。
+2. 在这个提交上打 tag 并推送：
 
    ```sh
-   git tag v0.9.0-rc.3
-   git push gh v0.9.0-rc.3
+   git tag -a v0.9.1-rc.1 -m "v0.9.1-rc.1"
+   git push gh v0.9.1-rc.1
    ```
 
 3. tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装默认也不会装它（要装得设 `SMELT_VERSION`）。
-4. 测试通过后在同一个提交（或修复后的提交）上打 `v0.9.0`，发成正式版。
+4. 测试通过后把版本改成 `0.9.1`、合进 `main`，再打 `v0.9.1` 发正式版。
+
+## 发布说明
+
+由 `build` job 的「Release notes」步骤生成，不用 GitHub 默认的起点（它往回找上一个正式版，而 v0.6.6–v0.6.14
+不在现在 main 的历史上，会一路退回 v0.6.5，把早就发过的 PR 再列一遍）。起点按版本号往前找第一个是本次祖先的 tag：
+预发布从上一个 tag（含 rc）算起，正式版从上一个正式版算起，所以正式版的说明涵盖它之前所有 rc 的改动。
 
 ## 版本号
 
 - 桌面与运行时：`Cargo.toml` 的 `version`。
-- Android：versionName 是 tag 去掉 `v`（含 `-rc.N`）；versionCode 是 release 流水线的 `run_number`，逐次递增，
+- Android：versionName 是 tag 去掉 `v`（含 `-rc.N`，与工作区版本相同）；versionCode 是 release 流水线的 `run_number`，逐次递增，
   新包总能覆盖安装旧包。`mobile/pubspec.yaml` 里的版本只给本地开发构建用。
 
 ## Android 签名
