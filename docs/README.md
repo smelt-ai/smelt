@@ -23,6 +23,7 @@ Contributor-facing notes that are still current.
 - [`control-api.md`](control-api.md) — smeltd Control API v1, the short request protocol shared by desktop, mobile, and CLI.
 - [`collaboration.md`](collaboration.md) — Design for multiplayer around a live session. Not implemented.
 - [`pi-session-messaging-design.html`](pi-session-messaging-design.html) — Pi↔Pi session messaging design (transcript-as-inbox; not implemented).
+- [`pi-runtime-compile-design.html`](pi-runtime-compile-design.html) — Compile the Pi runtime into one Bun binary. Implementation lands on the same PR.
 - [`notification-architecture.md`](notification-architecture.md) — Current status, attention, and notification model.
 - [`event-bus-architecture.md`](event-bus-architecture.md) — Event bus and `event_subscribe`. Plugin-host sections describe a removed design.
 - [`agent-memory.md`](agent-memory.md) — Agent memory. Phase 1 is implemented; later work is listed in the doc.
