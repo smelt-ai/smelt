@@ -1,0 +1,1205 @@
+{
+  "@@locale": "en",
+  "agentsTitle": "Agents",
+  "agentsSegmentAgents": "Agents",
+  "agentsSegmentAutomations": "Automations",
+  "agentsNoMachinesTitle": "No machines yet",
+  "agentsNoMachinesBody": "Pair a machine in Settings. Its agents and automations show up here.",
+  "agentsOfflineNote": "Shows up once this machine is back online.",
+  "agentsLoadFailed": "Couldn't load: {message}",
+  "@agentsLoadFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsEmptyAgents": "No agents on this machine yet. Create them in Smelt on the desktop.",
+  "agentsEmptyAutomations": "No automations on this machine yet. Create them in Smelt on the desktop.",
+  "agentsReadOnly": "Agents and automations are edited in Smelt on the desktop.",
+  "agentsGone": "This item is no longer on {machine}.",
+  "@agentsGone": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsMachineOffline": "{machine} is offline. Actions are available once it reconnects.",
+  "@agentsMachineOffline": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsEngine": "Runs on {engine}",
+  "@agentsEngine": {
+    "placeholders": {
+      "engine": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsPrompt": "Standing instructions",
+  "agentsNoPrompt": "No standing instructions.",
+  "agentsPlugins": "Plugins",
+  "agentsContext": "Context",
+  "agentsStartConversation": "Start conversation",
+  "agentsStarting": "Starting…",
+  "agentsStartFailed": "Couldn't start the conversation: {message}",
+  "@agentsStartFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsStartPending": "The conversation was created but hasn't shown up yet. Find it in Sessions shortly.",
+  "agentsCannotStart": "This machine can't start a conversation with this agent: its engine isn't available here.",
+  "agentsNextRun": "Next {when}",
+  "@agentsNextRun": {
+    "placeholders": {
+      "when": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsNextRunTitle": "Next run",
+  "agentsPaused": "Paused",
+  "agentsDue": "due now",
+  "agentsInMinutes": "{n, plural, =1{in 1 min} other{in {n} min}}",
+  "@agentsInMinutes": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "agentsToday": "today {time}",
+  "@agentsToday": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsTomorrow": "tomorrow {time}",
+  "@agentsTomorrow": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsYesterday": "yesterday {time}",
+  "@agentsYesterday": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsOnDate": "{date} {time}",
+  "@agentsOnDate": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      },
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsNeverRun": "Never run",
+  "agentsScheduleDaily": "Daily at {time}",
+  "@agentsScheduleDaily": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsScheduleEveryMinutes": "{n, plural, =1{Every minute} other{Every {n} min}}",
+  "@agentsScheduleEveryMinutes": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "agentsScheduleEveryHours": "{n, plural, =1{Every hour} other{Every {n} h}}",
+  "@agentsScheduleEveryHours": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "agentsScheduleWeekly": "{days} at {time}",
+  "@agentsScheduleWeekly": {
+    "placeholders": {
+      "days": {
+        "type": "String"
+      },
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsScheduleDuring": "{days} {start}–{end}, every {n} min",
+  "@agentsScheduleDuring": {
+    "placeholders": {
+      "days": {
+        "type": "String"
+      },
+      "start": {
+        "type": "String"
+      },
+      "end": {
+        "type": "String"
+      },
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "agentsDaysEveryDay": "Every day",
+  "agentsDaysWeekdays": "Weekdays",
+  "agentsDaysWeekends": "Weekends",
+  "agentsDaysNone": "No days",
+  "agentsDaysSeparator": ", ",
+  "agentsWeekday": "{day, select, mon{Mon} tue{Tue} wed{Wed} thu{Thu} fri{Fri} sat{Sat} other{Sun}}",
+  "@agentsWeekday": {
+    "placeholders": {
+      "day": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsTriggerEvent": "When “{topic}” happens",
+  "@agentsTriggerEvent": {
+    "placeholders": {
+      "topic": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsTriggerWebhook": "Webhook call",
+  "agentsTriggerNone": "No trigger",
+  "agentsRunQueued": "Queued",
+  "agentsRunRunning": "Running",
+  "agentsRunAwaitingApproval": "Waiting for approval",
+  "agentsRunWaitingForUser": "Waiting for you",
+  "agentsRunCompleted": "Succeeded",
+  "agentsRunFailed": "Failed",
+  "agentsRunCancelled": "Cancelled",
+  "agentsRunSkipped": "Skipped",
+  "agentsSourceManual": "Run by hand",
+  "agentsSourceScheduled": "On schedule",
+  "agentsSourceWebhook": "Webhook",
+  "agentsSourceEvent": "Event",
+  "agentsEnabled": "Enabled",
+  "agentsEnableFailed": "Couldn't turn on “{name}”: {message}",
+  "@agentsEnableFailed": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      },
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsDisableFailed": "Couldn't pause “{name}”: {message}",
+  "@agentsDisableFailed": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      },
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsTrigger": "Trigger",
+  "agentsAction": "Action",
+  "agentsActionAgent": "Agent “{name}” does the work",
+  "@agentsActionAgent": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsActionAgentMissing": "The agent that ran this was deleted",
+  "agentsActionShell": "Runs a shell command",
+  "agentsLastRun": "Last run",
+  "agentsRunStartedAt": "Started",
+  "agentsRunFinishedAt": "Finished",
+  "agentsRunDuration": "Took",
+  "agentsRunSource": "Triggered by",
+  "agentsOpenRun": "Open this run's session",
+  "agentsRunNow": "Run once now",
+  "agentsRunNowStarted": "“{name}” started",
+  "@agentsRunNowStarted": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "agentsRunNowFailed": "Couldn't run “{name}”: {message}",
+  "@agentsRunNowFailed": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      },
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "appName": "Smelt",
+  "navPass": "Now",
+  "@navPass": {
+    "description": "Tab: the cross-machine command post (things waiting for you, what is running)."
+  },
+  "navSessions": "Sessions",
+  "navAgents": "Agents",
+  "navSettings": "Settings",
+  "commonCancel": "Cancel",
+  "commonDone": "Done",
+  "commonSave": "Save",
+  "commonRetry": "Retry",
+  "commonOpen": "Open",
+  "commonClose": "Close",
+  "commonDelete": "Delete",
+  "commonRename": "Rename",
+  "commonCopy": "Copy",
+  "commonCopied": "Copied",
+  "commonMore": "More",
+  "commonNew": "New",
+  "commonAllow": "Allow",
+  "commonDeny": "Deny",
+  "commonAnswer": "Answer",
+  "commonView": "View",
+  "commonLoading": "Loading…",
+  "commonName": "Name",
+  "machineOnlineLan": "Local · {ms} ms",
+  "@machineOnlineLan": {
+    "placeholders": {
+      "ms": {
+        "type": "int"
+      }
+    }
+  },
+  "machineOnlineDirect": "Direct · {ms} ms",
+  "@machineOnlineDirect": {
+    "placeholders": {
+      "ms": {
+        "type": "int"
+      }
+    }
+  },
+  "machineOnlineRelay": "Relay · {ms} ms",
+  "@machineOnlineRelay": {
+    "placeholders": {
+      "ms": {
+        "type": "int"
+      }
+    }
+  },
+  "machineOnline": "Online",
+  "machineConnecting": "Connecting…",
+  "machineReconnecting": "Reconnecting…",
+  "machineSyncing": "Syncing…",
+  "machineOffline": "Offline",
+  "machineStatusCached": "{status} · showing data from {time}",
+  "@machineStatusCached": {
+    "placeholders": {
+      "status": {
+        "type": "String"
+      },
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "machineRevoked": "This phone was removed from this machine",
+  "machineIncompatible": "Machine needs an update",
+  "timeJustNow": "just now",
+  "timeMinutesAgo": "{n} min ago",
+  "@timeMinutesAgo": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "timeHoursAgo": "{n} h ago",
+  "@timeHoursAgo": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "timeDaysAgo": "{n} d ago",
+  "@timeDaysAgo": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "phaseConnecting": "Starting",
+  "phaseThinking": "Thinking",
+  "phaseExecutingTool": "Running a tool",
+  "phaseAwaitingApproval": "Waiting for approval",
+  "phaseWaitingForUser": "Waiting for you",
+  "phaseSucceeded": "Done",
+  "phaseFailed": "Failed",
+  "phaseIdle": "Idle",
+  "phaseDead": "Ended",
+  "kindConversation": "Conversation",
+  "kindTerminal": "Terminal",
+  "conversationUntitled": "Untitled conversation",
+  "conversationModelAndSettings": "Model & settings",
+  "conversationSkills": "Skills",
+  "conversationCopyInfo": "Copy session info",
+  "conversationInfoSession": "Session {id}",
+  "@conversationInfoSession": {
+    "placeholders": {
+      "id": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationLoading": "Opening conversation…",
+  "conversationUnavailableTitle": "Can't open this conversation",
+  "conversationUnavailableDefault": "This conversation isn't running on the machine.",
+  "conversationErrorDefault": "Couldn't load this conversation.",
+  "conversationCachedSaved": "Showing the last saved data",
+  "conversationEmptyTitle": "No messages yet",
+  "conversationEmptyBody": "Send a message to get started.",
+  "conversationLoadEarlier": "Load earlier messages",
+  "conversationJumpToLatest": "Back to latest",
+  "conversationInterrupted": "Interrupted",
+  "conversationThought": "Thought",
+  "conversationThinkingPreview": "Thinking…",
+  "conversationShowThought": "Show thought",
+  "conversationHideThought": "Hide thought",
+  "conversationCopyAnswer": "Copy answer",
+  "conversationTook": "Took {duration}",
+  "@conversationTook": {
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationCompleted": "Completed",
+  "conversationCompletionFailed": "Completion failed",
+  "conversationTaskCompleted": "Task completed.",
+  "conversationToolCalls": "{count, plural, =1{1 tool call} other{{count} tool calls}}",
+  "@conversationToolCalls": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationToolFailedCount": "{count} failed",
+  "@conversationToolFailedCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationToolRead": "Read",
+  "conversationToolEdit": "Edit",
+  "conversationToolDelete": "Delete",
+  "conversationToolMove": "Move",
+  "conversationToolSearch": "Search",
+  "conversationToolExecute": "Run",
+  "conversationToolThink": "Think",
+  "conversationToolFetch": "Fetch",
+  "conversationToolSwitchMode": "Mode",
+  "conversationToolCollaborate": "Delegate",
+  "conversationToolReview": "Review",
+  "conversationToolImage": "Image",
+  "conversationToolCompact": "Compact",
+  "conversationToolWait": "Wait",
+  "conversationToolOther": "Tool",
+  "conversationToolPending": "Not started",
+  "conversationToolInProgress": "Running",
+  "conversationToolDone": "Done",
+  "conversationToolFailed": "Failed",
+  "conversationShowOutput": "Show output",
+  "conversationHideOutput": "Hide output",
+  "conversationExitCode": "Exit code {code}",
+  "@conversationExitCode": {
+    "placeholders": {
+      "code": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationOutputTruncated": "Output truncated",
+  "conversationShowAllLines": "Show all {count} lines",
+  "@conversationShowAllLines": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationCollapse": "Collapse",
+  "conversationUnchangedLines": "{count, plural, =1{1 unchanged line} other{{count} unchanged lines}}",
+  "@conversationUnchangedLines": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationNewFile": "New file",
+  "conversationPlan": "Plan · {done}/{total}",
+  "@conversationPlan": {
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationPlanPending": "To do",
+  "conversationPlanInProgress": "In progress",
+  "conversationPlanCompleted": "Done",
+  "conversationTaskBackground": "Background task",
+  "conversationTaskSubagent": "Subagent",
+  "conversationTaskRunning": "Running",
+  "conversationTaskCompletedStatus": "Finished",
+  "conversationTaskFailed": "Failed",
+  "conversationTaskTimedOut": "Timed out",
+  "conversationTaskStopped": "Stopped",
+  "conversationImageOpen": "Open image",
+  "conversationImageClose": "Close image",
+  "conversationImageUnavailable": "Image not available",
+  "conversationImageUndecodable": "This image can't be displayed.",
+  "conversationImageLoadFailed": "Couldn't load the original: {message}",
+  "@conversationImageLoadFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationStatusEnded": "Session ended",
+  "conversationHint": "Message {agent}",
+  "@conversationHint": {
+    "placeholders": {
+      "agent": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationHintOffline": "Machine is offline. Your draft is kept.",
+  "conversationHintTicket": "Handle the ticket above first",
+  "conversationHintEnded": "This session has ended",
+  "conversationHintSending": "Waiting for the machine to confirm…",
+  "conversationSend": "Send",
+  "conversationStop": "Stop this turn",
+  "conversationAttachImage": "Add image",
+  "conversationNoImageSupport": "This agent can't take images",
+  "conversationCommands": "Commands and skills",
+  "conversationRemoveImage": "Remove image",
+  "conversationImagesSkipped": "{count, plural, =1{1 image was over 5 MB and was skipped} other{{count} images were over 5 MB and were skipped}}",
+  "@conversationImagesSkipped": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationAttachFailed": "Couldn't add the image: {message}",
+  "@conversationAttachFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationUnconfirmed": "Delivery wasn't confirmed. Check the conversation, then send again.",
+  "conversationRejected": "Not sent: {message}",
+  "@conversationRejected": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationDraftSaveFailed": "Couldn't save the draft: {message}",
+  "@conversationDraftSaveFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationResendTitle": "Send again?",
+  "conversationResendBody": "The last attempt may already have reached the agent. Check the conversation before sending it again.",
+  "conversationResendConfirm": "Send again",
+  "conversationContextUsage": "Context {percent}% · {used} of {total} tokens",
+  "@conversationContextUsage": {
+    "placeholders": {
+      "percent": {
+        "type": "int"
+      },
+      "used": {
+        "type": "String"
+      },
+      "total": {
+        "type": "String"
+      }
+    }
+  },
+  "conversationModel": "Model",
+  "conversationProvider": "Provider",
+  "conversationOn": "On",
+  "conversationOff": "Off",
+  "conversationSkillsEmpty": "No skills are loaded in this conversation.",
+  "conversationSkillsNote": "Skills are managed on the computer.",
+  "conversationCommandsTitle": "Commands",
+  "conversationNoSettings": "This agent has no settings to change here.",
+  "conversationTicketApproval": "Approval",
+  "conversationTicketQuestion": "Question",
+  "conversationTicketCount": "{index} of {count}",
+  "@conversationTicketCount": {
+    "placeholders": {
+      "index": {
+        "type": "int"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "conversationTicketCollapse": "Fold the ticket down",
+  "conversationTicketExpand": "Open the ticket",
+  "conversationActionFailed": "Couldn't send: {message}",
+  "@conversationActionFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "launchTitle": "New session",
+  "launchBack": "Back",
+  "launchStepMachine": "Choose a machine",
+  "launchStepProject": "Choose a project",
+  "launchNoMachineOnline": "No machine is online. A session starts on the machine itself, so it has to be connected.",
+  "launchMachineUnavailable": "{status} · available once it reconnects",
+  "@launchMachineUnavailable": {
+    "placeholders": {
+      "status": {
+        "type": "String"
+      }
+    }
+  },
+  "launchLoadFailed": "Couldn't load this machine's projects",
+  "launchNoProjects": "No projects open on this machine. Open one in Smelt on the computer first.",
+  "launchNoProject": "No project",
+  "launchNoProjectHint": "Talk to one of your agents in its own space",
+  "launchSectionPinned": "Pinned",
+  "launchSectionConversation": "Conversations",
+  "launchSectionTerminal": "Terminals",
+  "launchSectionAgents": "Agents",
+  "launchAgentSubtitle": "Agent · {engine}",
+  "@launchAgentSubtitle": {
+    "placeholders": {
+      "engine": {
+        "type": "String"
+      }
+    }
+  },
+  "launchNoActions": "Nothing to start here yet. Update Smelt on the computer, then try again.",
+  "launchStarting": "Starting {label}…",
+  "@launchStarting": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
+  "launchWaiting": "Started. Opening it…",
+  "launchFailedTitle": "Couldn't start {label}",
+  "@launchFailedTitle": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
+  "launchFailed": "Couldn't start the session: {message}",
+  "@launchFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "launchNotListed": "It started on {machine} but hasn't shown up yet. Look for it in Sessions in a moment.",
+  "@launchNotListed": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesOsMacos": "macOS",
+  "machinesOsLinux": "Linux",
+  "machinesOsWindows": "Windows",
+  "machinesOsUnknown": "Unknown system",
+  "machinesName": "Name",
+  "machinesHostname": "Host name: {hostname}",
+  "@machinesHostname": {
+    "placeholders": {
+      "hostname": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesRenameTitle": "Rename machine",
+  "machinesRenameEmptyHint": "Leave empty to use the host name ({hostname})",
+  "@machinesRenameEmptyHint": {
+    "placeholders": {
+      "hostname": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesRenameFailed": "Couldn't rename: {error}",
+  "@machinesRenameFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesAccent": "Label color",
+  "machinesAccentFooter": "Every session from this machine carries this color.",
+  "machinesAccentBlue": "Blue",
+  "machinesAccentTeal": "Teal",
+  "machinesAccentViolet": "Violet",
+  "machinesAccentPink": "Pink",
+  "machinesAccentOlive": "Olive",
+  "machinesAccentIndigo": "Indigo",
+  "machinesAccentSky": "Sky",
+  "machinesAccentBrown": "Brown",
+  "machinesAccentOther": "Color {n}",
+  "@machinesAccentOther": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "machinesAccentFailed": "Couldn't change the color: {error}",
+  "@machinesAccentFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesLink": "Connection",
+  "machinesStatus": "Status",
+  "machinesPath": "Path",
+  "machinesPathLan": "Local network",
+  "machinesPathDirect": "Direct",
+  "machinesPathRelay": "Relay",
+  "machinesPathUnknown": "Not chosen yet",
+  "machinesRtt": "Round trip",
+  "machinesRttValue": "{ms} ms",
+  "@machinesRttValue": {
+    "placeholders": {
+      "ms": {
+        "type": "int"
+      }
+    }
+  },
+  "machinesEndpoint": "Endpoint ID",
+  "machinesEndpointCopy": "Copy endpoint ID",
+  "machinesRelay": "Relay server",
+  "machinesRelayDefault": "Default public relays",
+  "machinesVersion": "Runtime version",
+  "machinesVersionUnknown": "Not connected yet",
+  "machinesSystem": "System",
+  "machinesLastError": "Last error",
+  "machinesRelayMixedNote": "Your machines use different relay settings, so on iOS a self-hosted relay may be unreachable while a system proxy or VPN is on.",
+  "machinesReconnect": "Reconnect now",
+  "machinesReconnectBusy": "Reconnecting…",
+  "machinesReconnected": "Connected to {name}",
+  "@machinesReconnected": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesReconnectOffline": "Still can't reach {name}. It keeps retrying in the background.",
+  "@machinesReconnectOffline": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesReconnectFailed": "Couldn't reconnect: {error}",
+  "@machinesReconnectFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesRevokedBody": "{name} no longer accepts this phone: it was removed on that machine, or its device list was reset. Make a new pairing code there and pair again. The name and label color stay.",
+  "@machinesRevokedBody": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesIncompatibleBody": "This app and Smelt on {name} are on incompatible versions. Update the older one, then reconnect. If it still fails, pair again.",
+  "@machinesIncompatibleBody": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesRepair": "Pair again",
+  "machinesForget": "Forget this machine",
+  "machinesForgetTitle": "Forget {name}?",
+  "@machinesForgetTitle": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesForgetBody": "Removes {name} from this phone, along with its drafts and offline cache. Whether this phone may connect is managed on {name} itself: to revoke access, remove this phone from its device list. You can pair again later.",
+  "@machinesForgetBody": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesForgetConfirm": "Forget",
+  "machinesForgotten": "Forgot {name}",
+  "@machinesForgotten": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesForgetFailed": "Couldn't forget the machine: {error}",
+  "@machinesForgetFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesGone": "This machine is no longer on this phone.",
+  "machinesPairTitle": "Pair a machine",
+  "machinesPairGuide": "Scan the code from Smelt on your computer (Settings → Mobile Remote), or the one printed by “smeltd pair” on a server.",
+  "machinesPairPaste": "Paste pairing code",
+  "machinesPairPasteHint": "smelt+iroh://…",
+  "machinesPairFromClipboard": "Paste from clipboard",
+  "machinesPairSubmit": "Pair",
+  "machinesPairTorchOn": "Turn on flashlight",
+  "machinesPairTorchOff": "Turn off flashlight",
+  "machinesPairNotACode": "That isn't a Smelt pairing code.",
+  "machinesPairBusyNew": "Pairing with a new machine…",
+  "machinesPairBusyAgain": "Pairing with {name} again…",
+  "@machinesPairBusyAgain": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesPairBusyBody": "Your other machines stay connected.",
+  "machinesPaired": "Connected to {name}",
+  "@machinesPaired": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesPairFailed": "Couldn't pair",
+  "machinesPairErrorExpired": "This pairing code has expired or was already used. Make a new one on the machine and scan it.",
+  "machinesPairErrorIncompatible": "This app and Smelt on that machine are on incompatible versions. Update the older one, then pair with a new code.",
+  "machinesPairErrorOffline": "Couldn't reach the machine. Check that it's awake and both sides are online, then try again. If the code has expired, make a new one.",
+  "machinesPairErrorRejected": "The machine turned this phone away. Make a new pairing code on it and try again.",
+  "machinesPairErrorCancelled": "Pairing was interrupted. Try again.",
+  "machinesPairErrorOther": "Pairing failed: {error}",
+  "@machinesPairErrorOther": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "machinesPairScanAgain": "Scan again",
+  "machinesCameraDenied": "Smelt can't use the camera. Allow camera access in the system settings, or paste the pairing code instead.",
+  "machinesCameraUnavailable": "The camera isn't available. Paste the pairing code instead.",
+  "passTitle": "Now",
+  "passNewSession": "New session",
+  "passRailEmpty": "Nothing is waiting for you.",
+  "passTicketsWaiting": "{count, plural, =1{1 waiting for you} other{{count} waiting for you}}",
+  "@passTicketsWaiting": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "passTicketNumber": "#{n}",
+  "@passTicketNumber": {
+    "placeholders": {
+      "n": {
+        "type": "int"
+      }
+    }
+  },
+  "passWantsToRun": "{agent} wants to run",
+  "@passWantsToRun": {
+    "placeholders": {
+      "agent": {
+        "type": "String"
+      }
+    }
+  },
+  "passWantsTo": "{agent} asks",
+  "@passWantsTo": {
+    "placeholders": {
+      "agent": {
+        "type": "String"
+      }
+    }
+  },
+  "passHasQuestion": "{agent} has a question",
+  "@passHasQuestion": {
+    "placeholders": {
+      "agent": {
+        "type": "String"
+      }
+    }
+  },
+  "passFailed": "{agent} stopped with an error",
+  "@passFailed": {
+    "placeholders": {
+      "agent": {
+        "type": "String"
+      }
+    }
+  },
+  "passContextYou": "You",
+  "passLoadingDetails": "Fetching what it needs…",
+  "passMoreOptions": "More options",
+  "passStampAllowed": "Allowed · {time}",
+  "@passStampAllowed": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "passStampDenied": "Denied · {time}",
+  "@passStampDenied": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "passStampAnswered": "Answered · {time}",
+  "@passStampAnswered": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "passStationIdle": "Nothing running here.",
+  "passSeeAllSessions": "All sessions",
+  "passRunning": "Running",
+  "passJustFinished": "Just finished",
+  "passRecent": "Recent",
+  "passRepair": "Pair again",
+  "passNoMachinesTitle": "Pair your first machine",
+  "passNoMachinesBody": "On your Mac, open Smelt → Settings → Mobile Remote, or run `smeltd pair` on a server, then scan the code.",
+  "passScanCode": "Scan pairing code",
+  "passTriageTitle": "{index} of {count}",
+  "@passTriageTitle": {
+    "placeholders": {
+      "index": {
+        "type": "int"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "passTriageDone": "All caught up",
+  "passTriageDoneBody": "Every ticket has been handled.",
+  "passOpenConversation": "Open conversation",
+  "passWorkingDir": "In {dir}",
+  "@passWorkingDir": {
+    "placeholders": {
+      "dir": {
+        "type": "String"
+      }
+    }
+  },
+  "passGrantRoot": "Grants access to {path}",
+  "@passGrantRoot": {
+    "placeholders": {
+      "path": {
+        "type": "String"
+      }
+    }
+  },
+  "passActionFailed": "Couldn't send: {message}",
+  "@passActionFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "approvalAllowOnce": "Allow once",
+  "approvalAllowAlways": "Always allow",
+  "approvalRejectOnce": "Deny",
+  "approvalRejectAlways": "Always deny",
+  "elicitationSubmit": "Send answer",
+  "elicitationDismiss": "Skip",
+  "elicitationRequired": "Required",
+  "elicitationOpenLink": "Open link",
+  "elicitationTextHint": "Type your answer",
+  "sessionsTitle": "Sessions",
+  "sessionsNewSession": "New session",
+  "sessionsFilterAll": "All",
+  "sessionsFilterMachines": "Show sessions from",
+  "@sessionsFilterMachines": {
+    "description": "Screen reader label for the row of machine filter chips."
+  },
+  "sessionsSearchHint": "Search titles, projects, agents",
+  "sessionsSearchClear": "Clear search",
+  "sessionsAgentChats": "Agent conversations",
+  "sessionsAutomationRuns": "Automation runs",
+  "sessionsNoProject": "No project",
+  "sessionsIdleProjects": "Projects without open sessions",
+  "sessionsHistoryRow": "History",
+  "@sessionsHistoryRow": {
+    "description": "Last row in a project group: opens the resumable past conversations of that project."
+  },
+  "sessionsMachineEmpty": "No sessions on this machine.",
+  "sessionsMachineWaiting": "Waiting for this machine's session list…",
+  "sessionsNoMachinesTitle": "No machines yet",
+  "sessionsNoMachinesBody": "Pair a machine from Now or Settings, and its sessions show up here.",
+  "sessionsNoMatchesTitle": "Nothing matches “{query}”",
+  "@sessionsNoMatchesTitle": {
+    "placeholders": {
+      "query": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsNoMatchesBody": "Search looks at titles, projects and agents.",
+  "sessionsUntitledConversation": "Untitled conversation",
+  "sessionsUntitledTerminal": "Terminal",
+  "sessionsDeleteTerminalTitle": "Delete this terminal?",
+  "sessionsDeleteTerminalBody": "“{title}” closes on {machine} and its shell process ends.",
+  "@sessionsDeleteTerminalBody": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      },
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsDeleteConversationTitle": "Delete this conversation?",
+  "sessionsDeleteConversationBody": "“{title}” stops on {machine} and leaves the session list. The agent's transcript stays in History.",
+  "@sessionsDeleteConversationBody": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      },
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsDeleteFailed": "Couldn't delete: {message}",
+  "@sessionsDeleteFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsHistoryTitle": "History",
+  "sessionsHistoryNoAgents": "This machine has no agents to resume conversations with.",
+  "sessionsHistoryEmptyTitle": "Nothing to resume",
+  "sessionsHistoryEmptyBody": "{agent} has no saved conversations in {project}.",
+  "@sessionsHistoryEmptyBody": {
+    "placeholders": {
+      "agent": {
+        "type": "String"
+      },
+      "project": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsHistoryLoadFailed": "Couldn't load history",
+  "sessionsHistoryMessages": "{count, plural, =1{1 message} other{{count} messages}}",
+  "@sessionsHistoryMessages": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "sessionsHistoryOriginal": "Originally “{title}”",
+  "@sessionsHistoryOriginal": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsHistoryRenameTitle": "Rename conversation",
+  "sessionsHistoryRenameHelp": "Leave empty to go back to the agent's own title.",
+  "sessionsHistoryResetName": "Use original name",
+  "sessionsHistoryRenameFailed": "Couldn't rename: {message}",
+  "@sessionsHistoryRenameFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsHistoryResumeFailed": "Couldn't resume: {message}",
+  "@sessionsHistoryResumeFailed": {
+    "placeholders": {
+      "message": {
+        "type": "String"
+      }
+    }
+  },
+  "sessionsHistoryResuming": "Resuming…",
+  "settingsTitle": "Settings",
+  "settingsMachines": "Machines",
+  "settingsPairNew": "Pair a new machine",
+  "settingsNoMachines": "No machines yet. Pair one and its sessions show up here.",
+  "settingsReorderHint": "Touch and hold a machine to drag it into a new order.",
+  "settingsOpenMachine": "Details for {name}",
+  "@settingsOpenMachine": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsAppearance": "Appearance",
+  "settingsThemeSystem": "System",
+  "settingsThemeLight": "Light",
+  "settingsThemeDark": "Dark",
+  "settingsTerminal": "Terminal",
+  "settingsTerminalFontSize": "Font size",
+  "settingsTerminalFontValue": "{size} pt",
+  "@settingsTerminalFontValue": {
+    "placeholders": {
+      "size": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsTerminalFontSmaller": "Smaller text",
+  "settingsTerminalFontLarger": "Larger text",
+  "settingsTerminalPreview": "~/code/smelt $ cargo test",
+  "settingsAbout": "About",
+  "settingsAboutTagline": "Approve, answer and follow the agents on your machines.",
+  "settingsDeviceId": "This device's ID",
+  "settingsLicenses": "Open-source licenses",
+  "shellPickAgentHint": "Pick an agent or automation to see its details.",
+  "terminalStateConnecting": "Connecting…",
+  "@terminalStateConnecting": {
+    "description": "Terminal page subtitle: attaching to the terminal, nothing on screen is live yet."
+  },
+  "terminalStateConnected": "Live",
+  "@terminalStateConnected": {
+    "description": "Terminal page subtitle: attached, output is streaming."
+  },
+  "terminalStateReconnecting": "Reconnecting…",
+  "terminalStateEnded": "Ended",
+  "terminalCopyOutput": "Copy output",
+  "terminalCopySelection": "Copy selection",
+  "terminalTextSize": "Text size",
+  "terminalTextSizePoints": "{size} pt",
+  "@terminalTextSizePoints": {
+    "placeholders": {
+      "size": {
+        "type": "int"
+      }
+    }
+  },
+  "terminalShowKeyboard": "Show keyboard",
+  "terminalHideKeyboard": "Hide keyboard",
+  "terminalKeyboardUnavailable": "Can't type right now",
+  "terminalNothingToCopy": "Nothing to copy",
+  "terminalCopyFailed": "Couldn't copy",
+  "terminalNothingToPaste": "The clipboard is empty",
+  "terminalPasteFailed": "Couldn't read the clipboard",
+  "terminalOpenLinkFailed": "Couldn't open the link",
+  "terminalSelectAll": "Select all",
+  "terminalPaste": "Paste",
+  "terminalOpenLink": "Open link",
+  "terminalJumpToLatest": "Latest",
+  "@terminalJumpToLatest": {
+    "description": "Button that scrolls the terminal back to the newest output."
+  },
+  "terminalJumpToLatestHint": "Jump to the newest output",
+  "terminalLoadingHistory": "Loading earlier output",
+  "terminalSessionEnded": "This terminal session has ended.",
+  "terminalConnectionLost": "Lost this terminal. It may have been closed on the machine.",
+  "terminalConnectionDropped": "Connection dropped. Reconnecting…",
+  "terminalKeyEscape": "Escape",
+  "terminalKeyCtrl": "Ctrl, applies to the next key",
+  "terminalKeyTab": "Tab",
+  "terminalKeyShiftTab": "Shift+Tab",
+  "terminalKeyInterrupt": "Interrupt (Ctrl+C)",
+  "terminalKeyLeft": "Left",
+  "terminalKeyDown": "Down",
+  "terminalKeyUp": "Up",
+  "terminalKeyRight": "Right",
+  "terminalKeyNewLine": "Shift+Enter (new line)",
+  "terminalKeyPageUp": "Page up",
+  "terminalKeyPageDown": "Page down"
+}

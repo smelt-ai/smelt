@@ -1,0 +1,9 @@
+# 文案在 lib/l10n/src/<功能>_{en,zh}.arb，按功能分文件，避免并行开发时互相覆盖。
+# `dart run tool/merge_arb.dart` 合并成 lib/l10n/app_{en,zh}.arb（生成物，别手改），
+# 再由 flutter gen-l10n（flutter pub get / run 时自动）生成 L10n 类。
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-dir: lib/l10n/gen
+output-localization-file: l10n.dart
+output-class: L10n
+nullable-getter: false

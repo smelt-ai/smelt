@@ -138,6 +138,11 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # 文案按功能分片写在 lib/l10n/src，合并出的 app_*.arb 与生成的 L10n 类都提交在库里；
+      # 改了片段忘了合并，这一步就红。
+      - name: Check l10n
+        run: dart run tool/merge_arb.dart --check && flutter gen-l10n && git diff --exit-code -- lib/l10n
+
       - name: Analyze
         run: flutter analyze
 

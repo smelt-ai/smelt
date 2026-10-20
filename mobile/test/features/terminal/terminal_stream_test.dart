@@ -3,14 +3,22 @@ import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:smelt_mobile/services/terminal_stream_service.dart';
-import 'package:smelt_mobile/src/rust/api/error.dart';
-import 'package:smelt_mobile/src/rust/api/terminal.dart' as rust;
+import 'package:smelt_mobile/data/demo_backend.dart';
+import 'package:smelt_mobile/data/models.dart' as rust;
+import 'package:smelt_mobile/data/models.dart'
+    show SmeltError, SmeltErrorKind, TerminalGeometry;
+import 'package:smelt_mobile/features/terminal/terminal_stream.dart';
 
-/// 一次 [_FakeBackend.attach]。
+/// 一次 [_FakeBackend.terminalAttach]。
 class _Attach {
-  _Attach(this.sessionId, this.geometry, this.maxScrollbackLines);
+  _Attach(
+    this.runtimeId,
+    this.sessionId,
+    this.geometry,
+    this.maxScrollbackLines,
+  );
 
+  final String runtimeId;
   final String sessionId;
   final TerminalGeometry geometry;
   final int? maxScrollbackLines;
@@ -19,9 +27,9 @@ class _Attach {
   void add(rust.TerminalEvent event) => controller.add(event);
 }
 
-/// 假的 Rust 内核：记下调用，事件由测试手动推。同一会话再次附着、detach 都会结束
-/// 旧流，与内核一致。
-class _FakeBackend implements TerminalBackend {
+/// 假的 Rust 内核：记下终端调用，事件由测试手动推。同一会话再次附着、detach 都会
+/// 结束旧流，与内核一致。其余接口沿用演示后端（这里用不到）。
+class _FakeBackend extends DemoBackend {
   final attaches = <_Attach>[];
   final resizes = <TerminalGeometry>[];
   final inputs = <String>[];
@@ -32,33 +40,38 @@ class _FakeBackend implements TerminalBackend {
   _Attach get current => attaches.last;
 
   @override
-  Stream<rust.TerminalEvent> attach({
-    required String sessionId,
+  Stream<rust.TerminalEvent> terminalAttach(
+    String runtimeId,
+    String sessionId, {
     required TerminalGeometry geometry,
     int? maxScrollbackLines,
   }) {
     final error = attachError;
     if (error != null) throw error;
     _endCurrent();
-    final attach = _Attach(sessionId, geometry, maxScrollbackLines);
+    final attach = _Attach(runtimeId, sessionId, geometry, maxScrollbackLines);
     attaches.add(attach);
     return attach.controller.stream;
   }
 
   @override
-  void resize({required String sessionId, required TerminalGeometry geometry}) {
+  void terminalResize(
+    String runtimeId,
+    String sessionId,
+    TerminalGeometry geometry,
+  ) {
     resizes.add(geometry);
   }
 
   @override
-  void input({required String sessionId, required String data}) {
+  void terminalInput(String runtimeId, String sessionId, String data) {
     final error = inputError;
     if (error != null) throw error;
     inputs.add(data);
   }
 
   @override
-  void detach({required String sessionId}) {
+  void terminalDetach(String runtimeId, String sessionId) {
     detaches.add(sessionId);
     _endCurrent();
   }
@@ -141,7 +154,8 @@ class _Harness {
   }
 
   final backend = _FakeBackend();
-  late final service = TerminalStreamService(
+  late final service = TerminalStream(
+    runtimeId: 'rt-1',
     sessionId: 'terminal-1',
     backend: backend,
     resizeDebounce: _debounce,
@@ -203,7 +217,7 @@ void main() {
 
     expect(h.backend.attaches, hasLength(1));
     final attach = h.backend.current;
-    expect(attach.sessionId, 'terminal-1');
+    expect((attach.runtimeId, attach.sessionId), ('rt-1', 'terminal-1'));
     expect(attach.geometry, _g40x32);
     expect(
       attach.maxScrollbackLines,

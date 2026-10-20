@@ -54,3 +54,10 @@ app.*.map.json
 # cargokit 的构建缓存（rust_builder 本身要入库，它的产物不要）
 /rust_builder/**/.dart_tool/
 /rust_builder/**/build/
+
+# impeccable 设计流程的过程产物：截图、决策页线框、审查包。方向契约（surfaces/）与
+# 构建说明（build-brief.md）要提交，后续改界面时照着它们来。
+/.impeccable/review/
+/.impeccable/mocks/
+/.impeccable/decision-*.json
+/.impeccable/*.local.json

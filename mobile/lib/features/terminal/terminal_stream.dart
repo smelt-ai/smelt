@@ -1,11 +1,11 @@
+/// 终端流：Rust 内核终端附着之上的一层薄封装，终端页只认这里的事件和状态。
+library;
+
 import 'dart:async';
 import 'dart:typed_data';
 
-import '../src/rust/api/error.dart';
-import '../src/rust/api/terminal.dart' as rust;
-import '../src/rust/api/terminal.dart' show TerminalGeometry;
-
-export '../src/rust/api/terminal.dart' show TerminalGeometry;
+import '../../data/backend.dart';
+import '../../data/models.dart';
 
 /// 首次 attach 要多少行 scrollback。
 ///
@@ -72,10 +72,14 @@ class TerminalReplayCompleteEvent extends TerminalStreamEvent {
   const TerminalReplayCompleteEvent();
 }
 
+/// 附着出了问题。[message] 是内核给人看的一句话；为 null 时没有更具体的说法（比如流被
+/// 悄悄结束），页面自己用本地化文案说明。
 class TerminalErrorEvent extends TerminalStreamEvent {
   const TerminalErrorEvent(this.message, {this.fatal = false});
 
-  final String message;
+  final String? message;
+
+  /// 之后不会再附着：会话没了，或调用本身就不合法。
   final bool fatal;
 }
 
@@ -83,96 +87,42 @@ class TerminalClosedEvent extends TerminalStreamEvent {
   const TerminalClosedEvent();
 }
 
-abstract interface class TerminalStreamClient {
-  Stream<TerminalStreamEvent> get events;
-  Stream<TerminalStreamState> get stateStream;
-  TerminalStreamState get state;
-
-  bool get canLoadMoreScrollback;
-
-  void start(TerminalGeometry geometry);
-  void updateGeometry(TerminalGeometry geometry);
-  void sendInput(String data);
-
-  /// 提高 scrollback 预算并重新取一次快照。返回 false 表示已经到头/取不动了。
-  bool loadMoreScrollback();
-  void suspend();
-  void resume();
-  Future<void> dispose();
-}
-
-/// Rust 内核的终端入口。单独抽出来是为了单测能注入假的，不加载动态库。
-///
-/// 语义以 `crates/smelt-mobile/src/api/terminal.rs` 的注释为准：全是同步调用，
-/// 在 UI 线程上按调用顺序执行；同一会话再次 [attach] 会替换旧附着（旧流随之结束）。
-abstract interface class TerminalBackend {
-  Stream<rust.TerminalEvent> attach({
-    required String sessionId,
-    required TerminalGeometry geometry,
-    int? maxScrollbackLines,
-  });
-
-  void resize({required String sessionId, required TerminalGeometry geometry});
-
-  void input({required String sessionId, required String data});
-
-  void detach({required String sessionId});
-}
-
-class RustTerminalBackend implements TerminalBackend {
-  const RustTerminalBackend();
-
-  @override
-  Stream<rust.TerminalEvent> attach({
-    required String sessionId,
-    required TerminalGeometry geometry,
-    int? maxScrollbackLines,
-  }) => rust.terminalAttach(
-    sessionId: sessionId,
-    geometry: geometry,
-    maxScrollbackLines: maxScrollbackLines,
-  );
-
-  @override
-  void resize({
-    required String sessionId,
-    required TerminalGeometry geometry,
-  }) => rust.terminalResize(sessionId: sessionId, geometry: geometry);
-
-  @override
-  void input({required String sessionId, required String data}) =>
-      rust.terminalInput(sessionId: sessionId, data: data);
-
-  @override
-  void detach({required String sessionId}) =>
-      rust.terminalDetach(sessionId: sessionId);
-}
-
 /// 终端流：Rust 内核附着之上的一层薄封装。
 ///
-/// 连接、断线重连、运行时切换都在内核里做；这里只管「什么时候附着、要多少历史、
-/// 尺寸怎么防抖」，并把内核事件翻成页面用的 [TerminalStreamEvent]。
-class TerminalStreamService implements TerminalStreamClient {
-  TerminalStreamService({
+/// 连接、断线重连都在内核里做；这里只管「什么时候附着、要多少历史、尺寸怎么防抖」，
+/// 并把内核事件翻成页面用的 [TerminalStreamEvent]。
+///
+/// 内核调用语义以 `crates/smelt-mobile/src/api/terminal.rs` 的注释为准：全是同步调用，
+/// 在 UI 线程上按调用顺序执行；同一会话再次附着会替换旧附着（旧流随之结束）。
+class TerminalStream {
+  TerminalStream({
+    required this.backend,
+    required this.runtimeId,
     required this.sessionId,
-    this.backend = const RustTerminalBackend(),
-    this.resizeDebounce = const Duration(milliseconds: 120),
-    this.attachSettleDelay = const Duration(milliseconds: 150),
+    this.resizeDebounce = defaultResizeDebounce,
+    this.attachSettleDelay = defaultAttachSettleDelay,
   });
 
+  /// 协议节奏，不是动效：几次连续测量（键盘开合、旋转）合成一次 PTY resize。
+  static const defaultResizeDebounce = Duration(milliseconds: 120);
+
+  /// 见 [attachSettleDelay]。
+  static const defaultAttachSettleDelay = Duration(milliseconds: 150);
+
+  final Backend backend;
+  final String runtimeId;
   final String sessionId;
-  final TerminalBackend backend;
   final Duration resizeDebounce;
 
-  /// 拿到第一份几何（或切回前台）后等多久再附着。留给页面一次布局：字号偏好是异步
-  /// 读出来的，读到后会改行列；行列得在附着之前就落定，否则紧接着就是一次多余的 PTY
-  /// resize——不切备用屏的 CLI 每收一次 SIGWINCH 就把整段对话重印一遍。
+  /// 拿到第一份几何（或切回前台）后等多久再附着。留给页面把 chrome（导航栏、快捷键
+  /// 栏、错误条）摆完、行列落定；行列得在附着之前就定下来，否则紧接着就是一次多余的
+  /// PTY resize——不切备用屏的 CLI 每收一次 SIGWINCH 就把整段对话重印一遍。
   final Duration attachSettleDelay;
 
   final _eventsController = StreamController<TerminalStreamEvent>.broadcast();
   final _stateController = StreamController<TerminalStreamState>.broadcast();
 
-  StreamSubscription<rust.TerminalEvent>? _subscription;
+  StreamSubscription<TerminalEvent>? _subscription;
   Timer? _resizeTimer;
   Timer? _attachTimer;
   TerminalGeometry? _geometry;
@@ -204,21 +154,16 @@ class TerminalStreamService implements TerminalStreamClient {
   bool _disposed = false;
   bool _ended = false;
 
-  @override
   Stream<TerminalStreamEvent> get events => _eventsController.stream;
-  @override
   Stream<TerminalStreamState> get stateStream => _stateController.stream;
-  @override
   TerminalStreamState get state => _state;
 
-  @override
   bool get canLoadMoreScrollback =>
       !_disposed &&
       !_ended &&
       _scrollbackLines < kMaxTerminalScrollbackLines &&
       _historyLines > _scrollbackLines;
 
-  @override
   bool loadMoreScrollback() {
     if (!canLoadMoreScrollback || _state != TerminalStreamState.connected) {
       return false;
@@ -235,7 +180,6 @@ class TerminalStreamService implements TerminalStreamClient {
     return true;
   }
 
-  @override
   void start(TerminalGeometry geometry) {
     if (_disposed || _ended) return;
     _geometry = geometry;
@@ -247,7 +191,6 @@ class TerminalStreamService implements TerminalStreamClient {
     _scheduleAttach();
   }
 
-  @override
   void updateGeometry(TerminalGeometry geometry) {
     if (_disposed || _ended) return;
     if (!_started) {
@@ -267,23 +210,21 @@ class TerminalStreamService implements TerminalStreamClient {
     if (latest == _lastSentGeometry) return;
     _lastSentGeometry = latest;
     try {
-      backend.resize(sessionId: sessionId, geometry: latest);
+      backend.terminalResize(runtimeId, sessionId, latest);
     } catch (_) {
       // 只有附着已经不在内核里才会报错；那种情况流上会有 Closed / fatal 错误说明原因。
     }
   }
 
-  @override
   void sendInput(String data) {
     if (data.isEmpty || !_attached) return;
     try {
-      backend.input(sessionId: sessionId, data: data);
+      backend.terminalInput(runtimeId, sessionId, data);
     } catch (error) {
-      _emit(TerminalErrorEvent(_describe(error)));
+      _emit(TerminalErrorEvent(describeError(error)));
     }
   }
 
-  @override
   void suspend() {
     if (_disposed || _suspended) return;
     _suspended = true;
@@ -292,7 +233,6 @@ class TerminalStreamService implements TerminalStreamClient {
     if (!_ended) _setState(TerminalStreamState.connecting);
   }
 
-  @override
   void resume() {
     if (_disposed || !_suspended) return;
     _suspended = false;
@@ -317,17 +257,18 @@ class TerminalStreamService implements TerminalStreamClient {
         _nextScrollbackLines ?? initialTerminalScrollbackLines(geometry.rows);
     _nextScrollbackLines = null;
     _setState(TerminalStreamState.connecting);
-    final Stream<rust.TerminalEvent> stream;
+    final Stream<TerminalEvent> stream;
     try {
-      stream = backend.attach(
-        sessionId: sessionId,
+      stream = backend.terminalAttach(
+        runtimeId,
+        sessionId,
         geometry: geometry,
         maxScrollbackLines: budget,
       );
     } catch (error) {
       // 同步报错只有调用错误（行列为 0、会话 id 为空），重试也没用。
       _attached = false;
-      _conclude(TerminalErrorEvent(_describe(error), fatal: true));
+      _conclude(TerminalErrorEvent(describeError(error), fatal: true));
       return;
     }
     _attached = true;
@@ -336,17 +277,17 @@ class TerminalStreamService implements TerminalStreamClient {
       (event) => _handleEvent(event, generation),
       onError: (Object error) {
         if (generation != _generation) return;
-        _emit(TerminalErrorEvent(_describe(error)));
+        _emit(TerminalErrorEvent(describeError(error)));
       },
       onDone: () => _handleDone(generation),
     );
   }
 
-  void _handleEvent(rust.TerminalEvent event, int generation) {
+  void _handleEvent(TerminalEvent event, int generation) {
     if (_disposed || generation != _generation) return;
     _silentEnds = 0;
     switch (event.kind) {
-      case rust.TerminalEventKind.ready:
+      case TerminalEventKind.ready:
         final ready = event.ready;
         if (ready == null) return;
         _scrollbackLines = ready.scrollbackLines;
@@ -361,21 +302,21 @@ class TerminalStreamService implements TerminalStreamClient {
             historyLines: ready.historyLines,
           ),
         );
-      case rust.TerminalEventKind.data:
+      case TerminalEventKind.data:
         final bytes = event.data;
         if (bytes == null || bytes.isEmpty) return;
         // 非 fatal 错误也可能只是一次输入没发出去，附着本身还活着：流上还有字节来，
         // 就说明没在重连。
         _setState(TerminalStreamState.connected);
         _emit(TerminalDataEvent(bytes));
-      case rust.TerminalEventKind.replayComplete:
+      case TerminalEventKind.replayComplete:
         _setState(TerminalStreamState.connected);
         _emit(const TerminalReplayCompleteEvent());
-      case rust.TerminalEventKind.closed:
+      case TerminalEventKind.closed:
         _attached = false;
         _conclude(const TerminalClosedEvent());
-      case rust.TerminalEventKind.error:
-        final message = event.message ?? 'Terminal request failed';
+      case TerminalEventKind.error:
+        final message = event.message;
         if (event.fatal) {
           _attached = false;
           _conclude(TerminalErrorEvent(message, fatal: true));
@@ -397,7 +338,7 @@ class TerminalStreamService implements TerminalStreamClient {
     if (_ended || _suspended) return;
     _silentEnds++;
     if (_silentEnds > 1) {
-      _conclude(const TerminalErrorEvent('Terminal stream ended', fatal: true));
+      _conclude(const TerminalErrorEvent(null, fatal: true));
       return;
     }
     _attach();
@@ -420,7 +361,7 @@ class TerminalStreamService implements TerminalStreamClient {
     _attached = false;
     _lastSentGeometry = null;
     try {
-      backend.detach(sessionId: sessionId);
+      backend.terminalDetach(runtimeId, sessionId);
     } catch (_) {}
   }
 
@@ -443,10 +384,6 @@ class TerminalStreamService implements TerminalStreamClient {
     _stateController.add(next);
   }
 
-  static String _describe(Object error) =>
-      error is SmeltError ? error.message : error.toString();
-
-  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

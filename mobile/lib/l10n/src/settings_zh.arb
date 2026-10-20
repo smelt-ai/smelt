@@ -1,0 +1,23 @@
+{
+  "@@locale": "zh",
+  "settingsTitle": "设置",
+  "settingsMachines": "机器",
+  "settingsPairNew": "配对新机器",
+  "settingsNoMachines": "还没有机器。配对一台，它上面的会话就会出现在这里。",
+  "settingsReorderHint": "长按一台机器拖动，调整顺序。",
+  "settingsOpenMachine": "{name} 的详情",
+  "settingsAppearance": "外观",
+  "settingsThemeSystem": "跟随系统",
+  "settingsThemeLight": "浅色",
+  "settingsThemeDark": "深色",
+  "settingsTerminal": "终端",
+  "settingsTerminalFontSize": "字号",
+  "settingsTerminalFontValue": "{size} pt",
+  "settingsTerminalFontSmaller": "字号调小",
+  "settingsTerminalFontLarger": "字号调大",
+  "settingsTerminalPreview": "~/code/smelt $ cargo test",
+  "settingsAbout": "关于",
+  "settingsAboutTagline": "在手机上批准、回答、跟进你机器上的 agent。",
+  "settingsDeviceId": "本机设备 ID",
+  "settingsLicenses": "开源许可"
+}

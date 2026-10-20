@@ -1,5 +1,5 @@
 name: smelt_mobile
-description: "A new Flutter project."
+description: "Smelt mobile: a command post for agents running on your machines."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -30,10 +30,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
+  flutter_localizations:
+    sdk: flutter
+  intl: any
+  # 一套线条统一的图标（ISC）。两端同一套视觉语言，不混用 Material / Cupertino 图标。
+  lucide_icons_flutter: ^4.0.0
   mobile_scanner: ^7.4.0
   flutter_secure_storage: ^10.3.1
   flutter_markdown_plus: ^1.0.7
@@ -84,45 +85,22 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
-
-  # The following line ensures that the Material Icons font is
-  # included with your application, so that you can use the icons in
-  # the material Icons class.
   uses-material-design: true
+  generate: true
 
   # 各家 agent 的身份图标。**这几个 SVG 是从 `crates/smelt/assets/icons/` 复制来的**
   # ——Flutter 的 asset 声明不能指到 package 目录外，所以只能带一份副本。桌面端换图
   # 标时这里要跟着换（THIRD_PARTY_NOTICES.md 一并复制，LobeHub Icons / MIT）。
   assets:
     - assets/agent-icons/
+    - assets/fonts/jetbrains-mono/OFL.txt
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
-
-  # An image asset can refer to one or more resolution-specific "variants", see
-  # https://flutter.dev/to/resolution-aware-images
-
-  # For details regarding adding assets from package dependencies, see
-  # https://flutter.dev/to/asset-from-package
-
-  # To add custom fonts to your application, add a fonts section here,
-  # in this "flutter" section. Each entry in this list should have a
-  # "family" key with the font family name, and a "fonts" key with a
-  # list giving the asset and other descriptors for the font. For
-  # example:
-  # fonts:
-  #   - family: Schyler
-  #     fonts:
-  #       - asset: fonts/Schyler-Regular.ttf
-  #       - asset: fonts/Schyler-Italic.ttf
-  #         style: italic
-  #   - family: Trajan Pro
-  #     fonts:
-  #       - asset: fonts/TrajanPro.ttf
-  #       - asset: fonts/TrajanPro_Bold.ttf
-  #         weight: 700
-  #
-  # For details regarding fonts from package dependencies,
-  # see https://flutter.dev/to/font-from-package
+  # 单据头、耗时、命令、代码、终端用的等宽字。用无连字版（NL）：终端和代码里不该出现连字。
+  fonts:
+    - family: JetBrainsMonoNL
+      fonts:
+        - asset: assets/fonts/jetbrains-mono/JetBrainsMonoNL-Regular.ttf
+        - asset: assets/fonts/jetbrains-mono/JetBrainsMonoNL-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/jetbrains-mono/JetBrainsMonoNL-Bold.ttf
+          weight: 700
