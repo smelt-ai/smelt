@@ -3,15 +3,28 @@
 //! `gpui-component` 的 `TextView::markdown` 默认把 mermaid 围栏代码块当普通代码
 //! 块处理（纯文本 + 语法高亮壳，mermaid 语法本身没有 tree-sitter 语法，等于纯文
 //! 本）。这里接上它的 `markdown_block_parser`/`markdown_block_renderer` 钩子，识
-//! 别出 mermaid 代码块，用 `rusty-mermaid`（纯 Rust，无浏览器/Node 依赖）离线渲成
-//! SVG，再用 GPUI 的 `img()` 全彩显示——注意不
-//! 是 `svg()`：那个元素只做单色 alpha mask 渲染（图标那条路），画不出多彩图，
-//! `img()` 对 `.svg` 走的才是全彩栅格化管线。
+//! 别出 mermaid 代码块，用 `merman` 0.9.1（纯 Rust，对齐 mermaid.js，Zed 也在用）
+//! 离线渲成 SVG，再用 GPUI 的 `img()` 全彩显示——注意不是 `svg()`：那个元素只做
+//! 单色 alpha mask 渲染（图标那条路），画不出多彩图，`img()` 对 `.svg` 走的才是
+//! 全彩栅格化管线。
 //!
-//! 渲染库换过一次：最早用的 `mermaid-rs-renderer`，实测边路由（尤其反向/回边）
-//! 绕远路明显；`rusty-mermaid` 用的是真正的 Sugiyama/dagre 布局算法，同一张图边
-//! 路径干净不少。两者都遇到同一个坑：内置字体栈不含 CJK 字体，得自己覆盖（见
-//! `MERMAID_LEGACY_FONT_FAMILY` 上的注释）。
+//! 渲染库换过两次。最早是 `mermaid-rs-renderer`，反向边绕路。接着换成
+//! `rusty-mermaid` 0.2.0，布局好一些，但中文子图 id 解析失败，中文状态名会在
+//! `state/parser.rs:70` 按字节切 UTF-8 直接 panic，stateDiagram 布局不对，ER 注释
+//! 被拼进属性名，也不认识 `@{ shape }`。`merman` 按 mermaid.js 做对齐，37 种图，
+//! 就是为了换掉这些问题。不保留旧渲染器的开关或垫片。
+//!
+//! 输出背景是透明的，跟着外面的亮暗主题走；节点配色仍由 merman 的 theme 决定，
+//! 所以缓存 key 还是要把主题模式编进去。字体写进站点配置的 `fontFamily`，不再
+//! 在 SVG 文本里做字符串替换。类图标签包在带 `overflow:hidden` 的嵌套 svg 里，
+//! 测宽回调如果只按字符数估算，文字会被裁掉；这里用 GPUI 同一份 usvg 0.46 的
+//! 系统 fontdb，再用 rustybuzz 量 advance。
+//!
+//! 不编 `layout-elk`。它带进的 `merman-elk-layered` 是 EPL-2.0 的 ELK 移植，链进二进制
+//! 就得随附 EPL 文本、出处和对应源码，仓库没有这套流程。而且上游
+//! `default_config.json` 根上的 `layout` 默认是 `elk`，编进来后所有没写布局的流程图、
+//! 状态图、类图、ER 都会换成 ELK，和 GitHub / mermaid.js 上看到的排法不一样。
+//! 不编这个 feature 时，`elk` 请求缺 loader，退回 dagre；图里写 `layout: elk` 也一样。
 //!
 //! 全仓库新增/已有的 `TextView::markdown` 调用点都应该改走这里的 `markdown_view`，
 //! 不要直接调 `TextView::markdown`，否则等于每处都得重新接一遍这两个钩子。
@@ -19,9 +32,6 @@
 //! 内存缓存：GPUI 是即时模式 UI，`BlockNode` 的渲染函数每帧 paint 都会重新调用
 //! （对照 gpui-component `node.rs` 里 `CODE_BLOCK_HIGHLIGHTERS` 那个 thread_local
 //! 先例），同一张图只渲一次，否则滚动会变成每帧重算。不落盘——这是派生图，不是状态。
-//!
-//! mermaid 渲染库默认输出不透明白底、不会跟随亮暗主题，缓存 key 必须把主题模式
-//! 并进去，否则暗色模式下会看到刺眼的白底图。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -37,39 +47,50 @@ use gpui_component::text::{
     MarkdownExtensions, MarkdownNode, MarkdownParseContext, TextView, TextViewState, TextViewStyle,
     markdown_ast,
 };
+use merman::svg::{
+    DeterministicTextMeasurer, MeasurementProfileId, SvgPipeline, TextMeasurementPolicy,
+    TextMeasurementProfile, TextMeasurementProfileIdentity, TextStyle,
+};
+use merman::{
+    Engine, MermaidConfig, OperationControl, RenderOutput, RenderRequest, Renderer, SvgEnvironment,
+    SvgRequest,
+};
 use sha2::{Digest, Sha256};
 
 use crate::IconAction as _;
 
-/// rusty-mermaid（crates.io `=0.2.0`）默认字体栈——见其
-/// `rusty_mermaid_core::font_fallback::SVG_FONT_FAMILY` 常量。整份字体栈都是西文
-/// 字体（Intel One Mono / SF Mono / .../ monospace），不含任何 CJK 字体，且
-/// `Theme`/`SvgConfig` 都没有暴露字体覆盖的公开 API（`Theme.custom_font` 是给
-/// raster/gpui 后端吃字体字节用的，SVG 后端根本不读它）——所以只能在渲染出的
-/// SVG 文本里做字符串替换。这个值是抄自它当前版本的源码字面量，不是公开契约，
-/// 升级 crate 版本前必须先去它源码里确认这个字符串没变，变了这段替换就会静默
-/// 失效（不会报错，只是又变回一串画不出字的默认字体名）。
-const MERMAID_LEGACY_FONT_FAMILY: &str = "'Intel One Mono', 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', 'Menlo', monospace";
-
-/// 换成系统里实测确认存在、且中英文字形都齐的字体，兜底几个常见西文字体。这条
-/// 经验是从上一版 mermaid-rs-renderer 那次调试来的：GPUI 的 usvg 字体解析按字面
-/// 名字精确匹配 `font-family`，不认 "sans-serif"/"monospace" 这类 CSS 泛型关键
-/// 字，字体栈里但凡没有一个字面匹配得上，文字（不分中英文）就整个画不出来。
+/// 传给 merman `fontFamily` 的 CSS 字体栈。多词名字必须加引号，否则 CSS 会把
+/// `Hiragino Sans GB` 拆成三个 family。GPUI 的 usvg 按字面名精确匹配
+/// `font-family`，不认 `sans-serif` 这类泛型关键字，栈里得有一个系统字体目录里
+/// 真能查到的名字，中英文才画得出来。
 ///
-/// 首选没敢直接写 PingFang SC——实测它的字体文件在
+/// 首选没直接写 PingFang SC：它的文件在
 /// `/System/Library/PrivateFrameworks/FontServices.framework/.../Reserved/
-/// PingFangUI.ttc`，是私有框架资源，不在 `fontdb`（GPUI 底层用的字体库，只走标准
-/// 目录扫描）扫描得到的范围内，任何拼法都查不到，不是名字问题。换成冬青黑体简体
-/// 中文（Hiragino Sans GB）：PingFang 之前 macOS 用了很多年的中文默认字体，笔画
-/// 比黑体-简细、观感上更接近 PingFang，且实测在标准字体目录（会被 fontdb 扫到）。
+/// PingFangUI.ttc`，fontdb 只扫标准目录，任何拼法都查不到。冬青黑体简体中文
+/// （Hiragino Sans GB）是 PingFang 之前 macOS 用了很多年的中文默认字体，笔画比
+/// 黑体-简细，而且在标准字体目录里。
 const MERMAID_FONT_FAMILY: &str =
-    "Hiragino Sans GB, Heiti SC, PingFang SC, Helvetica Neue, Arial, sans-serif";
+    "\"Hiragino Sans GB\", \"Heiti SC\", \"PingFang SC\", \"Helvetica Neue\", Arial, sans-serif";
 
-/// 内存缓存 key 版本：改了渲染库/字体栈得跟着升，避免同进程里旧产物被复用。
-const CACHE_FORMAT_VERSION: &str = "v4";
+/// 机器上没有上面这套字体时，测宽再试的 CJK 家族。只参与量字宽，不写进 SVG 的
+/// `font-family`：macOS 上 Hiragino 能命中，GPUI 栅格化走的就是这条栈。
+const CJK_MEASURE_FALLBACKS: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+    "Droid Sans Fallback",
+];
+
+/// 内存缓存 key 版本：换了渲染库、字体栈或 SVG 后处理就跟着升，避免同进程里旧产物被复用。
+const CACHE_FORMAT_VERSION: &str = "v5";
+
+/// 粗体没有独立字重时，在 regular advance 上乘的系数。跟评估原型一致。
+const SYNTHETIC_BOLD_SCALE: f64 = 1.06;
 
 /// parser 阶段存进 `MarkdownNode` 的原始数据。parser 不能碰 Window/App，真正的
-/// 渲染（调 rusty-mermaid、查缓存）都留到 renderer 阶段做。
+/// 渲染（调 merman、查缓存）都留到 renderer 阶段做。
 struct MermaidBlockData {
     source: SharedString,
 }
@@ -129,7 +150,7 @@ thread_local! {
 }
 
 /// `sha256(缓存格式版本 + 源码 + 主题模式)`。主题模式必须编进去，否则切换亮暗模式
-/// 不会触发重渲；格式版本必须编进去，否则升级渲染逻辑后旧缓存文件会一直被复用。
+/// 不会触发重渲；格式版本必须编进去，否则升级渲染逻辑后旧缓存会一直被复用。
 fn source_digest(source: &str, is_dark: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CACHE_FORMAT_VERSION.as_bytes());
@@ -158,30 +179,535 @@ fn parse_viewbox_size(svg: &str) -> Option<(f32, f32)> {
     (w > 0.0 && h > 0.0).then_some((w, h))
 }
 
-fn inject_cjk_font_style(svg: &str) -> String {
-    let replaced = svg.replace(MERMAID_LEGACY_FONT_FAMILY, MERMAID_FONT_FAMILY);
-    const CJK_STYLE: &str = r#"<style>text, tspan { font-family: Hiragino Sans GB, Heiti SC, PingFang SC, Helvetica Neue, Arial, sans-serif !important; }</style>"#;
-    if let Some(pos) = replaced.find("<svg")
-        && let Some(tag_end) = replaced[pos..].find('>')
-    {
-        let insert_at = pos + tag_end + 1;
-        let mut out = String::with_capacity(replaced.len() + CJK_STYLE.len());
-        out.push_str(&replaced[..insert_at]);
-        out.push_str(CJK_STYLE);
-        out.push_str(&replaced[insert_at..]);
-        return out;
+/// mindmap 按 `17 - 3*i` 给深层 section 写 `stroke-width`，到 `edge-depth-5` 就已经
+/// 是 `-1`。浏览器会丢掉非法声明，回落到 `.edge{stroke-width:3}`；resvg / usvg
+/// 见到负数会把这条线整段丢掉。这里把负的声明删掉，正的和 0 保持不动。
+///
+/// 只改标签里的属性和 `<style>` 里的 CSS。文字节点是图里写的字，原样保留：标签里
+/// 写着 `stroke-width:-1` 也照样显示。
+fn strip_negative_stroke_width(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let from_tag = &rest[open..];
+        let Some(close) = from_tag.find('>') else {
+            out.push_str(from_tag);
+            return out;
+        };
+        let tag = &from_tag[..=close];
+        out.push_str(&strip_negative_stroke_width_in(tag));
+        rest = &from_tag[close + 1..];
+        // `<style>` 的正文是 CSS（可能包在 CDATA 里），一直处理到 `</style>`。
+        if tag.starts_with("<style") && !tag.ends_with("/>") {
+            let end = rest.find("</style>").unwrap_or(rest.len());
+            out.push_str(&strip_negative_stroke_width_in(&rest[..end]));
+            rest = &rest[end..];
+        }
     }
-    replaced
+    out.push_str(rest);
+    out
+}
+
+/// 在一段属性或 CSS 里删掉负的 `stroke-width` 声明。
+fn strip_negative_stroke_width_in(svg: &str) -> String {
+    const KEY: &str = "stroke-width";
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    while let Some(idx) = rest.find(KEY) {
+        out.push_str(&rest[..idx]);
+        let after_key = &rest[idx + KEY.len()..];
+        if let Some(kept_from) = negative_stroke_width_tail(after_key) {
+            rest = kept_from;
+            continue;
+        }
+        out.push_str(KEY);
+        rest = after_key;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `after_key` 是 `stroke-width` 后面的文本。值是负数时返回声明结束后的剩余切片，
+/// 调用方把整个声明丢掉；不是负数则返回 `None`，原样保留。
+fn negative_stroke_width_tail(after_key: &str) -> Option<&str> {
+    let trimmed = after_key.trim_start_matches([' ', '\t', '\n', '\r']);
+    let sep = *trimmed.as_bytes().first()?;
+    if sep != b':' && sep != b'=' {
+        return None;
+    }
+    let after_sep = &trimmed[1..];
+    let (value, quoted) = if sep == b'=' {
+        match after_sep.as_bytes().first().copied() {
+            Some(q @ (b'"' | b'\'')) => (&after_sep[1..], Some(q)),
+            _ => (after_sep, None),
+        }
+    } else {
+        (after_sep, None)
+    };
+    let value = value.trim_start_matches([' ', '\t', '\n', '\r']);
+    let number_len = negative_number_len(value)?;
+    let mut end = number_len;
+    if sep == b':' && value[end..].starts_with("px") {
+        end += 2;
+    }
+    if let Some(q) = quoted {
+        let tail = value[end..].trim_start_matches([' ', '\t', '\n', '\r']);
+        let ws = value[end..].len() - tail.len();
+        if tail.as_bytes().first().copied() != Some(q) {
+            return None;
+        }
+        end += ws + 1;
+    }
+    let mut tail_from = end;
+    let bytes = value.as_bytes();
+    while tail_from < bytes.len() && matches!(bytes[tail_from], b' ' | b'\t' | b'\n' | b'\r') {
+        tail_from += 1;
+    }
+    if sep == b':' && tail_from < bytes.len() && bytes[tail_from] == b';' {
+        tail_from += 1;
+    }
+    Some(&value[tail_from..])
+}
+
+fn negative_number_len(value: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    if bytes.first().copied() != Some(b'-') {
+        return None;
+    }
+    let mut i = 1;
+    let mut digits = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+        digits += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+            digits += 1;
+        }
+    }
+    (digits > 0).then_some(i)
+}
+
+/// 系统字体库里的一个面。字节是 fontdb 共享出来的文件映射：同一个文件（TTC 里的
+/// regular / bold）共用一份，不拷进堆里。
+struct LoadedFace {
+    family: String,
+    data: Arc<dyn AsRef<[u8]> + Send + Sync>,
+    index: u32,
+    bold: bool,
+}
+
+impl LoadedFace {
+    fn bytes(&self) -> &[u8] {
+        AsRef::<[u8]>::as_ref(&*self.data)
+    }
+}
+
+fn measure_faces() -> &'static [LoadedFace] {
+    static FACES: OnceLock<Vec<LoadedFace>> = OnceLock::new();
+    FACES.get_or_init(load_measure_faces)
+}
+
+/// 和 `measure_faces` 一一对应的解析结果，解析不了的是 `None`。量每个标签都要用，
+/// 只解析一次。
+fn parsed_faces() -> &'static [Option<rustybuzz::Face<'static>>] {
+    static PARSED: OnceLock<Vec<Option<rustybuzz::Face<'static>>>> = OnceLock::new();
+    PARSED.get_or_init(|| {
+        measure_faces()
+            .iter()
+            .map(|face| rustybuzz::Face::from_slice(face.bytes(), face.index))
+            .collect()
+    })
+}
+
+/// GPUI 的 `SvgRenderer` 用 `usvg::fontdb::Database::load_system_fonts()` 扫系统字体
+/// （另外还会塞 IBM Plex / Lilex，只用来兜泛型家族）。gpui 不把这份 fontdb 公开出来，
+/// 所以这里直接依赖同一个 usvg 0.46，按 SVG 里那条字体栈查询，再退到 sans-serif、
+/// 任意一款，以及 Linux 上常见的 CJK 字体。
+fn load_measure_faces() -> Vec<LoadedFace> {
+    let mut db = usvg::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut faces = Vec::new();
+    let mut seen = HashSet::new();
+
+    for name in font_family_names(MERMAID_FONT_FAMILY) {
+        if is_generic_family(&name) {
+            continue;
+        }
+        push_named_family(&mut db, &name, &mut faces, &mut seen);
+    }
+    let regular = query_sans(&db, 400);
+    let bold = query_sans(&db, 700);
+    push_queried_family(&mut db, "sans-serif", regular, bold, &mut faces, &mut seen);
+    if !faces_cover(&faces, '中') {
+        for name in CJK_MEASURE_FALLBACKS {
+            push_named_family(&mut db, name, &mut faces, &mut seen);
+            if faces_cover(&faces, '中') {
+                break;
+            }
+        }
+    }
+    if faces.is_empty() {
+        let fallback = db
+            .faces()
+            .next()
+            .map(|info| (info.id, info.weight.0 >= 600));
+        if let Some((id, bold)) = fallback {
+            push_face(&mut db, id, "fallback", bold, &mut faces, &mut seen);
+        }
+    }
+    faces
+}
+
+fn push_named_family(
+    db: &mut usvg::fontdb::Database,
+    family: &str,
+    faces: &mut Vec<LoadedFace>,
+    seen: &mut HashSet<usvg::fontdb::ID>,
+) {
+    let regular = query_named(db, family, 400);
+    let bold = query_named(db, family, 700);
+    push_queried_family(db, family, regular, bold, faces, seen);
+}
+
+fn push_queried_family(
+    db: &mut usvg::fontdb::Database,
+    family: &str,
+    regular: Option<usvg::fontdb::ID>,
+    bold: Option<usvg::fontdb::ID>,
+    faces: &mut Vec<LoadedFace>,
+    seen: &mut HashSet<usvg::fontdb::ID>,
+) {
+    let weight = |db: &usvg::fontdb::Database, id| db.face(id).map_or(400, |face| face.weight.0);
+    if let Some(id) = regular {
+        let is_bold = weight(&*db, id) >= 600;
+        push_face(db, id, family, is_bold, faces, seen);
+    }
+    if let Some(id) = bold
+        && weight(&*db, id) >= 600
+    {
+        push_face(db, id, family, true, faces, seen);
+    }
+}
+
+/// 按 fontdb 的面 id 去重。不能按数据指针：`load_system_fonts` 的面是按需映射的，
+/// 用完就解除，下一个文件很可能映射到同一个地址。
+fn push_face(
+    db: &mut usvg::fontdb::Database,
+    id: usvg::fontdb::ID,
+    family: &str,
+    bold: bool,
+    faces: &mut Vec<LoadedFace>,
+    seen: &mut HashSet<usvg::fontdb::ID>,
+) {
+    if !seen.insert(id) {
+        return;
+    }
+    // SAFETY: 映射的是系统字体文件，进程里一直留着。fontdb 的说明是别的进程原地改写
+    // 这个文件时，映射里可能看到改动甚至崩溃；系统字体只会整个替换（新 inode），旧映射
+    // 不受影响。GPUI 栅格化 SVG 时也是这样映射同一批文件。
+    let Some((data, index)) = (unsafe { db.make_shared_face_data(id) }) else {
+        return;
+    };
+    faces.push(LoadedFace {
+        family: family.to_string(),
+        data,
+        index,
+        bold,
+    });
+}
+
+fn query_named(db: &usvg::fontdb::Database, family: &str, weight: u16) -> Option<usvg::fontdb::ID> {
+    let name = usvg::fontdb::Family::Name(family);
+    db.query(&font_query(&[name], weight))
+}
+
+fn query_sans(db: &usvg::fontdb::Database, weight: u16) -> Option<usvg::fontdb::ID> {
+    db.query(&font_query(&[usvg::fontdb::Family::SansSerif], weight))
+}
+
+fn font_query<'a>(
+    families: &'a [usvg::fontdb::Family<'a>],
+    weight: u16,
+) -> usvg::fontdb::Query<'a> {
+    usvg::fontdb::Query {
+        families,
+        weight: usvg::fontdb::Weight(weight),
+        stretch: usvg::fontdb::Stretch::Normal,
+        style: usvg::fontdb::Style::Normal,
+    }
+}
+
+fn faces_cover(faces: &[LoadedFace], ch: char) -> bool {
+    faces.iter().any(|face| face_covers(face, ch))
+}
+
+fn face_covers(face: &LoadedFace, ch: char) -> bool {
+    rustybuzz::Face::from_slice(face.bytes(), face.index)
+        .and_then(|parsed| parsed.glyph_index(ch))
+        .is_some()
+}
+
+fn is_generic_family(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "sans-serif"
+            | "serif"
+            | "monospace"
+            | "cursive"
+            | "fantasy"
+            | "system-ui"
+            | "ui-sans-serif"
+            | "emoji"
+    )
+}
+
+/// 拆 CSS `font-family` 列表，去掉引号。引号里的逗号不当分隔符。
+fn font_family_names(stack: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in stack.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == ',' => {
+                push_family_name(&mut names, &mut current);
+            }
+            None => current.push(ch),
+        }
+    }
+    push_family_name(&mut names, &mut current);
+    names
+}
+
+fn push_family_name(names: &mut Vec<String>, current: &mut String) {
+    let name = current.trim();
+    if !name.is_empty() {
+        names.push(name.to_string());
+    }
+    current.clear();
+}
+
+fn text_measurement_policy() -> &'static TextMeasurementPolicy {
+    static POLICY: OnceLock<TextMeasurementPolicy> = OnceLock::new();
+    POLICY.get_or_init(|| {
+        let _ = measure_faces();
+        let measurer =
+            DeterministicTextMeasurer::default().with_width_callback(measure_label_width);
+        let profile =
+            MeasurementProfileId::new("smelt.system-fontdb").expect("测宽 profile 名字非空");
+        let identity =
+            TextMeasurementProfileIdentity::new(profile, "1").expect("测宽 profile 版本非空");
+        TextMeasurementPolicy::uniform(TextMeasurementProfile::new(identity, measurer))
+    })
+}
+
+/// merman 的宽度回调。U+00AD 必须原样交给 shaper，不能先删掉。
+/// 回调得返回有限、非负的 CSS 像素。
+fn measure_label_width(text: &str, style: &TextStyle) -> f64 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let font_size = if style.font_size.is_finite() && style.font_size > 0.0 {
+        style.font_size
+    } else {
+        return 0.0;
+    };
+    let faces = measure_faces();
+    if faces.is_empty() {
+        return heuristic_width(text, font_size, style_is_bold(style));
+    }
+    let parsed = parsed_faces();
+    let preferred = style
+        .font_family
+        .as_deref()
+        .map(font_family_names)
+        .filter(|names| !names.is_empty())
+        .unwrap_or_else(|| font_family_names(MERMAID_FONT_FAMILY));
+    let bold = style_is_bold(style);
+
+    let mut total = 0.0;
+    let mut run = String::new();
+    let mut run_face: Option<usize> = None;
+    let mut started = false;
+    for ch in text.chars() {
+        let idx = pick_face(parsed, faces, ch, &preferred, bold);
+        if started && run_face != idx {
+            total += run_width(parsed, faces, run_face, &run, font_size, bold);
+            run.clear();
+        }
+        started = true;
+        run_face = idx;
+        run.push(ch);
+    }
+    total += run_width(parsed, faces, run_face, &run, font_size, bold);
+    if total.is_finite() && total >= 0.0 {
+        total
+    } else {
+        0.0
+    }
+}
+
+fn pick_face(
+    parsed: &[Option<rustybuzz::Face<'_>>],
+    faces: &[LoadedFace],
+    ch: char,
+    preferred: &[String],
+    bold: bool,
+) -> Option<usize> {
+    let mut best: Option<(u16, usize)> = None;
+    for (index, face) in parsed.iter().enumerate() {
+        let Some(face) = face else {
+            continue;
+        };
+        if face.glyph_index(ch).is_none() {
+            continue;
+        }
+        let family_rank = preferred
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(&faces[index].family))
+            .map(|pos| pos as u16)
+            .unwrap_or(200);
+        let bold_penalty = u16::from(bold != faces[index].bold);
+        let rank = family_rank.saturating_mul(2).saturating_add(bold_penalty);
+        if best.is_none_or(|(prev, _)| rank < prev) {
+            best = Some((rank, index));
+        }
+    }
+    best.map(|(_, index)| index)
+}
+
+fn run_width(
+    parsed: &[Option<rustybuzz::Face<'_>>],
+    faces: &[LoadedFace],
+    index: Option<usize>,
+    text: &str,
+    font_size: f64,
+    bold: bool,
+) -> f64 {
+    let Some(index) = index else {
+        return heuristic_width(text, font_size, bold);
+    };
+    let Some(face) = parsed.get(index).and_then(Option::as_ref) else {
+        return heuristic_width(text, font_size, bold);
+    };
+    let width = shape_width(face, text, font_size);
+    if bold && !faces[index].bold {
+        width * SYNTHETIC_BOLD_SCALE
+    } else {
+        width
+    }
+}
+
+fn shape_width(face: &rustybuzz::Face<'_>, text: &str, font_size: f64) -> f64 {
+    let upem = f64::from(face.units_per_em());
+    if upem <= 0.0 {
+        return heuristic_width(text, font_size, false);
+    }
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    let glyphs = rustybuzz::shape(face, &[], buffer);
+    let advance: i64 = glyphs
+        .glyph_positions()
+        .iter()
+        .map(|pos| i64::from(pos.x_advance))
+        .sum();
+    let width = advance as f64 / upem * font_size;
+    if width.is_finite() && width >= 0.0 {
+        width
+    } else {
+        0.0
+    }
+}
+
+fn style_is_bold(style: &TextStyle) -> bool {
+    style.font_weight.as_deref().is_some_and(|weight| {
+        weight.eq_ignore_ascii_case("bold")
+            || weight.eq_ignore_ascii_case("bolder")
+            || weight.parse::<u32>().is_ok_and(|value| value >= 600)
+    })
+}
+
+/// 没有任何面能画出这个字符时的宽度。CJK 按 1em、ASCII 按 0.55em，略偏宽，
+/// 避免类图 `overflow:hidden` 把字裁掉。
+fn heuristic_width(text: &str, font_size: f64, bold: bool) -> f64 {
+    let em: f64 = text.chars().map(heuristic_em).sum();
+    let scale = if bold { SYNTHETIC_BOLD_SCALE } else { 1.0 };
+    em * font_size * scale
+}
+
+fn heuristic_em(ch: char) -> f64 {
+    if ch == '\u{00AD}' || ch.is_control() {
+        return 0.0;
+    }
+    match u32::from(ch) {
+        0x1100..=0x115F
+        | 0x2329..=0x232A
+        | 0x2E80..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE10..=0xFE19
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x20000..=0x3FFFD => 1.0,
+        0x20..=0x7E => 0.55,
+        _ => 0.7,
+    }
+}
+
+fn renderer(is_dark: bool) -> &'static Renderer {
+    fn build(is_dark: bool) -> Renderer {
+        let config = MermaidConfig::from_value(serde_json::json!({
+            "theme": if is_dark { "dark" } else { "default" },
+            "fontFamily": MERMAID_FONT_FAMILY,
+        }));
+        Renderer::new().with_engine(Engine::new().with_site_config(config))
+    }
+    static LIGHT: OnceLock<Renderer> = OnceLock::new();
+    static DARK: OnceLock<Renderer> = OnceLock::new();
+    if is_dark {
+        DARK.get_or_init(|| build(true))
+    } else {
+        LIGHT.get_or_init(|| build(false))
+    }
+}
+
+fn svg_request() -> SvgRequest {
+    SvgRequest {
+        pipeline: Some(SvgPipeline::resvg_safe()),
+        environment: SvgEnvironment::deterministic()
+            .with_text_measurement_policy(text_measurement_policy().clone()),
+        ..Default::default()
+    }
 }
 
 fn render_svg(source: &str, is_dark: bool) -> Result<String, String> {
-    let theme = if is_dark {
-        rusty_mermaid::Theme::dark()
-    } else {
-        rusty_mermaid::Theme::light()
-    };
-    let svg = rusty_mermaid::to_svg(source, &theme).map_err(|e| e.to_string())?;
-    Ok(inject_cjk_font_style(&svg))
+    match std::panic::catch_unwind(|| render_svg_inner(source, is_dark)) {
+        Ok(result) => result,
+        Err(_) => Err("渲染中断".into()),
+    }
+}
+
+fn render_svg_inner(source: &str, is_dark: bool) -> Result<String, String> {
+    let output = renderer(is_dark)
+        .render(RenderRequest::svg(
+            source,
+            OperationControl::new(),
+            svg_request(),
+        ))
+        .map_err(|err| err.to_string())?;
+    match output {
+        RenderOutput::Svg(Some(svg)) => Ok(strip_negative_stroke_width(svg.svg())),
+        RenderOutput::Svg(None) => Err("源码里没有 mermaid 图".into()),
+        _ => Err("渲染结果不是 SVG".into()),
+    }
 }
 
 fn render_or_load(source: &str, is_dark: bool) -> Result<MermaidImage, String> {
@@ -468,20 +994,18 @@ mod tests {
         assert!(img.width > 0.0 && img.height > 0.0);
         let svg = render_svg("flowchart TD\nA-->B", false).expect("应能渲出 SVG");
         assert!(svg.trim_start().starts_with("<svg"));
+        assert!(svg.contains("width=\"100%\""));
     }
 
-    /// 回归守卫：rusty-mermaid 内置字体栈在 GPUI 的 usvg 字体解析里一个都对不上
-    /// （实测验证过，见 `MERMAID_LEGACY_FONT_FAMILY`/`MERMAID_FONT_FAMILY` 上的
-    /// 注释），会导致文字整个画不出来（不分中英文，不只是缺中文字形）。这里锁死
-    /// 「渲染产物必须带上覆盖后的字体名」，防止以后有人顺手把 `render_or_load`
-    /// 里那行字符串替换删掉。
+    /// 字体栈来自站点配置，不再做 rusty-mermaid 那次字符串替换。GPUI 的 usvg
+    /// 要在 `font-family` 里看到能对上的字面名。
     #[test]
-    fn rendered_svg_overrides_font_family_to_a_resolvable_one() {
+    fn rendered_svg_uses_cjk_font_stack() {
         let img = render_or_load("flowchart TD\nA[开始]-->B[结束]", false).expect("应能渲染");
         let svg = render_svg("flowchart TD\nA[开始]-->B[结束]", false).unwrap();
         assert!(
             svg.contains("Hiragino Sans GB"),
-            "渲染产物应该用覆盖后的字体栈，而不是渲染库默认的那套解析不出来的西文字体名"
+            "渲染产物应该带上配置的 CJK 字体栈"
         );
         assert!(img.width > 0.0 && img.height > 0.0);
     }
@@ -492,12 +1016,13 @@ mod tests {
     }
 
     #[test]
-    fn theme_mode_changes_cache_key() {
+    fn theme_mode_changes_cache_key_and_svg() {
         let light = source_digest("graph TD\nA-->B", false);
         let dark = source_digest("graph TD\nA-->B", true);
         assert_ne!(light, dark);
-        render_or_load("graph TD\nA-->B", false).expect("亮色应能渲染");
-        render_or_load("graph TD\nA-->B", true).expect("暗色应能渲染");
+        let light_svg = render_svg("graph TD\nA-->B", false).expect("亮色应能渲染");
+        let dark_svg = render_svg("graph TD\nA-->B", true).expect("暗色应能渲染");
+        assert_ne!(light_svg, dark_svg);
     }
 
     #[test]
@@ -541,10 +1066,209 @@ mod tests {
     }
 
     #[test]
-    fn inject_cjk_font_style_inserts_css_rule() {
-        let raw = "<svg width=\"100\" height=\"100\"><g></g></svg>";
-        let injected = super::inject_cjk_font_style(raw);
-        assert!(injected.contains("<style>text, tspan { font-family:"));
-        assert!(injected.starts_with("<svg width=\"100\" height=\"100\"><style>"));
+    fn strip_negative_stroke_width_keeps_positive_rules() {
+        let raw = "<svg><style>#mm .edge-depth-5{stroke-width:-1;}#mm .edge{stroke-width:3;}</style><line stroke-width=\"-4\" stroke=\"red\"/></svg>";
+        let fixed = super::strip_negative_stroke_width(raw);
+        assert_eq!(
+            fixed,
+            "<svg><style>#mm .edge-depth-5{}#mm .edge{stroke-width:3;}</style><line stroke=\"red\"/></svg>"
+        );
+    }
+
+    /// 图里写的字原样显示，哪怕正好是一句负的 `stroke-width`。
+    #[test]
+    fn strip_negative_stroke_width_leaves_text_alone() {
+        let raw = "<svg><style><![CDATA[.a > .b{stroke-width:-2}]]></style><text x=\"1\" style=\"stroke-width:-3\">stroke-width:-1</text></svg>";
+        let fixed = super::strip_negative_stroke_width(raw);
+        assert_eq!(
+            fixed,
+            "<svg><style><![CDATA[.a > .b{}]]></style><text x=\"1\" style=\"\">stroke-width:-1</text></svg>"
+        );
+    }
+
+    #[test]
+    fn font_family_names_keep_quoted_spaces() {
+        let names = super::font_family_names(MERMAID_FONT_FAMILY);
+        assert_eq!(
+            names,
+            vec![
+                "Hiragino Sans GB",
+                "Heiti SC",
+                "PingFang SC",
+                "Helvetica Neue",
+                "Arial",
+                "sans-serif",
+            ]
+        );
+    }
+
+    /// 用 GPUI 同一份 usvg 0.46 解析 merman 的 `resvg_safe` 输出。样本覆盖
+    /// rusty-mermaid 已知会坏的几类：中文子图 id、带回边和 classDef 的流程图、
+    /// 中文复合状态、sequence 的 alt/loop/note、类图、带注释的 ER、mindmap、gantt。
+    #[test]
+    fn samples_render_svg_that_gpui_usvg_parses() {
+        let samples = [
+            (
+                "flowchart",
+                "flowchart TD\n\
+                 subgraph 规划\n\
+                 A[开始] -->|下一步| B[处理]\n\
+                 end\n\
+                 B --> C{判断}\n\
+                 C -->|是| A\n\
+                 C --> D@{ shape: diam, label: \"菱形\" }\n\
+                 classDef done fill:#dfd,stroke:#333\n\
+                 class A done\n",
+            ),
+            (
+                "state",
+                "stateDiagram-v2\n\
+                 [*] --> 空闲\n\
+                 state 工作中 {\n\
+                 [*] --> 编写\n\
+                 编写 --> 审查\n\
+                 }\n\
+                 空闲 --> 工作中\n\
+                 工作中 --> 空闲\n",
+            ),
+            (
+                "sequence",
+                "sequenceDiagram\n\
+                 participant 用户\n\
+                 participant 服务\n\
+                 用户->>服务: 请求\n\
+                 alt 成功\n\
+                 服务-->>用户: 结果\n\
+                 else 失败\n\
+                 服务-->>用户: 错误\n\
+                 end\n\
+                 loop 重试\n\
+                 用户->>服务: 再试\n\
+                 end\n\
+                 Note over 用户,服务: 备注\n",
+            ),
+            (
+                "class",
+                "classDiagram\n\
+                 class 订单 {\n\
+                 +String 编号\n\
+                 +确认()\n\
+                 }\n\
+                 class 用户 {\n\
+                 +String 姓名\n\
+                 }\n\
+                 用户 \"1\" --> \"*\" 订单 : 下单\n",
+            ),
+            (
+                "er",
+                "erDiagram\n\
+                 USER ||--o{ ORDER : places\n\
+                 USER {\n\
+                 string email\n\
+                 string name\n\
+                 }\n\
+                 %% SHOULD_NOT_MERGE\n\
+                 ORDER {\n\
+                 int total\n\
+                 }\n",
+            ),
+            (
+                "mindmap",
+                "mindmap\n  root((主题))\n    一级\n      二级\n        三级\n          四级\n            五级\n              六级\n                七级\n",
+            ),
+            (
+                "gantt",
+                "gantt\n\
+                 title 排期\n\
+                 dateFormat YYYY-MM-DD\n\
+                 section 设计\n\
+                 方案 :a1, 2024-01-01, 7d\n\
+                 section 开发\n\
+                 实现 :a2, after a1, 10d\n\
+                 验收 :a3, after a2, 3d\n",
+            ),
+        ];
+
+        for (name, source) in samples {
+            for dark in [false, true] {
+                let svg = render_svg(source, dark)
+                    .unwrap_or_else(|err| panic!("{name} dark={dark} 渲染失败: {err}"));
+                assert!(svg.trim_start().starts_with("<svg"), "{name} 应该是 svg 根");
+                assert!(svg.contains("width=\"100%\""), "{name} 根宽度应为 100%");
+                let (width, height) =
+                    parse_viewbox_size(&svg).unwrap_or_else(|| panic!("{name} 应有正的 viewBox"));
+                assert!(width > 0.0 && height > 0.0, "{name} viewBox");
+                assert!(
+                    !svg.contains("stroke-width:-"),
+                    "{name} 不应再留下负的 stroke-width"
+                );
+                assert_gpui_usvg_parses(name, &svg);
+            }
+        }
+
+        let flow = render_svg(samples[0].1, false).unwrap();
+        assert!(flow.contains("规划"), "中文子图 id 应该进 SVG");
+        assert!(flow.contains("下一步"));
+        assert!(flow.contains("菱形"));
+        assert!(flow.contains("Hiragino Sans GB"));
+
+        let state = render_svg(samples[1].1, false).unwrap();
+        assert!(state.contains("空闲"));
+        assert!(state.contains("工作中"));
+
+        let sequence = render_svg(samples[2].1, false).unwrap();
+        assert!(sequence.contains("备注"));
+        assert!(sequence.contains("重试"));
+
+        let class = render_svg(samples[3].1, false).unwrap();
+        assert!(class.contains("订单"));
+        assert!(class.contains("确认"));
+
+        let er = render_svg(samples[4].1, false).unwrap();
+        assert!(er.contains("email"));
+        assert!(
+            !er.contains("SHOULD_NOT_MERGE"),
+            "ER 注释不应进属性名或标签"
+        );
+
+        let mindmap = render_svg(samples[5].1, false).unwrap();
+        assert!(mindmap.contains("主题"));
+
+        let gantt = render_svg(samples[6].1, false).unwrap();
+        assert!(gantt.contains("排期") || gantt.contains("方案"));
+    }
+
+    /// 不编 `layout-elk`：没写布局的图、写了 `layout: elk` 的图都按 dagre 排，和显式
+    /// `layout: dagre` 一样。有人打开这个 feature，这里会先挂，提醒去看许可证和默认布局。
+    #[test]
+    fn flowcharts_lay_out_with_dagre_even_when_elk_is_requested() {
+        let body = "flowchart TD\nA[开始] --> B[处理]\nB --> C[结束]\nC --> A\n";
+        let elk_src = format!("---\nconfig:\n  layout: elk\n---\n{body}");
+        let dagre_src = format!("---\nconfig:\n  layout: dagre\n---\n{body}");
+
+        let plain = render_svg(body, false).expect("默认布局应能渲染");
+        let elk = render_svg(&elk_src, false).expect("layout: elk 应退回 dagre 渲染");
+        let dagre = render_svg(&dagre_src, false).expect("layout: dagre 应能渲染");
+        assert_gpui_usvg_parses("layout-elk", &elk);
+
+        let dagre_box = parse_viewbox_size(&dagre).expect("dagre 应有 viewBox");
+        assert_eq!(
+            parse_viewbox_size(&plain),
+            Some(dagre_box),
+            "默认应是 dagre"
+        );
+        assert_eq!(
+            parse_viewbox_size(&elk),
+            Some(dagre_box),
+            "elk 请求应退回 dagre"
+        );
+    }
+
+    /// gpui-pre 0.3.9 栅格化 SVG 用的就是 usvg 0.46。这里用同一份 crate 解析，
+    /// 确认 `resvg_safe` 的输出不会被这版 usvg 拒掉。
+    fn assert_gpui_usvg_parses(name: &str, svg: &str) {
+        let options = usvg::Options::default();
+        usvg::Tree::from_str(svg, &options)
+            .unwrap_or_else(|err| panic!("{name} 用 usvg 0.46 解析失败: {err}"));
     }
 }
