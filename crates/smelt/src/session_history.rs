@@ -350,6 +350,8 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                 let row_count = visible_indices.len();
                 let row_text = row_text.clone();
                 let row_keys = row_keys.clone();
+                // 列表回调是 `move` 闭包；详情页的文件链接还要用 `cwd`，这里给列表一份自己的。
+                let cwd = cwd.clone();
                 uniform_list("session-list", row_count, move |range, _window, _app| {
                     range
                         .map(|row_ix| {
