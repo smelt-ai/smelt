@@ -362,10 +362,19 @@ async fn run_connection(
             return Ok(());
         }
         let spawn_started = std::time::Instant::now();
-        let spawned = spawn_process(launch, inline_env, process_args, Some(background.socket_path()))?;
+        let spawned = spawn_process(
+            launch,
+            inline_env,
+            process_args,
+            Some(background.socket_path()),
+        )?;
         crate::app_log::info(
             "pi-rpc",
-            &format!("会话 {} 进程已拉起，用时 {:?}", launch.sid, spawn_started.elapsed()),
+            &format!(
+                "会话 {} 进程已拉起，用时 {:?}",
+                launch.sid,
+                spawn_started.elapsed()
+            ),
         );
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
@@ -668,11 +677,9 @@ struct HandshakeTrace {
     published_model: Option<(String, String, String)>,
 }
 
-/// 转录只认 Pi 的会话文件，不认 `get_entries`。
-///
-/// 启动前读到的是种子，和进程拉起重叠。握手结束、`Ready` 已经发出之后，按
-/// `get_state` 给出的 session id 再读一次（分叉则是切点落盘后的新文件）。
-/// 指纹不同时后一次读取覆盖种子。两次都走 `session_history::read_pi_session_branch`。
+/// 模型名在握手之前用启动前读到的会话文件发布。转录在 `Ready` 之前重放：
+/// 先按 cwd 目录和会话 id 读文件；文件不存在或解析失败时再向 Pi 要 `get_entries`。
+/// 两次都失败则握手失败，不把空转录当成成功。
 #[allow(clippy::too_many_arguments)]
 async fn initialize_session<R, W>(
     lines: &mut R,
@@ -690,10 +697,6 @@ where
     W: AsyncWrite + Unpin,
 {
     let resumed = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
-    let sessions_root = pi_sessions_root(launch);
-    let seed = seed.or_else(|| resume_source_id(launch).and_then(|id| {
-        crate::session_history::read_pi_session_branch(&sessions_root, &id)
-    }));
     if let Some(model) = optimistic_pi_model(launch, seed.as_ref(), resumed) {
         note_model(state, event_tx, launch, trace, model, "启动前");
     }
@@ -708,10 +711,7 @@ where
         state,
         launch,
         vec![
-            (
-                "smelt-init-state",
-                serde_json::json!({"type": "get_state"}),
-            ),
+            ("smelt-init-state", serde_json::json!({"type": "get_state"})),
             (
                 "smelt-init-models",
                 serde_json::json!({"type": "get_available_models"}),
@@ -735,11 +735,15 @@ where
             round_started.elapsed()
         ),
     );
-    apply_state_response(state, response_data(responses.get("smelt-init-state").unwrap())?)?;
+    apply_state_response(
+        state,
+        response_data(responses.get("smelt-init-state").unwrap())?,
+    )?;
     if let Some(model) = state.model.clone() {
         note_model(state, event_tx, launch, trace, model, "get_state");
     }
-    state.models = parse_available_models(response_data(responses.get("smelt-init-models").unwrap())?);
+    state.models =
+        parse_available_models(response_data(responses.get("smelt-init-models").unwrap())?);
     let model_before_set = state
         .model
         .as_ref()
@@ -783,14 +787,14 @@ where
             .as_ref()
             .is_none_or(|model| model.provider == "unknown" || model.id == "unknown")
     {
-        let default_target = force_agent_model.or_else(|| settings_default_model(launch)).or_else(
-            || {
+        let default_target = force_agent_model
+            .or_else(|| settings_default_model(launch))
+            .or_else(|| {
                 state
                     .models
                     .first()
                     .map(|model| (model.provider.clone(), model.id.clone()))
-            },
-        );
+            });
         if let Some((provider, model_id)) = default_target {
             let set_res = rpc_call(
                 lines,
@@ -868,8 +872,9 @@ where
                 .collect()
         })
         .unwrap_or_default();
-    state.available_commands =
-        parse_pi_commands(response_data(responses.get("smelt-init-commands").unwrap())?);
+    state.available_commands = parse_pi_commands(response_data(
+        responses.get("smelt-init-commands").unwrap(),
+    )?);
 
     publish_configuration(state, event_tx);
     let _ = event_tx.try_send(ConversationEvent::SessionControls {
@@ -882,6 +887,36 @@ where
     )));
     if let Some(title) = state.session_name.clone() {
         let _ = event_tx.try_send(ConversationEvent::SessionTitle(Some(title)));
+    }
+    if resumed {
+        let session_id = if state.session_id.is_empty() {
+            resume_source_id(launch).unwrap_or_default()
+        } else {
+            state.session_id.clone()
+        };
+        let messages = resume_transcript(
+            lines,
+            writer,
+            outbound_tx,
+            outbound_rx,
+            event_tx,
+            state,
+            launch,
+            &session_id,
+        )
+        .await?;
+        if !messages.is_empty() {
+            crate::app_log::info(
+                "pi-rpc",
+                &format!(
+                    "会话 {} 开始重放 {} 条当前分支历史消息",
+                    launch.sid,
+                    messages.len()
+                ),
+            );
+            let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
+            replay_history(&messages, event_tx, state);
+        }
     }
     let _ = event_tx.try_send(ConversationEvent::Ready {
         session_id: SessionId::new(state.session_id.clone()),
@@ -900,77 +935,73 @@ where
             trace.started.elapsed()
         ),
     );
-    // Ready 先单独进快照。drain 把通道取空之后再灌转录，输入栏不必等整段历史排版。
-    yield_until_events_drained(event_tx).await;
+    Ok(())
+}
 
-    if resumed {
-        let reconcile_id = if state.session_id.is_empty() {
-            resume_source_id(launch).unwrap_or_default()
-        } else {
-            state.session_id.clone()
-        };
-        let reread_started = std::time::Instant::now();
-        let reread = crate::session_history::read_pi_session_branch(&sessions_root, &reconcile_id);
-        let (chosen, source) = match (seed, reread) {
-            (Some(seed), Some(live)) if seed.fingerprint == live.fingerprint => (Some(seed), "种子"),
-            (_, Some(live)) => (Some(live), "握手后的会话文件"),
-            (Some(seed), None) => (Some(seed), "种子（握手后文件不可读）"),
-            (None, None) => (None, "无"),
-        };
-        if let Some(branch) = chosen.as_ref() {
+#[allow(clippy::too_many_arguments)]
+async fn resume_transcript<R, W>(
+    lines: &mut R,
+    writer: &mut W,
+    outbound_tx: &smol::channel::Sender<serde_json::Value>,
+    outbound_rx: &smol::channel::Receiver<serde_json::Value>,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+    launch: &ConversationLaunch,
+    session_id: &str,
+) -> Result<Vec<serde_json::Value>, String>
+where
+    R: Stream<Item = std::io::Result<String>> + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    match read_launch_session(launch, session_id) {
+        Ok(branch) => Ok(branch.entries.iter().filter_map(entry_message).collect()),
+        Err(error) => {
             crate::app_log::info(
                 "pi-rpc",
                 &format!(
-                    "会话 {} 转录采用{source}：{} 字节，读 {:?}，解析 {:?}，活动分支 {:?}，重读墙钟 {:?}，{} 条 entry",
-                    launch.sid,
-                    branch.bytes,
-                    branch.read,
-                    branch.parse,
-                    branch.extract,
-                    reread_started.elapsed(),
-                    branch.entries.len()
+                    "会话 {} 读会话文件失败（{error}），改向 Pi 请求 get_entries",
+                    launch.sid
                 ),
             );
-        }
-        let mut messages = chosen
-            .as_ref()
-            .map(|branch| {
-                branch
-                    .entries
-                    .iter()
-                    .filter_map(entry_message)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if launch.fork_session_id.is_some()
-            && source != "握手后的会话文件"
-            && let Some(cut) = launch.fork_cut.as_ref()
-        {
-            messages = cut_messages_before(messages, cut);
-        }
-        if !messages.is_empty() {
-            let replay_started = std::time::Instant::now();
-            crate::app_log::info(
-                "pi-rpc",
-                &format!(
-                    "会话 {} 开始重放 {} 条当前分支历史消息",
-                    launch.sid,
-                    messages.len()
-                ),
-            );
-            let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-            replay_history(&messages, event_tx, state);
-            crate::app_log::info(
-                "pi-rpc",
-                &format!(
-                    "会话 {} 历史重放事件发完，用时 {:?}",
-                    launch.sid,
-                    replay_started.elapsed()
-                ),
-            );
+            let response = rpc_call(
+                lines,
+                writer,
+                outbound_tx,
+                outbound_rx,
+                event_tx,
+                state,
+                launch,
+                "smelt-init-entries",
+                serde_json::json!({"type": "get_entries"}),
+            )
+            .await?;
+            messages_from_get_entries(response_data(&response)?)
         }
     }
-    Ok(())
+}
+
+fn read_launch_session(
+    launch: &ConversationLaunch,
+    session_id: &str,
+) -> Result<crate::session_history::PiSessionBranch, String> {
+    let agent = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
+        .map(String::as_str);
+    let session = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_SESSION_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_SESSION_DIR"))
+        .map(String::as_str);
+    crate::session_history::read_pi_session_branch(
+        agent,
+        session,
+        launch.cwd.as_deref(),
+        session_id,
+    )
 }
 
 fn resume_source_id(launch: &ConversationLaunch) -> Option<String> {
@@ -980,45 +1011,6 @@ fn resume_source_id(launch: &ConversationLaunch) -> Option<String> {
         .or(launch.resume_session_id.as_ref())
         .map(|id| id.to_string())
         .filter(|id| !id.is_empty())
-}
-
-fn pi_sessions_root(launch: &ConversationLaunch) -> std::path::PathBuf {
-    let agent_dir = launch
-        .launch
-        .env
-        .get("PI_CODING_AGENT_DIR")
-        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(crate::pi_model_settings::pi_agent_dir);
-    if let Some(dir) = launch
-        .launch
-        .env
-        .get("PI_CODING_AGENT_SESSION_DIR")
-        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_SESSION_DIR"))
-    {
-        let path = std::path::PathBuf::from(crate::workspace_override::expand_tilde(dir));
-        return if path.is_absolute() {
-            path
-        } else {
-            agent_dir.join(path)
-        };
-    }
-    let settings_path = agent_dir.join("settings.json");
-    if let Ok(raw) = std::fs::read_to_string(&settings_path)
-        && let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(dir) = settings
-            .get("sessionDir")
-            .and_then(serde_json::Value::as_str)
-            .filter(|dir| !dir.trim().is_empty())
-    {
-        let path = std::path::PathBuf::from(crate::workspace_override::expand_tilde(dir));
-        return if path.is_absolute() {
-            path
-        } else {
-            agent_dir.join(path)
-        };
-    }
-    agent_dir.join("sessions")
 }
 
 fn optimistic_pi_model(
@@ -1034,7 +1026,9 @@ fn optimistic_pi_model(
     }
     agent_model_from_launch(launch)
         .map(|(provider, id)| named_pi_model(provider, id))
-        .or_else(|| settings_default_model(launch).map(|(provider, id)| named_pi_model(provider, id)))
+        .or_else(|| {
+            settings_default_model(launch).map(|(provider, id)| named_pi_model(provider, id))
+        })
 }
 
 fn named_pi_model(provider: String, id: String) -> PiModel {
@@ -1078,11 +1072,7 @@ fn note_model(
     model: PiModel,
     reason: &str,
 ) {
-    let next = (
-        model.provider.clone(),
-        model.id.clone(),
-        model.name.clone(),
-    );
+    let next = (model.provider.clone(), model.id.clone(), model.name.clone());
     state.model = Some(model);
     if trace.published_model.as_ref() == Some(&next) {
         return;
@@ -1102,41 +1092,36 @@ fn note_model(
     trace.published_model = Some(next);
 }
 
-fn cut_messages_before(messages: Vec<serde_json::Value>, cut: &AcpForkCut) -> Vec<serde_json::Value> {
-    let mut seen = 0usize;
-    let mut kept = Vec::new();
-    for message in messages {
-        if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
-            let text = content_text(message.get("content"));
-            if text == cut.text {
-                if seen == cut.occurrence {
-                    break;
-                }
-                seen += 1;
-            }
-        }
-        kept.push(message);
-    }
-    kept
-}
-
-async fn yield_until_events_drained(event_tx: &smol::channel::Sender<ConversationEvent>) {
-    let deadline = std::time::Instant::now() + Duration::from_millis(20);
-    while !event_tx.is_empty() && std::time::Instant::now() < deadline {
-        smol::Timer::after(Duration::from_millis(1)).await;
-    }
-}
-
 fn start_session_preload(
     launch: &ConversationLaunch,
 ) -> Option<std::sync::mpsc::Receiver<Option<crate::session_history::PiSessionBranch>>> {
     let id = resume_source_id(launch)?;
-    let root = pi_sessions_root(launch);
+    let agent = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
+        .cloned();
+    let session = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_SESSION_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_SESSION_DIR"))
+        .cloned();
+    let cwd = launch.cwd.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("smelt-pi-session-file".into())
         .spawn(move || {
-            let _ = tx.send(crate::session_history::read_pi_session_branch(&root, &id));
+            let _ = tx.send(
+                crate::session_history::read_pi_session_branch(
+                    agent.as_deref(),
+                    session.as_deref(),
+                    cwd.as_deref(),
+                    &id,
+                )
+                .ok(),
+            );
         })
         .ok()?;
     Some(rx)
@@ -2668,8 +2653,8 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     }
     // 换到了新分叉，旧会话的队列跟着作废。
     state.queue.reset();
-    let restore = matches!(pending.then, crate::acp_conn::AfterRewind::RestoreComposer)
-        .then(|| {
+    let restore =
+        matches!(pending.then, crate::acp_conn::AfterRewind::RestoreComposer).then(|| {
             data.get("text")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(&pending.text)
@@ -3074,9 +3059,8 @@ fn handle_event(
                     runs,
                 });
             }
-            let failure = is_error.then(|| {
-                content_text(event.get("result").and_then(|value| value.get("content")))
-            });
+            let failure = is_error
+                .then(|| content_text(event.get("result").and_then(|value| value.get("content"))));
             emit_peer_send(
                 event_tx,
                 id,
@@ -3632,11 +3616,9 @@ fn text_looks_like_diff(text: &str) -> bool {
             .any(|line| line.starts_with("+++ ") || line.starts_with("--- "))
 }
 
-/// 从 Pi 的 append-only entry tree 中严格还原当前活动分支，再提取 UI transcript。
-/// `get_messages` 是 compaction-aware 的模型上下文，不能承担历史恢复；compaction、
-/// model change 等 entry 只参与 parent 链校验，不替代或裁掉它们之前的原始消息。
-#[cfg(test)]
-fn active_branch_messages(data: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+/// 从 Pi `get_entries` 的 `leafId` 沿 parent 链取出当前分支上的消息。
+/// 文件恢复用的是「文件最后一条是叶子」；这里的叶子以响应为准，两者不是同一个走法。
+fn messages_from_get_entries(data: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
     let entries = data
         .get("entries")
         .and_then(serde_json::Value::as_array)
@@ -3703,10 +3685,11 @@ fn entry_message(entry: &serde_json::Value) -> Option<serde_json::Value> {
 /// 同一套规则归约。子智能体的子会话就这样给界面看。
 pub fn transcript_entries_from_session_file(text: &str) -> Vec<AcpEntry> {
     let (version, entries) = crate::session_history::pi_session_entries(text);
-    let messages: Vec<serde_json::Value> = crate::session_history::pi_active_branch(version, &entries)
-        .into_iter()
-        .filter_map(entry_message)
-        .collect();
+    let messages: Vec<serde_json::Value> =
+        crate::session_history::pi_active_branch(version, &entries)
+            .into_iter()
+            .filter_map(entry_message)
+            .collect();
     let (event_tx, event_rx) = smol::channel::unbounded();
     let mut state = PiState::new();
     // 和恢复会话时同一个顺序：开始、整段回放、结束。
@@ -5166,111 +5149,6 @@ mod tests {
         assert!(state.active_turn);
     }
 
-    #[test]
-    fn active_pi_branch_keeps_pre_compaction_messages_and_excludes_other_branches() {
-        let messages = active_branch_messages(&serde_json::json!({
-            "entries": [
-                {
-                    "type": "message",
-                    "id": "user-old",
-                    "parentId": null,
-                    "message": {"role": "user", "content": "压缩前问题"}
-                },
-                {
-                    "type": "message",
-                    "id": "assistant-old",
-                    "parentId": "user-old",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩前回答"}]}
-                },
-                {
-                    "type": "compaction",
-                    "id": "compaction",
-                    "parentId": "assistant-old",
-                    "summary": "模型上下文摘要",
-                    "firstKeptEntryId": "assistant-old"
-                },
-                {
-                    "type": "message",
-                    "id": "other-branch",
-                    "parentId": "assistant-old",
-                    "message": {"role": "user", "content": "已放弃旁支"}
-                },
-                {
-                    "type": "message",
-                    "id": "user-new",
-                    "parentId": "compaction",
-                    "message": {"role": "user", "content": "压缩后问题"}
-                },
-                {
-                    "type": "custom_message",
-                    "id": "extension-note",
-                    "parentId": "user-new",
-                    "customType": "note",
-                    "content": "可见扩展消息",
-                    "display": true
-                },
-                {
-                    "type": "message",
-                    "id": "assistant-new",
-                    "parentId": "extension-note",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩后回答"}]}
-                }
-            ],
-            "leafId": "assistant-new"
-        }))
-        .unwrap();
-
-        assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0]["content"], "压缩前问题");
-        assert_eq!(messages[1]["content"][0]["text"], "压缩前回答");
-        assert_eq!(messages[2]["content"], "压缩后问题");
-        assert_eq!(messages[3]["role"], "custom");
-        assert_eq!(messages[3]["content"], "可见扩展消息");
-        assert_eq!(messages[4]["content"][0]["text"], "压缩后回答");
-        assert!(
-            messages
-                .iter()
-                .all(|message| message["content"] != "已放弃旁支")
-        );
-        assert!(
-            messages
-                .iter()
-                .all(|message| message["content"] != "模型上下文摘要")
-        );
-    }
-
-    #[test]
-    fn active_pi_branch_rejects_a_broken_parent_chain() {
-        let error = active_branch_messages(&serde_json::json!({
-            "entries": [{
-                "type": "message",
-                "id": "leaf",
-                "parentId": "missing",
-                "message": {"role": "user", "content": "不能只恢复这一截"}
-            }],
-            "leafId": "leaf"
-        }))
-        .unwrap_err();
-
-        assert!(error.contains("missing"));
-    }
-
-    #[test]
-    fn active_pi_branch_can_be_empty_while_the_entry_tree_is_not() {
-        let messages = active_branch_messages(&serde_json::json!({
-            "entries": [{
-                "type": "message",
-                "id": "old",
-                "parentId": null,
-                "message": {"role": "user", "content": "已离开分支"}
-            }],
-            "leafId": null
-        }))
-        .unwrap();
-
-        assert!(messages.is_empty());
-    }
-
     /// 重放必须以显式的结束信号收尾。没有它时，`replaying_history` 只能等「下一条
     /// prompt」才复位，恢复后就闲置的会话会永远挂在「重放中」。
     #[test]
@@ -5305,24 +5183,31 @@ mod tests {
             serde_json::json!({"type": "message", "id": "a-old", "parentId": "u1",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "旧分支"}]}}),
             serde_json::json!({"type": "message", "id": "a1", "parentId": "u1",
-                "message": {"role": "assistant", "content": [
-                    {"type": "text", "text": "先看看"},
-                    {"type": "toolCall", "id": "t1", "name": "read", "arguments": {"path": "src/auth.rs"}}
-                ]}}),
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "先看看"},
+                {"type": "toolCall", "id": "t1", "name": "read", "arguments": {"path": "src/auth.rs"}}
+            ]}}),
             serde_json::json!({"type": "message", "id": "r1", "parentId": "a1",
                 "message": {"role": "toolResult", "toolCallId": "t1", "toolName": "read",
                     "content": [{"type": "text", "text": "fn login() {}"}]}}),
             serde_json::json!({"type": "message", "id": "a2", "parentId": "r1",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "登录在 src/auth.rs"}]}}),
         ];
-        let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let entries = transcript_entries_from_session_file(&text);
         let texts: Vec<String> = entries
             .iter()
             .filter_map(|entry| match entry {
                 AcpEntry::User(text) => Some(format!("user:{text}")),
-                AcpEntry::Assistant { text, thought: false } => Some(format!("assistant:{text}")),
+                AcpEntry::Assistant {
+                    text,
+                    thought: false,
+                } => Some(format!("assistant:{text}")),
                 AcpEntry::ToolCall { kind, .. } => Some(format!("tool:{kind:?}")),
                 _ => None,
             })
@@ -5386,7 +5271,10 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].id, "sa-a");
         assert_eq!(runs[0].title, "审计 a");
-        assert_eq!(runs[0].status, crate::acp_session::SubagentStatus::Completed);
+        assert_eq!(
+            runs[0].status,
+            crate::acp_session::SubagentStatus::Completed
+        );
         assert_eq!(runs[1].id, "sa-b");
         assert_eq!(runs[1].status, crate::acp_session::SubagentStatus::Failed);
     }
@@ -8719,14 +8607,12 @@ mod tests {
         let mut state = PiState::new();
         let mut launch = test_launch("smelt-pi-agent --offline");
         launch.resume_session_id = Some(SessionId::new("pi-session"));
-        let agent_dir = std::env::temp_dir().join(format!(
-            "smelt-pi-resume-file-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let sessions = agent_dir.join("sessions");
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-resume-file-{}", uuid::Uuid::new_v4()));
+        let sessions = agent_dir.join("sessions/--workspace--");
         std::fs::create_dir_all(&sessions).unwrap();
         std::fs::write(
-            sessions.join("pi-session.jsonl"),
+            sessions.join("20260101T000000_pi-session.jsonl"),
             concat!(
                 "{\"type\":\"session\",\"version\":2,\"id\":\"pi-session\",\"cwd\":\"/tmp\"}\n",
                 "{\"type\":\"model_change\",\"id\":\"model\",\"parentId\":null,\"provider\":\"test\",\"modelId\":\"seed-model\"}\n",
@@ -8736,10 +8622,19 @@ mod tests {
             ),
         )
         .unwrap();
-        launch.launch.env.insert(
-            "PI_CODING_AGENT_DIR".into(),
-            agent_dir.to_string_lossy().into_owned(),
-        );
+        let agent = agent_dir.to_string_lossy().into_owned();
+        launch
+            .launch
+            .env
+            .insert("PI_CODING_AGENT_DIR".into(), agent.clone());
+        // 生产路径在 spawn 之前把会话文件读进种子，只为了尽早发布模型名。
+        let seed = crate::session_history::read_pi_session_branch(
+            Some(&agent),
+            None,
+            Some("/workspace"),
+            "pi-session",
+        )
+        .expect("启动前能读到会话文件");
         let mut lines = fake_pi_lines(vec![
             serde_json::json!({
                 "id": "smelt-init-state", "type": "response", "command": "get_state",
@@ -8788,7 +8683,7 @@ mod tests {
             &event_tx,
             &mut state,
             &launch,
-            None,
+            Some(seed),
             &mut trace,
         ))
         .unwrap();
@@ -8812,7 +8707,9 @@ mod tests {
             ]
         );
         assert!(
-            requests.iter().all(|request| request["type"] != "get_entries"),
+            requests
+                .iter()
+                .all(|request| request["type"] != "get_entries"),
             "恢复转录读会话文件，启动握手不再拉整棵 entry 树"
         );
 
@@ -8836,7 +8733,12 @@ mod tests {
             .iter()
             .position(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
             .expect("重放开始");
-        assert!(ready_at < replay_at, "转录不能挡在 Ready 前面");
+        assert!(replay_at < ready_at, "转录必须在 Ready 之前重放完");
+        let finished_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+            .expect("重放结束");
+        assert!(finished_at < ready_at, "Ready 不能插在重放结束之前");
         let models: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -8865,12 +8767,12 @@ mod tests {
         launch.resume_session_id = Some(SessionId::new("pi-session"));
         let agent_dir =
             std::env::temp_dir().join(format!("smelt-pi-reread-{}", uuid::Uuid::new_v4()));
-        let sessions = agent_dir.join("sessions");
+        let sessions = agent_dir.join("sessions/--workspace--");
         std::fs::create_dir_all(&sessions).unwrap();
         std::fs::write(
-            sessions.join("pi-session.jsonl"),
+            sessions.join("20260101T000000_pi-session.jsonl"),
             concat!(
-                "{\"type\":\"session\",\"version\":2,\"id\":\"pi-session\",\"cwd\":\"/tmp\"}\n",
+                "{\"type\":\"session\",\"version\":2,\"id\":\"pi-session\",\"cwd\":\"/workspace\"}\n",
                 "{\"type\":\"message\",\"id\":\"only\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"文件里的新消息\"}}\n",
             ),
         )
@@ -8880,17 +8782,12 @@ mod tests {
             agent_dir.to_string_lossy().into_owned(),
         );
         let stale = crate::session_history::PiSessionBranch {
-            bytes: 1,
-            read: Duration::from_millis(0),
-            parse: Duration::from_millis(0),
-            extract: Duration::from_millis(0),
             entries: vec![serde_json::json!({
                 "type": "message",
                 "id": "stale",
                 "parentId": null,
                 "message": {"role": "user", "content": "过期种子"}
             })],
-            fingerprint: 1,
         };
         let mut lines = fake_pi_lines(vec![
             serde_json::json!({
@@ -8943,234 +8840,209 @@ mod tests {
             }
         }
         assert_eq!(texts, ["文件里的新消息"]);
-    }
-
-    /// 短会话和 500 条以上、工具输出很大的会话，把会话文件读和旧的整树
-    /// `get_entries` 载荷拆开计时。不拿耗时做断言，数字打到 stderr，给 PR 记录用。
-    #[test]
-    fn resume_transcript_stage_timings_cover_short_and_long_sessions() {
-        for (label, turns) in [("short", 8usize), ("long", 174usize)] {
-            measure_resume_stages(label, turns);
-        }
-    }
-
-    fn measure_resume_stages(label: &str, turns: usize) {
-        let tool_bytes = 8 * 1024;
-        let blob = "x".repeat(tool_bytes);
-        let mut active_parent: Option<String> = None;
-        let mut entries: Vec<serde_json::Value> = Vec::new();
-        let mut expected_users = Vec::new();
-
-        fn link(
-            entries: &mut Vec<serde_json::Value>,
-            parent: &mut Option<String>,
-            id: String,
-            mut body: serde_json::Value,
-        ) {
-            let obj = body.as_object_mut().expect("entry");
-            obj.insert("id".into(), serde_json::Value::String(id.clone()));
-            obj.insert(
-                "parentId".into(),
-                match parent {
-                    Some(parent) => serde_json::Value::String(parent.clone()),
-                    None => serde_json::Value::Null,
-                },
-            );
-            *parent = Some(id);
-            entries.push(body);
-        }
-
-        link(
-            &mut entries,
-            &mut active_parent,
-            "model".into(),
-            serde_json::json!({"type": "model_change", "provider": "test", "modelId": "seed"}),
-        );
-        // 死分支从模型节点叉出去，写在活动链中间。文件最后一行仍是活动叶子。
-        let mut dead_parent = active_parent.clone();
-        for index in 0..turns {
-            let user = format!("u{index}");
-            expected_users.push(user.clone());
-            link(
-                &mut entries,
-                &mut active_parent,
-                format!("u{index}"),
-                serde_json::json!({"type": "message", "message": {"role": "user", "content": user}}),
-            );
-            if index == 0 {
-                // 同样大的工具输出留在死分支上，整树载荷比活动分支大一截。
-                for dead in 0..turns {
-                    link(
-                        &mut entries,
-                        &mut dead_parent,
-                        format!("dead-{dead}"),
-                        serde_json::json!({
-                            "type": "message",
-                            "message": {"role": "user", "content": format!("dead-{dead}:{blob}")}
-                        }),
-                    );
-                }
-            }
-            let call_id = format!("call-{index}");
-            link(
-                &mut entries,
-                &mut active_parent,
-                format!("a{index}"),
-                serde_json::json!({
-                    "type": "message",
-                    "message": {
-                        "role": "assistant",
-                        "content": [{
-                            "type": "toolCall",
-                            "id": call_id,
-                            "name": "bash",
-                            "arguments": {"command": "echo hi"}
-                        }]
-                    }
-                }),
-            );
-            link(
-                &mut entries,
-                &mut active_parent,
-                format!("t{index}"),
-                serde_json::json!({
-                    "type": "message",
-                    "message": {
-                        "role": "toolResult",
-                        "toolCallId": call_id,
-                        "content": [{"type": "text", "text": blob}]
-                    }
-                }),
-            );
-        }
-
-        let session_id = format!("pi-timing-{label}");
-        let root = std::env::temp_dir().join(format!(
-            "smelt-pi-timing-{}-{}",
-            label,
-            uuid::Uuid::new_v4()
-        ));
-        let sessions = root.join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        let mut file = format!(
-            "{{\"type\":\"session\",\"version\":2,\"id\":\"{session_id}\",\"cwd\":\"/tmp\"}}\n"
-        );
-        for entry in &entries {
-            file.push_str(&serde_json::to_string(entry).unwrap());
-            file.push('\n');
-        }
-        std::fs::write(sessions.join(format!("{session_id}.jsonl")), &file).unwrap();
-
-        let branch =
-            crate::session_history::read_pi_session_branch(&sessions, &session_id).expect("会话文件");
-        let file_users = user_texts_from_entries(&branch.entries);
-        assert_eq!(file_users, expected_users);
+        let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert!(
-            branch.entries.len() >= turns * 3,
-            "{label} 活动分支 {} 条，期望至少 {}",
-            branch.entries.len(),
-            turns * 3
+            requests
+                .iter()
+                .all(|request| request["type"] != "get_entries"),
+            "文件能读时不向 Pi 要 get_entries"
         );
-        if label == "long" {
-            assert!(
-                branch.entries.len() >= 500,
-                "长会话活动分支 {} 条",
-                branch.entries.len()
-            );
-        }
+    }
 
-        let leaf_id = active_parent.expect("leaf");
-        let file_entries = entries.len();
-        let payload = serde_json::json!({"entries": entries, "leafId": leaf_id});
-        let line = serde_json::to_string(&payload).unwrap();
-        let parse_started = std::time::Instant::now();
-        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let tree_parse = parse_started.elapsed();
-        let extract_started = std::time::Instant::now();
-        let messages = active_branch_messages(&parsed).unwrap();
-        let tree_extract = extract_started.elapsed();
-        let tree_users = user_texts(&messages);
-        assert_eq!(tree_users, expected_users);
-        assert!(tree_users.iter().all(|text| !text.starts_with("dead-")));
-
-        let (event_tx, event_rx) = smol::channel::unbounded();
+    #[test]
+    fn missing_session_file_replays_get_entries_before_ready() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
         let mut state = PiState::new();
-        let replay_started = std::time::Instant::now();
-        let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-        replay_history(&messages, &event_tx, &mut state);
-        let replay = replay_started.elapsed();
-        drop(event_tx);
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("missing-session"));
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-missing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(agent_dir.join("sessions/--workspace--")).unwrap();
+        launch.launch.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            agent_dir.to_string_lossy().into_owned(),
+        );
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "missing-session",
+                    "thinkingLevel": "medium",
+                    "model": {"provider": "test", "id": "live", "name": "Live"}
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-entries", "type": "response", "command": "get_entries",
+                "success": true,
+                "data": {
+                    "leafId": "assistant",
+                    "entries": [
+                        {
+                            "type": "message", "id": "user", "parentId": null,
+                            "message": {"role": "user", "content": "文件里没有的消息"}
+                        },
+                        {
+                            "type": "message", "id": "assistant", "parentId": "user",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "回过"}]}
+                        }
+                    ]
+                }
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+            None,
+            &mut trace,
+        ))
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["type"] == "get_entries"),
+            "文件不在时必须改问 Pi"
+        );
         let mut events = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
         }
-        let replayed: Vec<_> = events
+        let texts: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                ConversationEvent::UserChunk(text) => Some(text.clone()),
+                ConversationEvent::UserChunk(text) => Some(text.as_str()),
                 _ => None,
             })
             .collect();
-        assert_eq!(replayed, expected_users);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ConversationEvent::HistoryReplayStarted
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ConversationEvent::HistoryReplayFinished
-        )));
-
-        let event_count = events.len();
-        let mut reduced = crate::acp_session::AcpSessionState::default();
-        let snapshot_started = std::time::Instant::now();
-        for event in events {
-            let _ = crate::acp_session::apply_event(&mut reduced, event);
-        }
-        let snapshot = reduced.to_snapshot(false);
-        let snapshot_bytes = serde_json::to_vec(&snapshot).expect("快照").len();
-        let snapshot_elapsed = snapshot_started.elapsed();
-        assert!(snapshot.entries_total > 0);
-        let _ = std::fs::remove_dir_all(&root);
-
-        eprintln!(
-            "SMELT_REPLAY_TIMING {label} file_bytes={} file_entries={} read={:?} parse={:?} extract={:?} branch_entries={} get_entries_bytes={} tree_parse={:?} active_branch={:?} messages={} replay_events={} user_chunks={} replay={:?} snapshot_bytes={} snapshot={:?}",
-            branch.bytes,
-            file_entries,
-            branch.read,
-            branch.parse,
-            branch.extract,
-            branch.entries.len(),
-            line.len(),
-            tree_parse,
-            tree_extract,
-            messages.len(),
-            event_count,
-            replayed.len(),
-            replay,
-            snapshot_bytes,
-            snapshot_elapsed
-        );
-    }
-
-    fn user_texts(messages: &[serde_json::Value]) -> Vec<String> {
-        messages
+        assert_eq!(texts, ["文件里没有的消息"]);
+        let ready_at = events
             .iter()
-            .filter_map(|message| {
-                if message.get("role").and_then(serde_json::Value::as_str) != Some("user") {
-                    return None;
-                }
-                message
-                    .get("content")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect()
+            .position(|event| matches!(event, ConversationEvent::Ready { .. }))
+            .expect("Ready");
+        let finished_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+            .expect("重放结束");
+        assert!(finished_at < ready_at);
     }
 
-    fn user_texts_from_entries(entries: &[serde_json::Value]) -> Vec<String> {
-        let messages: Vec<_> = entries.iter().filter_map(entry_message).collect();
-        user_texts(&messages)
+    #[test]
+    fn header_only_session_file_is_an_empty_transcript() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("empty-session"));
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-empty-{}", uuid::Uuid::new_v4()));
+        let sessions = agent_dir.join("sessions/--workspace--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("empty-session.jsonl"),
+            "{\"type\":\"session\",\"version\":2,\"id\":\"empty-session\",\"cwd\":\"/workspace\"}
+",
+        )
+        .unwrap();
+        launch.launch.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            agent_dir.to_string_lossy().into_owned(),
+        );
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "empty-session",
+                    "thinkingLevel": "medium",
+                    "model": {"provider": "test", "id": "live", "name": "Live"}
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+            None,
+            &mut trace,
+        ))
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let requests = String::from_utf8(writer.into_inner()).unwrap();
+        assert!(!requests.contains("get_entries"));
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::Ready { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, ConversationEvent::UserChunk(_)))
+        );
     }
 
     #[test]
@@ -9340,7 +9212,10 @@ mod tests {
         let request: serde_json::Value =
             serde_json::from_str(String::from_utf8(writer.get_ref().clone()).unwrap().trim())
                 .unwrap();
-        assert_eq!(request["type"], "get_state", "重发归 daemon，驱动不自己写 prompt");
+        assert_eq!(
+            request["type"], "get_state",
+            "重发归 daemon，驱动不自己写 prompt"
+        );
     }
 
     #[test]

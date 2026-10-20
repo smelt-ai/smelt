@@ -403,12 +403,18 @@
   <ul>
     <li>
       编译命令是 <code>bun build --compile --bytecode --format=esm --no-compile-autoload-dotenv --no-compile-autoload-bunfig</code>。
-      没有 <code>--splitting</code>。Bun 1.4.0 上拆块之后，图片 worker 里的 photon 绑定变成
-      <code>exports_photon_rs is not defined</code>，静态 import 也补不回来。启动时间上的那点收益不值得让缩放走失败回退。
+      <code>--splitting</code> 是否打开，以这一节后面记下的 Bun 1.4.3 复测为准。
+      Bun 1.4.0 上拆块之后，图片 worker 里的 photon 绑定变成
+      <code>exports_photon_rs is not defined</code>，静态 import 也补不回来。
     </li>
     <li>
-      Bun 仍是真正的 <code>bun</code> 二进制，放进 app，并用符号链接提供 <code>~/.smelt/runtime/bin/bun</code>。
-      不使用 <code>BUN_BE_BUN=1</code> 再 exec <code>smelt-pi</code>。MCP 预设和 Claude/Codex 的 <code>bunx</code> 还要这个二进制。
+      Bun 不打进应用，也不用 <code>BUN_BE_BUN</code>。MCP 预设的 <code>bun x</code> 和 Claude/Codex 的 <code>bunx</code>
+      仍用按需下载的 Bun 1.4.3：<code>~/.smelt/runtime</code> 下的 generation（<code>store</code>、<code>current</code>、<code>leases</code>、<code>staging</code>）就是它的家，这些目录不能当成旧运行时清掉。
+      <code>~/.smelt/runtime/bin/bun</code> 指向当前 generation。
+    </li>
+    <li>
+      <code>smeltd</code> 发布成 <code>~/.smelt/bin/smeltd-&lt;指纹&gt;</code> 时，旁边的 <code>smelt-pi</code>、<code>photon_rs_bg.wasm</code> 和 <code>native/</code>
+      放进 <code>smelt-pi-&lt;同一指纹&gt;/</code>。映像守护只启动这一份。开发构建才退到 <code>target/smelt-pi/smelt-pi</code>。<code>SMELT_PI</code> 仍可覆盖。
     </li>
     <li>
       <code>photon_rs_bg.wasm</code> 是可执行文件旁边的 sidecar，不打进 bunfs。QuickJS wasm 由静态 import 嵌进二进制。
@@ -418,16 +424,16 @@
       没有 <code>ci/</code> 目录。
     </li>
     <li>
-      恢复和 fork 的转录只读 Pi 会话文件，走 <code>read_pi_session_branch</code>（和子会话预览同一条活动分支）。
-      启动前先读一遍，和拉起 smelt-pi 重叠。握手里的 <code>get_state</code> 给出活的 session id 之后再读一遍。
-      活动分支上 message / custom_message 的 id 指纹相同就用启动前那份；不同则握手后的文件胜出；
-      后一次读不到文件才退回启动前那份。<code>get_entries</code> 不参与，也不是失败时的后备。
-      fork 时新文件还读不到，就按用户原文在种子消息上本地截断，近似 Pi 的 <code>fork(entryId)</code>。
+      会话文件按 cwd 目录名加文件名里的会话 id 定位（<code>session_history::pi_sessions_dir</code>，展开 <code>~</code>，认 <code>PI_CODING_AGENT_DIR</code>）。
+      启动前读一遍只为了尽早发布模型名。握手和分叉完成之后、发出 <code>Ready</code> 之前再读这一份来重放。
+      文件找不到或解析失败就向 Pi 要 <code>get_entries</code> 并记一条日志；两边都失败则恢复失败，不显示空转录。
+      只有文件头的空会话是真正的空转录。分叉切点在 Pi 里对不上仍是错误；不再在本地把整段历史留下来冒充分叉结果。
     </li>
     <li>
       模型在拉起进程之前就发 <code>ConversationEvent::Model</code>：恢复时用文件里的最后一次模型，否则用启动参数，再否则用设置里的默认模型。
+      消息上的 provider 用条目自己的 <code>provider</code> 字段，不把 model id 按 <code>/</code> 切开。
       <code>get_state</code> 和 <code>set_model</code> 之后再各发一次，后到的盖住先到的。不用未确认点击那层 overlay。
-      <code>Ready</code> 在转录事件之前发出，输入栏不必等整段历史。
+      转录重放完才发 <code>Ready</code>，避免 <code>awaiting_user_echo</code> 吞掉用户消息。不写 <code>~/.pi/agent/settings.json</code>。
     </li>
   </ul>
   <p>
@@ -455,7 +461,7 @@
     转录阶段用同一份夹具：每轮一条用户消息、一次工具调用、一份 8KB 工具输出，另外有一条同样大的死分支。
     短的是 8 轮。长的是 174 轮，活动分支 523 条 entry（含 model_change），文件里一共 697 条。
     Rust 数字来自 <code>cargo test</code> 的 debug 剖面，比 release 的 smeltd 慢。
-    Pi 的 <code>get_entries</code> 是对编好的 smelt-pi 实发的；启动路径已经不调用它。
+    这些阶段数字是旧路径上量的。现在文件读得到就直接重放，不再为了恢复去要 <code>get_entries</code>。
   </p>
   <table>
     <thead>
@@ -471,10 +477,7 @@
   </table>
   <p>
     界面第一次把转录排出来的时间没有量。GPUI 的 <code>render</code> 不能写日志。
-    视图在快照应用到空列表上时记一行「视图收到首批转录」，那是应用快照，不是布局。
-    重放不拆成「先尾部、再补旧消息」：归约按时间从旧到新追加，<code>HistoryReplayStarted</code> 到
-    <code>HistoryReplayFinished</code> 之间界面仍显示上一份基线。贵的是整棵树的 RPC 挡在任何界面更新前面。
-    文件读取和进程启动重叠，<code>Ready</code> 单独进一批快照，转录在它之后一次换上。
+    重放在发出 <code>Ready</code> 之前完成，界面在同一批快照里拿到转录和就绪。
   </p>
 </section>
 
@@ -913,11 +916,11 @@ exec "&lt;当前 bundle 的 smelt-pi&gt;" "$@"</code></pre>
 
   <h3>8.2 签名</h3>
   <p>
-    <code>scripts/package-mac.sh</code> 今天对 Developer ID 使用 Hardened Runtime、<code>--timestamp</code>，
-    并且只在 <code>ci/mac/entitlements.plist</code> 存在时才带上 entitlements。那个文件目前不在仓库里，
-    条件判断会静默跳过。Pi 二进制不能沿用这个判断。
+    <code>scripts/package-mac.sh</code> 对 Developer ID 使用 Hardened Runtime、<code>--timestamp</code>。
+    旧稿写的 <code>ci/mac/entitlements.plist</code> 不在仓库里。现在缺
+    <code>scripts/entitlements.plist</code> 或 <code>scripts/jit-entitlements.plist</code> 就失败，不再静默跳过。
   </p>
-  <p>新增 <code>ci/mac/pi-entitlements.plist</code>，无 XML 注释，内容按 Bun 的签名文档：</p>
+  <p>新增 <code>scripts/jit-entitlements.plist</code>，无 XML 注释，内容按 Bun 的签名文档：</p>
   <ul>
     <li><code>com.apple.security.cs.allow-jit</code></li>
     <li><code>com.apple.security.cs.allow-unsigned-executable-memory</code></li>
@@ -947,8 +950,8 @@ exec "&lt;当前 bundle 的 smelt-pi&gt;" "$@"</code></pre>
   <h3>8.4 <code>release.yml</code> 要加的步骤</h3>
   <ul>
     <li>macOS job：checkout 之后、组装 <code>.app</code> 之前，安装 Bun 1.4.0，编译 <code>smelt-pi</code>，拷贝 wasm 和 darwin-arm64 的 <code>.node</code>，先跑 §11 的冒烟，再进入签名。</li>
-    <li>Linux job：同样编译对应架构，把 <code>smelt-pi</code>、wasm、<code>.node</code> 放进 <code>ci/linux/ci.sh package</code> 的目录。不要打 #52 那种 Pi 运行时归档。</li>
-    <li><code>Verify required files exist</code> 加上 <code>packages/pi-agent/package.json</code>、<code>bun.lock</code>、<code>src/compiled-main.ts</code> 和 <code>ci/mac/pi-entitlements.plist</code>。</li>
+    <li>Linux job：同样编译对应架构，把 <code>smelt-pi</code>、wasm、<code>.node</code> 放进 <code>scripts/package-linux.sh</code> 的目录。不要打 #52 那种 Pi 运行时归档，也不要再打一份 <code>bun</code>。</li>
+    <li><code>Verify required files exist</code> 加上 <code>packages/pi-agent/package.json</code>、<code>packages/pi-agent/bun.lock</code>、<code>src/compiled-main.ts</code> 和 <code>scripts/jit-entitlements.plist</code>。</li>
   </ul>
 </section>
 

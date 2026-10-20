@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { McpServerEntry, McpTransportFactory } from "@earendil-works/pi-coding-agent";
 import {
 	type JsonRpcMessage,
@@ -120,9 +121,12 @@ function spawnGateway(dir: string): number {
 	} catch {}
 	const output = openSync(log, "a", 0o600);
 	try {
-		// 编译后的 smelt-pi 把 `/$bunfs/root/...` 插进 argv[1]。这里只传子命令，
-		// 不再传一份磁盘上不存在的脚本路径。
-		const child = spawn(process.execPath, ["gateway"], {
+		// 编译后的 smelt-pi 认子命令 `gateway`。源码模式没有这条子命令：
+		// `src/main.ts` 会在前面塞上 `--mode rpc`，所以这里直接跑网关入口。
+		const gatewayArgs = import.meta.url.includes("$bunfs")
+			? ["gateway"]
+			: [fileURLToPath(new URL("./mcp-gateway-main.ts", import.meta.url))];
+		const child = spawn(process.execPath, gatewayArgs, {
 			// Own session: the conversation's process group is killed when it ends.
 			detached: true,
 			stdio: ["ignore", output, output],

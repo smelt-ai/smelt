@@ -4,7 +4,10 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all
+.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all smelt-pi
+
+SMELT_PI := target/smelt-pi/smelt-pi
+PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts')
 
 build run install: SHELL := /bin/bash
 
@@ -60,12 +63,15 @@ pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 
 check-all: fmt-check lint lint-sh lint-paths test pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
 
-build: ## 编译 release 二进制（GUI + 守护 + helpers + smelt-pi）
-	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
-	./scripts/fetch-bun.sh
+$(SMELT_PI): packages/pi-agent/package.json packages/pi-agent/bun.lock scripts/compile-smelt-pi.ts scripts/build-smelt-pi.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
 	./scripts/build-smelt-pi.sh
 
-run: ## 本地直接跑 GUI（开发用）
+smelt-pi: $(SMELT_PI) ## 编译 smelt-pi；源码、锁和编译脚本没变就跳过
+
+build: $(SMELT_PI) ## 编译 release 二进制（GUI + 守护 + helpers + smelt-pi）
+	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
+
+run: $(SMELT_PI) ## 本地直接跑 GUI（开发用）
 	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
 	cargo run --bin $(BIN)
 
@@ -78,7 +84,7 @@ dist: ## 用已有 release 产物打包 app + dmg
 dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
 
-install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
+install: $(SMELT_PI) ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
 	@# 旧包再装一遍，守护永远跑不到新代码。插件脚本没有 cargo binary，因此同时
 	@# 检查 plugins 的源内容（按 .gitignore 排除编辑器生成文件和本地 clone 的外部仓库）。
@@ -111,6 +117,9 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 		|| [ target/release/$(BIN) -nt dist/Smelt.app/Contents/MacOS/$(BIN) ] \
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
+		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-pi ] \
+		|| [ target/smelt-pi/smelt-pi -nt dist/Smelt.app/Contents/MacOS/smelt-pi ] \
+		|| [ target/smelt-pi/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/MacOS/photon_rs_bg.wasm ] \
 		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
 		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \

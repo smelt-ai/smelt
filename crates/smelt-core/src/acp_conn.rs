@@ -1654,7 +1654,7 @@ async fn run_connection(
             return Ok(None);
         }
         let (child_stdin, child_stdout, child_stderr, child) =
-            spawn_agent_process(&agent, launch.cwd.as_deref())?;
+            spawn_agent_process(&agent, launch.cwd.as_deref(), managed_bun.as_ref())?;
         *stdio = Some(AcpStdio {
             pid: child.id() as i32,
             stdin_fd: child_stdin.as_raw_fd(),
@@ -2074,7 +2074,7 @@ pub fn list_acp_sessions(
         let agent = build_agent(&resolved_launch, &BTreeMap::new())
             .map_err(|error| format!("构建 ACP 历史查询进程失败：{error}"))?;
         let (child_stdin, child_stdout, child_stderr, child) =
-            spawn_agent_process(&agent, None)
+            spawn_agent_process(&agent, None, managed_bun.as_ref())
                 .map_err(|error| format!("启动 ACP 历史查询进程失败：{error}"))?;
         let mut child_guard = AcpChildGuard::new(child);
         spawn_stderr_drain(child_stderr, Arc::default());
@@ -3684,6 +3684,7 @@ fn build_agent(
 fn spawn_agent_process(
     config: &AcpAgentConfig,
     cwd: Option<&str>,
+    managed_bun: Option<&crate::managed_runtime::ManagedBunRuntime>,
 ) -> Result<
     (
         async_process::ChildStdin,
@@ -3722,6 +3723,9 @@ fn spawn_agent_process(
         // 与 agent-client-protocol 的 AcpAgent::spawn_process 一致：wrapper
         // （npx/uvx）以及它派生的真实 agent 必须属于同一进程组，结束会话时不留孤儿。
         std_cmd.process_group(0);
+    }
+    if let Some(runtime) = managed_bun {
+        runtime.inherit_into(&mut std_cmd);
     }
     let mut cmd = async_process::Command::from(std_cmd);
     #[cfg(windows)]

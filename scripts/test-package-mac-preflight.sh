@@ -103,11 +103,10 @@ if [[ "$OUTPUT" == *"需要 Python >= 3.10"* ]]; then
   exit 1
 fi
 
-mkdir -p "$FIXTURE/target/smelt-pi" "$FIXTURE/target/bundled-bun/darwin-arm64"
+mkdir -p "$FIXTURE/target/smelt-pi"
 printf 'arm64' >"$FIXTURE/target/smelt-pi/smelt-pi"
 printf 'wasm' >"$FIXTURE/target/smelt-pi/photon_rs_bg.wasm"
-printf 'bun' >"$FIXTURE/target/bundled-bun/darwin-arm64/bun"
-chmod +x "$FIXTURE/target/smelt-pi/smelt-pi" "$FIXTURE/target/bundled-bun/darwin-arm64/bun"
+chmod +x "$FIXTURE/target/smelt-pi/smelt-pi"
 
 make_signing_shims
 make_stopping_python "$FIXTURE/python-stop-after-signing"

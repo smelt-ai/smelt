@@ -21,7 +21,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROGRAMS=(smeltd smelt-notify)
-# curl 用来装桌面 Chrome。Bun 和 smelt-pi 已经在包里，不再下载解压。
+# curl 用来装桌面 Chrome。smelt-pi 跟 smeltd 一起按映像指纹发布。Bun 仍按需下载到 ~/.smelt/runtime。
 BASE_PACKAGES=(ca-certificates curl)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
 # 所以 Xvnc 要的 X 核心字体（fixed）和任务栏图标的主题要自己列上。
@@ -321,14 +321,9 @@ user_phase() {
   mkdir -p "$BIN"
   put 0755 "$HERE/smelt-notify" "$BIN/smelt-notify"
   put 0755 "$HERE/smelt-up" "$BIN/smelt-up"
-  put 0755 "$HERE/smelt-pi" "$BIN/smelt-pi"
-  put 0755 "$HERE/bun" "$BIN/bun"
-  put 0644 "$HERE/photon_rs_bg.wasm" "$BIN/photon_rs_bg.wasm"
-  if [[ -d "$HERE/native" ]]; then
-    rm -rf "$BIN/native"
-    mkdir -p "$BIN/native"
-    cp -R "$HERE/native/." "$BIN/native/"
-  fi
+  # smelt-pi、wasm、native 留在包目录里。下面的 `smeltd install` 按 smeltd 的指纹
+  # 把它们发布成 ~/.smelt/bin/smelt-pi-<指纹>/，不在 bin 里放一份会变的副本。
+  [[ -x "$HERE/smelt-pi" && -f "$HERE/photon_rs_bg.wasm" ]] || die "包里缺少 smelt-pi 或 photon_rs_bg.wasm"
   # 跨 Agent 消息下线后留下的旧 helper。
   rm -f "$BIN/smelt-agent-mcp"
 

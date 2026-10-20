@@ -25,10 +25,10 @@ Extension / Tool / Skill 交付。
 
 ## 运行与安全
 
-发布时 `packages/pi-agent` 编成单个 `smelt-pi`，和 `smeltd` 放在同一目录。
+发布时 `packages/pi-agent` 编成单个 `smelt-pi`，和对应的 `smeltd-<指纹>` 放在一起。
 不再把源码嵌进 `smelt-core`，也不再在用户机器上 `bun install`。
-Bun 仍打进应用，只给 MCP 预设的 `bun x` 和 Claude/Codex 的 `bunx` 用；
-`~/.smelt/runtime/bin/bun` 指向这份 Bun。Pi 登录仍写 `~/.pi/agent/auth.json`。
+Bun 不打进应用：MCP 预设的 `bun x` 和 Claude/Codex 的 `bunx` 仍用按需下载的那份，
+`~/.smelt/runtime/bin/bun` 指向当前 generation。Pi 登录仍写 `~/.pi/agent/auth.json`。
 
 读取与搜索工具只有在 Pi registry 证明其确为 built-in 时才默认直接执行；写文件、
 执行命令和 Extension 注册的 Tool 由权限 Extension 通过 Pi RPC 的 Extension UI

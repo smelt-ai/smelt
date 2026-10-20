@@ -1568,13 +1568,6 @@ pub(crate) fn start_acp_event_drain(
                 while let Ok(next) = event_rx.try_recv() {
                     batch.push(next);
                 }
-                let batch_started = std::time::Instant::now();
-                let replay_finished = batch.iter().any(|event| {
-                    matches!(
-                        event,
-                        smelt_core::acp_conn::ConversationEvent::HistoryReplayFinished
-                    )
-                });
                 let mut offsets = Vec::with_capacity(batch.len());
                 let mut should_persist = false;
                 let mut runtime_debug_changed = false;
@@ -1732,17 +1725,6 @@ pub(crate) fn start_acp_event_drain(
                         envelope_changed,
                         None,
                     );
-                    if replay_finished {
-                        let entries = sess.reduced.lock().unwrap().entries_total();
-                        smelt_core::app_log::info(
-                            "pi-rpc",
-                            &format!(
-                                "会话 {session_id} 快照发布用时 {:?}（转录 {} 条）",
-                                batch_started.elapsed(),
-                                entries
-                            ),
-                        );
-                    }
                     update_acp_daemon_state(sess, &subscribers);
                     if let Some((text, images)) = resend.take() {
                         queue_retry_prompt(sess, text, images);
@@ -3250,10 +3232,9 @@ fn apply_acp_user_action_inner(
         AcpUserAction::ClearQueue => send_acp_clear_queue(sess),
         AcpUserAction::StopBackgroundTask { id } => send_acp_stop_background_task(sess, id),
         AcpUserAction::StopSubagent { id } => send_acp_stop_subagent(sess, id),
-        AcpUserAction::DeliverPeerMessage { message } => send_acp_command(
-            sess,
-            ConversationCommand::DeliverPeerMessage(message),
-        ),
+        AcpUserAction::DeliverPeerMessage { message } => {
+            send_acp_command(sess, ConversationCommand::DeliverPeerMessage(message))
+        }
         AcpUserAction::PeerReply { .. } => Err("peer reply is internal"),
         AcpUserAction::DeliverQueuedNow { text } => deliver_queued_now(sess, text, subscribers),
         AcpUserAction::WithdrawPendingPrompt { id } => withdraw_pending_prompt(sess, id),

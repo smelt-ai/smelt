@@ -4115,16 +4115,6 @@ impl AcpView {
         );
         self.layout_cache.borrow_mut().dirty_from = Some(changed_from.unwrap_or(usize::MAX));
         let snapshot_entries_changed = changed_from.is_some();
-        if old_entries_len == 0 && self.entries.len() > old_entries_len && snap.entries_offset == 0 {
-            smelt_sys::app_log::info(
-                "pi-rpc",
-                &format!(
-                    "会话 {} 视图收到首批转录 {} 条",
-                    self.sid,
-                    self.entries.len()
-                ),
-            );
-        }
         let entries_offset = changed_from.unwrap_or(self.entries.len());
         let previous_permission = self
             .permissions

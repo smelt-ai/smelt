@@ -23,10 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 /// 一次「问一句、答一句」的助手命令最多等这么久。登录要走网络，比一次往返宽。
 const ONE_SHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-fn spawn_auth_process(
-    args: &[&str],
-    status: &dyn Fn(&str),
-) -> Result<std::process::Child, String> {
+fn spawn_auth_process(args: &[&str], status: &dyn Fn(&str)) -> Result<std::process::Child, String> {
     let runtime = crate::managed_runtime::sync_managed_pi_agent(status)?;
     let mut command = runtime.command(Some("auth"));
     command

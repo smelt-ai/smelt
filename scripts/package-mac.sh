@@ -64,9 +64,8 @@ fi
 if [[ "$BUILD" -eq 1 ]]; then
   echo "▶ 编译 release …"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-installer
-  echo "▶ 编译 smelt-pi 并取 darwin-arm64 的 Bun …"
-  "$ROOT/scripts/fetch-bun.sh" darwin-arm64
-  "$ROOT/scripts/build-smelt-pi.sh" --target bun-darwin-arm64 --out "$ROOT/target/smelt-pi"
+  echo "▶ 编译 smelt-pi …"
+  make -C "$ROOT" smelt-pi
 fi
 
 if [[ ! -f "$BIN" ]]; then
@@ -92,17 +91,23 @@ if ! file "$BIN" | grep -q "arm64"; then
 fi
 PI_BIN="$ROOT/target/smelt-pi/smelt-pi"
 PI_WASM="$ROOT/target/smelt-pi/photon_rs_bg.wasm"
-BUNDLED_BUN="$ROOT/target/bundled-bun/darwin-arm64/bun"
-if [[ ! -x "$PI_BIN" || ! -f "$PI_WASM" || ! -x "$BUNDLED_BUN" ]]; then
-  echo "✗ 缺少 smelt-pi、photon_rs_bg.wasm 或 darwin-arm64 的 bun。先跑 scripts/build-smelt-pi.sh --target bun-darwin-arm64 和 scripts/fetch-bun.sh darwin-arm64，或给本脚本加 --build。" >&2
+if [[ ! -x "$PI_BIN" || ! -f "$PI_WASM" ]]; then
+  echo "✗ 缺少 smelt-pi 或 photon_rs_bg.wasm。先 make smelt-pi，或给本脚本加 --build。" >&2
   exit 1
 fi
-for mach in "$PI_BIN" "$BUNDLED_BUN"; do
-  if ! file "$mach" | grep -q "arm64"; then
-    echo "✗ $mach 不是 arm64。" >&2
+if [[ -d "$ROOT/packages/pi-agent/src" ]]; then
+  newer="$(find "$ROOT/packages/pi-agent/src" "$ROOT/packages/pi-agent/package.json" "$ROOT/packages/pi-agent/bun.lock" \
+    "$ROOT/scripts/compile-smelt-pi.ts" "$ROOT/scripts/build-smelt-pi.sh" "$ROOT/scripts/fetch-bun.sh" \
+    -type f -newer "$PI_BIN" -print -quit 2>/dev/null || true)"
+  if [[ -n "$newer" ]]; then
+    echo "✗ smelt-pi 比源码旧（$newer）。先 make smelt-pi。" >&2
     exit 1
   fi
-done
+fi
+if ! file "$PI_BIN" | grep -q "arm64"; then
+  echo "✗ $PI_BIN 不是 arm64。" >&2
+  exit 1
+fi
 
 # 在临时目录组装。签名校验通过前不碰 dist 里的正式包，失败的半成品不能被
 # make install 当成已经打好的 Smelt.app。
@@ -158,8 +163,7 @@ cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
 chmod +x "$MACOS/smelt-installer"
 cp "$PI_BIN" "$MACOS/smelt-pi"
 cp "$PI_WASM" "$MACOS/photon_rs_bg.wasm"
-cp "$BUNDLED_BUN" "$MACOS/bun"
-chmod +x "$MACOS/smelt-pi" "$MACOS/bun"
+chmod +x "$MACOS/smelt-pi"
 if [[ -d "$ROOT/target/smelt-pi/native" ]]; then
   mkdir -p "$MACOS/native"
   cp -R "$ROOT/target/smelt-pi/native/." "$MACOS/native/"
@@ -270,7 +274,7 @@ xattr -cr "$APP" || true
 #
 # 1) Developer ID Application 身份（名字以 "Developer ID Application" 开头）：走可对外
 #    分发的完整签名——Hardened Runtime（--options runtime）+ secure timestamp + 授权
-#    清单（scripts/entitlements.plist，smelt-pi 和 bun 用 scripts/jit-entitlements.plist）。
+#    清单（scripts/entitlements.plist，smelt-pi 用 scripts/jit-entitlements.plist）。
 #    这是公证的前置：Apple 要求包里每个 Mach-O 都带 Hardened Runtime。
 #
 # 2) 自签名（scripts/setup-codesign-identity.sh 生成的 "Smelt Local Signing"）：
@@ -312,7 +316,7 @@ ENTITLEMENTS="$ROOT/scripts/entitlements.plist"
 JIT_ENTITLEMENTS="$ROOT/scripts/jit-entitlements.plist"
 # 普通 entitlements 只放 library validation 例外。GPUI 的图形/字体栈会在运行时
 # dlopen 系统库；Hardened Runtime 默认只允许同 Team 的库。
-# smelt-pi 和 Bun 跑 JavaScriptCore，还要 JIT 那一组授权。
+# smelt-pi 跑 JavaScriptCore，还要 JIT 那一组授权。
 # plist 不能带 XML 注释，codesign 的解析器比 plutil 严。
 if [[ ! -f "$ENTITLEMENTS" || ! -f "$JIT_ENTITLEMENTS" ]]; then
   echo "✗ 缺少 $ENTITLEMENTS 或 $JIT_ENTITLEMENTS" >&2
@@ -340,8 +344,6 @@ for inner in smelt-notify smelt-installer; do
 done
 echo "  … 签内层：smelt-pi"
 sign_one "$JIT_ENTITLEMENTS" "$MACOS/smelt-pi"
-echo "  … 签内层：bun"
-sign_one "$JIT_ENTITLEMENTS" "$MACOS/bun"
 if [[ -d "$MACOS/native" ]]; then
   while IFS= read -r -d '' node; do
     echo "  … 签内层：${node#"$MACOS/"}"

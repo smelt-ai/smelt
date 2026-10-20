@@ -878,9 +878,10 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
+    // 守护字节没变也要发布：同一指纹下缺的 smelt-pi 配对要补上。内容相同不会换 inode。
+    let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
-        let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
         if managed.is_file() && path_is_live_executable(&managed) {
             smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image)?;
             eprintln!(

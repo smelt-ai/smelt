@@ -48,6 +48,7 @@ pub mod login_env;
 pub mod managed_runtime;
 pub mod memory_settings;
 pub mod new_session;
+pub mod runtime_generation;
 pub use smelt_model::osc;
 pub mod peer_link;
 pub mod pi_auth;

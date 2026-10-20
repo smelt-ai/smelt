@@ -83,14 +83,24 @@ child.stderr.on("data", (chunk: string) => stderr.push(chunk));
 
 const lines = createInterface({ input: child.stdout });
 const pending = new Map<string, (value: Record<string, unknown>) => void>();
+const REQUEST_TIMEOUT_MS = 20_000;
+let failed = false;
 
 function fail(message: string): never {
+	if (failed) process.exit(1);
+	failed = true;
 	child.kill("SIGKILL");
 	console.error(message);
 	if (stderr.length) console.error(stderr.join(""));
 	rmSync(dir, { recursive: true, force: true });
 	process.exit(1);
 }
+
+child.on("exit", (code, signal) => {
+	if (failed || pending.size === 0) return;
+	const waiting = [...pending.keys()].join(", ");
+	fail(`smelt-pi 在请求 ${waiting} 尚未回执时退出（code=${code ?? "null"} signal=${signal ?? "null"}）`);
+});
 
 lines.on("line", (line) => {
 	let value: Record<string, unknown>;
@@ -108,7 +118,14 @@ lines.on("line", (line) => {
 
 function request(id: string, command: Record<string, unknown>): Promise<Record<string, unknown>> {
 	return new Promise((resolve) => {
-		pending.set(id, resolve);
+		const timer = setTimeout(() => {
+			pending.delete(id);
+			fail(`请求 ${id} 超过 ${REQUEST_TIMEOUT_MS}ms 没有回执`);
+		}, REQUEST_TIMEOUT_MS);
+		pending.set(id, (value) => {
+			clearTimeout(timer);
+			resolve(value);
+		});
 		child.stdin.write(`${JSON.stringify({ id, ...command })}\n`);
 	});
 }
