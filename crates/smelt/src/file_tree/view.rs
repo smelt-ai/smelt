@@ -824,6 +824,7 @@ pub fn file_content_parts(
     open_file: &Option<OpenFile>,
     roots: &[String],
     file_tree_open: bool,
+    overlay_open: bool,
     cx: &mut Context<Workspace>,
 ) -> FileContentParts {
     let (muted, fg, border, warning) = {
@@ -843,9 +844,9 @@ pub fn file_content_parts(
             let dirty = of.readable
                 && !is_image
                 && of.editor.read(cx).value().as_ref() != of.saved_content.as_str();
-            // Markdown 用一个动作切换源码/预览，其它文件类型没有预览这一说。
-            let is_md = editor_language_for_path(&of.path) == "md";
-            let preview = of.preview && is_md;
+            // 能预览的文件用一个动作切换源码/预览，其它文件类型没有预览这一说。
+            let preview_kind = PreviewKind::for_path(&of.path);
+            let preview = of.preview && preview_kind.is_some();
             let last_idx = breadcrumb_segs.len().saturating_sub(1);
             let this = cx.entity();
             let breadcrumb = h_flex()
@@ -915,20 +916,32 @@ pub fn file_content_parts(
                                 .map(|msg| div().text_xs().text_color(warning).child(msg)),
                         ),
                 )
-                .when(is_md, |el| {
-                    let markdown_label = if preview {
+                .when(preview_kind == Some(PreviewKind::Html), |el| {
+                    el.child(
+                        Button::new("file-open-in-browser")
+                            .quiet()
+                            .icon_size()
+                            .flex_shrink_0()
+                            .label("浏览器打开")
+                            .on_click(
+                                cx.listener(|ws, _ev, _window, cx| ws.open_file_in_browser(cx)),
+                            ),
+                    )
+                })
+                .when(preview_kind.is_some(), |el| {
+                    let preview_label = if preview {
                         "查看原始码"
                     } else {
                         "查看预览"
                     };
                     el.child(
-                        Button::new("markdown-view-toggle")
+                        Button::new("file-preview-toggle")
                             .quiet()
                             .icon_size()
                             .flex_shrink_0()
-                            .label(markdown_label)
-                            .on_click(cx.listener(move |ws, _ev, _window, cx| {
-                                ws.set_file_preview(!preview, cx)
+                            .label(preview_label)
+                            .on_click(cx.listener(move |ws, _ev, window, cx| {
+                                ws.set_file_preview(!preview, window, cx)
                             })),
                     )
                 })
@@ -968,6 +981,14 @@ pub fn file_content_parts(
                         smelt_ui::image::ensure_preview(image, cx);
                         smelt_ui::image::image_surface(image)
                     })
+                    .into_any_element()
+            } else if let (true, Some(html)) = (preview, of.html_preview.clone()) {
+                // 原生网页视图会盖住遮罩层：有遮罩时不画它，它会自己藏起来（见 html_preview）。
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .when(!overlay_open, |el| el.child(html))
                     .into_any_element()
             } else if preview {
                 div()

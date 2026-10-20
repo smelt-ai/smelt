@@ -138,6 +138,14 @@ impl Workspace {
         rank
     }
 
+    /// 主窗口里有 Workspace 自己画的遮罩层开着（确认框、命令面板、大图预览）。原生网页视图
+    /// 会盖住这些层，开着时文件面板的 HTML 预览让开。
+    pub(crate) fn main_overlay_open(&self) -> bool {
+        self.main_modal_rank().is_some()
+            || self.palette.is_some()
+            || self.acp_image_preview.is_some()
+    }
+
     pub(crate) fn settings_modal_rank(&self) -> Option<u8> {
         let mut rank = None;
         if self.session_manager_open {

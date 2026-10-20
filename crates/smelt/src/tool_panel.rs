@@ -563,8 +563,14 @@ impl Workspace {
             .into_any_element();
         // 路径栏横跨整个面板；只有它下方才开始左右分栏。这样路径不被左侧内容区
         // 裁掉，树内搜索也不会与面包屑抢同一行，结构对齐常见编辑器的文件视图。
-        let content_parts =
-            crate::file_tree::file_content_parts(&self.open_file, &roots, tree_open, cx);
+        let overlay_open = self.main_overlay_open();
+        let content_parts = crate::file_tree::file_content_parts(
+            &self.open_file,
+            &roots,
+            tree_open,
+            overlay_open,
+            cx,
+        );
         let content_header = content_parts.header;
         let content = content_parts.body;
         let resize_listener = tree_open.then(|| self.file_tree_resize_listener(cx));
