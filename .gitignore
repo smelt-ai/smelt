@@ -30,9 +30,6 @@ __pycache__/
 # 本地手测用的一次性文件
 /mermaid-test.md
 
-# CI 环境上下文，由 ci/<平台>/env-setup.sh 生成
-/ci/.env/
-
 # dsh 实测（`dsh_live_tests`，见 crates/smelt-core/src/acp_conn.rs）跑起来的
 # harness 会话库。桥的 profile 里 `root: './.sessions'` 曾相对**进程 cwd** 解析，
 # 而 smelt 把 agent 子进程的 cwd 设成用户的项目目录，于是同一份 profile 会往每个

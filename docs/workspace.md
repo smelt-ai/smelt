@@ -255,7 +255,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 ### Linux 无头运行时
 
-发布包是 `smeltd-<版本>-linux-<架构>.tar.gz`（`ci/linux/ci.sh package`）。在机器上解包后：
+发布包是 `smeltd-<版本>-linux-<架构>.tar.gz`。在机器上解包后：
 
 ```bash
 ./install.sh           # 装 systemd 用户服务、启动，并打印配对串
