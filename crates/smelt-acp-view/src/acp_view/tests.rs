@@ -4076,6 +4076,99 @@ fn wheel(position: gpui::Point<gpui::Pixels>, up: gpui::Pixels) -> gpui::ScrollW
     }
 }
 
+/// 拖选文字时，上游按最近的裁剪区判断指针是否贴边，贴边就合成滚轮滚动列表。
+/// 消息行若自己裁剪，一条短回答的行就成了这块区域：上下 16px 的触发带盖满整行，
+/// 在里面横着拖也会让整个列表跟着滚。最近的裁剪区必须是列表视口。
+#[gpui::test]
+fn dragging_a_selection_across_a_short_answer_does_not_scroll_the_list(
+    cx: &mut gpui::TestAppContext,
+) {
+    let long_answer = || AcpEntry::Assistant {
+        text: numbered_paragraphs("长回答", 40),
+        thought: false,
+    };
+    let (view, cx) = open_conversation(
+        cx,
+        "acp-drag-select-short-answer",
+        vec![
+            AcpEntry::User("第一问".into()),
+            long_answer(),
+            AcpEntry::User("第二问".into()),
+            AcpEntry::Assistant {
+                text: "这是一条只有一行的短回答，横着拖选它不该滚动列表。".into(),
+                thought: false,
+            },
+            AcpEntry::User("第三问".into()),
+            long_answer(),
+        ],
+        DaemonPhase::Succeeded,
+    );
+    draw_settled(cx);
+    draw_settled(cx);
+
+    // 第二问顶到视口上沿，短回答落在它下面，离视口上下沿都远。
+    let short_answer = 3;
+    cx.update(|_window, cx| {
+        view.update(cx, |view, cx| {
+            view.list_state.scroll_to(gpui::ListOffset {
+                item_ix: short_answer - 1,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        })
+    });
+    draw_settled(cx);
+    draw_settled(cx);
+
+    let (viewport, row, before) = view.read_with(cx, |view, _| {
+        (
+            view.list_state.viewport_bounds(),
+            view.list_state.bounds_for_item(short_answer),
+            view.list_state.logical_scroll_top(),
+        )
+    });
+    let row = row.expect("短回答在视口里画过");
+    assert!(
+        row.top() > viewport.top() + px(40.) && row.bottom() < viewport.bottom() - px(40.),
+        "短回答要离视口上下沿都远: row={row:?} viewport={viewport:?}"
+    );
+
+    let column = ui_theme::conversation_max_width().min(viewport.size.width - px(32.));
+    let left = viewport.center().x - column * 0.5;
+    let y = row.top() + px(8.);
+    cx.simulate_mouse_down(
+        gpui::point(left + px(2.), y),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    for step in 1..=4 {
+        cx.simulate_mouse_move(
+            gpui::point(left + px(60. * step as f32), y),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+    }
+    // 自动滚动每 16ms 一跳；给它足够的时间跳上好几次。
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    draw_settled(cx);
+
+    let selected = cx.update(|window, cx| gpui_base::TextSelection::selected_text(window, cx));
+    assert!(!selected.is_empty(), "拖动要真的选中了短回答里的字");
+    let after = view.read_with(cx, |view, _| view.list_state.logical_scroll_top());
+    assert_eq!(
+        (after.item_ix, after.offset_in_item),
+        (before.item_ix, before.offset_in_item),
+        "横着拖选没贴视口边，列表不该滚"
+    );
+
+    cx.simulate_mouse_up(
+        gpui::point(left + px(240.), y),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+}
+
 /// 流式正文每来一段就改一次最后一条。快照落地到下一帧画出来之间，滚轮事件照常
 /// 进来，按上一帧的位置换算。改动的行这时不能变成没有高度的新行：总高度少了
 /// 这一截，滚动位置会被夹到很靠上的地方，视口一下跳走。
