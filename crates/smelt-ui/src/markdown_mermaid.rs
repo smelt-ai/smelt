@@ -20,6 +20,16 @@
 //! 测宽回调如果只按字符数估算，文字会被裁掉；这里用 GPUI 同一份 usvg 0.46 的
 //! 系统 fontdb，再用 rustybuzz 量 advance。
 //!
+//! 布局开了 `layout-elk`。适配层 `merman-layout-elk` 自己是 MIT OR Apache-2.0，
+//! 真正的 ELK 移植在 `merman-elk-layered`，许可证 EPL-2.0。
+//! `resolve_graph_layout` 只有在这个 feature 编进来、且解析后的 `layout` 是已注册
+//! 的 ELK 算法名（`elk`、`elk.stress`、`elk.force`、`elk.mrtree`、`elk.sporeOverlap`、
+//! `elk.box`、`elk.rectpacking`）时才走 ELK，其余名字退回 dagre。上游
+//! `default_config.json` 根上的 `layout` 和 `state.layout` 默认就是 `elk`，feature
+//! 关掉时这套配置会被当成缺 loader 退回 dagre；打开之后，没写布局的流程图、状态图、
+//! 类图、ER 等直接用 ELK，不是继续 dagre。`flowchart-elk` 在外观解析之后强制
+//! `layout=elk`。图里写 `layout: dagre` 仍走 dagre。站点配置不改这个默认值。
+//!
 //! 全仓库新增/已有的 `TextView::markdown` 调用点都应该改走这里的 `markdown_view`，
 //! 不要直接调 `TextView::markdown`，否则等于每处都得重新接一遍这两个钩子。
 //!
@@ -1125,6 +1135,38 @@ mod tests {
 
         let gantt = render_svg(samples[6].1, false).unwrap();
         assert!(gantt.contains("排期") || gantt.contains("方案"));
+    }
+
+    /// frontmatter `layout: elk` 的流程图要能被 usvg 0.46 解析，并且真的走了 ELK。
+    ///
+    /// 上游默认 `layout` 已是 `elk`，所以没写 frontmatter 的同一张图和显式 elk
+    /// 同一 viewBox；`layout: dagre` 仍走 dagre，SVG 应不同。
+    #[test]
+    fn elk_frontmatter_flowchart_parses_with_usvg() {
+        let body = "flowchart TD\nA[开始] --> B[处理]\nB --> C[结束]\nC --> A\n";
+        let elk_src = format!("---\nconfig:\n  layout: elk\n---\n{body}");
+        let dagre_src = format!("---\nconfig:\n  layout: dagre\n---\n{body}");
+
+        let elk = render_svg(&elk_src, false).expect("layout: elk 应能渲染");
+        assert!(elk.trim_start().starts_with("<svg"));
+        assert!(parse_viewbox_size(&elk).is_some());
+        assert_gpui_usvg_parses("layout-elk", &elk);
+
+        let dagre = render_svg(&dagre_src, false).expect("layout: dagre 应能渲染");
+        assert_gpui_usvg_parses("layout-dagre", &dagre);
+        assert_ne!(elk, dagre, "layout: elk 不应退回 dagre");
+
+        let plain = render_svg(body, false).expect("默认布局应能渲染");
+        assert_eq!(
+            parse_viewbox_size(&plain),
+            parse_viewbox_size(&elk),
+            "默认配置 layout 是 elk，未声明布局应和显式 elk 同一 viewBox"
+        );
+        assert_ne!(
+            parse_viewbox_size(&elk),
+            parse_viewbox_size(&dagre),
+            "elk 和 dagre 的 viewBox 应不同"
+        );
     }
 
     /// gpui-pre 0.3.9 栅格化 SVG 用的就是 usvg 0.46。这里用同一份 crate 解析，

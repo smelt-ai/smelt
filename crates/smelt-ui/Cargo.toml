@@ -24,10 +24,10 @@ gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6" }
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6", features = ["tree-sitter-languages"] }
 # mermaid 代码块画图，见 markdown_mermaid.rs。版本锁死。
-# 默认 features 是 complete-svg-elk，会把 EPL-2.0 的 ELK 编进来，这里关掉。
-# architecture 图要 cytoscape 布局。complete-svg 还会打开 math（RaTeX），
-# 当前图种用不到，所以只开 svg + layout-cytoscape，不单开 math。
-merman = { version = "=0.9.1", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape"] }
+# layout-elk 编进适配层 merman-layout-elk（MIT OR Apache-2.0），它再依赖
+# merman-elk-layered（EPL-2.0 的 ELK 源码移植）。不走 complete-svg-elk：那条还会
+# 打开 math（RaTeX）。architecture 图要 cytoscape，所以保留 layout-cytoscape。
+merman = { version = "=0.9.1", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape", "layout-elk"] }
 # 类图测宽和单测解析都用 GPUI 同一份 usvg 0.46（gpui-pre 0.3.9 经 resvg 打开
 # text/system-fonts/memmap-fonts）。gpui 不把 fontdb 公开出去，只能直接依赖这个版本，
 # cargo 会和 gpui 合成同一份。
