@@ -219,6 +219,10 @@ fn v2_session_routes_are_dropped() {
            ('', 'term-1', NULL, 'git', 1, 420.0, NULL, NULL, 240.0, 1, 'changes', 0, 'all');
          INSERT INTO session_route_path VALUES ('', 'term-1', 'expanded', '/repo/src', 0);
          INSERT INTO workspace_ui VALUES (1, 2, 's-1', 'session', NULL, 320.0, 1, 'project', 1);
+         -- v2 起折叠、置顶就在独立表里（本机运行时的 runtime_id 是空串）。v3 只换会话路由，这些表原样留下。
+         INSERT INTO collapsed_project VALUES ('', '/repo/b', 0), ('', '/repo/a', 1);
+         INSERT INTO collapsed_agent VALUES ('writer', 0);
+         INSERT INTO pinned_project VALUES ('', '/repo/z', 0), ('', '/repo/a', 1);
          PRAGMA user_version = 2;",
     )
     .unwrap();
