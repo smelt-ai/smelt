@@ -4033,6 +4033,33 @@ fn numbered_paragraphs(label: &str, count: usize) -> String {
         .join("\n\n")
 }
 
+fn conversation_fixture(
+    sid: &str,
+    entries: Vec<AcpEntry>,
+    phase: DaemonPhase,
+    cx: &mut gpui::Context<super::AcpView>,
+) -> super::AcpView {
+    let mut view = super::AcpView::placeholder(
+        cx,
+        super::AcpViewOrigin {
+            runtime: offline_runtime(),
+            launch_prep: None,
+            agent: ConversationAgentKind::Pi,
+            launch: ConversationLaunchSpec::from_command("true"),
+            refresh_launch_from_settings: false,
+            profile_id: None,
+            cwd: Some("/tmp/smelt".into()),
+            reason: "scroll".into(),
+            entries,
+            resume_session_id: None,
+            saved_sid: Some(sid.into()),
+        },
+    );
+    view.phase = phase;
+    view.awaiting_initial_history_snapshot = false;
+    view
+}
+
 /// 打开一个已有消息的会话视图。不等首帧快照，后续快照按增量尾片合并。
 fn open_conversation<'a>(
     cx: &'a mut gpui::TestAppContext,
@@ -4044,27 +4071,46 @@ fn open_conversation<'a>(
     &'a mut gpui::VisualTestContext,
 ) {
     cx.update(gpui_component::init);
-    let (view, cx) = cx.add_window_view(move |_window, cx| {
-        let mut view = super::AcpView::placeholder(
-            cx,
-            super::AcpViewOrigin {
-                runtime: offline_runtime(),
-                launch_prep: None,
-                agent: ConversationAgentKind::Pi,
-                launch: ConversationLaunchSpec::from_command("true"),
-                refresh_launch_from_settings: false,
-                profile_id: None,
-                cwd: Some("/tmp/smelt".into()),
-                reason: "scroll".into(),
-                entries,
-                resume_session_id: None,
-                saved_sid: Some(sid.into()),
-            },
-        );
-        view.phase = phase;
-        view.awaiting_initial_history_snapshot = false;
-        view
+    let (view, cx) =
+        cx.add_window_view(move |_window, cx| conversation_fixture(sid, entries, phase, cx));
+    (view, cx)
+}
+
+/// 正式窗口的根上有文字选择层，拖选才登记得到。测试把对话视图直接当窗口根时没有这一层。
+struct SelectingConversation {
+    view: gpui::Entity<super::AcpView>,
+}
+
+impl gpui::Render for SelectingConversation {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement, Styled, div};
+        div()
+            .relative()
+            .size_full()
+            .child(gpui_base::TextSelectionLayer)
+            .child(self.view.clone())
+    }
+}
+
+fn open_conversation_with_text_selection<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    sid: &'static str,
+    entries: Vec<AcpEntry>,
+    phase: DaemonPhase,
+) -> (
+    gpui::Entity<super::AcpView>,
+    &'a mut gpui::VisualTestContext,
+) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let (host, cx) = cx.add_window_view(move |_window, cx| SelectingConversation {
+        view: cx.new(|cx| conversation_fixture(sid, entries, phase, cx)),
     });
+    let view = host.read_with(cx, |host, _| host.view.clone());
     (view, cx)
 }
 
@@ -4095,6 +4141,8 @@ fn wheel(position: gpui::Point<gpui::Pixels>, up: gpui::Pixels) -> gpui::ScrollW
 /// 拖选文字时，上游按最近的裁剪区判断指针是否贴边，贴边就合成滚轮滚动列表。
 /// 消息行若自己裁剪，一条短回答的行就成了这块区域：上下 16px 的触发带盖满整行，
 /// 在里面横着拖也会让整个列表跟着滚。最近的裁剪区必须是列表视口。
+///
+/// 文字选择层装在应用根上，不在对话视图里。这里把同一层装进测试窗口，拖选才走正式路径。
 #[gpui::test]
 fn dragging_a_selection_across_a_short_answer_does_not_scroll_the_list(
     cx: &mut gpui::TestAppContext,
@@ -4103,7 +4151,8 @@ fn dragging_a_selection_across_a_short_answer_does_not_scroll_the_list(
         text: numbered_paragraphs("长回答", 40),
         thought: false,
     };
-    let (view, cx) = open_conversation(
+    let short_text = "这是一条只有一行的短回答，横着拖选它不该滚动列表。";
+    let (view, cx) = open_conversation_with_text_selection(
         cx,
         "acp-drag-select-short-answer",
         vec![
@@ -4111,7 +4160,7 @@ fn dragging_a_selection_across_a_short_answer_does_not_scroll_the_list(
             long_answer(),
             AcpEntry::User("第二问".into()),
             AcpEntry::Assistant {
-                text: "这是一条只有一行的短回答，横着拖选它不该滚动列表。".into(),
+                text: short_text.into(),
                 thought: false,
             },
             AcpEntry::User("第三问".into()),
@@ -4169,8 +4218,12 @@ fn dragging_a_selection_across_a_short_answer_does_not_scroll_the_list(
         .advance_clock(std::time::Duration::from_millis(300));
     draw_settled(cx);
 
-    let selected = cx.update(|window, cx| gpui_base::TextSelection::selected_text(window, cx));
-    assert!(!selected.is_empty(), "拖动要真的选中了短回答里的字");
+    let selected = cx.update(gpui_base::TextSelection::selected_text);
+    let selected = selected.trim();
+    assert!(
+        !selected.is_empty() && short_text.contains(selected),
+        "拖动要真的选中了短回答里的字: {selected:?}"
+    );
     let after = view.read_with(cx, |view, _| view.list_state.logical_scroll_top());
     assert_eq!(
         (after.item_ix, after.offset_in_item),
