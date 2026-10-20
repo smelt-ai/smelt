@@ -345,22 +345,29 @@ fn markdown_view_with_selection(
     text: impl Into<SharedString>,
     selectable: bool,
 ) -> TextView {
-    with_markdown_hooks(TextView::markdown(id, text).selectable(selectable))
+    with_markdown_hooks(
+        TextView::markdown(id, text).selectable(selectable),
+        shared_markdown_extensions(),
+    )
 }
 
-/// 和 [`markdown_view_clickable`] 一样的 Markdown，只是解析状态由调用方持有。
+/// 对话消息（ACP 对话、会话历史）的 Markdown，解析状态由调用方持有。原始 HTML 按
+/// 原文显示，见 `markdown_literal_html` 模块。
 ///
 /// `TextView::markdown` 把解析结果挂在元素上，元素有一帧没画就丢掉。虚拟列表里的行
 /// 滚出渲染范围再回来，超过 4KB 的正文要先以空内容等后台重新解析，行高跟着跳。
 /// 这类地方自己留住 `TextViewState`，用这个入口画。
-pub fn markdown_view_for_state(state: &gpui::Entity<TextViewState>) -> TextView {
-    with_markdown_hooks(TextView::new(state).selectable(true))
+pub fn chat_markdown_view(state: &gpui::Entity<TextViewState>) -> TextView {
+    with_markdown_hooks(
+        TextView::new(state).selectable(true),
+        chat_markdown_extensions(),
+    )
 }
 
-fn with_markdown_hooks(view: TextView) -> TextView {
+fn with_markdown_hooks(view: TextView, extensions: &MarkdownExtensions) -> TextView {
     view.style(markdown_text_view_style())
         .code_block_actions(code_block_corner)
-        .markdown_extensions(shared_markdown_extensions().clone())
+        .markdown_extensions(extensions.clone())
 }
 
 /// `MarkdownExtensions` assigns a new global revision whenever a parser or renderer is registered.
@@ -376,9 +383,67 @@ fn shared_markdown_extensions() -> &'static MarkdownExtensions {
     })
 }
 
+/// [`shared_markdown_extensions`] 再加上原始 HTML 按原文显示。同样只建一次。
+fn chat_markdown_extensions() -> &'static MarkdownExtensions {
+    static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
+    EXTENSIONS.get_or_init(|| {
+        shared_markdown_extensions()
+            .clone()
+            .plugin(crate::markdown_literal_html::LiteralInlineHtml)
+            .plugin(crate::markdown_literal_html::LiteralBlockHtml)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ChatMarkdownRoot {
+        state: gpui::Entity<TextViewState>,
+    }
+
+    impl gpui::Render for ChatMarkdownRoot {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().w(px(600.)).child(chat_markdown_view(&self.state))
+        }
+    }
+
+    /// 对话里的原始 HTML 原样显示：不认识的标签不吞内容，代码里不多出 `\`。
+    #[gpui::test]
+    fn chat_markdown_shows_raw_html_as_written(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let source = "前 <section class=\"card\">内容</section> 和 <panel>\n\n\
+                      <div>\n块里的字\n</div>\n\n\
+                      1. 步骤\n   - 子项\n\n     ```rust\n     let v: Vec<String> = vec![];\n     ```\n";
+        let (root, cx) = cx.add_window_view(|_window, cx| ChatMarkdownRoot {
+            state: cx.new(|cx| TextViewState::markdown(source, cx)),
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+
+        let text = cx.update(|_window, cx| {
+            let state = root.read(cx).state.clone();
+            state.update(cx, |state, cx| {
+                state.select_all(cx);
+                state.selected_text()
+            })
+        });
+        assert!(
+            text.contains("<section class=\"card\">内容</section>"),
+            "{text}"
+        );
+        assert!(text.contains("<panel>"), "{text}");
+        assert!(text.contains("<div>\n块里的字\n</div>"), "{text}");
+        assert!(text.contains("let v: Vec<String> = vec![];"), "{text}");
+        assert!(!text.contains('\\'), "{text}");
+    }
 
     #[test]
     fn markdown_extensions_are_reused_across_views() {

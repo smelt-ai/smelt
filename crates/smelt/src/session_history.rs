@@ -21,7 +21,9 @@ use gpui::*;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::tab::{Tab, TabBar};
+use gpui_component::text::{TextView, TextViewState};
 use gpui_component::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -196,7 +198,7 @@ pub(crate) struct HistoryViewParams<'a> {
     pub profile_id: Option<String>,
     pub cwd: Option<String>,
     pub list: HistoryListState,
-    pub detail: &'a Option<(PathBuf, Rc<SessionDetail>)>,
+    pub detail: &'a Option<OpenedHistory>,
     pub detail_list_state: ListState,
     pub filter: Option<Entity<gpui_component::input::InputState>>,
     /// 智能体上下文里只允许一个引擎。`None` 表示普通项目。
@@ -293,12 +295,12 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         HistoryListState::Ready(s) => Some(s.clone()),
         _ => None,
     };
-    let detail = detail.as_ref().filter(|(path, _)| {
+    let detail = detail.as_ref().filter(|opened| {
         sessions
             .as_ref()
-            .is_some_and(|list| list.iter().any(|session| session.path == *path))
+            .is_some_and(|list| list.iter().any(|session| session.path == opened.path))
     });
-    let selected_path = detail.map(|(path, _)| path.clone());
+    let selected_path = detail.map(|opened| opened.path.clone());
     let query = filter
         .as_ref()
         .map(|input| input.read(cx).value().trim().to_lowercase())
@@ -684,14 +686,17 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
 
     let turns_body: AnyElement = match detail {
         None => placeholder_view("← 选择一个历史会话查看内容", muted).into_any_element(),
-        Some((_, d)) if d.turns.is_empty() => {
+        Some(opened) if opened.detail.turns.is_empty() => {
             placeholder_view("这份会话没有可展示的对话内容", muted).into_any_element()
         }
-        Some((_, d)) => {
-            let detail = d.clone();
+        Some(opened) => {
+            let detail = opened.detail.clone();
+            let turn_markdown = opened.turn_markdown.clone();
+            let remeasure = detail_list_state.clone();
             // 和对话页同一套排版：居中限宽的阅读栏，间距算在虚拟项自己身上。
-            gpui::list(detail_list_state, move |i, _window, _app| {
+            gpui::list(detail_list_state, move |i, _window, app| {
                 let turn = &detail.turns[i];
+                let body = turn_markdown.view(i, &turn.text, &remeasure, app);
                 h_flex()
                     .w_full()
                     .justify_center()
@@ -702,7 +707,7 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
                             .w_full()
                             .min_w_0()
                             .max_w(ui_theme::conversation_max_width())
-                            .child(history_turn(turn, i, muted, fg, c_border)),
+                            .child(history_turn(turn, body, muted, fg, c_border)),
                     )
                     .into_any_element()
             })
@@ -771,8 +776,56 @@ pub fn history_view(params: HistoryViewParams<'_>, cx: &mut Context<Workspace>) 
         .child(content)
 }
 
+/// 打开着的那份历史会话：路径、解析出的对话，和各轮正文的 Markdown 解析状态。
+/// 解析状态跟着它一起换掉、一起丢，换会话不用另外清。
+pub(crate) struct OpenedHistory {
+    pub path: PathBuf,
+    pub detail: Rc<SessionDetail>,
+    turn_markdown: Rc<HistoryTurnMarkdown>,
+}
+
+impl OpenedHistory {
+    fn new(path: PathBuf, detail: SessionDetail) -> Self {
+        Self {
+            path,
+            detail: Rc::new(detail),
+            turn_markdown: Rc::default(),
+        }
+    }
+}
+
+/// 历史详情各轮正文的解析状态，按轮次下标留着。
+///
+/// 详情是虚拟列表。解析结果挂在元素上的话，行一滚出渲染范围就丢：超过 4KB 的正文
+/// 滚回来要先以空内容等后台重新解析，行高跟着跳（对话页同一个坑，见
+/// `chat_markdown_view`）。解析落地时请列表重新量这一行，还在视口外的行也能在滚到之前量对。
+#[derive(Default)]
+struct HistoryTurnMarkdown {
+    turns: RefCell<HashMap<usize, (Entity<TextViewState>, Subscription)>>,
+}
+
+impl HistoryTurnMarkdown {
+    fn view(&self, index: usize, text: &str, list_state: &ListState, cx: &mut App) -> TextView {
+        let state = self
+            .turns
+            .borrow_mut()
+            .entry(index)
+            .or_insert_with(|| {
+                let state = cx.new(|cx| TextViewState::markdown(text, cx));
+                let list_state = list_state.clone();
+                let remeasure = cx.observe(&state, move |_, _| {
+                    list_state.remeasure_items(index..index + 1);
+                });
+                (state, remeasure)
+            })
+            .0
+            .clone();
+        crate::markdown_mermaid::chat_markdown_view(&state)
+    }
+}
+
 /// 一轮对话，排版对齐对话页：用户消息是靠右的气泡，agent 回答是不套卡片的正文。
-fn history_turn(turn: &Turn, index: usize, muted: Hsla, fg: Hsla, border: Hsla) -> AnyElement {
+fn history_turn(turn: &Turn, body: TextView, muted: Hsla, fg: Hsla, border: Hsla) -> AnyElement {
     // agent 回显的中断标记不是用户说的话，和对话页一样画成分隔线。
     if turn.is_user && smelt_model::acp_chat::is_interrupt_marker(&turn.text) {
         return h_flex()
@@ -784,7 +837,6 @@ fn history_turn(turn: &Turn, index: usize, muted: Hsla, fg: Hsla, border: Hsla) 
             .child(div().flex_1().h(px(1.)).bg(border))
             .into_any_element();
     }
-    let body = crate::markdown_mermaid::markdown_view(("turn-md", index), turn.text.clone());
     if turn.is_user {
         // 最小宽度的原因见对话页 `user_message_bubble`：markdown 列表在收缩的气泡里会被裁掉。
         return h_flex()
@@ -1079,7 +1131,7 @@ impl Workspace {
                 }
                 if let Some(detail) = detail {
                     this.history_detail_list_state.reset(detail.turns.len());
-                    this.session_detail = Some((path, Rc::new(detail)));
+                    this.session_detail = Some(OpenedHistory::new(path, detail));
                 }
                 cx.notify();
             });
@@ -1112,7 +1164,7 @@ impl Workspace {
         if self
             .session_detail
             .as_ref()
-            .is_some_and(|(path, _)| path == &target.path)
+            .is_some_and(|opened| opened.path == target.path)
         {
             self.session_detail = None;
             self.history_detail_list_state.reset(0);

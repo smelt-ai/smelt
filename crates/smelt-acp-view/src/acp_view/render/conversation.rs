@@ -175,7 +175,9 @@ impl AcpView {
                 state
             }
         };
-        smelt_ui::markdown_mermaid::markdown_view_for_state(&state)
+        smelt_ui::markdown_mermaid::chat_markdown_view(&state).on_link_click(markdown_link_opener(
+            FileLinks::of(&self.runtime, self.cwd.as_deref()),
+        ))
     }
 
     pub(super) fn render_message_list(
@@ -369,12 +371,7 @@ impl AcpView {
                                         "acp-user-md",
                                         i,
                                         0,
-                                        cached_entry_markdown(
-                                            &this.rendered_markdown,
-                                            i,
-                                            entry,
-                                            FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                                        ),
+                                        cached_entry_markdown(&this.rendered_markdown, i, entry),
                                         cx,
                                     ))
                                     .context_menu(move |menu, window, cx| {
@@ -404,12 +401,7 @@ impl AcpView {
                                     "acp-user-images-md",
                                     i,
                                     0,
-                                    cached_entry_markdown(
-                                        &this.rendered_markdown,
-                                        i,
-                                        entry,
-                                        FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                                    ),
+                                    cached_entry_markdown(&this.rendered_markdown, i, entry),
                                     cx,
                                 ),
                             );
@@ -509,12 +501,7 @@ impl AcpView {
                                 "acp-md",
                                 i,
                                 0,
-                                cached_entry_markdown(
-                                    &this.rendered_markdown,
-                                    i,
-                                    entry,
-                                    FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                                ),
+                                cached_entry_markdown(&this.rendered_markdown, i, entry),
                                 cx,
                             ))
                             .when(final_answer, |col| {
@@ -594,14 +581,9 @@ impl AcpView {
                             "任务完成".to_string()
                         };
                         let body_markdown = if !has_summary {
-                            markdown_text_for_cwd(&body, FileLinks::of(&this.runtime, this.cwd.as_deref())).into()
+                            body.clone().into()
                         } else {
-                            cached_entry_markdown(
-                                &this.rendered_markdown,
-                                i,
-                                entry,
-                                FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                            )
+                            cached_entry_markdown(&this.rendered_markdown, i, entry)
                         };
                         let mut answer = v_flex()
                             .id(("acp-completion-message", i))
@@ -2388,12 +2370,7 @@ impl AcpView {
                     },
                     entry_ix,
                     0,
-                    cached_entry_markdown(
-                        &self.rendered_markdown,
-                        entry_ix,
-                        entry,
-                        FileLinks::of(&self.runtime, self.cwd.as_deref()),
-                    ),
+                    cached_entry_markdown(&self.rendered_markdown, entry_ix, entry),
                     cx,
                 ))
                 .into_any_element();

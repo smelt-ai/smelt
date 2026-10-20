@@ -11,6 +11,7 @@ pub mod frame_stats;
 pub mod history_titles_global;
 pub mod icon_action;
 pub mod image;
+mod markdown_literal_html;
 pub mod markdown_mermaid;
 pub mod motion;
 pub mod provider_status_global;
