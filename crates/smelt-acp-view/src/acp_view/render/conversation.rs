@@ -233,7 +233,6 @@ impl AcpView {
                         .justify_center()
                         .px_4()
                         .pb(px(12.))
-                        .overflow_hidden()
                         .child(
                             div()
                                 .w_full()
@@ -1282,13 +1281,14 @@ impl AcpView {
                 } else {
                     0.
                 };
+                // 行外壳不裁剪。拖选文字的自动滚动拿最近的裁剪区当视口，行一裁剪，
+                // 短消息整行都落在贴边触发带里，横着拖也会滚走列表；裁剪交给列表本身。
                 h_flex()
                     .w_full()
                     .justify_center()
                     .px_4()
                     .pt(px(top))
                     .pb(px(bottom))
-                    .overflow_hidden()
                     .child(
                         div()
                             .w_full()
@@ -1877,6 +1877,7 @@ impl AcpView {
                 .quiet()
                 .w_full()
                 .justify_start()
+                .group(SUBAGENT_STOP_GROUP)
                 .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
                 .child(header)
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -1999,6 +2000,7 @@ impl AcpView {
             .quiet()
             .w_full()
             .justify_start()
+            .group(SUBAGENT_STOP_GROUP)
             .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
             .child(row)
             .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -2028,11 +2030,15 @@ impl AcpView {
             );
         }
         let stop_id = id.to_string();
+        // 整行 hover 才显出来，用透明度而不是不渲染，耗时才不会跳。
         Some(
             Button::new((gpui::ElementId::from("acp-subagent-stop"), stop_id.clone()))
                 .danger()
                 .icon_size()
                 .label("停止")
+                .flex_shrink_0()
+                .opacity(0.0)
+                .group_hover(SUBAGENT_STOP_GROUP, |s| s.opacity(1.0))
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     // 不要顺带打开侧边视图。
                     cx.stop_propagation();
@@ -2964,6 +2970,8 @@ fn subagent_child_status_glyph(
 
 const EXPAND_ICON_GROUP: &str = "acp-expand-row";
 const PEEK_ROW_GROUP: &str = "acp-peek-row";
+/// 子智能体那一行：指上去才显出「停止」。
+const SUBAGENT_STOP_GROUP: &str = "acp-subagent-stop-row";
 
 /// 可展开行：平时左侧是工具图标，hover 换成箭头。展开仍靠点击。
 fn expandable_lead_icon(
