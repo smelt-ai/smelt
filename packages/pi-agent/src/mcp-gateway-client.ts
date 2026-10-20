@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { McpServerEntry, McpTransportFactory } from "@earendil-works/pi-coding-agent";
 import {
 	type JsonRpcMessage,
@@ -114,8 +113,6 @@ async function runningGateway(dir: string): Promise<GatewayEndpoint | undefined>
 	return (await healthy(endpoint)) ? endpoint : undefined;
 }
 
-const GATEWAY_MAIN = fileURLToPath(new URL("./mcp-gateway-main.ts", import.meta.url));
-
 function spawnGateway(dir: string): number {
 	const log = join(dir, "gateway.log");
 	try {
@@ -123,7 +120,9 @@ function spawnGateway(dir: string): number {
 	} catch {}
 	const output = openSync(log, "a", 0o600);
 	try {
-		const child = spawn(process.execPath, [GATEWAY_MAIN], {
+		// 编译后的 smelt-pi 把 `/$bunfs/root/...` 插进 argv[1]。这里只传子命令，
+		// 不再传一份磁盘上不存在的脚本路径。
+		const child = spawn(process.execPath, ["gateway"], {
 			// Own session: the conversation's process group is killed when it ends.
 			detached: true,
 			stdio: ["ignore", output, output],

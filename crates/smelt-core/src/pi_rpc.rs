@@ -340,8 +340,6 @@ async fn run_connection(
     let resume_id = launch.resume_session_id.as_ref().map(|id| id.to_string());
     let fork_id = launch.fork_session_id.as_ref().map(|id| id.to_string());
     apply_pi_session_cli_args(&mut trailing, resume_id.as_deref(), fork_id.as_deref());
-    // `runtime` 在同步完成、全局锁释放前已经取得 shared generation lease；将它持有
-    // 到本连接结束，消除 prepare 与 spawn 之间被升级 GC 删除目录的窗口。
     let process_args = runtime.process_args(trailing);
     let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
     let background = crate::background_tasks::BackgroundSupervisor::start(
@@ -350,19 +348,23 @@ async fn run_connection(
         event_tx.clone(),
         outbound_tx.clone(),
     )?;
+    let mut trace = HandshakeTrace {
+        started: std::time::Instant::now(),
+        published_model: None,
+    };
+    let session_seed_rx = start_session_preload(launch);
     let (child_stdin, child_stdout, child_stderr, child) = {
         let _spawn_permit = spawn_gate.as_ref().map(|gate| gate.read().unwrap());
         let mut stdio = stdio_out.lock().unwrap();
         if shutdown_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let spawned = spawn_process(
-            launch,
-            inline_env,
-            process_args,
-            &runtime,
-            Some(background.socket_path()),
-        )?;
+        let spawn_started = std::time::Instant::now();
+        let spawned = spawn_process(launch, inline_env, process_args, Some(background.socket_path()))?;
+        crate::app_log::info(
+            "pi-rpc",
+            &format!("会话 {} 进程已拉起，用时 {:?}", launch.sid, spawn_started.elapsed()),
+        );
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
             stdin_fd: spawned.0.as_raw_fd(),
@@ -370,6 +372,7 @@ async fn run_connection(
         });
         spawned
     };
+    let session_seed = session_seed_rx.and_then(|rx| rx.recv().ok()).flatten();
     let mut process = PiProcessGuard::new(child);
     *stderr_drain.lock().unwrap() = Some(spawn_stderr_drain(child_stderr, stderr_tail));
 
@@ -387,6 +390,8 @@ async fn run_connection(
             &event_tx,
             &mut state,
             launch,
+            session_seed,
+            &mut trace,
         );
         smol::future::race(initialize, async {
             smol::Timer::after(PI_RPC_HANDSHAKE_TIMEOUT).await;
@@ -450,8 +455,7 @@ async fn run_connection(
         }
     }
     .await;
-    // 必须先确认直属子进程已退出，再让 `runtime` 的 generation lease 析构。
-    // 仅发送 SIGKILL 不等于进程已经消失，期间原地修复会与旧进程并发读模块树。
+    // 仅发送 SIGKILL 不等于进程已经消失。先收割，再让函数返回。
     process.kill_and_reap();
     drop(background);
     result
@@ -497,11 +501,10 @@ fn spawn_process(
     launch: &ConversationLaunch,
     inline_env: BTreeMap<String, String>,
     mut process_args: Vec<String>,
-    runtime: &crate::managed_runtime::ManagedPiRuntime,
     background_sock: Option<&std::path::Path>,
 ) -> Result<SpawnedPi, String> {
-    if process_args.len() < 2 {
-        return Err("Pi 受管运行时启动参数不完整".to_string());
+    if process_args.is_empty() {
+        return Err("Pi 启动参数不完整".to_string());
     }
     let program = process_args.remove(0);
     let mut command = std::process::Command::new(program);
@@ -541,7 +544,6 @@ fn spawn_process(
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
-    runtime.inherit_into(&mut command);
     let mut command = async_process::Command::from(command);
     let mut child = command
         .stdin(std::process::Stdio::piped())
@@ -658,6 +660,17 @@ impl Drop for PiProcessGuard {
     }
 }
 
+struct HandshakeTrace {
+    started: std::time::Instant,
+    /// 已经发给界面的 provider / id / 显示名。用来判断这次是不是一次新的对齐。
+    published_model: Option<(String, String, String)>,
+}
+
+/// 转录只认 Pi 的会话文件，不认 `get_entries`。
+///
+/// 启动前读到的是种子，和进程拉起重叠。握手结束、`Ready` 已经发出之后，按
+/// `get_state` 给出的 session id 再读一次（分叉则是切点落盘后的新文件）。
+/// 指纹不同时后一次读取覆盖种子。两次都走 `session_history::read_pi_session_branch`。
 #[allow(clippy::too_many_arguments)]
 async fn initialize_session<R, W>(
     lines: &mut R,
@@ -667,12 +680,24 @@ async fn initialize_session<R, W>(
     event_tx: &smol::channel::Sender<ConversationEvent>,
     state: &mut PiState,
     launch: &ConversationLaunch,
+    seed: Option<crate::session_history::PiSessionBranch>,
+    trace: &mut HandshakeTrace,
 ) -> Result<(), String>
 where
     R: Stream<Item = std::io::Result<String>> + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let response = rpc_call(
+    let resumed = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
+    let sessions_root = pi_sessions_root(launch);
+    let seed = seed.or_else(|| resume_source_id(launch).and_then(|id| {
+        crate::session_history::read_pi_session_branch(&sessions_root, &id)
+    }));
+    if let Some(model) = optimistic_pi_model(launch, seed.as_ref(), resumed) {
+        note_model(state, event_tx, launch, trace, model, "启动前");
+    }
+
+    let round_started = std::time::Instant::now();
+    let responses = rpc_round(
         lines,
         writer,
         outbound_tx,
@@ -680,14 +705,45 @@ where
         event_tx,
         state,
         launch,
-        "smelt-init-state",
-        serde_json::json!({"type": "get_state"}),
+        vec![
+            (
+                "smelt-init-state",
+                serde_json::json!({"type": "get_state"}),
+            ),
+            (
+                "smelt-init-models",
+                serde_json::json!({"type": "get_available_models"}),
+            ),
+            (
+                "smelt-init-thinking",
+                serde_json::json!({"type": "get_available_thinking_levels"}),
+            ),
+            (
+                "smelt-init-commands",
+                serde_json::json!({"type": "get_commands"}),
+            ),
+        ],
     )
     .await?;
-    apply_state_response(state, response_data(&response)?)?;
+    crate::app_log::info(
+        "pi-rpc",
+        &format!(
+            "会话 {} 独立握手 RPC 收齐，用时 {:?}",
+            launch.sid,
+            round_started.elapsed()
+        ),
+    );
+    apply_state_response(state, response_data(responses.get("smelt-init-state").unwrap())?)?;
+    if let Some(model) = state.model.clone() {
+        note_model(state, event_tx, launch, trace, model, "get_state");
+    }
+    state.models = parse_available_models(response_data(responses.get("smelt-init-models").unwrap())?);
+    let model_before_set = state
+        .model
+        .as_ref()
+        .map(|model| (model.provider.clone(), model.id.clone()));
 
-    // 分叉副本的切点：必须在重放历史之前切分支（切完 `get_state` 才是分支的
-    // session id）；放在首个 `get_state` 之后，先用回执确认进程活着。
+    // 分叉切点要先落在 Pi 里，用户才能对切完的会话发消息。它不读整棵 entry 树。
     if let Some(cut) = launch.fork_cut.as_ref() {
         apply_fork_cut(
             lines,
@@ -700,7 +756,6 @@ where
             cut,
         )
         .await?;
-        // fork 后 Pi 已切到新 session 文件，补一次 get_state 拿分支身份。
         let response = rpc_call(
             lines,
             writer,
@@ -709,55 +764,31 @@ where
             event_tx,
             state,
             launch,
-            "smelt-init-state",
+            "smelt-init-state-fork",
             serde_json::json!({"type": "get_state"}),
         )
         .await?;
         apply_state_response(state, response_data(&response)?)?;
+        if let Some(model) = state.model.clone() {
+            note_model(state, event_tx, launch, trace, model, "fork 后的 get_state");
+        }
     }
-
-    let response = rpc_call(
-        lines,
-        writer,
-        outbound_tx,
-        outbound_rx,
-        event_tx,
-        state,
-        launch,
-        "smelt-init-models",
-        serde_json::json!({"type": "get_available_models"}),
-    )
-    .await?;
-    state.models = parse_available_models(response_data(&response)?);
 
     let force_agent_model = agent_model_from_launch(launch);
     if force_agent_model.is_some()
         || state
             .model
             .as_ref()
-            .is_none_or(|m| m.provider == "unknown" || m.id == "unknown")
+            .is_none_or(|model| model.provider == "unknown" || model.id == "unknown")
     {
-        let default_target = force_agent_model
-            .or_else(|| {
-                crate::pi_model_settings::load_pi_model_settings()
-                    .ok()
-                    .and_then(|settings| {
-                        let p = settings.default_model.provider.trim().to_string();
-                        let m = settings.default_model.model.trim().to_string();
-                        if !p.is_empty() && !m.is_empty() {
-                            Some((p, m))
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .or_else(|| {
+        let default_target = force_agent_model.or_else(|| settings_default_model(launch)).or_else(
+            || {
                 state
                     .models
                     .first()
-                    .map(|m| (m.provider.clone(), m.id.clone()))
-            });
-
+                    .map(|model| (model.provider.clone(), model.id.clone()))
+            },
+        );
         if let Some((provider, model_id)) = default_target {
             let set_res = rpc_call(
                 lines,
@@ -776,17 +807,17 @@ where
             )
             .await;
             if let Ok(res) = set_res
-                && let Some(m) = res.get("data").and_then(parse_model)
+                && let Some(model) = res.get("data").and_then(parse_model)
             {
-                state.model = Some(m);
+                state.model = Some(model);
             }
             if state.model.is_none() {
-                if let Some(m) = state
+                if let Some(model) = state
                     .models
                     .iter()
-                    .find(|m| m.provider == provider && m.id == model_id)
+                    .find(|model| model.provider == provider && model.id == model_id)
                 {
-                    state.model = Some(m.clone());
+                    state.model = Some(model.clone());
                 } else {
                     state.model = Some(PiModel {
                         provider: provider.clone(),
@@ -796,22 +827,36 @@ where
                     });
                 }
             }
+            if let Some(model) = state.model.clone() {
+                note_model(state, event_tx, launch, trace, model, "set_model");
+            }
         }
     }
 
-    let response = rpc_call(
-        lines,
-        writer,
-        outbound_tx,
-        outbound_rx,
-        event_tx,
-        state,
-        launch,
-        "smelt-init-thinking",
-        serde_json::json!({"type": "get_available_thinking_levels"}),
-    )
-    .await?;
-    state.thinking_levels = response_data(&response)?["levels"]
+    let model_after_set = state
+        .model
+        .as_ref()
+        .map(|model| (model.provider.clone(), model.id.clone()));
+    let thinking = if model_before_set != model_after_set && model_after_set.is_some() {
+        rpc_call(
+            lines,
+            writer,
+            outbound_tx,
+            outbound_rx,
+            event_tx,
+            state,
+            launch,
+            "smelt-init-thinking-after-model",
+            serde_json::json!({"type": "get_available_thinking_levels"}),
+        )
+        .await?
+    } else {
+        responses
+            .get("smelt-init-thinking")
+            .cloned()
+            .ok_or_else(|| "缺少 thinking level 回执".to_string())?
+    };
+    state.thinking_levels = response_data(&thinking)?["levels"]
         .as_array()
         .map(|levels| {
             levels
@@ -821,48 +866,8 @@ where
                 .collect()
         })
         .unwrap_or_default();
-
-    let response = rpc_call(
-        lines,
-        writer,
-        outbound_tx,
-        outbound_rx,
-        event_tx,
-        state,
-        launch,
-        "smelt-init-commands",
-        serde_json::json!({"type": "get_commands"}),
-    )
-    .await?;
-    state.available_commands = parse_pi_commands(response_data(&response)?);
-
-    let resumed = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
-    if resumed {
-        let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-        let response = rpc_call(
-            lines,
-            writer,
-            outbound_tx,
-            outbound_rx,
-            event_tx,
-            state,
-            launch,
-            "smelt-init-entries",
-            serde_json::json!({"type": "get_entries"}),
-        )
-        .await?;
-        let messages = active_branch_messages(response_data(&response)?)?;
-        crate::app_log::info(
-            "pi-rpc",
-            &format!(
-                "会话 {} 开始重放 {} 条当前分支历史消息",
-                launch.sid,
-                messages.len()
-            ),
-        );
-        replay_history(&messages, event_tx, state);
-        crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
-    }
+    state.available_commands =
+        parse_pi_commands(response_data(responses.get("smelt-init-commands").unwrap())?);
 
     publish_configuration(state, event_tx);
     let _ = event_tx.try_send(ConversationEvent::SessionControls {
@@ -888,11 +893,332 @@ where
     crate::app_log::info(
         "pi-rpc",
         &format!(
-            "会话 {} 握手完成，已发出 Ready（resumed={resumed}）",
-            launch.sid
+            "会话 {} 握手完成，已发出 Ready（resumed={resumed}，距启动 {:?}）",
+            launch.sid,
+            trace.started.elapsed()
         ),
     );
+    // Ready 先单独进快照。drain 把通道取空之后再灌转录，输入栏不必等整段历史排版。
+    yield_until_events_drained(event_tx).await;
+
+    if resumed {
+        let reconcile_id = if state.session_id.is_empty() {
+            resume_source_id(launch).unwrap_or_default()
+        } else {
+            state.session_id.clone()
+        };
+        let reread_started = std::time::Instant::now();
+        let reread = crate::session_history::read_pi_session_branch(&sessions_root, &reconcile_id);
+        let (chosen, source) = match (seed, reread) {
+            (Some(seed), Some(live)) if seed.fingerprint == live.fingerprint => (Some(seed), "种子"),
+            (_, Some(live)) => (Some(live), "握手后的会话文件"),
+            (Some(seed), None) => (Some(seed), "种子（握手后文件不可读）"),
+            (None, None) => (None, "无"),
+        };
+        if let Some(branch) = chosen.as_ref() {
+            crate::app_log::info(
+                "pi-rpc",
+                &format!(
+                    "会话 {} 转录采用{source}：{} 字节，读 {:?}，解析 {:?}，活动分支 {:?}，重读墙钟 {:?}，{} 条 entry",
+                    launch.sid,
+                    branch.bytes,
+                    branch.read,
+                    branch.parse,
+                    branch.extract,
+                    reread_started.elapsed(),
+                    branch.entries.len()
+                ),
+            );
+        }
+        let mut messages = chosen
+            .as_ref()
+            .map(|branch| {
+                branch
+                    .entries
+                    .iter()
+                    .filter_map(entry_message)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if launch.fork_session_id.is_some()
+            && source != "握手后的会话文件"
+            && let Some(cut) = launch.fork_cut.as_ref()
+        {
+            messages = cut_messages_before(messages, cut);
+        }
+        if !messages.is_empty() {
+            let replay_started = std::time::Instant::now();
+            crate::app_log::info(
+                "pi-rpc",
+                &format!(
+                    "会话 {} 开始重放 {} 条当前分支历史消息",
+                    launch.sid,
+                    messages.len()
+                ),
+            );
+            let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
+            replay_history(&messages, event_tx, state);
+            crate::app_log::info(
+                "pi-rpc",
+                &format!(
+                    "会话 {} 历史重放事件发完，用时 {:?}",
+                    launch.sid,
+                    replay_started.elapsed()
+                ),
+            );
+        }
+    }
     Ok(())
+}
+
+fn resume_source_id(launch: &ConversationLaunch) -> Option<String> {
+    launch
+        .fork_session_id
+        .as_ref()
+        .or(launch.resume_session_id.as_ref())
+        .map(|id| id.to_string())
+        .filter(|id| !id.is_empty())
+}
+
+fn pi_sessions_root(launch: &ConversationLaunch) -> std::path::PathBuf {
+    let agent_dir = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::pi_model_settings::pi_agent_dir);
+    if let Some(dir) = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_SESSION_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_SESSION_DIR"))
+    {
+        let path = std::path::PathBuf::from(crate::workspace_override::expand_tilde(dir));
+        return if path.is_absolute() {
+            path
+        } else {
+            agent_dir.join(path)
+        };
+    }
+    let settings_path = agent_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&settings_path)
+        && let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(dir) = settings
+            .get("sessionDir")
+            .and_then(serde_json::Value::as_str)
+            .filter(|dir| !dir.trim().is_empty())
+    {
+        let path = std::path::PathBuf::from(crate::workspace_override::expand_tilde(dir));
+        return if path.is_absolute() {
+            path
+        } else {
+            agent_dir.join(path)
+        };
+    }
+    agent_dir.join("sessions")
+}
+
+fn optimistic_pi_model(
+    launch: &ConversationLaunch,
+    seed: Option<&crate::session_history::PiSessionBranch>,
+    resumed: bool,
+) -> Option<PiModel> {
+    if resumed
+        && let Some(branch) = seed
+        && let Some((provider, id)) = crate::session_history::pi_branch_model(&branch.entries)
+    {
+        return Some(named_pi_model(provider, id));
+    }
+    agent_model_from_launch(launch)
+        .map(|(provider, id)| named_pi_model(provider, id))
+        .or_else(|| settings_default_model(launch).map(|(provider, id)| named_pi_model(provider, id)))
+}
+
+fn named_pi_model(provider: String, id: String) -> PiModel {
+    let name = id.clone();
+    PiModel {
+        provider,
+        id,
+        name,
+        context_window: None,
+    }
+}
+
+fn settings_default_model(launch: &ConversationLaunch) -> Option<(String, String)> {
+    let from_dir = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
+        .map(std::path::PathBuf::from);
+    let settings = if let Some(dir) = from_dir {
+        crate::pi_model_settings::load_pi_model_settings_at(&dir).ok()
+    } else if smelt_paths::running_under_test() {
+        None
+    } else {
+        crate::pi_model_settings::load_pi_model_settings().ok()
+    }?;
+    let provider = settings.default_model.provider.trim().to_string();
+    let model = settings.default_model.model.trim().to_string();
+    if provider.is_empty() || model.is_empty() {
+        None
+    } else {
+        Some((provider, model))
+    }
+}
+
+fn note_model(
+    state: &mut PiState,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    launch: &ConversationLaunch,
+    trace: &mut HandshakeTrace,
+    model: PiModel,
+    reason: &str,
+) {
+    let next = (
+        model.provider.clone(),
+        model.id.clone(),
+        model.name.clone(),
+    );
+    state.model = Some(model);
+    if trace.published_model.as_ref() == Some(&next) {
+        return;
+    }
+    publish_model_event(state, event_tx);
+    let shown = state.model.as_ref().expect("刚刚写上");
+    crate::app_log::info(
+        "pi-rpc",
+        &format!(
+            "会话 {} 发布模型 {}/{}（{reason}），距启动 {:?}",
+            launch.sid,
+            shown.provider,
+            shown.id,
+            trace.started.elapsed()
+        ),
+    );
+    trace.published_model = Some(next);
+}
+
+fn cut_messages_before(messages: Vec<serde_json::Value>, cut: &AcpForkCut) -> Vec<serde_json::Value> {
+    let mut seen = 0usize;
+    let mut kept = Vec::new();
+    for message in messages {
+        if message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+            let text = content_text(message.get("content"));
+            if text == cut.text {
+                if seen == cut.occurrence {
+                    break;
+                }
+                seen += 1;
+            }
+        }
+        kept.push(message);
+    }
+    kept
+}
+
+async fn yield_until_events_drained(event_tx: &smol::channel::Sender<ConversationEvent>) {
+    let deadline = std::time::Instant::now() + Duration::from_millis(20);
+    while !event_tx.is_empty() && std::time::Instant::now() < deadline {
+        smol::Timer::after(Duration::from_millis(1)).await;
+    }
+}
+
+fn start_session_preload(
+    launch: &ConversationLaunch,
+) -> Option<std::sync::mpsc::Receiver<Option<crate::session_history::PiSessionBranch>>> {
+    let id = resume_source_id(launch)?;
+    let root = pi_sessions_root(launch);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("smelt-pi-session-file".into())
+        .spawn(move || {
+            let _ = tx.send(crate::session_history::read_pi_session_branch(&root, &id));
+        })
+        .ok()?;
+    Some(rx)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rpc_round<R, W>(
+    lines: &mut R,
+    writer: &mut W,
+    outbound_tx: &smol::channel::Sender<serde_json::Value>,
+    outbound_rx: &smol::channel::Receiver<serde_json::Value>,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+    launch: &ConversationLaunch,
+    requests: Vec<(&str, serde_json::Value)>,
+) -> Result<HashMap<String, serde_json::Value>, String>
+where
+    R: Stream<Item = std::io::Result<String>> + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let started = std::time::Instant::now();
+    let mut pending: HashSet<String> = HashSet::new();
+    for (id, mut command) in requests {
+        command["id"] = serde_json::Value::String(id.to_string());
+        write_rpc(writer, &command).await?;
+        pending.insert(id.to_string());
+    }
+    let mut responses = HashMap::new();
+    let mut events = 0usize;
+    while !pending.is_empty() {
+        enum Wait {
+            Line(Option<std::io::Result<String>>),
+            Outbound(Result<serde_json::Value, smol::channel::RecvError>),
+        }
+        match smol::future::race(async { Wait::Line(lines.next().await) }, async {
+            Wait::Outbound(outbound_rx.recv().await)
+        })
+        .await
+        {
+            Wait::Outbound(Ok(message)) => {
+                if message.get("type").and_then(serde_json::Value::as_str)
+                    == Some("smelt_background_notify")
+                {
+                    if let Some(event) = background_notice_from_outbound(&message) {
+                        let _ = event_tx.try_send(event);
+                    }
+                    continue;
+                }
+                write_rpc(writer, &message).await?;
+            }
+            Wait::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
+            Wait::Line(Some(Ok(line))) => {
+                let value = parse_rpc_line(&line)?;
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
+                    let id = value
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if pending.remove(&id) {
+                        ensure_response_success(&value)?;
+                        crate::app_log::info(
+                            "pi-rpc",
+                            &format!(
+                                "会话 {} 握手 {id} 用时 {:?}，响应 {} 字节（其间 {events} 条事件）",
+                                launch.sid,
+                                started.elapsed(),
+                                line.len()
+                            ),
+                        );
+                        responses.insert(id, value);
+                    }
+                    continue;
+                }
+                events += 1;
+                handle_event(value, event_tx, outbound_tx, state, launch);
+            }
+            Wait::Line(Some(Err(error))) => {
+                return Err(format!("读取 Pi RPC 握手响应失败：{error}"));
+            }
+            Wait::Line(None) => return Err("Pi RPC 在握手完成前退出".to_string()),
+        }
+    }
+    Ok(responses)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -949,9 +1275,10 @@ where
                         crate::app_log::info(
                             "pi-rpc",
                             &format!(
-                                "会话 {} 握手 {id} 用时 {:?}（其间 {events} 条事件）",
+                                "会话 {} 握手 {id} 用时 {:?}，响应 {} 字节（其间 {events} 条事件）",
                                 launch.sid,
-                                started.elapsed()
+                                started.elapsed(),
+                                line.len()
                             ),
                         );
                         return Ok(value);
@@ -1118,71 +1445,75 @@ fn config_update_failure_status(detail: impl std::fmt::Display) -> String {
     format!("更新会话配置失败：{detail}")
 }
 
-fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<ConversationEvent>) {
+fn publish_model_event(state: &PiState, event_tx: &smol::channel::Sender<ConversationEvent>) {
     let effective_model = state
         .model
         .as_ref()
-        .filter(|m| m.provider != "unknown" && m.id != "unknown")
+        .filter(|model| model.provider != "unknown" && model.id != "unknown")
         .or_else(|| state.models.first());
+    let Some(current) = effective_model else {
+        return;
+    };
+    let mut providers = BTreeMap::<String, Vec<(String, String)>>::new();
+    for model in &state.models {
+        providers.entry(model.provider.clone()).or_default().push((
+            format!("{}/{}", model.provider, model.id),
+            model.name.clone(),
+        ));
+    }
 
-    if let Some(current) = effective_model {
-        let mut providers = BTreeMap::<String, Vec<(String, String)>>::new();
-        for model in &state.models {
-            providers.entry(model.provider.clone()).or_default().push((
-                format!("{}/{}", model.provider, model.id),
-                model.name.clone(),
-            ));
-        }
-
-        if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
-            for cp in settings.custom_providers {
-                for m in cp.models {
-                    let val = format!("{}/{}", cp.id, m.id);
-                    let list = providers.entry(cp.id.clone()).or_default();
-                    if !list.iter().any(|(v, _)| v == &val) {
-                        let display = if m.name.is_empty() {
-                            m.id.clone()
-                        } else {
-                            m.name
-                        };
-                        list.push((val, display));
-                    }
+    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
+        for cp in settings.custom_providers {
+            for m in cp.models {
+                let val = format!("{}/{}", cp.id, m.id);
+                let list = providers.entry(cp.id.clone()).or_default();
+                if !list.iter().any(|(v, _)| v == &val) {
+                    let display = if m.name.is_empty() {
+                        m.id.clone()
+                    } else {
+                        m.name
+                    };
+                    list.push((val, display));
                 }
             }
         }
-
-        if !state
-            .models
-            .iter()
-            .any(|m| m.provider == current.provider && m.id == current.id)
-            && current.provider != "unknown"
-        {
-            providers
-                .entry(current.provider.clone())
-                .or_default()
-                .push((
-                    format!("{}/{}", current.provider, current.id),
-                    current.name.clone(),
-                ));
-        }
-
-        let provider_groups = providers
-            .iter()
-            .map(|(provider, options)| ModelProviderGroup {
-                id: provider.clone(),
-                name: provider.clone(),
-                options: options.clone(),
-            })
-            .collect();
-        let options = providers.into_values().flatten().collect();
-        let _ = event_tx.try_send(ConversationEvent::Model(ModelState {
-            config_id: "model".to_string(),
-            current_value: format!("{}/{}", current.provider, current.id),
-            current_name: current.name.clone(),
-            options,
-            provider_groups,
-        }));
     }
+
+    if !state
+        .models
+        .iter()
+        .any(|m| m.provider == current.provider && m.id == current.id)
+        && current.provider != "unknown"
+    {
+        providers
+            .entry(current.provider.clone())
+            .or_default()
+            .push((
+                format!("{}/{}", current.provider, current.id),
+                current.name.clone(),
+            ));
+    }
+
+    let provider_groups = providers
+        .iter()
+        .map(|(provider, options)| ModelProviderGroup {
+            id: provider.clone(),
+            name: provider.clone(),
+            options: options.clone(),
+        })
+        .collect();
+    let options = providers.into_values().flatten().collect();
+    let _ = event_tx.try_send(ConversationEvent::Model(ModelState {
+        config_id: "model".to_string(),
+        current_value: format!("{}/{}", current.provider, current.id),
+        current_name: current.name.clone(),
+        options,
+        provider_groups,
+    }));
+}
+
+fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<ConversationEvent>) {
+    publish_model_event(state, event_tx);
 
     let mut levels = state.thinking_levels.clone();
     if !levels.iter().any(|level| level == &state.thinking_level) {
@@ -3288,6 +3619,7 @@ fn text_looks_like_diff(text: &str) -> bool {
 /// 从 Pi 的 append-only entry tree 中严格还原当前活动分支，再提取 UI transcript。
 /// `get_messages` 是 compaction-aware 的模型上下文，不能承担历史恢复；compaction、
 /// model change 等 entry 只参与 parent 链校验，不替代或裁掉它们之前的原始消息。
+#[cfg(test)]
 fn active_branch_messages(data: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
     let entries = data
         .get("entries")
@@ -7986,7 +8318,7 @@ mod tests {
     /// 从 Smelt 的统一运行时入口走完受管 Bun -> Pi RPC -> Ready，
     /// 避免逻辑命令意外落回 ACP parser 却只有单元测试通过。
     #[test]
-    #[ignore = "会写 ~/.smelt/runtime 并可能联网安装 Pi 依赖"]
+    #[ignore = "需要先编出 smelt-pi（scripts/build-smelt-pi.sh）"]
     fn managed_native_driver_reaches_ready() {
         let agent_dir =
             std::env::temp_dir().join(format!("smelt-pi-rpc-driver-{}", uuid::Uuid::new_v4()));
@@ -8030,7 +8362,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "会写 ~/.smelt/runtime 并可能联网安装 Pi 依赖"]
+    #[ignore = "需要先编出 smelt-pi（scripts/build-smelt-pi.sh）"]
     fn missing_native_session_is_classified_for_fresh_fallback() {
         let agent_dir = std::env::temp_dir().join(format!(
             "smelt-pi-rpc-missing-session-{}",
@@ -8360,6 +8692,27 @@ mod tests {
         let mut state = PiState::new();
         let mut launch = test_launch("smelt-pi-agent --offline");
         launch.resume_session_id = Some(SessionId::new("pi-session"));
+        let agent_dir = std::env::temp_dir().join(format!(
+            "smelt-pi-resume-file-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let sessions = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("pi-session.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"version\":2,\"id\":\"pi-session\",\"cwd\":\"/tmp\"}\n",
+                "{\"type\":\"model_change\",\"id\":\"model\",\"parentId\":null,\"provider\":\"test\",\"modelId\":\"seed-model\"}\n",
+                "{\"type\":\"message\",\"id\":\"old\",\"parentId\":\"model\",\"message\":{\"role\":\"user\",\"content\":\"压缩前\"}}\n",
+                "{\"type\":\"compaction\",\"id\":\"compact\",\"parentId\":\"old\",\"summary\":\"模型只看摘要\",\"firstKeptEntryId\":\"old\"}\n",
+                "{\"type\":\"message\",\"id\":\"new\",\"parentId\":\"compact\",\"message\":{\"role\":\"user\",\"content\":\"压缩后\"}}\n",
+            ),
+        )
+        .unwrap();
+        launch.launch.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            agent_dir.to_string_lossy().into_owned(),
+        );
         let mut lines = fake_pi_lines(vec![
             serde_json::json!({
                 "id": "smelt-init-state", "type": "response", "command": "get_state",
@@ -8393,29 +8746,12 @@ mod tests {
                 "command": "get_commands", "success": true,
                 "data": {"commands": []}
             }),
-            serde_json::json!({
-                "id": "smelt-init-entries", "type": "response",
-                "command": "get_entries", "success": true,
-                "data": {
-                    "entries": [
-                        {
-                            "type": "message", "id": "old", "parentId": null,
-                            "message": {"role": "user", "content": "压缩前"}
-                        },
-                        {
-                            "type": "compaction", "id": "compact", "parentId": "old",
-                            "summary": "模型只看摘要", "firstKeptEntryId": "old"
-                        },
-                        {
-                            "type": "message", "id": "new", "parentId": "compact",
-                            "message": {"role": "user", "content": "压缩后"}
-                        }
-                    ],
-                    "leafId": "new"
-                }
-            }),
         ]);
         let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
 
         smol::block_on(initialize_session(
             &mut lines,
@@ -8425,8 +8761,11 @@ mod tests {
             &event_tx,
             &mut state,
             &launch,
+            None,
+            &mut trace,
         ))
         .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
 
         let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
             .unwrap()
@@ -8443,8 +8782,11 @@ mod tests {
                 "get_available_models",
                 "get_available_thinking_levels",
                 "get_commands",
-                "get_entries"
             ]
+        );
+        assert!(
+            requests.iter().all(|request| request["type"] != "get_entries"),
+            "恢复转录读会话文件，启动握手不再拉整棵 entry 树"
         );
 
         let mut events = Vec::new();
@@ -8459,16 +8801,349 @@ mod tests {
             })
             .collect();
         assert_eq!(replayed_user_text, ["压缩前", "压缩后"]);
+        let ready_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::Ready { .. }))
+            .expect("Ready");
+        let replay_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+            .expect("重放开始");
+        assert!(ready_at < replay_at, "转录不能挡在 Ready 前面");
+        let models: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::Model(model) => Some(model.current_value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(models.first().copied(), Some("test/seed-model"));
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+            models.contains(&"test/model"),
+            "get_state 的模型要盖过文件里的种子模型：{models:?}"
         );
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
         );
+    }
+
+    #[test]
+    fn handshake_reread_replaces_a_stale_session_seed() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("pi-session"));
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-reread-{}", uuid::Uuid::new_v4()));
+        let sessions = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("pi-session.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"version\":2,\"id\":\"pi-session\",\"cwd\":\"/tmp\"}\n",
+                "{\"type\":\"message\",\"id\":\"only\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"文件里的新消息\"}}\n",
+            ),
+        )
+        .unwrap();
+        launch.launch.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            agent_dir.to_string_lossy().into_owned(),
+        );
+        let stale = crate::session_history::PiSessionBranch {
+            bytes: 1,
+            read: Duration::from_millis(0),
+            parse: Duration::from_millis(0),
+            extract: Duration::from_millis(0),
+            entries: vec![serde_json::json!({
+                "type": "message",
+                "id": "stale",
+                "parentId": null,
+                "message": {"role": "user", "content": "过期种子"}
+            })],
+            fingerprint: 1,
+        };
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "pi-session",
+                    "thinkingLevel": "medium",
+                    "model": {"provider": "test", "id": "live", "name": "Live"}
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+            Some(stale),
+            &mut trace,
+        ))
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let mut texts = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            if let ConversationEvent::UserChunk(text) = event {
+                texts.push(text);
+            }
+        }
+        assert_eq!(texts, ["文件里的新消息"]);
+    }
+
+    /// 短会话和 500 条以上、工具输出很大的会话，把会话文件读和旧的整树
+    /// `get_entries` 载荷拆开计时。不拿耗时做断言，数字打到 stderr，给 PR 记录用。
+    #[test]
+    fn resume_transcript_stage_timings_cover_short_and_long_sessions() {
+        for (label, turns) in [("short", 8usize), ("long", 174usize)] {
+            measure_resume_stages(label, turns);
+        }
+    }
+
+    fn measure_resume_stages(label: &str, turns: usize) {
+        let tool_bytes = 8 * 1024;
+        let blob = "x".repeat(tool_bytes);
+        let mut active_parent: Option<String> = None;
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        let mut expected_users = Vec::new();
+
+        fn link(
+            entries: &mut Vec<serde_json::Value>,
+            parent: &mut Option<String>,
+            id: String,
+            mut body: serde_json::Value,
+        ) {
+            let obj = body.as_object_mut().expect("entry");
+            obj.insert("id".into(), serde_json::Value::String(id.clone()));
+            obj.insert(
+                "parentId".into(),
+                match parent {
+                    Some(parent) => serde_json::Value::String(parent.clone()),
+                    None => serde_json::Value::Null,
+                },
+            );
+            *parent = Some(id);
+            entries.push(body);
+        }
+
+        link(
+            &mut entries,
+            &mut active_parent,
+            "model".into(),
+            serde_json::json!({"type": "model_change", "provider": "test", "modelId": "seed"}),
+        );
+        // 死分支从模型节点叉出去，写在活动链中间。文件最后一行仍是活动叶子。
+        let mut dead_parent = active_parent.clone();
+        for index in 0..turns {
+            let user = format!("u{index}");
+            expected_users.push(user.clone());
+            link(
+                &mut entries,
+                &mut active_parent,
+                format!("u{index}"),
+                serde_json::json!({"type": "message", "message": {"role": "user", "content": user}}),
+            );
+            if index == 0 {
+                // 同样大的工具输出留在死分支上，整树载荷比活动分支大一截。
+                for dead in 0..turns {
+                    link(
+                        &mut entries,
+                        &mut dead_parent,
+                        format!("dead-{dead}"),
+                        serde_json::json!({
+                            "type": "message",
+                            "message": {"role": "user", "content": format!("dead-{dead}:{blob}")}
+                        }),
+                    );
+                }
+            }
+            let call_id = format!("call-{index}");
+            link(
+                &mut entries,
+                &mut active_parent,
+                format!("a{index}"),
+                serde_json::json!({
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{
+                            "type": "toolCall",
+                            "id": call_id,
+                            "name": "bash",
+                            "arguments": {"command": "echo hi"}
+                        }]
+                    }
+                }),
+            );
+            link(
+                &mut entries,
+                &mut active_parent,
+                format!("t{index}"),
+                serde_json::json!({
+                    "type": "message",
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": call_id,
+                        "content": [{"type": "text", "text": blob}]
+                    }
+                }),
+            );
+        }
+
+        let session_id = format!("pi-timing-{label}");
+        let root = std::env::temp_dir().join(format!(
+            "smelt-pi-timing-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        let sessions = root.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let mut file = format!(
+            "{{\"type\":\"session\",\"version\":2,\"id\":\"{session_id}\",\"cwd\":\"/tmp\"}}\n"
+        );
+        for entry in &entries {
+            file.push_str(&serde_json::to_string(entry).unwrap());
+            file.push('\n');
+        }
+        std::fs::write(sessions.join(format!("{session_id}.jsonl")), &file).unwrap();
+
+        let branch =
+            crate::session_history::read_pi_session_branch(&sessions, &session_id).expect("会话文件");
+        let file_users = user_texts_from_entries(&branch.entries);
+        assert_eq!(file_users, expected_users);
+        assert!(
+            branch.entries.len() >= turns * 3,
+            "{label} 活动分支 {} 条，期望至少 {}",
+            branch.entries.len(),
+            turns * 3
+        );
+        if label == "long" {
+            assert!(
+                branch.entries.len() >= 500,
+                "长会话活动分支 {} 条",
+                branch.entries.len()
+            );
+        }
+
+        let leaf_id = active_parent.expect("leaf");
+        let file_entries = entries.len();
+        let payload = serde_json::json!({"entries": entries, "leafId": leaf_id});
+        let line = serde_json::to_string(&payload).unwrap();
+        let parse_started = std::time::Instant::now();
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let tree_parse = parse_started.elapsed();
+        let extract_started = std::time::Instant::now();
+        let messages = active_branch_messages(&parsed).unwrap();
+        let tree_extract = extract_started.elapsed();
+        let tree_users = user_texts(&messages);
+        assert_eq!(tree_users, expected_users);
+        assert!(tree_users.iter().all(|text| !text.starts_with("dead-")));
+
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        let replay_started = std::time::Instant::now();
+        let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
+        replay_history(&messages, &event_tx, &mut state);
+        let replay = replay_started.elapsed();
+        drop(event_tx);
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        let replayed: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::UserChunk(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed, expected_users);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::HistoryReplayStarted
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::HistoryReplayFinished
+        )));
+
+        let event_count = events.len();
+        let mut reduced = crate::acp_session::AcpSessionState::default();
+        let snapshot_started = std::time::Instant::now();
+        for event in events {
+            let _ = crate::acp_session::apply_event(&mut reduced, event);
+        }
+        let snapshot = reduced.to_snapshot(false);
+        let snapshot_bytes = serde_json::to_vec(&snapshot).expect("快照").len();
+        let snapshot_elapsed = snapshot_started.elapsed();
+        assert!(snapshot.entries_total > 0);
+        let _ = std::fs::remove_dir_all(&root);
+
+        eprintln!(
+            "SMELT_REPLAY_TIMING {label} file_bytes={} file_entries={} read={:?} parse={:?} extract={:?} branch_entries={} get_entries_bytes={} tree_parse={:?} active_branch={:?} messages={} replay_events={} user_chunks={} replay={:?} snapshot_bytes={} snapshot={:?}",
+            branch.bytes,
+            file_entries,
+            branch.read,
+            branch.parse,
+            branch.extract,
+            branch.entries.len(),
+            line.len(),
+            tree_parse,
+            tree_extract,
+            messages.len(),
+            event_count,
+            replayed.len(),
+            replay,
+            snapshot_bytes,
+            snapshot_elapsed
+        );
+    }
+
+    fn user_texts(messages: &[serde_json::Value]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| {
+                if message.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+                    return None;
+                }
+                message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    fn user_texts_from_entries(entries: &[serde_json::Value]) -> Vec<String> {
+        let messages: Vec<_> = entries.iter().filter_map(entry_message).collect();
+        user_texts(&messages)
     }
 
     #[test]

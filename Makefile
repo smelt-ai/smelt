@@ -53,15 +53,17 @@ test: ## 运行全工作区单元测试（nextest：smeltd handoff 不能同进�
 
 pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 	@bun="$$(./scripts/bun.sh --managed-only)" || { \
-		echo "✗ 找不到源码锁定版本的受管 Bun。请先运行一次 Smelt 完成 runtime 准备"; exit 1; }; \
+		echo "✗ 取不到钉死版本的 Bun（scripts/fetch-bun.sh）"; exit 1; }; \
 	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent \
 		&& "$$bun" run check \
 		&& "$$bun" run production-smoke
 
 check-all: fmt-check lint lint-sh lint-paths test pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
 
-build: ## 编译 release 二进制（GUI + 守护 + helpers）
+build: ## 编译 release 二进制（GUI + 守护 + helpers + smelt-pi）
 	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
+	./scripts/fetch-bun.sh
+	./scripts/build-smelt-pi.sh
 
 run: ## 本地直接跑 GUI（开发用）
 	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer

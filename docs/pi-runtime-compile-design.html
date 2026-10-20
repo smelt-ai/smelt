@@ -356,6 +356,7 @@
   <div class="brand">smelt · 设计文档</div>
   <div class="toc-title">Pi 运行时编译成单个二进制<br/>bun build --compile<br/>2026-10-20</div>
   <ol>
+    <li><a href="#landed">落地差异</a></li>
     <li><a href="#s1">背景与目标</a></li>
     <li><a href="#s2">设计原则</a></li>
     <li><a href="#s3">实测依据</a></li>
@@ -378,7 +379,7 @@
   <div class="meta">
     <strong>日期</strong>：2026-10-20（Asia/Taipei） ·
     <strong>受众</strong>：smelt 仓库维护者（Rust <code>smeltd</code> + Pi agent） ·
-    <strong>状态</strong>：方案待评审。落地实现做在本 PR
+    <strong>状态</strong>：已按下面的「落地差异」实现。原稿里和实现不一致的地方以那一节为准
   </div>
   <div class="meta" style="margin-top:0.45rem">
     <strong>项目</strong>：
@@ -393,6 +394,89 @@
     <span class="badge warn">Mac 签名尚未实测</span>
   </div>
 </header>
+
+<section id="landed">
+  <h2><span class="num">0.</span>落地差异</h2>
+  <p>
+    这一节是已经进仓库的行为。下面各节是当时的方案，和这里冲突时以这里为准。
+  </p>
+  <ul>
+    <li>
+      编译命令是 <code>bun build --compile --bytecode --format=esm --no-compile-autoload-dotenv --no-compile-autoload-bunfig</code>。
+      没有 <code>--splitting</code>。Bun 1.4.0 上拆块之后，图片 worker 里的 photon 绑定变成
+      <code>exports_photon_rs is not defined</code>，静态 import 也补不回来。启动时间上的那点收益不值得让缩放走失败回退。
+    </li>
+    <li>
+      Bun 仍是真正的 <code>bun</code> 二进制，放进 app，并用符号链接提供 <code>~/.smelt/runtime/bin/bun</code>。
+      不使用 <code>BUN_BE_BUN=1</code> 再 exec <code>smelt-pi</code>。MCP 预设和 Claude/Codex 的 <code>bunx</code> 还要这个二进制。
+    </li>
+    <li>
+      <code>photon_rs_bg.wasm</code> 是可执行文件旁边的 sidecar，不打进 bunfs。QuickJS wasm 由静态 import 嵌进二进制。
+    </li>
+    <li>
+      签名用的 plist 在 <code>scripts/entitlements.plist</code> 和 <code>scripts/jit-entitlements.plist</code>。
+      没有 <code>ci/</code> 目录。
+    </li>
+    <li>
+      恢复和 fork 的转录只读 Pi 会话文件，走 <code>read_pi_session_branch</code>（和子会话预览同一条活动分支）。
+      启动前先读一遍，和拉起 smelt-pi 重叠。握手里的 <code>get_state</code> 给出活的 session id 之后再读一遍。
+      活动分支上 message / custom_message 的 id 指纹相同就用启动前那份；不同则握手后的文件胜出；
+      后一次读不到文件才退回启动前那份。<code>get_entries</code> 不参与，也不是失败时的后备。
+      fork 时新文件还读不到，就按用户原文在种子消息上本地截断，近似 Pi 的 <code>fork(entryId)</code>。
+    </li>
+    <li>
+      模型在拉起进程之前就发 <code>ConversationEvent::Model</code>：恢复时用文件里的最后一次模型，否则用启动参数，再否则用设置里的默认模型。
+      <code>get_state</code> 和 <code>set_model</code> 之后再各发一次，后到的盖住先到的。不用未确认点击那层 overlay。
+      <code>Ready</code> 在转录事件之前发出，输入栏不必等整段历史。
+    </li>
+  </ul>
+  <p>
+    下面的体积和耗时是这台 Linux x64、Bun 1.4.0 baseline 上的实测。
+    用户在 Bun 1.4.3 上量过：源码 RPC ready 339ms，只 <code>--compile</code> 316ms，
+    <code>--compile --bytecode --format=esm</code> 约 95ms；再加上 <code>--splitting</code> 热启动约 89ms→82ms、冷启动 136ms→124ms。
+    1.4.0 上拆块会弄坏 photon，所以发布构建不带 <code>--splitting</code>。
+  </p>
+  <table>
+    <thead>
+      <tr><th>产物</th><th>字节</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Linux x64 baseline <code>smelt-pi</code>（bytecode + esm）</td><td>144,585,928</td></tr>
+      <tr><td>交叉编译 <code>bun-darwin-arm64</code></td><td>126,441,458（Mach-O arm64，本机不能执行）</td></tr>
+      <tr><td><code>photon_rs_bg.wasm</code></td><td>1,881,634</td></tr>
+    </tbody>
+  </table>
+  <p>
+    空会话上重复 <code>get_state</code>：129.6、115.3、115.8、113.2、117.2 ms。
+    带 jiti 扩展的冒烟第一次是 200.4ms。短会话恢复 176.5ms，长会话恢复 154.4ms。
+    这是进程启动到 <code>get_state</code> 回包，比 1.4.3 上只量 RPC ready 的 95ms 多了 Pi 自己的初始化。
+  </p>
+  <p>
+    转录阶段用同一份夹具：每轮一条用户消息、一次工具调用、一份 8KB 工具输出，另外有一条同样大的死分支。
+    短的是 8 轮。长的是 174 轮，活动分支 523 条 entry（含 model_change），文件里一共 697 条。
+    Rust 数字来自 <code>cargo test</code> 的 debug 剖面，比 release 的 smeltd 慢。
+    Pi 的 <code>get_entries</code> 是对编好的 smelt-pi 实发的；启动路径已经不调用它。
+  </p>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>短会话</th><th>长会话</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>会话文件字节 / 读 / 逐行解析 / 抽出活动分支</td><td>135,165 · 72µs · 950µs · 387µs</td><td>2,939,432 · 1.43ms · 17.7ms · 4.21ms</td></tr>
+      <tr><td>整树 JSON 字节 / 一次解析 / <code>active_branch</code></td><td>135,125 · 766µs · 178µs</td><td>2,939,395 · 15.9ms · 3.27ms</td></tr>
+      <tr><td>重放事件条数 / 发出耗时</td><td>34 · 370µs</td><td>698 · 4.45ms</td></tr>
+      <tr><td>归约并序列化快照</td><td>68,229 字节 · 1.69ms</td><td>1,458,862 字节 · 31.7ms</td></tr>
+      <tr><td>Pi <code>get_entries</code> 响应</td><td>1.5ms · 136,625 字节 · 34 条</td><td>18.1ms · 2,966,791 字节 · 698 条</td></tr>
+    </tbody>
+  </table>
+  <p>
+    界面第一次把转录排出来的时间没有量。GPUI 的 <code>render</code> 不能写日志。
+    视图在快照应用到空列表上时记一行「视图收到首批转录」，那是应用快照，不是布局。
+    重放不拆成「先尾部、再补旧消息」：归约按时间从旧到新追加，<code>HistoryReplayStarted</code> 到
+    <code>HistoryReplayFinished</code> 之间界面仍显示上一份基线。贵的是整棵树的 RPC 挡在任何界面更新前面。
+    文件读取和进程启动重叠，<code>Ready</code> 单独进一批快照，转录在它之后一次换上。
+  </p>
+</section>
 
 <section id="s1">
   <h2><span class="num">1.</span>背景与目标 / 非目标</h2>
@@ -998,7 +1082,7 @@ exec "&lt;当前 bundle 的 smelt-pi&gt;" "$@"</code></pre>
 
 <footer>
   smelt · Pi 运行时单二进制技术方案 · 2026-10-20（Asia/Taipei） ·
-  方案待评审，落地实现做在本 PR ·
+  已落地，和原稿不一致处以「落地差异」为准 ·
   项目 <a href="https://github.com/smelt-ai/smelt">smelt-ai/smelt</a>
 </footer>
 </main>

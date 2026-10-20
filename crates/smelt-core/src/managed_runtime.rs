@@ -1,612 +1,257 @@
-//! Provisioning for Smelt's immutable Bun and Pi runtime generations.
+//! 随应用发布的 `smelt-pi` 和 Bun。
+//!
+//! Pi 是 `bun build --compile` 出来的单个可执行文件，和 `smeltd` 放在同一目录
+//! （macOS 的 `Contents/MacOS`，Linux 的 `~/.smelt/bin`）。不再把源码嵌进 Rust
+//! 二进制，也不再在用户机器上 `bun install`。
+//!
+//! Bun 只留给 MCP 预设的 `bun x` 和 Claude/Codex 的 `bunx`。它同样打进应用，
+//! 不再首启下载。`~/.smelt/runtime/bin/bun` 是指向这份 Bun 的符号链接，
+//! `mcp.json` 里写的还是这条路径。
 
 #![cfg(unix)]
 
-use crate::runtime_generation::{
-    BunGenerationManifest, GENERATION_SCHEMA, GenerationKind, GenerationLease, GenerationStore,
-    PiGenerationManifest, RuntimeManagerLock, inherit_generation_fds,
-};
-use sha2::{Digest, Sha256};
-use std::{
-    collections::HashSet,
-    fs,
-    os::unix::fs::PermissionsExt as _,
-    path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
-};
+use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-pub(crate) const BUN_VERSION: &str = "1.4.0";
-
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-/// 当前受管 Bun 的固定入口，相对 runtime 根目录。generation 目录名带哈希、随版本变，
-/// 写进外部配置（如 `mcp.json` 的 `command`）的路径必须是这一条。
-const BUN_LAUNCHER: &str = "bin/bun";
+/// 与 `scripts/fetch-bun.sh` 钉死的版本一致。运行时不再按这个版本下载。
+#[cfg(test)]
+const BUN_VERSION: &str = "1.4.0";
 
 pub use smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH;
-pub(crate) const PI_BRIDGE_PROTOCOL: &str = "smelt-pi-rpc-v1";
-include!(concat!(env!("OUT_DIR"), "/pi_agent_runtime_files.rs"));
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-aarch64.zip",
-    "c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381",
-);
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-x64.zip",
-    "1d0211b8f1dc991182344687ad15e72ee86f154845a5f7fa477994cd341dd9b0",
-);
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const BUN_ZIP_DIR: &str = "bun-darwin-aarch64";
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "539598c775882420b9d8deb7dc14d845f20f7d26f5600c50ab067dde6ac3f3bf";
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const BUN_ZIP_DIR: &str = "bun-darwin-x64";
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "ca8a18d0116d7b6b19f53bb0d8c48e487c0757cab4dc3f4f8cc5e43a44cd75d8";
-// Linux x64 用 baseline 版：不要求 AVX2，云主机的老 CPU 也能跑。
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip",
-    "184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f",
-);
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const BUN_ZIP_DIR: &str = "bun-linux-x64-baseline";
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip",
-    "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e",
-);
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const BUN_ZIP_DIR: &str = "bun-linux-aarch64";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "086c4121c8738a8e0f5ed730e8a461bc3973b4444e372ddb77aef9a747fa2ae9";
+include!(concat!(env!("OUT_DIR"), "/pi_agent_version.rs"));
+
+/// `~/.smelt/runtime/bin/bun`，相对 runtime 根目录。
+const BUN_LAUNCHER: &str = "bin/bun";
 
 #[derive(Clone, Debug)]
 pub struct ManagedBunRuntime {
     pub path: PathBuf,
-    pub generation_id: String,
-    lease: GenerationLease,
-}
-
-impl ManagedBunRuntime {
-    pub fn inherit_into(&self, command: &mut Command) {
-        inherit_generation_fds(command, std::slice::from_ref(&self.lease));
-    }
-
-    pub fn inherited_fd(&self) -> std::sync::Arc<std::os::fd::OwnedFd> {
-        self.lease.inherited_fd()
-    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ManagedPiRuntime {
-    pub bun: PathBuf,
-    pub root: PathBuf,
-    pub entry: PathBuf,
-    bun_runtime: ManagedBunRuntime,
-    pi_lease: GenerationLease,
+    pub executable: PathBuf,
 }
 
 impl ManagedPiRuntime {
     pub(crate) fn process_args(&self, trailing: impl IntoIterator<Item = String>) -> Vec<String> {
-        std::iter::once(self.bun.to_string_lossy().into_owned())
-            .chain(std::iter::once(self.entry.to_string_lossy().into_owned()))
+        std::iter::once(self.executable.to_string_lossy().into_owned())
             .chain(trailing)
             .collect()
     }
 
-    pub(crate) fn inherit_into(&self, command: &mut Command) {
-        inherit_generation_fds(
-            command,
-            &[self.bun_runtime.lease.clone(), self.pi_lease.clone()],
-        );
-    }
-}
-
-fn sha256_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
-    let mut digest = Sha256::new();
-    for part in parts {
-        digest.update((part.len() as u64).to_le_bytes());
-        digest.update(part);
-    }
-    format!("{:x}", digest.finalize())
-}
-
-fn bun_manifest() -> BunGenerationManifest {
-    let (download_url, archive_sha256) = BUN_DOWNLOAD;
-    let identity = sha256_parts([
-        BUN_VERSION.as_bytes(),
-        std::env::consts::OS.as_bytes(),
-        std::env::consts::ARCH.as_bytes(),
-        BUN_EXECUTABLE_SHA256.as_bytes(),
-        download_url.as_bytes(),
-        archive_sha256.as_bytes(),
-    ]);
-    BunGenerationManifest {
-        schema: GENERATION_SCHEMA,
-        generation_id: format!("bun-{identity}"),
-        version: BUN_VERSION.to_string(),
-        platform: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        executable_sha256: BUN_EXECUTABLE_SHA256.to_string(),
-        download_url: download_url.to_string(),
-        archive_sha256: archive_sha256.to_string(),
-    }
-}
-
-pub(crate) fn pi_agent_dependency_fingerprint() -> String {
-    sha256_parts(
-        PI_AGENT_RUNTIME_FILES
-            .iter()
-            .filter(|(name, _)| {
-                *name == "package.json" || *name == "bun.lock" || name.starts_with("patches/")
-            })
-            .flat_map(|(name, content)| [name.as_bytes(), content.as_bytes()]),
-    )
-}
-
-fn pi_agent_source_fingerprint() -> String {
-    sha256_parts(
-        PI_AGENT_RUNTIME_FILES
-            .iter()
-            .flat_map(|(name, content)| [name.as_bytes(), content.as_bytes()]),
-    )
-}
-
-fn pi_manifest(bun_id: &str) -> PiGenerationManifest {
-    let source_sha256 = pi_agent_source_fingerprint();
-    let dependency_sha256 = pi_agent_dependency_fingerprint();
-    let identity = sha256_parts([
-        PI_AGENT_RUNTIME_VERSION.as_bytes(),
-        source_sha256.as_bytes(),
-        dependency_sha256.as_bytes(),
-        std::env::consts::OS.as_bytes(),
-        std::env::consts::ARCH.as_bytes(),
-        PI_BRIDGE_PROTOCOL.as_bytes(),
-        bun_id.as_bytes(),
-    ]);
-    PiGenerationManifest {
-        schema: GENERATION_SCHEMA,
-        generation_id: format!("pi-{identity}"),
-        runtime_version: PI_AGENT_RUNTIME_VERSION.to_string(),
-        platform: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        bridge_protocol: PI_BRIDGE_PROTOCOL.to_string(),
-        source_sha256,
-        dependency_sha256,
-        bun_generation_id: bun_id.to_string(),
-    }
-}
-
-fn bun_tree_matches(root: &Path, expected: &BunGenerationManifest) -> bool {
-    let bun = root.join("bun");
-    let Ok(metadata) = fs::symlink_metadata(&bun) else {
-        return false;
-    };
-    metadata.is_file()
-        && !metadata.file_type().is_symlink()
-        && metadata.permissions().mode() & 0o111 != 0
-        && fs::read(root.join("manifest.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<BunGenerationManifest>(&bytes).ok())
-            .as_ref()
-            == Some(expected)
-}
-
-fn pi_tree_matches(root: &Path, expected: &PiGenerationManifest) -> bool {
-    root.join("src/main.ts").is_file()
-        && managed_pi_agent_dependencies_installed(root)
-        && fs::read(root.join("manifest.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<PiGenerationManifest>(&bytes).ok())
-            .as_ref()
-            == Some(expected)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn sync_managed_bun(_status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
-    Err("受管 Bun 运行时只在 macOS 和 Linux 上提供".to_string())
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn sync_managed_bun(status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
-    let store = GenerationStore::managed()?;
-    let manager = store.lock_manager()?;
-    let runtime = sync_managed_bun_locked(&store, status, &manager)?;
-    drop(manager);
-    Ok(runtime)
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn sync_managed_bun_locked(
-    store: &GenerationStore,
-    status: &dyn Fn(&str),
-    manager: &RuntimeManagerLock,
-) -> Result<ManagedBunRuntime, String> {
-    let manifest = bun_manifest();
-    store.remove_stale_staging_locked();
-    let root = store.generation_root(GenerationKind::Bun, &manifest.generation_id);
-    if !bun_tree_matches(&root, &manifest) {
-        store.discard_invalid_locked(GenerationKind::Bun, &manifest.generation_id)?;
-        status("正在下载 Bun 运行时（约 25MB，仅首次）…");
-        store.publish_locked(
-            GenerationKind::Bun,
-            &manifest.generation_id,
-            &manifest,
-            |staging| install_bun_generation(staging, status, manager),
-        )?;
-    }
-    let lease = store.acquire_shared_locked(GenerationKind::Bun, &manifest.generation_id)?;
-    store.write_current_locked(GenerationKind::Bun, &manifest.generation_id)?;
-    // 先把固定入口切到新 generation，再回收旧的：顺序反过来，入口会短暂悬空。
-    publish_bun_launcher(store.runtime_root(), &root.join("bun"))?;
-    let mut keep = HashSet::new();
-    keep.insert(manifest.generation_id.clone());
-    store.gc_kind_locked(GenerationKind::Bun, &keep);
-    Ok(ManagedBunRuntime {
-        path: root.join("bun"),
-        generation_id: manifest.generation_id,
-        lease,
-    })
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
-/// 把 `<runtime>/bin/bun` 原子地指向 `bun`：先建临时符号链接再 rename 覆盖，
-/// 正在通过旧链接启动的进程不会撞上「文件不存在」。
-fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<(), String> {
-    let launcher = runtime_root.join(BUN_LAUNCHER);
-    if fs::read_link(&launcher).is_ok_and(|target| target == bun) {
-        return Ok(());
-    }
-    let dir = launcher.parent().unwrap_or(runtime_root);
-    fs::create_dir_all(dir).map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
-    let temporary = dir.join(format!(
-        ".bun-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    let result = std::os::unix::fs::symlink(bun, &temporary)
-        .and_then(|()| fs::rename(&temporary, &launcher))
-        .map_err(|error| format!("更新 Bun 固定入口 {} 失败：{error}", launcher.display()));
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-/// 下载 Bun 的 curl。连不上、或者连上了却半天不动（走代理、跨地区连 GitHub 常见）都要
-/// 放弃，不能一直等：没有超时的话，第一次用 Pi 的对话会一直停在「正在想」，还占着准备
-/// 运行时的锁，后面的对话也跟着等。两种超时 curl 都当可重试的错误，重试完仍失败就报出来。
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn bun_download_command(archive: &Path, url: &str) -> Command {
-    let mut download = Command::new("curl");
-    download
-        .args(["-fsSL", "--retry", "2", "--connect-timeout", "20"])
-        // 连续 60 秒低于 1 KB/s 就当卡住了。
-        .args(["--speed-limit", "1024", "--speed-time", "60", "-o"])
-        .arg(archive)
-        .arg(url);
-    download
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn install_bun_generation(
-    staging: &Path,
-    status: &dyn Fn(&str),
-    manager: &RuntimeManagerLock,
-) -> Result<(), String> {
-    let (url, expected_archive_sha) = BUN_DOWNLOAD;
-    let archive = staging.join("download.zip");
-    let mut download = bun_download_command(&archive, url);
-    manager.inherit_into(&mut download);
-    let output = download
-        .output()
-        .map_err(|error| format!("无法执行 curl：{error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "下载 Bun 失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let actual_archive_sha = sha256_file(&archive)?;
-    if actual_archive_sha != expected_archive_sha {
-        return Err(format!(
-            "Bun 下载校验失败（期望 {expected_archive_sha}，实际 {actual_archive_sha}）"
-        ));
-    }
-    status("校验并解压 Bun 运行时…");
-    let unpack = staging.join("unpack");
-    fs::create_dir(&unpack).map_err(|error| format!("创建 Bun 解压目录失败：{error}"))?;
-    let mut unzip = Command::new("unzip");
-    unzip.args(["-q"]).arg(&archive).arg("-d").arg(&unpack);
-    manager.inherit_into(&mut unzip);
-    let output = unzip
-        .output()
-        .map_err(|error| format!("无法执行 unzip：{error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "解压 Bun 失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let bun = staging.join("bun");
-    fs::rename(unpack.join(BUN_ZIP_DIR).join("bun"), &bun)
-        .map_err(|error| format!("安放 Bun 制品失败：{error}"))?;
-    fs::remove_file(&archive).map_err(|error| format!("清理 Bun 下载包失败：{error}"))?;
-    fs::remove_dir_all(&unpack).map_err(|error| format!("清理 Bun 解压目录失败：{error}"))?;
-    validate_bun(&bun)
-}
-
-/// Return the expected Pi entry and whether the exact Bun+Pi generation pair is currently
-/// published. This never downloads, installs, hashes the Bun executable, or waits for a manager
-/// transaction; it is safe for diagnostics and availability UI.
-pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Err("此平台没有 Smelt 受管 Bun".to_string())
-    }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        let store = GenerationStore::managed()?;
-        let bun = bun_manifest();
-        let pi = pi_manifest(&bun.generation_id);
-        let root = store.generation_root(GenerationKind::Pi, &pi.generation_id);
-        let entry = root.join("src/main.ts");
-        let Some(_manager) = store.try_lock_manager()? else {
-            return Ok((entry, false));
-        };
-        let bun_root = store.generation_root(GenerationKind::Bun, &bun.generation_id);
-        let ready = store.current_locked(GenerationKind::Bun).as_deref()
-            == Some(bun.generation_id.as_str())
-            && bun_tree_matches(&bun_root, &bun)
-            && store.current_locked(GenerationKind::Pi).as_deref()
-                == Some(pi.generation_id.as_str())
-            && pi_tree_matches(&root, &pi);
-        Ok((entry, ready))
-    }
-}
-
-pub(crate) fn sync_managed_pi_agent(status: &dyn Fn(&str)) -> Result<ManagedPiRuntime, String> {
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        return Err("受管 Pi 运行时只在 macOS 和 Linux 上提供".to_string());
-    }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let store = GenerationStore::managed()?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let manager = store.lock_manager()?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let bun_runtime = sync_managed_bun_locked(&store, status, &manager)
-        .map_err(|error| format!("无法准备 Smelt Pi 运行时：{error}"))?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let manifest = pi_manifest(&bun_runtime.generation_id);
-    store.remove_stale_staging_locked();
-    let root = store.generation_root(GenerationKind::Pi, &manifest.generation_id);
-    if !pi_tree_matches(&root, &manifest) {
-        store.discard_invalid_locked(GenerationKind::Pi, &manifest.generation_id)?;
-        status("正在准备 Pi 智能体运行时（仅首次或版本变化）…");
-        store.publish_locked(
-            GenerationKind::Pi,
-            &manifest.generation_id,
-            &manifest,
-            |staging| {
-                materialize_pi_files(staging)?;
-                run_pi_install(&bun_runtime, &manager, staging)?;
-                if !managed_pi_agent_dependencies_installed(staging) {
-                    return Err("Pi 依赖安装完成，但 RPC 入口不完整".to_string());
-                }
-                Ok(())
-            },
-        )?;
-    }
-    let pi_lease = store.acquire_shared_locked(GenerationKind::Pi, &manifest.generation_id)?;
-    store.write_current_locked(GenerationKind::Pi, &manifest.generation_id)?;
-    let mut keep = HashSet::new();
-    keep.insert(manifest.generation_id);
-    store.gc_kind_locked(GenerationKind::Pi, &keep);
-    drop(manager);
-    Ok(ManagedPiRuntime {
-        bun: bun_runtime.path.clone(),
-        entry: root.join("src/main.ts"),
-        root,
-        bun_runtime,
-        pi_lease,
-    })
-}
-
-pub(crate) fn sync_managed_pi_tool(
-    relative: &str,
-    status: &dyn Fn(&str),
-) -> Result<(ManagedPiRuntime, PathBuf), String> {
-    let runtime = sync_managed_pi_agent(status)?;
-    let script = runtime.root.join(relative);
-    if !script.is_file() {
-        return Err(format!("Pi 运行时里没有 {relative}"));
-    }
-    Ok((runtime, script))
-}
-
-fn materialize_pi_files(root: &Path) -> Result<(), String> {
-    for (relative, content) in PI_AGENT_RUNTIME_FILES {
-        let path = root.join(relative);
-        let parent = path.parent().ok_or("Pi runtime 文件没有父目录")?;
-        fs::create_dir_all(parent).map_err(|error| format!("创建 Pi runtime 目录失败：{error}"))?;
-        fs::write(&path, content)
-            .map_err(|error| format!("写入 Pi runtime 文件 {} 失败：{error}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn run_pi_install(
-    bun_runtime: &ManagedBunRuntime,
-    manager: &RuntimeManagerLock,
-    root: &Path,
-) -> Result<(), String> {
-    const TIMEOUT: Duration = Duration::from_secs(15 * 60);
-    let mut command = Command::new(&bun_runtime.path);
-    command
-        .args([
-            "install",
-            "--frozen-lockfile",
-            "--production",
-            "--ignore-scripts",
-        ])
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env("NO_COLOR", "1");
-    // If the supervisor is killed during install, the child keeps both the global staging
-    // transaction lock and the referenced Bun generation alive until it exits.
-    manager.inherit_into(&mut command);
-    bun_runtime.inherit_into(&mut command);
-    let child = command
-        .spawn()
-        .map_err(|error| format!("无法启动 Pi 运行时依赖安装：{error}"))?;
-    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = std::sync::Arc::clone(&timed_out);
-    match crate::process_wait::wait_child_for(child, TIMEOUT, move |pid| {
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+    pub(crate) fn command(&self, subcommand: Option<&str>) -> Command {
+        let mut command = Command::new(&self.executable);
+        if let Some(subcommand) = subcommand {
+            command.arg(subcommand);
         }
-    }) {
-        Ok(status) if status.success() => Ok(()),
-        Ok(_) if timed_out.load(std::sync::atomic::Ordering::SeqCst) => {
-            Err("Pi 运行时依赖安装超时（15 分钟）".to_string())
-        }
-        Ok(status) => Err(format!("Pi 运行时依赖安装失败（{status}）")),
-        Err(error) => Err(format!("等待 Pi 运行时依赖安装失败：{error}")),
+        command
     }
-}
-
-fn managed_pi_agent_dependencies_installed(root: &Path) -> bool {
-    let rpc_entry =
-        root.join("node_modules/@earendil-works/pi-coding-agent/dist/bundle/rpc-entry.js");
-    let rpc_mode =
-        root.join("node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js");
-    rpc_entry.is_file() && rpc_mode.is_file()
-}
-
-fn sha256_file(path: &Path) -> Result<String, String> {
-    crate::daemon_image::content_fingerprint(path)
-        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn validate_bun(bun: &Path) -> Result<(), String> {
-    let metadata =
-        fs::symlink_metadata(bun).map_err(|error| format!("读取受管 Bun 元数据失败：{error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("受管 Bun 不是普通文件".to_string());
-    }
-    if metadata.permissions().mode() & 0o111 == 0 {
-        return Err("受管 Bun 没有可执行权限".to_string());
-    }
-    let actual = sha256_file(bun)?;
-    if actual != BUN_EXECUTABLE_SHA256 {
-        return Err(format!(
-            "受管 Bun 制品校验失败（期望 {BUN_EXECUTABLE_SHA256}，实际 {actual}）"
-        ));
-    }
-    let output = Command::new(bun)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("受管 Bun 无法执行：{error}"))?;
-    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != BUN_VERSION {
-        return Err("受管 Bun 版本检查失败".to_string());
-    }
-    Ok(())
 }
 
 pub(crate) fn pi_runtime_version() -> &'static str {
     PI_AGENT_RUNTIME_VERSION
 }
 
-#[cfg(test)]
-pub(crate) fn pi_package_json() -> &'static str {
-    PI_AGENT_PACKAGE_JSON
+/// 定位 `smelt-pi`，并在 Bun 也在旁边时把 `~/.smelt/runtime/bin/bun` 指过去。
+/// Pi 会话不依赖 Bun；MCP 预设写进 `mcp.json` 的是那条固定路径，所以能指就指。
+pub(crate) fn sync_managed_pi_agent(_status: &dyn Fn(&str)) -> Result<ManagedPiRuntime, String> {
+    let executable = locate_smelt_pi()?;
+    require_photon_wasm(&executable)?;
+    if let Ok(bun) = locate_bundled_bun() {
+        publish_managed_bun(&bun)?;
+    }
+    Ok(ManagedPiRuntime { executable })
 }
 
-#[cfg(test)]
-pub(crate) fn pi_runtime_files() -> &'static [(&'static str, &'static str)] {
-    PI_AGENT_RUNTIME_FILES
+pub fn sync_managed_bun(_status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
+    let path = locate_bundled_bun()?;
+    publish_managed_bun(&path)?;
+    Ok(ManagedBunRuntime { path })
+}
+
+/// 诊断用：不下载、不写启动器。二进制在且旁边有 photon wasm 才算就绪。
+pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
+    let executable = locate_smelt_pi()?;
+    Ok((executable.clone(), photon_wasm(&executable).is_file()))
+}
+
+fn publish_managed_bun(bun: &Path) -> Result<(), String> {
+    let Some(home) = smelt_paths::smelt_home() else {
+        return Err("找不到 $HOME".to_string());
+    };
+    let launcher = publish_bun_launcher(&home.join("runtime"), bun)?;
+    // 测试二进制的 ~/.pi 不是沙箱。npmCommand 的写入由单测直接打到临时目录。
+    if smelt_paths::running_under_test() {
+        return Ok(());
+    }
+    ensure_pi_npm_command(&crate::pi_model_settings::pi_agent_dir(), &launcher)
+}
+
+fn locate_smelt_pi() -> Result<PathBuf, String> {
+    first_executable([
+        env_path("SMELT_PI"),
+        sibling("smelt-pi"),
+        dev_artifact("smelt-pi"),
+    ])
+    .ok_or_else(|| {
+        "找不到 smelt-pi。它应和 smeltd 在同一目录（应用内的 Contents/MacOS，或 Linux 的 ~/.smelt/bin）。开发时先运行 scripts/build-smelt-pi.sh，或设置 SMELT_PI。"
+            .to_string()
+    })
+}
+
+fn locate_bundled_bun() -> Result<PathBuf, String> {
+    first_executable([
+        env_path("SMELT_BUN"),
+        sibling("bun"),
+        dev_bun(),
+    ])
+    .ok_or_else(|| {
+        "找不到随应用发布的 Bun。它应和 smeltd 在同一目录。开发时先运行 scripts/fetch-bun.sh，或设置 SMELT_BUN。"
+            .to_string()
+    })
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(PathBuf::from)
+}
+
+fn sibling(name: &str) -> Option<PathBuf> {
+    std::env::current_exe().ok().map(|exe| exe.with_file_name(name))
+}
+
+fn dev_artifact(name: &str) -> Option<PathBuf> {
+    target_dir().map(|target| target.join("smelt-pi").join(name))
+}
+
+fn dev_bun() -> Option<PathBuf> {
+    target_dir().map(|target| target.join("bundled-bun").join(host_bun_id()).join("bun"))
+}
+
+fn target_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "target"))
+        .map(Path::to_path_buf)
+}
+
+fn host_bun_id() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", "x86_64") => "darwin-x64",
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        _ => "unsupported",
+    }
+}
+
+fn first_executable(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|path| executable_file(path))
+}
+
+fn executable_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| {
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    })
+}
+
+fn photon_wasm(executable: &Path) -> PathBuf {
+    executable.with_file_name("photon_rs_bg.wasm")
+}
+
+fn require_photon_wasm(executable: &Path) -> Result<(), String> {
+    let wasm = photon_wasm(executable);
+    if wasm.is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "smelt-pi 旁边缺少 photon_rs_bg.wasm（{}）",
+            wasm.display()
+        ))
+    }
+}
+
+/// 把 `<runtime>/bin/bun` 原子地指向 `bun`。正在通过旧链接启动的进程不会撞上「文件不存在」。
+pub(crate) fn publish_bun_launcher(runtime_root: &Path, bun: &Path) -> Result<PathBuf, String> {
+    let launcher = runtime_root.join(BUN_LAUNCHER);
+    let bun = fs::canonicalize(bun).unwrap_or_else(|_| bun.to_path_buf());
+    if fs::read_link(&launcher).is_ok_and(|target| target == bun) {
+        return Ok(launcher);
+    }
+    let dir = launcher.parent().unwrap_or(runtime_root);
+    fs::create_dir_all(dir).map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
+    let temporary = dir.join(format!(".bun-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+    let result = std::os::unix::fs::symlink(&bun, &temporary)
+        .and_then(|()| fs::rename(&temporary, &launcher))
+        .map_err(|error| format!("更新 Bun 固定入口 {} 失败：{error}", launcher.display()));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+    Ok(launcher)
+}
+
+/// Pi 安装扩展依赖时，只有命令的 basename 是 `bun` 才会改用 `--cwd` 和 `--omit=peer`。
+pub(crate) fn ensure_pi_npm_command(agent_dir: &Path, launcher: &Path) -> Result<(), String> {
+    let path = agent_dir.join("settings.json");
+    let mut value = crate::pi_model_settings::read_or_create_json(&path)?;
+    let command = serde_json::json!([launcher.to_string_lossy()]);
+    if value.get("npmCommand") == Some(&command) {
+        return Ok(());
+    }
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| format!("{} 的顶层不是对象", path.display()))?;
+    object.insert("npmCommand".to_string(), command);
+    crate::pi_model_settings::write_json_file(&path, &value, false)
 }
 
 #[cfg(test)]
 mod tests {
-    /// 真去下载、校验、安装钉死的 Bun 和 Pi，再跑一下。要联网，默认不跑；新平台上线、
-    /// 改 Bun 版本或校验值时手动跑：`cargo test -p smelt-core managed_runtime -- --ignored`。
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    #[ignore = "需要联网下载 Bun 和 Pi 依赖"]
-    fn installs_and_runs_the_pinned_bun_and_pi_runtime() {
-        let home = std::env::temp_dir().join(format!(
-            "smelt-managed-runtime-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        // SAFETY: nextest 每个测试一个进程，这里没有别的线程在读环境变量。
-        unsafe { std::env::set_var("SMELT_HOME", &home) };
-        let runtime = sync_managed_pi_agent(&|message| eprintln!("{message}")).unwrap();
-        assert!(runtime.entry.is_file(), "{}", runtime.entry.display());
-        let output = std::process::Command::new(&runtime.bun)
-            .arg("--version")
-            .output()
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), BUN_VERSION);
-        drop(runtime);
-        let _ = std::fs::remove_dir_all(home);
-    }
-
     use super::*;
 
-    /// 复现：远程 Linux 上下载 Bun 卡住，curl 没有超时，对话一直停在「正在想」。
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn a_stalled_bun_download_gives_up_instead_of_waiting_forever() {
-        let command =
-            bun_download_command(Path::new("/tmp/bun.zip"), "https://example.com/bun.zip");
-        let args = command
+    fn process_args_are_the_binary_then_the_existing_flags() {
+        let runtime = ManagedPiRuntime {
+            executable: PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smelt-pi"),
+        };
+        assert_eq!(
+            runtime.process_args(["--offline".into(), "--no-approve".into()]),
+            vec![
+                "/Applications/Smelt.app/Contents/MacOS/smelt-pi",
+                "--offline",
+                "--no-approve",
+            ]
+        );
+        assert_eq!(
+            runtime.command(Some("auth")).get_program(),
+            "/Applications/Smelt.app/Contents/MacOS/smelt-pi"
+        );
+        let args = runtime
+            .command(Some("auth"))
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let value_of = |flag: &str| {
-            args.iter()
-                .position(|arg| arg == flag)
-                .and_then(|index| args.get(index + 1))
-                .map(String::as_str)
-        };
-        assert_eq!(value_of("--connect-timeout"), Some("20"));
-        assert_eq!(value_of("--speed-limit"), Some("1024"));
-        assert_eq!(value_of("--speed-time"), Some("60"));
-        assert_eq!(value_of("--retry"), Some("2"));
-        assert_eq!(value_of("-o"), Some("/tmp/bun.zip"));
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("https://example.com/bun.zip")
-        );
+        assert_eq!(args, vec!["auth".to_string()]);
     }
 
     #[test]
-    fn bun_launcher_follows_the_latest_generation() {
+    fn bun_launcher_follows_the_bundled_binary() {
         let runtime =
             std::env::temp_dir().join(format!("smelt-bun-launcher-{}", uuid::Uuid::new_v4()));
-        let first = runtime.join("store/bun/bun-a/bun");
-        let second = runtime.join("store/bun/bun-b/bun");
+        let bun = runtime.join("Smelt.app/Contents/MacOS/bun");
+        fs::create_dir_all(bun.parent().unwrap()).unwrap();
+        fs::write(&bun, b"bun").unwrap();
 
-        publish_bun_launcher(&runtime, &first).unwrap();
-        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), first);
-        publish_bun_launcher(&runtime, &first).unwrap();
-        publish_bun_launcher(&runtime, &second).unwrap();
-        assert_eq!(fs::read_link(runtime.join(BUN_LAUNCHER)).unwrap(), second);
+        let first = publish_bun_launcher(&runtime, &bun).unwrap();
+        assert_eq!(fs::read_link(&first).unwrap(), fs::canonicalize(&bun).unwrap());
+        publish_bun_launcher(&runtime, &bun).unwrap();
         assert!(
             MANAGED_BUN_LAUNCHER_HOME_PATH.ends_with(BUN_LAUNCHER),
             "写进外部配置的路径必须就是这个入口"
@@ -616,73 +261,49 @@ mod tests {
         fs::remove_dir_all(runtime).ok();
     }
 
-    fn collect_runtime_files(dir: &Path, package: &Path, output: &mut Vec<String>) {
-        for entry in fs::read_dir(dir).expect("读取 runtime 源码目录") {
-            let path = entry.expect("读取 runtime 源码项").path();
-            if path.is_dir() {
-                collect_runtime_files(&path, package, output);
-                continue;
-            }
-            let relative = path
-                .strip_prefix(package)
-                .expect("runtime 文件应位于 package 下")
-                .to_string_lossy()
-                .replace('\\', "/");
-            if (relative.starts_with("src/")
-                && relative.ends_with(".ts")
-                && !relative.ends_with(".d.ts"))
-                || relative.starts_with("patches/")
-            {
-                output.push(relative);
-            }
-        }
+    #[test]
+    fn npm_command_points_at_the_bun_launcher_and_keeps_other_settings() {
+        let dir = std::env::temp_dir().join(format!("smelt-pi-npm-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"defaultProvider":"openai","defaultModel":"gpt"}"#,
+        )
+        .unwrap();
+        let launcher = dir.join("runtime/bin/bun");
+        ensure_pi_npm_command(&dir, &launcher).unwrap();
+        ensure_pi_npm_command(&dir, &launcher).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(value["defaultProvider"], "openai");
+        assert_eq!(value["npmCommand"], serde_json::json!([launcher.to_string_lossy()]));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn embedded_runtime_files_match_the_source_tree() {
-        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/pi-agent");
-        let mut expected = vec!["bun.lock".to_string(), "package.json".to_string()];
-        collect_runtime_files(&package.join("src"), &package, &mut expected);
-        let patches = package.join("patches");
-        if patches.is_dir() {
-            collect_runtime_files(&patches, &package, &mut expected);
-        }
-        expected.sort();
-
-        let mut embedded = pi_runtime_files()
-            .iter()
-            .map(|(relative, _)| (*relative).to_string())
-            .collect::<Vec<_>>();
-        embedded.sort();
-        assert_eq!(embedded, expected);
-
-        let root = std::env::temp_dir().join(format!("smelt-pi-stage-{}", uuid::Uuid::new_v4()));
-        materialize_pi_files(&root).expect("物化 Pi runtime staging");
-        for (relative, content) in pi_runtime_files() {
-            assert_eq!(fs::read(root.join(relative)).unwrap(), content.as_bytes());
-        }
-        let _ = fs::remove_dir_all(root);
+    fn photon_wasm_must_sit_beside_the_binary() {
+        let dir = std::env::temp_dir().join(format!("smelt-pi-wasm-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("smelt-pi");
+        fs::write(&executable, b"pi").unwrap();
+        assert!(require_photon_wasm(&executable).is_err());
+        fs::write(photon_wasm(&executable), b"wasm").unwrap();
+        assert!(require_photon_wasm(&executable).is_ok());
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn embedded_package_version_and_oauth_registration_are_present() {
-        let manifest: serde_json::Value = serde_json::from_str(pi_package_json()).unwrap();
+    fn packaged_version_matches_package_json_and_oauth_stays_static() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../packages/pi-agent/package.json"
+        ))
+        .unwrap();
         assert_eq!(manifest["version"], pi_runtime_version());
         let main = include_str!("../../../packages/pi-agent/src/main.ts");
+        let auth = include_str!("../../../packages/pi-agent/src/auth-main.ts");
         assert!(main.contains("registerBunOAuthFlows()"));
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn bun_manifest_pins_the_release_and_executable() {
-        let manifest = bun_manifest();
-        assert_eq!(manifest.version, BUN_VERSION);
-        assert_eq!(manifest.executable_sha256.len(), 64);
-        assert!(
-            manifest
-                .download_url
-                .contains(&format!("/bun-v{BUN_VERSION}/"))
-        );
-        assert_eq!(manifest.archive_sha256.len(), 64);
+        assert!(auth.contains("registerBunOAuthFlows()"));
+        let fetch = include_str!("../../../scripts/fetch-bun.sh");
+        assert!(fetch.contains(&format!("BUN_VERSION={BUN_VERSION}")));
     }
 }

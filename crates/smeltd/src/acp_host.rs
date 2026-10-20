@@ -1568,6 +1568,13 @@ pub(crate) fn start_acp_event_drain(
                 while let Ok(next) = event_rx.try_recv() {
                     batch.push(next);
                 }
+                let batch_started = std::time::Instant::now();
+                let replay_finished = batch.iter().any(|event| {
+                    matches!(
+                        event,
+                        smelt_core::acp_conn::ConversationEvent::HistoryReplayFinished
+                    )
+                });
                 let mut offsets = Vec::with_capacity(batch.len());
                 let mut should_persist = false;
                 let mut runtime_debug_changed = false;
@@ -1716,6 +1723,17 @@ pub(crate) fn start_acp_event_drain(
                         envelope_changed,
                         None,
                     );
+                    if replay_finished {
+                        let entries = sess.reduced.lock().unwrap().entries_total();
+                        smelt_core::app_log::info(
+                            "pi-rpc",
+                            &format!(
+                                "会话 {session_id} 快照发布用时 {:?}（转录 {} 条）",
+                                batch_started.elapsed(),
+                                entries
+                            ),
+                        );
+                    }
                     update_acp_daemon_state(sess, &subscribers);
                     // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
                     settle_acp_turn_locked(sess, turn_ended, ready, provider_idle, &subscribers);

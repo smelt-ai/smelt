@@ -1438,6 +1438,165 @@ pub(crate) fn pi_active_branch(version: u64, entries: &[Value]) -> Vec<&Value> {
     path
 }
 
+/// 一份 Pi 会话文件的活动分支。启动时和握手之后各读一次，用的是同一个函数。
+pub(crate) struct PiSessionBranch {
+    pub bytes: u64,
+    pub read: std::time::Duration,
+    pub parse: std::time::Duration,
+    pub extract: std::time::Duration,
+    pub entries: Vec<Value>,
+    /// 活动分支上 message / custom_message 的 id 序列。两次读取用它判断文件有没有变。
+    pub fingerprint: u64,
+}
+
+/// 按会话 id 找到 jsonl，读出活动分支。文件名里带 id 时只核对文件头，不必把每个大文件读完。
+pub(crate) fn read_pi_session_branch(sessions_root: &Path, session_id: &str) -> Option<PiSessionBranch> {
+    let path = find_pi_session_file(sessions_root, session_id)?;
+    let read_started = std::time::Instant::now();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let read = read_started.elapsed();
+    let bytes = text.len() as u64;
+    let parse_started = std::time::Instant::now();
+    let (version, entries) = pi_session_entries(&text);
+    let parse = parse_started.elapsed();
+    let extract_started = std::time::Instant::now();
+    let branch = pi_active_branch(version, &entries);
+    let owned: Vec<Value> = branch.into_iter().cloned().collect();
+    let fingerprint = pi_branch_fingerprint(&owned);
+    let extract = extract_started.elapsed();
+    Some(PiSessionBranch {
+        bytes,
+        read,
+        parse,
+        extract,
+        entries: owned,
+        fingerprint,
+    })
+}
+
+/// 活动分支上最后一次模型。`model_change` 带 provider；消息上的 `model` 可能只有 id。
+pub(crate) fn pi_branch_model(entries: &[Value]) -> Option<(String, String)> {
+    let mut provider = None;
+    let mut model_id = None;
+    for entry in entries {
+        match entry.get("type").and_then(Value::as_str) {
+            Some("model_change") => {
+                let Some(id) = entry
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                model_id = Some(id.to_string());
+                if let Some(next) = entry
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|provider| !provider.is_empty())
+                {
+                    provider = Some(next.to_string());
+                }
+            }
+            Some("message") => {
+                let Some(raw) = entry
+                    .get("message")
+                    .and_then(|message| message.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                else {
+                    continue;
+                };
+                if let Some((next_provider, next_id)) = raw.split_once('/')
+                    && !next_provider.is_empty()
+                    && !next_id.is_empty()
+                {
+                    provider = Some(next_provider.to_string());
+                    model_id = Some(next_id.to_string());
+                } else {
+                    model_id = Some(raw.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Some((provider?, model_id?))
+}
+
+fn pi_branch_fingerprint(entries: &[Value]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for entry in entries {
+        let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind != "message" && kind != "custom_message" {
+            continue;
+        }
+        kind.hash(&mut hasher);
+        entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn find_pi_session_file(root: &Path, session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() || !root.is_dir() {
+        return None;
+    }
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut seen = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 64 || seen > 10_000 {
+            break;
+        }
+        seen += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push((path, depth + 1));
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if !name.contains(session_id) && header_session_id(&path).as_deref() != Some(session_id)
+            {
+                continue;
+            }
+            if header_session_id(&path).as_deref() == Some(session_id) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn header_session_id(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    use std::io::BufRead;
+    reader.read_line(&mut line).ok()?;
+    let header: Value = serde_json::from_str(line.trim()).ok()?;
+    if header.get("type").and_then(Value::as_str) != Some("session") {
+        return None;
+    }
+    header
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 pub fn list_pi_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
     list_pi_sessions_with(&LocalFs, cwd, override_dir)
 }

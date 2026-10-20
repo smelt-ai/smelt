@@ -68,8 +68,6 @@ pub use smelt_model::provider_api;
 pub mod provider_quota;
 pub mod quota_service;
 pub mod remote_config;
-#[cfg(unix)]
-pub mod runtime_generation;
 pub mod session_control;
 pub use smelt_model::session_handoff;
 pub mod session_history;

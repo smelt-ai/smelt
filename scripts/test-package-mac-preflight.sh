@@ -8,6 +8,8 @@ trap 'rm -rf "$FIXTURE"' EXIT
 
 mkdir -p "$FIXTURE/scripts"
 cp "$ROOT/scripts/package-mac.sh" "$FIXTURE/scripts/package-mac.sh"
+cp "$ROOT/scripts/entitlements.plist" "$FIXTURE/scripts/entitlements.plist"
+cp "$ROOT/scripts/jit-entitlements.plist" "$FIXTURE/scripts/jit-entitlements.plist"
 cp "$ROOT/Cargo.toml" "$FIXTURE/Cargo.toml"
 mkdir -p "$FIXTURE/target/release"
 : >"$FIXTURE/target/release/smelt"
@@ -100,6 +102,12 @@ if [[ "$OUTPUT" == *"需要 Python >= 3.10"* ]]; then
   echo "✗ Python 3.12 不应被版本检查拒绝" >&2
   exit 1
 fi
+
+mkdir -p "$FIXTURE/target/smelt-pi" "$FIXTURE/target/bundled-bun/darwin-arm64"
+printf 'arm64' >"$FIXTURE/target/smelt-pi/smelt-pi"
+printf 'wasm' >"$FIXTURE/target/smelt-pi/photon_rs_bg.wasm"
+printf 'bun' >"$FIXTURE/target/bundled-bun/darwin-arm64/bun"
+chmod +x "$FIXTURE/target/smelt-pi/smelt-pi" "$FIXTURE/target/bundled-bun/darwin-arm64/bun"
 
 make_signing_shims
 make_stopping_python "$FIXTURE/python-stop-after-signing"

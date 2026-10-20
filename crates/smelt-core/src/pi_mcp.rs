@@ -4,7 +4,7 @@
 //! Smelt 只做配置界面：增删、启停、登录，格式和 Pi 文档（`docs/mcp.md`）一致，写回时
 //! 保留文件里与本次操作无关的内容。会话里怎么连、怎么调用都交给 Pi。
 //!
-//! 登录走受管运行时里的 `src/mcp-main.ts`，也就是 `pi mcp login <name>`：OAuth 流程
+//! 登录走 `smelt-pi mcp login <name>`：OAuth 流程
 //! （动态注册、PKCE、回环回调、令牌落盘到 `mcp-auth.json`）全在 Pi 里，这里不重写。
 
 pub use smelt_model::pi_mcp::*;
@@ -16,9 +16,6 @@ use serde_json::{Map, Value};
 use smelt_model::redact::{redact_args, redact_secrets};
 
 use crate::pi_model_settings::{pi_agent_dir, read_or_create_json, write_json_file};
-
-/// 受管运行时里的 `pi mcp` 入口，相对 pi-agent 根目录。
-const MCP_SCRIPT: &str = "src/mcp-main.ts";
 
 /// 登录最多等浏览器这么久，和 `pi mcp login` 的默认值一致。
 const LOGIN_TIMEOUT_SECS: u64 = 300;
@@ -198,19 +195,11 @@ fn edit_servers(
 /// 跑 `pi mcp login <name>`：Pi 先试连接，需要授权时打开浏览器，等回环回调写好令牌。
 /// 阻塞到结束，调用方放后台线程。成功返回 Pi 的最后一行输出。
 pub fn login_pi_mcp_server(name: &str, status: &dyn Fn(&str)) -> Result<String, String> {
-    let (runtime, script) = crate::managed_runtime::sync_managed_pi_tool(MCP_SCRIPT, status)?;
-    let mut command = std::process::Command::new(&runtime.bun);
+    let runtime = crate::managed_runtime::sync_managed_pi_agent(status)?;
+    let mut command = runtime.command(Some("mcp"));
     command
-        .arg(&script)
         .args(["login", name, "--timeout", &LOGIN_TIMEOUT_SECS.to_string()])
-        .current_dir(
-            script
-                .parent()
-                .and_then(|src| src.parent())
-                .unwrap_or(&script),
-        )
         .stdin(std::process::Stdio::null());
-    runtime.inherit_into(&mut command);
     let output = command
         .output()
         .map_err(|error| format!("启动 Pi MCP 助手失败：{error}"))?;
