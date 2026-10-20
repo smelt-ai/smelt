@@ -642,7 +642,7 @@ flowchart TB
   <h2>通信链路 / 传输层</h2>
 
   <p>
-    P0 的 <code>session_list</code> 与 <code>session_send</code> 不新开协议、不新开套接字、不走 MCP、也不让两个 Pi 直接连。
+    P0 的 <code>session_list</code>、<code>session_read</code> 与 <code>session_send</code> 不新开协议、不新开套接字、不走 MCP、也不让两个 Pi 直接连。
     扩展只连自己这个会话宿主上已经在听的 Unix 套接字；宿主只沿主 daemon 拉起它时留下的那条 socketpair 把请求交上去；
     主 daemon 在 <code>AcpRegistry</code> 里找到目标宿主，把一条既有的 <code>AcpUserAction</code> 写回去。
     下面每一步都是现网代码里已经存在的通道，标「建议」的只有新 op 的名字。
@@ -666,7 +666,7 @@ flowchart TB
           扩展侧短调用是 <code>callBackgroundHost</code>（<code>packages/pi-agent/src/background-task.ts</code>）。
         </td>
         <td>
-          <code>session_list</code> 与 <code>session_send</code> 各加一个<strong>短</strong> op，形态对齐 <code>callBackgroundHost</code>，不要占着 <code>subagent_dispatch</code> 那条长连接。
+          <code>session_list</code>、<code>session_read</code>、<code>session_send</code> 各加一个<strong>短</strong> op，形态对齐 <code>callBackgroundHost</code>，不要占着 <code>subagent_dispatch</code> 那条长连接。
           <code>request_owner</code> 非空是子智能体归属（<code>SMELT_BACKGROUND_TASK_OWNER</code>）；peer 只接受空 owner，也就是会话本身。
         </td>
       </tr>
@@ -763,7 +763,7 @@ flowchart TB
   <h3>5. 回程</h3>
   <ul>
     <li><strong>enqueued</strong>：主 daemon 已经对 B <code>send_action</code> 成功，并且 <code>remember</code> 了 key。这个结果沿 socketpair 回到宿主 A，再沿后台套接字的那一行响应回到扩展。到此为止，不保证 Pi 已经把它写进 transcript。</li>
-    <li><strong>delivered</strong>：B 的扩展回了 ack。宿主 B 的快照带 <code>peer_inbox</code>（还没 ack 的 peer 消息，和 <code>subagents</code> 一样从宿主发布），ack 后这条从里面消失。主 daemon 看镜像就知道送没送到，不用回连 A。</li>
+    <li><strong>delivered</strong>：B 的扩展回了 ack。宿主 B 的快照带 <code>peer_inbox</code>（peer 消息的 id、来源、类型、<code>pending</code> / <code>delivered</code>；和 <code>subagents</code> 一样从宿主发布，已送达的只留最近 64 条），ack 后这条标成 <code>delivered</code>。主 daemon 看镜像就知道送没送到，A 用 <code>session_list</code> 的 <code>sent</code> 查。</li>
     <li><strong>完成</strong>：B 在自己的回合里再调 <code>session_send</code> 回 A（<code>kind=completion</code>）。不是 <code>subagent_dispatch</code> 那种把连接留到 <code>finish</code> 的 ack，原连接上没有完成回调。</li>
   </ul>
 
@@ -792,7 +792,7 @@ flowchart TB
           <code>handle_acp_submit_input</code> 在投递前调 <code>wake_suspended_acp_session</code>：runtime 已死则 <code>relaunch_recorded_acp_runtime</code>，再 <code>wait_for_acp_ready</code>。
           这是唯一的懒启动。
         </td>
-        <td>同样先 <code>wake_suspended_acp_session</code>，醒来再发 <code>DeliverPeerMessage</code>。不要在 send 里另写一套拉起。<code>peer_inbox</code> 不空时，<code>reduced_suspend_blocker</code> 不让它挂起。</td>
+        <td>同样先 <code>wake_suspended_acp_session</code>，醒来再发 <code>DeliverPeerMessage</code>。不要在 send 里另写一套拉起。<code>peer_inbox</code> 里还有 <code>pending</code> 时，<code>reduced_suspend_blocker</code> 不让它挂起。</td>
       </tr>
       <tr>
         <td>B 根本不在这次 daemon 的注册表里</td>
@@ -955,13 +955,44 @@ flowchart TB
       "title": "Tests · login e2e",
       "engine": "pi",
       "busy": true,
-      "updated_at": "2026-10-20T01:10:00+08:00"
+      "updated_at": "2026-10-20T01:10:00+08:00",
+      "sent": [                // 调用方发给这个会话、对方宿主还记得的消息
+        { "id": "pm-1a2b3c4d5e6f", "kind": "task", "status": "delivered" },
+        { "id": "pm-7f8e9d0c1b2a", "kind": "message", "status": "pending" }
+      ]
     }
   ]
 }</code></pre>
   <ul>
     <li>仅返回 Pi engine 的 durable session（排除非 Pi / 已删除）。</li>
     <li>不返回「假会话」或仅存在于内存的临时 subagent id。</li>
+    <li>
+      <strong><code>sent</code>：投递状态。</strong>取自 B 快照的 <code>peer_inbox</code>，过滤出来源是调用方的条目。
+      <code>pending</code> = 还没 ack；<code>delivered</code> = 已进 B 的 transcript。
+      <code>session_send</code> 返回过的 id 不在这里，就是「不知道」：B 的宿主退出过，或者已经被挤出最近窗口。工具说明要把这三种讲清楚。
+    </li>
+  </ul>
+
+  <h3>7.1.1 P0：<code>session_read</code>（只读拉取）</h3>
+  <p>
+    不靠 B 配合也能看到进度或结果：读 B 最近的助手回复。PI Desktop 插件 0.7.0 也改成了默认拉取。
+  </p>
+  <div class="sketch-label">建议</div>
+  <pre><code>session_read({
+  "session_id": "acp-…",
+  "limit"?: number             // 最近几条助手回复，默认 1，最多 5
+}) → {
+  "session_id": "acp-…",
+  "title": "Tests · login e2e",
+  "busy": false,
+  "replies": [
+    { "at": "2026-10-20T01:31:00+08:00", "text": "e2e 跑完了，失败 2 个：…" }
+  ]
+}</code></pre>
+  <ul>
+    <li>读主 daemon 里 B 的会话镜像（<code>AcpSessionState</code> 的条目尾部），不读文件，不唤醒 B，不进 B 的 transcript。挂起的 B 镜像还在，照样能读；不在注册表的拒绝，和 <code>session_send</code> 一致。</li>
+    <li>只返回助手的文字回复，每条截到 4000 字符；不返回 B 的用户消息、工具输出和思考。</li>
+    <li>来源认定和 <code>session_list</code> 一样走宿主连接；只读，不过 hops / 深度护栏。</li>
   </ul>
 
   <h3>7.2 P0：<code>session_send</code></h3>
@@ -984,7 +1015,7 @@ flowchart TB
     <li><strong>Pi→Pi only</strong>：双方均为 durable Pi session。</li>
     <li><strong>source</strong>：仅从当前 tool 调用的 host context 取得，忽略客户端自报 source。</li>
     <li><strong>source ≠ target</strong>。</li>
-    <li><strong>inbox depth</strong>：数 B 快照里的 <code>peer_inbox</code>（未 ack 的 peer 消息）加在途条数；超限则 <code>AGENT_BUSY</code>（建议默认阈值对齐业界常见值，如 8，可配置）。</li>
+    <li><strong>inbox depth</strong>：数 B 快照里 <code>peer_inbox</code> 的 <code>pending</code> 条数加在途条数；超限则 <code>AGENT_BUSY</code>（建议默认阈值对齐业界常见值，如 8，可配置）。</li>
     <li><strong>hops</strong>：信封内递减；≤0 拒绝。</li>
     <li><strong>permission_ceiling</strong>：快照写入信封；目标本 turn 工具权限取 min(自身, ceiling)。</li>
     <li><strong>idempotency_key</strong>：同 source + key 在进程内近期窗口视为 duplicate（见 §12 弱点）。</li>
@@ -1039,7 +1070,7 @@ sequenceDiagram
     HostB->>PiB: listen 连接写 completion 行<br/>kind peer_message
     Note over PiB: pi.sendMessage customType smelt.peer_message<br/>空闲开一轮 · 忙则 followUp 排队，不 steer
     PiB-->>HostB: message_start 后 ack pm-…
-    Note over HostB,PiB: 权威：已进 transcript<br/>peer_inbox 去掉这条
+    Note over HostB,PiB: 权威：已进 transcript<br/>peer_inbox 标成 delivered
     opt 完成回执
       Note over PiB,Tool: B 之后自己再调 session_send 回 A<br/>不是这条连接上的 finish
     end
@@ -1071,7 +1102,7 @@ sequenceDiagram
     <tbody>
       <tr>
         <td>Inbox 深度</td>
-        <td>B 快照里的 <code>peer_inbox</code> 条数，加上主 daemon 刚投出、快照还没回来的条数</td>
+        <td>B 快照里 <code>peer_inbox</code> 的 <code>pending</code> 条数，加上主 daemon 刚投出、快照还没回来的条数</td>
         <td>满（默认 8）则拒绝；不靠 <code>status='queued'</code> SQL 计数，也不读 transcript</td>
       </tr>
       <tr>
@@ -1201,6 +1232,7 @@ sequenceDiagram
       <ul>
         <li><code>session_list</code></li>
         <li><code>session_send</code></li>
+        <li><code>session_read</code>（只读拉取）、<code>session_list</code> 带 <code>sent</code> 投递状态</li>
         <li>门卫：Pi→Pi、source 防伪、≠、depth、hops、ceiling</li>
         <li>DeliverPeerMessage → BackgroundSupervisor → <code>smelt.peer_message</code> → message_start ack</li>
         <li>对话区居中事件行，<code>TaskNote</code> 一起改成同一样式</li>
@@ -1291,7 +1323,7 @@ sequenceDiagram
   <h3>落到 smelt 上的五件事</h3>
   <ol>
     <li>
-      <strong>enqueued</strong> 只表示主 daemon 对宿主 B 的 <code>send_action</code> 写成功；<strong>delivered</strong> 要等 B 的扩展在 <code>message_start</code> 回 ack，<code>peer_inbox</code> 去掉这条。
+      <strong>enqueued</strong> 只表示主 daemon 对宿主 B 的 <code>send_action</code> 写成功；<strong>delivered</strong> 要等 B 的扩展在 <code>message_start</code> 回 ack，<code>peer_inbox</code> 里标成 <code>delivered</code>。A 用 <code>session_list</code> 的 <code>sent</code> 看得到。
       这一段是准的，但只在内存里：宿主 B 在 ack 前退出，消息就没了，没有一行把状态改成失败，发送方也不会收到通知。
     </li>
     <li>
@@ -1321,7 +1353,12 @@ sequenceDiagram
     </li>
     <li>
       <strong>回合状态用 <code>session_list</code> 看。</strong>
-      列表读的是注册表里已有的相位和是否挂起，不另造 peer 状态枚举。A 由此知道 B 是空闲、忙，还是被 <code>acp_idle</code> 挂起。
+      列表读的是注册表里已有的相位和是否挂起，不另造 peer 状态枚举。A 由此知道 B 是空闲、忙，还是被 <code>acp_idle</code> 挂起；
+      <code>sent</code> 告诉 A 自己发的消息送到没有。
+    </li>
+    <li>
+      <strong>B 没回，A 自己去读。</strong>
+      <code>session_read</code> 读 B 最近的助手回复，不靠 B 记得回 completion，也不唤醒 B。
     </li>
     <li>
       <strong>崩溃后的重复靠 transcript 认。</strong>
@@ -1386,7 +1423,7 @@ sequenceDiagram
     </li>
     <li>
       <strong>Inbox 深度默认阈值。</strong>
-      统计口径已定为 <code>peer_inbox</code>（未 ack）。阈值建议先用 8，用指标验证。
+      统计口径已定为 <code>peer_inbox</code> 里的 <code>pending</code>。阈值建议先用 8，用指标验证。
     </li>
     <li>
       <strong>Hops 默认初始值。</strong>
