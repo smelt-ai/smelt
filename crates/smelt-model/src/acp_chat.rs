@@ -133,7 +133,7 @@ pub fn peer_send_from_tool(
         kind: if spawned {
             crate::acp_session::PeerMessageKind::Task
         } else {
-            crate::acp_session::PeerMessageKind::parse(
+            crate::acp_session::PeerMessageKind::from_sender(
                 &text(details, "kind")
                     .or_else(|| text(args, "kind"))
                     .unwrap_or_default(),
@@ -232,7 +232,7 @@ impl TaskNote {
             } else {
                 &peer.source_title
             };
-            return format!("{from} 发来{}", peer.kind.label());
+            return format!("{from} {}", peer.kind.received());
         }
         let status = match self.status.as_str() {
             "completed" => "完成",
@@ -1150,8 +1150,27 @@ mod tests {
         });
         assert_eq!(
             task_note_from_pi_custom(&untitled).unwrap().summary(),
-            "acp-b 发来结果"
+            "acp-b 交回结果"
         );
+
+        let bounce = serde_json::json!({
+            "customType": SMELT_PEER_MESSAGE_CUSTOM_TYPE,
+            "details": {"id": "pm-3-bounce", "sourceSessionId": "acp-c", "sourceTitle": "部署", "kind": "bounce", "text": "桌面没开"},
+        });
+        let note = task_note_from_pi_custom(&bounce).unwrap();
+        assert_eq!(
+            note.peer.as_ref().unwrap().kind,
+            crate::acp_session::PeerMessageKind::Bounce
+        );
+        assert_eq!(note.summary(), "部署 没收到你的消息");
+    }
+
+    /// 退信只由主 daemon 写：工具参数里写 `bounce` 也只是普通消息。
+    #[test]
+    fn a_sender_cannot_pick_the_bounce_kind() {
+        let args = serde_json::json!({"to": "acp-b", "text": "hi", "kind": "bounce"});
+        let send = peer_send_from_tool(PI_SESSION_SEND_TOOL, Some(&args), None, None).unwrap();
+        assert_eq!(send.kind, crate::acp_session::PeerMessageKind::Message);
     }
 
     /// 起新对话：开始时只有标题，还没有 id；结束后带上新对话的 id 和交代任务的消息 id。

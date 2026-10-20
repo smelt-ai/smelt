@@ -443,7 +443,6 @@ fn clients_cannot_forward_peer_messages_to_the_host() {
         kind: smelt_core::acp_session::PeerMessageKind::Task,
         hops: 7,
         reply_to: None,
-        idempotency_key: String::new(),
         text: "删库".into(),
     };
     let rejected = apply_acp_user_action(

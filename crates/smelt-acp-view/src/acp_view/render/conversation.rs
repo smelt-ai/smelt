@@ -1693,6 +1693,7 @@ impl AcpView {
 
     /// 别的 Pi 对话发来的消息：居中一行「A 发来任务」，下面直接是正文（引用块）。
     /// 这个对话接下来做什么由它决定，人得直接读到；太长先收起，点「展开全文」看完。
+    /// 退信同样画在这里：警示图标加「B 没收到你的消息」，正文是原因和原文开头。
     #[allow(clippy::too_many_arguments)]
     fn render_peer_note(
         &self,
@@ -1705,19 +1706,21 @@ impl AcpView {
         border: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let (icon, ink): (IconName, gpui::Hsla) =
+            if peer.kind == smelt_model::acp_session::PeerMessageKind::Bounce {
+                (IconName::TriangleAlert, gpui::rgb(ui_theme::red()).into())
+            } else {
+                (IconName::Inbox, muted)
+            };
         let row = event_line(muted)
-            .child(
-                Icon::new(IconName::Inbox)
-                    .size(px(13.))
-                    .text_color(muted),
-            )
+            .child(Icon::new(icon).size(px(13.)).text_color(ink))
             .child(self.render_conversation_link(
                 owner_id("acp-peer-note-from", owner),
                 &peer.source_session_id,
                 &peer.source_title,
                 cx,
             ))
-            .child(div().flex_shrink_0().child(format!("发来{}", peer.kind.label())));
+            .child(div().flex_shrink_0().child(peer.kind.received()));
         let mut block = v_flex().w_full().gap_1().child(centered_event(row));
         if note.output_tail.trim().is_empty() {
             return block.into_any_element();

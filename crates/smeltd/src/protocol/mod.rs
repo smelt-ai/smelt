@@ -135,7 +135,7 @@ pub(crate) fn handle_conn(conn: UnixStream, ctx: ServerContext) {
         DaemonOperation::AcpSnapshot => handle_acp_snapshot(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::AcpSkills => handle_acp_skills(conn, &v, &acp_sessions),
         DaemonOperation::AcpSubmitInput => {
-            handle_acp_submit_input(conn, &v, &acp_sessions, &event_hub)
+            handle_acp_submit_input(conn, &v, &acp_sessions, &workspace_menu, &event_hub)
         }
         DaemonOperation::AcpAction => handle_acp_action(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::AcpKill => {

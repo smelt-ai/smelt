@@ -3053,7 +3053,6 @@ mod tests {
             kind: crate::acp_session::PeerMessageKind::Task,
             hops: 7,
             reply_to: None,
-            idempotency_key: "a:remind:1".into(),
             text: "重跑 flaky e2e".into(),
         }
     }

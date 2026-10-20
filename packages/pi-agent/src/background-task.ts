@@ -81,7 +81,6 @@ export type PeerNoticeFields = {
 	kind: PeerMessageKind;
 	hops: number;
 	replyTo: string | null;
-	idempotencyKey: string;
 };
 
 export type TaskCompletionNotice = {
@@ -158,7 +157,6 @@ function parsePeer(value: unknown): PeerNoticeFields | undefined {
 		kind: peerMessageKind(row.kind),
 		hops: typeof row.hops === "number" ? row.hops : 0,
 		replyTo: typeof row.replyTo === "string" && row.replyTo ? row.replyTo : null,
-		idempotencyKey: typeof row.idempotencyKey === "string" ? row.idempotencyKey : "",
 	};
 }
 

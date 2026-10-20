@@ -1,4 +1,4 @@
-//! 会话宿主向主 daemon 转交 Pi 会话互发的请求（`session_list` / `session_read` / `session_send`）。
+//! 会话宿主向主 daemon 转交 Pi 会话互发的请求（`session_list` / `session_read` / `session_send` / `session_spawn`）。
 //!
 //! 一个会话宿主进程只托管一个对话，所以通道是进程级的：宿主启动时 [`install`] 一个
 //! 往控制连接写行的函数，扩展的请求经 [`request`] 写成一行

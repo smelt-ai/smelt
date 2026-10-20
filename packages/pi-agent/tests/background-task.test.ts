@@ -264,7 +264,6 @@ describe("background task host client", () => {
 				kind: "task" as const,
 				hops: 7,
 				replyTo: null,
-				idempotencyKey: "a:e2e:1",
 			},
 			wake: true,
 		};

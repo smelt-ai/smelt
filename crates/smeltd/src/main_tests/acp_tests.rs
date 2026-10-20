@@ -514,6 +514,7 @@ fn submit_input_applies_pending_model_before_the_prompt() {
             "config_values": [["model", "sonnet"]],
         }),
         &acp_sessions,
+        &new_test_workspace_menu(),
         &new_event_hub(),
     );
     let mut response = String::new();
@@ -573,6 +574,7 @@ fn switching_model_does_not_stop_the_current_turn() {
             "config_values": [["model", "github-copilot/kimi-k3"]],
         }),
         &acp_sessions,
+        &new_test_workspace_menu(),
         &new_event_hub(),
     );
     let mut response = String::new();
@@ -2525,6 +2527,34 @@ fn watch_on_dormant_desktop_conversation_without_desktop_fails_fast() {
         &new_event_hub(),
     );
     assert!(read_watch_unavailable(client).contains("not open"));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "没有桌面端能兑现唤醒时不能空等超时"
+    );
+}
+
+/// 手机给侧栏里还没打开的对话发消息：和旁观一样请桌面打开，不再直接报「没有这个会话」。
+/// 桌面没开就立刻说清楚，不空等。
+#[test]
+fn submit_to_dormant_desktop_conversation_asks_the_desktop_and_fails_fast_without_it() {
+    let acp_sessions = new_test_acp_sessions();
+    let (server, client) = UnixStream::pair().unwrap();
+    let started = Instant::now();
+    handle_acp_submit_input(
+        server,
+        &serde_json::json!({
+            "id": "acp-dormant",
+            "input": {"text": "在吗", "images": []},
+        }),
+        &acp_sessions,
+        &desktop_menu_with_acp("acp-dormant"),
+        &new_event_hub(),
+    );
+    let mut response = String::new();
+    BufReader::new(client).read_line(&mut response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(response.to_string().contains("not open"), "{response}");
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "没有桌面端能兑现唤醒时不能空等超时"

@@ -205,7 +205,10 @@ pub(crate) fn suspend_idle_acp_sessions(
     let mut suspended = Vec::new();
     for (id, slot) in acp_sessions.snapshot() {
         let sess = &slot.value;
-        if acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some() {
+        // 发件队列里还有发给它、没送到的信：挂起会让交出去的那几封跟着宿主一起没了。
+        if acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some()
+            || crate::peer_messages::has_undelivered(&id)
+        {
             continue;
         }
         if is_known_remote_session(remote_sessions, RemoteSessionKind::Acp, &id) != Some(false) {
@@ -216,6 +219,7 @@ pub(crate) fn suspend_idle_acp_sessions(
         };
         if !acp_sessions.is_current(&id, &slot)
             || acp_suspend_blocker(sess, crate::event_hub::now_ms(), idle_after).is_some()
+            || crate::peer_messages::has_undelivered(&id)
         {
             continue;
         }

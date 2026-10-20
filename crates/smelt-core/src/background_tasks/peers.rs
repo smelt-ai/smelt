@@ -19,11 +19,8 @@ use super::{Inner, ModelNotice, State, now_ms, poke, request_owner};
 
 /// 送到的留最近这么多条，`session_list` 据此告诉发送方送到了没有。
 const KEEP_DELIVERED: usize = 64;
-/// `session_send` 可能要等主 daemon 唤醒挂起的对方，最多等 runtime 就绪的那么久。
-const SEND_TIMEOUT: Duration = Duration::from_secs(150);
-/// `session_spawn` 要等新对话起来、配置一项项写好，再发第一条。
-const SPAWN_TIMEOUT: Duration = Duration::from_secs(300);
-const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+/// 主 daemon 只做同步检查就回答（发送、起新对话都是先收下、后台再做），不用等对方。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(super) struct LivePeer {
     view: PeerMessageView,
@@ -33,7 +30,7 @@ pub(super) struct LivePeer {
     quiet: bool,
 }
 
-/// 主 daemon 交来一条。同一个 id 只收一次：daemon 重试、交接重放都不会排两条。
+/// 主 daemon 交来一条。同一个 id 只收一次：发件队列重投、交接重放都不会排两条。
 pub(super) fn deliver(inner: &Inner, delivery: PeerDelivery) {
     {
         let mut state = inner.mu.lock().unwrap();
@@ -64,17 +61,12 @@ pub(super) fn forward(mut stream: UnixStream, op: &str, request: &serde_json::Va
     let reply = if !request_owner(request).is_empty() {
         serde_json::json!({"ok": false, "error": "子智能体不能和别的对话通信"})
     } else {
-        let timeout = match op {
-            "session_send" => SEND_TIMEOUT,
-            "session_spawn" => SPAWN_TIMEOUT,
-            _ => QUERY_TIMEOUT,
-        };
         let mut body = request.clone();
         if let Some(fields) = body.as_object_mut() {
             fields.remove("op");
             fields.remove("owner");
         }
-        crate::peer_link::request(op, body, timeout)
+        crate::peer_link::request(op, body, REQUEST_TIMEOUT)
             .unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error}))
     };
     let _ = stream.write_all(reply.to_string().as_bytes());
@@ -98,7 +90,6 @@ fn notice_of(peer: &LivePeer) -> ModelNotice {
             "kind": delivery.kind.as_str(),
             "hops": delivery.hops,
             "replyTo": delivery.reply_to,
-            "idempotencyKey": delivery.idempotency_key,
         })),
         wake: !peer.quiet,
     }

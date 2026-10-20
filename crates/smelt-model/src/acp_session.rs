@@ -384,11 +384,21 @@ pub enum PeerMessageKind {
     Task,
     /// 回报结果，通常带 `reply_to`。
     Completion,
+    /// 退信：发出去的消息没送到。只由主 daemon 写，发送方选不到。
+    Bounce,
 }
 
 impl PeerMessageKind {
-    /// 工具参数和自定义消息里的写法。认不出来的当普通消息。
+    /// 会话记录里的写法。认不出来的当普通消息。
     pub fn parse(value: &str) -> Self {
+        match value {
+            "bounce" => Self::Bounce,
+            other => Self::from_sender(other),
+        }
+    }
+
+    /// 发送方（工具参数）能选的几类。写了 `bounce` 也只当普通消息。
+    pub fn from_sender(value: &str) -> Self {
         match value {
             "task" => Self::Task,
             "completion" => Self::Completion,
@@ -401,15 +411,27 @@ impl PeerMessageKind {
             Self::Message => "message",
             Self::Task => "task",
             Self::Completion => "completion",
+            Self::Bounce => "bounce",
         }
     }
 
-    /// 事件行里的名词：「发来任务」「交回结果」。
+    /// 发送那一头的名词：「已发任务给」。
     pub fn label(self) -> &'static str {
         match self {
             Self::Message => "消息",
             Self::Task => "任务",
             Self::Completion => "结果",
+            Self::Bounce => "退信",
+        }
+    }
+
+    /// 收到时事件行里跟在对方名字后面的那半句：「〈A〉发来任务」「〈B〉没收到你的消息」。
+    pub fn received(self) -> &'static str {
+        match self {
+            Self::Message => "发来消息",
+            Self::Task => "发来任务",
+            Self::Completion => "交回结果",
+            Self::Bounce => "没收到你的消息",
         }
     }
 }
@@ -428,7 +450,7 @@ pub enum PeerMessageStatus {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerMessageView {
-    /// 主 daemon 分的 `pm-` id。
+    /// 主 daemon 按（来源，`toolCallId`）算出的 `pm-` id。
     pub id: String,
     pub source_session_id: String,
     pub source_title: String,
@@ -451,7 +473,6 @@ pub struct PeerDelivery {
     pub hops: u32,
     #[serde(default)]
     pub reply_to: Option<String>,
-    pub idempotency_key: String,
     pub text: String,
 }
 
