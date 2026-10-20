@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>smelt Pi↔Pi 会话消息技术方案</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-elevated: #161b22;
+    --bg-sidebar: #0b1017;
+    --border: #30363d;
+    --border-subtle: #21262d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --text-dim: #6e7681;
+    --accent: #39c5cf;
+    --accent-2: #58a6ff;
+    --accent-soft: rgba(57, 197, 207, 0.12);
+    --accent-2-soft: rgba(88, 166, 255, 0.12);
+    --warn: #d29922;
+    --warn-soft: rgba(210, 153, 34, 0.12);
+    --danger: #f85149;
+    --danger-soft: rgba(248, 81, 73, 0.1);
+    --ok: #3fb950;
+    --ok-soft: rgba(63, 185, 80, 0.1);
+    --code-bg: #010409;
+    --sidebar-w: 240px;
+    --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono",
+      Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 1.25rem 0.9rem 2rem;
+    font-size: 13px;
+  }
+  nav.toc .brand {
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.35rem;
+  }
+  nav.toc .toc-title {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-bottom: 1rem;
+    line-height: 1.4;
+  }
+  nav.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: toc;
+  }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block;
+    padding: 0.35rem 0.55rem;
+    border-radius: 6px;
+    color: var(--text-muted);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+  }
+  nav.toc a:hover {
+    background: var(--accent-soft);
+    color: var(--text);
+    text-decoration: none;
+  }
+  nav.toc a::before {
+    counter-increment: toc;
+    content: counter(toc) ". ";
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  main {
+    max-width: 880px;
+    padding: 2rem 2.5rem 4rem;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  header.doc-header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  header.doc-header h1 {
+    margin: 0 0 0.6rem;
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+  }
+  header.doc-header .meta {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+  header.doc-header .meta strong { color: var(--text); font-weight: 600; }
+  .badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.9rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+  }
+  .badge.accent { border-color: rgba(57,197,207,0.4); color: var(--accent); background: var(--accent-soft); }
+  .badge.blue { border-color: rgba(88,166,255,0.4); color: var(--accent-2); background: var(--accent-2-soft); }
+  .badge.warn { border-color: rgba(210,153,34,0.4); color: var(--warn); background: var(--warn-soft); }
+  .badge.ok { border-color: rgba(63,185,80,0.4); color: var(--ok); background: var(--ok-soft); }
+
+  section {
+    margin-bottom: 2.75rem;
+    scroll-margin-top: 1.25rem;
+  }
+  h2 {
+    font-size: 1.3rem;
+    margin: 0 0 1rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  h2 .num {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    margin-right: 0.35rem;
+  }
+  h3 {
+    font-size: 1.05rem;
+    margin: 1.5rem 0 0.6rem;
+    color: var(--text);
+  }
+  h4 {
+    font-size: 0.95rem;
+    margin: 1.1rem 0 0.45rem;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  p { margin: 0.65rem 0; }
+  ul, ol { margin: 0.5rem 0 0.85rem; padding-left: 1.35rem; }
+  li { margin: 0.28rem 0; }
+  li::marker { color: var(--text-dim); }
+
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin: 1rem 0;
+    font-size: 0.92rem;
+  }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .callout.danger { border-left-color: var(--danger); background: var(--danger-soft); }
+  .callout.ok { border-left-color: var(--ok); background: var(--ok-soft); }
+  .callout .label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.25rem;
+  }
+  .callout.warn .label { color: var(--warn); }
+  .callout.danger .label { color: var(--danger); }
+  .callout.ok .label { color: var(--ok); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    margin: 0.9rem 0 1.2rem;
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  th, td {
+    text-align: left;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: top;
+  }
+  th {
+    background: #1c2128;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 0.85em; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--code-bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    color: #c9d1d9;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.95rem 1.05rem;
+    overflow-x: auto;
+    margin: 0.85rem 0 1.1rem;
+    font-size: 0.8rem;
+    line-height: 1.55;
+  }
+  pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #c9d1d9;
+    font-size: inherit;
+  }
+  .sketch-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--warn);
+    background: var(--warn-soft);
+    border: 1px solid rgba(210,153,34,0.35);
+    border-radius: 4px;
+    padding: 0.1rem 0.45rem;
+    margin-bottom: 0.45rem;
+  }
+
+  .mermaid {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1rem 0 1.25rem;
+    overflow-x: auto;
+  }
+
+  .phase-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin: 1rem 0;
+  }
+  .phase-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    background: var(--bg-elevated);
+  }
+  .phase-card h4 { margin: 0 0 0.4rem; color: var(--accent); font-size: 0.95rem; }
+  .phase-card.p1 h4 { color: var(--accent-2); }
+  .phase-card.p2 h4 { color: var(--warn); }
+  .phase-card.out h4 { color: var(--danger); }
+  .phase-card ul { margin: 0; padding-left: 1.1rem; font-size: 0.88rem; }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc {
+      position: relative;
+      height: auto;
+      max-height: none;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding: 1rem;
+    }
+    nav.toc ol {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.25rem;
+    }
+    nav.toc a { border-left: none; padding: 0.3rem 0.5rem; }
+    main { padding: 1.25rem 1.1rem 3rem; }
+  }
+
+  @media print {
+    :root {
+      --bg: #fff;
+      --bg-elevated: #f6f8fa;
+      --bg-sidebar: #f6f8fa;
+      --text: #1f2328;
+      --text-muted: #656d76;
+      --text-dim: #8c959f;
+      --border: #d0d7de;
+      --border-subtle: #eaeef2;
+      --code-bg: #f6f8fa;
+      --accent: #0550ae;
+      --accent-2: #0550ae;
+    }
+    nav.toc { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    a { color: inherit; text-decoration: underline; }
+    .mermaid { break-inside: avoid; }
+    pre { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="目录">
+  <div class="brand">smelt · 设计文档</div>
+  <div class="toc-title">Pi↔Pi 会话消息<br/>transcript 即收件箱<br/>2026-10-20</div>
+  <ol>
+    <li><a href="#s1">背景与目标</a></li>
+    <li><a href="#s2">设计原则</a></li>
+    <li><a href="#s3">现状</a></li>
+    <li><a href="#s4">与 PI / 业内对照</a></li>
+    <li><a href="#s5">总体方案</a></li>
+    <li><a href="#s6">「数据」放哪</a></li>
+    <li><a href="#s7">API / 工具</a></li>
+    <li><a href="#s8">投递时序</a></li>
+    <li><a href="#s9">护栏与权限</a></li>
+    <li><a href="#s10">UI</a></li>
+    <li><a href="#s11">分阶段落地</a></li>
+    <li><a href="#s12">风险与取舍</a></li>
+    <li><a href="#s13">开放问题</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="doc-header">
+  <h1>smelt Pi↔Pi 会话消息技术方案</h1>
+  <div class="meta">
+    <strong>日期</strong>：2026-10-20（Asia/Taipei） ·
+    <strong>受众</strong>：smelt 仓库维护者（Rust <code>smeltd</code> + Pi agent） ·
+    <strong>状态</strong>：建议草案（非已实现 API）
+  </div>
+  <div class="meta" style="margin-top:0.45rem">
+    <strong>项目</strong>：
+    <a href="https://github.com/smelt-ai/smelt" target="_blank" rel="noopener">smelt-ai/smelt</a>
+    （macOS AI coding cockpit · <code>smeltd</code> + Pi / Bun） ·
+    <strong>依据调研</strong>：
+    <code>2026-10-20-pi-and-industry-session-messaging.md</code> 等
+  </div>
+  <div class="badge-row">
+    <span class="badge accent">Pi transcript 即收件箱</span>
+    <span class="badge ok">零新 SQL 账本</span>
+    <span class="badge blue">仅 Pi → Pi</span>
+    <span class="badge warn">建议 · 非现网 API</span>
+  </div>
+</header>
+
+<!-- ========== 1 ========== -->
+<section id="s1">
+  <h2><span class="num">1.</span>背景与目标 / 非目标</h2>
+
+  <h3>1.1 为何要做</h3>
+  <p>
+    smelt 是 macOS 上的 AI coding cockpit：侧栏可见的 durable Pi 会话由 <code>smeltd</code>（Rust）托管，
+    会话内 agent 为 Pi（Bun）。产品需要<strong>对等 peer messaging</strong>：一个正在跑的 Pi 对话
+    能在 mid-run 向<strong>另一个</strong> durable Pi session 发送提醒 / 任务 / 完成通知，
+    并让对方在既有 turn 路径上被唤醒、消费。
+  </p>
+  <p>
+    这与现有 <code>subagent</code>（后台子进程、只向父报告、不进侧栏）是<strong>不同层</strong>：
+    subagent 保持不变；peer send 面向侧栏 durable Pi 会话之间的协作。
+  </p>
+
+  <h3>1.2 目标</h3>
+  <ul>
+    <li>Pi↔Pi：发现其他 durable Pi 会话，并向其投递 peer 消息。</li>
+    <li>投递权威落在<strong>目标 Pi 的原生 transcript</strong>：消息进入 transcript 并被 turn 消费即视为送达。</li>
+    <li><code>smeltd</code> 仍做校验与入队门卫（身份、目标、跳数、权限天花板、inbox 深度），但不引入协作账本表。</li>
+    <li>P0 只暴露 <code>session_list</code> + <code>session_send</code>；spawn 可选、靠既有建会话路径。</li>
+  </ul>
+
+  <h3>1.3 非目标</h3>
+  <ul>
+    <li><strong>不</strong>做跨引擎 ACP 总线（Claude / Codex / 其他 runtime 互通）。</li>
+    <li><strong>不</strong>复活已删除的 schema-23 MCP peer 总线（<code>smelt-agent-mcp</code> / <code>peer_message_*</code>）。</li>
+    <li><strong>不</strong>把 Task 级 A2A / 兄弟子 agent 互聊作为产品模型（与 PI Desktop ADR 0165 同向：子 agent 仍是报告型）。</li>
+    <li><strong>不</strong>新增 <code>session_messages</code> / <code>session_links</code> 等 SQL 协作账本，也<strong>不</strong>为该功能在 <code>smelt.sqlite3</code> 上加新 schema 字段。</li>
+  </ul>
+
+  <div class="callout ok">
+    <div class="label">产品偏好（用户强制）</div>
+    协作状态放进 Pi transcript framing，而不是 host SQL ledger。
+    接受相对 PI Desktop 更薄的持久化与幂等保证，换取零新表、与 Pi 原生会话模型对齐。
+  </div>
+</section>
+
+<!-- ========== 2 ========== -->
+<section id="s2">
+  <h2><span class="num">2.</span>设计原则</h2>
+
+  <ol>
+    <li>
+      <strong>Pi transcript 即收件箱。</strong>
+      对等消息以与 user/assistant 同结构族的一条（或一组）transcript 条目呈现，
+      带可辨认的 provenance framing；UI 与模型都能从 transcript 本身读到「谁发来的」。
+    </li>
+    <li>
+      <strong>零新 SQL 协作账本。</strong>
+      不新增 <code>session_messages</code>、<code>session_links</code>，不为 peer 功能扩展
+      <code>smelt.sqlite3</code> schema。<code>source_session_id</code>、<code>kind</code>、
+      <code>remaining_hops</code>、<code>permission_ceiling</code>、<code>idempotency_key</code>、
+      <code>reply_to</code> 等元数据住在<strong>transcript 消息信封</strong>里。
+    </li>
+    <li>
+      <strong>smeltd 仍是门卫。</strong>
+      发现、校验、入队走 daemon；source 从 tool-host 上下文注入（禁止客户端伪造）；
+      目标必须是已有 durable Pi session；source ≠ target；可选跳数与权限天花板在进程内检查。
+    </li>
+    <li>
+      <strong>复用既有 session / turn 路径。</strong>
+      投递 = 把 framed 输入推进目标 session 的既有 turn / input queue，再由 Pi 写入自身 transcript；
+      ack 对齐同 session 既有的至少一次模式（如 <code>claim_model</code> / <code>acknowledge_model</code> 风格）。
+    </li>
+    <li>
+      <strong>与 subagent 分层。</strong>
+      subagent：后台子、报告型、不进侧栏。Peer send：侧栏 durable Pi 之间，可 mid-run 唤醒。
+    </li>
+  </ol>
+</section>
+
+<!-- ========== 3 ========== -->
+<section id="s3">
+  <h2><span class="num">3.</span>现状</h2>
+
+  <table>
+    <thead>
+      <tr><th>能力</th><th>现状</th><th>备注</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Durable Pi 会话</td>
+        <td>已有</td>
+        <td><code>smeltd</code> 管理 session 身份与侧栏列表；Pi 持有原生 transcript</td>
+      </tr>
+      <tr>
+        <td><code>subagent</code></td>
+        <td>已有</td>
+        <td>后台子进程；向父报告；非侧栏 peer</td>
+      </tr>
+      <tr>
+        <td>Pi→Pi peer send</td>
+        <td><strong>无</strong></td>
+        <td>本次要补的缺口</td>
+      </tr>
+      <tr>
+        <td>schema-23 MCP peer 总线</td>
+        <td>已删除</td>
+        <td>明确不复活</td>
+      </tr>
+      <tr>
+        <td>同 session claim/ack</td>
+        <td>已有模式</td>
+        <td>可对齐至少一次投递消费语义</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    一句话：<code>smeltd</code> 今天能列会话、跑 Pi、管 subagent，但<strong>没有</strong>把一条 peer 消息
+    合法地塞进另一个 Pi 的 turn / transcript 的产品路径。
+  </p>
+</section>
+
+<!-- ========== 4 ========== -->
+<section id="s4">
+  <h2><span class="num">4.</span>与 PI / 业内对照</h2>
+
+  <h3>4.1 PI Desktop：host SQL collaboration ledger</h3>
+  <p>
+    PI Desktop（ADR 0239 / 0240）对 durable Agent Session 采用<strong>host 拥有的协作账本</strong>：
+  </p>
+  <ul>
+    <li><code>session_collaboration_messages</code>：按 message ID / idempotency key 幂等；kind ∈ {task, message, completion}</li>
+    <li><code>session_collaboration_links</code>：仅记录 spawn 创建的 parent–worker 关系</li>
+    <li>投递经 turn queue（忙则排队）；inbox 深度、hops、permission_ceiling 均有 SQL / host 侧权威</li>
+    <li>崩溃恢复与 exactly-once completion 回调由 ledger 支撑</li>
+  </ul>
+  <p>
+    这是「厚 host」路线：协作事实先落 SQL，再投影进模型 framing。
+  </p>
+
+  <h3>4.2 smelt 选择：更薄的 Pi-native 路径</h3>
+  <p>
+    产品明确拒绝「为协作再开一套 SQL 表」——认为不够优雅，也与「Pi 会话本身就是真相」的心智不一致。
+    因此 smelt 对照 PI Desktop 后<strong>刻意不照搬 ledger</strong>：
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>维度</th><th>PI Desktop</th><th>smelt（本稿）</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>收件箱权威</td>
+        <td>host SQL ledger 行</td>
+        <td>目标 Pi transcript 中的 peer-framed 条目</td>
+      </tr>
+      <tr>
+        <td>关系图</td>
+        <td><code>session_collaboration_links</code></td>
+        <td>约定（标题 / 初始 framing / 软 parent hint），无表</td>
+      </tr>
+      <tr>
+        <td>幂等</td>
+        <td>UNIQUE(plugin, source, idempotency_key)</td>
+        <td>信封内 key + 进程内去重；无跨重启全局唯一约束</td>
+      </tr>
+      <tr>
+        <td>崩溃恢复</td>
+        <td>queued 行可重放</td>
+        <td>依赖既有 turn queue 持久化；未入 transcript 者可能丢失</td>
+      </tr>
+      <tr>
+        <td>schema 成本</td>
+        <td>新表 + 迁移</td>
+        <td>零新协作表 / 零新 runtime DB 字段</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn">
+    <div class="label">刻意取舍</div>
+    smelt 用更弱的「未入 transcript 前」持久化，换取与 Pi 原生 transcript 对齐、零 SQL 账本。
+    护栏（深度、hops、ceiling）仍在 <code>smeltd</code> 进程内执行，只是<strong>不落协作表</strong>。
+  </div>
+
+  <h3>4.3 业内简述</h3>
+  <ul>
+    <li><strong>报告型子 agent（模式 a）</strong>：Claude Code Task、PI Task——子结束交结果，无兄弟 peer；smelt <code>subagent</code> 属此类，保持不变。</li>
+    <li><strong>带账本的对等投递（模式 b）</strong>：PI Desktop session collaboration——smelt 产品语义同属 (b)，实现落点改为 transcript。</li>
+    <li><strong>黑板 / 共享状态（模式 c）</strong>：非本次范围。</li>
+  </ul>
+</section>
+
+<!-- ========== 5 ========== -->
+<section id="s5">
+  <h2><span class="num">5.</span>总体方案</h2>
+
+  <p>
+    三个角色：发起方 Pi（A）、门卫 <code>smeltd</code>、目标 Pi（B）。
+    发现复用既有 session 列表；发送经 daemon 校验后进入 B 的既有 turn/input 路径；
+    B 将 framed peer 消息写入自身 transcript，再按既有 claim/ack 风格消费。
+  </p>
+
+  <div class="sketch-label">建议 · 组件关系</div>
+  <div class="mermaid">
+flowchart TB
+  subgraph UI["macOS UI / 侧栏"]
+    Sidebar["Session 侧栏<br/>既有身份 · 无新表"]
+  end
+
+  subgraph Daemon["smeltd (Rust)"]
+    List["session_list<br/>过滤 durable Pi"]
+    Gate["session_send 门卫<br/>Pi→Pi · source≠target<br/>hops / ceiling / depth"]
+    TQ["目标 session<br/>既有 turn / input queue"]
+  end
+
+  subgraph PiA["Pi session A (Bun)"]
+    ToolA["tools: session_list<br/>session_send"]
+    TrA["A transcript"]
+  end
+
+  subgraph PiB["Pi session B (Bun)"]
+    TrB["B transcript<br/>= peer 收件箱"]
+    Claim["claim / ack<br/>至少一次消费"]
+  end
+
+  Sidebar --- Daemon
+  ToolA -->|"RPC / tool host"| List
+  ToolA -->|"RPC / tool host"| Gate
+  Gate -->|"enqueue framed input"| TQ
+  TQ -->|"注入 turn"| TrB
+  TrB --> Claim
+  Gate -.->|"元数据仅在信封"| TrB
+  </div>
+
+  <div class="callout">
+    <div class="label">核心断言</div>
+    送达权威 =「peer-framed 消息已进入目标 Pi transcript，且被该 turn 路径消费」。
+    <strong>不是</strong>「<code>session_messages</code> 里多了一行」。
+  </div>
+</section>
+
+<!-- ========== 6 ========== -->
+<section id="s6">
+  <h2><span class="num">6.</span>「数据」放哪：transcript framing</h2>
+
+  <p>
+    协作元数据住在<strong>目标会话 transcript 的消息信封</strong>中。
+    结构族与 user/assistant turn 相同（便于渲染与上下文窗口纳入），但带可区分 provenance，
+    避免模型/用户误以为是人类直接输入。
+  </p>
+
+  <div class="callout danger">
+    <div class="label">明确不做</div>
+    <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
+      <li>不新增表 <code>session_messages</code></li>
+      <li>不新增表 <code>session_links</code></li>
+      <li>不为该功能给 <code>smelt.sqlite3</code> 加列 / 新 migration</li>
+    </ul>
+  </div>
+
+  <h3>6.1 信封草图（建议）</h3>
+  <div class="sketch-label">建议形状 · 非定稿 API</div>
+  <pre><code>{
+  "role": "user",
+  "channel": "peer_session",
+  "peer": {
+    "source_session_id": "sess_a_01",
+    "source_title": "Orchestrator · fix login",
+    "kind": "message",
+    "remaining_hops": 7,
+    "permission_ceiling": {
+      "mode": "workspace_write",
+      "snapshot_at": "2026-10-20T01:19:00+08:00"
+    },
+    "idempotency_key": "a01:remind-b:v1",
+    "reply_to": null,
+    "delivered_at": "2026-10-20T01:19:02+08:00"
+  },
+  "content": [
+    {
+      "type": "text",
+      "text": "[peer from sess_a_01 · message]\n请在测试会话里重跑 flaky e2e，跑完用 session_send 回我。"
+    }
+  ]
+}</code></pre>
+
+  <h3>6.2 字段说明（建议）</h3>
+  <table>
+    <thead>
+      <tr><th>字段</th><th>位置</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>channel: "peer_session"</code></td>
+        <td>transcript 条目</td>
+        <td>UI / 模型区分「人类输入」与「peer 投递」</td>
+      </tr>
+      <tr>
+        <td><code>source_session_id</code></td>
+        <td>信封</td>
+        <td>来源；由 smeltd 从 tool-host 上下文写入，不可客户端伪造</td>
+      </tr>
+      <tr>
+        <td><code>kind</code></td>
+        <td>信封</td>
+        <td><code>message</code> | <code>task</code> | <code>completion</code>（语义标签，非 SQL enum 表）</td>
+      </tr>
+      <tr>
+        <td><code>remaining_hops</code></td>
+        <td>信封</td>
+        <td>自治链预算；每跳递减；耗尽则门卫拒绝再转发</td>
+      </tr>
+      <tr>
+        <td><code>permission_ceiling</code></td>
+        <td>信封快照</td>
+        <td>目标在本 turn 跑工具时不得抬高至此快照之上</td>
+      </tr>
+      <tr>
+        <td><code>idempotency_key</code></td>
+        <td>信封</td>
+        <td>发送方提供；smeltd 进程内对近期 key 去重（见 §12）</td>
+      </tr>
+      <tr>
+        <td><code>reply_to</code></td>
+        <td>信封</td>
+        <td>可选；指向先前 peer 条目的 id / key，表达线程，无 link 表</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>6.3 关系如何表达（无 <code>session_links</code>）</h3>
+  <p>可选 <code>session_spawn</code>（P1）创建的是<strong>普通 durable Pi session</strong>，关系仅靠约定：</p>
+  <ul>
+    <li>标题前缀 / 命名约定（如 <code>← sess_a · flaky e2e</code>）</li>
+    <li>首条 transcript 的 framing 写明「由 sess_a 请求创建」</li>
+    <li>可选 soft parent hint 字段放在<strong>那条初始 framing</strong>里，不进 SQL</li>
+  </ul>
+  <p>侧栏身份、列表、删除生命周期继续走既有 session 路径——spawn 不发明第二种会话类型。</p>
+</section>
+
+<!-- ========== 7 ========== -->
+<section id="s7">
+  <h2><span class="num">7.</span>API / 工具（建议）</h2>
+
+  <p>工具挂在 Pi tool-host 上，由 <code>smeltd</code> 实现门卫与入队。下列形状为<strong>建议</strong>，非现网契约。</p>
+
+  <h3>7.1 P0：<code>session_list</code></h3>
+  <p>列出可投递的 durable Pi 会话（复用 smeltd 已掌握的 session / 侧栏身份）。无新 DB。</p>
+  <div class="sketch-label">建议</div>
+  <pre><code>session_list({
+  "query"?: string,          // 可选：标题模糊匹配
+  "include_self"?: boolean   // 默认 false
+}) → {
+  "sessions": [
+    {
+      "session_id": "sess_b_02",
+      "title": "Tests · login e2e",
+      "engine": "pi",
+      "busy": true,
+      "updated_at": "2026-10-20T01:10:00+08:00"
+    }
+  ]
+}</code></pre>
+  <ul>
+    <li>仅返回 Pi engine 的 durable session（排除非 Pi / 已删除）。</li>
+    <li>不返回「假会话」或仅存在于内存的临时 subagent id。</li>
+  </ul>
+
+  <h3>7.2 P0：<code>session_send</code></h3>
+  <div class="sketch-label">建议</div>
+  <pre><code>session_send({
+  "target_session_id": "sess_b_02",
+  "kind": "message",           // message | task | completion
+  "body": "请重跑 flaky e2e…",
+  "idempotency_key": "a01:remind-b:v1",
+  "reply_to"?: string,
+  "remaining_hops"?: number    // 通常由门卫从入站信封继承并递减；首跳可给默认
+}) → {
+  "status": "enqueued",        // enqueued | duplicate | rejected
+  "target_session_id": "sess_b_02",
+  "reason"?: string            // rejected 时：AGENT_BUSY | LIMIT_EXCEEDED | …
+}</code></pre>
+
+  <h4>门卫规则（进程内）</h4>
+  <ul>
+    <li><strong>Pi→Pi only</strong>：双方均为 durable Pi session。</li>
+    <li><strong>source</strong>：仅从当前 tool 调用的 host context 取得，忽略客户端自报 source。</li>
+    <li><strong>source ≠ target</strong>。</li>
+    <li><strong>inbox depth</strong>：统计目标 transcript 中近期未 ack 的 peer-framed 条目，和/或内存 / 既有 turn queue 深度；超限则 <code>AGENT_BUSY</code>（建议默认阈值对齐业界常见值，如 8，可配置）。</li>
+    <li><strong>hops</strong>：信封内递减；≤0 拒绝。</li>
+    <li><strong>permission_ceiling</strong>：快照写入信封；目标本 turn 工具权限取 min(自身, ceiling)。</li>
+    <li><strong>idempotency_key</strong>：同 source + key 在进程内近期窗口视为 duplicate（见 §12 弱点）。</li>
+  </ul>
+
+  <h3>7.3 P1（可选）：<code>session_spawn</code></h3>
+  <p>
+    经<strong>既有 create-session 路径</strong>新建 durable Pi session，再可选地向其
+    <code>session_send</code> 一条 <code>kind=task</code> 的初始 framing。
+    <strong>不</strong>写 <code>session_links</code>。
+  </p>
+  <div class="sketch-label">建议</div>
+  <pre><code>session_spawn({
+  "title": "← sess_a · flaky e2e",
+  "initial_task": "重跑 login e2e 并汇总失败用例",
+  "permission_ceiling"?: object
+}) → {
+  "session_id": "sess_c_03",
+  "enqueued_initial": true
+}</code></pre>
+  <p>P0 <strong>不</strong>要求 spawn；发现 + 向已有会话 send 即可闭环「互提醒」。</p>
+</section>
+
+<!-- ========== 8 ========== -->
+<section id="s8">
+  <h2><span class="num">8.</span>投递时序</h2>
+
+  <div class="sketch-label">建议 · 主路径</div>
+  <div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant A as Pi A
+  participant D as smeltd 门卫
+  participant Q as B turn / input queue
+  participant B as Pi B
+  participant T as B transcript
+
+  A->>D: session_send(target=B, body, key, kind)
+  Note over D: 校验 Pi→Pi<br/>source from host ctx<br/>source≠target<br/>hops / ceiling / depth
+  alt 拒绝
+    D-->>A: rejected (AGENT_BUSY / LIMIT_…)
+  else 通过
+    D->>Q: enqueue framed peer input
+    D-->>A: enqueued
+    Q->>B: 注入下一 turn（忙则排队）
+    B->>T: append peer-framed 条目
+    Note over B,T: 权威：已入 transcript
+    B->>B: claim / 消费（对齐既有至少一次）
+    B-->>D: acknowledge（同 session 风格）
+    opt kind=completion 或主动回执
+      B->>D: session_send(target=A, …)
+    end
+  end
+  </div>
+
+  <h3>8.1 Ack / 送达语义</h3>
+  <ul>
+    <li><strong>enqueued</strong>：已通过门卫并进入目标既有 turn/input 路径（对发送方的 RPC 成功）。</li>
+    <li><strong>delivered（权威）</strong>：peer-framed 条目已 append 进目标 transcript。</li>
+    <li><strong>consumed</strong>：目标 turn 按既有 <code>claim_model</code> / <code>acknowledge_model</code> 风格至少一次认领并处理。</li>
+  </ul>
+  <p>
+    发送方默认只保证观察到 <code>enqueued</code>；若需要端到端确认，由目标主动
+    <code>session_send(..., kind=completion)</code> 回源（信封可带 <code>reply_to</code>），
+    <strong>不</strong>依赖 SQL settle 行。
+  </p>
+</section>
+
+<!-- ========== 9 ========== -->
+<section id="s9">
+  <h2><span class="num">9.</span>护栏与权限</h2>
+
+  <h3>9.1 护栏（无 ledger 表时如何实现）</h3>
+  <table>
+    <thead>
+      <tr><th>护栏</th><th>实现落点</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Inbox 深度</td>
+        <td>目标 transcript 近期未 ack peer 条数，和/或内存 / 既有 turn queue 深度</td>
+        <td>满则拒绝；不靠 <code>status='queued'</code> SQL 计数</td>
+      </tr>
+      <tr>
+        <td>Hops</td>
+        <td>信封 <code>remaining_hops</code> 递减</td>
+        <td>门卫读入站信封、写出站信封；耗尽拒绝</td>
+      </tr>
+      <tr>
+        <td>Permission ceiling</td>
+        <td>信封快照 + 目标 turn 工具执行时取 min</td>
+        <td>防止「低权限会话借高权限会话提权」</td>
+      </tr>
+      <tr>
+        <td>Source 防伪</td>
+        <td>tool-host 上下文</td>
+        <td>客户端不可自报 source_session_id</td>
+      </tr>
+      <tr>
+        <td>Engine 边界</td>
+        <td>门卫</td>
+        <td>仅 Pi→Pi；拒绝跨引擎</td>
+      </tr>
+      <tr>
+        <td>幂等窗口</td>
+        <td>smeltd 进程内近期 key 集合</td>
+        <td>非全局 UNIQUE；重启后窗口清空（见 §12）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>9.2 权限模型（建议）</h3>
+  <ul>
+    <li>发送：调用方须是<strong>当前活跃 Pi turn 的工具调用</strong>（与 PI Desktop「plugin context」同思路）。</li>
+    <li>接收：目标 session 无需事先「加好友」；发现即潜在可投（产品若要收紧，可用标题约定 / 用户设置，仍不建 link 表）。</li>
+    <li>工具执行：本 turn 若由 peer 消息触发，有效权限 ≤ 信封 ceiling ∩ session 自身策略。</li>
+    <li>人类始终可在 UI 中停止 / 删除目标会话；peer 消息不提升为「系统级」权限。</li>
+  </ul>
+</section>
+
+<!-- ========== 10 ========== -->
+<section id="s10">
+  <h2><span class="num">10.</span>UI</h2>
+
+  <ul>
+    <li><strong>侧栏</strong>：继续渲染既有 durable session 列表；<strong>无需</strong>为 peer 功能新表或新列。未读感若需要，可从该会话 transcript 尾部是否存在未消费 <code>channel=peer_session</code> 推导（客户端投影），而非 SQL unread 计数。</li>
+    <li><strong>对话区</strong>：peer 消息与人类 user 气泡区分样式——例如左侧色条、角标「来自 · {title/session_id}」、kind 标签（message / task / completion）。文案需标明「另一 agent 发送，非用户直接输入」（对齐 PI Desktop framing 精神）。</li>
+    <li><strong>发送方 UI</strong>：P0 可不做独立面板；agent 通过工具完成 list/send。可选后续：在会话菜单提供「提醒另一会话…」快捷入口，仍走同一 tool/RPC。</li>
+    <li><strong>subagent</strong>：不出现在侧栏 peer 选择器中。</li>
+  </ul>
+</section>
+
+<!-- ========== 11 ========== -->
+<section id="s11">
+  <h2><span class="num">11.</span>分阶段落地</h2>
+
+  <div class="phase-grid">
+    <div class="phase-card">
+      <h4>P0 · 最小闭环</h4>
+      <ul>
+        <li><code>session_list</code></li>
+        <li><code>session_send</code></li>
+        <li>门卫：Pi→Pi、source 防伪、≠、depth、hops、ceiling</li>
+        <li>入队 → transcript framing → claim/ack</li>
+        <li>对话区 peer 样式</li>
+      </ul>
+    </div>
+    <div class="phase-card p1">
+      <h4>P1 · 可选 spawn</h4>
+      <ul>
+        <li><code>session_spawn</code>（既有 create-session）</li>
+        <li>标题 / 初始 framing 约定</li>
+        <li>soft parent hint（仅 transcript）</li>
+        <li>completion 回源约定文档化</li>
+      </ul>
+    </div>
+    <div class="phase-card p2">
+      <h4>P2 · 体验与硬化</h4>
+      <ul>
+        <li>侧栏未读投影（读 transcript）</li>
+        <li>发送快捷 UI</li>
+        <li>更稳的进程内幂等窗口 / 与既有 queue 持久化对齐</li>
+        <li>可观测性：门卫拒绝指标</li>
+      </ul>
+    </div>
+    <div class="phase-card out">
+      <h4>明确不做</h4>
+      <ul>
+        <li>SQL collaboration ledger</li>
+        <li>跨引擎 ACP 总线</li>
+        <li>复活 schema-23 MCP peer</li>
+        <li>Task / subagent 级 A2A</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 12 ========== -->
+<section id="s12">
+  <h2><span class="num">12.</span>风险与取舍</h2>
+
+  <div class="callout danger">
+    <div class="label">相对 PI Desktop SQL ledger 的诚实弱点</div>
+    <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
+      <li><strong>幂等非全局</strong>：无 UNIQUE(source, idempotency_key) 表约束；daemon 重启后进程内去重窗口丢失，可能导致重复 enqueue（transcript 可能出现两条相同 peer 条目）。</li>
+      <li><strong>崩溃窗口</strong>：已通过门卫、尚未 append 进 transcript、且未坐落在「既有 turn queue 持久化」上的条目，重启后可能丢失。</li>
+      <li><strong>inbox 深度近似</strong>：扫 transcript 尾部 / 内存队列，不如 SQL <code>status='queued'</code> 计数精确，极端并发下可能短暂漂移。</li>
+      <li><strong>无 exactly-once completion 账本</strong>：回执靠目标再 send；重复 completion 需接收方自辨（信封 key / reply_to）。</li>
+    </ul>
+  </div>
+
+  <h3>12.1 用 transcript + 既有队列尽量补</h3>
+  <ul>
+    <li><strong>优先落 transcript</strong>：一旦 append，消息即成为会话历史的一部分，随 Pi 既有持久化存活——这是本设计的主恢复面。</li>
+    <li><strong>复用既有 turn queue 持久化</strong>（若 smeltd / Pi 已有）：enqueue 后、跑 turn 前的条目应尽量走同一持久化，而不是另造协作表。</li>
+    <li><strong>消费侧去重</strong>：Pi 在纳入上下文前，可对近期 <code>idempotency_key</code> 相同的 peer 条目折叠显示 / 跳过重复工具副作用（建议行为，P2 硬化）。</li>
+    <li><strong>发送侧重试</strong>：工具层对 <code>enqueued</code> / <code>duplicate</code> 给出明确结果；发送方用同一 key 重试是安全的<strong>仅在</strong>进程内窗口仍有效时——文档与 SDK 注释需写清。</li>
+  </ul>
+
+  <h3>12.2 为何仍选这条路</h3>
+  <p>
+    产品认为「再开一套协作 SQL」与 Pi-native 心智冲突，且维护成本（migration、投影、与 transcript 双写一致性）高于其带来的恢复收益。
+    smelt 选择<strong>薄 host 门卫 + 厚 transcript 真相</strong>；接受上述弱点，并在 §13 保留「若生产事故证明不够，再评估最小持久化」的退路——但那不是 P0 默认。
+  </p>
+</section>
+
+<!-- ========== 13 ========== -->
+<section id="s13">
+  <h2><span class="num">13.</span>开放问题</h2>
+
+  <ol>
+    <li>
+      <strong>Peer 条目的精确 transcript schema。</strong>
+      是扩展现有 user message 的 metadata 字段，还是引入并列 role/channel？
+      需与 Pi（Bun）transcript 写入路径对齐后定稿。
+    </li>
+    <li>
+      <strong>既有 turn / input queue 的持久化强度。</strong>
+      决定「门卫通过后、入 transcript 前」的丢失面有多大；需对照 smeltd 现状代码确认，而非假设。
+    </li>
+    <li>
+      <strong>Inbox 深度默认阈值与统计窗口。</strong>
+      扫 transcript 多深？是否计入已 claim 未 ack？建议先对齐 8，用指标验证。
+    </li>
+    <li>
+      <strong>Hops 默认初始值。</strong>
+      PI Desktop 约从 9 递减；smelt 是否同值，或按产品更保守。
+    </li>
+    <li>
+      <strong>人类是否可在 UI 手动「注入 peer 样式」消息。</strong>
+      建议否——peer channel 仅 daemon 门卫可写，避免伪造 provenance。
+    </li>
+    <li>
+      <strong>P1 spawn 是否限制「worker 不可再 spawn」。</strong>
+      PI Desktop 有此限制；无 link 表时只能靠信封 hint / 标题约定软限制，或门卫读目标 transcript 初始 framing——需产品拍板。
+    </li>
+    <li>
+      <strong>若 P0 线上重复投递不可接受，最小补丁是什么。</strong>
+      例如：仅一张极瘦的 <code>idempotency_keys</code>（非完整 ledger）——当前产品偏好仍是尽量不走 SQL；列为应急选项而非计划。
+    </li>
+  </ol>
+
+  <div class="callout">
+    <div class="label">决策摘要</div>
+    P0 = <code>session_list</code> + <code>session_send</code>；Pi transcript 即收件箱；
+    smeltd 做校验与入队；<strong>零</strong>新协作 SQL 表 / 字段；spawn 可选且无 link 表；
+    与 PI Desktop ADR 0239/0240 对照后<strong>有意</strong>选择更薄路径。
+  </div>
+</section>
+
+<footer>
+  smelt · Pi↔Pi 会话消息技术方案 · 2026-10-20（Asia/Taipei） ·
+  建议草案 · 形状未冻结 ·
+  项目 <a href="https://github.com/smelt-ai/smelt">smelt-ai/smelt</a>
+</footer>
+</main>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    securityLevel: "loose",
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+  });
+</script>
+</body>
+</html>
