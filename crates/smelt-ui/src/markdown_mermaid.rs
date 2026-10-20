@@ -20,15 +20,11 @@
 //! 测宽回调如果只按字符数估算，文字会被裁掉；这里用 GPUI 同一份 usvg 0.46 的
 //! 系统 fontdb，再用 rustybuzz 量 advance。
 //!
-//! 布局开了 `layout-elk`。适配层 `merman-layout-elk` 自己是 MIT OR Apache-2.0，
-//! 真正的 ELK 移植在 `merman-elk-layered`，许可证 EPL-2.0。
-//! `resolve_graph_layout` 只有在这个 feature 编进来、且解析后的 `layout` 是已注册
-//! 的 ELK 算法名（`elk`、`elk.stress`、`elk.force`、`elk.mrtree`、`elk.sporeOverlap`、
-//! `elk.box`、`elk.rectpacking`）时才走 ELK，其余名字退回 dagre。上游
-//! `default_config.json` 根上的 `layout` 和 `state.layout` 默认就是 `elk`，feature
-//! 关掉时这套配置会被当成缺 loader 退回 dagre；打开之后，没写布局的流程图、状态图、
-//! 类图、ER 等直接用 ELK，不是继续 dagre。`flowchart-elk` 在外观解析之后强制
-//! `layout=elk`。图里写 `layout: dagre` 仍走 dagre。站点配置不改这个默认值。
+//! 不编 `layout-elk`。它带进的 `merman-elk-layered` 是 EPL-2.0 的 ELK 移植，链进二进制
+//! 就得随附 EPL 文本、出处和对应源码，仓库没有这套流程。而且上游
+//! `default_config.json` 根上的 `layout` 默认是 `elk`，编进来后所有没写布局的流程图、
+//! 状态图、类图、ER 都会换成 ELK，和 GitHub / mermaid.js 上看到的排法不一样。
+//! 不编这个 feature 时，`elk` 请求缺 loader，退回 dagre；图里写 `layout: elk` 也一样。
 //!
 //! 全仓库新增/已有的 `TextView::markdown` 调用点都应该改走这里的 `markdown_view`，
 //! 不要直接调 `TextView::markdown`，否则等于每处都得重新接一遍这两个钩子。
@@ -186,7 +182,35 @@ fn parse_viewbox_size(svg: &str) -> Option<(f32, f32)> {
 /// mindmap 按 `17 - 3*i` 给深层 section 写 `stroke-width`，到 `edge-depth-5` 就已经
 /// 是 `-1`。浏览器会丢掉非法声明，回落到 `.edge{stroke-width:3}`；resvg / usvg
 /// 见到负数会把这条线整段丢掉。这里把负的声明删掉，正的和 0 保持不动。
+///
+/// 只改标签里的属性和 `<style>` 里的 CSS。文字节点是图里写的字，原样保留：标签里
+/// 写着 `stroke-width:-1` 也照样显示。
 fn strip_negative_stroke_width(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let from_tag = &rest[open..];
+        let Some(close) = from_tag.find('>') else {
+            out.push_str(from_tag);
+            return out;
+        };
+        let tag = &from_tag[..=close];
+        out.push_str(&strip_negative_stroke_width_in(tag));
+        rest = &from_tag[close + 1..];
+        // `<style>` 的正文是 CSS（可能包在 CDATA 里），一直处理到 `</style>`。
+        if tag.starts_with("<style") && !tag.ends_with("/>") {
+            let end = rest.find("</style>").unwrap_or(rest.len());
+            out.push_str(&strip_negative_stroke_width_in(&rest[..end]));
+            rest = &rest[end..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 在一段属性或 CSS 里删掉负的 `stroke-width` 声明。
+fn strip_negative_stroke_width_in(svg: &str) -> String {
     const KEY: &str = "stroke-width";
     let mut out = String::with_capacity(svg.len());
     let mut rest = svg;
@@ -267,18 +291,36 @@ fn negative_number_len(value: &str) -> Option<usize> {
     (digits > 0).then_some(i)
 }
 
-/// 系统字体库里拷出来的一个面。字节按 mmap 指针去重，同一 TTC 的 regular / bold
-/// 共用一块 `Arc`。
+/// 系统字体库里的一个面。字节是 fontdb 共享出来的文件映射：同一个文件（TTC 里的
+/// regular / bold）共用一份，不拷进堆里。
 struct LoadedFace {
     family: String,
-    data: Arc<[u8]>,
+    data: Arc<dyn AsRef<[u8]> + Send + Sync>,
     index: u32,
     bold: bool,
+}
+
+impl LoadedFace {
+    fn bytes(&self) -> &[u8] {
+        AsRef::<[u8]>::as_ref(&*self.data)
+    }
 }
 
 fn measure_faces() -> &'static [LoadedFace] {
     static FACES: OnceLock<Vec<LoadedFace>> = OnceLock::new();
     FACES.get_or_init(load_measure_faces)
+}
+
+/// 和 `measure_faces` 一一对应的解析结果，解析不了的是 `None`。量每个标签都要用，
+/// 只解析一次。
+fn parsed_faces() -> &'static [Option<rustybuzz::Face<'static>>] {
+    static PARSED: OnceLock<Vec<Option<rustybuzz::Face<'static>>>> = OnceLock::new();
+    PARSED.get_or_init(|| {
+        measure_faces()
+            .iter()
+            .map(|face| rustybuzz::Face::from_slice(face.bytes(), face.index))
+            .collect()
+    })
 }
 
 /// GPUI 的 `SvgRenderer` 用 `usvg::fontdb::Database::load_system_fonts()` 扫系统字体
@@ -289,27 +331,20 @@ fn load_measure_faces() -> Vec<LoadedFace> {
     let mut db = usvg::fontdb::Database::new();
     db.load_system_fonts();
     let mut faces = Vec::new();
-    let mut blobs: HashMap<usize, Arc<[u8]>> = HashMap::new();
-    let mut seen: HashSet<(usize, u32)> = HashSet::new();
+    let mut seen = HashSet::new();
 
     for name in font_family_names(MERMAID_FONT_FAMILY) {
         if is_generic_family(&name) {
             continue;
         }
-        push_named_family(&db, &name, &mut faces, &mut blobs, &mut seen);
+        push_named_family(&mut db, &name, &mut faces, &mut seen);
     }
-    push_queried_family(
-        &db,
-        "sans-serif",
-        query_sans(&db, 400),
-        query_sans(&db, 700),
-        &mut faces,
-        &mut blobs,
-        &mut seen,
-    );
+    let regular = query_sans(&db, 400);
+    let bold = query_sans(&db, 700);
+    push_queried_family(&mut db, "sans-serif", regular, bold, &mut faces, &mut seen);
     if !faces_cover(&faces, '中') {
         for name in CJK_MEASURE_FALLBACKS {
-            push_named_family(&db, name, &mut faces, &mut blobs, &mut seen);
+            push_named_family(&mut db, name, &mut faces, &mut seen);
             if faces_cover(&faces, '中') {
                 break;
             }
@@ -321,75 +356,61 @@ fn load_measure_faces() -> Vec<LoadedFace> {
             .next()
             .map(|info| (info.id, info.weight.0 >= 600));
         if let Some((id, bold)) = fallback {
-            push_face(&db, id, "fallback", bold, &mut faces, &mut blobs, &mut seen);
+            push_face(&mut db, id, "fallback", bold, &mut faces, &mut seen);
         }
     }
     faces
 }
 
 fn push_named_family(
-    db: &usvg::fontdb::Database,
+    db: &mut usvg::fontdb::Database,
     family: &str,
     faces: &mut Vec<LoadedFace>,
-    blobs: &mut HashMap<usize, Arc<[u8]>>,
-    seen: &mut HashSet<(usize, u32)>,
+    seen: &mut HashSet<usvg::fontdb::ID>,
 ) {
-    push_queried_family(
-        db,
-        family,
-        query_named(db, family, 400),
-        query_named(db, family, 700),
-        faces,
-        blobs,
-        seen,
-    );
+    let regular = query_named(db, family, 400);
+    let bold = query_named(db, family, 700);
+    push_queried_family(db, family, regular, bold, faces, seen);
 }
 
 fn push_queried_family(
-    db: &usvg::fontdb::Database,
+    db: &mut usvg::fontdb::Database,
     family: &str,
     regular: Option<usvg::fontdb::ID>,
     bold: Option<usvg::fontdb::ID>,
     faces: &mut Vec<LoadedFace>,
-    blobs: &mut HashMap<usize, Arc<[u8]>>,
-    seen: &mut HashSet<(usize, u32)>,
+    seen: &mut HashSet<usvg::fontdb::ID>,
 ) {
+    let weight = |db: &usvg::fontdb::Database, id| db.face(id).map_or(400, |face| face.weight.0);
     if let Some(id) = regular {
-        let weight = db.face(id).map(|face| face.weight.0).unwrap_or(400);
-        push_face(db, id, family, weight >= 600, faces, blobs, seen);
+        let is_bold = weight(&*db, id) >= 600;
+        push_face(db, id, family, is_bold, faces, seen);
     }
-    if let Some(id) = bold {
-        let weight = db.face(id).map(|face| face.weight.0).unwrap_or(400);
-        if weight >= 600 {
-            push_face(db, id, family, true, faces, blobs, seen);
-        }
+    if let Some(id) = bold
+        && weight(&*db, id) >= 600
+    {
+        push_face(db, id, family, true, faces, seen);
     }
 }
 
+/// 按 fontdb 的面 id 去重。不能按数据指针：`load_system_fonts` 的面是按需映射的，
+/// 用完就解除，下一个文件很可能映射到同一个地址。
 fn push_face(
-    db: &usvg::fontdb::Database,
+    db: &mut usvg::fontdb::Database,
     id: usvg::fontdb::ID,
     family: &str,
     bold: bool,
     faces: &mut Vec<LoadedFace>,
-    blobs: &mut HashMap<usize, Arc<[u8]>>,
-    seen: &mut HashSet<(usize, u32)>,
+    seen: &mut HashSet<usvg::fontdb::ID>,
 ) {
-    let Some((ptr, index)) = db.with_face_data(id, |data, index| (data.as_ptr() as usize, index))
-    else {
-        return;
-    };
-    if !seen.insert((ptr, index)) {
+    if !seen.insert(id) {
         return;
     }
-    let data = if let Some(existing) = blobs.get(&ptr) {
-        Arc::clone(existing)
-    } else {
-        let Some(copied) = db.with_face_data(id, |data, _| Arc::<[u8]>::from(data)) else {
-            return;
-        };
-        blobs.insert(ptr, Arc::clone(&copied));
-        copied
+    // SAFETY: 映射的是系统字体文件，进程里一直留着。fontdb 的说明是别的进程原地改写
+    // 这个文件时，映射里可能看到改动甚至崩溃；系统字体只会整个替换（新 inode），旧映射
+    // 不受影响。GPUI 栅格化 SVG 时也是这样映射同一批文件。
+    let Some((data, index)) = (unsafe { db.make_shared_face_data(id) }) else {
+        return;
     };
     faces.push(LoadedFace {
         family: family.to_string(),
@@ -425,7 +446,7 @@ fn faces_cover(faces: &[LoadedFace], ch: char) -> bool {
 }
 
 fn face_covers(face: &LoadedFace, ch: char) -> bool {
-    rustybuzz::Face::from_slice(&face.data, face.index)
+    rustybuzz::Face::from_slice(face.bytes(), face.index)
         .and_then(|parsed| parsed.glyph_index(ch))
         .is_some()
 }
@@ -501,10 +522,7 @@ fn measure_label_width(text: &str, style: &TextStyle) -> f64 {
     if faces.is_empty() {
         return heuristic_width(text, font_size, style_is_bold(style));
     }
-    let parsed: Vec<Option<rustybuzz::Face<'_>>> = faces
-        .iter()
-        .map(|face| rustybuzz::Face::from_slice(&face.data, face.index))
-        .collect();
+    let parsed = parsed_faces();
     let preferred = style
         .font_family
         .as_deref()
@@ -518,16 +536,16 @@ fn measure_label_width(text: &str, style: &TextStyle) -> f64 {
     let mut run_face: Option<usize> = None;
     let mut started = false;
     for ch in text.chars() {
-        let idx = pick_face(&parsed, faces, ch, &preferred, bold);
+        let idx = pick_face(parsed, faces, ch, &preferred, bold);
         if started && run_face != idx {
-            total += run_width(&parsed, faces, run_face, &run, font_size, bold);
+            total += run_width(parsed, faces, run_face, &run, font_size, bold);
             run.clear();
         }
         started = true;
         run_face = idx;
         run.push(ch);
     }
-    total += run_width(&parsed, faces, run_face, &run, font_size, bold);
+    total += run_width(parsed, faces, run_face, &run, font_size, bold);
     if total.is_finite() && total >= 0.0 {
         total
     } else {
@@ -975,14 +993,23 @@ mod tests {
 
     #[test]
     fn strip_negative_stroke_width_keeps_positive_rules() {
-        let raw = "#mm .edge-depth-5{stroke-width:-1;}#mm .edge{stroke-width:3;}<line stroke-width=\"-4\" stroke=\"red\"/>";
+        let raw = "<svg><style>#mm .edge-depth-5{stroke-width:-1;}#mm .edge{stroke-width:3;}</style><line stroke-width=\"-4\" stroke=\"red\"/></svg>";
         let fixed = super::strip_negative_stroke_width(raw);
         assert_eq!(
             fixed,
-            "#mm .edge-depth-5{}#mm .edge{stroke-width:3;}<line stroke=\"red\"/>"
+            "<svg><style>#mm .edge-depth-5{}#mm .edge{stroke-width:3;}</style><line stroke=\"red\"/></svg>"
         );
-        assert!(!fixed.contains("stroke-width:-"));
-        assert!(fixed.contains("stroke-width:3"));
+    }
+
+    /// 图里写的字原样显示，哪怕正好是一句负的 `stroke-width`。
+    #[test]
+    fn strip_negative_stroke_width_leaves_text_alone() {
+        let raw = "<svg><style><![CDATA[.a > .b{stroke-width:-2}]]></style><text x=\"1\" style=\"stroke-width:-3\">stroke-width:-1</text></svg>";
+        let fixed = super::strip_negative_stroke_width(raw);
+        assert_eq!(
+            fixed,
+            "<svg><style><![CDATA[.a > .b{}]]></style><text x=\"1\" style=\"\">stroke-width:-1</text></svg>"
+        );
     }
 
     #[test]
@@ -1137,35 +1164,29 @@ mod tests {
         assert!(gantt.contains("排期") || gantt.contains("方案"));
     }
 
-    /// frontmatter `layout: elk` 的流程图要能被 usvg 0.46 解析，并且真的走了 ELK。
-    ///
-    /// 上游默认 `layout` 已是 `elk`，所以没写 frontmatter 的同一张图和显式 elk
-    /// 同一 viewBox；`layout: dagre` 仍走 dagre，SVG 应不同。
+    /// 不编 `layout-elk`：没写布局的图、写了 `layout: elk` 的图都按 dagre 排，和显式
+    /// `layout: dagre` 一样。有人打开这个 feature，这里会先挂，提醒去看许可证和默认布局。
     #[test]
-    fn elk_frontmatter_flowchart_parses_with_usvg() {
+    fn flowcharts_lay_out_with_dagre_even_when_elk_is_requested() {
         let body = "flowchart TD\nA[开始] --> B[处理]\nB --> C[结束]\nC --> A\n";
         let elk_src = format!("---\nconfig:\n  layout: elk\n---\n{body}");
         let dagre_src = format!("---\nconfig:\n  layout: dagre\n---\n{body}");
 
-        let elk = render_svg(&elk_src, false).expect("layout: elk 应能渲染");
-        assert!(elk.trim_start().starts_with("<svg"));
-        assert!(parse_viewbox_size(&elk).is_some());
+        let plain = render_svg(body, false).expect("默认布局应能渲染");
+        let elk = render_svg(&elk_src, false).expect("layout: elk 应退回 dagre 渲染");
+        let dagre = render_svg(&dagre_src, false).expect("layout: dagre 应能渲染");
         assert_gpui_usvg_parses("layout-elk", &elk);
 
-        let dagre = render_svg(&dagre_src, false).expect("layout: dagre 应能渲染");
-        assert_gpui_usvg_parses("layout-dagre", &dagre);
-        assert_ne!(elk, dagre, "layout: elk 不应退回 dagre");
-
-        let plain = render_svg(body, false).expect("默认布局应能渲染");
+        let dagre_box = parse_viewbox_size(&dagre).expect("dagre 应有 viewBox");
         assert_eq!(
             parse_viewbox_size(&plain),
-            parse_viewbox_size(&elk),
-            "默认配置 layout 是 elk，未声明布局应和显式 elk 同一 viewBox"
+            Some(dagre_box),
+            "默认应是 dagre"
         );
-        assert_ne!(
+        assert_eq!(
             parse_viewbox_size(&elk),
-            parse_viewbox_size(&dagre),
-            "elk 和 dagre 的 viewBox 应不同"
+            Some(dagre_box),
+            "elk 请求应退回 dagre"
         );
     }
 
