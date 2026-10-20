@@ -50,8 +50,8 @@ mkdir -p "$OUT"
   cd "$ROOT/packages/pi-agent"
   "$BUN" install --frozen-lockfile
 )
-# 不用 --splitting：photon 的 wasm 绑定在拆开的 worker 块里会变成
-# exports_photon_rs is not defined。说明符改写在 compile-smelt-pi.ts。
+# --splitting 在 compile-smelt-pi.ts 里打开。Bun 1.4.3 上图片 worker 和
+# codemode worker 都过了冒烟。说明符改写也在那个脚本里：相对的 ./src 路径仍然找不到。
 "$BUN" "$ROOT/scripts/compile-smelt-pi.ts" "$OUT/smelt-pi" "$TARGET"
 
 WASM="$ROOT/packages/pi-agent/node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"

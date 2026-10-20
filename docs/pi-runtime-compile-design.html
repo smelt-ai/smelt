@@ -402,10 +402,11 @@
   </p>
   <ul>
     <li>
-      编译命令是 <code>bun build --compile --bytecode --format=esm --no-compile-autoload-dotenv --no-compile-autoload-bunfig</code>。
-      <code>--splitting</code> 是否打开，以这一节后面记下的 Bun 1.4.3 复测为准。
+      编译命令是 <code>bun build --compile --bytecode --format=esm --splitting --no-compile-autoload-dotenv --no-compile-autoload-bunfig</code>。
+      Bun 1.4.3 上图片 worker 和 codemode worker 的冒烟都过了。
       Bun 1.4.0 上拆块之后，图片 worker 里的 photon 绑定变成
-      <code>exports_photon_rs is not defined</code>，静态 import 也补不回来。
+      <code>exports_photon_rs is not defined</code>，1.4.3 没有这个问题。
+      <code>./src/...worker.ts</code> 在 bunfs 里仍然是 <code>Cannot find module</code>，所以编译时还是把这两条说明符改成 <code>/$bunfs/root/...</code>。
     </li>
     <li>
       Bun 不打进应用，也不用 <code>BUN_BE_BUN</code>。MCP 预设的 <code>bun x</code> 和 Claude/Codex 的 <code>bunx</code>
@@ -440,7 +441,7 @@
     下面的体积和耗时是这台 Linux x64、Bun 1.4.0 baseline 上的实测。
     用户在 Bun 1.4.3 上量过：源码 RPC ready 339ms，只 <code>--compile</code> 316ms，
     <code>--compile --bytecode --format=esm</code> 约 95ms；再加上 <code>--splitting</code> 热启动约 89ms→82ms、冷启动 136ms→124ms。
-    1.4.0 上拆块会弄坏 photon，所以发布构建不带 <code>--splitting</code>。
+    发布构建用 Bun 1.4.3，并带 <code>--splitting</code>。上面的体积和耗时仍是 1.4.0、不拆块时量的，不是这次的数字。
   </p>
   <table>
     <thead>

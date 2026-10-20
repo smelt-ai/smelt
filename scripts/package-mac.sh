@@ -100,7 +100,7 @@ if [[ -d "$ROOT/packages/pi-agent/src" ]]; then
     "$ROOT/scripts/compile-smelt-pi.ts" "$ROOT/scripts/build-smelt-pi.sh" "$ROOT/scripts/fetch-bun.sh" \
     -type f -newer "$PI_BIN" -print -quit 2>/dev/null || true)"
   if [[ -n "$newer" ]]; then
-    echo "✗ smelt-pi 比源码旧（$newer）。先 make smelt-pi。" >&2
+    echo "✗ smelt-pi 比源码旧（${newer}）。先 make smelt-pi。" >&2
     exit 1
   fi
 fi

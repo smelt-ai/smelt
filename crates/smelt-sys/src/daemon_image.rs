@@ -400,12 +400,11 @@ fn reap_unused_images_with(
             }
             continue;
         }
-        if let Some(fingerprint) = fingerprint_from_image_name(name) {
-            if let Err(error) = reap_paired_pi(dir, fingerprint, &mut probe) {
-                if first_delete_error.is_none() {
-                    first_delete_error = Some(error);
-                }
-            }
+        if let Some(fingerprint) = fingerprint_from_image_name(name)
+            && let Err(error) = reap_paired_pi(dir, fingerprint, &mut probe)
+            && first_delete_error.is_none()
+        {
+            first_delete_error = Some(error);
         }
     }
     match first_delete_error {
@@ -894,9 +893,7 @@ mod tests {
             fingerprint_from_image_name(live.file_name().unwrap().to_str().unwrap()).unwrap();
         let live_pair = bin.join(paired_pi_dir_name(live_fp));
         reap_unused_images_with(&bin, |path| {
-            if path == live {
-                MappedState::InUse
-            } else if path == live_pair.join("smelt-pi") {
+            if path == live || path == live_pair.join("smelt-pi") {
                 MappedState::InUse
             } else {
                 MappedState::Unused

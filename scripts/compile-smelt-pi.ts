@@ -1,10 +1,11 @@
 /**
  * 把 packages/pi-agent 编成 smelt-pi。
- * bun 1.4.0 不会把 ./src/...worker.ts 登记成 Worker 能打开的路径，
+ * Bun 1.4.3 仍然打不开 `./src/...worker.ts`（Cannot find module）。
  * 嵌入文件落在 /$bunfs 下。这里把 Pi 写死的两条说明符改成那两个路径。
+ * Pi 在这条路径失败时会退回进程内缩放，冒烟就看不出 worker 没起来。
  *
- * --splitting 会让 photon 的 wasm 绑定在 worker 里变成
- * `exports_photon_rs is not defined`，所以不用。
+ * --splitting 在 Bun 1.4.3 上和图片 worker、codemode worker 一起通过了冒烟。
+ * Bun 1.4.0 上拆块会让 photon 报 `exports_photon_rs is not defined`，1.4.3 没有。
  *
  * 用法：bun scripts/compile-smelt-pi.ts <outfile> <bun-target>
  */
@@ -60,6 +61,7 @@ const result = await Bun.build({
 	target: "bun",
 	format: "esm",
 	bytecode: true,
+	splitting: true,
 	plugins: [workerPaths],
 	compile: {
 		outfile,
