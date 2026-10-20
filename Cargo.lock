@@ -10884,7 +10884,6 @@ dependencies = [
  "smelt-sys",
  "smelt-ui",
  "smol",
- "url",
  "uuid",
 ]
 
@@ -11105,6 +11104,7 @@ dependencies = [
  "smelt-store",
  "smelt-sys",
  "smol",
+ "url",
  "usvg 0.46.0",
 ]
 

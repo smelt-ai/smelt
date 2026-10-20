@@ -45,6 +45,7 @@ use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
 use smelt_model::agent_status::{AcpStatusEvidence, AgentStatus};
 use smelt_ui::IconAction as _;
 use smelt_ui::daemon_states_global::AttentionGlobal;
+use smelt_ui::markdown_links::FileLinks;
 use smelt_ui::motion::{
     BASE_MS, COPY_ACK_MS, ENTER_MS, SweepMode, ambient_animation, ambient_application_active,
     ambient_motion_enabled, ambient_spinner, composer_shadows, copy_ack_opacity, ease_overshoot,
@@ -1922,8 +1923,7 @@ impl AcpView {
         let initial_entry_count = entries.len();
         let rendered_images = decode_entry_images(&entries, 0);
         let rendered_diffs = std::collections::HashMap::new();
-        let rendered_markdown =
-            build_markdown_cache(&entries, FileLinks::of(&runtime, cwd.as_deref()));
+        let rendered_markdown = build_markdown_cache(&entries);
         let list_state = ListState::new(initial_entry_count, ListAlignment::Top, px(800.))
             .with_uniform_item_height(px(RESTORED_ENTRY_HEIGHT_HINT_PX));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -2782,10 +2782,7 @@ impl AcpView {
         self.rendered_images
             .extend(decode_entry_images(&self.entries[..page_len], 0));
 
-        let mut markdown = build_markdown_cache(
-            &self.entries[..page_len],
-            FileLinks::of(&self.runtime, self.cwd.as_deref()),
-        );
+        let mut markdown = build_markdown_cache(&self.entries[..page_len]);
         markdown.append(&mut self.rendered_markdown);
         self.rendered_markdown = markdown;
         self.expanded_thoughts = self
@@ -4110,12 +4107,7 @@ impl AcpView {
             .first()
             .map(|card| (card.tool_call_id.clone(), card.question.clone()));
         if snapshot_entries_changed {
-            refresh_markdown_cache(
-                &self.entries,
-                entries_offset,
-                FileLinks::of(&self.runtime, self.cwd.as_deref()),
-                &mut self.rendered_markdown,
-            );
+            refresh_markdown_cache(&self.entries, entries_offset, &mut self.rendered_markdown);
             let loaded =
                 self.loaded_entries_offset..self.loaded_entries_offset + self.entries.len();
             self.retained_text
@@ -6913,111 +6905,60 @@ fn format_duration(milliseconds: u64) -> String {
     }
 }
 
-/// gpui-component 会把 Markdown 链接目标原样交给 `open_url`。相对文件路径在
-/// macOS 上会被 LaunchServices 误当作应用标识并报 -50，因此在进入 Markdown
-/// 渲染前把本地路径解析成 Smelt 内部使用的 file URL。
-fn markdown_text_for_cwd(text: &str, links: FileLinks<'_>) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find("](") {
-        let target_start = open + 2;
-        let Some(close_offset) = rest[target_start..].find(')') else {
-            break;
-        };
-        let target_end = target_start + close_offset;
-        let target = &rest[target_start..target_end];
-        out.push_str(&rest[..target_start]);
-        if let Some(resolved) = resolve_relative_file_link(target, links) {
-            out.push_str(&resolved);
-        } else {
-            out.push_str(target);
-        }
-        out.push(')');
-        rest = &rest[target_end + 1..];
-    }
-    out.push_str(rest);
-    out
+/// Markdown 文件链接的解析基准：相对路径按会话 `cwd` 补全，远程运行时把 id 写进 host。
+fn file_links<'a>(runtime: &'a Runtime, cwd: Option<&'a str>) -> FileLinks<'a> {
+    let runtime = match runtime.key() {
+        smelt_client::runtime::RuntimeKey::Local => None,
+        smelt_client::runtime::RuntimeKey::Remote(id) => Some(id.as_str()),
+    };
+    FileLinks::new(cwd, runtime)
 }
 
-/// Markdown 里文件链接的解析基准。相对路径按 `cwd` 补全；`runtime` 是远程运行时的 id，
-/// 写进链接的 host，桌面据此知道文件在哪台机器上，不会去打开本机同路径的文件。
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct FileLinks<'a> {
-    cwd: Option<&'a str>,
-    runtime: Option<&'a str>,
-}
-
-impl<'a> FileLinks<'a> {
-    fn of(runtime: &'a Runtime, cwd: Option<&'a str>) -> Self {
-        let runtime = match runtime.key() {
-            smelt_client::runtime::RuntimeKey::Local => None,
-            smelt_client::runtime::RuntimeKey::Remote(id) => Some(id.as_str()),
-        };
-        Self { cwd, runtime }
-    }
-}
-
-fn markdown_user_text_for_cwd(text: &str, links: FileLinks<'_>) -> String {
-    markdown_text_for_cwd(&escape_html_tags_for_markdown(text), links)
-}
-
-fn markdown_for_entry(entry: &AcpEntry, links: FileLinks<'_>) -> Option<gpui::SharedString> {
-    let rendered = match entry {
-        AcpEntry::User(text) if !is_interrupt_marker(text) => {
-            markdown_user_text_for_cwd(text, links)
-        }
-        AcpEntry::UserWithImages { text, .. } => markdown_user_text_for_cwd(text, links),
-        AcpEntry::Assistant { text, .. } => markdown_text_for_cwd(text, links),
+/// 一条消息交给 Markdown 渲染的正文，原文不改：原始 HTML 由
+/// `smelt_ui::markdown_mermaid::chat_markdown_view` 按原文显示，文件链接在点击时才
+/// 解析（`smelt_ui::markdown_links`）。
+fn markdown_for_entry(entry: &AcpEntry) -> Option<gpui::SharedString> {
+    let text = match entry {
+        AcpEntry::User(text) if !is_interrupt_marker(text) => text.clone(),
+        AcpEntry::UserWithImages { text, .. } | AcpEntry::Assistant { text, .. } => text.clone(),
         AcpEntry::ToolCall { title, output, .. } if is_task_completion_tool_title(title) => {
             let text = completion_summary_text(output);
             if text.trim().is_empty() {
                 return None;
             }
-            markdown_text_for_cwd(&text, links)
+            text
         }
         _ => return None,
     };
-    Some(rendered.into())
+    Some(text.into())
 }
 
-fn build_markdown_cache(
-    entries: &[AcpEntry],
-    links: FileLinks<'_>,
-) -> Vec<Option<gpui::SharedString>> {
-    entries
-        .iter()
-        .map(|entry| markdown_for_entry(entry, links))
-        .collect()
+fn build_markdown_cache(entries: &[AcpEntry]) -> Vec<Option<gpui::SharedString>> {
+    entries.iter().map(markdown_for_entry).collect()
 }
 
 fn refresh_markdown_cache(
     entries: &[AcpEntry],
     entries_offset: usize,
-    links: FileLinks<'_>,
     cache: &mut Vec<Option<gpui::SharedString>>,
 ) {
     if cache.len() < entries_offset {
-        *cache = build_markdown_cache(entries, links);
+        *cache = build_markdown_cache(entries);
         return;
     }
     cache.truncate(entries_offset);
-    cache.extend(
-        entries[entries_offset..]
-            .iter()
-            .map(|entry| markdown_for_entry(entry, links)),
-    );
+    cache.extend(entries[entries_offset..].iter().map(markdown_for_entry));
 }
 
 fn cached_entry_markdown(
     cache: &[Option<gpui::SharedString>],
     entry_ix: usize,
     entry: &AcpEntry,
-    links: FileLinks<'_>,
 ) -> gpui::SharedString {
     cache
         .get(entry_ix)
         .and_then(Clone::clone)
-        .or_else(|| markdown_for_entry(entry, links))
+        .or_else(|| markdown_for_entry(entry))
         .unwrap_or_default()
 }
 
@@ -7041,83 +6982,6 @@ fn diff_stats_for_output(output: &[ToolOutputPart]) -> Option<(usize, usize)> {
     has_diff.then_some((added, removed))
 }
 
-/// Raw HTML is parsed as markup by the Markdown renderer. Unsupported tags can
-/// therefore make the whole fragment disappear; user messages should show the
-/// literal tag instead. Keep code spans and fenced code untouched.
-fn escape_html_tags_for_markdown(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    let mut inline_code_ticks = None;
-    let mut fenced_code_ticks = None;
-
-    while i < text.len() {
-        if let Some(fence_len) = fenced_code_ticks {
-            if is_line_start(text, i)
-                && let Some((run_len, end)) = backtick_run(text, i)
-                && run_len >= fence_len
-                && line_after_backticks_is_blank(text, end)
-            {
-                out.push_str(&text[i..end]);
-                i = end;
-                fenced_code_ticks = None;
-                continue;
-            }
-            let ch = text[i..].chars().next().expect("valid UTF-8 offset");
-            out.push(ch);
-            i += ch.len_utf8();
-            continue;
-        }
-
-        if is_line_start(text, i) {
-            let indent = text[i..]
-                .chars()
-                .take(3)
-                .take_while(|ch| *ch == ' ')
-                .count();
-            if let Some((run_len, end)) = backtick_run(text, i + indent)
-                && run_len >= 3
-            {
-                out.push_str(&text[i..end]);
-                i = end;
-                fenced_code_ticks = Some(run_len);
-                inline_code_ticks = None;
-                continue;
-            }
-        }
-
-        if text.as_bytes()[i] == b'`'
-            && let Some((run_len, end)) = backtick_run(text, i)
-        {
-            out.push_str(&text[i..end]);
-            i = end;
-            inline_code_ticks = match inline_code_ticks {
-                Some(active) if active == run_len => None,
-                None => Some(run_len),
-                active => active,
-            };
-            continue;
-        }
-
-        if inline_code_ticks.is_none()
-            && text.as_bytes()[i] == b'<'
-            && looks_like_html_tag(text, i)
-            && html_tag_end(text, i).is_some()
-            && (i == 0 || text.as_bytes()[i - 1] != b'\\')
-        {
-            out.push('\\');
-            out.push('<');
-            i += 1;
-            continue;
-        }
-
-        let ch = text[i..].chars().next().expect("valid UTF-8 offset");
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-
-    out
-}
-
 /// `TextView::markdown` deliberately interprets Markdown. Tool output and diff text must remain
 /// literal, so render escaped HTML inside `<pre>` while still opting into native text selection.
 fn selectable_plain_text(id: impl Into<gpui::ElementId>, text: &str) -> TextView {
@@ -7139,139 +7003,6 @@ fn preformatted_html(text: &str) -> String {
     }
     html.push_str("</pre>");
     html
-}
-
-fn is_line_start(text: &str, offset: usize) -> bool {
-    offset == 0 || text.as_bytes().get(offset - 1) == Some(&b'\n')
-}
-
-fn backtick_run(text: &str, offset: usize) -> Option<(usize, usize)> {
-    if text.as_bytes().get(offset) != Some(&b'`') {
-        return None;
-    }
-    let mut end = offset;
-    while text.as_bytes().get(end) == Some(&b'`') {
-        end += 1;
-    }
-    Some((end - offset, end))
-}
-
-fn line_after_backticks_is_blank(text: &str, offset: usize) -> bool {
-    text[offset..]
-        .split_once('\n')
-        .is_none_or(|(line, _)| line.trim().is_empty())
-}
-
-fn looks_like_html_tag(text: &str, start: usize) -> bool {
-    let rest = &text[start + 1..];
-    if rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("mailto:") {
-        return false;
-    }
-    if rest.starts_with('/')
-        || rest.starts_with('!')
-        || rest.starts_with('?')
-        || rest.starts_with("![CDATA[")
-    {
-        return true;
-    }
-
-    let first = rest.chars().next();
-    if !first.is_some_and(|ch| ch.is_ascii_alphabetic()) {
-        return false;
-    }
-    let first_len = first.map_or(0, char::len_utf8);
-    let mut name_end = first_len;
-    for (offset, ch) in rest[first_len..].char_indices() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':') {
-            name_end = first_len + offset + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    rest[name_end..]
-        .chars()
-        .next()
-        .is_some_and(|ch| ch == '>' || ch == '/' || ch.is_whitespace())
-}
-
-fn html_tag_end(text: &str, start: usize) -> Option<usize> {
-    let mut quote = None;
-    for (offset, ch) in text[start + 1..].char_indices() {
-        match quote {
-            Some(active) if ch == active => quote = None,
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
-            None if ch == '>' => return Some(start + 1 + offset),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn resolve_relative_file_link(target: &str, links: FileLinks<'_>) -> Option<String> {
-    let target = target.trim();
-    if target.is_empty()
-        || target.starts_with('#')
-        || target.starts_with('~')
-        || target.contains("://")
-        || target.starts_with("mailto:")
-        || target.starts_with("data:")
-    {
-        return None;
-    }
-    let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
-    // Agent 引用文件常写成 grep/编译器诊断那种 `path:行号` 或 `path:行号:列号`
-    // 格式（不是 `#L行号` 片段）。这种没有 `#` 片段时，才尝试从冒号后缀里抠
-    // 行号出来——不然会把 `:2765` 当成文件名的一部分拼进路径，读不到文件时
-    // 还误报“可能是二进制文件”。
-    let (path, fragment) = if fragment.is_empty() {
-        match extract_trailing_line_number(path) {
-            Some((base, line)) => (base, format!("L{line}")),
-            None => (path, String::new()),
-        }
-    } else {
-        (path, fragment.to_string())
-    };
-    let path = std::path::Path::new(path);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::path::Path::new(links.cwd?).join(path)
-    };
-    let mut url = url::Url::from_file_path(absolute).ok()?;
-    // 远程运行时上的文件：host 写运行时 id。本机的不带 host。
-    if let Some(runtime) = links.runtime {
-        url.set_host(Some(runtime)).ok()?;
-    }
-    if !fragment.is_empty() {
-        url.set_fragment(Some(&fragment));
-    }
-    // `Url::set_scheme` 会把自定义 scheme 序列化成 `smelt-file:/path`
-    // （单斜杠），而 macOS URL scheme 与主进程解析器都按 authority 形式接收。
-    // 从标准 file URL 替换前缀可稳定保留 `smelt-file:///absolute/path`。
-    Some(url.to_string().replacen("file://", "smelt-file://", 1))
-}
-
-/// 从 `path:行号` / `path:行号:列号` 里拆出末尾的行号：从右往左数，只要是纯
-/// 数字的 segment 就一直往前吞（列号可选，最多吞两段），吞到的最后一个数字
-/// segment 就是行号；一段数字都没吃到就说明不是这种格式，返回 None 原样处理
-/// （比如 Windows 盘符 `C:\...`，虽然本 app 只跑 macOS，多判一下无妨）。
-fn extract_trailing_line_number(path: &str) -> Option<(&str, u32)> {
-    let mut rest = path;
-    let mut line = None;
-    for _ in 0..2 {
-        let Some((head, tail)) = rest.rsplit_once(':') else {
-            break;
-        };
-        if head.is_empty() {
-            break;
-        }
-        let Ok(n) = tail.parse::<u32>() else {
-            break;
-        };
-        line = Some(n);
-        rest = head;
-    }
-    line.map(|n| (rest, n))
 }
 
 /// 审批请求按收到顺序串行展示和处理，不能越过队首回应后续 responder。

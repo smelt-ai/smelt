@@ -2,7 +2,7 @@
 
 use super::trajectory::runtime_debug_contexts;
 use super::{
-    CachedDiff, ComposerMenuSection, FileLinks, LoadedSkillsRefresh, LoadedSkillsSnapshot,
+    CachedDiff, ComposerMenuSection, LoadedSkillsRefresh, LoadedSkillsSnapshot,
     OwnerIdCache, ProcessGroupInfo, RESTORED_ENTRY_HEIGHT_HINT_PX, TurnOutcomeAction,
     ViewHistoryIdentity, append_prompt_text, apply_pending_config_selection,
     background_task_elapsed, background_task_one_line, background_task_output_lines,
@@ -16,11 +16,11 @@ use super::{
     composer_usage_breakdown, config_selection_is_pending, config_update_failure_is_new,
     consecutive_compact_tool_run, consume_composer_restore, conversation_input_for_submit,
     current_turn_has_agent_output, did_recover_from_ended, diff_cache_matches_output,
-    diff_stats_for_output, entries_to_fade_in, escape_html_tags_for_markdown,
+    diff_stats_for_output, entries_to_fade_in,
     external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
     is_active_permission_selection, is_fresh_conversation_start, is_match_count_line,
     is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
-    loaded_entries_end, loaded_skills_refresh, markdown_text_for_cwd, markdown_user_text_for_cwd,
+    loaded_entries_end, loaded_skills_refresh,
     merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
     native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
@@ -1417,95 +1417,23 @@ fn state_only_snapshot_does_not_rebuild_loaded_entries() {
     assert_eq!(entries.len(), 2);
 }
 
+/// 交给 Markdown 的正文就是消息原文：链接不在原文里改写（代码块里的链接、复制出来的
+/// 内容都不该变），HTML 也不在原文里加反斜杠（交给渲染层按原文显示）。
 #[test]
-fn markdown_local_files_become_internal_file_urls() {
-    let rendered = markdown_text_for_cwd(
-        "看 [workspace.md](docs/workspace.md)、[源码](/tmp/source.rs#L42) 和 [官网](https://example.com)",
-        FileLinks {
-            cwd: Some("/tmp/project"),
-            runtime: None,
+fn markdown_cache_keeps_message_text_verbatim() {
+    let user = "见 [文件](src/index.html) 和 <panel>";
+    let answer =
+        "改 [入口](src/main.rs:3)：\n\n```markdown\n见 [设计](docs/a.md)\n```\n\n行内 `[x](y.md)`";
+    let entries = vec![
+        AcpEntry::User(user.into()),
+        AcpEntry::Assistant {
+            text: answer.into(),
+            thought: false,
         },
-    );
-    assert!(rendered.contains("[workspace.md](smelt-file:///tmp/project/docs/workspace.md)"));
-    assert!(rendered.contains("[源码](smelt-file:///tmp/source.rs#L42)"));
-    assert!(rendered.contains("[官网](https://example.com)"));
-}
-
-#[test]
-fn markdown_absolute_files_resolve_without_session_cwd() {
-    let rendered = markdown_text_for_cwd(
-        "无弹窗：[截图](/tmp/smelt-current-notification-final.png)",
-        FileLinks::default(),
-    );
-    assert_eq!(
-        rendered,
-        "无弹窗：[截图](smelt-file:///tmp/smelt-current-notification-final.png)"
-    );
-}
-
-/// grep / 编译器诊断常见的 `path:行号` 引用格式（不是 `#L行号` 片段）也要能
-/// 拆出行号——原来只认 `#`，`:2765` 会整段被当成文件名拼进路径，导致读不到
-/// 文件、误报“可能是二进制文件”（见用户反馈：点 ACP 对话里的文件引用链接）。
-#[test]
-fn markdown_colon_line_refs_resolve_to_fragment() {
-    let rendered = markdown_text_for_cwd(
-        "见 [acp_view.rs](crates/smelt-acp-view/src/acp_view.rs:2765)",
-        FileLinks {
-            cwd: Some("/tmp/project"),
-            runtime: None,
-        },
-    );
-    assert!(rendered.contains(
-        "[acp_view.rs](smelt-file:///tmp/project/crates/smelt-acp-view/src/acp_view.rs#L2765)"
-    ));
-}
-
-/// `path:行号:列号` 形式（列号可选的第二段）也只取行号，列号丢弃。
-#[test]
-fn markdown_colon_line_col_refs_take_line_not_col() {
-    let rendered = markdown_text_for_cwd(
-        "见 [x](src/main.rs:10:5)",
-        FileLinks {
-            cwd: Some("/tmp/project"),
-            runtime: None,
-        },
-    );
-    assert!(rendered.contains("[x](smelt-file:///tmp/project/src/main.rs#L10)"));
-}
-
-/// 远程对话里的文件在另一台机器上：链接带上运行时 id，桌面不会去打开本机同路径的文件。
-#[test]
-fn markdown_files_in_remote_conversations_carry_the_runtime() {
-    let rendered = markdown_text_for_cwd(
-        "看 [main.rs](src/main.rs:3) 和 [hosts](/etc/hosts)",
-        FileLinks {
-            cwd: Some("/root/project"),
-            runtime: Some("39fafd41-9942-49b0-b9ec-7eb670d2711e"),
-        },
-    );
-    assert!(rendered.contains(
-        "[main.rs](smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/root/project/src/main.rs#L3)"
-    ));
-    assert!(
-        rendered.contains("[hosts](smelt-file://39fafd41-9942-49b0-b9ec-7eb670d2711e/etc/hosts)")
-    );
-}
-
-#[test]
-fn user_markdown_keeps_html_tags_literal() {
-    let escaped = escape_html_tags_for_markdown(
-        "前 <section class=\"card\">内容</section> <https://example.com> ` <span> `\n\
-             ```html\n<div>代码</div>\n```\n",
-    );
-    assert_eq!(
-        escaped,
-        "前 \\<section class=\"card\">内容\\</section> <https://example.com> ` <span> `\n\
-             ```html\n<div>代码</div>\n```\n"
-    );
-
-    let rendered =
-        markdown_user_text_for_cwd("见 [文件](src/index.html) 和 <panel>", FileLinks::default());
-    assert!(rendered.contains("\\<panel>"));
+    ];
+    let cache = build_markdown_cache(&entries);
+    assert_eq!(cache[0].as_deref(), Some(user));
+    assert_eq!(cache[1].as_deref(), Some(answer));
 }
 
 fn long_tool(id: &str) -> AcpEntry {
@@ -1548,11 +1476,7 @@ fn markdown_cache_reuses_prefix_and_refreshes_changed_tail() {
             thought: false,
         },
     ];
-    let links = FileLinks {
-        cwd: Some("/tmp/project"),
-        runtime: None,
-    };
-    let mut cache = build_markdown_cache(&entries, links);
+    let mut cache = build_markdown_cache(&entries);
     let unchanged_prefix = cache[0].clone();
 
     entries.truncate(1);
@@ -1561,17 +1485,16 @@ fn markdown_cache_reuses_prefix_and_refreshes_changed_tail() {
         thought: false,
     });
     entries.push(AcpEntry::Divider("next".into()));
-    refresh_markdown_cache(&entries, 1, links, &mut cache);
+    refresh_markdown_cache(&entries, 1, &mut cache);
 
     assert_eq!(cache.len(), entries.len());
     assert_eq!(cache[0], unchanged_prefix);
-    assert!(cache[0].as_deref().unwrap().contains("\\<panel>"));
-    assert!(
-        cache[1]
-            .as_deref()
-            .unwrap()
-            .contains("smelt-file:///tmp/project/new.rs")
+    // 前缀没重建：还是同一份分配，`retained_markdown` 靠指针认出没变。
+    assert_eq!(
+        cache[0].as_ref().unwrap().as_ptr(),
+        unchanged_prefix.as_ref().unwrap().as_ptr()
     );
+    assert_eq!(cache[1].as_deref(), Some("查看 [新回答](new.rs)"));
     assert!(cache[2].is_none());
 }
 
@@ -3790,10 +3713,7 @@ fn first_history_page_paints_after_the_empty_open_frame(cx: &mut gpui::TestAppCo
         view.update(cx, |view, cx| {
             view.entries = vec![AcpEntry::User("已经写好的那一句".into())];
             view.loaded_entries_offset = 0;
-            view.rendered_markdown = build_markdown_cache(
-                &view.entries,
-                FileLinks::of(&view.runtime, view.cwd.as_deref()),
-            );
+            view.rendered_markdown = build_markdown_cache(&view.entries);
             super::reveal_first_history_page(&view.list_state, view.entries.len());
             cx.notify();
         });
