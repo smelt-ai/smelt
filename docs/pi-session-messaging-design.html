@@ -458,9 +458,9 @@
       目标必须是已有 durable Pi session；source ≠ target；可选跳数与权限天花板在进程内检查。
     </li>
     <li>
-      <strong>复用既有 session / turn 路径。</strong>
-      投递 = 把 framed 输入推进目标 session 的既有 turn / input queue，再由 Pi 写入自身 transcript；
-      ack 对齐同 session 既有的至少一次模式（如 <code>claim_model</code> / <code>acknowledge_model</code> 风格）。
+      <strong>复用既有结果投递路径，不当用户输入。</strong>
+      投递 = 交给目标宿主的 <code>BackgroundSupervisor</code>，由扩展写成一条 <code>smelt.peer_message</code> 自定义消息进 Pi transcript；
+      ack 就是现有的 <code>claim_model</code> / <code>acknowledge_model</code>，在 <code>message_start</code> 时认。不走 <code>Prompt</code> / <code>FollowUp</code>。
     </li>
     <li>
       <strong>与 subagent 分层。</strong>
@@ -589,8 +589,8 @@
 
   <p>
     三个角色：发起方 Pi（A）、门卫 <code>smeltd</code>、目标 Pi（B）。
-    发现复用既有 session 列表；发送经 daemon 校验后进入 B 的既有 turn/input 路径；
-    B 将 framed peer 消息写入自身 transcript，再按既有 claim/ack 风格消费。
+    发现复用既有 session 列表；发送经 daemon 校验后交给 B 宿主的 <code>BackgroundSupervisor</code>；
+    B 的扩展把它写成 <code>smelt.peer_message</code> 自定义消息进自身 transcript，按既有 claim/ack 认领。
   </p>
 
   <div class="sketch-label">建议 · 组件关系</div>
@@ -613,24 +613,26 @@ flowchart TB
   end
 
   subgraph HostB["宿主 B"]
-    Rpc["pi_rpc · write_rpc"]
+    BgB["BackgroundSupervisor<br/>peer 投递队列"]
   end
 
-  subgraph PiB["Pi B"]
-    TrB["transcript = 收件箱"]
+  subgraph PiB["Pi B（Bun 扩展）"]
+    Listen["listen 连接<br/>pi.sendMessage"]
+    TrB["transcript = 收件箱<br/>customType smelt.peer_message"]
   end
 
   Sidebar --- Daemon
   ToolA -->|"既有 Unix 套接字<br/>新 op · 一行 JSON"| BgA
   BgA -->|"既有 socketpair<br/>不是 Control API"| Gate
-  Gate -->|"AcpUserAction::FollowUp"| Rpc
-  Rpc -->|"空闲 prompt · 忙 follow_up"| TrB
+  Gate -->|"AcpUserAction::DeliverPeerMessage"| BgB
+  BgB -->|"completion 行 · kind peer_message"| Listen
+  Listen -->|"空闲开一轮 · 忙 followUp 排队<br/>message_start 回 ack"| TrB
   </div>
 
   <div class="callout">
     <div class="label">核心断言</div>
-    送达权威 =「peer-framed 消息已进入目标 Pi transcript，且被该 turn 路径消费」。
-    <strong>不是</strong>「<code>session_messages</code> 里多了一行」。
+    送达权威 =「<code>smelt.peer_message</code> 自定义消息已进入目标 Pi transcript」，以 Pi 的 <code>message_start</code> 为准，扩展此时回 ack。
+    <strong>不是</strong>「<code>session_messages</code> 里多了一行」，也<strong>不是</strong>一条带前缀的用户消息。
     会话之间走哪几条已经存在的套接字，见下一节。
   </div>
 </section>
@@ -692,7 +694,8 @@ flowchart TB
           Pi 的 stdin 由 <code>write_rpc</code>（<code>pi_rpc.rs</code>）写一行 JSON。
         </td>
         <td>
-          转发的是既有 <code>AcpUserAction::FollowUp</code>，正文是 framed 信封的文本。见下面「空闲 / 忙」。
+          转发一个新的 <code>AcpUserAction::DeliverPeerMessage</code>，宿主把它交给自己的 <code>BackgroundSupervisor</code>，
+          和后台任务、子智能体交回结果走同一条 listen / ack。<strong>不用</strong> <code>FollowUp</code> / <code>Prompt</code>，见第 4 步。
         </td>
       </tr>
     </tbody>
@@ -720,7 +723,8 @@ flowchart TB
   <h3>3. 主 smeltd → 宿主 B</h3>
   <p>
     <code>AcpRegistry::get</code> / <code>with_current</code> 找到 B。门卫（Pi→Pi、source ≠ target、hops、ceiling、深度）在主进程里做，仍然不落协作表。
-    通过之后把 <code>AcpUserAction::FollowUp</code> 写到 B 的 <code>hosted_handle</code>。
+    通过之后把 <code>AcpUserAction::DeliverPeerMessage { id, from, kind, hops, reply_to, text }</code> 写到 B 的 <code>hosted_handle</code>。
+    <code>id</code> 由主 daemon 分配（<code>pm-</code> 加 12 位十六进制），宿主和扩展都按它认 ack。
   </p>
 
   <h3>4. 宿主 B → Pi B</h3>
@@ -730,25 +734,36 @@ flowchart TB
     <code>accepts_mid_turn_steer</code> 为真，<code>send_acp_mid_turn_input</code> 会发 <code>ConversationCommand::Steer</code>，<code>write_rpc</code> 写出 <code>{"type":"steer"}</code>，插进<strong>当前回合</strong>，不是排队。
   </p>
   <p>
-    「空闲开一轮、忙则排队」对应的现成动作是 <code>AcpUserAction::FollowUp</code> → <code>send_acp_follow_up</code>：
+    <code>AcpUserAction::FollowUp</code>（<code>send_acp_follow_up</code>）的时机是对的：空闲时退回 <code>Prompt</code> 开一轮，忙时写 <code>{"type":"follow_up"}</code> 进 Pi 自己的队列。
+    但它和 <code>Prompt</code> 一样，进 Pi 的是一条 <strong>user 消息</strong>，peer 也<strong>不用</strong>它：
   </p>
   <ul>
-    <li>Pi <code>supports_native_queue == true</code>（<code>run_connection</code> 里写死）。空闲（<code>prompt_in_flight</code> 为假）时 <code>send_acp_follow_up</code> 自己退回 <code>Prompt</code>，<code>write_rpc</code> 写 <code>{"type":"prompt"}</code>，开新回合。</li>
-    <li>忙着时写 <code>ConversationCommand::FollowUp</code>，<code>write_rpc</code> 写 <code>{"type":"follow_up","message":...}</code>，进 Pi 自己的队列。取消窗口里 <code>accepts_mid_turn_steer</code> 为假时，Prompt 才会掉进 daemon 的 <code>QueuedAcpPrompt</code>；peer 不依赖那条退路。</li>
+    <li><strong>界面</strong>：B 的对话里会画成用户气泡。要和用户自己说的话分开，只能解析正文前缀，是隐式约定。</li>
+    <li><strong>排队</strong>：忙时进 Pi 的 follow_up 队列，<code>PiQueueMirror</code> 把它镜像成 B 输入栏里「用户排队的消息」，用户能撤回、改写。</li>
+    <li><strong>归属</strong>：hops 复位、通知等凡是要判断「是不是用户在 B 里说了话」的地方，都分不出来。</li>
   </ul>
   <p>
-    信封是 <code>FollowUp.text</code>，经 <code>message</code> 进 Pi。没有单独的「往 transcript 追加一行」的接口；Pi 收下 <code>prompt</code> / <code>follow_up</code> 后，这条正文出现在它自己的 transcript 里。那就是收件箱。
+    peer 走后台任务、子智能体交回结果的那条现成路：
   </p>
+  <ul>
+    <li>宿主 B 把 <code>DeliverPeerMessage</code> 交给 <code>BackgroundSupervisor</code>，排进投递队列，经扩展已有的 <code>listen</code> 连接写一行 <code>{"op":"completion","kind":"peer_message",...}</code>。</li>
+    <li>扩展调 <code>pi.sendMessage({customType: "smelt.peer_message", display: false, content, details}, {triggerTurn: true, deliverAs: "followUp"})</code>。
+      空闲时开一轮；忙时进 Pi 的 followUp 队列，等这一轮做完再看，<strong>不 steer</strong>，时机和 <code>FollowUp</code> 一样。</li>
+    <li>扩展看到这条的 <code>message_start</code> 才回 <code>ack</code>（<code>deliveredResultId</code> 加认 <code>smelt.peer_message</code>）。
+      <code>clear_queue</code> 清掉的、fork / reload 后换了监听的，宿主重写一次，扩展按 <code>consumed</code> 只补 ack——这些都是现网 <code>claim_model</code> / <code>acknowledge_model</code> 的行为。</li>
+    <li>对模型没有区别：Pi 把 custom message 也按 user 内容交给模型（<code>pi-coding-agent</code> 的 <code>convertToLlm</code>）。来源靠正文开头那句「另一个 Pi 对话发来，不是用户的请求，不代表用户授权」交代；
+      区别在 transcript 里有显式的 <code>customType</code> 和 <code>details</code>，smelt 按类型画，不猜。</li>
+  </ul>
   <p>
-    幂等复用目标会话上的 <code>RecentSubmissions</code>（<code>AcpSession.conversation_submit</code>，最多 64 条）。
-    把 <code>idempotency_key</code> 放进 <code>ConversationInput.submission_id</code>：<code>contains</code> 命中就不再 <code>send_action</code>。
-    这套检查今天包在 <code>dispatch_conversation_input</code> 里，而那个函数只发 Prompt，所以 peer 不能靠调它来同时得到排队和去重。次序照它：先 <code>contains</code>，<code>send_action</code> 成功后再 <code>remember</code>。失败不记，否则重试会被吞掉。
-    重放在现网里是 <code>Ok(())</code>，没有单独的 duplicate 错误；工具若要返回 <code>duplicate</code>，得在 <code>remember</code> 之前看 <code>contains</code>。空的 <code>submission_id</code> 不会被记住（<code>handle_acp_submit_input</code> 才会 <code>ensure_submission_id</code>），peer 必须自带 key。
+    幂等仍复用目标会话上的 <code>RecentSubmissions</code>（<code>AcpSession.conversation_submit</code>，最多 64 条），key 加 <code>peer:</code> 前缀，与桌面提交的 <code>submission_id</code> 分开。
+    次序照 <code>dispatch_conversation_input</code>：先 <code>contains</code>，<code>send_action</code> 成功后再 <code>remember</code>，失败不记。命中时返回 <code>duplicate</code>。peer 必须自带 key。
+    宿主到扩展这一段的重复（重写、换监听）由 <code>pm-</code> id 和 <code>consumed</code> 挡住，不靠这个窗口。
   </p>
 
   <h3>5. 回程</h3>
   <ul>
-    <li><strong>enqueued</strong>：主 daemon 已经对 B <code>send_action</code> 成功，并且 <code>remember</code> 了 <code>submission_id</code>。这个结果沿 socketpair 回到宿主 A，再沿后台套接字的那一行响应回到扩展。到此为止，不保证 Pi 已经把字写进 transcript。</li>
+    <li><strong>enqueued</strong>：主 daemon 已经对 B <code>send_action</code> 成功，并且 <code>remember</code> 了 key。这个结果沿 socketpair 回到宿主 A，再沿后台套接字的那一行响应回到扩展。到此为止，不保证 Pi 已经把它写进 transcript。</li>
+    <li><strong>delivered</strong>：B 的扩展回了 ack。宿主 B 的快照带 <code>peer_inbox</code>（还没 ack 的 peer 消息，和 <code>subagents</code> 一样从宿主发布），ack 后这条从里面消失。主 daemon 看镜像就知道送没送到，不用回连 A。</li>
     <li><strong>完成</strong>：B 在自己的回合里再调 <code>session_send</code> 回 A（<code>kind=completion</code>）。不是 <code>subagent_dispatch</code> 那种把连接留到 <code>finish</code> 的 ack，原连接上没有完成回调。</li>
   </ul>
 
@@ -777,7 +792,7 @@ flowchart TB
           <code>handle_acp_submit_input</code> 在投递前调 <code>wake_suspended_acp_session</code>：runtime 已死则 <code>relaunch_recorded_acp_runtime</code>，再 <code>wait_for_acp_ready</code>。
           这是唯一的懒启动。
         </td>
-        <td>同样先 <code>wake_suspended_acp_session</code>，醒来再发 <code>FollowUp</code>。不要在 send 里另写一套拉起。</td>
+        <td>同样先 <code>wake_suspended_acp_session</code>，醒来再发 <code>DeliverPeerMessage</code>。不要在 send 里另写一套拉起。<code>peer_inbox</code> 不空时，<code>reduced_suspend_blocker</code> 不让它挂起。</td>
       </tr>
       <tr>
         <td>B 根本不在这次 daemon 的注册表里</td>
@@ -825,9 +840,9 @@ flowchart TB
   <h2><span class="num">6.</span>「数据」放哪：transcript framing</h2>
 
   <p>
-    协作元数据住在<strong>目标会话 transcript 的消息信封</strong>中。
-    结构族与 user/assistant turn 相同（便于渲染与上下文窗口纳入），但带可区分 provenance，
-    避免模型/用户误以为是人类直接输入。
+    协作元数据住在<strong>目标会话 transcript 的一条 Pi 自定义消息</strong>里（<code>role: "custom"</code>，<code>customType: "smelt.peer_message"</code>）。
+    Pi 把它按 user 内容纳入上下文；smelt 按 <code>customType</code> 认出它，画成事件行，不画成用户气泡。
+    元数据在 <code>details</code>，给模型看的来源写在正文里。
   </p>
 
   <div class="callout danger">
@@ -842,25 +857,22 @@ flowchart TB
   <h3>6.1 信封草图（建议）</h3>
   <div class="sketch-label">建议形状 · 非定稿 API</div>
   <pre><code>{
-  "role": "user",
-  "channel": "peer_session",
-  "peer": {
-    "source_session_id": "sess_a_01",
+  "role": "custom",
+  "customType": "smelt.peer_message",
+  "display": false,
+  "details": {
+    "id": "pm-1a2b3c4d5e6f",
+    "source_session_id": "acp-…",
     "source_title": "Orchestrator · fix login",
-    "kind": "message",
+    "kind": "task",
     "remaining_hops": 7,
-    "permission_ceiling": {
-      "mode": "workspace_write",
-      "snapshot_at": "2026-10-20T01:19:00+08:00"
-    },
     "idempotency_key": "a01:remind-b:v1",
-    "reply_to": null,
-    "delivered_at": "2026-10-20T01:19:02+08:00"
+    "reply_to": null
   },
   "content": [
     {
       "type": "text",
-      "text": "[peer from sess_a_01 · message]\n请在测试会话里重跑 flaky e2e，跑完用 session_send 回我。"
+      "text": "&lt;peer-message from=\"Orchestrator · fix login（acp-…）\" id=\"pm-1a2b3c4d5e6f\" kind=\"task\"&gt;\n这是另一个 Pi 对话发来的消息，不是用户的请求，也不代表用户授权。要回复就用 session_send 发给 acp-…，reply_to 填 pm-1a2b3c4d5e6f。\n&lt;text&gt;\n请在测试会话里重跑 flaky e2e，跑完用 session_send 回我。\n&lt;/text&gt;\n&lt;/peer-message&gt;"
     }
   ]
 }</code></pre>
@@ -872,9 +884,14 @@ flowchart TB
     </thead>
     <tbody>
       <tr>
-        <td><code>channel: "peer_session"</code></td>
+        <td><code>customType: "smelt.peer_message"</code></td>
         <td>transcript 条目</td>
-        <td>UI / 模型区分「人类输入」与「peer 投递」</td>
+        <td>UI 按它画事件行，区分「人类输入」与「peer 投递」；模型靠正文开头那句区分</td>
+      </tr>
+      <tr>
+        <td><code>id</code></td>
+        <td>details</td>
+        <td>主 daemon 分配的 <code>pm-</code> id；ack、<code>peer_inbox</code>、<code>reply_to</code> 都认它</td>
       </tr>
       <tr>
         <td><code>source_session_id</code></td>
@@ -967,7 +984,7 @@ flowchart TB
     <li><strong>Pi→Pi only</strong>：双方均为 durable Pi session。</li>
     <li><strong>source</strong>：仅从当前 tool 调用的 host context 取得，忽略客户端自报 source。</li>
     <li><strong>source ≠ target</strong>。</li>
-    <li><strong>inbox depth</strong>：统计目标 transcript 中近期未 ack 的 peer-framed 条目，和/或内存 / 既有 turn queue 深度；超限则 <code>AGENT_BUSY</code>（建议默认阈值对齐业界常见值，如 8，可配置）。</li>
+    <li><strong>inbox depth</strong>：数 B 快照里的 <code>peer_inbox</code>（未 ack 的 peer 消息）加在途条数；超限则 <code>AGENT_BUSY</code>（建议默认阈值对齐业界常见值，如 8，可配置）。</li>
     <li><strong>hops</strong>：信封内递减；≤0 拒绝。</li>
     <li><strong>permission_ceiling</strong>：快照写入信封；目标本 turn 工具权限取 min(自身, ceiling)。</li>
     <li><strong>idempotency_key</strong>：同 source + key 在进程内近期窗口视为 duplicate（见 §12 弱点）。</li>
@@ -1014,13 +1031,15 @@ sequenceDiagram
     HostA-->>Tool: ok false
   else 通过
     D->>D: 若已挂起则 wake_suspended_acp_session
-    D->>D: RecentSubmissions 认 submission_id
-    D->>HostB: send_action FollowUp<br/>text 为 framed 信封
-    Note over HostB: 空闲则 type prompt 开回合<br/>忙则 type follow_up 进 Pi 队列<br/>不要走 Prompt：忙时会 steer
-    HostB->>PiB: write_rpc 写入 stdin
-    Note over PiB: 权威：Pi 把 message 写入 transcript
+    D->>D: RecentSubmissions 认 peer: key
+    D->>HostB: send_action DeliverPeerMessage<br/>id = pm-…
     D-->>HostA: enqueued
     HostA-->>Tool: enqueued
+    Note over HostB: BackgroundSupervisor 排队<br/>快照 peer_inbox 多一条
+    HostB->>PiB: listen 连接写 completion 行<br/>kind peer_message
+    Note over PiB: pi.sendMessage customType smelt.peer_message<br/>空闲开一轮 · 忙则 followUp 排队，不 steer
+    PiB-->>HostB: message_start 后 ack pm-…
+    Note over HostB,PiB: 权威：已进 transcript<br/>peer_inbox 去掉这条
     opt 完成回执
       Note over PiB,Tool: B 之后自己再调 session_send 回 A<br/>不是这条连接上的 finish
     end
@@ -1029,9 +1048,9 @@ sequenceDiagram
 
   <h3>8.1 Ack / 送达语义</h3>
   <ul>
-    <li><strong>enqueued</strong>：已通过门卫并进入目标既有 turn/input 路径（对发送方的 RPC 成功）。</li>
-    <li><strong>delivered（权威）</strong>：peer-framed 条目已 append 进目标 transcript。</li>
-    <li><strong>consumed</strong>：目标 turn 按既有 <code>claim_model</code> / <code>acknowledge_model</code> 风格至少一次认领并处理。</li>
+    <li><strong>enqueued</strong>：已通过门卫，主 daemon 对宿主 B 的 <code>send_action</code> 写成功（对发送方的 RPC 成功）。</li>
+    <li><strong>delivered（权威）</strong>：B 的扩展在 <code>message_start</code> 回了 ack，条目已进 transcript、模型这一轮看得到。
+      在 Pi 里「进 transcript」和「交给模型」是同一刻，所以不再单列 consumed。</li>
   </ul>
   <p>
     发送方默认只保证观察到 <code>enqueued</code>；若需要端到端确认，由目标主动
@@ -1052,8 +1071,8 @@ sequenceDiagram
     <tbody>
       <tr>
         <td>Inbox 深度</td>
-        <td>目标 transcript 近期未 ack peer 条数，和/或内存 / 既有 turn queue 深度</td>
-        <td>满则拒绝；不靠 <code>status='queued'</code> SQL 计数</td>
+        <td>B 快照里的 <code>peer_inbox</code> 条数，加上主 daemon 刚投出、快照还没回来的条数</td>
+        <td>满（默认 8）则拒绝；不靠 <code>status='queued'</code> SQL 计数，也不读 transcript</td>
       </tr>
       <tr>
         <td>Hops</td>
@@ -1096,11 +1115,79 @@ sequenceDiagram
 <section id="s10">
   <h2><span class="num">10.</span>UI</h2>
 
+  <p>
+    智能体之间的消息不是用户对话，也不是助手回答，是「发生了一件事」。对话区里用<strong>居中的事件行</strong>表示，
+    和用户气泡（靠右）、助手回答（靠左）都分开。参考 Grok 对话里的「已传讯息给 〈对象〉」。
+  </p>
+
+  <div class="sketch-label">建议 · 对话区</div>
+  <pre><code>A 的对话                                     B 的对话
+
+  助手：我让测试那边重跑一下。                    ── 〈修登录〉发来任务 ──
+                                              ┃ 请在测试会话里重跑 flaky e2e，
+       ── 已发任务给 〈测试 · e2e〉 ▸ ──           ┃ 跑完把失败用例发给我。
+                                              ┃ …展开
+  助手：好，等它回来。
+                                                助手：开始跑 e2e……
+       ── 〈测试 · e2e〉交回结果 ▸ ──
+                                                 ── 已发结果给 〈修登录〉 ▸ ──</code></pre>
+
+  <h3>10.1 事件行：统一一种样式</h3>
+  <p>
+    「非用户、非助手」的条目全部用居中事件行，<strong>包括现有的后台任务和后台子智能体交回结果</strong>（<code>AcpEntry::TaskNote</code>，
+    今天是靠左一行灰字，<code>crates/smelt-acp-view/src/acp_view/render/conversation.rs</code>）。不并存两种样式。
+  </p>
   <ul>
-    <li><strong>侧栏</strong>：继续渲染既有 durable session 列表；<strong>无需</strong>为 peer 功能新表或新列。未读感若需要，可从该会话 transcript 尾部是否存在未消费 <code>channel=peer_session</code> 推导（客户端投影），而非 SQL unread 计数。</li>
-    <li><strong>对话区</strong>：peer 消息与人类 user 气泡区分样式——例如左侧色条、角标「来自 · {title/session_id}」、kind 标签（message / task / completion）。文案需标明「另一 agent 发送，非用户直接输入」（对齐 PI Desktop framing 精神）。</li>
-    <li><strong>发送方 UI</strong>：P0 可不做独立面板；agent 通过工具完成 list/send。可选后续：在会话菜单提供「提醒另一会话…」快捷入口，仍走同一 tool/RPC。</li>
+    <li><strong>一行</strong>：居中、次要文字色、小字号；前面一个图标（对话 / 任务 / 子智能体），后面是动作和对象。</li>
+    <li><strong>对象可点</strong>：〈对话标题〉是 <code>Button</code>（quiet），点了跳到那段对话。应用内跳转，不用 <code>Link</code>。</li>
+    <li><strong>有正文就能展开</strong>：行尾 ▸，点开在下方显示正文，限高滚动；展开状态沿用 <code>TaskNote</code> 现在的做法。</li>
+    <li><strong>失败看得出来</strong>：警示图标加文字原因，例如「发给〈B〉失败：桌面没开，拉不起这段对话」，不只靠变色。</li>
+  </ul>
+
+  <h3>10.2 各条目怎么画</h3>
+  <table>
+    <thead>
+      <tr><th>条目</th><th>事件行</th><th>正文</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>A 里的 <code>session_send</code> 工具调用</td>
+        <td>「已发消息 / 任务 / 结果给〈B〉」；被拒时「发给〈B〉失败：原因」</td>
+        <td>默认收起。正文是 A 自己写的，人要看再点。替代通用工具卡片。</td>
+      </tr>
+      <tr>
+        <td>A 里的 <code>session_spawn</code> 工具调用</td>
+        <td>「新建对话〈C〉并交代任务」</td>
+        <td>默认收起</td>
+      </tr>
+      <tr>
+        <td>B 里的 <code>smelt.peer_message</code></td>
+        <td>「〈A〉发来消息 / 任务 / 结果」</td>
+        <td><strong>默认展开</strong>，左边框引用块，超过 4–5 行折叠。B 接下来做什么由它决定，人得直接读到。</td>
+      </tr>
+      <tr>
+        <td>后台任务结果（<code>smelt.background_task</code>）</td>
+        <td>沿用 <code>TaskNote::summary()</code>，例如「后台任务 … 已完成」</td>
+        <td>默认收起，同今天</td>
+      </tr>
+      <tr>
+        <td>后台子智能体结果（<code>smelt.subagent_result</code>）</td>
+        <td>沿用 <code>TaskNote::summary()</code>，例如「子智能体 sa-…（标题）完成」</td>
+        <td>默认收起，同今天</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    工具调用画成事件行靠工具名认（<code>session_send</code> / <code>session_spawn</code>，常量，和 <code>PI_SUBAGENT_TOOL</code> 同一做法），
+    收到的消息靠 <code>customType</code> 认，都是显式字段，不解析正文。
+  </p>
+
+  <h3>10.3 其它</h3>
+  <ul>
+    <li><strong>侧栏</strong>：继续渲染既有 durable session 列表；<strong>无需</strong>为 peer 功能新表或新列。新建的对话就是一条普通对话，点进去第一条就是「〈A〉发来任务」。未读感若需要，从会话快照的 <code>peer_inbox</code> 等内存状态推导，render 不读 transcript。</li>
+    <li><strong>发送方 UI</strong>：P0 不做独立面板；agent 通过工具完成 list/send。可选后续：在会话菜单提供「提醒另一会话…」快捷入口，仍走同一 tool/RPC。</li>
     <li><strong>subagent</strong>：不出现在侧栏 peer 选择器中。</li>
+    <li><strong>手机</strong>：先按自定义消息的通用样式出现，事件行之后再做。</li>
   </ul>
 </section>
 
@@ -1115,8 +1202,8 @@ sequenceDiagram
         <li><code>session_list</code></li>
         <li><code>session_send</code></li>
         <li>门卫：Pi→Pi、source 防伪、≠、depth、hops、ceiling</li>
-        <li>入队 → transcript framing → claim/ack</li>
-        <li>对话区 peer 样式</li>
+        <li>DeliverPeerMessage → BackgroundSupervisor → <code>smelt.peer_message</code> → message_start ack</li>
+        <li>对话区居中事件行，<code>TaskNote</code> 一起改成同一样式</li>
       </ul>
     </div>
     <div class="phase-card p1">
@@ -1131,7 +1218,7 @@ sequenceDiagram
     <div class="phase-card p2">
       <h4>P2 · 体验与硬化</h4>
       <ul>
-        <li>侧栏未读投影（读 transcript）</li>
+        <li>侧栏未读投影（读快照，不读 transcript）</li>
         <li>发送快捷 UI</li>
         <li>更稳的进程内幂等窗口 / 与既有 queue 持久化对齐</li>
         <li>可观测性：门卫拒绝指标</li>
@@ -1191,7 +1278,7 @@ sequenceDiagram
       <tr>
         <td>排队上限</td>
         <td>每目标最多 8 条，跨重启仍在</td>
-        <td>没有跨重启的账本计数；忙时只进 Pi 的 <code>follow_up</code></td>
+        <td>宿主 B 的 <code>peer_inbox</code>，每目标 8 条，只在内存里，不跨宿主重启</td>
       </tr>
       <tr>
         <td>等待</td>
@@ -1204,11 +1291,11 @@ sequenceDiagram
   <h3>落到 smelt 上的五件事</h3>
   <ol>
     <li>
-      <strong>delivered</strong> 只表示主 daemon 对宿主 B 的 <code>send_action</code> 写成功。
-      B 在回合真正跑起来之前崩溃，没有一行把状态改成失败。发送方仍以为已经入队。
+      <strong>enqueued</strong> 只表示主 daemon 对宿主 B 的 <code>send_action</code> 写成功；<strong>delivered</strong> 要等 B 的扩展在 <code>message_start</code> 回 ack，<code>peer_inbox</code> 去掉这条。
+      这一段是准的，但只在内存里：宿主 B 在 ack 前退出，消息就没了，没有一行把状态改成失败，发送方也不会收到通知。
     </li>
     <li>
-      <strong>done</strong> 只有两种看起来像做完的信号：B 的 <code>kind=completion</code> 已经写进 A 的 transcript；或者带着这个 <code>submission_id</code> 的那一轮结束，B 回到 <code>DaemonPhase::Idle</code>。
+      <strong>done</strong> 只有两种看起来像做完的信号：B 的 <code>kind=completion</code> 已经写进 A 的 transcript；或者这条 peer 消息 ack 之后的那一轮结束，B 回到 <code>DaemonPhase::Idle</code>。
       后者分不出成功和放弃。<code>Idle</code> 同样会出现在人停掉回合、取消、或闲置挂起之后。<code>Succeeded</code> / <code>Failed</code> 是这一轮 runtime 的相位，不是这条 peer 任务的结果。
     </li>
     <li>
@@ -1217,8 +1304,8 @@ sequenceDiagram
     </li>
     <li>
       没有跨重启、按目标计数的队列深度。
-      <code>PiQueueMirror</code> 只在宿主进程里镜像 Pi 报上来的 <code>follow_up</code> 文字，结构本身不设上限，也不落库。
-      重启之后，宿主不再知道「这个目标还排着几条 peer」。
+      <code>peer_inbox</code> 只活在宿主 B 的 <code>BackgroundSupervisor</code> 里，不落库。
+      宿主退出后，排着的 peer 消息和这个计数一起没了。
     </li>
     <li>
       <strong>result</strong> 就是 B 那条 completion 的正文，不是账本上的结构化字段。没有 <code>SessionTask.result</code> 这种列。
@@ -1238,7 +1325,7 @@ sequenceDiagram
     </li>
     <li>
       <strong>崩溃后的重复靠 transcript 认。</strong>
-      信封带上这次的 <code>submission_id</code>（与 <code>idempotency_key</code> 同一个值，<code>RecentSubmissions</code> 记的也是它）。
+      <code>details</code> 带上这次的 <code>idempotency_key</code>（<code>RecentSubmissions</code> 记的是加了 <code>peer:</code> 前缀的同一个值）。
       内存窗口没了之后，扫 B 的 transcript 仍能看出这条是不是已经收过。宿主崩溃重启时不会自动扫。
     </li>
     <li>
@@ -1263,8 +1350,8 @@ sequenceDiagram
     <div class="label">相对 PI Desktop SQL ledger 的诚实弱点</div>
     <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
       <li><strong>幂等非全局</strong>：无 UNIQUE(source, idempotency_key) 表约束；daemon 重启后进程内去重窗口丢失，可能导致重复 enqueue（transcript 可能出现两条相同 peer 条目）。</li>
-      <li><strong>崩溃窗口</strong>：已通过门卫、尚未 append 进 transcript、且未坐落在「既有 turn queue 持久化」上的条目，重启后可能丢失。</li>
-      <li><strong>inbox 深度近似</strong>：扫 transcript 尾部 / 内存队列，不如 SQL <code>status='queued'</code> 计数精确，极端并发下可能短暂漂移。</li>
+      <li><strong>崩溃窗口</strong>：已通过门卫、还没 ack 的条目只在宿主 B 的内存里（现网没有可借用的 turn queue 持久化），宿主退出就丢。</li>
+      <li><strong>inbox 深度近似</strong>：读 <code>peer_inbox</code> 镜像加在途计数，不如 SQL <code>status='queued'</code> 计数精确，极端并发下可能短暂漂移。</li>
       <li><strong>无 exactly-once completion 账本</strong>：回执靠目标再 send；重复 completion 需接收方自辨（信封 key / reply_to）。</li>
     </ul>
   </div>
@@ -1272,7 +1359,7 @@ sequenceDiagram
   <h3>12.1 用 transcript + 既有队列尽量补</h3>
   <ul>
     <li><strong>优先落 transcript</strong>：一旦 append，消息即成为会话历史的一部分，随 Pi 既有持久化存活——这是本设计的主恢复面。</li>
-    <li><strong>复用既有 turn queue 持久化</strong>（若 smeltd / Pi 已有）：enqueue 后、跑 turn 前的条目应尽量走同一持久化，而不是另造协作表。</li>
+    <li><strong>复用既有投递机制</strong>：ack 前的条目和后台任务结果走同一个 <code>BackgroundSupervisor</code> 队列，<code>clear_queue</code>、fork、reload 后照样重写；不另造协作表。</li>
     <li><strong>消费侧去重</strong>：Pi 在纳入上下文前，可对近期 <code>idempotency_key</code> 相同的 peer 条目折叠显示 / 跳过重复工具副作用（建议行为，P2 硬化）。</li>
     <li><strong>发送侧重试</strong>：工具层对 <code>enqueued</code> / <code>duplicate</code> 给出明确结果；发送方用同一 key 重试是安全的<strong>仅在</strong>进程内窗口仍有效时——文档与 SDK 注释需写清。</li>
   </ul>
@@ -1290,17 +1377,16 @@ sequenceDiagram
 
   <ol>
     <li>
-      <strong>Peer 条目的精确 transcript schema。</strong>
-      是扩展现有 user message 的 metadata 字段，还是引入并列 role/channel？
-      需与 Pi（Bun）transcript 写入路径对齐后定稿。
+      <s><strong>Peer 条目的精确 transcript schema。</strong></s>
+      已定：Pi 自定义消息，<code>customType: "smelt.peer_message"</code>，元数据在 <code>details</code>（§6）。
     </li>
     <li>
-      <strong>既有 turn / input queue 的持久化强度。</strong>
-      决定「门卫通过后、入 transcript 前」的丢失面有多大；需对照 smeltd 现状代码确认，而非假设。
+      <s><strong>既有 turn / input queue 的持久化强度。</strong></s>
+      已查：没有持久化。<code>pending_prompts</code> 和 <code>BackgroundSupervisor</code> 都只在内存里，丢失面见 §12。
     </li>
     <li>
-      <strong>Inbox 深度默认阈值与统计窗口。</strong>
-      扫 transcript 多深？是否计入已 claim 未 ack？建议先对齐 8，用指标验证。
+      <strong>Inbox 深度默认阈值。</strong>
+      统计口径已定为 <code>peer_inbox</code>（未 ack）。阈值建议先用 8，用指标验证。
     </li>
     <li>
       <strong>Hops 默认初始值。</strong>
