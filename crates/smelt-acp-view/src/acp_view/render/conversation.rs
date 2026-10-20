@@ -200,7 +200,10 @@ impl AcpView {
                 state
             }
         };
-        smelt_ui::markdown_mermaid::markdown_view_for_state(&state)
+        smelt_ui::markdown_mermaid::chat_markdown_view(
+            &state,
+            file_links(&self.runtime, self.cwd.as_deref()),
+        )
     }
 
     pub(super) fn render_message_list(
@@ -258,7 +261,6 @@ impl AcpView {
                         .justify_center()
                         .px_4()
                         .pb(px(12.))
-                        .overflow_hidden()
                         .child(
                             div()
                                 .w_full()
@@ -395,12 +397,7 @@ impl AcpView {
                                         "acp-user-md",
                                         i,
                                         0,
-                                        cached_entry_markdown(
-                                            &this.rendered_markdown,
-                                            i,
-                                            entry,
-                                            FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                                        ),
+                                        cached_entry_markdown(&this.rendered_markdown, i, entry),
                                         cx,
                                     ))
                                     .context_menu(move |menu, window, cx| {
@@ -430,12 +427,7 @@ impl AcpView {
                                     "acp-user-images-md",
                                     i,
                                     0,
-                                    cached_entry_markdown(
-                                        &this.rendered_markdown,
-                                        i,
-                                        entry,
-                                        FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                                    ),
+                                    cached_entry_markdown(&this.rendered_markdown, i, entry),
                                     cx,
                                 ),
                             );
@@ -535,12 +527,7 @@ impl AcpView {
                                 "acp-md",
                                 i,
                                 0,
-                                cached_entry_markdown(
-                                    &this.rendered_markdown,
-                                    i,
-                                    entry,
-                                    FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                                ),
+                                cached_entry_markdown(&this.rendered_markdown, i, entry),
                                 cx,
                             ))
                             .when(final_answer, |col| {
@@ -620,14 +607,9 @@ impl AcpView {
                             "任务完成".to_string()
                         };
                         let body_markdown = if !has_summary {
-                            markdown_text_for_cwd(&body, FileLinks::of(&this.runtime, this.cwd.as_deref())).into()
+                            body.clone().into()
                         } else {
-                            cached_entry_markdown(
-                                &this.rendered_markdown,
-                                i,
-                                entry,
-                                FileLinks::of(&this.runtime, this.cwd.as_deref()),
-                            )
+                            cached_entry_markdown(&this.rendered_markdown, i, entry)
                         };
                         let mut answer = v_flex()
                             .id(("acp-completion-message", i))
@@ -1299,13 +1281,14 @@ impl AcpView {
                 } else {
                     0.
                 };
+                // 行外壳不裁剪。拖选文字的自动滚动拿最近的裁剪区当视口，行一裁剪，
+                // 短消息整行都落在贴边触发带里，横着拖也会滚走列表；裁剪交给列表本身。
                 h_flex()
                     .w_full()
                     .justify_center()
                     .px_4()
                     .pt(px(top))
                     .pb(px(bottom))
-                    .overflow_hidden()
                     .child(
                         div()
                             .w_full()
@@ -1741,12 +1724,7 @@ impl AcpView {
         }
         let long = peer_text_is_long(&note.output_tail);
         let full = self.expanded_thoughts.contains(&index);
-        let markdown = cached_entry_markdown(
-            &self.rendered_markdown,
-            index,
-            entry,
-            FileLinks::of(&self.runtime, self.cwd.as_deref()),
-        );
+        let markdown = cached_entry_markdown(&self.rendered_markdown, index, entry);
         let mut body = div()
             .id(owner_id("acp-peer-note-body", owner))
             .w_full()
@@ -2095,6 +2073,7 @@ impl AcpView {
                 .quiet()
                 .w_full()
                 .justify_start()
+                .group(SUBAGENT_STOP_GROUP)
                 .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
                 .child(header)
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -2217,6 +2196,7 @@ impl AcpView {
             .quiet()
             .w_full()
             .justify_start()
+            .group(SUBAGENT_STOP_GROUP)
             .accessibility_label(format!("查看子智能体 {run_title} 的过程"))
             .child(row)
             .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -2246,11 +2226,15 @@ impl AcpView {
             );
         }
         let stop_id = id.to_string();
+        // 整行 hover 才显出来，用透明度而不是不渲染，耗时才不会跳。
         Some(
             Button::new((gpui::ElementId::from("acp-subagent-stop"), stop_id.clone()))
                 .danger()
                 .icon_size()
                 .label("停止")
+                .flex_shrink_0()
+                .opacity(0.0)
+                .group_hover(SUBAGENT_STOP_GROUP, |s| s.opacity(1.0))
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     // 不要顺带打开侧边视图。
                     cx.stop_propagation();
@@ -2601,12 +2585,7 @@ impl AcpView {
                     },
                     entry_ix,
                     0,
-                    cached_entry_markdown(
-                        &self.rendered_markdown,
-                        entry_ix,
-                        entry,
-                        FileLinks::of(&self.runtime, self.cwd.as_deref()),
-                    ),
+                    cached_entry_markdown(&self.rendered_markdown, entry_ix, entry),
                     cx,
                 ))
                 .into_any_element();
@@ -3183,6 +3162,8 @@ fn subagent_child_status_glyph(
 
 const EXPAND_ICON_GROUP: &str = "acp-expand-row";
 const PEEK_ROW_GROUP: &str = "acp-peek-row";
+/// 子智能体那一行：指上去才显出「停止」。
+const SUBAGENT_STOP_GROUP: &str = "acp-subagent-stop-row";
 
 /// 可展开行：平时左侧是工具图标，hover 换成箭头。展开仍靠点击。
 fn expandable_lead_icon(

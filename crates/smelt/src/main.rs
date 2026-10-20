@@ -2677,8 +2677,8 @@ struct Workspace {
     history_titles_at: Option<Instant>,
     /// 是否已有一次后台重读在路上，防止逐帧重复 spawn。
     history_titles_inflight: bool,
-    /// 当前选中查看的历史会话（路径 + 解析出的对话内容）；None 表示未选。
-    session_detail: Option<(PathBuf, Rc<session_history::SessionDetail>)>,
+    /// 当前选中查看的历史会话；None 表示未选。
+    session_detail: Option<session_history::OpenedHistory>,
     /// 历史会话右键删除的二次确认目标（None = 没在删除）。
     delete_history_target: Option<session_history::DeleteHistoryTarget>,
     /// 历史会话右侧消息详情的可变高度虚拟列表状态。

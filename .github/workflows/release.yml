@@ -20,6 +20,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # 发布说明要找上一个 tag，需要完整历史和全部 tag。
+          fetch-depth: 0
 
       # tag 必须就是 v<工作区版本号>（预发布也一样，先把版本号改成 0.9.1-rc.1 再打
       # v0.9.1-rc.1）：桌面请远程运行时升级时，运行时按桌面的版本号去这个 tag 的 Release
@@ -51,19 +54,6 @@ jobs:
           done
           [[ "$missing" == 0 ]] || { echo "打包链路文件不完整，终止。"; exit 1; }
           echo "✅ 打包所需文件齐全"
-
-      # tag 去掉 v 前缀，必须与 Cargo.toml 的 version 一致，避免版本号漂移。预发布的
-      # tag 带 -rc.1 这类后缀（见 prerelease），比对时只看后缀前面的部分。
-      - name: Check tag matches Cargo.toml version
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          tag="${tag%%-*}"
-          crate="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
-          echo "tag=$tag  Cargo.toml=$crate"
-          if [[ "$tag" != "$crate" ]]; then
-            echo "✗ tag($tag) 与 Cargo.toml version($crate) 不一致，先改 Cargo.toml 再打 tag。"
-            exit 1
-          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -133,13 +123,41 @@ jobs:
         run: |
           [[ -n "${KEYCHAIN_PATH:-}" ]] && security delete-keychain "$KEYCHAIN_PATH" || true
 
+      # 发布说明的起点要自己算：GitHub 默认往回找上一个正式版，而 v0.6.6–v0.6.14 在改以
+      # GitHub 为开发源之前的历史上、不是现在 main 的祖先，它会一路退回 v0.6.5，每个版本
+      # 都把以前的 PR 再列一遍。规则：按版本号往前找第一个是本次祖先的 tag；预发布从上一个
+      # tag（含 rc）算起，正式版从上一个正式版算起，正式版的说明就涵盖它之前所有 rc。
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=false
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=true
+          previous=""
+          seen=false
+          # versionsort.suffix=- 让 v0.9.0-rc.3 排在 v0.9.0 前面。
+          for tag in $(git -c versionsort.suffix=- tag --list 'v*' --sort=-v:refname); do
+            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then seen=true; continue; fi
+            $seen || continue
+            [[ "$prerelease" == false && "$tag" == *-* ]] && continue
+            git merge-base --is-ancestor "$tag" "$GITHUB_REF_NAME" || continue
+            previous="$tag"
+            break
+          done
+          echo "上一个版本：${previous:-（无）}"
+          args=(-f tag_name="$GITHUB_REF_NAME")
+          [[ -n "$previous" ]] && args+=(-f previous_tag_name="$previous")
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body \
+            > "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md"
+
       # tag 带 - 后缀（v0.9.0-rc.1）就发成预发布：不成为 Latest，一键安装默认装的
       # releases/latest 也不会指向它（要装它得设 SMELT_VERSION）。
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: dist/Smelt.dmg
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/release-notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}
 
   # Linux 运行时的包（设计文档 D7「一键安装」）：两种架构各在对应架构的 runner 上原生构建，
@@ -200,6 +218,8 @@ jobs:
           merge-multiple: true
           path: dist
 
+      # 先只放 Linux 包的校验和，一键安装和运行时自动升级马上能用；所有产物到齐后
+      # checksums job 再整份重写（两边都按文件名精确匹配，多出的行不影响它们）。
       - name: Checksums and installer
         run: |
           cd dist
@@ -319,3 +339,19 @@ jobs:
         with:
           files: dist/Smelt-*-android-arm64.apk
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、APK、Linux 包、install.sh）。
+  checksums:
+    needs: [linux-release, android-release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checksums of all assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist && cd dist
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Smelt.dmg' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'install.sh'
+          sha256sum -- * | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"

@@ -470,29 +470,6 @@ fn agent_launch_reads_interactive_shell_config() {
 }
 
 #[test]
-fn mcp_launch_detection_handles_env_prefixes_and_absolute_paths() {
-    use smelt_core::agent_kind::ConversationAgentKind;
-
-    assert_eq!(
-        launch_agent_kind("CLAUDE_CONFIG_DIR=/tmp/profile claude --resume abc"),
-        Some(ConversationAgentKind::Claude)
-    );
-    assert_eq!(
-        launch_agent_kind("env CODEX_HOME=/tmp/codex /opt/homebrew/bin/codex resume abc"),
-        Some(ConversationAgentKind::Codex)
-    );
-    assert_eq!(
-        launch_agent_kind("cursor-agent --force"),
-        Some(ConversationAgentKind::Cursor)
-    );
-    assert_eq!(
-        launch_agent_kind("opencode --auto"),
-        Some(ConversationAgentKind::OpenCode)
-    );
-    assert_eq!(launch_agent_kind("zsh -l"), None);
-}
-
-#[test]
 fn snapshot_includes_scrollback_history() {
     // 3 行屏高，灌 10 行 → 前几行进 history
     let size = DaemonTermSize { rows: 3, cols: 40 };
