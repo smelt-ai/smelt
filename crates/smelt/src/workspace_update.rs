@@ -22,6 +22,9 @@ impl Workspace {
     /// 关掉则停在 `Available`，只亮出版本号等用户自己决定何时下载。
     /// 检查本身两种情况下都照做——不然关掉之后连"有新版"都无从得知。
     pub(crate) fn check_for_update(&mut self, silent: bool, cx: &mut Context<Self>) {
+        if smelt_demo::is_active() {
+            return;
+        }
         if !self.update_status.can_check() {
             return;
         }
@@ -171,6 +174,9 @@ impl Workspace {
     /// 恢复失败时先收敛原事务；安装失败则由 check_for_update 拉取 manifest，只有
     /// 确认发布 URL 已变化后才作废旧作业，不能绕过持久化事务直接另起下载。
     pub(crate) fn check_or_recover_update(&mut self, silent: bool, cx: &mut Context<Self>) {
+        if smelt_demo::is_active() {
+            return;
+        }
         if self.update_status.can_retry_recovery() {
             self.recover_update_at_launch(silent, cx);
         } else {
@@ -255,6 +261,9 @@ impl Workspace {
     }
 
     pub(crate) fn recover_update_at_launch(&mut self, silent_check: bool, cx: &mut Context<Self>) {
+        if smelt_demo::is_active() {
+            return;
+        }
         self.update_status = updater::UpdateStatus::Checking;
         cx.notify();
         cx.spawn(async move |this, cx| {

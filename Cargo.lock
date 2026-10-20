@@ -10851,6 +10851,7 @@ dependencies = [
  "smelt-client",
  "smelt-client-store",
  "smelt-core",
+ "smelt-demo",
  "smelt-event-protocol",
  "smelt-iroh",
  "smelt-model",
@@ -10961,6 +10962,16 @@ dependencies = [
  "url",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "smelt-demo"
+version = "0.9.0-rc.4"
+dependencies = [
+ "libc",
+ "serde_json",
+ "smelt-model",
+ "smelt-store",
 ]
 
 [[package]]
@@ -11155,6 +11166,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smelt-core",
+ "smelt-demo",
  "smelt-event-bus",
  "smelt-event-protocol",
  "smelt-git",

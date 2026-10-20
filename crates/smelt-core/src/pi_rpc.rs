@@ -242,6 +242,10 @@ pub fn spawn_pi_rpc(
     std::thread::Builder::new()
         .name(format!("smelt-pi-rpc-{}", &sid[..sid.len().min(12)]))
         .spawn(move || {
+            if let Some(message) = crate::login_env::live_agent_refusal() {
+                let _ = event_tx.try_send(ConversationEvent::Fatal(message.to_string()));
+                return;
+            }
             let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
             let stderr_drain: Arc<Mutex<Option<smol::Task<()>>>> = Arc::default();
             let ready = Arc::new(AtomicBool::new(false));
@@ -520,6 +524,7 @@ fn spawn_process(
         .unwrap_or_else(crate::acp_conn::extended_search_path);
     command.env("PATH", crate::agent_kind::prepend_dsh_cli_shim(&path));
     command.envs(environment);
+    crate::login_env::pin_demo_environment(&mut command);
     // 会话身份与 capability token 必须由 daemon 决定；用户在旧式命令
     // 前缀或配置 env 中写了同名变量也不能覆盖。
     command.env("SMELT_SESSION_ID", &launch.sid);

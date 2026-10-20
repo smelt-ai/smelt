@@ -1112,6 +1112,10 @@ pub fn spawn_acp(
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            if let Some(message) = crate::login_env::live_agent_refusal() {
+                let _ = event_tx.try_send(ConversationEvent::Fatal(message.to_string()));
+                return;
+            }
             // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
             // 失败的真实原因都在 stderr 里，别让用户猜）。
             let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -3678,6 +3682,9 @@ fn spawn_agent_process(
     ),
     agent_client_protocol::Error,
 > {
+    if let Some(message) = crate::login_env::live_agent_refusal() {
+        return Err(agent_client_protocol::Error::internal_error().data(message));
+    }
     let mut std_cmd = std::process::Command::new(config.command());
     std_cmd.args(config.arguments());
     // 先铺登录 shell 的完整环境作为基底。只传 PATH 不够：用户的 node 可能来自
@@ -3697,6 +3704,7 @@ fn spawn_agent_process(
     // `PATH=` 前缀会盖掉 login 环境。npx 退路的 `dsh` shim 必须垫在最终 PATH
     // 最前面，否则桥里 `spawn('dsh')` 仍然 ENOENT。
     std_cmd.env("PATH", crate::agent_kind::prepend_dsh_cli_shim(&path));
+    crate::login_env::pin_demo_environment(&mut std_cmd);
     if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
         std_cmd.current_dir(cwd);
     }

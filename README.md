@@ -59,8 +59,11 @@ The `make dist-build` target requires **Python 3.10+** to package a DMG. The `/u
 make run                    # Build the GUI, daemon, and notifier, then run the GUI
 cargo run --bin smelt       # Run the GUI only when smeltd is already available
 make dist-build             # Build a release and package dist/Smelt.dmg
+make demo                   # Package dist/Smelt Demo.app for a booth (no DMG, not a release)
 make help                   # Show all available build targets
 ```
+
+Booth builds are a separate app, `Smelt Demo.app` (`com.zzfn.smelt.demo`). It keeps its own temporary data directory and does not read or write `~/.smelt` or agent configs such as `~/.claude`. See [`docs/demo.md`](docs/demo.md).
 
 Run tests and type checks:
 

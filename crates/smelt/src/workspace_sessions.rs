@@ -387,6 +387,7 @@ impl Workspace {
                         this.active_session_revision != restore_active_revision,
                         this.active_session,
                     );
+                    this.reassert_demo_surface(window, cx);
                     this.sync_session_ui(window, cx);
                     this.consume_pending_notification_session_jump(window, cx);
                     this.consume_pending_conversation_wakes(window, cx);

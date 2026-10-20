@@ -1,0 +1,15 @@
+# 展台演示的隔离与种子数据。只给桌面 `smelt` / `smeltd` 用。
+# 不进 smelt-core：那边还要编进移动端，不能把桌面 SQLite 种子拖进去。
+[package]
+name = "smelt-demo"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+smelt-model = { path = "../smelt-model" }
+smelt-store = { path = "../smelt-store" }
