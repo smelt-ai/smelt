@@ -367,6 +367,7 @@
     <li><a href="#s9">护栏与权限</a></li>
     <li><a href="#s10">UI</a></li>
     <li><a href="#s11">分阶段落地</a></li>
+    <li><a href="#s-status">状态与结果的精度代价</a></li>
     <li><a href="#s12">风险与取舍</a></li>
     <li><a href="#s13">开放问题</a></li>
   </ol>
@@ -1145,6 +1146,112 @@ sequenceDiagram
         <li>Task / subagent 级 A2A</li>
       </ul>
     </div>
+  </div>
+</section>
+
+<!-- ========== status ========== -->
+<section id="s-status">
+  <h2>状态与结果的精度代价（无账本取舍）</h2>
+
+  <p>
+    没有 <code>session_messages</code> / <code>session_links</code>，也就没有一份按消息记账的权威状态。
+    发送方要知道「送到了 / 正在跑 / 做完了 / 失败了」以及「结果是什么」，只能从两边拼：
+    目标会话在 <code>AcpRegistry</code> 里的回合相位（<code>DaemonPhase</code>：<code>Idle</code>、忙着的 <code>Thinking</code> / <code>ExecutingTool</code> / <code>AwaitingApproval</code> / <code>WaitingForUser</code>，以及 <code>acp_idle</code> 的挂起），
+    加上目标 transcript 里那条信封，以及 B 后来用 <code>session_send</code> 送回 A 的 <code>kind=completion</code>（信封上的 <code>reply_to</code>）。
+    宿主不替这条 peer 消息单记一行。
+  </p>
+
+  <h3>对照：PI Desktop <code>pi.session-orchestrator</code> 0.6.0</h3>
+  <p>
+    那条插件的 host 账本就是状态、结果和 completion 的权威。写入按 key 幂等，自带 hop 预算，每个目标最多排队 8 条。
+    <code>SessionTask</code> 提供 <code>status</code> / <code>result</code> / <code>wait</code>。<code>wait</code> 每 1 秒看一次账本，默认等到 25 秒，最长 45 秒。
+    smelt 不复制这套表，于是也没有这套精度。
+  </p>
+
+  <table>
+    <thead>
+      <tr><th></th><th>orchestrator 0.6.0</th><th>smelt（本稿）</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>状态权威</td>
+        <td>账本行</td>
+        <td>B 的回合相位 + B 的 transcript + 回到 A 的 completion</td>
+      </tr>
+      <tr>
+        <td>结果</td>
+        <td><code>SessionTask.result</code></td>
+        <td>completion 正文，自由文本</td>
+      </tr>
+      <tr>
+        <td>幂等</td>
+        <td>账本上的幂等写</td>
+        <td><code>RecentSubmissions</code>，最多 64 条，只在目标会话的内存里</td>
+      </tr>
+      <tr>
+        <td>排队上限</td>
+        <td>每目标最多 8 条，跨重启仍在</td>
+        <td>没有跨重启的账本计数；忙时只进 Pi 的 <code>follow_up</code></td>
+      </tr>
+      <tr>
+        <td>等待</td>
+        <td><code>wait</code>：1 秒一轮，默认 25 秒，最长 45 秒</td>
+        <td>宿主不等。超时由 A 自己看</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>落到 smelt 上的五件事</h3>
+  <ol>
+    <li>
+      <strong>delivered</strong> 只表示主 daemon 对宿主 B 的 <code>send_action</code> 写成功。
+      B 在回合真正跑起来之前崩溃，没有一行把状态改成失败。发送方仍以为已经入队。
+    </li>
+    <li>
+      <strong>done</strong> 只有两种看起来像做完的信号：B 的 <code>kind=completion</code> 已经写进 A 的 transcript；或者带着这个 <code>submission_id</code> 的那一轮结束，B 回到 <code>DaemonPhase::Idle</code>。
+      后者分不出成功和放弃。<code>Idle</code> 同样会出现在人停掉回合、取消、或闲置挂起之后。<code>Succeeded</code> / <code>Failed</code> 是这一轮 runtime 的相位，不是这条 peer 任务的结果。
+    </li>
+    <li>
+      <code>RecentSubmissions</code>（<code>AcpSession.conversation_submit</code>，容量 64）和在途状态都在进程内存里。
+      <code>smeltd</code> 崩溃后窗口清空。崩溃前没来得及写进 B 的 transcript 的那次，重试会再送一遍。
+    </li>
+    <li>
+      没有跨重启、按目标计数的队列深度。
+      <code>PiQueueMirror</code> 只在宿主进程里镜像 Pi 报上来的 <code>follow_up</code> 文字，结构本身不设上限，也不落库。
+      重启之后，宿主不再知道「这个目标还排着几条 peer」。
+    </li>
+    <li>
+      <strong>result</strong> 就是 B 那条 completion 的正文，不是账本上的结构化字段。没有 <code>SessionTask.result</code> 这种列。
+    </li>
+  </ol>
+
+  <h3>仍保持 Pi 原生的补法</h3>
+  <ul>
+    <li>
+      <strong>completion 是约定，不是表。</strong>
+      工具说明要求 B 用 <code>session_send</code> 回一条 <code>kind=completion</code>，带上 <code>reply_to</code>。
+      A 以这条出现在自己的 transcript 里当作「做完了，结果是这段文字」。
+    </li>
+    <li>
+      <strong>回合状态用 <code>session_list</code> 看。</strong>
+      列表读的是注册表里已有的相位和是否挂起，不另造 peer 状态枚举。A 由此知道 B 是空闲、忙，还是被 <code>acp_idle</code> 挂起。
+    </li>
+    <li>
+      <strong>崩溃后的重复靠 transcript 认。</strong>
+      信封带上这次的 <code>submission_id</code>（与 <code>idempotency_key</code> 同一个值，<code>RecentSubmissions</code> 记的也是它）。
+      内存窗口没了之后，扫 B 的 transcript 仍能看出这条是不是已经收过。宿主崩溃重启时不会自动扫。
+    </li>
+    <li>
+      <strong>超时在 A。</strong>
+      宿主不实现 <code>wait</code>，也不替 A 轮询。A 若要放弃，自己看时钟，再决定要不要再发或改问 B 的相位。
+    </li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="label">何时再考虑账本</div>
+    上面这些精度是用掉的，用来换零新表、以及和 Pi transcript 对齐。
+    真出现「要精确状态、要 <code>wait</code>、要在界面上监督一批工人」的需求时，账本才重新进入讨论。
+    在那之前，发送方从回合相位和 completion 推断，就是这条设计的边界。
   </div>
 </section>
 
