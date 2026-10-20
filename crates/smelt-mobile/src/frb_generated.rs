@@ -3235,6 +3235,7 @@ impl SseDecode for crate::api::conversation::TaskNoteKind {
         return match inner {
             0 => crate::api::conversation::TaskNoteKind::BackgroundTask,
             1 => crate::api::conversation::TaskNoteKind::Subagent,
+            2 => crate::api::conversation::TaskNoteKind::PeerMessage,
             _ => unreachable!("Invalid variant for TaskNoteKind: {}", inner),
         };
     }
@@ -5159,6 +5160,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::conversation::TaskNoteKind {
         match self {
             Self::BackgroundTask => 0.into_dart(),
             Self::Subagent => 1.into_dart(),
+            Self::PeerMessage => 2.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -6921,6 +6923,7 @@ impl SseEncode for crate::api::conversation::TaskNoteKind {
             match self {
                 crate::api::conversation::TaskNoteKind::BackgroundTask => 0,
                 crate::api::conversation::TaskNoteKind::Subagent => 1,
+                crate::api::conversation::TaskNoteKind::PeerMessage => 2,
                 _ => {
                     unimplemented!("");
                 }

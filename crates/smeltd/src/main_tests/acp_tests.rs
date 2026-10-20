@@ -1153,6 +1153,7 @@ fn task_note() -> smelt_core::acp_chat::TaskNote {
         exit_code: Some(1),
         output_tail: "error: boom".into(),
         runs: Vec::new(),
+        peer: None,
     }
 }
 
@@ -2141,6 +2142,7 @@ fn watchdog_and_late_tool_update_serialize_prompt_dispatch() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     let session = make_acp_session("acp-dangling-tool", reduced);
     let (cmd_tx, cmd_rx) = smol::channel::unbounded();
@@ -3011,6 +3013,7 @@ fn parallel_tool_completion_replaces_snapshot_from_the_changed_card() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         });
     }
     let sess = make_acp_session("acp-parallel", reduced);
@@ -3690,6 +3693,7 @@ fn upgrade_barrier_requires_quiescent_phase_and_no_outstanding_rpc() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         });
     assert_eq!(acp_upgrade_blockers(&acp_sessions), vec!["acp-idle"]);
 
@@ -3820,6 +3824,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&running_with_tool),
@@ -3840,6 +3845,7 @@ fn daemon_phase_distinguishes_executing_tool_from_thinking() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&idle_with_tool),
@@ -3902,6 +3908,7 @@ fn daemon_phase_projects_acp_outcomes_and_failure_reason() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     assert_eq!(
         compute_acp_daemon_phase(&completed),

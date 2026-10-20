@@ -104,6 +104,7 @@ fn keep_envelope(target: &mut ConversationSnapshot, previous: ConversationSnapsh
     target.plan = previous.plan;
     target.background_tasks = previous.background_tasks;
     target.subagents = previous.subagents;
+    target.peer_inbox = previous.peer_inbox;
     target.model = previous.model;
     target.config_options = previous.config_options;
     target.conversation_state = previous.conversation_state;

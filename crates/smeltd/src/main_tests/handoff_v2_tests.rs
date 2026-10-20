@@ -602,6 +602,7 @@ fn import_loopback_restores_hosted_acp_mid_turn() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     let (slot, _) =
         acp_sessions.reserve_with("acp-drill", || make_acp_session_value("acp-drill", running));

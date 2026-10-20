@@ -159,6 +159,8 @@ pub enum ConversationCommand {
     StopBackgroundTask { id: String },
     /// 用户在界面上停一个 Pi 子智能体。只有 Pi 驱动会处理。
     StopSubagent { id: String },
+    /// 主 daemon 交来的别的 Pi 对话的消息，交给会话宿主排队写进会话。只有 Pi 驱动会处理。
+    DeliverPeerMessage(crate::acp_session::PeerDelivery),
     /// 关闭会话：退出连接循环，随连接 drop 杀掉子进程。
     Shutdown,
 }
@@ -286,6 +288,11 @@ pub enum ConversationEvent {
         children: Vec<crate::acp_chat::AcpEntry>,
         debug: BTreeMap<String, crate::acp_session::ToolCallDebug>,
     },
+    /// 这次 Pi `session_send` 发给了谁、结果如何。工具开始时只有参数，结束后补上门卫的回答。
+    PeerSend {
+        id: String,
+        send: crate::acp_chat::PeerSend,
+    },
     /// 这次 Pi `subagent` 调用派出的子智能体（工具结果里的 `runs`），全量替换。
     SubagentRuns {
         id: String,
@@ -298,6 +305,8 @@ pub enum ConversationEvent {
     BackgroundTasks(Vec<crate::acp_session::BackgroundTaskView>),
     /// Pi 子智能体的全量快照（本次会话宿主生命期内的）。
     Subagents(Vec<crate::acp_session::SubagentView>),
+    /// 别的 Pi 对话发来、宿主还记得的消息，全量快照。
+    PeerInbox(Vec<crate::acp_session::PeerMessageView>),
     /// 后台任务结束。归约写成状态行，不开回合，也不当成用户说的话。
     BackgroundNotice(crate::acp_chat::TaskNote),
     /// 模型状态：当前名 + 可选列表。来自会话配置项里 category=Model 的那条
@@ -2746,6 +2755,7 @@ fn push_missing_tool(
         output,
         children,
         subagents: _,
+        peer: _,
     } = entry
     else {
         return;
@@ -3133,10 +3143,12 @@ async fn drive_session<S: SessionDrive>(
             }
             // 通用 ACP 没有改会话名的方法；本地标题已经改好，这里无声跳过。
             Next::Cmd(Some(ConversationCommand::SetSessionTitle(_))) => {}
-            // 通用 ACP 没有宿主里的后台任务，界面也不会给它出停止按钮。
+            // 通用 ACP 没有宿主里的后台任务，界面也不会给它出停止按钮。daemon 只把
+            // 别的对话的消息投给 Pi 对话。
             Next::Cmd(Some(
                 ConversationCommand::StopBackgroundTask { .. }
-                | ConversationCommand::StopSubagent { .. },
+                | ConversationCommand::StopSubagent { .. }
+                | ConversationCommand::DeliverPeerMessage(_),
             )) => {}
             // 通用 ACP 的模型列表由 agent 在 `session/update` 里自己推，没有「重拉」
             // 这个动作；这条命令是给 Pi 那条路径的。

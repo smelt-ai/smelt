@@ -8,6 +8,11 @@ import {
 	SMELT_MEMORY_EXTENSION_PATH,
 	SMELT_MEMORY_SEARCH_TOOL_NAME,
 } from "./memory-extension.ts";
+import {
+	SMELT_SESSION_LIST_TOOL_NAME,
+	SMELT_SESSION_PEERS_EXTENSION_PATH,
+	SMELT_SESSION_READ_TOOL_NAME,
+} from "./session-peers.ts";
 
 /** Rust 端据此识别 Smelt 自己的权限请求，不会误吞用户 Extension 的 confirm。 */
 export const SMELT_PERMISSION_TITLE = "smelt.permission.v1";
@@ -35,6 +40,18 @@ function isSmeltMemorySearchTool(tool: ToolIdentity): boolean {
 	);
 }
 
+/**
+ * 列出别的对话、读它们最近的回复：只读，不改任何东西，免审批。发消息（`session_send`）照常审批。
+ * 按身份认，同名的用户扩展工具不算。
+ */
+function isSmeltSessionPeerReadTool(tool: ToolIdentity): boolean {
+	return (
+		(tool.name === SMELT_SESSION_LIST_TOOL_NAME || tool.name === SMELT_SESSION_READ_TOOL_NAME) &&
+		tool.sourceInfo.source === "inline" &&
+		tool.sourceInfo.path === SMELT_SESSION_PEERS_EXTENSION_PATH
+	);
+}
+
 function isSmeltElicitationTool(tool: ToolIdentity): boolean {
 	return (
 		tool.name === SMELT_ELICITATION_TOOL_NAME &&
@@ -58,7 +75,7 @@ export function toolNeedsSmeltApproval(tool: ToolIdentity | undefined, _input?: 
 	if (READ_ONLY_BUILTIN_TOOLS.has(tool.name) && isActualBuiltin(tool)) {
 		return false;
 	}
-	if (isSmeltMemorySearchTool(tool)) {
+	if (isSmeltMemorySearchTool(tool) || isSmeltSessionPeerReadTool(tool)) {
 		return false;
 	}
 	return !isSmeltElicitationTool(tool);

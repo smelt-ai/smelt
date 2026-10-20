@@ -52,6 +52,8 @@ struct HostInner {
     pid: i32,
     control: Mutex<Option<UnixStream>>,
     snapshot_rx: smol::channel::Receiver<HostedSnapshotEnvelope>,
+    /// 宿主转上来的 Pi 会话互发请求（`peer_request` 行的内容）。
+    peer_rx: smol::channel::Receiver<serde_json::Value>,
     provider_pid: Arc<AtomicI32>,
     history_waiters:
         Arc<Mutex<HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>>>,
@@ -142,6 +144,7 @@ impl HostedConversationHandle {
         let provider_pid = Arc::new(AtomicI32::new(initial_provider_pid.unwrap_or(0)));
         let history_waiters = Arc::new(Mutex::new(HashMap::new()));
         let handoff = ReaderHandoff::new();
+        let (peer_tx, peer_rx) = smol::channel::unbounded();
         let snapshot_rx = start_snapshot_reader(
             reader,
             pending_host_bytes,
@@ -149,12 +152,14 @@ impl HostedConversationHandle {
             Arc::clone(&provider_pid),
             pid,
             Arc::clone(&history_waiters),
+            peer_tx,
         )?;
         Ok(Self {
             inner: Arc::new(HostInner {
                 pid,
                 control: Mutex::new(Some(control)),
                 snapshot_rx,
+                peer_rx,
                 provider_pid,
                 history_waiters,
                 next_history_request: AtomicU64::new(0),
@@ -297,6 +302,11 @@ impl HostedConversationHandle {
 
     pub(crate) fn snapshot_rx(&self) -> smol::channel::Receiver<HostedSnapshotEnvelope> {
         self.inner.snapshot_rx.clone()
+    }
+
+    /// 宿主转上来的 Pi 会话互发请求。来源就是这个句柄所在的注册表槽。
+    pub(crate) fn peer_requests(&self) -> smol::channel::Receiver<serde_json::Value> {
+        self.inner.peer_rx.clone()
     }
 
     pub(crate) fn control_fd(&self) -> Option<RawFd> {
@@ -640,6 +650,7 @@ fn dispatch_snapshot_line(
     history_waiters: &Mutex<
         HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>,
     >,
+    peer_requests: &smol::channel::Sender<serde_json::Value>,
 ) -> bool {
     let trimmed = trim_ascii(line);
     let value: serde_json::Value = match serde_json::from_slice(trimmed) {
@@ -662,6 +673,11 @@ fn dispatch_snapshot_line(
         {
             let _ = waiter.try_send(page.history_page.snapshot);
         }
+        return true;
+    }
+    // 宿主转上来的 Pi 会话互发请求，同样不是快照。
+    if let Some(request) = value.get("peer_request") {
+        let _ = peer_requests.try_send(request.clone());
         return true;
     }
     // 增量帧经镜像还原成完整的快照帧，和整段帧一样交给合并。镜像接不上只会发生在
@@ -717,6 +733,7 @@ fn start_snapshot_reader(
     history_waiters: Arc<
         Mutex<HashMap<u64, mpsc::SyncSender<smelt_core::acp_session::ConversationSnapshot>>>,
     >,
+    peer_requests: smol::channel::Sender<serde_json::Value>,
 ) -> std::io::Result<smol::channel::Receiver<HostedSnapshotEnvelope>> {
     stream.set_read_timeout(Some(SNAPSHOT_READ_POLL))?;
     let (tx, rx) = smol::channel::unbounded();
@@ -774,6 +791,7 @@ fn start_snapshot_reader(
                                 &tx,
                                 &provider_pid,
                                 &history_waiters,
+                                &peer_requests,
                             )
                         {
                             return;
@@ -801,6 +819,7 @@ fn start_snapshot_reader(
                                     &tx,
                                     &provider_pid,
                                     &history_waiters,
+                                    &peer_requests,
                                 )
                             {
                                 return;
@@ -808,7 +827,14 @@ fn start_snapshot_reader(
                             reap_host_tasks(host_pid);
                             return;
                         }
-                        if !dispatch_snapshot_line(&pending, &mut mirror, &tx, &provider_pid, &history_waiters) {
+                        if !dispatch_snapshot_line(
+                            &pending,
+                            &mut mirror,
+                            &tx,
+                            &provider_pid,
+                            &history_waiters,
+                            &peer_requests,
+                        ) {
                             return;
                         }
                         pending.clear();
@@ -900,6 +926,7 @@ pub(crate) fn run_session_host() {
     if !created {
         return;
     }
+    crate::acp_host::install_peer_uplink(Arc::clone(&acp_sessions), req.id.clone());
 
     handle_acp_open(
         conn,
@@ -974,6 +1001,7 @@ mod tests {
             Arc::new(AtomicI32::new(0)),
             0,
             Arc::new(Mutex::new(std::collections::HashMap::new())),
+            smol::channel::unbounded().0,
         )
         .unwrap();
 
@@ -1080,6 +1108,38 @@ mod tests {
         );
     }
 
+    /// 宿主转上来的互发请求和快照走同一条 socket，不能被当成坏快照拆掉镜像。
+    #[test]
+    fn peer_request_reaches_the_gate_without_dropping_the_mirror() {
+        let (handle, mut peer) = HostedConversationHandle::test_stub();
+        let requests = handle.peer_requests();
+        let request = serde_json::json!({
+            "peer_request": {"request_id": 7, "op": "session_list", "body": {}}
+        });
+        writeln!(peer, "{request}").unwrap();
+        peer.write_all(&hosted_line("still")).unwrap();
+
+        let forwarded = smol::block_on(smol::future::race(
+            async { requests.recv().await.ok() },
+            async {
+                smol::Timer::after(Duration::from_secs(2)).await;
+                None
+            },
+        ))
+        .expect("请求应交给门卫");
+        assert_eq!(forwarded["request_id"], 7);
+        assert_eq!(forwarded["op"], "session_list");
+        let next = smol::block_on(smol::future::race(
+            async { handle.snapshot_rx().recv().await.ok() },
+            async {
+                smol::Timer::after(Duration::from_secs(2)).await;
+                None
+            },
+        ))
+        .expect("后面的快照照常到达");
+        assert_eq!(next.snapshot.session_title.as_deref(), Some("still"));
+    }
+
     fn hosted_line(title: &str) -> Vec<u8> {
         let mut snapshot = smelt_core::acp_session::AcpSessionState::default().to_snapshot(false);
         snapshot.session_title = Some(title.to_string());
@@ -1127,6 +1187,7 @@ mod tests {
             Arc::new(AtomicI32::new(0)),
             0,
             Arc::new(Mutex::new(std::collections::HashMap::new())),
+            smol::channel::unbounded().0,
         )
         .unwrap();
         let second = smol::block_on(smol::future::race(async { rx.recv().await.ok() }, async {

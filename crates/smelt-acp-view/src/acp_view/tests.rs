@@ -1517,6 +1517,7 @@ fn long_tool(id: &str) -> AcpEntry {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     }
 }
 
@@ -1599,6 +1600,7 @@ fn final_answer_is_the_last_body_in_each_user_turn() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "已修复".into(),
@@ -1634,6 +1636,7 @@ fn incremental_open_turn_layout_matches_full_rebuild() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "好".into(),
@@ -1654,6 +1657,7 @@ fn incremental_open_turn_layout_matches_full_rebuild() {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     });
     let from = super::layout_recompute_start(&entries, entries.len() - 1);
     assert!(from >= 3, "已结束回合不应重算，起点={from}");
@@ -1898,6 +1902,7 @@ fn active_turn_wraps_tools_in_a_live_process_group() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::ToolCall {
             id: "read-1".into(),
@@ -1907,6 +1912,7 @@ fn active_turn_wraps_tools_in_a_live_process_group() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
     ];
 
@@ -1928,6 +1934,7 @@ fn task_note_stays_outside_the_process_group() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::TaskNote(TaskNote {
             kind: Default::default(),
@@ -1937,6 +1944,7 @@ fn task_note_stays_outside_the_process_group() {
             exit_code: Some(1),
             output_tail: "error: boom".into(),
             runs: Vec::new(),
+            peer: None,
         }),
         AcpEntry::Assistant {
             text: "编译失败了".into(),
@@ -1951,6 +1959,76 @@ fn task_note_stays_outside_the_process_group() {
         "后台任务状态行不收进执行过程，折叠后仍要看得见"
     );
     assert!(layout[3].final_answer);
+}
+
+/// 发给别的对话的一条是事件行：不收进执行过程，折叠后仍看得见，也不打断前后同类工具的合并判断。
+#[test]
+fn peer_send_stays_outside_the_process_group() {
+    let entries = vec![
+        AcpEntry::User("让测试那边跑一下".into()),
+        AcpEntry::ToolCall {
+            id: "read-1".into(),
+            title: "README.md".into(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+            subagents: Vec::new(),
+            peer: None,
+        },
+        AcpEntry::ToolCall {
+            id: "send-1".into(),
+            title: "session_send".into(),
+            kind: ToolKind::Other,
+            status: ToolCallStatus::Completed,
+            output: Vec::new(),
+            children: Vec::new(),
+            subagents: Vec::new(),
+            peer: Some(smelt_model::acp_chat::PeerSend {
+                to_id: "acp-b".into(),
+                to_title: "测试".into(),
+                kind: smelt_model::acp_session::PeerMessageKind::Task,
+                text: "跑 e2e".into(),
+                message_id: Some("pm-1".into()),
+                error: None,
+                spawned: false,
+            }),
+        },
+        AcpEntry::Assistant {
+            text: "已经交给测试那边了".into(),
+            thought: false,
+        },
+    ];
+
+    let layout = build_conversation_layout(&entries, false);
+    assert!(layout[1].process_group.is_some());
+    assert!(
+        layout[2].process_group.is_none(),
+        "发给别的对话的一条不收进执行过程"
+    );
+    assert!(layout[3].final_answer);
+}
+
+#[test]
+fn a_message_from_another_conversation_reads_as_who_sent_what() {
+    let note = TaskNote {
+        kind: smelt_model::acp_chat::TaskNoteKind::PeerMessage,
+        id: "pm-1".into(),
+        title: String::new(),
+        status: String::new(),
+        exit_code: None,
+        output_tail: "跑 e2e".into(),
+        runs: Vec::new(),
+        peer: Some(smelt_model::acp_chat::PeerNote {
+            source_session_id: "acp-a".into(),
+            source_title: "修登录".into(),
+            kind: smelt_model::acp_session::PeerMessageKind::Task,
+        }),
+    };
+    assert_eq!(note.summary(), "修登录 发来任务");
+    let entries = vec![AcpEntry::User("在吗".into()), AcpEntry::TaskNote(note)];
+    let layout = build_conversation_layout(&entries, false);
+    assert!(layout[1].process_group.is_none());
 }
 
 #[test]
@@ -1996,6 +2074,7 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::ToolCall {
             id: "read-1".into(),
@@ -2005,6 +2084,7 @@ fn collaboration_tools_are_not_folded_into_process_groups() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
     ];
 
@@ -2038,6 +2118,7 @@ fn completed_process_group_keeps_inner_tool_failures_inside() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::ToolCall {
             id: "test-2".into(),
@@ -2047,6 +2128,7 @@ fn completed_process_group_keeps_inner_tool_failures_inside() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "测过了，已经修好".into(),
@@ -2073,6 +2155,7 @@ fn previous_turn_subagent_does_not_join_the_next_process_group() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "旧问题已完成".into(),
@@ -2141,6 +2224,7 @@ fn task_complete_is_final_and_not_counted_as_a_process_tool() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "已经修好".into(),
@@ -2154,6 +2238,7 @@ fn task_complete_is_final_and_not_counted_as_a_process_tool() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
     ];
 
@@ -2177,6 +2262,7 @@ fn task_complete_is_final_when_no_assistant_answer_exists() {
             output: vec![ToolOutputPart::Text("全部完成".into())],
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
     ];
 
@@ -2404,6 +2490,7 @@ fn completed_tool(id: &str, kind: ToolKind, title: &str) -> AcpEntry {
         output: Vec::new(),
         children: Vec::new(),
         subagents: Vec::new(),
+        peer: None,
     }
 }
 
@@ -2598,6 +2685,7 @@ fn nested_subagent_entries_are_independent_trajectory_events() {
                 ),
             ],
             subagents: Vec::new(),
+            peer: None,
         },
     ];
     let tool_debug = std::collections::BTreeMap::from([(
@@ -2638,6 +2726,7 @@ fn session_trajectory_events_keep_debug_sources_and_model_thinking() {
             output: vec![ToolOutputPart::Text("found icon.rs".into())],
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         completed_tool("done", ToolKind::Other, "task_complete"),
         AcpEntry::Assistant {
@@ -2772,6 +2861,7 @@ fn failed_tools_do_not_join_compact_runs() {
             output: vec![ToolOutputPart::Text("boom".into())],
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         completed_tool("r3", ToolKind::Read, "c.rs"),
         completed_tool("r4", ToolKind::Read, "d.rs"),
@@ -2814,6 +2904,7 @@ fn compact_tool_run_breaks_on_kind_change_or_progress() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         completed_tool("s4", ToolKind::Search, "e"),
         completed_tool("s5", ToolKind::Search, "f"),
@@ -3199,6 +3290,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
             output: vec![ToolOutputPart::Text("Found 12 matches".into())],
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "已经定位入口，正在读取实现".into(),
@@ -3212,6 +3304,7 @@ fn expanded_process_paints_as_header_progress_and_tool_timeline(cx: &mut gpui::T
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "已经改好过程组展示".into(),
@@ -3606,6 +3699,7 @@ fn expanded_tool_log_viewport_stays_within_its_cap(cx: &mut gpui::TestAppContext
             output: vec![ToolOutputPart::Text(log)],
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
         AcpEntry::Assistant {
             text: "好了".into(),
@@ -3679,6 +3773,7 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
             output: vec![ToolOutputPart::Text(log)],
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
     ];
     let layout = super::build_conversation_layout(&entries, false);
@@ -3971,6 +4066,7 @@ fn live_elapsed_hangs_on_the_current_action_row() {
             output: Vec::new(),
             children: Vec::new(),
             subagents: Vec::new(),
+            peer: None,
         },
     ];
     let layout = build_conversation_layout_with_timings(&entries, true, 0, &[], Some(6_000));

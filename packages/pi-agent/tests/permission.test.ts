@@ -40,6 +40,15 @@ describe("Smelt Pi permission extension", () => {
 		}
 	});
 
+	test("reading other conversations skips approval but sending to them or starting one does not", () => {
+		const peers = "<inline:smelt-session-peers>";
+		expect(toolNeedsSmeltApproval(extension("session_list", peers))).toBe(false);
+		expect(toolNeedsSmeltApproval(extension("session_read", peers))).toBe(false);
+		expect(toolNeedsSmeltApproval(extension("session_send", peers))).toBe(true);
+		expect(toolNeedsSmeltApproval(extension("session_spawn", peers))).toBe(true);
+		expect(toolNeedsSmeltApproval(extension("session_read", "/tmp/spoof.ts"))).toBe(true);
+	});
+
 	test("only the Smelt-owned canonical elicitation tool bypasses approval", () => {
 		const choice = {
 			question: "用哪种节奏？",

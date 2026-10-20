@@ -2023,6 +2023,7 @@ fn background_notice_is_a_status_line_and_not_a_user_turn() {
         exit_code: Some(1),
         output_tail: "error: boom".into(),
         runs: Vec::new(),
+        peer: None,
     };
     let outcome = apply_event(
         &mut state,

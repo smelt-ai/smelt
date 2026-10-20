@@ -449,8 +449,8 @@
       <strong>零新 SQL 协作账本。</strong>
       不新增 <code>session_messages</code>、<code>session_links</code>，不为 peer 功能扩展
       <code>smelt.sqlite3</code> schema。<code>source_session_id</code>、<code>kind</code>、
-      <code>remaining_hops</code>、<code>permission_ceiling</code>、<code>idempotency_key</code>、
-      <code>reply_to</code> 等元数据住在<strong>transcript 消息信封</strong>里。
+      <code>hops</code>、<code>idempotency_key</code>、<code>reply_to</code> 等元数据住在
+      <strong>transcript 里那条自定义消息的 <code>details</code></strong> 里；链预算和投递状态只在内存里。
     </li>
     <li>
       <strong>smeltd 仍是门卫。</strong>
@@ -862,12 +862,13 @@ flowchart TB
   "display": false,
   "details": {
     "id": "pm-1a2b3c4d5e6f",
-    "source_session_id": "acp-…",
-    "source_title": "Orchestrator · fix login",
+    "sourceSessionId": "acp-…",
+    "sourceTitle": "Orchestrator · fix login",
     "kind": "task",
-    "remaining_hops": 7,
-    "idempotency_key": "a01:remind-b:v1",
-    "reply_to": null
+    "hops": 7,
+    "replyTo": null,
+    "idempotencyKey": "a01:remind-b:v1",
+    "text": "请在测试会话里重跑 flaky e2e，跑完用 session_send 回我。"
   },
   "content": [
     {
@@ -904,14 +905,14 @@ flowchart TB
         <td><code>message</code> | <code>task</code> | <code>completion</code>（语义标签，非 SQL enum 表）</td>
       </tr>
       <tr>
-        <td><code>remaining_hops</code></td>
-        <td>信封</td>
-        <td>自治链预算；每跳递减；耗尽则门卫拒绝再转发</td>
+        <td><code>hops</code></td>
+        <td>details（只作记录）</td>
+        <td>投递时对方还剩几跳。权威在主 daemon 内存里按会话记的链预算，见 §9.1</td>
       </tr>
       <tr>
-        <td><code>permission_ceiling</code></td>
-        <td>信封快照</td>
-        <td>目标在本 turn 跑工具时不得抬高至此快照之上</td>
+        <td><code>text</code></td>
+        <td>details</td>
+        <td>对方原文。界面画它；写给模型的框架句只在 <code>content</code> 里</td>
       </tr>
       <tr>
         <td><code>idempotency_key</code></td>
@@ -927,11 +928,10 @@ flowchart TB
   </table>
 
   <h3>6.3 关系如何表达（无 <code>session_links</code>）</h3>
-  <p>可选 <code>session_spawn</code>（P1）创建的是<strong>普通 durable Pi session</strong>，关系仅靠约定：</p>
+  <p><code>session_spawn</code> 创建的是<strong>普通 durable Pi session</strong>，关系只靠它的第一条消息：</p>
   <ul>
-    <li>标题前缀 / 命名约定（如 <code>← sess_a · flaky e2e</code>）</li>
-    <li>首条 transcript 的 framing 写明「由 sess_a 请求创建」</li>
-    <li>可选 soft parent hint 字段放在<strong>那条初始 framing</strong>里，不进 SQL</li>
+    <li>首条 transcript 就是发起方交代任务的那条 <code>smelt.peer_message</code>，<code>details.sourceSessionId</code> 写明是谁起的。</li>
+    <li>「起出来的对话不能再起」「每个对话最多 4 个」这两条限制只记在主 daemon 内存里，不进 SQL。</li>
   </ul>
   <p>侧栏身份、列表、删除生命周期继续走既有 session 路径——spawn 不发明第二种会话类型。</p>
 </section>
@@ -946,16 +946,14 @@ flowchart TB
   <p>列出可投递的 durable Pi 会话（复用 smeltd 已掌握的 session / 侧栏身份）。无新 DB。</p>
   <div class="sketch-label">建议</div>
   <pre><code>session_list({
-  "query"?: string,          // 可选：标题模糊匹配
-  "include_self"?: boolean   // 默认 false
+  "query"?: string           // 可选：按标题或 id 过滤；不含自己
 }) → {
   "sessions": [
     {
-      "session_id": "sess_b_02",
+      "id": "acp-…",
       "title": "Tests · login e2e",
-      "engine": "pi",
-      "busy": true,
-      "updated_at": "2026-10-20T01:10:00+08:00",
+      "project": "/repo",
+      "state": "busy",         // busy | idle | suspended
       "sent": [                // 调用方发给这个会话、对方宿主还记得的消息
         { "id": "pm-1a2b3c4d5e6f", "kind": "task", "status": "delivered" },
         { "id": "pm-7f8e9d0c1b2a", "kind": "message", "status": "pending" }
@@ -979,64 +977,73 @@ flowchart TB
   </p>
   <div class="sketch-label">建议</div>
   <pre><code>session_read({
-  "session_id": "acp-…",
+  "sessionId": "acp-…",
   "limit"?: number             // 最近几条助手回复，默认 1，最多 5
 }) → {
-  "session_id": "acp-…",
+  "sessionId": "acp-…",
   "title": "Tests · login e2e",
-  "busy": false,
-  "replies": [
-    { "at": "2026-10-20T01:31:00+08:00", "text": "e2e 跑完了，失败 2 个：…" }
-  ]
+  "state": "idle",
+  "replies": ["e2e 跑完了，失败 2 个：…"]
 }</code></pre>
   <ul>
-    <li>读主 daemon 里 B 的会话镜像（<code>AcpSessionState</code> 的条目尾部），不读文件，不唤醒 B，不进 B 的 transcript。挂起的 B 镜像还在，照样能读；不在注册表的拒绝，和 <code>session_send</code> 一致。</li>
+    <li>先读主 daemon 里 B 的会话镜像（<code>AcpSessionState</code> 的条目尾部）；宿主模式下镜像只留当前回合，不够时向还活着的宿主要一页历史。不读文件，不唤醒 B，不进 B 的 transcript。挂起的 B 只给镜像里有的；不在注册表的拒绝，和 <code>session_send</code> 一致。</li>
     <li>只返回助手的文字回复，每条截到 4000 字符；不返回 B 的用户消息、工具输出和思考。</li>
     <li>来源认定和 <code>session_list</code> 一样走宿主连接；只读，不过 hops / 深度护栏。</li>
+    <li><code>session_list</code> 与 <code>session_read</code> 只读，「逐次审批」下也免审批（按扩展身份认）；<code>session_send</code> 照常审批。子智能体拿不到这三个工具。</li>
   </ul>
 
   <h3>7.2 P0：<code>session_send</code></h3>
   <div class="sketch-label">建议</div>
   <pre><code>session_send({
-  "target_session_id": "sess_b_02",
-  "kind": "message",           // message | task | completion
-  "body": "请重跑 flaky e2e…",
-  "idempotency_key": "a01:remind-b:v1",
-  "reply_to"?: string,
-  "remaining_hops"?: number    // 通常由门卫从入站信封继承并递减；首跳可给默认
+  "to": "acp-…",
+  "text": "请重跑 flaky e2e…",
+  "kind"?: "message",          // message（默认）| task | completion
+  "replyTo"?: "pm-…",
+  "idempotencyKey"?: "a01:remind-b:v1"
 }) → {
-  "status": "enqueued",        // enqueued | duplicate | rejected
-  "target_session_id": "sess_b_02",
-  "reason"?: string            // rejected 时：AGENT_BUSY | LIMIT_EXCEEDED | …
+  "ok": true,
+  "status": "enqueued",        // enqueued | duplicate
+  "id": "pm-…",
+  "to": { "id": "acp-…", "title": "Tests · login e2e" }
+} | {
+  "ok": false,
+  "reason": "inbox_full",      // not_found | self | permission | inbox_full | hops_exhausted | target_unavailable | invalid
+  "error": "对方还有 8 条消息没收，等它处理完再发"
 }</code></pre>
+  <p>参数里没有来源，也没有跳数：模型能在 bash 里读到自己的环境，参数里的数都能伪造。</p>
 
   <h4>门卫规则（进程内）</h4>
   <ul>
     <li><strong>Pi→Pi only</strong>：双方均为 durable Pi session。</li>
     <li><strong>source</strong>：仅从当前 tool 调用的 host context 取得，忽略客户端自报 source。</li>
     <li><strong>source ≠ target</strong>。</li>
-    <li><strong>inbox depth</strong>：数 B 快照里 <code>peer_inbox</code> 的 <code>pending</code> 条数加在途条数；超限则 <code>AGENT_BUSY</code>（建议默认阈值对齐业界常见值，如 8，可配置）。</li>
-    <li><strong>hops</strong>：信封内递减；≤0 拒绝。</li>
-    <li><strong>permission_ceiling</strong>：快照写入信封；目标本 turn 工具权限取 min(自身, ceiling)。</li>
+    <li><strong>inbox depth</strong>：数 B 快照里 <code>peer_inbox</code> 的 <code>pending</code> 条数加在途条数；达到 8 则 <code>inbox_full</code>。</li>
+    <li><strong>hops</strong>：主 daemon 内存里每个会话一个链预算（初始 8）。投给 B 一条预算 h 的消息，B 的预算记成 <code>min(现值, h)</code>；B 发出的消息预算是现值减一，减到 0 拒绝（<code>hops_exhausted</code>）；用户在 B 里发消息时复位。</li>
+    <li><strong>权限</strong>：Pi 只有「逐次审批」「完全访问」两档、整个会话共用一份，做不出「本回合取 min」。规则是：对方是「完全访问」而发送方是「逐次审批」就拒绝（<code>permission</code>）。消息触发的回合在对方自己的档位里跑，审批照样弹给人。</li>
     <li><strong>idempotency_key</strong>：同 source + key 在进程内近期窗口视为 duplicate（见 §12 弱点）。</li>
   </ul>
 
-  <h3>7.3 P1（可选）：<code>session_spawn</code></h3>
+  <h3>7.3 P0：<code>session_spawn</code></h3>
   <p>
-    经<strong>既有 create-session 路径</strong>新建 durable Pi session，再可选地向其
-    <code>session_send</code> 一条 <code>kind=task</code> 的初始 framing。
-    <strong>不</strong>写 <code>session_links</code>。
+    在发起方的项目里新建一个<strong>普通的侧栏 Pi 对话</strong>，交给它一个任务。<strong>不</strong>写 <code>session_links</code>。
   </p>
-  <div class="sketch-label">建议</div>
+  <div class="sketch-label">已实现</div>
   <pre><code>session_spawn({
-  "title": "← sess_a · flaky e2e",
-  "initial_task": "重跑 login e2e 并汇总失败用例",
-  "permission_ceiling"?: object
+  "title": "跑 e2e",
+  "task": "重跑 login e2e 并把失败用例发回来"
 }) → {
-  "session_id": "sess_c_03",
-  "enqueued_initial": true
+  "ok": true,
+  "status": "spawned",
+  "id": "pm-…",                // 交代任务的那条消息
+  "to": { "id": "acp-…", "title": "跑 e2e" }
 }</code></pre>
-  <p>P0 <strong>不</strong>要求 spawn；发现 + 向已有会话 send 即可闭环「互提醒」。</p>
+  <ul>
+    <li><strong>建法</strong>：照发起方的启动规格（智能体、环境）走 <code>create_daemon_acp_session</code>，记进远程目录，桌面把它投到侧栏。不新发明一种会话。</li>
+    <li><strong>配置</strong>：模型、推理强度、权限模式和发起方一样，复用唤醒恢复配置的那套（<code>copy_session_config</code>），每一步等 agent 确认后才发任务。</li>
+    <li><strong>关系</strong>：任务就是新对话的第一条消息「〈A〉发来任务」，谁起的、做什么一眼看得到；不另记关系表。</li>
+    <li><strong>上限</strong>：每个对话同时最多 4 个它起的、还开着的新对话；起出来的对话不能再起（可以照常 <code>session_send</code>）。都只记在主 daemon 内存里，重启后清空。交代任务那条消息照常消耗一跳。</li>
+    <li><strong>审批</strong>：和 <code>session_send</code> 一样，「逐次审批」下要人点头。</li>
+  </ul>
 </section>
 
 <!-- ========== 8 ========== -->
@@ -1107,13 +1114,13 @@ sequenceDiagram
       </tr>
       <tr>
         <td>Hops</td>
-        <td>信封 <code>remaining_hops</code> 递减</td>
-        <td>门卫读入站信封、写出站信封；耗尽拒绝</td>
+        <td>主 daemon 内存里按会话记的链预算</td>
+        <td>发一条减一，耗尽拒绝；用户在这个对话里说话时复位。daemon 重启后回到初始值，上限仍然有界</td>
       </tr>
       <tr>
-        <td>Permission ceiling</td>
-        <td>信封快照 + 目标 turn 工具执行时取 min</td>
-        <td>防止「低权限会话借高权限会话提权」</td>
+        <td>权限</td>
+        <td>门卫比较两边的权限模式（驱动报的配置项，挂起的会话镜像里也有）</td>
+        <td>「逐次审批」不能发给「完全访问」，防止借对方的权限办事</td>
       </tr>
       <tr>
         <td>Source 防伪</td>
@@ -1137,7 +1144,7 @@ sequenceDiagram
   <ul>
     <li>发送：调用方须是<strong>当前活跃 Pi turn 的工具调用</strong>（与 PI Desktop「plugin context」同思路）。</li>
     <li>接收：目标 session 无需事先「加好友」；发现即潜在可投（产品若要收紧，可用标题约定 / 用户设置，仍不建 link 表）。</li>
-    <li>工具执行：本 turn 若由 peer 消息触发，有效权限 ≤ 信封 ceiling ∩ session 自身策略。</li>
+    <li>工具执行：消息触发的回合在对方自己的权限档位里跑；「完全访问」的对话只接受同样「完全访问」的对话发来的消息。</li>
     <li>人类始终可在 UI 中停止 / 删除目标会话；peer 消息不提升为「系统级」权限。</li>
   </ul>
 </section>
@@ -1233,17 +1240,17 @@ sequenceDiagram
         <li><code>session_list</code></li>
         <li><code>session_send</code></li>
         <li><code>session_read</code>（只读拉取）、<code>session_list</code> 带 <code>sent</code> 投递状态</li>
+        <li><code>session_spawn</code>：同模型同权限新建对话并交代任务，每个对话最多 4 个，起出来的不能再起</li>
         <li>门卫：Pi→Pi、source 防伪、≠、depth、hops、ceiling</li>
         <li>DeliverPeerMessage → BackgroundSupervisor → <code>smelt.peer_message</code> → message_start ack</li>
         <li>对话区居中事件行，<code>TaskNote</code> 一起改成同一样式</li>
       </ul>
     </div>
     <div class="phase-card p1">
-      <h4>P1 · 可选 spawn</h4>
+      <h4>P1 · 后续</h4>
       <ul>
-        <li><code>session_spawn</code>（既有 create-session）</li>
-        <li>标题 / 初始 framing 约定</li>
-        <li>soft parent hint（仅 transcript）</li>
+        <li>手机端的事件行</li>
+        <li>起出来的对话跨 daemon 重启仍认得「是谁起的」（目前只在内存里）</li>
         <li>completion 回源约定文档化</li>
       </ul>
     </div>

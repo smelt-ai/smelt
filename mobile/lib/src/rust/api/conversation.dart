@@ -1007,7 +1007,7 @@ class SlashCommand {
           description == other.description;
 }
 
-enum TaskNoteKind { backgroundTask, subagent }
+enum TaskNoteKind { backgroundTask, subagent, peerMessage }
 
 class TaskNoteView {
   final TaskNoteKind kind;
