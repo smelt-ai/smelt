@@ -1476,6 +1476,40 @@ fn pane_conversation_identity(
     Some((terminal.into(), conversation_id))
 }
 
+/// 侧栏「复制会话 ID」指向的视图。复制的是 agent 自己的对话 id，拿去 `--resume`、
+/// 找 transcript 才用得上；agent 还没报上来时退回 Smelt 的会话 id。点击时才取：
+/// 握手、TUI 里 `/resume` 都会换 id，绘制时算好的会过期。
+#[derive(Clone)]
+enum CopySessionIdSource {
+    Terminal(Entity<TerminalView>),
+    Conversation(Entity<acp_view::AcpView>),
+}
+
+impl CopySessionIdSource {
+    fn of(kind: &SessionKind) -> Self {
+        match kind {
+            SessionKind::Term { active, .. } => Self::Terminal(active.clone()),
+            SessionKind::Conversation(view) => Self::Conversation(view.clone()),
+        }
+    }
+
+    fn session_id(&self, cx: &App) -> String {
+        match self {
+            Self::Terminal(view) => pane_conversation_identity(view, cx)
+                .map(|(_, id)| id)
+                .unwrap_or_else(|| view.read(cx).session_id().to_string()),
+            // 续接用的历史身份优先，还没确认时用本次运行时的 id。
+            Self::Conversation(view) => {
+                let view = view.read(cx);
+                view.history_session_id_for_save()
+                    .or_else(|| view.provider_session_id())
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| view.session_id().to_string())
+            }
+        }
+    }
+}
+
 /// 用户给这段对话起过的名字（历史页 / 侧栏改名写的是同一份覆盖层）。
 fn pane_conversation_custom_title(view: &Entity<TerminalView>, cx: &App) -> Option<String> {
     let (agent, conversation_id) = pane_conversation_identity(view, cx)?;
