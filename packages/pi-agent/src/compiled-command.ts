@@ -21,6 +21,23 @@ export function userArguments(argv: readonly string[]): string[] {
 	return rest;
 }
 
+/** 守护起 smelt-pi 时用这个环境变量告诉它自己的握手约定版本。 */
+export const SMELT_PROTOCOL_ENV = "SMELT_PI_PROTOCOL";
+
+/**
+ * smelt-pi 和守护分开发布：App 升级后、守护交接前，会是旧守护起新 Pi。约定对不上时
+ * 返回要写进 stderr 的说明，不让握手莫名失败。改了守护和 Pi 之间的约定（RPC 扩展命令、
+ * 握手、auth / mcp 子命令的输出），就把 package.json 的 smeltProtocol 加一。
+ */
+export function protocolMismatch(
+	own: number,
+	env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+	const wanted = env[SMELT_PROTOCOL_ENV];
+	if (wanted === String(own)) return undefined;
+	return `smelt-pi 的协议是 ${own}，守护要的是 ${wanted ?? "（没给）"}。重新打开 Smelt，让守护换到同一版本。`;
+}
+
 export function parseCompiledCommand(argv: readonly string[]): CompiledCommand {
 	const args = userArguments(argv);
 	const [head, ...rest] = args;

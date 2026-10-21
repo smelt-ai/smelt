@@ -89,6 +89,14 @@ impl ManagedBunRuntime {
     }
 }
 
+/// 起 smelt-pi 时用这个环境变量告诉它守护这边的约定版本（`PI_SMELT_PROTOCOL`）。
+/// smelt-pi 和守护分开发布，对不上它会拒绝启动，并在 stderr 说明。
+pub(crate) const PI_PROTOCOL_ENV: &str = "SMELT_PI_PROTOCOL";
+
+pub(crate) fn pi_protocol() -> String {
+    PI_SMELT_PROTOCOL.to_string()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ManagedPiRuntime {
     pub executable: PathBuf,
@@ -106,6 +114,7 @@ impl ManagedPiRuntime {
         if let Some(subcommand) = subcommand {
             command.arg(subcommand);
         }
+        command.env(PI_PROTOCOL_ENV, pi_protocol());
         command
     }
 }
@@ -435,6 +444,16 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert_eq!(args, vec!["auth".to_string()]);
+        let command = runtime.command(Some("auth"));
+        let protocol = command
+            .get_envs()
+            .find(|(name, _)| *name == PI_PROTOCOL_ENV)
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            protocol.map(|value| value.to_string_lossy().into_owned()),
+            Some(pi_protocol()),
+            "子命令也要带约定版本，不然 smelt-pi 会拒绝启动"
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import "./quickjs-embed.ts";
-import { parseCompiledCommand } from "./compiled-command.ts";
+import pkg from "../package.json" with { type: "json" };
+import { parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
 
 const IMAGE_WORKER = "/$bunfs/root/utils/image-resize-worker.js";
 const CODEMODE_WORKER = "/$bunfs/root/extensions/codemode/worker.js";
@@ -59,6 +60,12 @@ if (process.env.SMELT_PI_PROBE_WORKERS === "1") {
 		process.exit(1);
 	}
 	process.exit(0);
+}
+
+const mismatch = protocolMismatch(pkg.smeltProtocol, process.env);
+if (mismatch) {
+	console.error(mismatch);
+	process.exit(78);
 }
 
 const command = parseCompiledCommand(process.argv);

@@ -539,6 +539,10 @@ fn spawn_process(
     command.env("SMELT_SESSION_ID", &launch.sid);
     command.env("SMELT_AGENT_TOKEN", &launch.agent_token);
     command.env(
+        crate::managed_runtime::PI_PROTOCOL_ENV,
+        crate::managed_runtime::pi_protocol(),
+    );
+    command.env(
         "SMELT_SOCK",
         crate::daemon_state::smeltd_sock_path()
             .to_string_lossy()

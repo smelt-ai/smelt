@@ -7,6 +7,7 @@ import { mkdtempSync, copyFileSync, rmSync, mkdirSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { createInterface } from "node:readline";
+import pkg from "../packages/pi-agent/package.json" with { type: "json" };
 
 const source = process.argv[2];
 if (!source) {
@@ -73,6 +74,8 @@ const child = spawn(binary, ["--offline", "--no-approve"], {
 		...process.env,
 		PI_CODING_AGENT_DIR: agentDir,
 		PATH: process.env.PATH ?? "",
+		// 守护起 smelt-pi 时一定带这个；不带它会拒绝启动。
+		SMELT_PI_PROTOCOL: String(pkg.smeltProtocol),
 	},
 	stdio: ["pipe", "pipe", "pipe"],
 });

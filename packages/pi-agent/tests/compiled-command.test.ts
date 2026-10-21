@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseCompiledCommand } from "../src/compiled-command.ts";
+import { SMELT_PROTOCOL_ENV, parseCompiledCommand, protocolMismatch } from "../src/compiled-command.ts";
 
 describe("compiled command router", () => {
 	test("drops the bunfs entry and keeps rpc flags", () => {
@@ -26,5 +26,20 @@ describe("compiled command router", () => {
 
 	test("a flag in argv[1] is a user argument", () => {
 		expect(parseCompiledCommand(["smelt-pi", "--offline"])).toEqual({ kind: "rpc", args: ["--offline"] });
+	});
+});
+
+describe("daemon protocol", () => {
+	test("the same protocol starts", () => {
+		expect(protocolMismatch(2, { [SMELT_PROTOCOL_ENV]: "2" })).toBeUndefined();
+	});
+
+	test("an older or newer daemon is refused with both numbers", () => {
+		expect(protocolMismatch(2, { [SMELT_PROTOCOL_ENV]: "1" })).toContain("协议是 2，守护要的是 1");
+		expect(protocolMismatch(2, { [SMELT_PROTOCOL_ENV]: "3" })).toContain("守护要的是 3");
+	});
+
+	test("a daemon that predates the protocol is refused", () => {
+		expect(protocolMismatch(1, {})).toContain("（没给）");
 	});
 });
