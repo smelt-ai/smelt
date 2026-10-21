@@ -8,6 +8,22 @@ import 'package:path/path.dart' as path;
 
 import 'util.dart';
 
+/// 从 `rustup toolchain list` 的输出里取出非自定义工具链的名字。
+///
+/// 上游只认 stable/beta/nightly 开头的行，漏掉了铉成版本号的工具链（如
+/// `1.97.0-aarch64-apple-darwin`）。仓库用 rust-toolchain.toml 铉了版本，漏认会让每次构建
+/// 都去跑 `rustup toolchain install`，网络不通时整个构建失败。
+/// 自定义（`rustup toolchain link`）工具链仍然跳过：它们列不出 target。
+List<String> parseToolchainList(String output) {
+  final nonCustom = RegExp(r'^(stable|beta|nightly|\d+\.\d+)');
+  return output
+      .split('\n')
+      .where((line) => line.isNotEmpty && line.startsWith(nonCustom))
+      // 去掉名字后面的 (default) / (active)
+      .map((line) => line.split(' ').first)
+      .toList(growable: true);
+}
+
 class _Toolchain {
   _Toolchain(
     this.name,
@@ -69,25 +85,8 @@ class Rustup {
       ?.targets;
 
   static List<_Toolchain> _getInstalledToolchains() {
-    String extractToolchainName(String line) {
-      // ignore (default) after toolchain name
-      final parts = line.split(' ');
-      return parts[0];
-    }
-
     final res = runCommand("rustup", ['toolchain', 'list']);
-
-    // To list all non-custom toolchains, we need to filter out lines that
-    // don't start with "stable", "beta", or "nightly".
-    Pattern nonCustom = RegExp(r"^(stable|beta|nightly)");
-    final lines = res.stdout
-        .toString()
-        .split('\n')
-        .where((e) => e.isNotEmpty && e.startsWith(nonCustom))
-        .map(extractToolchainName)
-        .toList(growable: true);
-
-    return lines
+    return parseToolchainList(res.stdout.toString())
         .map(
           (name) => _Toolchain(
             name,
