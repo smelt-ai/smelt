@@ -108,12 +108,46 @@ fn labeled_divider(
         .into_any_element()
 }
 
-/// 别的对话发来的正文超过这么高先收起。
-const PEER_NOTE_PREVIEW_HEIGHT: f32 = 120.;
+/// 对话之间的消息在事件行里只露第一行，悬停看全文。
+fn peer_text_preview(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
 
-/// 正文长到要收起：行多或字多。按文本估，不量排版。
-fn peer_text_is_long(text: &str) -> bool {
-    text.lines().count() > 5 || text.chars().count() > 400
+/// 事件行里的一行预览，悬停弹出完整正文。悬停只是快捷方式：行尾箭头就地展开，
+/// 键盘也够得着。
+fn peer_preview_hover(
+    id: gpui::ElementId,
+    body_id: gpui::ElementId,
+    preview: String,
+    body: gpui::AnyElement,
+    muted: gpui::Hsla,
+) -> gpui::AnyElement {
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .child(
+            gpui_component::hover_card::HoverCard::new(id)
+                .trigger(
+                    div()
+                        .max_w(px(360.))
+                        .truncate()
+                        .text_color(muted)
+                        .child(preview),
+                )
+                .child(
+                    div()
+                        .id(body_id)
+                        .w(px(480.))
+                        .max_h(px(360.))
+                        .overflow_y_scroll()
+                        .child(body),
+                ),
+        )
+        .into_any_element()
 }
 
 /// 事件行的内容：小字、次要色，一行排开。
@@ -1617,7 +1651,7 @@ impl AcpView {
     }
 
     /// 发给别的 Pi 对话的一条：居中一行「已发任务给 B」，起新对话的是「新建对话 C 并交代任务」。
-    /// 点对方标题切过去，点箭头看发出去的正文。
+    /// 点对方标题切过去；正文露第一行，悬停看全文，点箭头展开。
     fn render_peer_send(
         &self,
         index: usize,
@@ -1663,12 +1697,22 @@ impl AcpView {
             row = row.child(div().min_w_0().truncate().text_color(red).child(reason));
         }
         if has_body {
-            row = row.child(self.render_event_toggle(
-                owner_id("acp-peer-send-toggle", owner),
-                index,
-                expanded,
-                cx,
-            ));
+            row = row
+                .child(peer_preview_hover(
+                    owner_id("acp-peer-send-hover", owner),
+                    owner_id("acp-peer-send-hover-body", owner),
+                    peer_text_preview(&send.text),
+                    selectable_plain_text(owner_id("acp-peer-send-hover-text", owner), &send.text)
+                        .text_xs()
+                        .into_any_element(),
+                    muted,
+                ))
+                .child(self.render_event_toggle(
+                    owner_id("acp-peer-send-toggle", owner),
+                    index,
+                    expanded,
+                    cx,
+                ));
         }
         let mut block = v_flex().w_full().child(centered_event(row));
         if expanded {
@@ -1689,9 +1733,9 @@ impl AcpView {
         block.into_any_element()
     }
 
-    /// 别的 Pi 对话发来的消息：居中一行「A 发来任务」，下面直接是正文（引用块）。
-    /// 这个对话接下来做什么由它决定，人得直接读到；太长先收起，点「展开全文」看完。
-    /// 退信同样画在这里：警示图标加「B 没收到你的消息」，正文是原因和原文开头。
+    /// 别的 Pi 对话发来的消息：居中一行「A 发来任务」加正文第一行，悬停看全文，
+    /// 点箭头在下面展开（引用块）。退信同样画在这里：警示图标加「B 没收到你的消息」，
+    /// 正文是原因和原文开头。
     #[allow(clippy::too_many_arguments)]
     fn render_peer_note(
         &self,
@@ -1719,40 +1763,37 @@ impl AcpView {
                 cx,
             ))
             .child(div().flex_shrink_0().child(peer.kind.received()));
-        let mut block = v_flex().w_full().gap_1().child(centered_event(row));
         if note.output_tail.trim().is_empty() {
-            return block.into_any_element();
+            return centered_event(row).into_any_element();
         }
-        let long = peer_text_is_long(&note.output_tail);
-        let full = self.expanded_thoughts.contains(&index);
+        let expanded = self.expanded_thoughts.contains(&index);
         let markdown = cached_entry_markdown(&self.rendered_markdown, index, entry);
-        let mut body = div()
-            .id(owner_id("acp-peer-note-body", owner))
-            .w_full()
-            .pl_3()
-            .border_l_2()
-            .border_color(border)
-            .child(self.retained_markdown("acp-peer-md", index, 0, markdown, cx));
-        if long && !full {
-            body = body.max_h(px(PEER_NOTE_PREVIEW_HEIGHT)).overflow_hidden();
-        }
-        block = block.child(body);
-        if long {
+        let row = row
+            .child(peer_preview_hover(
+                owner_id("acp-peer-note-hover", owner),
+                owner_id("acp-peer-note-hover-body", owner),
+                peer_text_preview(&note.output_tail),
+                // 悬停卡片和展开的正文可能同时在屏上，各用各的排版状态。
+                self.retained_markdown("acp-peer-md-hover", index, 0, markdown.clone(), cx)
+                    .into_any_element(),
+                muted,
+            ))
+            .child(self.render_event_toggle(
+                owner_id("acp-peer-note-toggle", owner),
+                index,
+                expanded,
+                cx,
+            ));
+        let mut block = v_flex().w_full().gap_1().child(centered_event(row));
+        if expanded {
             block = block.child(
-                h_flex().w_full().pl_3().child(
-                    Button::new(owner_id("acp-peer-note-more", owner))
-                        .quiet()
-                        .compact()
-                        .label(if full { "收起" } else { "展开全文" })
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            if !this.expanded_thoughts.remove(&index) {
-                                this.expanded_thoughts.insert(index);
-                            }
-                            this.list_state
-                                .remeasure_items(index..index.saturating_add(1));
-                            cx.notify();
-                        })),
-                ),
+                div()
+                    .id(owner_id("acp-peer-note-body", owner))
+                    .w_full()
+                    .pl_3()
+                    .border_l_2()
+                    .border_color(border)
+                    .child(self.retained_markdown("acp-peer-md", index, 0, markdown, cx)),
             );
         }
         block.into_any_element()
