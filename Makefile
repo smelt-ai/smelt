@@ -4,12 +4,12 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all smelt-pi
+.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all smelt-pi
 
 SMELT_PI := target/smelt-pi/smelt-pi
 PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts')
 
-build run install: SHELL := /bin/bash
+build install: SHELL := /bin/bash
 
 help: ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -70,10 +70,6 @@ smelt-pi: $(SMELT_PI) ## 编译 smelt-pi；源码、锁和编译脚本没变就�
 
 build: $(SMELT_PI) ## 编译 release 二进制（GUI + 守护 + helpers + smelt-pi）
 	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
-
-run: $(SMELT_PI) ## 本地直接跑 GUI（开发用）
-	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
-	cargo run --bin $(BIN)
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
 	./scripts/make-icon.sh

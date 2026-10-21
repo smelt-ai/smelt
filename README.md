@@ -56,7 +56,7 @@ Rust stable and macOS are required. **A full Xcode installation is not needed** 
 The `make dist-build` target requires **Python 3.10+** to package a DMG. The `/usr/bin/python3` included with Command Line Tools may still be Python 3.9; if needed, run `brew install python` or set the interpreter explicitly with `SMELT_PYTHON=/opt/homebrew/bin/python3 make dist-build`.
 
 ```sh
-make run                    # Build the GUI, daemon, and notifier, then run the GUI
+make dev                    # Build a release and install it to /Applications
 cargo run --bin smelt       # Run the GUI only when smeltd is already available
 make dist-build             # Build a release and package dist/Smelt.dmg
 make help                   # Show all available build targets
