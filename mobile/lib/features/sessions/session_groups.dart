@@ -1,4 +1,4 @@
-/// 「会话」页的分组：机器 → 项目，智能体对话和自动化运行各自成组。
+/// 「会话」页的分组：机器 → 项目。不在项目里的智能体对话、自动化运行各自成组。
 ///
 /// 这里只决定「放在哪一组、组怎么排」，不判断谁在等你、谁算刚完成（那是内核 Pass 的事）；
 /// 组内会话保持内核给的次序（已按桌面菜单排好）。抽成纯函数是为了能脱离界面单测。
@@ -118,12 +118,16 @@ List<MachineSessions> groupSessions({
           : agentName?.call(id, definition);
       if (!matchesQuery(s, query, agentName: name)) continue;
       // 自动化运行的工作区是运行时按自动化分配的目录，按 cwd 归项目会凭空造出一个
-      // 用户没打开过的「项目」；智能体对话开在智能体自己的 space，同理。
+      // 用户没打开过的「项目」。
       if (s.automation != null) {
         automationRuns.add(s);
         continue;
       }
-      if (definition != null && definition.isNotEmpty) {
+      // 智能体对话挂在项目下就留在项目里（和桌面侧栏一致）；不在项目里的开在智能体
+      // 自己的 space，同理不能按 cwd 造项目，归「智能体对话」。
+      if (definition != null &&
+          definition.isNotEmpty &&
+          (s.projectRoot?.trim().isEmpty ?? true)) {
         agentChats.add(s);
         continue;
       }
@@ -162,6 +166,13 @@ List<MachineSessions> groupSessions({
       });
 
     final groups = <SessionGroup>[
+      // 智能体对话不属于任何项目，放在最前，不被一长串项目压到底下。
+      if (agentChats.isNotEmpty)
+        SessionGroup(
+          kind: SessionGroupKind.agentChats,
+          key: '#agents',
+          sessions: List.unmodifiable(agentChats),
+        ),
       for (final e in ordered)
         SessionGroup(
           kind: SessionGroupKind.project,
@@ -169,12 +180,6 @@ List<MachineSessions> groupSessions({
           title: e.value.acc.title,
           projectRoot: e.key.isEmpty ? null : e.key,
           sessions: List.unmodifiable(e.value.acc.sessions),
-        ),
-      if (agentChats.isNotEmpty)
-        SessionGroup(
-          kind: SessionGroupKind.agentChats,
-          key: '#agents',
-          sessions: List.unmodifiable(agentChats),
         ),
       if (automationRuns.isNotEmpty)
         SessionGroup(

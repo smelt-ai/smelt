@@ -257,6 +257,10 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
                 duration: Motion.resolve(context, Motion.standard),
                 switchInCurve: Motion.easeOut,
                 switchOutCurve: Motion.easeOut,
+                // 只摆新一步、让它淡入：默认布局把淡出的上一步叠在底下，两份列表会在
+                // 转场里重影。上一步直接让位，弹层高度一次到位。
+                layoutBuilder: (current, _) =>
+                    current ?? const SizedBox.shrink(),
                 child: KeyedSubtree(key: ValueKey(_step), child: body),
               ),
             ),
@@ -343,18 +347,7 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
       ShelfHeader(title: l10n.launchStepProject, first: true),
       _RowList(
         children: [
-          for (final project in workspace.projects)
-            ShelfRow(
-              leading: Icon(
-                LucideIcons.folder,
-                size: Strokes.icon,
-                color: c.inkMuted,
-              ),
-              title: Text(project.title),
-              subtitle: Text(project.root),
-              trailing: _chevron(c),
-              onTap: () => _chooseProject(project),
-            ),
+          // 不选项目（跟智能体对话）放最前：它不属于下面任何一个项目。
           if (agents.isNotEmpty)
             ShelfRow(
               leading: Icon(
@@ -366,6 +359,18 @@ class _NewSessionSheetState extends State<NewSessionSheet> {
               subtitle: Text(l10n.launchNoProjectHint),
               trailing: _chevron(c),
               onTap: () => _chooseProject(null),
+            ),
+          for (final project in workspace.projects)
+            ShelfRow(
+              leading: Icon(
+                LucideIcons.folder,
+                size: Strokes.icon,
+                color: c.inkMuted,
+              ),
+              title: Text(project.title),
+              subtitle: Text(project.root),
+              trailing: _chevron(c),
+              onTap: () => _chooseProject(project),
             ),
         ],
       ),

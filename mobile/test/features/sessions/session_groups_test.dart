@@ -58,6 +58,14 @@ void main() {
         _s('3', definition: 'def-x', cwd: '/spaces/x'),
         _s('4', automation: _automation, cwd: '/auto/run-1'),
         _s('5', root: '/code/web', project: 'web', order: 1, agent: 'codex'),
+        // 开在项目里的智能体对话：留在项目组，不拆进「智能体对话」。
+        _s(
+          '7',
+          root: '/code/web',
+          project: 'web',
+          order: 1,
+          definition: 'def-x',
+        ),
       ],
     ),
     'b': SessionList(cached: true, savedAtMs: 1, sessions: [_s('6')]),
@@ -76,24 +84,26 @@ void main() {
     agentName: (rt, def) => def == 'def-x' ? '工作助手' : null,
   );
 
-  test('按机器 → 项目分组，项目按菜单次序；智能体对话和自动化运行各自成组', () {
+  test('按机器 → 项目分组；不在项目里的智能体对话放最前，自动化运行单独成组', () {
     final machines = group();
     expect(machines.map((m) => m.runtime.record.runtimeId), ['a', 'b']);
     final a = machines.first.groups;
     expect(a.map((g) => g.kind), [
-      SessionGroupKind.project,
-      SessionGroupKind.project,
       SessionGroupKind.agentChats,
+      SessionGroupKind.project,
+      SessionGroupKind.project,
       SessionGroupKind.automationRuns,
     ]);
+    // 只有不挂在项目下的智能体对话进这一组。
+    expect(a[0].sessions.map((s) => s.id), ['3']);
     // api 的 order 更小，排在前面；项目根去掉末尾斜杠。
-    expect(a[0].title, 'api');
-    expect(a[0].projectRoot, '/code/api');
-    expect(a[1].title, 'web');
-    expect(a[1].sessions.map((s) => s.id), ['1', '5']);
-    // 智能体对话、自动化运行不按 cwd 造出「项目」。
-    expect(a[2].sessions.map((s) => s.id), ['3']);
+    expect(a[1].title, 'api');
+    expect(a[1].projectRoot, '/code/api');
+    expect(a[2].title, 'web');
+    // 项目里的智能体对话按原次序留在项目组。
+    expect(a[2].sessions.map((s) => s.id), ['1', '5', '7']);
     expect(a[3].sessions.map((s) => s.id), ['4']);
+    // 智能体对话、自动化运行不按 cwd 造出「项目」。
     expect(a.where((g) => g.projectRoot == '/spaces/x'), isEmpty);
     expect(a.where((g) => g.projectRoot == '/auto/run-1'), isEmpty);
 
@@ -132,9 +142,12 @@ void main() {
     expect(group(query: 'api').single.groups.single.sessions.single.id, '2');
     // agent 品牌名，大小写不敏感。
     expect(group(query: 'CODEX').single.groups.single.sessions.single.id, '5');
+    // 智能体名：项目外的在「智能体对话」，项目里的留在项目组。
     expect(
-      group(query: '工作助手').single.groups.single.kind,
-      SessionGroupKind.agentChats,
+      group(query: '工作助手').single.groups.map(
+        (g) => '${g.kind.name}:${g.sessions.map((s) => s.id).join(',')}',
+      ),
+      ['agentChats:3', 'project:7'],
     );
     expect(
       group(query: '站会').single.groups.single.kind,

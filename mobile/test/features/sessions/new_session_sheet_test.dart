@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:smelt_mobile/data/preferences.dart';
+import 'package:smelt_mobile/data/stores.dart';
 import 'package:smelt_mobile/features/launch/launch_flow.dart';
+import 'package:smelt_mobile/features/launch/new_session_sheet.dart';
+import 'package:smelt_mobile/l10n/gen/l10n.dart';
+import 'package:smelt_mobile/theme/theme.dart';
+import 'package:smelt_mobile/ui/adaptive.dart';
 import 'package:smelt_mobile/features/sessions/sessions_page.dart';
 
 import 'harness.dart';
@@ -114,5 +120,57 @@ void main() {
     expect(call.projectRoot, '');
     expect(call.agentOptionId, 'assistant');
     expect(call.launchKey, isNull);
+  });
+
+  testWidgets('选项目：「不选项目」排在项目前面', (tester) async {
+    final filter = ValueNotifier<String?>('rt-mbp');
+    addTearDown(filter.dispose);
+    await pumpHarness(tester, TestBackend(), SessionsPage(filter: filter));
+
+    await tester.tap(find.byTooltip('New session'));
+    await settle(tester);
+    final noProject = tester.getTopLeft(_inSheet('No project')).dy;
+    for (final project in ['smelt', 'velum', 'website']) {
+      expect(noProject, lessThan(tester.getTopLeft(_inSheet(project)).dy));
+    }
+  });
+
+  testWidgets('换一步时上一步立刻让位，两步不在转场里叠着', (tester) async {
+    // 要看转场本身，不能用关了动效的 harness；也不挂会话页，免得状态点的呼吸让帧停不下来。
+    final model = AppModel(TestBackend(), PreferencesStore.memory())..start();
+    await tester.pumpWidget(
+      AppScope(
+        model: model,
+        child: MaterialApp(
+          theme: buildGalleyTheme(Brightness.light),
+          localizationsDelegates: L10n.localizationsDelegates,
+          supportedLocales: L10n.supportedLocales,
+          home: DetailHost(
+            open: (_, _) {},
+            selectedKey: null,
+            child: Scaffold(
+              body: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () =>
+                      showNewSessionSheet(context, runtimeId: 'rt-mbp'),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(_inSheet('smelt'));
+    // 转场刚开始：上一步的列表不能还留在下面和新一步重影。
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(_inSheet('Choose a project'), findsNothing);
+    expect(_inSheet('No project'), findsNothing);
+    expect(_inSheet('Pinned'), findsOneWidget);
+    await tester.pumpAndSettle();
   });
 }
