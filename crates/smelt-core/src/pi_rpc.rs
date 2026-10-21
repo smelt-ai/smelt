@@ -913,18 +913,18 @@ where
             &session_id,
         )
         .await?;
-        if !messages.is_empty() {
-            crate::app_log::info(
-                "pi-rpc",
-                &format!(
-                    "会话 {} 开始重放 {} 条当前分支历史消息",
-                    launch.sid,
-                    messages.len()
-                ),
-            );
-            let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-            replay_history(&messages, event_tx, state);
-        }
+        crate::app_log::info(
+            "pi-rpc",
+            &format!(
+                "会话 {} 开始重放 {} 条当前分支历史消息",
+                launch.sid,
+                messages.len()
+            ),
+        );
+        // 空的也要发开始和结束：`ResumedWithReplay` 不清投影，靠这一对换掉守护和窗口里
+        // 留着的旧消息。不发的话，Pi 没有的历史（比如没写进文件的那条用户消息）还挂在屏上。
+        let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
+        replay_history(&messages, event_tx, state);
     }
     let _ = event_tx.try_send(ConversationEvent::Ready {
         session_id: SessionId::new(state.session_id.clone()),
@@ -2261,6 +2261,12 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
             if !known && refresh_models_command_available(state) {
                 request_models_refresh(writer, state, Some(value), in_flight_rpc).await?;
             } else {
+                // 直接切的这次是最新选择：还在等重读的那次作废，不然回执到了会把它切回去。
+                if let Some((_, pending_model)) = &mut state.models_refresh_request
+                    && pending_model.take().is_some()
+                {
+                    finish_in_flight(in_flight_rpc);
+                }
                 send_set_model(writer, state, value).await?;
             }
         }
@@ -2711,6 +2717,38 @@ async fn handle_rewind_list_response<W: AsyncWrite + Unpin>(
 /// `ComposerRestore`（原文回输入框），然后补一发 `get_state` 换 session id。
 /// 重试不还原输入框：daemon 收到 `Rewound` 后按普通发送再发一次。
 #[allow(clippy::too_many_arguments)]
+/// fork 按切点那条分支重建会话，模型和推理强度也回到当时的设置。出错后换的模型记在被丢掉
+/// 的那一段里，不补就跟着没了，重试还是用出错的那个模型。按回退前的设置再设一次：Pi 按顺序
+/// 处理请求，这两条排在重发的消息和随后的 get_state 前面。回执不认领，结果由 get_state 带回。
+async fn restore_settings_after_fork<W: AsyncWrite + Unpin>(writer: &mut W, state: &mut PiState) {
+    if let Some(model) = state
+        .model
+        .clone()
+        .filter(|model| model.provider != "unknown" && model.id != "unknown")
+    {
+        let id = state.request_id("rewind-model");
+        let _ = write_rpc(
+            writer,
+            &serde_json::json!({
+                "id": id,
+                "type": "set_model",
+                "provider": model.provider,
+                "modelId": model.id,
+            }),
+        )
+        .await;
+    }
+    if !state.thinking_level.is_empty() {
+        let id = state.request_id("rewind-thinking");
+        let level = state.thinking_level.clone();
+        let _ = write_rpc(
+            writer,
+            &serde_json::json!({"id": id, "type": "set_thinking_level", "level": level}),
+        )
+        .await;
+    }
+}
+
 async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     pending: PendingRewind,
     response: &serde_json::Value,
@@ -2745,6 +2783,7 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
                 .unwrap_or(&pending.text)
                 .to_string()
         });
+    restore_settings_after_fork(writer, state).await;
     let _ = event_tx.try_send(ConversationEvent::Rewound {
         truncate_from: pending.truncate_from,
         then: pending.then,
@@ -8520,6 +8559,56 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 1, "等 set_model 的回执再还账");
     }
 
+    /// 先点了 Pi 还不认识的 A（在等重读），又点了认识的 B：B 是最后的选择，重读回执到了
+    /// 不能再把 A 切回来；被顶掉的 A 那次记账要还。
+    #[test]
+    fn a_later_direct_switch_cancels_the_switch_waiting_for_reload() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = deepseek_session_with_refresh_command();
+        state.models.push(PiModel {
+            provider: "deepseek".into(),
+            id: "deepseek-v4-pro".into(),
+            name: "DeepSeek-V4-Pro".into(),
+            context_window: None,
+        });
+        let in_flight = AtomicUsize::new(2);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        for value in ["minmax/minimax-m3.1-flash", "deepseek/deepseek-v4-pro"] {
+            smol::block_on(handle_command(
+                ConversationCommand::SetConfigOption {
+                    config_id: "model".to_string(),
+                    value: ConfigValue::Select(value.to_string()),
+                },
+                &mut writer,
+                &event_tx,
+                &mut state,
+                &in_flight,
+            ))
+            .unwrap();
+        }
+        let requests = rpc_lines(writer);
+        assert_eq!(requests[1]["type"], "set_model");
+        assert_eq!(requests[1]["modelId"], "deepseek-v4-pro");
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1, "被顶掉的 A 那次要还账");
+
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": requests[0]["id"], "type": "response", "command": "prompt",
+                "success": true, "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(
+            rpc_lines(writer).iter().all(|r| r["type"] != "set_model"),
+            "重读回执到了不能再切回 A"
+        );
+    }
+
     #[test]
     fn a_model_pi_already_knows_switches_directly() {
         let (event_tx, _) = smol::channel::unbounded();
@@ -8698,7 +8787,15 @@ mod tests {
         assert_eq!(request["entryId"], "e2");
         let fork_id = request["id"].as_str().unwrap().to_string();
 
-        // 阶段三：fork 成功 → 截断事件 + 原文回输入框 + 补发 get_state。
+        // 阶段三：fork 成功 → 截断事件 + 原文回输入框 + 补设回退前的模型 + 补发 get_state。
+        // 出错后换过模型再重试：fork 会把模型还原成那条分支当时的，必须按回退前的设回去。
+        state.model = Some(PiModel {
+            provider: "github-copilot".into(),
+            id: "gemini-3.8-flash".into(),
+            name: "Gemini 3.8 Flash".into(),
+            context_window: None,
+        });
+        state.thinking_level = "high".into();
         writer.get_mut().clear();
         writer.set_position(0);
         smol::block_on(handle_response(
@@ -8727,10 +8824,13 @@ mod tests {
             Ok(ConversationEvent::ComposerRestore { texts, .. })
                 if texts == ["same".to_string()]
         ));
-        let request: serde_json::Value =
-            serde_json::from_str(String::from_utf8(writer.get_ref().clone()).unwrap().trim())
-                .unwrap();
-        assert_eq!(request["type"], "get_state");
+        let requests = rpc_lines(writer.clone());
+        let types: Vec<_> = requests.iter().map(|r| r["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["set_model", "set_thinking_level", "get_state"]);
+        assert_eq!(requests[0]["provider"], "github-copilot");
+        assert_eq!(requests[0]["modelId"], "gemini-3.8-flash");
+        assert_eq!(requests[1]["level"], "high");
+        let request = requests[2].clone();
         let state_id = request["id"].as_str().unwrap().to_string();
         // in_flight 记账挂到 get_state 回执上：热升级不得跨越身份刷新。
         assert_eq!(in_flight.load(Ordering::SeqCst), 1);
@@ -9215,6 +9315,14 @@ mod tests {
                 .iter()
                 .all(|event| !matches!(event, ConversationEvent::UserChunk(_)))
         );
+        // 空转录也要成对发开始和结束，而且在 Ready 之前：投影靠它清掉旧消息。
+        let position = |want: fn(&ConversationEvent) -> bool| events.iter().position(want);
+        let started = position(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+            .expect("空转录也要发重放开始");
+        let finished = position(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+            .expect("空转录也要发重放结束");
+        let ready = position(|event| matches!(event, ConversationEvent::Ready { .. })).unwrap();
+        assert!(started < finished && finished < ready);
     }
 
     #[test]
@@ -9381,13 +9489,12 @@ mod tests {
             event_rx.try_recv().is_err(),
             "重试不能把原文还回输入框，否则用户还得再点一次发送"
         );
-        let request: serde_json::Value =
-            serde_json::from_str(String::from_utf8(writer.get_ref().clone()).unwrap().trim())
-                .unwrap();
-        assert_eq!(
-            request["type"], "get_state",
+        let requests = rpc_lines(writer);
+        assert!(
+            requests.iter().all(|request| request["type"] != "prompt"),
             "重发归 daemon，驱动不自己写 prompt"
         );
+        assert_eq!(requests.last().unwrap()["type"], "get_state");
     }
 
     #[test]
