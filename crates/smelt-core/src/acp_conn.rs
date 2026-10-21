@@ -1131,10 +1131,10 @@ pub fn spawn_acp(
             // stderr 尾巴：环形保尾部若干行，Fatal 时拼进诊断（npx 找不到包/装包
             // 失败的真实原因都在 stderr 里，别让用户猜）。
             let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::default();
-            // 先解析运行时（bunx → 受管 bun，可能触发首次下载），再进连接循环。
+            // 先把 bunx / bun 指到应用里的 Bun，再进连接循环。
             let (cmd, managed_bun) = {
                 let tx = event_tx.clone();
-                match resolve_runtime_command_with_lease(&launch.launch.command, &|msg| {
+                match resolve_runtime_command_with_bun(&launch.launch.command, &|msg| {
                     let _ = tx.try_send(ConversationEvent::Status(msg.to_string()));
                 }) {
                     Ok(cmd) => cmd,
@@ -2066,7 +2066,7 @@ pub fn list_acp_sessions(
 ) -> Result<Vec<SessionInfo>, String> {
     smol::block_on(async {
         let (command, managed_bun) =
-            resolve_runtime_command_with_lease(launch.command.as_str(), &|_| {})?;
+            resolve_runtime_command_with_bun(launch.command.as_str(), &|_| {})?;
         let resolved_launch = ConversationLaunchSpec {
             command,
             env: launch.env.clone(),
@@ -4617,7 +4617,7 @@ fn inspect_smelt_pi_runtime() -> RuntimeExecutable {
                 )
             } else {
                 format!(
-                    "Smelt Pi Runtime {} · 首次使用自动准备",
+                    "Smelt Pi Runtime {} · 缺少 photon_rs_bg.wasm",
                     crate::managed_runtime::pi_runtime_version()
                 )
             }),
@@ -4918,10 +4918,10 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
     }
 }
 
-/// 命令首词是 `bunx`/`bun` 时解析到受管 Bun（必要时下载）。Pi 的逻辑入口由
-/// `pi_rpc` 驱动在进入 ACP 解析前接管；这里不把它伪装成 ACP 命令。受管失败但
-/// 系统 PATH 里有同名可执行则原样放行；其他命令一律不动。
-fn resolve_runtime_command_with_lease(
+/// 命令首词是 `bunx`/`bun` 时解析到应用里的 Bun。Pi 的逻辑入口由
+/// `pi_rpc` 驱动在进入 ACP 解析前接管；这里不把它伪装成 ACP 命令。应用里没有
+/// Bun、但系统 PATH 里有同名可执行则原样放行；其他命令一律不动。
+fn resolve_runtime_command_with_bun(
     cmd: &str,
     status: &dyn Fn(&str),
 ) -> Result<(String, Option<crate::managed_runtime::ManagedBunRuntime>), String> {
@@ -4953,7 +4953,7 @@ fn resolve_runtime_command_with_lease(
 
 #[cfg(test)]
 fn resolve_runtime_command(cmd: &str, status: &dyn Fn(&str)) -> Result<String, String> {
-    resolve_runtime_command_with_lease(cmd, status).map(|(command, _lease)| command)
+    resolve_runtime_command_with_bun(cmd, status).map(|(command, _runtime)| command)
 }
 
 fn command_head_after_env_prefixes(cmd: &str) -> Option<&str> {

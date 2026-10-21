@@ -1574,6 +1574,8 @@ pub struct AcpView {
     pending_prompts: Vec<smelt_model::acp_session::PendingPromptView>,
     queued_steering: Vec<String>,
     queued_follow_up: Vec<String>,
+    /// 别的 Pi 对话发给这个对话的消息：还没送进会话的，加最近送到的一批。
+    peer_inbox: Vec<smelt_model::acp_session::PeerMessageView>,
     last_composer_restore_revision: u64,
     pending_composer_restore: Option<Vec<String>>,
     pending_composer_restore_images: Option<Vec<AcpImage>>,
@@ -2044,6 +2046,7 @@ impl AcpView {
             pending_prompts: Vec::new(),
             queued_steering: Vec::new(),
             queued_follow_up: Vec::new(),
+            peer_inbox: Vec::new(),
             last_composer_restore_revision: 0,
             pending_composer_restore: None,
             pending_composer_restore_images: None,
@@ -4229,6 +4232,7 @@ impl AcpView {
             self.notice = snap.notice;
             self.queued_steering = snap.queued_steering;
             self.queued_follow_up = snap.queued_follow_up;
+            self.peer_inbox = snap.peer_inbox;
             let restore_revision = snap.composer_restore_revision;
             let restore = consume_composer_restore(
                 self.last_composer_restore_revision,

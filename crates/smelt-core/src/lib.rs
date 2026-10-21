@@ -48,11 +48,14 @@ pub mod login_env;
 pub mod managed_runtime;
 pub mod memory_settings;
 pub mod new_session;
+pub mod runtime_generation;
 pub use smelt_model::osc;
 pub mod peer_link;
 pub mod pi_auth;
 pub mod pi_auth_service;
 pub mod pi_auto_models;
+#[cfg(unix)]
+pub use smelt_sys::pi_image;
 pub mod pi_mcp;
 pub mod pi_model_discovery;
 pub mod pi_model_settings;
@@ -68,8 +71,6 @@ pub use smelt_model::provider_api;
 pub mod provider_quota;
 pub mod quota_service;
 pub mod remote_config;
-#[cfg(unix)]
-pub mod runtime_generation;
 pub mod session_control;
 pub use smelt_model::session_handoff;
 pub mod session_history;

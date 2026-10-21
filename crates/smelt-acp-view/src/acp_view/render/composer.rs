@@ -657,6 +657,53 @@ impl AcpView {
                     }
                     col.child(strip)
                 })
+                // 别的 Pi 对话发来、还没送进这个对话的消息。这边忙时要等手上的工具调用做完才送到，
+                // 期间不画出来就像丢了。送到后正文在对话里显示，这一行随之消失。
+                .when(
+                    self.peer_inbox.iter().any(|message| {
+                        message.status == smelt_model::acp_session::PeerMessageStatus::Pending
+                    }),
+                    |col| {
+                        let muted = gpui::rgb(ui_theme::text_muted());
+                        let mut strip = v_flex().px_4().pt_3().gap_1p5();
+                        let pending = self.peer_inbox.iter().filter(|message| {
+                            message.status == smelt_model::acp_session::PeerMessageStatus::Pending
+                        });
+                        for (ix, message) in pending.enumerate() {
+                            let from = if message.source_title.trim().is_empty() {
+                                message.source_session_id.as_str()
+                            } else {
+                                message.source_title.as_str()
+                            };
+                            strip = strip.child(
+                                h_flex()
+                                    .id(("acp-peer-inbox", ix))
+                                    .gap_2()
+                                    .items_center()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(ui_theme::overlay(0x14))
+                                    .border_1()
+                                    .border_color(t.border)
+                                    .child(Icon::new(IconName::Inbox).size_3p5().text_color(muted))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(format!(
+                                                "〈{from}〉{} · 还没送到，手上的工具调用做完就送进来",
+                                                message.kind.received()
+                                            )),
+                                    ),
+                            );
+                        }
+                        col.child(strip)
+                    },
+                )
                 // 待发图片的缩略图条：粘完得看得见「贴上了」，还得能反悔。
                 .when(!self.pending_images.is_empty(), |col| {
                     let mut strip = h_flex().px_4().pt_3().gap_2().items_center().flex_wrap();

@@ -1173,12 +1173,8 @@ impl Workspace {
                     .then(|| session_projects.get(ix).cloned().flatten())
                     .flatten();
                 let is_acp = matches!(self.sessions[ix].kind, SessionKind::Conversation(_));
-                // 会话 ID 是 smeltd 侧的稳定运行时标识；终端会话取当前活动 pane，
-                // ACP 会话取自身。分屏子行会在各自的菜单中复制自己的 ID。
-                let session_id = match &self.sessions[ix].kind {
-                    SessionKind::Term { active, .. } => active.read(cx).session_id().to_string(),
-                    SessionKind::Conversation(view) => view.read(cx).session_id().to_string(),
-                };
+                // 终端会话取当前活动 pane，ACP 会话取自身。分屏子行会在各自的菜单中复制自己的 ID。
+                let copy_id_source = crate::CopySessionIdSource::of(&self.sessions[ix].kind);
                 let e_act = this.clone();
                 let e_close = this.clone();
                 let e_rename = this.clone();
@@ -1396,7 +1392,7 @@ impl Workspace {
                     .context_menu(move |menu, _window, _cx| {
                         let e_rename = e_rename.clone();
                         let e_restart = e_restart.clone();
-                        let copy_session_id = session_id.clone();
+                        let copy_id_source = copy_id_source.clone();
                         let sess_ix = ix;
                         let mut menu = menu
                             .item(
@@ -1413,7 +1409,7 @@ impl Workspace {
                                     .icon(IconName::Copy)
                                     .on_click(move |_ev, _window, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_session_id.clone(),
+                                            copy_id_source.session_id(cx),
                                         ));
                                     }),
                             );
@@ -1490,7 +1486,7 @@ impl Workspace {
                         let pane = view.clone();
                         let menu_pane = view.clone();
                         let close_pane = view.clone();
-                        let copy_session_id = view.read(cx).session_id().to_string();
+                        let copy_id_source = crate::CopySessionIdSource::Terminal(view.clone());
                         let pane_entity_id = view.entity_id();
                         let pane_icon = if animate_running && p_status == AgentStatus::Running {
                             ambient_animation(
@@ -1631,7 +1627,7 @@ impl Workspace {
                                     let e_rename = e_pane_menu.clone();
                                     let e_close_all = e_pane_menu.clone();
                                     let rename_pane = menu_pane.clone();
-                                    let copy_session_id = copy_session_id.clone();
+                                    let copy_id_source = copy_id_source.clone();
                                     menu.item(
                                         PopupMenuItem::new("重命名")
                                             .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
@@ -1647,7 +1643,7 @@ impl Workspace {
                                             .icon(IconName::Copy)
                                             .on_click(move |_ev, _window, cx| {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    copy_session_id.clone(),
+                                                    copy_id_source.session_id(cx),
                                                 ));
                                             }),
                                     )

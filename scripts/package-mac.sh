@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 把 workspace GUI 打包成可分发的 Smelt.app（Apple Silicon / arm64，不签名）。
+# 把 workspace GUI 打包成可分发的 Smelt.app（Apple Silicon / arm64）。
+# 内层二进制和 .app 都签名：本机用 Smelt Local Signing，发布用 Developer ID。
 #
 # 用法：
 #   ./scripts/package-mac.sh            # 用已有 release 产物组装，并打 dmg
@@ -63,6 +64,8 @@ fi
 if [[ "$BUILD" -eq 1 ]]; then
   echo "▶ 编译 release …"
   cargo build --release --bin "$BIN_NAME" --bin smeltd --bin smelt-notify --bin smelt-installer
+  echo "▶ 编译 smelt-pi …"
+  make -C "$ROOT" smelt-pi
 fi
 
 if [[ ! -f "$BIN" ]]; then
@@ -84,6 +87,25 @@ fi
 # 校验是 arm64，避免误把 Intel 产物发给 Apple Silicon 同事
 if ! file "$BIN" | grep -q "arm64"; then
   echo "✗ $BIN 不是 arm64，同事的 Apple Silicon Mac 会闪退。请在 Apple Silicon 上编译。" >&2
+  exit 1
+fi
+PI_BIN="$ROOT/target/smelt-pi/smelt-pi"
+PI_WASM="$ROOT/target/smelt-pi/photon_rs_bg.wasm"
+if [[ ! -x "$PI_BIN" || ! -f "$PI_WASM" ]]; then
+  echo "✗ 缺少 smelt-pi 或 photon_rs_bg.wasm。先 make smelt-pi，或给本脚本加 --build。" >&2
+  exit 1
+fi
+if [[ -d "$ROOT/packages/pi-agent/src" ]]; then
+  newer="$(find "$ROOT/packages/pi-agent/src" "$ROOT/packages/pi-agent/package.json" "$ROOT/packages/pi-agent/bun.lock" \
+    "$ROOT/scripts/compile-smelt-pi.ts" "$ROOT/scripts/build-smelt-pi.sh" "$ROOT/scripts/fetch-bun.sh" \
+    -type f -newer "$PI_BIN" -print -quit 2>/dev/null || true)"
+  if [[ -n "$newer" ]]; then
+    echo "✗ smelt-pi 比源码旧（${newer}）。先 make smelt-pi。" >&2
+    exit 1
+  fi
+fi
+if ! file "$PI_BIN" | grep -q "arm64"; then
+  echo "✗ $PI_BIN 不是 arm64。" >&2
   exit 1
 fi
 
@@ -139,6 +161,18 @@ chmod +x "$MACOS/smelt-notify"
 # 绝不能从即将被交换的 Bundle 内直接运行。
 cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
 chmod +x "$MACOS/smelt-installer"
+# smelt-pi 连同 wasm、native/ 整套放 Resources：Contents/MacOS 里每个文件都必须是签过的
+# 代码，wasm 签不了。App 只是载体，安装和 GUI 启动时把这一套发布到 ~/.smelt/bin，
+# 守护从那里起 Pi。
+PI_DIR="$RES/smelt-pi"
+mkdir -p "$PI_DIR"
+cp "$PI_BIN" "$PI_DIR/smelt-pi"
+cp "$PI_WASM" "$PI_DIR/photon_rs_bg.wasm"
+chmod +x "$PI_DIR/smelt-pi"
+if [[ -d "$ROOT/target/smelt-pi/native" ]]; then
+  mkdir -p "$PI_DIR/native"
+  cp -R "$ROOT/target/smelt-pi/native/." "$PI_DIR/native/"
+fi
 # 插件（gpui-shell 脚本应用，见 crates/smelt/src/plugins）：整目录随 App
 # 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell 加载时写编辑器文件的行为，
 # 不会写进已签名的 .app）。
@@ -245,8 +279,8 @@ xattr -cr "$APP" || true
 #
 # 1) Developer ID Application 身份（名字以 "Developer ID Application" 开头）：走可对外
 #    分发的完整签名——Hardened Runtime（--options runtime）+ secure timestamp + 授权
-#    清单（ci/mac/entitlements.plist）。这是公证（notarize）的前置：Apple 要求包里每个
-#    Mach-O 都带 Hardened Runtime。公证与 staple 在 ci/mac/ci.sh 的 notarize 阶段做。
+#    清单（scripts/entitlements.plist，smelt-pi 用 scripts/jit-entitlements.plist）。
+#    这是公证的前置：Apple 要求包里每个 Mach-O 都带 Hardened Runtime。
 #
 # 2) 自签名（scripts/setup-codesign-identity.sh 生成的 "Smelt Local Signing"）：
 #    只解决本机身份稳定，过不了公证。事件总线要正在运行的进程共用同一张证书。
@@ -283,37 +317,48 @@ if [[ "$IDENTITY_FOUND" != true ]]; then
   exit 1
 fi
 
-ENTITLEMENTS="$ROOT/ci/mac/entitlements.plist"
-# 普通 entitlements 只放 library validation 例外。GPUI 的图形/字体栈里带着 wgpu、
-# libloading、dlopen2 这类会在运行时 dlopen 系统/第三方动态库的依赖；Hardened Runtime
-# 默认只允许加载「与主程序同 Team 签名」的库，一旦 dlopen 到别人签名（或系统）的库就会崩。
-# 放开库验证是同类 Rust GUI 应用（如 Zed）的通行做法。不需要
-# allow-unsigned-executable-memory 或 allow-jit。
-# 这个文件必须是「无注释」的最精简 plist——codesign 用的是 AMFIUnserializeXML，
-# 它比 plutil 严格得多，plist 里带 XML 注释会直接 "syntax error" 签名失败。
+ENTITLEMENTS="$ROOT/scripts/entitlements.plist"
+JIT_ENTITLEMENTS="$ROOT/scripts/jit-entitlements.plist"
+# 普通 entitlements 只放 library validation 例外。GPUI 的图形/字体栈会在运行时
+# dlopen 系统库；Hardened Runtime 默认只允许同 Team 的库。
+# smelt-pi 跑 JavaScriptCore，还要 JIT 那一组授权。
+# plist 不能带 XML 注释，codesign 的解析器比 plutil 严。
+if [[ ! -f "$ENTITLEMENTS" || ! -f "$JIT_ENTITLEMENTS" ]]; then
+  echo "✗ 缺少 $ENTITLEMENTS 或 $JIT_ENTITLEMENTS" >&2
+  exit 1
+fi
+sign_one() {
+  local entitlements="$1"
+  local path="$2"
+  if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
+    codesign --force --options runtime --timestamp --entitlements "$entitlements" --sign "$IDENTITY" "$path"
+  else
+    codesign --force --entitlements "$entitlements" --sign "$IDENTITY" "$path"
+  fi
+}
 if [[ "$IDENTITY" == "Developer ID Application"* ]]; then
   echo "▶ Developer ID 签名（Hardened Runtime + 时间戳）：${IDENTITY} …"
-  sign_opts=( --force --options runtime --timestamp --sign "$IDENTITY" )
-  standard_sign_opts=( "${sign_opts[@]}" )
-  [[ -f "$ENTITLEMENTS" ]] && standard_sign_opts+=( --entitlements "$ENTITLEMENTS" )
-  # 先签内层松散 Mach-O，再封 .app。不走 --deep：Apple 已不建议，且它对 MacOS/ 下
-  # 的辅助二进制处理顺序不稳；先内后外能保证每个可执行文件都带上 Hardened Runtime，
-  # 否则公证会因某个内层文件缺 runtime 而整体被拒。主程序 smelt 由对 .app 的签名覆盖。
-  echo "  … 签内层：smeltd"
-  codesign "${standard_sign_opts[@]}" "$MACOS/smeltd"
-  for inner in smelt-notify smelt-installer; do
-    echo "  … 签内层：$inner"
-    codesign "${standard_sign_opts[@]}" "$MACOS/$inner"
-  done
-  echo "  … 封 .app（含主程序 ${EXEC_NAME}）"
-  codesign "${standard_sign_opts[@]}" "$APP"
-  codesign --verify --strict --verbose=2 "$APP"
-  echo "  ✓ Developer ID 签名完成（下一步公证：./ci/mac/ci.sh notarize）"
 else
   echo "▶ 自签名（身份：${IDENTITY}，仅稳定权限，过不了公证）…"
-  codesign --force --deep --sign "$IDENTITY" "$APP"
-  codesign --verify --deep --strict "$APP" && echo "  ✓ 签名校验通过"
 fi
+echo "  … 签内层：smeltd"
+sign_one "$ENTITLEMENTS" "$MACOS/smeltd"
+for inner in smelt-notify smelt-installer; do
+  echo "  … 签内层：$inner"
+  sign_one "$ENTITLEMENTS" "$MACOS/$inner"
+done
+echo "  … 签内层：smelt-pi"
+sign_one "$JIT_ENTITLEMENTS" "$PI_DIR/smelt-pi"
+if [[ -d "$PI_DIR/native" ]]; then
+  while IFS= read -r -d '' node; do
+    echo "  … 签内层：${node#"$RES/"}"
+    sign_one "$ENTITLEMENTS" "$node"
+  done < <(find "$PI_DIR/native" -type f -name '*.node' -print0)
+fi
+echo "  … 封 .app（含主程序 ${EXEC_NAME}）"
+sign_one "$ENTITLEMENTS" "$APP"
+codesign --verify --strict --verbose=2 "$APP"
+echo "  ✓ 签名校验通过"
 publish_signed_app
 
 if [[ "$SKIP_DMG" -eq 1 ]]; then

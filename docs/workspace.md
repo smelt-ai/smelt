@@ -101,7 +101,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - 新建自动化不自动保存：名称、触发器、智能体（定时还要指令）填齐后点「创建」才落库，缺什么就在表单顶部列出来；创建之后的修改照常自动保存，缺项时提示「补齐后自动保存」。模板「添加」只预填新建表单，模板指令用「填写…」留出要读的路径或对象，因为运行目录在智能体的 space 里，用户的项目不会自动带上。
 - Run 在 claim 时固化智能体身份与指令、输入和 daemon 托管工作区。投递时 daemon 固定启用 `FullAccess`，使用稳定 Run ID 并等待 ACP 接收账本确认；可重试故障按指数退避，最多尝试 5 次后明确失败。终态结果有界保存，执行器在终态后由 daemon 回收。
 - GUI 通过 EventHub 的首帧快照和 `automations.changed` 增量接收自动化投影，不再按秒轮询。自动化页保留有界 Run 历史，每条 Run 可查看固化输入、执行上下文、时间线、完整结果和错误。
-- Pi 由 Smelt 的受管 Bun 启动，直接使用官方 JSONL RPC。智能体本身不启动进程；用户每次选择它都会创建一段独立的普通对话，同一定义可以同时拥有多段上下文。
+- Pi 由应用里的 `smelt-pi` 启动，直接使用官方 JSONL RPC。智能体本身不启动进程；用户每次选择它都会创建一段独立的普通对话，同一定义可以同时拥有多段上下文。
 - 对话继续由 `WsState.sessions` 持久化，并在 ACP 元数据中保存 `agent_definition_id`。自动化权威状态在主库 `~/.smelt/smelt.sqlite3` 的关系表中；旧 `agent_ui.json` 自动化数据不再读取，新功能从空存储开始。0.8.0 开发版写出的单例 `agent_runs` 会在读取时迁移为普通对话，之后不再写回。
 - 自动化通知只有「应用内通知」和「不通知」，仍受设置里任务完成 / 失败通知的总开关约束。存储 schema v2 删掉了从未投递过的飞书 / Webhook sink，载入 v1 数据时剔除，剩下为空就回到默认的应用内通知。
 - 股票、飞书监听与输出目标属于后续 Smelt capability/plugin 层，不写进 Pi 引擎或智能体核心。
@@ -169,7 +169,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > 自动使用本机 `claude` CLI）、**GitHub Copilot**（CLI 自带 `copilot --acp`）、
 > **Codex**（经 `@agentclientprotocol/codex-acp` 标准 ACP 通道）、**Grok**（CLI 自带
 > `grok agent stdio`，凭据 `~/.grok/auth.json`）、**Cursor** / **OpenCode** /
-> **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由受管 Bun 启动 Pi 官方
+> **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-pi` 跑 Pi 官方
 > JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。**DSH** 是
 > profile-only 的第九种 ACP 引擎；终端通道另有 **Antigravity** 与 **Crush**
 > （`settings::TerminalAgentKind`）。
@@ -262,7 +262,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 ./install.sh --no-pair # 只安装并启动
 ```
 
-脚本要求 Linux 和 systemd。它把 `smelt-notify`、`smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`（不可变映像；已经在跑就交接，会话保留）。之后：
+脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-pi`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-pi-<指纹>/`，`~/.smelt/bin/smelt-pi` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-pi）。已经在跑就交接，会话保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`。之后：
 
 ```bash
 smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码

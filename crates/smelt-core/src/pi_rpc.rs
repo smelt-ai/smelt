@@ -37,6 +37,8 @@ const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
 const SMELT_CODEMODE_COMMAND: &str = "smelt-codemode";
+/// 让会话重读 models.json 的扩展命令（`packages/pi-agent/src/model-refresh.ts`）。
+const SMELT_REFRESH_MODELS_COMMAND: &str = "smelt-refresh-models";
 const SMELT_CODEMODE_WIDGET: &str = "smelt-codemode";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +88,8 @@ struct PiState {
     /// 用户在应用里登录/改配置后补拉的 `get_available_models`。会话启动时那一次走
     /// `rpc_call` 同步等，不走这里。
     models_request_id: Option<String>,
+    /// 已发出、等回执的重读 models.json：（request id，回执到了要切的模型）。
+    models_refresh_request: Option<(String, Option<String>)>,
     /// 压缩已经结束。拒绝用的快照可能仍写着 `isCompacting`，不能再把它当成还在忙。
     compaction_idle_pending: bool,
     /// 已发出、等 Pi 回执的 steer 请求。只用来把 `in_flight_rpc` 记账还回去；
@@ -342,8 +346,6 @@ async fn run_connection(
     let resume_id = launch.resume_session_id.as_ref().map(|id| id.to_string());
     let fork_id = launch.fork_session_id.as_ref().map(|id| id.to_string());
     apply_pi_session_cli_args(&mut trailing, resume_id.as_deref(), fork_id.as_deref());
-    // `runtime` 在同步完成、全局锁释放前已经取得 shared generation lease；将它持有
-    // 到本连接结束，消除 prepare 与 spawn 之间被升级 GC 删除目录的窗口。
     let process_args = runtime.process_args(trailing);
     let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
     let background = crate::background_tasks::BackgroundSupervisor::start(
@@ -352,19 +354,32 @@ async fn run_connection(
         event_tx.clone(),
         outbound_tx.clone(),
     )?;
+    let mut trace = HandshakeTrace {
+        started: std::time::Instant::now(),
+        published_model: None,
+    };
+    let session_seed_rx = start_session_preload(launch);
     let (child_stdin, child_stdout, child_stderr, child) = {
         let _spawn_permit = spawn_gate.as_ref().map(|gate| gate.read().unwrap());
         let mut stdio = stdio_out.lock().unwrap();
         if shutdown_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let spawn_started = std::time::Instant::now();
         let spawned = spawn_process(
             launch,
             inline_env,
             process_args,
-            &runtime,
             Some(background.socket_path()),
         )?;
+        crate::app_log::info(
+            "pi-rpc",
+            &format!(
+                "会话 {} 进程已拉起，用时 {:?}",
+                launch.sid,
+                spawn_started.elapsed()
+            ),
+        );
         *stdio = Some(AcpStdio {
             pid: spawned.3.id() as i32,
             stdin_fd: spawned.0.as_raw_fd(),
@@ -372,6 +387,7 @@ async fn run_connection(
         });
         spawned
     };
+    let session_seed = session_seed_rx.and_then(|rx| rx.recv().ok()).flatten();
     let mut process = PiProcessGuard::new(child);
     *stderr_drain.lock().unwrap() = Some(spawn_stderr_drain(child_stderr, stderr_tail));
 
@@ -389,6 +405,8 @@ async fn run_connection(
             &event_tx,
             &mut state,
             launch,
+            session_seed,
+            &mut trace,
         );
         smol::future::race(initialize, async {
             smol::Timer::after(PI_RPC_HANDSHAKE_TIMEOUT).await;
@@ -452,8 +470,7 @@ async fn run_connection(
         }
     }
     .await;
-    // 必须先确认直属子进程已退出，再让 `runtime` 的 generation lease 析构。
-    // 仅发送 SIGKILL 不等于进程已经消失，期间原地修复会与旧进程并发读模块树。
+    // 仅发送 SIGKILL 不等于进程已经消失。先收割，再让函数返回。
     process.kill_and_reap();
     drop(background);
     result
@@ -499,11 +516,10 @@ fn spawn_process(
     launch: &ConversationLaunch,
     inline_env: BTreeMap<String, String>,
     mut process_args: Vec<String>,
-    runtime: &crate::managed_runtime::ManagedPiRuntime,
     background_sock: Option<&std::path::Path>,
 ) -> Result<SpawnedPi, String> {
-    if process_args.len() < 2 {
-        return Err("Pi 受管运行时启动参数不完整".to_string());
+    if process_args.is_empty() {
+        return Err("Pi 启动参数不完整".to_string());
     }
     let program = process_args.remove(0);
     let mut command = std::process::Command::new(program);
@@ -527,6 +543,10 @@ fn spawn_process(
     command.env("SMELT_SESSION_ID", &launch.sid);
     command.env("SMELT_AGENT_TOKEN", &launch.agent_token);
     command.env(
+        crate::managed_runtime::PI_PROTOCOL_ENV,
+        crate::managed_runtime::pi_protocol(),
+    );
+    command.env(
         "SMELT_SOCK",
         crate::daemon_state::smeltd_sock_path()
             .to_string_lossy()
@@ -543,7 +563,6 @@ fn spawn_process(
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
-    runtime.inherit_into(&mut command);
     let mut command = async_process::Command::from(command);
     let mut child = command
         .stdin(std::process::Stdio::piped())
@@ -660,6 +679,15 @@ impl Drop for PiProcessGuard {
     }
 }
 
+struct HandshakeTrace {
+    started: std::time::Instant,
+    /// 已经发给界面的 provider / id / 显示名。用来判断这次是不是一次新的对齐。
+    published_model: Option<(String, String, String)>,
+}
+
+/// 模型名在握手之前用启动前读到的会话文件发布。转录在 `Ready` 之前重放：
+/// 先按 cwd 目录和会话 id 读文件；文件不存在或解析失败时再向 Pi 要 `get_entries`。
+/// 两次都失败则握手失败，不把空转录当成成功。
 #[allow(clippy::too_many_arguments)]
 async fn initialize_session<R, W>(
     lines: &mut R,
@@ -669,12 +697,20 @@ async fn initialize_session<R, W>(
     event_tx: &smol::channel::Sender<ConversationEvent>,
     state: &mut PiState,
     launch: &ConversationLaunch,
+    seed: Option<crate::session_history::PiSessionBranch>,
+    trace: &mut HandshakeTrace,
 ) -> Result<(), String>
 where
     R: Stream<Item = std::io::Result<String>> + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let response = rpc_call(
+    let resumed = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
+    if let Some(model) = optimistic_pi_model(launch, seed.as_ref(), resumed) {
+        note_model(state, event_tx, launch, trace, model, "启动前");
+    }
+
+    let round_started = std::time::Instant::now();
+    let responses = rpc_round(
         lines,
         writer,
         outbound_tx,
@@ -682,14 +718,46 @@ where
         event_tx,
         state,
         launch,
-        "smelt-init-state",
-        serde_json::json!({"type": "get_state"}),
+        vec![
+            ("smelt-init-state", serde_json::json!({"type": "get_state"})),
+            (
+                "smelt-init-models",
+                serde_json::json!({"type": "get_available_models"}),
+            ),
+            (
+                "smelt-init-thinking",
+                serde_json::json!({"type": "get_available_thinking_levels"}),
+            ),
+            (
+                "smelt-init-commands",
+                serde_json::json!({"type": "get_commands"}),
+            ),
+        ],
     )
     .await?;
-    apply_state_response(state, response_data(&response)?)?;
+    crate::app_log::info(
+        "pi-rpc",
+        &format!(
+            "会话 {} 独立握手 RPC 收齐，用时 {:?}",
+            launch.sid,
+            round_started.elapsed()
+        ),
+    );
+    apply_state_response(
+        state,
+        response_data(responses.get("smelt-init-state").unwrap())?,
+    )?;
+    if let Some(model) = state.model.clone() {
+        note_model(state, event_tx, launch, trace, model, "get_state");
+    }
+    state.models =
+        parse_available_models(response_data(responses.get("smelt-init-models").unwrap())?);
+    let model_before_set = state
+        .model
+        .as_ref()
+        .map(|model| (model.provider.clone(), model.id.clone()));
 
-    // 分叉副本的切点：必须在重放历史之前切分支（切完 `get_state` 才是分支的
-    // session id）；放在首个 `get_state` 之后，先用回执确认进程活着。
+    // 分叉切点要先落在 Pi 里，用户才能对切完的会话发消息。它不读整棵 entry 树。
     if let Some(cut) = launch.fork_cut.as_ref() {
         apply_fork_cut(
             lines,
@@ -702,7 +770,6 @@ where
             cut,
         )
         .await?;
-        // fork 后 Pi 已切到新 session 文件，补一次 get_state 拿分支身份。
         let response = rpc_call(
             lines,
             writer,
@@ -711,55 +778,31 @@ where
             event_tx,
             state,
             launch,
-            "smelt-init-state",
+            "smelt-init-state-fork",
             serde_json::json!({"type": "get_state"}),
         )
         .await?;
         apply_state_response(state, response_data(&response)?)?;
+        if let Some(model) = state.model.clone() {
+            note_model(state, event_tx, launch, trace, model, "fork 后的 get_state");
+        }
     }
-
-    let response = rpc_call(
-        lines,
-        writer,
-        outbound_tx,
-        outbound_rx,
-        event_tx,
-        state,
-        launch,
-        "smelt-init-models",
-        serde_json::json!({"type": "get_available_models"}),
-    )
-    .await?;
-    state.models = parse_available_models(response_data(&response)?);
 
     let force_agent_model = agent_model_from_launch(launch);
     if force_agent_model.is_some()
         || state
             .model
             .as_ref()
-            .is_none_or(|m| m.provider == "unknown" || m.id == "unknown")
+            .is_none_or(|model| model.provider == "unknown" || model.id == "unknown")
     {
         let default_target = force_agent_model
-            .or_else(|| {
-                crate::pi_model_settings::load_pi_model_settings()
-                    .ok()
-                    .and_then(|settings| {
-                        let p = settings.default_model.provider.trim().to_string();
-                        let m = settings.default_model.model.trim().to_string();
-                        if !p.is_empty() && !m.is_empty() {
-                            Some((p, m))
-                        } else {
-                            None
-                        }
-                    })
-            })
+            .or_else(|| settings_default_model(launch))
             .or_else(|| {
                 state
                     .models
                     .first()
-                    .map(|m| (m.provider.clone(), m.id.clone()))
+                    .map(|model| (model.provider.clone(), model.id.clone()))
             });
-
         if let Some((provider, model_id)) = default_target {
             let set_res = rpc_call(
                 lines,
@@ -778,17 +821,17 @@ where
             )
             .await;
             if let Ok(res) = set_res
-                && let Some(m) = res.get("data").and_then(parse_model)
+                && let Some(model) = res.get("data").and_then(parse_model)
             {
-                state.model = Some(m);
+                state.model = Some(model);
             }
             if state.model.is_none() {
-                if let Some(m) = state
+                if let Some(model) = state
                     .models
                     .iter()
-                    .find(|m| m.provider == provider && m.id == model_id)
+                    .find(|model| model.provider == provider && model.id == model_id)
                 {
-                    state.model = Some(m.clone());
+                    state.model = Some(model.clone());
                 } else {
                     state.model = Some(PiModel {
                         provider: provider.clone(),
@@ -798,22 +841,36 @@ where
                     });
                 }
             }
+            if let Some(model) = state.model.clone() {
+                note_model(state, event_tx, launch, trace, model, "set_model");
+            }
         }
     }
 
-    let response = rpc_call(
-        lines,
-        writer,
-        outbound_tx,
-        outbound_rx,
-        event_tx,
-        state,
-        launch,
-        "smelt-init-thinking",
-        serde_json::json!({"type": "get_available_thinking_levels"}),
-    )
-    .await?;
-    state.thinking_levels = response_data(&response)?["levels"]
+    let model_after_set = state
+        .model
+        .as_ref()
+        .map(|model| (model.provider.clone(), model.id.clone()));
+    let thinking = if model_before_set != model_after_set && model_after_set.is_some() {
+        rpc_call(
+            lines,
+            writer,
+            outbound_tx,
+            outbound_rx,
+            event_tx,
+            state,
+            launch,
+            "smelt-init-thinking-after-model",
+            serde_json::json!({"type": "get_available_thinking_levels"}),
+        )
+        .await?
+    } else {
+        responses
+            .get("smelt-init-thinking")
+            .cloned()
+            .ok_or_else(|| "缺少 thinking level 回执".to_string())?
+    };
+    state.thinking_levels = response_data(&thinking)?["levels"]
         .as_array()
         .map(|levels| {
             levels
@@ -823,48 +880,9 @@ where
                 .collect()
         })
         .unwrap_or_default();
-
-    let response = rpc_call(
-        lines,
-        writer,
-        outbound_tx,
-        outbound_rx,
-        event_tx,
-        state,
-        launch,
-        "smelt-init-commands",
-        serde_json::json!({"type": "get_commands"}),
-    )
-    .await?;
-    state.available_commands = parse_pi_commands(response_data(&response)?);
-
-    let resumed = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
-    if resumed {
-        let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-        let response = rpc_call(
-            lines,
-            writer,
-            outbound_tx,
-            outbound_rx,
-            event_tx,
-            state,
-            launch,
-            "smelt-init-entries",
-            serde_json::json!({"type": "get_entries"}),
-        )
-        .await?;
-        let messages = active_branch_messages(response_data(&response)?)?;
-        crate::app_log::info(
-            "pi-rpc",
-            &format!(
-                "会话 {} 开始重放 {} 条当前分支历史消息",
-                launch.sid,
-                messages.len()
-            ),
-        );
-        replay_history(&messages, event_tx, state);
-        crate::app_log::info("pi-rpc", &format!("会话 {} 历史重放完成", launch.sid));
-    }
+    state.available_commands = parse_pi_commands(response_data(
+        responses.get("smelt-init-commands").unwrap(),
+    )?);
 
     publish_configuration(state, event_tx);
     let _ = event_tx.try_send(ConversationEvent::SessionControls {
@@ -878,6 +896,36 @@ where
     if let Some(title) = state.session_name.clone() {
         let _ = event_tx.try_send(ConversationEvent::SessionTitle(Some(title)));
     }
+    if resumed {
+        let session_id = if state.session_id.is_empty() {
+            resume_source_id(launch).unwrap_or_default()
+        } else {
+            state.session_id.clone()
+        };
+        let messages = resume_transcript(
+            lines,
+            writer,
+            outbound_tx,
+            outbound_rx,
+            event_tx,
+            state,
+            launch,
+            &session_id,
+        )
+        .await?;
+        crate::app_log::info(
+            "pi-rpc",
+            &format!(
+                "会话 {} 开始重放 {} 条当前分支历史消息",
+                launch.sid,
+                messages.len()
+            ),
+        );
+        // 空的也要发开始和结束：`ResumedWithReplay` 不清投影，靠这一对换掉守护和窗口里
+        // 留着的旧消息。不发的话，Pi 没有的历史（比如没写进文件的那条用户消息）还挂在屏上。
+        let _ = event_tx.try_send(ConversationEvent::HistoryReplayStarted);
+        replay_history(&messages, event_tx, state);
+    }
     let _ = event_tx.try_send(ConversationEvent::Ready {
         session_id: SessionId::new(state.session_id.clone()),
         kind: if resumed {
@@ -890,11 +938,282 @@ where
     crate::app_log::info(
         "pi-rpc",
         &format!(
-            "会话 {} 握手完成，已发出 Ready（resumed={resumed}）",
-            launch.sid
+            "会话 {} 握手完成，已发出 Ready（resumed={resumed}，距启动 {:?}）",
+            launch.sid,
+            trace.started.elapsed()
         ),
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resume_transcript<R, W>(
+    lines: &mut R,
+    writer: &mut W,
+    outbound_tx: &smol::channel::Sender<serde_json::Value>,
+    outbound_rx: &smol::channel::Receiver<serde_json::Value>,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+    launch: &ConversationLaunch,
+    session_id: &str,
+) -> Result<Vec<serde_json::Value>, String>
+where
+    R: Stream<Item = std::io::Result<String>> + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    match read_launch_session(launch, session_id) {
+        Ok(branch) => Ok(branch.entries.iter().filter_map(entry_message).collect()),
+        Err(error) => {
+            crate::app_log::info(
+                "pi-rpc",
+                &format!(
+                    "会话 {} 读会话文件失败（{error}），改向 Pi 请求 get_entries",
+                    launch.sid
+                ),
+            );
+            let response = rpc_call(
+                lines,
+                writer,
+                outbound_tx,
+                outbound_rx,
+                event_tx,
+                state,
+                launch,
+                "smelt-init-entries",
+                serde_json::json!({"type": "get_entries"}),
+            )
+            .await?;
+            messages_from_get_entries(response_data(&response)?)
+        }
+    }
+}
+
+fn read_launch_session(
+    launch: &ConversationLaunch,
+    session_id: &str,
+) -> Result<crate::session_history::PiSessionBranch, String> {
+    let agent = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
+        .map(String::as_str);
+    let session = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_SESSION_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_SESSION_DIR"))
+        .map(String::as_str);
+    crate::session_history::read_pi_session_branch(
+        agent,
+        session,
+        launch.cwd.as_deref(),
+        session_id,
+    )
+}
+
+fn resume_source_id(launch: &ConversationLaunch) -> Option<String> {
+    launch
+        .fork_session_id
+        .as_ref()
+        .or(launch.resume_session_id.as_ref())
+        .map(|id| id.to_string())
+        .filter(|id| !id.is_empty())
+}
+
+fn optimistic_pi_model(
+    launch: &ConversationLaunch,
+    seed: Option<&crate::session_history::PiSessionBranch>,
+    resumed: bool,
+) -> Option<PiModel> {
+    if resumed
+        && let Some(branch) = seed
+        && let Some((provider, id)) = crate::session_history::pi_branch_model(&branch.entries)
+    {
+        return Some(named_pi_model(provider, id));
+    }
+    agent_model_from_launch(launch)
+        .map(|(provider, id)| named_pi_model(provider, id))
+        .or_else(|| {
+            settings_default_model(launch).map(|(provider, id)| named_pi_model(provider, id))
+        })
+}
+
+fn named_pi_model(provider: String, id: String) -> PiModel {
+    let name = id.clone();
+    PiModel {
+        provider,
+        id,
+        name,
+        context_window: None,
+    }
+}
+
+fn settings_default_model(launch: &ConversationLaunch) -> Option<(String, String)> {
+    let from_dir = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
+        .map(std::path::PathBuf::from);
+    let settings = if let Some(dir) = from_dir {
+        crate::pi_model_settings::load_pi_model_settings_at(&dir).ok()
+    } else if smelt_paths::running_under_test() {
+        None
+    } else {
+        crate::pi_model_settings::load_pi_model_settings().ok()
+    }?;
+    let provider = settings.default_model.provider.trim().to_string();
+    let model = settings.default_model.model.trim().to_string();
+    if provider.is_empty() || model.is_empty() {
+        None
+    } else {
+        Some((provider, model))
+    }
+}
+
+fn note_model(
+    state: &mut PiState,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    launch: &ConversationLaunch,
+    trace: &mut HandshakeTrace,
+    model: PiModel,
+    reason: &str,
+) {
+    let next = (model.provider.clone(), model.id.clone(), model.name.clone());
+    state.model = Some(model);
+    if trace.published_model.as_ref() == Some(&next) {
+        return;
+    }
+    publish_model_event(state, event_tx);
+    let shown = state.model.as_ref().expect("刚刚写上");
+    crate::app_log::info(
+        "pi-rpc",
+        &format!(
+            "会话 {} 发布模型 {}/{}（{reason}），距启动 {:?}",
+            launch.sid,
+            shown.provider,
+            shown.id,
+            trace.started.elapsed()
+        ),
+    );
+    trace.published_model = Some(next);
+}
+
+fn start_session_preload(
+    launch: &ConversationLaunch,
+) -> Option<std::sync::mpsc::Receiver<Option<crate::session_history::PiSessionBranch>>> {
+    let id = resume_source_id(launch)?;
+    let agent = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_DIR"))
+        .cloned();
+    let session = launch
+        .launch
+        .env
+        .get("PI_CODING_AGENT_SESSION_DIR")
+        .or_else(|| launch.ephemeral_env.get("PI_CODING_AGENT_SESSION_DIR"))
+        .cloned();
+    let cwd = launch.cwd.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("smelt-pi-session-file".into())
+        .spawn(move || {
+            let _ = tx.send(
+                crate::session_history::read_pi_session_branch(
+                    agent.as_deref(),
+                    session.as_deref(),
+                    cwd.as_deref(),
+                    &id,
+                )
+                .ok(),
+            );
+        })
+        .ok()?;
+    Some(rx)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rpc_round<R, W>(
+    lines: &mut R,
+    writer: &mut W,
+    outbound_tx: &smol::channel::Sender<serde_json::Value>,
+    outbound_rx: &smol::channel::Receiver<serde_json::Value>,
+    event_tx: &smol::channel::Sender<ConversationEvent>,
+    state: &mut PiState,
+    launch: &ConversationLaunch,
+    requests: Vec<(&str, serde_json::Value)>,
+) -> Result<HashMap<String, serde_json::Value>, String>
+where
+    R: Stream<Item = std::io::Result<String>> + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let started = std::time::Instant::now();
+    let mut pending: HashSet<String> = HashSet::new();
+    for (id, mut command) in requests {
+        command["id"] = serde_json::Value::String(id.to_string());
+        write_rpc(writer, &command).await?;
+        pending.insert(id.to_string());
+    }
+    let mut responses = HashMap::new();
+    let mut events = 0usize;
+    while !pending.is_empty() {
+        enum Wait {
+            Line(Option<std::io::Result<String>>),
+            Outbound(Result<serde_json::Value, smol::channel::RecvError>),
+        }
+        match smol::future::race(async { Wait::Line(lines.next().await) }, async {
+            Wait::Outbound(outbound_rx.recv().await)
+        })
+        .await
+        {
+            Wait::Outbound(Ok(message)) => {
+                if message.get("type").and_then(serde_json::Value::as_str)
+                    == Some("smelt_background_notify")
+                {
+                    if let Some(event) = background_notice_from_outbound(&message) {
+                        let _ = event_tx.try_send(event);
+                    }
+                    continue;
+                }
+                write_rpc(writer, &message).await?;
+            }
+            Wait::Outbound(Err(_)) => return Err("Pi RPC 回执通道已关闭".to_string()),
+            Wait::Line(Some(Ok(line))) => {
+                let value = parse_rpc_line(&line)?;
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("response") {
+                    let id = value
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if pending.remove(&id) {
+                        ensure_response_success(&value)?;
+                        crate::app_log::info(
+                            "pi-rpc",
+                            &format!(
+                                "会话 {} 握手 {id} 用时 {:?}，响应 {} 字节（其间 {events} 条事件）",
+                                launch.sid,
+                                started.elapsed(),
+                                line.len()
+                            ),
+                        );
+                        responses.insert(id, value);
+                    }
+                    continue;
+                }
+                events += 1;
+                handle_event(value, event_tx, outbound_tx, state, launch);
+            }
+            Wait::Line(Some(Err(error))) => {
+                return Err(format!("读取 Pi RPC 握手响应失败：{error}"));
+            }
+            Wait::Line(None) => return Err("Pi RPC 在握手完成前退出".to_string()),
+        }
+    }
+    Ok(responses)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -951,9 +1270,10 @@ where
                         crate::app_log::info(
                             "pi-rpc",
                             &format!(
-                                "会话 {} 握手 {id} 用时 {:?}（其间 {events} 条事件）",
+                                "会话 {} 握手 {id} 用时 {:?}，响应 {} 字节（其间 {events} 条事件）",
                                 launch.sid,
-                                started.elapsed()
+                                started.elapsed(),
+                                line.len()
                             ),
                         );
                         return Ok(value);
@@ -1120,71 +1440,75 @@ fn config_update_failure_status(detail: impl std::fmt::Display) -> String {
     format!("更新会话配置失败：{detail}")
 }
 
-fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<ConversationEvent>) {
+fn publish_model_event(state: &PiState, event_tx: &smol::channel::Sender<ConversationEvent>) {
     let effective_model = state
         .model
         .as_ref()
-        .filter(|m| m.provider != "unknown" && m.id != "unknown")
+        .filter(|model| model.provider != "unknown" && model.id != "unknown")
         .or_else(|| state.models.first());
+    let Some(current) = effective_model else {
+        return;
+    };
+    let mut providers = BTreeMap::<String, Vec<(String, String)>>::new();
+    for model in &state.models {
+        providers.entry(model.provider.clone()).or_default().push((
+            format!("{}/{}", model.provider, model.id),
+            model.name.clone(),
+        ));
+    }
 
-    if let Some(current) = effective_model {
-        let mut providers = BTreeMap::<String, Vec<(String, String)>>::new();
-        for model in &state.models {
-            providers.entry(model.provider.clone()).or_default().push((
-                format!("{}/{}", model.provider, model.id),
-                model.name.clone(),
-            ));
-        }
-
-        if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
-            for cp in settings.custom_providers {
-                for m in cp.models {
-                    let val = format!("{}/{}", cp.id, m.id);
-                    let list = providers.entry(cp.id.clone()).or_default();
-                    if !list.iter().any(|(v, _)| v == &val) {
-                        let display = if m.name.is_empty() {
-                            m.id.clone()
-                        } else {
-                            m.name
-                        };
-                        list.push((val, display));
-                    }
+    if let Ok(settings) = crate::pi_model_settings::load_pi_model_settings() {
+        for cp in settings.custom_providers {
+            for m in cp.models {
+                let val = format!("{}/{}", cp.id, m.id);
+                let list = providers.entry(cp.id.clone()).or_default();
+                if !list.iter().any(|(v, _)| v == &val) {
+                    let display = if m.name.is_empty() {
+                        m.id.clone()
+                    } else {
+                        m.name
+                    };
+                    list.push((val, display));
                 }
             }
         }
-
-        if !state
-            .models
-            .iter()
-            .any(|m| m.provider == current.provider && m.id == current.id)
-            && current.provider != "unknown"
-        {
-            providers
-                .entry(current.provider.clone())
-                .or_default()
-                .push((
-                    format!("{}/{}", current.provider, current.id),
-                    current.name.clone(),
-                ));
-        }
-
-        let provider_groups = providers
-            .iter()
-            .map(|(provider, options)| ModelProviderGroup {
-                id: provider.clone(),
-                name: provider.clone(),
-                options: options.clone(),
-            })
-            .collect();
-        let options = providers.into_values().flatten().collect();
-        let _ = event_tx.try_send(ConversationEvent::Model(ModelState {
-            config_id: "model".to_string(),
-            current_value: format!("{}/{}", current.provider, current.id),
-            current_name: current.name.clone(),
-            options,
-            provider_groups,
-        }));
     }
+
+    if !state
+        .models
+        .iter()
+        .any(|m| m.provider == current.provider && m.id == current.id)
+        && current.provider != "unknown"
+    {
+        providers
+            .entry(current.provider.clone())
+            .or_default()
+            .push((
+                format!("{}/{}", current.provider, current.id),
+                current.name.clone(),
+            ));
+    }
+
+    let provider_groups = providers
+        .iter()
+        .map(|(provider, options)| ModelProviderGroup {
+            id: provider.clone(),
+            name: provider.clone(),
+            options: options.clone(),
+        })
+        .collect();
+    let options = providers.into_values().flatten().collect();
+    let _ = event_tx.try_send(ConversationEvent::Model(ModelState {
+        config_id: "model".to_string(),
+        current_value: format!("{}/{}", current.provider, current.id),
+        current_name: current.name.clone(),
+        options,
+        provider_groups,
+    }));
+}
+
+fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<ConversationEvent>) {
+    publish_model_event(state, event_tx);
 
     let mut levels = state.thinking_levels.clone();
     if !levels.iter().any(|level| level == &state.thinking_level) {
@@ -1228,6 +1552,84 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
     let _ = event_tx.try_send(ConversationEvent::ConfigOptions(configs));
 }
 
+fn refresh_models_command_available(state: &PiState) -> bool {
+    state
+        .available_commands
+        .iter()
+        .any(|(name, _)| name == SMELT_REFRESH_MODELS_COMMAND)
+}
+
+/// 让 Pi 重读 models.json。Pi 的可用模型是会话启动时的快照，之后在 Smelt 里加的 provider
+/// 它不知道：`get_available_models` 拉回来还是旧的，`set_model` 也回 Model not found。
+/// 这条 prompt 只走扩展命令，回执是 handled，不开模型回合，回答进行中也立即执行。
+async fn request_models_refresh<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &mut PiState,
+    then_set_model: Option<String>,
+    in_flight_rpc: &AtomicUsize,
+) -> Result<(), String> {
+    if let Some((_, pending_model)) = &mut state.models_refresh_request {
+        // 已经在重读，等那次回执。要切的模型以最后一次为准，被顶掉的那次直接还账。
+        if let Some(value) = then_set_model
+            && pending_model.replace(value).is_some()
+        {
+            finish_in_flight(in_flight_rpc);
+        }
+        return Ok(());
+    }
+    let id = state.request_id("reload-models");
+    state.models_refresh_request = Some((id.clone(), then_set_model));
+    write_rpc(
+        writer,
+        &serde_json::json!({
+            "id": id,
+            "type": "prompt",
+            "message": format!("/{SMELT_REFRESH_MODELS_COMMAND}"),
+        }),
+    )
+    .await
+}
+
+/// 补拉一次可用模型。响应回来时按 request id 认领（见 `models_request_id`）。
+async fn request_available_models<W: AsyncWrite + Unpin>(writer: &mut W, state: &mut PiState) {
+    let id = state.request_id("refresh-models");
+    state.models_request_id = Some(id.clone());
+    if write_rpc(
+        writer,
+        &serde_json::json!({"id": id, "type": "get_available_models"}),
+    )
+    .await
+    .is_err()
+    {
+        state.models_request_id = None;
+    }
+}
+
+async fn send_set_model<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &mut PiState,
+    value: String,
+) -> Result<(), String> {
+    let Some((provider, model_id)) = value.split_once('/') else {
+        return Err(format!("Pi 模型值格式无效：{value}"));
+    };
+    let (provider, model_id) = (provider.to_string(), model_id.to_string());
+    let id = state.request_id("config-model");
+    state
+        .pending_configs
+        .insert(id.clone(), PendingConfig::Model(value));
+    write_rpc(
+        writer,
+        &serde_json::json!({
+            "id": id,
+            "type": "set_model",
+            "provider": provider,
+            "modelId": model_id,
+        }),
+    )
+    .await
+}
+
 fn codemode_command_available(state: &PiState) -> bool {
     state
         .available_commands
@@ -1253,7 +1655,7 @@ fn codemode_config(state: &PiState) -> SessionConfigState {
 fn publishable_commands(commands: &[(String, String)]) -> Vec<(String, String)> {
     commands
         .iter()
-        .filter(|(name, _)| name != SMELT_CODEMODE_COMMAND)
+        .filter(|(name, _)| name != SMELT_CODEMODE_COMMAND && name != SMELT_REFRESH_MODELS_COMMAND)
         .cloned()
         .collect()
 }
@@ -1674,18 +2076,13 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             handle_config_command(config_id, value, writer, event_tx, state, in_flight_rpc).await?;
         }
         ConversationCommand::RefreshModels => {
-            // 发出去就不管了：响应回来时按 request id 认领（见 `models_request_id`）。
-            // 这里不能同步等——命令循环在这条路上没有 reader，等下去会把整条会话卡死。
-            let id = state.request_id("refresh-models");
-            state.models_request_id = Some(id.clone());
-            if write_rpc(
-                writer,
-                &serde_json::json!({"id": id, "type": "get_available_models"}),
-            )
-            .await
-            .is_err()
-            {
-                state.models_request_id = None;
+            // 发出去就不管了，回执按 request id 认领。这里不能同步等——命令循环在这条
+            // 路上没有 reader，等下去会把整条会话卡死。先让 Pi 重读 models.json，
+            // 回执到了再拉列表，不然拉回来的还是会话启动时的快照。
+            if refresh_models_command_available(state) {
+                request_models_refresh(writer, state, None, in_flight_rpc).await?;
+            } else {
+                request_available_models(writer, state).await;
             }
         }
         ConversationCommand::StopBackgroundTask { id } => {
@@ -1851,29 +2248,27 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
             .await?;
         }
         "model" => {
-            let Some((provider, model_id)) = value.split_once('/') else {
+            if !value.contains('/') {
                 finish_in_flight(in_flight_rpc);
                 let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
                     "Pi 模型值格式无效",
                 )));
                 return Ok(());
-            };
-            let provider = provider.to_string();
-            let model_id = model_id.to_string();
-            let id = state.request_id("config-model");
-            state
-                .pending_configs
-                .insert(id.clone(), PendingConfig::Model(value));
-            write_rpc(
-                writer,
-                &serde_json::json!({
-                    "id": id,
-                    "type": "set_model",
-                    "provider": provider,
-                    "modelId": model_id,
-                }),
-            )
-            .await?;
+            }
+            // 菜单按磁盘上的 models.json 列模型，这个会话的 Pi 可能还不认识（会话启动后才加的
+            // provider）。先让它重读，回执到了再切。
+            let known = state.models.iter().any(|model| model_value(model) == value);
+            if !known && refresh_models_command_available(state) {
+                request_models_refresh(writer, state, Some(value), in_flight_rpc).await?;
+            } else {
+                // 直接切的这次是最新选择：还在等重读的那次作废，不然回执到了会把它切回去。
+                if let Some((_, pending_model)) = &mut state.models_refresh_request
+                    && pending_model.take().is_some()
+                {
+                    finish_in_flight(in_flight_rpc);
+                }
+                send_set_model(writer, state, value).await?;
+            }
         }
         _ => {
             finish_in_flight(in_flight_rpc);
@@ -2140,6 +2535,18 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         }
         return Ok(());
     }
+    if let Some((_, then_set_model)) = state
+        .models_refresh_request
+        .take_if(|(pending, _)| *pending == id)
+    {
+        // 重读失败也往下走：列表维持旧的，模型找不到由 set_model 自己报。
+        request_available_models(writer, state).await;
+        if let Some(value) = then_set_model {
+            // in_flight 记在这次切模型上，等 set_model 的回执再还。
+            send_set_model(writer, state, value).await?;
+        }
+        return Ok(());
+    }
     if let Some(pending) = state.pending_configs.remove(&id) {
         match ensure_response_success(&response) {
             Ok(()) => match pending {
@@ -2310,6 +2717,38 @@ async fn handle_rewind_list_response<W: AsyncWrite + Unpin>(
 /// `ComposerRestore`（原文回输入框），然后补一发 `get_state` 换 session id。
 /// 重试不还原输入框：daemon 收到 `Rewound` 后按普通发送再发一次。
 #[allow(clippy::too_many_arguments)]
+/// fork 按切点那条分支重建会话，模型和推理强度也回到当时的设置。出错后换的模型记在被丢掉
+/// 的那一段里，不补就跟着没了，重试还是用出错的那个模型。按回退前的设置再设一次：Pi 按顺序
+/// 处理请求，这两条排在重发的消息和随后的 get_state 前面。回执不认领，结果由 get_state 带回。
+async fn restore_settings_after_fork<W: AsyncWrite + Unpin>(writer: &mut W, state: &mut PiState) {
+    if let Some(model) = state
+        .model
+        .clone()
+        .filter(|model| model.provider != "unknown" && model.id != "unknown")
+    {
+        let id = state.request_id("rewind-model");
+        let _ = write_rpc(
+            writer,
+            &serde_json::json!({
+                "id": id,
+                "type": "set_model",
+                "provider": model.provider,
+                "modelId": model.id,
+            }),
+        )
+        .await;
+    }
+    if !state.thinking_level.is_empty() {
+        let id = state.request_id("rewind-thinking");
+        let level = state.thinking_level.clone();
+        let _ = write_rpc(
+            writer,
+            &serde_json::json!({"id": id, "type": "set_thinking_level", "level": level}),
+        )
+        .await;
+    }
+}
+
 async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     pending: PendingRewind,
     response: &serde_json::Value,
@@ -2337,13 +2776,14 @@ async fn handle_rewind_fork_response<W: AsyncWrite + Unpin>(
     }
     // 换到了新分叉，旧会话的队列跟着作废。
     state.queue.reset();
-    let restore = matches!(pending.then, crate::acp_conn::AfterRewind::RestoreComposer)
-        .then(|| {
+    let restore =
+        matches!(pending.then, crate::acp_conn::AfterRewind::RestoreComposer).then(|| {
             data.get("text")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(&pending.text)
                 .to_string()
         });
+    restore_settings_after_fork(writer, state).await;
     let _ = event_tx.try_send(ConversationEvent::Rewound {
         truncate_from: pending.truncate_from,
         then: pending.then,
@@ -2743,9 +3183,8 @@ fn handle_event(
                     runs,
                 });
             }
-            let failure = is_error.then(|| {
-                content_text(event.get("result").and_then(|value| value.get("content")))
-            });
+            let failure = is_error
+                .then(|| content_text(event.get("result").and_then(|value| value.get("content"))));
             emit_peer_send(
                 event_tx,
                 id,
@@ -3301,10 +3740,9 @@ fn text_looks_like_diff(text: &str) -> bool {
             .any(|line| line.starts_with("+++ ") || line.starts_with("--- "))
 }
 
-/// 从 Pi 的 append-only entry tree 中严格还原当前活动分支，再提取 UI transcript。
-/// `get_messages` 是 compaction-aware 的模型上下文，不能承担历史恢复；compaction、
-/// model change 等 entry 只参与 parent 链校验，不替代或裁掉它们之前的原始消息。
-fn active_branch_messages(data: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+/// 从 Pi `get_entries` 的 `leafId` 沿 parent 链取出当前分支上的消息。
+/// 文件恢复用的是「文件最后一条是叶子」；这里的叶子以响应为准，两者不是同一个走法。
+fn messages_from_get_entries(data: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
     let entries = data
         .get("entries")
         .and_then(serde_json::Value::as_array)
@@ -3371,10 +3809,11 @@ fn entry_message(entry: &serde_json::Value) -> Option<serde_json::Value> {
 /// 同一套规则归约。子智能体的子会话就这样给界面看。
 pub fn transcript_entries_from_session_file(text: &str) -> Vec<AcpEntry> {
     let (version, entries) = crate::session_history::pi_session_entries(text);
-    let messages: Vec<serde_json::Value> = crate::session_history::pi_active_branch(version, &entries)
-        .into_iter()
-        .filter_map(entry_message)
-        .collect();
+    let messages: Vec<serde_json::Value> =
+        crate::session_history::pi_active_branch(version, &entries)
+            .into_iter()
+            .filter_map(entry_message)
+            .collect();
     let (event_tx, event_rx) = smol::channel::unbounded();
     let mut state = PiState::new();
     // 和恢复会话时同一个顺序：开始、整段回放、结束。
@@ -4834,111 +5273,6 @@ mod tests {
         assert!(state.active_turn);
     }
 
-    #[test]
-    fn active_pi_branch_keeps_pre_compaction_messages_and_excludes_other_branches() {
-        let messages = active_branch_messages(&serde_json::json!({
-            "entries": [
-                {
-                    "type": "message",
-                    "id": "user-old",
-                    "parentId": null,
-                    "message": {"role": "user", "content": "压缩前问题"}
-                },
-                {
-                    "type": "message",
-                    "id": "assistant-old",
-                    "parentId": "user-old",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩前回答"}]}
-                },
-                {
-                    "type": "compaction",
-                    "id": "compaction",
-                    "parentId": "assistant-old",
-                    "summary": "模型上下文摘要",
-                    "firstKeptEntryId": "assistant-old"
-                },
-                {
-                    "type": "message",
-                    "id": "other-branch",
-                    "parentId": "assistant-old",
-                    "message": {"role": "user", "content": "已放弃旁支"}
-                },
-                {
-                    "type": "message",
-                    "id": "user-new",
-                    "parentId": "compaction",
-                    "message": {"role": "user", "content": "压缩后问题"}
-                },
-                {
-                    "type": "custom_message",
-                    "id": "extension-note",
-                    "parentId": "user-new",
-                    "customType": "note",
-                    "content": "可见扩展消息",
-                    "display": true
-                },
-                {
-                    "type": "message",
-                    "id": "assistant-new",
-                    "parentId": "extension-note",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": "压缩后回答"}]}
-                }
-            ],
-            "leafId": "assistant-new"
-        }))
-        .unwrap();
-
-        assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0]["content"], "压缩前问题");
-        assert_eq!(messages[1]["content"][0]["text"], "压缩前回答");
-        assert_eq!(messages[2]["content"], "压缩后问题");
-        assert_eq!(messages[3]["role"], "custom");
-        assert_eq!(messages[3]["content"], "可见扩展消息");
-        assert_eq!(messages[4]["content"][0]["text"], "压缩后回答");
-        assert!(
-            messages
-                .iter()
-                .all(|message| message["content"] != "已放弃旁支")
-        );
-        assert!(
-            messages
-                .iter()
-                .all(|message| message["content"] != "模型上下文摘要")
-        );
-    }
-
-    #[test]
-    fn active_pi_branch_rejects_a_broken_parent_chain() {
-        let error = active_branch_messages(&serde_json::json!({
-            "entries": [{
-                "type": "message",
-                "id": "leaf",
-                "parentId": "missing",
-                "message": {"role": "user", "content": "不能只恢复这一截"}
-            }],
-            "leafId": "leaf"
-        }))
-        .unwrap_err();
-
-        assert!(error.contains("missing"));
-    }
-
-    #[test]
-    fn active_pi_branch_can_be_empty_while_the_entry_tree_is_not() {
-        let messages = active_branch_messages(&serde_json::json!({
-            "entries": [{
-                "type": "message",
-                "id": "old",
-                "parentId": null,
-                "message": {"role": "user", "content": "已离开分支"}
-            }],
-            "leafId": null
-        }))
-        .unwrap();
-
-        assert!(messages.is_empty());
-    }
-
     /// 重放必须以显式的结束信号收尾。没有它时，`replaying_history` 只能等「下一条
     /// prompt」才复位，恢复后就闲置的会话会永远挂在「重放中」。
     #[test]
@@ -4973,24 +5307,31 @@ mod tests {
             serde_json::json!({"type": "message", "id": "a-old", "parentId": "u1",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "旧分支"}]}}),
             serde_json::json!({"type": "message", "id": "a1", "parentId": "u1",
-                "message": {"role": "assistant", "content": [
-                    {"type": "text", "text": "先看看"},
-                    {"type": "toolCall", "id": "t1", "name": "read", "arguments": {"path": "src/auth.rs"}}
-                ]}}),
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "先看看"},
+                {"type": "toolCall", "id": "t1", "name": "read", "arguments": {"path": "src/auth.rs"}}
+            ]}}),
             serde_json::json!({"type": "message", "id": "r1", "parentId": "a1",
                 "message": {"role": "toolResult", "toolCallId": "t1", "toolName": "read",
                     "content": [{"type": "text", "text": "fn login() {}"}]}}),
             serde_json::json!({"type": "message", "id": "a2", "parentId": "r1",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "登录在 src/auth.rs"}]}}),
         ];
-        let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let entries = transcript_entries_from_session_file(&text);
         let texts: Vec<String> = entries
             .iter()
             .filter_map(|entry| match entry {
                 AcpEntry::User(text) => Some(format!("user:{text}")),
-                AcpEntry::Assistant { text, thought: false } => Some(format!("assistant:{text}")),
+                AcpEntry::Assistant {
+                    text,
+                    thought: false,
+                } => Some(format!("assistant:{text}")),
                 AcpEntry::ToolCall { kind, .. } => Some(format!("tool:{kind:?}")),
                 _ => None,
             })
@@ -5054,7 +5395,10 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].id, "sa-a");
         assert_eq!(runs[0].title, "审计 a");
-        assert_eq!(runs[0].status, crate::acp_session::SubagentStatus::Completed);
+        assert_eq!(
+            runs[0].status,
+            crate::acp_session::SubagentStatus::Completed
+        );
         assert_eq!(runs[1].id, "sa-b");
         assert_eq!(runs[1].status, crate::acp_session::SubagentStatus::Failed);
     }
@@ -8002,7 +8346,7 @@ mod tests {
     /// 从 Smelt 的统一运行时入口走完受管 Bun -> Pi RPC -> Ready，
     /// 避免逻辑命令意外落回 ACP parser 却只有单元测试通过。
     #[test]
-    #[ignore = "会写 ~/.smelt/runtime 并可能联网安装 Pi 依赖"]
+    #[ignore = "需要先编出 smelt-pi（scripts/build-smelt-pi.sh）"]
     fn managed_native_driver_reaches_ready() {
         let agent_dir =
             std::env::temp_dir().join(format!("smelt-pi-rpc-driver-{}", uuid::Uuid::new_v4()));
@@ -8046,7 +8390,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "会写 ~/.smelt/runtime 并可能联网安装 Pi 依赖"]
+    #[ignore = "需要先编出 smelt-pi（scripts/build-smelt-pi.sh）"]
     fn missing_native_session_is_classified_for_fresh_fallback() {
         let agent_dir = std::env::temp_dir().join(format!(
             "smelt-pi-rpc-missing-session-{}",
@@ -8148,6 +8492,143 @@ mod tests {
         assert_eq!(model.current_value, "github-copilot/kimi-k3");
         assert_eq!(model.current_name, "Kimi K3");
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    fn deepseek_session_with_refresh_command() -> PiState {
+        let mut state = PiState::new();
+        state.models = vec![PiModel {
+            provider: "deepseek".into(),
+            id: "deepseek-flash".into(),
+            name: "DeepSeek-V4.1-Flash".into(),
+            context_window: None,
+        }];
+        state.model = Some(state.models[0].clone());
+        state
+            .available_commands
+            .push((SMELT_REFRESH_MODELS_COMMAND.to_string(), String::new()));
+        state
+    }
+
+    /// 复现：会话启动后才在 Smelt 里加的 provider，菜单里有、Pi 不认识，直接 set_model 回
+    /// Model not found，胶囊又跳回原来的模型。要先让 Pi 重读 models.json，回执到了再切。
+    #[test]
+    fn a_model_pi_does_not_know_yet_reloads_models_before_switching() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = deepseek_session_with_refresh_command();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "model".to_string(),
+                value: ConfigValue::Select("minmax/minimax-m3.1-flash".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let requests = rpc_lines(writer);
+        assert_eq!(requests.len(), 1, "回执到之前不能先发 set_model");
+        assert_eq!(requests[0]["type"], "prompt");
+        assert_eq!(requests[0]["message"], "/smelt-refresh-models");
+
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": requests[0]["id"],
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let requests = rpc_lines(writer);
+        assert!(requests.iter().any(|r| r["type"] == "get_available_models"));
+        let set = requests
+            .iter()
+            .find(|r| r["type"] == "set_model")
+            .expect("重读完要接着切模型");
+        assert_eq!(set["provider"], "minmax");
+        assert_eq!(set["modelId"], "minimax-m3.1-flash");
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1, "等 set_model 的回执再还账");
+    }
+
+    /// 先点了 Pi 还不认识的 A（在等重读），又点了认识的 B：B 是最后的选择，重读回执到了
+    /// 不能再把 A 切回来；被顶掉的 A 那次记账要还。
+    #[test]
+    fn a_later_direct_switch_cancels_the_switch_waiting_for_reload() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = deepseek_session_with_refresh_command();
+        state.models.push(PiModel {
+            provider: "deepseek".into(),
+            id: "deepseek-v4-pro".into(),
+            name: "DeepSeek-V4-Pro".into(),
+            context_window: None,
+        });
+        let in_flight = AtomicUsize::new(2);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        for value in ["minmax/minimax-m3.1-flash", "deepseek/deepseek-v4-pro"] {
+            smol::block_on(handle_command(
+                ConversationCommand::SetConfigOption {
+                    config_id: "model".to_string(),
+                    value: ConfigValue::Select(value.to_string()),
+                },
+                &mut writer,
+                &event_tx,
+                &mut state,
+                &in_flight,
+            ))
+            .unwrap();
+        }
+        let requests = rpc_lines(writer);
+        assert_eq!(requests[1]["type"], "set_model");
+        assert_eq!(requests[1]["modelId"], "deepseek-v4-pro");
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1, "被顶掉的 A 那次要还账");
+
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": requests[0]["id"], "type": "response", "command": "prompt",
+                "success": true, "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        assert!(
+            rpc_lines(writer).iter().all(|r| r["type"] != "set_model"),
+            "重读回执到了不能再切回 A"
+        );
+    }
+
+    #[test]
+    fn a_model_pi_already_knows_switches_directly() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = deepseek_session_with_refresh_command();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "model".to_string(),
+                value: ConfigValue::Select("deepseek/deepseek-flash".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let requests = rpc_lines(writer);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["type"], "set_model");
     }
 
     #[test]
@@ -8306,7 +8787,15 @@ mod tests {
         assert_eq!(request["entryId"], "e2");
         let fork_id = request["id"].as_str().unwrap().to_string();
 
-        // 阶段三：fork 成功 → 截断事件 + 原文回输入框 + 补发 get_state。
+        // 阶段三：fork 成功 → 截断事件 + 原文回输入框 + 补设回退前的模型 + 补发 get_state。
+        // 出错后换过模型再重试：fork 会把模型还原成那条分支当时的，必须按回退前的设回去。
+        state.model = Some(PiModel {
+            provider: "github-copilot".into(),
+            id: "gemini-3.8-flash".into(),
+            name: "Gemini 3.8 Flash".into(),
+            context_window: None,
+        });
+        state.thinking_level = "high".into();
         writer.get_mut().clear();
         writer.set_position(0);
         smol::block_on(handle_response(
@@ -8335,10 +8824,13 @@ mod tests {
             Ok(ConversationEvent::ComposerRestore { texts, .. })
                 if texts == ["same".to_string()]
         ));
-        let request: serde_json::Value =
-            serde_json::from_str(String::from_utf8(writer.get_ref().clone()).unwrap().trim())
-                .unwrap();
-        assert_eq!(request["type"], "get_state");
+        let requests = rpc_lines(writer.clone());
+        let types: Vec<_> = requests.iter().map(|r| r["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["set_model", "set_thinking_level", "get_state"]);
+        assert_eq!(requests[0]["provider"], "github-copilot");
+        assert_eq!(requests[0]["modelId"], "gemini-3.8-flash");
+        assert_eq!(requests[1]["level"], "high");
+        let request = requests[2].clone();
         let state_id = request["id"].as_str().unwrap().to_string();
         // in_flight 记账挂到 get_state 回执上：热升级不得跨越身份刷新。
         assert_eq!(in_flight.load(Ordering::SeqCst), 1);
@@ -8387,6 +8879,34 @@ mod tests {
         let mut state = PiState::new();
         let mut launch = test_launch("smelt-pi-agent --offline");
         launch.resume_session_id = Some(SessionId::new("pi-session"));
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-resume-file-{}", uuid::Uuid::new_v4()));
+        let sessions = agent_dir.join("sessions/--workspace--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("20260101T000000_pi-session.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"version\":2,\"id\":\"pi-session\",\"cwd\":\"/tmp\"}\n",
+                "{\"type\":\"model_change\",\"id\":\"model\",\"parentId\":null,\"provider\":\"test\",\"modelId\":\"seed-model\"}\n",
+                "{\"type\":\"message\",\"id\":\"old\",\"parentId\":\"model\",\"message\":{\"role\":\"user\",\"content\":\"压缩前\"}}\n",
+                "{\"type\":\"compaction\",\"id\":\"compact\",\"parentId\":\"old\",\"summary\":\"模型只看摘要\",\"firstKeptEntryId\":\"old\"}\n",
+                "{\"type\":\"message\",\"id\":\"new\",\"parentId\":\"compact\",\"message\":{\"role\":\"user\",\"content\":\"压缩后\"}}\n",
+            ),
+        )
+        .unwrap();
+        let agent = agent_dir.to_string_lossy().into_owned();
+        launch
+            .launch
+            .env
+            .insert("PI_CODING_AGENT_DIR".into(), agent.clone());
+        // 生产路径在 spawn 之前把会话文件读进种子，只为了尽早发布模型名。
+        let seed = crate::session_history::read_pi_session_branch(
+            Some(&agent),
+            None,
+            Some("/workspace"),
+            "pi-session",
+        )
+        .expect("启动前能读到会话文件");
         let mut lines = fake_pi_lines(vec![
             serde_json::json!({
                 "id": "smelt-init-state", "type": "response", "command": "get_state",
@@ -8420,29 +8940,12 @@ mod tests {
                 "command": "get_commands", "success": true,
                 "data": {"commands": []}
             }),
-            serde_json::json!({
-                "id": "smelt-init-entries", "type": "response",
-                "command": "get_entries", "success": true,
-                "data": {
-                    "entries": [
-                        {
-                            "type": "message", "id": "old", "parentId": null,
-                            "message": {"role": "user", "content": "压缩前"}
-                        },
-                        {
-                            "type": "compaction", "id": "compact", "parentId": "old",
-                            "summary": "模型只看摘要", "firstKeptEntryId": "old"
-                        },
-                        {
-                            "type": "message", "id": "new", "parentId": "compact",
-                            "message": {"role": "user", "content": "压缩后"}
-                        }
-                    ],
-                    "leafId": "new"
-                }
-            }),
         ]);
         let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
 
         smol::block_on(initialize_session(
             &mut lines,
@@ -8452,8 +8955,11 @@ mod tests {
             &event_tx,
             &mut state,
             &launch,
+            Some(seed),
+            &mut trace,
         ))
         .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
 
         let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
             .unwrap()
@@ -8470,8 +8976,13 @@ mod tests {
                 "get_available_models",
                 "get_available_thinking_levels",
                 "get_commands",
-                "get_entries"
             ]
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["type"] != "get_entries"),
+            "恢复转录读会话文件，启动握手不再拉整棵 entry 树"
         );
 
         let mut events = Vec::new();
@@ -8486,16 +8997,332 @@ mod tests {
             })
             .collect();
         assert_eq!(replayed_user_text, ["压缩前", "压缩后"]);
+        let ready_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::Ready { .. }))
+            .expect("Ready");
+        let replay_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+            .expect("重放开始");
+        assert!(replay_at < ready_at, "转录必须在 Ready 之前重放完");
+        let finished_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+            .expect("重放结束");
+        assert!(finished_at < ready_at, "Ready 不能插在重放结束之前");
+        let models: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::Model(model) => Some(model.current_value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(models.first().copied(), Some("test/seed-model"));
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+            models.contains(&"test/model"),
+            "get_state 的模型要盖过文件里的种子模型：{models:?}"
         );
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
         );
+    }
+
+    #[test]
+    fn handshake_reread_replaces_a_stale_session_seed() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("pi-session"));
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-reread-{}", uuid::Uuid::new_v4()));
+        let sessions = agent_dir.join("sessions/--workspace--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("20260101T000000_pi-session.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"version\":2,\"id\":\"pi-session\",\"cwd\":\"/workspace\"}\n",
+                "{\"type\":\"message\",\"id\":\"only\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"文件里的新消息\"}}\n",
+            ),
+        )
+        .unwrap();
+        launch.launch.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            agent_dir.to_string_lossy().into_owned(),
+        );
+        let stale = crate::session_history::PiSessionBranch {
+            entries: vec![serde_json::json!({
+                "type": "message",
+                "id": "stale",
+                "parentId": null,
+                "message": {"role": "user", "content": "过期种子"}
+            })],
+        };
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "pi-session",
+                    "thinkingLevel": "medium",
+                    "model": {"provider": "test", "id": "live", "name": "Live"}
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+            Some(stale),
+            &mut trace,
+        ))
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let mut texts = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            if let ConversationEvent::UserChunk(text) = event {
+                texts.push(text);
+            }
+        }
+        assert_eq!(texts, ["文件里的新消息"]);
+        let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["type"] != "get_entries"),
+            "文件能读时不向 Pi 要 get_entries"
+        );
+    }
+
+    #[test]
+    fn missing_session_file_replays_get_entries_before_ready() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("missing-session"));
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-missing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(agent_dir.join("sessions/--workspace--")).unwrap();
+        launch.launch.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            agent_dir.to_string_lossy().into_owned(),
+        );
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "missing-session",
+                    "thinkingLevel": "medium",
+                    "model": {"provider": "test", "id": "live", "name": "Live"}
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-entries", "type": "response", "command": "get_entries",
+                "success": true,
+                "data": {
+                    "leafId": "assistant",
+                    "entries": [
+                        {
+                            "type": "message", "id": "user", "parentId": null,
+                            "message": {"role": "user", "content": "文件里没有的消息"}
+                        },
+                        {
+                            "type": "message", "id": "assistant", "parentId": "user",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "回过"}]}
+                        }
+                    ]
+                }
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+            None,
+            &mut trace,
+        ))
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let requests: Vec<serde_json::Value> = String::from_utf8(writer.into_inner())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["type"] == "get_entries"),
+            "文件不在时必须改问 Pi"
+        );
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ConversationEvent::UserChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["文件里没有的消息"]);
+        let ready_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::Ready { .. }))
+            .expect("Ready");
+        let finished_at = events
+            .iter()
+            .position(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+            .expect("重放结束");
+        assert!(finished_at < ready_at);
+    }
+
+    #[test]
+    fn header_only_session_file_is_an_empty_transcript() {
+        let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
+        let (outbound_tx, outbound_rx) = smol::channel::unbounded::<serde_json::Value>();
+        let mut state = PiState::new();
+        let mut launch = test_launch("smelt-pi-agent --offline");
+        launch.resume_session_id = Some(SessionId::new("empty-session"));
+        let agent_dir =
+            std::env::temp_dir().join(format!("smelt-pi-empty-{}", uuid::Uuid::new_v4()));
+        let sessions = agent_dir.join("sessions/--workspace--");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("empty-session.jsonl"),
+            "{\"type\":\"session\",\"version\":2,\"id\":\"empty-session\",\"cwd\":\"/workspace\"}
+",
+        )
+        .unwrap();
+        launch.launch.env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            agent_dir.to_string_lossy().into_owned(),
+        );
+        let mut lines = fake_pi_lines(vec![
+            serde_json::json!({
+                "id": "smelt-init-state", "type": "response", "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "empty-session",
+                    "thinkingLevel": "medium",
+                    "model": {"provider": "test", "id": "live", "name": "Live"}
+                }
+            }),
+            serde_json::json!({
+                "id": "smelt-init-models", "type": "response",
+                "command": "get_available_models", "success": true,
+                "data": {"models": []}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-thinking", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["medium"]}
+            }),
+            serde_json::json!({
+                "id": "smelt-init-commands", "type": "response",
+                "command": "get_commands", "success": true,
+                "data": {"commands": []}
+            }),
+        ]);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut trace = HandshakeTrace {
+            started: std::time::Instant::now(),
+            published_model: None,
+        };
+        smol::block_on(initialize_session(
+            &mut lines,
+            &mut writer,
+            &outbound_tx,
+            &outbound_rx,
+            &event_tx,
+            &mut state,
+            &launch,
+            None,
+            &mut trace,
+        ))
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let requests = String::from_utf8(writer.into_inner()).unwrap();
+        assert!(!requests.contains("get_entries"));
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConversationEvent::Ready { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, ConversationEvent::UserChunk(_)))
+        );
+        // 空转录也要成对发开始和结束，而且在 Ready 之前：投影靠它清掉旧消息。
+        let position = |want: fn(&ConversationEvent) -> bool| events.iter().position(want);
+        let started = position(|event| matches!(event, ConversationEvent::HistoryReplayStarted))
+            .expect("空转录也要发重放开始");
+        let finished = position(|event| matches!(event, ConversationEvent::HistoryReplayFinished))
+            .expect("空转录也要发重放结束");
+        let ready = position(|event| matches!(event, ConversationEvent::Ready { .. })).unwrap();
+        assert!(started < finished && finished < ready);
     }
 
     #[test]
@@ -8662,10 +9489,12 @@ mod tests {
             event_rx.try_recv().is_err(),
             "重试不能把原文还回输入框，否则用户还得再点一次发送"
         );
-        let request: serde_json::Value =
-            serde_json::from_str(String::from_utf8(writer.get_ref().clone()).unwrap().trim())
-                .unwrap();
-        assert_eq!(request["type"], "get_state", "重发归 daemon，驱动不自己写 prompt");
+        let requests = rpc_lines(writer);
+        assert!(
+            requests.iter().all(|request| request["type"] != "prompt"),
+            "重发归 daemon，驱动不自己写 prompt"
+        );
+        assert_eq!(requests.last().unwrap()["type"], "get_state");
     }
 
     #[test]

@@ -3232,10 +3232,9 @@ fn apply_acp_user_action_inner(
         AcpUserAction::ClearQueue => send_acp_clear_queue(sess),
         AcpUserAction::StopBackgroundTask { id } => send_acp_stop_background_task(sess, id),
         AcpUserAction::StopSubagent { id } => send_acp_stop_subagent(sess, id),
-        AcpUserAction::DeliverPeerMessage { message } => send_acp_command(
-            sess,
-            ConversationCommand::DeliverPeerMessage(message),
-        ),
+        AcpUserAction::DeliverPeerMessage { message } => {
+            send_acp_command(sess, ConversationCommand::DeliverPeerMessage(message))
+        }
         AcpUserAction::PeerReply { .. } => Err("peer reply is internal"),
         AcpUserAction::DeliverQueuedNow { text } => deliver_queued_now(sess, text, subscribers),
         AcpUserAction::WithdrawPendingPrompt { id } => withdraw_pending_prompt(sess, id),

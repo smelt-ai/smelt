@@ -25,14 +25,12 @@ const MANIFEST_FILE: &str = "manifest.json";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenerationKind {
     Bun,
-    Pi,
 }
 
 impl GenerationKind {
     fn directory(self) -> &'static str {
         match self {
             Self::Bun => "bun",
-            Self::Pi => "pi",
         }
     }
 }
@@ -292,19 +290,52 @@ impl GenerationStore {
         let _ = sync_directory(&root);
     }
 
+    /// 删掉一整类不再发布的 generation（`directory` 是它在 store 下的目录名）。
+    ///
+    /// 还被进程持着 lease 的留到下一次；其余的连 lease 文件一起删。这一类不会再有人来
+    /// 取 lease，删 lease inode 不会出现新旧进程各锁一个的情况。全删完后收掉 store、
+    /// leases 下的空目录。current 指针没人再读，直接删。调用方持有管理锁。
+    pub fn retire_kind_locked(&self, directory: &str) {
+        let store_root = self.runtime.join("store").join(directory);
+        let lease_root = self.runtime.join("leases").join(directory);
+        let _ = fs::remove_file(self.runtime.join("current").join(directory));
+        // 旧 GC 删过内容树但特意留下了 lease 文件，两边都要扫。
+        let mut ids = std::collections::BTreeSet::new();
+        for root in [&store_root, &lease_root] {
+            let Ok(entries) = fs::read_dir(root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    ids.insert(name.strip_suffix(".lock").unwrap_or(name).to_string());
+                }
+            }
+        }
+        for id in ids {
+            if validate_id(&id).is_err() {
+                continue;
+            }
+            let lease = lease_root.join(format!("{id}.lock"));
+            let Ok(exclusive) = try_exclusive(&lease) else {
+                continue;
+            };
+            let tree = store_root.join(&id);
+            if fs::symlink_metadata(&tree).is_ok() && fs::remove_dir_all(&tree).is_err() {
+                continue;
+            }
+            let _ = fs::remove_file(&lease);
+            drop(exclusive);
+        }
+        let _ = fs::remove_dir(&store_root);
+        let _ = fs::remove_dir(&lease_root);
+    }
+
     fn try_exclusive_locked(
         &self,
         kind: GenerationKind,
         id: &str,
     ) -> Result<ExclusiveGenerationLease, String> {
-        let path = self.lease_path(kind, id);
-        let parent = path.parent().ok_or("generation lease 没有父目录")?;
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("创建 generation lease 目录失败：{error}"))?;
-        let file = open_lock_file(&path)
-            .map_err(|error| format!("打开 generation GC lease 失败：{error}"))?;
-        flock(&file, libc::LOCK_EX | libc::LOCK_NB, "generation 仍在使用")?;
-        Ok(ExclusiveGenerationLease { _file: file })
+        try_exclusive(&self.lease_path(kind, id))
     }
 
     pub fn remove_stale_staging_locked(&self) {
@@ -377,19 +408,6 @@ pub struct BunGenerationManifest {
     pub archive_sha256: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PiGenerationManifest {
-    pub schema: u32,
-    pub generation_id: String,
-    pub runtime_version: String,
-    pub platform: String,
-    pub arch: String,
-    pub bridge_protocol: String,
-    pub source_sha256: String,
-    pub dependency_sha256: String,
-    pub bun_generation_id: String,
-}
-
 pub fn inherit_generation_fds(command: &mut Command, leases: &[GenerationLease]) {
     inherit_raw_fds(
         command,
@@ -418,6 +436,16 @@ fn inherit_raw_fds(command: &mut Command, fds: &[std::os::fd::RawFd]) {
             Ok(())
         });
     }
+}
+
+fn try_exclusive(path: &Path) -> Result<ExclusiveGenerationLease, String> {
+    let parent = path.parent().ok_or("generation lease 没有父目录")?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("创建 generation lease 目录失败：{error}"))?;
+    let file =
+        open_lock_file(path).map_err(|error| format!("打开 generation GC lease 失败：{error}"))?;
+    flock(&file, libc::LOCK_EX | libc::LOCK_NB, "generation 仍在使用")?;
+    Ok(ExclusiveGenerationLease { _file: file })
 }
 
 fn open_lock_file(path: &Path) -> std::io::Result<File> {
@@ -528,6 +556,49 @@ mod tests {
             download_url: "https://example.invalid/bun.zip".into(),
             archive_sha256: "11".repeat(32),
         }
+    }
+
+    /// 旧版的 `store/pi`：没人占着的连 lease 一起删，旧 Pi 进程还占着的留到下次，
+    /// 全删完后整类目录收干净。
+    #[test]
+    fn retiring_a_kind_removes_unleased_generations_and_its_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let store = GenerationStore::new(runtime.clone());
+        for id in ["pi-aaaaaaaa", "pi-bbbbbbbb"] {
+            let tree = runtime.join("store/pi").join(id).join("node_modules");
+            fs::create_dir_all(&tree).unwrap();
+            fs::write(tree.join("index.js"), b"old").unwrap();
+        }
+        fs::create_dir_all(runtime.join("leases/pi")).unwrap();
+        // 旧 GC 只删内容树、留下的 lease 文件。
+        fs::write(runtime.join("leases/pi/pi-cccccccc.lock"), b"").unwrap();
+        fs::create_dir_all(runtime.join("current")).unwrap();
+        fs::write(runtime.join("current/pi"), b"pi-aaaaaaaa\n").unwrap();
+
+        let held = open_lock_file(&runtime.join("leases/pi/pi-bbbbbbbb.lock")).unwrap();
+        flock(&held, libc::LOCK_SH, "测试占住旧 Pi generation").unwrap();
+        {
+            let _manager = store.lock_manager().unwrap();
+            store.retire_kind_locked("pi");
+        }
+        assert!(!runtime.join("store/pi/pi-aaaaaaaa").exists());
+        assert!(!runtime.join("leases/pi/pi-aaaaaaaa.lock").exists());
+        assert!(!runtime.join("leases/pi/pi-cccccccc.lock").exists());
+        assert!(!runtime.join("current/pi").exists());
+        assert!(
+            runtime.join("store/pi/pi-bbbbbbbb/node_modules/index.js").exists(),
+            "还被旧 Pi 进程占着的 generation 不能删"
+        );
+        assert!(runtime.join("leases/pi/pi-bbbbbbbb.lock").exists());
+
+        drop(held);
+        {
+            let _manager = store.lock_manager().unwrap();
+            store.retire_kind_locked("pi");
+        }
+        assert!(!runtime.join("store/pi").exists());
+        assert!(!runtime.join("leases/pi").exists());
     }
 
     #[test]

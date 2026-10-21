@@ -280,9 +280,9 @@ describe("background task host client", () => {
 			hops: 7,
 			text: "重跑 flaky e2e，跑完把失败用例发给我",
 		});
-		// 空闲时开一轮，忙时排到这一轮之后，不插进手上的工具调用。
-		expect(options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
-		expect(completionMessage({ ...notice, wake: false }).options).toEqual({ triggerTurn: false, deliverAs: "followUp" });
+		// 空闲时开一轮；忙时在手上这批工具调用之后、下一次问模型之前送到，不等整轮做完。
+		expect(options).toEqual({ triggerTurn: true, deliverAs: "steer" });
+		expect(completionMessage({ ...notice, wake: false }).options).toEqual({ triggerTurn: false, deliverAs: "steer" });
 	});
 
 	test("the host results and peer messages are the ones acknowledged", () => {

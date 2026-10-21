@@ -878,9 +878,9 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
+    let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
-        let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
         if managed.is_file() && path_is_live_executable(&managed) {
             smelt_sys::daemon_image::retarget_pending_symlink(&dir, &image)?;
             eprintln!(
@@ -1099,6 +1099,9 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
     let bundled = bundled_daemon_path();
     let managed = managed_daemon_path();
 
+    if let Some(bundled) = &bundled {
+        sync_bundled_pi(bundled);
+    }
     // 无分发物：仅依赖已有 managed（开发机偶发）。
     let Some(bundled) = bundled else {
         return if managed.is_file() {
@@ -1159,6 +1162,28 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             }
             Ok(managed_daemon_path())
         }
+    }
+}
+
+/// 把 App 里的 smelt-pi 发布到 `~/.smelt/bin` 并拨好 `smelt-pi` 链接，再回收没人用的旧版本。
+/// 和守护版本无关：只换了 Pi 时守护不用交接，之后新起的 Pi 就是新的。要读一遍约
+/// 120MB 算指纹，每个 GUI 进程只做一次。
+fn sync_bundled_pi(bundled_daemon: &std::path::Path) {
+    static SYNCED: AtomicBool = AtomicBool::new(false);
+    if SYNCED.load(Ordering::Relaxed) {
+        return;
+    }
+    // 守护在 `Contents/MacOS`，Pi 在同一个 `Contents` 下的 Resources 里。
+    let Some(contents) = bundled_daemon.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    let dir = managed_daemon_dir();
+    match smelt_sys::pi_image::publish(&dir, &contents.join(smelt_sys::pi_image::APP_BUNDLE_DIR)) {
+        Ok(_) => SYNCED.store(true, Ordering::Relaxed),
+        Err(error) => eprintln!("[workspace] 发布 smelt-pi 失败：{error}"),
+    }
+    if let Err(error) = smelt_sys::pi_image::reap_unused(&dir) {
+        eprintln!("[workspace] 回收旧 smelt-pi 失败：{error}");
     }
 }
 
@@ -1611,6 +1636,11 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
     if !daemon.is_file() {
         anyhow::bail!("候选 App 缺少守护程序：{}", daemon.display());
     }
+    // smelt-pi 和守护分开发布。安装会当场交接守护，交接上来的新守护起 Pi 时链接必须已经
+    // 就位；发布不上就不换 App。
+    let pi_bundle = candidate_app.join("Contents").join(smelt_sys::pi_image::APP_BUNDLE_DIR);
+    smelt_sys::pi_image::publish(&managed_daemon_dir(), &pi_bundle)
+        .map_err(|error| anyhow::anyhow!("发布 smelt-pi 失败：{error}"))?;
     Ok(daemon)
 }
 

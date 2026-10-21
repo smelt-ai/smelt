@@ -182,7 +182,7 @@ pub enum StoredHistoryIdentity {
     NoRow,
     /// 行在，列是空。窗口缓存不能把旧 id 填回来。
     Unbound,
-    /// 守护进程已经确认的对话身份。
+    /// 已绑定的对话身份：第一次落库时窗口带的，或守护进程之后确认的。
     Bound(String),
 }
 
@@ -5628,6 +5628,26 @@ mod tests {
             .map(str::to_string)
     }
 
+    /// 历史页「继续」新开的槽位：窗口存档常常比 acp_open 先落库。第一次落库必须
+    /// 留下这次选中的 id，否则守护进程读到「行在、列空」，会当成已放弃、开一段空白会话。
+    #[test]
+    fn first_workspace_save_keeps_the_resumed_history_id() {
+        let dir = temp_dir("history-first-save");
+        let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
+        put_workspace_json(&store, &acp_workspace(Some("pi-picked")));
+        assert_eq!(
+            store.stored_history_identity("acp-1").unwrap(),
+            StoredHistoryIdentity::Bound("pi-picked".into())
+        );
+        put_workspace_json(&store, &acp_workspace(Some("gui-stale")));
+        assert_eq!(
+            stored_history_id(&store).as_deref(),
+            Some("pi-picked"),
+            "只有第一次落库采用窗口的 id"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn daemon_confirmed_history_id_survives_workspace_rewrite() {
         let dir = temp_dir("history-owner");
@@ -5641,12 +5661,7 @@ mod tests {
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::NoRow
         );
-        put_workspace_json(&store, &acp_workspace(Some("from-gui")));
-        assert_eq!(
-            stored_history_id(&store),
-            None,
-            "第一次落库后这一列仍是空的，要等守护进程确认"
-        );
+        put_workspace_json(&store, &acp_workspace(None));
         assert_eq!(
             store.stored_history_identity("acp-1").unwrap(),
             StoredHistoryIdentity::Unbound

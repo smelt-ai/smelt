@@ -21,7 +21,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROGRAMS=(smeltd smelt-notify)
-# 准备受管 Pi 运行时要调系统的 curl、unzip。
+# curl、unzip：按需下载到 ~/.smelt/runtime 的 Bun 要用（MCP 预设的 `bun x`、Claude/Codex 的 `bunx`）。
 BASE_PACKAGES=(ca-certificates curl unzip)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
 # 所以 Xvnc 要的 X 核心字体（fixed）和任务栏图标的主题要自己列上。
@@ -321,6 +321,9 @@ user_phase() {
   mkdir -p "$BIN"
   put 0755 "$HERE/smelt-notify" "$BIN/smelt-notify"
   put 0755 "$HERE/smelt-up" "$BIN/smelt-up"
+  # smelt-pi、wasm、native 留在包目录里。下面的 `smeltd install` 按它们自己的指纹
+  # 发布成 ~/.smelt/bin/smelt-pi-<指纹>/，再把 ~/.smelt/bin/smelt-pi 链接拨过去。
+  [[ -x "$HERE/smelt-pi" && -f "$HERE/photon_rs_bg.wasm" ]] || die "包里缺少 smelt-pi 或 photon_rs_bg.wasm"
   # 跨 Agent 消息下线后留下的旧 helper。
   rm -f "$BIN/smelt-agent-mcp"
 

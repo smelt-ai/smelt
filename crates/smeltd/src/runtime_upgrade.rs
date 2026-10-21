@@ -63,6 +63,26 @@ fn check_target(requested: &str, current: &str) -> Result<semver::Version, Strin
     Ok(target)
 }
 
+/// 守护启动后在后台调一次，见 `linux::ensure_smelt_pi`。只有装在 `~/.smelt/bin` 的映像
+/// 才这样补：开发、测试里直接跑的 smeltd 不去 Release 下载。macOS 上由桌面从 App 里发布。
+#[cfg(target_os = "linux")]
+pub(crate) fn ensure_smelt_pi() {
+    let managed = std::env::current_exe().ok().is_some_and(|exe| {
+        exe.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(smelt_core::daemon_image::is_immutable_image_name)
+    });
+    if !managed {
+        return;
+    }
+    let Ok(version) = semver::Version::parse(env!("CARGO_PKG_VERSION")) else {
+        return;
+    };
+    if let Err(error) = linux::ensure_smelt_pi(&version) {
+        smelt_core::app_log::error("smeltd", &format!("补齐 smelt-pi 失败：{error}"));
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 fn install_release(_version: &semver::Version) -> RuntimeUpgradeReply {
     RuntimeUpgradeReply::Failed {
@@ -74,7 +94,7 @@ fn install_release(_version: &semver::Version) -> RuntimeUpgradeReply {
 fn install_release(version: &semver::Version) -> RuntimeUpgradeReply {
     use crate::service::ImageInstall;
 
-    let result = linux::Staging::new().and_then(|staging| {
+    let result = linux::Staging::new("runtime-upgrade").and_then(|staging| {
         let package = linux::fetch_package(&staging, version, &release_url(version))?;
         linux::install_helpers(&package)?;
         crate::service::install_image(&package.join("smeltd"))
@@ -129,17 +149,17 @@ mod linux {
     const HELPERS: [&str; 2] = ["smelt-notify", "smelt-up"];
 
     /// 下载、解包用的临时目录，用完删掉。放在 `~/.smelt` 下：和 `~/.smelt/bin` 同一个
-    /// 文件系统，`/tmp` 常是容量很小的 tmpfs。名字固定、每次先清空：交接成功时旧进程
-    /// 直接退出，`Drop` 来不及跑，留下的这份由下一次升级清掉。同一时间只有一次升级
-    /// （`IN_PROGRESS`），不会互相清掉。
+    /// 文件系统，`/tmp` 常是容量很小的 tmpfs。按用途分名字、每次先清空：交接成功时旧进程
+    /// 直接退出，`Drop` 来不及跑，留下的这份由下一次同一用途清掉。同一用途同一时间只有
+    /// 一次（升级有 `IN_PROGRESS`，补 smelt-pi 只在启动时跑一次），不会互相清掉。
     pub(super) struct Staging(PathBuf);
 
     impl Staging {
-        pub(super) fn new() -> Result<Self, String> {
+        pub(super) fn new(purpose: &str) -> Result<Self, String> {
             let dir = smelt_paths::smelt_home()
                 .ok_or_else(|| "找不到 $HOME".to_string())?
                 .join("staging")
-                .join("runtime-upgrade");
+                .join(purpose);
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir)
                 .map_err(|error| format!("创建 {} 失败：{error}", dir.display()))?;
@@ -244,6 +264,21 @@ mod linux {
     }
 
     /// 同安装脚本的 `put`：先写到旁边再改名盖过去，正在跑的旧版本不受影响。
+    /// Linux 上没有桌面替运行时发布 smelt-pi，运行时自己保证它在位。链接已经指向能执行的
+    /// 一份就不动；缺了（旧版运行时代为升级时还不认识 smelt-pi、文件被删、从没有 smelt-pi
+    /// 的目录 install）就按自己的版本取 Release 包，校验后发布。顺带回收没人用的旧版本。
+    pub(super) fn ensure_smelt_pi(version: &semver::Version) -> Result<(), String> {
+        let bin = crate::service::bin_dir()?;
+        if smelt_core::pi_image::current(&bin).is_none() {
+            let staging = Staging::new("smelt-pi")?;
+            let package = fetch_package(&staging, version, &super::release_url(version))?;
+            smelt_core::pi_image::publish(&bin, &package)
+                .map_err(|error| format!("发布 smelt-pi 失败：{error}"))?;
+        }
+        smelt_core::pi_image::reap_unused(&bin)
+            .map_err(|error| format!("回收旧 smelt-pi 失败：{error}"))
+    }
+
     pub(super) fn install_helpers(package: &Path) -> Result<(), String> {
         let bin = crate::service::bin_dir()?;
         fs::create_dir_all(&bin)

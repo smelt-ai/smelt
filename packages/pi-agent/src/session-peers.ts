@@ -43,7 +43,7 @@ const STATE_LABEL: Record<string, string> = {
 
 const SENT_LABEL: Record<PeerSent["status"], string> = {
 	queued: "排队中，等对方打开",
-	pending: "已交给对方，等它这一轮做完再看",
+	pending: "已交给对方，等它手上的工具调用做完再看",
 	delivered: "已送到",
 	failed: "没送到",
 };
@@ -81,7 +81,7 @@ export function sessionSendText(reply: PeerHostReply): string {
 	const to = reply.to ? `〈${reply.to.title}〉（${reply.to.id}）` : "对方";
 	return [
 		`Smelt 已收下，正在发给${to}，消息 id ${reply.id}。`,
-		"对方没打开会先打开它；空闲时马上处理，正忙时等它这一轮做完再看。这次调用不等结果。",
+		"对方没打开会先打开它；空闲时马上处理，正忙时等它手上的工具调用做完就会看到。这次调用不等结果。",
 		"对方回复会作为一条 <peer-message> 出现在这里；送不到会收到一条退信。也可以用 session_list 看送到没有，用 session_read 看它最近的回复。",
 	].join("\n");
 }
@@ -191,7 +191,8 @@ function registerSessionPeerTools(pi: ExtensionAPI): void {
 					signal,
 				);
 				const kind = params.kind ?? "message";
-				if (!reply.ok) return failed(reply, { to: { id: params.to, title: "" }, kind });
+				// 守护找到了对方才拒的，回复里带着对方标题。
+				if (!reply.ok) return failed(reply, { to: reply.to ?? { id: params.to, title: "" }, kind });
 				return {
 					content: [{ type: "text" as const, text: sessionSendText(reply) }],
 					details: { to: reply.to, kind, messageId: reply.id, status: reply.status },

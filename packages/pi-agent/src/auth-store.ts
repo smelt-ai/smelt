@@ -2,7 +2,7 @@
  * `~/.pi/agent/auth.json` as a pi-ai `CredentialStore`.
  *
  * Pi's own `AuthStorage` is not exported from `@earendil-works/pi-coding-agent`
- * (its package exports are `.`, `./rpc-entry`, `./client`), so the helper has
+ * (its package exports are `.` and `./rpc-entry`), so the helper has
  * to write the file itself. Everything here mirrors what Pi does, because both
  * processes write the same file: `proper-lockfile` with `realpath: false` for
  * the cross-process lock, `0600` on the file, `0700` on the directory, and

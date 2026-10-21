@@ -2414,6 +2414,9 @@ fn run_serve_loop(
     let exe_mtime = exe_mtime_secs();
     // 第一次启动就把运行时身份落盘，不等第一个客户端来问；失败只记日志，describe 时再试。
     let _ = runtime_identity::runtime_id();
+    thread::spawn(smelt_core::managed_runtime::retire_pi_source_generations);
+    #[cfg(target_os = "linux")]
+    thread::spawn(runtime_upgrade::ensure_smelt_pi);
     // 远程访问不参与无缝升级交接：每次进程启动都是空的，按落盘配置重新拉起。
     // 菜单栏 quit / 任何路径 cleanup 都要够得着它。
     let remote_state = new_remote_state();

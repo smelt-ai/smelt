@@ -443,6 +443,12 @@ fn rejected(reason: &str, error: impl Into<String>) -> serde_json::Value {
     serde_json::json!({"ok": false, "reason": reason, "error": error.into()})
 }
 
+/// 找到了对方才被拒：带上对方是谁，界面写它的标题，不写 id。
+fn with_target(mut reply: serde_json::Value, id: &str, title: &str) -> serde_json::Value {
+    reply["to"] = serde_json::json!({"id": id, "title": title});
+    reply
+}
+
 fn workspace_menu() -> WorkspaceMenuStore {
     SERVER
         .get()
@@ -804,16 +810,24 @@ fn send(
     let source = &source_slot.value;
     let source_bypasses = bypasses_approval(source);
     if target.bypasses == Some(true) && !source_bypasses {
-        return Err(rejected(
-            "permission",
-            "对方是「完全访问」，你是「逐次审批」，不能给它发消息",
+        return Err(with_target(
+            rejected(
+                "permission",
+                "对方是「完全访问」，你是「逐次审批」，不能给它发消息",
+            ),
+            &to,
+            &target.title,
         ));
     }
     let budget = chain_budget(source_id);
     if budget == 0 {
-        return Err(rejected(
-            "hops_exhausted",
-            "这条消息链转发次数用完了，等用户在这个对话里说话后才能再发",
+        return Err(with_target(
+            rejected(
+                "hops_exhausted",
+                "这条消息链转发次数用完了：用户在这个对话里说话之前，发给哪个对话都会被拒，不要重试。要对方知道的事告诉用户",
+            ),
+            &to,
+            &target.title,
         ));
     }
     let hops = budget - 1;
@@ -839,9 +853,13 @@ fn send(
             return replay_reply(&id).ok_or_else(|| rejected("invalid", "这条消息刚被清掉"));
         }
         Accepted::InboxFull => {
-            return Err(rejected(
-                "inbox_full",
-                format!("对方还有 {INBOX_LIMIT} 条消息没收，等它处理完再发"),
+            return Err(with_target(
+                rejected(
+                    "inbox_full",
+                    format!("对方还有 {INBOX_LIMIT} 条消息没收，等它处理完再发"),
+                ),
+                &to,
+                &target.title,
             ));
         }
     }
@@ -896,7 +914,7 @@ fn spawn(
     if budget == 0 {
         return Err(rejected(
             "hops_exhausted",
-            "这条消息链转发次数用完了，等用户在这个对话里说话后才能再起新对话",
+            "这条消息链转发次数用完了：用户在这个对话里说话之前，不能再起新对话，不要重试。要做的事告诉用户",
         ));
     }
 

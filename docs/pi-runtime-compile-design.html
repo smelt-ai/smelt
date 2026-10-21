@@ -1,0 +1,1106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>smelt Pi 运行时单二进制技术方案</title>
+<style>
+
+  :root {
+    --bg: #0d1117;
+    --bg-elevated: #161b22;
+    --bg-sidebar: #0b1017;
+    --border: #30363d;
+    --border-subtle: #21262d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --text-dim: #6e7681;
+    --accent: #39c5cf;
+    --accent-2: #58a6ff;
+    --accent-soft: rgba(57, 197, 207, 0.12);
+    --accent-2-soft: rgba(88, 166, 255, 0.12);
+    --warn: #d29922;
+    --warn-soft: rgba(210, 153, 34, 0.12);
+    --danger: #f85149;
+    --danger-soft: rgba(248, 81, 73, 0.1);
+    --ok: #3fb950;
+    --ok-soft: rgba(63, 185, 80, 0.1);
+    --code-bg: #010409;
+    --sidebar-w: 240px;
+    --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono",
+      Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 1.25rem 0.9rem 2rem;
+    font-size: 13px;
+  }
+  nav.toc .brand {
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.35rem;
+  }
+  nav.toc .toc-title {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-bottom: 1rem;
+    line-height: 1.4;
+  }
+  nav.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: toc;
+  }
+  nav.toc li { margin: 0; }
+  nav.toc a {
+    display: block;
+    padding: 0.35rem 0.55rem;
+    border-radius: 6px;
+    color: var(--text-muted);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+  }
+  nav.toc a:hover {
+    background: var(--accent-soft);
+    color: var(--text);
+    text-decoration: none;
+  }
+  nav.toc a::before {
+    counter-increment: toc;
+    content: counter(toc) ". ";
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  main {
+    max-width: 880px;
+    padding: 2rem 2.5rem 4rem;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  header.doc-header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  header.doc-header h1 {
+    margin: 0 0 0.6rem;
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+  }
+  header.doc-header .meta {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+  header.doc-header .meta strong { color: var(--text); font-weight: 600; }
+  .badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.9rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+  }
+  .badge.accent { border-color: rgba(57,197,207,0.4); color: var(--accent); background: var(--accent-soft); }
+  .badge.blue { border-color: rgba(88,166,255,0.4); color: var(--accent-2); background: var(--accent-2-soft); }
+  .badge.warn { border-color: rgba(210,153,34,0.4); color: var(--warn); background: var(--warn-soft); }
+  .badge.ok { border-color: rgba(63,185,80,0.4); color: var(--ok); background: var(--ok-soft); }
+
+  section {
+    margin-bottom: 2.75rem;
+    scroll-margin-top: 1.25rem;
+  }
+  h2 {
+    font-size: 1.3rem;
+    margin: 0 0 1rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  h2 .num {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    margin-right: 0.35rem;
+  }
+  h3 {
+    font-size: 1.05rem;
+    margin: 1.5rem 0 0.6rem;
+    color: var(--text);
+  }
+  h4 {
+    font-size: 0.95rem;
+    margin: 1.1rem 0 0.45rem;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  p { margin: 0.65rem 0; }
+  ul, ol { margin: 0.5rem 0 0.85rem; padding-left: 1.35rem; }
+  li { margin: 0.28rem 0; }
+  li::marker { color: var(--text-dim); }
+
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin: 1rem 0;
+    font-size: 0.92rem;
+  }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .callout.danger { border-left-color: var(--danger); background: var(--danger-soft); }
+  .callout.ok { border-left-color: var(--ok); background: var(--ok-soft); }
+  .callout .label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.25rem;
+  }
+  .callout.warn .label { color: var(--warn); }
+  .callout.danger .label { color: var(--danger); }
+  .callout.ok .label { color: var(--ok); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    margin: 0.9rem 0 1.2rem;
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  th, td {
+    text-align: left;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: top;
+  }
+  th {
+    background: #1c2128;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 0.85em; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--code-bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    color: #c9d1d9;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.95rem 1.05rem;
+    overflow-x: auto;
+    margin: 0.85rem 0 1.1rem;
+    font-size: 0.8rem;
+    line-height: 1.55;
+  }
+  pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #c9d1d9;
+    font-size: inherit;
+  }
+  .sketch-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--warn);
+    background: var(--warn-soft);
+    border: 1px solid rgba(210,153,34,0.35);
+    border-radius: 4px;
+    padding: 0.1rem 0.45rem;
+    margin-bottom: 0.45rem;
+  }
+
+  .mermaid {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1rem 0 1.25rem;
+    overflow-x: auto;
+  }
+
+  .phase-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin: 1rem 0;
+  }
+  .phase-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    background: var(--bg-elevated);
+  }
+  .phase-card h4 { margin: 0 0 0.4rem; color: var(--accent); font-size: 0.95rem; }
+  .phase-card.p1 h4 { color: var(--accent-2); }
+  .phase-card.p2 h4 { color: var(--warn); }
+  .phase-card.out h4 { color: var(--danger); }
+  .phase-card ul { margin: 0; padding-left: 1.1rem; font-size: 0.88rem; }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.82rem;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc {
+      position: relative;
+      height: auto;
+      max-height: none;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding: 1rem;
+    }
+    nav.toc ol {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.25rem;
+    }
+    nav.toc a { border-left: none; padding: 0.3rem 0.5rem; }
+    main { padding: 1.25rem 1.1rem 3rem; }
+  }
+
+  @media print {
+    :root {
+      --bg: #fff;
+      --bg-elevated: #f6f8fa;
+      --bg-sidebar: #f6f8fa;
+      --text: #1f2328;
+      --text-muted: #656d76;
+      --text-dim: #8c959f;
+      --border: #d0d7de;
+      --border-subtle: #eaeef2;
+      --code-bg: #f6f8fa;
+      --accent: #0550ae;
+      --accent-2: #0550ae;
+    }
+    nav.toc { display: none; }
+    .layout { display: block; }
+    main { max-width: none; padding: 0; }
+    a { color: inherit; text-decoration: underline; }
+    .mermaid { break-inside: avoid; }
+    pre { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="目录">
+  <div class="brand">smelt · 设计文档</div>
+  <div class="toc-title">Pi 运行时编译成单个二进制<br/>bun build --compile<br/>2026-10-20</div>
+  <ol>
+    <li><a href="#landed">落地差异</a></li>
+    <li><a href="#s1">背景与目标</a></li>
+    <li><a href="#s2">设计原则</a></li>
+    <li><a href="#s3">实测依据</a></li>
+    <li><a href="#s4">目标架构</a></li>
+    <li><a href="#s5">pi-agent 怎么改</a></li>
+    <li><a href="#s6">managed runtime 收敛</a></li>
+    <li><a href="#s7">扩展依赖安装</a></li>
+    <li><a href="#s8">打包、签名、公证</a></li>
+    <li><a href="#s9">命名陷阱</a></li>
+    <li><a href="#s10">要删掉的东西</a></li>
+    <li><a href="#s11">实施步骤与验收</a></li>
+    <li><a href="#s12">风险与待验证</a></li>
+    <li><a href="#s13">PR 关系</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="doc-header">
+  <h1>smelt Pi 运行时单二进制技术方案</h1>
+  <div class="meta">
+    <strong>日期</strong>：2026-10-20（Asia/Taipei） ·
+    <strong>受众</strong>：smelt 仓库维护者（Rust <code>smeltd</code> + Pi agent） ·
+    <strong>状态</strong>：已按下面的「落地差异」实现。原稿里和实现不一致的地方以那一节为准
+  </div>
+  <div class="meta" style="margin-top:0.45rem">
+    <strong>项目</strong>：
+    <a href="https://github.com/smelt-ai/smelt" target="_blank" rel="noopener">smelt-ai/smelt</a>
+    ·
+    <strong>依据</strong>：2026-10-20 在 Linux x64 上用 Bun 1.4.0 baseline 对 <code>packages/pi-agent</code> 做的 <code>bun build --compile</code> 实测
+  </div>
+  <div class="badge-row">
+    <span class="badge accent">单个 Bun 二进制</span>
+    <span class="badge ok">首启不安装</span>
+    <span class="badge blue">随 app 签名发布</span>
+    <span class="badge warn">Mac 签名尚未实测</span>
+  </div>
+</header>
+
+<section id="landed">
+  <h2><span class="num">0.</span>落地差异</h2>
+  <p>
+    这一节是已经进仓库的行为。下面各节是当时的方案，和这里冲突时以这里为准。
+  </p>
+  <ul>
+    <li>
+      编译命令是 <code>bun build --compile --bytecode --format=esm --splitting --no-compile-autoload-dotenv --no-compile-autoload-bunfig</code>。
+      Bun 1.4.3 上图片 worker 和 codemode worker 的冒烟都过了。
+      Bun 1.4.0 上拆块之后，图片 worker 里的 photon 绑定变成
+      <code>exports_photon_rs is not defined</code>，1.4.3 没有这个问题。
+      <code>./src/...worker.ts</code> 在 bunfs 里仍然是 <code>Cannot find module</code>，所以编译时还是把这两条说明符改成 <code>/$bunfs/root/...</code>。
+    </li>
+    <li>
+      Bun 不打进应用，也不用 <code>BUN_BE_BUN</code>。MCP 预设的 <code>bun x</code> 和 Claude/Codex 的 <code>bunx</code>
+      仍用按需下载的 Bun 1.4.3：<code>~/.smelt/runtime</code> 下的 generation（<code>store</code>、<code>current</code>、<code>leases</code>、<code>staging</code>）就是它的家，这些目录不能当成旧运行时清掉。
+      <code>~/.smelt/runtime/bin/bun</code> 指向当前 generation。
+    </li>
+    <li>
+      <code>smelt-pi</code>、<code>photon_rs_bg.wasm</code> 和 <code>native/</code> 按这一整套自己的指纹发布成
+      <code>~/.smelt/bin/smelt-pi-&lt;指纹&gt;/</code>，<code>~/.smelt/bin/smelt-pi</code> 链接指向当前那份。和守护映像的指纹无关：只换了 Pi 不用等守护交接。
+      桌面每次启动从 App 里发布一次，Linux 由 <code>smeltd install</code> 发布。守护起 Pi 时解析链接、exec 真实路径，已经在跑的 Pi 不受换链接影响。没有别的查找路径，也没有环境变量覆盖。
+    </li>
+    <li>
+      <code>photon_rs_bg.wasm</code> 是可执行文件旁边的 sidecar，不打进 bunfs。QuickJS wasm 由静态 import 嵌进二进制。
+    </li>
+    <li>
+      签名用的 plist 在 <code>scripts/entitlements.plist</code> 和 <code>scripts/jit-entitlements.plist</code>。
+      没有 <code>ci/</code> 目录。
+    </li>
+    <li>
+      会话文件按 cwd 目录名加文件名里的会话 id 定位（<code>session_history::pi_sessions_dir</code>，展开 <code>~</code>，认 <code>PI_CODING_AGENT_DIR</code>）。
+      启动前读一遍只为了尽早发布模型名。握手和分叉完成之后、发出 <code>Ready</code> 之前再读这一份来重放。
+      文件找不到或解析失败就向 Pi 要 <code>get_entries</code> 并记一条日志；两边都失败则恢复失败，不显示空转录。
+      只有文件头的空会话是真正的空转录。分叉切点在 Pi 里对不上仍是错误；不再在本地把整段历史留下来冒充分叉结果。
+    </li>
+    <li>
+      模型在拉起进程之前就发 <code>ConversationEvent::Model</code>：恢复时用文件里的最后一次模型，否则用启动参数，再否则用设置里的默认模型。
+      消息上的 provider 用条目自己的 <code>provider</code> 字段，不把 model id 按 <code>/</code> 切开。
+      <code>get_state</code> 和 <code>set_model</code> 之后再各发一次，后到的盖住先到的。不用未确认点击那层 overlay。
+      转录重放完才发 <code>Ready</code>，避免 <code>awaiting_user_echo</code> 吞掉用户消息。不写 <code>~/.pi/agent/settings.json</code>。
+    </li>
+  </ul>
+  <p>
+    下面的体积和耗时是这台 Linux x64、Bun 1.4.0 baseline 上的实测。
+    用户在 Bun 1.4.3 上量过：源码 RPC ready 339ms，只 <code>--compile</code> 316ms，
+    <code>--compile --bytecode --format=esm</code> 约 95ms；再加上 <code>--splitting</code> 热启动约 89ms→82ms、冷启动 136ms→124ms。
+    发布构建用 Bun 1.4.3，并带 <code>--splitting</code>。上面的体积和耗时仍是 1.4.0、不拆块时量的，不是这次的数字。
+  </p>
+  <table>
+    <thead>
+      <tr><th>产物</th><th>字节</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Linux x64 baseline <code>smelt-pi</code>（bytecode + esm）</td><td>144,585,928</td></tr>
+      <tr><td>交叉编译 <code>bun-darwin-arm64</code></td><td>126,441,458（Mach-O arm64，本机不能执行）</td></tr>
+      <tr><td><code>photon_rs_bg.wasm</code></td><td>1,881,634</td></tr>
+    </tbody>
+  </table>
+  <p>
+    空会话上重复 <code>get_state</code>：129.6、115.3、115.8、113.2、117.2 ms。
+    带 jiti 扩展的冒烟第一次是 200.4ms。短会话恢复 176.5ms，长会话恢复 154.4ms。
+    这是进程启动到 <code>get_state</code> 回包，比 1.4.3 上只量 RPC ready 的 95ms 多了 Pi 自己的初始化。
+  </p>
+  <p>
+    转录阶段用同一份夹具：每轮一条用户消息、一次工具调用、一份 8KB 工具输出，另外有一条同样大的死分支。
+    短的是 8 轮。长的是 174 轮，活动分支 523 条 entry（含 model_change），文件里一共 697 条。
+    Rust 数字来自 <code>cargo test</code> 的 debug 剖面，比 release 的 smeltd 慢。
+    这些阶段数字是旧路径上量的。现在文件读得到就直接重放，不再为了恢复去要 <code>get_entries</code>。
+  </p>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>短会话</th><th>长会话</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>会话文件字节 / 读 / 逐行解析 / 抽出活动分支</td><td>135,165 · 72µs · 950µs · 387µs</td><td>2,939,432 · 1.43ms · 17.7ms · 4.21ms</td></tr>
+      <tr><td>整树 JSON 字节 / 一次解析 / <code>active_branch</code></td><td>135,125 · 766µs · 178µs</td><td>2,939,395 · 15.9ms · 3.27ms</td></tr>
+      <tr><td>重放事件条数 / 发出耗时</td><td>34 · 370µs</td><td>698 · 4.45ms</td></tr>
+      <tr><td>归约并序列化快照</td><td>68,229 字节 · 1.69ms</td><td>1,458,862 字节 · 31.7ms</td></tr>
+      <tr><td>Pi <code>get_entries</code> 响应</td><td>1.5ms · 136,625 字节 · 34 条</td><td>18.1ms · 2,966,791 字节 · 698 条</td></tr>
+    </tbody>
+  </table>
+  <p>
+    界面第一次把转录排出来的时间没有量。GPUI 的 <code>render</code> 不能写日志。
+    重放在发出 <code>Ready</code> 之前完成，界面在同一批快照里拿到转录和就绪。
+  </p>
+</section>
+
+<section id="s1">
+  <h2><span class="num">1.</span>背景与目标 / 非目标</h2>
+
+  <h3>1.1 现在怎么跑</h3>
+  <p>
+    Pi agent 的源码在 <code>packages/pi-agent</code>（<code>@smelt-ai/pi-agent</code>），依赖
+    <code>@earendil-works/pi-coding-agent</code>、<code>pi-ai</code>、<code>pi-mcp</code> 1.1.0 和
+    <code>proper-lockfile</code>。<code>crates/smelt-core/build.rs</code> 把入口、扩展、
+    <code>package.json</code> 和 <code>bun.lock</code> 嵌进二进制。首次准备时，
+    <code>managed_runtime.rs</code> 在 <code>~/.smelt/runtime/store/pi/&lt;generation&gt;/</code>
+    用受管 Bun 执行 <code>bun install --frozen-lockfile --production --ignore-scripts</code>。
+    Bun 自己放在 <code>~/.smelt/runtime/store/bun/&lt;generation&gt;/</code>，稳定入口是
+    <code>~/.smelt/runtime/bin/bun</code>。会话持有两份 generation lease，并把 lease FD 继承给子进程。
+  </p>
+  <p>
+    这条路的代价是首启要下载 Bun、解压、再装一整棵 <code>node_modules</code>（production 安装实测 170MB、124 个包），
+    还要维护 generation、staging、lease 和文件嵌入表。运行时目录被回收之后，按 <code>import.meta.url</code>
+    再去读磁盘的 OAuth 刷新会 <code>ENOENT</code>，所以现在启动时还要静态注册 OAuth flow。
+  </p>
+
+  <h3>1.2 为什么不再用首启 bun install</h3>
+  <p>
+    依赖已经能在发布时打进一个可执行文件，Bun 运行时也在里面。首启安装解的是发布机上就能确定的东西：
+    锁定的 npm 树和 Bun 本身。把它留到用户机器上，多一次网络、一次磁盘事务、一套租约，换来的运行结果和编译后的二进制相同。
+    实测里，编译产物在没有旁边 <code>node_modules</code> 的临时目录里完成了 <code>get_state</code>、扩展加载和 MCP 网关健康检查。
+  </p>
+
+  <h3>1.3 为什么不再用 tar.gz（PR #52）</h3>
+  <p>
+    草稿 PR #52（分支 <code>cursor/pi-runtime-archive-e544</code>）试过把装好的运行时预先打成 tar.gz，首启只解压。
+    这个方向已经放弃，#52 已关闭，由本方案取代。main 上没有那套代码。它仍然是「用户机器上展开一棵运行时目录」：解压、generation、lease、
+    磁盘上的 <code>node_modules</code> 都还在，只是把 <code>bun install</code> 换成了解包。
+    编译方案把代码和 Bun 收进签名过的 app bundle，首启不下载、不安装、不解压。
+  </p>
+  <p>
+    Linux 发行物 <code>smeltd-&lt;版本&gt;-linux-&lt;架构&gt;.tar.gz</code> 是另一回事，那是 <code>smeltd</code> 的安装包。
+    实现时这个包里要带上编好的 Pi 二进制和旁路文件。不要把 #52 的 Pi 运行时归档做进这个包。
+  </p>
+
+  <h3>1.4 目标</h3>
+  <ul>
+    <li>用 <code>bun build --compile</code> 把 Pi 依赖和 <code>packages/pi-agent/src</code> 编成一个可执行文件，按平台随 <code>smelt.app</code> / Linux 包发布并签名。</li>
+    <li>一个二进制，用子命令区分 RPC、登录、MCP、<code>gateway</code>。子智能体再执行自己。</li>
+    <li>两个 worker（图片缩放、codemode）作为编译入口嵌进去。QuickJS wasm 嵌进二进制。Photon wasm 和 <code>pi-tui</code> 的 <code>.node</code> 作为旁路文件放在可执行文件旁边。</li>
+    <li>首启直接运行 bundle 里的文件。<code>~/.smelt/runtime/bin/bun</code> 这个已经写进 <code>mcp.json</code> 的路径改成指向 bundle 的启动器，不再下载 Bun、不再 <code>bun install</code>。</li>
+    <li><code>packages/pi-agent</code> 继续保留源码、<code>package.json</code> 和 <code>bun.lock</code>，用来锁版本和跑测试。运行时不再把它们嵌进 Rust 二进制再写到用户目录。</li>
+  </ul>
+
+  <h3>1.5 非目标</h3>
+  <ul>
+    <li>落地实现做在本 PR，按本文直接替换旧路径。</li>
+    <li>不保留首启 <code>bun install</code> 作为退路，也不把 #52 的 tar.gz 和编译产物并存。</li>
+    <li>不在这篇方案里做 macOS 签名或公证。那些步骤写清楚，留到 Mac runner 上验收。</li>
+    <li>不改 Pi RPC 协议，不改 Smelt 扩展的产品行为。</li>
+  </ul>
+
+  <div class="callout ok">
+    <div class="label">结论</div>
+    有条件可行。Pi 1.1.0 的发布包自己就带 <code>build:binary</code>，用 <code>bun build --compile</code> 编官方 CLI，并声明 worker 入口和 photon wasm 旁路。2026-10-20 的实测把同一机制用在 Smelt 的源码上，Linux 上 RPC、扩展、codemode、图片缩放和网关都跑通了。条件是：子命令分流、静态 import、worker 路径、旁路文件、进程不能叫 <code>bun</code>、JIT entitlements。后两项里，签名尚未在 Mac 上验证。
+  </div>
+</section>
+
+<section id="s2">
+  <h2><span class="num">2.</span>设计原则</h2>
+  <ol>
+    <li><strong>直接替换。</strong>运行中的 Pi 只从 bundle 里的 <code>smelt-pi</code> 拉起。generation 目录、staging、<code>bun install</code>、源码嵌入表一并删掉，不留「编译失败就退回安装」的分支。</li>
+    <li><strong>不打补丁硬撑。</strong><code>pi-mcp-runtime.ts</code> 里用 <code>import.meta.resolve</code> 再动态加载 Pi 内部文件的写法，在编译产物里会在启动时失败。改成静态 import，让打包器收进二进制。不要在运行时再去磁盘上找一份 <code>node_modules</code>。</li>
+    <li><strong>外部路径和内部实现分开。</strong><code>~/.smelt/runtime/bin/bun</code> 已经写进用户的 <code>mcp.json</code>（<code>MANAGED_BUN_LAUNCHER_HOME_PATH</code>）。路径字符串留下，因为它是外部配置里的命令。路径后面的下载、generation 和 lease 删掉，改成一条指向当前 bundle 的启动器。</li>
+    <li><strong>仓库里的包还在。</strong><code>packages/pi-agent</code> 的源码、<code>package.json</code>、<code>bun.lock</code> 继续是版本和测试的依据。<code>bun run check</code>、<code>bun test</code>、<code>production-smoke</code> 仍对着这棵源码树跑。变的是发布物，不是开发时的包。</li>
+    <li><strong>证据先于推断。</strong>下面每条架构选择都对应 §3 的实测。Mac 上没跑过的，写成待验证，不写成已经成立。</li>
+  </ol>
+</section>
+
+<section id="s3">
+  <h2><span class="num">3.</span>实测依据</h2>
+  <p>
+    环境：Linux x64，Bun 1.4.0 baseline。可执行文件 SHA-256 为
+    <code>33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b</code>，
+    与 <code>managed_runtime.rs</code> 里 Linux x64 的 <code>BUN_EXECUTABLE_SHA256</code> 一致。
+    依赖用 <code>bun install --frozen-lockfile</code> 装在 <code>packages/pi-agent</code>。
+    实验代码没有进 main。
+  </p>
+
+  <h3>3.1 Pi 官方已经按二进制设计</h3>
+  <p><code>@earendil-works/pi-coding-agent@1.1.0</code> 的 <code>build:binary</code>：</p>
+  <pre><code>bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv \
+  ./dist/bun/cli.js \
+  ./src/utils/image-resize-worker.ts \
+  ./src/extensions/codemode/worker.ts \
+  --outfile dist/pi</code></pre>
+  <p>
+    <code>copy-binary-assets</code> 把 <code>photon_rs_bg.wasm</code> 拷到产物旁边。
+    <code>dist/core/extensions/virtual-modules.js</code> 把 <code>@earendil-works/pi-coding-agent</code>、
+    <code>pi-ai</code>、<code>pi-agent-core</code>、<code>pi-tui</code>、<code>typebox</code> 和
+    <code>@mariozechner/*</code> 映到打进去的模块，注释写的是 source and compiled binary runtimes。
+    <code>jiti-static-loader.js</code> 写明编译后的二进制用 <code>jiti/static</code>。
+    <code>dist/bun/runtime-setup.js</code> 静态 import <code>quickjs-wasi/quickjs.wasm</code>，并调用
+    <code>setEmbeddedQuickJSWasmPath</code>。npm 包里没有那些 <code>.ts</code> worker 源文件，实测用同路径的 shim 转调 <code>dist</code>。
+  </p>
+
+  <h3>3.2 编出来的体积</h3>
+  <p>在包目录里编译（2068 个模块，bundle + compile 约 0.4 秒）：</p>
+  <pre><code>bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv \
+  ./.spike/entry.ts \
+  ./src/utils/image-resize-worker.ts \
+  ./src/extensions/codemode/worker.ts \
+  --outfile smelt-pi</code></pre>
+  <table>
+    <thead>
+      <tr><th>产物</th><th>字节</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Linux x64 <code>smelt-pi</code></td><td>95,159,496（91MB）</td><td>gzip 39,268,740。动态链接 glibc，最高符号版本 <code>GLIBC_2.17</code></td></tr>
+      <tr><td>交叉编译 <code>--target=bun-darwin-arm64</code></td><td>76,624,754（74MB）</td><td>gzip 28,589,864。<code>file</code> 为 Mach-O arm64。在 Linux 上执行得到 Exec format error</td></tr>
+      <tr><td>Bun 1.4.0 baseline 本体</td><td>80,761,952（78MB）</td><td>体积大头是运行时。空入口的小二进制已经 79MB</td></tr>
+      <tr><td>production <code>node_modules</code></td><td>170MB</td><td><code>bun install --frozen-lockfile --production --ignore-scripts</code>，124 个包。这是现在首启要装下来的树</td></tr>
+      <tr><td>含 devDependencies 的 <code>node_modules</code></td><td>197MB</td><td>开发机上的完整安装，不是发布物</td></tr>
+      <tr><td><code>photon_rs_bg.wasm</code></td><td>1,881,634</td><td>必须放在可执行文件旁边，不会打进二进制</td></tr>
+      <tr><td><code>quickjs.wasm</code></td><td>637,405</td><td>静态 import 之后出现在 <code>/$bunfs/root/quickjs-*.wasm</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    从包外用绝对路径 <code>import()</code> 去编，只会收进 41 个模块、约 80MB。运行时再去读磁盘上的 <code>.ts</code>，然后报
+    <code>Cannot find module '@earendil-works/pi-ai/providers/all'</code>。发布用的编译必须在 <code>packages/pi-agent</code> 里、用相对路径。
+  </p>
+
+  <h3>3.3 进程参数和子命令</h3>
+  <p>编译产物的 <code>process.argv</code> 实测是：</p>
+  <pre><code>["bun", "/$bunfs/root/smelt-pi", "hello", "--mode", "rpc"]</code></pre>
+  <p>
+    <code>argv[0]</code> 是字符串 <code>bun</code>，不是路径。<code>process.execPath</code> 才是真实路径。
+    <code>import.meta.url</code> 是 <code>file:///$bunfs/root/smelt-pi</code>，Pi 的 <code>isBunBinary</code> 为 true。
+    第二个编译入口不会变成可选的主程序：小二进制里后一个文件的 <code>SECOND_ENTRY</code> 从未打印。
+  </p>
+  <p>
+    <code>smelt-pi auth list</code> 退出码 0，列出 42 个 provider，第一个是 <code>amazon-bedrock</code>。
+    <code>smelt-pi mcp list</code> 在临时 <code>PI_CODING_AGENT_DIR</code> 下退出码 0，输出
+    <code>No MCP servers configured</code>。
+  </p>
+  <p>
+    子智能体的 <code>getPiInvocation</code> 已经认识 <code>/$bunfs/root/</code>。二进制名叫 <code>smelt-pi</code> 时，
+    它再执行 <code>process.execPath</code>，参数里不再带脚本路径。实测子进程 argv 为
+    <code>["bun", "/$bunfs/root/smelt-pi", "argv"]</code>。把同一文件复制成名为 <code>bun</code> 的路径后再执行，
+    会去 spawn <code>pi</code>，结果是 <code>Executable not found in $PATH: "pi"</code>。
+  </p>
+  <p>
+    网关今天用 <code>fileURLToPath(new URL("./mcp-gateway-main.ts", import.meta.url))</code> 当脚本路径。
+    编译后这条路径是 <code>/$bunfs/src/mcp-gateway-main.ts</code>，<code>exists</code> 为 false。
+    按现有代码 spawn，子进程退出码 1：<code>Cannot find module '@earendil-works/pi-coding-agent'</code>。
+    改成子命令 <code>gateway</code> 之后，同一二进制可以听端口。
+  </p>
+  <p>
+    <code>src/pi-mcp-runtime.ts</code> 用 <code>import.meta.resolve("@earendil-works/pi-coding-agent")</code>
+    再动态加载 <code>./extensions/mcp/runtime.js</code>。打进二进制后这个包名在运行时解析不到，
+    <code>get_state</code> 和网关都会马上失败。改成对
+    <code>node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js</code> 的静态 import 之后，RPC 才通过。
+  </p>
+
+  <h3>3.4 Worker、wasm、原生模块</h3>
+  <ul>
+    <li>在空目录里，带上两个 worker 入口的二进制把 8×8 PNG 缩成 4×4，<code>wasResized: true</code>。不带这两个入口时：<code>Cannot find module './src/utils/image-resize-worker.ts'</code>，退出码 1。</li>
+    <li>codemode worker <code>./src/extensions/codemode/worker.ts</code> 执行 <code>return 1+1</code>，得到 <code>{ ok: true, value: 2 }</code>。wasm 路径在 <code>/$bunfs</code> 里。把二进制拷到没有 <code>node_modules</code> 的目录，结果相同。</li>
+    <li>把 <code>node_modules</code> 里的 <code>photon_rs_bg.wasm</code> 改名之后：可执行文件旁边有这份 wasm 时缩放成功；旁边也没有时 <code>resizeImage</code> 返回空，退出码 1。测完已把原文件放回。</li>
+    <li>依赖树里的 <code>.node</code> 只有 <code>@earendil-works/pi-tui</code> 的剪贴板预编译库（Linux x64 18,008 字节，darwin-arm64 52,024 字节，另有 linux-arm64、darwin-x64、win32）。没有 koffi，没有 sharp。<code>quickjs-wasi/extensions/*.so</code> 是 wasm，不是 ELF；<code>1+1</code> 没有加载它们。</li>
+    <li><code>.node</code> 不会打进二进制。从编译后的进程 <code>require</code> Linux x64 那份，<code>hasGetText: true</code>。文件放在可执行文件旁的 <code>native/linux/prebuilds/linux-x64/linux-platform-x11.node</code> 也能加载。文件不在则 <code>MODULE_NOT_FOUND</code>。darwin 的 <code>.node</code> 在包里，这台机器加载不了。</li>
+  </ul>
+
+  <h3>3.5 扩展、安装命令、RPC</h3>
+  <p>
+    <code>--approve --offline --no-session</code> 下，三份扩展同时加载：用户目录里 import
+    <code>@earendil-works/pi-coding-agent</code> 和 <code>typebox</code> 的 <code>user-ext.ts</code>、
+    项目 <code>.pi/extensions/proj-ext.ts</code>、自带 <code>package.json</code> 和 <code>node_modules/ms</code> 的
+    <code>with-deps</code>。<code>ms("2 days")</code> 得到 <code>172800000</code>。
+    <code>get_commands</code> 返回 <code>spike-proj</code>、<code>spike-user</code>、<code>spike-duration</code>、
+    <code>llama</code>、<code>mcp</code>、<code>shake</code>、<code>handoff</code>、<code>smelt-codemode</code>。
+    stderr 为空。<code>--no-approve</code> 按 Pi 的项目信任规则跳过项目扩展，<code>spike-proj</code> 消失。
+    挪走 <code>with-deps/node_modules</code> 后进程退出码 1：<code>Cannot find module 'ms'</code>。
+  </p>
+  <p>
+    Pi 安装包扩展时，未配置 <code>npmCommand</code> 就调用 <code>npm</code>。假 npm 记到的参数是：
+  </p>
+  <pre><code>npm install ms --prefix &lt;agentDir&gt;/npm --legacy-peer-deps</code></pre>
+  <p>
+    <code>BUN_BE_BUN=1 ./smelt-pi argv</code> 把智能体入口换成 Bun CLI，报 <code>Script not found "argv"</code>，退出码 1。
+    只加在子进程上时，<code>--version</code> 输出 <code>1.4.0</code>。
+    <code>/usr/bin/env BUN_BE_BUN=1 ./smelt-pi install ms --cwd &lt;dir&gt; --omit=peer</code> 装上了 <code>ms@2.1.3</code>。
+    同一条二进制执行 Pi 传给 npm 的 <code>--prefix &lt;dir&gt; --legacy-peer-deps</code>，Bun 报 <code>Invalid dependency name</code>，退出码 1。
+    Pi 只有在命令 basename 被认成 <code>bun</code> 时才会改传 <code>--cwd</code> 和 <code>--omit=peer</code>。
+  </p>
+  <p>
+    RPC 冒烟对应 <code>packages/pi-agent/scripts/production-smoke.ts</code> 的 <code>get_state</code>，工作目录旁边没有 Pi 的 <code>node_modules</code>。
+    约 406ms，退出码 0，<code>success: true</code>，<code>messageCount: 0</code>，<code>sessionFile: null</code>。
+    启动时有一条 <code>extension_ui_request</code>（<code>setWidget</code> / <code>smelt-codemode</code>）。
+    没有配模型密钥，没有发一轮对话。
+  </p>
+  <p>
+    网关子命令在临时 <code>SMELT_HOME</code> 写下 <code>gateway-v2.json</code>，<code>protocol</code> 为 2。
+    正确 bearer 的 <code>GET /health</code> 返回 200 <code>{"ok":true,"protocol":2,...,"servers":[],"sessions":0}</code>，
+    错误 token 返回 401。<code>SIGTERM</code> 后日志是 <code>exiting: SIGTERM</code>。
+  </p>
+
+  <h3>3.6 交叉编译和签名</h3>
+  <p>
+    <code>bun build --compile --target=bun-darwin-arm64</code> 在 Linux 上成功，日志使用
+    <code>bun-darwin-aarch64-v1.4.0</code>。<code>file</code> 输出：
+  </p>
+  <pre><code>Mach-O 64-bit arm64 executable, flags:&lt;NOUNDEFS|DYLDLINK|TWOLEVEL|BINDS_TO_WEAK|PIE|HAS_TLV_DESCRIPTORS&gt;</code></pre>
+  <p>
+    在 Linux 上运行该文件：<code>cannot execute binary file: Exec format error</code>。
+    darwin 二进制的 worker、扩展、签名、公证、<code>.node</code> 加载都没有在 Mac 上做过。
+    Bun 文档写明这个 target：
+    <a href="https://bun.com/docs/bundler/executables">Single-file executable</a>。
+    codesign 从 Bun 1.2.4 起可用（我们用的是 1.4.0）：
+    <a href="https://bun.com/guides/runtime/codesign-macos-executable">Codesign a single-file JavaScript executable on macOS</a>，
+    实现是 <a href="https://github.com/oven-sh/bun/pull/17207">oven-sh/bun#17207</a>。
+    文档要求的 entitlements 是 <code>allow-jit</code>、<code>allow-unsigned-executable-memory</code>、
+    <code>disable-executable-page-protection</code>、<code>allow-dyld-environment-variables</code>、
+    <code>disable-library-validation</code>。Bun 仓库的
+    <a href="https://github.com/oven-sh/bun/blob/main/entitlements.plist"><code>entitlements.plist</code></a>
+    含前四项。这些是文档，不是这次的签名结果。
+  </p>
+</section>
+
+<section id="s4">
+  <h2><span class="num">4.</span>目标架构</h2>
+
+  <div class="sketch-label">发布物</div>
+  <div class="mermaid">
+flowchart TB
+  subgraph App["smelt.app / Linux 包"]
+    Pi["MacOS/smelt-pi<br/>进程名不是 bun"]
+    Wasm["photon_rs_bg.wasm"]
+    Node["native/&lt;os&gt;/prebuilds/.../*.node"]
+  end
+  subgraph Home["~/.smelt/runtime"]
+    Launcher["bin/bun<br/>启动器：BUN_BE_BUN=1 再 exec smelt-pi"]
+  end
+  Host["smeltd"] -->|"无脚本路径"| Pi
+  Pi -->|"子命令 auth / mcp / gateway"| Pi
+  Pi -->|"getPiInvocation 再 exec 自己"| Pi
+  Mcp["mcp.json 里的 command"] --> Launcher
+  Launcher --> Pi
+  Pi --- Wasm
+  Pi --- Node
+  </div>
+
+  <h3>4.1 一个二进制，四条入口</h3>
+  <table>
+    <thead>
+      <tr><th>调用</th><th>谁发起</th><th>二进制看到的用户参数</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>RPC 会话</td><td><code>smeltd</code>、<code>subagent</code></td><td>现有的 Pi 参数（<code>--offline</code>、<code>--mode rpc</code> 等）。没有子命令时进入现在的 <code>src/main.ts</code></td></tr>
+      <tr><td><code>auth</code></td><td>登录 UI，今天走 <code>src/auth-main.ts</code></td><td><code>auth list|login|logout ...</code></td></tr>
+      <tr><td><code>mcp</code></td><td>MCP 登录，今天走 <code>src/mcp-main.ts</code></td><td><code>mcp list|login ...</code></td></tr>
+      <tr><td><code>gateway</code></td><td>第一个要用 stdio MCP 的对话</td><td><code>gateway</code>。网关逻辑仍是现在的 <code>mcp-gateway-main.ts</code></td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>bun build --compile</code> 只有第一个文件是主入口。worker 是另外的入口，不能靠 argv 选成主程序。
+    分流写在主入口里：先丢掉 <code>argv[1]</code> 的 <code>/$bunfs/root/...</code>，再看第一个用户参数。
+    <code>main.ts</code> 仍然自己前置 <code>--mode rpc</code>。子智能体传过来的参数里已经有一次 <code>--mode rpc</code>，
+    Pi 的解析以后者为准，重复无害，不必为了这个再包一层兼容。
+  </p>
+
+  <h3>4.2 编译入口</h3>
+  <pre><code>bun build --compile \
+  --no-compile-autoload-bunfig \
+  --no-compile-autoload-dotenv \
+  ./src/compiled-main.ts \
+  ./src/utils/image-resize-worker.ts \
+  ./src/extensions/codemode/worker.ts \
+  --outfile smelt-pi</code></pre>
+  <p>
+    两个 worker 路径必须和 Pi 写死的字符串一致：<code>./src/utils/image-resize-worker.ts</code>、
+    <code>./src/extensions/codemode/worker.ts</code>（<code>dist/config.js</code> 的
+    <code>resolveCodemodeWorkerSpecifier</code>，<code>dist/utils/image-resize.js</code>）。
+    发布到 npm 的 Pi 包没有这两份 <code>.ts</code>。在 <code>packages/pi-agent/src</code> 放同路径文件，
+    内容只 import <code>dist</code> 里的 worker。这是编译入口，不是运行时去磁盘找源码。
+  </p>
+  <p>
+    <code>compiled-main.ts</code> 在做任何事之前静态 <code>import "quickjs-wasi/quickjs.wasm"</code>，
+    并调用 <code>setEmbeddedQuickJSWasmPath</code>。这和 <code>dist/bun/runtime-setup.js</code> 相同。
+    没有这一步，codemode 会用 <code>createRequire</code> 到磁盘上找 <code>quickjs-wasi</code>。
+  </p>
+
+  <h3>4.3 旁路文件</h3>
+  <ul>
+    <li><strong>Photon。</strong><code>photon_rs_bg.wasm</code> 放在 <code>smelt-pi</code> 同一目录。Pi 的 <code>dist/utils/photon.js</code> 会在可执行文件目录、<code>photon/</code> 子目录和 cwd 里找它。CJS 把构建机的绝对路径写进了二进制，所以不能单靠 <code>node_modules</code> 里的那份。</li>
+    <li><strong>pi-tui <code>.node</code>。</strong>按加载器的相对路径放在可执行文件旁：<code>native/&lt;platform&gt;/prebuilds/&lt;platform&gt;-&lt;arch&gt;/&lt;platform&gt;-platform[&lt;suffix&gt;].node</code>。文件从依赖包里的预编译产物拷贝，不在发布时现编原生代码。RPC 不加载它；交互式剪贴板才会。Linux 上 <code>require</code> 已成功，darwin 的那份还要在 Mac 上加载一次。</li>
+    <li><strong>QuickJS wasm</strong>在二进制里，不另放文件。</li>
+  </ul>
+
+  <h3>4.4 放在哪</h3>
+  <ul>
+    <li>macOS：<code>smelt.app/Contents/Resources/smelt-pi/smelt-pi</code>，wasm 和 <code>native/</code> 跟它同一层。<code>Contents/MacOS</code> 只能放签过的代码，wasm 签不了，所以整套放 Resources。App 只是载体，安装和 GUI 启动时发布到 <code>~/.smelt/bin</code>。和 <code>smeltd</code> 一样先签内层再签 <code>.app</code>。</li>
+    <li>Linux：放进现有的 <code>smeltd-*-linux-*.tar.gz</code>，和 <code>smeltd</code> 同级。首启不下载。</li>
+    <li><code>~/.smelt</code> 不再出现 <code>runtime/store/pi</code> 或 <code>runtime/store/bun</code>。</li>
+  </ul>
+</section>
+
+<section id="s5">
+  <h2><span class="num">5.</span><code>packages/pi-agent</code> 怎么改</h2>
+
+  <h3>5.1 留下的</h3>
+  <p>
+    源码目录、<code>package.json</code>、<code>bun.lock</code>、<code>tests/</code>、<code>scripts/production-smoke.ts</code> 都留在仓库里。
+    版本仍然钉死在 package.json。<code>bun install --frozen-lockfile</code> 只发生在 CI 和开发机上，用来编译和测试，不发生在用户首启。
+  </p>
+
+  <h3>5.2 分流入口</h3>
+  <p>
+    新增 <code>src/compiled-main.ts</code> 作为编译主入口。<code>src/main.ts</code>、<code>src/auth-main.ts</code>、
+    <code>src/mcp-main.ts</code>、<code>src/mcp-gateway-main.ts</code> 仍是各自的实现，由分流入口在运行时 import 其中一个。
+    开发时 <code>bun src/main.ts</code> 继续可用，测试不必先编译。
+  </p>
+  <p>分流规则：</p>
+  <ul>
+    <li>用户参数以 <code>auth</code> 开头：丢掉这个词，再 import <code>auth-main.ts</code>。该文件用 <code>process.argv.slice(2)</code>，所以 import 前要把 argv 摆成 <code>[argv0, 虚拟脚本, ...其余]</code>。</li>
+    <li><code>mcp</code> 同理，进入 <code>mcp-main.ts</code>。</li>
+    <li><code>gateway</code>：import <code>mcp-gateway-main.ts</code>。它不吃子命令参数。</li>
+    <li>其它参数：原样交给 <code>main.ts</code>。</li>
+  </ul>
+
+  <h3>5.3 <code>pi-mcp-runtime.ts</code> 改静态 import</h3>
+  <p>
+    删掉 <code>import.meta.resolve</code> 和随后的动态 <code>import()</code>。
+    直接从钉死的文件导入 <code>createDefaultTransport</code>：
+  </p>
+  <pre><code>import { createDefaultTransport as piCreateDefaultTransport }
+  from "../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js";</code></pre>
+  <p>
+    这个路径不在包的 <code>exports</code> 里，所以必须是相对文件路径，不能写成包的子路径。
+    Pi 升级把文件挪走时，编译失败，这和现在「升级后动态 import 大声失败」是同一种约束，只是提前到了打包。
+    类型仍然用包导出的 <code>McpTransportFactory</code>。
+  </p>
+
+  <h3>5.4 网关改成 <code>gateway</code> 子命令</h3>
+  <p>
+    <code>mcp-gateway-client.ts</code> 里删掉 <code>GATEWAY_MAIN = fileURLToPath(...)</code>。
+    <code>spawnGateway</code> 改为 <code>spawn(process.execPath, ["gateway"], ...)</code>。
+    其余不变：detached、自己的会话、日志、锁、<code>SMELT_MCP_GATEWAY_DIR</code>。
+    编译产物会自己插入 <code>/$bunfs/root/...</code> 作为 <code>argv[1]</code>，调用方不要再传脚本路径。
+  </p>
+
+  <h3>5.5 子智能体</h3>
+  <p>
+    <code>getPiInvocation</code> 的 <code>/$bunfs</code> 分支留下。实现要保证拉起会话的路径 basename 不是 <code>bun</code> 或 <code>node</code>（见 §9）。
+    不要在这里再加一层「如果是 bun 就改去找 smelt-pi」的兼容判断。进程名从一开始就叫对。
+  </p>
+</section>
+
+<section id="s6">
+  <h2><span class="num">6.</span><code>managed_runtime.rs</code> 怎么收敛</h2>
+
+  <h3>6.1 删掉的运行时模型</h3>
+  <p>下面这些只为「首启下载 Bun + 安装 Pi 树」存在，在本 PR 里删除，不留空函数或开关：</p>
+  <ul>
+    <li><code>build.rs</code> 生成的 <code>PI_AGENT_RUNTIME_FILES</code>、<code>PI_AGENT_PACKAGE_JSON</code>、<code>PI_AGENT_BUN_LOCK</code> 嵌入表。Rust 二进制不再携带 <code>packages/pi-agent</code> 的源码副本。</li>
+    <li>Pi generation：<code>pi_manifest</code>、staging、<code>materialize_pi_files</code>、<code>run_pi_install</code>（<code>bun install --frozen-lockfile --production --ignore-scripts</code>）、<code>managed_pi_agent_dependencies_installed</code>、Pi lease。</li>
+    <li>Bun generation：按平台下载 zip、校验、解压到 <code>store/bun/&lt;generation&gt;</code>、<code>sync_managed_bun</code> 的租约。Bun 1.4.0 的 URL 和 SHA 常量随这套下载一起删。</li>
+    <li><code>ManagedPiRuntime::process_args</code> 里「bun 路径 + <code>src/main.ts</code> + 其余参数」这种拼法。<code>sync_managed_pi_tool</code> 按相对路径检查脚本文件是否存在的逻辑一起删。</li>
+    <li>会话继承两份 generation FD 的做法。bundle 里的文件由正在运行的进程映射；替换 app 之后，已启动的进程在 Unix 上继续用旧 inode，直到退出。不再为了防止目录被回收而持有 lease。</li>
+  </ul>
+
+  <h3>6.2 新的 <code>process_args</code></h3>
+  <p>宿主只知道 bundle 里的 <code>smelt-pi</code> 绝对路径：</p>
+  <ul>
+    <li>RPC：<code>[smelt_pi, ...现有尾部参数]</code>。尾部参数就是今天写在脚本路径后面的那些（<code>--offline</code> 等）。</li>
+    <li>登录：<code>[smelt_pi, "auth", ...]</code>。</li>
+    <li>MCP：<code>[smelt_pi, "mcp", ...]</code>。</li>
+  </ul>
+  <p>不再把 Bun 可执行文件和 TypeScript 路径放进 argv。</p>
+
+  <h3>6.3 <code>~/.smelt/runtime/bin/bun</code></h3>
+  <p>
+    <code>crates/smelt-model</code> 的 <code>MANAGED_BUN_LAUNCHER_HOME_PATH</code>（<code>~/.smelt/runtime/bin/bun</code>）
+    继续是写进 <code>mcp.json</code> 的 <code>command</code>。Playwright、浏览器类 MCP 今天就是这个命令。
+    实现改成：smelt 启动时把这个路径写成一条启动器，内容等价于
+  </p>
+  <pre><code>export BUN_BE_BUN=1
+exec "&lt;当前 bundle 的 smelt-pi&gt;" "$@"</code></pre>
+  <p>
+    启动器在每次启动时覆盖，指向这一次安装的 bundle。它不是 generation，不下载，不持有 lease。
+    外部 MCP 因此仍然能执行 <code>bun &lt;script&gt;</code>。智能体进程由 <code>smeltd</code> 直接 exec
+    <code>~/.smelt/bin/smelt-pi</code> 解析出的真实路径，环境里没有 <code>BUN_BE_BUN</code>。
+  </p>
+  <p>
+    <code>acp_conn</code> 里为会话保存的 <code>ManagedBunRuntime</code> 改成「当前 <code>smelt-pi</code> 路径」。
+    不再为了让子进程活过 generation 回收而继承 FD。
+  </p>
+</section>
+
+<section id="s7">
+  <h2><span class="num">7.</span>用户扩展的三方依赖</h2>
+  <p>
+    扩展自己的 <code>import "ms"</code> 这类依赖由 jiti 从扩展目录的 <code>node_modules</code> 解析。
+    虚拟模块只覆盖 Pi 和 typebox 那一组包。目录里没有 <code>node_modules</code> 时，加载失败，进程退出，这是实测结果，要保持。
+  </p>
+  <p>
+    Pi 安装 <code>npm:</code> / git 包时走 <code>npmCommand</code>。未配置时命令是 <code>npm</code>，参数是
+    <code>install &lt;spec&gt; --prefix &lt;agentDir&gt;/npm --legacy-peer-deps</code>。
+    这些参数交给 Bun 会失败。Bun 能接受的是 <code>install &lt;spec&gt; --cwd &lt;dir&gt; --omit=peer</code>，
+    而且只有 <code>getPackageManagerName()</code> 认出 basename 为 <code>bun</code> 时，Pi 才会发出这组参数。
+  </p>
+  <p>因此安装命令就是 §6.3 的启动器，不再另找系统 npm 或系统 bun：</p>
+  <ul>
+    <li>Smelt 在 Pi 设置里把 <code>npmCommand</code> 写成 <code>["~/.smelt/runtime/bin/bun"]</code> 的绝对路径。basename 是 <code>bun</code>，Pi 会用 <code>--cwd</code> 和 <code>--omit=peer</code>。</li>
+    <li>启动器自己设置 <code>BUN_BE_BUN=1</code> 再 exec <code>smelt-pi</code>。这个环境变量只出现在安装子进程和 MCP 服务器子进程里。</li>
+    <li>智能体进程不设置 <code>BUN_BE_BUN</code>。设了之后入口会被 Bun CLI 换掉，<code>argv</code> 实测变成 <code>Script not found</code>。</li>
+  </ul>
+  <p>
+    扩展目录里手放的 <code>package.json</code> + 已安装的 <code>node_modules</code> 不经过这条命令，jiti 直接读。
+    这和 Pi 今天的行为一致。
+  </p>
+</section>
+
+<section id="s8">
+  <h2><span class="num">8.</span><code>package-mac.sh</code> 和 <code>release.yml</code></h2>
+
+  <h3>8.1 在哪编译</h3>
+  <p>
+    发布用的 darwin 二进制在 <code>release.yml</code> 已有的 <code>macos-14</code> job 里编译，然后再交给 <code>scripts/package-mac.sh</code>。
+    Linux 的两个架构在现有 Linux job 里编译，打进 <code>smeltd</code> 的 tar.gz。
+    Linux 上交叉出 Mach-O 已经成功，但那份文件没有在 Mac 上运行过，所以不拿它当要签名的发布物。
+  </p>
+  <p>
+    CI 安装 Bun 1.4.0，与 <code>managed_runtime.rs</code> 今天锁定的版本相同，然后在 <code>packages/pi-agent</code> 执行
+    <code>bun install --frozen-lockfile</code> 和 §4.2 的 <code>bun build --compile</code>。
+    macOS 目标是本机编译；Linux x64 / arm64 用对应的 <code>--target</code>。Bun 1.4 文档写明 <code>-baseline</code> 后缀会解析成同一份二进制。
+    编完把 <code>photon_rs_bg.wasm</code> 和该平台的 <code>pi-tui</code> <code>.node</code> 拷到 <code>smelt-pi</code> 旁边的固定相对路径。
+  </p>
+
+  <h3>8.2 签名</h3>
+  <p>
+    <code>scripts/package-mac.sh</code> 对 Developer ID 使用 Hardened Runtime、<code>--timestamp</code>。
+    旧稿写的 <code>ci/mac/entitlements.plist</code> 不在仓库里。现在缺
+    <code>scripts/entitlements.plist</code> 或 <code>scripts/jit-entitlements.plist</code> 就失败，不再静默跳过。
+  </p>
+  <p>新增 <code>scripts/jit-entitlements.plist</code>，无 XML 注释，内容按 Bun 的签名文档：</p>
+  <ul>
+    <li><code>com.apple.security.cs.allow-jit</code></li>
+    <li><code>com.apple.security.cs.allow-unsigned-executable-memory</code></li>
+    <li><code>com.apple.security.cs.disable-executable-page-protection</code></li>
+    <li><code>com.apple.security.cs.allow-dyld-environment-variables</code></li>
+    <li><code>com.apple.security.cs.disable-library-validation</code></li>
+  </ul>
+  <p>
+    <code>package-mac.sh</code> 在 Developer ID 路径上要求这个文件存在，缺失就失败。
+    用它签 <code>Contents/Resources/smelt-pi/smelt-pi</code>，并签旁边的 Mach-O <code>.node</code>。
+    wasm 不是代码，不签。签名顺序保持现有约定：先内层 Mach-O，再封 <code>.app</code>，不用 <code>--deep</code>。
+  </p>
+  <p>
+    Rust/GPUI 那条注释写明主程序不需要 <code>allow-jit</code> 或 <code>allow-unsigned-executable-memory</code>。
+    这组键只放在 Pi 二进制的 plist 上，不并进 GUI 的 entitlements。
+    <code>disable-library-validation</code> 留在 Pi 的 plist 里，因为 Bun 文档把它和原生 addon 放在一起；
+    Linux 上我们已经确认 <code>.node</code> 是运行时 <code>dlopen</code> 的外部文件。
+  </p>
+
+  <h3>8.3 公证</h3>
+  <p>
+    公证仍走现在的 Developer ID + Hardened Runtime 路径（<code>package-mac.sh</code> 指向的 notarize 阶段）。
+    内层 <code>smelt-pi</code> 必须带 runtime，否则包会被拒，这是脚本里已有的说明。
+    这次没有执行 <code>codesign</code> 或 <code>notarytool</code>。验收放在 §11，在 macos-14 上做。
+  </p>
+
+  <h3>8.4 <code>release.yml</code> 要加的步骤</h3>
+  <ul>
+    <li>macOS job：checkout 之后、组装 <code>.app</code> 之前，安装 Bun 1.4.0，编译 <code>smelt-pi</code>，拷贝 wasm 和 darwin-arm64 的 <code>.node</code>，先跑 §11 的冒烟，再进入签名。</li>
+    <li>Linux job：同样编译对应架构，把 <code>smelt-pi</code>、wasm、<code>.node</code> 放进 <code>scripts/package-linux.sh</code> 的目录。不要打 #52 那种 Pi 运行时归档，也不要再打一份 <code>bun</code>。</li>
+    <li><code>Verify required files exist</code> 加上 <code>packages/pi-agent/package.json</code>、<code>packages/pi-agent/bun.lock</code>、<code>src/compiled-main.ts</code> 和 <code>scripts/jit-entitlements.plist</code>。</li>
+  </ul>
+</section>
+
+<section id="s9">
+  <h2><span class="num">9.</span>命名陷阱</h2>
+  <div class="callout danger">
+    <div class="label">进程不能叫 bun</div>
+    <code>getPiInvocation</code> 在 <code>argv[1]</code> 是 <code>/$bunfs/root/...</code> 时，如果
+    <code>process.execPath</code> 的 basename 匹配 <code>bun</code> 或 <code>node</code>，就会去 spawn 命令 <code>pi</code>。
+    实测把二进制复制为名为 <code>bun</code> 的路径后，<code>reexec</code> 得到
+    <code>Executable not found in $PATH: "pi"</code>。
+  </div>
+  <ul>
+    <li>bundle 里的文件名是 <code>smelt-pi</code>。<code>smeltd</code> 用这个路径 exec。子智能体再执行的也是这个路径。</li>
+    <li><code>~/.smelt/runtime/bin/bun</code> 只给 MCP 和 <code>npmCommand</code>。它是启动器，里面设置 <code>BUN_BE_BUN=1</code>。不要用这个路径启动会话。</li>
+    <li><code>argv[0]</code> 在编译产物里是字符串 <code>bun</code>。判断进程身份用 <code>process.execPath</code>，不要用 <code>argv[0]</code>。</li>
+    <li><code>BUN_BE_BUN=1</code> 出现在启动器和它拉起的子进程上。会话环境里不设置它。</li>
+  </ul>
+</section>
+
+<section id="s10">
+  <h2><span class="num">10.</span>要删掉的东西</h2>
+  <p>本 PR 直接删，不留开关、不留双路径：</p>
+  <table>
+    <thead>
+      <tr><th>删除</th><th>位置</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>首启 <code>bun install --frozen-lockfile --production --ignore-scripts</code></td><td><code>managed_runtime.rs</code> 的 <code>run_pi_install</code> 及其调用</td></tr>
+      <tr><td>把源码、<code>package.json</code>、<code>bun.lock</code> 嵌进 Rust 二进制再写到用户目录</td><td><code>crates/smelt-core/build.rs</code>，以及 <code>materialize_pi_files</code></td></tr>
+      <tr><td>Pi / Bun 的 generation 目录、manifest、staging、lease、FD 继承</td><td><code>managed_runtime.rs</code> 和只为这两类 generation 服务的 <code>runtime_generation</code> 代码。若该模块再无其它调用方，整个模块删掉</td></tr>
+      <tr><td>按平台下载 Bun zip 的 URL 和 SHA</td><td><code>managed_runtime.rs</code> 的 <code>BUN_DOWNLOAD</code> 等常量</td></tr>
+      <tr><td>「bun + <code>src/main.ts</code>」以及按 <code>src/auth-main.ts</code>、<code>src/mcp-main.ts</code> 检查文件是否存在</td><td><code>process_args</code>、<code>sync_managed_pi_tool</code>、<code>pi_auth.rs</code>、<code>pi_mcp.rs</code> 里的脚本常量</td></tr>
+      <tr><td>PR #52 的 tar.gz 运行时归档</td><td>#52 已关闭，由本方案取代。没有进 main。不要把那个分支的补丁捡回来</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>packages/pi-agent</code> 的 <code>package.json</code> 和 <code>bun.lock</code> 不删。它们不再被嵌入用户机器，仍是锁版本和 CI 安装的依据。
+  </p>
+</section>
+
+<section id="s11">
+  <h2><span class="num">11.</span>实施步骤与验收</h2>
+
+  <div class="phase-grid">
+    <div class="phase-card">
+      <h4>1. 编译入口</h4>
+      <ul>
+        <li><code>compiled-main.ts</code> 分流</li>
+        <li>两个 worker shim</li>
+        <li>QuickJS 静态 import</li>
+        <li><code>pi-mcp-runtime.ts</code> 静态 import</li>
+        <li>网关 <code>spawn(execPath, ["gateway"])</code></li>
+      </ul>
+    </div>
+    <div class="phase-card p1">
+      <h4>2. 宿主</h4>
+      <ul>
+        <li>删 generation / install / 嵌入表</li>
+        <li><code>process_args</code> 只剩二进制和子命令</li>
+        <li><code>bin/bun</code> 改成启动器</li>
+        <li><code>npmCommand</code> 指向启动器</li>
+      </ul>
+    </div>
+    <div class="phase-card p2">
+      <h4>3. 发布</h4>
+      <ul>
+        <li><code>release.yml</code> 编译</li>
+        <li><code>package-mac.sh</code> 拷贝并签名</li>
+        <li>Linux 包带上同一组文件</li>
+        <li>Pi entitlements 缺失即失败</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>11.1 验收</h3>
+  <p>本 PR 至少要有这些结果。前四条在 Linux CI 上就能做，后三条在 macos-14 上做。</p>
+  <ol>
+    <li>仓库里不再有首启 <code>bun install</code>、Pi/Bun generation 或源码嵌入表。测试不再准备 <code>~/.smelt/runtime/store/pi</code>。</li>
+    <li>编译产物在空目录里：<code>get_state</code> 的 <code>success</code> 为 true；<code>auth list</code> 退出码 0；带 <code>typebox</code> 和 <code>@earendil-works/pi-coding-agent</code> import 的用户扩展出现在 <code>get_commands</code>；自带 <code>node_modules</code> 的扩展能加载，挪走 <code>node_modules</code> 则失败。</li>
+    <li>空目录里图片缩放返回尺寸；codemode <code>return 1+1</code> 得到 2。去掉 wasm 旁路文件后缩放失败。去掉 worker 编译入口后出现 <code>MODULE_NOT_FOUND</code>。</li>
+    <li><code>gateway</code> 子命令健康检查 200，错误 token 401。子智能体再执行的 <code>execPath</code> basename 是 <code>smelt-pi</code>，参数里没有脚本路径。</li>
+    <li><code>bin/bun</code> 启动器在 <code>BUN_BE_BUN=1</code> 下执行 <code>install ms --cwd &lt;dir&gt; --omit=peer</code> 能装上包。会话进程的环境里没有 <code>BUN_BE_BUN</code>。</li>
+    <li>macos-14 上编出的 arm64 二进制能执行 <code>argv</code> 和 <code>get_state</code>。Developer ID 签名带 §8.2 的 entitlements，<code>codesign --verify --strict</code> 通过。然后走现有公证。</li>
+    <li>签过名的二进制在 Mac 上再跑一次 <code>get_state</code> 和一次图片缩放，确认 Hardened Runtime 下 JIT 和 photon wasm 可用。加载一次 darwin 的 <code>.node</code>，确认 <code>hasGetText</code>。</li>
+  </ol>
+  <p>
+    <code>packages/pi-agent</code> 现有的 <code>bun test</code> 和 <code>production-smoke</code> 继续对着源码跑，用来守住协议。编译产物的冒烟是另外一组，对着二进制。
+  </p>
+</section>
+
+<section id="s12">
+  <h2><span class="num">12.</span>风险与待在 Mac 上验证的项</h2>
+
+  <div class="callout warn">
+    <div class="label">已在 Linux 上看到、实现时要守住的</div>
+    <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
+      <li>编译必须发生在 <code>packages/pi-agent</code> 内，用相对路径。绝对路径的动态 import 不会把依赖打进去。</li>
+      <li>Photon 的 1.8MB wasm 必须跟着二进制走。只有二进制、没有这个文件时缩放失败。</li>
+      <li>进程名叫 <code>bun</code> 时，子智能体去找系统里的 <code>pi</code>。</li>
+      <li><code>BUN_BE_BUN=1</code> 设在会话进程上会换成 Bun CLI。</li>
+      <li>Pi 默认的 npm <code>--prefix</code> 参数不能交给 Bun。安装必须走 basename 为 <code>bun</code> 的启动器。</li>
+      <li><code>import.meta.resolve</code> 进未导出的 Pi 内部文件，在编译产物里启动即失败。这次只碰到 <code>pi-mcp-runtime.ts</code>。实现时如果再出现同类动态 import，同样改成静态 import，不要在旁边放一份 <code>node_modules</code> 去救。</li>
+      <li>Linux 产物动态链接 glibc，这次 <code>objdump</code> 看到的最高版本是 2.17。还要在发布用的 Ubuntu 22.04 容器里跑一次冒烟，确认和现在的 Linux job 一致。</li>
+    </ul>
+  </div>
+
+  <h3>12.1 还没在 Mac 上做的</h3>
+  <ol>
+    <li>运行交叉编出的，或在 macos-14 上编出的 arm64 二进制。这次只有 <code>file</code> 和 Exec format error。</li>
+    <li><code>codesign</code>、<code>notarytool</code>、Hardened Runtime 下 JIT 是否真能启动。依据是 Bun 的签名文档和 entitlements 列表，不是一次成功的签名。</li>
+    <li>darwin-arm64 的 <code>pi-tui</code> <code>.node</code> 能否被签过名的进程 <code>dlopen</code>。</li>
+    <li>带 JIT entitlements 的内层二进制放进 <code>.app</code> 之后，现有公证是否仍然 Accepted。</li>
+  </ol>
+  <p>
+    没有真实模型 API 的一轮对话也不在这次实测里。验收里的 <code>get_state</code> 和现有 <code>production-smoke</code> 对齐；模型回合仍由现有测试和手工会话覆盖，不在这篇方案里新定协议。
+  </p>
+</section>
+
+<section id="s13">
+  <h2><span class="num">13.</span>PR 关系</h2>
+  <div class="callout">
+    <div class="label">实现做在本 PR</div>
+    落地实现做在本 PR：按 §10 删掉首启安装和 generation，按 §4–§8 接上编译产物。
+    PR #52（<code>cursor/pi-runtime-archive-e544</code>，预打 tar.gz）已关闭，由本方案取代。
+  </div>
+  <p>
+    #52 的补丁不要整分支 rebase 进来。main 上没有那套归档代码；本 PR 从当前 main 做编译方案，而不是在 #52 上改。
+  </p>
+</section>
+
+<footer>
+  smelt · Pi 运行时单二进制技术方案 · 2026-10-20（Asia/Taipei） ·
+  已落地，和原稿不一致处以「落地差异」为准 ·
+  项目 <a href="https://github.com/smelt-ai/smelt">smelt-ai/smelt</a>
+</footer>
+</main>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    securityLevel: "loose",
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+  });
+</script>
+</body>
+</html>

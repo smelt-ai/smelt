@@ -55,7 +55,7 @@ AI 插件让编辑器更聪明，但人还是那个敲键盘的苦力。当 agen
 打包 DMG 的 `make dist-build` 需要 **Python 3.10+**（Command Line Tools 自带的 `/usr/bin/python3` 可能仍是 3.9，版本不够可 `brew install python` 或用 `SMELT_PYTHON=/opt/homebrew/bin/python3 make dist-build` 指定解释器）。
 
 ```sh
-make run                    # 编译 GUI、守护进程和通知器，然后运行 GUI
+make dev                    # 编译 release 并原子安装到 /Applications
 cargo run --bin smelt       # 仅运行 GUI，需确保 smeltd 已经可用
 make dist-build             # 编译 release 并打包出 dist/Smelt.dmg
 make help                   # 查看全部构建目标

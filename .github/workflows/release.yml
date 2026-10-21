@@ -1,6 +1,6 @@
 # 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release，
 # 再附上 Linux 运行时两种架构的包和一键安装脚本。
-# 本地打包链路复用：make dist-build → scripts/package-mac.sh；scripts/package-linux.sh。
+# 本地打包链路复用：make dist-build → scripts/package-mac.sh；Linux 用 scripts/package-linux.sh。
 name: release
 
 on:
@@ -43,6 +43,11 @@ jobs:
           for f in \
             Makefile \
             scripts/package-mac.sh \
+            scripts/package-linux.sh \
+            scripts/build-smelt-pi.sh \
+            scripts/fetch-bun.sh \
+            scripts/entitlements.plist \
+            scripts/jit-entitlements.plist \
             scripts/make-dmg-bg.py \
             scripts/dmg-settings.py \
             assets/AppIcon.icns \
@@ -70,15 +75,15 @@ jobs:
       # 导入稳定签名身份（scripts/setup-codesign-identity.sh 本地生成、存进
       # repo secrets 的自签名证书）：签名的 designated requirement 锚定在证书
       # 哈希而非二进制内容，用户装上新版本后 TCC（完全磁盘访问权限等）授权不会
-      # 失效。没配置 secrets（比如 fork 出去的仓库）就跳过，package-mac.sh 会
-      # 自动回退 ad-hoc 签名。
+      # 失效。没配置 secrets（比如 fork 出去的仓库）就跳过；package-mac.sh
+      # 找不到证书会失败，不会改用 ad-hoc（-）。
       - name: Import codesign identity
         env:
           CODESIGN_P12_BASE64: ${{ secrets.CODESIGN_P12_BASE64 }}
           CODESIGN_P12_PASSWORD: ${{ secrets.CODESIGN_P12_PASSWORD }}
         run: |
           if [[ -z "$CODESIGN_P12_BASE64" ]]; then
-            echo "未配置 CODESIGN_P12_BASE64，本次仍走 ad-hoc 签名"
+            echo "未配置 CODESIGN_P12_BASE64，打包时会因缺少签名身份失败"
             exit 0
           fi
           KEYCHAIN="$RUNNER_TEMP/codesign.keychain-db"
@@ -190,7 +195,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git libssl-dev pkg-config
+            build-essential ca-certificates curl git libssl-dev pkg-config unzip
 
       - name: Checkout
         uses: actions/checkout@v7

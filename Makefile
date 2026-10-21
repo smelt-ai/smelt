@@ -4,9 +4,12 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build run icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all
+.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all smelt-pi
 
-build run install: SHELL := /bin/bash
+SMELT_PI := target/smelt-pi/smelt-pi
+PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts')
+
+build install: SHELL := /bin/bash
 
 help: ## 显示可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -53,19 +56,20 @@ test: ## 运行全工作区单元测试（nextest：smeltd handoff 不能同进�
 
 pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 	@bun="$$(./scripts/bun.sh --managed-only)" || { \
-		echo "✗ 找不到源码锁定版本的受管 Bun。请先运行一次 Smelt 完成 runtime 准备"; exit 1; }; \
+		echo "✗ 取不到钉死版本的 Bun（scripts/fetch-bun.sh）"; exit 1; }; \
 	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent \
 		&& "$$bun" run check \
 		&& "$$bun" run production-smoke
 
 check-all: fmt-check lint lint-sh lint-paths test pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
 
-build: ## 编译 release 二进制（GUI + 守护 + helpers）
-	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
+$(SMELT_PI): packages/pi-agent/package.json packages/pi-agent/bun.lock scripts/compile-smelt-pi.ts scripts/build-smelt-pi.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
+	./scripts/build-smelt-pi.sh
 
-run: ## 本地直接跑 GUI（开发用）
-	cargo build --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
-	cargo run --bin $(BIN)
+smelt-pi: $(SMELT_PI) ## 编译 smelt-pi；源码、锁和编译脚本没变就跳过
+
+build: $(SMELT_PI) ## 编译 release 二进制（GUI + 守护 + helpers + smelt-pi）
+	cargo build --release --bin $(BIN) --bin $(DAEMON) --bin smelt-notify --bin smelt-installer
 
 icon: ## 生成 app 图标（assets/AppIcon.icns）
 	./scripts/make-icon.sh
@@ -76,7 +80,7 @@ dist: ## 用已有 release 产物打包 app + dmg
 dist-build: ## 先编 release 再打包（一步到位）
 	./scripts/package-mac.sh --build
 
-install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
+install: $(SMELT_PI) ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞，旧 runtime 首次迁移在后台完成
 	@# make build && make install 必须装刚编的二进制；只检查 dist 是否存在会把
 	@# 旧包再装一遍，守护永远跑不到新代码。插件脚本没有 cargo binary，因此同时
 	@# 检查 plugins 的源内容（按 .gitignore 排除编辑器生成文件和本地 clone 的外部仓库）。
@@ -109,6 +113,9 @@ install: ## 原子安装到 /Applications（不打 dmg）；活跃 ACP 不阻塞
 		|| [ target/release/$(BIN) -nt dist/Smelt.app/Contents/MacOS/$(BIN) ] \
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
+		|| [ ! -x dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
+		|| [ target/smelt-pi/smelt-pi -nt dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
+		|| [ target/smelt-pi/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/Resources/smelt-pi/photon_rs_bg.wasm ] \
 		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
 		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \

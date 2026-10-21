@@ -1,5 +1,5 @@
-import { pathToFileURL } from "node:url";
 import type { McpTransportFactory } from "@earendil-works/pi-coding-agent";
+import { createDefaultTransport as piCreateDefaultTransport } from "../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js";
 import { StdioTransport } from "@earendil-works/pi-mcp";
 
 /**
@@ -9,24 +9,11 @@ import { StdioTransport } from "@earendil-works/pi-mcp";
  * a connection: `~` expansion, `${VAR}` and `!cmd` values in `env` and `headers`, OAuth for HTTP
  * servers. Smelt routes stdio servers through the shared gateway and hands everything else back to
  * this factory, and the gateway starts each server with it, so both keep Pi's exact semantics
- * instead of a copy that drifts. Pi is pinned to an exact version; the import fails loudly (and the
- * tests with it) if a Pi upgrade moves the module.
+ * instead of a copy that drifts. The path is a file inside the pinned package, not a package
+ * export: `import.meta.resolve` plus a dynamic import does not survive `bun build --compile`.
+ * Pi is pinned to an exact version; the compile fails if an upgrade moves the module.
  */
-function piModuleUrl(relative: string): string {
-	const resolved = import.meta.resolve("@earendil-works/pi-coding-agent");
-	const entry = resolved.startsWith("file:") ? resolved : pathToFileURL(resolved).href;
-	return new URL(relative, entry).href;
-}
-
-const runtime = (await import(piModuleUrl("./extensions/mcp/runtime.js"))) as {
-	createDefaultTransport?: unknown;
-};
-
-if (typeof runtime.createDefaultTransport !== "function") {
-	throw new Error("Pi's MCP runtime no longer exports createDefaultTransport");
-}
-
-export const createPiDefaultTransport = runtime.createDefaultTransport as McpTransportFactory;
+export const createPiDefaultTransport: McpTransportFactory = piCreateDefaultTransport;
 
 /**
  * MCP server 进程该拿到的环境：去掉 Smelt 的会话控制变量。

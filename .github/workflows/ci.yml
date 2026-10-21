@@ -35,7 +35,7 @@ jobs:
         id: filter
         uses: dorny/paths-filter@v3
         with:
-          # rust：整个 workspace 的输入。smelt-core 的 build.rs 会打包 packages/pi-agent，
+          # rust：整个 workspace 的输入。smelt-core 的 build.rs 只读 packages/pi-agent 的版本号，
           # 桌面与 smeltd 会嵌 assets/，所以这两处也算。
           # android：手机内核 smelt_mobile 及其依赖的 crate（`cargo tree -p smelt_mobile`
           # 里的本地 crate，加依赖时同步这里）和 Flutter 工程。

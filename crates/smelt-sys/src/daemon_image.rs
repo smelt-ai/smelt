@@ -307,7 +307,7 @@ fn reap_unused_images_with(
 /// lsof（很多机器不装）。同一用户的进程读不到 maps 就证明不了，按未知处理；别的用户
 /// 的进程碰不到 `~/.smelt` 里的映像，跳过。
 #[cfg(target_os = "linux")]
-fn probe_image_mapped(path: &Path) -> MappedState {
+pub(crate) fn probe_image_mapped(path: &Path) -> MappedState {
     use std::os::unix::fs::MetadataExt as _;
 
     let Ok(meta) = fs::metadata(path) else {
@@ -377,7 +377,7 @@ fn linux_makedev(major: u32, minor: u32) -> u64 {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn probe_image_mapped(path: &Path) -> MappedState {
+pub(crate) fn probe_image_mapped(path: &Path) -> MappedState {
     let output = match std::process::Command::new("/usr/sbin/lsof")
         .arg("-Fn")
         .arg("--")

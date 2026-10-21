@@ -4,8 +4,8 @@
 //! 协议没有任何 auth 方法，CLI 也没有对应子命令。而 OAuth 流程本身（PKCE、
 //! 回环回调服务器、device code 轮询、各家的令牌兑换端点）是 pi-ai 里几千行会
 //! 随版本变的东西。在 Rust 里重写一份，等于承诺跟着 Pi 的每次协议调整改一遍，
-//! 且写下的凭据形状一旦对不上，跑会话的那个 Pi 就登录不上。所以这里复用受管
-//! 运行时里的 `src/auth-main.ts`，让 pi-ai 自己跑流程、自己写 `auth.json`。
+//! 且写下的凭据形状一旦对不上，跑会话的那个 Pi 就登录不上。所以这里跑
+//! `smelt-pi auth`，让 pi-ai 自己跑流程、自己写 `auth.json`。
 //!
 //! **为什么是双向流而不是一次调用。** 授权 URL、device code 要在流程中途推给
 //! 用户，粘贴回来的 code 又要送回流程；浏览器回调和手工粘贴还会互相抢跑（谁先
@@ -20,42 +20,20 @@ pub use smelt_model::pi_auth::*;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Condvar, Mutex};
 
-/// 受管运行时里的登录入口，相对 pi-agent 根目录。
-const AUTH_SCRIPT: &str = "src/auth-main.ts";
-
-/// 一次「问一句、答一句」的助手命令最多等这么久。首次调用可能连带装运行时，
-/// 所以给得比一次网络往返宽。
+/// 一次「问一句、答一句」的助手命令最多等这么久。登录要走网络，比一次往返宽。
 const ONE_SHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-fn spawn_auth_process(
-    args: &[&str],
-    status: &dyn Fn(&str),
-) -> Result<
-    (
-        std::process::Child,
-        crate::managed_runtime::ManagedPiRuntime,
-    ),
-    String,
-> {
-    let (runtime, script) = crate::managed_runtime::sync_managed_pi_tool(AUTH_SCRIPT, status)?;
-    let mut command = std::process::Command::new(&runtime.bun);
+fn spawn_auth_process(args: &[&str], status: &dyn Fn(&str)) -> Result<std::process::Child, String> {
+    let runtime = crate::managed_runtime::sync_managed_pi_agent(status)?;
+    let mut command = runtime.command(Some("auth"));
     command
-        .arg(&script)
         .args(args)
-        .current_dir(
-            script
-                .parent()
-                .and_then(|src| src.parent())
-                .unwrap_or(&script),
-        )
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    runtime.inherit_into(&mut command);
-    let child = command
+    command
         .spawn()
-        .map_err(|error| format!("启动 Pi 凭据助手失败：{error}"))?;
-    Ok((child, runtime))
+        .map_err(|error| format!("启动 Pi 凭据助手失败：{error}"))
 }
 
 /// 收尾一个已经结束/要结束的子进程，把 stderr 拼成人能看的错误。
@@ -82,10 +60,10 @@ fn run_once<T>(
     status: &dyn Fn(&str),
     pick: impl Fn(PiLoginEvent) -> Option<T>,
 ) -> Result<T, String> {
-    let (mut child, _runtime) = spawn_auth_process(args, status)?;
+    let mut child = spawn_auth_process(args, status)?;
     let stdout = child.stdout.take().ok_or("Pi 凭据助手没有 stdout")?;
     // 看门狗单独一条线程：超时判断不能挂在「收到一行输出」上——真正会卡死的
-    // 情形恰恰是子进程一声不吭（装运行时时网络吊住、等一个永远不来的回调），
+    // 情形恰恰是子进程一声不吭（网络吊住、等一个永远不来的回调），
     // 那时读循环停在 read 上，永远走不到超时检查。
     let child = Arc::new(Mutex::new(child));
     let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -165,7 +143,7 @@ fn run_once<T>(
 
 /// 列出所有内置 provider 及其凭据现状。
 ///
-/// 同步调用，会起一个子进程并可能触发首次运行时安装，必须在后台线程里跑。
+/// 同步调用，会起一个子进程，必须在后台线程里跑。
 pub fn list_providers(status: &dyn Fn(&str)) -> Result<Vec<PiAuthProvider>, String> {
     run_once(&["list"], status, |event| match event {
         PiLoginEvent::Providers { providers } => Some(providers),
@@ -199,7 +177,6 @@ pub fn logout(provider_id: &str, status: &dyn Fn(&str)) -> Result<(), String> {
 pub struct PiLoginSession {
     child: Arc<Mutex<std::process::Child>>,
     stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
-    _runtime: crate::managed_runtime::ManagedPiRuntime,
     /// 用户主动取消过。之后子进程报的 abort 错误不该再当失败展示。
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -229,7 +206,7 @@ fn pump_login_events(reader: impl BufRead, mut emit: impl FnMut(PiLoginEvent) ->
 impl PiLoginSession {
     /// 起一个登录流程，返回会话与事件流。
     ///
-    /// 同步调用（可能触发运行时安装），在后台线程里起；事件流交给 UI 侧消费。
+    /// 同步调用，在后台线程里起；事件流交给 UI 侧消费。
     ///
     /// `ask_all` 关掉助手的提问代答（企业版域名、登录方式这类「几乎只有一个
     /// 正确答案」的步骤），把每一问都交回给用户。
@@ -249,7 +226,7 @@ impl PiLoginSession {
         if ask_all {
             args.push("--ask-all");
         }
-        let (mut child, runtime) = spawn_auth_process(&args, status)?;
+        let mut child = spawn_auth_process(&args, status)?;
         let stdout = child.stdout.take().ok_or("Pi 凭据助手没有 stdout")?;
         let stdin = child.stdin.take();
         let (sender, receiver) = futures::channel::mpsc::unbounded();
@@ -257,7 +234,6 @@ impl PiLoginSession {
         let session = Self {
             child: Arc::new(Mutex::new(child)),
             stdin: Arc::new(Mutex::new(stdin)),
-            _runtime: runtime,
             cancelled: cancelled.clone(),
         };
         let child_handle = session.child.clone();

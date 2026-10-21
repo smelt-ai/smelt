@@ -1202,15 +1202,31 @@ fn pi_resolve_configured_path(base: &Path, raw: &str) -> PathBuf {
 }
 
 fn pi_sessions_dir(fs: &dyn FileSystem, override_dir: Option<&str>) -> PathBuf {
-    let agent_dir = pi_agent_dir(override_dir);
+    pi_sessions_dir_for(fs, override_dir, None)
+}
+
+/// `agent_dir` / `session_dir` 是这次启动显式给出的目录（`PI_CODING_AGENT_DIR`、
+/// `PI_CODING_AGENT_SESSION_DIR`）。调用方给了 agent 目录时不再读进程环境里的
+/// session 目录，避免测试或另一份配置漏进这次定位。两边都空才退回进程环境和
+/// `settings.json`。`~` 在这里展开。
+pub(crate) fn pi_sessions_dir_for(
+    fs: &dyn FileSystem,
+    agent_dir: Option<&str>,
+    session_dir: Option<&str>,
+) -> PathBuf {
+    let agent_dir_path = pi_agent_dir(agent_dir);
+    if let Some(session_dir) = session_dir.filter(|dir| !dir.trim().is_empty()) {
+        return pi_resolve_configured_path(&agent_dir_path, session_dir);
+    }
     // The environment override is intentionally ignored only for injected test/profile
     // roots. A profile-specific root is already the strongest caller-provided setting.
-    if override_dir.is_none()
+    if agent_dir.is_none()
         && let Ok(session_dir) = std::env::var("PI_CODING_AGENT_SESSION_DIR")
         && !session_dir.trim().is_empty()
     {
-        return pi_resolve_configured_path(&agent_dir, &session_dir);
+        return pi_resolve_configured_path(&agent_dir_path, &session_dir);
     }
+    let agent_dir = agent_dir_path;
     let settings_path = agent_dir.join("settings.json");
     let configured = fs
         .read_to_string(&settings_path)
@@ -1406,8 +1422,8 @@ pub(crate) fn pi_session_entries(text: &str) -> (u64, Vec<Value>) {
 /// Pi 不持久化叶子指针：`SessionManager._buildIndex` 把文件里最后一个 entry 当叶子，
 /// `buildSessionPath` 再沿 `parentId` 走回根，父节点找不到就停（见 pi-coding-agent
 /// `dist/core/session-manager.js`）。终端里 `/tree` 跳到别的节点后接着追加，旧分支
-/// 仍留在文件里，逐行读会把它混进历史和交接。实时恢复 `pi_rpc::active_branch_messages`
-/// 走的是 Pi `get_entries` 给出的同一条链，两边由此一致；跟它一样保留整条链上的
+/// 仍留在文件里，逐行读会把它混进历史和交接。文件最后一条是叶子。`get_entries`
+/// 的叶子由响应里的 `leafId` 指定，不在这个函数里走。跟会话文件一样保留整条链上的
 /// 原始消息，不按 compaction 裁掉旧消息。
 ///
 /// `version < 2` 的旧格式没有 id/parentId，Pi 迁移时按文件顺序串成一条链，这里同样
@@ -1436,6 +1452,153 @@ pub(crate) fn pi_active_branch(version: u64, entries: &[Value]) -> Vec<&Value> {
     }
     path.reverse();
     path
+}
+
+/// 一份 Pi 会话文件的活动分支。
+pub(crate) struct PiSessionBranch {
+    pub entries: Vec<Value>,
+}
+
+/// Pi 把 cwd 编进会话目录名：去掉开头的 `/` 或 `\`，其余 `/`、`\`、`:` 换成 `-`，
+/// 再包一层 `--`。`/workspace` 得到 `--workspace--`。
+pub(crate) fn pi_session_cwd_dir(cwd: &str) -> String {
+    let stripped = cwd.trim().trim_start_matches(['/', '\\']);
+    let encoded: String = stripped
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' => '-',
+            other => other,
+        })
+        .collect();
+    format!("--{encoded}--")
+}
+
+fn session_filename_matches(name: &str, session_id: &str) -> bool {
+    name == format!("{session_id}.jsonl") || name.ends_with(&format!("_{session_id}.jsonl"))
+}
+
+/// 在 cwd 对应的那一个目录里按文件名定位会话，读出活动分支。
+/// 不扫别的 cwd 目录，也不读不匹配文件的首行。找不到、读失败、头对不上、
+/// 或多于一个文件名匹配，都返回错误，由调用方改问 Pi。只有文件头的空会话是
+/// 成功的空转录。
+pub(crate) fn read_pi_session_branch(
+    agent_dir: Option<&str>,
+    session_dir: Option<&str>,
+    cwd: Option<&str>,
+    session_id: &str,
+) -> Result<PiSessionBranch, String> {
+    if session_id.is_empty() {
+        return Err("会话 id 为空".to_string());
+    }
+    let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) else {
+        return Err("没有工作目录，无法定位 Pi 会话文件".to_string());
+    };
+    let dir = pi_sessions_dir_for(&LocalFs, agent_dir, session_dir).join(pi_session_cwd_dir(cwd));
+    let mut files = Vec::new();
+    walk_pi_session_files(&LocalFs, &dir, 0, &mut files);
+    let mut matches = files
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| session_filename_matches(name, session_id))
+        })
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(format!("在 {} 找不到会话 {session_id}", dir.display())),
+        1 => parse_pi_session_file(&matches.remove(0), session_id),
+        _ => Err(format!(
+            "会话 {session_id} 在 {} 匹配到多份文件",
+            dir.display()
+        )),
+    }
+}
+
+fn parse_pi_session_file(path: &Path, session_id: &str) -> Result<PiSessionBranch, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+    let header = text
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| format!("{} 没有会话头", path.display()))?;
+    let header: Value = serde_json::from_str(header)
+        .map_err(|error| format!("{} 的会话头无法解析：{error}", path.display()))?;
+    if header.get("type").and_then(Value::as_str) != Some("session") {
+        return Err(format!("{} 的第一行不是 session 头", path.display()));
+    }
+    let id = header
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if id != session_id {
+        return Err(format!(
+            "{} 的会话头 id 是 {id}，不是 {session_id}",
+            path.display()
+        ));
+    }
+    let (version, entries) = pi_session_entries(&text);
+    let owned = pi_active_branch(version, &entries)
+        .into_iter()
+        .cloned()
+        .collect();
+    Ok(PiSessionBranch { entries: owned })
+}
+
+/// 活动分支上最后一次模型。`model_change` 带 provider；消息上的 `model` 可能只有 id。
+pub(crate) fn pi_branch_model(entries: &[Value]) -> Option<(String, String)> {
+    let mut provider = None;
+    let mut model_id = None;
+    for entry in entries {
+        match entry.get("type").and_then(Value::as_str) {
+            Some("model_change") => {
+                let Some(id) = entry
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                model_id = Some(id.to_string());
+                if let Some(next) = entry
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|provider| !provider.is_empty())
+                {
+                    provider = Some(next.to_string());
+                }
+            }
+            Some("message") => {
+                let Some(message) = entry.get("message") else {
+                    continue;
+                };
+                let Some(raw) = message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                else {
+                    continue;
+                };
+                // OpenRouter 的 model id 本身含 `/`。provider 是消息上的独立字段。
+                model_id = Some(raw.to_string());
+                if let Some(next) = message
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|provider| !provider.is_empty())
+                {
+                    provider = Some(next.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Some((provider?, model_id?))
 }
 
 pub fn list_pi_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {

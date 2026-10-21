@@ -328,6 +328,13 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
     let launch = dir.join(daemon_image::LAUNCH_NAME);
     let image = daemon_image::publish_image(&dir, exe)
         .map_err(|error| format!("发布 smeltd 映像失败：{error}"))?;
+    // 包里带着 smelt-pi 就一起发布、拨链接，和守护换不换代无关。从 `~/.smelt/bin` 或
+    // 开发目录 install 时旁边没有，交给运行时启动时按自己的版本补（`ensure_smelt_pi`）。
+    let package = exe.parent().ok_or("smeltd 没有所在目录")?;
+    if smelt_core::pi_image::bundled(package) {
+        smelt_core::pi_image::publish(&dir, package)
+            .map_err(|error| format!("发布 smelt-pi 失败：{error}"))?;
+    }
     let installed = std::fs::canonicalize(&launch).ok() == std::fs::canonicalize(&image).ok();
     let running = smelt_runtime_client::local::local_runtime()
         .describe()
@@ -351,6 +358,9 @@ pub(crate) fn install_image(exe: &Path) -> Result<ImageInstall, String> {
     };
     if let Err(error) = daemon_image::reap_unused_images(&dir) {
         eprintln!("回收旧映像失败：{error}");
+    }
+    if let Err(error) = smelt_core::pi_image::reap_unused(&dir) {
+        eprintln!("回收旧 smelt-pi 失败：{error}");
     }
     Ok(outcome)
 }

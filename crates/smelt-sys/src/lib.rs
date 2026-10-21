@@ -4,6 +4,8 @@ pub mod app_log;
 pub mod block_on;
 pub mod daemon_image;
 pub mod fd_limit;
+#[cfg(unix)]
+pub mod pi_image;
 pub mod process_wait;
 pub mod tty_color;
 
