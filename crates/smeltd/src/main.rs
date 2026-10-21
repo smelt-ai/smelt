@@ -2943,14 +2943,13 @@ fn resume_hosted_acp_handoff_item(
         );
     let owner_ids = live_acp_owner_ids(&reduced);
     let instance = next_session_instance();
-    let state = Arc::new(Mutex::new(SessionState {
-        id: id.clone(),
+    let state = Arc::new(Mutex::new(SessionState::acp(
+        id.clone(),
         instance,
-        cwd: cwd.clone(),
-        launch: Some(launch.command.clone()),
+        cwd.clone(),
+        Some(launch.command.clone()),
         agent_token,
-        ..Default::default()
-    }));
+    )));
     let launch_spec = Mutex::new(Some(launch));
     let (slot, created) = acp_sessions.reserve_with(&id, || AcpSession {
         instance,
@@ -3502,14 +3501,13 @@ pub(crate) fn resume_from_value(
             .map(String::from)
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
         let instance = next_session_instance();
-        let state = Arc::new(Mutex::new(SessionState {
-            id: id.clone(),
+        let state = Arc::new(Mutex::new(SessionState::acp(
+            id.clone(),
             instance,
-            cwd: cwd.clone(),
-            launch: Some(launch.command.clone()),
+            cwd.clone(),
+            Some(launch.command.clone()),
             agent_token,
-            ..Default::default()
-        }));
+        )));
         let launch_spec = Mutex::new(Some(launch.clone()));
         let (slot, created) = acp_sessions.reserve_with(&id, || AcpSession {
             instance,

@@ -80,6 +80,30 @@ pub(crate) struct SessionState {
     pub(crate) runtime: bool,
 }
 
+impl SessionState {
+    /// ACP 会话的状态。相位全由 ACP 投影给出（`update_acp_daemon_state`），从创建那一刻就是权威的。
+    /// 新建和升级交接接管都走这里：用 `..Default::default()` 拼会丢掉 `turn_events`，
+    /// `effective_phase()` 随之把运行中 / 已完成一律降成 Idle。
+    pub(crate) fn acp(
+        id: String,
+        instance: u64,
+        cwd: Option<String>,
+        launch: Option<String>,
+        agent_token: String,
+    ) -> Self {
+        Self {
+            id,
+            instance,
+            cwd,
+            launch,
+            agent_token,
+            structured_events: true,
+            turn_events: true,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for SessionState {
     fn default() -> Self {
         Self {

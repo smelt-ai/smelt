@@ -840,6 +840,56 @@ fn connecting_hosted_handoff_does_not_keep_the_process() {
 }
 
 #[test]
+fn adopted_hosted_handoff_keeps_acp_phase_authoritative() {
+    use std::os::unix::io::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn stand-in host");
+    let host_pid = child.id() as i32;
+    // 不 wait，避免和 cleanup 的 waitpid 抢同一个 child。
+    std::mem::forget(child);
+    let (kept, handed) = UnixStream::pair().expect("socketpair");
+    let host_fd = handed.into_raw_fd();
+    let mut snapshot = sample_snapshot("hist-adopted");
+    snapshot.history_session_id = Some("hist-adopted".into());
+    let sessions = new_test_acp_sessions();
+    resume_hosted_acp_handoff_item(
+        ValidatedHostedAcpHandoff {
+            id: "acp-adopted".into(),
+            owned: OwnedHostedAcpHandoff {
+                host_pid,
+                host_fd,
+                provider_pid: None,
+            },
+            snapshot,
+            host_snapshot_revision: 1,
+            cwd: None,
+            launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("/usr/bin/true"),
+            runtime_spec_fingerprint: None,
+            agent_token: "token".into(),
+            conversation_binding: None,
+            pending_host_bytes: Vec::new(),
+        },
+        &sessions,
+        &no_subs(),
+        std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+    );
+    let slot = sessions.get("acp-adopted").expect("空闲的独立宿主应被收养");
+    assert_acp_phase_is_authoritative(&slot.value);
+    assert_eq!(slot.value.state.lock().unwrap().agent_token, "token");
+    let _ = retire_acp_runtime(&slot.value);
+    drop(kept);
+}
+
+#[test]
 fn hosted_handoff_accepts_an_active_snapshot_without_sdk_reconstruction() {
     let mut snapshot = sample_snapshot("sid-hosted");
     snapshot.phase = smelt_core::daemon_state::DaemonPhase::AwaitingApproval;
@@ -1082,6 +1132,16 @@ fn acp_session_with_valid_fds_and_session_id_is_recovered() {
     assert_eq!(reduced.entries().len(), 1);
     assert_eq!(reduced.acp_session_id.as_deref(), Some("sid-1"));
     assert_eq!(reduced.history_session_id.as_deref(), Some("sid-1"));
+    drop(reduced);
+    assert_acp_phase_is_authoritative(sess);
+}
+
+/// ACP 的相位全由 ACP 投影给出。交接接管后若丢了 `turn_events`，
+/// `effective_phase()` 会把运行中 / 已完成一律降成 Idle，手机指挥台和通知都看不到在做的事。
+fn assert_acp_phase_is_authoritative(sess: &AcpSession) {
+    let state = sess.state.lock().unwrap();
+    assert!(state.turn_events, "接管的 ACP 会话相位必须仍是权威的");
+    assert!(state.structured_events);
 }
 
 /// 没有 agent 侧 session id 就没法 attach_session——理论上不该发生，但
