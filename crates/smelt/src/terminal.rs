@@ -1173,11 +1173,12 @@ fn sync_bundled_pi(bundled_daemon: &std::path::Path) {
     if SYNCED.load(Ordering::Relaxed) {
         return;
     }
-    let Some(src_dir) = bundled_daemon.parent() else {
+    // 守护在 `Contents/MacOS`，Pi 在同一个 `Contents` 下的 Resources 里。
+    let Some(contents) = bundled_daemon.parent().and_then(std::path::Path::parent) else {
         return;
     };
     let dir = managed_daemon_dir();
-    match smelt_sys::pi_image::publish(&dir, src_dir) {
+    match smelt_sys::pi_image::publish(&dir, &contents.join(smelt_sys::pi_image::APP_BUNDLE_DIR)) {
         Ok(_) => SYNCED.store(true, Ordering::Relaxed),
         Err(error) => eprintln!("[workspace] 发布 smelt-pi 失败：{error}"),
     }
@@ -1637,7 +1638,8 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
     }
     // smelt-pi 和守护分开发布。安装会当场交接守护，交接上来的新守护起 Pi 时链接必须已经
     // 就位；发布不上就不换 App。
-    smelt_sys::pi_image::publish(&managed_daemon_dir(), &candidate_app.join("Contents/MacOS"))
+    let pi_bundle = candidate_app.join("Contents").join(smelt_sys::pi_image::APP_BUNDLE_DIR);
+    smelt_sys::pi_image::publish(&managed_daemon_dir(), &pi_bundle)
         .map_err(|error| anyhow::anyhow!("发布 smelt-pi 失败：{error}"))?;
     Ok(daemon)
 }

@@ -20,8 +20,10 @@ pub const LAUNCH_NAME: &str = "smelt-pi";
 const WASM_NAME: &str = "photon_rs_bg.wasm";
 const NATIVE_DIR: &str = "native";
 const DIR_PREFIX: &str = "smelt-pi-";
+/// App 里这一整套相对 `Contents` 的位置。wasm 不是代码，不能放进只收签名代码的 `Contents/MacOS`。
+pub const APP_BUNDLE_DIR: &str = "Resources/smelt-pi";
 
-/// 把 `src_dir`（App 的 `Contents/MacOS` 或 Linux 包目录）里的这一整套发布到 `dir`，
+/// 把 `src_dir`（App 的 `Contents/Resources/smelt-pi` 或 Linux 包目录）里的这一整套发布到 `dir`，
 /// 再把 `dir/smelt-pi` 拨过去。同一套内容只发布一次。返回发布出的 smelt-pi。
 pub fn publish(dir: &Path, src_dir: &Path) -> io::Result<PathBuf> {
     let files = bundle_files(src_dir)?;

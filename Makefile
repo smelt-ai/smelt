@@ -113,9 +113,9 @@ install: $(SMELT_PI) ## 原子安装到 /Applications（不打 dmg）；活跃 A
 		|| [ target/release/$(BIN) -nt dist/Smelt.app/Contents/MacOS/$(BIN) ] \
 		|| [ target/release/smelt-notify -nt dist/Smelt.app/Contents/MacOS/smelt-notify ] \
 		|| [ target/release/smelt-installer -nt dist/Smelt.app/Contents/MacOS/smelt-installer ] \
-		|| [ ! -x dist/Smelt.app/Contents/MacOS/smelt-pi ] \
-		|| [ target/smelt-pi/smelt-pi -nt dist/Smelt.app/Contents/MacOS/smelt-pi ] \
-		|| [ target/smelt-pi/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/MacOS/photon_rs_bg.wasm ] \
+		|| [ ! -x dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
+		|| [ target/smelt-pi/smelt-pi -nt dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
+		|| [ target/smelt-pi/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/Resources/smelt-pi/photon_rs_bg.wasm ] \
 		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
 		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \

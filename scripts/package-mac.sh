@@ -161,12 +161,17 @@ chmod +x "$MACOS/smelt-notify"
 # 绝不能从即将被交换的 Bundle 内直接运行。
 cp "$INSTALLER_BIN" "$MACOS/smelt-installer"
 chmod +x "$MACOS/smelt-installer"
-cp "$PI_BIN" "$MACOS/smelt-pi"
-cp "$PI_WASM" "$MACOS/photon_rs_bg.wasm"
-chmod +x "$MACOS/smelt-pi"
+# smelt-pi 连同 wasm、native/ 整套放 Resources：Contents/MacOS 里每个文件都必须是签过的
+# 代码，wasm 签不了。App 只是载体，安装和 GUI 启动时把这一套发布到 ~/.smelt/bin，
+# 守护从那里起 Pi。
+PI_DIR="$RES/smelt-pi"
+mkdir -p "$PI_DIR"
+cp "$PI_BIN" "$PI_DIR/smelt-pi"
+cp "$PI_WASM" "$PI_DIR/photon_rs_bg.wasm"
+chmod +x "$PI_DIR/smelt-pi"
 if [[ -d "$ROOT/target/smelt-pi/native" ]]; then
-  mkdir -p "$MACOS/native"
-  cp -R "$ROOT/target/smelt-pi/native/." "$MACOS/native/"
+  mkdir -p "$PI_DIR/native"
+  cp -R "$ROOT/target/smelt-pi/native/." "$PI_DIR/native/"
 fi
 # 插件（gpui-shell 脚本应用，见 crates/smelt/src/plugins）：整目录随 App
 # 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell 加载时写编辑器文件的行为，
@@ -343,12 +348,12 @@ for inner in smelt-notify smelt-installer; do
   sign_one "$ENTITLEMENTS" "$MACOS/$inner"
 done
 echo "  … 签内层：smelt-pi"
-sign_one "$JIT_ENTITLEMENTS" "$MACOS/smelt-pi"
-if [[ -d "$MACOS/native" ]]; then
+sign_one "$JIT_ENTITLEMENTS" "$PI_DIR/smelt-pi"
+if [[ -d "$PI_DIR/native" ]]; then
   while IFS= read -r -d '' node; do
-    echo "  … 签内层：${node#"$MACOS/"}"
+    echo "  … 签内层：${node#"$RES/"}"
     sign_one "$ENTITLEMENTS" "$node"
-  done < <(find "$MACOS/native" -type f -name '*.node' -print0)
+  done < <(find "$PI_DIR/native" -type f -name '*.node' -print0)
 fi
 echo "  … 封 .app（含主程序 ${EXEC_NAME}）"
 sign_one "$ENTITLEMENTS" "$APP"

@@ -778,7 +778,7 @@ flowchart TB
 
   <h3>4.4 放在哪</h3>
   <ul>
-    <li>macOS：<code>smelt.app/Contents/MacOS/smelt-pi</code>，wasm 和 <code>native/</code> 跟它同一层。和 <code>smeltd</code> 一样先签内层再签 <code>.app</code>。</li>
+    <li>macOS：<code>smelt.app/Contents/Resources/smelt-pi/smelt-pi</code>，wasm 和 <code>native/</code> 跟它同一层。<code>Contents/MacOS</code> 只能放签过的代码，wasm 签不了，所以整套放 Resources。App 只是载体，安装和 GUI 启动时发布到 <code>~/.smelt/bin</code>。和 <code>smeltd</code> 一样先签内层再签 <code>.app</code>。</li>
     <li>Linux：放进现有的 <code>smeltd-*-linux-*.tar.gz</code>，和 <code>smeltd</code> 同级。首启不下载。</li>
     <li><code>~/.smelt</code> 不再出现 <code>runtime/store/pi</code> 或 <code>runtime/store/bun</code>。</li>
   </ul>
@@ -868,7 +868,7 @@ exec "&lt;当前 bundle 的 smelt-pi&gt;" "$@"</code></pre>
   <p>
     启动器在每次启动时覆盖，指向这一次安装的 bundle。它不是 generation，不下载，不持有 lease。
     外部 MCP 因此仍然能执行 <code>bun &lt;script&gt;</code>。智能体进程由 <code>smeltd</code> 直接 exec
-    <code>Contents/MacOS/smelt-pi</code>，环境里没有 <code>BUN_BE_BUN</code>。
+    <code>~/.smelt/bin/smelt-pi</code> 解析出的真实路径，环境里没有 <code>BUN_BE_BUN</code>。
   </p>
   <p>
     <code>acp_conn</code> 里为会话保存的 <code>ManagedBunRuntime</code> 改成「当前 <code>smelt-pi</code> 路径」。
@@ -932,7 +932,7 @@ exec "&lt;当前 bundle 的 smelt-pi&gt;" "$@"</code></pre>
   </ul>
   <p>
     <code>package-mac.sh</code> 在 Developer ID 路径上要求这个文件存在，缺失就失败。
-    用它签 <code>Contents/MacOS/smelt-pi</code>，并签旁边的 Mach-O <code>.node</code>。
+    用它签 <code>Contents/Resources/smelt-pi/smelt-pi</code>，并签旁边的 Mach-O <code>.node</code>。
     wasm 不是代码，不签。签名顺序保持现有约定：先内层 Mach-O，再封 <code>.app</code>，不用 <code>--deep</code>。
   </p>
   <p>
