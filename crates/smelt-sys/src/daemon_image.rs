@@ -37,70 +37,41 @@ pub fn image_file_name(fingerprint: &str) -> String {
 }
 
 pub fn is_immutable_image_name(name: &str) -> bool {
-    fingerprint_from_image_name(name).is_some()
-}
-
-/// `smeltd-<64 位十六进制>` 的指纹。启动名 `smeltd` 和别的文件名都不是。
-pub fn fingerprint_from_image_name(name: &str) -> Option<&str> {
-    let rest = name.strip_prefix(IMAGE_PREFIX)?;
-    if rest.len() == 64
+    let Some(rest) = name.strip_prefix(IMAGE_PREFIX) else {
+        return false;
+    };
+    rest.len() == 64
         && rest
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        Some(rest)
-    } else {
-        None
-    }
-}
-
-const PI_DIR_PREFIX: &str = "smelt-pi-";
-
-/// 和这份守护映像绑在一起的 Pi 目录名。指纹是 smeltd 的，不是 smelt-pi 自己的。
-pub fn paired_pi_dir_name(fingerprint: &str) -> String {
-    format!("{PI_DIR_PREFIX}{fingerprint}")
 }
 
 /// 把 `src` 的字节写成 `dir/smeltd-<指纹>`。同内容再发布一次必须还是同一个 inode。
 /// 名字已经存在但内容对不上时直接报错，绝不覆盖。
-///
-/// `src` 旁边如果有 `smelt-pi`，连同 `photon_rs_bg.wasm` 和可选的 `native/`
-/// 一起放进 `dir/smelt-pi-<同一指纹>/`。映像已经存在时仍补上缺的这一份；
-/// 目录里已有的字节对不上就拒绝覆盖。旁边没有 `smelt-pi` 时什么都不做。
 pub fn publish_image(dir: &Path, src: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let fingerprint = content_fingerprint(src)?;
     let name = image_file_name(&fingerprint);
     let dest = dir.join(&name);
-    let image = if let Some(existing) = existing_image(&dest, &fingerprint)? {
-        existing
-    } else {
-        publish_new_image(&dest, src, &fingerprint)?
-    };
-    publish_paired_pi(dir, src, &fingerprint)?;
-    Ok(image)
-}
-
-fn publish_new_image(dest: &Path, src: &Path, fingerprint: &str) -> io::Result<PathBuf> {
-    let name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("smeltd");
-    let tmp = dest.with_file_name(format!(
+    if let Some(existing) = existing_image(&dest, &fingerprint)? {
+        return Ok(existing);
+    }
+    let tmp = dir.join(format!(
         ".{name}.partial-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    if let Err(error) = write_temp(&tmp, src) {
+    let copied = write_temp(&tmp, src);
+    if let Err(error) = copied {
         let _ = fs::remove_file(&tmp);
         return Err(error);
     }
-    let linked = fs::hard_link(&tmp, dest);
+    let linked = fs::hard_link(&tmp, &dest);
     let _ = fs::remove_file(&tmp);
     match linked {
-        Ok(()) => Ok(dest.to_path_buf()),
+        Ok(()) => Ok(dest),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            existing_image(dest, fingerprint)?.ok_or(error)
+            existing_image(&dest, &fingerprint)?.ok_or(error)
         }
         Err(error) => Err(error),
     }
@@ -180,80 +151,6 @@ pub fn retarget_launch_after_commit(executed: &Path) -> io::Result<PathBuf> {
     retarget_launch_symlink(dir, &image)?;
     remove_pending_symlink(dir)?;
     Ok(image)
-}
-
-fn publish_paired_pi(dir: &Path, src: &Path, fingerprint: &str) -> io::Result<()> {
-    let Some(src_dir) = src.parent() else {
-        return Ok(());
-    };
-    let pi = src_dir.join("smelt-pi");
-    if !fs::symlink_metadata(&pi).is_ok_and(|meta| meta.is_file()) {
-        return Ok(());
-    }
-    let wasm = src_dir.join("photon_rs_bg.wasm");
-    if !fs::symlink_metadata(&wasm).is_ok_and(|meta| meta.is_file()) {
-        return Err(io::Error::other(format!(
-            "smelt-pi 旁边缺少 photon_rs_bg.wasm（{}）",
-            wasm.display()
-        )));
-    }
-    let pair = dir.join(paired_pi_dir_name(fingerprint));
-    fs::create_dir_all(&pair)?;
-    publish_file_once(&pi, &pair.join("smelt-pi"))?;
-    publish_file_once(&wasm, &pair.join("photon_rs_bg.wasm"))?;
-    let native = src_dir.join("native");
-    if fs::symlink_metadata(&native).is_ok_and(|meta| meta.is_dir()) {
-        copy_tree_once(&native, &pair.join("native"))?;
-    }
-    Ok(())
-}
-
-fn publish_file_once(src: &Path, dest: &Path) -> io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let fingerprint = content_fingerprint(src)?;
-    if existing_image(dest, &fingerprint)?.is_some() {
-        return Ok(());
-    }
-    let name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("file");
-    let tmp = dest.with_file_name(format!(
-        ".{name}.partial-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    if let Err(error) = write_temp(&tmp, src) {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
-    }
-    let linked = fs::hard_link(&tmp, dest);
-    let _ = fs::remove_file(&tmp);
-    match linked {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            existing_image(dest, &fingerprint)?.map(|_| ()).ok_or(error)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-/// 只复制普通文件。符号链接不跟随、也不写进映像目录。
-fn copy_tree_once(src: &Path, dest: &Path) -> io::Result<()> {
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let meta = fs::symlink_metadata(entry.path())?;
-        let target = dest.join(entry.file_name());
-        if meta.is_dir() {
-            copy_tree_once(&entry.path(), &target)?;
-        } else if meta.is_file() {
-            publish_file_once(&entry.path(), &target)?;
-        }
-    }
-    Ok(())
 }
 
 fn existing_image(dest: &Path, fingerprint: &str) -> io::Result<Option<PathBuf>> {
@@ -398,13 +295,6 @@ fn reap_unused_images_with(
             if error.kind() != io::ErrorKind::NotFound && first_delete_error.is_none() {
                 first_delete_error = Some(error);
             }
-            continue;
-        }
-        if let Some(fingerprint) = fingerprint_from_image_name(name)
-            && let Err(error) = reap_paired_pi(dir, fingerprint, &mut probe)
-            && first_delete_error.is_none()
-        {
-            first_delete_error = Some(error);
         }
     }
     match first_delete_error {
@@ -417,7 +307,7 @@ fn reap_unused_images_with(
 /// lsof（很多机器不装）。同一用户的进程读不到 maps 就证明不了，按未知处理；别的用户
 /// 的进程碰不到 `~/.smelt` 里的映像，跳过。
 #[cfg(target_os = "linux")]
-fn probe_image_mapped(path: &Path) -> MappedState {
+pub(crate) fn probe_image_mapped(path: &Path) -> MappedState {
     use std::os::unix::fs::MetadataExt as _;
 
     let Ok(meta) = fs::metadata(path) else {
@@ -487,7 +377,7 @@ fn linux_makedev(major: u32, minor: u32) -> u64 {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn probe_image_mapped(path: &Path) -> MappedState {
+pub(crate) fn probe_image_mapped(path: &Path) -> MappedState {
     let output = match std::process::Command::new("/usr/sbin/lsof")
         .arg("-Fn")
         .arg("--")
@@ -528,26 +418,6 @@ fn file_id(meta: &fs::Metadata) -> Option<FileId> {
         let _ = meta;
         None
     }
-}
-
-/// 守护映像删掉之后，配对的 `smelt-pi-<指纹>/` 只在里面的 `smelt-pi` 也没人映射时一起删。
-/// 探测不了就留下。
-fn reap_paired_pi(
-    dir: &Path,
-    fingerprint: &str,
-    probe: &mut impl FnMut(&Path) -> MappedState,
-) -> io::Result<()> {
-    let pair = dir.join(paired_pi_dir_name(fingerprint));
-    if fs::symlink_metadata(&pair).is_err() {
-        return Ok(());
-    }
-    let binary = pair.join("smelt-pi");
-    if fs::symlink_metadata(&binary).is_ok_and(|meta| meta.is_file())
-        && probe(&binary) != MappedState::Unused
-    {
-        return Ok(());
-    }
-    fs::remove_dir_all(&pair)
 }
 
 fn referenced_image_ids(dir: &Path) -> io::Result<Vec<FileId>> {
@@ -802,125 +672,5 @@ mod tests {
         assert!(unknown.is_file(), "无法证明空闲的映像必须留下");
         assert!(!stale.exists(), "既没人指向也没人映射的旧映像要删掉");
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn publishing_a_daemon_also_publishes_its_paired_pi_once() {
-        let root = scratch("pair");
-        let src_dir = root.join("pkg");
-        let bin = root.join("bin");
-        fs::create_dir_all(&src_dir).unwrap();
-        let daemon = src_dir.join("smeltd");
-        fs::write(&daemon, b"daemon-v1").unwrap();
-        fs::write(src_dir.join("smelt-pi"), b"pi-v1").unwrap();
-        fs::write(src_dir.join("photon_rs_bg.wasm"), b"wasm-v1").unwrap();
-        fs::create_dir(src_dir.join("native")).unwrap();
-        fs::write(src_dir.join("native/addon.node"), b"native-v1").unwrap();
-
-        let image = publish_image(&bin, &daemon).unwrap();
-        let fingerprint =
-            fingerprint_from_image_name(image.file_name().unwrap().to_str().unwrap()).unwrap();
-        let pair = bin.join(paired_pi_dir_name(fingerprint));
-        assert_eq!(fs::read(pair.join("smelt-pi")).unwrap(), b"pi-v1");
-        assert_eq!(
-            fs::read(pair.join("photon_rs_bg.wasm")).unwrap(),
-            b"wasm-v1"
-        );
-        assert_eq!(
-            fs::read(pair.join("native/addon.node")).unwrap(),
-            b"native-v1"
-        );
-        let pi_inode = fs::metadata(pair.join("smelt-pi")).unwrap().ino();
-
-        // 映像已经在，配对目录被删掉之后再发布，要补上同一份，不能因为映像存在就跳过。
-        fs::remove_dir_all(&pair).unwrap();
-        let again = publish_image(&bin, &daemon).unwrap();
-        assert_eq!(again, image);
-        assert_eq!(fs::read(pair.join("smelt-pi")).unwrap(), b"pi-v1");
-
-        // 守护字节不变、Pi 字节变了：不能覆盖已经发布的那一份。
-        fs::write(src_dir.join("smelt-pi"), b"pi-v2-different").unwrap();
-        let error = publish_image(&bin, &daemon).expect_err("配对内容变了必须拒绝覆盖");
-        assert!(error.to_string().contains("拒绝覆盖"), "实际错误：{error}");
-        assert_eq!(fs::read(pair.join("smelt-pi")).unwrap(), b"pi-v1");
-        assert_eq!(fs::metadata(pair.join("smelt-pi")).unwrap().ino(), pi_inode);
-
-        // 旁边没有 smelt-pi 时，只发布守护，不造空目录。
-        let bare = root.join("bare");
-        fs::create_dir_all(&bare).unwrap();
-        fs::write(bare.join("smeltd"), b"daemon-bare").unwrap();
-        let bare_image = publish_image(&bin, &bare.join("smeltd")).unwrap();
-        let bare_fp =
-            fingerprint_from_image_name(bare_image.file_name().unwrap().to_str().unwrap()).unwrap();
-        assert!(!bin.join(paired_pi_dir_name(bare_fp)).exists());
-
-        fs::write(src_dir.join("smelt-pi"), b"pi-without-wasm").unwrap();
-        fs::remove_file(src_dir.join("photon_rs_bg.wasm")).unwrap();
-        let missing = publish_image(&root.join("other-bin"), &daemon);
-        // 守护字节没变，但 wasm 没了：发布配对必须失败，已有的那份不动。
-        assert!(missing.is_err(), "有 smelt-pi 却没有 wasm 必须失败");
-        assert_eq!(
-            fs::read(pair.join("photon_rs_bg.wasm")).unwrap(),
-            b"wasm-v1"
-        );
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn reaping_a_daemon_image_removes_its_unused_pi_pair() {
-        let root = scratch("reap-pair");
-        let src_dir = root.join("pkg");
-        let bin = root.join("bin");
-        fs::create_dir_all(&src_dir).unwrap();
-        fs::write(src_dir.join("smeltd"), b"daemon-stale").unwrap();
-        fs::write(src_dir.join("smelt-pi"), b"pi-stale").unwrap();
-        fs::write(src_dir.join("photon_rs_bg.wasm"), b"wasm").unwrap();
-        let image = publish_image(&bin, &src_dir.join("smeltd")).unwrap();
-        let fingerprint =
-            fingerprint_from_image_name(image.file_name().unwrap().to_str().unwrap()).unwrap();
-        let pair = bin.join(paired_pi_dir_name(fingerprint));
-        assert!(pair.join("smelt-pi").is_file());
-
-        reap_unused_images_with(&bin, |_| MappedState::Unused).unwrap();
-        assert!(!image.exists());
-        assert!(!pair.exists(), "没人映射的配对目录要跟着映像一起删");
-
-        fs::write(src_dir.join("smeltd"), b"daemon-live").unwrap();
-        fs::write(src_dir.join("smelt-pi"), b"pi-live").unwrap();
-        let live = publish_image(&bin, &src_dir.join("smeltd")).unwrap();
-        let live_fp =
-            fingerprint_from_image_name(live.file_name().unwrap().to_str().unwrap()).unwrap();
-        let live_pair = bin.join(paired_pi_dir_name(live_fp));
-        reap_unused_images_with(&bin, |path| {
-            if path == live || path == live_pair.join("smelt-pi") {
-                MappedState::InUse
-            } else {
-                MappedState::Unused
-            }
-        })
-        .unwrap();
-        assert!(live.is_file(), "仍被映射的守护映像留下");
-        assert!(
-            live_pair.join("smelt-pi").is_file(),
-            "仍被映射的 smelt-pi 留下"
-        );
-
-        reap_unused_images_with(&bin, |path| {
-            if path == live {
-                MappedState::Unused
-            } else if path == live_pair.join("smelt-pi") {
-                MappedState::Unknown
-            } else {
-                MappedState::Unused
-            }
-        })
-        .unwrap();
-        assert!(!live.exists());
-        assert!(
-            live_pair.exists(),
-            "证明不了 smelt-pi 没人用时，配对目录留下"
-        );
-        fs::remove_dir_all(root).unwrap();
     }
 }

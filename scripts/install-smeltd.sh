@@ -321,8 +321,8 @@ user_phase() {
   mkdir -p "$BIN"
   put 0755 "$HERE/smelt-notify" "$BIN/smelt-notify"
   put 0755 "$HERE/smelt-up" "$BIN/smelt-up"
-  # smelt-pi、wasm、native 留在包目录里。下面的 `smeltd install` 按 smeltd 的指纹
-  # 把它们发布成 ~/.smelt/bin/smelt-pi-<指纹>/，不在 bin 里放一份会变的副本。
+  # smelt-pi、wasm、native 留在包目录里。下面的 `smeltd install` 按它们自己的指纹
+  # 发布成 ~/.smelt/bin/smelt-pi-<指纹>/，再把 ~/.smelt/bin/smelt-pi 链接拨过去。
   [[ -x "$HERE/smelt-pi" && -f "$HERE/photon_rs_bg.wasm" ]] || die "包里缺少 smelt-pi 或 photon_rs_bg.wasm"
   # 跨 Agent 消息下线后留下的旧 helper。
   rm -f "$BIN/smelt-agent-mcp"

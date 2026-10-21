@@ -878,7 +878,6 @@ fn install_managed_daemon_from(src: &std::path::Path) -> std::io::Result<std::pa
     let dir = managed_daemon_dir();
     std::fs::create_dir_all(&dir)?;
     let managed = managed_daemon_path();
-    // 守护字节没变也要发布：同一指纹下缺的 smelt-pi 配对要补上。内容相同不会换 inode。
     let image = smelt_sys::daemon_image::publish_image(&dir, src)?;
     let need = !managed.is_file() || !same_daemon_binary(src, &managed);
     if need {
@@ -1100,6 +1099,9 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
     let bundled = bundled_daemon_path();
     let managed = managed_daemon_path();
 
+    if let Some(bundled) = &bundled {
+        sync_bundled_pi(bundled);
+    }
     // 无分发物：仅依赖已有 managed（开发机偶发）。
     let Some(bundled) = bundled else {
         return if managed.is_file() {
@@ -1160,6 +1162,27 @@ fn ensure_managed_daemon_current_locked() -> std::io::Result<std::path::PathBuf>
             }
             Ok(managed_daemon_path())
         }
+    }
+}
+
+/// 把 App 里的 smelt-pi 发布到 `~/.smelt/bin` 并拨好 `smelt-pi` 链接，再回收没人用的旧版本。
+/// 和守护版本无关：只换了 Pi 时守护不用交接，之后新起的 Pi 就是新的。要读一遍约
+/// 120MB 算指纹，每个 GUI 进程只做一次。
+fn sync_bundled_pi(bundled_daemon: &std::path::Path) {
+    static SYNCED: AtomicBool = AtomicBool::new(false);
+    if SYNCED.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(src_dir) = bundled_daemon.parent() else {
+        return;
+    };
+    let dir = managed_daemon_dir();
+    match smelt_sys::pi_image::publish(&dir, src_dir) {
+        Ok(_) => SYNCED.store(true, Ordering::Relaxed),
+        Err(error) => eprintln!("[workspace] 发布 smelt-pi 失败：{error}"),
+    }
+    if let Err(error) = smelt_sys::pi_image::reap_unused(&dir) {
+        eprintln!("[workspace] 回收旧 smelt-pi 失败：{error}");
     }
 }
 

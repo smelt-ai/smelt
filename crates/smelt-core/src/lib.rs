@@ -54,6 +54,8 @@ pub mod peer_link;
 pub mod pi_auth;
 pub mod pi_auth_service;
 pub mod pi_auto_models;
+#[cfg(unix)]
+pub use smelt_sys::pi_image;
 pub mod pi_mcp;
 pub mod pi_model_discovery;
 pub mod pi_model_settings;

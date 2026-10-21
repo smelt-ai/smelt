@@ -1,5 +1,5 @@
 //! 受管 Bun 仍按 generation 下载到 `~/.smelt/runtime`。
-//! Pi 不再物化源码：跑的是和 `smeltd-<指纹>` 绑在同一目录的 `smelt-pi-<同一指纹>/smelt-pi`。
+//! Pi 不再物化源码：跑的是 `~/.smelt/bin/smelt-pi` 指向的那份编译好的 smelt-pi（见 `pi_image`）。
 //!
 //! Bun 只留给 MCP 预设的 `bun x` 和 Claude/Codex 的 `bunx`。`~/.smelt/runtime/bin/bun`
 //! 指向当前 generation，`mcp.json` 里写的还是这条路径。
@@ -343,10 +343,6 @@ pub(crate) fn pi_runtime_version() -> &'static str {
 }
 
 /// 定位编译好的 `smelt-pi`。不下载、不写 `settings.json`。
-///
-/// `SMELT_PI` 优先。当前进程是 `smeltd-<指纹>`（或指向它的启动名）时，只用旁边
-/// `smelt-pi-<同一指纹>/smelt-pi`，找不到就失败，不能退到另一版。开发构建
-/// （`target/.../smeltd`）才退到 `target/smelt-pi/smelt-pi`。
 pub(crate) fn sync_managed_pi_agent(_status: &dyn Fn(&str)) -> Result<ManagedPiRuntime, String> {
     let executable = locate_smelt_pi()?;
     require_photon_wasm(&executable)?;
@@ -360,79 +356,25 @@ pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
 }
 
 fn locate_smelt_pi() -> Result<PathBuf, String> {
-    let override_pi = std::env::var_os("SMELT_PI").map(PathBuf::from);
-    locate_smelt_pi_from(
-        override_pi.as_deref(),
-        std::env::current_exe().ok().as_deref(),
-    )
+    let home = smelt_paths::smelt_home().ok_or("找不到 home 目录")?;
+    locate_smelt_pi_in(&home.join("bin"))
 }
 
-fn locate_smelt_pi_from(override_pi: Option<&Path>, exe: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(path) = override_pi {
-        if executable_file(path) {
-            return Ok(path.to_path_buf());
-        }
-        return Err(format!("SMELT_PI 不是可执行文件：{}", path.display()));
-    }
-    if let Some(exe) = exe {
-        if let Some(paired) = paired_pi_for_exe(exe)? {
-            return Ok(paired);
-        }
-        if let Some(dev) = dev_smelt_pi(exe).filter(|path| executable_file(path)) {
-            return Ok(dev);
-        }
-    }
-    Err(
-        "找不到 smelt-pi。受管守护只用 ~/.smelt/bin/smelt-pi-<与 smeltd 相同的指纹>/smelt-pi。开发时先运行 scripts/build-smelt-pi.sh，或设置 SMELT_PI。"
-            .to_string(),
-    )
-}
-
-/// `Ok(None)`：这个可执行文件不是不可变守护映像，调用方可以走开发目录。
-/// 是映像但配对的 smelt-pi 不在，则直接报错。
-fn paired_pi_for_exe(exe: &Path) -> Result<Option<PathBuf>, String> {
-    let name = exe.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    let (dir, fingerprint) = if let Some(fingerprint) =
-        crate::daemon_image::fingerprint_from_image_name(name)
-    {
-        let dir = exe
-            .parent()
-            .ok_or_else(|| format!("守护映像没有目录：{}", exe.display()))?;
-        (dir.to_path_buf(), fingerprint.to_string())
-    } else if name == crate::daemon_image::LAUNCH_NAME {
-        let canonical = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
-        let canonical_name = canonical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        let Some(fingerprint) = crate::daemon_image::fingerprint_from_image_name(canonical_name)
-        else {
-            return Ok(None);
-        };
-        let dir = canonical
-            .parent()
-            .ok_or_else(|| format!("守护映像没有目录：{}", canonical.display()))?;
-        (dir.to_path_buf(), fingerprint.to_string())
+/// 解析 `bin/smelt-pi` 链接，返回真实路径。拿真实路径去 exec：之后链接拨到新版本，
+/// 已经起来的这个 Pi 还在原来的目录里。
+fn locate_smelt_pi_in(bin: &Path) -> Result<PathBuf, String> {
+    let link = bin.join(crate::pi_image::LAUNCH_NAME);
+    let executable = fs::canonicalize(&link).map_err(|error| {
+        format!(
+            "找不到 smelt-pi（{}：{error}）。重新打开 Smelt 会从 App 里装上；Linux 运行 smeltd install。",
+            link.display()
+        )
+    })?;
+    if executable_file(&executable) {
+        Ok(executable)
     } else {
-        return Ok(None);
-    };
-    let pi = dir
-        .join(crate::daemon_image::paired_pi_dir_name(&fingerprint))
-        .join("smelt-pi");
-    if executable_file(&pi) {
-        Ok(Some(pi))
-    } else {
-        Err(format!(
-            "找不到与守护映像配对的 smelt-pi（{}）。这一版 smeltd 不能改用别的 smelt-pi。",
-            pi.display()
-        ))
+        Err(format!("smelt-pi 不是可执行文件：{}", executable.display()))
     }
-}
-
-fn dev_smelt_pi(exe: &Path) -> Option<PathBuf> {
-    exe.ancestors()
-        .find(|path| path.file_name().is_some_and(|name| name == "target"))
-        .map(|target| target.join("smelt-pi").join("smelt-pi"))
 }
 
 fn executable_file(path: &Path) -> bool {
@@ -496,43 +438,27 @@ mod tests {
     }
 
     #[test]
-    fn a_hashed_daemon_uses_only_its_paired_smelt_pi() {
+    fn smelt_pi_resolves_through_the_launch_link_to_its_real_path() {
         let root = std::env::temp_dir().join(format!(
-            "smelt-pi-pair-locate-{}",
+            "smelt-pi-locate-{}",
             uuid::Uuid::new_v4().simple()
         ));
         let bin = root.join("bin");
-        let fingerprint = "ab".repeat(32);
-        let image = bin.join(format!("smeltd-{fingerprint}"));
-        executable(&image, b"daemon");
-        let paired = bin
-            .join(crate::daemon_image::paired_pi_dir_name(&fingerprint))
-            .join("smelt-pi");
-        let error = locate_smelt_pi_from(None, Some(&image)).expect_err("缺配对必须失败");
-        assert!(error.contains("配对"), "实际错误：{error}");
+        fs::create_dir_all(&bin).unwrap();
+        let error = locate_smelt_pi_in(&bin).expect_err("没发布过必须失败");
+        assert!(error.contains("找不到 smelt-pi"), "实际错误：{error}");
 
-        executable(&paired, b"pi");
-        let newer = root.join("target/smelt-pi/smelt-pi");
-        executable(&newer, b"newer-pi");
+        let published = bin.join(format!("smelt-pi-{}", "ab".repeat(32))).join("smelt-pi");
+        executable(&published, b"pi");
+        std::os::unix::fs::symlink(
+            published.strip_prefix(&bin).unwrap(),
+            bin.join("smelt-pi"),
+        )
+        .unwrap();
         assert_eq!(
-            locate_smelt_pi_from(None, Some(&image)).unwrap(),
-            paired,
-            "映像守护不能退到开发目录里更新的 smelt-pi"
-        );
-
-        let launch = bin.join("smeltd");
-        std::os::unix::fs::symlink(image.file_name().unwrap(), &launch).unwrap();
-        assert_eq!(locate_smelt_pi_from(None, Some(&launch)).unwrap(), paired);
-
-        let dev = root.join("target/debug/smeltd");
-        executable(&dev, b"dev-daemon");
-        assert_eq!(locate_smelt_pi_from(None, Some(&dev)).unwrap(), newer);
-
-        let override_pi = root.join("override/smelt-pi");
-        executable(&override_pi, b"override");
-        assert_eq!(
-            locate_smelt_pi_from(Some(&override_pi), Some(&image)).unwrap(),
-            override_pi
+            locate_smelt_pi_in(&bin).unwrap(),
+            fs::canonicalize(&published).unwrap(),
+            "要 exec 解析后的真实路径，链接换了也不影响已经起来的 Pi"
         );
         fs::remove_dir_all(root).ok();
     }
