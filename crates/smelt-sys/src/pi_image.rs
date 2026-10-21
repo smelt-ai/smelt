@@ -227,10 +227,6 @@ mod tests {
         }
     }
 
-    fn current(bin: &Path) -> PathBuf {
-        fs::canonicalize(bin.join(LAUNCH_NAME)).unwrap()
-    }
-
     /// 复现：守护字节没变、只换了 Pi，旧做法按守护指纹配对，新 Pi 发布不上去。
     #[test]
     fn a_pi_only_change_publishes_a_new_dir_and_moves_the_link() {
@@ -238,7 +234,7 @@ mod tests {
         let (pkg, bin) = (root.join("pkg"), root.join("bin"));
         package(&pkg, b"pi-v1", b"wasm", Some(b"native-v1"));
         let first = publish(&bin, &pkg).unwrap();
-        assert_eq!(current(&bin), fs::canonicalize(&first).unwrap());
+        assert_eq!(current(&bin), Some(fs::canonicalize(&first).unwrap()));
         let first_dir = first.parent().unwrap().to_path_buf();
         assert_eq!(fs::read(first_dir.join("native/sub/addon.node")).unwrap(), b"native-v1");
         let mode = fs::metadata(&first).unwrap().permissions().mode();
@@ -250,7 +246,7 @@ mod tests {
         package(&pkg, b"pi-v1", b"wasm", Some(b"native-v2"));
         let second = publish(&bin, &pkg).unwrap();
         assert_ne!(second, first);
-        assert_eq!(current(&bin), fs::canonicalize(&second).unwrap());
+        assert_eq!(current(&bin), Some(fs::canonicalize(&second).unwrap()));
         assert_eq!(fs::read(&first).unwrap(), b"pi-v1", "旧目录原样留着给在跑的 Pi");
         fs::remove_dir_all(root).unwrap();
     }
@@ -282,7 +278,7 @@ mod tests {
         fs::write(pkg.join(LAUNCH_NAME), b"pi-v2").unwrap();
         fs::remove_file(pkg.join(WASM_NAME)).unwrap();
         assert!(publish(&bin, &pkg).is_err());
-        assert_eq!(current(&bin), fs::canonicalize(&first).unwrap());
+        assert_eq!(current(&bin), Some(fs::canonicalize(&first).unwrap()));
         fs::remove_dir_all(root).unwrap();
     }
 
