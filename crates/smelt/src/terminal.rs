@@ -1635,6 +1635,10 @@ fn prepare_candidate_daemon(candidate_app: &std::path::Path) -> anyhow::Result<s
     if !daemon.is_file() {
         anyhow::bail!("候选 App 缺少守护程序：{}", daemon.display());
     }
+    // smelt-pi 和守护分开发布。安装会当场交接守护，交接上来的新守护起 Pi 时链接必须已经
+    // 就位；发布不上就不换 App。
+    smelt_sys::pi_image::publish(&managed_daemon_dir(), &candidate_app.join("Contents/MacOS"))
+        .map_err(|error| anyhow::anyhow!("发布 smelt-pi 失败：{error}"))?;
     Ok(daemon)
 }
 
