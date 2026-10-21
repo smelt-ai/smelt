@@ -358,6 +358,12 @@ pub(crate) fn sync_managed_pi_agent(_status: &dyn Fn(&str)) -> Result<ManagedPiR
     Ok(ManagedPiRuntime { executable })
 }
 
+/// 当前这一套 smelt-pi 里的内置技能目录。还没装 smelt-pi 时没有。
+pub(crate) fn builtin_skills_dir() -> Option<PathBuf> {
+    let executable = locate_smelt_pi().ok()?;
+    Some(executable.parent()?.join(crate::pi_image::SKILLS_DIR))
+}
+
 /// 诊断用：不下载、不写启动器。二进制在且旁边有 photon wasm 才算就绪。
 pub(crate) fn managed_pi_diagnostic() -> Result<(PathBuf, bool), String> {
     let executable = locate_smelt_pi()?;

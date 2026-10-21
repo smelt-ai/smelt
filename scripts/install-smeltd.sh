@@ -24,10 +24,11 @@ PROGRAMS=(smeltd smelt-notify)
 # curl、unzip：按需下载到 ~/.smelt/runtime 的 Bun 要用（MCP 预设的 `bun x`、Claude/Codex 的 `bunx`）。
 BASE_PACKAGES=(ca-certificates curl unzip)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
-# 所以 Xvnc 要的 X 核心字体（fixed）和任务栏图标的主题要自己列上。
+# 所以 Xvnc 要的 X 核心字体（fixed）、图标主题和终端的等宽字体要自己列上。图标用 Papirus
+# （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。
 DESKTOP_PACKAGES=(
   tigervnc-standalone-server xauth xfonts-base xfce4 xfce4-terminal adwaita-icon-theme
-  dbus-x11 xdotool fonts-noto-cjk
+  papirus-icon-theme dbus-x11 xdotool fonts-noto-cjk fonts-dejavu-core
 )
 DESKTOP_UNITS=(smelt-display.service smelt-desktop.service smelt-chrome.service)
 
@@ -241,6 +242,10 @@ install_desktop() {
   for xml in "$HERE"/desktop/xfce4/*.xml; do
     [[ -e "$xml_dir/$(basename "$xml")" ]] || install -m 0644 "$xml" "$xml_dir/"
   done
+  # xfce4-terminal 1.0 以前的版本不读 xfconf，读这份；和 xfce4-terminal.xml 内容相同。
+  mkdir -p "$config/xfce4/terminal"
+  [[ -e "$config/xfce4/terminal/terminalrc" ]] \
+    || install -m 0644 "$HERE/desktop/terminalrc" "$config/xfce4/terminal/terminalrc"
   # 任务栏的两个启动图标（xfce4-panel.xml 里的 launcher-1、launcher-2）。Chrome 图标调同一个
   # 启动脚本，开的是 agent 用的那个实例，不会另起一个没有登录状态、agent 也连不上的 Chrome。
   local icon=chromium

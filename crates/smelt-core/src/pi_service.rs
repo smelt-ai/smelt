@@ -27,7 +27,7 @@ pub fn config() -> PiConfig {
         model_settings: crate::pi_model_settings::load_pi_model_settings(),
         settings_summary: crate::pi_model_settings::pi_settings_summary(),
         mcp_servers: crate::pi_mcp::load_pi_mcp_servers(),
-        plugins: crate::pi_plugin_catalog::discover_plugins(),
+        plugins: crate::pi_plugin_catalog::selectable_plugins(),
         model_choice_groups: crate::pi_model_settings::list_pi_model_choice_groups(),
         auto_provider_ids: crate::pi_auto_models::load().auto_providers(),
         paths: PiConfigPaths {
@@ -275,6 +275,7 @@ mod tests {
                 path: PathBuf::from("/home/me/.pi/agent/skills/review"),
                 origin: "~/.pi/agent/skills".into(),
                 broken: None,
+                builtin: false,
             }],
             model_choice_groups: Vec::new(),
             auto_provider_ids: vec!["gateway".into()],

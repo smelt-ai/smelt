@@ -113,9 +113,9 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty` |
 | 智能体记忆 | `agent.memory.meta` / `record_read` / `record_write` / `list` / `delete` / `approve` / `ensure_dir`；`memory.test_embedding` |
 | Pi / DSH / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`；`dsh.*`；`quota.get` / `quota.refresh` |
-| 其它 | `agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`skills.sync_control`、`history.*`、`desktop.type_text`、`automation.run_detail` |
+| 其它 | `agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`history.*`、`desktop.type_text`、`automation.run_detail` |
 
-CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用的 skill 安装到 `~/.agents/skills/smelt/SKILL.md`。无头机器上的安装和配对是 `smeltd install` / `smeltd pair` / `smeltd devices`，不是这组 CLI。
+CLI：`smelt agent` / `smelt automation` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI）。教模型用这组 CLI 的技能（`packages/pi-agent/skills/smelt`）随 smelt-pi 发布，产品智能体勾选了才传给 Pi，不写进 `~/.agents/skills`。无头机器上的安装和配对是 `smeltd install` / `smeltd pair` / `smeltd devices`，不是这组 CLI。
 
 ## 版本与重试
 

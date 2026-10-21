@@ -449,6 +449,13 @@ fn composer_should_nest_models(
 /// gpui-component 的可滚动菜单画不出二级菜单，所以这两项互斥：模型收进
 /// 「模型」二级时只滚二级；平铺时根菜单没有二级，才滚根菜单。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 一次连接从发起到能用的计时。按阶段写进 app.log（`[acp] 会话 … 启动：…`），和守护、
+/// Pi 的日志按时间对起来就是完整的一条，查「新建对话慢在哪」用。
+struct StartupTrace {
+    since: std::time::Instant,
+    first_snapshot_seen: bool,
+}
+
 struct ComposerModelScroll {
     root: bool,
     submenu: bool,
@@ -1588,6 +1595,8 @@ pub struct AcpView {
     /// 实测 `session/new` 里 Claude Code 自身要约 10 秒（跟下载无关，同一适配器
     /// 进程建第二个会话一样慢），没有进度反馈会让人以为卡死了。
     starting_since: Option<std::time::Instant>,
+    /// 这次连接的启动计时，能用了或失败了就清掉。
+    startup_trace: Option<StartupTrace>,
     /// agent 最近一次上报的任务计划（每次全量覆盖）。回合态：不落盘，
     /// TurnEnded 保留最后一份供回看，「重新开始」清空。
     plan: Option<PlanView>,
@@ -2053,6 +2062,7 @@ impl AcpView {
             pending_composer_restore_revision: None,
             pending_composer_restore_ack: None,
             starting_since: None,
+            startup_trace: None,
             plan: None,
             // 计划是导航摘要，不应该在打开会话时占据整块消息区；需要细节时
             // 由用户主动展开，保持第一眼聚焦在目标和结果上。
@@ -2597,6 +2607,18 @@ impl AcpView {
         mut client: ConversationClientLaunch,
         cx: &mut Context<Self>,
     ) {
+        self.startup_trace = Some(StartupTrace {
+            since: std::time::Instant::now(),
+            first_snapshot_seen: false,
+        });
+        let kind = if client.fork_id.is_some() {
+            "分叉"
+        } else if client.resume_id.is_some() {
+            "续接"
+        } else {
+            "新建"
+        };
+        self.trace_startup(&format!("发起（{kind}）"));
         let Some(prep) = self.launch_prep.take() else {
             let handle = spawn_acp_client(self.runtime.client().clone(), client);
             self.attach_handle(handle, cx);
@@ -2621,6 +2643,7 @@ impl AcpView {
             let _ = this.update(cx, |this, cx| {
                 match prepared {
                     Ok(prepared) => {
+                        this.trace_startup("运行时补齐了启动参数");
                         this.launch = prepared.launch.clone();
                         this.loaded_skills = Some(LoadedSkillsSnapshot {
                             launch: prepared.launch.clone(),
@@ -2632,6 +2655,8 @@ impl AcpView {
                         this.attach_handle(handle, cx);
                     }
                     Err(error) => {
+                        this.trace_startup("补齐启动参数失败");
+                        this.startup_trace = None;
                         // 留着要求，下次重连再补。
                         this.launch_prep = Some(prep);
                         this.phase = DaemonPhase::Dead;
@@ -2643,6 +2668,33 @@ impl AcpView {
             });
         })
         .detach();
+    }
+
+    fn trace_startup(&self, step: &str) {
+        if let Some(trace) = &self.startup_trace {
+            eprintln!(
+                "[acp] 会话 {} 启动：{step}，距发起 {}ms",
+                self.sid,
+                trace.since.elapsed().as_millis()
+            );
+        }
+    }
+
+    /// 第一份快照和离开「连接中」各记一笔；能用了或断了就不再记。
+    fn trace_startup_snapshot(&mut self, phase: DaemonPhase) {
+        let Some(trace) = self.startup_trace.as_mut() else {
+            return;
+        };
+        let first = !trace.first_snapshot_seen;
+        trace.first_snapshot_seen = true;
+        if first {
+            self.trace_startup(&format!("收到第一份快照（{phase:?}）"));
+        }
+        if phase != DaemonPhase::Connecting {
+            let step = if phase == DaemonPhase::Dead { "没起来" } else { "可以用了" };
+            self.trace_startup(&format!("{step}（{phase:?}）"));
+            self.startup_trace = None;
+        }
     }
 
     fn loaded_skills(&self) -> &[smelt_model::pi_plugin_catalog::PiPlugin] {
@@ -4180,6 +4232,7 @@ impl AcpView {
             self.load_older_history(cx);
         }
         let snapshot_phase = snap.phase;
+        self.trace_startup_snapshot(snap.phase);
         self.phase = snap.phase;
         self.end_reason = snap.end_reason;
         self.end_kind = snap.end_kind;

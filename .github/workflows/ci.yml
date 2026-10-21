@@ -55,10 +55,12 @@ jobs:
               - 'assets/**'
             mobile:
               - *workflow
+              - 'mise.toml'
               - 'mobile/**'
             android:
               - *workflow
               - *toolchain
+              - 'mise.toml'
               - 'mobile/**'
               - 'crates/smelt-mobile/**'
               - 'crates/smelt-model/**'
@@ -128,10 +130,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # 版本钉在仓库根的 mise.toml，与本地开发同一份；只装 Flutter，CocoaPods 这里用不到。
+      # 不开缓存：Flutter SDK 解压后约 4GB，会挤掉仓库 10GB 配额里的 Rust 缓存，现下载更划算。
       - name: Install Flutter
-        uses: subosito/flutter-action@v2
+        uses: jdx/mise-action@v5
         with:
-          channel: stable
+          install_args: flutter
+          cache: false
 
       # 也是在验证 xterm 那条 git 依赖能解析：它指向 smelt-ai/xterm.dart 的一个
       # commit，pub 上没有，解析不了的话这一步就直接红。
@@ -196,10 +201,13 @@ jobs:
           workspaces: ". -> mobile/build/rust_lib_smelt_mobile/build/release"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # 版本钉在仓库根的 mise.toml，与本地开发同一份；只装 Flutter，CocoaPods 这里用不到。
+      # 不开缓存：Flutter SDK 解压后约 4GB，会挤掉仓库 10GB 配额里的 Rust 缓存，现下载更划算。
       - name: Install Flutter
-        uses: subosito/flutter-action@v2
+        uses: jdx/mise-action@v5
         with:
-          channel: stable
+          install_args: flutter
+          cache: false
 
       # 不带签名配置，app/build.gradle.kts 会退回 debug 签名。这里只验证能不能
       # 编过，可分发的包由发版流水线单独出。

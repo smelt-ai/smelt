@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 打 Linux 无头运行时（smeltd）的发布包：dist/smeltd-<版本>-linux-<架构>.tar.gz。
 # 由 release.yml 在两种架构的 runner 上各跑一次。
-# 包里还有 smelt-pi、photon wasm，以及 pi-tui 的 native/。Bun 不打进包，第一次用到 MCP 或 bunx 时再下载。
+# 包里还有 smelt-pi、photon wasm，pi-tui 的 native/，以及内置技能 skills/。Bun 不打进包，第一次用到 MCP 或 bunx 时再下载。
 #
 # 不交叉编译：在哪种架构的 Linux 机器上跑，就出哪种架构的包。只编运行时这一侧：
 # 桌面 GUI 那几个 crate 依赖 GPUI，只有 macOS 版。
@@ -32,7 +32,7 @@ if [[ ! -x "$bin" || ! -f "$wasm" ]]; then
   echo "✗ 缺少 smelt-pi 或 photon_rs_bg.wasm" >&2
   exit 1
 fi
-newer="$(find packages/pi-agent/src packages/pi-agent/package.json packages/pi-agent/bun.lock \
+newer="$(find packages/pi-agent/src packages/pi-agent/skills packages/pi-agent/package.json packages/pi-agent/bun.lock \
   scripts/compile-smelt-pi.ts scripts/build-smelt-pi.sh scripts/fetch-bun.sh \
   -type f -newer "$bin" -print -quit || true)"
 if [[ -n "$newer" ]]; then
@@ -52,6 +52,9 @@ install -m 0755 "$bin" "$staging/smelt-pi"
 install -m 0644 "$wasm" "$staging/photon_rs_bg.wasm"
 if [[ -d target/smelt-pi/native ]]; then
   cp -R target/smelt-pi/native "$staging/native"
+fi
+if [[ -d target/smelt-pi/skills ]]; then
+  cp -R target/smelt-pi/skills "$staging/skills"
 fi
 # 远程桌面（install.sh --with-desktop）的启动脚本、XFCE 设置、Chrome 策略。
 cp -R scripts/desktop "$staging/desktop"

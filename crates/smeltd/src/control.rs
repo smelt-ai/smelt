@@ -561,20 +561,6 @@ fn dispatch_control(
                 ),
             }
         }
-        ControlMethod::SkillsSyncControl => {
-            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
-                Ok(params) => params,
-                Err(response) => return response,
-            };
-            match smelt_core::control_skill::sync() {
-                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
-                Err(error) => error_value(
-                    control_version,
-                    request_id,
-                    ControlError::new(ControlErrorCode::OperationFailed, error.to_string()),
-                ),
-            }
-        }
         ControlMethod::ProjectWatch => {
             let params: smelt_runtime_client::protocol::files::ProjectRootParams =
                 match params_or_error(control_version, &request_id, params) {

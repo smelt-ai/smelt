@@ -1,7 +1,8 @@
 //! 设置页：智能体插件（Pi 的技能与扩展）。
 //!
 //! 这里只管「装了什么、还在不在、谁在用」，勾选在智能体编辑器里做。
-//! 只列全局目录：智能体对话的工作目录是一次性空目录，项目级插件永远扫不到。
+//! 只列全局目录和随 smelt-pi 发布的内置技能：智能体对话的工作目录是一次性空目录，
+//! 项目级插件永远扫不到。内置技能跟着运行时更新，不能删。
 
 use super::*;
 use smelt_model::pi_plugin_catalog::{
@@ -190,13 +191,18 @@ fn plugin_item(
     let path = plugin.path.display().to_string();
     let broken = plugin.broken.clone();
     let description = plugin.description.clone();
+    let builtin = plugin.builtin;
 
     let title = format!("{name}（{kind_label}）");
     let mut detail = Vec::new();
     if !description.is_empty() {
         detail.push(description);
     }
-    detail.push(format!("来源：{origin} · {path}"));
+    if builtin {
+        detail.push(format!("来源：{origin}，跟着 Smelt 更新"));
+    } else {
+        detail.push(format!("来源：{origin} · {path}"));
+    }
     if let Some(reason) = &broken {
         detail.push(format!("失效：{reason}"));
     }
@@ -209,6 +215,9 @@ fn plugin_item(
     SettingItem::new(
         title,
         SettingField::render(move |_, _, _| {
+            if builtin {
+                return div().into_any_element();
+            }
             let id_for_request = id.clone();
             let id_for_confirm = id.clone();
             let request_entity = entity.clone();

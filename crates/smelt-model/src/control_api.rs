@@ -865,8 +865,6 @@ pi_calls! {
     /// OSC 11 查到的底色得和桌面实际底色一致。
     TerminalThemePublish => TerminalThemePublish(crate::terminal_theme::TerminalThemeSnapshot)
         -> EmptyParams;
-    /// 把教智能体用 `smelt` 命令行的技能写到运行时那台机器上（内容没变就不写）。
-    SkillsSyncControl => SkillsSyncControl(EmptyParams) -> EmptyParams;
     /// 用产品智能体定义开一场对话（`smelt agent start`）。
     ConversationCreateForAgent => ConversationCreateForAgent(AgentDefinitionIdParams)
         -> crate::session_control::CreatedAgentConversation;

@@ -35,8 +35,6 @@ where
 }
 
 fn run(args: &[String]) -> i32 {
-    // 技能写在运行时那台机器上；运行时没在跑时后面的命令也会报连不上，这里不另报。
-    let _ = control::<smelt_model::control_api::SkillsSyncControl>(EmptyParams::default());
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => {
             println!("{}", env!("CARGO_PKG_VERSION"));

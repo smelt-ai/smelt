@@ -4764,12 +4764,6 @@ fn main() {
                     use smelt_runtime_client::protocol::control::EmptyParams;
                     let timeout = std::time::Duration::from_secs(300);
                     if let Err(error) = runtime_call::call::<
-                        smelt_model::control_api::SkillsSyncControl,
-                    >(EmptyParams::default(), runtime_call::RUNTIME_CALL_TIMEOUT)
-                    {
-                        eprintln!("[workspace] 同步 smelt skill 失败：{}", runtime_call::error_text(error));
-                    }
-                    if let Err(error) = runtime_call::call::<
                         smelt_model::control_api::PiProvidersRefreshAuto,
                     >(EmptyParams::default(), timeout)
                     {

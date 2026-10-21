@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Smelt 远程桌面：深色主题、图标和字体。GTK 自带 Adwaita-dark，不用另装主题；xfwm4 的
+     Default 窗口主题跟着 GTK 配色走，标题栏一起变深。图标用 Papirus-Dark。抗锯齿用灰度不用分色：分色在 VNC
+     的 JPEG 压缩下会出彩边，也更难压。界面字体用 Noto Sans CJK（中文网页本来就要装，
+     拉丁字母也好看），终端和代码用 DejaVu Sans Mono。 -->
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Adwaita-dark"/>
+    <property name="IconThemeName" type="string" value="Papirus-Dark"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="FontName" type="string" value="Noto Sans CJK SC 10"/>
+    <property name="MonospaceFontName" type="string" value="DejaVu Sans Mono 10"/>
+    <property name="CursorThemeName" type="string" value="Adwaita"/>
+  </property>
+  <property name="Xft" type="empty">
+    <property name="Antialias" type="int" value="1"/>
+    <property name="Hinting" type="int" value="1"/>
+    <property name="HintStyle" type="string" value="hintslight"/>
+    <property name="RGBA" type="string" value="none"/>
+  </property>
+</channel>

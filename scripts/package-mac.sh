@@ -96,7 +96,7 @@ if [[ ! -x "$PI_BIN" || ! -f "$PI_WASM" ]]; then
   exit 1
 fi
 if [[ -d "$ROOT/packages/pi-agent/src" ]]; then
-  newer="$(find "$ROOT/packages/pi-agent/src" "$ROOT/packages/pi-agent/package.json" "$ROOT/packages/pi-agent/bun.lock" \
+  newer="$(find "$ROOT/packages/pi-agent/src" "$ROOT/packages/pi-agent/skills" "$ROOT/packages/pi-agent/package.json" "$ROOT/packages/pi-agent/bun.lock" \
     "$ROOT/scripts/compile-smelt-pi.ts" "$ROOT/scripts/build-smelt-pi.sh" "$ROOT/scripts/fetch-bun.sh" \
     -type f -newer "$PI_BIN" -print -quit 2>/dev/null || true)"
   if [[ -n "$newer" ]]; then
@@ -172,6 +172,9 @@ chmod +x "$PI_DIR/smelt-pi"
 if [[ -d "$ROOT/target/smelt-pi/native" ]]; then
   mkdir -p "$PI_DIR/native"
   cp -R "$ROOT/target/smelt-pi/native/." "$PI_DIR/native/"
+fi
+if [[ -d "$ROOT/target/smelt-pi/skills" ]]; then
+  cp -R "$ROOT/target/smelt-pi/skills" "$PI_DIR/skills"
 fi
 # 插件（gpui-shell 脚本应用，见 crates/smelt/src/plugins）：整目录随 App
 # 分发，GUI 从这里只读加载（发布版关掉了 gpui-shell 加载时写编辑器文件的行为，

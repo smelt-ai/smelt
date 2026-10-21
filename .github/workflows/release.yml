@@ -290,10 +290,13 @@ jobs:
           workspaces: ". -> mobile/build/rust_lib_smelt_mobile/build/release"
           save-if: false
 
+      # 版本钉在仓库根的 mise.toml，与本地开发同一份；只装 Flutter，CocoaPods 这里用不到。
+      # 不开缓存：Flutter SDK 解压后约 4GB，会挤掉仓库 10GB 配额里的 Rust 缓存，现下载更划算。
       - name: Install Flutter
-        uses: subosito/flutter-action@v2
+        uses: jdx/mise-action@v5
         with:
-          channel: stable
+          install_args: flutter
+          cache: false
 
       # app/build.gradle.kts 读 android/key.properties（已 gitignore）。不用 -P 直通 Gradle：
       # 参数会进构建缓存和日志，密码容易泄进 CI 输出。构建完和 keystore 一起删。

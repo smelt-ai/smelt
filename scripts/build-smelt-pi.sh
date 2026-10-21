@@ -61,6 +61,9 @@ if [[ ! -f "$WASM" ]]; then
 fi
 cp "$WASM" "$OUT/photon_rs_bg.wasm"
 chmod +x "$OUT/smelt-pi"
+# 内置技能跟 smelt-pi 一起发布，智能体勾选了才用 --skill 传进去，不进 Pi 的自动发现。
+rm -rf "$OUT/skills"
+cp -R "$ROOT/packages/pi-agent/skills" "$OUT/skills"
 
 read -r platform arch suffix <<<"$(native_layout "$TARGET")"
 node_src="$ROOT/packages/pi-agent/node_modules/@earendil-works/pi-tui/native/${platform}/prebuilds/${platform}-${arch}/${platform}-platform${suffix}.node"

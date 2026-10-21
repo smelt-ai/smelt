@@ -414,9 +414,10 @@
       <code>~/.smelt/runtime/bin/bun</code> 指向当前 generation。
     </li>
     <li>
-      <code>smelt-pi</code>、<code>photon_rs_bg.wasm</code> 和 <code>native/</code> 按这一整套自己的指纹发布成
+      <code>smelt-pi</code>、<code>photon_rs_bg.wasm</code>、<code>native/</code> 和内置技能 <code>skills/</code> 按这一整套自己的指纹发布成
       <code>~/.smelt/bin/smelt-pi-&lt;指纹&gt;/</code>，<code>~/.smelt/bin/smelt-pi</code> 链接指向当前那份。和守护映像的指纹无关：只换了 Pi 不用等守护交接。
       桌面每次启动从 App 里发布一次，Linux 由 <code>smeltd install</code> 发布。守护起 Pi 时解析链接、exec 真实路径，已经在跑的 Pi 不受换链接影响。没有别的查找路径，也没有环境变量覆盖。
+      <code>skills/</code> 不在 Pi 的自动发现路径上：产品智能体勾选了内置技能，才用 <code>--skill</code> 传这份目录里的路径。
     </li>
     <li>
       <code>photon_rs_bg.wasm</code> 是可执行文件旁边的 sidecar，不打进 bunfs。QuickJS wasm 由静态 import 嵌进二进制。

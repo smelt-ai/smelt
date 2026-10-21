@@ -230,7 +230,7 @@ pub fn prepare_agent_definition_launch(
     if let Some(definition) = definition {
         let mut args = crate::pi_plugin_catalog::launch_args_for_selection(
             &definition.plugins,
-            &crate::pi_plugin_catalog::discover_plugins(),
+            &crate::pi_plugin_catalog::selectable_plugins(),
         );
         // 工作区自带的技能包跟着目录走，不进勾选列表：绑定一个目录就意味着连
         // 它的技能一起带上，否则用户每绑一次都要再去卡片里勾一遍。

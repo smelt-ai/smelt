@@ -1,0 +1,6 @@
+# 本地开发与 CI 共用的工具版本。Rust 由 rust-toolchain.toml 管，不在这里。
+[tools]
+# 改版本时，把新 SDK 迁移出的平台工程改动（Podfile.lock 等）一起提交，见 mobile/README.md。
+flutter = "3.47.3"
+# 与 mobile/ios/Podfile.lock 末尾的 COCOAPODS 版本保持一致。
+"gem:cocoapods" = "1.17.0"

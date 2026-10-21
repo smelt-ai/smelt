@@ -1,17 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Smelt 远程桌面：只有顶部一条任务栏，放「Chrome」「终端」两个启动图标和已打开窗口的
-     列表，没有底部停靠栏。两个启动图标的 .desktop 由 install.sh 写进
-     ~/.config/xfce4/panel/launcher-1、launcher-2（里面要写绝对路径）。 -->
+<!-- Smelt 远程桌面：只有底部居中一条停靠栏，长度随内容，放「Chrome」「终端」两个启动图标
+     和已打开的窗口（同一个程序的窗口合成一个图标，不显示文字）。没有顶部任务栏。
+     两个启动图标的 .desktop 由 install.sh 写进 ~/.config/xfce4/panel/launcher-1、launcher-2
+     （里面要写绝对路径）。停靠栏是不透明的直角矩形：圆角和半透明要开合成器，这里不开
+     （见 xfwm4.xml）。 -->
 <channel name="xfce4-panel" version="1.0">
   <property name="configver" type="int" value="2"/>
   <property name="panels" type="array">
     <value type="int" value="1"/>
     <property name="panel-1" type="empty">
-      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="position" type="string" value="p=10;x=0;y=0"/>
       <property name="position-locked" type="bool" value="true"/>
-      <property name="length" type="uint" value="100"/>
-      <property name="size" type="uint" value="30"/>
-      <property name="icon-size" type="uint" value="16"/>
+      <property name="length" type="uint" value="1"/>
+      <property name="length-adjust" type="bool" value="true"/>
+      <property name="size" type="uint" value="48"/>
+      <property name="icon-size" type="uint" value="32"/>
       <property name="plugin-ids" type="array">
         <value type="int" value="1"/>
         <value type="int" value="2"/>
@@ -35,7 +38,8 @@
       <property name="style" type="uint" value="0"/>
     </property>
     <property name="plugin-4" type="string" value="tasklist">
-      <property name="grouping" type="uint" value="0"/>
+      <property name="grouping" type="uint" value="1"/>
+      <property name="show-labels" type="bool" value="false"/>
       <property name="flat-buttons" type="bool" value="true"/>
     </property>
   </property>

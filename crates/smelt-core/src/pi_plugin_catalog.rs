@@ -5,8 +5,10 @@
 //! `~/.pi/agent/mcp.json` 里的全局配置（见 `pi_mcp`），智能体只连自己勾的那几个。裸 Pi 会自动发现全局资源及受信任项目中的原生资源；
 //! Smelt 的产品智能体则用勾选式加载：先关掉自动发现，再显式传入勾选插件和工作区技能。
 //!
-//! `discover_plugins` 只扫供产品智能体勾选的全局插件目录。智能体 space 和绑定目录里的
-//! 技能由 `workspace_skill_args` 单独显式加载，避免依赖 Pi 的 cwd / 项目信任推断。
+//! `discover_plugins` 只扫 Pi 自己也会自动发现的全局插件目录。智能体能勾选的是
+//! `selectable_plugins`：再加上随 smelt-pi 发布的内置技能，它们不在 Pi 的发现路径上，
+//! 只有勾选了才传。智能体 space 和绑定目录里的技能由 `workspace_skill_args` 单独显式加载，
+//! 避免依赖 Pi 的 cwd / 项目信任推断。
 
 pub use smelt_model::pi_plugin_catalog::*;
 
@@ -54,6 +56,34 @@ pub fn discover_plugins() -> Vec<PiPlugin> {
     dedupe(plugins)
 }
 
+/// 智能体可以勾选的插件：随 smelt-pi 发布的内置技能，加上全局目录里的。
+pub fn selectable_plugins() -> Vec<PiPlugin> {
+    let builtin = crate::managed_runtime::builtin_skills_dir()
+        .map(|dir| builtin_skills_in(&dir))
+        .unwrap_or_default();
+    with_builtin(builtin, discover_plugins())
+}
+
+fn builtin_skills_in(dir: &Path) -> Vec<PiPlugin> {
+    let mut skills = Vec::new();
+    collect_skills(dir, &mut skills);
+    for skill in &mut skills {
+        skill.builtin = true;
+        skill.origin = "Smelt 内置".to_string();
+    }
+    skills
+}
+
+/// 同名时内置的算数：以前同步进 `~/.agents/skills` 的旧副本没清掉时会撞名，智能体勾的
+/// 是同一个 id，该拿到跟着运行时走的那份。
+fn with_builtin(builtin: Vec<PiPlugin>, global: Vec<PiPlugin>) -> Vec<PiPlugin> {
+    let ids: std::collections::BTreeSet<String> =
+        builtin.iter().map(|plugin| plugin.id.clone()).collect();
+    let mut plugins = builtin;
+    plugins.extend(global.into_iter().filter(|plugin| !ids.contains(&plugin.id)));
+    dedupe(plugins)
+}
+
 /// 按真实路径去重；坏条目没有真实路径，用 id 兜底避免互相顶掉。
 fn dedupe(plugins: Vec<PiPlugin>) -> Vec<PiPlugin> {
     let mut seen = BTreeMap::new();
@@ -96,6 +126,7 @@ fn collect_skills(root: &Path, out: &mut Vec<PiPlugin>) {
                 path,
                 origin: origin.clone(),
                 broken: Some("链接目标不存在".to_string()),
+                builtin: false,
             });
             continue;
         }
@@ -113,6 +144,7 @@ fn collect_skills(root: &Path, out: &mut Vec<PiPlugin>) {
                 path,
                 origin: origin.clone(),
                 broken: None,
+                builtin: false,
             });
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
             // Pi 只把带合法 frontmatter 的根 md 当技能，没有 description 的忽略。
@@ -132,6 +164,7 @@ fn collect_skills(root: &Path, out: &mut Vec<PiPlugin>) {
                 path,
                 origin: origin.clone(),
                 broken: None,
+                builtin: false,
             });
         }
     }
@@ -162,6 +195,7 @@ fn collect_extensions(root: &Path, out: &mut Vec<PiPlugin>) {
                 path,
                 origin: origin.clone(),
                 broken: Some("链接目标不存在".to_string()),
+                builtin: false,
             });
             continue;
         }
@@ -190,6 +224,7 @@ fn collect_extensions(root: &Path, out: &mut Vec<PiPlugin>) {
             path: entry_path,
             origin: origin.clone(),
             broken: None,
+            builtin: false,
         });
     }
 }
@@ -500,6 +535,7 @@ fn skills_at_load_path(path: &Path) -> Vec<PiPlugin> {
             path: path.to_path_buf(),
             origin: display_path(path.parent().unwrap_or(path)),
             broken: None,
+            builtin: false,
         });
         return out;
     }
@@ -657,6 +693,7 @@ mod tests {
                 path: PathBuf::from("/skills/a"),
                 origin: String::new(),
                 broken: None,
+                builtin: false,
             },
             PiPlugin {
                 id: "skill:b".into(),
@@ -666,6 +703,7 @@ mod tests {
                 path: PathBuf::from("/skills/b"),
                 origin: String::new(),
                 broken: None,
+                builtin: false,
             },
             PiPlugin {
                 id: "extension:e".into(),
@@ -675,6 +713,7 @@ mod tests {
                 path: PathBuf::from("/ext/e.ts"),
                 origin: String::new(),
                 broken: None,
+                builtin: false,
             },
         ];
 
@@ -709,6 +748,7 @@ mod tests {
             path: PathBuf::from("/skills/gone"),
             origin: String::new(),
             broken: Some("链接目标不存在".into()),
+            builtin: false,
         }];
         let args = launch_args_for_selection(
             &["skill:gone".to_string(), "skill:never".to_string()],
@@ -731,6 +771,28 @@ mod tests {
 
     fn skill_manifest(name: &str, description: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\n")
+    }
+
+    /// 内置技能可以勾选、勾了就按它的路径传；全局目录里同名的旧副本让给它。
+    #[test]
+    fn builtin_skills_are_selectable_and_win_over_a_global_copy() {
+        let temp = std::env::temp_dir().join(format!("smelt-builtin-skills-{}", uuid::Uuid::new_v4()));
+        write(&temp.join("bundle/skills/smelt/SKILL.md"), &skill_manifest("smelt", "内置"));
+        write(&temp.join("global/smelt/SKILL.md"), &skill_manifest("smelt", "旧副本"));
+        write(&temp.join("global/other/SKILL.md"), &skill_manifest("other", "别的"));
+        let mut global = Vec::new();
+        collect_skills(&temp.join("global"), &mut global);
+
+        let plugins = with_builtin(builtin_skills_in(&temp.join("bundle/skills")), global);
+        let smelt: Vec<_> = plugins.iter().filter(|plugin| plugin.id == "skill:smelt").collect();
+        assert_eq!(smelt.len(), 1);
+        assert!(smelt[0].builtin);
+        assert_eq!(smelt[0].description, "内置");
+        assert!(plugins.iter().any(|plugin| plugin.id == "skill:other" && !plugin.builtin));
+
+        let args = launch_args_for_selection(&["skill:smelt".to_string()], &plugins);
+        assert_eq!(args[2..], ["--skill".to_string(), temp.join("bundle/skills/smelt").to_string_lossy().into_owned()]);
+        std::fs::remove_dir_all(&temp).ok();
     }
 
     fn launch_with_plugin_args(args: &[&str]) -> ConversationLaunchSpec {

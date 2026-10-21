@@ -1,7 +1,7 @@
 //! 编译好的 smelt-pi 发布在 `~/.smelt/bin/smelt-pi-<指纹>/`，同目录的 `smelt-pi` 是指向
 //! 当前那份可执行文件的符号链接。
 //!
-//! 指纹按 smelt-pi、photon wasm 和 `native/` 这一整套算，和守护映像无关：只改了 Pi
+//! 指纹按 smelt-pi、photon wasm、`native/` 和内置技能 `skills/` 这一整套算，和守护映像无关：只改了 Pi
 //! 也能换上新的一份，不用等守护交接。目录发布后不再改动。守护每次起 Pi 都解析
 //! 链接、exec 解析出来的真实路径，所以拨链接不影响已经在跑的 Pi；旧目录等里面的
 //! smelt-pi 没人映射了再删。
@@ -19,6 +19,8 @@ use crate::daemon_image::{MappedState, content_fingerprint, probe_image_mapped};
 pub const LAUNCH_NAME: &str = "smelt-pi";
 const WASM_NAME: &str = "photon_rs_bg.wasm";
 const NATIVE_DIR: &str = "native";
+/// 内置技能目录。只在智能体勾选时用 `--skill` 传给 Pi，不在 Pi 的自动发现路径上。
+pub const SKILLS_DIR: &str = "skills";
 const DIR_PREFIX: &str = "smelt-pi-";
 /// App 里这一整套相对 `Contents` 的位置。wasm 不是代码，不能放进只收签名代码的 `Contents/MacOS`。
 pub const APP_BUNDLE_DIR: &str = "Resources/smelt-pi";
@@ -120,9 +122,11 @@ fn bundle_files(src_dir: &Path) -> io::Result<Vec<PathBuf>> {
         }
         files.push(PathBuf::from(required));
     }
-    let native = src_dir.join(NATIVE_DIR);
-    if fs::symlink_metadata(&native).is_ok_and(|meta| meta.is_dir()) {
-        collect_regular_files(src_dir, &native, &mut files)?;
+    for optional in [NATIVE_DIR, SKILLS_DIR] {
+        let dir = src_dir.join(optional);
+        if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            collect_regular_files(src_dir, &dir, &mut files)?;
+        }
     }
     files.sort();
     Ok(files)
@@ -225,6 +229,26 @@ mod tests {
             fs::create_dir_all(dir.join("native/sub")).unwrap();
             fs::write(dir.join("native/sub/addon.node"), native).unwrap();
         }
+    }
+
+    /// 只改了内置技能也是新的一套：智能体勾选时传的是当前链接后面那份。
+    #[test]
+    fn a_skill_only_change_publishes_a_new_dir() {
+        let root = scratch("skills");
+        let (pkg, bin) = (root.join("pkg"), root.join("bin"));
+        package(&pkg, b"pi-v1", b"wasm", None);
+        fs::create_dir_all(pkg.join("skills/smelt")).unwrap();
+        fs::write(pkg.join("skills/smelt/SKILL.md"), "v1").unwrap();
+        let first = publish(&bin, &pkg).unwrap();
+        let first_dir = first.parent().unwrap();
+        assert_eq!(fs::read_to_string(first_dir.join("skills/smelt/SKILL.md")).unwrap(), "v1");
+
+        fs::write(pkg.join("skills/smelt/SKILL.md"), "v2").unwrap();
+        let second = publish(&bin, &pkg).unwrap();
+        assert_ne!(second, first);
+        let second_dir = second.parent().unwrap();
+        assert_eq!(fs::read_to_string(second_dir.join("skills/smelt/SKILL.md")).unwrap(), "v2");
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// 复现：守护字节没变、只换了 Pi，旧做法按守护指纹配对，新 Pi 发布不上去。

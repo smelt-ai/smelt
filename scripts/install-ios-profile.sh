@@ -216,7 +216,8 @@ fi
 # 找不到 flutter 时明确报错——否则下面 `flutter devices` 失败会被误报成「没连手机」。
 ensure_flutter() {
   command -v flutter >/dev/null 2>&1 && return 0
-  echo "PATH 里找不到 flutter。按 mobile/README.md 装好对应版本的 Flutter，再重跑本脚本。" >&2
+  echo "PATH 里找不到 flutter。版本钉在仓库根的 mise.toml：在仓库里执行 mise trust && mise install，" >&2
+  echo "并确认 shell 已启用 mise（见 mobile/README.md），再重跑本脚本。" >&2
   exit 1
 }
 

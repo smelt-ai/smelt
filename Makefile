@@ -7,7 +7,7 @@ DAEMON := smeltd
 .PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all smelt-pi
 
 SMELT_PI := target/smelt-pi/smelt-pi
-PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts')
+PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts') $(shell find packages/pi-agent/skills -type f)
 
 build install: SHELL := /bin/bash
 
@@ -116,6 +116,7 @@ install: $(SMELT_PI) ## 原子安装到 /Applications（不打 dmg）；活跃 A
 		|| [ ! -x dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
 		|| [ target/smelt-pi/smelt-pi -nt dist/Smelt.app/Contents/Resources/smelt-pi/smelt-pi ] \
 		|| [ target/smelt-pi/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/Resources/smelt-pi/photon_rs_bg.wasm ] \
+		|| ! diff -rq target/smelt-pi/skills dist/Smelt.app/Contents/Resources/smelt-pi/skills >/dev/null 2>&1 \
 		|| [ -n "$$plugin_sources_changed" ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
 		echo "· dist 落后于 release、签名不对，或插件脚本有改动，重新打包"; \

@@ -67,6 +67,9 @@ pub struct PiPlugin {
     pub origin: String,
     /// 失效原因。软链断了之类的坏条目要列出来让用户能删，而不是静默藏起来。
     pub broken: Option<String>,
+    /// 随 smelt-pi 发布的内置技能。跟着运行时更新，不能删。
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 impl PiPlugin {
