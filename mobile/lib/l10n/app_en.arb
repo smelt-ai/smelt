@@ -481,6 +481,7 @@
   "conversationPlanInProgress": "In progress",
   "conversationPlanCompleted": "Done",
   "conversationTaskBackground": "Background task",
+  "conversationTaskPeerMessage": "Message",
   "conversationTaskSubagent": "Subagent",
   "conversationTaskRunning": "Running",
   "conversationTaskCompletedStatus": "Finished",

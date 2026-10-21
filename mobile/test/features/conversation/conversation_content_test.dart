@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:smelt_mobile/ui/status.dart';
 import 'package:image/image.dart' as img;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:smelt_mobile/data/models.dart';
@@ -116,6 +117,38 @@ void main() {
       await tester.tap(find.text('Background task'));
       await tester.pumpAndSettle();
       expect(find.text('Finished release'), findsOneWidget);
+    });
+
+    testWidgets('别的 Pi 对话发来的消息：标「消息」、摘要是正文，不画任务状态', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          const TaskNoteRow(
+            entry: ConversationEntry(
+              index: 5,
+              kind: EntryKind.taskNote,
+              text: '',
+              thought: false,
+              images: [],
+              taskNote: TaskNoteView(
+                kind: TaskNoteKind.peerMessage,
+                id: 'msg-1',
+                title: '',
+                status: '',
+                outputTail: '接口改好了，你那边可以接着写测试。',
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Message'), findsOneWidget);
+      expect(find.text('Background task'), findsNothing);
+      expect(find.text('接口改好了，你那边可以接着写测试。'), findsOneWidget);
+      expect(find.byType(StatusMark), findsNothing);
+
+      // 展开后全文在下面，摘要让出来，同一段话只出现一次。
+      await tester.tap(find.text('Message'));
+      await tester.pumpAndSettle();
+      expect(find.text('接口改好了，你那边可以接着写测试。'), findsOneWidget);
     });
 
     testWidgets('计划是勾选清单，读屏读出每步的状态', (tester) async {

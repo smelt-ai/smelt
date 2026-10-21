@@ -1062,7 +1062,13 @@ class SlashCommand {
           description == other.description;
 }
 
-enum TaskNoteKind { backgroundTask, subagent, peerMessage }
+enum TaskNoteKind {
+  backgroundTask,
+  subagent,
+
+  /// 另一个 Pi 对话发来的消息。
+  peerMessage,
+}
 
 class TaskNoteView {
   final TaskNoteKind kind;

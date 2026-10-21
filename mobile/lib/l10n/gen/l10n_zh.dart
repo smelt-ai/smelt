@@ -640,6 +640,9 @@ class L10nZh extends L10n {
   String get conversationTaskBackground => '后台任务';
 
   @override
+  String get conversationTaskPeerMessage => '消息';
+
+  @override
   String get conversationTaskSubagent => '子智能体';
 
   @override

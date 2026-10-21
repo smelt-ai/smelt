@@ -182,6 +182,7 @@
   "conversationPlanInProgress": "进行中",
   "conversationPlanCompleted": "已完成",
   "conversationTaskBackground": "后台任务",
+  "conversationTaskPeerMessage": "消息",
   "conversationTaskSubagent": "子智能体",
   "conversationTaskRunning": "运行中",
   "conversationTaskCompletedStatus": "已结束",

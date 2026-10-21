@@ -338,18 +338,36 @@ class _TaskNoteRowState extends State<TaskNoteRow> {
     final (mark, statusLabel) = note == null
         ? (SessionMark.idle, '')
         : _taskStatus(l10n, note.status);
+    // 穷举：再加一种便签，编译器会在这里拦下，不会被兜底成「后台任务」。
     final kind = switch (note?.kind) {
+      null || TaskNoteKind.backgroundTask => l10n.conversationTaskBackground,
       TaskNoteKind.subagent => l10n.conversationTaskSubagent,
-      _ => l10n.conversationTaskBackground,
+      TaskNoteKind.peerMessage => l10n.conversationTaskPeerMessage,
     };
+    // 另一个 Pi 对话发来的消息：没有标题和状态，正文（对方写的原文）在 outputTail。
+    final peer = note?.kind == TaskNoteKind.peerMessage;
+    // 消息的摘要就是正文的第一行；展开后下面已经是全文，摘要让出来，同一段话不出现两遍。
     final summary = widget.entry.text.trim().isNotEmpty
         ? widget.entry.text.trim()
+        : peer
+        ? (_open ? '' : tail)
         : note?.title ?? '';
     final row = ConstrainedBox(
       constraints: const BoxConstraints(minHeight: Space.touch),
       child: Row(
         children: [
-          StatusMark(mark: mark, label: statusLabel),
+          // 消息没有「运行 / 完成」这回事，不画状态记号，画消息图标。
+          if (peer)
+            SizedBox.square(
+              dimension: Strokes.icon,
+              child: Icon(
+                LucideIcons.messageSquareShare,
+                size: Strokes.iconSmall,
+                color: c.inkMuted,
+              ),
+            )
+          else
+            StatusMark(mark: mark, label: statusLabel),
           const SizedBox(width: Space.sm),
           Text(kind, style: t.label.copyWith(color: c.ink)),
           const SizedBox(width: Space.sm),

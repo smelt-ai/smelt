@@ -1189,6 +1189,12 @@ abstract class L10n {
   /// **'Background task'**
   String get conversationTaskBackground;
 
+  /// No description provided for @conversationTaskPeerMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'Message'**
+  String get conversationTaskPeerMessage;
+
   /// No description provided for @conversationTaskSubagent.
   ///
   /// In en, this message translates to:

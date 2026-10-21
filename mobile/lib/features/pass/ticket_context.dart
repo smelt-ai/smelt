@@ -118,7 +118,10 @@ class _Line extends StatelessWidget {
             const SizedBox(width: Space.sm),
             Expanded(
               child: Text(
-                e.taskNote!.title,
+                // 消息便签没有标题，正文在 outputTail。
+                e.taskNote!.kind == TaskNoteKind.peerMessage
+                    ? _plain(e.taskNote!.outputTail)
+                    : e.taskNote!.title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: t.callout.copyWith(color: c.onPaperMuted),

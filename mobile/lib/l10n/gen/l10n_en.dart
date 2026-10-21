@@ -677,6 +677,9 @@ class L10nEn extends L10n {
   String get conversationTaskBackground => 'Background task';
 
   @override
+  String get conversationTaskPeerMessage => 'Message';
+
+  @override
   String get conversationTaskSubagent => 'Subagent';
 
   @override
