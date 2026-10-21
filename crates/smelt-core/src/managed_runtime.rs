@@ -369,26 +369,13 @@ fn locate_smelt_pi() -> Result<PathBuf, String> {
     locate_smelt_pi_in(&home.join("bin"))
 }
 
-/// 解析 `bin/smelt-pi` 链接，返回真实路径。拿真实路径去 exec：之后链接拨到新版本，
-/// 已经起来的这个 Pi 还在原来的目录里。
 fn locate_smelt_pi_in(bin: &Path) -> Result<PathBuf, String> {
-    let link = bin.join(crate::pi_image::LAUNCH_NAME);
-    let executable = fs::canonicalize(&link).map_err(|error| {
+    crate::pi_image::current(bin).ok_or_else(|| {
         format!(
-            "找不到 smelt-pi（{}：{error}）。重新打开 Smelt 会从 App 里装上；Linux 运行 smeltd install。",
-            link.display()
+            "找不到 smelt-pi（{}）。桌面重新打开 Smelt 会从 App 里装上；Linux 上运行时启动时会按自己的版本补上，或重新运行安装脚本。",
+            bin.join(crate::pi_image::LAUNCH_NAME).display()
         )
-    })?;
-    if executable_file(&executable) {
-        Ok(executable)
-    } else {
-        Err(format!("smelt-pi 不是可执行文件：{}", executable.display()))
-    }
-}
-
-fn executable_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    })
 }
 
 fn photon_wasm(executable: &Path) -> PathBuf {

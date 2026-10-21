@@ -21,8 +21,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROGRAMS=(smeltd smelt-notify)
-# curl 用来装桌面 Chrome。smelt-pi 跟 smeltd 一起按映像指纹发布。Bun 仍按需下载到 ~/.smelt/runtime。
-BASE_PACKAGES=(ca-certificates curl)
+# curl、unzip：按需下载到 ~/.smelt/runtime 的 Bun 要用（MCP 预设的 `bun x`、Claude/Codex 的 `bunx`）。
+BASE_PACKAGES=(ca-certificates curl unzip)
 # D9 实测过的一套；不装中文字体，中文网页全是方块。装时不带推荐包（容器里能省几百 MB），
 # 所以 Xvnc 要的 X 核心字体（fixed）和任务栏图标的主题要自己列上。
 DESKTOP_PACKAGES=(

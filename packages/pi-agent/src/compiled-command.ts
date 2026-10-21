@@ -38,6 +38,15 @@ export function protocolMismatch(
 	return `smelt-pi 的协议是 ${own}，守护要的是 ${wanted ?? "（没给）"}。重新打开 Smelt，让守护换到同一版本。`;
 }
 
+/**
+ * 约定版本管的是守护调用 smelt-pi 的接口，所以只有守护直接调用的入口（RPC 会话、auth、mcp）
+ * 才校验。`gateway` 是 smelt-pi 自己拉起的同一份二进制，没有版本错配可言；它的环境也按
+ * MCP server 的规矩去掉了 SMELT_* 变量，本来就拿不到守护给的版本。
+ */
+export function checksDaemonProtocol(command: CompiledCommand): boolean {
+	return command.kind !== "gateway";
+}
+
 export function parseCompiledCommand(argv: readonly string[]): CompiledCommand {
 	const args = userArguments(argv);
 	const [head, ...rest] = args;

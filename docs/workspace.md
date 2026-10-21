@@ -262,7 +262,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 ./install.sh --no-pair # 只安装并启动
 ```
 
-脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-pi`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-pi-<指纹>/`，`~/.smelt/bin/smelt-pi` 链接指向当前那份。已经在跑就交接，会话保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`。之后：
+脚本要求 Linux。有 systemd 时装成用户服务。它把 `smelt-notify` 和 `smelt-up` 放进 `~/.smelt/bin`，再执行 `smeltd install`：smeltd 发布成不可变映像；包里的 `smelt-pi`、photon wasm 和 `native/` 按它们自己的指纹放进 `smelt-pi-<指纹>/`，`~/.smelt/bin/smelt-pi` 链接指向当前那份。运行时每次启动都检查这条链接，缺了就按自己的版本从 Release 取包补上（比如旧版运行时代为升级时还不认识 smelt-pi）。已经在跑就交接，会话保留。Bun 不在这个包里，第一次用到时下载到 `~/.smelt/runtime`。之后：
 
 ```bash
 smeltd pair                      # 打开远程访问，打印一次性配对串和终端二维码

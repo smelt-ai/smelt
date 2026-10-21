@@ -35,6 +35,19 @@ pub fn publish(dir: &Path, src_dir: &Path) -> io::Result<PathBuf> {
     Ok(target.join(LAUNCH_NAME))
 }
 
+/// `dir/smelt-pi` 现在指向的、能执行的那份，解析成真实路径。链接缺了、指空了都是 `None`。
+/// 拿真实路径去 exec：之后链接拨到新版本，已经起来的 Pi 还在原来的目录里。
+pub fn current(dir: &Path) -> Option<PathBuf> {
+    let executable = fs::canonicalize(dir.join(LAUNCH_NAME)).ok()?;
+    let meta = fs::metadata(&executable).ok()?;
+    (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(executable)
+}
+
+/// `src_dir` 里有没有一整套可以发布的 smelt-pi（不跟符号链接）。
+pub fn bundled(src_dir: &Path) -> bool {
+    fs::symlink_metadata(src_dir.join(LAUNCH_NAME)).is_ok_and(|meta| meta.is_file())
+}
+
 /// 删掉启动链接没指向、里面的 smelt-pi 也证明没人映射的旧目录。证明不了就留下。
 pub fn reap_unused(dir: &Path) -> io::Result<()> {
     reap_unused_with(dir, probe_image_mapped)
@@ -237,6 +250,24 @@ mod tests {
         assert_ne!(second, first);
         assert_eq!(current(&bin), fs::canonicalize(&second).unwrap());
         assert_eq!(fs::read(&first).unwrap(), b"pi-v1", "旧目录原样留着给在跑的 Pi");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 守护起 Pi、Linux 运行时启动时补齐，都看这一个答案：链接缺了、指空了都算没有。
+    #[test]
+    fn current_is_the_real_path_behind_a_live_link() {
+        let root = scratch("current");
+        let (pkg, bin) = (root.join("pkg"), root.join("bin"));
+        fs::create_dir_all(&bin).unwrap();
+        assert!(current(&bin).is_none(), "没发布过");
+        assert!(!bundled(&pkg));
+        package(&pkg, b"pi-v1", b"wasm", None);
+        assert!(bundled(&pkg));
+        let published = publish(&bin, &pkg).unwrap();
+        assert_eq!(current(&bin), Some(fs::canonicalize(&published).unwrap()));
+        assert!(!bundled(&bin), "bin 里的 smelt-pi 是链接，不能当成一套包再发布");
+        fs::remove_dir_all(published.parent().unwrap()).unwrap();
+        assert!(current(&bin).is_none(), "链接指空了");
         fs::remove_dir_all(root).unwrap();
     }
 

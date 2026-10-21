@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { SMELT_PROTOCOL_ENV, parseCompiledCommand, protocolMismatch } from "../src/compiled-command.ts";
+import {
+	SMELT_PROTOCOL_ENV,
+	checksDaemonProtocol,
+	parseCompiledCommand,
+	protocolMismatch,
+} from "../src/compiled-command.ts";
 
 describe("compiled command router", () => {
 	test("drops the bunfs entry and keeps rpc flags", () => {
@@ -41,5 +46,14 @@ describe("daemon protocol", () => {
 
 	test("a daemon that predates the protocol is refused", () => {
 		expect(protocolMismatch(1, {})).toContain("（没给）");
+	});
+
+	// 复现：smelt-pi 自己拉起的 MCP 网关去掉了 SMELT_* 变量，校验它会让所有 stdio MCP 起不来。
+	test("only entries the daemon calls check the protocol", () => {
+		const parse = (...args: string[]) => parseCompiledCommand(["smelt-pi", ...args]);
+		expect(checksDaemonProtocol(parse("--offline"))).toBe(true);
+		expect(checksDaemonProtocol(parse("auth", "list"))).toBe(true);
+		expect(checksDaemonProtocol(parse("mcp", "login", "figma"))).toBe(true);
+		expect(checksDaemonProtocol(parse("gateway"))).toBe(false);
 	});
 });

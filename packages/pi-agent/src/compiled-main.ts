@@ -1,6 +1,6 @@
 import "./quickjs-embed.ts";
 import pkg from "../package.json" with { type: "json" };
-import { parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
+import { checksDaemonProtocol, parseCompiledCommand, protocolMismatch } from "./compiled-command.ts";
 
 const IMAGE_WORKER = "/$bunfs/root/utils/image-resize-worker.js";
 const CODEMODE_WORKER = "/$bunfs/root/extensions/codemode/worker.js";
@@ -62,13 +62,13 @@ if (process.env.SMELT_PI_PROBE_WORKERS === "1") {
 	process.exit(0);
 }
 
-const mismatch = protocolMismatch(pkg.smeltProtocol, process.env);
+const command = parseCompiledCommand(process.argv);
+
+const mismatch = checksDaemonProtocol(command) ? protocolMismatch(pkg.smeltProtocol, process.env) : undefined;
 if (mismatch) {
 	console.error(mismatch);
 	process.exit(78);
 }
-
-const command = parseCompiledCommand(process.argv);
 
 function presentAs(rest: string[]): void {
 	// auth-main / mcp-main 用 process.argv.slice(2)，所以 argv 要摆成
