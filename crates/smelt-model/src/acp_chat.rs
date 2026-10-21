@@ -1173,6 +1173,26 @@ mod tests {
         assert_eq!(send.kind, crate::acp_session::PeerMessageKind::Message);
     }
 
+    /// 被拒的发送：守护找到了对方才拒的会带上对方标题，失败行写标题，不写 acp- id。
+    #[test]
+    fn a_refused_send_keeps_the_target_title_from_the_daemon() {
+        let args = serde_json::json!({"to": "acp-b", "text": "同步一下"});
+        let details = serde_json::json!({
+            "error": true, "reason": "hops_exhausted",
+            "to": {"id": "acp-b", "title": "修评论功能"}, "kind": "message"
+        });
+        let send = peer_send_from_tool(
+            PI_SESSION_SEND_TOOL,
+            Some(&args),
+            Some(&details),
+            Some("这条消息链转发次数用完了"),
+        )
+        .unwrap();
+        assert_eq!(send.to_id, "acp-b");
+        assert_eq!(send.to_title, "修评论功能");
+        assert_eq!(send.error.as_deref(), Some("这条消息链转发次数用完了"));
+    }
+
     /// 起新对话：开始时只有标题，还没有 id；结束后带上新对话的 id 和交代任务的消息 id。
     #[test]
     fn session_spawn_reads_as_a_task_handed_to_a_new_conversation() {

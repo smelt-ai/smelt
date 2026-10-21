@@ -180,8 +180,9 @@ export function completionMessage(notice: TaskCompletionNotice): {
 	if (notice.kind === "peer_message" && notice.peer) {
 		return {
 			message: peerMessage({ id: notice.id, ...notice.peer, text: notice.output }),
-			// 和子智能体的结果一样，等这一轮做完再看，不插进手上的工具调用；空闲时开一轮。
-			options: { triggerTurn: notice.wake, deliverAs: "followUp" },
+			// 对方要协调的事等不到整轮做完：一轮可能跑几十分钟，「先停手」这种消息到时已经没用。
+			// steer 在手上这批工具调用做完、下一次问模型之前送进去，不打断正在跑的工具。空闲时开一轮。
+			options: { triggerTurn: notice.wake, deliverAs: "steer" },
 		};
 	}
 	if (notice.kind === "subagent") {
