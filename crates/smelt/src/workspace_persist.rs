@@ -1422,8 +1422,8 @@ mod agent_conversation_persist_tests {
                 .as_ref()
                 .map(|id| id.to_string())
                 .as_deref(),
-            None,
-            "第一次落库后这一列仍是空的，要等守护进程确认"
+            Some("pi-history-1"),
+            "第一次落库采用窗口带的对话身份"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

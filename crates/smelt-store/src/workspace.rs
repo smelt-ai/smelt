@@ -34,13 +34,17 @@ fn normalize_history_id(id: Option<&str>) -> Option<String> {
 
 fn history_session_id_for_rewrite(
     session_id: &str,
+    window: Option<&str>,
     preserved: &HashMap<String, Option<String>>,
 ) -> Option<String> {
-    // 没有行，或列还是空，第一次落库也不采用窗口载荷。
-    // 这一列只由守护进程 remember / clear 来写。
-    preserved
-        .get(session_id)
-        .and_then(|stored| normalize_history_id(stored.as_deref()))
+    match preserved.get(session_id) {
+        // 行已经在：确认过的 id 或守护进程放弃后的空，窗口都不能改。
+        Some(stored) => normalize_history_id(stored.as_deref()),
+        // 第一次落库：和守护进程「没有行就用请求带的 id」是同一条规则。历史页「继续」
+        // 新开的槽位常常先被窗口存档落库、后才 acp_open，这里写空就会被读成「已放弃」，
+        // 续接退化成一段空白新会话。
+        None => normalize_history_id(window),
+    }
 }
 
 /// 整份替换工作区目录。会话和 ACP 细节都挂在会话组上，删组即级联删光。
@@ -151,7 +155,11 @@ fn write_session_record(
             params![session_id, group_id, acp.cwd.as_deref(), session_position],
         )?;
         let history_key = acp.sid.as_deref().unwrap_or(session_id.as_str());
-        let history_session_id = history_session_id_for_rewrite(history_key, preserved_history);
+        let history_session_id = history_session_id_for_rewrite(
+            history_key,
+            acp.history_session_id.as_deref(),
+            preserved_history,
+        );
         write_acp_record(transaction, &session_id, acp, history_session_id.as_deref())?;
         session_position += 1;
     }
