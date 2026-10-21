@@ -158,6 +158,21 @@ fn bun_tree_matches(root: &Path, expected: &BunGenerationManifest) -> bool {
             == Some(expected)
 }
 
+/// 旧版把 Pi 源码连整份 node_modules 物化在 `runtime/store/pi` 下，现在跑的是编译好的 smelt-pi。
+const RETIRED_PI_GENERATIONS: &str = "pi";
+
+/// 守护启动后在后台调一次，删掉旧的 Pi 源码 generation。别的进程正管着 runtime 目录就
+/// 这次不做；交接继承下来的旧 Pi 进程还占着的，留到它退出后的下一次启动。
+pub fn retire_pi_source_generations() {
+    let Ok(store) = GenerationStore::managed() else {
+        return;
+    };
+    let Ok(Some(_manager)) = store.try_lock_manager() else {
+        return;
+    };
+    store.retire_kind_locked(RETIRED_PI_GENERATIONS);
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn sync_managed_bun(_status: &dyn Fn(&str)) -> Result<ManagedBunRuntime, String> {
     Err("受管 Bun 运行时只在 macOS 和 Linux 上提供".to_string())
