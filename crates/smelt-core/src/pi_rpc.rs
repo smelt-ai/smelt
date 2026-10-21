@@ -37,6 +37,8 @@ const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
 const SMELT_CODEMODE_COMMAND: &str = "smelt-codemode";
+/// 让会话重读 models.json 的扩展命令（`packages/pi-agent/src/model-refresh.ts`）。
+const SMELT_REFRESH_MODELS_COMMAND: &str = "smelt-refresh-models";
 const SMELT_CODEMODE_WIDGET: &str = "smelt-codemode";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +88,8 @@ struct PiState {
     /// 用户在应用里登录/改配置后补拉的 `get_available_models`。会话启动时那一次走
     /// `rpc_call` 同步等，不走这里。
     models_request_id: Option<String>,
+    /// 已发出、等回执的重读 models.json：（request id，回执到了要切的模型）。
+    models_refresh_request: Option<(String, Option<String>)>,
     /// 压缩已经结束。拒绝用的快照可能仍写着 `isCompacting`，不能再把它当成还在忙。
     compaction_idle_pending: bool,
     /// 已发出、等 Pi 回执的 steer 请求。只用来把 `in_flight_rpc` 记账还回去；
@@ -1548,6 +1552,84 @@ fn publish_configuration(state: &PiState, event_tx: &smol::channel::Sender<Conve
     let _ = event_tx.try_send(ConversationEvent::ConfigOptions(configs));
 }
 
+fn refresh_models_command_available(state: &PiState) -> bool {
+    state
+        .available_commands
+        .iter()
+        .any(|(name, _)| name == SMELT_REFRESH_MODELS_COMMAND)
+}
+
+/// 让 Pi 重读 models.json。Pi 的可用模型是会话启动时的快照，之后在 Smelt 里加的 provider
+/// 它不知道：`get_available_models` 拉回来还是旧的，`set_model` 也回 Model not found。
+/// 这条 prompt 只走扩展命令，回执是 handled，不开模型回合，回答进行中也立即执行。
+async fn request_models_refresh<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &mut PiState,
+    then_set_model: Option<String>,
+    in_flight_rpc: &AtomicUsize,
+) -> Result<(), String> {
+    if let Some((_, pending_model)) = &mut state.models_refresh_request {
+        // 已经在重读，等那次回执。要切的模型以最后一次为准，被顶掉的那次直接还账。
+        if let Some(value) = then_set_model
+            && pending_model.replace(value).is_some()
+        {
+            finish_in_flight(in_flight_rpc);
+        }
+        return Ok(());
+    }
+    let id = state.request_id("reload-models");
+    state.models_refresh_request = Some((id.clone(), then_set_model));
+    write_rpc(
+        writer,
+        &serde_json::json!({
+            "id": id,
+            "type": "prompt",
+            "message": format!("/{SMELT_REFRESH_MODELS_COMMAND}"),
+        }),
+    )
+    .await
+}
+
+/// 补拉一次可用模型。响应回来时按 request id 认领（见 `models_request_id`）。
+async fn request_available_models<W: AsyncWrite + Unpin>(writer: &mut W, state: &mut PiState) {
+    let id = state.request_id("refresh-models");
+    state.models_request_id = Some(id.clone());
+    if write_rpc(
+        writer,
+        &serde_json::json!({"id": id, "type": "get_available_models"}),
+    )
+    .await
+    .is_err()
+    {
+        state.models_request_id = None;
+    }
+}
+
+async fn send_set_model<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    state: &mut PiState,
+    value: String,
+) -> Result<(), String> {
+    let Some((provider, model_id)) = value.split_once('/') else {
+        return Err(format!("Pi 模型值格式无效：{value}"));
+    };
+    let (provider, model_id) = (provider.to_string(), model_id.to_string());
+    let id = state.request_id("config-model");
+    state
+        .pending_configs
+        .insert(id.clone(), PendingConfig::Model(value));
+    write_rpc(
+        writer,
+        &serde_json::json!({
+            "id": id,
+            "type": "set_model",
+            "provider": provider,
+            "modelId": model_id,
+        }),
+    )
+    .await
+}
+
 fn codemode_command_available(state: &PiState) -> bool {
     state
         .available_commands
@@ -1573,7 +1655,7 @@ fn codemode_config(state: &PiState) -> SessionConfigState {
 fn publishable_commands(commands: &[(String, String)]) -> Vec<(String, String)> {
     commands
         .iter()
-        .filter(|(name, _)| name != SMELT_CODEMODE_COMMAND)
+        .filter(|(name, _)| name != SMELT_CODEMODE_COMMAND && name != SMELT_REFRESH_MODELS_COMMAND)
         .cloned()
         .collect()
 }
@@ -1994,18 +2076,13 @@ async fn handle_command<W: AsyncWrite + Unpin>(
             handle_config_command(config_id, value, writer, event_tx, state, in_flight_rpc).await?;
         }
         ConversationCommand::RefreshModels => {
-            // 发出去就不管了：响应回来时按 request id 认领（见 `models_request_id`）。
-            // 这里不能同步等——命令循环在这条路上没有 reader，等下去会把整条会话卡死。
-            let id = state.request_id("refresh-models");
-            state.models_request_id = Some(id.clone());
-            if write_rpc(
-                writer,
-                &serde_json::json!({"id": id, "type": "get_available_models"}),
-            )
-            .await
-            .is_err()
-            {
-                state.models_request_id = None;
+            // 发出去就不管了，回执按 request id 认领。这里不能同步等——命令循环在这条
+            // 路上没有 reader，等下去会把整条会话卡死。先让 Pi 重读 models.json，
+            // 回执到了再拉列表，不然拉回来的还是会话启动时的快照。
+            if refresh_models_command_available(state) {
+                request_models_refresh(writer, state, None, in_flight_rpc).await?;
+            } else {
+                request_available_models(writer, state).await;
             }
         }
         ConversationCommand::StopBackgroundTask { id } => {
@@ -2171,29 +2248,21 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
             .await?;
         }
         "model" => {
-            let Some((provider, model_id)) = value.split_once('/') else {
+            if !value.contains('/') {
                 finish_in_flight(in_flight_rpc);
                 let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
                     "Pi 模型值格式无效",
                 )));
                 return Ok(());
-            };
-            let provider = provider.to_string();
-            let model_id = model_id.to_string();
-            let id = state.request_id("config-model");
-            state
-                .pending_configs
-                .insert(id.clone(), PendingConfig::Model(value));
-            write_rpc(
-                writer,
-                &serde_json::json!({
-                    "id": id,
-                    "type": "set_model",
-                    "provider": provider,
-                    "modelId": model_id,
-                }),
-            )
-            .await?;
+            }
+            // 菜单按磁盘上的 models.json 列模型，这个会话的 Pi 可能还不认识（会话启动后才加的
+            // provider）。先让它重读，回执到了再切。
+            let known = state.models.iter().any(|model| model_value(model) == value);
+            if !known && refresh_models_command_available(state) {
+                request_models_refresh(writer, state, Some(value), in_flight_rpc).await?;
+            } else {
+                send_set_model(writer, state, value).await?;
+            }
         }
         _ => {
             finish_in_flight(in_flight_rpc);
@@ -2457,6 +2526,18 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         } else {
             handle_rewind_list_response(pending, &response, writer, event_tx, state, in_flight_rpc)
                 .await?;
+        }
+        return Ok(());
+    }
+    if let Some((_, then_set_model)) = state
+        .models_refresh_request
+        .take_if(|(pending, _)| *pending == id)
+    {
+        // 重读失败也往下走：列表维持旧的，模型找不到由 set_model 自己报。
+        request_available_models(writer, state).await;
+        if let Some(value) = then_set_model {
+            // in_flight 记在这次切模型上，等 set_model 的回执再还。
+            send_set_model(writer, state, value).await?;
         }
         return Ok(());
     }
@@ -8372,6 +8453,93 @@ mod tests {
         assert_eq!(model.current_value, "github-copilot/kimi-k3");
         assert_eq!(model.current_name, "Kimi K3");
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    fn deepseek_session_with_refresh_command() -> PiState {
+        let mut state = PiState::new();
+        state.models = vec![PiModel {
+            provider: "deepseek".into(),
+            id: "deepseek-flash".into(),
+            name: "DeepSeek-V4.1-Flash".into(),
+            context_window: None,
+        }];
+        state.model = Some(state.models[0].clone());
+        state
+            .available_commands
+            .push((SMELT_REFRESH_MODELS_COMMAND.to_string(), String::new()));
+        state
+    }
+
+    /// 复现：会话启动后才在 Smelt 里加的 provider，菜单里有、Pi 不认识，直接 set_model 回
+    /// Model not found，胶囊又跳回原来的模型。要先让 Pi 重读 models.json，回执到了再切。
+    #[test]
+    fn a_model_pi_does_not_know_yet_reloads_models_before_switching() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = deepseek_session_with_refresh_command();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "model".to_string(),
+                value: ConfigValue::Select("minmax/minimax-m3.1-flash".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let requests = rpc_lines(writer);
+        assert_eq!(requests.len(), 1, "回执到之前不能先发 set_model");
+        assert_eq!(requests[0]["type"], "prompt");
+        assert_eq!(requests[0]["message"], "/smelt-refresh-models");
+
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_response(
+            serde_json::json!({
+                "id": requests[0]["id"],
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {"disposition": "handled"}
+            }),
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let requests = rpc_lines(writer);
+        assert!(requests.iter().any(|r| r["type"] == "get_available_models"));
+        let set = requests
+            .iter()
+            .find(|r| r["type"] == "set_model")
+            .expect("重读完要接着切模型");
+        assert_eq!(set["provider"], "minmax");
+        assert_eq!(set["modelId"], "minimax-m3.1-flash");
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1, "等 set_model 的回执再还账");
+    }
+
+    #[test]
+    fn a_model_pi_already_knows_switches_directly() {
+        let (event_tx, _) = smol::channel::unbounded();
+        let mut state = deepseek_session_with_refresh_command();
+        let in_flight = AtomicUsize::new(1);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        smol::block_on(handle_command(
+            ConversationCommand::SetConfigOption {
+                config_id: "model".to_string(),
+                value: ConfigValue::Select("deepseek/deepseek-flash".to_string()),
+            },
+            &mut writer,
+            &event_tx,
+            &mut state,
+            &in_flight,
+        ))
+        .unwrap();
+        let requests = rpc_lines(writer);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["type"], "set_model");
     }
 
     #[test]

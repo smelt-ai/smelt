@@ -11,6 +11,7 @@ import {
 } from "./elicitation.ts";
 import { SMELT_MCP_EXTENSION_NAME, smeltMcpExtension } from "./mcp-selection.ts";
 import smeltMemoryExtension, { SMELT_MEMORY_EXTENSION_NAME } from "./memory-extension.ts";
+import smeltModelRefreshExtension from "./model-refresh.ts";
 import { createSmeltMcpTransport } from "./pi-mcp-runtime.ts";
 import { SMELT_SESSION_PEERS_EXTENSION_NAME, smeltSessionPeersExtension } from "./session-peers.ts";
 import smeltPermissionExtension from "./smelt-permission.ts";
@@ -26,6 +27,7 @@ export const SMELT_EXTENSION_FACTORIES = [
 	{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
 	{ name: SMELT_SESSION_PEERS_EXTENSION_NAME, factory: smeltSessionPeersExtension, hidden: true },
 	{ name: "smelt-codemode", factory: smeltCodemodeExtension, hidden: true },
+	{ name: "smelt-model-refresh", factory: smeltModelRefreshExtension, hidden: true },
 	{ name: SMELT_MEMORY_EXTENSION_NAME, factory: smeltMemoryExtension, hidden: true },
 	{ name: "smelt-permission", factory: smeltPermissionExtension, hidden: true },
 ] satisfies InlineExtension[];
