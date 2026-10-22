@@ -12,11 +12,15 @@
 //!                     取详情线程（pending_actions）──> 记下详情、再投影一次
 //! ```
 //!
+//! 取详情失败（断线、会话唤醒超时）就在取详情线程里退避重取，直到取到、单据没了或指纹
+//! 变了：在等你的会话列表不会再变，等不来下一次推送替它重取。
+//!
 //! 锁的顺序：会话目录的锁 → 本模块的锁（`update` 在会话目录的监听里调）。持有本模块的
 //! 锁时不调会话目录、不做网络 IO；取详情在单独的线程上做。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use crate::api::catalog::{
     AttentionKind, SessionList, SessionPhase, SessionStatus, SessionSummary,
@@ -30,6 +34,25 @@ pub(crate) const RECENT_LIMIT: usize = 5;
 
 /// 取一个会话在等的审批和询问：`(runtime_id, session_id)`。阻塞，只在取详情线程上调。
 pub(crate) type Fetch = Arc<dyn Fn(&str, &str) -> Result<PendingActions, SmeltError> + Send + Sync>;
+
+/// 取详情失败后的重取退避。生产值见 [`Timing::PRODUCTION`]，测试用毫秒级。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Timing {
+    pub retry_base: Duration,
+    pub retry_max: Duration,
+}
+
+impl Timing {
+    pub(crate) const PRODUCTION: Self = Self {
+        retry_base: Duration::from_secs(2),
+        retry_max: Duration::from_secs(30),
+    };
+
+    fn retry_delay(&self, failures: u32) -> Duration {
+        let factor = 1u32 << failures.saturating_sub(1).min(16);
+        self.retry_base.saturating_mul(factor).min(self.retry_max)
+    }
+}
 
 /// Dart 订阅者：返回 false 表示已取消。在本模块的锁里调用，不能阻塞。
 pub(crate) type PassListener = Box<dyn Fn(&Pass) -> bool + Send>;
@@ -205,6 +228,7 @@ pub(crate) struct PassHub {
 
 struct Shared {
     fetch: Fetch,
+    timing: Timing,
     inner: Mutex<Inner>,
 }
 
@@ -212,7 +236,7 @@ struct Shared {
 struct Inner {
     order: Vec<String>,
     lists: HashMap<String, SessionList>,
-    /// 已取回的详情。单据消失时丢掉，下次再成为单据会重新取。
+    /// 已取回的详情。会话从列表里消失时丢掉；只是暂时不是单据（机器重连中）的留着。
     details: HashMap<Key, Loaded>,
     /// 正在取的单据和取的时候的指纹，避免同一状态反复请求。
     in_flight: HashMap<Key, String>,
@@ -228,10 +252,11 @@ impl Shared {
 }
 
 impl PassHub {
-    pub(crate) fn new(fetch: Fetch) -> Self {
+    pub(crate) fn new(fetch: Fetch, timing: Timing) -> Self {
         Self {
             shared: Arc::new(Shared {
                 fetch,
+                timing,
                 inner: Mutex::new(Inner::default()),
             }),
         }
@@ -304,7 +329,17 @@ fn refresh(inner: &mut Inner) -> Pass {
         .iter()
         .map(|ticket| (ticket.runtime_id.clone(), ticket.session.id.clone()))
         .collect();
-    details.retain(|key, _| tickets.contains(key));
+    // 详情留到会话从列表里消失：机器重连（换代）时列表先退回缓存、单据暂时下架，连回来
+    // 指纹没变就直接用，不用整台重取一遍。指纹带着最后活动时间，变过就会重取。
+    let sessions: HashSet<Key> = lists
+        .iter()
+        .flat_map(|(runtime_id, list)| {
+            list.sessions
+                .iter()
+                .map(move |session| (runtime_id.clone(), session.id.clone()))
+        })
+        .collect();
+    details.retain(|key, _| sessions.contains(key));
     in_flight.retain(|key, _| tickets.contains(key));
     if last.as_ref() != Some(&pass) {
         *last = Some(pass.clone());
@@ -353,29 +388,42 @@ fn spawn_fetches(shared: &Arc<Shared>, requests: Vec<(Key, String)>) {
     }
 }
 
+/// 取一张单据的详情，失败就退避重取。期间一直占着 `in_flight`：同一指纹不会另起请求。
 fn fetch(shared: &Arc<Shared>, key: Key, fingerprint: String) {
-    let result = (shared.fetch)(&key.0, &key.1);
-    let mut inner = shared.lock();
-    if inner.in_flight.get(&key) != Some(&fingerprint) {
-        // 取的期间指纹又变了（已有新的请求），或单据没了：这份作废。
-        return;
-    }
-    inner.in_flight.remove(&key);
-    match result {
-        Ok(actions) => {
-            inner.details.insert(
-                key,
-                Loaded {
-                    fingerprint,
-                    actions,
-                },
-            );
-            let requests = update_locked(&mut inner);
-            drop(inner);
-            spawn_fetches(shared, requests);
+    let mut failures = 0u32;
+    loop {
+        let result = (shared.fetch)(&key.0, &key.1);
+        let mut inner = shared.lock();
+        if inner.in_flight.get(&key) != Some(&fingerprint) {
+            // 取的期间指纹又变了（已有新的请求），或单据没了：这份作废。
+            return;
         }
-        // 断线等失败不记账：这台机器下一次推会话列表时会再取。
-        Err(failure) => log::info!("取单据详情失败（{}）：{}", key.1, failure.message),
+        match result {
+            Ok(actions) => {
+                inner.in_flight.remove(&key);
+                inner.details.insert(
+                    key,
+                    Loaded {
+                        fingerprint,
+                        actions,
+                    },
+                );
+                let requests = update_locked(&mut inner);
+                drop(inner);
+                spawn_fetches(shared, requests);
+                return;
+            }
+            Err(failure) => {
+                drop(inner);
+                failures = failures.saturating_add(1);
+                log::info!(
+                    "取单据详情失败（{}，第 {failures} 次）：{}",
+                    key.1,
+                    failure.message
+                );
+                std::thread::sleep(shared.timing.retry_delay(failures));
+            }
+        }
     }
 }
 

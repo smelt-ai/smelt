@@ -425,6 +425,16 @@ fn record(hub: &PassHub) -> Recorded {
     Recorded(passes)
 }
 
+/// 重取退避用毫秒级。
+const FAST: Timing = Timing {
+    retry_base: Duration::from_millis(20),
+    retry_max: Duration::from_millis(40),
+};
+
+fn new_hub(fetch: Fetch) -> PassHub {
+    PassHub::new(fetch, FAST)
+}
+
 /// 每次取详情都记一笔；`replies` 决定回什么。
 fn fetcher(
     calls: Arc<Mutex<Vec<Key>>>,
@@ -442,7 +452,7 @@ fn fetcher(
 #[test]
 fn details_are_fetched_once_per_fingerprint_and_pushed() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let hub = PassHub::new(fetcher(Arc::clone(&calls), |_, session| {
+    let hub = new_hub(fetcher(Arc::clone(&calls), |_, session| {
         Ok(actions(&[session]))
     }));
     hub.set_order(vec!["a".to_string()]);
@@ -482,13 +492,14 @@ fn details_are_fetched_once_per_fingerprint_and_pushed() {
     );
 }
 
+/// 在等你的会话列表不会再变：失败了要自己重取，不能等下一次推列表。
 #[test]
-fn failed_fetches_are_retried_on_the_next_list() {
+fn failed_fetches_are_retried_with_backoff() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&attempts);
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let hub = PassHub::new(fetcher(Arc::clone(&calls), move |_, _| {
-        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+    let hub = new_hub(fetcher(Arc::clone(&calls), move |_, _| {
+        if counter.fetch_add(1, Ordering::SeqCst) < 2 {
             Err(error(SmeltErrorKind::Offline, "断线"))
         } else {
             Ok(actions(&["t"]))
@@ -497,21 +508,66 @@ fn failed_fetches_are_retried_on_the_next_list() {
     hub.set_order(vec!["a".to_string()]);
     let passes = record(&hub);
     hub.update("a", live(vec![waiting("s", 100)]));
-    wait_until("第一次失败", || attempts.load(Ordering::SeqCst) == 1);
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(!passes.last().tickets[0].details_loaded);
-    assert_eq!(attempts.load(Ordering::SeqCst), 1, "失败不立刻重试");
-
-    hub.update("a", live(vec![waiting("s", 100)]));
-    passes.wait("下次推列表时重取成功", |pass| {
-        pass.tickets[0].details_loaded
+    passes.wait("不推新列表也重取成功", |pass| {
+        pass.tickets.first().is_some_and(|ticket| ticket.details_loaded)
     });
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn retrying_stops_once_the_ticket_is_gone() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let hub = new_hub(fetcher(Arc::clone(&calls), |_, _| {
+        Err(error(SmeltErrorKind::Offline, "断线"))
+    }));
+    hub.set_order(vec!["a".to_string()]);
+    let _passes = record(&hub);
+    hub.update("a", live(vec![waiting("s", 100)]));
+    wait_until("重取过", || calls.lock().unwrap().len() >= 2);
+
+    hub.update("a", live(Vec::new()));
+    // 等在睡的那一轮醒来、看到单据没了退出。
+    std::thread::sleep(Duration::from_millis(100));
+    let settled = calls.lock().unwrap().len();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(calls.lock().unwrap().len(), settled, "单据没了就不再取");
+}
+
+/// 机器重连（换代）时列表先退回缓存、单据暂时下架；连回来状态没变就不重取。
+#[test]
+fn details_survive_a_reconnect() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let hub = new_hub(fetcher(Arc::clone(&calls), |_, _| Ok(actions(&["t"]))));
+    hub.set_order(vec!["a".to_string()]);
+    let passes = record(&hub);
+    hub.update("a", live(vec![waiting("s", 100)]));
+    passes.wait("取到详情", |pass| {
+        pass.tickets.first().is_some_and(|ticket| ticket.details_loaded)
+    });
+
+    hub.update(
+        "a",
+        SessionList {
+            sessions: vec![waiting("s", 100)],
+            cached: true,
+            saved_at_ms: Some(1),
+        },
+    );
+    assert!(passes.last().tickets.is_empty(), "重连中：缓存里的不算单据");
+    hub.update("a", live(vec![waiting("s", 100)]));
+    assert!(passes.last().tickets[0].details_loaded, "连回来直接带着详情");
+
+    hub.update("a", live(vec![waiting("s", 200)]));
+    passes.wait("状态变了才重取", |pass| {
+        pass.tickets.first().is_some_and(|ticket| ticket.details_loaded)
+    });
+    assert_eq!(calls.lock().unwrap().len(), 2);
 }
 
 #[test]
 fn nothing_is_fetched_without_a_subscriber() {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let hub = PassHub::new(fetcher(Arc::clone(&calls), |_, _| Ok(actions(&[]))));
+    let hub = new_hub(fetcher(Arc::clone(&calls), |_, _| Ok(actions(&[]))));
     hub.set_order(vec!["a".to_string()]);
     hub.update("a", live(vec![waiting("s", 100)]));
     std::thread::sleep(Duration::from_millis(50));
@@ -526,7 +582,7 @@ fn nothing_is_fetched_without_a_subscriber() {
 
 #[test]
 fn order_changes_and_unknown_runtimes() {
-    let hub = PassHub::new(Arc::new(|_, _| Ok(actions(&[]))));
+    let hub = new_hub(Arc::new(|_, _| Ok(actions(&[]))));
     let passes = record(&hub);
     hub.update("a", live(vec![waiting("s", 1)]));
     assert!(passes.last().stations.is_empty(), "没登记的机器不算");
@@ -560,7 +616,7 @@ fn order_changes_and_unknown_runtimes() {
 
 #[test]
 fn a_cancelled_subscriber_is_dropped() {
-    let hub = PassHub::new(Arc::new(|_, _| Ok(actions(&[]))));
+    let hub = new_hub(Arc::new(|_, _| Ok(actions(&[]))));
     let (tx, rx) = mpsc::channel();
     hub.subscribe(Box::new(move |pass| tx.send(pass.clone()).is_ok()));
     rx.recv_timeout(Duration::from_secs(1)).unwrap();

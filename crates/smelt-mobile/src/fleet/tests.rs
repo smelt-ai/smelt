@@ -57,6 +57,10 @@ const FAST: Timings = Timings {
         backoff_base: Duration::from_millis(20),
         backoff_max: Duration::from_millis(80),
     },
+    pass: crate::pass::Timing {
+        retry_base: Duration::from_millis(20),
+        retry_max: Duration::from_millis(80),
+    },
 };
 
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {

@@ -55,6 +55,7 @@ pub(crate) struct Timings {
     pub catalog: crate::catalog::Timing,
     pub conversation: crate::conversation::Timing,
     pub terminal: crate::terminal::Timing,
+    pub pass: crate::pass::Timing,
 }
 
 impl Timings {
@@ -63,6 +64,7 @@ impl Timings {
         catalog: crate::catalog::Timing::PRODUCTION,
         conversation: crate::conversation::Timing::PRODUCTION,
         terminal: crate::terminal::Timing::PRODUCTION,
+        pass: crate::pass::Timing::PRODUCTION,
     };
 }
 
@@ -307,13 +309,16 @@ impl Fleet {
                 ops: Mutex::new(()),
                 registry: Mutex::new(Registry::default()),
                 view: Mutex::new(View::default()),
-                pass: PassHub::new(Arc::new(move |runtime_id, session_id| {
-                    let shared = weak.upgrade().ok_or_else(not_initialized)?;
-                    shared
-                        .node(runtime_id)?
-                        .conversations
-                        .pending_actions(session_id)
-                })),
+                pass: PassHub::new(
+                    Arc::new(move |runtime_id, session_id| {
+                        let shared = weak.upgrade().ok_or_else(not_initialized)?;
+                        shared
+                            .node(runtime_id)?
+                            .conversations
+                            .pending_actions(session_id)
+                    }),
+                    timings.pass,
+                ),
                 next_serial: AtomicU64::new(0),
             }
         });
