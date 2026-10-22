@@ -11,11 +11,14 @@ import 'api/fleet.dart';
 import 'api/identity.dart';
 import 'api/pass.dart';
 import 'api/terminal.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
 import 'frb_generated.io.dart'
     if (dart.library.js_interop) 'frb_generated.web.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// Main entrypoint of the Rust API
@@ -297,6 +300,7 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiConversationUnwatchConversation({
     required String runtimeId,
     required String sessionId,
+    required int watchId,
   });
 
   Future<void> crateApiConversationUpdateElicitationText({
@@ -311,6 +315,7 @@ abstract class RustLibApi extends BaseApi {
   Stream<ConversationEvent> crateApiConversationWatchConversation({
     required String runtimeId,
     required String sessionId,
+    required int watchId,
   });
 
   Future<WorkspaceCatalog> crateApiCatalogWorkspaceCatalog({
@@ -1777,6 +1782,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<void> crateApiConversationUnwatchConversation({
     required String runtimeId,
     required String sessionId,
+    required int watchId,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1784,6 +1790,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(runtimeId, serializer);
           sse_encode_String(sessionId, serializer);
+          sse_encode_u_32(watchId, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1796,7 +1803,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: null,
         ),
         constMeta: kCrateApiConversationUnwatchConversationConstMeta,
-        argValues: [runtimeId, sessionId],
+        argValues: [runtimeId, sessionId, watchId],
         apiImpl: this,
       ),
     );
@@ -1805,7 +1812,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiConversationUnwatchConversationConstMeta =>
       const TaskConstMeta(
         debugName: "unwatch_conversation",
-        argNames: ["runtimeId", "sessionId"],
+        argNames: ["runtimeId", "sessionId", "watchId"],
       );
 
   @override
@@ -1878,6 +1885,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Stream<ConversationEvent> crateApiConversationWatchConversation({
     required String runtimeId,
     required String sessionId,
+    required int watchId,
   }) {
     final sink = RustStreamSink<ConversationEvent>();
     unawaited(
@@ -1887,6 +1895,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             final serializer = SseSerializer(generalizedFrbRustBinding);
             sse_encode_String(runtimeId, serializer);
             sse_encode_String(sessionId, serializer);
+            sse_encode_u_32(watchId, serializer);
             sse_encode_StreamSink_conversation_event_Sse(sink, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
@@ -1900,7 +1909,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: sse_decode_smelt_error,
           ),
           constMeta: kCrateApiConversationWatchConversationConstMeta,
-          argValues: [runtimeId, sessionId, sink],
+          argValues: [runtimeId, sessionId, watchId, sink],
           apiImpl: this,
         ),
       ),
@@ -1911,7 +1920,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiConversationWatchConversationConstMeta =>
       const TaskConstMeta(
         debugName: "watch_conversation",
-        argNames: ["runtimeId", "sessionId", "sink"],
+        argNames: ["runtimeId", "sessionId", "watchId", "sink"],
       );
 
   @override

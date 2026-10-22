@@ -27,7 +27,7 @@
 // Section: imports
 
 use flutter_rust_bridge::for_generated::byteorder::{NativeEndian, ReadBytesExt, WriteBytesExt};
-use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
 use flutter_rust_bridge::{Handler, IntoIntoDart};
 
 // Section: boilerplate
@@ -1608,6 +1608,7 @@ fn wire__crate__api__conversation__unwatch_conversation_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_runtime_id = <String>::sse_decode(&mut deserializer);
             let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_watch_id = <u32>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, ()>((move || {
@@ -1615,6 +1616,7 @@ fn wire__crate__api__conversation__unwatch_conversation_impl(
                         crate::api::conversation::unwatch_conversation(
                             api_runtime_id,
                             api_session_id,
+                            api_watch_id,
                         );
                     })?;
                     Ok(output_ok)
@@ -1722,6 +1724,7 @@ fn wire__crate__api__conversation__watch_conversation_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_runtime_id = <String>::sse_decode(&mut deserializer);
             let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_watch_id = <u32>::sse_decode(&mut deserializer);
             let api_sink = <StreamSink<
                 crate::api::conversation::ConversationEvent,
                 flutter_rust_bridge::for_generated::SseCodec,
@@ -1732,6 +1735,7 @@ fn wire__crate__api__conversation__watch_conversation_impl(
                     let output_ok = crate::api::conversation::watch_conversation(
                         api_runtime_id,
                         api_session_id,
+                        api_watch_id,
                         api_sink,
                     )?;
                     Ok(output_ok)
@@ -8019,7 +8023,7 @@ mod io {
     use flutter_rust_bridge::for_generated::byteorder::{
         NativeEndian, ReadBytesExt, WriteBytesExt,
     };
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate
@@ -8043,7 +8047,7 @@ mod web {
     };
     use flutter_rust_bridge::for_generated::wasm_bindgen;
     use flutter_rust_bridge::for_generated::wasm_bindgen::prelude::*;
-    use flutter_rust_bridge::for_generated::{Lifetimeable, Lockable, transform_result_dco};
+    use flutter_rust_bridge::for_generated::{transform_result_dco, Lifetimeable, Lockable};
     use flutter_rust_bridge::{Handler, IntoIntoDart};
 
     // Section: boilerplate

@@ -5,31 +5,38 @@
 
 import '../frb_generated.dart';
 import 'error.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
-/// 订阅一个会话。可以同时订阅多个会话（含不同机器上的），各自独立。同一会话再调一次
-/// 只换推送出口：旧流不再收到事件，新流马上收到手里的视图。
+/// 订阅一个会话。可以同时订阅多个会话（含不同机器上的），各自独立。`watch_id` 是调用方
+/// 给这个订阅者取的编号（进程内不重复），退订时带回。同一会话可以有几个订阅者，共用一条
+/// 订阅、都收到视图；后来的马上收到手里的视图。
 ///
 /// 有离线缓存就先推一份（`cached = true`），再连运行时，收到实时数据后推 `cached = false`
 /// 的视图。断线或这台机器重新连过时后台续订；和这台机器的连接停下（未配对、被忘记）就停，
-/// 重新连上后要再调一次。Dart 取消订阅也会停。
+/// 重新连上后要再调一次。所有订阅者的流都被 Dart 取消也会停。
 Stream<ConversationEvent> watchConversation({
   required String runtimeId,
   required String sessionId,
+  required int watchId,
 }) => RustLib.instance.api.crateApiConversationWatchConversation(
   runtimeId: runtimeId,
   sessionId: sessionId,
+  watchId: watchId,
 );
 
-/// 停掉一个会话的订阅（离开对话页时调），其它订阅不受影响。
+/// 退掉一个订阅者（它的流被取消时调）。同一会话没有别的订阅者了才停掉订阅，其它订阅不受
+/// 影响。
 Future<void> unwatchConversation({
   required String runtimeId,
   required String sessionId,
+  required int watchId,
 }) => RustLib.instance.api.crateApiConversationUnwatchConversation(
   runtimeId: runtimeId,
   sessionId: sessionId,
+  watchId: watchId,
 );
 
 /// 往前翻一页（100 条）。结果合并进这个会话订阅的窗口，从订阅流推出。
