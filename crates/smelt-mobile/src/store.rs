@@ -132,6 +132,9 @@ impl Store {
                 .map_err(db_error)?;
             if let Some(old) = &replaced {
                 delete_runtime_rows(tx, old)?;
+                // 补上空出来的序号，下面新插的排在最后时才不会和别人重号。
+                let ids = ordered_ids(tx)?;
+                renumber(tx, &ids)?;
             }
             let updated = tx
                 .execute(

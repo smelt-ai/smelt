@@ -452,6 +452,52 @@ fn pairing_a_known_endpoint_updates_the_entry_and_keeps_the_node() {
     h.wait_state("ra", ConnectionState::Connected);
 }
 
+/// 机器重装后换了 `runtime_id`、endpoint 没变：重新配对替换旧登记，按 endpoint 存的旧缓存
+/// 一并删掉，新登记不会把重装前的会话当成自己的。
+#[test]
+fn re_pairing_a_reinstalled_runtime_drops_the_old_cache() {
+    let a = FakeRuntime::new("ra", "mac-a");
+    let b = FakeRuntime::new("rb", "mac-b");
+    let h = harness(&[(&a, None), (&b, None)], &[]);
+    h.wait_state("ra", ConnectionState::Connected);
+    h.cache
+        .save_session_list(&a.endpoint_id, &vec!["重装前的会话".to_string()]);
+    h.cache.save_snapshot(&a.endpoint_id, "s1", &1);
+
+    let reinstalled = Arc::new(FakeRuntime {
+        runtime_id: "ra2".to_string(),
+        endpoint_id: a.endpoint_id.clone(),
+        hostname: "mac-a".to_string(),
+        paired: AtomicBool::new(false),
+        online: AtomicBool::new(true),
+        describes: AtomicUsize::new(0),
+        links: AtomicUsize::new(0),
+        subscriptions: Mutex::new(Vec::new()),
+    });
+    {
+        let mut runtimes = h.transport.runtimes.lock().unwrap();
+        runtimes.retain(|runtime| runtime.runtime_id != "ra");
+        runtimes.push(Arc::clone(&reinstalled));
+    }
+    let record = h.pair(&reinstalled, None).unwrap();
+
+    assert_eq!(record.runtime_id, "ra2");
+    assert!(h.fleet.node("ra").is_err(), "旧登记撤掉了");
+    assert!(
+        h.cache
+            .load_session_list::<Vec<String>>(&a.endpoint_id)
+            .is_none()
+    );
+    assert!(h.cache.load_snapshot::<i32>(&a.endpoint_id, "s1").is_none());
+    let positions: Vec<u32> = h
+        .view()
+        .runtimes
+        .iter()
+        .map(|runtime| runtime.record.position)
+        .collect();
+    assert_eq!(positions, [0, 1], "序号连续，不重号");
+}
+
 #[test]
 fn a_failed_pairing_leaves_nothing_behind() {
     let a = FakeRuntime::new("ra", "mac-a");

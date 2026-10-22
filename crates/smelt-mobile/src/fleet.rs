@@ -460,6 +460,11 @@ impl Fleet {
                 record.runtime_id
             );
             shared.remove_node(&replaced);
+            // 缓存按 endpoint 存：不删的话新登记会把重装前的会话列表和对话当成自己的。
+            // 旧节点已停（不再写缓存），新节点还没建。
+            if let Some(cache) = &env.cache {
+                cache.delete_runtime(&target.endpoint_id);
+            }
         }
         let record_target = Target::new(record.endpoint_id.clone(), record.relay_url.clone());
         let existing = lock(&shared.registry)
