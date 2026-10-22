@@ -650,7 +650,7 @@ impl Watch {
                 } else {
                     pending.clone()
                 };
-                event.is_some_and(|event| sink(event))
+                event.is_some_and(sink)
             });
             sinks.is_empty()
         };
