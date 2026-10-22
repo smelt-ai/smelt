@@ -1096,7 +1096,6 @@ fn message_event(kind: ConversationEventKind, message: String) -> ConversationEv
 // 一问一答的请求
 // ---------------------------------------------------------------------------
 
-/// `acp_snapshot`：`before` 之前的 `limit` 条，和完整的快照头。
 /// 快照头末尾的几条，带上它们在整段对话里的序号。
 fn recent_context(snapshot: &ConversationSnapshot) -> Vec<ConversationEntry> {
     let start = snapshot.entries.len().saturating_sub(RECENT_CONTEXT);
@@ -1109,6 +1108,7 @@ fn recent_context(snapshot: &ConversationSnapshot) -> Vec<ConversationEntry> {
         .collect()
 }
 
+/// `acp_snapshot`：`before` 之前的 `limit` 条，和完整的快照头。
 fn history_page(
     client: &RuntimeClient,
     session_id: &str,
