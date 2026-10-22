@@ -167,7 +167,11 @@ impl HubInner {
         let attachments: Vec<_> = self.attachments().values().cloned().collect();
         for attachment in attachments {
             match attachment.generation() {
-                // 同一台机器重新连过：旧一代链路上的附着连接掐掉，立刻在新连接上重新附着。
+                // 连接停下（未配对、被忘记、主动断开）：终端跟着停。
+                Some(_) if event.state == ConnectionState::Disconnected => {
+                    attachment.fail(RUNTIME_GONE);
+                }
+                // 同一台机器重新连过：旧一代链路上的附着连接掐掉，新一代连上后在新连接上重新附着。
                 Some(bound) if bound != generation => attachment.follow(generation),
                 // 重新连上：别等退避，立刻重新附着。
                 Some(_) if event.state == ConnectionState::Connected => attachment.retry_now(),
@@ -176,19 +180,30 @@ impl HubInner {
         }
     }
 
-    /// 这台机器当前连接的客户端。连接停下了（没有当前连接）就让附着以 fatal 收尾，返回 None。
+    /// 这台机器当前连接的客户端。从没连上过就让附着以 fatal 收尾；附着过、新一代正在连
+    /// （换代时状态机先撤掉旧连接再连）就等它连上。被叫停返回 None。
     fn runtime_for(&self, attachment: &Attachment) -> Option<RuntimeClient> {
-        let Some((generation, client)) = self.source.current() else {
-            attachment.fail(if attachment.generation().is_some() {
-                RUNTIME_GONE
-            } else {
-                NO_RUNTIME
-            });
-            return None;
-        };
-        // 记下这次用的代号：之后换代由监听掐掉这条连接、叫读线程重新附着。
-        attachment.bind(generation);
-        Some(client)
+        loop {
+            match self.source.current() {
+                // 记下这次用的代号：之后换代由监听掐掉这条连接、叫读线程重新附着。监听已经
+                // 跟到更新的一代时手里这个客户端是旧的，重新取。
+                Some((generation, client)) => {
+                    if attachment.bind(generation) {
+                        return Some(client);
+                    }
+                }
+                None if attachment.generation().is_none() => {
+                    attachment.fail(NO_RUNTIME);
+                    return None;
+                }
+                // 连上时监听叫醒；连接停下由监听收尾。
+                None => {
+                    if let Wake::Stop = attachment.wait(self.timing.backoff_max) {
+                        return None;
+                    }
+                }
+            }
+        }
     }
 
     /// 读线程：附着、读流、断线后退避重连，直到被叫停或得出结论。
@@ -534,8 +549,14 @@ impl Attachment {
         self.lock().generation
     }
 
-    fn bind(&self, generation: u64) {
-        self.lock().generation = Some(generation);
+    /// 记下这次用的代号。监听已经跟到更新的一代时不倒退，返回 false。
+    fn bind(&self, generation: u64) -> bool {
+        let mut state = self.lock();
+        if state.generation.is_some_and(|bound| bound > generation) {
+            return false;
+        }
+        state.generation = Some(generation);
+        true
     }
 
     /// 连接换代：掐掉旧链路上的附着连接（读线程随之返回），并让它别等退避立刻重新附着。

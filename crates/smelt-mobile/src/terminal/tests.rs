@@ -197,6 +197,21 @@ impl FakeSource {
     fn publish(&self, connection: ConnectionState) {
         publish(&mut self.state.lock().unwrap(), connection);
     }
+
+    /// 同 `ConnectionHub::connect` 开头：撤掉当前连接、换代、报「正在连」。
+    fn begin(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.generation += 1;
+        state.client = None;
+        publish(&mut state, ConnectionState::Connecting);
+    }
+
+    /// 同 `ConnectionHub::connect` 收尾：这一代连上了。
+    fn connected(&self, client: RuntimeClient) {
+        let mut state = self.state.lock().unwrap();
+        state.client = Some(client);
+        publish(&mut state, ConnectionState::Connected);
+    }
 }
 
 fn publish(state: &mut FakeState, connection: ConnectionState) {
@@ -732,6 +747,44 @@ fn a_new_generation_reattaches_on_the_new_link() {
     assert_eq!(new.watches(), 1, "在新连接上重新附着");
     assert_eq!(old.watches(), 1);
     assert!(!recorder.ended());
+    assert!(
+        !recorder
+            .events()
+            .iter()
+            .any(|event| matches!(event, TerminalUpdate::Error { fatal: true, .. }))
+    );
+}
+
+/// 真的状态机换代时先撤掉旧连接、报「正在连」，连上才有新客户端：中间这段没有当前连接，
+/// 终端要等新一代连上，不能当成连接停了。
+#[test]
+fn a_new_generation_still_connecting_is_waited_for() {
+    let old = FakeRuntime::new(|_, _, reader, writer| {
+        send_header(&writer, 80, 24, b"", 0);
+        read_until_eof(reader);
+    });
+    let new = FakeRuntime::new(idle_watch);
+    let source = FakeSource::new(old.client());
+    let hub = TerminalHub::new(
+        Arc::clone(&source) as Arc<dyn RuntimeSource>,
+        Timing {
+            backoff_base: Duration::from_secs(3600),
+            backoff_max: Duration::from_secs(3600),
+            ..FAST
+        },
+    );
+    let recorder = Recorder::new();
+    hub.attach("t1".into(), GEOMETRY, None, recorder.emit())
+        .unwrap();
+    recorder.wait_readies(1);
+
+    source.begin();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!recorder.ended(), "正在连不是连接停了");
+    source.connected(new.client());
+
+    recorder.wait_readies(2);
+    assert_eq!(new.watches(), 1, "在新连接上重新附着");
     assert!(
         !recorder
             .events()
