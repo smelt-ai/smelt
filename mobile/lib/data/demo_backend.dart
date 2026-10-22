@@ -813,9 +813,6 @@ class DemoBackend implements Backend {
   final Set<String> _resolvedToolCalls = {};
 
   @override
-  Future<void> unwatchConversation(String runtimeId, String sessionId) async {}
-
-  @override
   Future<bool> loadOlder(String runtimeId, String sessionId) async => false;
 
   @override

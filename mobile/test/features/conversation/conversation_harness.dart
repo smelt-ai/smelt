@@ -29,14 +29,24 @@ class RecordingBackend extends DemoBackend {
     String sessionId,
   ) {
     calls.add('watch $sessionId');
-    return manualWatch
-        ? watch.stream
-        : super.watchConversation(runtimeId, sessionId);
+    return _recordCancel(
+      sessionId,
+      manualWatch
+          ? watch.stream
+          : super.watchConversation(runtimeId, sessionId),
+    );
   }
 
-  @override
-  Future<void> unwatchConversation(String runtimeId, String sessionId) async {
-    calls.add('unwatch $sessionId');
+  /// 订阅流被取消（退订）时记一笔。
+  Stream<ConversationEvent> _recordCancel(
+    String sessionId,
+    Stream<ConversationEvent> source,
+  ) async* {
+    try {
+      yield* source;
+    } finally {
+      calls.add('unwatch $sessionId');
+    }
   }
 
   @override

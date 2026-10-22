@@ -140,12 +140,8 @@ class _ConversationPageState extends State<ConversationPage> {
         ).catchError((Object _) {}),
       );
     }
+    // 取消流就是退订：只退这一页自己的订阅，同一会话的别的页面不受影响。
     _subscription?.cancel();
-    unawaited(
-      _model.backend
-          .unwatchConversation(widget.runtimeId, widget.sessionId)
-          .catchError((Object _) {}),
-    );
     // 看着它跑完再离开，也算读过了。
     _model.backend.markRead(widget.runtimeId, widget.sessionId);
     _model.fleet.removeListener(_onFleet);

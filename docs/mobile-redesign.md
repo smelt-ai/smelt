@@ -100,9 +100,11 @@ CREATE TABLE draft_image (
 
 ### 对话订阅
 
-`Conversations` 由「全局一个订阅」改为按 `session_id` 存多个订阅：`watch` 已在订的会话时替换它的
-sink，`unwatch(session_id)` 只停这一个。平板双栏同时开着列表和对话、逐张处理时预载下一张，都需要
-多个订阅；Dart 侧原来那个「订阅栈」随之删除。
+`Conversations` 由「全局一个订阅」改为按 `session_id` 存多个订阅。同一会话可以有几个订阅者，各带
+调用方给的 `watch_id`：共用一条 watch、都收到视图，`unwatch(session_id, watch_id)` 只摘自己，最后
+一个摘掉才停。同一会话的页面换下来时新页先订、旧页后退，旧页的退订不能把新页一起停掉。平板双栏
+同时开着列表和对话、逐张处理时预载下一张，都需要多个订阅；Dart 侧原来那个「订阅栈」随之删除，
+Dart 的订阅流被取消就是退订。
 
 ### 跨机器投影（Pass）
 
@@ -123,7 +125,7 @@ sink，`unwatch(session_id)` 只停这一个。平板双栏同时开着列表和
 | `fleet`（替换 `connection`） | `fleet_events(sink)`（整份机队：登记 + 连接状态）、`rename_runtime`、`set_runtime_accent`、`move_runtime`、`forget_runtime`、`reconnect_runtime`、`verify_connections`、`import_runtimes` |
 | `pass` | `pass_events(sink)` |
 | `catalog` | 原有入口全部加 `runtime_id`；`catalog_events` 推所有机器的事件，事件带 `runtime_id` |
-| `conversation` | 原有入口全部加 `runtime_id`；`watch_conversation(runtime_id, session_id, sink)`、`unwatch_conversation(runtime_id, session_id)` |
+| `conversation` | 原有入口全部加 `runtime_id`；`watch_conversation(runtime_id, session_id, watch_id, sink)`、`unwatch_conversation(runtime_id, session_id, watch_id)` |
 | `terminal` | 原有入口全部加 `runtime_id` |
 | `draft` | `load_draft`、`save_draft`、`clear_draft`（键为 `runtime_id + session_id`） |
 

@@ -5,6 +5,7 @@
 /// 跨机器汇总、分段排序都在 Rust 内核（`crates/smelt-mobile`）。
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import '../src/rust/api/catalog.dart' as catalog;
@@ -74,11 +75,12 @@ abstract interface class Backend {
   });
 
   // 对话 ---------------------------------------------------------------------
+  /// 订阅一个会话。每次调用是一个独立的订阅者：同一会话可以同时有几个（新页先订、旧页
+  /// 后退），取消流就退掉自己这一个，不影响别人。
   Stream<ConversationEvent> watchConversation(
     String runtimeId,
     String sessionId,
   );
-  Future<void> unwatchConversation(String runtimeId, String sessionId);
   Future<bool> loadOlder(String runtimeId, String sessionId);
   Future<PendingActions> pendingActions(String runtimeId, String sessionId);
   String newRequestId();
@@ -287,21 +289,34 @@ class FrbBackend implements Backend {
     title: title,
   );
 
+  /// 订阅者编号，进程内不重复。
+  static int _nextWatchId = 0;
+
   @override
   Stream<ConversationEvent> watchConversation(
     String runtimeId,
     String sessionId,
-  ) => conversation.watchConversation(
-    runtimeId: runtimeId,
-    sessionId: sessionId,
-  );
-
-  @override
-  Future<void> unwatchConversation(String runtimeId, String sessionId) =>
-      conversation.unwatchConversation(
+  ) async* {
+    final watchId = _nextWatchId++;
+    try {
+      yield* conversation.watchConversation(
         runtimeId: runtimeId,
         sessionId: sessionId,
+        watchId: watchId,
       );
+    } finally {
+      // 流被取消（或内核那头结束）：退掉自己这个订阅者。
+      unawaited(
+        conversation
+            .unwatchConversation(
+              runtimeId: runtimeId,
+              sessionId: sessionId,
+              watchId: watchId,
+            )
+            .catchError((Object _) {}),
+      );
+    }
+  }
 
   @override
   Future<bool> loadOlder(String runtimeId, String sessionId) =>

@@ -2,6 +2,10 @@
 //! `crate::api::conversation`。机队里每个节点一份（见 `crate::fleet`），同一节点上可以同时
 //! 订阅多个会话（平板双栏、逐张处理单据时预载下一张），按会话 id 各自独立。
 //!
+//! 同一会话可以有几个订阅者（同一会话的页面换下来时新页先订、旧页后退），各带调用方给的
+//! 订阅编号：共用一条 watch，每个推送出口都收到视图；退订只摘自己的出口，最后一个摘掉
+//! 才停。
+//!
 //! 订阅（`acp_watch`）是只读长连接：首帧整段快照，之后是整段帧或相对上一帧的增量帧，
 //! 用 [`FrameMirror`] 还原。客户端只写首行请求，之后**不能往这条连接写任何东西，也不能
 //! 半关闭写方向**（经 iroh 传过去的 EOF 会让运行时结束 watch）；停的时候 shutdown 整条
@@ -129,21 +133,24 @@ impl Conversations {
         self.watches.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 订阅一个会话。已经在订（且没停）时只换掉推送出口，把手里的视图补推一次给新出口；
-    /// 否则新开一个订阅。不阻塞在网络上（缓存读写除外）。
-    pub(crate) fn watch(&self, session_id: String, sink: EventSink) {
-        let sink = {
-            let watches = self.watches();
-            match watches.get(&session_id) {
-                Some(existing) => match existing.replace_sink(sink) {
+    /// 订阅一个会话，`watch_id` 是调用方给这个订阅者的编号，退订时原样带回。已经在订（且
+    /// 没停）时只挂上新出口，把手里的视图补推一次；否则新开一个订阅。不阻塞在网络上（缓存
+    /// 读写除外）。
+    pub(crate) fn watch(&self, session_id: String, watch_id: u32, sink: EventSink) {
+        // 查和插在同一把表锁下：同一会话同时来两次订阅也只开一条 watch。
+        let (watch, previous) = {
+            let mut watches = self.watches();
+            let sink = match watches.get(&session_id) {
+                Some(existing) => match existing.add_sink(watch_id, sink) {
                     Ok(()) => return,
                     Err(sink) => sink,
                 },
                 None => sink,
-            }
+            };
+            let watch = Arc::new(Watch::new(session_id.clone(), watch_id, sink, self.timing));
+            let previous = watches.insert(session_id, Arc::clone(&watch));
+            (watch, previous)
         };
-        let watch = Arc::new(Watch::new(session_id.clone(), sink, self.timing));
-        let previous = self.watches().insert(session_id, Arc::clone(&watch));
         let cache = self.source.cache();
         if let Some(previous) = previous {
             previous.stop();
@@ -210,11 +217,20 @@ impl Conversations {
         }
     }
 
-    /// 停掉一个会话的订阅，其它会话不受影响。
-    pub(crate) fn unwatch(&self, session_id: &str) {
-        let previous = self.watches().remove(session_id);
+    /// 摘掉一个订阅者。同一会话还有别的订阅者时订阅照常；这是最后一个就停掉这个会话的
+    /// 订阅，其它会话不受影响。编号对不上（已经摘过）时不动别人的出口。
+    pub(crate) fn unwatch(&self, session_id: &str, watch_id: u32) {
+        let previous = {
+            let mut watches = self.watches();
+            let Some(watch) = watches.get(session_id) else {
+                return;
+            };
+            if !watch.remove_sink(watch_id) {
+                return;
+            }
+            watches.remove(session_id)
+        };
         if let Some(previous) = previous {
-            previous.stop();
             previous.flush(self.source.cache().as_deref());
         }
     }
@@ -491,7 +507,8 @@ struct Watch {
     timing: Timing,
     state: Mutex<WatchState>,
     wake: Condvar,
-    sink: Mutex<EventSink>,
+    /// 各订阅者的推送出口，带订阅编号。全空了订阅就停。和状态锁一起拿时先拿状态锁。
+    sinks: Mutex<Vec<(u32, EventSink)>>,
 }
 
 #[derive(Default)]
@@ -529,18 +546,22 @@ enum StreamEnd {
 }
 
 impl Watch {
-    fn new(session_id: String, sink: EventSink, timing: Timing) -> Self {
+    fn new(session_id: String, watch_id: u32, sink: EventSink, timing: Timing) -> Self {
         Self {
             session_id,
             timing,
             state: Mutex::new(WatchState::default()),
             wake: Condvar::new(),
-            sink: Mutex::new(sink),
+            sinks: Mutex::new(vec![(watch_id, sink)]),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, WatchState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn sinks(&self) -> MutexGuard<'_, Vec<(u32, EventSink)>> {
+        self.sinks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn wait<'a>(&self, state: MutexGuard<'a, WatchState>) -> MutexGuard<'a, WatchState> {
@@ -578,26 +599,70 @@ impl Watch {
         self.lock().stopped
     }
 
-    /// 换推送出口（同一会话又被订阅一次），并让推送线程把手里的视图补推一次。已经停了就
-    /// 原样还回出口，由调用方新开订阅。
-    fn replace_sink(&self, sink: EventSink) -> Result<(), EventSink> {
+    /// 挂上一个订阅者（同一会话又被订阅一次），并让推送线程把手里的视图补推一次（已有的
+    /// 出口也会再收到同一份视图）。同一编号已挂着就换掉它的出口。已经停了就原样还回出口，
+    /// 由调用方新开订阅。
+    fn add_sink(&self, watch_id: u32, sink: EventSink) -> Result<(), EventSink> {
         let mut state = self.lock();
         if state.stopped {
             return Err(sink);
         }
-        // 先换出口再放状态锁：推送线程推之前要拿状态锁，补推一定落在新出口上。
-        *self.sink.lock().unwrap_or_else(|e| e.into_inner()) = sink;
+        // 先挂出口再放状态锁：推送线程推之前要拿状态锁，补推一定落到新出口上。
+        {
+            let mut sinks = self.sinks();
+            sinks.retain(|(id, _)| *id != watch_id);
+            sinks.push((watch_id, sink));
+        }
         state.emit_pending = state.snapshot.is_some();
         drop(state);
         self.wake.notify_all();
         Ok(())
     }
 
-    /// 推一个事件。Dart 取消订阅了就停。不能在持有状态锁时调。
+    /// 摘掉一个订阅者的出口。没有出口剩下时停掉订阅并返回 true。
+    fn remove_sink(&self, watch_id: u32) -> bool {
+        let mut state = self.lock();
+        let empty = {
+            let mut sinks = self.sinks();
+            sinks.retain(|(id, _)| *id != watch_id);
+            sinks.is_empty()
+        };
+        if empty {
+            stop_locked(&mut state);
+        }
+        drop(state);
+        self.wake.notify_all();
+        empty
+    }
+
+    /// 推一个事件给每个出口。Dart 取消了的出口摘掉，全摘光了就停。不能在持有状态锁时调。
     fn emit(&self, event: ConversationEvent) {
-        let delivered = (self.sink.lock().unwrap_or_else(|e| e.into_inner()))(event);
-        if !delivered {
-            self.stop();
+        let emptied = {
+            let mut sinks = self.sinks();
+            // 只有一个出口（常态）时不克隆视图：最后一个出口拿走原件。
+            let count = sinks.len();
+            let mut pending = Some(event);
+            let mut seen = 0;
+            sinks.retain(|(_, sink)| {
+                seen += 1;
+                let event = if seen == count {
+                    pending.take()
+                } else {
+                    pending.clone()
+                };
+                event.is_some_and(|event| sink(event))
+            });
+            sinks.is_empty()
+        };
+        if emptied {
+            // 放掉出口锁之后到这里之间可能又挂上了新出口：在状态锁下再看一次，和
+            // `add_sink` 互斥。
+            let mut state = self.lock();
+            if self.sinks().is_empty() {
+                stop_locked(&mut state);
+            }
+            drop(state);
+            self.wake.notify_all();
         }
     }
 
