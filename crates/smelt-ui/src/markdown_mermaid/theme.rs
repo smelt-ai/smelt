@@ -8,19 +8,12 @@
 //! `darkMode` 必须写进 `themeVariables`。merman 跟 mermaid.js 一样只从这里读，
 //! 写在配置根上不生效。
 //!
-//! base 主题算完显式变量以后，还会无条件再改两组颜色（对照 merman
-//! `theme/base.rs`，即 mermaid.js 的 `theme-base.js`）：
-//! - `cScale0..11`：亮色压暗 25，暗色压暗 75（HSL 亮度百分点）；
-//! - `git0..7`：亮色压暗 25，暗色提亮 25。
-//!
-//! 直接传想要的颜色，思维导图在暗色下会变成一片黑。所以先把 HSL 亮度反向挪回去
-//! 再交给 merman。写成 `hsl()` 是因为 merman 解析 hsl 时保留色相和饱和度，改亮度
-//! 不经过 RGB 来回取整。挪过头会顶到 0 或 100，只能夹住：暗色下分区底最亮 25%，
-//! 亮色下最亮 75%。
+//! base 主题会把 `cScale0..11` 压暗、把 `git0..7` 压暗或提亮，但只作用于它自己
+//! 派生出来的颜色。显式给的变量，merman 最后会原样写回（mermaid.js 的
+//! `Theme.calculate` 也是先算派生色、再回填用户给的值），所以这里直接传最终色。
 
 use std::hash::{Hash, Hasher};
 
-use gpui::{Hsla, rgb};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -222,26 +215,15 @@ impl DiagramColors {
         vars.insert("fontFamily".into(), font_family.into());
 
         let series = self.series();
-        let (scale_shift, git_shift) = if self.light {
-            (-25.0, -25.0)
-        } else {
-            (-75.0, 25.0)
-        };
         for index in 0..SCALE_LEN {
             let color = series[index % SERIES_LEN];
             let section = ui_theme::mix(self.card, color, SECTION_TINT);
-            vars.insert(
-                format!("cScale{index}"),
-                precompensated(section, scale_shift).into(),
-            );
+            vars.insert(format!("cScale{index}"), css_hex(section).into());
             vars.insert(format!("cScaleLabel{index}"), text.clone().into());
             vars.insert(format!("pie{}", index + 1), css_hex(color).into());
         }
         for (index, color) in series.iter().copied().enumerate() {
-            vars.insert(
-                format!("git{index}"),
-                precompensated(color, git_shift).into(),
-            );
+            vars.insert(format!("git{index}"), css_hex(color).into());
             vars.insert(
                 format!("gitBranchLabel{index}"),
                 css_hex(self.label_on(color)).into(),
@@ -264,17 +246,6 @@ fn css_hex(color: u32) -> String {
     format!("#{:06x}", color & 0x00ff_ffff)
 }
 
-/// merman 会在 base 主题算完以后给这个颜色的 HSL 亮度加上 `shift`（负数是压暗）。
-/// 先减回去，加完正好落在 `target`；超出 0..=100 的部分只能夹住。
-fn precompensated(target: u32, shift: f32) -> String {
-    let hsla = Hsla::from(rgb(target));
-    let hue = (hsla.h * 360.0).round() % 360.0;
-    let saturation = (hsla.s * 100.0).round();
-    let lightness = (hsla.l * 100.0).round();
-    let before = (lightness - shift).clamp(0.0, 100.0);
-    format!("hsl({hue}, {saturation}%, {before}%)")
-}
-
 #[cfg(test)]
 mod tests {
     use sha2::Digest as _;
@@ -283,24 +254,6 @@ mod tests {
 
     fn fallback(light: bool) -> DiagramColors {
         DiagramColors::from_palette(&ui_theme::builtin_fallback(light), light)
-    }
-
-    #[test]
-    fn precompensated_undoes_the_base_theme_shift() {
-        // 0x333333 的亮度正好 20%，压暗 75 之前得是 95%。
-        assert_eq!(precompensated(0x333333, -75.0), "hsl(0, 0%, 95%)");
-        // 亮色分区压暗 25：60% 先抬到 85%。
-        assert_eq!(precompensated(0x999999, -25.0), "hsl(0, 0%, 85%)");
-        // 顶到 100 就夹住，merman 压完只剩 25%。
-        assert_eq!(precompensated(0x999999, -75.0), "hsl(0, 0%, 100%)");
-        // 暗色 git 提亮 25：5% 只能从 0 开始。
-        assert_eq!(precompensated(0x0d0d0d, 25.0), "hsl(0, 0%, 0%)");
-    }
-
-    #[test]
-    fn precompensated_keeps_hue_and_saturation() {
-        // 纯蓝：240°、100%、50%。
-        assert_eq!(precompensated(0x0000ff, -25.0), "hsl(240, 100%, 75%)");
     }
 
     #[test]
@@ -353,19 +306,17 @@ mod tests {
     }
 
     #[test]
-    fn dark_mindmap_sections_are_not_crushed_to_black() {
-        let colors = fallback(false);
-        let svg = super::super::render_svg("mindmap\n  root((根))\n    一\n    二", colors)
-            .expect("应能渲染");
-        // cScale1 是第一个分区。merman 压暗 75 以后应当正好落回想要的亮度。
-        let section = ui_theme::mix(colors.card, colors.series()[1], SECTION_TINT);
-        let hsla = Hsla::from(rgb(section));
-        let expected = format!(
-            "hsl({}, {}%, {}%)",
-            (hsla.h * 360.0).round() % 360.0,
-            (hsla.s * 100.0).round(),
-            (hsla.l * 100.0).round().min(25.0),
-        );
-        assert!(svg.contains(&expected), "思维导图分区应为 {expected}");
+    fn mindmap_sections_use_palette_tints() {
+        for light in [false, true] {
+            let colors = fallback(light);
+            let svg = super::super::render_svg("mindmap\n  root((根))\n    一\n    二", colors)
+                .expect("应能渲染");
+            // cScale1 是第一个分区。显式给的值 merman 原样写回，不会再被 base 主题压暗。
+            let section = css_hex(ui_theme::mix(colors.card, colors.series()[1], SECTION_TINT));
+            assert!(
+                svg.to_ascii_lowercase().contains(&section),
+                "light={light} 思维导图分区应为 {section}"
+            );
+        }
     }
 }
