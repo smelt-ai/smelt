@@ -14,9 +14,10 @@
 //! 被拼进属性名，也不认识 `@{ shape }`。`merman` 按 mermaid.js 做对齐，37 种图，
 //! 就是为了换掉这些问题。不保留旧渲染器的开关或垫片。
 //!
-//! 输出背景是透明的，跟着外面的亮暗主题走；节点配色仍由 merman 的 theme 决定，
-//! 所以缓存 key 还是要把主题模式编进去。字体写进站点配置的 `fontFamily`，不再
-//! 在 SVG 文本里做字符串替换。类图标签包在带 `overflow:hidden` 的嵌套 svg 里，
+//! 输出背景是透明的，跟着外面的亮暗主题走；节点、连线、文字的配色从 smelt 当前
+//! 色板生成（见 `theme.rs`），所以缓存 key 要把整套配色编进去。字体写进站点配置
+//! 的 `fontFamily`，不再在 SVG 文本里做字符串替换。类图标签包在带
+//! `overflow:hidden` 的嵌套 svg 里，
 //! 测宽回调如果只按字符数估算，文字会被裁掉；这里用 GPUI 同一份 usvg 0.46 的
 //! 系统 fontdb，再用 rustybuzz 量 advance。
 //!
@@ -35,7 +36,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -64,6 +65,10 @@ use sha2::{Digest, Sha256};
 
 use crate::IconAction as _;
 
+mod theme;
+
+use theme::DiagramColors;
+
 /// 传给 merman `fontFamily` 的 CSS 字体栈。多词名字必须加引号，否则 CSS 会把
 /// `Hiragino Sans GB` 拆成三个 family。GPUI 的 usvg 按字面名精确匹配
 /// `font-family`，不认 `sans-serif` 这类泛型关键字，栈里得有一个系统字体目录里
@@ -89,7 +94,7 @@ const CJK_MEASURE_FALLBACKS: &[&str] = &[
 ];
 
 /// 内存缓存 key 版本：换了渲染库、字体栈或 SVG 后处理就跟着升，避免同进程里旧产物被复用。
-const CACHE_FORMAT_VERSION: &str = "v5";
+const CACHE_FORMAT_VERSION: &str = "v6";
 
 /// 粗体没有独立字重时，在 regular advance 上乘的系数。跟评估原型一致。
 const SYNTHETIC_BOLD_SCALE: f64 = 1.06;
@@ -627,23 +632,20 @@ enum MermaidRender {
 }
 
 thread_local! {
-    /// 内存态一级缓存，key 是 `source_digest`（已经把主题模式编进去了）。
+    /// 内存态一级缓存，key 是 `source_digest`（已经把配色编进去了）。
     static MERMAID_RENDER_CACHE: RefCell<HashMap<String, MermaidRender>> = RefCell::new(HashMap::new());
     /// 正在后台渲染的 digest 集合：同一张图只起一个后台任务，避免滚动/重绘重复触发。
     static MERMAID_RENDER_INFLIGHT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
-/// `sha256(缓存格式版本 + 源码 + 主题模式)`。主题模式必须编进去，否则切换亮暗模式
+/// `sha256(缓存格式版本 + 源码 + 配色)`。配色必须编进去，否则换主题、切亮暗都
 /// 不会触发重渲；格式版本必须编进去，否则升级渲染逻辑后旧缓存会一直被复用。
-fn source_digest(source: &str, is_dark: bool) -> String {
+fn source_digest(source: &str, colors: &DiagramColors) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CACHE_FORMAT_VERSION.as_bytes());
     hasher.update(source.as_bytes());
-    hasher.update(if is_dark {
-        "\0dark".as_bytes()
-    } else {
-        "\0light".as_bytes()
-    });
+    hasher.update(b"\0");
+    colors.feed(&mut hasher);
     format!("{:x}", hasher.finalize())
 }
 
@@ -1146,21 +1148,21 @@ fn heuristic_em(ch: char) -> f64 {
     }
 }
 
-fn renderer(is_dark: bool) -> &'static Renderer {
-    fn build(is_dark: bool) -> Renderer {
-        let config = MermaidConfig::from_value(serde_json::json!({
-            "theme": if is_dark { "dark" } else { "default" },
-            "fontFamily": MERMAID_FONT_FAMILY,
-        }));
-        Renderer::new().with_engine(Engine::new().with_site_config(config))
-    }
-    static LIGHT: OnceLock<Renderer> = OnceLock::new();
-    static DARK: OnceLock<Renderer> = OnceLock::new();
-    if is_dark {
-        DARK.get_or_init(|| build(true))
-    } else {
-        LIGHT.get_or_init(|| build(false))
-    }
+/// 每套配色一个 renderer。换过的主题留着，切回来不用重建；条目数就是这次进程里
+/// 用过的配色数。
+fn renderer(colors: DiagramColors) -> Arc<Renderer> {
+    static RENDERERS: LazyLock<Mutex<HashMap<DiagramColors, Arc<Renderer>>>> =
+        LazyLock::new(Default::default);
+    let mut renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    renderers
+        .entry(colors)
+        .or_insert_with(|| {
+            let config = MermaidConfig::from_value(colors.site_config(MERMAID_FONT_FAMILY));
+            Arc::new(Renderer::new().with_engine(Engine::new().with_site_config(config)))
+        })
+        .clone()
 }
 
 fn svg_request() -> SvgRequest {
@@ -1172,15 +1174,15 @@ fn svg_request() -> SvgRequest {
     }
 }
 
-fn render_svg(source: &str, is_dark: bool) -> Result<String, String> {
-    match std::panic::catch_unwind(|| render_svg_inner(source, is_dark)) {
+fn render_svg(source: &str, colors: DiagramColors) -> Result<String, String> {
+    match std::panic::catch_unwind(|| render_svg_inner(source, colors)) {
         Ok(result) => result,
         Err(_) => Err("渲染中断".into()),
     }
 }
 
-fn render_svg_inner(source: &str, is_dark: bool) -> Result<String, String> {
-    let output = renderer(is_dark)
+fn render_svg_inner(source: &str, colors: DiagramColors) -> Result<String, String> {
+    let output = renderer(colors)
         .render(RenderRequest::svg(
             source,
             OperationControl::new(),
@@ -1194,8 +1196,8 @@ fn render_svg_inner(source: &str, is_dark: bool) -> Result<String, String> {
     }
 }
 
-fn render_or_load(source: &str, is_dark: bool) -> Result<MermaidImage, String> {
-    let svg = render_svg(source, is_dark)?;
+fn render_or_load(source: &str, colors: DiagramColors) -> Result<MermaidImage, String> {
+    let svg = render_svg(source, colors)?;
     let (width, height) = parse_viewbox_size(&svg).unwrap_or((400.0, 300.0));
     let image = gpui::Image::from_bytes(gpui::ImageFormat::Svg, svg.into_bytes());
     Ok(MermaidImage {
@@ -1212,8 +1214,8 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
         return div().child(node.as_text().to_string()).into_any_element();
     };
 
-    let is_dark = cx.theme().is_dark();
-    let digest = source_digest(&data.source, is_dark);
+    let colors = DiagramColors::current();
+    let digest = source_digest(&data.source, &colors);
 
     if let Some(result) = MERMAID_RENDER_CACHE.with(|c| c.borrow().get(&digest).cloned()) {
         return mermaid_result_element(result, &digest, &data.source, cx);
@@ -1233,7 +1235,7 @@ fn render_mermaid_block(node: &MarkdownNode, _window: &mut Window, cx: &mut App)
     cx.spawn(async move |cx| {
         let outcome = cx
             .background_executor()
-            .spawn(async move { render_or_load(&source, is_dark) })
+            .spawn(async move { render_or_load(&source, colors) })
             .await
             .map(|img| MermaidRender::Ok(Arc::new(img)))
             .unwrap_or_else(|e| MermaidRender::Err(e.into()));
@@ -1421,6 +1423,11 @@ fn chat_markdown_extensions() -> &'static MarkdownExtensions {
 mod tests {
     use super::*;
 
+    /// 测试用的配色：库自带的兜底色板，不碰进程级的当前主题。
+    fn colors(dark: bool) -> DiagramColors {
+        DiagramColors::from_palette(&crate::ui_theme::builtin_fallback(!dark), !dark)
+    }
+
     struct ChatMarkdownRoot {
         state: gpui::Entity<TextViewState>,
     }
@@ -1504,7 +1511,7 @@ mod tests {
         let trigger = cx
             .debug_bounds("MERMAID_PREVIEW_TRIGGER")
             .expect("Mermaid 图表应可点击打开预览");
-        let natural = render_or_load("flowchart TD\nA-->B", false).expect("应能渲染");
+        let natural = render_or_load("flowchart TD\nA-->B", colors(false)).expect("应能渲染");
         assert!(
             (f32::from(trigger.size.height) - natural.height).abs() < 1.0,
             "内嵌图按 SVG 自然高度显示"
@@ -1622,9 +1629,9 @@ mod tests {
 
     #[test]
     fn valid_source_renders_without_writing_disk() {
-        let img = render_or_load("flowchart TD\nA-->B", false).expect("应能渲染");
+        let img = render_or_load("flowchart TD\nA-->B", colors(false)).expect("应能渲染");
         assert!(img.width > 0.0 && img.height > 0.0);
-        let svg = render_svg("flowchart TD\nA-->B", false).expect("应能渲出 SVG");
+        let svg = render_svg("flowchart TD\nA-->B", colors(false)).expect("应能渲出 SVG");
         assert!(svg.trim_start().starts_with("<svg"));
         assert!(svg.contains("width=\"100%\""));
     }
@@ -1633,8 +1640,9 @@ mod tests {
     /// 要在 `font-family` 里看到能对上的字面名。
     #[test]
     fn rendered_svg_uses_cjk_font_stack() {
-        let img = render_or_load("flowchart TD\nA[开始]-->B[结束]", false).expect("应能渲染");
-        let svg = render_svg("flowchart TD\nA[开始]-->B[结束]", false).unwrap();
+        let img =
+            render_or_load("flowchart TD\nA[开始]-->B[结束]", colors(false)).expect("应能渲染");
+        let svg = render_svg("flowchart TD\nA[开始]-->B[结束]", colors(false)).unwrap();
         assert!(
             svg.contains("Hiragino Sans GB"),
             "渲染产物应该带上配置的 CJK 字体栈"
@@ -1644,16 +1652,16 @@ mod tests {
 
     #[test]
     fn invalid_source_errs_without_panicking() {
-        assert!(render_or_load("this is not mermaid at all {{{", false).is_err());
+        assert!(render_or_load("this is not mermaid at all {{{", colors(false)).is_err());
     }
 
     #[test]
     fn theme_mode_changes_cache_key_and_svg() {
-        let light = source_digest("graph TD\nA-->B", false);
-        let dark = source_digest("graph TD\nA-->B", true);
+        let light = source_digest("graph TD\nA-->B", &colors(false));
+        let dark = source_digest("graph TD\nA-->B", &colors(true));
         assert_ne!(light, dark);
-        let light_svg = render_svg("graph TD\nA-->B", false).expect("亮色应能渲染");
-        let dark_svg = render_svg("graph TD\nA-->B", true).expect("暗色应能渲染");
+        let light_svg = render_svg("graph TD\nA-->B", colors(false)).expect("亮色应能渲染");
+        let dark_svg = render_svg("graph TD\nA-->B", colors(true)).expect("暗色应能渲染");
         assert_ne!(light_svg, dark_svg);
     }
 
@@ -1823,7 +1831,7 @@ mod tests {
 
         for (name, source) in samples {
             for dark in [false, true] {
-                let svg = render_svg(source, dark)
+                let svg = render_svg(source, colors(dark))
                     .unwrap_or_else(|err| panic!("{name} dark={dark} 渲染失败: {err}"));
                 assert!(svg.trim_start().starts_with("<svg"), "{name} 应该是 svg 根");
                 assert!(svg.contains("width=\"100%\""), "{name} 根宽度应为 100%");
@@ -1838,35 +1846,35 @@ mod tests {
             }
         }
 
-        let flow = render_svg(samples[0].1, false).unwrap();
+        let flow = render_svg(samples[0].1, colors(false)).unwrap();
         assert!(flow.contains("规划"), "中文子图 id 应该进 SVG");
         assert!(flow.contains("下一步"));
         assert!(flow.contains("菱形"));
         assert!(flow.contains("Hiragino Sans GB"));
 
-        let state = render_svg(samples[1].1, false).unwrap();
+        let state = render_svg(samples[1].1, colors(false)).unwrap();
         assert!(state.contains("空闲"));
         assert!(state.contains("工作中"));
 
-        let sequence = render_svg(samples[2].1, false).unwrap();
+        let sequence = render_svg(samples[2].1, colors(false)).unwrap();
         assert!(sequence.contains("备注"));
         assert!(sequence.contains("重试"));
 
-        let class = render_svg(samples[3].1, false).unwrap();
+        let class = render_svg(samples[3].1, colors(false)).unwrap();
         assert!(class.contains("订单"));
         assert!(class.contains("确认"));
 
-        let er = render_svg(samples[4].1, false).unwrap();
+        let er = render_svg(samples[4].1, colors(false)).unwrap();
         assert!(er.contains("email"));
         assert!(
             !er.contains("SHOULD_NOT_MERGE"),
             "ER 注释不应进属性名或标签"
         );
 
-        let mindmap = render_svg(samples[5].1, false).unwrap();
+        let mindmap = render_svg(samples[5].1, colors(false)).unwrap();
         assert!(mindmap.contains("主题"));
 
-        let gantt = render_svg(samples[6].1, false).unwrap();
+        let gantt = render_svg(samples[6].1, colors(false)).unwrap();
         assert!(gantt.contains("排期") || gantt.contains("方案"));
     }
 
@@ -1878,9 +1886,9 @@ mod tests {
         let elk_src = format!("---\nconfig:\n  layout: elk\n---\n{body}");
         let dagre_src = format!("---\nconfig:\n  layout: dagre\n---\n{body}");
 
-        let plain = render_svg(body, false).expect("默认布局应能渲染");
-        let elk = render_svg(&elk_src, false).expect("layout: elk 应退回 dagre 渲染");
-        let dagre = render_svg(&dagre_src, false).expect("layout: dagre 应能渲染");
+        let plain = render_svg(body, colors(false)).expect("默认布局应能渲染");
+        let elk = render_svg(&elk_src, colors(false)).expect("layout: elk 应退回 dagre 渲染");
+        let dagre = render_svg(&dagre_src, colors(false)).expect("layout: dagre 应能渲染");
         assert_gpui_usvg_parses("layout-elk", &elk);
 
         let dagre_box = parse_viewbox_size(&dagre).expect("dagre 应有 viewBox");

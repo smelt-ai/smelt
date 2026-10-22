@@ -318,7 +318,7 @@ fn faint_text(muted: u32, background: u32) -> u32 {
 /// 主题还没装上时的底。只对齐库 Default 的窗口底：深色 `neutral-950`，浅色白。
 /// 强调色用一档能看见的蓝，不跟正文糊在一起。状态色彼此不同，
 /// 好让首帧的状态点分得开。正式颜色由 `adopt_active_theme` 换上。
-fn builtin_fallback(light: bool) -> Palette {
+pub(crate) fn builtin_fallback(light: bool) -> Palette {
     let bg = if light { 0xffffff } else { 0x0a0a0a };
     let fg = if light { 0x0a0a0a } else { 0xfafafa };
     let muted = if light { 0x737373 } else { 0xa3a3a3 };
@@ -388,7 +388,7 @@ fn pack(color: Rgba) -> u32 {
     (q(color.r) << 16) | (q(color.g) << 8) | q(color.b)
 }
 
-fn mix(from: u32, to: u32, t: f32) -> u32 {
+pub(crate) fn mix(from: u32, to: u32, t: f32) -> u32 {
     let channel = |shift: u32| {
         let start = ((from >> shift) & 0xff) as f32;
         let end = ((to >> shift) & 0xff) as f32;
@@ -421,7 +421,7 @@ fn relative_luminance(color: u32) -> f32 {
         + 0.0722 * channel_lin(color & 0xff)
 }
 
-fn contrast_ratio(a: u32, b: u32) -> f32 {
+pub(crate) fn contrast_ratio(a: u32, b: u32) -> f32 {
     let l1 = relative_luminance(a);
     let l2 = relative_luminance(b);
     let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
