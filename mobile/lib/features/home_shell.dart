@@ -46,17 +46,38 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   /// 切 tab：平板上详情栏回到这个 tab 的默认内容（上一个 tab 打开的详情不留着）。
   void _selectTab(HomeTab tab) {
     if (tab == _tab) return;
+    final split = isSplitLayout(context);
     setState(() {
       _tab = tab;
       _tabNotifier.value = tab;
-      if (isSplitLayout(context)) {
-        _detailKey = null;
-        _detailNavigator.currentState?.popUntil((route) => route.isFirst);
-      }
+      if (split) _detailKey = null;
     });
+    if (!split) return;
+    _pinnedDefault.value = null;
+    final navigator = _detailNavigator.currentState;
+    if (_defaultAtBottom) {
+      navigator?.popUntil((route) => route.isFirst);
+    } else {
+      // 打开详情时整个栈都换掉了，默认内容已经不在栈底：重新放一页。
+      _defaultAtBottom = true;
+      navigator?.pushAndRemoveUntil(
+        PageRouteBuilder<void>(
+          pageBuilder: (context, _, _) => _defaultDetail(),
+          transitionDuration: Duration.zero,
+        ),
+        (_) => false,
+      );
+    }
   }
 
   String? _detailKey;
+
+  /// 平板详情栏的栈底还是默认内容（没被打开的详情整个换掉）。
+  bool _defaultAtBottom = true;
+
+  /// 平板会话 tab 的默认详情显示着「最近动过的会话」时，用户在列表里点了它：钉住这条，
+  /// 不再跟着「最近」换。页面原样留着，不重建。
+  final _pinnedDefault = ValueNotifier<(String, String)?>(null);
   StreamSubscription<(String, AttentionItem)>? _attention;
 
   @override
@@ -100,6 +121,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
     _attention?.cancel();
     _sessionFilter.dispose();
     _tabNotifier.dispose();
+    _pinnedDefault.dispose();
     super.dispose();
   }
 
@@ -140,6 +162,22 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
 
   void _open(String key, WidgetBuilder builder, {required bool split}) {
     if (split) {
+      if (key == _detailKey) {
+        // 已经在详情栏里：不重建，详情里往下钻过就退回它。
+        _detailNavigator.currentState?.popUntil((route) => route.isFirst);
+        return;
+      }
+      if (_detailKey == null && _defaultAtBottom && _tab == HomeTab.sessions) {
+        final latest = _DefaultDetail._latestSession(AppScope.of(context));
+        if (latest != null && sessionKey(latest.$1, latest.$2.id) == key) {
+          // 默认详情显示的就是它：钉住，算选中。
+          _pinnedDefault.value = (latest.$1, latest.$2.id);
+          setState(() => _detailKey = key);
+          _detailNavigator.currentState?.popUntil((route) => route.isFirst);
+          return;
+        }
+      }
+      _defaultAtBottom = false;
       setState(() => _detailKey = key);
       _detailNavigator.currentState?.pushAndRemoveUntil(
         PageRouteBuilder<void>(
@@ -166,6 +204,21 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
           if (mounted && _detailKey == key) setState(() => _detailKey = null);
         });
   }
+
+  /// 平板详情栏的默认内容。
+  Widget _defaultDetail() => _DefaultDetail(
+    tab: _tabNotifier,
+    pinned: _pinnedDefault,
+    openSession: (runtimeId, session) => openSessionWith(
+      DetailHost(
+        open: (key, builder) => _open(key, builder, split: true),
+        selectedKey: null,
+        child: const SizedBox.shrink(),
+      ),
+      runtimeId,
+      session,
+    ),
+  );
 
   Widget _page(HomeTab tab) => switch (tab) {
     HomeTab.pass => PassPage(onShowAllSessions: _showSessions),
@@ -232,19 +285,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
                 Expanded(
                   child: DetailPane(
                     navigatorKey: _detailNavigator,
-                    placeholder: _DefaultDetail(
-                      tab: _tabNotifier,
-                      openSession: (runtimeId, session) => openSessionWith(
-                        DetailHost(
-                          open: (key, builder) =>
-                              _open(key, builder, split: true),
-                          selectedKey: null,
-                          child: const SizedBox.shrink(),
-                        ),
-                        runtimeId,
-                        session,
-                      ),
-                    ),
+                    placeholder: _defaultDetail(),
                   ),
                 ),
               ],
@@ -276,13 +317,20 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
 /// 平板详情栏没选东西时显示什么：不留一大块空白。
 ///
 /// - 指挥台：有单据就嵌入逐张处理，没有就说没有。
-/// - 会话：最近动过的那条会话。
+/// - 会话：最近动过的那条会话；用户在列表里点了它就钉住（见 [pinned]）。
 /// - 设置：第一台机器的详情。
 /// - 智能体：一句该选什么。
 class _DefaultDetail extends StatelessWidget {
-  const _DefaultDetail({required this.tab, required this.openSession});
+  const _DefaultDetail({
+    required this.tab,
+    required this.pinned,
+    required this.openSession,
+  });
 
   final ValueListenable<HomeTab> tab;
+
+  /// 钉住的会话（机器 id，会话 id）。为空时跟着「最近动过」走。
+  final ValueListenable<(String, String)?> pinned;
   final void Function(String runtimeId, SessionSummary session) openSession;
 
   @override
@@ -304,9 +352,9 @@ class _DefaultDetail extends StatelessWidget {
                 ),
         ),
         HomeTab.sessions => ListenableBuilder(
-          listenable: model.catalog,
+          listenable: Listenable.merge([model.catalog, pinned]),
           builder: (context, _) {
-            final latest = _latestSession(model);
+            final latest = _pinnedSession(model) ?? _latestSession(model);
             if (latest == null) {
               return _note(l10n.navSessions, LucideIcons.messagesSquare);
             }
@@ -334,6 +382,14 @@ class _DefaultDetail extends StatelessWidget {
         HomeTab.agents => _note(l10n.shellPickAgentHint, LucideIcons.bot),
       },
     );
+  }
+
+  /// 钉住的那条会话。机器掉线了列表成了缓存也照样显示：页面自己会说没连上。
+  (String, SessionSummary)? _pinnedSession(AppModel model) {
+    final key = pinned.value;
+    if (key == null) return null;
+    final session = model.catalog.session(key.$1, key.$2);
+    return session == null ? null : (key.$1, session);
   }
 
   /// 所有在线机器里最近动过的会话。只看实时列表：缓存里的会话不自动打开。
