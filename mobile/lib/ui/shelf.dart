@@ -72,21 +72,43 @@ class ShelfHeader extends StatelessWidget {
         children: [
           if (leading != null) ...[leading!, const SizedBox(width: Space.sm)],
           Expanded(
-            child: Semantics(
-              header: true,
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: t.label.copyWith(color: c.inkMuted),
-              ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // 状态可以比标题长（「重连中… · 显示的是 21:07 的数据」）。窄的列表栏
+                // 放不下整句：状态最多占六成，超出省略。短状态仍按原宽靠右，标题占剩下的。
+                final gap = trailing == null ? 0.0 : Space.sm;
+                final room = constraints.maxWidth - gap;
+                final maxTrail = room < 0 ? 0.0 : room * 0.62;
+                return Row(
+                  children: [
+                    Expanded(
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: t.label.copyWith(color: c.inkMuted),
+                        ),
+                      ),
+                    ),
+                    if (trailing != null) ...[
+                      const SizedBox(width: Space.sm),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxWidth: maxTrail),
+                        child: DefaultTextStyle.merge(
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: t.meta.copyWith(color: c.inkMuted),
+                          child: trailing!,
+                        ),
+                      ),
+                    ],
+                  ],
+                );
+              },
             ),
           ),
-          if (trailing != null)
-            DefaultTextStyle.merge(
-              style: t.meta.copyWith(color: c.inkMuted),
-              child: trailing!,
-            ),
         ],
       ),
     );
