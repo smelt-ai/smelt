@@ -9,7 +9,7 @@ set -euo pipefail
 # 每屏启动后等多久再截（秒）。刚开机的模拟器、debug 包冷启动慢，截到启动页就加大它。
 settle=${SETTLE:-6}
 udid=${1:?模拟器 UDID}
-prefix=${2:?输出前缀，如 .impeccable/review/phone-ios}
+prefix=${2:?输出前缀，如 review/phone-ios}
 shift 2
 screens=("$@")
 [ ${#screens[@]} -eq 0 ] && screens=(pass triage conversation approval stamped terminal terminal-offline sessions agents settings machine launch)

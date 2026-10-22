@@ -5,8 +5,8 @@
 1. **内核同时连上所有配对过的机器**（之前一次只连一台「当前运行时」）。
 2. **界面按新视觉方向「出菜口」重画**，信息架构围绕跨机器的待办重排。
 
-产品事实见 [`mobile/PRODUCT.md`](../mobile/PRODUCT.md)，视觉方向契约见
-`mobile/.impeccable/surfaces/lib-main-dart.md`，落地后的设计系统写进 `mobile/DESIGN.md`。
+产品事实见 [`mobile/PRODUCT.md`](../mobile/PRODUCT.md)，视觉系统见
+[`mobile/DESIGN.md`](../mobile/DESIGN.md)。
 
 ---
 
