@@ -37,16 +37,32 @@ class RecordingBackend extends DemoBackend {
     );
   }
 
-  /// 订阅流被取消（退订）时记一笔。
+  /// 监听方取消订阅时记一笔。
+  ///
+  /// 演示快照是一次性的 [Stream]，自己就会结束；真订阅会一直开着，直到这一页取消。
+  /// 上游结束不算退订。取消发生在 `dispose` 里，记账必须同步——widget 测试的假异步
+  /// 不会把 `async*` 的 `finally` 跑完。
   Stream<ConversationEvent> _recordCancel(
     String sessionId,
     Stream<ConversationEvent> source,
-  ) async* {
-    try {
-      yield* source;
-    } finally {
-      calls.add('unwatch $sessionId');
-    }
+  ) {
+    late final StreamController<ConversationEvent> controller;
+    StreamSubscription<ConversationEvent>? subscription;
+    controller = StreamController<ConversationEvent>(
+      onListen: () {
+        subscription = source.listen(
+          controller.add,
+          onError: controller.addError,
+          // 演示快照自己会结束。那不是页面退订，下游继续开着。
+          onDone: () {},
+        );
+      },
+      onCancel: () {
+        calls.add('unwatch $sessionId');
+        return subscription?.cancel();
+      },
+    );
+    return controller.stream;
   }
 
   @override
