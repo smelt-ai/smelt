@@ -157,6 +157,29 @@ async function scanRoot(root, placement, agent, projectScope, copies, links, bro
   }
 }
 
+/// 一个层级里要扫的 skill 根目录，顺序同 `placementRank`。根目录本身是软链、解开后就是
+/// 前面某个根目录时（如 `.claude/skills -> ../.agents/skills`），里面是同一批 skill，
+/// 不另算一处存放，只在被指向的那个根目录上记下这个 agent 经整个目录读到它们。
+function skillRoots(base, projectScope) {
+  const candidates = [
+    { path: join(base, UNIVERSAL), placement: "universal", agent: null },
+    { path: join(base, LEGACY), placement: "legacy", agent: null },
+    ...AGENTS.filter((agent) => agentRelative(agent, projectScope) !== undefined).map((agent) => ({
+      path: join(base, agentRelative(agent, projectScope)),
+      placement: "agent",
+      agent: agent.label,
+    })),
+  ];
+  const roots = [];
+  for (const candidate of candidates) {
+    const real = canonical(candidate.path);
+    const target = roots.find((root) => root.real === real);
+    if (target === undefined) roots.push({ ...candidate, real, aliases: [] });
+    else if (candidate.agent !== null) target.aliases.push(candidate.agent);
+  }
+  return roots;
+}
+
 function placementRank(copy) {
   if (copy.placement === "universal") return 0;
   if (copy.placement === "legacy") return 1;
@@ -193,13 +216,9 @@ function coverageOf(primary, bridges, installed, projectScope) {
 async function scanScope(installed, base, projectScope, output, broken) {
   const copies = [];
   const links = [];
-  await scanRoot(join(base, UNIVERSAL), "universal", null, projectScope, copies, links, broken);
-  await scanRoot(join(base, LEGACY), "legacy", null, projectScope, copies, links, broken);
-  for (const agent of AGENTS) {
-    const relative = agentRelative(agent, projectScope);
-    if (relative !== undefined) {
-      await scanRoot(join(base, relative), "agent", agent.label, projectScope, copies, links, broken);
-    }
+  const roots = skillRoots(base, projectScope);
+  for (const root of roots) {
+    await scanRoot(root.path, root.placement, root.agent, projectScope, copies, links, broken);
   }
 
   // 指向本 base 之外的软链，本身就是一份独立存在的 skill。
@@ -228,7 +247,10 @@ async function scanScope(installed, base, projectScope, output, broken) {
     const linked = links
       .filter((link) => link.target === canonicalPrimary && link.at !== primary.dir)
       .map((link) => link.agent);
-    const bridges = AGENTS.filter((agent) => linked.includes(agent.label)).map((agent) => agent.label);
+    const aliases = roots.find((root) => root.path === dirname(primary.dir))?.aliases ?? [];
+    const bridges = AGENTS.filter((agent) => linked.includes(agent.label) || aliases.includes(agent.label)).map(
+      (agent) => agent.label,
+    );
     const missing =
       primary.placement === "agent"
         ? []
@@ -292,15 +314,8 @@ export async function repairBridges(home, skill) {
 /// 这个 base 里指向 `target` 的软链。删本体或搬走时要一并清掉，否则留下悬空链接。
 async function referencesTo(base, projectScope, target) {
   const wanted = canonical(target);
-  const roots = [
-    join(base, UNIVERSAL),
-    join(base, LEGACY),
-    ...AGENTS.map((agent) => agentRelative(agent, projectScope))
-      .filter((relative) => relative !== undefined)
-      .map((relative) => join(base, relative)),
-  ];
   const found = [];
-  for (const root of roots) {
+  for (const { path: root } of skillRoots(base, projectScope)) {
     const entries = await attempt(() => list(root));
     if (!entries.ok) continue;
     for (const entry of entries.value) {
@@ -399,12 +414,16 @@ function destinationFor(base, name, request) {
 }
 
 /// 本体落定之后，还要被哪些路径引用。通用只给「在用、且自己不读 .agents」的 agent 打桥；
-/// 指定 agent 时，第一个是本体，其余是用户明确勾上的链接。
+/// 指定 agent 时，第一个是本体，其余是用户明确勾上的链接。整个 skills 目录就软链到
+/// 本体所在目录的 agent 已经读得到，不再建：那条链接会落进本体自己的目录。
 function referencesFor(installed, base, name, request) {
   const wanted = request.universal
     ? bridgeAgents(installed, request.project_scope)
     : AGENTS.filter((agent) => request.labels.includes(agent.label) && agent.label !== request.labels[0]);
-  return wanted.map((agent) => join(agentRootOrReject(base, agent, request.project_scope), name));
+  const destinationRoot = canonical(dirname(destinationFor(base, name, request)));
+  return wanted
+    .map((agent) => join(agentRootOrReject(base, agent, request.project_scope), name))
+    .filter((at) => canonical(dirname(at)) !== destinationRoot);
 }
 
 async function locate(home, projectRoot, dir) {

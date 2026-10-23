@@ -196,6 +196,8 @@ for dir in "$ROOT"/plugins/*/; do
     case "$(basename "$file")" in
       # gpui-shell 生成给编辑器用的文件，不是插件内容。
       gpui-kit.d.ts|jsconfig.json) continue ;;
+      # 测试和它用的宿主模块替身，只在仓库里跑。
+      tests) continue ;;
     esac
     cp -R "$file" "$target/"
   done
